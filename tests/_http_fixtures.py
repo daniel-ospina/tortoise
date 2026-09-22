@@ -73,7 +73,8 @@ def patched_tortoise_sdk(db_path: str) -> Iterator[None]:
 
     _orig_init = ha_mod.TortoiseSDK.__init__
 
-    def _patched_init(self, db_path_arg=None, *, namespace=None, **kwargs):
+    def _patched_init(self, db_path_arg=None, *, namespace=None,
+                      graph_name=None, **kwargs):
         # Deliberately drop caller path args (db_path_arg / a db_path kwarg):
         # _make_sdk's embedded-lane fallback constructs
         # TortoiseSDK(db_path=<shared path>) — forwarding the caller path
@@ -82,7 +83,16 @@ def patched_tortoise_sdk(db_path: str) -> Iterator[None]:
         # :272/:309 audit names). event_log_path and other kwargs are also
         # dropped in the fixture context (no event files in temp DBs) —
         # mirrors the #1950 canonical (tests/test_hosted_api.py:110-113).
-        _orig_init(self, db_path, namespace=namespace)
+        #
+        # graph_name is NOT one of those: it is the C5 #2114 explicit
+        # full-name seam (the data-plane tenancy path —
+        # `_require_graph_scope`, `_export_graph_snapshot`, the backup
+        # restores). Dropping it re-binds the SDK to the DEFAULT graph, so a
+        # test exercising that seam silently reads (or writes) an EMPTY graph
+        # and passes or fails for the wrong reason. Every other canonical
+        # fixture forwards it (test_hosted_api.py:133,
+        # test_acl_graph_users.py:91) — this one was the outlier.
+        _orig_init(self, db_path, namespace=namespace, graph_name=graph_name)
 
     ha_mod.TortoiseSDK.__init__ = _patched_init
     _close_keepalive_anchors(ha_mod)

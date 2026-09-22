@@ -137,15 +137,15 @@ def incident_title_matches(title: str, kind: str,
 
 
 def search_open_incident(repo: str, token: str, kind: str,
-                          team_id: str = "") -> list[int]:
+                          org_id: str = "") -> list[int]:
     """GH-search fallback: open ``dr:backup`` issues whose title carries
-    ``kind`` AND the incident subject (``team_id`` — a team id or the
-    per-graph "{team}:{graph}" subject, #2313 Task 4).
+    ``kind`` AND the incident subject (``org_id`` — an org id or the
+    per-graph "{org}:{graph}" subject, #2313 Task 4).
 
     Subject scoping matters: incidents are keyed per (kind, subject); an
     adoption search that matches only ``kind`` would bind a same-kind issue
     opened for a DIFFERENT subject — recovery of one would then close the
-    other's issue (silent-loss cross-talk). Empty ``team_id`` (global kinds
+    other's issue (silent-loss cross-talk). Empty ``org_id`` (global kinds
     like DRIVER_DOWN) matches the bare ``[DR] {kind}`` title.
 
     Used when R2 is unreachable (no dedup object possible) or when a created
@@ -153,15 +153,15 @@ def search_open_incident(repo: str, token: str, kind: str,
 
     #3029: EVERY hit is verified against the incident's own title shape
     (:func:`incident_title_matches`). The search index is a recall filter, not
-    an identity proof — the pre-#3029 code only verified when ``team_id`` was
+    an identity proof — the pre-#3029 code only verified when ``org_id`` was
     truthy, so a platform-scoped kind (empty subject) adopted the first token
     match, which is how a bug report about R2_DOWN became closable as the
     R2_DOWN incident.
     """
-    title = f"[DR] {kind}" + (f" — {team_id}" if team_id else "")
+    title = f"[DR] {kind}" + (f" — {org_id}" if org_id else "")
     query = f'repo:{repo} is:issue is:open label:"{_DR_LABEL}" in:title "{title}"'
     url = f"{_API}/search/issues?q={urllib.parse.quote(query)}"
     data = _request("GET", url, token)
     items = data.get("items", [])
     return [int(i["number"]) for i in items
-            if incident_title_matches(str(i.get("title", "")), kind, team_id)]
+            if incident_title_matches(str(i.get("title", "")), kind, org_id)]

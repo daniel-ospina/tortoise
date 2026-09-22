@@ -156,7 +156,7 @@ def lookup_hash(key: str) -> str:
     PBKDF2 hash_api_key() (verification-only, iterated, salt per key), this
     is a deterministic one-way digest used to LOOK UP a key at request time:
     the presented key is hashed and matched against the indexed
-    lookup_hash column (team_memberships / api_keys) — O(1) index equality,
+    lookup_hash column (org_memberships / api_keys) — O(1) index equality,
     no scan. The pepper is held in app code (never the DB), so the DB cannot
     reverse the digest without it.
 

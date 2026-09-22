@@ -437,26 +437,48 @@ if ! aws s3api head-bucket --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" >
 fi
 
 if [ "$R2_OK" = "1" ]; then
-  if TEAMS="$(aws s3api list-objects-v2 --endpoint-url "$R2_ENDPOINT" \
+  # #3659: decode the top-level listing as JSON, not `--output text`. botocore
+  # renders a null JMESPath result as the literal "None" under text — which is
+  # indistinguishable from a genuine team id, so an object-EMPTY pool read as a
+  # team named "None" (and a real "None" team would be dropped). jq maps an
+  # absent CommonPrefixes (`null`) to the measured-EMPTY pool it truly is.
+  # The decode is GATED: an unparseable body is UNKNOWN, never an empty pool.
+  TOP_ERR="$(mktemp)"
+  if TEAMS_JSON="$(aws s3api list-objects-v2 --endpoint-url "$R2_ENDPOINT" \
     --bucket "$R2_BUCKET" --prefix "backups/" --delimiter "/" --query "CommonPrefixes[].Prefix" \
-    --output text 2>/dev/null)"; then
-    R2_LIST_OK=1
+    --output json 2>"$TOP_ERR")"; then
+    if TEAMS="$(printf '%s' "$TEAMS_JSON" | jq -r 'if . == null then empty else .[] end' 2>/dev/null)"; then
+      R2_LIST_OK=1
+    else
+      # A body the decoder could not read is not a measured-empty pool.
+      R2_LIST_OK=0
+      TEAMS=""
+      log "R2 top-level listing UNPARSEABLE — pool state is UNKNOWN (not empty)"
+    fi
   else
     TEAMS=""
-    log "R2 top-level listing failed — pool state is UNKNOWN (not empty)"
+    top_err_txt="$(redact_truncate "$(cat "$TOP_ERR")" 300)"
+    log "R2 top-level listing failed — pool state is UNKNOWN (not empty) (${top_err_txt:-no stderr})"
   fi
+  rm -f "$TOP_ERR"
   if [ -n "$TEAMS" ]; then
     # Review F5 (security): a predictable /tmp path is a symlink/overwrite
     # hazard on a shared runner and can be read back stale. Use mktemp.
     IDX_ERR="$(mktemp)"
+    # #3659: the per-team listing stderr is captured (not /dev/null'd) so a
+    # genuine failure is DIAGNOSABLE — mirroring IDX_ERR. Without it the run
+    # log carried only the driver's own sentence and could not be told apart
+    # from the empty-prefix edge case it was actually hitting.
+    DEFAULT_ERR="$(mktemp)"
+    FLAT_ERR="$(mktemp)"
     # `while read` rather than `for $TEAMS`: an unquoted expansion word-splits
     # AND glob-expands, so a bucket key containing `*` or whitespace would
     # fabricate team names carried into R2 keys and incident titles (security
     # review). Skip keys that are not our validated team-id shape.
     while IFS= read -r prefix; do
       [ -n "$prefix" ] || continue
-      team="$(basename "$prefix")"
-      case "$team" in
+      org_id="$(basename "$prefix")"
+      case "$org_id" in
         ''|*[!A-Za-z0-9_-]*)
           log "skipping unexpected team prefix '${prefix}' (not a valid team id)"
           continue
@@ -464,7 +486,7 @@ if [ "$R2_OK" = "1" ]; then
       esac
       R2_TEAM_COUNT=$((R2_TEAM_COUNT + 1))
       # #2375: DEFAULT-graph freshness ONLY — nested default segment
-      # (backups/{team}/default/) + legacy flat (pre-#2313 default dumps;
+      # (backups/{org_id}/default/) + legacy flat (pre-#2313 default dumps;
       # flat keys start with the dump year "2xxx" so the 2-prefix never
       # matches custom nested gids g_*). The pre-#2375 leg took the newest
       # dump.enc under the WHOLE team prefix, so a team whose DEFAULT failed
@@ -473,40 +495,67 @@ if [ "$R2_OK" = "1" ]; then
       # legacy-flat classification index (#2370) additionally excludes
       # C5-era custom flat dumps when present (flat-only fallback is parity
       # pre-index).
-      team_measured=1
-      if ! newest="$(aws s3api list-objects-v2 --endpoint-url "$R2_ENDPOINT" \
-        --bucket "$R2_BUCKET" --prefix "backups/${team}/default/" \
-        --query "Contents[?ends_with(Key, 'dump.enc')] | sort_by(@, &LastModified) | [-1].LastModified" \
-        --output text 2>/dev/null)"; then
-        newest=""
-        team_measured=0
-        log "team ${team}: default-archive listing FAILED — freshness UNKNOWN"
+      # #3659: the DEFAULT-archive listing must be TOTAL on an empty prefix.
+      # S3 omits `Contents` entirely when nothing matches, and a `sort_by()`
+      # aggregator over that absent element raises JMESPathTypeError, so the
+      # aws CLI exits non-zero — an EMPTY prefix was read as a LISTING
+      # FAILURE, set the GLOBAL R2_LIST_OK=0, and escalated to a platform-wide
+      # R2_DOWN while the top-level listing had succeeded in the same run.
+      # The plain projection is total (absent/empty -> `null`/`[]`) and jq
+      # takes the max — the same `max(LastModified)` shape the legacy-flat leg
+      # already uses. An empty prefix is a MEASURED result, not an outage.
+      default_ok=1
+      newest=""
+      if ! default_raw="$(aws s3api list-objects-v2 --endpoint-url "$R2_ENDPOINT" \
+        --bucket "$R2_BUCKET" --prefix "backups/${org_id}/default/" \
+        --query "Contents[?ends_with(Key, 'dump.enc')].LastModified" \
+        --output json 2>"$DEFAULT_ERR")"; then
+        default_ok=0
+        default_err_txt="$(redact_truncate "$(cat "$DEFAULT_ERR")" 300)"
+        log "team ${org_id}: default-archive listing FAILED — freshness UNKNOWN (${default_err_txt:-no stderr})"
+      else
+        newest="$(printf '%s' "$default_raw" | jq -r 'if type == "array" and length > 0 then max else empty end' 2>/dev/null || true)"
       fi
+      flat_ok=1
       if ! flat_list="$(aws s3api list-objects-v2 --endpoint-url "$R2_ENDPOINT" \
-        --bucket "$R2_BUCKET" --prefix "backups/${team}/2" \
+        --bucket "$R2_BUCKET" --prefix "backups/${org_id}/2" \
         --query "Contents[?ends_with(Key, 'dump.enc')].[Key,LastModified]" \
-        --output json 2>/dev/null)"; then
+        --output json 2>"$FLAT_ERR")"; then
         flat_list="[]"
-        team_measured=0
-        log "team ${team}: legacy-flat listing FAILED — freshness UNKNOWN"
+        flat_ok=0
+        flat_err_txt="$(redact_truncate "$(cat "$FLAT_ERR")" 300)"
+        log "team ${org_id}: legacy-flat listing FAILED — freshness UNKNOWN (${flat_err_txt:-no stderr})"
+      elif [ -z "$flat_list" ] || [ "$flat_list" = "null" ]; then
+        # #3659: an EMPTY flat prefix is MEASURED too. botocore renders an
+        # absent `Contents` as the JSON literal `null` (not `[]`), which the
+        # `[ "$flat_list" != "[]" ]` guard would treat as a non-empty pool and
+        # route into flat classification — where an index-read error would
+        # blank a MEASURED default archive and file a false R2_DOWN. Normalize
+        # null/empty to the empty list.
+        flat_list="[]"
       fi
-      if [ "$team_measured" = "0" ]; then
-        # A failed per-team read is unmeasurable, never "no archive" (review
-        # R2a): the disabled path must refuse to claim freshness, not file a
-        # false stale.
+      if [ "$default_ok" = "0" ] || [ "$flat_ok" = "0" ]; then
+        # A failed per-team listing CALL is unmeasurable, never "no archive"
+        # (review R2a) — but it must NOT swallow the leg that DID answer
+        # (#3659 defect 2: the old code `continue`d here before consuming
+        # flat_list, so a legacy-flat default archive was never measured).
         R2_LIST_OK=0
+      fi
+      if [ "$default_ok" = "0" ] && [ "$flat_ok" = "0" ]; then
+        # BOTH legs unmeasured — nothing to evaluate for this org. The pool is
+        # already flagged unmeasurable (R2_LIST_OK=0) above.
         continue
       fi
-      if [ -n "$flat_list" ] && [ "$flat_list" != "[]" ]; then
+      if [ "$flat_ok" = "1" ] && [ -n "$flat_list" ] && [ "$flat_list" != "[]" ]; then
         # Review P2 (bug-deep): a FAILED read of the classification index is
         # NOT "no index" — a custom flat could then be misread as a default
         # dump and mask a stale default. Only a definitive absence
         # (NoSuchKey/404) means the pre-#2370 parity.
         idx=""; idx_rc=0
         idx="$(aws s3api get-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" \
-          --key "ops/legacy-flat-index/${team}.json" /dev/stdout 2>"$IDX_ERR")" || idx_rc=$?
+          --key "ops/legacy-flat-index/${org_id}.json" /dev/stdout 2>"$IDX_ERR")" || idx_rc=$?
         if [ "$idx_rc" != "0" ] && ! grep -qiE 'NoSuchKey|404|Not Found' "$IDX_ERR" 2>/dev/null; then
-          log "team ${team}: legacy-flat index read FAILED — freshness UNKNOWN"
+          log "team ${org_id}: legacy-flat index read FAILED — freshness UNKNOWN"
           R2_LIST_OK=0
           continue
         fi
@@ -530,27 +579,38 @@ if [ "$R2_OK" = "1" ]; then
         if [ "$newest_ts" = "0" ]; then
           # An unparseable timestamp is an unmeasurable pool — fail loud, never
           # report it fresh.
-          log "team ${team}: unparseable archive timestamp '${newest}' — treating pool as stale"
+          log "team ${org_id}: unparseable archive timestamp '${newest}' — treating pool as stale"
           POOL_STALE=1
         else
           age_min=$(( ($(date +%s) - newest_ts) / 60 ))
           if [ "$age_min" -gt "$STALE_MIN" ]; then
-            log "team ${team}: newest archive ${age_min}m old — filing STALE (direct leg)"
-            file_alert STALE "[DR] STALE — ${team}" "Direct R2 freshness check: newest archive ${age_min}m old (> ${STALE_MIN}m)." "$team"
+            log "team ${org_id}: newest archive ${age_min}m old — filing STALE (direct leg)"
+            file_alert STALE "[DR] STALE — ${org_id}" "Direct R2 freshness check: newest archive ${age_min}m old (> ${STALE_MIN}m)." "$org_id"
           fi
           if [ "$age_min" -gt "$DRIVER_DOWN_MIN" ]; then
             POOL_STALE=1
           fi
         fi
       else
-        # Team prefix present but no DEFAULT (or legacy-flat) archive: this
-        # graph has NO restorable dump. Never-backed-up is worse than old, so
-        # a disabled sweep must not read this as a fresh pool (#2796 review R5).
-        log "team ${team}: team prefix present but no default archive — treating pool as stale"
-        POOL_STALE=1
+        if [ "$default_ok" = "1" ] && [ "$flat_ok" = "1" ]; then
+          # Team prefix present but BOTH legs measured EMPTY: this graph has
+          # NO restorable dump. Never-backed-up is worse than old, so a
+          # disabled sweep must not read this as a fresh pool (#2796 review
+          # R5). Only reachable when the listings ANSWERED (an empty prefix is
+          # a measurement, not a failure — #3659).
+          log "team ${org_id}: team prefix present but no default archive — treating pool as stale"
+          POOL_STALE=1
+        else
+          # An absence we could not confirm is NOT an absence (unknown != no
+          # archive): a failed listing call leaves this org unmeasured, and
+          # the pool is already flagged unmeasurable above. Never fabricate a
+          # "no default archive" from a read that did not answer (#3659
+          # defect 3).
+          log "team ${org_id}: no archive measured (a listing call failed) — pool UNKNOWN"
+        fi
       fi
     done < <(printf '%s\n' "$TEAMS" | tr '\t' '\n')
-    rm -f "$IDX_ERR"
+    rm -f "$IDX_ERR" "$DEFAULT_ERR" "$FLAT_ERR"
   fi
 fi
 

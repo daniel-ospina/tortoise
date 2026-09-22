@@ -65,6 +65,26 @@
 #  54. an unparseable archive timestamp is never read as fresh
 #  55. a stale watcher AGE alone (running=true, age>30) files WATCHER_DOWN
 #  56. the measurable-empty lock branch is the silent one
+#  57. an empty default prefix is a MEASURED-EMPTY result, not a global
+#      R2_DOWN (#3659 defects 1+3)
+#  58. a failed default listing still consumes the legacy-flat leg (#3659
+#      defect 2)
+#  59. a genuine listing failure surfaces the CLI stderr (#3659 defect 4)
+#  60. an empty top-level pool (JSON `null`, absent CommonPrefixes) is a
+#      measured-EMPTY pool, and a team genuinely named "None" survives
+#  61. an empty legacy-flat prefix (JSON `null`) is measured-empty — it must
+#      not enter flat classification and blank a measured default archive
+#  62. an unparseable top-level listing is UNKNOWN, never an empty pool
+#  63. the top-level listing stderr is captured (not /dev/null'd)
+#  64. #3029: a FAILED search is not "no incident" — defer, never duplicate
+#  65. #3029: an ERROR BODY (403 rate-limit) is not an empty result
+#  66. #3029: an issue that merely MENTIONS the kind is never adopted
+#  67. #3029: the kind must follow `[DR] ` immediately (boundary)
+#  68. #3029: the subject must be the EXACT ` — ` segment
+#  69. #3032: unsupported IfNoneMatch + ambiguous HEAD → LOUD, never a blind put
+#  69b. #3032: a bare `412` in an unrelated error is NOT "already exists"
+#  70. #3032: unsupported IfNoneMatch + EXISTING object → adopt, no duplicate
+#  71. #3032: an UNRESOLVED dedup write fails LOUD, never search-only
 #
 # Fixtures are simulated; the real driver defers nothing.
 
@@ -128,22 +148,59 @@ case "$op" in
     p="$(argval --prefix)"
     case "$p" in
       "backups/")
-        [ "${STUB_LIST_FAIL:-0}" = "1" ] && exit 1
-        printf '%s' "${R2_TEAMS:-}" ;;
+        [ "${STUB_LIST_FAIL:-0}" = "1" ] && { echo "An error occurred (AccessDenied) when calling the ListObjectsV2 operation: Access Denied" >&2; exit 1; }
+        # STUB_TOP_NOT_JSON: an exit-0 body the driver's jq cannot decode — the
+        # top-level listing must read as UNKNOWN, never as an empty pool.
+        [ "${STUB_TOP_NOT_JSON:-0}" = "1" ] && { printf 'not json at all'; exit 0; }
+        if [ "$(argval --output)" = "json" ]; then
+          # #3659: model the CLI faithfully — an absent CommonPrefixes renders
+          # as JSON `null`; otherwise the tab-separated fixture prefixes are
+          # rendered as a JSON array.
+          if [ -z "${R2_TEAMS:-}" ]; then printf 'null'; else
+            printf '%s' "$R2_TEAMS" | tr '\t' '\n' | jq -Rsc 'split("\n") | map(select(. != ""))'
+          fi
+        else
+          # `--output text` renders a null JMESPath result as the literal
+          # "None" — mirror it so the pre-fix text path is faithfully modelled
+          # (and case 60 actually discriminates).
+          if [ -z "${R2_TEAMS:-}" ]; then printf 'None'; else printf '%s' "$R2_TEAMS"; fi
+        fi ;;
       */default/)
-        [ "${STUB_LIST_FAIL_TEAM:-0}" = "1" ] && exit 1
+        [ "${STUB_LIST_FAIL_TEAM:-0}" = "1" ] && { echo "An error occurred (AccessDenied) when calling the ListObjectsV2 operation: Access Denied" >&2; exit 1; }
         # Per-team override so a multi-team case can distinguish WHICH team the
         # driver measured (review R1 test-integrity): with one shared listing
         # every prefix returns the same value and the tab-split regression is
         # invisible (the buggy loop measures only the LAST team).
         case "$p" in
-          "backups/teamZ/default/") printf '%s' "${R2_DEFAULT_LIST_Z:-${R2_DEFAULT_LIST:-}}" ;;
-          "backups/teamA/default/") printf '%s' "${R2_DEFAULT_LIST_A:-${R2_DEFAULT_LIST:-}}" ;;
-          *) printf '%s' "${R2_DEFAULT_LIST:-}" ;;
+          "backups/teamZ/default/") dval="${R2_DEFAULT_LIST_Z:-${R2_DEFAULT_LIST:-}}" ;;
+          "backups/teamA/default/") dval="${R2_DEFAULT_LIST_A:-${R2_DEFAULT_LIST:-}}" ;;
+          *) dval="${R2_DEFAULT_LIST:-}" ;;
+        esac
+        # #3659: emulate awscli's JMESPath evaluation faithfully. An empty
+        # prefix means S3 omits `Contents` entirely, so a sort_by()/max_by()
+        # aggregator over it raises JMESPathTypeError and the CLI exits
+        # non-zero (the driver read that as a storage outage). A total query
+        # (plain projection, no aggregator) returns `null`/`[]` instead, and
+        # `--output json` renders the result as JSON. Simplification: the
+        # fixture has no Contents-level detail, so "prefix has objects but no
+        # dump.enc" is not modelled — the empty fixture stands in for an
+        # absent Contents (the production empty-prefix path).
+        if [ -z "$dval" ]; then
+          case "$(argval --query)" in
+            *sort_by*|*max_by*)
+              echo "JMESPathTypeError: In function sort_by(), invalid type for value: None, expected one of: ['array'], received: \"null\"" >&2
+              exit 255 ;;
+          esac
+        fi
+        case "$(argval --output)" in
+          json) if [ -z "$dval" ]; then printf 'null'; else printf '[\"%s\"]' "$dval"; fi ;;
+          *)    printf '%s' "$dval" ;;
         esac ;;
       backups/*/2)
-        [ "${STUB_FLAT_FAIL:-0}" = "1" ] && exit 1
-        printf '%s' "${R2_FLAT_LIST:-[]}" ;;
+        [ "${STUB_FLAT_FAIL:-0}" = "1" ] && { echo "An error occurred (AccessDenied) when calling the ListObjectsV2 operation: Access Denied" >&2; exit 1; }
+        # #3659: an EMPTY flat prefix renders as JSON `null` (absent Contents),
+        # not `[]` — mirror the real CLI so the empty-prefix path is exercised.
+        if [ -n "${R2_FLAT_LIST:-}" ]; then printf '%s' "$R2_FLAT_LIST"; else printf 'null'; fi ;;
       *)            printf '' ;;
     esac
     ;;
@@ -306,6 +363,7 @@ reset_case() {
         STUB_NO_IFNONEMATCH STUB_HEAD_EXISTS STUB_PUT_FAIL STUB_PUT_412_SUBSTRING \
         STUB_GH_CLOSE_CODE \
         STUB_LIST_FAIL STUB_LIST_FAIL_TEAM STUB_FLAT_FAIL STUB_INDEX_FAIL GH_ISSUE_STATE STUB_ISSUE_CODE \
+        STUB_TOP_NOT_JSON \
         GH_SEARCH_JSON GH_NEW_ISSUE R2_TEAMS R2_DEFAULT_LIST R2_FLAT_LIST \
         R2_DEFAULT_LIST_Z R2_DEFAULT_LIST_A \
         GH_ISSUE_SWEEP_CONFIG_ERROR GH_ISSUE_SWEEP_OFF_STALE GH_ISSUE_SWEEP_NO_COVERAGE \
@@ -1006,7 +1064,117 @@ assert_eq "$RC" 0 "56. a lock with a measured-empty pool exits 0"
 assert_contains "$OUT" "leaving silent" "56. the measured-empty lock is the silent branch"
 assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*SWEEP_NO_COVERAGE" "56. no incident for a measured-empty lock"
 
-# ── 57. #3029: a FAILED search is not "no incident" — defer, never duplicate ─
+# ── 57. an empty default prefix is measured-empty, not a storage outage ───
+# #3659: S3 omits `Contents` on an empty listing, so `sort_by()` raised and the
+# CLI exited non-zero — an EMPTY prefix set the GLOBAL R2_LIST_OK=0 and filed a
+# platform-wide R2_DOWN while the top-level listing had succeeded. It must be
+# a measured result instead: no R2_DOWN, and the honest "prefix present but no
+# default archive" branch (which exists for exactly this) is reached.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST=""          # prefix exists, zero objects under default/
+export R2_FLAT_LIST="[]"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+run_driver
+assert_eq "$RC" 0 "57. an empty default prefix is a healthy measured pool (exit 0)"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*R2_DOWN" "57. an empty prefix files NO R2_DOWN"
+assert_not_contains "$OUT" "storage is only partially reachable" "57. the pool is not called partially reachable"
+assert_contains "$OUT" "team teamA: team prefix present but no default archive" "57. the measured-empty branch is reached"
+
+# ── 58. a failed default call still consumes the legacy-flat leg ──────────
+# #3659 defect 2: the old `team_measured=0; continue` bailed out BEFORE
+# consuming flat_list, so a pre-#2313 legacy-flat default archive was never
+# measured. A genuine per-org default-listing failure must not swallow the
+# leg that answered.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export STUB_LIST_FAIL_TEAM=1        # the default-archive listing CALL fails
+export R2_FLAT_LIST='[["backups/teamA/2024/dump.enc","2024-01-01T00:00:00Z"]]'
+export STUB_STATUS_BODY="$(status_body false null null)"
+run_driver
+assert_eq "$RC" 1 "58. a failed default call with a measured flat leg while OFF exits RED (1)"
+assert_contains "$OUT" "filing STALE (direct leg)" "58. the legacy-flat archive is measured (direct-leg STALE)"
+assert_filed "$(cat "$LOG")" "STALE — teamA" "58. the legacy-flat archive files the per-team STALE"
+assert_contains "$OUT" "default-archive listing FAILED" "58. the genuine call failure is surfaced"
+
+# ── 59. a genuine listing failure surfaces the CLI stderr ────────────────
+# #3659 defect 4: both listings redirected stderr to /dev/null, so the run log
+# could not distinguish an empty prefix from an AccessDenied. The failure must
+# still be a real R2_DOWN AND its cause must be visible.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export STUB_LIST_FAIL_TEAM=1
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+run_driver
+assert_eq "$RC" 1 "59. a genuine failed listing exits RED (1)"
+assert_filed "$(cat "$LOG")" R2_DOWN "59. a genuine call failure is still a real R2_DOWN"
+assert_contains "$OUT" "AccessDenied" "59. the CLI stderr is captured, not discarded"
+
+# ── 60. an empty top-level pool is measured-EMPTY, not "None" ──────────
+# #3659: an absent CommonPrefixes renders as JSON `null` (under `--output
+# text` it was the literal "None", indistinguishable from a team id).
+reset_case
+export R2_TEAMS=""              # empty pool → CommonPrefixes absent → JSON null
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"no_teams","teams_backed_up":0}'
+run_driver
+assert_eq "$RC" 0 "60. an empty pool (JSON null) is a measured-empty exit 0"
+assert_not_contains "$OUT" "team None" "60. no fabricated 'None' team is ever measured"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*SWEEP_NO_COVERAGE" "60. no false coverage incident on an empty pool"
+# A team genuinely named "None" must survive the JSON decode (it must not be
+# conflated with the null-rendering artifact).
+reset_case
+export R2_TEAMS=$'backups/None/'
+export R2_DEFAULT_LIST="$TS_STALE"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+run_driver
+assert_eq "$RC" 1 "60b. a stale team named 'None' is measured and RED (1)"
+assert_contains "$OUT" "team None: newest archive" "60b. the 'None' team is measured, not dropped"
+
+# ── 61. an empty legacy-flat prefix renders as JSON `null`, not `[]` ─────
+# botocore returns the literal `null` for an absent Contents; the driver must
+# normalize it to the empty list, otherwise it routes into flat classification
+# and an index-read error blanks a MEASURED default archive and files a false
+# R2_DOWN.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"   # default leg MEASURED fresh
+export R2_FLAT_LIST=""                # empty flat prefix → CLI renders `null`
+export STUB_INDEX_FAIL=1              # would fail IF the driver mis-read the null
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+run_driver
+assert_eq "$RC" 0 "61. a null flat listing with a measured default is healthy (exit 0)"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*R2_DOWN" "61. no false R2_DOWN from a null flat listing"
+assert_not_contains "$OUT" "legacy-flat index read FAILED" "61. the null flat listing never enters flat classification"
+
+# ── 62. an unparseable top-level listing is UNKNOWN, not an empty pool ──
+# An exit-0 body the decoder cannot read must not collapse to a measured-empty
+# pool (which would suppress every downstream freshness/coverage signal).
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export STUB_TOP_NOT_JSON=1             # exit-0 body the driver's jq cannot read
+export R2_DEFAULT_LIST="$TS_STALE"     # a stale archive that must not be ignored
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+run_driver
+assert_eq "$RC" 1 "62. an unparseable top-level listing exits RED (1)"
+assert_contains "$OUT" "R2 top-level listing UNPARSEABLE" "62. the unparseable listing is surfaced"
+assert_filed "$(cat "$LOG")" R2_DOWN "62. unknown is never read as a measured-empty pool"
+
+# ── 63. the top-level listing stderr is captured, not discarded ──────────
+reset_case
+export STUB_LIST_FAIL=1
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"no_teams","teams_backed_up":0}'
+run_driver
+assert_eq "$RC" 1 "63. a failed top-level listing exits RED (1)"
+assert_contains "$OUT" "AccessDenied" "63. the top-level CLI stderr is captured, not discarded"
+
+# ── 64. #3029: a FAILED search is not "no incident" — defer, never duplicate ─
 # The alerter's dedup authority is the create-once object; the search is the
 # fallback that decides whether an issue already exists. When the search does
 # not run, treating it as empty files a DUPLICATE — so filing is deferred (the
@@ -1018,12 +1186,12 @@ export R2_DEFAULT_LIST="$TS_RECENT"
 export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' null)"
 export STUB_GH_SEARCH_FAIL=1
 run_driver
-assert_eq "$RC" 1 "57. a failed search exits RED (1)"
-assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "57. a failed search never files a duplicate"
-assert_contains "$OUT" "filing DEFERRED" "57. the deferral is loud and explicit"
-assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/SWEEP_CONFIG_ERROR" "57. the dedup object is still created (the next run retries)"
+assert_eq "$RC" 1 "64. a failed search exits RED (1)"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "64. a failed search never files a duplicate"
+assert_contains "$OUT" "filing DEFERRED" "64. the deferral is loud and explicit"
+assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/SWEEP_CONFIG_ERROR" "64. the dedup object is still created (the next run retries)"
 
-# ── 58. #3029: an ERROR BODY (403 rate-limit) is not an empty result ─────────
+# ── 65. #3029: an ERROR BODY (403 rate-limit) is not an empty result ─────────
 # GitHub answers a rate-limited search with HTTP 200-ish JSON that carries no
 # `items`, and curl exits 0 — the pre-#3029 `.items[0] // empty` read that as
 # "no open incident".
@@ -1033,11 +1201,11 @@ export R2_DEFAULT_LIST="$TS_RECENT"
 export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' null)"
 export STUB_GH_SEARCH_BODY='{"message":"API rate limit exceeded"}'
 run_driver
-assert_eq "$RC" 1 "58. a rate-limit body exits RED (1)"
-assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "58. a rate-limit body is not read as 'no incident'"
-assert_contains "$OUT" "filing DEFERRED" "58. the rate-limit body is treated as a search failure"
+assert_eq "$RC" 1 "65. a rate-limit body exits RED (1)"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "65. a rate-limit body is not read as 'no incident'"
+assert_contains "$OUT" "filing DEFERRED" "65. the rate-limit body is treated as a search failure"
 
-# ── 59. #3029: an issue that merely MENTIONS the kind is never adopted ───────
+# ── 66. #3029: an issue that merely MENTIONS the kind is never adopted ───────
 # The live production shape: the platform-scoped query for `[DR] R2_DOWN`
 # resolved to #2844 — a bug report ABOUT R2_DOWN (title "bug(dr): R2_DOWN is
 # deduped under two different R2 keys…"). Adoption would have closed it.
@@ -1047,11 +1215,11 @@ export R2_DEFAULT_LIST="$TS_RECENT"
 export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' null)"
 export STUB_GH_SEARCH_BODY='{"items":[{"number":2844,"title":"bug(dr): R2_DOWN is deduped under two different R2 keys by the driver and the app watcher"},{"number":2845,"title":"bug(dr): SWEEP_CONFIG_ERROR mentions this kind in prose"}]}'
 run_driver
-assert_eq "$RC" 1 "59. a prose mention does not suppress filing (still RED)"
-assert_filed "$(cat "$LOG")" "SWEEP_CONFIG_ERROR" "59. the driver files its OWN issue instead of adopting #2844"
-assert_not_match "$(cat "$LOG")" "issues/2844" "59. the unrelated issue is never touched (not closed, not commented)"
+assert_eq "$RC" 1 "66. a prose mention does not suppress filing (still RED)"
+assert_filed "$(cat "$LOG")" "SWEEP_CONFIG_ERROR" "66. the driver files its OWN issue instead of adopting #2844"
+assert_not_match "$(cat "$LOG")" "issues/2844" "66. the unrelated issue is never touched (not closed, not commented)"
 
-# ── 60. #3029: the kind must follow `[DR] ` immediately (boundary) ───────────
+# ── 67. #3029: the kind must follow `[DR] ` immediately (boundary) ───────────
 # `[DR] SWEEP_CONFIG_ERROR_EXTRA` must not be adopted for kind
 # SWEEP_CONFIG_ERROR — a bare startswith would accept it.
 reset_case
@@ -1060,10 +1228,10 @@ export R2_DEFAULT_LIST="$TS_RECENT"
 export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' null)"
 export STUB_GH_SEARCH_BODY='{"items":[{"number":777,"title":"[DR] SWEEP_CONFIG_ERROR_EXTRA — a different kind"},{"number":778,"title":"[DR] SWEEP_CONFIG_ERRORish"}]}'
 run_driver
-assert_filed "$(cat "$LOG")" "SWEEP_CONFIG_ERROR" "60. a kind-prefix collision is not adopted"
-assert_not_match "$(cat "$LOG")" "issues/777" "60. the colliding kind's issue is untouched"
+assert_filed "$(cat "$LOG")" "SWEEP_CONFIG_ERROR" "67. a kind-prefix collision is not adopted"
+assert_not_match "$(cat "$LOG")" "issues/777" "67. the colliding kind's issue is untouched"
 
-# ── 61. #3029: the subject must be the EXACT ` — ` segment ────────────────
+# ── 68. #3029: the subject must be the EXACT ` — ` segment ────────────────
 # A bare team subject is a literal PREFIX of its per-graph subjects, so
 # `[DR] STALE — teamA:g_x` must never satisfy a search for subject teamA —
 # adopting it would let teamA's recovery close the custom graph's live issue
@@ -1075,10 +1243,10 @@ export STUB_STATUS_BODY="$(status_body true null null)"
 export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
 export STUB_GH_SEARCH_BODY='{"items":[{"number":555,"title":"[DR] STALE — teamA:g_x — last backup 3h"}]}'
 run_driver
-assert_filed "$(cat "$LOG")" STALE "61. a per-graph subject does not satisfy the team subject"
-assert_not_match "$(cat "$LOG")" "issues/555" "61. the per-graph issue is not adopted by the team incident"
+assert_filed "$(cat "$LOG")" STALE "68. a per-graph subject does not satisfy the team subject"
+assert_not_match "$(cat "$LOG")" "issues/555" "68. the per-graph issue is not adopted by the team incident"
 
-# ── 62. #3032: unsupported IfNoneMatch + ambiguous HEAD → LOUD, never a blind put
+# ── 69. #3032: unsupported IfNoneMatch + ambiguous HEAD → LOUD, never a blind put
 # The Python twin RAISES in this case (`hosted_backup.create_if_not_exists`:
 # "a blind-put would weaken the dedup linearization point"); the shell twin must
 # not create an object it cannot prove absent — that could overwrite a
@@ -1090,12 +1258,12 @@ export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' nul
 export STUB_NO_IFNONEMATCH=1
 export STUB_HEAD_EXISTS=0
 run_driver
-assert_eq "$RC" 1 "62. an ambiguous dedup write exits RED (1)"
-assert_match "$(cat "$LOG")" "AWS head-object key=ops/alerts/SWEEP_CONFIG_ERROR" "62. the fallback HEAD-checks the object"
-assert_contains "$OUT" "refusing a blind put" "62. an unconfirmable object is never blind-put"
-assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "62. nothing is filed on an unverified dedup"
+assert_eq "$RC" 1 "69. an ambiguous dedup write exits RED (1)"
+assert_match "$(cat "$LOG")" "AWS head-object key=ops/alerts/SWEEP_CONFIG_ERROR" "69. the fallback HEAD-checks the object"
+assert_contains "$OUT" "refusing a blind put" "69. an unconfirmable object is never blind-put"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "69. nothing is filed on an unverified dedup"
 
-# ── 62b. #3032: a bare `412` in an unrelated error is NOT "already exists" ──
+# ── 69b. #3032: a bare `412` in an unrelated error is NOT "already exists" ──
 # The pre-review glob `*412*` matched any request-id/byte-count, reporting
 # "exists" without ever HEAD-checking. Only the real AWS markers may shortcut.
 reset_case
@@ -1106,10 +1274,10 @@ export STUB_PUT_412_SUBSTRING=1
 export STUB_HEAD_EXISTS=1
 export STUB_GET_BODY='{"kind":"SWEEP_CONFIG_ERROR","issue_number":42}'
 run_driver
-assert_match "$(cat "$LOG")" "AWS head-object key=ops/alerts/SWEEP_CONFIG_ERROR" "62b. an unrelated 412 substring still HEAD-checks"
-assert_contains "$OUT" "already tracked by open issue #42" "62b. the existing object is adopted (not a false exists)"
+assert_match "$(cat "$LOG")" "AWS head-object key=ops/alerts/SWEEP_CONFIG_ERROR" "69b. an unrelated 412 substring still HEAD-checks"
+assert_contains "$OUT" "already tracked by open issue #42" "69b. the existing object is adopted (not a false exists)"
 
-# ── 63. #3032: unsupported IfNoneMatch + EXISTING object → adopt, no duplicate
+# ── 70. #3032: unsupported IfNoneMatch + EXISTING object → adopt, no duplicate
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
@@ -1119,10 +1287,10 @@ export STUB_HEAD_EXISTS=1
 export STUB_GET_BODY='{"kind":"SWEEP_CONFIG_ERROR","issue_number":42}'
 export GH_ISSUE_SWEEP_CONFIG_ERROR=42
 run_driver
-assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "63. an existing object is adopted (no duplicate filed)"
-assert_contains "$OUT" "already tracked by open issue #42" "63. the open issue is adopted from the object"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "70. an existing object is adopted (no duplicate filed)"
+assert_contains "$OUT" "already tracked by open issue #42" "70. the open issue is adopted from the object"
 
-# ── 64. #3032: an UNRESOLVED dedup write fails LOUD, never search-only ──────
+# ── 71. #3032: an UNRESOLVED dedup write fails LOUD, never search-only ──────
 # Conditional write rejected AND HEAD cannot confirm the object AND the
 # unconditional put fails: dedup is unverifiable, so the run must not proceed
 # on the fail-open search.
@@ -1132,9 +1300,9 @@ export R2_DEFAULT_LIST="$TS_RECENT"
 export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' null)"
 export STUB_PUT_FAIL=1
 run_driver
-assert_eq "$RC" 1 "64. an unresolved dedup write exits RED (1)"
-assert_contains "$OUT" "Dedup is unverified" "64. the failure is loud and names the cause"
-assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "64. nothing is filed on an unverified dedup"
+assert_eq "$RC" 1 "71. an unresolved dedup write exits RED (1)"
+assert_contains "$OUT" "Dedup is unverified" "71. the failure is loud and names the cause"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "71. nothing is filed on an unverified dedup"
 
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"

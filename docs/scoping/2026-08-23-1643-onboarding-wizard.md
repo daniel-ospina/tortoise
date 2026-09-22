@@ -8,7 +8,7 @@ The first-run experience is dead ends: the welcome card links OUT to static docs
 ## Solution (converged — journey approved by the user 2026-08-23)
 A 7-step in-dashboard wizard (progress bar, skippable, resumable) replacing the welcome card's dead links + the graph-missing curl card:
 
-1. **STEP 0 — Name your workspace**: team confirm/rename (the provisioning auto-creates the first team), create-another (`POST /v1/teams`), and multi-team SELECT for returning users (the existing switcher surfaced here).
+1. **STEP 0 — Name your workspace**: team confirm/rename (the provisioning auto-creates the first team), create-another (`POST /v1/organizations`), and multi-team SELECT for returning users (the existing switcher surfaced here).
 2. **STEP 1 — Choose your plan**: free default (no card), upgrade CTAs (existing checkout), skippable — account decisions before the credential.
 3. **STEP 2 — Your API key**: reveal once (A13) + Copy.
 4. **STEP 3 — Connect your tool**: the HARNESS CHOOSER ported into the dashboard (Claude Code / Codex / Cursor / Pi one-click config + Copy — currently only on website/docs.html#mcp). Shared data module (`src/harnesses.js`) mirroring product/pricing.js.
@@ -39,7 +39,7 @@ Use the EXISTING `/v1/onboarding/state` model (onboarding_complete, github_conne
 The chooser lives in welcome.html (HARNESS_* data with copy analytics wired to /v1/onboarding/state harness/section enums) — NOT docs.html's static cards. Port from welcome.html's data + the backend enums.
 
 ### Anon teams + OAuth specifics
-- STEP 0 is session-gated; define wizard behavior for key-login anon teams (claim funnel first; the D4/D5 endpoints accept tt_ keys via get_current_team, so steps 4–7 are reachable).
+- STEP 0 is session-gated; define wizard behavior for key-login anon teams (claim funnel first; the D4/D5 endpoints accept tt_ keys via get_current_org, so steps 4–7 are reachable).
 - STEP 5 needs the OAuth popup + state restore (the GITHUB_STATES TTL pattern).
 
 ## Key decisions
