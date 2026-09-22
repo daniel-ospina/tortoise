@@ -22,20 +22,32 @@ What the execution buys:
 * A wrapper that DISCARDS the status (`echo $(invocation)`,
   `sh -c '<invocation>; true'`, `|| true`, a `trap`, `exit 0`) still executes the
   guard and still records it, so only running the step and reading its status
-  separates it from a correct invocation. (A bare subshell or
-  `sh -c '<invocation>'` propagates the status correctly, and is correctly
-  accepted.)
+  separates it from a correct invocation. The failure is injected into the
+  invocation carrying `--manifest-only` and no other, so what is asserted is the
+  ENFORCING call's status — failing every interpreter call would let the step's
+  other guard set a shared status variable and hide it. (A bare subshell or
+  `sh -c '<invocation>'` propagates the status correctly, and is accepted.)
 * A duplicate `--manifest` in either spelling is decided by the shell: the
   recorded argv is exactly what the guard would see, and the ambiguity itself is
   the defect this file reds on.
 * `set +e` with a masking last command, an early `exit`, a parse-invalid step:
   all decided by execution.
-* The guard must be the interpreter's SCRIPT operand, not merely a word in the
-  argv — `python3 -c 'pass' tools/skip-guard.py … --manifest-only` runs no guard.
-* The step's environments are applied as CI applies them (workflow < job < step),
-  so the manifest cannot be chosen by an `env:` value the harness ignores.
+* The guard must be the interpreter's SCRIPT operand AND resolve to
+  `tools/skip-guard.py` in this tree — `python3 -c 'pass' tools/skip-guard.py …`
+  runs no guard, and a decoy file that merely ends in the same suffix is not it.
+* The environment is CI's, not the developer's: the step's `env:` chain is applied
+  (workflow < job < step), the standard runner variables are set with the real job
+  name, and the AMBIENT environment is reduced to an allowlist. An enforcing step
+  that reads a runner variable this file does not model, or whose `env:` chain
+  holds a value interpolating `${{ … }}`, is refused rather than guessed.
 * A step whose `if:` is neither absent nor a plain `always()` may not run in CI
   at all, so it cannot be where the enforcement lives.
+* A runner-temp path the enforcing step reads must be spelled literally and be one
+  of `FIXTURES`, which the harness fabricates; a path assembled at run time is
+  refused, and an earlier step in the same job must still write each of them.
+* A frozen manifest may not be a symlink — one can point at the regenerated set
+  the comparison exists to catch — and every file in the directory counts, not
+  just `*.txt`.
 
 Benign, deliberate rewrites (the control flow is untouched, and the suite passes
 with the runner's TMPDIR *unset*, where `mkdtemp` returns a `/tmp/...` path):
@@ -54,23 +66,31 @@ Declared bounds — what this file does NOT verify, and why that is safe:
 * **Job-level reachability.** The `if:`/`needs:` of the JOB that owns a step, and
   the end-to-end proof that the job runs against the real suite, are #4463.
   STEP-level `if:` IS checked below.
+* **The runner's full environment.** Only the modelled runner variables are
+  available to the step; a variable this file does not model cannot be read by an
+  enforcing step at all (refused, not guessed), so an unmodelled gate cannot pass
+  here and take the other branch in CI.
 * **Lane-to-manifest pairing.** Swapping `embedded-only.txt` and
   `platform-gated.txt` between the two lanes keeps this suite green; CI itself
   reds (one lane's junit cannot satisfy the other lane's frozen set), so the
   pairing is not re-pinned here.
 * **The guard's own logic.** `tools/skip-guard.py` and `tests/test_skip_guard.py`
   are untouched by this change and verified by their own suite.
-* **The fixtures the enforcing steps branch on** (`pytest-rc`, `pytest-files`)
-  are FABRICATED here. A structural check asserts the workflow still writes
-  `pytest-rc` before the enforcing step, but the pytest leg itself is not
-  executed.
+* **The pytest leg itself** is not executed. The fixtures the enforcing steps
+  branch on are fabricated, so what is asserted is that the workflow still writes
+  each one before the step that reads it, and that the step reads it by a literal
+  path this file can prepare.
 * **An interpreter the stub does not shadow** (`python3.12`, `uv run python`):
   the coverage assertion reds and names the missing manifest, rather than passing.
+* **Parallel execution and test order** are reasoned about, not exercised here:
+  the caches are per-process, sandboxes are unique directories, and a workflow is
+  cached by (path, content), so a rewritten mutant is re-executed.
 """
 
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import os
 import re
@@ -95,14 +115,47 @@ STEP_TIMEOUT_S = 120
 #: The environment CI gives these jobs. Without it a step whose invocation is
 #: gated on any of these would pass on a developer's machine and skip in CI, so
 #: the verdict would be a property of the shell rather than of the workflow.
-#: `RUNNER_OS` is Linux because both enforcing jobs are `runs-on: ubuntu-latest`.
+#: `RUNNER_OS`/`RUNNER_ARCH` are Linux/X64 because both enforcing jobs are
+#: `runs-on: ubuntu-latest`. `GITHUB_JOB` is set per run (the real job name), and
+#: `RUNNER_TEMP` per run (the sandbox).
 CI_ENV = {
     "CI": "true",
     "GITHUB_ACTIONS": "true",
     "GITHUB_EVENT_NAME": "push",
     "GITHUB_REF": "refs/heads/main",
+    "GITHUB_REF_NAME": "main",
+    "GITHUB_SHA": "0" * 40,
+    "GITHUB_REPOSITORY": "daniel-ospina/tortoise",
+    "GITHUB_REPOSITORY_OWNER": "daniel-ospina",
+    "GITHUB_WORKFLOW": "python-ci.yml",
+    "GITHUB_WORKSPACE": str(ROOT),
+    "GITHUB_RUN_ID": "1",
+    "GITHUB_RUN_NUMBER": "1",
+    "GITHUB_RUN_ATTEMPT": "1",
+    "GITHUB_SERVER_URL": "https://github.com",
+    "GITHUB_API_URL": "https://api.github.com",
+    "GITHUB_GRAPHQL_URL": "https://api.github.com/graphql",
     "RUNNER_OS": "Linux",
+    "RUNNER_ARCH": "X64",
+    "RUNNER_NAME": "GitHub Actions 1",
+    "RUNNER_TOOL_CACHE": "/opt/hostedtoolcache",
 }
+#: The only ambient variables a step inherits. Everything else is DROPPED: an
+#: invocation gated on a developer's own environment (`[ -n "$TORTOISE_DB_URI" ]`)
+#: would otherwise pass here and take the skip branch in CI.
+AMBIENT_ENV = ("PATH", "HOME", "LANG", "LANGUAGE", "TZ", "TMPDIR", "LC_ALL", "LC_CTYPE")
+#: Variables whose ABSENCE from `CI_ENV`/the workflow's `env` chain means the
+#: runner sets them from outside anything this file models.
+RUNNER_VAR_RE = re.compile(r"(?:CI|GITHUB_[A-Z0-9_]+|RUNNER_[A-Z0-9_]+)")
+#: an environment reference in a shell body: `$NAME` or `${NAME…}`
+ENV_REF_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)")
+#: the fixtures the harness fabricates in each sandbox, by basename: an
+#: enforcing step may only read runner-temp paths from this set, so that what the
+#: harness prepares and what the workflow produces are known to be the same file.
+FIXTURES = ("pytest-rc", "pytest-files")
+#: a literal runner-temp path, the only form this harness can fabricate
+RUNNER_TEMP_LITERAL_RE = re.compile(r"\$\{RUNNER_TEMP:-/tmp\}/[A-Za-z0-9._-]+")
+RUNNER_TEMP_REF_RE = re.compile(r"\$\{RUNNER_TEMP[^}]*\}|\$RUNNER_TEMP\b")
 
 #: Records every interpreter invocation as one JSON argv line, then behaves like
 #: the interpreter for the one case the harness needs: a pytest run emits enough
@@ -124,6 +177,14 @@ if any(a == "pytest" or a.endswith("/pytest") for a in argv):
     for i in range(int(os.environ.get("STUB_PASSED", "40"))):
         print(f"tests/stub_module.py::test_stub_{i:03d} PASSED")
     sys.exit(int(os.environ.get("STUB_PYTEST_RC", "0")))
+
+# STUB_FAIL_ON selects WHICH invocation fails: only the one whose argv carries
+# the marker. Without it a red test fails every interpreter call, so a step can
+# look like it propagates a guard's status while the flagged invocation's own
+# status is discarded by the shell (found in review).
+fail_on = os.environ.get("STUB_FAIL_ON", "")
+if fail_on and not any(fail_on in a for a in argv):
+    sys.exit(0)
 sys.exit(int(os.environ.get("STUB_RC", "0")))
 '''
 
@@ -145,14 +206,25 @@ exec "$@"
 # ── locating the steps (a LOCATOR, never the assertion) ──────────────────────
 
 
+def _digest(path: Path) -> str:
+    """Content hash of a workflow: the cache key must not be the path alone.
+
+    A probe that overwrites the SAME path with a new mutant would otherwise be
+    served the previous execution (found in review).
+    """
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 @lru_cache(maxsize=8)
-def _workflow_at(path: Path) -> dict:
-    """Parse a workflow. Cached per PATH, so a mutated copy gets its own parse."""
+def _workflow_at(path: Path, digest: str) -> dict:
+    """Parse a workflow. Cached per (path, CONTENT), so a rewritten mutant is
+    re-parsed rather than served stale. `digest` is a cache key, not a read."""
+    del digest
     return yaml.safe_load(path.read_text())
 
 
 def _workflow() -> dict:
-    return _workflow_at(WORKFLOW)
+    return _workflow_at(WORKFLOW, _digest(WORKFLOW))
 
 
 def _all_steps() -> list[tuple[str, dict]]:
@@ -177,13 +249,18 @@ def _committed_manifests() -> dict[Path, str]:
     """{resolved path: relative posix path} for every frozen manifest in CI.
 
     Every FILE counts, not just `*.txt`: the property is "a frozen set that no
-    step enforces must red", and an extension is not a reason to skip it.
+    step enforces must red", and an extension is not a reason to skip it. A
+    SYMLINK is refused: one pointing at the regenerated `/tmp` set would make the
+    "frozen" check read the very set it exists to be compared against (#4207).
     """
-    return {
-        path.resolve(): path.relative_to(ROOT).as_posix()
-        for path in sorted(FROZEN_DIR.iterdir())
-        if path.is_file() and not path.name.startswith(".")
-    }
+    entries = [p for p in sorted(FROZEN_DIR.iterdir()) if not p.name.startswith(".")]
+    links = [p.name for p in entries if p.is_symlink()]
+    assert not links, (
+        f"frozen manifests must be real files, not symlinks: {links} — a symlinked manifest can "
+        "point at the REGENERATED set, so `--manifest-only` would compare the tree against "
+        "itself and the #4207 property would be vacuous"
+    )
+    return {path.resolve(): path.relative_to(ROOT).as_posix() for path in entries if path.is_file()}
 
 
 def _env_chain(job_name: str, step: dict) -> tuple[dict[str, str], dict[str, str]]:
@@ -280,16 +357,20 @@ class _Run:
         self.log.write_text("", encoding="utf-8")
         return self
 
-    def run(self, stub_rc: str = "0", pytest_rc: str = "0") -> _Run:
+    def run(self, stub_rc: str = "0", pytest_rc: str = "0", stub_fail_on: str = "") -> _Run:
         literal_env, _unmodelled = _env_chain(self.job, self.step)
         env = {
-            **os.environ,
+            # ONLY the allowlisted ambient variables: otherwise a step gated on a
+            # developer's environment passes here and skips in CI
+            **{k: v for k, v in os.environ.items() if k in AMBIENT_ENV},
             **CI_ENV,
+            "GITHUB_JOB": self.job,
             **literal_env,  # the workflow's own environment, as CI would apply it
             # harness controls last: they must not be overridden by the workflow
             "PATH": f"{_stub_bin()}:{os.environ['PATH']}",
             "STUB_LOG": str(self.log),
             "STUB_RC": stub_rc,
+            "STUB_FAIL_ON": stub_fail_on,
             "STUB_PYTEST_RC": pytest_rc,
             "STUB_PASSED": "40",
             "RUNNER_TEMP": str(self.sandbox),
@@ -320,16 +401,25 @@ class _Run:
 
 
 def _is_guard_invocation(args: list[str]) -> bool:
-    """True when the guard is the script the interpreter EXECUTED.
+    """True when the guard is the script the interpreter EXECUTED, by PATH.
 
     Not "any word ends with the guard path": `python3 -c 'pass' tools/skip-guard.py
     … --manifest-only` runs no guard at all while carrying the path as an inert
-    argument, and would otherwise be recorded as an enforcement. The interpreter's
-    script is its first non-option word; for `-c`/`-m` that word is the
-    code/module, so neither form can be mistaken for the guard.
+    argument. The interpreter's script is its first non-option word; for
+    `-c`/`-m` that word is the code/module, so neither form can be mistaken for the
+    guard. And the word must RESOLVE to `tools/skip-guard.py` in this tree — a
+    decoy file that merely ends in the same suffix is not the guard (found in
+    review).
     """
     operands = [word for word in args if not word.startswith("-")]
-    return bool(operands) and operands[0].endswith(GUARD_SUFFIX)
+    if not operands:
+        return False
+    script = Path(operands[0])
+    resolved = script if script.is_absolute() else ROOT / script
+    try:
+        return resolved.resolve() == (ROOT / GUARD_SUFFIX).resolve()
+    except OSError:  # pragma: no cover - a path that cannot be resolved
+        return False
 
 
 def _run_step(job: str, step: dict, parent: Path | None = None, **kw) -> _Run:
@@ -340,17 +430,17 @@ def _run_step(job: str, step: dict, parent: Path | None = None, **kw) -> _Run:
 
 
 @lru_cache(maxsize=8)
-def _enforcing_steps_at(path: Path) -> list[tuple[_Run, list[list[str]]]]:
+def _enforcing_steps_at(path: Path, digest: str) -> list[tuple[_Run, list[list[str]]]]:
     """Every guard step EXECUTED once (guard exiting 0); the enforcing ones.
 
     Only the steps that actually passed `--manifest-only` are returned — decided
-    by the argv the process received, never by reading the step. `path` is the
-    CACHE KEY as well as the workflow under test: a mutated copy is keyed
-    separately (a probe that swaps `WORKFLOW` cannot be served a stale
-    execution), and the run is shared across tests because it is read-only
-    evidence that would otherwise cost the CI pool ~3x for the same facts. The
-    failing-guard test deliberately gets its own fresh execution.
+    by the argv the process received, never by reading the step. The key is
+    (path, CONTENT) so a mutant rewritten at the same path is executed afresh, and
+    the run is shared across tests because it is read-only evidence that would
+    otherwise cost the CI pool ~3x for the same facts. The failing-guard test
+    deliberately gets its own fresh execution.
     """
+    del digest
     assert path == WORKFLOW, "_guard_steps() reads the module WORKFLOW; keep the key in step"
     steps = _guard_steps()
     assert steps, (
@@ -371,7 +461,7 @@ def _enforcing_steps_at(path: Path) -> list[tuple[_Run, list[list[str]]]]:
 
 
 def _enforcing_steps() -> list[tuple[_Run, list[list[str]]]]:
-    return _enforcing_steps_at(WORKFLOW)
+    return _enforcing_steps_at(WORKFLOW, _digest(WORKFLOW))
 
 
 def _manifest_values(args: list[str]) -> list[str]:
@@ -460,7 +550,11 @@ def test_a_failing_guard_reds_the_step():
     """
     failed = []
     for first, _flagged in _enforcing_steps():
-        run = _run_step(first.job, first.step, stub_rc="1")
+        # ONLY the enforcing invocation fails: with every call failing, the
+        # carve-out step's sibling guard (degenerate-manifest) sets the shared
+        # `guard_rc`, so a MASKED frozen invocation still looked like it
+        # propagated (found in review).
+        run = _run_step(first.job, first.step, stub_rc="1", stub_fail_on="--manifest-only")
         detail = f"{run.where} (exited {run.returncode})"
         if run.timed_out:
             detail += " [TIMED OUT]"
@@ -524,35 +618,57 @@ def test_the_sandbox_relocation_survives_a_tmp_based_tempdir():
     )
 
 
-def test_the_enforcing_steps_preconditions_are_still_produced():
+def test_the_enforcing_steps_preconditions_are_modelled_literally():
     """The harness FABRICATES the fixtures the enforcing steps branch on.
 
     A green run therefore says nothing about whether the workflow still produces
     them: if nothing wrote `${RUNNER_TEMP}/pytest-rc`, CI would take the "job
     already red" branch and never run the frozen check, while every execution
-    property here stayed green. So the producer is asserted structurally, as
-    `tests/test_ci_selection.py:1443` does for the slow lane.
+    property here stayed green. Two things are asserted, structurally:
+
+    * every runner-temp path the step READS is spelled literally, so the harness
+      can know what it is fabricating (a computed path — `"pytest"-"rc"` — is
+      refused rather than guessed, the same fail-closed choice as everywhere else);
+    * some EARLIER step in the same job writes each of those literal paths, as
+      `tests/test_ci_selection.py:1443` pins for the slow lane.
+
+    A step that runs pytest itself (the d14 lane) reads no such fixture and is
+    skipped: its junit and log are produced by the stubbed run.
     """
     jobs = _workflow().get("jobs") or {}
-    missing = []
+    missing: list[str] = []
     for run, _flagged in _enforcing_steps():
         body = run.step.get("run") or ""
-        if "pytest-rc" not in body:
-            # this step runs pytest itself (its junit and log are produced by the
-            # stub's output, not fabricated), so it has no upstream precondition
+        if "RUNNER_TEMP" not in body:
             continue
-        name = run.step.get("name")
+        literals = set(RUNNER_TEMP_LITERAL_RE.findall(body))
+        # every reference must be a PREFIX of a literal path, i.e. the step spells
+        # the whole path — `"${RUNNER_TEMP:-/tmp}/pytest"-"rc"` is not spelled
+        computed = [ref for ref in sorted(set(RUNNER_TEMP_REF_RE.findall(body)))
+                    if not any(lit.startswith(ref) for lit in literals)]
+        if computed:
+            missing.append(
+                f"{run.where} reads a COMPUTED runner-temp path {computed} — this harness can only "
+                "fabricate the literal `${RUNNER_TEMP:-/tmp}/<name>` form, so spell it literally"
+            )
+        unknown = sorted(lit.rsplit("/", 1)[-1] for lit in literals
+                         if lit.rsplit("/", 1)[-1] not in FIXTURES)
+        if unknown:
+            missing.append(
+                f"{run.where} reads runner-temp paths this harness does not fabricate {unknown}; it "
+                f"can only fabricate {sorted(FIXTURES)} — add the fixture to FIXTURES so the "
+                "producer is checked and the file exists at run time, or use a path this step makes"
+            )
         steps = (jobs.get(run.job) or {}).get("steps") or []
-        position = next((i for i, s in enumerate(steps) if s.get("name") == name), None)
-        if position is None:  # pragma: no cover - impossible for a located step
-            missing.append(f"{run.where} (step not found in its own job)")
-            continue
-        if not any("pytest-rc" in (s.get("run") or "") for s in steps[:position]):
-            missing.append(f"{run.where} (no earlier step in `{run.job}` writes pytest-rc)")
+        position = next((i for i, s in enumerate(steps) if s.get("name") == run.step.get("name")), None)
+        for literal in sorted(literals):
+            earlier = steps[: position or 0]
+            if not any(literal in (s.get("run") or "") for s in earlier):
+                missing.append(f"{run.where} reads {literal} and no earlier step in `{run.job}` writes it")
     assert not missing, (
-        "these enforcing steps depend on a fixture this harness fabricates and that no step in "
-        f"the workflow produces before them: {missing} — in CI the guard would be skipped as "
-        "'job already red' and the frozen set would go unchecked"
+        "these enforcing steps depend on a fixture this harness fabricates that the workflow does "
+        f"not verifiably produce: {missing} — in CI the guard would be skipped as 'job already red' "
+        "and the frozen set would go unchecked"
     )
 
 
@@ -608,32 +724,53 @@ def test_an_enforcing_step_is_not_neutralised_by_metadata():
     )
 
 
-def test_an_enforcing_step_does_not_depend_on_unmodelable_env():
-    """A step's `env:` chain is applied (workflow < job < step), so a manifest
-    cannot be chosen by an `env:` value this harness ignores.
+def test_an_enforcing_steps_environment_is_fully_modelable():
+    """No value in an enforcing step's `env:` chain may be unevaluable here.
 
     `env: {MANIFEST: /tmp/expected-nodeids.txt}` with
     `--manifest "${MANIFEST:-config/…}"` reads as the frozen path here and as the
     REGENERATED path in CI — the #4207 defect, green. Literal values are applied,
-    so that shape reds in the coverage test above. A value that interpolates
-    `${{ … }}` cannot be resolved outside Actions; if the step's shell can read it,
-    the invocation is unverifiable, and that fails closed here rather than
-    reporting a mode of operation that may not hold in CI.
+    so that shape reds in the coverage test above.
+
+    A value that interpolates `${{ … }}` is resolved by Actions, not by bash, so it
+    is REFUSED outright rather than checked for a textual mention of its name:
+    `XK=MG; --manifest "${!XK:-<frozen>}"` reads the same variable through shell
+    indirection and defeats any such match (found in review). Fail-closed on the
+    whole chain, which is verifiable, beats a text rule that is not.
     """
     offenders = []
     for run, _flagged in _enforcing_steps():
-        _literal, unevaluable = _env_chain(run.job, run.step)
-        body = run.step.get("run") or ""
-        for name in unevaluable:
-            # any shell reference form: $NAME, ${NAME}, ${NAME:-default}
-            if re.search(rf"\$\{{?{re.escape(name)}\b", body):
-                offenders.append(
-                    f"{run.where} (env `{name}` interpolates `${{{{ … }}}}` and the step's shell "
-                    "reads it)"
-                )
+        _literal, unmodelled = _env_chain(run.job, run.step)
+        if unmodelled:
+            offenders.append(f"{run.where} (env: {sorted(unmodelled)})")
     assert not offenders, (
-        f"these enforcing steps read environment values this harness cannot model: {offenders} — "
-        "an unmodelled environment can select a different manifest than the one the step spells. "
+        f"these enforcing steps run with environment values this harness cannot model: {offenders} "
+        "— an unmodelled environment can select a different manifest than the one the step spells. "
         "Make the value literal, pass the manifest explicitly, or extend this harness to evaluate "
         "the expression"
+    )
+
+
+def test_an_enforcing_step_reads_no_unmodelled_runner_variable():
+    """A gate on any CI/runner variable this harness does not model is green here
+    and skipped in CI — the `[ -z "$GITHUB_ACTIONS" ]` class, one variable over:
+    `$GITHUB_JOB`, `$RUNNER_ARCH`, `if [ "$GITHUB_EVENT_NAME" = push ]` (which
+    skips the whole job on a pull request), and so on. CI sets an open-ended set of
+    them, so instead of modelling all of it the harness refuses a step that reads
+    one it does not model. Shell-local names (`RC`, `guard_rc`, `passed`, `FILES`)
+    are not runner variables and are unaffected.
+    """
+    offenders = []
+    for run, _flagged in _enforcing_steps():
+        literal_env, _unmodelled = _env_chain(run.job, run.step)
+        modelled = set(CI_ENV) | set(literal_env) | {"RUNNER_TEMP", "GITHUB_JOB"}
+        body = run.step.get("run") or ""
+        for name in sorted(set(ENV_REF_RE.findall(body))):
+            if RUNNER_VAR_RE.fullmatch(name) and name not in modelled:
+                offenders.append(f"{run.where} reads `${name}`")
+    assert not offenders, (
+        f"these enforcing steps read CI/runner variables this harness does not model: {offenders} "
+        "— such a gate can pass here and take the other branch in CI, so the verdict would not be "
+        "a property of the workflow. Model the variable (add it to CI_ENV) if it is genuinely "
+        "needed, or drop the gate"
     )
