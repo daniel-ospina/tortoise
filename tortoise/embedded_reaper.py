@@ -3149,8 +3149,9 @@ def _owner_record_dir_present(socket_dir: str) -> bool:
     whose owner closed GRACEFULLY while the daemon survived loses its
     instrument (`forget_owner` removes the record and rmdirs the dir, #3599),
     so it reads `unattributed` and reap() no longer fast-kills it in a full
-    sweep — it converges only through the #1557/#1642 FIX 3 confirmation
-    window. That is the deliberate fail-CLOSED direction: an instrument-less
+    sweep — EXCEPT a `dir_missing` record, which #4546 exempts — otherwise it
+    converges only through the #1557/#1642 FIX 3 confirmation window. That is
+    the deliberate fail-CLOSED direction: an instrument-less
     server is byte-for-byte indistinguishable from a foreign same-uid
     application's (`_has_ownership_claim`), and the whole point of #3767 is
     that we may not kill what we cannot attribute. Distinguishing "never
