@@ -231,7 +231,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_recall
-  served_from: tortoise/mcp_server.py:32a22d4162be59b6
+  served_from: tortoise/mcp_server.py:d625dc916f15d980
   family: memory
   family_rank: 1
   served: http
@@ -261,7 +261,10 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  approval: null
+  # PR #4173 changed the implementation served as `tortoise_recall`: the #3926
+  # typed-error guard refactor moved its fingerprint 32a22d4162be59b6 -> d625dc916f15d980.
+  # No tool was added, removed or renamed; landing PR #4173 is the approving act.
+  approval: '#4173 @daniel-ospina'
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_search
@@ -291,7 +294,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_suggest_entry_points
-  served_from: tortoise/mcp_server.py:4fc2d2c7d48e54e5
+  served_from: tortoise/mcp_server.py:564fb24731914250
   family: memory
   family_rank: 1
   served: http
@@ -311,7 +314,10 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  approval: null
+  # PR #4173 changed the implementation served as `tortoise_suggest_entry_points`: the #3926
+  # typed-error guard refactor moved its fingerprint 4fc2d2c7d48e54e5 -> 564fb24731914250.
+  # No tool was added, removed or renamed; landing PR #4173 is the approving act.
+  approval: '#4173 @daniel-ospina'
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_index_files
@@ -343,7 +349,7 @@ rows:
   class: agent-reachable
   cluster_canonical: tortoise_index_files
 - name: tortoise_create_point
-  served_from: tortoise/mcp_server.py:3d72f7a7b56da6d0
+  served_from: tortoise/mcp_server.py:6ac682bb45fbc1ab
   family: memory
   family_rank: 1
   served: http
@@ -364,8 +370,11 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  # Re-carried verbatim by the #3883 re-cut, which resets per-row approval to null.
-  approval: '#3949 @daniel-ospina'
+  # PR #4173 (#3926 typed-error guard) and PR #3949 (#3784 fail-closed decision
+  # observation) both changed the implementation served as `tortoise_create_point`.
+  # The merged implementation carries BOTH, at 6ac682bb45fbc1ab; no tool was added,
+  # removed or renamed, so both recorded approvals stand.
+  approval: '#4173 @daniel-ospina, #3949 @daniel-ospina'
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_calibrate_summary
@@ -493,7 +502,7 @@ rows:
   cluster_canonical: tortoise_update
   cluster_note: group `update` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
 - name: tortoise_delete
-  served_from: tortoise/mcp_server.py:bc9ed3ffe618b1f1
+  served_from: tortoise/mcp_server.py:92890c80d0ad8e5e
   family: memory
   family_rank: 1
   served: http
@@ -513,7 +522,10 @@ rows:
   recommended_family: memory
   proposed: true
   exemption: false
-  approval: null
+  # PR #4173 changed the implementation served as `tortoise_delete`: the #3926
+  # typed-error guard refactor moved its fingerprint bc9ed3ffe618b1f1 -> 92890c80d0ad8e5e.
+  # No tool was added, removed or renamed; landing PR #4173 is the approving act.
+  approval: '#4173 @daniel-ospina'
   class: agent-reachable
   cluster_canonical: tortoise_delete
   cluster_note: group `delete` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
@@ -2018,7 +2030,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_file_decision
-  served_from: tortoise/mcp_server.py:5b94130694a2f699
+  served_from: tortoise/mcp_server.py:1a8c8a757eb40d30
   family: journal
   family_rank: 7
   served: http
@@ -2038,8 +2050,11 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  # Re-carried verbatim by the #3883 re-cut, which resets per-row approval to null.
-  approval: '#3949 @daniel-ospina'
+  # PR #4173 (#3926 typed-error guard) and PR #3949 (#3784 fail-closed decision
+  # observation) both changed the implementation served as `tortoise_file_decision`.
+  # The merged implementation carries BOTH, at 1a8c8a757eb40d30; no tool was added,
+  # removed or renamed, so both recorded approvals stand.
+  approval: '#4173 @daniel-ospina, #3949 @daniel-ospina'
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_file_human_approval

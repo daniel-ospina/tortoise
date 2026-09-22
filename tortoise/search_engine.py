@@ -330,7 +330,8 @@ class SearchResult:
     content: str
     point_kind: str
     scores: SearchScores | None = None
-    match_source: Literal["fts", "vector", "structural", "rrf", "tfidf"] = "rrf"
+    match_source: Literal["fts", "vector", "structural", "rrf", "tfidf",
+                         "session"] = "rrf"
     ep: EpBreakdown | None = None
     relationships: list[dict] = field(default_factory=list)  # SDK compat (sdk.py passes it; non-point = empty)
     # #125 capture metadata (document entity_type) — optional, empty for non-docs

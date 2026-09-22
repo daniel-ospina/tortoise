@@ -236,6 +236,128 @@ plan listed them as if they were renames. This is what Part A exists to catch.
 A tool that declares a binding to a method **that is not a `def` on `TortoiseSDK`** is a
 declaration that cannot be honoured. It fails silently today because nothing checks it.
 
+## Part D — destination citations
+
+The `Destination` column's evidence is the beta doc's own disposition row, quoted
+**in full**. The quote is not decoration. A read that stops at the clause agreeing with
+the row drops the clause that contradicts it, and because a truncated prefix of a real
+sentence is still a real substring, a `quote in text` test passes while the evidence has
+been edited to agree with the row. **Every quote below is the whole disposition ROW, read
+at build time** — a truncation is not merely detected, it is *impossible to construct*,
+because there is no slicing step: the row **is** the quote. (The authored FOLD hop below
+is hand-typed, so the generator additionally rejects it with a maximality check.)
+
+**19 citations cover 41 of the 98 registry rows.** The other **57**
+are map decisions with no disposition row in the doc to cite — a net-new target, or a row
+that table does not carry.
+
+#### D1 — the citation corpus
+
+- `beta-sdk-surface.md` · rows `tortoise_assess_source`, `tortoise_get_source_reliability`, `tortoise_set_source_tier`
+  > | `assess_source`, `set_source_tier`, `get_source_reliability` | 3 | → `manage_source_trust` for the setter; reads via `list_sources`. |
+- `beta-sdk-surface.md` · rows `tortoise_audit`, `tortoise_dream_health`, `tortoise_summarize_structure`, `tortoise_validate_domain`
+  > | `audit`, `validate_domain`, `summarize_structure`, `dream_health_check`, `dream_health_state` | ~5 | → `graph_overview` where they are orientation. The diagnostics are the held question above. |
+- `beta-sdk-surface.md` · rows `tortoise_create_operator`
+  > | `create_operator`, `create_direct_edge`, `create_derivation`, `link_source_to_entity` | 4 | → `link_entities`, which dispatches on the relation. |
+- `beta-sdk-surface.md` · rows `tortoise_delete_point`
+  > | `delete_point`, `delete_point_wrapped` | 2 | → `delete_knowledge`. |
+- `beta-sdk-surface.md` · rows `tortoise_file_human_approval`
+  > | `file_human_approval` | 1 | → `record_decision`. |
+- `beta-sdk-surface.md` · rows `tortoise_ingest_corpus`
+  > | `ingest_corpus`, `index_file`, `session_index_health` | 3 | → `index_sources_from_directory`. |
+- `beta-sdk-surface.md` · rows `tortoise_list_batch`, `tortoise_list_batches`
+  > | `list_batch`, `list_batches` | 2 | → `list_knowledge(kind='batch')`. The batch contents come back inline in the bounded, paged page. |
+- `beta-sdk-surface.md` · rows `tortoise_mine_conversations`
+  > | `mine_corpus` | 1 | → `mine_knowledge_from_directory`. It is the **batch form of `mine_knowledge_from_session`**, not a kind of indexing. |
+- `beta-sdk-surface.md` · rows `tortoise_annotate_operator`, `tortoise_mitigate_operator`, `tortoise_operator_action`
+  > | `mitigate_operator`, `operator_action`, `annotate_operator` | 3 | → `adjust_relationship` for strength, `update_knowledge` for annotation. `operator_action(**kwargs)` currently **accepts and silently ignores** `credibility` — a bug. |
+- `beta-sdk-surface.md` · rows `tortoise_belief_timeline`, `tortoise_provenance`, `tortoise_session_context`
+  > | `provenance`, `belief_timeline`, `session_context`, `volunteer_context` | 4 | → `check_confidence` where they are confidence context; `poll_events` where they are a timeline. |
+- `beta-sdk-surface.md` · rows `tortoise_paginated_query`, `tortoise_query`, `tortoise_query_points_by_tag`
+  > | `query`, `paginated_query`, `query_points_by_tag` | 3 | → `list_knowledge`. |
+- `beta-sdk-surface.md` · rows `tortoise_calibrate_summary`, `tortoise_recall`
+  > | `recall_gaps`, `recall_subgraph`, `recall_state`, `recall_legs`, `calibrate_summary`, `calibration_passed` | ~6 | → `check_confidence` for the confidence view; **`recall_subgraph` is dropped, not folded** — `explore_connections` answers that question. The gaps question is flagged in "Named but not solved". |
+- `beta-sdk-surface.md` · rows `tortoise_invalidate`, `tortoise_retract_point`
+  > | `retract_point`, `invalidate_point` | 2 | → fields on `update_knowledge`. **Zep's shape:** retraction is `invalid_at`/`expired_at` on the existing update, not a separate verb. |
+- `beta-sdk-surface.md` · rows `tortoise_find_cross_lens_candidates`, `tortoise_list_dedup_candidates`, `tortoise_review_connections`
+  > | `review_connections`, `get_cross_lens_candidates`, `list_dedup_candidates` | 3 | → `review_link_candidates`. |
+- `beta-sdk-surface.md` · rows `tortoise_issue_insight`, `tortoise_search_sessions`, `tortoise_suggest_entry_points`
+  > | `search_sessions`, `suggest_entry_points`, `topic_summarize`, `issue_insight`, `annotate_ask_hits` | 5 | → `search_knowledge`. |
+- `beta-sdk-surface.md` · rows `tortoise_supersede`
+  > | `supersede`, `supersede_point` | 2 | → `supersede_knowledge`. They also **disagree** — `supersede_point` carries a `valid_from` the other silently drops. |
+- `beta-sdk-surface.md` · rows `tortoise_expand_relationships`, `tortoise_traverse`
+  > | `traverse`, `expand_relationships`, `get_org_structure` | 3 | → `explore_connections`. |
+- `beta-sdk-surface.md` · rows `tortoise_update_entity`, `tortoise_update_point`
+  > | `update_point`, `update_entity` | 2 | → `update_knowledge`. |
+- `beta-sdk-surface.md` · rows `tortoise_get_events`, `tortoise_get_governance`, `tortoise_get_session`
+  > | narrow readers (`get_session`, `get_events`, `get_owned_entities`, `get_provenance_chain`, …) | ~8 | → `get_entity`, except where a genuinely different shape is returned. |
+
+**Documented hops.** A citation can name something that is not a target because it is
+itself folded one hop further. The hop is stated in the doc, so it is carried as a
+citation of its own — checked by the same rule — rather than assumed. Without it
+`tortoise_get_source_reliability`'s row reads as unsupported, which is not a finding.
+
+- `list_sources` → `list_knowledge`
+  > | `list_sources` | **Not discarded.** Present at `tortoise/sdk.py` with an MCP tool and a CLI command (`tortoise/__main__.py`), and it is covered by `tests/test_enumeration_surfaces.py` and `tests/test_connector_sources.py`. It folds into **row 4 `list_knowledge(kind='source')`** — the *question* it asks stays first-class and gains the credibility tier; it no longer needs its own method. |
+
+**4 rows disagree with their own citation; 1 are supported only
+beyond the first clause; 9 sit under an ambiguous citation.** Every count
+here is computed from the doc, not typed.
+
+#### D2 — citations that do NOT name their row's destination
+
+**These are findings, not edits.** A row whose destination is not named by the row's own
+full citation is the `get_source_reliability` failure mode read one level up — the row and
+its evidence disagree. The destination map is owner-approved, so the disagreement is
+reported here with its evidence and the mapping is left ALONE. Changing an owner-approved
+destination is not a build step.
+
+**D2 is a LOWER BOUND, and reads that way on purpose.** Its predicate is exhaustive — every
+row whose destination is named *nowhere* in its citation is listed. What it cannot decide
+is clause ATTRIBUTION. `tortoise_assess_source` is the concrete case: its citation names the
+setter's `manage_source_trust` first and the reader's `list_sources` second, and the map
+puts it on the setter's target — a reading of which clause applies, not a computation. Such
+rows are visible in D3, not here, and are not counted as disagreements.
+
+- **`tortoise_invalidate`** — map says `supersede_knowledge`; citation names `update_knowledge`
+  > | `retract_point`, `invalidate_point` | 2 | → fields on `update_knowledge`. **Zep's shape:** retraction is `invalid_at`/`expired_at` on the existing update, not a separate verb. |
+- **`tortoise_paginated_query`** — map says `search_knowledge`; citation names `list_knowledge`
+  > | `query`, `paginated_query`, `query_points_by_tag` | 3 | → `list_knowledge`. |
+- **`tortoise_query`** — map says `search_knowledge`; citation names `list_knowledge`
+  > | `query`, `paginated_query`, `query_points_by_tag` | 3 | → `list_knowledge`. |
+- **`tortoise_query_points_by_tag`** — map says `search_knowledge`; citation names `list_knowledge`
+  > | `query`, `paginated_query`, `query_points_by_tag` | 3 | → `list_knowledge`. |
+
+#### D2b — rows whose support exists ONLY beyond the first clause
+
+These rows are **why the first-clause split is load-bearing, not decorative**. Their
+destination is named by the citation, but only in a clause after the first `→` — the
+exact point a truncated read would stop. A read that took only the first clause would
+lose the row's whole support, silently — so the generator computes the first-clause names
+(`_prefix_targets`) and surfaces any discrepancy as this list.
+
+- **`tortoise_get_source_reliability`** — map says `list_knowledge`; the first clause names `manage_source_trust`, the full citation names `manage_source_trust`, `list_knowledge`
+  > | `assess_source`, `set_source_tier`, `get_source_reliability` | 3 | → `manage_source_trust` for the setter; reads via `list_sources`. |
+
+#### D3 — citations that name more than one target
+
+A citation here does not by itself determine a destination: it names several, split by
+prose (`; reads via …`, `where they are …`, `for annotation`). Which clause applies to
+which method is a reading, not a computation — so the **full** quote is rendered for these
+rows in D1, where the clause a truncated read would have dropped is visible.
+
+| Row | Destination (map) | Citation names | First clause names |
+|---|---|---|---|
+| `tortoise_annotate_operator` | `adjust_relationship` | `adjust_relationship`, `update_knowledge` | `adjust_relationship`, `update_knowledge` |
+| `tortoise_assess_source` | `manage_source_trust` | `manage_source_trust`, `list_knowledge` | `manage_source_trust` |
+| `tortoise_belief_timeline` | `check_confidence` | `check_confidence`, `poll_events` | `check_confidence` |
+| `tortoise_get_source_reliability` | `list_knowledge` | `manage_source_trust`, `list_knowledge` | `manage_source_trust` |
+| `tortoise_mitigate_operator` | `adjust_relationship` | `adjust_relationship`, `update_knowledge` | `adjust_relationship`, `update_knowledge` |
+| `tortoise_operator_action` | `adjust_relationship` | `adjust_relationship`, `update_knowledge` | `adjust_relationship`, `update_knowledge` |
+| `tortoise_provenance` | `check_confidence` | `check_confidence`, `poll_events` | `check_confidence` |
+| `tortoise_session_context` | `check_confidence` | `check_confidence`, `poll_events` | `check_confidence` |
+| `tortoise_set_source_tier` | `manage_source_trust` | `manage_source_trust`, `list_knowledge` | `manage_source_trust` |
+
 ---
 
 ## Reproduce

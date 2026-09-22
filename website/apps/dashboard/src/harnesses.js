@@ -361,7 +361,9 @@ ${PI_CAPTURE_INSTALL}
    from the environment of the shell that LAUNCHED it, so a reload (or a
    restart in the same old terminal) silently keeps the stale or empty
    value. You get a 401, or connect to a previous organization with no
-   warning at all.
+   warning at all. ('/reload' re-scans configs, skills, and MCP
+   registrations, and tortoise connects eagerly at startup — the config
+   doesn't mark it lazy — so no separate connect step is needed.)
    Then call tortoise_health — when it passes, tell me "Tortoise is
    connected". The first time you write a memory or file a decision,
    onboarding auto-completes (no separate ceremony needed).`,
@@ -641,7 +643,9 @@ ${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}
 4. Restart Pi from a NEW terminal (quit Pi fully, open a new terminal
    window, and start Pi there). A \"/reload\" is NOT enough — Pi reads the
    key from the environment of the shell that launched it, so a reload
-   keeps the stale or empty value.
+   keeps the stale or empty value. ('/reload' re-scans configs, skills, and
+   MCP registrations, and tortoise connects eagerly at startup — the config
+   doesn't mark it lazy — so no separate connect step is needed.)
    Then call tortoise_health — when it passes, tell me "Tortoise is
    connected".`,
   // #2865: key-less OAuth. `key` is accepted (one signature for every harness)
