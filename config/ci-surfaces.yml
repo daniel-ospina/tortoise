@@ -65,6 +65,12 @@ surfaces:
   # change. Dual-registered with `onboarding` (the step-edge `created`
   # contract) and `core` (the analytics.py seam).
   - test_onboarding_telemetry_w11.py
+  # #3287: the selfhost health probes must not ride the loop's SHARED default
+  # executor — a starved readiness probe returned a false 503 for a healthy DB
+  # (measured 6020 ms, probe never ran), which fails publish-selfhost.yml. Dual
+  # registration like test_health_ready_nonblocking.py: the file it guards is
+  # tortoise/selfhost.py, which selects the `api` surface.
+  - test_selfhost_health_probe_executor.py
   - test_sentry.py
   - test_telemetry_registration.py
   - test_tenancy_spine.py     # C5 #2114: data-plane tenancy spine (cross-graph suite)
@@ -490,6 +496,7 @@ surfaces:
   # runs on the PR that edits the gate — pinned by test_ci_selection.py.
   - test_finding_provenance.py
   - test_health_ready_nonblocking.py  # #2988: /health/ready off-loop + bounded probes
+  - test_selfhost_health_probe_executor.py  # #3287: selfhost probes own their pool (dual-registered)
   - test_transport_wait_bound.py  # #3834: transport wait bound + cold-half gate wiring (dual: api)
   # #2877: DB-free guards that a dead backup watcher degrades /health (the file
   # it guards, tortoise/hosted_api.py, selects the `api` surface, so it is
@@ -1496,6 +1503,11 @@ durations:
   test_signup_token_revoke.py: 8.0
   test_w4_why_enrichment.py: 8.0
   test_capture_loop_responsiveness.py: 7.7
+  # #3287: 17 cases — structural AST pins plus behavioural starvation tests that
+  # park real daemon-pool workers on threading.Event gates. Measured ~7.4s in
+  # the embedded lane. FIRST ESTIMATE; re-measure from the first post-merge
+  # junit artifact rather than trusting it.
+  test_selfhost_health_probe_executor.py: 7.4
   test_writer_inventory.py: 7.3
   test_decide.py: 7.2
   test_onboarding_endpoints.py: 7.2
