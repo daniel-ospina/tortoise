@@ -376,6 +376,18 @@ def _liveness_probe_stale_after() -> float:
     With the reused probe connection (``_probe_sdk``) the steady-state probe is
     a warm ``RETURN 1``, so this is a ceiling that only the FIRST (cold) probe
     can approach — not a routine widening of the hung-DB window.
+
+    That sizing is STEADY-STATE. The age of the previous verdict when the next
+    one lands is ``interval - d_prev + d_new``, not ``max(interval, d_new)`` —
+    so a genuine warm→cold transition (e.g. the first probe after
+    ``_probe_sdk`` rebuilds its client) can exceed this window by up to
+    ``interval - d_prev`` (≈1.4 s at the default 10 s interval with a 20 s
+    cold start, ≈6.5 s at the 15 s clamp) and report a REACHABLE graph as
+    ``degraded`` for that sliver. Widening the window to cover it
+    (``interval + hard_timeout``, ≈34-39 s) would in exchange lengthen how long
+    a wedged DB reads last-known-good — a trade-off on the #1384 honesty bound,
+    so it is filed rather than taken here: **#4765**. ``/health`` still answers
+    200 and ``/health/ready`` (the 503 gate) is unaffected throughout.
     """
     from tortoise.monitoring import PROBE_STALE_AFTER  # lazy
 

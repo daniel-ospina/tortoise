@@ -1213,7 +1213,10 @@ def probe_db(sdk, setup_timeout=None) -> dict:
     allowance that bears the ``sdk._get_proj()`` cost (connect + a
     size-dependent ``_ensure_indexes()``) ON TOP of the ``PROBE_TIMEOUT``
     reachability budget. The platform liveness gate passes nothing and keeps
-    the single shared budget; only the MCP ``tortoise_health`` tool opts in.
+    the single shared budget; the callers that opt in are the MCP
+    ``tortoise_health`` tool and the selfhost liveness coordinator's refresher
+    (``selfhost._probe_db``, #2988 — off the request path, which is what makes
+    spending the allowance there free).
 
     #1565: a single TRANSIENT connection-level failure (embedded redislite
     # server mid-startup / momentarily unreachable under parallel load —
@@ -1230,10 +1233,11 @@ def probe_db(sdk, setup_timeout=None) -> dict:
     #3143: ``setup_timeout`` is the projection-cold-start allowance (see
     ``_probe_once``). When it is not given, the cold-start and the query SHARE
     the single ``PROBE_TIMEOUT`` budget, so the platform liveness gate keeps
-    its tight fast-degrade bound (#1384). Only callers that opt in (the MCP
-    ``tortoise_health`` tool) pay a separate allowance for a large graph's
-    cold-start instead of being reported unreachable for it. In that explicit
-    shape the reachability budget is NOT spent waiting for the single #3062
+    its tight fast-degrade bound (#1384). The callers that opt in — the MCP
+    ``tortoise_health`` tool, and the selfhost liveness coordinator's refresher
+    (``selfhost._probe_db``, #2988) — pay a separate allowance for a large
+    graph's cold-start instead of being reported unreachable for it. In that
+    explicit shape the reachability budget is NOT spent waiting for the single #3062
     worker slot — a query queued behind another probe's cold-start is charged
     to the leftover of the allowance instead, so congestion cannot fake the
     degraded/0 report this change exists to remove (review P1).
