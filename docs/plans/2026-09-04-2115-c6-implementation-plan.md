@@ -31,17 +31,17 @@ Epic #2083 child C6 (standard). Depends: #2110 (C1 — `graphs.recording` column
   impl head reads ONLY the team onboarding state (`_get_onboarding_state(...)
   ["session_recording"]`, hosted_api:13165) → 409 when off.
 - **MCP gap (C5 residual)**: `tortoise_session_capture` (mcp_server.py:2826)
-  builds `team = {"team_id", "tier", "key_id": None, "max_points"}` — no graph
+  builds `team = {"org_id", "tier", "key_id": None, "max_points"}` — no graph
   fields → `_data_sdk` treats graph-bound keys as team-wide → capture writes
   the DEFAULT graph (cross-graph write for a graph-bound MCP key). The C5
-  ContextVar graph scope only feeds tools that use `_get_team_sdk()` directly.
+  ContextVar graph scope only feeds tools that use `_get_org_sdk()` directly.
 - Recording storage: registry Graph node has NO recording writer (graph_list
   reads `props.get("recording")` → always None today); supabase `graphs` rows
   carry `recording` (C1 col, NULL default); `graph_metadata`
   (supabase_control:2240) already emits recording per row + default None.
   Supabase DEFAULT graph has NO row (derived from `teams.graph_name`).
 - Graph write patterns: delete_graph (hosted_api:8485 on main) — dual-auth
-  `get_current_team_session` (key face: scope or legacy; session face:
+  `get_current_org_session` (key face: scope or legacy; session face:
   `_membership_team` owner/admin), mode-branch reads kind, then
   `soft_delete_graph` / `sdk.graph_delete`. `_make_sdk(namespace="registry")`
   is the registry handle.
@@ -49,7 +49,7 @@ Epic #2083 child C6 (standard). Depends: #2110 (C1 — `graphs.recording` column
 ## Design decisions
 
 ### D-C6-1 — recording storage (registry default node + supabase default row)
-Registry: `recording` prop on the Graph node (MATCH (g:Graph {id,team_id})
+Registry: `recording` prop on the Graph node (MATCH (g:Graph {id,org_id})
 SET g.recording = $v; FalkorDB SET null removes the prop = inherit). Default
 graph node (kind='default', random gid) IS settable — same MATCH. Supabase:
 custom rows → PATCH `graphs.recording`. DEFAULT graph has no row → PATCH
@@ -57,15 +57,15 @@ custom rows → PATCH `graphs.recording`. DEFAULT graph has no row → PATCH
 name='default' per team; kind='default' rows are invisible to the custom-only
 list/count filters and protected by the soft-delete kind guard — no
 double-list, no delete path). recording=null on a missing row = no-op (NULL IS
-inherit). New seam helpers: `sdk.graph_set_recording(team_id, graph_id, v)`
+inherit). New seam helpers: `sdk.graph_set_recording(org_id, graph_id, v)`
 (registry SET; also resolves 'default' literal → the kind='default' node) and
-`supabase_control.set_graph_recording(cp, team_id, graph_id, v)` (graphs PATCH
+`supabase_control.set_graph_recording(cp, org_id, graph_id, v)` (graphs PATCH
 or kind='default' upsert). `graph_metadata` default dict reads the
 kind='default' row's recording when present (fallback None).
 
 ### D-C6-2 — PATCH auth + contract (epic §6.3 verbatim)
-`PATCH /v1/graphs/{graph_id}?team_id=…` body `{recording: bool|null}`.
-Dual-auth `get_current_team_session`: key face → `team:manage` scope OR
+`PATCH /v1/graphs/{graph_id}?org_id=…` body `{recording: bool|null}`.
+Dual-auth `get_current_org_session`: key face → `team:manage` scope OR
 legacy_full_access (owner-minted deleg-NULL) — child policy never mints
 team:manage (C2/C3), so a deleg=0 tk_ key 403s (correct); session face →
 `_membership_team` owner/admin (mirror delete_graph). Suspended team → 403

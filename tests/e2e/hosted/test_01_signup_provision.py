@@ -35,7 +35,7 @@ def test_register_provisions_team_key_and_first_point(api, tenant_factory):
     assert r.status == 200, r.text()
     body = r.json()
     assert body["api_key"].startswith("tt_"), "API key must be a tt_ key"
-    assert body["team_id"] and body["graph_name"], r.text()
+    assert body["org_id"] and body["graph_name"], r.text()
 
     h = {"Authorization": f"Bearer {body['api_key']}"}
     r = api.get("/v1/team", headers=h)

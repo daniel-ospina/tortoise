@@ -30,6 +30,11 @@
 //   with the 402 tier gate on free/anon only — solo CAN create up to its
 //   409 quota, so only free/anon show the locked create.
 
+// #2784: reuse the existing relative-time formatter (memorySourcesStatus,
+// the #1894 helper) rather than adding a second one. Returns null for a
+// missing/unparseable input; ≥24h it degrades to a locale date.
+import { formatRelativeTime } from './memorySourcesStatus.js'
+
 export const GRAPH_KEY_SCOPES = Object.freeze(['graphs:read', 'graphs:write'])
 
 // Tier gate (indicator 5): only tiers the server 402-blocks on graph
@@ -55,6 +60,106 @@ export function graphCanDelete(g) {
 
 export function isDefaultGraph(g) {
   return !!(g && g.kind === 'default')
+}
+
+// ── #2784: per-graph "last backup" for the Graphs table ─────────────────
+// Pure, node --test-able. The dashboard derives the column from the
+// GET /backups payload it already fetches (`loadBackups` retains the array)
+// — no server change, no per-graph endpoint, no extra storage listing.
+
+// The /backups bucket key for a Graphs-table row (AND for a manifest — both
+// lanes call this one function, so the row side and the payload side can
+// never drift apart).
+//
+// The DEFAULT row's graph_id is LANE-DEPENDENT: the literal 'default' in
+// supabase mode, but the registry node's random uuid in registry mode —
+// while every default-graph artifact is keyed 'default' (the sweep
+// normalizes the default node's gid; legacy flat manifests bucket to
+// 'default' by key shape, hosted_api.py `_manifest_graph`). Joining on raw
+// graph_id would therefore render the default row as unbacked-up on
+// self-host deployments, so `kind` — the signal isDefaultGraph already uses
+// — is authoritative.
+// Empty string = unattributable: it matches no row (the cell never reads a
+// falsy key), so an anomalous payload can never be credited to a real graph.
+export function graphBackupBucketKey(m) {
+  if (!m || m.graph_id == null || m.graph_id === '') return ''
+  return isDefaultGraph(m) ? 'default' : String(m.graph_id)
+}
+
+// Group the /backups array into per-graph buckets. The newest PARSEABLE
+// created_at wins: `list_backups` sorts newest-first, but a manifest with no
+// created_at key sorts LAST (the sort key is `str(m.get("created_at", ""))`)
+// while an explicit null sorts first ("None") — either way input order is
+// never trusted for recency. Unreadable manifests are skipped server-side with
+// only a logger.warning, so a bucket can legitimately exist with no parseable
+// timestamp — that is the 'unknown' state, never 'none'.
+// Shape: { [bucketKey]: { key, lastBackupAt, count } }
+// The map has NO prototype (review: a server-supplied graph_id of `__proto__`
+// or `constructor` would otherwise resolve through Object.prototype and mutate
+// a shared object instead of creating a bucket — prototype pollution from
+// payload content, plus the graph's real manifests silently unbucketed).
+export function graphBackupSummary(backups) {
+  const out = Object.create(null)
+  for (const m of Array.isArray(backups) ? backups : []) {
+    if (!m || typeof m !== 'object') continue
+    const key = graphBackupBucketKey(m)
+    const b = out[key] || (out[key] = { key, lastBackupAt: null, count: 0 })
+    b.count += 1
+    const at = typeof m.created_at === 'string' ? m.created_at : null
+    if (!at) continue
+    const t = Date.parse(at)
+    if (Number.isNaN(t)) continue
+    if (b.lastBackupAt === null || t > Date.parse(b.lastBackupAt)) {
+      b.lastBackupAt = at
+    }
+  }
+  return out
+}
+
+// One Graphs-table cell state. Precedence matters: an UNKNOWN window
+// (loading / list unavailable) must never render as a negative claim about
+// the graph — /backups 503s terminally on storage failure (#1923: the '—'
+// surface must not read as a previous team's count, nor as "no backups").
+// The known-empty copy is deliberately NEUTRAL ("None recorded"): the
+// listing cannot prove "never" — per-graph retention prunes manifests
+// (~35 objects/pool) and sweep eligibility is a per-team flag the dashboard
+// cannot read. No staleness verdict is computed here: the authoritative
+// threshold is server-side and internal-auth only (backup_watcher).
+export function graphBackupCellState(g, summary, backupsStatus, nowMs) {
+  if (backupsStatus === 'loading') {
+    return { kind: 'loading', label: '…', title: 'Loading backup status…', at: null, count: 0 }
+  }
+  if (backupsStatus !== 'ok') {
+    return {
+      kind: 'unavailable', label: '—',
+      title: 'Backup list unavailable — retry in a moment.', at: null, count: 0,
+    }
+  }
+  const key = graphBackupBucketKey(g)
+  const b = key ? (summary || {})[key] : null
+  if (!b || b.count === 0) {
+    return {
+      kind: 'none', label: 'None recorded',
+      title: 'No backup recorded for this graph.', at: null, count: 0,
+    }
+  }
+  if (!b.lastBackupAt) {
+    return {
+      kind: 'unknown', label: 'No timestamp',
+      title: `No readable backup timestamp for this graph (${b.count} on record).`,
+      at: null, count: b.count,
+    }
+  }
+  return {
+    kind: 'ok',
+    label: formatRelativeTime(b.lastBackupAt, nowMs) || b.lastBackupAt,
+    // Localized for reading + the wire value in parentheses (lane-dependent
+    // serialization: 'Z' vs '+00:00' — a raw ISO alone reads as ambiguous to
+    // a non-UTC user). The keys-table Last-used cell sets this precedent.
+    title: `Last backup: ${new Date(Date.parse(b.lastBackupAt)).toLocaleString()} (${b.lastBackupAt})`,
+    at: b.lastBackupAt,
+    count: b.count,
+  }
 }
 
 // Rows are already default-first from the server (C2 list contract); the
@@ -113,15 +218,16 @@ export function graphMintBody(graphId, name) {
 
 // ── #2304 trash derivations (pure) ─────────────────────────────────────────
 // Server contract (branch feat/2304-delete-trash, verified against hosted_api):
-// - GET /v1/graphs/trash?team_id= rows: {graph_id, name, kind: 'custom',
+// - GET /v1/graphs/trash?org_id= rows: {graph_id, name, kind: 'custom',
 //   deleted_at} — owner/admin session only; purged rows never appear; the
 //   default graph can never be here.
-// - POST /v1/graphs/trash/{id}/restore?team_id= → {graph_id, status,
+// - POST /v1/graphs/trash/{id}/restore?org_id= → {graph_id, status,
 //   name, note} or 404/403/409 (live name conflict)/410 (purged).
-// - GET /v1/graphs/trash/{id}/points?team_id= → {archive_count,
+// - GET /v1/graphs/trash/{id}/points?org_id= → {archive_count,
 //   latest_backup: {backup_id, created_at, node_count, edge_count}|null}.
 
-// The server-side recovery window (#2304 default). Client displays it only;
+// The server-side recovery window (#2304 default) — authority:
+// docs/retention-and-deletion.md. Client displays it only;
 // the purge enforces it.
 export const TRASH_GRACE_DAYS = 7
 

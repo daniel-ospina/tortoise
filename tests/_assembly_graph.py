@@ -16,6 +16,19 @@ v2 eval lane faithfully (docs/plans/2026-09-08-2165-connected-assembly.md):
 
 This module is a TEST HELPER (underscore prefix) — excluded from
 ci-surfaces.yml selection and from any production import path.
+
+⛔ NOT a capture-shaped session graph, deliberately (#3914). Every Point here
+carries only the snake ``session_id`` prop that ``create_point(session_id=…``
+writes — there is NO ``(:Session {id})`` node and NO
+``(:Session)-[:CONTAINS]->(:Point)`` edge, and the shipping point fetch
+deliberately does NOT read the snake prop (#3804). The assembly goldens in
+``tests/test_assembly_sdk.py`` therefore pin ``[session ?]`` — they assert the
+identity is ABSENT, so this fixture cannot green-light a broken CONTAINS read
+the way the ask fixtures in #3910/#3914 did. Wiring a Session here WOULD
+change those goldens (``[session sess-2026-08-10]``), which is the
+policy-governed change tracked by #3804 — not something a fixture edit may do
+incidentally. Read as: "session identity is not the subject of the
+connected-assembly goldens", NOT as "capture writes a ``session_id`` prop".
 """
 from __future__ import annotations
 
@@ -36,6 +49,20 @@ SESSION_B = "sess-2026-09-01"
 
 OBJECTS = {"couch": "core:furniture", "dog bed": "core:furniture",
            "sofa": "core:furniture"}
+
+
+def evidence_chunks(evidence: str) -> list[str]:
+    """Split an ask-lane evidence block into its blank-line-separated chunks
+    (the ``Current Date:`` header chunk INCLUDED), in document order.
+
+    One shared parse rule for the #3095 evidence invariants. Callers that
+    need an order-insensitive view must sort/count the result themselves and
+    must NEVER wrap it in ``set()``: a set silently absorbs a duplicated
+    chunk, so a duplication (or header-rendering) regression would compare
+    equal and get mislabelled as an order drift — exactly the failure mode
+    the golden gate exists to tell apart.
+    """
+    return [c for c in evidence.split("\n\n") if c]
 
 
 def _link_point_about(proj, pid: str, names: list[str]) -> None:
@@ -237,17 +264,27 @@ def build_deep_rank_substrate(sdk: TortoiseSDK) -> dict:
     this FalkorDB fulltext returns score ties (0.0) for every match — the
     result order is a deterministic-but-opaque internal order, NOT BM25
     relevance — and the DEFAULT ask evidence keeps the first ~40 rows (the
-    pool-40 rerank depth). On this exact content set the earlier-created
-    gold (pDeepG1) deterministically ranks at FTS index 1 (an in-pool
-    same-subject evidence row — faithful: real graphs always hold SOME
-    in-pool evidence) and the second gold (pDeepG2) at index 56 of 57
-    retrievable — OUTSIDE the default pool-40, INSIDE a widened 120 fetch.
-    That geometry is the honest, non-vacuous R9 mechanism: the DEFAULT arm
-    admits G1 only; Task 7's A-widened arm (pool 40→120) must admit BOTH
-    (G2 is the discriminating row) — pinned by the calibration NOW because
-    Task 7 is forbidden from editing the substrate. Positional stability:
-    gold_a is created before gold_b in this builder (do not reorder — the
-    ranks are creation-order-pinned)."""
+    pool-40 rerank depth).
+
+    #3095 update (post-#3018, `fix(retrieval): deterministic ranking order
+    for a static store`): the pre-#3018 ranks were measured against an index
+    whose collection statistics were skewed by a second post-CREATE write on
+    every fresh Point (the #2952 delete/re-add). #3018 removed that write,
+    which fixed the skew and therefore re-ordered the engine's opaque scan
+    order. Re-measured on the same 87 rows / 57 retrievable matches: BOTH
+    golds rank OUTSIDE the default pool-40 and INSIDE a widened 120 fetch.
+    The R9 mechanism is therefore the pool-depth discriminator itself —
+    A-DEFAULT admits FEWER THAN 2 of the deep golds; A-WIDENED (pool 40→120)
+    admits BOTH — and Task 7's A-widened LEGACY arm is the only legacy arm
+    that reaches them. (The separate R16(b) canary pins the
+    A-DEFAULT-admits-≥1-gold property.)
+    The ranks are still a pure function of the substrate contents, so the
+    geometry is deterministic; what is NOT stable across an engine/write-path
+    change is WHICH tied row lands at which opaque index — the test must
+    assert the pool-depth invariant, never a specific gold's index.
+    Positional stability: gold_a is created before gold_b in this builder
+    (do not reorder — the substrate's opaque ranks are a function of the
+    authoring sequence, and reordering re-measures the geometry)."""
     proj = sdk._get_proj()
     name = "deep-subject"
     sdk.create_entity("object", name, objectKind="core:other",

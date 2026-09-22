@@ -1,0 +1,18 @@
+# CI run 35588858762 job 'test (b)' (head db858ad5c) — failures extracted from the uploaded junit.xml artifact
+# artifact: pytest-log-test-b (id 10634336259); junit.xml is the authoritative observed set
+
+## pytest.log FAILED lines
+FAILED tests/test_rebuild_recreate_content_parity.py::test_bare_reemit_still_folds_annotator_dim - AssertionError: embedding derives from content and must not drift independently
+FAILED tests/test_rebuild_recreate_content_parity.py::test_bare_reemit_supersedes_revision - AssertionError: embedding derives from content and must not drift independently
+FAILED tests/test_rebuild_recreate_content_parity.py::test_intermediate_derived_write_wins - AssertionError: embedding derives from content and must not drift independently
+
+## pytest.log final summary
+= 3 failed, 3115 passed, 25 skipped, 6 deselected, 6 xfailed, 22 warnings, 96 subtests passed in 773.59s (0:12:53) =
+
+## junit.xml testcases with <failure> (test id + assertion message)
+- tests.test_rebuild_recreate_content_parity::test_bare_reemit_supersedes_revision
+    message: AssertionError: embedding derives from content and must not drift independently
+- tests.test_rebuild_recreate_content_parity::test_intermediate_derived_write_wins
+    message: AssertionError: embedding derives from content and must not drift independently
+- tests.test_rebuild_recreate_content_parity::test_bare_reemit_still_folds_annotator_dim
+    message: AssertionError: embedding derives from content and must not drift independently

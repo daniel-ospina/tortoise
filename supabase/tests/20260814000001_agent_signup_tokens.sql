@@ -21,10 +21,10 @@ BEGIN
 END $$;
 
 -- ── Cleanup any prior test rows (idempotent re-runs) ────────────────────────
-DELETE FROM public.agent_signup_tokens WHERE team_id LIKE '%-1709';
-DELETE FROM public.api_keys WHERE team_id LIKE '%-1709';
-DELETE FROM public.team_memberships WHERE team_id LIKE '%-1709';
-DELETE FROM public.teams WHERE id LIKE '%-1709';
+DELETE FROM public.agent_signup_tokens WHERE org_id LIKE '%-1709';
+DELETE FROM public.api_keys WHERE org_id LIKE '%-1709';
+DELETE FROM public.org_memberships WHERE org_id LIKE '%-1709';
+DELETE FROM public.organizations WHERE id LIKE '%-1709';
 
 -- ============================================================================
 -- SECTION 1 — grant hygiene (service_role-only; anon/authenticated DENIED)
@@ -96,16 +96,16 @@ DO $$ DECLARE
   v_token_hash text := 'ab' || repeat('cd', 31);  -- 64-hex st_ token hash
   v_err text := NULL;
 BEGIN
-  -- Success path: team + membership + key + token row land in one call.
+  -- Success path: org + membership + key + token row land in one call.
   PERFORM public.provision_team_with_token(
     p_user_id => NULL,
     p_identity => 'anon-1709mint',
-    p_team_id => 'team-1709-mint-a',
-    p_team_name => 'Agent 1709 A',
+    p_org_id => 'org-1709-mint-a',
+    p_org_name => 'Agent 1709 A',
     p_api_key => 'tt_1709mintkey',
     p_key_hash => 'pbkdf2-stub-1709',
     p_lookup_hash => 'lookup-1709-a',
-    p_graph_name => 'team_team-1709-mint-a',
+    p_graph_name => 'org_org-1709-mint-a',
     p_key_prefix => 'tt_1709min',
     p_tier => 'free',
     p_max_users => 1,
@@ -115,20 +115,20 @@ BEGIN
     p_signup_token_hash => v_token_hash
   );
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.teams WHERE id = 'team-1709-mint-a') = 1,
-    'provision_team_with_token must create the team');
+    (SELECT count(*) FROM public.organizations WHERE id = 'org-1709-mint-a') = 1,
+    'provision_team_with_token must create the org');
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.team_memberships WHERE team_id = 'team-1709-mint-a') = 1,
+    (SELECT count(*) FROM public.org_memberships WHERE org_id = 'org-1709-mint-a') = 1,
     'provision_team_with_token must create the membership');
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.api_keys WHERE team_id = 'team-1709-mint-a') = 1,
+    (SELECT count(*) FROM public.api_keys WHERE org_id = 'org-1709-mint-a') = 1,
     'provision_team_with_token must create the api key');
   PERFORM tests.assert(
     (SELECT count(*) FROM public.agent_signup_tokens WHERE token_hash = v_token_hash) = 1,
     'provision_team_with_token must insert the token row');
   PERFORM tests.assert(
-    (SELECT team_id FROM public.agent_signup_tokens WHERE token_hash = v_token_hash) = 'team-1709-mint-a',
-    'token row must bind to the minted team');
+    (SELECT org_id FROM public.agent_signup_tokens WHERE token_hash = v_token_hash) = 'org-1709-mint-a',
+    'token row must bind to the minted org');
 
   -- ⛔ Atomicity contract: a FAILED provision leaves NO token row behind.
   -- The rejection must be GENUINE — provision_team's guard is asymmetric:
@@ -142,12 +142,12 @@ BEGIN
     PERFORM public.provision_team_with_token(
       p_user_id => NULL,
       p_identity => 'anon-1709b',
-      p_team_id => NULL,               -- genuine rejection (guard: IS NULL)
-      p_team_name => 'Agent 1709 B',
+      p_org_id => NULL,               -- genuine rejection (guard: IS NULL)
+      p_org_name => 'Agent 1709 B',
       p_api_key => 'tt_1709mintkeyB',
       p_key_hash => 'pbkdf2-stub-1709',
       p_lookup_hash => 'lookup-1709-b',
-      p_graph_name => 'team_team-1709-mint-b',
+      p_graph_name => 'org_org-1709-mint-b',
       p_signup_token_hash => 'bb' || repeat('cd', 31)
     );
   EXCEPTION WHEN OTHERS THEN
@@ -162,26 +162,26 @@ BEGIN
       WHERE token_hash = 'bb' || repeat('cd', 31)) = 0,
     'a failed provision must roll back the token insert (no orphan token)');
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.teams WHERE id = 'team-1709-mint-b') = 0,
-    'a failed provision must roll back the team insert');
+    (SELECT count(*) FROM public.organizations WHERE id = 'org-1709-mint-b') = 0,
+    'a failed provision must roll back the org insert');
 
-  -- One-token-per-team: a second (different) token for the same team is
-  -- rejected by uq_agent_signup_tokens_team.
+  -- One-token-per-org: a second (different) token for the same org is
+  -- rejected by uq_agent_signup_tokens_org.
   BEGIN
     PERFORM public.provision_team_with_token(
       p_user_id => NULL,
       p_identity => 'anon-1709c',
-      p_team_id => 'team-1709-mint-a',
-      p_team_name => 'Agent 1709 A',
+      p_org_id => 'org-1709-mint-a',
+      p_org_name => 'Agent 1709 A',
       p_api_key => 'tt_1709mintkey2',
       p_key_hash => 'pbkdf2-stub-1709',
       p_lookup_hash => 'lookup-1709-a2',
-      p_graph_name => 'team_team-1709-mint-a',
+      p_graph_name => 'org_org-1709-mint-a',
       p_signup_token_hash => 'cc' || repeat('cd', 31)
     );
-    PERFORM tests.assert(false, 'second live token for one team must be rejected');
+    PERFORM tests.assert(false, 'second live token for one org must be rejected');
   EXCEPTION WHEN unique_violation THEN
-    PERFORM tests.assert(true, 'uq_agent_signup_tokens_team rejects a second live token');
+    PERFORM tests.assert(true, 'uq_agent_signup_tokens_org rejects a second live token');
   END;
 END $$;
 
@@ -192,8 +192,8 @@ DO $$ DECLARE
   v_token_hash text := 'ab' || repeat('cd', 31);
 BEGIN
   PERFORM tests.assert(
-    public.resolve_signup_token(v_token_hash) = 'team-1709-mint-a',
-    'resolve_signup_token returns the bound team_id');
+    public.resolve_signup_token(v_token_hash) = 'org-1709-mint-a',
+    'resolve_signup_token returns the bound org_id');
   PERFORM tests.assert(
     (SELECT last_used_at IS NOT NULL FROM public.agent_signup_tokens
       WHERE token_hash = v_token_hash),
@@ -218,22 +218,22 @@ END $$;
 -- ============================================================================
 DO $$ DECLARE
   v_token_hash text := 'ab' || repeat('cd', 31);
-  v_team_id text := 'team-1709-mint-a';
+  v_org_id text := 'org-1709-mint-a';
   v_first_id text;
   v_count integer;
 BEGIN
-  -- Bootstrap key on the team (never counted against the non-bootstrap cap).
-  INSERT INTO public.api_keys (id, team_id, lookup_hash, key_prefix, created_via, created_by)
-  VALUES ('key-bootstrap-1709', v_team_id, 'lookup-bootstrap-1709', 'tt_1709boot', 'bootstrap', 'st_' || left(v_token_hash, 12));
+  -- Bootstrap key on the org (never counted against the non-bootstrap cap).
+  INSERT INTO public.api_keys (id, org_id, lookup_hash, key_prefix, created_via, created_by)
+  VALUES ('key-bootstrap-1709', v_org_id, 'lookup-bootstrap-1709', 'tt_1709boot', 'bootstrap', 'st_' || left(v_token_hash, 12));
 
-  -- Under cap (0 non-bootstrap): recovery mints, returns team_id.
+  -- Under cap (0 non-bootstrap): recovery mints, returns org_id.
   PERFORM tests.assert(
-    public.recover_team_key(v_token_hash, v_team_id, 'lu1709aaaaaaaa', 'tt_1709rec', 2) = v_team_id,
-    'recover_team_key returns the team_id');
+    public.recover_team_key(v_token_hash, v_org_id, 'lu1709aaaaaaaa', 'tt_1709rec', 2) = v_org_id,
+    'recover_team_key returns the org_id');
   SELECT id INTO v_first_id FROM public.api_keys
-   WHERE team_id = v_team_id AND created_via = 'recovery' AND revoked_at IS NULL;
+   WHERE org_id = v_org_id AND created_via = 'recovery' AND revoked_at IS NULL;
   PERFORM tests.assert(
-    v_first_id = 'key_' || v_team_id || '_' || left('lu1709aaaaaaaa', 12),
+    v_first_id = 'key_' || v_org_id || '_' || left('lu1709aaaaaaaa', 12),
     'recovery key uses the deterministic id');
   PERFORM tests.assert(
     (SELECT created_by FROM public.api_keys WHERE id = v_first_id) = 'st_' || left(v_token_hash, 12),
@@ -251,10 +251,10 @@ BEGIN
   -- revoke (the cap revoke fires only when a row was genuinely inserted —
   -- a no-op retry with the same lookup_hash must never revoke a live key).
   PERFORM tests.assert(
-    public.recover_team_key(v_token_hash, v_team_id, 'lu1709bbbbbbbb', 'tt_1709rec', 2) = v_team_id,
+    public.recover_team_key(v_token_hash, v_org_id, 'lu1709bbbbbbbb', 'tt_1709rec', 2) = v_org_id,
     'second recovery under cap mints');
   SELECT count(*) INTO v_count FROM public.api_keys
-   WHERE team_id = v_team_id AND revoked_at IS NULL
+   WHERE org_id = v_org_id AND revoked_at IS NULL
      AND (created_via IS NULL OR created_via <> 'bootstrap');
   PERFORM tests.assert(v_count = 2, 'non-bootstrap active keys = 2 at cap');
 
@@ -262,45 +262,45 @@ BEGIN
   -- → revoke the OLDEST non-bootstrap (lookup-1709-r1, created first) →
   -- still 2 active.
   PERFORM tests.assert(
-    public.recover_team_key(v_token_hash, v_team_id, 'lu1709cccccccc', 'tt_1709rec', 2) = v_team_id,
+    public.recover_team_key(v_token_hash, v_org_id, 'lu1709cccccccc', 'tt_1709rec', 2) = v_org_id,
     'third recovery at cap mints');
   PERFORM tests.assert(
     (SELECT revoked_at IS NOT NULL FROM public.api_keys WHERE lookup_hash = 'lu1709aaaaaaaa'),
     'at cap, the OLDEST non-bootstrap key is revoked');
   SELECT count(*) INTO v_count FROM public.api_keys
-   WHERE team_id = v_team_id AND revoked_at IS NULL
+   WHERE org_id = v_org_id AND revoked_at IS NULL
      AND (created_via IS NULL OR created_via <> 'bootstrap');
   PERFORM tests.assert(v_count = 2, 'non-bootstrap active keys stay ≤ 2 (cap cannot overshoot)');
 
-  -- Zero-row lock: a token/team mismatch (or revoked token) fails closed.
+  -- Zero-row lock: a token/org mismatch (or revoked token) fails closed.
   BEGIN
-    PERFORM public.recover_team_key('zz' || repeat('cd', 31), v_team_id, 'lu1709dddddddd', 'tt_1709rec');
+    PERFORM public.recover_team_key('zz' || repeat('cd', 31), v_org_id, 'lu1709dddddddd', 'tt_1709rec');
     PERFORM tests.assert(false, 'recover_team_key must raise on an unknown token');
   EXCEPTION WHEN OTHERS THEN
     PERFORM tests.assert(true, 'recover_team_key fails closed on a zero-row lock');
   END;
   BEGIN
-    PERFORM public.recover_team_key(v_token_hash, 'team-1709-other', 'lu1709eeeeeeee', 'tt_1709rec');
-    PERFORM tests.assert(false, 'recover_team_key must raise on a team mismatch');
+    PERFORM public.recover_team_key(v_token_hash, 'org-1709-other', 'lu1709eeeeeeee', 'tt_1709rec');
+    PERFORM tests.assert(false, 'recover_team_key must raise on a org mismatch');
   EXCEPTION WHEN OTHERS THEN
-    PERFORM tests.assert(true, 'recover_team_key fails closed on a team mismatch');
+    PERFORM tests.assert(true, 'recover_team_key fails closed on a org mismatch');
   END;
 
-  -- Soft-deleted team → fail closed.
-  INSERT INTO public.teams (id, name, graph_name, deleted_at)
-  VALUES ('team-1709-del', 'Deleted 1709', 'team_team-1709-del', now());
-  INSERT INTO public.agent_signup_tokens (token_hash, team_id)
-  VALUES ('dd' || repeat('cd', 31), 'team-1709-del');
+  -- Soft-deleted org → fail closed.
+  INSERT INTO public.organizations (id, name, graph_name, deleted_at)
+  VALUES ('org-1709-del', 'Deleted 1709', 'org_org-1709-del', now());
+  INSERT INTO public.agent_signup_tokens (token_hash, org_id)
+  VALUES ('dd' || repeat('cd', 31), 'org-1709-del');
   BEGIN
-    PERFORM public.recover_team_key('dd' || repeat('cd', 31), 'team-1709-del', 'lu1709ffffffff', 'tt_1709rec');
-    PERFORM tests.assert(false, 'recover_team_key must raise on a soft-deleted team');
+    PERFORM public.recover_team_key('dd' || repeat('cd', 31), 'org-1709-del', 'lu1709ffffffff', 'tt_1709rec');
+    PERFORM tests.assert(false, 'recover_team_key must raise on a soft-deleted org');
   EXCEPTION WHEN OTHERS THEN
-    PERFORM tests.assert(true, 'recover_team_key fails closed on a soft-deleted team');
+    PERFORM tests.assert(true, 'recover_team_key fails closed on a soft-deleted org');
   END;
 END $$;
 
 -- ── Final cleanup (idempotent re-runs) ─────────────────────────────────────
-DELETE FROM public.agent_signup_tokens WHERE team_id LIKE '%-1709';
-DELETE FROM public.api_keys WHERE team_id LIKE '%-1709';
-DELETE FROM public.team_memberships WHERE team_id LIKE '%-1709';
-DELETE FROM public.teams WHERE id LIKE '%-1709';
+DELETE FROM public.agent_signup_tokens WHERE org_id LIKE '%-1709';
+DELETE FROM public.api_keys WHERE org_id LIKE '%-1709';
+DELETE FROM public.org_memberships WHERE org_id LIKE '%-1709';
+DELETE FROM public.organizations WHERE id LIKE '%-1709';
