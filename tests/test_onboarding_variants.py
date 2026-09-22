@@ -174,12 +174,27 @@ def _run_installer(tmp_path: Path, home: Path, harness: str = "pi",
     )
 
 
-def test_installer_public_and_dist_mirrors_match():
-    """The committed dist/ build mirror matches the public/ source (the
-    served installer is the public one — a stale dist copy muddies which
-    bytes are live)."""
-    assert INSTALLER_DIST.exists(), f"dist installer missing: {INSTALLER_DIST}"
-    assert INSTALLER_DIST.read_text(encoding="utf-8") == _installer_text()
+def test_installer_dist_is_a_build_artifact_not_a_committed_mirror():
+    """#3775 untracked `website/apps/dashboard/dist/` — it is a vite build output, not a
+    committed mirror, so asserting a COMMITTED dist copy exists cannot hold on a fresh
+    checkout, and re-committing one is the artifact #3775 deliberately removed.
+
+    What still matters is the source-of-truth relation: the served installer is the
+    `public/` one, so if a `dist/` tree happens to be built in this checkout, its copy
+    must not disagree with the source (a stale built mirror muddies which bytes are live).
+    """
+    tracked = subprocess.run(
+        ["git", "ls-files", "--error-unmatch",
+         "website/apps/dashboard/dist/install-tortoise-skills.sh"],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True, text=True,
+    ).returncode == 0
+    assert not tracked, (
+        "dist/install-tortoise-skills.sh is tracked again — #3775 untracked dist/ as a "
+        "build artifact; a committed stale copy muddies which bytes are served")
+    if INSTALLER_DIST.exists():
+        assert INSTALLER_DIST.read_text(encoding="utf-8") == _installer_text(), (
+            "a BUILT dist copy disagrees with public/ — rerun the dashboard build")
 
 
 def test_installer_pi_row_verifies_the_mcp_connection():
