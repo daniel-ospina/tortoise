@@ -22,13 +22,19 @@ npm run build          # tsc --noEmit && vite build → dist/ (base '/admin/', a
 
 ## Auth model
 
-- The SPA reads the PKCE session with the **user's own token** via a storage
-  adapter keyed on `sb-tortoise-auth-token` (localStorage + the site's
-  parent-domain cookie — `src/lib/supabase.ts`). No service-role keys client-side.
+- **Session (routing gate):** the BFF's HttpOnly `__Host-session` on the app
+  origin, read through the same-origin `/api/session` probe — `useAuth` uses
+  `fetchSession()` from `src/lib/session.ts`, never `supabase.auth.getSession()`.
+  Missing session / non-admin → redirect to the same-origin `/auth?next=…`.
+  There is no `is_admin()` RPC call in this SPA (the gate does that server-side).
+- **Data layer (direct Supabase calls):** a storage adapter keyed on
+  `sb-tortoise-auth-token` (`src/lib/supabase.ts`). This is a **retained legacy
+  credential**, not the session: the cookie is issued by the MCP consent page in
+  `tortoise/oauth.py`, is JS-readable and parent-domain, and supabase-js recovers
+  the session from it on init. Migrating these calls onto the BFF is **#4178** —
+  do not add a new caller. No service-role keys client-side.
 - Data authorization is Supabase RLS: `blog_posts` admin_all policy gates on
   `is_admin()` membership (migration `20260827000001`, issue #1793).
-- `useAuth` additionally calls the `is_admin()` RPC; missing session / non-admin
-  → redirect to `https://tortoise.premiselabs.co/auth`.
 
 ## Views (hash routes)
 

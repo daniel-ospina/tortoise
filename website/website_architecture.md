@@ -66,10 +66,19 @@ Host routing lives in `website/functions/_middleware.ts`:
   decision on **#3501 / #4054** (full rationale: the private `premise-labs` repo,
   `engineering/auth/SCOPE.md` §3, §4 W6, §13 — cited across this repo's Functions the same way, and
   deliberately marked as outside this one). The JS-readable bridge
-  (`website/assets/supabase-session.js`, cookie `sb-tortoise-auth-token`) is RETAINED as the parity
-  target for the consent-page port and the non-secret claim-marker helpers, and **no page loads
-  it** (`tests/test_cross_subdomain_cookie_sync.py` pins `PAGES = []`) — it is **not** the session
-  backbone.
+  (`website/assets/supabase-session.js`, cookie `sb-tortoise-auth-token`) is
+  **not** the session backbone: **no BFF page loads** it
+  (`tests/test_cross_subdomain_cookie_sync.py` pins `PAGES = []`). That is not the
+  whole story though — the cookie is still **issued** by the MCP consent page in
+  `tortoise/oauth.py` (`/oauth/authorize` on `api.premiselabs.co`,
+  `Domain=.premiselabs.co`, JS-readable) and still **accepted** by two live
+  surfaces: the blog-admin console's supabase-js data layer
+  (`website/apps/blog-admin/src/lib/supabase.ts`, which recovers the session from
+  it on init) and `website/functions/blog/_shared/admin-auth.ts`'s Bearer
+  fallback. So a JS-readable parent-domain session is in play, which is exactly
+  what this `OVERRIDES` ruling exists to prevent. Stop issuing: **#3524**. Stop
+  accepting: **#4178**. See `docs/auth-architecture.md` §2.1 “Legacy cohort” and
+  §4 item 1 (which is OPEN, not closed).
 - The raw API key (`tt_…`) **never** leaves app-origin (sessionStorage on `app.premiselabs.co` only)
 
 ---
