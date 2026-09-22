@@ -387,6 +387,7 @@ surfaces:
   - test_analytics_fallback_alert.py
   - test_client_status_vocabulary.py
   - test_embedder_provision.py
+  - test_hermetic_egress_guard.py  # #4387: pins the suite-wide egress guard installed by tests/conftest.py — a conftest change already forces `full`, so this registration exists to keep the guard's own file in the surface it protects
   - test_lifecycle_guards.py        # #2498: shared lifecycle guard — also runs on a tortoise/live.py-only change (terminal vocabulary pin)
   - test_about_edges.py
   - test_about_event_untangle.py
@@ -1204,6 +1205,7 @@ durations:
   test_shared_state_imports.py: 2.0
   test_shared_state_monitoring.py: 2.0
   test_shared_state_recovery.py: 2.0
+  test_hermetic_egress_guard.py: 2.0  # #4387: same #3400 flat-default policy as the six above — no CI junit measurement exists for it yet, and leaving it unmapped drops duration coverage below the 90% floor
   eval/retrieval/test_integration.py: 855.2
   test_onboarding_state_split.py: 182.5
   eval/write_path/test_write_path_benchmark.py: 112.3
