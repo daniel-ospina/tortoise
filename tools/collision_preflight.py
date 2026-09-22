@@ -803,6 +803,10 @@ def _closed_pr_list_rest(gh_bin: str, slug: str | None, cwd: str,
 
 
 def _pr_ref(pr: dict) -> str:
+    # Both sides of the #3219 merge rewrote this from the same `%`-format
+    # original into an f-string; the rendered output is byte-identical, so the
+    # origin/main form is kept (fewer intermediates, matches the surrounding
+    # post-merge code).
     return (
         f"PR #{pr.get('number', '?')} "
         f"{_one_line(pr.get('title', ''), 90)} "

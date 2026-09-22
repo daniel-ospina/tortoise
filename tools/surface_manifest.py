@@ -19,6 +19,21 @@ itself and the expansion gate could never go red.
 
 `cut` is run by a human, once, with an explicit --commit. `render`, `check` and
 `guard` are safe to run anywhere, including CI.
+
+THE BASELINE IS VERIFIED AGAINST THE CODE, NOT AGAINST ITSELF
+    `check` re-derives the whole baseline with the SAME function `cut` writes
+    (`build_doc`) and fails on any difference outside the keys whose value is not a
+    function of the code alone (`NON_DERIVABLE_ROW_KEYS` / `NON_DERIVABLE_DOC_KEYS`,
+    each with its reason stated where it is declared). Without that, the artifact's
+    own numbers were the one thing nothing checked: a hand-edited `counts.tools: 999`
+    passed both this lint and the D2 expansion gate (measured).
+
+UNAVAILABLE EVIDENCE IS A REFUSAL, NEVER A SKIP
+    Every read of the baseline, the order table or the declaration raises
+    `SurfaceEvidenceUnreadable` and exits non-zero with `::error::`. A gate that cannot
+    read its evidence must not report success (the #1382 class), and a `cut` that cannot
+    read the artifact it is about to overwrite must not silently discard the approvals
+    recorded in it.
 """
 
 from __future__ import annotations
@@ -63,7 +78,123 @@ ORDER_FILE = ROOT / "config" / "surface-order.yml"
 MANIFEST_FILE = ROOT / "config" / "surface-manifest.yml"
 RENDERED_FILE = ROOT / "docs" / "product" / "mcp-sdk-surface.md"
 
-# The four consumer-class values the guard derives from caller file paths. The
+
+class SurfaceEvidenceUnreadable(Exception):
+    """The evidence a check needs could not be read — a failure, never a skip.
+
+    The sibling `tools/sdk_surface.py` refuses in exactly this contract. This tool used
+    to raise a bare `FileNotFoundError` / `yaml` traceback out of `open()`, which is a
+    non-zero exit that says nothing about which evidence was missing — and, from `cut`,
+    a way to overwrite the baseline having read none of it.
+    """
+
+
+def _refuse(exc: SurfaceEvidenceUnreadable) -> int:
+    print(f"::error::{exc}")
+    print(f"REFUSED {exc}")
+    return 1
+
+
+def _read_manifest(path: Path | None = None) -> dict:
+    """Read the frozen baseline, or refuse. Never returns a partial document.
+
+    `path` is resolved at CALL time (never bound as a default), so a caller that
+    redirects `MANIFEST_FILE` — the tests do, and so would any future tool — reads the
+    file it redirected to. A default argument bound at import time silently read the
+    original, which is how a redirection can look effective and verify nothing.
+    """
+    if path is None:
+        path = MANIFEST_FILE
+    if not path.exists():
+        raise SurfaceEvidenceUnreadable(
+            f"the approved surface baseline is missing at {path}. The tool cannot verify "
+            "(or re-cut) the surface without it; a check that cannot read its evidence "
+            "must not report success."
+        )
+    try:
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # any read/parse failure is a refusal
+        raise SurfaceEvidenceUnreadable(f"could not read {path}: {exc}") from exc
+    if not isinstance(doc, dict) or not isinstance(doc.get("rows"), list):
+        raise SurfaceEvidenceUnreadable(
+            f"{path} is malformed: expected a mapping carrying a `rows:` list."
+        )
+    if doc.get("retired") is not None and not isinstance(doc.get("retired"), list):
+        raise SurfaceEvidenceUnreadable(
+            f"{path} is malformed: `retired:` must be a list (got "
+            f"{type(doc.get('retired')).__name__})."
+        )
+    # `cut_at_commit` is PROVENANCE, not a derived value (`cut` records the commit it ran
+    # at), so it is excluded from the drift comparison — which makes this shape check the
+    # ONLY thing that pins it. It lives HERE rather than in one consumer because
+    # `cmd_render` slices it for the document's header: a hand-edited `cut_at_commit: null`
+    # escaped as `TypeError: 'NoneType' object is not subscriptable` out of the renderer
+    # while `cmd_check` reported the missing value as a mere problem — two readers, two
+    # opinions, and one of them a traceback.
+    if not isinstance(doc.get("cut_at_commit"), str) or not doc["cut_at_commit"]:
+        raise SurfaceEvidenceUnreadable(
+            f"{path} records no `cut_at_commit`: it must name the commit the baseline was cut "
+            "at, as a non-empty string. Re-cut the baseline."
+        )
+    # A DUPLICATE NAME is unverified content, not a harmless repetition. Every comparison
+    # in this file — here and in tools/surface-guard.py — keys rows by NAME, so a second
+    # row with an existing name is silently DROPPED: a doctored duplicate inserted before
+    # the true one left the drift check green, the rendered document claiming a fabricated
+    # `class`, and the guard green too (verified adversarially). Reject it as malformed
+    # evidence; a name set cannot show it, so it must be refused before any comparison.
+    for field in ("rows", "retired"):
+        names = [str(r.get("name")) for r in doc.get(field) or [] if isinstance(r, dict)]
+        duplicates = sorted({n for n in names if names.count(n) > 1})
+        if duplicates:
+            raise SurfaceEvidenceUnreadable(
+                f"{path} carries duplicate `{field}` name(s): {duplicates[:5]} "
+                f"({len(names) - len(set(names))} row(s) over). A name-keyed comparison drops "
+                "all but the last, so the duplicate is UNVERIFIED content. Re-cut the baseline."
+            )
+    return doc
+
+
+# --- what a re-derivation CANNOT reproduce -----------------------------------
+# `check` re-derives the baseline from code and reds on any difference, which is what
+# makes a hand-edited manifest a failure rather than a fact. These keys are excluded
+# from that comparison because their value is not a function of the code alone:
+#
+#   * `used_by` / `recommendation` / `basis` / `reason` read a MACHINE-LOCAL call log
+#     (`~/.tortoise/analytics_fallback.jsonl`): it supplies the `agents` / `never called`
+#     prefix of `used_by` and the wording of `reason`, so neither column is reproducible on
+#     another checkout — measured with the log absent, 132 `used_by` and 25 `reason` rows
+#     differ, and those are the ONLY row keys that do. `recommendation` and `basis` are
+#     computed from the same observed-call signal, so they are excluded even where today's
+#     rows happen to agree. NOTE: a PR author can therefore rewrite the evidence the owner
+#     READS (the rendered `Used by` / `Recomm.` columns) while every gate stays green. That
+#     is a documented residual — the columns are not a function of the code — FILED, not hidden.
+#   * `approval` is the owner's reference: a PR number and a principal. The gate checks its
+#     SHAPE only; the consent carrier is a repository ruleset, per the #3863 scope doc.
+#   * `exemption` is a HUMAN RECORDING too — an owner-approved flag that a row's
+#     reachability is deliberately excused (`tools/surface-guard.py` reads it). It was
+#     missing from this list while `build_doc` emits `exemption: False` for every row, so
+#     recording one — the path CONTRIBUTING documents — made the REQUIRED check red with no
+#     way back (`cut` resets it to False forever). Verified: `exemption: true` on an SDK row
+#     makes the guard report "1 exempt" and the check FAIL "recorded {True}, derived {False}".
+#   * `cut_at_commit` is provenance: `cut` records the commit it ran at.
+#
+# The exclusion is a DENY-list applied to BOTH sides, so a key the generator grows later is
+# compared by default (present on one side only, and ABSENCE is compared as absence — a
+# hand-added top-level key whose value is `null` used to match `None` and slip through) and
+# reds until it is deliberately classified here.
+NON_DERIVABLE_ROW_KEYS = frozenset(
+    {"used_by", "recommendation", "basis", "reason", "approval", "exemption"}
+)
+NON_DERIVABLE_DOC_KEYS = frozenset(
+    {"cut_at_commit", "approval_status", "approval_principal", "approval_pr"}
+)
+
+# The sentinel for "this key is not in the document at all". `doc.get(key)` cannot express
+# absence separately from a `null` value, and the difference is exactly what a hand-added
+# top-level `sneaky_key: null` exploited.
+_ABSENT = object()
+
+# The four consumer-class values the DERIVATION computes from caller file paths. The
 # fifth, `control-plane`, is a judgement (it is about what a method DOES —
 # provision or destroy keys, orgs, instances, tenants) and is therefore authored
 # and baseline-protected, not derived.
@@ -107,15 +238,120 @@ def category(path: str) -> str:
 
 
 def tracked_python() -> list[str]:
-    out = subprocess.run(
-        ["git", "ls-files", "*.py"], cwd=ROOT, capture_output=True, text=True, check=True
-    )
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "*.py"], cwd=ROOT, capture_output=True, text=True, check=True
+        )
+    except Exception as exc:  # an unlistable tree is a refusal
+        raise SurfaceEvidenceUnreadable(
+            f"could not list the tracked python files (`git ls-files *.py`): "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
     return [line for line in out.stdout.splitlines() if line]
 
 
 def load_order() -> dict:
-    with ORDER_FILE.open() as fh:
-        return yaml.safe_load(fh)
+    """The ordering/keyword table, or a refusal — never a bare traceback.
+
+    The lint's pass/fail must not be satisfiable by editing the rows it checks, so this
+    table is a separate file; that makes it evidence, and evidence that cannot be read is
+    a failure (see `SurfaceEvidenceUnreadable`).
+    """
+    if not ORDER_FILE.exists():
+        raise SurfaceEvidenceUnreadable(
+            f"the ordering table is missing at {ORDER_FILE}. The lint cannot derive a keyword "
+            "or an order without it."
+        )
+    try:
+        table = yaml.safe_load(ORDER_FILE.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise SurfaceEvidenceUnreadable(f"could not read {ORDER_FILE}: {exc}") from exc
+    if not isinstance(table, dict):
+        raise SurfaceEvidenceUnreadable(
+            f"{ORDER_FILE} is malformed: expected a mapping carrying `keywords:`, `tokens:` "
+            f"and `family_rank:` (got {type(table).__name__})."
+        )
+    required = ("keywords", "tokens", "family_rank", "baseline_counts")
+    missing = [k for k in required if k not in table]
+    if missing:
+        # `family_rank` is required by `build_doc`, not only by this lint: validating a
+        # SUBSET let a table missing it pass the read and then escape as a bare KeyError
+        # out of the derivation — the traceback the refusal contract exists to prevent.
+        raise SurfaceEvidenceUnreadable(
+            f"{ORDER_FILE} is malformed: missing {missing}. The derivation cannot order or "
+            "label a row without them."
+        )
+    # KEY PRESENCE IS NOT SHAPE. The checks below exist because a plausible-looking table
+    # passed the presence test and then escaped as a bare traceback or produced a WRONG
+    # derivation — each measured against a copy of this file:
+    #   tokens: []                   -> AttributeError: 'list' object has no attribute 'items'
+    #   tokens: {fetch: fetch}       -> iterated the STRING's characters, so every real token
+    #                                   fell through and the keyword silently became `operate`
+    #   keywords: {}                 -> KeyError: 'fetch'
+    #   keywords/family_rank values  -> `TypeError: '<' not supported` when sorted, and string
+    #                                   ranks sort LEXICOGRAPHICALLY ('10' < '2')
+    #   family_rank: {}              -> KeyError out of `build_doc`
+    #   baseline_counts empty/absent -> property 4's `if baseline and ...` short-circuited, so
+    #                                   deleting the frozen expectation turned the check OFF
+    def _refuse_shape(what: str, why: str) -> SurfaceEvidenceUnreadable:
+        return SurfaceEvidenceUnreadable(f"{ORDER_FILE} is malformed: {what} {why}.")
+
+    for key in ("keywords", "family_rank"):
+        table_key = table[key]
+        if not isinstance(table_key, dict) or not table_key:
+            raise _refuse_shape(f"`{key}:` must be a non-empty mapping", f"(got {table_key!r:.120})")
+        if any(
+            not isinstance(k, str) or not isinstance(v, int) or isinstance(v, bool)
+            for k, v in table_key.items()
+        ):
+            raise _refuse_shape(f"every `{key}:` entry must map a name to an INTEGER", "")
+        ranks = sorted(table_key.values())
+        if ranks != list(range(1, len(ranks) + 1)):
+            # Ranks that are not a clean 1..N let two entries share a rank (an order the
+            # emitted list cannot express) or leave a gap (a rank nothing can reach).
+            # Nothing else checks this: property 5 compares each row to its OWN stored
+            # rank, which is self-consistent under either defect.
+            raise _refuse_shape(
+                f"`{key}:` ranks must be exactly 1..{len(ranks)}", f"(got {ranks})"
+            )
+    toks = table["tokens"]
+    if not isinstance(toks, dict) or not toks:
+        raise _refuse_shape("`tokens:` must be a non-empty mapping", f"(got {toks!r:.120})")
+    bad_tokens = [
+        k
+        for k, v in toks.items()
+        if not isinstance(v, list) or not all(isinstance(t, str) for t in v)
+    ]
+    if bad_tokens:
+        raise _refuse_shape(
+            "every `tokens:` entry must map a keyword to a LIST of token strings",
+            f"(offenders: {bad_tokens[:5]})",
+        )
+    unknown = sorted(set(toks) - set(table["keywords"]))
+    if unknown:
+        raise _refuse_shape(
+            "every `tokens:` key must be one of the `keywords:`", f"(unknown: {unknown[:5]})"
+        )
+    counts = table["baseline_counts"]
+    if not isinstance(counts, dict) or not counts:
+        raise _refuse_shape(
+            "`baseline_counts:` must be a non-empty mapping — it is the frozen keyword "
+            "distribution the derivation is checked against, and an empty one turns that "
+            "check off",
+            f"(got {counts!r:.120})",
+        )
+    if any(
+        not isinstance(k, str) or not isinstance(v, int) or isinstance(v, bool)
+        for k, v in counts.items()
+    ):
+        raise _refuse_shape("every `baseline_counts:` entry must map a keyword to an INTEGER", "")
+    if set(counts) != set(table["keywords"]):
+        raise _refuse_shape(
+            "`baseline_counts:` must have exactly one entry per `keywords:` entry — a keyword "
+            "with no frozen count is a keyword whose distribution nothing checks",
+            f"(diff: {sorted(set(counts) ^ set(table['keywords']))[:5]})",
+        )
+    return table
 
 
 def derive_keyword(name: str, description: str, tokens_to_keyword: dict[str, str]) -> str:
@@ -156,7 +392,19 @@ def scan_callers(method_names: set[str], registered_handlers: set[str] | None = 
     for rel in tracked_python():
         path = ROOT / rel
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            # `git ls-files` lists INDEX entries, so a tracked file removed from the working
+            # tree (or unreadable) is still listed and this read raised `FileNotFoundError`
+            # out of the derivation — a bare traceback in the REQUIRED gate, the same defect
+            # class this file refuses for every other piece of evidence. A silently OMITTED
+            # file is worse than a refusal: a missed caller changes a row's derived class.
+            raise SurfaceEvidenceUnreadable(
+                f"could not read the tracked file {rel}: {exc}. The caller scan must not omit "
+                "a tracked file."
+            ) from exc
+        try:
+            tree = ast.parse(text)
         except (SyntaxError, UnicodeDecodeError):
             continue
         registered = registered_handlers or set()
@@ -195,11 +443,14 @@ def derive_class(name: str, callers: set[str], agent_reachable: bool) -> str:
 # row field. Completeness of the cluster set is a human review step, not a lint
 # check — the lint checks properties OVER the declared set.
 SEED_CLUSTERS: list[tuple[str, list[str]]] = [
-    # `tortoise_get`'s own description names what it consolidates: "get_point /
-    # get_entity / get_operator / get_events / get_session / get_governance". The
-    # first cut of this seeder listed only four of the six and left the other two
-    # to be culled as orphans — caught in review of the recommendations (#3863).
-    ("fetch-by-id", ["tortoise_get", "tortoise_get_point", "tortoise_get_operator", "tortoise_get_entity",
+    # `tortoise_get_entity` is the CANONICAL fetch-by-id tool — an owner decision in
+    # `docs/product/canonical-mcp-tools.md` (approved, approval_pr 4120), which rules
+    # that `tortoise_get_entity` must not be retired and that `tortoise_get` retires
+    # into it instead. The canonical member is the first listed, so it is listed first
+    # here; the five per-type getters and `tortoise_get` are the names that fold in.
+    # (An earlier cut seeded the cluster with `tortoise_get` first; that put the
+    # canonical flag on the name the decision retires.)
+    ("fetch-by-id", ["tortoise_get_entity", "tortoise_get", "tortoise_get_point", "tortoise_get_operator",
                      "tortoise_get_events", "tortoise_get_session", "tortoise_get_governance"]),
     ("create", ["tortoise_create_entity", "tortoise_create_subject", "tortoise_create_object", "tortoise_create_event", "tortoise_create_document"]),
     ("delete", ["tortoise_delete", "tortoise_delete_point", "tortoise_delete_entity"]),
@@ -220,8 +471,10 @@ def seed_clusters() -> dict[str, tuple[str, str]]:
     return out
 
 
-# Methods that are deprecated aliases — prose only today (no deprecation warning
-# is emitted anywhere, which is the point of #3876).
+# The four names the declaration marked as deprecated aliases (#3876). All four are
+# now RETIRED (#3883), so no live row carries this lifecycle any more — the set is
+# kept as the alias vocabulary `recommend_tool` still reads, not as a claim about
+# the current registry.
 DEPRECATED_ALIASES = frozenset(
     {"tortoise_paginated_query", "tortoise_query_points_by_tag", "tortoise_ingest_corpus", "tortoise_index_sessions"}
 )
@@ -365,10 +618,22 @@ def _component_fingerprint(fn) -> str | None:
     return f"{rel}:{_code_digest(code)}"
 
 
-def cmd_cut(args: argparse.Namespace) -> int:
-    from tortoise.mcp_server import __name__ as _  # noqa: F401  (import check)
-    from tortoise.sdk import TortoiseSDK
-    from tortoise.tool_registry import GROUP_BY_NAME, TOOL_REGISTRY
+def build_doc(commit: str | None = None) -> dict:
+    """Derive the baseline from the declaration. THE single derivation.
+
+    `cut` writes what this returns; `check` compares the committed artifact against it.
+    One function, so the generator and the verifier cannot hold two opinions about what
+    the surface is — the failure mode the sibling `tools/sdk_surface.py` names when it
+    explains why it imports `_sdk_targets` instead of re-implementing it.
+    """
+    try:
+        from tortoise.mcp_server import __name__ as _  # noqa: F401  (import check)
+        from tortoise.sdk import TortoiseSDK
+        from tortoise.tool_registry import GROUP_BY_NAME, RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+    except Exception as exc:  # an unimportable declaration is a refusal
+        raise SurfaceEvidenceUnreadable(
+            f"could not import the surface declaration: {type(exc).__name__}: {exc}"
+        ) from exc
 
     order = load_order()
     keywords = order["keywords"]
@@ -379,7 +644,13 @@ def cmd_cut(args: argparse.Namespace) -> int:
     public = sorted(
         name for name in dir(TortoiseSDK) if not name.startswith("_") and callable(getattr(TortoiseSDK, name))
     )
-    callers = scan_callers(set(public), {t.name for t in TOOL_REGISTRY})
+    # Retired names are STILL HANDLERS (they are served through the #3883 shim), so
+    # they count for the caller scan: a call inside `tortoise_get_point` is a call
+    # inside a tool handler, not free-floating code.
+    callers = scan_callers(
+        set(public),
+        {t.name for t in TOOL_REGISTRY} | {t.name for t in RETIRED_TOOL_REGISTRY},
+    )
     corpora = usage_index()
     called_names = telemetry_tools()
     clusters = seed_clusters()
@@ -511,6 +782,15 @@ def cmd_cut(args: argparse.Namespace) -> int:
         )
 
     sdk_out = []
+    # A RETIRED name still calls its handler, and the handler still calls the SDK
+    # method, so a method must not be reported as "reached by no registered MCP
+    # tool" when a retired name reaches it — that is the unverified-negative class
+    # this column was already fixed for once. The `(retired)` suffix keeps the
+    # distinction visible rather than hiding it.
+    for entry in RETIRED_TOOL_REGISTRY:
+        declared = getattr(entry, "sdk_method", "") or ""
+        if declared:
+            bound_by.setdefault(declared, []).append(f"{entry.name} (retired)")
     for name in public:
         reached = bool(bound_by.get(name))
         reached_paths = sorted(
@@ -526,6 +806,16 @@ def cmd_cut(args: argparse.Namespace) -> int:
         # AC11/§6.1 item 4(i)/§6.3 declare this union; this is what makes it true.
         agent_reachable = reached or bool({"mcp-handler", "cli"} & set(reached_paths))
         cls = derive_class(name, callers.get(name, set()), agent_reachable)
+        # `bound_by` now includes RETIRED names (marked `(retired)`), so the count
+        # cannot be read as advertised-surface usage: a retired name is explicitly NOT
+        # a registered tool. Splitting the count keeps the column honest — a method
+        # reached only by retired names says so instead of claiming registered
+        # reachers it does not have.
+        reachers = sorted(bound_by[name])
+        n_retired = sum(1 for r in reachers if r.endswith("(retired)"))
+        reach_phrase = f"{len(reachers) - n_retired} registered tool(s)"
+        if n_retired:
+            reach_phrase += f" and {n_retired} retired name(s)"
         sdk_out.append(
             {
                 "name": f"sdk:{name}",
@@ -541,7 +831,7 @@ def cmd_cut(args: argparse.Namespace) -> int:
                 "canonical": None,
                 "job": f"Public SDK method TortoiseSDK.{name}.",
                 "dependency": (
-                    f"reached by {len(bound_by[name])} registered tool(s): {', '.join(sorted(bound_by[name]))}"
+                    f"reached by {reach_phrase}: {', '.join(reachers)}"
                     if reached
                     else f"reached by no registered MCP tool; caller categories: {', '.join(reached_paths) or 'none outside tests'}"
                 ),
@@ -554,7 +844,7 @@ def cmd_cut(args: argparse.Namespace) -> int:
                 # session_index_health, volunteer_context) — the row said "callers: cli" while
                 # the reason denied it. Never assert a negative the caller scan did not verify.
                 "reason": (
-                    f"reached by {len(bound_by[name])} registered tool(s)"
+                    f"reached by {reach_phrase}"
                     if reached
                     else (
                         f"no MCP tool binds it; callers: {', '.join(reached_paths)}"
@@ -614,10 +904,30 @@ def cmd_cut(args: argparse.Namespace) -> int:
     sdk_rows = sdk_out
     sdk_rows.sort(key=lambda r: (r["method"],))
 
+    # Retired names (#3883) are NOT surface rows — they are advertised nowhere. They
+    # are recorded separately so the gate can hold the other half of the contract:
+    # each one must still RESOLVE and WARN, not silently disappear. A retirement is
+    # as much a surface change as an addition, so entering or leaving this list is a
+    # re-cut in a PR that carries the decision.
+    retired_out = [
+        {
+            "name": e.name,
+            "use_instead": e.retired_use_instead,
+            "sdk_method": getattr(e, "sdk_method", None) or None,
+            "http_policy": bool(getattr(e, "http_policy", False)),
+            # Carried so `approval_status: approved` has a place to record the
+            # decision for a retirement, exactly as it does for a live row: a
+            # retirement shrinks the surface and needs the same human approval.
+            "approval": None,
+        }
+        for e in RETIRED_TOOL_REGISTRY
+    ]
+    retired_out.sort(key=lambda r: r["name"])
+
     doc = {
         "manifest_version": 1,
         "issue": 3863,
-        "cut_at_commit": args.commit or subprocess.run(
+        "cut_at_commit": commit or subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True
         ).stdout.strip(),
         "allowed_transforms": transform_names,
@@ -627,18 +937,53 @@ def cmd_cut(args: argparse.Namespace) -> int:
         "counts": {
             "tools": len(tools_out),
             "sdk_public_methods": len(sdk_out),
+            "retired": len(retired_out),
             "keyword_distribution": keyword_counts,
         },
+        "retired": retired_out,
         "rows": tools_out + sdk_rows,
     }
-    with MANIFEST_FILE.open("w") as fh:
-        yaml.safe_dump(doc, fh, sort_keys=False, allow_unicode=True, width=110, default_flow_style=False)
+    return doc
 
-    print(f"wrote {MANIFEST_FILE.relative_to(ROOT)}")
-    print(f"  tools={len(tools_out)} sdk={len(sdk_out)}")
-    print(f"  keyword distribution: {keyword_counts}")
-    print(f"  distinct declared bindings: {len({t['sdk_method'] for t in tools_out if t['sdk_method']})}")
-    print(f"  dead declared bindings: {sorted({t['sdk_method'] for t in tools_out if t['sdk_method'] and not hasattr(TortoiseSDK, t['sdk_method'])})}")
+
+def _display(path: Path) -> str:
+    """Repo-relative when possible, absolute otherwise.
+
+    `cmd_cut` writes to `MANIFEST_FILE`, which a test (or a future `--out`) may redirect
+    outside the checkout; `relative_to` raises there, and a print must not be what fails.
+    """
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+def cmd_cut(args: argparse.Namespace) -> int:
+    try:
+        doc = build_doc(args.commit)
+    except SurfaceEvidenceUnreadable as exc:
+        return _refuse(exc)
+
+    MANIFEST_FILE.write_text(
+        yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110, default_flow_style=False),
+        encoding="utf-8",
+    )
+
+    # NOT CARRIED FORWARD, DELIBERATELY: this writes `approval_status: pending-owner-approval`
+    # and `approval: null` on every row, exactly as `build_doc` produces them. Carrying the
+    # previous approvals over a re-cut looks like protecting the audit record, and it was
+    # drafted and then REFUSED: CONTRIBUTING.md ("To propose an addition", steps 2-4) makes
+    # the reset the control — a re-cut forces the owner to re-approve the baseline, so a
+    # changed `served_from` cannot ride an old approval into `approved`. Preserving them
+    # would silently reverse that decision, so the reset stays and the tool SAYS so, because
+    # otherwise the next reader sees the wipe as a bug and "fixes" it back.
+    print(f"wrote {_display(MANIFEST_FILE)}")
+    print(f"  tools={doc['counts']['tools']} sdk={doc['counts']['sdk_public_methods']} "
+          f"retired={doc['counts']['retired']}")
+    print(f"  keyword distribution: {doc['counts']['keyword_distribution']}")
+    print(f"  distinct declared bindings: "
+          f"{len({r['sdk_method'] for r in doc['rows'] if r.get('sdk_method')})}")
+    print("  approvals reset to null — re-record them per row (CONTRIBUTING.md, step 4)")
     return 0
 
 
@@ -651,11 +996,24 @@ def cmd_render(args: argparse.Namespace) -> int:
     lands on consecutive lines and can be judged as a group rather than hunted
     for across 99 rows.
     """
-    with MANIFEST_FILE.open() as fh:
-        doc = yaml.safe_load(fh)
+    try:
+        doc = _read_manifest()
+    except SurfaceEvidenceUnreadable as exc:
+        return _refuse(exc)
+    # ROWS THE RENDERER CANNOT READ ARE A REFUSAL, not a traceback: `cmd_render` indexes
+    # `family_rank` / `keyword_rank` / `cluster` / `family` directly, and it used to raise
+    # `KeyError: 'family_rank'` on a manifest that `check` merely reported as malformed.
+    _, malformed = _partition_rows(doc["rows"])
+    if malformed:
+        return _refuse(
+            SurfaceEvidenceUnreadable(
+                "the baseline carries rows this tool cannot render (re-cut it): "
+                + "; ".join(malformed[:5])
+            )
+        )
     rows = doc["rows"]
-    tools = [r for r in rows if not str(r["name"]).startswith("sdk:")]
-    sdk = [r for r in rows if str(r["name"]).startswith("sdk:")]
+    tools = [r for r in rows if not r["name"].startswith("sdk:")]
+    sdk = [r for r in rows if r["name"].startswith("sdk:")]
 
     tools.sort(key=lambda r: (r["family_rank"], r["keyword_rank"], r["cluster"] or r["name"], 0 if r["canonical"] in (True, None) else 1, r["name"]))
 
@@ -714,7 +1072,9 @@ def cmd_render(args: argparse.Namespace) -> int:
     add("  or `handler-served` when it declares no SDK call at all.")
     add("- **`⚠ FALSE DECLARATION`** marks an entry that names an SDK method which does not exist. The")
     add("  tool still works; the declaration is wrong.")
-    add("- **`DEPRECATED`** marks an alias kept for compatibility. Nothing warns a caller today.")
+    add("- **`DEPRECATED`** marks an alias kept for compatibility. **Retired** names are listed at")
+    add("  the end: they are off the advertised surface, still answer, and warn the caller with the")
+    add("  replacement (#3883).")
     add("- **`used by`** answers *what is this for*: which eval harness, piece of tooling, skill, or")
     add("  doc references it by name — and whether agents actually call it.")
     add("- **`recomm.`** is a vocabulary of five values, and it is a **proposal**, not a verdict:")
@@ -730,6 +1090,9 @@ def cmd_render(args: argparse.Namespace) -> int:
     for fam in sorted(families, key=lambda f: families[f][0]["family_rank"]):
         add(f"| {fam} | {len(families[fam])} |")
     add(f"| **total** | **{len(tools)}** |")
+    retired_rows = [r for r in (doc.get("retired") or []) if isinstance(r, dict)]
+    if retired_rows:
+        add(f"| **retired — callable, warns (#3883)** | **{len(retired_rows)}** |")
     add("")
     add("| SDK methods, by who reaches them | Count |")
     add("|---|---|")
@@ -784,6 +1147,36 @@ def cmd_render(args: argparse.Namespace) -> int:
             add(
                 f"| `{r['name']}` | {does} | {reaches} | {r.get('used_by') or ''} | **{rec}** "
                 f"| {status} — {rationale} |"
+            )
+        add("")
+
+    retired_rows = [r for r in (doc.get("retired") or []) if isinstance(r, dict)]
+    if retired_rows:
+        add("---")
+        add("")
+        add(f"## Retired names — {len(retired_rows)} (off the advertised surface, not out of the product)")
+        add("")
+        add("A retired name is **no longer advertised**: it is absent from `tools/list`, so it is not")
+        add("counted above. It is **not gone** — calling it still works and now returns an answer that")
+        add("carries a warning naming the replacement (#3883). The ability to warn is what makes a")
+        add("retirement safe; a retired name that stopped resolving would be a silent removal.")
+        add("")
+        add("| Retired name | Use instead | SDK method it declared | Was |")
+        add("|---|---|---|---|")
+        from tortoise.sdk import TortoiseSDK as _SDK
+
+        for r in sorted(retired_rows, key=lambda x: str(x.get("name"))):
+            was = "http" if r.get("http_policy") else "stdio-only"
+            declared = r.get("sdk_method") or "—"
+            if r.get("sdk_method") and not hasattr(_SDK, str(r["sdk_method"])):
+                # The retired alias declared an SDK method that never existed
+                # (`tortoise_health` -> `health`). Do not assert it is public: the
+                # live table marked this \u26a0 FALSE DECLARATION, and the retired
+                # table must not silently upgrade a false declaration to a fact.
+                declared = f"~~{declared}~~ (no such method)"
+            add(
+                f"| `{r.get('name')}` | `{r.get('use_instead')}` | "
+                f"{declared if declared.startswith('~~') else '`' + str(declared) + '`'} | {was} |"
             )
         add("")
 
@@ -941,7 +1334,7 @@ def cmd_render(args: argparse.Namespace) -> int:
     add("reported 40 in Cursor — so a large part of our surface is not merely unused, it is invisible")
     add("anyway, and we pay context for it on every turn. Every comparable we studied pins a smaller set,")
     add("and the pattern is not novel here: `tortoise_recall` is already one tool with four modes and")
-    add(f"`tortoise_get` already absorbed six getters. Deferring the rest keeps all {len(tools)} callable.")
+    add(f"`tortoise_get_entity` already absorbed the six fetch-by-id getters. Deferring the rest keeps all {len(tools)} callable.")
     add("")
     add("**The case against, which is real and not a formality.** Tortoise is genuinely broader than the")
     add("comparables — a graph memory *and* a reasoning engine with sessions, sources and mining — so some")
@@ -973,25 +1366,69 @@ def cmd_render(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_check(args: argparse.Namespace) -> int:
-    """AC13's lint: eight properties over the declared set."""
-    from tortoise.tool_registry import GROUP_BY_NAME, TOOL_REGISTRY
+REQUIRED_ROW_COLUMNS = ("family", "family_rank", "keyword", "keyword_rank", "cluster")
 
-    order = load_order()
+
+def _partition_rows(rows: list) -> tuple[list[dict], list[str]]:
+    """(the non-`sdk:` rows the comparisons can read, why each other row cannot be read).
+
+    A row that HAS a name but lacks a column the properties index is malformed EVIDENCE,
+    not a comparison result: it used to escape as a bare KeyError/TypeError (`r["keyword"]`,
+    then the family_rank sort) instead of the `::error::` refusal the contract promises.
+    Both readers share this one predicate — `cmd_check` reports what it cannot compare and
+    `cmd_render` refuses — because two readers with two opinions is how `cmd_render` came to
+    trace back (`KeyError: 'family_rank'`) on a manifest the check merely reported.
+    """
+    problems: list[str] = []
+    usable: list[dict] = []
+    for r in rows:
+        if not isinstance(r, dict) or not isinstance(r.get("name"), str) or not r["name"]:
+            problems.append(f"malformed row (not a mapping with a non-empty string name): {r!r}")
+            continue
+        if r["name"].startswith("sdk:"):
+            continue
+        missing = [k for k in REQUIRED_ROW_COLUMNS if k not in r]
+        if missing:
+            problems.append(f"malformed row {r['name']!r}: missing {missing} — re-cut the baseline")
+            continue
+        bad = [k for k in ("family_rank", "keyword_rank") if not isinstance(r[k], int)]
+        if r["cluster"] is not None and not isinstance(r["cluster"], str):
+            bad.append("cluster")
+        if bad:
+            problems.append(
+                f"malformed row {r['name']!r}: {bad} have types the check cannot order — "
+                "re-cut the baseline"
+            )
+            continue
+        usable.append(r)
+    return usable, problems
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    """AC13's lint: nine structural properties, plus a tenth derived from the code."""
+    try:
+        order = load_order()
+        doc = _read_manifest()
+        from tortoise.tool_registry import GROUP_BY_NAME, RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+    except SurfaceEvidenceUnreadable as exc:
+        return _refuse(exc)
+    except Exception as exc:  # an unimportable declaration is a refusal
+        return _refuse(
+            SurfaceEvidenceUnreadable(
+                f"could not import the surface declaration: {type(exc).__name__}: {exc}"
+            )
+        )
+
     verbs = order["keywords"]
     tokens_to_keyword = {t: kw for kw, toks in order["tokens"].items() for t in toks}
-    with MANIFEST_FILE.open() as fh:
-        doc = yaml.safe_load(fh)
-    # Malformed rows must fail CLEANLY, and this must run before any row access —
-    # the previous placement sat after `r["name"]` has already been dereferenced, so a
-    # malformed row crashed with a bare traceback and the property could never fire.
-    problems: list[str] = []
-    malformed = [r for r in doc["rows"] if not isinstance(r, dict) or "name" not in r]
-    for r in malformed:
-        problems.append(f"malformed row (not a mapping with a name): {r!r}")
-    rows = [
-        r for r in doc["rows"] if isinstance(r, dict) and "name" in r and not str(r["name"]).startswith("sdk:")
-    ]
+    # Malformed rows must fail CLEANLY, and this must run before any row access. The
+    # predicate is shared with `cmd_render` (`_partition_rows`), so neither reader can
+    # half-fix it. Properties 1-9 index these keys directly, so a row that HAS a name but
+    # lacks one of them is malformed EVIDENCE, not a comparison result — it is reported and
+    # excluded rather than allowed to raise (verified: a row missing `keyword` or carrying a
+    # non-integer `family_rank` escaped as KeyError/TypeError instead of the refusal).
+    rows, malformed = _partition_rows(doc["rows"])
+    problems: list[str] = list(malformed)
 
     # 1. totality — every tool row carries exactly one derived keyword
     # 2. derivation agreement
@@ -1061,13 +1498,135 @@ def cmd_check(args: argparse.Namespace) -> int:
                 f"{r['family']!r} in the baseline"
             )
 
+    # 9. retired names (#3883) — the manifest's `retired:` block must match the
+    # declaration exactly. A retired name is not a surface row, but it IS a contract
+    # (it must resolve and warn), so a name that silently enters or leaves the retired
+    # set is the same class of defect as a row that appears or disappears.
+    retired = doc.get("retired")
+    if not isinstance(retired, list):
+        problems.append("the manifest carries no `retired:` list — re-cut the baseline")
+    else:
+        declared_retired = {
+            e.name: (getattr(e, "retired_use_instead", None) or "") for e in RETIRED_TOOL_REGISTRY
+        }
+        manifest_retired = {
+            str(r.get("name")): str(r.get("use_instead") or "")
+            for r in retired
+            if isinstance(r, dict) and r.get("name")
+        }
+        for name in sorted(set(declared_retired) - set(manifest_retired)):
+            problems.append(f"retired name {name!r} is declared but not in the manifest")
+        for name in sorted(set(manifest_retired) - set(declared_retired)):
+            problems.append(f"retired name {name!r} is in the manifest but not declared")
+        for name in sorted(set(declared_retired) & set(manifest_retired)):
+            if declared_retired[name] != manifest_retired[name]:
+                problems.append(
+                    f"retired name {name!r}: use_instead {manifest_retired[name]!r} in the "
+                    f"manifest != {declared_retired[name]!r} in the declaration"
+                )
+        row_names = {r["name"] for r in rows}
+        for name in sorted(set(declared_retired) & row_names):
+            problems.append(f"{name!r} is BOTH a surface row and a retired name")
+
+    # 10. the artifact matches a fresh derivation from the CODE -------------------
+    # Properties 1-9 check the artifact against ITSELF (order, clusters, families) and
+    # against two hand-authored tables (`surface-order.yml`, `retired`). None of them
+    # compared it to the declaration, so the baseline's headline numbers and every
+    # derived column could be edited by hand while BOTH this lint and the D2 expansion
+    # gate stayed green (measured: `counts.tools: 999` plus a doctored
+    # `keyword_distribution` passed both). The baseline is frozen — freezing it is what
+    # `cut` did — so a hand-edit is a failure to report, not a fact to accept.
+    #
+    # COST: this is the whole derivation, ~14 s CPU against ~0.4 s for properties 1-9,
+    # because it imports the declaration and scans every tracked module for callers. That
+    # is the price of the artifact being verified against the code at all; the CI job that
+    # runs this has a 10-minute bound and the check is required.
+    # The `cut_at_commit` presence check MOVED into `_read_manifest`: it is provenance and
+    # the renderer slices it, so a null value was a TypeError there and a mere problem here.
+    # One reader, one verdict.
+    try:
+        derived = build_doc()
+    except SurfaceEvidenceUnreadable as exc:
+        return _refuse(exc)
+    problems.extend(_derivation_problems(doc, derived))
+
     for p in problems:
         print(f"FAIL {p}")
     if problems:
         print(f"\n{len(problems)} problem(s)")
         return 1
-    print(f"OK — {len(rows)} tool rows, eight properties hold")
+    print(
+        f"OK — {len(rows)} tool rows, {len(retired) if isinstance(retired, list) else 0} retired, "
+        "ten properties hold (nine structural, one derived-from-code)"
+    )
     return 0
+
+
+def _project_row(row: dict) -> dict:
+    return {k: v for k, v in row.items() if k not in NON_DERIVABLE_ROW_KEYS}
+
+
+def _derivation_problems(doc: dict, derived: dict) -> list[str]:
+    """Every difference between the committed baseline and a fresh derivation.
+
+    Compared by row NAME, so a rename is one removal plus one addition rather than a
+    silent re-point. The projected dict is compared WHOLE, so a key the generator grows
+    later is present on one side only and reds by default — an unclassified column cannot
+    escape verification by being new.
+    """
+    problems: list[str] = []
+    for key in sorted(set(doc) | set(derived)):
+        if key in NON_DERIVABLE_DOC_KEYS or key in ("rows", "retired"):
+            continue
+        # A MISSING key and a `null` ONE ARE NOT THE SAME THING. `doc.get(key) !=
+        # derived.get(key)` treated a hand-added top-level key whose value was `null` as a
+        # match (both sides `None`), so it slipped through — contradicting this function's
+        # own contract that an unclassified key reds by DEFAULT, and contradicting the
+        # deny-list comment that says absence is compared as absence.
+        if doc.get(key, _ABSENT) != derived.get(key, _ABSENT):
+            problems.append(
+                f"the baseline's `{key}` does not match the code: recorded "
+                f"{doc.get(key, _ABSENT)!r}, derived {derived.get(key, _ABSENT)!r}"
+            )
+    for label, key in (("row", "rows"), ("retired row", "retired")):
+        derived_rows = {str(r.get("name")): r for r in derived.get(key) or [] if isinstance(r, dict)}
+        recorded_rows = {str(r.get("name")): r for r in doc.get(key) or [] if isinstance(r, dict)}
+        # ORDER FIRST. `cut` emits both lists in a defined order (the tools by family /
+        # keyword / cluster, the SDK rows and retired names alphabetically) and the
+        # nine structural properties only pin the non-`sdk:` subsequence of `rows` — so
+        # moving every `sdk:` row to the front of the frozen artifact passed the check
+        # with "ten properties hold" (verified). The emitted order is part of the
+        # artifact, so it is compared like any other derived content.
+        recorded_order = [str(r.get("name")) for r in doc.get(key) or [] if isinstance(r, dict)]
+        derived_order = [str(r.get("name")) for r in derived.get(key) or [] if isinstance(r, dict)]
+        if recorded_order != derived_order:
+            at = next(
+                (i for i, (a, b) in enumerate(zip(recorded_order, derived_order, strict=False)) if a != b),
+                min(len(recorded_order), len(derived_order)),
+            )
+            problems.append(
+                f"the baseline's `{key}` are not in the derived order — first divergence at "
+                f"index {at}: recorded {recorded_order[at:at + 1]}, derived {derived_order[at:at + 1]}"
+            )
+        for name in sorted(set(recorded_rows) | set(derived_rows)):
+            recorded, fresh = recorded_rows.get(name), derived_rows.get(name)
+            if recorded is None:
+                problems.append(f"{label} `{name}` is derived from the code but is not in the baseline")
+                continue
+            if fresh is None:
+                problems.append(f"{label} `{name}` is in the baseline but is not derived from the code")
+                continue
+            a, b = _project_row(recorded), _project_row(fresh)
+            if a == b:
+                continue
+            keys = sorted(set(a) | set(b))
+            differing = [k for k in keys if a.get(k) != b.get(k)]
+            problems.append(
+                f"{label} `{name}` was hand-edited — {', '.join(differing)}: recorded "
+                f"{{{', '.join(f'{k}={a.get(k)!r}' for k in differing)}}}, derived "
+                f"{{{', '.join(f'{k}={b.get(k)!r}' for k in differing)}}}"
+            )
+    return problems
 
 
 def main() -> int:
