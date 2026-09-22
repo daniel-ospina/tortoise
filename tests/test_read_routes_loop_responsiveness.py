@@ -39,7 +39,11 @@ SCOPE — the handlers converted in this change (the read-only FalkorDB class):
 ``list_points``, ``get_point``, ``org_info``, ``list_sessions``,
 ``get_session_detail``, ``dream_health`` (graph) and ``list_api_keys``,
 ``list_members``, ``list_pending_invites_for_me`` (registry), plus the hot
-onboarding PATCH's read (``patch_onboarding_state``). EVERY OTHER async body in
+onboarding PATCH's read (``patch_onboarding_state``) and the public invite-info
+read (``invite_info``, ``GET /v1/invites/info``). ``invite_info``'s reads are
+off-loaded too — the registry legs via ``asyncio.to_thread``, the Supabase
+control-plane legs via ``_cp_offload`` — so it is no longer in
+``_KNOWN_INLINE_ROUTE_RESIDUAL``. EVERY OTHER async body in
 the module that still runs sync FalkorDB I/O inline is enumerated in
 ``_KNOWN_INLINE_ROUTE_RESIDUAL`` / ``_KNOWN_INLINE_HELPER_RESIDUAL`` below —
 that is the declared, non-silent residual (it includes the per-request
@@ -83,10 +87,17 @@ MIN_TICKS_IN_STALL = 10
 
 _SEEDED_POINT = "read-loop-3718-point"
 _SEEDED_SESSION = "read-loop-3718-session"
+# The public invite-info read (#3718): its registry lookup iterates pending
+# ``Invitation`` rows and verifies the presented token against ``token_hash``,
+# so a seeded pending invite + its Team is what makes the handler reach its
+# read at all.
+_SEEDED_INVITE_TOKEN = "read-loop-3718-invite-token"
+_SEEDED_INVITE_ORG = "read-loop-3718-invite-org"
 
 
 def _seed_read_surface():
-    """Seed one Point + one Session and WARM the embedded anchors.
+    """Seed a Point, a Session, a pending invite + its Team, and WARM the
+    embedded anchors.
 
     Warming matters only for EMBEDDED-SERVER liveness: ``_make_sdk`` eagerly
     connects a brand-new keepalive anchor so the redislite server survives
@@ -114,6 +125,20 @@ def _seed_read_surface():
     reg = ha_mod._make_sdk(namespace="registry")
     try:
         reg._get_registry()  # warm the registry graph + its indexes
+        from tortoise.auth import hash_api_key as _hash
+        reg._get_registry().query(
+            "CREATE (t:Team {id:$tid, name:$tname})",
+            params={"tid": _SEEDED_INVITE_ORG,
+                    "tname": "read-loop-3718-team"},
+        )
+        reg._get_registry().query(
+            "CREATE (i:Invitation {id:'read-loop-3718-invite', org_id:$tid, "
+            "email:'invitee@example.com', role:'member', token_hash:$th, "
+            "inviter_email:'owner@example.com', expires_at:null, "
+            "accepted_at:null, status:'pending'})",
+            params={"tid": _SEEDED_INVITE_ORG,
+                    "th": _hash(_SEEDED_INVITE_TOKEN)},
+        )
     finally:
         reg.close()
 
@@ -141,6 +166,9 @@ _READ_CASES = [
               "url": f"/v1/organizations/{TEST_ORG_ID}/members"}),
     ("invites-pending", "list_pending_invites_for_me",
      lambda: {"method": "GET", "url": "/v1/invites/pending"}),
+    ("invite-info", "invite_info",
+     lambda: {"method": "GET",
+              "url": f"/v1/invites/info?token={_SEEDED_INVITE_TOKEN}"}),
 ]
 
 
@@ -411,6 +439,10 @@ _OFFLOADED_ASYNC_BODIES = frozenset({
     "get_session_detail", "dream_health",
     "list_api_keys", "list_members", "list_pending_invites_for_me",
     "patch_onboarding_state",
+    # The public invite-info read: both of its reads are off-loaded — the
+    # registry legs via ``asyncio.to_thread`` (the sibling registry reads'
+    # house style) and the Supabase control-plane legs via ``_cp_offload``.
+    "invite_info",
 })
 
 #: FastAPI route handlers STILL running sync FalkorDB I/O inline. Declared,
@@ -426,11 +458,6 @@ _KNOWN_INLINE_ROUTE_RESIDUAL = frozenset({
     "session_key", "public_demo", "github_callback", "backups_create",
     "backups_restore", "backups_sweep", "backups_purge", "backups_rebaseline",
     "backups_drill", "backups_drill_scheduled", "webhooks_stripe",
-    # Surfaced when the nested-closure rule landed (#4455 review P1): its only
-    # registry seams sit inside the ``_registry_invite`` / ``_org_name``
-    # closures, which ARE invoked bare on the loop. A genuine pre-existing
-    # inline site, not visible before because every nested def was skipped.
-    "invite_info",
 })
 
 #: Non-route async bodies with inline sync FalkorDB I/O — the per-request auth

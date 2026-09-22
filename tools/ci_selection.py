@@ -448,7 +448,16 @@ SOURCE_PATTERNS = {
             # generator-only edit selected NO surface and the gate never ran on
             # the PR that can break it. A docs-only hand-edit of the generated
             # file still skips the matrix by the docs-PR policy (tortoise #4454).
-            "tools/sdk_rename_table.py"),
+            "tools/sdk_rename_table.py",
+            # #4282 Phase 0.4 + 1.1: `tools/sdk_surface.py` derives the declared
+            # `TortoiseSDK` public surface and GENERATES `config/sdk-surface.json` +
+            # `docs/product/sdk-surface-declaration.md`; `test_sdk_surface.py`
+            # (registered in `api` AND `core`) is the drift gate. Same gap as the bridge
+            # table above: `tools/` is in NON_PYTHON_PREFIXES, so a generator-only edit
+            # selected NO surface and the gate never ran on the PR that can break it.
+            # A docs-only hand-edit of the generated doc still skips the matrix by the
+            # repo's deliberate docs-PR policy (tortoise #4454).
+            "tools/sdk_surface.py"),
     # eval (#1349): the probe, LongMemEval/mini-BEIR harnesses, threshold
     # tools, benchmark infra, and the backfill script all produce gate
     # evidence — their tests live in the eval surface (config/ci-surfaces.yml).

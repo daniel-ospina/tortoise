@@ -316,12 +316,13 @@ export const HARNESS_INSTALL = {
 mkdir -p .claude/hooks
 cp <path-to-tortoise>/tortoise/claude-hooks/session-start.sh .claude/hooks/session-start.sh
 cp <path-to-tortoise>/tortoise/claude-hooks/session-end.sh .claude/hooks/session-end.sh
-chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh
+cp <path-to-tortoise>/tortoise/claude-hooks/session-turn.sh .claude/hooks/session-turn.sh
+chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh .claude/hooks/session-turn.sh
 # then merge into .claude/settings.json:
 # #3754: the explicit timeout is load-bearing — Claude Code cancels a SessionEnd
 # hook at its 1.5s default; the budget rises to the highest per-hook timeout (60
 # is the documented ceiling). session-end.sh measured 9.26s on a real run.
-# { "hooks": { "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-start.sh", "timeout": 60 }] }], "SessionEnd": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-end.sh", "timeout": 60 }] }] } }`,
+# { "hooks": { "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-start.sh", "timeout": 60 }] }], "SessionEnd": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-end.sh", "timeout": 60 }] }], "UserPromptSubmit": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-turn.sh", "timeout": 30 }] }] } }`,
   // #2827: these constants are NOT wired to any live surface — they are only
   // reachable from the archived LEGACY_WIZARD_ARCHIVED render in main.jsx and
   // from harnesses.test.js. A remote HTTP MCP server must NOT be documented as
@@ -361,7 +362,9 @@ ${PI_CAPTURE_INSTALL}
    from the environment of the shell that LAUNCHED it, so a reload (or a
    restart in the same old terminal) silently keeps the stale or empty
    value. You get a 401, or connect to a previous organization with no
-   warning at all.
+   warning at all. ('/reload' re-scans configs, skills, and MCP
+   registrations, and tortoise connects eagerly at startup — the config
+   doesn't mark it lazy — so no separate connect step is needed.)
    Then call tortoise_health — when it passes, tell me "Tortoise is
    connected". The first time you write a memory or file a decision,
    onboarding auto-completes (no separate ceremony needed).`,
@@ -424,12 +427,13 @@ export const HARNESS_CAPTURE_INSTALL = {
 mkdir -p .claude/hooks
 cp <path-to-tortoise>/tortoise/claude-hooks/session-start.sh .claude/hooks/session-start.sh
 cp <path-to-tortoise>/tortoise/claude-hooks/session-end.sh .claude/hooks/session-end.sh
-chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh
+cp <path-to-tortoise>/tortoise/claude-hooks/session-turn.sh .claude/hooks/session-turn.sh
+chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh .claude/hooks/session-turn.sh
 # then merge into .claude/settings.json:
 # #3754: the explicit timeout is load-bearing — Claude Code cancels a SessionEnd
 # hook at its 1.5s default; the budget rises to the highest per-hook timeout (60
 # is the documented ceiling). session-end.sh measured 9.26s on a real run.
-# { "hooks": { "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-start.sh", "timeout": 60 }] }], "SessionEnd": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-end.sh", "timeout": 60 }] }] } }`,
+# { "hooks": { "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-start.sh", "timeout": 60 }] }], "SessionEnd": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-end.sh", "timeout": 60 }] }], "UserPromptSubmit": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-turn.sh", "timeout": 30 }] }] } }`,
   // #3575: the SAME constant HARNESS_INSTALL.pi installs — the in-repo
   // extension, not an agent-infra settings toggle. Shared so the Memory-
   // sources row and the setup prompt can never drift.
@@ -641,7 +645,9 @@ ${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}
 4. Restart Pi from a NEW terminal (quit Pi fully, open a new terminal
    window, and start Pi there). A \"/reload\" is NOT enough — Pi reads the
    key from the environment of the shell that launched it, so a reload
-   keeps the stale or empty value.
+   keeps the stale or empty value. ('/reload' re-scans configs, skills, and
+   MCP registrations, and tortoise connects eagerly at startup — the config
+   doesn't mark it lazy — so no separate connect step is needed.)
    Then call tortoise_health — when it passes, tell me "Tortoise is
    connected".`,
   // #2865: key-less OAuth. `key` is accepted (one signature for every harness)
