@@ -382,13 +382,48 @@ def test_callback_with_forged_flow_cookie_is_rejected(stack):
     assert "interstitial=1" in headers.get("Location", ""), headers.get("Location")
 
 
-def test_confirm_without_flow_is_interstitial(stack):
+def test_email_confirmation_completes_through_the_interstitial(stack):
+    """#3528: an emailed confirmation link must COMPLETE.
+
+    `type=email` (signup confirmation AND magic link) used to be answered
+    `302 /auth?interstitial=1` whenever the browser carried no `__Host-authflow`
+    cookie matching a live `auth_flows` row — and NO email flow establishes one:
+    `FLOW_COOKIE` is minted only by `/auth/start` (OAuth) and `/auth/link`
+    (identity linking), while `/auth/reset` and `/auth/resend` set
+    `redirect_to=/auth/confirm` without one. A link opened from an inbox was
+    therefore answered with a redirect nothing consumes, and the single-use
+    `token_hash` was dropped — email confirmation did not work at all.
+
+    It now has the same contract as recovery: the GET verifies the token,
+    renders the consent interstitial, and mints NOTHING; the CSRF-guarded POST
+    mints exactly one session. A confirmation is NOT a password reset, so it
+    lands on `/welcome`, never on the reset panel.
+    """
     j = Jar()
-    status, _, headers = j.get(
+    status, body, _ = j.get(
         f"{APP}/auth/confirm?token_hash=abc&type=email", follow=False
     )
-    assert status == 302
-    assert "interstitial=1" in headers.get("Location", ""), headers
+    assert status == 200, (
+        f"an email confirmation link must render the interstitial, got {status} {body[:200]}"
+    )
+    assert "Confirm it's you" in body, f"not the interstitial: {body[:200]!r}"
+    assert "password" not in body.lower(), (
+        "a confirmation link must not be presented as a password reset"
+    )
+    assert j.cookie("__Host-session") is None, (
+        "the confirm GET minted a session from the link alone — the fixation vector"
+    )
+    assert j.cookie("__Host-authflow"), (
+        "the interstitial must bind the pending confirmation to this browser"
+    )
+
+    req = urllib.request.Request(f"{APP}/auth/confirm", method="POST", data=b"{}")
+    req.add_header("Content-Type", "application/json")
+    status, location, _ = _jar_call(j, req)
+    assert status == 302, f"the confirm POST must redirect, got {status}"
+    assert "/welcome" in location, f"confirmation must land on /welcome, got {location!r}"
+    assert "reset=1" not in location, f"a confirmation is not a reset: {location!r}"
+    assert j.cookie("__Host-session"), "the confirmed POST minted no session"
 
 
 def test_recovery_confirm_completes_through_the_interstitial(stack):
