@@ -935,124 +935,36 @@ def _worktree_at(ref: str, run_root: Path, name: str) -> tuple[Path, bool]:
     return wt, True
 
 
-def _record_out_pathspec(
-    cwd: Path, exclude: Path | None, env: dict[str, str] | None = None
-) -> list[str]:
-    """Git pathspec entries that drop `exclude` from a status/diff scoped to `cwd`.
-
-    `--record-out` is a command-line argument, so a RELATIVE one names a path under
-    the invocation directory (`Path.cwd()`) — NOT under `cwd`, which is the tree
-    being measured and, for a `--ref` run, is a detached worktree the receipt is not
-    inside.
-
-    The pin's correctness property is ONE-DIRECTIONAL: a genuinely dirty tree must
-    never read clean (`dirty` is derived from the post-exclusion porcelain). So an
-    ambiguous input is REFUSED — `[]` — and never guessed at, because a refusal can
-    only ADD dirt while an over-broad exclusion removes it.
-
-    An exclusion is emitted only for a path that is, lexically, a REGULAR FILE
-    inside `cwd`. Three independent over-matches are closed here, each an exclusion
-    that named a set larger than the receipt:
-
-    * LEXICAL, never `Path.resolve()`. `resolve()` follows symlinks, so with
-      `--record-out docs/out` where `docs/out` is a symlink to a DIRECTORY it
-      resolved to `docs` and emitted `:(exclude)docs` — dropping the whole `docs/`
-      subtree from BOTH legs, so a real edit under `docs/` read clean. A receipt
-      symlinked in from outside the repo (`ln -s <repo>/docs /elsewhere/r.json`)
-      collapsed to the same pathspec. Git resolves a pathspec relative to the
-      directory it runs in, and it matches index paths LEXICALLY, so the lexical
-      `os.path.relpath` of the (unresolved) target is the exact string git needs.
-      Only `cwd` itself is put on a physical basis (`os.path.realpath`) — a prefix
-      difference never changes the relative path, and without it a `cwd` from
-      `tempfile.mkdtemp()` (`/var/…`) would not line up with `Path.cwd()`
-      (`/private/var/…`) on macOS.
-    * `literal` magic. Without it git GLOBS the pathspec: a receipt named
-      `docs/out[12].json` matched `docs/out1.json` and `docs/out2.json` (measured),
-      hiding two genuinely dirty files. `*` and `?` are the same class.
-    * a target that `os.path.isdir` reports as a directory — which it does for a
-      symlink RESOLVED to a directory, since it follows the final component. Git
-      treats a pathspec naming a directory as that whole subtree, so this is the
-      same whole-subtree over-match reached from the other direction.
-    * a target with anything UNDER it that git can report. Git expands a pathspec
-      `X` to `X` **and every `X/…`**, and that expansion does not consult the
-      filesystem: with `X` a REGULAR FILE in the worktree, the index or the HEAD
-      tree can still hold `X/a.txt` (a typechange), and then `D X/a.txt` — real
-      dirt — vanished from the pin while an unrelated dirty file kept `dirty`
-      True. So the guard asks git for the union it would report (`ls-files
-      --with-tree=HEAD` = index ∪ HEAD tree, which is what catches a path dropped
-      from the index but still in HEAD) instead of assuming a file target is safe.
-
-    `rel == "."` (the target IS the measured root), `rel == ".."` (an ancestor of
-    `cwd`, hence outside the measured tree), anything outside the repo, and a path
-    that does not exist are each refused. Refusing a nonexistent path costs nothing
-    — nothing is there to exclude — and every measurement in `_build_record` is
-    taken BEFORE `_write_record` runs, so a receipt that does not exist yet is a
-    receipt that is not yet dirt.
-
-    Returns `[]` when there is nothing safe to exclude.
-    """
-    if exclude is None:
-        return []
-    try:
-        # The JOIN is lexical (`Path.__truediv__`), so a symlink anywhere in
-        # `exclude` — final component or interior — stays a symlink in `rel`.
-        target = exclude if exclude.is_absolute() else (Path.cwd() / exclude)
-        target_abs = os.path.abspath(os.fspath(target))
-        cwd_abs = os.path.realpath(os.fspath(cwd))
-        rel = os.path.relpath(target_abs, cwd_abs)
-    except (OSError, ValueError):
-        return []
-    if rel == os.curdir or rel == os.pardir or rel.startswith(os.pardir + os.sep):
-        return []  # the measured root itself, or outside it (an ancestor, a sibling)
-    if os.path.isabs(rel):  # a different drive (Windows): not under `cwd`
-        return []
-    if not os.path.lexists(target_abs):
-        return []  # nothing to exclude yet — never guess at what it might mean
-    if os.path.isdir(target_abs):
-        return []  # a directory, incl. a symlink RESOLVED to one: a whole subtree
-    rel_posix = Path(rel).as_posix()
-    try:
-        # Index ∪ HEAD tree. `--with-tree=HEAD` is load-bearing: a path removed
-        # from the index but still in HEAD is absent from `ls-files` and yet
-        # `diff-index HEAD` reports it as `D`, so it is exactly the kind of dirt
-        # the exclusion would otherwise swallow.
-        descendants = _git(
-            "ls-files", "--with-tree=HEAD", "--", f":(literal){rel_posix}/",
-            cwd=cwd, env=env,
-        )
-    except RuntimeError:
-        return []  # exactness cannot be PROVEN ⇒ refuse; refusal only ADDS dirt
-    if descendants.strip():
-        return []  # `:(exclude)X` would also drop everything under `X/`
-    return [f":(exclude,literal){rel_posix}"]
-
-
 def _porcelain_digest(
-    cwd: Path, exclude: Path | None = None, env: dict[str, str] | None = None
+    cwd: Path, env: dict[str, str] | None = None
 ) -> tuple[str, bool]:
-    # The resolved `--record-out` path is excluded from the pin (M5/D6) BY GIT, as a
-    # pathspec — never by filtering the porcelain text. The substring filter this
-    # replaces held two reproduced defects (#4540), and because #4203 moved `dirty`
-    # onto the filtered lines, its over-broad match was no longer cosmetic:
-    #   (a) FAIL-OPEN: `ex` was matched with `in`, so `--record-out tools/e` dropped
-    #       the dirty `tools/embedded_evidence.py` from BOTH the digest and `dirty` —
-    #       a real edit read as a clean tree (post_review_dirty False, exit 0).
-    #   (b) SILENT NO-OP: `status` without `--untracked-files=all` collapses a fresh
-    #       untracked receipt directory to ONE entry (`? docs/evidence/`), which the
-    #       per-file filter never matched — so `dirty` stayed True on exactly the
-    #       documented re-run (the permanent false-FAIL #4203 was raised to close).
-    # Both die at the source when git does the exclusion: the pathspec is exact
-    # (`:(exclude,literal)tools/e` keeps `tools/embedded_evidence.py`, and the
-    # `literal` magic keeps `docs/out[12].json` from matching `docs/out1.json`) and
-    # `-uall` makes the receipt a path git can exclude at all. `.` is the include,
-    # stated explicitly so the scope of the measurement is visible here; an
-    # exclusion-only pathspec is in fact legal (measured rc 0), so `.` is
-    # documentation, not a requirement. `env` pins the environment the measured
-    # calls see — see `_git`.
-    pathspec = [".", *_record_out_pathspec(cwd, exclude, env=env)]
-    status = _git("status", "--porcelain=v2", "--untracked-files=all", "--", *pathspec,
+    """The measured tree's cleanliness digest, and whether it is DIRTY.
+
+    The tool's own `--record-out` receipt is NOT excluded here, and does not need
+    to be: `_build_record` REFUSES an in-tree `--record-out` as a usage error
+    before any measurement is taken (#4203, owner-ruled option (a), #4572). With
+    the receipt outside the tree this function performs NO path-based exclusion at
+    all — and an exclusion that does not exist cannot over-match.
+
+    That is the whole point. The exclusion this replaces was re-derived five times
+    (`--record-out tools/e` substring-matched the dirty `tools/embedded_evidence`
+    py; `Path.resolve()` followed a symlink and named a whole directory; the
+    pathspec lacked `literal` and globbed; `:(exclude)X` also matched every `X/…`;
+    a lexical-vs-kernel `--record-out link/../out` divergence), and each spelling
+    traded one over-broad form for another. Every one of them could turn a
+    genuinely dirty tree into a digest that reads clean (post_review_dirty False,
+    exit 0 — the fail-open class of #4540), because any path-based exclusion has
+    to PROVE it names the receipt and nothing else, and each proof rested on an
+    assumption about git's pathspec semantics that turned out to be wrong.
+
+    `--untracked-files=all` is load-bearing and is KEPT: without it git collapses a
+    fresh untracked directory to ONE entry (`? docs/evidence/`), the permanent
+    false-FAIL #4203 was raised to close. `env` pins the environment the measured
+    calls see — see `_git`.
+    """
+    status = _git("status", "--porcelain=v2", "--untracked-files=all", "--", ".",
                   cwd=cwd, env=env)
-    diff = _git("diff-index", "HEAD", "--", *pathspec, cwd=cwd, env=env)
+    diff = _git("diff-index", "HEAD", "--", ".", cwd=cwd, env=env)
     blob = (status + "\n" + diff + "\n").encode()
     return "sha256:" + hashlib.sha256(blob).hexdigest(), bool(status.strip())
 
@@ -1332,6 +1244,65 @@ def _write_record(rec: dict, out: Path) -> None:
     os.replace(tmp, out)
 
 
+def _default_record_out() -> Path:
+    """The ONLY supported destination: outside every tree the pin measures.
+
+    Derived, never a stale literal, so the refusal message and `main()`'s fallback
+    cannot drift apart. Computed per call because `TMPDIR` can change within a
+    process (a test, an operator export).
+    """
+    return Path(tempfile.gettempdir()) / "pi-embedded-evidence" / "record.json"
+
+
+def _written_location(out: Path) -> Path:
+    """Where `_write_record(out)` will ACTUALLY create the file.
+
+    `_write_record` calls `os.replace(tmp, out)`. The kernel resolves every
+    DIRECTORY component of `out` through symlinks, but `rename(2)` REPLACES a
+    symlink at the FINAL component rather than following it. So `realpath(out)`
+    would follow that final symlink and report a location the write does not use:
+    `--record-out <a symlink inside the tree that points outside>` would pass a
+    `realpath`-based containment check while the receipt still lands INSIDE the
+    tree — and then the tool's own record is dirt it did not exclude. Resolve the
+    PARENT physically and keep the final component lexical.
+
+    The parent is resolved with `realpath` (not `abspath`) so both sides of the
+    containment comparison sit on the same basis: a `--ref` measured root comes
+    from `tempfile.mkdtemp()` and is `/var/…` while macOS's `Path.cwd()` is
+    `/private/var/…` — the same directory spelled two ways.
+    """
+    abs_out = os.path.abspath(os.fspath(out))
+    return Path(os.path.realpath(os.path.dirname(abs_out)), os.path.basename(abs_out))
+
+
+def _refuse_in_tree_record_out(out: Path, *measured_roots: Path) -> None:
+    """Usage error when the receipt would land inside a measured tree (#4203).
+
+    The pin's one-directional property is that a genuinely dirty tree must never
+    read clean. The tool's own record used to be excluded from the measurement BY
+    PATH, and that exclusion over-matched five different ways, each hiding real
+    dirt. The owner ruled (option (a), #4572) that the record must not live in the
+    measured tree at all: with the receipt outside, `_porcelain_digest` performs NO
+    path-based exclusion, so there is nothing left to over-match.
+
+    Every tree the pin measures is checked. `REPO_ROOT` is always one of them —
+    `pin.post_review_dirty` is measured on the INVOKING checkout even when `--ref`
+    points the run at a detached worktree — so an in-repo receipt would dirty the
+    pin whether or not `--ref` was given.
+    """
+    location = _written_location(out)
+    for root in measured_roots:
+        root_real = Path(os.path.realpath(os.fspath(root)))
+        if location == root_real or root_real in location.parents:
+            raise UsageError(
+                f"--record-out {out} is inside the measured tree ({root}). The "
+                "tool's own record would then be part of the dirt it is "
+                "measuring, falsely reporting a post-review edit. Write the "
+                "record outside the measured tree (the default is "
+                f"{_default_record_out()}) and copy or upload it afterwards."
+            )
+
+
 def _build_record(args: argparse.Namespace) -> dict:
     # M52/C1: `closing` is accepted ONLY with an explicit `--pairing-ref` — without
     # it there is no ref to pair against, so a closing claim has no antecedent and
@@ -1354,9 +1325,18 @@ def _build_record(args: argparse.Namespace) -> dict:
     requested_ref = None
     measured_root = REPO_ROOT
     worktree_added = False
+    # #4203 owner ruling (option (a), #4572): the record must not live inside the
+    # measured tree. Refuse it BEFORE any measurement — and before the `--ref`
+    # worktree exists — so a usage error costs no measurement and leaves no
+    # worktree behind. `REPO_ROOT` is checked first because `post_review_dirty` is
+    # measured on the invoking checkout even when `--ref` measures elsewhere.
+    if args.record_out is not None:
+        _refuse_in_tree_record_out(args.record_out, REPO_ROOT)
     if args.ref:
         requested_ref = _git("rev-parse", f"{args.ref}^{{commit}}")
         measured_root, worktree_added = _worktree_at(requested_ref, run_root, "worktree")
+        if args.record_out is not None:
+            _refuse_in_tree_record_out(args.record_out, measured_root)
     commit = _git("rev-parse", "HEAD", cwd=measured_root)
     tree = _git("rev-parse", "HEAD^{tree}", cwd=measured_root)
 
@@ -1377,7 +1357,7 @@ def _build_record(args: argparse.Namespace) -> dict:
         # run 1 compare with itself — `tree_moved` was False for run 1 by
         # construction — so a tree that moved only during run 1 left
         # `pin-not-airtight` passing while the tree moved.
-        base_digest, _base_dirty = _porcelain_digest(measured_root, exclude=args.record_out)
+        base_digest, _base_dirty = _porcelain_digest(measured_root)
         for i in range(1, args.n + 1):
             runs.append(_run_once(files, measured_root, run_root, i, args.marker,
                                   args.run_timeout))
@@ -1385,7 +1365,7 @@ def _build_record(args: argparse.Namespace) -> dict:
             # measured tree still EXISTS (see below) — and it is taken once per run so
             # `tree_moved` is MEASURED: a run whose tree digest differs from the
             # pre-run baseline is a moved tree, which `pin-not-airtight` refuses.
-            tree_states.append(_porcelain_digest(measured_root, exclude=args.record_out))
+            tree_states.append(_porcelain_digest(measured_root))
         # `tree_moved` is per-run: True iff this run's tree state differs from the
         # digest captured before run 1.
         for r, (digest, _d) in zip(runs, tree_states):
@@ -1411,7 +1391,7 @@ def _build_record(args: argparse.Namespace) -> dict:
     # `certificate-not-bound-to-review-head`. A literal (`head_sha = commit`,
     # `post_review_dirty = False`) made that conjunct unfailable.
     reviewed_head = _git("rev-parse", "HEAD")
-    _, review_dirty = _porcelain_digest(REPO_ROOT, exclude=args.record_out)
+    _, review_dirty = _porcelain_digest(REPO_ROOT)
 
     # D16: when a pairing ref is declared, the RED is re-run AT THE PAIRING REF
     # inside this invocation, so `at_fixed_commit` becomes a MEASURED claim (the
@@ -1440,14 +1420,10 @@ def _build_record(args: argparse.Namespace) -> dict:
         pair_root.mkdir(parents=True, exist_ok=True)
         pair_measured, pair_added = _worktree_at(pair_ref, run_root, "pairing-worktree")
         try:
-            pair_base_digest, _pbd = _porcelain_digest(
-                pair_measured, exclude=args.record_out
-            )
+            pair_base_digest, _pbd = _porcelain_digest(pair_measured)
             baseline_run = _run_once(files, pair_measured, pair_root, 1, args.marker,
                                      args.run_timeout)
-            pair_post_digest, _ppd = _porcelain_digest(
-                pair_measured, exclude=args.record_out
-            )
+            pair_post_digest, _ppd = _porcelain_digest(pair_measured)
             # The baseline is a RUN too: persist its own tree state so `pin-not-airtight`
             # and a re-evaluating verifier can see whether the pairing worktree moved.
             baseline_run["tree_moved"] = pair_post_digest != pair_base_digest
@@ -1568,7 +1544,6 @@ def _build_record(args: argparse.Namespace) -> dict:
             "pairing_ref": pair_ref,
             "worktree_clean": not dirty,
             "porcelain_digest": porcelain,
-            "record_out_excluded": str(args.record_out) if args.record_out else None,
             "measured_root": str(measured_root),
             "environment_pinned": False,
         },
@@ -1709,7 +1684,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"environment error: {exc}", file=sys.stderr)
         return 2
 
-    out = args.record_out or Path(tempfile.gettempdir()) / "pi-embedded-evidence" / "record.json"
+    out = args.record_out or _default_record_out()
     _write_record(rec, out)
     print(json.dumps({
         "record": str(out),
