@@ -557,6 +557,78 @@ def test_org_node_seam_reads_off_main_thread(monkeypatch):
     )
 
 
+def test_invite_info_supabase_lane_reads_off_main_thread(monkeypatch):
+    """#3718: the hosted (Supabase) lane of the public invite-info handler.
+
+    ``GET /v1/invites/info`` is unauthenticated, so its two blocking reads —
+    the token lookup (``invitation_info_by_token``) and the org-name
+    resolution (``org_by_id``) — are reachable without a session. Both must
+    run off the loop. The registry lane is pinned behaviourally in
+    ``test_read_routes_loop_responsiveness.py``.
+
+    This case (with ``test_invite_info_submits_one_offload_regardless_of_token``
+    below) is the SOLE guard for the hosted lane: the two reads live in the
+    nested sync ``def _hosted_invite`` handed to ``_cp_offload`` as a callable
+    reference, and ``_unoffloaded_calls`` deliberately skips nested ``def``
+    bodies (a nested *sync* def has no inventory entry of its own). Inventory
+    membership for ``invitation_info_by_token`` does NOT observe this call site
+    — inlining the unit leaves the static pins green (only these behavioural
+    cases fail). See #4587 for closing that scan gap.
+
+    The stub answers every PostgREST query with the same row, so it carries
+    both the invite fields and the org ``name``.
+    """
+    _cp, transport = _stub_control_plane(monkeypatch, [{
+        "id": "inv-3718", "org_id": "org-1", "role": "member",
+        "inviter_email": "owner@example.com", "expires_at": None,
+        "status": "pending", "accepted_at": None, "name": "Stub Org",
+    }])
+
+    result = asyncio.run(ha.invite_info("tok-3718"))
+
+    assert result["org_name"] == "Stub Org"
+    assert result["role"] == "member"
+    assert transport.threads, "the control-plane transport was never called"
+    assert all(name != "MainThread" for name in transport.threads), (
+        f"the hosted invite-info lane ran on the event loop: {transport.threads}"
+    )
+
+
+def test_invite_info_submits_one_offload_regardless_of_token(monkeypatch):
+    """#3718: the hosted lane submits ONE offload unit for ANY token.
+
+    The route's 404 copy is deliberately oracle-free, so its offload-FAILURE
+    exposure must not depend on whether the token matched. If a matched token
+    were the only case that submitted a SECOND offload (the org read), then
+    under a saturated pool ``P(503 | valid) > P(503 | unknown)`` — a capacity
+    oracle an attacker can drive by loading the shared auth pool. Both hosted
+    reads are therefore one unit, and an unknown token never issues the org read.
+    """
+    def _ops_since(mark: int) -> list[str]:
+        return [op for op, _dur in monitoring.control_plane_offload_records()[mark:]]
+
+    _stub_control_plane(monkeypatch, [{
+        "id": "inv-3718", "org_id": "org-1", "role": "member",
+        "inviter_email": "owner@example.com", "expires_at": None,
+        "status": "pending", "accepted_at": None, "name": "Stub Org",
+    }])
+    mark = len(monitoring.control_plane_offload_records())
+    asyncio.run(ha.invite_info("tok-valid"))
+    assert _ops_since(mark) == ["invite_info"], (
+        "a matched token must submit exactly one offload unit"
+    )
+
+    _stub_control_plane(monkeypatch, [])  # unknown token: the lookup finds no row
+    mark = len(monitoring.control_plane_offload_records())
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(ha.invite_info("tok-unknown"))
+    assert exc.value.status_code == 404
+    assert _ops_since(mark) == ["invite_info"], (
+        "an unknown token must submit the SAME single offload unit — a second "
+        "submission on the matched path is a capacity oracle"
+    )
+
+
 # ── #3498 item 1: the loop-lag baseline ─────────────────────────────────────
 
 

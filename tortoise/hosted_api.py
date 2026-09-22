@@ -14257,9 +14257,8 @@ async def invite_info(token: str):
     if not token:
         raise HTTPException(status_code=422, detail="token required")
 
-    def _registry_invite():
+    def _registry_invite(sdk):
         from tortoise.auth import verify_api_key as _verify
-        sdk = _make_sdk(namespace="registry")
         reg = sdk._get_registry()
         rows = reg.query(
             "MATCH (i:Invitation) WHERE i.accepted_at IS NULL "
@@ -14272,47 +14271,69 @@ async def invite_info(token: str):
                         "inviter_email": ie, "expires_at": exp}
         return None
 
-    def _org_name(org_id: str) -> str | None:
-        from tortoise.supabase_control import (
-            get_control_plane,
-            is_supabase_enabled,
-            org_by_id,
-        )
-        if is_supabase_enabled():
-            t = org_by_id(get_control_plane(), org_id)
-            return (t or {}).get("name")
-        sdk = _make_sdk(namespace="registry")
-        reg = sdk._get_registry()
-        rows = reg.query(
-            "MATCH (t:Team {id:$id}) RETURN properties(t)",
-            params={"id": org_id},
-        ).result_set
-        return rows[0][0].get("name") if rows else None
-
     try:
         from tortoise.supabase_control import (
             get_control_plane,
             invitation_info_by_token,
             is_supabase_enabled,
+            org_by_id,
         )
-        inv = (invitation_info_by_token(get_control_plane(), token)
-               if is_supabase_enabled() else _registry_invite())
+        if is_supabase_enabled():
+            # #3718/#3498: BOTH control-plane reads are blocking PostgREST
+            # calls, submitted as ONE offload unit. That keeps the route's
+            # offload-failure exposure independent of whether the token
+            # matched — a matched token must not be the only case that can
+            # observe a saturated pool, since ``_cp_offload`` is fail-closed
+            # 503 and the 404 copy below is deliberately oracle-free — and it
+            # is one worker hop instead of two. The expiry gate lives inside
+            # the unit so an expired token never reaches the org read.
+            def _hosted_invite():
+                cp = get_control_plane()
+                found = invitation_info_by_token(cp, token)
+                if not found:
+                    return None
+                exp = found.get("expires_at")
+                if exp and exp < datetime.now(UTC).isoformat():
+                    return None
+                name = (org_by_id(cp, found["org_id"]) or {}).get("name")
+                return (found, name) if name else None
+
+            result = await _cp_offload(_hosted_invite, op="invite_info")
+        else:
+            # #3718: the registry scan is sync FalkorDB I/O
+            # (``_get_registry().query``), so it runs off the loop. The SDK
+            # attach is built on the loop and the closure is handed over as a
+            # callable REFERENCE — the read-half house style (``list_members``
+            # / ``list_pending_invites_for_me``). A nested def counts as
+            # on-loop only when it is INVOKED on the loop, which is what keeps
+            # the AST guard in `tests/test_read_routes_loop_responsiveness.py`
+            # satisfied here (re-inlining the call re-reports this handler).
+            _reg_sdk = _make_sdk(namespace="registry")
+            inv = await asyncio.to_thread(_registry_invite, _reg_sdk)
+            result = None
+            if inv:
+                _exp = inv.get("expires_at")
+                if not (_exp and _exp < datetime.now(UTC).isoformat()):
+                    # #3718: the org-name read is sync FalkorDB I/O too — off
+                    # the loop, the same reference style as the invite scan.
+                    _org_sdk = _make_sdk(namespace="registry")
+                    _rows = await asyncio.to_thread(
+                        lambda: _org_sdk._get_registry().query(
+                            "MATCH (t:Team {id:$id}) RETURN properties(t)",
+                            params={"id": inv["org_id"]},
+                        ).result_set)
+                    _name = _rows[0][0].get("name") if _rows else None
+                    if _name:
+                        result = (inv, _name)
     except HTTPException:
         raise
     except Exception:
         raise HTTPException(status_code=500,  # noqa: B904
                             detail="Invites unavailable (control plane error)")
 
-    if not inv:
+    if not result:
         raise HTTPException(status_code=404, detail="Invite not found or expired")
-
-    exp = inv.get("expires_at")
-    if exp and exp < datetime.now(UTC).isoformat():
-        raise HTTPException(status_code=404, detail="Invite not found or expired")
-
-    org_name = _org_name(inv["org_id"])
-    if not org_name:
-        raise HTTPException(status_code=404, detail="Invite not found or expired")
+    inv, org_name = result
 
     return {
         "org_name": org_name,
