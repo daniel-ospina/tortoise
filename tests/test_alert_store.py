@@ -354,7 +354,7 @@ def test_search_fallback_is_subject_scoped():
         "ops/alerts/STALE/team_b.json",
         json.dumps({"kind": "STALE", "org_id": "team_b", "detail": {},
                     "filed_at": "2026-08-08T00:00:00+00:00",
-                    "issue_number": None}).encode(),
+                    "issue_number": None, "telegram_pushed": False}).encode(),
     )
     # Adopter for team_b: the search must be scoped to team_b (no match — the
     # only open issue belongs to team_a), so team_b files its OWN issue.
@@ -1027,6 +1027,41 @@ def test_resolve_state_reports_the_three_facts():
         before=filed_at + timedelta(seconds=1)) is ResolveOutcome.RESOLVED
     assert len(ch.closed) == 1
     assert store._storage.list("ops/alerts/") == []
+
+
+def test_skipped_fresh_does_not_assert_the_sentinel_is_live():
+    """#3127 + #3820 cycle-7: ``SKIPPED_FRESH`` also covers a REFUSED sentinel.
+
+    The outcome means "an incident is ON RECORD and this attempt left it
+    untouched", NOT "an incident is open". The #3127 authority refusal fires
+    before — and independently of — any liveness read, and ``_alias_states``
+    never consults the issue state, so a non-owner's refusal against a sentinel
+    naming a CLOSED issue reports ``SKIPPED_FRESH`` exactly as a fresh one
+    does. The caller must still stay pending (nothing was resolved), but must
+    not read this outcome as proof of a live incident.
+
+    RED mutation: return ``RESOLVED``/``ABSENT`` at the #3127 refusal → this
+    reds on the ``is SKIPPED_FRESH`` assertion; delete the sentinel on refusal
+    → it reds on ``storage.download(_DRIVER_KEY)``.
+    """
+    from tortoise.alert_store import ResolveOutcome
+
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    # The driver's sentinel names issue 7 … which is already CLOSED.
+    _driver_sentinel(storage, 7, writer="driver")
+    ch.issues[7] = "[DR] R2_DOWN"
+    ch.closed.append(7)
+    # The watcher does not own R2_DOWN, so its resolve must refuse.
+    store = _store(ch, storage, writer="watcher",
+                   issue_open=lambda n: n not in ch.closed)
+
+    assert store.resolve_incident_state("R2_DOWN") is ResolveOutcome.SKIPPED_FRESH
+    assert ch.closed == [7], (
+        "the refusal must not close anything — the sentinel already names a "
+        "closed issue and a refusal resolves nothing")
+    assert storage.download(_DRIVER_KEY), (
+        "the sentinel must survive the refusal — SKIPPED_FRESH left it untouched")
 
 
 def test_resolve_incident_stays_a_bool_for_a_skipped_fresh():

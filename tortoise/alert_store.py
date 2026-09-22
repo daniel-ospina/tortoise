@@ -146,10 +146,17 @@ class ResolveOutcome(Enum):
 
     * ``RESOLVED``      — an incident was open and has been closed + deleted.
     * ``ABSENT``        — no incident to resolve.
-    * ``SKIPPED_FRESH`` — an incident IS open, but was filed at/after the
-                          caller's ``before`` bound, so this attempt left it
-                          untouched. The caller must stay pending: an incident
-                          is live and has NOT been resolved.
+    * ``SKIPPED_FRESH`` — an incident is ON RECORD and this attempt left it
+                          untouched, for one of two reasons: it was filed
+                          at/after the caller's ``before`` bound (fresh), or it
+                          is owned by another writer whose probes cover its
+                          recovery (#3127), so this caller may not clear it.
+                          The caller must stay pending — but the outcome does
+                          NOT establish that the incident is LIVE: the
+                          authority refusal runs before (and independently of)
+                          the issue's liveness, and ``_alias_states`` does not
+                          consult the issue state, so a sentinel naming a
+                          CLOSED issue is refused as ``SKIPPED_FRESH`` too.
     """
 
     RESOLVED = "resolved"
@@ -568,10 +575,14 @@ class AlertStore:
         not own the kind refuses: its evidence does not cover the failing
         dependency, so the "recovery" may be false and the owner re-files on its
         next run (one duplicate pair per cycle). The sentinel is left intact.
-        The refusal is reported as ``SKIPPED_FRESH`` — an incident IS open and
-        this attempt left it untouched, which is exactly the fact the caller
-        must act on. Declaring no writer keeps the historical behaviour for
-        callers outside the DR watcher/driver pair.
+        The refusal is reported as ``SKIPPED_FRESH`` — an incident is ON RECORD
+        and this attempt left it untouched, which is exactly the fact the caller
+        must act on. The outcome does NOT assert liveness: this authority check
+        runs before the issue state is consulted, so a refused sentinel naming a
+        CLOSED issue is reported ``SKIPPED_FRESH`` too (the caller must still
+        stay pending — nothing was resolved — but it must not read the outcome
+        as proof of a live incident). Declaring no writer keeps the historical
+        behaviour for callers outside the DR watcher/driver pair.
 
         There is deliberately NO provenance exception. Three review rounds
         found three ways a self-asserted "filed by" note went wrong — stamped by
