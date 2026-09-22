@@ -154,7 +154,10 @@ function rotateEnv({ response, reject, loadAll, orgIdRef, apiImpl, lifetimeDays 
       if (reject) throw reject
       return response
     },
-    loadAll: async () => { calls.loadAll++; if (loadAll) await loadAll(calls) },
+    // The stub RETURNS the rows the refresh landed, because #4355's ambiguous
+    // failure branch decides its disclosure from the reloaded state (undefined
+    // models a refresh that failed or went stale).
+    loadAll: async () => { calls.loadAll++; return loadAll ? await loadAll(calls) : undefined },
     setCapNotice: (v) => calls.capNotice.push(v),
     setError: (v) => calls.error.push(v),
     setBusy: () => {},
@@ -314,6 +317,91 @@ test('#4355: replaced_revoked:false surfaces the partial-state notice AND the li
   assert.deepEqual(calls.rotateNotice, [warning],
     'the partial state is disclosed, verbatim from the server')
   assert.deepEqual(calls.error, [''], 'it is NOT an error — the call succeeded')
+})
+
+// ── #4355: the AMBIGUOUS non-402 failure (lost/timed-out response) ───────
+//
+// The single rotate call creates the replacement AND revokes the displaced row
+// server-side. A dropped or timed-out reply therefore leaves the client
+// holding no plaintext for a live replacement it cannot know about, while the
+// table still renders the old row active — a state the pre-#4355 two-call
+// shape could not reach from a lost MINT response (the revoke was a separate
+// call it never made). Reporting only `e.message` is therefore not merely
+// unhelpful, it can be false. The catch must re-read the true state FIRST and
+// disclose only what the table shows.
+
+test('#4355: a lost non-402 rotate response re-reads state and discloses a COMPLETED rotate', async () => {
+  // The reloaded row is revoked → the server DID complete the rotate: the
+  // replacement exists and its value cannot be shown.
+  const { calls, regenerateKey } = rotateEnv({
+    reject: Object.assign(new Error('Network request failed'), { status: 0 }),
+    loadAll: () => [{ id: 'k-old', key_id: 'k-old', revoked_at: '2026-09-21T00:00:00.000Z' }],
+  })
+  await regenerateKey('k-old')
+  assert.equal(calls.loadAll, 1,
+    'the true state must be re-read BEFORE the message is chosen')
+  assert.deepEqual(calls.rotatedKey, [],
+    'a lost response can never latch a reveal — it carried no plaintext')
+  const msg = calls.error.filter(Boolean).at(-1) || ''
+  assert.match(msg, /may have completed/,
+    'the ambiguous failure must say the request may have completed')
+  assert.match(msg, /shows as revoked/,
+    'the reloaded state is the evidence, and it must be stated')
+  assert.match(msg, /cannot be shown/,
+    'a replacement exists whose value cannot be shown')
+  assert.match(msg, /create a new key/, 'and name the remedy')
+  assert.doesNotMatch(msg, /^Network request failed$/, 'never just the transport error')
+})
+
+test('#4355: a lost non-402 rotate response whose row is still live states the UNKNOWN outcome', async () => {
+  // The reloaded row is still active → the rotate may not have run, but a
+  // replacement may still exist. Claiming the row is gone would be a false
+  // disclosure; claiming nothing would hide the ambiguity.
+  const { calls, regenerateKey } = rotateEnv({
+    reject: Object.assign(new Error('Gateway timeout'), { status: 504 }),
+    loadAll: () => [{ id: 'k-old', key_id: 'k-old', revoked_at: null }],
+  })
+  await regenerateKey('k-old')
+  assert.equal(calls.loadAll, 1)
+  const msg = calls.error.filter(Boolean).at(-1) || ''
+  assert.match(msg, /could not be confirmed/,
+    'the outcome is unknown and must be presented as such')
+  assert.match(msg, /still listed as active/,
+    'the reloaded state is stated — the row is NOT reported revoked')
+  assert.match(msg, /may have been created/,
+    'a replacement may exist even though the row is still live')
+  assert.match(msg, /Gateway timeout/, 'the underlying failure is still named')
+  assert.doesNotMatch(msg, /shows as revoked/, 'never a false completed-rotate claim')
+})
+
+test('#4355: a refresh that cannot report state still discloses the ambiguity', async () => {
+  // `loadAll` returning nothing (the refresh failed, or the team went stale)
+  // must not collapse to `e.message`: the client still cannot know whether the
+  // rotate ran. Fail toward the reader, not toward a false all-clear.
+  const { calls, regenerateKey } = rotateEnv({
+    reject: Object.assign(new Error('Network request failed'), { status: 0 }),
+  })
+  await regenerateKey('k-old')
+  assert.equal(calls.loadAll, 1)
+  const msg = calls.error.filter(Boolean).at(-1) || ''
+  assert.match(msg, /could not be confirmed/)
+  assert.doesNotMatch(msg, /shows as revoked/)
+})
+
+test('#4355: a team switch during the ambiguous-failure refresh suppresses the disclosure', async () => {
+  // Same stale-response rule as the plaintext-less branch: the disclosure names
+  // THIS team's row, so it must not land under the new team's header.
+  const orgIdRef = { current: 'org-A' }
+  const { calls, regenerateKey } = rotateEnv({
+    orgIdRef,
+    reject: Object.assign(new Error('Network request failed'), { status: 0 }),
+    loadAll: async () => { orgIdRef.current = 'org-B' },
+  })
+  await regenerateKey('k-old')
+  assert.equal(calls.loadAll, 1, 'the state is still re-read')
+  assert.deepEqual(calls.error.filter(Boolean), [],
+    'a disclosure whose team changed mid-refresh must not be surfaced')
+  assert.deepEqual(calls.rotatedKey, [])
 })
 
 test('#4355: a rotate 402 is the OVER-cap case and uses the over-cap copy', async () => {

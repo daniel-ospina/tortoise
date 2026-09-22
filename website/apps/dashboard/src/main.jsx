@@ -4424,6 +4424,12 @@ function claimIntentInFlight() {
       // managedKeys (isManagedKey render filter) + durableConnectKey's
       // rows-resolution keep working off the full payload.
       setSessions(Array.isArray(s) ? s : s.sessions || [])
+      // #4355: return the loaded rows so a caller that must decide something
+      // from the TRUE state (the rotate catch's ambiguous-failure branch) reads
+      // the same payload this call landed in `keys` — state updates are async,
+      // so the closure's `keys` is still the pre-refresh snapshot here.
+      // undefined when the read failed or the team went stale mid-refresh.
+      return Array.isArray(k) ? k : k.keys || []
     } catch (e) {
       // Round-12: a stale switch's error must not land under the newer team's header
       if (orgIdRef.current === _teamAtCall) {
@@ -6159,7 +6165,36 @@ function claimIntentInFlight() {
         setCapNotice(rotateCapNoticeFrom(e.message, team))
         setError('')
       } else {
-        setError(e.message)
+        // #4355: any other failure may be a LOST RESPONSE, not a lost
+        // request. The server creates the replacement and then revokes the
+        // displaced row in ONE call, so a dropped/timed-out reply can leave
+        // the old key revoked server-side, the replacement secret already
+        // gone (reveal-once), and the table still rendering the row active —
+        // while `e.message` would assert an outcome the client cannot know.
+        // The two-call shape could not reach that state from a lost MINT
+        // response (the revoke was a separate call it never made), so this is
+        // a regression the single call introduces and the client must disclose.
+        // Re-read the true state FIRST (the refresh owns the same `error`
+        // slot, so it must run before the message is set), then say only what
+        // the table shows. The identity guard mirrors the other stale-response
+        // rules: a switch across this reload must not land under the new team.
+        let rowsAfter = null
+        try {
+          rowsAfter = await loadAll('')
+        } catch { /* loadAll owns its own error slot */ }
+        if (orgIdRef.current !== _teamAtCall) return
+        const after = Array.isArray(rowsAfter)
+          ? rowsAfter.find((k) => (k.id || k.key_id) === keyId)
+          : null
+        if (after && after.revoked_at) {
+          // The rotate DID complete: the row is revoked and the replacement's
+          // plaintext was never delivered, so it cannot be shown.
+          setError(`The rotate request did not return a usable response, and it may have completed: ${rowName} now shows as revoked, so a replacement key exists whose value cannot be shown. Revoke the unused replacement row and create a new key.`)
+        } else {
+          // The row is still listed active (or the refresh itself failed):
+          // the outcome is genuinely unknown and a replacement may still exist.
+          setError(`The rotate request failed (${e.message}), and its outcome could not be confirmed — ${rowName} is still listed as active, but a replacement may have been created. Refresh the key list before relying on this key.`)
+        }
       }
     } finally {
       setBusy(false)

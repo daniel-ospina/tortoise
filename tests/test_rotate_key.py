@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -137,6 +138,21 @@ def _revoke_row(fake, key_id: str) -> None:
             row["revoked_at"] = datetime.now(UTC).isoformat()
             return
     raise AssertionError(f"no api_keys row {key_id}")
+
+
+def _seed_graph(fake, org_id: str, graph_id: str) -> str:
+    """A custom (key-bindable) graph row — `_ensure_graph_exists` 404s a
+    graph-bound mint unless the org owns a non-default, non-deleted row."""
+    fake.seed("graphs", [{
+        "id": graph_id, "org_id": org_id, "name": graph_id,
+        "kind": "custom", "namespace": f"ns_{org_id}_{graph_id}",
+        "status": "active", "created_at": datetime.now(UTC).isoformat(),
+    }])
+    return graph_id
+
+
+def _row_by_id(fake, key_id: str) -> dict:
+    return next(r for r in fake.tables.get("api_keys", []) if r.get("id") == key_id)
 
 
 def _mint(client, headers, body) -> dict:
@@ -349,6 +365,48 @@ def test_scoped_key_without_keys_manage_cannot_rotate(client, fake):
     assert "keys:manage" in r.json()["detail"]
 
 
+def test_scoped_keys_manage_caller_rotates_to_a_deleg0_child(client, fake, monkeypatch):
+    """T4 (the escalation-relevant SUCCESS path): a REAL scoped deleg-NULL key
+    carrying `keys:manage` — the only non-owner class that reaches rotate — is
+    replaced by a deleg=0 CHILD of that caller, never by another owner-class
+    credential. This is the one success path with escalation relevance, and it
+    is asserted end to end rather than through a dependency override.
+
+    Non-vacuity: each claim below is the guard the test names — the child-policy
+    intersection (`final_scopes = [s for s in target_scopes if s in
+    _MINTABLE_SCOPES] or ["graphs:read"]`), the deleg=0 stamp, and the lineage
+    assignment (`caller_key_id = org["key_id"]`). Removing any of them reddens
+    this test.
+    """
+    org = _claimed_session_org(client, fake, monkeypatch)
+    gid = _seed_graph(fake, org["org_id"], "g_rot4355_caller")
+    # The caller: a session-minted, graph-bound, SCOPED key. Its class is
+    # deleg-NULL + scopes non-empty → legacy_full_access False, key_id set →
+    # `is_owner_class` False in rotate. It carries the escalation scope
+    # `keys:manage` (mintable only by the owner class), which is exactly why
+    # the replacement must NOT inherit it verbatim.
+    caller = _mint(client, org["headers"],
+                   {"name": "caller", "graph_id": gid, "scopes": ["keys:manage"]})
+    assert caller["delegation_depth"] is None, caller
+    assert caller["scopes"] == ["keys:manage"], caller
+    r = _rotate(client, caller["id"], _auth(caller["key"]))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # The child policy filters the escalation scope away (an empty intersection
+    # falls back to the child default — never to the target's allowance).
+    assert body["delegation_depth"] == 0, body
+    assert set(body["scopes"] or []) <= set(ha_mod._MINTABLE_SCOPES), (
+        f"the non-owner replacement must hold only child-policy scopes: {body['scopes']}"
+    )
+    assert body["graph_id"] == gid, "the replacement inherits the target's graph"
+    row = _row_by_id(fake, body["id"])
+    assert row["created_by_key_id"] == caller["id"], (
+        "the child's lineage must name the rotating caller, not be laundered to None"
+    )
+    assert row["delegation_depth"] == 0
+    assert row["graph_id"] == gid
+
+
 def test_member_session_cannot_rotate(client, fake, monkeypatch):
     """T4: the #2297 POLICY A owner/admin gate applies to the SESSION lane — a
     plain member must not rotate an org key."""
@@ -395,6 +453,72 @@ def test_rotate_inherits_the_targets_scopes(client, fake, monkeypatch):
     )
     assert body["delegation_depth"] is None
     assert body["graph_id"] is None
+
+
+def test_rotate_inherits_the_targets_graph_binding(client, fake, monkeypatch):
+    """T6 (graph half): a GRAPH-BOUND target is replaced by an equally
+    graph-bound key. Dropping `graph_id=target_graph` from the `_mint_key` call
+    would silently re-scope the replacement onto the org-wide/default graph — a
+    privilege widening (or, for a default-shape key, a silent demotion).
+
+    Non-vacuity: the `graph_id` passed to `_mint_key` is the guard under test;
+    removing it reddens this test.
+    """
+    org = _claimed_session_org(client, fake, monkeypatch)
+    gid = _seed_graph(fake, org["org_id"], "g_rot4355_bound")
+    target = _mint(client, org["headers"],
+                   {"name": "graphed", "graph_id": gid, "scopes": ["graphs:write"]})
+    assert target["graph_id"] == gid, target
+    r = _rotate(client, target["id"], org["headers"])
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["graph_id"] == gid, (
+        "the replacement must inherit the displaced row's graph binding"
+    )
+    assert _row_by_id(fake, body["id"])["graph_id"] == gid, (
+        "the STORED row must be graph-bound, not just the response envelope"
+    )
+
+
+def test_rotate_preserves_a_child_targets_delegation_and_lineage(client, fake, monkeypatch):
+    """T6 (lineage half): a deleg=0 CHILD target is replaced by a deleg=0 child
+    of the SAME parent — rotate must not launder a delegated credential into an
+    owner-class one, nor drop the lineage that makes the child revocable with
+    its parent.
+
+    Non-vacuity: the owner-class branch's `delegation_depth = row.get(...)` and
+    `caller_key_id = row.get('created_by_key_id')` are the guards; nulling
+    either reddens this test.
+    """
+    org = _claimed_session_org(client, fake, monkeypatch)
+    gid = _seed_graph(fake, org["org_id"], "g_rot4355_child")
+    fake.tables.setdefault("api_keys", []).append({
+        "id": "key_child_target_4355",
+        "org_id": org["org_id"],
+        "lookup_hash": "hash_child_target_4355",
+        "key_prefix": "tk_child4355",
+        "created_via": "provisioned",
+        "created_by": "api",
+        "created_at": datetime.now(UTC).isoformat(),
+        "revoked_at": None,
+        "expires_at": None,
+        "name": "child",
+        "graph_id": gid,
+        "scopes": ["graphs:read"],
+        "delegation_depth": 0,
+        "created_by_key_id": "key_parent_4355",
+    })
+    r = _rotate(client, "key_child_target_4355", org["headers"])
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["delegation_depth"] == 0, (
+        "a deleg=0 child must not be rotated into an owner-class key"
+    )
+    row = _row_by_id(fake, body["id"])
+    assert row["created_by_key_id"] == "key_parent_4355", (
+        "the child's parent lineage must survive the rotation"
+    )
+    assert row["graph_id"] == gid
 
 
 def test_rotate_inherits_expiry_when_the_body_omits_it(client, fake, monkeypatch):
@@ -483,7 +607,13 @@ def test_double_failure_reveals_the_live_replacement(client, fake, monkeypatch):
 def test_lost_claim_rolls_back_and_409s(client, fake, monkeypatch):
     """T7: the destructive leg is a CLAIM. When another writer already revoked
     the row, the loser must roll its replacement back and refuse — never leave
-    an orphan live key behind, never exceed the cap at steady state."""
+    an orphan live key behind, never exceed the cap at steady state.
+
+    NOTE: this pins the rotate's behaviour GIVEN a lost-claim verdict; the
+    verdict itself is pinned by `test_claim_api_key_revocation_*` below, against
+    the real predicate (this test monkeypatches it, so it can never see a
+    predicate that always returns True).
+    """
     org = _signup_org(client, fake)
     real_claim = sc.claim_api_key_revocation
 
@@ -496,6 +626,129 @@ def test_lost_claim_rolls_back_and_409s(client, fake, monkeypatch):
     assert r.status_code == 409, r.text
     assert _live(fake, org["org_id"]) == [], (
         "the loser must revoke its own replacement — no orphan live key"
+    )
+
+
+def test_claim_api_key_revocation_is_a_real_conditional_claim(fake):
+    """T7 (the predicate ITSELF): `claim_api_key_revocation` must report
+    whether THIS call revoked a LIVE row — True exactly once per row, False for
+    a row that was already revoked (and it must not re-stamp it).
+
+    This is the guard the whole cap-neutral rotate rests on: an unconditional
+    revoke is a claim that always succeeds, and a rotate racing a plain DELETE
+    of the same row would then credit a slot it never released. Exercised
+    DIRECTLY against the real predicate — nothing here is monkeypatched, so an
+    always-True or filter-free claim cannot pass it.
+    """
+    stamp = datetime.now(UTC).isoformat()
+    fake.tables.setdefault("api_keys", []).extend([
+        {"id": "key_live_4355", "org_id": "org_4355", "revoked_at": None},
+        {"id": "key_dead_4355", "org_id": "org_4355", "revoked_at": stamp},
+    ])
+    live = _row_by_id(fake, "key_live_4355")
+    assert sc.claim_api_key_revocation(fake, "key_live_4355") is True, (
+        "a LIVE row must be claimed by this call"
+    )
+    claimed_stamp = live["revoked_at"]
+    assert claimed_stamp is not None, "the winner must have stamped revoked_at"
+    # The SAME row, now revoked → the claim LOSES. An unconditional PATCH would
+    # answer True here (and re-stamp the tombstone).
+    assert sc.claim_api_key_revocation(fake, "key_live_4355") is False, (
+        "a row this call did not find live must NOT be claimed"
+    )
+    assert live["revoked_at"] == claimed_stamp, (
+        "a lost claim must leave the winner's tombstone untouched"
+    )
+    # A row already revoked BEFORE the first call is never claimable either.
+    dead = _row_by_id(fake, "key_dead_4355")
+    assert sc.claim_api_key_revocation(fake, "key_dead_4355") is False
+    assert dead["revoked_at"] == stamp, (
+        "an already-revoked row must not be re-stamped"
+    )
+
+
+def test_concurrent_rotate_of_one_row_admits_exactly_one(client, fake, monkeypatch):
+    """T7 (the RACE, not a simulation of it): two real clients rotating the SAME
+    row simultaneously. Both requests are held at the claim write, so BOTH have
+    already proved the row live (`api_key_occupies_slot`) and minted their
+    replacements — then the CAS decides. Exactly one 200, one 409, and the live
+    count is exactly where it started.
+
+    Why the rendezvous matters for non-vacuity. Without it the two requests can
+    serialize, and the loser would exit at the `api_key_occupies_slot` check
+    (409) BEFORE reaching the claim — so an unconditional claim would still pass
+    the assertion. Holding both at the claim makes the claim the deciding write,
+    which is the only interleaving in which the cap-raise is observable.
+
+    The rendezvous wraps the control-plane's `query` (it only SCHEDULES; the
+    real PATCH still decides), so the predicate under test is untouched.
+    """
+    org = _claimed_session_org(client, fake, monkeypatch)
+    # The race needs the cap gate to admit BOTH mints: the loser's admission
+    # check runs after the winner's insert, so a cap of 2 would 402 the loser
+    # before it ever reached the claim. `solo` (max_api_keys=5) keeps the gate
+    # out of the way of the claim. Real tier, real caller, no override.
+    org_row = next(r for r in fake.tables["organizations"]
+                   if r["id"] == org["org_id"])
+    org_row["tier"] = "solo"
+    target = "key_target_4355"
+    fake.tables.setdefault("api_keys", []).append({
+        "id": target, "org_id": org["org_id"],
+        "lookup_hash": "hash_target_4355", "key_prefix": "tk_target4355",
+        "created_via": "provisioned", "created_by": "api",
+        "created_at": datetime.now(UTC).isoformat(),
+        "revoked_at": None, "expires_at": None, "name": "target",
+        "graph_id": None, "scopes": [], "delegation_depth": None,
+        "created_by_key_id": None,
+    })
+    before = len(_live(fake, org["org_id"]))
+    assert before == 2, before
+
+    gate = threading.Barrier(2, timeout=60)
+    real_query = fake.query
+
+    def _rendezvous_at_claim(table, **kwargs):  # noqa: ANN001
+        filters = kwargs.get("filters") or []
+        # The claim write — keyed on the TARGET id, which the compensation
+        # write (the loser's replacement id) can never match. Under the
+        # mutation this class is named for (filter reduced to the id), the
+        # first filter is unchanged, so the rendezvous still fires.
+        if (table == "api_keys" and kwargs.get("method") == "PATCH"
+                and filters[:1] == [("id", "eq", target)]):
+            gate.wait(timeout=60)
+        return real_query(table, **kwargs)
+
+    monkeypatch.setattr(fake, "query", _rendezvous_at_claim)
+
+    results: list = [None, None]
+    errors: list[BaseException] = []
+
+    def _worker(i: int) -> None:
+        try:
+            results[i] = _rotate(client, target, org["headers"])
+        except BaseException as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=_worker, args=(i,)) for i in (0, 1)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=120)
+    assert not errors, errors
+    assert not any(t.is_alive() for t in threads), (
+        "a rotate thread never returned — the claim rendezvous deadlocked"
+    )
+    statuses = sorted(r.status_code for r in results)
+    assert statuses == [200, 409], [
+        (r.status_code, r.text) for r in results
+    ]
+    assert len(_live(fake, org["org_id"])) == before, (
+        "a rotate racing a rotate must leave the live count unchanged"
+    )
+    winner = next(r for r in results if r.status_code == 200)
+    assert _row_by_id(fake, target)["revoked_at"] is not None
+    assert _row_by_id(fake, winner.json()["id"])["revoked_at"] is None, (
+        "the winner's replacement must be the live one"
     )
 
 
