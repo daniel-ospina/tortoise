@@ -381,10 +381,12 @@ class TestCliOnboardDbTarget:
         class #3767 deliberately refuses to fast-kill (the `test-slow (b)`
         red leg before this fix).
 
-        redislite removes `<db>.settings` on the last-client close and keeps
-        it (with a live pidfile) while a daemon survives, so the registry's
-        ABSENCE is the direct, deterministic proof that the daemon is gone by
-        the time `_cmd_init` returns — not merely collected later by GC.
+        The assertion pins the DAEMON, not merely the registry. redislite's
+        `<db>.settings` registry is removed only by the client that STARTED
+        the daemon, so registry-absence is order-dependent (an attaching
+        client shuts the daemon down but leaves the registry behind). If the
+        registry survives, its recorded pid must be DEAD — that is the
+        order-independent statement of "no daemon outlived the call".
         """
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         db_path = str(tmp_path / "init-closed.db")
@@ -396,10 +398,39 @@ class TestCliOnboardDbTarget:
             path=None, cmd="init", yes=True, api_key=None, no_index=True))
         assert rc == 0
 
-        assert not os.path.exists(db_path + ".settings"), (
-            "init left its embedded daemon running — redislite's registry "
-            "still exists (#4579); once the co-tenant release withdraws the "
-            "owner record it becomes an uninstrumented, dir-present orphan")
+        # POSITIVE: init really stood the embedded store up (the welcome
+        # write landed), so the negative assertion below cannot pass
+        # vacuously if the resolved target ever drifts elsewhere.
+        assert os.path.exists(db_path), "init did not create the embedded db"
+
+        # NEGATIVE: no LIVE daemon survives the call.
+        settings = db_path + ".settings"
+        if os.path.exists(settings):
+            import json as _json
+            from pathlib import Path as _Path
+            pid = None
+            try:
+                reg = _json.loads(_Path(settings).read_text())
+                pidfile = reg.get("pidfile")
+                if pidfile and os.path.exists(pidfile):
+                    pid = int(_Path(pidfile).read_text().strip())
+            except Exception:
+                pid = None
+            assert pid is not None, (
+                "init left its redislite registry but no readable pidfile — "
+                "cannot prove the daemon is gone (#4579)")
+            alive = True
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                alive = False
+            except PermissionError:
+                alive = True
+            assert not alive, (
+                f"init leaked its embedded redis-server (pid {pid}, #4579): "
+                "once the co-tenant release withdraws the owner record it "
+                "becomes an uninstrumented, dir-present orphan the #3767 "
+                "reaper refuses to fast-kill")
 
     def test_onboard_completion_gates_embedded_default(self, tmp_path, monkeypatch, capsys):
         """#2200: the `tortoise onboard` wizard completion must gate the

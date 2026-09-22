@@ -536,6 +536,9 @@ def _cmd_init(args):
 
     graph_ready = False
     uri_mode = False
+    # #4579: bound before the mode branches so the probe-error returns below
+    # can release a probe that was created before the failure.
+    _proj = None
 
     if is_db_uri(target):
         # 1. URI mode — connect to the configured URI target itself (never a
@@ -559,6 +562,9 @@ def _cmd_init(args):
             else:
                 print(f"  ❌ FalkorDB unreachable ({e})")
             print("     Fix TORTOISE_DB_URI, or unset it to use embedded mode.")
+            with contextlib.suppress(Exception):
+                if _proj is not None:
+                    _proj.close()
             return 1
     else:
         # 2. Fallback: embedded mode (SQLite-backed) at the resolved path
@@ -609,6 +615,12 @@ def _cmd_init(args):
             print(f"     pip install falkordblite    # for embedded mode (FalkorProjection)")  # noqa: F541
             return 1
         except Exception as e:
+            # #4579: release a probe that succeeded before a later step in
+            # this branch failed — otherwise it can outlive the call and,
+            # collected late, leave the daemon running uninstrumented.
+            with contextlib.suppress(Exception):
+                if _proj is not None:
+                    _proj.close()
             print(f"  ❌ Embedded mode init failed: {e}")
             return 1
 
