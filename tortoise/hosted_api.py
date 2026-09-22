@@ -22870,7 +22870,6 @@ async def connector_auth(
     """Initiate OAuth for a connector source type. Returns the authorize URL.
 
     Dispatches to the correct OAuth flow based on source_type.
-    Creates the connector row if it doesn't exist yet.
     """
     org_id = org["org_id"]
     if source_type == "github":
@@ -22887,7 +22886,6 @@ async def connector_auth(
         _GITHUB_STATES[state] = {
             "org_id": org_id,
             "org": None,
-            "connector_create": True,  # signal to create connector on callback
             "created_at": __import__("time").time(),
         }
         callback = _os.environ.get(

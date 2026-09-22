@@ -175,6 +175,7 @@ const suites = [
   '20260901000001_graphs_and_key_scopes.sql',  // C1 #2110
   '20260906000001_graphs_deleted_at.sql',  // #2304
   '20260919000001_metering_period_end_repair.sql',  // #4216
+  '20260922000001_connectors.sql',  // #2636 connectors data model
 ];
 for (const suite of suites) {
   const sql = readFileSync(`${TESTS_DIR}/${suite}`, 'utf8');
