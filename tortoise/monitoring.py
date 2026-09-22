@@ -78,6 +78,15 @@ PROBE_TIMEOUT = 1.5
 #     allowance *is* a slower gate — exactly the trade #3243's notes forbid.
 #     The same reasoning keeps the hosted ``/health/ready`` coordinator on the
 #     tight bound, since its request path waits on the verdict.
+#
+# The selfhost liveness coordinator is currently the ONLY background spender
+# of this allowance. The hosted ``/health`` coordinator (``hosted_api.
+# _HEALTH_PROBE``) also reads in-memory, but deliberately keeps
+# ``setup_timeout=None``/``DB_PROBE_HARD_TIMEOUT``: its probe reuses ONE cached
+# connection (``hosted_api._probe_sdk``), so the cold start is paid at most once
+# and its tight bound is already coherent — extending the allowance there is a
+# separate decision owned by the hosted health lineage (#3070/#3062), not a
+# consequence of this rule. Do not "fix" it by analogy.
 # Both phases stay bounded (the worker is
 # abandoned on overrun); the caller is never blocked past its budget.
 PROBE_SETUP_TIMEOUT = 20.0

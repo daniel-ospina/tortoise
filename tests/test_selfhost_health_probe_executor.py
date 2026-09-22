@@ -493,17 +493,76 @@ def test_liveness_probe_carries_the_cold_start_allowance():
 
 def test_liveness_coordinator_bound_sits_above_its_probe_total():
     """Layered-timeout discipline: the coordinator's ``timeout`` must exceed the
-    explicit-allowance shape's real total (``setup_timeout + PROBE_TIMEOUT``),
-    or the refresher returns before the verdict it is waiting for and strands a
-    worker on every cold start."""
+    explicit-allowance shape's real total (``setup_timeout + PROBE_TIMEOUT`` plus
+    the SDK-acquisition budget the bound is charged for), or the refresher
+    returns before the verdict it is waiting for and strands a worker on every
+    cold start."""
     import tortoise.monitoring as mon
     from tortoise import selfhost as sh
 
-    total = mon.probe_setup_timeout() + mon.PROBE_TIMEOUT
+    total = (mon.probe_setup_timeout() + mon.PROBE_TIMEOUT
+             + mon.PROBE_SDK_ACQUISITION_BUDGET)
     assert sh._HEALTH_PROBE._timeout > total, (
         f"_HEALTH_PROBE timeout {sh._HEALTH_PROBE._timeout}s is not above the "
         f"allowance shape's total {total}s"
     )
+
+
+def test_liveness_coordinator_window_covers_its_cycle():
+    """A result older than ``stale_after`` is discarded, so the freshness
+    window must cover the worst-case refresh cycle (``max(interval,
+    probe_bound)``) or a REACHABLE graph reads degraded between refreshes —
+    the #3243 lie in steady state. The bound is the dominating term (the
+    interval is capped at half the platform window), so pin the window against
+    it."""
+    from tortoise import selfhost as sh
+
+    assert sh._HEALTH_PROBE._stale_after >= sh._HEALTH_PROBE._timeout, (
+        f"staleness window {sh._HEALTH_PROBE._stale_after}s is below the probe "
+        f"bound {sh._HEALTH_PROBE._timeout}s — a slow-but-valid probe would be "
+        "discarded as stale (#3243)"
+    )
+
+
+def test_health_probe_loop_does_not_compound_the_interval():
+    """#3243 review: the refresh is a FIXED CADENCE, not
+    ``probe_duration + interval``. The loop must subtract its own run time from
+    the sleep, or a slow (cold) probe pushes the cycle past ``PROBE_STALE_AFTER``
+    and a reachable graph reads degraded between refreshes."""
+    node = _handler("_health_probe_loop")
+    sleeps = list(_calls(_walk_own_body(node), attr="sleep"))
+    assert sleeps, "_health_probe_loop never sleeps"
+    max_calls = [
+        arg for call in sleeps for arg in call.args
+        if isinstance(arg, ast.Call)
+        and isinstance(arg.func, ast.Name)
+        and arg.func.id == "max"
+    ]
+    assert max_calls, (
+        "_health_probe_loop sleeps the raw interval — the cycle becomes "
+        "probe_duration + interval, which can exceed PROBE_STALE_AFTER (#3243)"
+    )
+    # The clamped expression must subtract the run's elapsed time from the
+    # interval: `max(0.0, health_probe_interval() - (loop.time() - started))`.
+    subtracted = [
+        a for arg in max_calls for a in arg.args
+        if isinstance(a, ast.BinOp) and isinstance(a.op, ast.Sub)
+        and any(
+            isinstance(n, ast.Call)
+            and getattr(n.func, "id", None) == "health_probe_interval"
+            for n in ast.walk(a)
+        )
+    ]
+    assert subtracted, (
+        "the sleep is not `interval - elapsed` — the interval is not "
+        "compensated for the probe's own duration (#3243)"
+    )
+    assert any(
+        isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "time"
+        for n in ast.walk(node)
+    ), "_health_probe_loop does not measure the run's elapsed time"
 
 
 # ── behavioural harness ────────────────────────────────────────────────────
@@ -697,6 +756,71 @@ def test_refresher_keeps_the_verdict_fresh_without_a_request(selfhost, monkeypat
     assert calls["n"] >= 1, "the refresher never probed"
     view = selfhost._HEALTH_PROBE.snapshot()
     assert view["ok"] is True, view
+
+
+def test_probe_sdk_is_reused_across_refreshes(selfhost, monkeypatch):
+    """#3243 review: the probe must NOT rebuild the SDK every cycle.
+
+    A fresh ``TortoiseSDK`` per refresh re-pays the projection cold start every
+    cycle, which both holds the process-wide single probe-worker slot for the
+    cold-start duration every interval (#3683) and can push the cycle past
+    ``PROBE_STALE_AFTER`` so a REACHABLE graph reads degraded between refreshes
+    — the #3243 lie in steady state. One cached connection, rebuilt only when
+    the DB target changes (hosted ``_probe_sdk`` pattern).
+    """
+    first = selfhost._probe_sdk()
+    assert selfhost._probe_sdk() is first, (
+        "_probe_sdk() built a second connection — the refresher would re-pay the "
+        "projection cold start on every cycle (#3243)"
+    )
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(selfhost.__file__) + "-changed")
+    assert selfhost._probe_sdk() is not first, (
+        "a changed DB target did not rebuild the cached probe SDK — the probe "
+        "would answer for a stale DB"
+    )
+
+
+def test_endpoint_degrades_within_one_refresh_after_a_healthy_verdict(
+        selfhost, monkeypatch):
+    """Replaces the deleted ``test_health_liveness_passes_no_setup_allowance``
+    guard AT THE ENDPOINT LEVEL (#1384).
+
+    The in-memory read moves /health's degrade latency from the probe's bound to
+    the REFRESH PERIOD: after a healthy verdict, a DB that dies must flip
+    /health to ``degraded`` on the next refresh, not wait out
+    ``PROBE_STALE_AFTER``. A stopped FalkorDB fails fast, so the flip is one
+    interval.
+    """
+    import tortoise.monitoring as mon
+
+    state = {"ok": True}
+
+    def _probe(sdk=None, setup_timeout=None):
+        if state["ok"]:
+            return {"ok": True, "latency_ms": 0.1, "error": None}
+        raise ConnectionError("NXDOMAIN")
+
+    monkeypatch.setattr(mon, "probe_db", _probe)
+    monkeypatch.setattr(selfhost, "health_probe_interval", lambda: 0.05)
+    selfhost._HEALTH_PROBE.reset()
+    assert selfhost._HEALTH_PROBE.wait(5.0)["ok"] is True
+
+    state["ok"] = False
+
+    async def _run():
+        task = asyncio.get_running_loop().create_task(selfhost._health_probe_loop())
+        await asyncio.sleep(0.3)  # several refresh periods
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_run())
+    view = selfhost._HEALTH_PROBE.snapshot()
+    assert view["ok"] is False, (
+        f"/health still reports the graph healthy {view} after the DB died — "
+        "the verdict is not refreshed, so a dead DB would serve a fossil 'ok' "
+        "(#1384)"
+    )
 
 
 def test_health_reflects_a_dead_db_from_memory(selfhost, monkeypatch):

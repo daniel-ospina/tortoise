@@ -1018,16 +1018,20 @@ def test_push_legs_partitions_every_classified_file():
     # classified file flipped all three bench files into half_a, reddening an
     # unrelated PR). Assert the invariant the code actually provides — every
     # bench file reaches a half (the partition assertion above), and
-    # `push_extra`, when non-empty, reaches BOTH rather than being dumped on
-    # one.
+    # `push_extra`, when non-empty, is spread rather than dumped on one half.
+    #
+    # #2988/#3243: assert the SPREAD RULE directly (even index -> a, odd -> b —
+    # exactly what `push_legs` implements) instead of pinning which half a bench
+    # file lands on. "bench lands in half b" was a function of the duration
+    # estimates, not a designed invariant — it flipped when the stale weight for
+    # test_selfhost_health_probe_executor.py was corrected. The positional rule
+    # is strictly stronger than a per-half intersection check, so it carries
+    # main's spread intent too.
     assert any(f.startswith("bench/") for f in legs["half_a"] + legs["half_b"]), \
         "no bench file reached the push legs at all"
-    push_extra = {f.replace(".py", "") for f in m.get("push_extra", [])}
-    if push_extra:
-        assert push_extra & set(legs["half_a"]), \
-            "push_extra lost its even spread (#1485): none in half a"
-        assert push_extra & set(legs["half_b"]), \
-            "push_extra lost its even spread (#1485): none in half b"
+    for i, f in enumerate(m.get("push_extra", [])):
+        expected = "half_a" if i % 2 == 0 else "half_b"
+        assert f.replace(".py", "") in legs[expected], (f, expected)
 
 
 def test_carve_out_mirrors_test_no_redirect_stems():

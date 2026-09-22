@@ -82,7 +82,6 @@ from tortoise.hosted_backup import (
 )
 from tortoise.mcp_server import create_http_app
 from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
-    HEALTH_PROBE_MIN_INTERVAL_S,  # noqa: F401 — re-exported for existing importers
     HEALTH_PROBE_REFRESH_S,  # noqa: F401 — re-exported (tests import it here)
     PROBE_HARD_TIMEOUT,
     ControlPlaneOffloadError,

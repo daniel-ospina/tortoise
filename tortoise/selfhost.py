@@ -26,6 +26,7 @@ import contextvars
 import logging
 import os
 import sys
+import threading
 from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
@@ -125,7 +126,7 @@ _READY_PROBE_TIMEOUT_S = 6.0
 # ``_READY_PROBE_TIMEOUT_S`` waiting, and report a FALSE 503 for a healthy DB —
 # the same symptom this change exists to remove, reached through readiness
 # fan-in instead of through unrelated load. Width is pinned by
-# test_probe_lane_is_named_and_sized and exercised by
+# test_ready_probe_lane_is_named_and_sized and exercised by
 # test_readiness_fan_in_does_not_produce_a_false_503.
 #
 # Residual (pre-existing #2988, NOT introduced here): the client read timeout
@@ -225,13 +226,86 @@ def _submit_probe(pool, fn):
 #     change exists to fix.
 
 
+# ── #2988/#3243: ONE reused probe connection (hosted `_probe_sdk` pattern) ────
+#
+# Building a fresh ``TortoiseSDK`` on EVERY refresh re-pays the O(graph)
+# projection cold start (connect + version probe + ``_ensure_indexes()``) every
+# cycle. Two harms, both review findings on this change:
+#
+#   * the refresh CYCLE becomes ``probe_duration + health_probe_interval()``. A
+#     cold start near the allowance (e.g. 20 s + 10 s = 30 s) reaches
+#     ``PROBE_STALE_AFTER`` (30 s), so ``snapshot()`` discards the last good
+#     verdict as STALE and a REACHABLE graph reads ``degraded`` between
+#     refreshes — the #3243 lie in steady state, not per request;
+#   * the cold start holds ``monitoring._PROBE_WORKER`` (a process-wide SINGLE
+#     slot) for its whole duration every interval, so an in-process MCP
+#     ``tortoise_health`` call queues behind background work (#3683).
+#
+# The probe therefore owns ONE connection, rebuilt only when the DB target
+# itself changes. After the first (cold) probe the projection is cached, so
+# every later cycle is a warm ``RETURN 1`` — the same shape the hosted
+# coordinator uses (``hosted_api._probe_sdk``).
+_PROBE_SDK_CACHE: dict = {"key": None, "sdk": None}
+_PROBE_SDK_LOCK = threading.Lock()
+
+
+def _probe_sdk_key() -> tuple:
+    """Identity of the DB target the cached probe SDK is bound to.
+
+    A changed ``TORTOISE_DB_URI`` / ``TORTOISE_DB_PATH`` must rebuild rather
+    than probe a stale DB (test fixtures swap temp paths; the entrypoint
+    rewrites the URI). Production is a stable key, so the connection is built
+    once.
+    """
+    return (os.environ.get("TORTOISE_DB_URI") or "",
+            os.environ.get("TORTOISE_DB_PATH") or "")
+
+
+def _probe_sdk_reset() -> None:
+    """Close + drop the cached probe SDK (app startup / tests / ops)."""
+    with _PROBE_SDK_LOCK:
+        sdk = _PROBE_SDK_CACHE.get("sdk")
+        _PROBE_SDK_CACHE["sdk"] = None
+        _PROBE_SDK_CACHE["key"] = None
+    if sdk is not None:
+        try:  # noqa: SIM105 — a stale temp DB may already be gone
+            sdk.close()
+        except Exception:
+            pass
+
+
+def _probe_sdk():
+    """Return the cached probe SDK, rebuilding only when the target changes.
+
+    The same connection the MCP tools resolve (``namespace="selfhost"``), so
+    liveness reports the engine's real DB rather than a divergent default path
+    (#2202/#2988). Construction and cache mutation are serialized on
+    ``_PROBE_SDK_LOCK``.
+    """
+    from tortoise.sdk import TortoiseSDK  # lazy — liveness stays cheap
+
+    key = _probe_sdk_key()
+    with _PROBE_SDK_LOCK:
+        cached = _PROBE_SDK_CACHE.get("sdk")
+        if cached is not None and _PROBE_SDK_CACHE.get("key") == key:
+            return cached
+        old = cached
+        sdk = TortoiseSDK(namespace="selfhost")
+        _PROBE_SDK_CACHE["sdk"] = sdk
+        _PROBE_SDK_CACHE["key"] = key
+    if old is not None:
+        try:  # noqa: SIM105
+            old.close()
+        except Exception:
+            pass
+    return sdk
+
+
 def _probe_db() -> dict:
     """Deep-check the selfhost graph, WITH the #3243 cold-start allowance.
 
-    Builds the SAME ``TortoiseSDK(namespace="selfhost")`` connection the MCP
-    tools resolve (so liveness reports the engine's real DB, not a divergent
-    default path — #2202/#2988) and runs the shared, never-raising
-    ``monitoring.probe_db``.
+    Uses the REUSED ``_probe_sdk()`` connection (above) and runs the shared,
+    never-raising ``monitoring.probe_db``.
 
     The allowance is resolved HERE, at call time, for the same reason
     ``probe_setup_timeout`` is a function: ``mcp_server._load_dotenv()`` runs
@@ -240,9 +314,12 @@ def _probe_db() -> dict:
     ``.env``.
     """
     from tortoise.monitoring import probe_db, probe_setup_timeout  # lazy
-    from tortoise.sdk import TortoiseSDK  # lazy — liveness stays cheap
 
-    sdk = TortoiseSDK(namespace="selfhost")
+    try:
+        sdk = _probe_sdk()
+    except Exception as exc:  # noqa: BLE001, RUF100 — probe_db never raises
+        _probe_sdk_reset()
+        return {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
     return probe_db(sdk, setup_timeout=probe_setup_timeout())
 
 
@@ -255,26 +332,54 @@ def _liveness_probe_hard_timeout() -> float:
     same layered-timeout alignment the hosted coordinators follow
     (``hosted_api.DB_PROBE_HARD_TIMEOUT``): a ``HealthProbe`` bound BELOW its
     probe's total would return before the verdict it is waiting for and strand
-    its daemon worker on every cold start.
+    its daemon worker on every cold start. ``PROBE_SDK_ACQUISITION_BUDGET`` is
+    charged too, matching the hosted bound: the SDK lookup happens before
+    ``probe_db`` (and, with the reused connection, only on the FIRST probe).
 
-    Resolved once at import, like the hosted bound, and for the same reason —
-    it sizes a refresh SCHEDULE, not a correctness property. The read path is
-    unaffected by it (``snapshot()`` never waits), so an operator who raises
-    ``TORTOISE_PROBE_SETUP_TIMEOUT`` after import cannot make /health slow; the
-    probe's own call-time allowance still governs the verdict.
+    Resolved once at import, like the hosted bound. In production this is safe
+    to freeze: ``tortoise.selfhost`` imports ``tortoise.mcp_server`` (which
+    runs ``_load_dotenv()``) before this module-level coordinator is built, so
+    an operator's ``TORTOISE_PROBE_SETUP_TIMEOUT`` — env var or repo-root
+    ``.env`` — is already resolved. A post-import change (tests/tooling) would
+    NOT move this bound; it sizes a refresh SCHEDULE, not the read path
+    (``snapshot()`` never waits), and the probe's own call-time allowance still
+    governs the verdict.
     """
     from tortoise.monitoring import (  # lazy — liveness stays cheap
         PROBE_DB_BOUND_MARGIN_S,
+        PROBE_SDK_ACQUISITION_BUDGET,
         PROBE_TIMEOUT,
         probe_setup_timeout,
     )
 
-    return probe_setup_timeout() + PROBE_TIMEOUT + PROBE_DB_BOUND_MARGIN_S
+    return (probe_setup_timeout() + PROBE_TIMEOUT
+            + PROBE_SDK_ACQUISITION_BUDGET + PROBE_DB_BOUND_MARGIN_S)
+
+
+def _liveness_probe_stale_after() -> float:
+    """The coordinator's freshness window, sized to cover its worst-case cycle.
+
+    The refresh cycle is ``max(health_probe_interval(), probe_duration)`` (fixed
+    cadence, see ``_health_probe_loop``), and ``snapshot()`` discards a result
+    once it is older than ``stale_after`` — so a window smaller than the cycle
+    makes a REACHABLE graph read ``degraded`` between refreshes (the #3243 lie
+    in steady state). The operator-settable allowance can deepen
+    ``probe_duration`` past the shared ``PROBE_STALE_AFTER`` (30 s), so the
+    window follows the bound instead of being fixed at the platform default.
+
+    With the reused probe connection (``_probe_sdk``) the steady-state probe is
+    a warm ``RETURN 1``, so this is a ceiling that only the FIRST (cold) probe
+    can approach — not a routine widening of the hung-DB window.
+    """
+    from tortoise.monitoring import PROBE_STALE_AFTER  # lazy
+
+    return max(PROBE_STALE_AFTER, _liveness_probe_hard_timeout())
 
 
 _HEALTH_PROBE = HealthProbe(
     _probe_db,
     timeout=_liveness_probe_hard_timeout(),
+    stale_after=_liveness_probe_stale_after(),
     refresh_budget=health_probe_interval,
 )
 
@@ -285,15 +390,22 @@ async def _health_probe_loop() -> None:
     Single-flight and hard-bounded (``HealthProbe.run`` returns within
     ``_HEALTH_PROBE``'s timeout even against a black-holed DB), and it must
     never die: a raise here would freeze the reported DB verdict forever.
+
+    The refresh is a FIXED CADENCE, not ``probe_duration + interval``: the
+    sleep subtracts the run's own elapsed time, so a slow (cold) probe cannot
+    push the cycle past ``PROBE_STALE_AFTER`` and make a reachable graph read
+    degraded between refreshes (#3243 review).
     """
+    loop = asyncio.get_running_loop()
     while True:
+        started = loop.time()
         try:
             await _HEALTH_PROBE.run()
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001, RUF100 — a refresher must not die
             _logger.warning("selfhost health probe refresh failed: %s", exc)
-        await asyncio.sleep(health_probe_interval())
+        await asyncio.sleep(max(0.0, health_probe_interval() - (loop.time() - started)))
 
 
 def _auth_mode() -> str:
@@ -366,9 +478,11 @@ async def _lifespan(app: FastAPI):
     # continuously refreshed in-memory verdict from the first millisecond.
     # Each app instance starts from a CLEAN probe state — a probe worker wedged
     # during a previous instance (TestClient reuse, in-process reload) must not
-    # survive into this one — and the task is CREATED (not awaited) before the
-    # MCP lifespan, so it cannot delay the bind (#2953's discipline; creating a
-    # task starts nothing).
+    # survive into this one — and the cached probe connection is dropped for
+    # the same reason (a stale handle from a previous target/DB). The task is
+    # CREATED (not awaited) before the MCP lifespan, so it cannot delay the
+    # bind (#2953's discipline; creating a task starts nothing).
+    _probe_sdk_reset()
     _HEALTH_PROBE.reset()
     refresher = asyncio.get_running_loop().create_task(_health_probe_loop())
     try:
