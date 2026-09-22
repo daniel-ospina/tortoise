@@ -7,9 +7,10 @@
 # `curl` on PATH. No network, no Fly, no live service.
 #
 # Coverage:
-#   1. app unreachable            → exit 1, fails FAST, and never reports a DB
-#                                   wait (a dead app is a deploy failure, not a
-#                                   slow database).
+#   1. app unreachable            → exit 1 without ever waiting on the DB, and
+#                                   without reaching the readiness assertion (a
+#                                   dead app is a deploy failure, not a slow
+#                                   database). Probe-count control included.
 #   2. db.ok never true           → exit 1 with the FalkorDB message.
 #   3. REGRESSION (#4545): db.ok true on the first DB poll while /health/ready
 #      is still 503, becoming 200 on a LATER probe → exit 0. This is the defect:
@@ -27,9 +28,13 @@
 #      count. (The counter is shared with the app-reachability probe, so the
 #      knob is named for the Nth /health response — the app probe consumes one.)
 #   7. readiness answering 3xx    → exit 1. `curl -f` treats ANY status < 400 as
-#      success, so a redirecting /health/ready would otherwise PASS and be
-#      logged as "200" — asserting a predicate never observed, the same class
-#      as #4545. The gate reads the status instead of inferring it.
+#      success, so a redirecting /health/ready PASSED this gate — main logged
+#      the true status (`-w %{http_code}`) but never failed on it, so a 302
+#      sailed through as a success. Same class as #4545: passing an
+#      unobserved predicate.
+#   7b. the stub STREAMS A BODY, as real curl does, so dropping `-o /dev/null`
+#      is caught: curl would then capture "<body>200", which never equals
+#      "200" and would redden EVERY deploy.
 #   8. readiness with NO RESPONSE → exit 1, and the message names the 000
 #      sentinel, so a dead app is not reported as an unready one.
 #   9. POSITIVE CONTROLS: in case 3 readiness is polled MORE THAN ONCE and in
@@ -100,6 +105,14 @@ case "$url" in
     else
       code="${STUB_READY_CODE:-503}"
     fi
+    # Emulate curl's body streaming: real curl writes the response BODY to
+    # stdout, then the -w output. If the gate ever dropped `-o /dev/null` the
+    # command substitution would capture "<body>200", never equal "200", and
+    # the gate would be red on EVERY deploy — a harness that prints only the
+    # code cannot see that.
+    has_devnull=0
+    for a in "$@"; do case "$a" in */dev/null) has_devnull=1 ;; esac; done
+    [ "$has_devnull" = "1" ] || printf '{"status":"ok","db":"connected","control_plane":"connected"}'
     echo "$code"
     # Emulate `curl -f`: it fails only on status >= 400, so a 3xx SUCCEEDS.
     # This is what makes case 7 meaningful — a stub that failed on any non-200
@@ -154,12 +167,13 @@ run_gate() {
 echo "deploy-health-gate.test.sh (#4545)"
 echo
 
-echo "1. app unreachable → fail fast, no DB wait"
+echo "1. app unreachable → fails without waiting on the DB"
 run_gate "no" 1 1
 assert_eq "$RC" "1" "exits 1"
 assert_contains "$OUT" "app unreachable" "reports app-unreachable"
 assert_not_contains "$OUT" "db.ok" "never reports a DB wait"
 assert_not_contains "$OUT" "health/ready" "never reaches the readiness assertion"
+assert_eq "$HEALTH_POLLS" "2" "stopped at the app budget, did not fall through (positive control)"
 
 echo "2. db.ok never true → FalkorDB message"
 run_gate "yes" 0 1
@@ -195,10 +209,14 @@ assert_contains "$OUT" "db.ok true" "observed the data plane"
 assert_contains "$OUT" "health/ready 200" "reported readiness"
 assert_eq "$HEALTH_POLLS" "3" "polled /health until db.ok flipped (positive control)"
 
-echo "7. readiness answering 3xx → FAILS (curl -f would pass and log '200')"
+echo "7. readiness answering 3xx → FAILS (curl -f would pass it)"
 run_gate "yes" 1 0 302
 assert_eq "$RC" "1" "exits 1 on a redirect"
-assert_contains "$OUT" "last status 302" "reports the OBSERVED status, not a claim"
+assert_contains "$OUT" "last status 302" "reports the OBSERVED status"
+
+# NOTE: case 3 is ALSO the pin for `-o /dev/null` — the stub streams a body,
+# so dropping the flag makes the captured status "<body>200", which never
+# equals "200", and case 3 fails.
 
 echo "8. readiness with NO response → FAILS and names the sentinel"
 run_gate "yes" 1 0 503 yes

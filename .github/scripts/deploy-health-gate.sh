@@ -72,6 +72,22 @@ DB_SLEEP="${DB_SLEEP:-10}"
 READY_TRIES="${READY_TRIES:-18}"
 READY_SLEEP="${READY_SLEEP:-10}"
 
+# ── guard the knobs ─────────────────────────────────────────────────────────
+# A non-integer override would make `seq` produce nothing and then blow up the
+# `$((...))` inside the failure message — and under `set -u` that aborts the
+# shell AT the echo, so `exit 1` never runs. bash 3.2 then exits with the LAST
+# command's status, i.e. GREEN. Fail loudly on a bad knob rather than failing
+# OPEN on a dead database. (Introduced with the env-overridable knobs; main
+# used a literal `3 min` here, which could not be mis-set.)
+for _knob in APP_PROBES APP_PROBE_SLEEP DB_TRIES DB_SLEEP READY_TRIES READY_SLEEP; do
+  case "${!_knob}" in
+    '' | *[!0-9]*)
+      echo "::error::$_knob must be a non-negative integer (got '${!_knob}')"
+      exit 2
+      ;;
+  esac
+done
+
 # ── 1. app reachable (fail fast) ────────────────────────────────────────────
 app_ok=0
 for _ in $(seq 1 "$APP_PROBES"); do
@@ -108,16 +124,22 @@ echo "db.ok true"
 # db.ok==true does NOT imply ready (#4545), so this gets its own tolerance
 # rather than being asserted once on the strength of the data plane.
 #
-# The HTTP STATUS is READ, not inferred from curl's exit code. `curl -fsS`
+# The HTTP STATUS is READ, not inferred from curl's exit code. `curl -f`
 # succeeds on ANY status < 400, so a redirecting readiness endpoint (a
-# misconfigured route, a CDN rule) would pass this gate AND be logged as
-# "200" — asserting a predicate never observed, which is the very defect
-# #4545 is about. Exactly 200 is what the gate claims, so exactly 200 is what
-# it requires.
+# misconfigured route, a CDN rule) PASSED this gate — main logged the true
+# status (`-w "health/ready: %{http_code}"`) but never failed on it, so a 302
+# sailed through as a success. Exactly 200 is what the gate claims to have
+# observed, so exactly 200 is what it now requires.
 ready_ok=0
-ready_code="000"
+ready_code=""
 for _ in $(seq 1 "$READY_TRIES"); do
-  ready_code=$(curl -sS -o /dev/null -w '%{http_code}' "$GATE_BASE/health/ready" 2>/dev/null) || ready_code="000"
+  # Only substitute the sentinel when NOTHING was captured: curl can print a
+  # real code and STILL exit non-zero (a transfer failure after the status
+  # line), and overwriting an observed 200 with 000 would report "no response"
+  # for an app that answered — the indistinguishable-failure class this file's
+  # comment warns about.
+  ready_code=$(curl -sS -o /dev/null -w '%{http_code}' "$GATE_BASE/health/ready" 2>/dev/null)
+  [ -n "$ready_code" ] || ready_code="000"
   if [ "$ready_code" = "200" ]; then
     ready_ok=1
     break
