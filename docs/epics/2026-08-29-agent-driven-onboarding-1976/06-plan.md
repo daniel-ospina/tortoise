@@ -14,6 +14,8 @@ aboutObjects: tortoise
 > **Inputs:** align `01-align.md` (PROCEED; Rails 1/2 + named couplings) · research `02-research-brief.md` · scope `03-scope.md` (12 E2E) · test-design `04-test-design.md` (#1992, 17 surfaces) · UX decisions `05-ux-decisions.md`.
 > **Authoritative decomposition source:** the W1-W12 list in the epic issue body (FINAL WORKSTREAM LIST section, R2-1/R2-2 amendment) + this plan's substeps below. Where this plan and the issue body differ, the issue's CONSISTENCY RESOLUTION ROUND 2 + this plan's decisions govern.
 
+> ⚠️ **Superseded for the build fork — #3913 (owner ruling 2026-09-20):** where this document states the build-fork completion gate as including `catalog-presented`, or states that the dashboard / a catalog render / the fork pick writes the `catalog-presented` step edge, that is the superseded design. The build gate is `{harness-connected, first-points-filed}`; `catalog-presented` is no longer a gate input, and **no dashboard path writes it** — the fork card writes only the fork (or its unsure marker), never a `step`, and the id stays accepted for agent/external callers and for existing orgs' `completed_steps`. The superseded wording is kept verbatim as the historical record.
+
 ---
 
 # 1. User Journeys
@@ -24,7 +26,7 @@ aboutObjects: tortoise
 | Phase | User action | Agent/system action | Exit state |
 |---|---|---|---|
 | Entry ① | Signs up (identity + email only, ≤1 screen) | Pre-onboarding; light "create your org" nudge if no org created | Account exists, no org |
-| Entry ② | Creates org; **name REQUIRED w/ editable prefill** | `POST /v1/teams` (#1877) + `teams` row + membership; **OnboardingState node initialized graph-side, same eager statement as TeamMeta** (W5); onboarding FIRES here | Org + onboarding state exist |
+| Entry ② | Creates org; **name REQUIRED w/ editable prefill** | `POST /v1/organizations` (#1877) + `teams` row + membership; **OnboardingState node initialized graph-side, same eager statement as TeamMeta** (W5); onboarding FIRES here | Org + onboarding state exist |
 | Fork card | Picks "use for your own agents" | `fork: 'self'` persisted in onboarding state; seed-step presentation set | Fork recorded (once, per org) |
 | Connect-consent | Runs ONE universal command (or pastes it) | Agent self-adjudicates harness (4 self-install / 2 teach-human); MCP connected; connection reported to state | Harness-connected checkpoint set |
 | Agent setup | Watches/reads Setup guide card | Agent reads OnboardingState → files **Organization (Subject/organization)** + **User (Subject/naturalPerson)** linked `memberOf` from API data; asks only for gaps (never invents identity) | Two Subjects filed; `onboarding_seed_complete` (W11) |
@@ -402,7 +404,7 @@ No threshold (R2-6 — funnel visibility only)
 ┌──────▼─────────────────────────────────────────┐
 │ hosted_api.py (FastAPI)                         │
 │ /v1/onboarding/state (READ surface — store     │
-│   changes to graph) · /v1/teams (org-create +  │
+│   changes to graph) · /v1/organizations (org-create +  │
 │   OnboardingState init in transaction) ·        │
 │ /v1/invites* (PRESERVED, W7 extends) ·         │
 │ DELETE /v1/sessions/{id} (W6) · telemetry emit │
@@ -420,7 +422,7 @@ No threshold (R2-6 — funnel visibility only)
 │ OnboardingState node · Organization+User        │
 │ Subjects (memberOf) · decisions · sessions      │
 └────────────────────────────────────────────────┘
-Supabase control plane: teams / team_memberships / api_keys / invitations (identity + tenant facts)
+Supabase control plane: teams / org_memberships / api_keys / invitations (identity + tenant facts)
 Self-hosted (W12): selfhost_api.py + local FalkorDB — no Supabase dependency introduced
 ```
 
@@ -473,11 +475,11 @@ Errors: 401 (no team context), 404 (no org), 409 ONLY for node-level conflicts (
 
 ### I-2 — Org-create (W1/W9; extends #1877)
 ```
-POST /v1/teams  (existing) → body gains nothing user-facing; backend:
+POST /v1/organizations  (existing) → body gains nothing user-facing; backend:
   - name REQUIRED (validation: non-empty; 409 on duplicate)
   - OnboardingState node init INSIDE the create transaction
   - onboarding FIRES here (state armed)
-Response: 201 {team_id, onboarding_state: {...}} (front-end renders fork card next)
+Response: 201 {org_id, onboarding_state: {...}} (front-end renders fork card next)
 ```
 
 ### I-3 — Universal setup command (W2)

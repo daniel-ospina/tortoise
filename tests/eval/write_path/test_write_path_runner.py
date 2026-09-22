@@ -18,7 +18,7 @@ import shutil
 
 import pytest
 
-from tests.eval.write_path import corpus, runner, schema
+from tests.eval.write_path import corpus, generate_corpus, runner, schema
 from tests.eval.write_path.judge import JUDGE_PIN_MECHANICAL
 
 
@@ -56,12 +56,16 @@ def _tmp_corpus(tmp_path) -> object:
 def test_parser_roundtrip_is_byte_identical(session_id, harness, tmp_path):
     fixture = corpus.load_fixture(session_id)
     conversation = fixture["conversation"]
-    parsed = runner.parse_roundtrip(
+    runner.parse_roundtrip(
         session_id, conversation, fixture["harness"], workdir=tmp_path
     )
-    assert parsed == conversation
-    assert [t["role"] for t in parsed] == ["user", "assistant"] or True  # roles kept
-    assert all(t["content"] for t in parsed)
+    # The round-trip guard is `parse_roundtrip`'s RunError on any drift — it
+    # never returns a drifted list, so a deep-equality/role/content assert
+    # here would be dead (the drift case is covered by
+    # test_parse_roundtrip_drift_raises). What this test CAN still fail on is
+    # the fixture SHAPE: a turn growing a key the round-trip contract does not
+    # cover would slip past parse_roundtrip undetected.
+    assert {k for t in conversation for k in t} == {"role", "content"}
 
 
 def test_parse_roundtrip_drift_raises(tmp_path):
@@ -572,9 +576,22 @@ def test_run_carries_operator_edge_audit_dimension(tmp_path, monkeypatch):
     """#2514: every completed run carries the planted-operator (layer-2)
     audit — the corpus-wide mechanical grade of whether the extractor wired
     the RIGHT operator edge between the anchored claims. On the deterministic
-    m2 echo lane the numbers are structural (no relation extraction ⇒ 0/4
-    edges, 3/4 endpoint-anchor pairs content-present), recorded as an
-    additive audit dimension + note + receipt field — never a gated metric."""
+    m2 echo lane the operator EDGES do not match the planted semantics (the
+    M2 MockModel relation stage is a cue-word heuristic, not the product
+    extractor) — only a few edges match, endpoint-anchor pairs largely
+    content-present — recorded as an additive audit dimension + note +
+    receipt field, never a gated metric.
+
+    #2552 (layer-2 WIRE): the m2 lane DOES commit operators; the structural
+    fix makes them retrievable — every committed operator node carries the
+    sessionCaptured eventId and enters the eventId-keyed memory layer
+    (``operators_provenanced == operators_total``). The pre-fix signature was
+    ``operators_total == 0`` on the retrievable surface with a silently empty
+    ``operator_counts``.
+
+    #2552 (measurement power): the gold grew 4 -> 15 planted edges across all
+    seven sessions, so this asserts the count rather than a magic 4.
+    """
     root = _tmp_corpus(tmp_path)
     monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
@@ -582,23 +599,91 @@ def test_run_carries_operator_edge_audit_dimension(tmp_path, monkeypatch):
     assert report["run_status"] == "completed", report.get("log")
     audit = report["operator_audit"]
     assert audit is not None
-    assert audit["planted"] == 4  # wp06 (1) + wp07 (3) seeded operator edges
-    assert audit["edge_correct"] == 0  # structural: the echo lane writes no operators
+    # Pinned to the corpus FLOOR (a LOWER BOUND, so `>=`) AND tied to the
+    # gold-derived ACTUAL count. Two different jobs, and neither is a literal,
+    # so a grown corpus reddens nothing:
+    #   * `>=` catches a total that drops BELOW the floor. The equality cannot
+    #     (both sides read the same gold content, so they shrink together).
+    #   * `== corpus.planted_operator_count()` catches an AUDIT that stops
+    #     covering the corpus — the grader counts only the sessions the runner
+    #     selected and collapses duplicate ids, while this count iterates the
+    #     corpus itself. The floor cannot catch that.
+    # NEITHER catches a within-floor shrink of the committed gold; that is
+    # ``validate_committed``'s per-kind-floor job.
+    assert audit["planted"] >= generate_corpus.MIN_PLANTED_OPERATOR_EDGES
+    assert audit["planted"] == corpus.planted_operator_count()
+    assert audit["edge_correct"] < audit["planted"]  # m2 cue-word relations
     assert 1 <= audit["content_ok"] <= audit["planted"]
+    # #2552: the committed operator topology entered the retrievable layer.
+    assert audit["operators_total"] > 0
+    assert audit["operators_provenanced"] == audit["operators_total"]
     notes = "\n".join(report.get("notes", []))
     assert "operator-edge audit (#2514)" in notes
+    assert "operator persistence (#2552)" in notes
     # Per-session detail rides the owning session's result (the cross-session
     # SUPERSEDE is owned by wp07; its to-anchor lives in wp06's memory layer).
     owned_by = {
         r["session_id"]: r.get("planted_operators", []) for r in report["session_results"]
     }
-    assert len(owned_by["wp06_quarry_rollout"]) == 1
-    assert len(owned_by["wp07_bluepeak_followup"]) == 3
-    supersede = owned_by["wp07_bluepeak_followup"][2]
-    assert supersede["expected_kind"] == "SUPERSEDE"
-    assert supersede["to_session"] == "wp06_quarry_rollout"
-    # The receipt carries the audit (audit trail for the sealed run).
+    # Locate the cross-session SUPERSEDE by KIND, never by a positional or
+    # per-session literal: `len(...) == 1` / `== 3` / `[2]` were hardcoded
+    # operator counts that the #2552 gold growth only happened to leave valid
+    # (it added edges to wp01-wp05) — the same hardcoded-denominator class the
+    # rest of this file no longer contains.
+    assert sum(len(v) for v in owned_by.values()) == \
+        corpus.planted_operator_count()
+    supersedes = [
+        op for ops in owned_by.values() for op in ops
+        if op.get("expected_kind") == "SUPERSEDE"
+    ]
+    # Lower-bounded by the corpus's OWN declared SUPERSEDE floor, never a magic
+    # `1` — a second encoding of ``MIN_PLANTED_OPERATOR_KINDS["SUPERSEDE"]``
+    # would keep accepting a corpus that violates the declared floor.
+    assert len(supersedes) >= \
+        generate_corpus.MIN_PLANTED_OPERATOR_KINDS["SUPERSEDE"]
+    # Scope the TARGET assertion to the CROSS-SESSION SUPERSEDE. A second
+    # planted SUPERSEDE is a legitimate measurement-power extension (see
+    # ``MIN_PLANTED_OPERATOR_KINDS``), and one whose ``to`` is its own session
+    # — the schema's default — carries ``to_session == owner_session``, so
+    # "every SUPERSEDE targets wp06" would be the same hardcoded-corpus-shape
+    # defect the rest of this commit removes.
+    cross_session_supersedes = [
+        op for op in supersedes
+        if op.get("from_session") != op.get("to_session")
+    ]
+    assert cross_session_supersedes, supersedes
+    # …and assert the PROPERTY that makes a cross-session CORRECTS possible at
+    # all: the superseded claim must already be in the graph, so the TARGET's
+    # session is captured BEFORE the owning one. Never pin the target to a
+    # session NAME — a second genuine cross-session SUPERSEDE (wp03 -> wp01,
+    # say) is a legitimate extension and a name pin would redden this lane for
+    # no regression; the ordering property holds for every such edge.
+    session_order = {
+        r["session_id"]: i for i, r in enumerate(report["session_results"])
+    }
+    assert all(
+        session_order[op["to_session"]] < session_order[op["from_session"]]
+        for op in cross_session_supersedes
+    ), cross_session_supersedes
+    # The cross-session SUPERSEDE's detail needs no owner-name pin here, and must
+    # not get one: ``runner.run_benchmark`` buckets each detail by its OWN
+    # ``owner_session``, so a bucket assertion would be a TAUTOLOGY (a
+    # cannot-fail guard, the #4261/#4222 family) rather than a check, while a
+    # session-name pin would redden for no regression the moment a cross-session
+    # SUPERSEDE is planted in another session. The exactly-once sum above already
+    # proves this edge — like every other planted edge — landed in exactly one
+    # bucket; its capture-order precondition is asserted just above.
+    # The receipt must CARRY the audit block (it is the publish artifact).
+    # ``build_receipt`` REBUILDS an explicit projection rather than copying the
+    # report's block, so this equality is a real cross-object check — a
+    # projection that drops or substitutes the key fails here. Pinned to the
+    # gold-derived count (an independent source), never to the report's own
+    # field and never to a literal.
     receipt = runner.build_receipt(report)
     assert runner.validate_receipt(receipt) == []
-    assert receipt["operator_audit"]["planted"] == 4
-    assert receipt["operator_audit"]["edge_correct"] == 0
+    assert "operator_audit" in receipt
+    assert receipt["operator_audit"]["planted"] == corpus.planted_operator_count()
+    assert (receipt["operator_audit"]["edge_correct"]
+            < receipt["operator_audit"]["planted"])
+    assert (receipt["operator_audit"]["operators_provenanced"]
+            == receipt["operator_audit"]["operators_total"] > 0)

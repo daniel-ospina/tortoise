@@ -48,9 +48,9 @@ def client(tmp_path):
     # the single source of truth now. The override must stay inside the
     # helper so its exit clear covers failure paths too.
     with patched_tortoise_sdk(fixture_db_path):
-        from tortoise.hosted_api import get_current_team
-        app.dependency_overrides[get_current_team] = lambda: {
-            "team_id": "test-team-1", "tier": "free", "key_id": "k1",
+        from tortoise.hosted_api import get_current_org
+        app.dependency_overrides[get_current_org] = lambda: {
+            "org_id": "test-team-1", "tier": "free", "key_id": "k1",
             # C5 #2114: key_id-bearing dicts must carry the C2 owner class —
             # deleg-NULL + scopes [] resolves legacy_full_access True at auth
             # time (see test_hosted_api TEST_TEAM). A scope-less minted shape
@@ -59,11 +59,13 @@ def client(tmp_path):
             "max_teams": 1,
             # #1922: the demo seed is now quota-gated — the team dict must
             # carry max_points (the fail-closed points cap) or the check
-            # 500s.
+            # 500s. #4010: the same contract now applies to max_sessions
+            # (unlimited → explicit None); a missing key is fail-closed.
             "max_points": 10000,
+            "max_sessions": None,
             # #1748: the onboarding sub-team is provisioned on the USER path
             # — the session user becomes the owner member
-            # (get_current_team_session attaches session_user_id for session
+            # (get_current_org_session attaches session_user_id for session
             # JWT auth; tests seed it here).
             "session_user_id": "user-1",
         }
@@ -135,13 +137,14 @@ class TestPublicDemo:
         (the per-path redirect derivation isolates it)."""
         import uuid
 
-        from tortoise.hosted_api import _make_sdk, app, get_current_team
+        from tortoise.hosted_api import _make_sdk, app, get_current_org
         tid = f"team-demo-{uuid.uuid4().hex[:8]}"
-        app.dependency_overrides[get_current_team] = lambda tid=tid: {
-            "team_id": tid, "tier": "free", "key_id": "k1",
+        app.dependency_overrides[get_current_org] = lambda tid=tid: {
+            "org_id": tid, "tier": "free", "key_id": "k1",
             "legacy_full_access": True,
             "max_users": 1, "max_graphs": 1, "max_teams": 1,
             "max_points": 0,  # at cap — count(0) >= limit(0)
+            "max_sessions": None,
         }
         r = client.post("/v1/demo")
         assert r.status_code == 402, r.text
@@ -152,7 +155,7 @@ class TestPublicDemo:
         ).result_set
         assert not sent, "quota-gated demo seed must not write points"
         rows = _make_sdk(namespace="registry")._get_registry().query(
-            "MATCH (m:MeteringRecord {team_id:$tid}) RETURN m.write_ops",
+            "MATCH (m:MeteringRecord {org_id:$tid}) RETURN m.write_ops",
             params={"tid": tid},
         ).result_set
         assert not rows, "quota-gated demo seed must not record write ops"
@@ -164,18 +167,19 @@ class TestPublicDemo:
         per-path server graph (see test_demo_seed_402_at_cap)."""
         import uuid
 
-        from tortoise.hosted_api import _make_sdk, app, get_current_team
+        from tortoise.hosted_api import _make_sdk, app, get_current_org
         tid = f"team-demo-{uuid.uuid4().hex[:8]}"
-        app.dependency_overrides[get_current_team] = lambda tid=tid: {
-            "team_id": tid, "tier": "free", "key_id": "k1",
+        app.dependency_overrides[get_current_org] = lambda tid=tid: {
+            "org_id": tid, "tier": "free", "key_id": "k1",
             "legacy_full_access": True,
             "max_users": 1, "max_graphs": 1, "max_teams": 1,
             "max_points": 10000,
+            "max_sessions": None,
         }
         r = client.post("/v1/demo")
         assert r.status_code == 200, r.text
         rows = _make_sdk(namespace="registry")._get_registry().query(
-            "MATCH (m:MeteringRecord {team_id:$tid}) "
+            "MATCH (m:MeteringRecord {org_id:$tid}) "
             "RETURN m.write_ops, m.nodes_written",
             params={"tid": tid},
         ).result_set
@@ -228,10 +232,10 @@ class TestSessionRecording:
 # must be able to re-enable via the tool REGARDLESS of ``capture_revised``.
 
 
-def _invoke_session_recording_tool(tmp_path, team_id: str, enabled: bool):
+def _invoke_session_recording_tool(tmp_path, org_id: str, enabled: bool):
     """Invoke the MCP tool the way Q3 executes it (HTTP mode team context)
     against an isolated temp SDK, returning (result, state_after)."""
-    from tortoise.mcp_auth import _current_team_id
+    from tortoise.mcp_auth import _current_org_id
     from tortoise.mcp_server import tortoise_onboarding_session_recording
     orig_init = TortoiseSDK.__init__
 
@@ -245,14 +249,14 @@ def _invoke_session_recording_tool(tmp_path, team_id: str, enabled: bool):
     from tortoise.hosted_api import _get_onboarding_state, _make_sdk
     _make_sdk(namespace="registry")._get_registry().query(
         "CREATE (t:Team {id:$id, onboarding_state:$st})",
-        params={"id": team_id, "st": "{}"},
+        params={"id": org_id, "st": "{}"},
     )
-    tok = _current_team_id.set(team_id)
+    tok = _current_org_id.set(org_id)
     try:
         result = tortoise_onboarding_session_recording(enabled=enabled)
-        state = _get_onboarding_state(team_id)
+        state = _get_onboarding_state(org_id)
     finally:
-        _current_team_id.reset(tok)
+        _current_org_id.reset(tok)
         _close_keepalive_anchors(_FALLBACK_KEEPALIVE)
         TortoiseSDK.__init__ = orig_init
     return result, state
@@ -279,7 +283,7 @@ def test_q3_and_wizard_write_same_keys(tmp_path):
     # (same discipline as _invoke_session_recording_tool's restore) — the
     # shared binding while ACTIVE is the deliberate pass-through; the anchor
     # no longer survives into the next test.
-    from tortoise.hosted_api import _FALLBACK_KEEPALIVE, get_current_team
+    from tortoise.hosted_api import _FALLBACK_KEEPALIVE, get_current_org
     from tortoise.hosted_api import app as _app
     orig_init = TortoiseSDK.__init__
 
@@ -288,8 +292,8 @@ def test_q3_and_wizard_write_same_keys(tmp_path):
                   namespace=namespace, **kw)
 
     TortoiseSDK.__init__ = _patched
-    _app.dependency_overrides[get_current_team] = lambda: {
-        "team_id": "team-1728-q3", "tier": "free", "key_id": "k1",
+    _app.dependency_overrides[get_current_org] = lambda: {
+        "org_id": "team-1728-q3", "tier": "free", "key_id": "k1",
             "legacy_full_access": True,
     }
     try:
@@ -338,12 +342,12 @@ def test_fresh_team_defaults_to_recording_on(client):
     import uuid
 
     from tortoise.hosted_api import _get_onboarding_state, _make_sdk
-    team_id = f"test-team-1927-default-{uuid.uuid4().hex[:8]}"
+    org_id = f"test-team-1927-default-{uuid.uuid4().hex[:8]}"
     _make_sdk(namespace="registry")._get_registry().query(
         "CREATE (t:Team {id:$id, onboarding_state:$st})",
-        params={"id": team_id, "st": "{}"},
+        params={"id": org_id, "st": "{}"},
     )
-    st = _get_onboarding_state(team_id)
+    st = _get_onboarding_state(org_id)
     assert st["session_recording"] is True
     assert st["capture_revised"] is False
 
@@ -436,7 +440,7 @@ class TestOnboardingTeam:
         r = client.post("/v1/onboarding/team", json={"name": "acme"})
         assert r.status_code == 200
         body = r.json()
-        assert body.get("team_id") or body.get("id")
+        assert body.get("org_id") or body.get("id")
         assert body.get("name") == "acme"
         assert "key" not in body  # #1716: the response never carries a key
 
@@ -452,7 +456,7 @@ class TestOnboardingTeam:
         assert "key" not in body
         # the registry-lane SDK is the CANONICAL control plane
         # (namespace="registry" → registry_control_plane — #1748: the old
-        # namespace=team_id wrote a {team_id}_control_plane graph that no
+        # namespace=org_id wrote a {org_id}_control_plane graph that no
         # other registry path reads, orphaning the sub-team) — query the
         # same graph the endpoint wrote to.
         reg = _make_sdk(namespace="registry")._get_registry()
@@ -463,12 +467,12 @@ class TestOnboardingTeam:
         tid, team_key_hash = rows[0]
         assert team_key_hash is None  # no dead key hash on the Team node
         n_keys = reg.query(
-            "MATCH (k:APIKey {team_id:$tid}) RETURN count(k)",
+            "MATCH (k:APIKey {org_id:$tid}) RETURN count(k)",
             params={"tid": tid},
         ).result_set[0][0]
         assert n_keys == 0  # no APIKey node minted for the sub-team
 
-    def test_team_name_validation(self, client):
+    def test_org_name_validation(self, client):
         r = client.post("/v1/onboarding/team", json={"name": ""})
         assert r.status_code < 500
 
@@ -483,81 +487,81 @@ class TestOnboardingTeam:
         assert r.status_code == 200, r.text
         body = r.json()
         assert "key" not in body  # #1716: keyless — no tt_ mint at onboarding
-        sub_team_id = body["team_id"]
+        sub_org_id = body["org_id"]
         # the session user is the owner member (registry Membership node in
         # the CANONICAL control plane — registry_control_plane)
         reg = _make_sdk(namespace="registry")._get_registry()
         rows = reg.query(
-            "MATCH (m:Membership {team_id:$tid}) "
+            "MATCH (m:Membership {org_id:$tid}) "
             "RETURN m.user_id, m.role, m.status",
-            params={"tid": sub_team_id},
+            params={"tid": sub_org_id},
         ).result_set
         assert rows == [["user-1", "owner", "active"]], rows
         # no APIKey node minted for the keyless sub-team
         n_keys = reg.query(
-            "MATCH (k:APIKey {team_id:$tid}) RETURN count(k)",
-            params={"tid": sub_team_id},
+            "MATCH (k:APIKey {org_id:$tid}) RETURN count(k)",
+            params={"tid": sub_org_id},
         ).result_set[0][0]
         assert n_keys == 0
         # session-key mint (registry lane) — resolves the owner membership.
         # #1970 coverage preservation: under per-test isolation the registry
         # is FRESH, so user-1 has exactly ONE membership — the mint's
         # >1-membership disambiguation branch (the production multi-team
-        # shape: a user with several memberships passes team_id) would go
+        # shape: a user with several memberships passes org_id) would go
         # silently dead. Seed a deterministic SECOND active owner membership
         # on another team so the branch is exercised, not inherited from
         # shared-session leftovers.
         import uuid
-        seed_team_id = f"seed-team-{uuid.uuid4().hex[:8]}"
-        assert seed_team_id != sub_team_id
+        seed_org_id = f"seed-team-{uuid.uuid4().hex[:8]}"
+        assert seed_org_id != sub_org_id
         reg.query(
             "CREATE (t:Team {id:$tid, name:'seed-other', tier:'free'})",
-            params={"tid": seed_team_id},
+            params={"tid": seed_org_id},
         )
         reg.query(
-            "CREATE (m:Membership {team_id:$tid, user_id:'user-1', "
+            "CREATE (m:Membership {org_id:$tid, user_id:'user-1', "
             "role:'owner', status:'active'})",
-            params={"tid": seed_team_id},
+            params={"tid": seed_org_id},
         )
         # self-verifying precondition: the seed must be LIVE (the mint filters
-        # user_id + status:'active' + team_id <> '' — a wrong shape silently
+        # user_id + status:'active' + org_id <> '' — a wrong shape silently
         # reverts to the single-membership branch, defeating the coverage
         # intent).
         n_active = reg.query(
             "MATCH (m:Membership {user_id:'user-1', status:'active'}) "
-            "WHERE m.team_id <> '' RETURN count(m)",
+            "WHERE m.org_id <> '' RETURN count(m)",
         ).result_set[0][0]
         assert n_active == 2, "multi-team disambiguation seed must be active"
         app.dependency_overrides[get_current_user] = lambda: {
             "user_id": "user-1", "email": "user-1@example.com"}
         r2 = client.post("/v1/session/key", json={
-            "purpose": "bootstrap", "team_id": sub_team_id})
+            "purpose": "bootstrap", "org_id": sub_org_id})
         assert r2.status_code == 200, r2.text
         key = r2.json()["key"]
         assert key.startswith("tt_")
-        assert r2.json()["team_id"] == sub_team_id
+        assert r2.json()["org_id"] == sub_org_id
         # the minted key resolves on REST (registry APIKey node)
         app.dependency_overrides.clear()
         r3 = client.get("/v1/team",
                         headers={"Authorization": f"Bearer {key}"})
         assert r3.status_code == 200, r3.text
-        assert r3.json()["team_id"] == sub_team_id
-        # listable by the owner (GET /v1/teams)
+        assert r3.json()["org_id"] == sub_org_id
+        # listable by the owner (GET /v1/organizations)
         app.dependency_overrides[get_current_user] = lambda: {
             "user_id": "user-1", "email": "user-1@example.com"}
-        r4 = client.get("/v1/teams")
+        r4 = client.get("/v1/organizations")
         assert r4.status_code == 200, r4.text
-        assert any(t["team_id"] == sub_team_id for t in r4.json())
-        # deletable by the owner (DELETE /v1/teams/{id})
-        r5 = client.delete(f"/v1/teams/{sub_team_id}")
+        assert any(t["org_id"] == sub_org_id for t in r4.json())
+        # deletable by the owner (DELETE /v1/organizations/{id})
+        r5 = client.delete(f"/v1/organizations/{sub_org_id}")
         assert r5.status_code in (200, 202), r5.text
 
     def test_create_team_requires_session_user_registry(self, client):
         """#1748: no session user on the team context → 403 (never an
         owner-less orphan sub-team)."""
-        from tortoise.hosted_api import get_current_team
-        app.dependency_overrides[get_current_team] = lambda: {
-            "team_id": "test-team-1", "tier": "free", "key_id": "k1",
+        from tortoise.hosted_api import get_current_org
+        app.dependency_overrides[get_current_org] = lambda: {
+            "org_id": "test-team-1", "tier": "free", "key_id": "k1",
             # C5 #2114: key_id-bearing dicts must carry the C2 owner class —
             # deleg-NULL + scopes [] resolves legacy_full_access True at auth
             # time (see test_hosted_api TEST_TEAM). A scope-less minted shape
@@ -651,12 +655,16 @@ _STATE_KEY_TABLE: dict[str, tuple[str, object]] = {
 
 
 def test_state_keys_registered_parametrized(client):
-    """Task 11 (cycle-3 P1-2 fix, self-verifying): every capture-surface key
-    round-trips through BOTH live default-state dicts, the allowlist, and the
-    PATCH model — a key added to the table without registering it anywhere
-    fails here (the allowlist filter would silently drop it in production)."""
+    """Task 11 (cycle-3 P1-2 fix, self-verifying): every capture-surface key is
+    REGISTERED — present in BOTH live default-state dicts, the allowlist, and
+    the PATCH model — so a key added to the table without registering it
+    anywhere fails here (the allowlist filter would otherwise silently drop it
+    in production). The OPERATIONAL keys then round-trip through PATCH + GET;
+    the server-owned capture/install evidence keys are REFUSED there (403, no
+    write) instead — see ``_CAPTURE_SERVER_OWNED_KEYS`` and the branch below."""
     from tortoise.hosted_api import (
         _ALLOWED_STATE_KEYS,
+        _CAPTURE_SERVER_OWNED_KEYS,
         _ONBOARDING_DEFAULT_STATE,
         DEFAULT_ONBOARDING_STATE,
         OnboardingStatePatchRequest,
@@ -683,6 +691,22 @@ def test_state_keys_registered_parametrized(client):
         # merge (bool keys take True; timestamp keys take an ISO string;
         # scope keys take a small non-empty sample) AND read back via GET
         # (the node is provisioned, so this is a real persisted round-trip).
+        #
+        # #3681: the capture/install EVIDENCE keys (receipts, per-harness
+        # last-errors, install probes) are SERVER-OWNED — registration still
+        # guarantees the key ROUND-TRIPS through the read path, but a client
+        # PATCH must be REFUSED (403) rather than accepted. Asserting the
+        # refusal here keeps the registration table honest about the key (it
+        # exists on both default dicts + the model) while pinning the
+        # server-owned write surface.
+        if state_key in _CAPTURE_SERVER_OWNED_KEYS:
+            r = client.patch("/v1/onboarding/state",
+                             json={patch_field: patch_value})
+            assert r.status_code == 403, (
+                f"server-owned key {state_key} was client-writable: {r.text}")
+            assert r.json()["detail"] == {
+                "message": "server_owned_key", "keys": [state_key]}, r.text
+            continue
         r = client.patch("/v1/onboarding/state",
                          json={patch_field: patch_value})
         assert r.status_code == 200, r.text
@@ -876,7 +900,7 @@ def test_install_probe_round_trip(client):
     install_probe_{harness} REGISTERED state key (harness + server timestamp
     only — no content) and reads back. The probe is NOT consent-gated (it's
     install telemetry, so the dashboard can show install status before
-    consent), but it IS get_current_team-gated (auth required — probes are
+    consent), but it IS get_current_org-gated (auth required — probes are
     per-team state)."""
     # Provision the Team node so state writes persist (the state writer is
     # MATCH...SET — a silent no-op without the node).
@@ -905,10 +929,10 @@ def test_install_probe_round_trip(client):
 
 def test_install_probe_unregistered_harness_422(client):
     """Task 14: a harness with no REGISTERED install_probe_ key (codex /
-    claude-desktop / claude-web / cursor — backfill-only or pending-spike
-    harnesses) → 422 at the model boundary, never a silent drop (an
-    unregistered key would be discarded by the allowlist filter and look
-    like a recorded probe)."""
+    claude-desktop / claude-web / cursor — harnesses with no install-probe
+    beacon; cursor has a capture seam (#3819) but fires no probe) → 422 at the
+    model boundary, never a silent drop (an unregistered key would be
+    discarded by the allowlist filter and look like a recorded probe)."""
     from tortoise.hosted_api import _make_sdk
     _make_sdk(namespace="registry")._get_registry().query(
         "CREATE (t:Team {id:$id, onboarding_state:$st})",
@@ -920,7 +944,7 @@ def test_install_probe_unregistered_harness_422(client):
 
 
 def test_install_probe_requires_auth(unauth_client):
-    """Task 14: the probe is get_current_team-gated — no auth, no probe."""
+    """Task 14: the probe is get_current_org-gated — no auth, no probe."""
     r = unauth_client.post("/v1/sessions/install-probe",
                            json={"harness": "claude"})
     assert r.status_code == 401, r.text

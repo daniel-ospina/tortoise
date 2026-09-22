@@ -410,7 +410,7 @@ class TestPacksDirComposition:
         monkeypatch.setenv("TORTOISE_STARTER_PACKS", "dev,tenant-ops,bogus-pack")
         sdk = TortoiseSDK(
             db_path=str(tmp_path / "a.db"),
-            namespace=f"test_pack_team_{os.urandom(4).hex()}")
+            namespace=f"test_pack_org_{os.urandom(4).hex()}")
         with caplog.at_level(logging.WARNING):
             activated = pack_state.ensure_tenant_packs(sdk)
         names = sorted(r["namespace"] for r in activated)
@@ -446,7 +446,7 @@ class TestPacksDirComposition:
         monkeypatch.setenv("TORTOISE_STARTER_PACKS", "dev,broken")
         sdk = TortoiseSDK(
             db_path=str(tmp_path / "a.db"),
-            namespace=f"test_pack_team_{os.urandom(4).hex()}")
+            namespace=f"test_pack_org_{os.urandom(4).hex()}")
         with caplog.at_level(logging.WARNING):
             activated = pack_state.ensure_tenant_packs(sdk)
         names = sorted(r["namespace"] for r in activated)

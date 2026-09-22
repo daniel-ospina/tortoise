@@ -45,6 +45,7 @@ from typing import Any
 import httpx
 
 from tortoise import github_map
+from tortoise.live import _terminal_excluded  # #2901 canonical non-current predicate
 from tortoise.quota import QuotaCheckError, QuotaExceededError
 
 logger = logging.getLogger(__name__)
@@ -61,11 +62,6 @@ _PAGE_SIZE = 100
 # are far below this ceiling; anything above is a malformed cursor.
 _SANE_ISSUE_NUMBER_MAX = 10_000_000
 
-# Terminal point statuses — the current-statement lookup is externalId +
-# status != terminal (P1-2), NEVER content-hash dedup (a revert mints v+1,
-# so a content-identical terminal point must never be resolved as current).
-TERMINAL_STATUSES = ("retracted", "superseded", "archived")
-
 # Object.status → issue-state projection (inverse of the lifecycle fold).
 _STATUS_TO_STATE = {
     "completed": "closed",
@@ -73,6 +69,29 @@ _STATUS_TO_STATE = {
     "live": "open",
     "open": "open",
 }
+
+
+def _current_statement_rows(proj, eid: str) -> list:
+    """Phase A probe — the CURRENT (non-terminal) statement for an externalId.
+
+    The lookup keys on ``externalId``, NEVER content-hash dedup (a revert
+    mints v+1, so a content-identical terminal point must never be resolved as
+    current — P1-2).
+
+    #2901: uses ``live._terminal_excluded`` — the ONE canonical non-current
+    predicate — so the status set AND the legacy ``outdated=true`` flag are
+    both honoured. The pre-fix local subset omitted ``outdated``, so an
+    outdated point resolved as the current statement. Extracted to module
+    scope so the filter is directly testable
+    (tests/test_terminal_status_vocabulary.py).
+    """
+    return proj.g.query(
+        "MATCH (n:Point {externalId:$eid}) "
+        f"WHERE {_terminal_excluded('n.status')} "
+        "RETURN n.id, n.content_hash, n.updatedAt "
+        "ORDER BY n.createdAt DESC LIMIT 1",
+        params={"eid": eid},
+    ).result_set
 
 
 class GitHubFetchError(Exception):
@@ -137,7 +156,7 @@ class GitHubIndexer:
     async def current_login(self) -> str | None:
         """The authenticated user's GitHub login (``GET /user``) — None on
         failure. Used at connect time (#1845) to store the REAL org/login
-        instead of the internal team_id, and by the self-heal paths."""
+        instead of the internal org_id, and by the self-heal paths."""
         client = await self._get_client()
         r = await self._get(client, f"{_GITHUB_API}/user")
         if r.status_code == 200:
@@ -153,7 +172,7 @@ class GitHubIndexer:
         A non-200 from BOTH (org not found / no access) falls back to the
         authenticated token's OWN repos (``/user/repos``) — the selector
         (#1845) must list what the token can actually see even when the
-        stored org is a legacy team_id UUID (the pre-#1845 connect bug) or
+        stored org is a legacy org_id UUID (the pre-#1845 connect bug) or
         the org lookup 404s. GitHub returns 200 for a valid-but-empty org,
         so a 404 genuinely means 'unknown/no access'.
 
@@ -632,13 +651,7 @@ class GitHubIndexer:
         rec = records[0]
 
         # Phase A — probe: current (non-terminal) statement for this issue.
-        rows = proj.g.query(
-            "MATCH (n:Point {externalId:$eid}) "
-            "WHERE n.status IS NULL OR NOT (n.status IN $terminal) "
-            "RETURN n.id, n.content_hash, n.updatedAt "
-            "ORDER BY n.createdAt DESC LIMIT 1",
-            params={"eid": eid, "terminal": list(TERMINAL_STATUSES)},
-        ).result_set
+        rows = _current_statement_rows(proj, eid)
         # Bi-temporal window start: the statement is valid from the issue's
         # last update (E6 D3 — written at creation; the supersede's
         # valid_from closes the predecessor's window contiguously).

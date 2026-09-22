@@ -946,7 +946,7 @@ def mine_corpus(
 
     Convenience wrapper over :func:`mine_corpus_with_sdk` — creates an
     isolated embedded graph next to the corpus directory. Callers that want
-    to mine into an existing team graph use ``TortoiseSDK.mine_corpus``.
+    to mine into an existing org graph use ``TortoiseSDK.mine_corpus``.
     ``event_log_path`` routes mining events to the given JSONL log (default:
     the SDK's configured event log, or a fallback next to the DB path).
     """
@@ -1042,7 +1042,7 @@ def mine_corpus_with_sdk(
     # creates/updates the session Event (file_hash set) INCLUDING on the
     # first mine, so a file_hash-only match would silently skip a corpus
     # that a standalone ingest_corpus indexed but never mined (the
-    # documented "mine into an existing team graph" flow no-ops; round-2
+    # documented "mine into an existing org graph" flow no-ops; round-2
     # review). Symlinks are skipped (R17); duplicate sessionIds are deduped
     # to one primary per sessionId (#280 parity). ──
     from .session_indexer import _FM_RE

@@ -2,8 +2,8 @@
 account/team deletion (E2E-6-D), on BOTH control planes.
 
 Supabase mode (FakeControlPlane, mirroring test_auth_flip):
-- GET /v1/teams/{id}/export — owner-only JSON export (graph + control plane)
-- DELETE /v1/teams/{id} — owner-only soft delete → 24h grace → hard purge
+- GET /v1/organizations/{id}/export — owner-only JSON export (graph + control plane)
+- DELETE /v1/organizations/{id} — owner-only soft delete → 7-day grace → hard purge
 
 Registry mode (temp FalkorDBLite, mirroring test_dr_endpoints): the same
 surface over registry Membership/APIKey/Team nodes.
@@ -29,6 +29,7 @@ os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
 import tortoise.hosted_api as ha_mod  # noqa: I001
 from tortoise.hosted_api import app, get_current_user
+from tortoise.retention import RESTORE_WINDOW_HOURS
 from tortoise.sdk import TortoiseSDK
 
 from tests._http_fixtures import patched_tortoise_sdk
@@ -37,15 +38,16 @@ from tests.test_supabase_control import (
     FREE_TEAM, TOKEN, _key_row, _membership_row,
 )
 
-TEAM_ID = "team-free-001"
+ORG_ID = "team-free-001"
 
 # ═══════════════════════════════════════════════════════════════════════
 # #2090 — keepalive-anchor churn instrumentation (Task 1, RED).
 # The fixture patches TortoiseSDK.__init__ to a per-test temp DB but never
-# pins TORTOISE_DB_PATH, so _anchor_usable (hosted_api.py:96) path-drifts on
-# every _make_sdk/_registry_anchor() call → the #1607 keepalive anchor is
-# evicted+closed per call (0-other-client windows) → a dropped seed SDK's
-# GC-NOSAVE (embedded_lifecycle.py:204-282, TORTOISE_FAST_ATEXIT=1) can kill
+# pins TORTOISE_DB_PATH, so `_anchor_usable` (tortoise/hosted_api.py)
+# path-drifts on every _make_sdk/_registry_anchor() call → the #1607 keepalive
+# anchor is evicted+closed per call (0-other-client windows) → a dropped seed
+# SDK's GC-NOSAVE (`register_gc_close`/`_gc_close` in embedded_lifecycle.py,
+# TORTOISE_FAST_ATEXIT=1) can kill
 # the redislite daemon → empty respawn → 403 "Requires owner role in team".
 # The counter asserts ZERO mid-test drift evictions post-fix (Task 2); pre-fix
 # it deterministically reads ≥1 — the churn-enabler demonstration (G1).
@@ -62,10 +64,11 @@ _SEED_SDKS: list[TortoiseSDK] = []
 def _close_seed_sdks() -> None:
     """Close held seed SDKs (per-test; runs in the fixture finally).
 
-    # mirrors tests/test_dr_endpoints.py:34-39 — keep in sync.
+    # mirrors tests/test_dr_endpoints.py's session-scoped
+    # `_close_seed_sdks` — keep in sync.
     """
     while _SEED_SDKS:
-        try:  # noqa: SIM105  (mirrors test_dr_endpoints.py:37)
+        try:  # noqa: SIM105  (mirrors that fixture's pop/close drain)
             _SEED_SDKS.pop().close()
         except Exception:
             pass
@@ -74,7 +77,8 @@ def _close_seed_sdks() -> None:
 def _computed_db_path() -> str:
     """Replicate _make_sdk's env-path computation.
 
-    Mirrors tortoise/hosted_api.py:141-149 — keep in sync.
+    Mirrors `_resolve_embedded_db_path` (tortoise/hosted_api.py) — keep in
+    sync.
     """
     db_path = os.environ.get("TORTOISE_DB_PATH", "/data/tortoise.db")
     try:
@@ -85,7 +89,7 @@ def _computed_db_path() -> str:
 
 
 def _paths_same(path_a: object, path_b: str) -> bool:
-    """Mirror _anchor_usable's path comparison (hosted_api.py:114-125)."""
+    """Mirror `_anchor_usable`'s path comparison (tortoise/hosted_api.py)."""
     return (str(path_a) == str(path_b)) or (
         str(path_a) != ":memory:"
         and os.path.abspath(str(path_a)) == os.path.abspath(path_b)
@@ -198,7 +202,7 @@ class TestDriftCounterWiring:
                             pass
                 ha_mod._FALLBACK_KEEPALIVE = _orig_dict
 
-# #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
+# #1719 (Task 3): org_memberships.user_id is a uuid column — real JWT
 # subjects are UUIDs; non-UUID literals 22P02 (HTTP 400) under
 # FakeControlPlane's fidelity check. user-1 → _U1; registry owner
 # "u-owner" → _U2; JWT overrides for non-members → _U3/_U4.
@@ -229,9 +233,131 @@ def _enable_supabase(monkeypatch, cp) -> FakeControlPlane:
 # docs/scoping/2026-09-02-2127-b-waves-scoping.md.
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# #3472/#3505 — background work armed by `TestClient(app)`, for BOTH fixtures.
+# One shared mechanism, deliberately fixture-INDEPENDENT (never copy-pasted):
+# `_lifespan` arms this work for EVERY `TestClient(app)` entry, so it is a
+# property of opening the app, not of the control-plane mode.
+# ═══════════════════════════════════════════════════════════════════════
+
+# #3505/#3546: the embedded construction serialization this file needs lives
+# ONCE for the whole session — `tests/_embedded.EMBEDDED_CONSTRUCTION_LOCK`,
+# installed by `tests/conftest._serialize_embedded_construction`. It was a
+# module-scoped copy here (#3511); that copy could not serialize against the
+# one in `tests/test_import_endpoint.py` or cover any other file, which is the
+# defect #3546 names. Do NOT re-add a per-file copy.
+#
+# LANE SCOPE — the serialization is INERT on the lane CI runs this file on.
+# Under a supported `TORTOISE_DB_URI` (the docker lane, this file's default)
+# every construction from this module REDIRECTS to that server
+# (`tortoise/projection/__init__.py`, the #1647 D-1=A test redirect: `path` is
+# nulled, so `_is_embedded` is False), no redislite daemon is started, and no
+# double-start can occur. `test_export_delete` is NOT in
+# `tests._embedded.TEST_NO_REDIRECT_STEMS`, which is what selects that branch.
+# What protects THIS file on the docker lane is the BOOT-SWEEP quiesce
+# (`_quiesce_testclient_background_work`), not the serialization. The lock is
+# live only on the embedded tier-2 / carve-out lane (no URI), where
+# constructions stay local-file and real daemons are spawned; it is kept for
+# correctness there, not because the docker lane depends on it.
+
+
+async def _quiet_boot_sweeps() -> None:
+    """#3472: no-op stand-in for the lifespan's one-shot `_run_boot_sweeps`.
+
+    Must be `async def`: `_lifespan` arms it with
+    `create_task(_run_boot_sweeps())`, so a sync stub would hand
+    `create_task` a `None` and raise inside the startup half — turning a
+    test-isolation fix into a second, unrelated failure.
+    """
+
+
+def _quiesce_testclient_background_work(monkeypatch) -> None:
+    """#3472/#3505: make `TestClient(app)` entry safe for this file's tests.
+
+    `_lifespan` arms background work for EVERY `TestClient(app)` entry,
+    regardless of control-plane mode, and all of it touches the same store
+    the test body is driving:
+
+    1. `_run_boot_sweeps()` (armed by `_lifespan` as
+       `app.state._boot_sweep_task`, one-shot) and `_event_retention_loop()`
+       (the `_lifespan` closure armed as `app.state._event_retention_task`,
+       re-armed every `event_retention_interval()`) BOTH call
+       `_purge_deleted_teams`. A
+       background purge landing between a test's seeding and its own
+       `ha_mod._purge_deleted_teams()` call makes both read the row before
+       either deletes it: two `_drop_team_graph` calls and two
+       `team_delete_purged` audit rows — `assert ['reg-old', 'reg-old'] ==
+       ['reg-old']` on the registry fixture. Worse on Supabase mode, where
+       the test injects its `_drop_team_graph_strict` fault ONLY AFTER
+       seeding: a boot sweep in that window runs the REAL strict drop for
+       the past-grace teams and deletes the retry-anchor row the test
+       asserts must survive.
+
+       The product behaviour is benign (dropping an already-dropped graph
+       is idempotent) — the defect is test isolation: the assertions assume
+       exclusive ownership of a sweep production also runs. Both callers are
+       therefore quiesced here.
+
+       The CALLEE is deliberately not stubbed: this file's tests call
+       `ha_mod._purge_deleted_teams()` directly and resolve it off the
+       module at call time, so a callee stub would silence the very call
+       under test. `_run_boot_sweeps` is stubbed with an `async def` because
+       `_lifespan` arms it with `create_task(...)` (see
+       `_quiet_boot_sweeps`). The retention interval is pinned beyond any
+       test's lifetime: `_event_retention_loop` invokes BOTH `_sweep_events`
+       and `_purge_deleted_teams` on the same target, so pinning the
+       interval quiesces the loop while leaving the directly-called
+       `_purge_deleted_teams` under test.
+
+    2. The app's `_health_probe_loop` (armed by `_lifespan` as
+       `app.state._health_probe_task`) is NOT stubbed:
+       it runs `_probe_db -> _probe_sdk -> _make_sdk(namespace=None)` and so
+       constructs a projection on the SAME pinned db file, concurrently with
+       the test body's own constructions (the seeder's and
+       `_registry_count`'s SDKs). Quiescing the boot sweeps does NOT remove
+       that constructor, so the embedded double-start race would stay live.
+       Rather than quiesce a third background caller one caller at a time
+       (whack-a-mole — `_lifespan` already grew the probe loop after
+       #2850), the CONSTRUCTION is serialized: the invariant redislite
+       actually needs is that the first construction on a given db_path
+       writes `<db>.settings` before any other opener evaluates the
+       fresh-start branch. #3546 moved that serialization to ONE
+       process-wide lock for the whole session
+       (`tests/_embedded.EMBEDDED_CONSTRUCTION_LOCK`, installed by
+       `tests/conftest._serialize_embedded_construction`) — this file no
+       longer installs its own.
+
+       LANE SCOPE — the serialization is INERT on the lane CI runs this file
+       on. Under a supported `TORTOISE_DB_URI` (the docker lane, this file's
+       default) every construction from this module redirects to that server
+       (`tortoise/projection/__init__.py`, the #1647 D-1=A test redirect:
+       `path` is nulled, so `_is_embedded` is False), so no redislite daemon
+       exists and no double-start is possible. `test_export_delete` is NOT in
+       `tests._embedded.TEST_NO_REDIRECT_STEMS`, which is what selects that
+       branch. On that lane the protection this file actually gets is item 1
+       — the BOOT-SWEEP quiesce, which removes the second caller of
+       `_purge_deleted_teams` — and NOT the serialization. The lock is live
+       only on the embedded tier-2 / carve-out lane (no URI), where
+       constructions stay local-file and real daemons are spawned; it is
+       kept for correctness there, not because the docker lane depends on
+       it.
+    """
+    # (1) quiesce both background callers of the purge sweep (the caller, not
+    # the callee — `_purge_deleted_teams` itself stays under test).
+    monkeypatch.setattr(ha_mod, "_run_boot_sweeps", _quiet_boot_sweeps)
+    monkeypatch.setattr(ha_mod, "event_retention_interval",
+                        lambda *args, **kwargs: 86400.0)
+
+
 @pytest.fixture
 def sb_client(monkeypatch):
     """Supabase-mode TestClient with a fake control plane + temp DB.
+
+    #3472/#3505: `_quiesce_testclient_background_work` is applied BEFORE the
+    app is entered — the same lifespan-armed purge callers and health-probe
+    constructor run for this fixture too (the arming is mode-independent),
+    and on Supabase mode a boot sweep in the seeding window would run the
+    REAL strict drop behind the test's late-installed fault injection.
 
     #2090: no drift counter here (reg_client only) — supabase-mode authz is
     control-plane-only (no SDK/anchor op before the authz short-circuit in
@@ -239,8 +365,9 @@ def sb_client(monkeypatch):
     pin + close-at-restore still apply (anchors created mid-test via
     _export_graph_snapshot are reused, not evicted).
     """
-    fake = FakeControlPlane({"teams": [], "api_keys": [],
-                             "team_memberships": [], "invitations": []})
+    _quiesce_testclient_background_work(monkeypatch)
+    fake = FakeControlPlane({"organizations": [], "api_keys": [],
+                             "org_memberships": [], "invitations": []})
     _enable_supabase(monkeypatch, fake)
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "export.db")
@@ -263,7 +390,19 @@ def sb_client(monkeypatch):
 
 @pytest.fixture
 def reg_client(monkeypatch):
-    """Registry-mode TestClient (TORTOISE_CONTROL_PLANE=registry) + temp DB."""
+    """Registry-mode TestClient (TORTOISE_CONTROL_PLANE=registry) + temp DB.
+
+    #3472/#3505: `_quiesce_testclient_background_work` is applied BEFORE the
+    tempdir opens — it neutralizes the lifespan-armed background work that
+    would otherwise race this fixture's own seeding: a background
+    `_purge_deleted_teams` landing between the seed and the test's direct
+    call (two `_drop_team_graph` calls, two `team_delete_purged` rows,
+    surfacing as `assert ['reg-old', 'reg-old'] == ['reg-old']`), plus the
+    health probe's projection construction on the same db file. Neither is
+    registry-specific — see the helper — but this is the fixture whose
+    exact-count assertions make the race an outright failure.
+    """
+    _quiesce_testclient_background_work(monkeypatch)
     monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "export.db")
@@ -309,8 +448,9 @@ def reg_client(monkeypatch):
                     # RESTORED real dict, which is empty — every in-test
                     # anchor lives in the counter). The fixture owns the
                     # deterministic close: drain + close counter-held anchors
-                    # (uncounted), verbatim mirror of TestDriftCounterWiring
-                    # :164-170. The (d) guard sits in an inner try so a RED
+                    # (uncounted), verbatim mirror of the `finally` drain in
+                    # TestDriftCounterWiring.test_drift_counter_classifies_real_eviction.
+                    # The (d) guard sits in an inner try so a RED
                     # still restores the real dict + closes seeds (code-
                     # review P2-2: an (a)/(d) assert RED must leave clean
                     # module state).
@@ -343,11 +483,11 @@ def as_user():
 def capture_audit(monkeypatch):
     """Capture _audit_logger.append calls (no Postgres/JSONL in tests).
 
-    AuditLogger.append is called with positional team_id/actor/operation by
+    AuditLogger.append is called with positional org_id/actor/operation by
     the purge sweep and with kwargs by _async_audit — normalize both into
     the kwargs dict."""
     captured: list[dict] = []
-    _POSITIONAL = ("team_id", "actor_user_id", "operation",
+    _POSITIONAL = ("org_id", "actor_user_id", "operation",
                    "resource_type", "resource_id", "ip_address", "user_agent")
 
     def _capture(*args, **kwargs):
@@ -368,18 +508,18 @@ def _seed_supabase_team(fake, *, role: str = "owner", deleted_at: str | None = N
     team = dict(FREE_TEAM)
     if deleted_at:
         team["deleted_at"] = deleted_at
-    fake.seed("teams", [team])
-    fake.seed("team_memberships", [_membership_row(role=role)])
+    fake.seed("organizations", [team])
+    fake.seed("org_memberships", [_membership_row(role=role)])
     if with_key:
         fake.seed("api_keys", [_key_row()])
     if with_invite:
         fake.seed("invitations", [{
-            "id": "inv-1", "team_id": TEAM_ID, "email": "bob@example.com",
+            "id": "inv-1", "org_id": ORG_ID, "email": "bob@example.com",
             "role": "member", "status": "pending", "expires_at": None,
         }])
 
 
-def _seed_graph(db_path: str, team_id: str = TEAM_ID, *,
+def _seed_graph(db_path: str, org_id: str = ORG_ID, *,
                 n_points: int = 2, n_events: int = 1) -> TortoiseSDK:
     """Seed the team's FalkorDB graph: points + a Tag + a TAGGED edge + events.
 
@@ -390,7 +530,7 @@ def _seed_graph(db_path: str, team_id: str = TEAM_ID, *,
     reconnects to a dead socket or a fresh empty DB (redis.socket
     ConnectionError / 0 nodes — the test-isolation flake class).
     """
-    sdk = TortoiseSDK(db_path, namespace=team_id)
+    sdk = TortoiseSDK(db_path, namespace=org_id)
     g = sdk._get_proj().g
     for i in range(n_points):
         g.query(
@@ -411,7 +551,7 @@ def _seed_graph(db_path: str, team_id: str = TEAM_ID, *,
     return sdk  # caller keeps this alive until the export reads the graph
 
 
-def _seed_registry(db_path: str, team_id: str = "reg-team-1", *,
+def _seed_registry(db_path: str, org_id: str = "reg-team-1", *,
                    deleted_at: str | None = None) -> None:
     """Seed registry Team + owner Membership + APIKey (+ optional deleted_at).
 
@@ -424,57 +564,57 @@ def _seed_registry(db_path: str, team_id: str = "reg-team-1", *,
     _SEED_SDKS.append(sdk)
     reg = sdk._get_registry()
     reg.query("CREATE (t:Team {id:$id, name:$name, tier:'free'})",
-              params={"id": team_id, "name": team_id})
+              params={"id": org_id, "name": org_id})
     reg.query(
         # user_id mirrors _U2 (9f2c1a40-...-0002) — registry Membership
-        # user_id is the same uuid column as team_memberships (#1719 T3).
-        "CREATE (m:Membership {id:'m-1', user_id:'9f2c1a40-0000-4a00-8000-000000000002', team_id:$tid, "
+        # user_id is the same uuid column as org_memberships (#1719 T3).
+        "CREATE (m:Membership {id:'m-1', user_id:'9f2c1a40-0000-4a00-8000-000000000002', org_id:$tid, "
         "role:'owner', status:'active', joined_at:'2026-08-01T00:00:00Z'})",
-        params={"tid": team_id},
+        params={"tid": org_id},
     )
     reg.query(
-        "CREATE (k:APIKey {id:'k-1', team_id:$tid, key_hash:'h', "
+        "CREATE (k:APIKey {id:'k-1', org_id:$tid, key_hash:'h', "
         "key_prefix:'reg-team', revoked_at:null})",
-        params={"tid": team_id},
+        params={"tid": org_id},
     )
     if deleted_at:
         reg.query("MATCH (t:Team {id:$id}) SET t.deleted_at=$d",
-                  params={"id": team_id, "d": deleted_at})
+                  params={"id": org_id, "d": deleted_at})
 
 
-def _registry_count(db_path: str, label: str, team_id: str) -> int:
+def _registry_count(db_path: str, label: str, org_id: str) -> int:
     """Count registry nodes of `label` scoped to a team. Team nodes key on
-    `id`; Membership/APIKey/Invitation key on `team_id`.
+    `id`; Membership/APIKey/Invitation key on `org_id`.
 
     #2090: hold the read SDK in _SEED_SDKS (same dropped-SDK class as
     _seed_registry) — closed deterministically by the fixture teardown.
     """
-    prop = "id" if label == "Team" else "team_id"
+    prop = "id" if label == "Team" else "org_id"
     sdk = TortoiseSDK(db_path, namespace="registry")
     _SEED_SDKS.append(sdk)
     rows = sdk._get_registry().query(
         f"MATCH (n:{label} {{{prop}:$tid}}) RETURN count(n)",
-        params={"tid": team_id},
+        params={"tid": org_id},
     ).result_set
     return int(rows[0][0]) if rows else 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# GET /v1/teams/{team_id}/export — Supabase mode
+# GET /v1/organizations/{org_id}/export — Supabase mode
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class TestExportSupabase:
     def test_export_requires_session_auth(self, sb_client):
         tc, _, _ = sb_client
-        r = tc.get(f"/v1/teams/{TEAM_ID}/export")
+        r = tc.get(f"/v1/organizations/{ORG_ID}/export")
         assert r.status_code == 401
 
     def test_export_requires_owner(self, sb_client, as_user):
         tc, fake, _ = sb_client
         _seed_supabase_team(fake, role="member")
         as_user()
-        r = tc.get(f"/v1/teams/{TEAM_ID}/export")
+        r = tc.get(f"/v1/organizations/{ORG_ID}/export")
         assert r.status_code == 403
         assert "owner" in r.json()["detail"]
 
@@ -483,14 +623,14 @@ class TestExportSupabase:
         tc, fake, _ = sb_client
         _seed_supabase_team(fake, role="admin")
         as_user()
-        assert tc.get(f"/v1/teams/{TEAM_ID}/export").status_code == 403
+        assert tc.get(f"/v1/organizations/{ORG_ID}/export").status_code == 403
 
     def test_export_unknown_team_403(self, sb_client, as_user):
         """AuthZ-first: a non-member gets 403 for an unknown team (no
         existence oracle — security review, PR #873)."""
         tc, _, _ = sb_client
         as_user()
-        r = tc.get("/v1/teams/nope/export")
+        r = tc.get("/v1/organizations/nope/export")
         assert r.status_code == 403
 
     def test_export_deleted_team_410(self, sb_client, as_user):
@@ -498,7 +638,7 @@ class TestExportSupabase:
         _seed_supabase_team(
             fake, deleted_at=datetime.now(timezone.utc).isoformat())  # noqa: UP017
         as_user()
-        r = tc.get(f"/v1/teams/{TEAM_ID}/export")
+        r = tc.get(f"/v1/organizations/{ORG_ID}/export")
         assert r.status_code == 410
 
     def test_export_deleted_team_non_owner_403(self, sb_client, as_user):
@@ -508,7 +648,7 @@ class TestExportSupabase:
         _seed_supabase_team(
             fake, role="member", deleted_at=datetime.now(timezone.utc).isoformat())  # noqa: UP017
         as_user()
-        r = tc.get(f"/v1/teams/{TEAM_ID}/export")
+        r = tc.get(f"/v1/organizations/{ORG_ID}/export")
         assert r.status_code == 403
 
     def test_export_events_truncated(self, sb_client, as_user, monkeypatch):
@@ -518,7 +658,7 @@ class TestExportSupabase:
         _seed_supabase_team(fake)
         seed_sdk = _seed_graph(db_path, n_events=5)  # noqa: F841
         as_user()
-        r = tc.get(f"/v1/teams/{TEAM_ID}/export")
+        r = tc.get(f"/v1/organizations/{ORG_ID}/export")
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["summary"]["events"] == 3
@@ -533,11 +673,11 @@ class TestExportSupabase:
         _seed_supabase_team(fake)
         seed_sdk = _seed_graph(db_path)  # noqa: F841
         as_user()
-        r = tc.get(f"/v1/teams/{TEAM_ID}/export")
+        r = tc.get(f"/v1/organizations/{ORG_ID}/export")
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["schema_version"] == 1
-        assert body["team_id"] == TEAM_ID
+        assert body["org_id"] == ORG_ID
         assert body["exported_at"]
         # summary: 2 points + 1 Tag + 1 GraphEvent, 1 TAGGED edge
         assert body["summary"]["points"] == 2
@@ -561,7 +701,7 @@ class TestExportSupabase:
         # event payload decoded to a dict
         assert body["events"][0]["payload"] == {"id": "pt-0"}
         # control-plane metadata: team row, members, plan
-        assert body["team"]["id"] == TEAM_ID
+        assert body["team"]["id"] == ORG_ID
         assert body["team"]["tier"] == "free"
         assert body["members"][0]["role"] == "owner"
         assert body["members"][0]["user_id"] == OWNER
@@ -573,39 +713,39 @@ class TestExportSupabase:
         _seed_supabase_team(fake)
         seed_sdk = _seed_graph(db_path)  # noqa: F841
         as_user()
-        r = tc.get(f"/v1/teams/{TEAM_ID}/export")
+        r = tc.get(f"/v1/organizations/{ORG_ID}/export")
         assert r.status_code == 200
         ops = [e["operation"] for e in capture_audit]
         assert "team_export" in ops
         event = next(e for e in capture_audit if e["operation"] == "team_export")
         assert event["actor_user_id"] == OWNER
-        assert event["team_id"] == TEAM_ID
+        assert event["org_id"] == ORG_ID
         assert event["resource_type"] == "team"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# DELETE /v1/teams/{team_id} — Supabase mode
+# DELETE /v1/organizations/{org_id} — Supabase mode
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class TestDeleteSupabase:
     def test_delete_requires_session_auth(self, sb_client):
         tc, _, _ = sb_client
-        r = tc.delete(f"/v1/teams/{TEAM_ID}")
+        r = tc.delete(f"/v1/organizations/{ORG_ID}")
         assert r.status_code == 401
 
     def test_delete_requires_owner(self, sb_client, as_user):
         tc, fake, _ = sb_client
         _seed_supabase_team(fake, role="admin")  # admin ≠ owner
         as_user()
-        r = tc.delete(f"/v1/teams/{TEAM_ID}")
+        r = tc.delete(f"/v1/organizations/{ORG_ID}")
         assert r.status_code == 403
 
     def test_delete_unknown_team_403(self, sb_client, as_user):
         """AuthZ-first: unknown team → 403 for non-members (no oracle)."""
         tc, _, _ = sb_client
         as_user()
-        assert tc.delete("/v1/teams/nope").status_code == 403
+        assert tc.delete("/v1/organizations/nope").status_code == 403
 
     def test_delete_cascade(self, sb_client, as_user, capture_audit):
         """Soft delete: deleted_at stamp + keys revoked + memberships
@@ -613,20 +753,20 @@ class TestDeleteSupabase:
         tc, fake, _ = sb_client
         _seed_supabase_team(fake, with_invite=True)
         as_user()
-        r = tc.delete(f"/v1/teams/{TEAM_ID}")
+        r = tc.delete(f"/v1/organizations/{ORG_ID}")
         assert r.status_code == 202, r.text
         body = r.json()
         assert body["status"] == "delete_scheduled"
-        assert body["team_id"] == TEAM_ID
-        assert body["grace_hours"] == 24
+        assert body["org_id"] == ORG_ID
+        assert body["grace_hours"] == RESTORE_WINDOW_HOURS
         assert body["deleted_at"]
         assert body["hard_delete_after"] > body["deleted_at"]
 
-        by_id = {row["id"]: row for row in fake.tables["teams"]}
-        assert by_id[TEAM_ID]["deleted_at"] == body["deleted_at"]
-        assert by_id[TEAM_ID]["grace_hours"] == 24  # persisted promise
+        by_id = {row["id"]: row for row in fake.tables["organizations"]}
+        assert by_id[ORG_ID]["deleted_at"] == body["deleted_at"]
+        assert by_id[ORG_ID]["grace_hours"] == RESTORE_WINDOW_HOURS  # persisted promise
         assert fake.tables["api_keys"][0]["revoked_at"] == body["deleted_at"]
-        assert fake.tables["team_memberships"][0]["status"] == "removed"
+        assert fake.tables["org_memberships"][0]["status"] == "removed"
         assert fake.tables["invitations"][0]["status"] == "revoked"
 
         ops = [e["operation"] for e in capture_audit]
@@ -634,14 +774,14 @@ class TestDeleteSupabase:
         event = next(e for e in capture_audit
                      if e["operation"] == "team_delete_requested")
         assert event["actor_user_id"] == OWNER
-        assert event["team_id"] == TEAM_ID
+        assert event["org_id"] == ORG_ID
 
     def test_delete_revokes_key_auth_fail_closed(self, sb_client, as_user):
         """After delete, the team's tt_ keys stop authenticating (401)."""
         tc, fake, _ = sb_client
         _seed_supabase_team(fake)
         as_user()
-        assert tc.delete(f"/v1/teams/{TEAM_ID}").status_code == 202
+        assert tc.delete(f"/v1/organizations/{ORG_ID}").status_code == 202
         r = tc.get("/v1/team/keys", headers={"Authorization": f"Bearer {TOKEN}"})
         assert r.status_code == 401
 
@@ -652,21 +792,21 @@ class TestDeleteSupabase:
         _seed_supabase_team(fake, deleted_at=datetime.now(timezone.utc).isoformat())  # noqa: UP017
         as_user()
         # owner replay still works (removed-owner state accepted)
-        r = tc.delete(f"/v1/teams/{TEAM_ID}")
+        r = tc.delete(f"/v1/organizations/{ORG_ID}")
         assert r.status_code == 200
         assert r.json()["already"] is True
         # non-owner → 403
         app.dependency_overrides[get_current_user] = lambda: {"user_id": _U4}
-        r2 = tc.delete(f"/v1/teams/{TEAM_ID}")
+        r2 = tc.delete(f"/v1/organizations/{ORG_ID}")
         assert r2.status_code == 403
 
     def test_delete_idempotent(self, sb_client, as_user, capture_audit):
         tc, fake, _ = sb_client
         _seed_supabase_team(fake)
         as_user()
-        first = tc.delete(f"/v1/teams/{TEAM_ID}")
+        first = tc.delete(f"/v1/organizations/{ORG_ID}")
         assert first.status_code == 202
-        second = tc.delete(f"/v1/teams/{TEAM_ID}")
+        second = tc.delete(f"/v1/organizations/{ORG_ID}")
         assert second.status_code == 200
         body = second.json()
         assert body["already"] is True
@@ -678,60 +818,60 @@ class TestDeleteSupabase:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# #1903 — dashboard-created teams (POST /v1/teams): stored graph_name must
-# equal the data-plane namespace (team_{team_id}) so export/delete resolve
-# the REAL graph. The old mint (team_{name}) made export empty and delete
+# #1903 — dashboard-created teams (POST /v1/organizations): stored graph_name must
+# equal the data-plane namespace (org_{org_id}) so export/delete resolve
+# the REAL graph. The old mint (org_{name}) made export empty and delete
 # orphan the real graph.
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class TestDashboardCreatedTeamRoundTrip:
     def test_dashboard_created_team_export_returns_points(self, sb_client, as_user):
-        """#1903 Indicator 1+2: POST /v1/teams mints graph_name=team_{team_id}
+        """#1903 Indicator 1+2: POST /v1/organizations mints graph_name=org_{org_id}
         and a dashboard-created team's export returns its points (the stored
         name resolves the real data graph)."""
         tc, fake, db_path = sb_client
         as_user()
-        r = tc.post("/v1/teams", json={"name": "acme"})
+        r = tc.post("/v1/organizations", json={"name": "acme"})
         assert r.status_code == 200, r.text
         body = r.json()
-        team_id = body["team_id"]
-        assert body["graph_name"] == f"team_{team_id}"  # Indicator 1
+        org_id = body["org_id"]
+        assert body["graph_name"] == f"org_{org_id}"  # Indicator 1
         fn, p = fake.rpc_calls[0]
         assert fn == "provision_team"
-        assert p["p_graph_name"] == f"team_{team_id}"
-        # data-plane write (the real write path: namespace=team_id)
-        seed_sdk = _seed_graph(db_path, team_id=team_id, n_points=1, n_events=0)  # noqa: F841
-        r2 = tc.get(f"/v1/teams/{team_id}/export")
+        assert p["p_graph_name"] == f"org_{org_id}"
+        # data-plane write (the real write path: namespace=org_id)
+        seed_sdk = _seed_graph(db_path, org_id=org_id, n_points=1, n_events=0)  # noqa: F841
+        r2 = tc.get(f"/v1/organizations/{org_id}/export")
         assert r2.status_code == 200, r2.text
         assert r2.json()["summary"]["points"] == 1  # Indicator 2
 
-    def test_dashboard_created_team_delete_drops_team_id_graph(self, sb_client, as_user, monkeypatch, capture_audit):
+    def test_dashboard_created_team_delete_drops_org_id_graph(self, sb_client, as_user, monkeypatch, capture_audit):
         """#1903 Indicator 3: delete of a dashboard-created team targets the
-        team_{team_id} graph (the old team_{name} stored name orphaned it).
+        org_{org_id} graph (the old org_{name} stored name orphaned it).
         The _drop_team_graph_strict spy is the mechanism proof — the
         assertion is on the CORRECT TARGET passed to the drop."""
         tc, fake, _ = sb_client
         as_user()
         # env must be 0 BEFORE delete — soft_delete stamps the STORED
         # grace_hours and the purge honors stored grace over env
-        # (_past_grace): a 24h stamp would skip the just-deleted team.
+        # (_past_grace): a 7-day stamp would skip the just-deleted team.
         monkeypatch.setenv("TORTOISE_TEAM_DELETE_GRACE_HOURS", "0")
-        r = tc.post("/v1/teams", json={"name": "acme"})
+        r = tc.post("/v1/organizations", json={"name": "acme"})
         assert r.status_code == 200, r.text
-        team_id = r.json()["team_id"]
-        assert r.json()["graph_name"] == f"team_{team_id}"
+        org_id = r.json()["org_id"]
+        assert r.json()["graph_name"] == f"org_{org_id}"
         dropped = []
-        monkeypatch.setattr(ha_mod, "_drop_team_graph_strict",
+        monkeypatch.setattr(ha_mod, '_drop_org_graph_strict',
                             lambda tid, gn=None: dropped.append((tid, gn)))
-        r = tc.delete(f"/v1/teams/{team_id}")
+        r = tc.delete(f"/v1/organizations/{org_id}")
         assert r.status_code == 202, r.text
         assert r.json()["grace_hours"] == 0  # env->stored promise pinned
-        ha_mod._purge_deleted_teams()
-        # exactly one drop, exactly the team_{team_id} target (suite precedent:
+        ha_mod._purge_deleted_orgs()
+        # exactly one drop, exactly the org_{org_id} target (suite precedent:
         # TestPurge asserts strict equality on the captured drop list)
-        assert dropped == [(team_id, f"team_{team_id}")]  # Indicator 3
-        assert not any(t["id"] == team_id for t in fake.tables["teams"])
+        assert dropped == [(org_id, f"org_{org_id}")]  # Indicator 3
+        assert not any(t["id"] == org_id for t in fake.tables["organizations"])
         ops = [e["operation"] for e in capture_audit]
         assert "team_delete_purged" in ops
 
@@ -745,9 +885,9 @@ class TestExportDeleteRegistry:
     def test_export_happy_path_registry(self, reg_client, as_user):
         tc, db_path = reg_client
         _seed_registry(db_path)
-        seed_sdk = _seed_graph(db_path, team_id="reg-team-1")  # noqa: F841
+        seed_sdk = _seed_graph(db_path, org_id="reg-team-1")  # noqa: F841
         as_user(user_id=_U2)
-        r = tc.get("/v1/teams/reg-team-1/export")
+        r = tc.get("/v1/organizations/reg-team-1/export")
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["summary"]["points"] == 2
@@ -764,25 +904,25 @@ class TestExportDeleteRegistry:
         # self-verify pattern).
         assert _registry_count(db_path, "Team", "reg-team-1") == 1
         as_user(user_id=_U3)  # no membership at all
-        assert tc.get("/v1/teams/reg-team-1/export").status_code == 403
+        assert tc.get("/v1/organizations/reg-team-1/export").status_code == 403
 
     def test_export_uses_stored_graph_name(self, reg_client, as_user):
-        """Teams created via sdk.team_create store graph_name=team_{name} —
-        export must read THAT graph, not team_{id} (code-review P1, #873)."""
+        """Teams created via sdk.team_create store graph_name=org_{name} —
+        export must read THAT graph, not org_{id} (code-review P1, #873)."""
         tc, db_path = reg_client
         sdk = TortoiseSDK(db_path, namespace="registry")
         reg = sdk._get_registry()
         reg.query(
             "CREATE (t:Team {id:'reg-named', name:'Acme', tier:'free', "
-            "graph_name:'team_Acme'})"
+            "graph_name:'org_Acme'})"
         )
         reg.query(
             "CREATE (m:Membership {id:'m-2', user_id:'9f2c1a40-0000-4a00-8000-000000000002', "
-            "team_id:'reg-named', role:'owner', status:'active'})"
+            "org_id:'reg-named', role:'owner', status:'active'})"
         )
-        seed_sdk = _seed_graph(db_path, team_id="Acme", n_points=1, n_events=0)  # noqa: F841
+        seed_sdk = _seed_graph(db_path, org_id="Acme", n_points=1, n_events=0)  # noqa: F841
         as_user(user_id=_U2)
-        r = tc.get("/v1/teams/reg-named/export")
+        r = tc.get("/v1/organizations/reg-named/export")
         assert r.status_code == 200, r.text
         assert r.json()["summary"]["points"] == 1
 
@@ -790,7 +930,7 @@ class TestExportDeleteRegistry:
         tc, db_path = reg_client
         _seed_registry(db_path, deleted_at=datetime.now(timezone.utc).isoformat())  # noqa: UP017
         as_user(user_id=_U2)
-        r = tc.get("/v1/teams/reg-team-1/export")
+        r = tc.get("/v1/organizations/reg-team-1/export")
         assert r.status_code == 410
 
     def test_delete_cascade_registry(self, reg_client, as_user):
@@ -799,11 +939,11 @@ class TestExportDeleteRegistry:
         # pending invitation must be revoked too (registry branch)
         sdk = TortoiseSDK(db_path, namespace="registry")
         sdk._get_registry().query(
-            "CREATE (i:Invitation {id:'inv-r', team_id:'reg-team-1', "
+            "CREATE (i:Invitation {id:'inv-r', org_id:'reg-team-1', "
             "email:'bob@example.com', role:'member', status:'pending'})"
         )
         as_user(user_id=_U2)
-        r = tc.delete("/v1/teams/reg-team-1")
+        r = tc.delete("/v1/organizations/reg-team-1")
         assert r.status_code == 202, r.text
         assert r.json()["status"] == "delete_scheduled"
 
@@ -812,18 +952,18 @@ class TestExportDeleteRegistry:
             "MATCH (t:Team {id:'reg-team-1'}) RETURN t.deleted_at, t.grace_hours"
         ).result_set
         assert rows and rows[0][0]  # deleted_at stamped
-        assert rows[0][1] == 24  # persisted grace promise
+        assert rows[0][1] == RESTORE_WINDOW_HOURS  # persisted grace promise
         assert _registry_count(db_path, "APIKey", "reg-team-1") == 1
         rev = reg.query(
-            "MATCH (k:APIKey {team_id:'reg-team-1'}) RETURN k.revoked_at"
+            "MATCH (k:APIKey {org_id:'reg-team-1'}) RETURN k.revoked_at"
         ).result_set
         assert rev and rev[0][0] is not None
         mem = reg.query(
-            "MATCH (m:Membership {team_id:'reg-team-1'}) RETURN m.status"
+            "MATCH (m:Membership {org_id:'reg-team-1'}) RETURN m.status"
         ).result_set
         assert mem and mem[0][0] == "removed"
         inv = reg.query(
-            "MATCH (i:Invitation {team_id:'reg-team-1'}) RETURN i.status"
+            "MATCH (i:Invitation {org_id:'reg-team-1'}) RETURN i.status"
         ).result_set
         assert inv and inv[0][0] == "revoked"
 
@@ -831,8 +971,8 @@ class TestExportDeleteRegistry:
         tc, db_path = reg_client
         _seed_registry(db_path)
         as_user(user_id=_U2)
-        assert tc.delete("/v1/teams/reg-team-1").status_code == 202
-        second = tc.delete("/v1/teams/reg-team-1")
+        assert tc.delete("/v1/organizations/reg-team-1").status_code == 202
+        second = tc.delete("/v1/organizations/reg-team-1")
         assert second.status_code == 200
         assert second.json()["already"] is True
 
@@ -846,16 +986,16 @@ class TestExportDeleteRegistry:
         reg = sdk._get_registry()
         reg.query("CREATE (t:Team {id:'reg-team-1', name:'reg-team-1'})")
         reg.query(
-            "CREATE (k:APIKey {id:'k-1', team_id:'reg-team-1', "
+            "CREATE (k:APIKey {id:'k-1', org_id:'reg-team-1', "
             "key_prefix:$pfx, key_hash:$hash, revoked_at:null})",
             params={"pfx": TOKEN[:10], "hash": hash_api_key(TOKEN)},
         )
         reg.query(
             "CREATE (m:Membership {id:'m-1', user_id:'9f2c1a40-0000-4a00-8000-000000000002', "
-            "team_id:'reg-team-1', role:'owner', status:'active'})"
+            "org_id:'reg-team-1', role:'owner', status:'active'})"
         )
         as_user(user_id=_U2)
-        assert tc.delete("/v1/teams/reg-team-1").status_code == 202
+        assert tc.delete("/v1/organizations/reg-team-1").status_code == 202
         r = tc.get("/v1/team", headers={"Authorization": f"Bearer {TOKEN}"})
         assert r.status_code == 401
 
@@ -869,16 +1009,16 @@ class TestPurge:
     def test_purge_hard_deletes_past_grace_registry(self, reg_client,
                                                     capture_audit, monkeypatch):
         tc, db_path = reg_client  # noqa: RUF059
-        past = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()  # noqa: UP017
-        _seed_registry(db_path, team_id="reg-old", deleted_at=past)
-        _seed_registry(db_path, team_id="reg-recent",
+        past = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()  # noqa: UP017
+        _seed_registry(db_path, org_id="reg-old", deleted_at=past)
+        _seed_registry(db_path, org_id="reg-recent",
                        deleted_at=datetime.now(timezone.utc).isoformat())  # noqa: UP017
         # wiring check: the graph drop is invoked for the purged team only
         dropped: list[str] = []
-        monkeypatch.setattr(ha_mod, "_drop_team_graph",
-                            lambda team_id, graph_name=None: dropped.append(team_id))
+        monkeypatch.setattr(ha_mod, '_drop_org_graph',
+                            lambda org_id, graph_name=None: dropped.append(org_id))
 
-        ha_mod._purge_deleted_teams()
+        ha_mod._purge_deleted_orgs()
 
         assert _registry_count(db_path, "Team", "reg-old") == 0
         assert _registry_count(db_path, "Membership", "reg-old") == 0
@@ -888,7 +1028,7 @@ class TestPurge:
         assert dropped == ["reg-old"]  # never the within-grace team
         ops = [e["operation"] for e in capture_audit]
         assert ops.count("team_delete_purged") == 1
-        assert capture_audit[-1]["team_id"] == "reg-old"
+        assert capture_audit[-1]["org_id"] == "reg-old"
 
     def test_purge_honors_stored_grace(self, reg_client, capture_audit,
                                        monkeypatch):
@@ -898,51 +1038,77 @@ class TestPurge:
         monkeypatch.setenv("TORTOISE_TEAM_DELETE_GRACE_HOURS", "1")
         tc, db_path = reg_client  # noqa: RUF059
         ten_hours = (datetime.now(timezone.utc) - timedelta(hours=10)).isoformat()  # noqa: UP017
-        _seed_registry(db_path, team_id="reg-promised", deleted_at=ten_hours)
+        _seed_registry(db_path, org_id="reg-promised", deleted_at=ten_hours)
         sdk = TortoiseSDK(db_path, namespace="registry")
         sdk._get_registry().query(
             "MATCH (t:Team {id:'reg-promised'}) SET t.grace_hours=24"
         )
-        _seed_registry(db_path, team_id="reg-env-old",
+        _seed_registry(db_path, org_id="reg-env-old",
                        deleted_at=ten_hours)  # no stored grace → env 1h
 
-        ha_mod._purge_deleted_teams()
+        ha_mod._purge_deleted_orgs()
 
         assert _registry_count(db_path, "Team", "reg-promised") == 1  # kept
         assert _registry_count(db_path, "Team", "reg-env-old") == 0  # purged
 
+    def test_purge_does_not_defer_org_past_stored_grace(
+            self, reg_client, capture_audit, monkeypatch):
+        """#4179 P1 — grow-direction twin of ``test_purge_honors_stored_grace``.
+
+        A legacy in-flight org deleted under the old 24h default (stored
+        ``grace_hours=24``) 30h ago is past its OWN disclosed
+        ``hard_delete_after``. Raising the env default to 168h must NOT hold
+        it until 168h: the env cutoff is a fetch superset, never a pre-filter
+        of the stored promise."""
+        monkeypatch.setenv("TORTOISE_TEAM_DELETE_GRACE_HOURS", "168")
+        tc, db_path = reg_client  # noqa: RUF059
+        thirty_hours = (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat()  # noqa: UP017
+        _seed_registry(db_path, org_id="reg-legacy", deleted_at=thirty_hours)
+        sdk = TortoiseSDK(db_path, namespace="registry")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:'reg-legacy'}) SET t.grace_hours=24"
+        )
+        # control: no stored grace → the env fallback (168h) still applies.
+        _seed_registry(db_path, org_id="reg-env-recent",
+                       deleted_at=thirty_hours)
+
+        ha_mod._purge_deleted_orgs()
+
+        assert _registry_count(db_path, "Team", "reg-legacy") == 0
+        assert _registry_count(db_path, "Team", "reg-env-recent") == 1
+
     def test_purge_deletes_rows_past_grace_supabase(self, sb_client,
                                                     capture_audit):
         tc, fake, _ = sb_client  # noqa: RUF059
-        past = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()  # noqa: UP017
+        past = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()  # noqa: UP017
         recent = datetime.now(timezone.utc).isoformat()  # noqa: UP017
-        fake.seed("teams", [
+        fake.seed("organizations", [
             dict(FREE_TEAM, deleted_at=past),
             dict(FREE_TEAM, id="team-recent", deleted_at=recent),
         ])
-        fake.seed("team_memberships", [
+        fake.seed("org_memberships", [
             _membership_row(),                       # team-free-001 (old)
-            _membership_row(team_id="team-recent"),  # within grace
+            _membership_row(org_id="team-recent"),  # within grace
         ])
         fake.seed("api_keys", [
             _key_row(),                              # team-free-001 (old)
-            _key_row(team_id="team-recent"),         # within grace
+            _key_row(org_id="team-recent"),         # within grace
         ])
         fake.seed("invitations", [{
-            "id": "inv-1", "team_id": TEAM_ID, "email": "bob@example.com",
+            "id": "inv-1", "org_id": ORG_ID, "email": "bob@example.com",
             "role": "member", "status": "pending", "expires_at": None,
         }])
 
-        ha_mod._purge_deleted_teams()
+        ha_mod._purge_deleted_orgs()
 
         # team-free-001 control-plane rows hard-deleted (all tables)
-        assert all(r["id"] != TEAM_ID for r in fake.tables["teams"])
-        assert all(r["team_id"] != TEAM_ID for r in fake.tables["api_keys"])
-        assert all(r["team_id"] != TEAM_ID
-                   for r in fake.tables["team_memberships"])
+        assert all(r["id"] != ORG_ID for r in fake.tables["organizations"])
+        assert all(r["org_id"] != ORG_ID for r in fake.tables["api_keys"])
+        assert all(r["org_id"] != ORG_ID
+                   for r in fake.tables["org_memberships"])
         assert fake.tables["invitations"] == []
         # within-grace team survives
-        assert any(r["id"] == "team-recent" for r in fake.tables["teams"])
+        assert any(r["id"] == "team-recent" for r in fake.tables["organizations"])
         ops = [e["operation"] for e in capture_audit]
         assert "team_delete_purged" in ops
 
@@ -954,42 +1120,42 @@ class TestPurge:
         (control-plane rows untouched, no purge audit event), and the
         next sweep retries the drop to completion."""
         tc, fake, _ = sb_client  # noqa: RUF059
-        past = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()  # noqa: UP017
-        fake.seed("teams", [dict(FREE_TEAM, deleted_at=past),
+        past = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()  # noqa: UP017
+        fake.seed("organizations", [dict(FREE_TEAM, deleted_at=past),
                              dict(FREE_TEAM, id="team-other",
                                   deleted_at=past)])
-        fake.seed("team_memberships", [_membership_row(),
-                                        _membership_row(team_id="team-other")])
+        fake.seed("org_memberships", [_membership_row(),
+                                        _membership_row(org_id="team-other")])
         fake.seed("api_keys", [_key_row(),
-                                _key_row(team_id="team-other")])
+                                _key_row(org_id="team-other")])
 
-        def _flaky(team_id, graph_name=None):
-            if team_id == TEAM_ID:
+        def _flaky(org_id, graph_name=None):
+            if org_id == ORG_ID:
                 raise RuntimeError("graph drop failed (fault injection, #926)")
             return None
 
-        monkeypatch.setattr(ha_mod, "_drop_team_graph_strict", _flaky)
+        monkeypatch.setattr(ha_mod, '_drop_org_graph_strict', _flaky)
 
-        ha_mod._purge_deleted_teams()
+        ha_mod._purge_deleted_orgs()
 
         # retry anchor survives: teams row + child rows NOT purged
-        assert any(r["id"] == TEAM_ID for r in fake.tables["teams"])
-        assert any(r["team_id"] == TEAM_ID for r in fake.tables["api_keys"])
-        assert any(r["team_id"] == TEAM_ID
-                   for r in fake.tables["team_memberships"])
+        assert any(r["id"] == ORG_ID for r in fake.tables["organizations"])
+        assert any(r["org_id"] == ORG_ID for r in fake.tables["api_keys"])
+        assert any(r["org_id"] == ORG_ID
+                   for r in fake.tables["org_memberships"])
         # ...and a failed drop never blocks OTHER past-grace teams
-        assert all(r["id"] != "team-other" for r in fake.tables["teams"])
-        assert all(r["team_id"] != "team-other"
+        assert all(r["id"] != "team-other" for r in fake.tables["organizations"])
+        assert all(r["org_id"] != "team-other"
                    for r in fake.tables["api_keys"])
         ops = [e["operation"] for e in capture_audit]
         assert ops.count("team_delete_purged") == 1
-        assert capture_audit[-1]["team_id"] == "team-other"
+        assert capture_audit[-1]["org_id"] == "team-other"
 
         # next sweep (drop healed, real strict impl) → row purged
-        monkeypatch.setattr(ha_mod, "_drop_team_graph_strict",
-                            ha_mod._drop_team_graph_impl)
-        ha_mod._purge_deleted_teams()
-        assert all(r["id"] != TEAM_ID for r in fake.tables["teams"])
+        monkeypatch.setattr(ha_mod, '_drop_org_graph_strict',
+                            ha_mod._drop_org_graph_impl)
+        ha_mod._purge_deleted_orgs()
+        assert all(r["id"] != ORG_ID for r in fake.tables["organizations"])
         ops = [e["operation"] for e in capture_audit]
         assert ops.count("team_delete_purged") == 2
 
@@ -1023,16 +1189,16 @@ class TestDropTeamGraphImplCloudShape:
         fake_sdk = type("FakeSDK", (), {"_get_proj": lambda self: proj})()
         monkeypatch.setattr(ha_mod, "_make_sdk", lambda namespace: fake_sdk)
 
-        # graph_name wins; the default team_{team_id} fallback also drops
-        ha_mod._drop_team_graph_impl("team-abc", "team_abc000000000000000000000")
-        ha_mod._drop_team_graph_impl("team-xyz")
+        # graph_name wins; the default org_{org_id} fallback also drops
+        ha_mod._drop_org_graph_impl("team-abc", "team_abc000000000000000000000")
+        ha_mod._drop_org_graph_impl("team-xyz")
 
         # the pre-#2163 code called NOTHING on this client (hasattr probe
         # false) — the regression pin is that both drops actually fired
         assert not hasattr(db, "delete_graph"), \
             "fixture must mirror the pip falkordb client (no delete_graph)"
         assert dropped == [
-            "team_abc000000000000000000000", "team_team-xyz"]
+            "team_abc000000000000000000000", "org_team-xyz"]
 
     def test_strict_drop_raises_when_graph_delete_fails(self, monkeypatch):
         """#926 retry-anchor contract: _drop_team_graph_strict propagates a
@@ -1048,9 +1214,9 @@ class TestDropTeamGraphImplCloudShape:
         monkeypatch.setattr(ha_mod, "_make_sdk", lambda namespace: fake_sdk)
 
         with pytest.raises(RuntimeError, match=r"GRAPH\.DELETE failed"):
-            ha_mod._drop_team_graph_strict("team-abc", "team_abc000000000000000000000")
+            ha_mod._drop_org_graph_strict("team-abc", "team_abc000000000000000000000")
         # best-effort variant swallows the same failure
-        ha_mod._drop_team_graph("team-abc", "team_abc000000000000000000000")
+        ha_mod._drop_org_graph("team-abc", "team_abc000000000000000000000")
 
     def test_strict_drop_converges_on_absent_graph(self, monkeypatch):
         """#2163 re-review P0: GRAPH.DELETE on an already-dropped graph
@@ -1074,8 +1240,8 @@ class TestDropTeamGraphImplCloudShape:
         monkeypatch.setattr(ha_mod, "_make_sdk", lambda namespace: fake_sdk)
 
         # strict drop must NOT raise on the absent-graph family
-        ha_mod._drop_team_graph_strict("team-abc", "team_abc000000000000000000000")
-        ha_mod._drop_team_graph("team-abc", "team_abc000000000000000000000")
+        ha_mod._drop_org_graph_strict("team-abc", "team_abc000000000000000000000")
+        ha_mod._drop_org_graph("team-abc", "team_abc000000000000000000000")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1091,9 +1257,9 @@ class TestSensitiveRateLimit:
         tc, _, _ = sb_client
         as_user()
         for _ in range(5):
-            r = tc.delete("/v1/teams/nope")  # unknown team → 403, not 429
+            r = tc.delete("/v1/organizations/nope")  # unknown team → 403, not 429
             assert r.status_code == 403
-        r = tc.delete("/v1/teams/nope")
+        r = tc.delete("/v1/organizations/nope")
         assert r.status_code == 429
         assert "Retry-After" in r.headers
         ha_mod._SENSITIVE_BUCKETS.clear()
@@ -1109,8 +1275,8 @@ class TestSensitiveRateLimit:
         as_user()
         # burn the delete budget first — export must be unaffected
         for _ in range(5):
-            assert tc.delete("/v1/teams/nope").status_code == 403
-        assert tc.get("/v1/teams/nope/export").status_code == 403  # budget 1
-        assert tc.get("/v1/teams/nope/export").status_code == 403  # budget 2
-        assert tc.get("/v1/teams/nope/export").status_code == 429  # exhausted
+            assert tc.delete("/v1/organizations/nope").status_code == 403
+        assert tc.get("/v1/organizations/nope/export").status_code == 403  # budget 1
+        assert tc.get("/v1/organizations/nope/export").status_code == 403  # budget 2
+        assert tc.get("/v1/organizations/nope/export").status_code == 429  # exhausted
         ha_mod._SENSITIVE_BUCKETS.clear()

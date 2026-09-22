@@ -106,7 +106,7 @@ class TestDe2e7:
         monkeypatch.setenv("TORTOISE_API_KEY", "")
         mcp._transport_mode.set("stdio")
         sdk = TortoiseSDK(db_path=os.path.join(tempfile.mkdtemp(), "t.db"))
-        monkeypatch.setattr(mcp, "_get_team_sdk", lambda: sdk)
+        monkeypatch.setattr(mcp, "_get_org_sdk", lambda: sdk)
         # Real SDK raise path: nonexistent ids → ValueError → {error: ...}.
         res = mcp.tortoise_promote_point("no-such-point-123")
         assert isinstance(res, dict) and "error" in res, res

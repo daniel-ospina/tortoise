@@ -97,36 +97,70 @@ def close_issue(repo: str, token: str, number: int, comment: str | None = None) 
 
 
 def search_open_incident(repo: str, token: str, kind: str,
-                          team_id: str = "") -> list[int]:
+                          org_id: str = "") -> list[int]:
     """GH-search fallback: open ``dr:backup`` issues whose title carries
-    ``kind`` AND the incident subject (``team_id`` — a team id or the
-    per-graph "{team}:{graph}" subject, #2313 Task 4).
+    ``kind`` AND the incident subject (``org_id`` — an org id or the
+    per-graph "{org}:{graph}" subject, #2313 Task 4).
 
     Subject scoping matters: incidents are keyed per (kind, subject); an
     adoption search that matches only ``kind`` would bind a same-kind issue
     opened for a DIFFERENT subject — recovery of one would then close the
-    other's issue (silent-loss cross-talk). Empty ``team_id`` (global kinds
+    other's issue (silent-loss cross-talk). Empty ``org_id`` (global kinds
     like DRIVER_DOWN) matches the bare ``[DR] {kind}`` title.
 
     Used when R2 is unreachable (no dedup object possible) or when a created
     dedup object is missing its issue_number (create-then-die window).
     """
-    title = f"[DR] {kind}" + (f" — {team_id}" if team_id else "")
+    title = f"[DR] {kind}" + (f" — {org_id}" if org_id else "")
     query = f'repo:{repo} is:issue is:open label:"{_DR_LABEL}" in:title "{title}"'
     url = f"{_API}/search/issues?q={urllib.parse.quote(query)}"
     data = _request("GET", url, token)
     items = data.get("items", [])
-    if team_id:
+    if org_id:
         # #2413 exact-subject verification: GitHub issue search does NOT
         # guarantee punctuation-exact phrase matching — ':' is a token
-        # boundary, so the phrase "[DR] KIND — team_a" can match a title
-        # "[DR] KIND — team_a:g_x" (the bare team subject is a literal
+        # boundary, so the phrase "[DR] KIND — org_a" can match a title
+        # "[DR] KIND — org_a:g_x" (the bare org subject is a literal
         # prefix of its per-graph subjects). A prefix-colliding adoption
         # would bind a DIFFERENT subject's issue into this incident's dedup
         # object — one subject's recovery then closes the other's live issue
         # (silent-loss cross-talk; the driver's gh_find_open already verifies
         # the exact title suffix, #2375). Verify server-side before adopting.
-        suffix = f" — {team_id}"
+        suffix = f" — {org_id}"
         items = [i for i in items
                  if str(i.get("title", "")).endswith(suffix)]
     return [int(i["number"]) for i in items]
+
+
+def issue_is_open(repo: str, token: str, number: int) -> bool:
+    """Authoritative open/closed state for ONE issue (#3127).
+
+    Preferred over inferring liveness from a search result: the GH *search*
+    endpoint is rate limited (~30/min) and matches titles heuristically, so
+    "absent from the results" is NOT proof of closure. Reading the issue's own
+    state is, and it is what lets the dedup store trust a sentinel only while
+    the issue it names is still open — a sentinel naming a CLOSED issue would
+    otherwise swallow every recurrence of a live fault.
+    """
+    data = _request("GET", f"{_API}/repos/{repo}/issues/{number}", token)
+    return str(data.get("state", "open")) == "open"
+
+
+def issue_is_open_checked(repo: str, token: str, number: int) -> bool:
+    """``issue_is_open`` with 404/410 treated as CLOSED, not as an error.
+
+    A deleted (or bogus) issue number is POSITIVE evidence that the incident is
+    no longer tracked, and the bash driver's ``gh_issue_open`` already treats it
+    that way (404 -> re-file). Letting it surface as a generic failure would let
+    a sentinel naming a deleted issue swallow the recurrence forever — the
+    silent-outage class this whole mechanism exists to stop. Every other failure
+    (5xx, rate limit, transport) still raises, so a blip counts as "open" and
+    never re-files a live incident.
+    """
+    try:
+        data = _request("GET", f"{_API}/repos/{repo}/issues/{number}", token)
+    except GithubApiError as e:
+        if e.status in (404, 410):
+            return False
+        raise
+    return str(data.get("state", "open")) == "open"
