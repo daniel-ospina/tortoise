@@ -68,17 +68,18 @@ on:
   workflow_dispatch:
     inputs:
       # #1719 (Task 7): DB-health verification bypass for incident-fix deploys.
-      # Defaults FALSE — re-armed by #4538 (2026-09-23). This input was 'true'
-      # ONLY as the RC3 FalkorDB-restore mitigation, a dated incident-window
-      # state with its own exit condition ("flip to false once the data plane
-      # is healthy"). That condition was evaluated and MET: sampling
-      # https://api.premiselabs.co/health on 2026-09-23 returned db.ok=true on
-      # every completed response (db latency 2.4-713.7 ms against the 1500 ms
-      # probe budget) with /health/ready 200 {"db":"connected",
-      # "control_plane":"connected"}, so fail-closed verification no longer
-      # reddens a healthy deploy. DO NOT "restore" the incident-window
-      # default: bypass per run with this input, or per window with the
-      # SKIP_DB_HEALTH_GATE repo variable (docs/infra-runbook.md §8.2).
+      # Defaults FALSE — re-armed by #4605 (2026-09-22, UTC). This input was
+      # 'true' ONLY as the RC3 FalkorDB-restore mitigation, a dated
+      # incident-window state with its own exit condition ("flip to false once
+      # the data plane is healthy"). That condition was evaluated and MET:
+      # sampling https://api.premiselabs.co/health on 2026-09-22 returned
+      # db.ok=true on every completed response (db latency 2.4-713.7 ms
+      # against the 1500 ms probe budget) with /health/ready 200
+      # {"db":"connected","control_plane":"connected"}, so fail-closed
+      # verification no longer reddens a healthy deploy. DO NOT "restore" the
+      # incident-window default: bypass per run with this input, or per window
+      # with the SKIP_DB_HEALTH_GATE repo variable (docs/infra-runbook.md
+      # §8.2).
       # Since #4538 it reports release health in its own job
       # (`post-deploy-verify`) and does not colour the deploy job.
       # Emits a ::warning:: when bypassed (auditability — never silently

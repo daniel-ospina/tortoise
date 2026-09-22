@@ -1477,17 +1477,20 @@ Rules that hold for every one of them:
   and `SKIP_DB_HEALTH_GATE` skips the whole health step — so nothing in it
   runs, and the bypass is not exit-class-limited.
 
-**All four dispatch inputs default to `false`**, so clearing the repo variable
-re-arms the gate on a dispatch run for every gate in the table. That was *not*
-true between #1719 and #4538: `skip-db-health-gate.default` was `'true'` during
-the RC3 restore window (when `db.ok=false` was the live prod state), so clearing
-the variable alone left the health verification skipped and the input also had
-to be passed as `false`. That default was an incident-window mitigation with its
-own exit condition — re-arm once the data plane is healthy — and it was
-re-armed on 2026-09-23 (#4538) after sampling `/health` showed `db.ok=true` on
-every completed response. If the data plane is unhealthy again, bypass **per
-run** via the input or **per window** via the variable — the committed default
-stays `false`.
+**A bypass is never the committed default.** Every `skip-*` dispatch input
+defaults to the non-bypass value, so clearing the repo variable re-arms the gate
+on a dispatch run for every gate in the table — the concrete defaults live in
+`.github/workflows/deploy-hosted.yml` (`workflow_dispatch.inputs`) and are not
+restated here. That was *not* true between #1719 and the #4605 re-arm:
+`skip-db-health-gate.default` was `'true'` during the RC3 restore window (when
+`db.ok=false` was the live prod state), so clearing the variable alone left the
+health verification skipped and the input also had to be passed as `false`.
+That default was an incident-window mitigation with its own exit condition —
+re-arm once the data plane is healthy — and #4605 re-armed it on 2026-09-22
+after sampling `/health` showed `db.ok=true` on every completed response.
+(`#4538` moved the check into its own job; it did not change this default.) If
+the data plane is unhealthy again, bypass **per run** via the input or **per
+window** via the variable — the committed default stays `false`.
 
 ```bash
 gh variable list                                             # what is currently bypassed

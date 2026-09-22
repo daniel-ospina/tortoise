@@ -422,13 +422,13 @@ def test_array_pair_parser_accepts_the_brace_spelling(workflow_text):
 
 
 def test_skip_bypass_inputs_are_re_armed_by_default():
-    """#4538 — every `skip-*` dispatch input defaults to `false`.
+    """#4605 — every `skip-*` dispatch input defaults to `false`.
 
     A bypass is an incident-window STATE — set per run with the input, or per
     window with the `SKIP_*` repo variable (docs/infra-runbook.md §8.2) — never
     a committed default. `skip-db-health-gate` shipped `default: 'true'` as the
     RC3 FalkorDB-restore mitigation and so skipped the release-health
-    verification on EVERY manual dispatch; #4538 re-armed it on 2026-09-23 once
+    verification on EVERY manual dispatch; #4605 re-armed it on 2026-09-22 once
     the data plane was healthy, which is why the incident default must not be
     "restored". A `'true'` default disarms a gate without any run saying so.
     """
@@ -437,7 +437,20 @@ def test_skip_bypass_inputs_are_re_armed_by_default():
     on = doc.get("on") or doc.get(True)
     inputs = on["workflow_dispatch"]["inputs"]
     skips = {name: spec for name, spec in inputs.items() if name.startswith("skip-")}
-    assert skips, "no skip-* dispatch inputs found — the anchor moved"
+    # Pin the NAMES, not just the prefix: prefix discovery alone would shrink
+    # silently if a gate were renamed out of the `skip-` namespace (or removed),
+    # leaving this guard green while covering one gate fewer (#4760 review).
+    expected = {
+        "skip-db-health-gate",
+        "skip-pack-smoke",
+        "skip-fly-machines-guard",
+        "skip-fly-secret-provenance",
+    }
+    missing = sorted(expected - set(skips))
+    assert not missing, (
+        f"bypass input(s) missing or renamed out of the skip-* namespace: {missing} "
+        "— update this guard deliberately, do not let it shrink silently"
+    )
     for name, spec in skips.items():
         assert spec.get("type") == "boolean", f"{name} must stay a boolean input"
         assert str(spec.get("default")).lower() == "false", (
