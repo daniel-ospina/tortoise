@@ -114,6 +114,22 @@ def test_plan_requires_expected_direction_for_confirm(tmp_path):
                          expected_direction="up on KU/TR, flat elsewhere")
 
 
+def test_run_step_commands_are_bytecode_free(tmp_path):
+    """#3712: the measured run must leave no ``.pyc`` under the surface — the
+    measured-revision guard refuses byte-caches by default, so a run that
+    writes them cannot be attested. Every cell passes ``-B``, and the
+    subprocess env carries ``PYTHONDONTWRITEBYTECODE=1`` for the children.
+
+    RED mutation: drop ``"-B"`` from ``_run_cmd``/``_cell_cmd`` (or the env
+    var from ``_run_env``) → this fails.
+    """
+    state = _fresh_state(tmp_path)
+    for s in (rp.STEPS_BY_NUMBER[3], rp.STEPS_BY_NUMBER[5]):
+        assert "-B" in rp.build_command(s, [], state=state)
+    assert "-B" in rp._cell_cmd([])
+    assert rp._run_env()["PYTHONDONTWRITEBYTECODE"] == "1"
+
+
 def test_build_command_uses_base_runner_flags(tmp_path):
     """Run-step commands must use flags that exist on the BASE runner (no
     M2–M8 dependency): --split/--limit/--ingest-mode/--checkpoint/--output."""
