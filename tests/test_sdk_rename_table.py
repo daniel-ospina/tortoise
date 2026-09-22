@@ -800,18 +800,20 @@ C3B_DIVERGENCES_LITERAL: dict[str, tuple[str, str, str]] = {
                            "tortoise_compute_confidence"),
     "diary_read": ("DEFERRED", "REMOVED", "tortoise_diary_read"),
     "diary_write": ("DEFERRED", "REMOVED", "tortoise_diary_write"),
-    "get_events": ("get_entity", "poll_events", "tortoise_get_events"),
     "invalidate_point": ("update_knowledge", "supersede_knowledge",
                           "tortoise_invalidate"),
     "list_graphs": ("graph_overview", "tenancy:list_memory_graphs",
                     "tortoise_list_graphs"),
     "list_namespaces": ("graph_overview", "list_knowledge", "tortoise_list_namespaces"),
-    "list_pointkinds": ("graph_overview", "list_knowledge", "tortoise_list_pointkinds"),
-    "list_tags": ("graph_overview", "list_knowledge", "tortoise_list_tags"),
+    "list_sources": ("list_knowledge", "graph_overview", "tortoise_list_sources"),
     "list_topics": ("graph_overview", "list_knowledge", "tortoise_list_topics"),
     "org_create": ("UNBACKED", "tenancy:create_memory_graph", "tortoise_org_create"),
+    "paginated_query": ("list_knowledge", "search_knowledge",
+                        "tortoise_paginated_query"),
     "promote_point": ("CONTESTED", "refresh_confidence", "tortoise_promote_point"),
     "query": ("list_knowledge", "search_knowledge", "tortoise_query"),
+    "query_points_by_tag": ("list_knowledge", "search_knowledge",
+                            "tortoise_query_points_by_tag"),
     "set_point_baseline": ("CONTESTED", "refresh_confidence",
                            "tortoise_set_point_baseline"),
 }
@@ -823,16 +825,16 @@ C3B_DETERMINATIONS_LITERAL: dict[str, str] = {
     'compute_confidence': "**Part A is right.** The canonical W13 group is renamed by beta to `refresh_confidence` (“Recompute confidence after changes”); `check_confidence` is the READ (“Returns the confidence view only”). `compute_confidence` recomputes, so the bridge follows the canonical group rather than beta's rename.",
     'diary_read': "**Part A is right; the sibling carries the same defect.** beta files `diary_read` under “Named but not solved” — live and unlisted, not dead. The bridge's `REMOVED` reads it as discarded.",
     'diary_write': "**Part A is right; the sibling carries the same defect.** beta files `diary_write` under “Named but not solved” — live and unlisted, not dead. The bridge's `REMOVED` reads it as discarded.",
-    'get_events': "**Genuinely contested — no owner ruling.** beta's narrow-readers row names `get_events` → `get_entity` but carves out “except where a genuinely different shape is returned”, and the bridge's `poll_events` (“Read the event log since a point in time”) is that different shape. Both readings come from the same approved row.",
     'invalidate_point': "**Part A is right.** beta: “`retract_point`, `invalidate_point` \\| 2 \\| → fields on `update_knowledge`”, and its retraction rationale is “not a separate verb”. The bridge follows the canonical collapse table's `invalidate_point` → `supersede`.",
     'list_graphs': "**Part A is right; the bridge conflates two methods.** beta's narrow-aliases row names `list_graphs` among the aliases absorbed by `graph_overview` and deleted, while `graph_list` is the one sent to `list_memory_graphs`. The canonical doc's “does not merge” list keeps `list_graphs` ≠ `graph_list` (raw DB names vs control-plane rows).",
     'list_namespaces': "**Part A is right; the bridge is wrong.** beta's narrow-aliases row names `list_namespaces` among the aliases absorbed by `graph_overview`, and canonical R6 lists it there too.",
-    'list_pointkinds': "**Part A is right; the bridge is wrong.** beta's narrow-aliases row names `list_pointkinds` among the aliases absorbed by `graph_overview`, and canonical R6 lists it there too.",
-    'list_tags': "**Part A is right; the bridge is wrong.** beta's narrow-aliases row names `list_tags` among the aliases absorbed by `graph_overview`, and canonical R6 lists it there too.",
+    'list_sources': "**Part A is right (beta governs).** beta's `list_sources` row is explicit that it is **not discarded** and folds into **row 4 `list_knowledge(kind='source')`**, and beta's `get_source_reliability` row routes its reads via `list_sources`. The bridge sends it to `graph_overview` — canonical R6's home for it — but beta governs the surface, so Part A carries beta's destination.",
     'list_topics': "**Part A is right; the bridge is wrong.** beta's narrow-aliases row names `list_topics` among the aliases absorbed by `graph_overview`, and canonical R6 lists it there too.",
     'org_create': "**Genuinely contested — no owner ruling.** No approved doc places organisation-account creation. `create_memory_graph` (beta row 29) provisions a memory GRAPH, not an account, and beta's tenancy block has no creation row. Part A's `UNBACKED` is the honest record; the bridge asserts a destination no doc states.",
     'promote_point': "**Genuinely contested — no owner ruling.** beta's row sits in “Removed” but reads “reachable through the canonical two” (a fold, not a delete), and the canonical doc's “does not merge” keeps `promote_point` ≠ `update_point(status='live')` because promote also promotes incident operators. The bridge's `refresh_confidence` does not cover that either.",
     'query': '**Part A is right; the bridge is wrong.** beta: “`query`, `paginated_query`, `query_points_by_tag` \\| 3 \\| → `list_knowledge`”, and canonical R2 (`list_knowledge`) lists all three. beta row 4 is explicit that `list_knowledge` is the browse-and-filter method.',
+    'paginated_query': '**Part A is right; the bridge is wrong.** beta: “`query`, `paginated_query`, `query_points_by_tag` \\| 3 \\| → `list_knowledge`”, and canonical R2 (`list_knowledge`) lists all three. beta row 4 is explicit that `list_knowledge` is the browse-and-filter method.',
+    'query_points_by_tag': '**Part A is right; the bridge is wrong.** beta: “`query`, `paginated_query`, `query_points_by_tag` \\| 3 \\| → `list_knowledge`”, and canonical R2 (`list_knowledge`) lists all three. beta row 4 is explicit that `list_knowledge` is the browse-and-filter method.',
     'set_point_baseline': "**Genuinely contested — no owner ruling.** Same beta row as `promote_point`. The bridge's `refresh_confidence` recomputes confidence; declaring a claim's starting belief is a different operation, and canonical's “What we have” rates it a strong novelty (“no product has a per-claim prior”).",
 }
 
@@ -1426,20 +1428,20 @@ def test_part_c2_reasons_and_sources_are_read() -> None:
     parsed = {n: (int(ln), reason) for n, ln, reason in rows}
     assert parsed == {
         "org_create": (
-            15385,
+            15499,
             "No target method creates an organisation account. The tenancy block reads "
             "one (`get_organisation_account`) and files account *closure* as a console "
             "operation, but no row covers creation.",
         ),
         "compute_reputation": (
-            20160,
+            20292,
             "The canonical `stabilize_beliefs` group lists it, but that group's beta "
             "target is `refresh_confidence` — “Recompute confidence after changes”. "
             "Reputation scoring is not confidence recomputation, and no other target "
             "absorbs it.",
         ),
         "record_calibration": (
-            20410,
+            20542,
             "Same group, same mismatch: `refresh_confidence` recomputes confidence; "
             "recording a calibration milestone is a different operation and has no target.",
         ),

@@ -1042,11 +1042,6 @@ BRIDGE_DETERMINATION: dict[str, str] = {
                           "`check_confidence` is the READ (\u201cReturns the confidence view "
                           "only\u201d). `compute_confidence` recomputes, so the bridge "
                           "follows the canonical group rather than beta's rename.",
-    "get_events": "**Genuinely contested — no owner ruling.** beta's narrow-readers row names "
-                  "`get_events` → `get_entity` but carves out \u201cexcept where a genuinely "
-                  "different shape is returned\u201d, and the bridge's `poll_events` "
-                  "(\u201cRead the event log since a point in time\u201d) is that different "
-                  "shape. Both readings come from the same approved row.",
     "invalidate_point": "**Part A is right.** beta: \u201c`retract_point`, "
                         "`invalidate_point` | 2 | → fields on `update_knowledge`\u201d, and "
                         "its retraction rationale is \u201cnot a separate verb\u201d. The "
@@ -1061,12 +1056,12 @@ BRIDGE_DETERMINATION: dict[str, str] = {
     "list_namespaces": "**Part A is right; the bridge is wrong.** beta's narrow-aliases row "
                        "names `list_namespaces` among the aliases absorbed by "
                        "`graph_overview`, and canonical R6 lists it there too.",
-    "list_pointkinds": "**Part A is right; the bridge is wrong.** beta's narrow-aliases row "
-                       "names `list_pointkinds` among the aliases absorbed by "
-                       "`graph_overview`, and canonical R6 lists it there too.",
-    "list_tags": "**Part A is right; the bridge is wrong.** beta's narrow-aliases row names "
-                 "`list_tags` among the aliases absorbed by `graph_overview`, and "
-                 "canonical R6 lists it there too.",
+    "list_sources": "**Part A is right (beta governs).** beta's `list_sources` row is "
+                    "explicit that it is **not discarded** and folds into **row 4 "
+                    "`list_knowledge(kind='source')`**, and beta's `get_source_reliability` "
+                    "row routes its reads via `list_sources`. The bridge sends it to "
+                    "`graph_overview` \u2014 canonical R6's home for it \u2014 but beta "
+                    "governs the surface, so Part A carries beta's destination.",
     "list_topics": "**Part A is right; the bridge is wrong.** beta's narrow-aliases row names "
                    "`list_topics` among the aliases absorbed by `graph_overview`, and "
                    "canonical R6 lists it there too.",
@@ -1091,6 +1086,16 @@ BRIDGE_DETERMINATION: dict[str, str] = {
              "`paginated_query`, `query_points_by_tag` | 3 | → `list_knowledge`\u201d, and "
              "canonical R2 (`list_knowledge`) lists all three. beta row 4 is explicit "
              "that `list_knowledge` is the browse-and-filter method.",
+    "paginated_query": "**Part A is right; the bridge is wrong.** beta: \u201c`query`, "
+                       "`paginated_query`, `query_points_by_tag` | 3 | → "
+                       "`list_knowledge`\u201d, and canonical R2 (`list_knowledge`) lists "
+                       "all three. beta row 4 is explicit that `list_knowledge` is the "
+                       "browse-and-filter method.",
+    "query_points_by_tag": "**Part A is right; the bridge is wrong.** beta: \u201c`query`, "
+                           "`paginated_query`, `query_points_by_tag` | 3 | → "
+                           "`list_knowledge`\u201d, and canonical R2 (`list_knowledge`) "
+                           "lists all three. beta row 4 is explicit that `list_knowledge` "
+                           "is the browse-and-filter method.",
     # The journal: the bridge's `REMOVED` repeats the exact defect this table fixes.
     "checkpoint": "**Part A is right; the sibling carries the same defect.** beta files "
                   "`checkpoint` under \u201cNamed but not solved\u201d: live in the MCP "
