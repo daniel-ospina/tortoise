@@ -5,6 +5,8 @@
 > **For Pi:** Use `executing-plans` to implement this plan task-by-task.
 > **Issue:** #1999 (W3 of epic #1976, agent-driven onboarding) · **Branch:** feat/1999-W3-onboarding
 
+> ⚠️ **Superseded for the build fork — #3913 (owner ruling 2026-09-20):** where this document states the build-fork completion gate as including `catalog-presented`, or states that the dashboard / a catalog render / the fork pick writes the `catalog-presented` step edge, that is the superseded design. The build gate is `{harness-connected, first-points-filed}`; `catalog-presented` is no longer a gate input, and **no dashboard path writes it** — the fork card writes only the fork (or its unsure marker), never a `step`, and the id stays accepted for agent/external callers and for existing orgs' `completed_steps`. The superseded wording is kept verbatim as the historical record.
+
 **Goal:** Ship the interactive ontology-precise seed — exactly two Subjects (Organization/organization + User/naturalPerson linked `memberOf`) with collision detection (never silent merge of distinct identities), person→naturalPerson normalization, no invented identity, an observable decide-completed/last_decide_attempt write path, and fork-aware completion (self = two Subjects + decide + connected; build defers decide to catalog-presented; compact = seed-lite org anchor + connected).
 
 **Team:** epistemic-team
@@ -60,7 +62,7 @@
 3. **Step:** assert anchors never Object/Statement → **Acceptance:** exactly 2 Subject nodes; 0 Object/Statement with the anchor names → **Test:** TestSeedOntology::test_never_object_or_statement
 
 ### Journey: Build + compact forks
-1. **Step:** fork=build → seed both + catalog-presented checkpoint → **Acceptance:** complete WITHOUT decide → **Test:** TestSeedEndpoint::test_build_fork_defers_decide_to_catalog
+1. **Step:** fork=build → seed both + catalog-presented checkpoint → **Acceptance:** complete WITHOUT decide → **Test:** `TestSeedJourney::test_build_fork_completes_on_the_seed_plus_connected` (renamed by #3913's gate change — the test now asserts completion on the two observed acts rather than deferral to a catalog; the former name `TestSeedEndpoint::test_build_fork_defers_decide_to_catalog` no longer exists).
 2. **Step:** compact org → seed (org anchor) → **Acceptance:** seed-lite completes on first-points-filed + connected; person not required → **Test:** TestSeedEndpoint::test_compact_seed_lite
 
 ### Failure Modes

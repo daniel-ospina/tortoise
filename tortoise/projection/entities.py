@@ -1,15 +1,19 @@
 """Entity CRUD handlers for FalkorProjection — Point, Subject, Object, Document, Event, Source.
 
-#2490 rebuild-decay note (rides #2488, APPLIED): #2488's
-``_fold_point_invalidated`` landed in this module and now appends
-``decay_clause('n')`` to ITS terminalizing SET (both the unconditional and
-``skip_updated_at`` branches) — otherwise INVALIDATED claims resurrect their
-frozen posterior post-rebuild while superseded/retracted decay (the exact
-ghost class #2490 eliminates).
+#2490 rebuild-decay note (APPLIED, then MOVED by #2884 A3): the terminalizing
+folds must decay the claim's belief (``decay_clause('n')``) or INVALIDATED /
+SUPERSEDED claims resurrect their frozen posterior post-rebuild (the ghost
+class #2490 eliminates). Both decays now fold INLINE in pass-1b via
+``_decay_point_belief`` — at the event's own journal seq — rather than riding
+``_fold_point_invalidated`` / ``_fold_point_superseded``: those run in the
+trailing sweep AFTER the whole pass-1b loop, so a decay applied there
+clobbered every later inline belief writer (replay != live). The two folds
+below own the status/flag/stamp/CORRECTS half only.
 """
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timezone
 
 # #2795: cycle-free helper (tortoise/ids.py is stdlib-only). sdk.py imports
@@ -55,6 +59,90 @@ def _is_persistable_prop_value(value, _depth: int = 0) -> bool:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017
+
+
+# ── #2884 D3: the belief-state value gate ─────────────────────────────────
+# The four properties the EP/dream write-backs carry. ONE gate, shared by
+# BOTH replay folds (`_fold_confidence_changed` here and `_apply_one` in
+# `tortoise/projection/__init__.py`), so a corrupt journal line cannot be
+# admitted by one dispatcher and rejected by the other — the #330 parity
+# contract, and the reason this is a single helper rather than two copies.
+BELIEF_PROPS: tuple = ("confidence", "posterior_alpha", "posterior_beta",
+                       "lastDreamedAt")
+# #2884 A5: the terminalizing flag that rides the SAME record. `assess_source`
+# flags a stale assessment EP-dead in the one live statement that decays it
+# (`SET p.outdated = true, {decay_clause}`), so the ConfidenceChanged record
+# must carry the flag too — otherwise a rebuilt graph treats the superseded
+# assessment as EP-active while live treats it as dead (`_apply_source_
+# inheritance` filters its factor query on `outdated`). It is a STRICT BOOL:
+# `isinstance(True, int)` is exactly why it cannot go through the numeric
+# gate, which would persist `1` where every lifecycle reader expects a flag.
+BELIEF_BOOL_PROPS: tuple = ("outdated",)
+# The numeric keys must be a REAL FINITE number. ``bool`` is rejected
+# EXPLICITLY: ``True`` is an ``int`` to Python, but it is not a belief, and
+# persisting it verbatim poisons the next EP run's ``float(...)`` read.
+_BELIEF_NUMERIC_PROPS: tuple = ("confidence", "posterior_alpha",
+                                "posterior_beta")
+
+
+def _belief_bool_value_ok(value) -> bool:
+    """True when a boolean belief flag (``outdated``) may be folded.
+
+    STRICT bool: ``1``/``0`` and every other truthy value are dropped rather
+    than coerced — the lifecycle writers read a boolean, and a coerced int
+    would round-trip into a graph state no live write produces. ``None`` is
+    valid (the journaled clear, mirroring the numeric gate). A corrupt line
+    degrades to a dropped flag, never an engine error.
+    """
+    return value is None or isinstance(value, bool)
+
+
+def _belief_prop_value_ok(key: str, value) -> bool:
+    """True when ``value`` may be folded as the belief property ``key``.
+
+    ``None`` is VALID for every key — it is the journaled CLEAR (the EP
+    run-evidence pre-write and ``set_point_baseline`` both write JSON null),
+    and dropping it would leave a stale prior in place across a rebuild.
+
+    The three numeric keys accept ``int``/``float`` but NOT ``bool`` and NOT
+    a non-finite float (NaN/±Inf). FalkorDB's parameter parse does NOT reject
+    a string/list/bool for a numeric prop — it persists it verbatim — and the
+    next EP run then raises ``ValueError`` from ``float(rows[0][0])``,
+    bricking the EP lane until a hand repair. ``lastDreamedAt`` is an ISO
+    TIMESTAMP string and takes its own string gate, rejecting a NUL or
+    lone-surrogate value the driver cannot encode as a parameter. A corrupt
+    line degrades to a DROPPED value, never an aborted recovery AFTER the
+    wipe — the guard's own documented purpose (#2884).
+
+    The numeric branch is TOTAL: an ``int`` no double can hold must return
+    ``False``, not raise. ``json.loads`` parses an integer literal of ANY
+    magnitude as an arbitrary-precision ``int``, and ``math.isfinite``
+    coerces its argument to a C double, so a >308-digit journaled posterior
+    raised ``OverflowError`` — inside pass-1b, AFTER ``DETACH DELETE`` —
+    which is the exact abort-after-the-wipe failure this guard exists to
+    prevent. A belief no double can hold is not a belief (the JSON
+    reader would read it as ``Infinity``); the same rule `hook_install`
+    applies to an over-large ``timeout`` int (#3808 R16).
+    """
+    if value is None:
+        return True
+    if key in _BELIEF_NUMERIC_PROPS:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        try:
+            return math.isfinite(value)
+        except OverflowError:
+            # int too large to convert to float — a value no double holds.
+            # Reject (drop the key), never abort the recovery pass.
+            return False
+    # lastDreamedAt (and any future non-numeric belief key): an encodable str.
+    if not isinstance(value, str) or "\x00" in value:
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False  # lone surrogate (driver rejects at encode)
+    return True
 
 
 # #388: connector sourceKinds eligible for choke-point Source materialization in
@@ -313,12 +401,43 @@ class _EntityHandlers:
             )
         return extra
 
-    def _upsert_point_props(self, p: dict) -> None:
+    def _upsert_point_props(self, p: dict) -> tuple[bool, bool]:
         """Write all Point node properties (no edges).
 
         Single source of truth for Point property parity between apply() and
         rebuild_all() (#330): rebuild pass 1a calls this so a rebuilt graph can
         never drift from the incrementally-applied graph on node properties.
+
+        Returns ``(embedding_written, content_hash_written)`` — the two
+        CONDITIONAL derived writes. The fixed SET list writes them as
+        ``n.embedding = CASE WHEN $embedding IS NOT NULL … ELSE n.embedding
+        END`` and ``n.content_hash = coalesce($ch, …)``, and computes neither
+        for an operator, falsy content, an unavailable embedder, or a raising
+        ``_content_hash`` — so in those cases the existing value is PRESERVED.
+        #4042's pass-1b content boundary needs that outcome exactly, never a
+        ``bool(content)`` guess. Every other caller ignores the return.
+
+        #4457: when a NEW embedding is written, the ``REMOVE n.embedding``
+        clause rides in the SAME query ahead of the SET list. On the embedded
+        engine (falkordblite/redislite) a ``vecf32`` overwrite of an existing
+        vector property can be SILENTLY DISCARDED — measured there as landing
+        only once some component moves by ~1.0, which real embedder output
+        never does (the server lane lands the same write, which is why only
+        the embedded lane reddened). So the node kept its OLD vector and a
+        rebuilt Point's ``embedding`` no longer derived from its ``content``.
+        ``REMOVE``-first is the workaround this repo's own test helper
+        documents (``tests/test_precision_leak_4028.py``); the OTHER
+        vector-write sites carry the same overwrite shape and are NOT fixed by
+        this clause (tracked in #4520). On the server lane the final state is
+        unchanged, and because the clause is emitted ONLY when a new vector is
+        being written, the preserve-on-None semantics above are untouched.
+        See the query below.
+
+        The parity tests exercise this with REAL embedder output, whose
+        per-component deltas are well below the threshold. A probe whose
+        per-component delta reaches ~1.0 — a plain 0/1 one-hot swap, exactly
+        1.0 — LANDS and therefore MISSES the discard; the engine defect is
+        tracked separately (#4520).
         """
         op = p.get("operator")
         if not isinstance(op, dict):
@@ -426,8 +545,16 @@ class _EntityHandlers:
             set_clauses.append("n.is_episodic=$episodic")
             params["episodic"] = bool(p["is_episodic"])
         # Phase 2 #49: context removed — never written
+        # #4457: clear the property FIRST, in the same atomic query, so the
+        # conditional `vecf32` write below actually lands on the embedded
+        # engine (the overwrite there can be silently discarded — see the
+        # docstring). Only emitted when a new embedding is being written, so
+        # the CASE's preserve-the-existing-value branch is unaffected, and
+        # `MERGE`-created nodes simply have nothing to remove.
+        embed_clear = "REMOVE n.embedding " if embedding is not None else ""
         self.g.query(
-            "MERGE (n:Point {id:$id}) SET " + ", ".join(set_clauses),
+            "MERGE (n:Point {id:$id}) " + embed_clear
+            + "SET " + ", ".join(set_clauses),
             params=params,
         )
         # Ontology v2.1: also store extractedFrom as property for query convenience.
@@ -504,6 +631,10 @@ class _EntityHandlers:
             logger.warning(
                 "Point list prop %r dropped — undeclared list props are never "
                 "written raw (#2795); not restorable from the payload", key)
+        # #4042: report which conditional derived writes actually landed (see
+        # the docstring). `embedding`/`point_content_hash` are exactly the
+        # values the `CASE`/`coalesce` clauses above gate on.
+        return embedding is not None, point_content_hash is not None
 
     def _upsert_point_edges(self, p: dict, contains_session: str | None = None) -> None:
         """Wire all Point edges (provenance + about + operator + session).
@@ -913,6 +1044,17 @@ class _EntityHandlers:
         a chain A→B→C leaves A superseded-by-B and B superseded-by-C (each
         event folds its own target — live semantics, mirror Object).
 
+        #2884 A3: the BELIEF-decay half of the live ``supersede_point`` SET is
+        NOT here — it folds INLINE in pass-1b via ``_decay_point_belief`` (at
+        the surviving event's own journal seq; see that method's docstring and
+        the ``supersede_decay_seq`` pre-pass). This fold owns the status flag,
+        the validity stamps and the CORRECTS edge only. Keeping ``decay_clause``
+        here was the write≠read defect: this fold runs in the TRAILING sweep,
+        after the whole pass-1b loop, so it clobbered every later inline belief
+        writer (replay ended at 0.5 while live ended at the later writer's
+        value). Mirrors ``_fold_point_invalidated``, whose decay also moved
+        inline.
+
         Returns the MATCHED-ROW count (#2164 Task 2 additive fold-miss
         signal): 1 = the target Point was found and folded, 0 = no Point
         matched (missing Point / stale id) or the event lacks id+new_id. The
@@ -937,8 +1079,7 @@ class _EntityHandlers:
         result = self.g.query(
             "MATCH (n:Point {id:$id}) "
             "SET n.status='superseded', n.outdated=true, "
-            "    n.validTo=$vt, n.expiredAt=$ea, n.updatedAt=$ua, "
-            f"    {decay_clause('n')} "
+            "    n.validTo=$vt, n.expiredAt=$ea, n.updatedAt=$ua "
             "RETURN n.id LIMIT 1",
             params={"id": oid, "vt": valid_to, "ea": expired_at,
                     "ua": updated_at},
@@ -949,6 +1090,35 @@ class _EntityHandlers:
                 "MERGE (a)-[:CORRECTS]->(b)",
                 params={"new_id": new_id, "old_id": oid},
             )
+        return len(result.result_set)
+
+    def _decay_point_belief(self, oid) -> int:
+        """#2884 A3: the BELIEF half of a PointInvalidated fold, applied INLINE.
+
+        ``invalidate_point`` decays the claim to vacuity in the SAME live SET
+        that raises the outdated flag (``decay_clause`` — crash-atomic). The
+        replay fold must reproduce that decay at the EVENT'S OWN journal
+        position, NOT in the trailing sweep: the sweep runs after the whole
+        pass-1b loop, so applying a journaled decay there clobbers every
+        LATER inline belief writer for the id — replay ended at
+        ``confidence=0.5`` while live ended at the later writer's value
+        (write != read). Inline application lets chronological order decide,
+        exactly as it does live; the deferred ``_fold_point_invalidated``
+        keeps only the outdated/stamp/CORRECTS half, which no belief writer
+        touches.
+
+        Returns the MATCHED-ROW count (0 = the id was never re-created, so
+        live's decay hit no node either). The invalidate fold's own 0-row
+        warning still fires from the sweep, so a miss is audible exactly once.
+        """
+        from tortoise.projection import _writable_id
+        if not _writable_id(oid):
+            return 0
+        result = self.g.query(
+            f"MATCH (n:Point {{id:$id}}) SET {decay_clause('n')} "
+            "RETURN n.id LIMIT 1",
+            params={"id": oid},
+        )
         return len(result.result_set)
 
     def _fold_point_invalidated(self, ev: dict, skip_updated_at: bool = False) -> int:
@@ -968,6 +1138,11 @@ class _EntityHandlers:
         node (same #2164-P4 drift class as supersede: stamps come from the
         journaled payload ts — the ORIGINAL invalidate time — never rebuild
         time).
+
+        #2884 A3: the BELIEF-decay half of the live SET is NOT here — it folds
+        INLINE in pass-1b via ``_decay_point_belief`` (see its docstring for
+        why the sweep would clobber a later belief writer). This fold owns the
+        outdated flag, the validity stamps and the CORRECTS edge only.
 
         updatedAt is seq-gated, NOT clock-conditional: pass-1a's
         ``_upsert_point_props`` stamps every replayed node with rebuild-time
@@ -1006,15 +1181,13 @@ class _EntityHandlers:
             # A later same-id PointRevised/PointPromoted already stamped
             # updatedAt (inline, pass-1b) — omit the column so this fold
             # cannot clobber the newer stamp with the older invalidate ts.
-            set_clause = ("SET n.outdated=true, n.validTo=$vt, n.expiredAt=$ea, "
-                          f"{decay_clause('n')} ")
+            set_clause = ("SET n.outdated=true, n.validTo=$vt, n.expiredAt=$ea ")
             params = {"id": oid, "vt": valid_to, "ea": expired_at}
         else:
             # Unconditional updatedAt write: this sweep fold is the id's last
             # journal writer → exact live parity (supersede's precedent).
             set_clause = ("SET n.outdated=true, n.validTo=$vt, "
-                          "n.expiredAt=$ea, n.updatedAt=$ua, "
-                          f"{decay_clause('n')} ")
+                          "n.expiredAt=$ea, n.updatedAt=$ua ")
             params = {"id": oid, "vt": valid_to, "ea": expired_at,
                       "ua": updated_at}
         result = self.g.query(
@@ -1032,6 +1205,78 @@ class _EntityHandlers:
                 "MERGE (a)-[:CORRECTS]->(b)",
                 params={"new_id": corrected_by, "old_id": oid},
             )
+        return len(result.result_set)
+
+    def _fold_confidence_changed(self, ev: dict) -> int:
+        """#2884 D3: fold a journaled EP/dream belief-state write-back.
+
+        ``ConfidenceChanged`` is the durability record for the four properties
+        the EP/dream write-backs mutate directly (``confidence``,
+        ``posterior_alpha``, ``posterior_beta``, ``lastDreamedAt``). Before
+        this fold it was listed in ``_NO_PROJECTION_FOLD`` as an "audit-only,
+        no graph effect" no-op, so a JSONL wipe+rebuild silently discarded
+        every posterior and reset the dream schedule.
+
+        PRESENCE-CONDITIONAL: only the keys the record actually carries are
+        applied. An EP flush journals ``confidence`` + both posteriors; a
+        dream stamp journals ``confidence`` (+ ``lastDreamedAt`` when the run
+        converged); the run-evidence pre-write journals the posteriors AS
+        JSON null (the clear). A key absent from the record is never written —
+        so a dream record cannot clobber the posteriors the flush recorded,
+        and a record cannot invent a value its writer never set. A key present
+        with null writes null (removes the property), mirroring the live SET.
+
+        Returns the MATCHED-ROW count (the #2164/#2423 additive fold-miss
+        signal): 1 = the target Point was found and folded, 0 = no Point
+        matched (hard-deleted / never re-created) or the record carries no
+        foldable value. Idempotent — a replayed/duplicate event re-applies the
+        same SET.
+        """
+        oid = ev.get("id")
+        # #2884 review P1: the SAME id gate the sibling folds use. A bare
+        # ``isinstance(oid, str)`` admits a NUL / lone-surrogate id that
+        # ``_writable_id`` rejects; such an id reaches ``params={"id": oid}``
+        # and the driver raises at encode — during pass-1b recovery, AFTER
+        # the graph was wiped. Lazy import mirrors the sibling folds
+        # (``_fold_entity_linked_reason`` / ``_apply_annotator``) and avoids
+        # the module cycle (``tortoise.projection`` imports this module).
+        from tortoise.projection import _writable_id
+        if not _writable_id(oid):
+            return 0
+        set_parts: list[str] = []
+        params: dict = {"id": oid}
+        for key in BELIEF_PROPS:
+            if key not in ev:
+                continue
+            value = ev[key]
+            # ONE value gate shared with the pure fold (``_apply_one``) so
+            # the two dispatchers cannot disagree on a corrupt line (#330
+            # parity). A non-finite / bool / string "posterior" persists
+            # verbatim through the param parse and brick the next EP run's
+            # ``float(...)`` read — drop it. ``None`` is valid: the clear.
+            if not _belief_prop_value_ok(key, value):
+                continue
+            set_parts.append(f"n.{key} = ${key}")
+            params[key] = value
+        # #2884 A5: the boolean flag carried by the same record
+        # (`assess_source`'s `outdated=true`). Its OWN strict gate — the
+        # numeric gate would admit `1`/`0` for an int and re-derive a flag
+        # type no live writer produces.
+        for key in BELIEF_BOOL_PROPS:
+            if key not in ev:
+                continue
+            value = ev[key]
+            if not _belief_bool_value_ok(value):
+                continue
+            set_parts.append(f"n.{key} = ${key}")
+            params[key] = value
+        if not set_parts:
+            return 0
+        result = self.g.query(
+            "MATCH (n:Point {id:$id}) SET " + ", ".join(set_parts) +
+            " RETURN n.id LIMIT 1",
+            params=params,
+        )
         return len(result.result_set)
 
     # ── Entity nodes ───────────────────────────────────────────────

@@ -72,8 +72,16 @@ jobs:
         # Fail loudly here rather than letting the tests silently SKIP (they skip
         # without a key) — a green run that asserted nothing is the #4220 class
         # of defect one layer up.
+        # #4361: the secret is bound in `env:` and read as a QUOTED shell
+        # variable. `${{ secrets.X }}` must never appear in a `run:` body —
+        # GitHub substitutes it into the shell SOURCE before bash parses it, so
+        # a value containing `"` loses its quotes (the #4334 outage) and one
+        # containing `$(…)`/backticks would EXECUTE. An expanded variable's
+        # contents are data, never re-parsed.
+        env:
+          BLOG_E2E_AGENT_KEY: ${{ secrets.BLOG_E2E_AGENT_KEY }}
         run: |
-          if [ -z "${{ secrets.BLOG_E2E_AGENT_KEY }}" ]; then
+          if [ -z "$BLOG_E2E_AGENT_KEY" ]; then
             echo "::error::BLOG_E2E_AGENT_KEY repo secret is required (provision agent_name='blog-e2e' in blog_agent_keys)"
             exit 1
           fi

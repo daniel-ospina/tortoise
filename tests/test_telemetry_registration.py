@@ -20,6 +20,7 @@ webhook emits ``plan``/``tier``, which were never registered (the live,
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import logging
 import os
@@ -189,8 +190,10 @@ def test_strict_mode_does_not_break_the_capture_path(tmp_path, monkeypatch):
     monkeypatch.setenv(ha._TELEMETRY_STRICT_ENV, "1")
     with pytest.raises(ha.UnregisteredTelemetryKey):
         ha._track_analytics_event("team-1", "capture_cost", {"aha": True})
+    # #3498: _track_onboarding_event is async (its emit is offloaded off the
+    # event loop), so the strict-mode exception is observed by awaiting it.
     with pytest.raises(ha.UnregisteredTelemetryKey):
-        ha._track_onboarding_event({"org_id": "team-1"}, "cap", aha=True)
+        asyncio.run(ha._track_onboarding_event({"org_id": "team-1"}, "cap", aha=True))
 
 
 def test_non_dict_properties_is_tolerated(tmp_path, monkeypatch):
@@ -561,10 +564,16 @@ class _Collector(ast.NodeVisitor):
         self.helper_returns = helper_returns
         self.calls: list[_Call] = []
         self.scopes: list[dict[str, set[str]]] = []
+        self.func_stack: list[str] = []
+        self.func_nodes: list[ast.AST] = []
 
     def visit_FunctionDef(self, node):
         self.scopes.append(_dict_assignments(node, self.helper_returns))
+        self.func_stack.append(node.name)
+        self.func_nodes.append(node)
         self.generic_visit(node)
+        self.func_nodes.pop()
+        self.func_stack.pop()
         self.scopes.pop()
 
     visit_AsyncFunctionDef = visit_FunctionDef
@@ -577,9 +586,100 @@ class _Collector(ast.NodeVisitor):
         self.calls.append(_Call(self.path, node.lineno, func, event,
                                 _resolve_keys(props_arg, self.scopes)))
 
+    #: The entry point's parameters, in signature order.
+    _ENTRY_POINT_PARAMS = ("org_id", "event_name", "properties")
+
+    def _is_entry_point_passthrough(self, node) -> bool:
+        """True only for the UNTOUCHED forward inside ``_emit_analytics_off_loop``.
+
+        Two conditions, both required (#4015 review):
+
+        1. The call sits in that function and passes the caller's
+           ``org_id``/``event_name``/``properties`` through **by name** —
+           positionally or by keyword, with no extra positional argument, no
+           keyword outside those three, and no ``**`` expansion. Anything else
+           (a literal dict, a call, an expression, a sneaked-in extra keyword)
+           is not the pass-through and gets RECORDED, where the count pin
+           catches it.
+        2. The helper does nothing else with those names — see
+           ``_entry_point_forwards_parameters_untouched``. Without it, a
+           one-line injection such as
+           ``properties = {**(properties or {}), "unregistered_key": 1}`` or
+           ``properties.update({"unregistered_key": 1})`` keeps the call
+           looking verbatim while the injected key reaches the sink from every
+           routed site.
+        """
+        if not self.func_stack \
+                or self.func_stack[-1] != "_emit_analytics_off_loop":
+            return False
+        if not self._entry_point_forwards_parameters_untouched():
+            return False
+        params = self._ENTRY_POINT_PARAMS
+        if len(node.args) > len(params):
+            return False
+        values: dict[str, ast.expr] = {}
+        for i, arg in enumerate(node.args):
+            values[params[i]] = arg
+        for kw in node.keywords:
+            if kw.arg is None or kw.arg not in params:
+                return False
+            values[kw.arg] = kw.value
+        if set(values) != set(params):
+            return False
+        return all(
+            isinstance(values[p], ast.Name) and values[p].id == p
+            for p in params)
+
+    def _entry_point_forwards_parameters_untouched(self) -> bool:
+        """True only when the helper does nothing with its own parameters.
+
+        Reference counting is deliberately strict: ``org_id``/``event_name``/
+        ``properties`` must appear EXACTLY ONCE each in the helper body — the
+        forward itself. That single rule closes every write/mutation shape at
+        once instead of enumerating them:
+
+        * a re-assignment (``properties = {...}``, ``properties, _ = ...``),
+        * an in-place mutation (``properties.update(...)``),
+        * a subscript target (``properties["k"] = 1``),
+        * a ``for``/``with``/``except``/comprehension target,
+        * any additional use at all (a log line, a second call),
+
+        each adds a reference and turns the skip OFF, so the call is RECORDED
+        and the count pin fails on it. An enumeration of assignment TARGETS (the
+        previous shape) let an in-place mutation through, because
+        ``properties.update(...)`` is a plain expression statement whose target
+        is a ``Subscript``/``Call``, not a ``Name``.
+        """
+        names = frozenset(self._ENTRY_POINT_PARAMS)
+        seen: dict[str, int] = {}
+        for stmt in ast.walk(self.func_nodes[-1]):
+            if isinstance(stmt, ast.Name) and stmt.id in names:
+                seen[stmt.id] = seen.get(stmt.id, 0) + 1
+        return all(seen.get(param) == 1 for param in names)
+
     def visit_Call(self, node):
         callee = _callee_name(node.func)
-        if callee == "_track_analytics_event":
+        # ``_emit_analytics_off_loop`` (#4015) is the off-loop entry point whose
+        # signature mirrors ``_track_analytics_event``'s first three positional
+        # parameters, so the SAME resolver walks its emit sites — otherwise
+        # rerouting a site through the seam would silence this allowlist gate
+        # for that site's props (the review the count pin exists to force).
+        if callee == "_track_analytics_event" \
+                and self._is_entry_point_passthrough(node):
+            # The entry point's own pass-through call (#4015): it forwards the
+            # callers' ``properties`` VERBATIM, so the calls TO it (recorded
+            # below) carry the real props — counting this one too would
+            # double-count and leave the inventory with a phantom unresolved
+            # site. Skip it; count the call sites.
+            #
+            # The skip is deliberately narrow (see
+            # ``_is_entry_point_passthrough``): it fires only for the UNTOUCHED
+            # forward. Any other call written into the helper — an injected
+            # dict passed AS the argument, or a rebound ``properties`` — is
+            # RECORDED, so the count pin below fails on it.
+            self.generic_visit(node)
+            return
+        if callee in ("_track_analytics_event", "_emit_analytics_off_loop"):
             event_arg = node.args[1] if len(node.args) >= 2 else None
             props_arg = node.args[2] if len(node.args) >= 3 else None
             for kw in node.keywords:
@@ -632,7 +732,11 @@ def test_every_emitted_prop_key_is_allowlisted():
     # be resolved would otherwise be filtered out by `if c.keys` and pass the
     # subset check. Any addition must update this inventory (and register its
     # props), which is exactly the review the gate exists to force.
-    assert len(calls) == 11, (
+    # #4015: routing the five analytics sites through ``_emit_analytics_off_loop``
+    # does NOT change the count — the collector resolves that helper's args
+    # exactly like the direct calls it replaced. main's #3773 added a sixth
+    # emitter, hence 12 here (11 before it).
+    assert len(calls) == 12, (
         f"emit-site inventory changed — {len(calls)} calls found: {calls}")
     resolved = [c for c in calls if c.keys]
     assert len(resolved) >= 10, (

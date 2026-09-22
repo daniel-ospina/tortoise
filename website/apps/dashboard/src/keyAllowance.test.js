@@ -16,6 +16,8 @@ import { dirname, join } from 'node:path'
 import {
   allowanceLine,
   capLimitFrom,
+  capRevokeFirstClause,
+  existingKeyNoteFrom,
   keyAllowance,
   rotateCapNoticeFrom,
   serverKeyLimit,
@@ -121,7 +123,8 @@ test('#2699: the numbered create notice offers the achievable remedy, never rege
   // The enforced number the user needs stays stated.
   assert.match(up, /limit of 2 API keys/, up)
   // The remedy that works AT the cap: revoke frees a slot
-  // (quota._count_resource('api_keys') counts only non-revoked, non-expired rows).
+  // (quota._count_resource('api_keys') counts only non-revoked, non-expired,
+  // non-bootstrap rows — #4140).
   assert.match(up, /Revoke an existing key to free a slot/, up)
   // The dead end is gone — the RED direction (fails against the pre-#2699 string).
   assert.doesNotMatch(up, /regenerate/i, up)
@@ -134,6 +137,56 @@ test('#2699: the degraded (no-number) create notice offers the achievable remedy
   assert.match(up, /Revoke an existing key to free a slot/, up)
   assert.doesNotMatch(up, /regenerate/i, up)
   assert.doesNotMatch(up, /\bof \d+ API keys\b/, `must not invent a limit: ${up}`)
+})
+
+// ── 4c. #4353: the connect step's existing-key note is cap-aware ─────────
+// Below the cap, rotate is the route that does not grow the count. AT the cap
+// it is a dead end: rotate mints the replacement through the SAME capped
+// POST /v1/team/keys before revoking the old row, so `regenerateKey` 402s on
+// its mint leg and the old key is never revoked. The note therefore returns
+// the canonical at-cap remedy (revoke — a revoked row leaves the gate's
+// count) exactly as the create-path notice states it.
+
+test('#4353: at the cap the existing-key note returns the canonical cap remedy, never rotate', () => {
+  const team = { max_api_keys: 2 }
+  const note = existingKeyNoteFrom(team, [{ id: 'a' }, { id: 'b' }])
+  // Pinned to the ONE canonical string — a second copy of the remedy here is
+  // exactly how the two surfaces desync.
+  assert.equal(note, rotateCapNoticeFrom('', team),
+    'the note must be the canonical at-cap notice, not a second copy that can drift')
+  assert.match(note, /revoke an unused key first/, note)
+  assert.doesNotMatch(note, /regenerate/i, `the dead end must not return: ${note}`)
+  assert.doesNotMatch(note, /^Rotate the existing key in the API Keys tab/, note)
+})
+
+test('#4353: below the cap the existing-key note keeps the rotate sentence', () => {
+  const note = existingKeyNoteFrom({ max_api_keys: 2 }, [{ id: 'a' }])
+  assert.match(note, /^Rotate the existing key in the API Keys tab/, note)
+  assert.match(note, /without adding a key/, note)
+  // The fresh-mint cost clause must survive the move out of main.jsx — the
+  // below-cap note has to name the price of creating another key here.
+  assert.match(note, /Creating a new key here spends another of your plan's key slots/, note)
+})
+
+test('#4353: an unknown allowance never fabricates a limit — the note stays the rotate sentence', () => {
+  for (const team of [{}, { max_api_keys: null }, { max_api_keys: undefined }, { max_api_keys: 'x' }]) {
+    const note = existingKeyNoteFrom(team, [{ id: 'a' }, { id: 'b' }, { id: 'c' }])
+    assert.match(note, /^Rotate the existing key in the API Keys tab/,
+      `unknown allowance (${JSON.stringify(team)}) must not claim the cap: ${note}`)
+  }
+})
+
+test('#4353: a revoked row does not hold a slot, so the note stays below-cap', () => {
+  const now = Date.parse('2026-09-18T00:00:00Z')
+  const rows = [
+    { id: 'live' },
+    { id: 'revoked', revoked_at: new Date(now - 1000).toISOString() },
+  ]
+  assert.equal(usedKeySlots(rows, now), 1,
+    'a revoked row is an audit tombstone — it leaves the gate count')
+  const note = existingKeyNoteFrom({ max_api_keys: 2 }, rows, now)
+  assert.match(note, /^Rotate the existing key in the API Keys tab/,
+    'one live row on a 2-key plan is not at the cap')
 })
 
 // ── 5. Cross-surface agreement (the issue's core invariant) ──────────────
@@ -153,7 +206,7 @@ test('#3874: the pre-cap allowance equals the at-cap refusal for the same org', 
 
 // ── 6. Usage mirrors the mint gate's predicate ───────────────────────────
 
-test('#3874: used-slot count mirrors quota._count_resource (non-revoked, non-expired)', () => {
+test('#3874: used-slot count mirrors quota._count_resource (non-revoked, non-expired, non-bootstrap)', () => {
   const now = Date.parse('2026-09-18T00:00:00Z')
   const iso = (ms) => new Date(now + ms).toISOString()
   const rows = [
@@ -162,11 +215,67 @@ test('#3874: used-slot count mirrors quota._count_resource (non-revoked, non-exp
     { id: 'future', expires_at: iso(86400000) },           // counts
     { id: 'expired', expires_at: iso(-86400000) },         // excluded (#2426)
     { id: 'revoked', revoked_at: iso(-1000) },             // excluded (#2481)
-    { id: 'bootstrap-live', created_via: 'bootstrap' },    // counts (gate predicate)
+    { id: 'bootstrap-live', created_via: 'bootstrap' },    // excluded (#4140/R13)
   ]
-  assert.equal(usedKeySlots(rows, now), 4)
+  assert.equal(usedKeySlots(rows, now), 3)
   const a = keyAllowance({ max_api_keys: 6 }, rows, now)
-  assert.deepEqual(a, { limit: 6, used: 4, remaining: 2, exhausted: false })
+  assert.deepEqual(a, { limit: 6, used: 3, remaining: 3, exhausted: false })
+})
+
+// ── 6b. #4140: bootstrap session credentials are cap-EXEMPT ───────────────
+// The R13 rule: `max_api_keys` counts the keys a user can manage. A 24h
+// bootstrap session credential is cap-EXEMPT in the server count
+// (quota._count_resource, BOTH lanes), so the display must exclude it too or
+// the pre-cap line and the #4353 at-cap notices over-state usage against a
+// gate that would allow the mint.
+
+test('#4140: a live, expiring, or unparseable bootstrap row never holds a slot', () => {
+  const now = Date.parse('2026-09-18T00:00:00Z')
+  const rows = [
+    { id: 'boot-live', created_via: 'bootstrap' },
+    { id: 'boot-future', created_via: 'bootstrap', expires_at: new Date(now + 86400000).toISOString() },
+    { id: 'boot-past', created_via: 'bootstrap', expires_at: new Date(now - 86400000).toISOString() },
+    // The order-of-checks case: bootstrap is excluded regardless of a junk
+    // expiry, so the conservative "unparseable ⇒ counts" rule must not win.
+    { id: 'boot-junk', created_via: 'bootstrap', expires_at: 'not-a-date' },
+    { id: 'durable', created_via: 'provisioned' },
+  ]
+  assert.equal(usedKeySlots(rows, now), 1, 'only the durable row holds a slot')
+  assert.deepEqual(keyAllowance({ max_api_keys: 2 }, rows, now),
+    { limit: 2, used: 1, remaining: 1, exhausted: false })
+})
+
+test('#4140: a NULL/legacy created_via is durable and still holds a slot (fail-closed)', () => {
+  // The over-exemption direction the cap must never take: a legacy row with
+  // no created_via is NOT a bootstrap session credential.
+  const now = Date.parse('2026-09-18T00:00:00Z')
+  const rows = [
+    { id: 'legacy' },                                   // NULL created_via → counts
+    { id: 'legacy-empty', created_via: '' },            // not the literal → counts
+    { id: 'boot', created_via: 'bootstrap' },           // exempt
+  ]
+  assert.equal(usedKeySlots(rows, now), 2)
+})
+
+test('#4140: revoked_at parity — any non-null value is revoked (server IS NULL)', () => {
+  // The mirror must match the server's `revoked_at IS NULL`, not JS truthiness:
+  // an anomalous '' or 0 is a non-null revoked_at the gate already excludes.
+  const now = Date.parse('2026-09-18T00:00:00Z')
+  assert.equal(usedKeySlots(
+    [{ id: 'empty', revoked_at: '' }, { id: 'zero', revoked_at: 0 }], now), 0)
+  assert.equal(usedKeySlots([{ id: 'live', revoked_at: null }], now), 1)
+})
+
+test('#4140: the allowance arithmetic matches the server gate at the boundary', () => {
+  // With max = N, N-1 counted rows allow a mint; N counted rows exhaust. The
+  // same fixture arithmetic the Python count tests pin (golden agreement).
+  const now = Date.parse('2026-09-18T00:00:00Z')
+  const boot = { id: 'boot', created_via: 'bootstrap' }
+  const durable = (id) => ({ id, created_via: 'provisioned' })
+  const before = keyAllowance({ max_api_keys: 2 }, [boot, durable('d1')], now)
+  assert.deepEqual(before, { limit: 2, used: 1, remaining: 1, exhausted: false })
+  const at = keyAllowance({ max_api_keys: 2 }, [boot, durable('d1'), durable('d2')], now)
+  assert.deepEqual(at, { limit: 2, used: 2, remaining: 0, exhausted: true })
 })
 
 test('#3874: an over-cap legacy org clamps remaining at zero (never negative)', () => {
@@ -211,4 +320,29 @@ test('#3874 (wiring backstop): main.jsx renders the pre-cap allowance on both ke
   const renderCalls = (src.match(/\{keysLoaded && allowanceLine\(team, keys\)/g) || []).length
   assert.ok(renderCalls >= 2,
     `both surfaces must gate on keysLoaded (no fabricated "0 in use"), found ${renderCalls}`)
+})
+
+// ── 9. #4353: the paste-validation at-cap clause ─────────────────────────
+// The clause is ADDED to a rejection's owner/admin remedy, never substituted
+// for it, and must be empty whenever the server has not said the org is at
+// its limit — so no surface can gain an at-cap warning it cannot substantiate.
+
+test('#4353: at the cap the paste-rejection clause names revoke first', () => {
+  const clause = capRevokeFirstClause({ max_api_keys: 2 }, [{ id: 'a' }, { id: 'b' }])
+  assert.match(clause, /revoke a key in the API Keys tab/,
+    `the clause must name the achievable at-cap action: ${clause}`)
+  assert.doesNotMatch(clause, /regenerate/i,
+    'at the cap a rotate/regenerate mints through the same capped route — it must never be offered')
+})
+
+test('#4353: below the cap the paste-rejection clause is empty', () => {
+  assert.equal(capRevokeFirstClause({ max_api_keys: 2 }, [{ id: 'a' }]), '')
+})
+
+test('#4353: an unknown allowance never fabricates an at-cap clause', () => {
+  assert.equal(capRevokeFirstClause({}, []), '')
+  assert.equal(capRevokeFirstClause({ max_api_keys: null }, [{ id: 'a' }]), '')
+  assert.equal(capRevokeFirstClause({ max_api_keys: 'lots' }, []), '')
+  assert.equal(capRevokeFirstClause({ max_api_keys: -3 }, []), '')
+  assert.equal(capRevokeFirstClause(undefined, undefined), '')
 })

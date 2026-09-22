@@ -164,6 +164,40 @@ curl https://api.premiselabs.co/health
 fly ssh console -a tortoise-api -C "python -c 'from tortoise.sdk import TortoiseSDK; sdk = TortoiseSDK(namespace=\"registry\"); print(sdk.db.ping())'"
 ```
 
+### 4.1 What a client must observe on `/health` — the effect and its budget (#3811)
+
+`/health` is the liveness surface. A client that starts against the hosted
+service must observe, **within the client's own startup budget**:
+
+| observed | value |
+|---|---|
+| HTTP status | **200** on the healthy path, with the body below. A dead *downstream* is `status: degraded` in the body — never a handler-generated non-200 (health truth lives in the body, not in a 5xx). **Limit, stated:** `/health` is *not* exempt from the outermost `WaitBoundMiddleware` (`_TRANSPORT_WAIT_BOUND_EXEMPT` covers only `POST /v1/context`), so a request that does not complete inside its **10 s** wait bound (`tortoise/mcp_auth.py::_TRANSPORT_WAIT_BOUND_S`) is answered **504 + `Retry-After`** instead of hanging (#4412). That refusal is legible, but a no-retry client cannot act on it — 200-inside-the-budget is the requirement; the refusal is the legible-failure floor, not a substitute. |
+| body | a JSON object carrying `status` (`"ok"` \| `"degraded"`) and `db` (`{"ok": bool, "latency_ms": …, "error": …}`). The deploy gate reads `db.ok` **by value**, never by spelling (#4470). |
+| latency | **< 15 s** — the client's own eager-startup deadline. In practice **< 10 s**, because the app's own wait bound refuses first. |
+
+**The budget's source is the client, not this document.** Pi's `mcp-client`
+connects **eagerly at session start**: one attempt per eager server, a hard
+15 000 ms per-server budget and **no retry** (`DEFAULT_CONNECTION_TIMEOUT_MS =
+15000`, `~/.pi/agent/extensions/mcp-client/index.ts`; §6.11). 15 s is the
+wall-clock envelope in which the service must be answerable for a client to
+start at all — there is no second attempt. `/health` is the surface whose stall
+is the **same held event loop** that fails that connect (#2924: “/health hangs
+>8 s” means the loop was held, and the client's first request times out inside
+the same window).
+
+**Stated plainly:** the client's eager request targets `/mcp`, not `/health`.
+`/health` reports whether the process is answerable at all, so a `/health`
+response past the client's single attempt is by construction a client-visible
+startup failure.
+
+**Executed, not asserted against source text.**
+`tests/test_health_client_effect.py` starts the real app on a real port, issues
+the real request, and asserts the resolved status/body/latency — and re-runs it
+with the data-plane probe wedged past the budget, so a handler that inherits the
+stall (the #2924 shape) reds. It complements
+`tests/test_health_ready_nonblocking.py`, which pins nonblocking *structure*
+in-process and names no client-visible budget.
+
 ## 4.5 Local Development — Local Stays Local
 
 **Best practice: a self-hosted/local instance is intentionally local.** Do not
@@ -254,7 +288,7 @@ enabled.
 | `DEEPSEEK_API_KEY` | DeepSeek | `deepseek-chat` | Cheapest-tier default; matches the analyzer's historical default |
 | `OPENAI_API_KEY` | OpenAI | `gpt-4o-mini` | |
 | `GEMINI_API_KEY` | Google Gemini | `gemini-2.0-flash` | Also used by MCP tooling — its presence here does NOT alone prove session capture is enabled |
-| `TORTOISE_SESSION_LLM_MODEL` | — | per-provider default | Override, format `<provider>:<model>`; the provider must match the key that is set |
+| `TORTOISE_SESSION_LLM_MODEL` | — | per-provider default | Override, format `<provider>:<model>`; the provider must match the key that is set. **On the hosted deployment `deploy-hosted.yml` now sets this unconditionally** — from the GitHub secret if present, else the versioned default `openrouter:google/gemini-2.5-flash` — so hosted extraction requires `OPENROUTER_API_KEY` (or a GitHub secret overriding the model). It is deliberately NOT left optional: an absent GitHub secret used to leave the hand-set Fly value in place forever (#4126). Unset for self-hosters, where the per-provider default applies. |
 | `TORTOISE_SESSION_LLM_MOCK` | — | unset | **TEST-ONLY** seam (`1` = offline MockModel). **NEVER set on Fly** — it counts as *configured* for the extraction gate, so a deploy with it set passes the gate while captures silently write offline MockModel points (see Verification procedure step 1) |
 
 Provider priority when MULTIPLE keys are set (first configured wins):
@@ -456,7 +490,7 @@ The flap only became an outage because of three independent defects:
 
 | # | Defect | Status |
 |---|---|---|
-| 1 | `path = "/health"` was coupled to a downstream — process liveness inherited every DB/probe stall | **mitigated in the app** — `hosted_api.health` (`@app.get("/health")`) returns 200 unconditionally with `status` = `ok`/`degraded`; DB truth lives in `/health/ready` (`hosted_api.health_ready`) |
+| 1 | `path = "/health"` was coupled to a downstream — process liveness inherited every DB/probe stall | **mitigated in the app** — `hosted_api.health` (`@app.get("/health")`) returns 200 unconditionally with `status` = `ok`/`degraded`; DB truth lives in `/health/ready` (`hosted_api.health_ready`). `status` is `ok` only when `db.ok` **and** `backup_watcher.ok` are true; read `backup_watcher.state` for which: `running` and `disabled` are `ok` (`disabled` = no sweep config, or `BACKUP_WATCHER_DISABLED=1`), while `stopped` (started, thread gone), `failed` (wanted, the start raised — `backup_watcher.error` carries it) and `unknown` (metadata unreadable) are not. Before this, a watcher that never started was invisible on `/health` while the process served normally (#2851/#2922: ~31 days) |
 | 2 | Routing was decided by an **HTTP** service check, so any application-level latency (probe latency, event-loop queueing) could de-register the only machine | **fixed in config** — `[[services.tcp_checks]]` is kernel-served, so it is not starved by event-loop/thread-pool scheduling and a slow/starved app no longer de-registers the machine (§6.4); the application-level liveness signal is the now-**live** non-routing `[checks.loop_liveness]` check (§6.0/§6.4), which cannot affect routing |
 | 3 | One machine + an implicit, undeclared lifecycle policy | policy now explicit (§6.2); machine redundancy **blocked** (§6.3) |
 
@@ -680,7 +714,7 @@ above must not be read as assuming either outcome:
   `grace_period` is the configured `"180s"` — generous headroom the TCP check
   does not need. The listener exists within seconds of start (the ~85 s
   torch/model load does not gate a connect), and the ~2 min FalkorDB DNS tail
-  (#1381) is surfaced by the deploy workflow's DB health gate, not by this check.
+  (#1381) is surfaced by the deploy workflow's DB health verification, not by this check.
 - **If the clamp exists**: the effective grace period is **60 s**, still far
   longer than the seconds it takes the listener to bind, so the clamp is no
   longer a cold-start hazard for the TCP check. The historical worry — that a
@@ -746,7 +780,7 @@ Machines API / Uptime Kuma / the existing Telegram alerting used by the backup
 sweep) that fires when the public endpoint fails for >2 consecutive probes.
 
 The deploy workflow only probes at deploy time (`.github/workflows/deploy-hosted.yml`
-"Post-deploy DB health gate"), so during #2850 nothing alerted for ~35 min while
+"Post-deploy DB health verification"), so during #2850 nothing alerted for ~35 min while
 the machine was locally healthy and serving. `fly checks list` and the presence
 of `[PR01] no known healthy instances` in the proxy logs are the two signals
 that would have caught it immediately.

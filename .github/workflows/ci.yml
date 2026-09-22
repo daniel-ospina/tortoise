@@ -44,7 +44,7 @@ jobs:
         run: |
           BASE="${{ github.event.pull_request.base.sha }}"
           [ -n "$BASE" ] || BASE="origin/main"
-          CHANGED=$(git diff --name-only "$BASE...HEAD" 2>/dev/null || true)
+          CHANGED=$(git diff --no-renames --name-only "$BASE...HEAD" 2>/dev/null || true)
           echo "changed files vs $BASE:"
           echo "$CHANGED"
           cat > /tmp/ci-gates.py <<'PY'
@@ -104,6 +104,25 @@ jobs:
                   # skips dashboard-js-tests, so the behavioural tests for the
                   # very file under review would never run.
                   isfile("website/assets/supabase-session.js"),
+                  # #3525: the dashboard's security-headers guard also pins the
+                  # MARKETING project's CSP, and it SCANS both projects'
+                  # `functions/` trees (cookie writers, `text/html` producers) —
+                  # the same policy text has to exist in a second `_headers` and
+                  # a second constant because a Pages project's `functions/`
+                  # cannot import across project roots, and
+                  # securityHeaders.test.js is what keeps the copies identical.
+                  # Scope by PREFIX, not by a list of filenames: the guard reads
+                  # the whole tree, so a file it scans but this predicate does
+                  # not name (a new marketing Function, or any file the guard
+                  # gains later) would skip dashboard-js-tests and let the guard
+                  # fail only where it never runs. A literal list is also
+                  # disarmed by a pure add: the new path matches nothing here
+                  # even though the guard scans it. The prefix is a superset of
+                  # the guard's input set by construction, which is the
+                  # fail-closed direction. `website/_headers` is a sibling of
+                  # `functions/`, so it is named explicitly.
+                  startswith("website/functions/"),
+                  isfile("website/_headers"),
               ),
               # uv-lock-check
               "uv_lock": any_file(
@@ -149,7 +168,12 @@ jobs:
                   and not f.startswith("website/apps/"),
                   isfile("tests/e2e/test_welcome_page.py", "tests/e2e/conftest.py",
                          "tests/test_waitlist_subscribe.mjs",
-                         "tests/test_tenant_provision_cors.mjs"),
+                         "tests/test_tenant_provision_cors.mjs",
+                         # #4481: the blog SSR markdown renderer's harness. Its
+                         # subject (website/functions/blog/_lib.ts) already
+                         # matches the website/ prefix, but the harness itself
+                         # needs a path entry or a test-only PR would not run it.
+                         "tests/test_blog_markdown.mjs"),
                   # #3501: the BFF auth suites live here and had NO path entry,
                   # so a PR touching only them could not trigger the job that
                   # runs them — the job would be skipped, not failed.
@@ -244,9 +268,16 @@ jobs:
                   # the record cannot silently lose the cadence factor that
                   # qualifies every availability figure.
                   startswith(".github/scripts/availability-record"),
+                  # #4545: the post-deploy health gate's harness — extracted from
+                  # deploy-hosted.yml so the gate that decides whether a deploy
+                  # SUCCEEDED is testable. It pins the regression where the gate
+                  # asserted /health/ready once after polling the strictly
+                  # weaker db.ok, reddening healthy deploys.
+                  startswith(".github/scripts/deploy-health-gate"),
                   isfile(".github/workflows/availability-watchdog.yml"),
                   isfile(".github/workflows/welcome-e2e-monitor.yml"),
                   isfile(".github/workflows/availability-record.yml"),
+                  isfile(".github/workflows/deploy-hosted.yml"),
                   # a job-definition change re-runs its own suite (dashboard_e2e
                   # precedent) — review R12/Config.
                   isfile(".github/workflows/ci.yml"),
@@ -452,7 +483,13 @@ jobs:
       - name: Get changed markdown files
         id: changed
         run: |
-          FILES=$(git diff --name-only "${{ github.event.pull_request.base.sha }}"...HEAD -- '*.md' || true)
+          # `--no-renames` is deliberate here, though this is a lint-target list
+          # rather than a changed-set SELECTION set (so the pin that enforces the
+          # flag workflow-wide still applies to it): a rename's deleted .md source
+          # path is tolerated because markdownlint-cli exits 0 on a nonexistent
+          # path, and plain .md deletions already produce exactly such paths.
+          # See tests/test_ci_selection.py::test_every_changed_set_diff_disables_rename_detection.
+          FILES=$(git diff --no-renames --name-only "${{ github.event.pull_request.base.sha }}"...HEAD -- '*.md' || true)
           echo "files=$FILES" >> "$GITHUB_OUTPUT"
       - name: Markdownlint (changed files)
         if: steps.changed.outputs.files != ''
@@ -580,6 +617,22 @@ jobs:
       - uses: actions/checkout@v4
       - name: Availability record-only baseline (#3810)
         run: bash .github/scripts/availability-record.test.sh
+
+  deploy-health-gate:
+    needs: changes
+    if: needs.changes.outputs.watchdog_scripts == 'true'  # #4545: deploy-gate surface only
+    # #4545: the post-deploy health gate's harness. Self-contained: stubs curl,
+    # no network. It pins the regression that reddened HEALTHY deploys — the
+    # gate polled db.ok (the FalkorDB data plane) and then asserted
+    # /health/ready ONCE, but readiness is an AND of the Supabase control plane
+    # and the data plane, so db.ok does NOT imply ready. Case 3 fails against
+    # the pre-fix single-shot assertion and passes only with the readiness
+    # poll. Mirrors availability-record above.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy health gate poll (#4545)
+        run: bash .github/scripts/deploy-health-gate.test.sh
 
   entrypoint-guards:
     needs: changes
@@ -852,6 +905,8 @@ jobs:
         run: node --experimental-strip-types tests/test_waitlist_subscribe.mjs
       - name: Run tenant-provision CORS runtime harness (#1110)
         run: node --experimental-strip-types tests/test_tenant_provision_cors.mjs
+      - name: Run blog SSR markdown renderer harness (#4481)
+        run: node --experimental-strip-types tests/test_blog_markdown.mjs
 
   legal-e2e:
     runs-on: ubuntu-latest
