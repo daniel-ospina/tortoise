@@ -517,7 +517,6 @@ def _stub_create_point_path(monkeypatch, *, opener=None, listed=None):
     written: list[tuple] = []
 
     monkeypatch.setattr(ha, "_check_org_limit", lambda org, res: None)
-    monkeypatch.setattr(ha, "_graph_available", lambda oid: True)
     monkeypatch.setattr(ha, "_get_onboarding_state", lambda oid: {})
     monkeypatch.setattr(ha, "_org_proj", lambda oid: object())
     monkeypatch.setattr(ha, "_maybe_apply_completion", lambda oid: False)
@@ -591,6 +590,121 @@ def _stub_create_point_path(monkeypatch, *, opener=None, listed=None):
     return steps, opens, written
 
 
+def _stub_mintable_org_graph(monkeypatch, *, listed=()):
+    """Route-path stubs for the point write that model graph MATERIALIZATION
+    faithfully, so the auto-file's real opener selection is OBSERVABLE.
+
+    The auto-file's own seams are NOT replaced: ``_open_org_graph_sdk`` runs
+    for real against a live listing. What is doubled is the store side:
+
+      * ``_registry_existing_graphs`` returns a snapshot of ``state``.
+      * ``_make_sdk(namespace=org_id)`` / ``_make_sdk(graph_name=...)``
+        ADDS the name it opens to ``state`` — the way the real projection
+        constructor's ``_ensure_indexes()`` (CREATE INDEX) materializes the
+        graph — and returns a handle whose ``_get_proj()`` carries that
+        ``graph_name`` (and a ``.db.list_graphs()``, so a restored
+        ``_graph_available`` pre-check works through it).
+
+    A mint is therefore VISIBLE in ``state``: that is what makes the
+    'no ``org_{org_id}`` created' assertion non-vacuous. Stubbing
+    ``_graph_available`` to ``True`` (removing the pre-check's
+    materialization) or handing the helper a fabricated opener would remove
+    exactly this observable, which is why the test must not do either.
+
+    An embedded temp DB cannot be used here: under ``TORTOISE_TEST_MODE=1``
+    the #1647 class-level URI redirect rewrites an explicit embedded path to
+    ``TORTOISE_DB_URI``, so ``patched_tortoise_sdk`` does NOT isolate the
+    docker lane and the listing would be the shared matrix DB.
+
+    Returns ``(steps, written, state, opens)``:
+      - ``steps`` — the step ids handed to ``write_completed_step``;
+      - ``written`` — ``(graph_name, step)`` pairs, attributing each write to
+        the graph it landed in;
+      - ``state`` — the LIVE registry listing (mutable);
+      - ``opens`` — the org-tenant ``(namespace, graph_name)`` constructions.
+    """
+    steps: list[str] = []
+    written: list[tuple] = []
+    opens: list[tuple] = []
+    state = set(listed)
+
+    class _Db:
+        def list_graphs(self):
+            return sorted(state)
+
+    class _Proj:
+        def __init__(self, name):
+            self.graph_name = name
+            self.db = _Db()
+
+        def create_about_edge(self, *a, **k):
+            return None
+
+    class _SdkHandle:
+        def __init__(self, name):
+            self._name = name
+            state.add(name)        # model _ensure_indexes() materialization
+
+        def _get_proj(self):
+            return _Proj(self._name)
+
+        def close(self):
+            return None
+
+    real_make_sdk = ha._make_sdk
+
+    def _make_sdk(*, namespace=None, graph_name=None):
+        if namespace in (None, "registry") and graph_name is None:
+            # Registry/background construction (the retention sweeps) — keep
+            # it real so the app is unaffected; only an ORG-TENANT open is
+            # doubled and recorded.
+            return real_make_sdk(namespace=namespace, graph_name=graph_name)
+        name = f"org_{namespace}" if namespace is not None else graph_name
+        opens.append((namespace, graph_name))
+        return _SdkHandle(name)
+
+    monkeypatch.setattr(ha, "_make_sdk", _make_sdk)
+    monkeypatch.setattr(ha, "_registry_existing_graphs", lambda: set(state))
+    monkeypatch.setattr(ha, "_check_org_limit", lambda org, res: None)
+    # ``_get_onboarding_state`` is the legacy jsonb mirror only; stub it so
+    # the test does not open the registry. ``_graph_available`` is
+    # deliberately NOT stubbed — the fixed auto-file never calls it, and a
+    # regression that restores the pre-check must show up as a mint.
+    monkeypatch.setattr(ha, "_get_onboarding_state", lambda oid: {})
+    monkeypatch.setattr(ha, "_maybe_apply_completion", lambda oid: False)
+    monkeypatch.setattr(ha, "_enqueue_dream", lambda *a, **k: None)
+    monkeypatch.setattr(ha, "_record_write_op", lambda org: None)
+
+    def _writer(proj, oid, step, **kw):
+        steps.append(step)
+        written.append((getattr(proj, "graph_name", None), step))
+        return {"created": True}
+
+    monkeypatch.setattr(ha._os, "write_completed_step", _writer)
+
+    async def _noop(*a, **k):
+        return None
+
+    monkeypatch.setattr(ha, "_async_audit", _noop)
+    monkeypatch.setattr(ha, "_abuse_record_points", _noop)
+
+    class _PointProj:
+        def create_about_edge(self, *a, **k):
+            return None
+
+    class _PointSdk:
+        _dirty_roots: tuple = ()
+
+        def create_point(self, **kw):
+            return {"id": "p-truth", "content": kw["content"]}
+
+        def _get_proj(self):
+            return _PointProj()
+
+    monkeypatch.setattr(ha, "_data_sdk", lambda org: _PointSdk())
+    return steps, written, state, opens
+
+
 def _post_point_request(credential):
     """POST /v1/points under the given credential, clearing the override."""
     _set_dependency(credential)
@@ -632,24 +746,62 @@ class TestAgentRestWriteFilesHarnessConnected:
 
     def test_unobserved_org_graph_files_no_step_and_never_mints(
             self, monkeypatch):
-        """A write must not MINT a graph whose name was never observed: when
-        ``_open_org_graph_sdk`` returns None (the registry probe failed, or
-        neither the canonical nor the pre-rename name is listed), the
-        auto-file SKIPS — no ``org_{org_id}`` is constructed and no step is
-        filed — while the caller's point write still succeeds (this function
-        must never fail its caller).
+        """A write must not MINT a graph whose name was never observed.
 
-        RED mutation: ``_open_org_graph_sdk(org_id) or _make_sdk(namespace=
-        org_id)`` → a handle is constructed and the step lands in an
-        unobserved graph → the 'no step', 'no write' and 'no mint' assertions
-        fail."""
-        r, steps, opens, written = self._post_point(
-            monkeypatch, _AGENT, opener=lambda oid: None)
+        Drives the REAL route handler and the REAL ``_open_org_graph_sdk``
+        opener against a listing that MODELS materialization (constructing a
+        projection adds the graph name — see ``_stub_mintable_org_graph``).
+        With neither ``org_org-truth`` nor ``team_org-truth`` listed, the
+        auto-file SKIPS: no step is filed and the registry listing is
+        UNCHANGED — ``org_org-truth`` was NOT minted.
+
+        Why the point write is faked: the production point write goes through
+        ``_data_sdk`` → ``_make_sdk(namespace=org_id)``, which materializes
+        ``org_{org_id}`` before the auto-file ever runs, so the production
+        caller cannot present an unlisted org. Faking ONLY the point write
+        (and modelling the store's materialization in the double) preserves
+        the premise while keeping the mint OBSERVABLE — a stubbed
+        ``_graph_available``/opener makes the mint invisible and the test
+        passes for the wrong reason.
+
+        RED mutation: restore the ``if not _graph_available(org_id): return``
+        pre-check → ``_graph_available`` builds
+        ``_make_sdk(namespace=org_id)._get_proj()``, which MATERIALIZES
+        ``org_org-truth`` in the listing; ``_open_org_graph_sdk`` then files
+        the step into it → the 'no step', 'no mint' and 'listing unchanged'
+        assertions all fail."""
+        steps, written, state, opens = _stub_mintable_org_graph(monkeypatch)
+        before = set(state)
+        r = _post_point_request(_AGENT)
         assert r.status_code == 200, r.text
         assert r.json()["id"] == "p-truth"   # the point write succeeded
         assert steps == []
         assert written == []
-        assert opens == []                    # no graph name minted
+        assert opens == []
+        assert "org_org-truth" not in state, state
+        assert set(state) == before, (before, state)
+
+    def test_legacy_org_graph_gets_the_step_and_no_org_graph_is_minted(
+            self, monkeypatch):
+        """For a legacy ``team_{org_id}`` org the auto-file writes through the
+        LISTED legacy name — the SAME selection ``_get_onboarding_projection``
+        reads through — and does NOT mint ``org_{org_id}``.
+
+        RED mutations: (a) restore the ``_graph_available`` pre-check → it
+        mints ``org_org-truth``, which ``_open_org_graph_sdk`` (org_ first)
+        then prefers, so the step lands in the minted graph and the listing
+        gains it; (b) revert the opener to a bare
+        ``_make_sdk(namespace=org_id)`` → the same two failures."""
+        steps, written, state, opens = _stub_mintable_org_graph(
+            monkeypatch, listed=["team_org-truth"])
+        r = _post_point_request(_AGENT)
+        assert r.status_code == 200, r.text
+        # the REAL opener selected the LISTED legacy name, not a minted org_
+        assert opens == [(None, "team_org-truth")], opens
+        assert steps == ["harness-connected"]
+        assert written == [("team_org-truth", "harness-connected")], written
+        assert "org_org-truth" not in state, state
+        assert state == {"team_org-truth"}, state
 
     def test_graph_bound_agent_write_files_no_org_level_step(
             self, monkeypatch):
@@ -692,10 +844,10 @@ class TestAgentRestWriteFilesHarnessConnected:
 class TestHarnessConnectedOpenerSelection:
     """#3670 / pin 4: the auto-file must write through the SDK opened for the
     LISTED org-graph name. ``_make_sdk(namespace=org_id)`` re-derives
-    ``org_{org_id}``, so for a legacy ``team_{org_id}`` org it would MINT a
-    different, absent graph and file the step where the onboarding projection
-    never reads it. This drives the REAL ``_open_org_graph_sdk`` through a
-    stubbed registry listing, so both listed-name branches are exercised.
+    ``org_{org_id}``, so for a legacy ``team_{org_id}`` org it would open —
+    and so MINT — a different, absent graph instead of the listed legacy one.
+    This drives the REAL ``_open_org_graph_sdk`` through a stubbed registry
+    listing, so both listed-name branches are exercised.
 
     RED mutation: ``_open_org_graph_sdk`` returning a handle without
     addressing the listed name (e.g. a bare ``_make_sdk(namespace=org_id)``)

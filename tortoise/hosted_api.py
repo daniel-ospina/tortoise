@@ -19168,24 +19168,27 @@ def _maybe_file_harness_connected(org_id: str) -> None:
     never fail the agent's committed write — the precedent is
     ``mcp_server._maybe_onboarding_auto_complete``'s fail-open ``except``."""
     try:
-        if not _graph_available(org_id):
-            return
         legacy_mirror = bool(
             _get_onboarding_state(org_id).get("onboarding_complete"))
         # review P2: own the SDK handle and close it. `_org_proj` opens a
         # fresh SDK per call and leaks a connection otherwise (the same leak
         # the PATCH handler documents at #1997); this runs on the hot
         # point-write path, so it must not add a per-write leak.
-        # Open the name the org-graph guard verified: `_make_sdk(namespace=)`
-        # re-derives `org_{org_id}`, so for a legacy `team_{org_id}` org it
-        # would MINT a different, absent graph and file the step where the
-        # projection never reads it (pin 4). None means NEITHER name is
-        # listed (or the registry probe failed) — and a WRITE must not mint a
-        # graph name that was never observed: minting `org_{org_id}` here
-        # would file the step into a graph the onboarding projection never
-        # reads, silently re-creating #3670 (the connected screen never
-        # appears) for that org. Skip, loudly — the caller's point write is
-        # never touched by this function.
+        #
+        # Open the LISTED org-graph name (the same selection
+        # `_get_onboarding_projection` reads through) and SKIP on None: a
+        # WRITE must never MINT a graph name that was never observed. Do NOT
+        # pre-check existence with `_graph_available` — that helper builds
+        # `_make_sdk(namespace=org_id)._get_proj()`, whose constructor runs
+        # `_ensure_indexes()` (CREATE INDEX) and so MATERIALIZES the very
+        # `org_{org_id}` this write must not create; the subsequent
+        # `_open_org_graph_sdk` then re-probes the listing it just polluted
+        # and files the step into the graph its own guard minted.
+        # `_open_org_graph_sdk` probes through `_registry_existing_graphs`
+        # (`list_graphs` — a read that never constructs a store), so the
+        # probe cannot materialize a name. None means NEITHER name is listed,
+        # or the registry probe failed. Skip, loudly — the caller's point
+        # write is never touched by this function.
         _sdk = _open_org_graph_sdk(org_id)
         if _sdk is None:
             _logger.warning(
