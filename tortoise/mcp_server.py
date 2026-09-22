@@ -3,6 +3,7 @@ from __future__ import annotations  # noqa: I001
 
 import asyncio
 import contextlib
+import inspect
 import json
 import logging
 import os
@@ -21,7 +22,7 @@ from tortoise.auth import is_dev_mode as _is_dev_mode
 from tortoise.config import is_db_uri as _is_db_uri
 from tortoise.sdk import (TortoiseSDK, INGEST_GRANULARITIES,
                           INGEST_PROMOTION_POLICIES, _first_non_draft_status,
-                          _RESERVED_ACTOR_PROPS)
+                          _RESERVED_ACTOR_PROPS, SUPERSEDE_STRUCTURAL_RELS)
 from tortoise import monitoring
 from tortoise.mcp_auth import (_current_org_id, _current_org_limits,
                                _current_scopes, _current_legacy_full_access,
@@ -664,8 +665,15 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
                                          run_middleware=False, task_meta=task_meta)
     org_id = _current_org_id.get() or ""
     _enforce_mcp_tool_scope(name)
-    maybe_record_mcp_read(name, org_id, _current_org_limits.get(),
-                          dry_run=bool((arguments or {}).get("dry_run")))
+    maybe_record_mcp_read(
+        name, org_id, _current_org_limits.get(),
+        # REVIEW-FIX P2 (#4057): `arguments` is the raw PRE-validation dict, and
+        # this metering runs BEFORE the dispatch. So a tool that does not
+        # declare `dry_run` — whose schema will REJECT that key — would be
+        # recorded as a READ the caller never performed. Gate on the declared
+        # preview set, not on key presence in untrusted input.
+        dry_run=name in _dry_run_tool_names() and bool((arguments or {}).get("dry_run")),
+    )
     status, error_kind = "ok", None
     t0 = _time.perf_counter()
     try:
@@ -846,6 +854,39 @@ _QUOTA_GATED: frozenset[str] = frozenset({
 from tortoise.tool_registry import get_tool_by_name, get_write_tool_names  # noqa: E402
 
 WRITE_TOOL_NAMES: frozenset[str] = get_write_tool_names()
+
+# #4057: a tool is dry-run-capable iff its SERVED HANDLER declares a `dry_run`
+# parameter — the fact this metering needs. It is deliberately NOT "the raw
+# argument dict carries a `dry_run` key": that dict is the PRE-validation
+# client input, read BEFORE the dispatch, so a caller could move the read
+# counter for a tool whose schema REJECTS the key (a READ recorded for a call
+# that is then refused). Computed from the declarations and cached (lazy — the
+# handlers are defined below this point — because it sits on the per-call
+# path). `tests/test_dry_run_preview.py::TestPreviewToolSetIsDeclared` pins it:
+# the six preview tools must be in it, a write tool without `dry_run` must not,
+# and the metering behaviour is verified through the real dispatch seam.
+_DRY_RUN_TOOLS: frozenset[str] | None = None
+
+
+def _dry_run_tool_names() -> frozenset[str]:
+    """Registry names whose served handler declares `dry_run` (computed once)."""
+    global _DRY_RUN_TOOLS
+    if _DRY_RUN_TOOLS is None:
+        from tortoise.tool_registry import TOOL_REGISTRY
+
+        names = set()
+        for entry in TOOL_REGISTRY:
+            fn = globals().get(entry.name)
+            if fn is None:
+                continue
+            try:
+                params = inspect.signature(fn).parameters
+            except (TypeError, ValueError):  # pragma: no cover - non-callable
+                continue
+            if "dry_run" in params:
+                names.add(entry.name)
+        _DRY_RUN_TOOLS = frozenset(names)
+    return _DRY_RUN_TOOLS
 
 
 # #329: per-org per-minute LLM-call budget for tortoise_analyze (operator LLM
@@ -4102,20 +4143,19 @@ def _preview_delete_point(sdk, id: str) -> dict:
     )
 
 
-# `_delete_entity` (sdk.py) hard-deletes across these labels, matching each on
-# its own identity property. Mirrored here so the preview enumerates the same
-# node set. (Session/APIKey/Org/Tag are intentionally NOT deleted.)
-_ENTITY_DELETE_TARGETS = (
-    ("Point", "id"), ("Subject", "id"), ("Object", "id"),
-    ("Document", "id"), ("Source", "id"), ("Event", "eventId"),
-)
-
-
 def _preview_delete_entity(sdk, id: str) -> dict:
+    # REVIEW-FIX P2 (#4057): the label→id-property table is IMPORTED, never
+    # re-hardcoded. `_delete_entity` (sdk.py) and the replay fold
+    # (`projection._delete_entity_by_id`) both read
+    # `projection._CANONICAL_ENTITY_ID_PROPS`, so a local copy here could drift
+    # — and drift makes this preview UNDER-report the blast radius (a label
+    # whose id property moved would match nothing and silently drop out of the
+    # count), which is the dangerous direction.
+    from tortoise.projection import _CANONICAL_ENTITY_ID_PROPS
     proj = sdk._get_proj()
     seen: set = set()
     nodes: list[str] = []
-    for label, prop in _ENTITY_DELETE_TARGETS:
+    for label, prop in _CANONICAL_ENTITY_ID_PROPS:
         # Dedup by INTERNAL node id: a node carrying two matched labels
         # (`:Point:Object`) is deleted ONCE — the writer's first DETACH DELETE
         # removes it and the next label matches 0. Two DISTINCT nodes sharing
@@ -4240,15 +4280,6 @@ def _preview_invalidate(sdk, id: str, corrected_by_id: str) -> dict:
     )
 
 
-# Mirrors the structural rels supersede_point transfers in 2b (sdk.py). A
-# differential test pins the preview against the writer's own ground truth, so
-# a drift here fails the suite rather than producing a preview that lies.
-_SUPERSEDE_STRUCTURAL_RELS = (
-    "aboutSubject", "aboutObject", "aboutAction", "aboutEvent",
-    "aboutPoint", "aboutDocument", "extractedFrom", "wasDerivedFrom",
-)
-
-
 def _preview_supersede(sdk, old_id: str, new_id: str,
                        transfer_edges: bool = True) -> dict:
     """Preview `tortoise_supersede`.
@@ -4259,12 +4290,25 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
         The writer uses CREATE here, so every row becomes its own edge;
       * 2a-DIRECT operator-less IMPL/NAND incident to old, excluding operator
         targets. The writer MERGEs, so rows to the same target collapse;
-      * 2b the structural rels in `_SUPERSEDE_STRUCTURAL_RELS`, also MERGEs.
+      * 2b the structural rels in `SUPERSEDE_STRUCTURAL_RELS` (imported from
+        the writer — sdk.py's own named constant), also MERGEs.
     An edge whose far endpoint IS the successor is delete-only (no phantom
     self-edge) — reported under `edges_dropped`.
 
-    `edges_removed_from_old` is the raw source count (edges that leave the old
-    node — the SDK's own `edges_transferred` on an SDK-reachable graph).
+    `edges_transferred_from_old` is the writer's own old-side count — the
+    number it reports as `edges_transferred` (the two are the same value by
+    construction, and a differential test pins them together). It counts every
+    row the write removes from old, INCLUDING the delete-only rows (`edge.
+    dropped`: a self-loop, or a far endpoint that is the successor / not a
+    Point) that the writer also books as "transferred" while creating nothing.
+    It is therefore NOT "the edges that arrive at the successor": those are
+    `edges_created_at_new` + `edges_already_present_at_new`.
+    `edges_remaining_at_old` is the complementary count — the edges incident to
+    old that the write neither repoints nor removes (e.g. `related`, `TAGGED`,
+    `aboutSource`, an inbound `CORRECTS`, an `alreadyDecided` operator edge via
+    `edges_kept_attached`). Without it a caller cannot read the residual blast
+    radius from any field. The `CORRECTS` edge the write ADDS is not included
+    (it does not exist yet) — see `corrects_edge`.
     `edges_created_at_new` is the NET-NEW edge count the write creates at the
     successor (MERGE destinations already present are excluded), and
     `edges_already_present_at_new` names those no-ops; both are multiplied by
@@ -4286,13 +4330,17 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
     merged: list[tuple] = []   # (merge_key, edge) — MERGE-backed legs
     dropped: list[dict] = []
     kept: list[dict] = []
+    # INTERNAL ids of every edge the write removes from old (repointed OR
+    # delete-only). Set-keyed so an edge matched by two passes is handled once;
+    # `edges_remaining_at_old` is the incident count minus this set.
+    handled_old_edge_ids: set = set()
 
     # 2a — operator edges. The writer validates every relationship type BEFORE
     # any mutation (a raw/imported undeclared type is an injection primitive),
     # so the preview validates too.
-    for op_id, rtype, _idx, op_label in proj.g.query(
+    for op_id, rtype, _idx, op_label, op_rid in proj.g.query(
         "MATCH (op:Point {is_operator:true})-[r]->(o:Point {id:$old}) "
-        "RETURN op.id, type(r), r.idx, op.label",
+        "RETURN op.id, type(r), r.idx, op.label, ID(r)",
         params={"old": old_id},
     ).result_set:
         validate_rel_type(rtype)
@@ -4301,6 +4349,7 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
                          "reason": "alreadyDecided stays on the superseded prior"})
         else:
             created.append({"type": rtype, "from": op_id, "to": new_id})
+            handled_old_edge_ids.add(op_rid)
 
     succ_rows = proj.g.query("MATCH (n:Point {id:$id}) RETURN ID(n)",
                             params={"id": new_id}).result_set
@@ -4346,6 +4395,7 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
             seen_direct.add(rid)
             if tid in op_ids:
                 continue  # operator target — owned by 2a, never repointed
+            handled_old_edge_ids.add(rid)
             if tid == old_id:
                 dropped.append({"type": rtype, "other": tid,
                                 "reason": "self-loop on the old node — its repoint is "
@@ -4365,13 +4415,14 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
                      "to": tid if direction == "out" else new_id},
                 ))
 
-    # 2b — structural rels.
-    for rel in _SUPERSEDE_STRUCTURAL_RELS:
-        for rtype, tid, t_internal in proj.g.query(
+    # 2b — structural rels (the writer's own constant — never a local copy).
+    for rel in SUPERSEDE_STRUCTURAL_RELS:
+        for rtype, tid, t_internal, rid in proj.g.query(
             f"MATCH (o:Point {{id:$old}})-[r:{rel}]->(t) "
-            "RETURN type(r), coalesce(t.id,t.eventId,t.name,t.url), ID(t)",
+            "RETURN type(r), coalesce(t.id,t.eventId,t.name,t.url), ID(t), ID(r)",
             params={"old": old_id},
         ).result_set:
+            handled_old_edge_ids.add(rid)
             if succ_first is not None and t_internal == succ_first:
                 dropped.append({"type": rtype, "other": tid or new_id,
                                 "reason": "far endpoint IS the successor — delete-only"})
@@ -4396,14 +4447,28 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
                    else (rtype, t_internal) in pre_in)
         (already_present if present else created_edges).append(edge)
     removed_raw = len(created) + len(merged) + len(dropped)
+    # The writer's status write is a bare `MATCH (n:Point {id:$id}) SET …` — it
+    # binds EVERY matching node (no cardinality guard), which is exactly what
+    # `_preview_invalidate` already counts as `n_old`. Mirror it instead of
+    # hardcoding 1.
+    n_old = proj.g.query("MATCH (n:Point {id:$old}) RETURN count(n)",
+                         params={"old": old_id}).result_set[0][0]
+    # Every edge still incident to old after the write removes the handled set.
+    # The writer ADDS only `(new)-[:CORRECTS]->(old)` (reported separately), and
+    # that edge does not exist yet, so it is correctly absent here.
+    incident_at_old = proj.g.query(
+        "MATCH (o:Point {id:$old})-[r]-() RETURN count(r)",
+        params={"old": old_id},
+    ).result_set[0][0]
     return _preview_result(
         "tortoise_supersede", "supersede",
         found=True,
         transfer_edges=True,
         target={"old_id": old_id, "new_id": new_id},
-        nodes_affected=1,
+        nodes_affected=n_old,
         nodes_removed=0,
-        edges_removed_from_old=removed_raw,
+        edges_transferred_from_old=removed_raw,
+        edges_remaining_at_old=incident_at_old - len(handled_old_edge_ids),
         edges_created_at_new=len(created_edges) * succ_count,
         edges_already_present_at_new=len(already_present) * succ_count,
         successor_nodes=succ_count,

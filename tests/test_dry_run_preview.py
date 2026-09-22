@@ -112,36 +112,89 @@ def _seed_point(sdk: TortoiseSDK, content: str = "seed") -> str:
 
 class TestDefaultPathUnchanged:
     """`dry_run=False` must not touch the preview code — if it did, the
-    "byte-identical" claim would be an assertion rather than a fact."""
+    "byte-identical" claim would be an assertion rather than a fact.
 
-    def _boom(self, *a, **k):  # pragma: no cover - must never run
-        raise AssertionError("the default path reached a dry-run preview")
+    The guard has to be OBSERVABLE IN THE HANDLER'S RETURN VALUE. A preview
+    that RAISES cannot prove anything here: every preview call is wrapped in
+    `_safe`, whose `except Exception` converts the raise into
+    `{"error": ...}` — so a preview reached on the default path is
+    indistinguishable from a benign failure unless the result is inspected.
+    Each preview therefore returns a UNIQUE sentinel, and the assertions below
+    read the result: a reached preview shows up as the handler's own return
+    value, and the expected default SHAPES pin that the default path really
+    did its work (so "no sentinel" cannot be satisfied by an error dict).
+    """
+
+    @staticmethod
+    def _sentinel_for(name: str):
+        def _sentinel(*a, **k):
+            return {"preview_sentinel": name}
+        return _sentinel
+
+    def _install_sentinels(self, mcp, monkeypatch):
+        for name in _PREVIEW_FUNCS:
+            monkeypatch.setattr(mcp, name, self._sentinel_for(name))
+
+    def _default_path_calls(self, mcp, *, explicit_false: bool):
+        """Call all six destructive tools on the default path."""
+        sdk = mcp._get_org_sdk()
+        ids = {
+            "a": _seed_point(sdk, "a"),
+            "b": _seed_point(sdk, "b"),
+            "c": _seed_point(sdk, "c"),
+            "d": _seed_point(sdk, "d"),
+            "e": _seed_point(sdk, "e"),
+            "f": _seed_point(sdk, "f"),
+            "g": _seed_point(sdk, "g"),
+        }
+        ids["subj"] = sdk.create_entity(
+            "subject", "S", subjectKind="company")["node"]["id"]
+        kw = {"dry_run": False} if explicit_false else {}
+        results = {
+            "tortoise_delete_point": mcp.tortoise_delete_point(ids["a"], **kw),
+            "tortoise_delete": mcp.tortoise_delete(ids["b"], **kw),
+            "tortoise_delete_entity": mcp.tortoise_delete_entity(ids["subj"], **kw),
+            "tortoise_retract_point": mcp.tortoise_retract_point(ids["c"], **kw),
+            "tortoise_invalidate": mcp.tortoise_invalidate(ids["d"], ids["e"], **kw),
+            "tortoise_supersede": mcp.tortoise_supersede(ids["f"], ids["g"], **kw),
+        }
+        return ids, results
+
+    def _assert_default_path(self, ids, results):
+        for tool, result in results.items():
+            if isinstance(result, dict):
+                assert "preview_sentinel" not in result, (
+                    f"{tool} reached its dry-run preview on the default path: "
+                    f"{result}")
+                assert "dry_run" not in result, (
+                    f"{tool} returned a dry-run preview on the default path: "
+                    f"{result}")
+        # The default path's OWN return shapes — a result that merely avoids
+        # the sentinel (e.g. an error dict) must not pass.
+        assert results["tortoise_delete_point"] == {
+            "deleted": True, "id": ids["a"]}, results["tortoise_delete_point"]
+        assert results["tortoise_delete"] == {
+            "deleted": True, "id": ids["b"]}, results["tortoise_delete"]
+        assert results["tortoise_delete_entity"] is True, (
+            results["tortoise_delete_entity"])
+        assert results["tortoise_retract_point"]["status"] == "retracted", (
+            results["tortoise_retract_point"])
+        assert results["tortoise_invalidate"]["invalidated"] is True, (
+            results["tortoise_invalidate"])
+        assert results["tortoise_supersede"]["invalidated"] is True, (
+            results["tortoise_supersede"])
 
     def test_previews_are_unreachable_when_dry_run_is_omitted(
             self, mcp, monkeypatch):
-        for name in _PREVIEW_FUNCS:
-            monkeypatch.setattr(mcp, name, self._boom)
-        a = _seed_point(mcp._get_org_sdk(), "a")
-        b = _seed_point(mcp._get_org_sdk(), "b")
-        subj = mcp._get_org_sdk().create_entity(
-            "subject", "S", subjectKind="company")["node"]["id"]
-
-        mcp.tortoise_delete_point(a)
-        mcp.tortoise_delete(b)
-        mcp.tortoise_delete_entity(subj)
-        c = _seed_point(mcp._get_org_sdk(), "c")
-        mcp.tortoise_retract_point(c)
-        d, e = _seed_point(mcp._get_org_sdk(), "d"), _seed_point(mcp._get_org_sdk(), "e")
-        mcp.tortoise_invalidate(d, e)
-        f, g = _seed_point(mcp._get_org_sdk(), "f"), _seed_point(mcp._get_org_sdk(), "g")
-        mcp.tortoise_supersede(f, g)
+        self._install_sentinels(mcp, monkeypatch)
+        ids, results = self._default_path_calls(mcp, explicit_false=False)
+        self._assert_default_path(ids, results)
 
     def test_previews_are_unreachable_when_dry_run_is_false(
             self, mcp, monkeypatch):
-        for name in _PREVIEW_FUNCS:
-            monkeypatch.setattr(mcp, name, self._boom)
-        a = _seed_point(mcp._get_org_sdk(), "a")
-        mcp.tortoise_delete_point(a, dry_run=False)
+        self._install_sentinels(mcp, monkeypatch)
+        ids, results = self._default_path_calls(mcp, explicit_false=True)
+        self._assert_default_path(ids, results)
 
     def test_dry_run_defaults_to_false_in_every_signature(self):
         import tortoise.mcp_server as m
@@ -294,7 +347,7 @@ class TestBlastRadius:
         )
         from tortoise.mcp_server import _preview_supersede
         preview = _preview_supersede(sdk, old, new)
-        assert preview["edges_removed_from_old"] == 2
+        assert preview["edges_transferred_from_old"] == 2
         assert preview["edges_created_at_new"] == 1
         real = sdk.supersede(old, new)
         assert preview["edges_created_at_new"] == real["edges_transferred"]
@@ -453,7 +506,7 @@ class TestBlastRadius:
         preview = _preview_supersede(sdk, old, new)
         assert preview["edges_created_at_new"] == 0, preview
         assert preview["edges_already_present_at_new"] == 1, preview
-        assert preview["edges_removed_from_old"] == 1
+        assert preview["edges_transferred_from_old"] == 1
 
     def test_delete_point_preview_lists_the_edges_the_delete_removes(
             self, mcp, sdk):
@@ -482,7 +535,7 @@ class TestBlastRadius:
         """Differential pin against GROUND TRUTH: the preview's
         `edges_added_at_new` must equal the edges that actually exist at the
         successor after the real supersede (minus the CORRECTS edge it adds),
-        and its `edges_removed_from_old` must equal the SDK's own
+        and its `edges_transferred_from_old` must equal the SDK's own
         `edges_transferred` on a parallel-edge-free graph. This is what stops
         the mirrored transfer rule from drifting into a preview that lies."""
         old, new = _seed_point(sdk, "old"), _seed_point(sdk, "new")
@@ -512,11 +565,81 @@ class TestBlastRadius:
             f"the graph gained {len(net_new)}")
         # The old-side count matches the SDK counter on a graph with no
         # parallel edges (the only kind any SDK write path can mint).
-        assert preview["edges_removed_from_old"] == real["edges_transferred"]
+        assert preview["edges_transferred_from_old"] == real["edges_transferred"]
         assert preview["edges_created_at_new"] >= 4
         kept = {(e["from"], e["to"]) for e in preview["edges_kept_attached"]}
         assert any(t == old for _, t in kept), kept
         assert preview["edges_dropped"], "the successor self-edge must be delete-only"
+
+    def test_supersede_preview_reports_the_edges_remaining_at_old(self, sdk):
+        """The transfer set is NOT the whole blast radius at `old`: an edge the
+        writer does not own (`related`) stays there. The preview must report
+        that residual, and the count must match what the real write leaves —
+        a `edges_transferred_from_old` alone reads as if every edge at `old`
+        moved."""
+        old, new = _seed_point(sdk, "old"), _seed_point(sdk, "new")
+        x, y = _seed_point(sdk, "x"), _seed_point(sdk, "y")
+        subj = sdk.create_entity(
+            "subject", "S", subjectKind="company")["node"]["id"]
+        sdk.create_direct_edge("IMPL", old, x)      # transferred
+        sdk.create_edge("aboutSubject", old, subj)  # transferred
+        sdk.create_edge("related", old, y)          # in NO transfer leg
+
+        from tortoise.mcp_server import _preview_supersede
+
+        preview = _preview_supersede(sdk, old, new)
+        assert preview["edges_transferred_from_old"] == 2, preview
+        assert preview["edges_remaining_at_old"] == 1, preview
+
+        sdk.supersede(old, new)
+        remaining = _edge_keys_at(sdk, old)  # excludes the CORRECTS edge
+        assert len(remaining) == preview["edges_remaining_at_old"], remaining
+        assert any(rtype == "related" for _, rtype, _, _ in remaining), remaining
+
+    def test_supersede_preview_counts_a_duplicate_old_id(self, sdk):
+        """The writer's status write is a bare `MATCH (n:Point {id}) SET …` —
+        it stamps EVERY matching node, so `nodes_affected` must count them
+        rather than hardcode 1 (which `_preview_invalidate` already gets
+        right)."""
+        proj = sdk._get_proj()
+        new = _seed_point(sdk, "new")
+        proj.g.query(
+            "CREATE (a:Point {id:'olddup2', content:'a', "
+            "pointKind:'statement'})")
+        proj.g.query(
+            "CREATE (b:Point {id:'olddup2', content:'b', "
+            "pointKind:'statement'})")
+
+        from tortoise.mcp_server import _preview_supersede
+
+        preview = _preview_supersede(sdk, "olddup2", new)
+        assert preview["nodes_affected"] == 2, preview
+
+    def test_delete_entity_preview_uses_the_canonical_id_property_table(
+            self, mcp, sdk, monkeypatch):
+        """The label→id-property table is IMPORTED from
+        `projection._CANONICAL_ENTITY_ID_PROPS`, never re-hardcoded. Patching
+        it at its home is invisible to a local copy — so a preview that still
+        counts the patched label proves the import (and, conversely, drift in
+        the canonical table propagates instead of silently under-reporting)."""
+        import tortoise.projection as projection
+
+        sdk._get_proj().g.query(
+            "CREATE (n:Widget {widgetId:'w-canon', content:'x'})")
+        monkeypatch.setattr(projection, "_CANONICAL_ENTITY_ID_PROPS",
+                            (("Widget", "widgetId"),))
+        preview = mcp.tortoise_delete_entity("w-canon", dry_run=True)
+        assert preview["nodes_removed"] == 1, preview
+        assert preview["nodes"] == ["w-canon"], preview
+
+    def test_supersede_structural_rels_are_the_writers_constant(self):
+        """A re-hardcoded rel list here would drift out of the writer's 2b
+        transfer silently; the preview must import the writer's own constant."""
+        import tortoise.mcp_server as m
+        from tortoise import sdk as sdk_mod
+
+        assert (m.SUPERSEDE_STRUCTURAL_RELS
+                is sdk_mod.SUPERSEDE_STRUCTURAL_RELS)
 
 
 # ── D. the guards fire identically in dry-run ───────────────────────
@@ -579,3 +702,69 @@ class TestDryRunIsMeteredAsARead:
         ms.maybe_record_mcp_read("tortoise_delete", "team-x",
                                  {"key_id": "k1"}, dry_run=True)
         assert calls == [("k1", "team-x")], "a dry run is a read"
+
+    def _dispatch_reads(self, monkeypatch, name, arguments):
+        """Drive the REAL dispatch seam and return the recorded reads."""
+        import asyncio
+
+        import tortoise.abuse as abuse_mod
+        import tortoise.mcp_server as ms
+        from tortoise.mcp_auth import _current_org_id, _current_org_limits
+
+        calls = []
+        monkeypatch.setattr(
+            abuse_mod, "record_read",
+            lambda key_id, org_id, now=None: calls.append((key_id, org_id)))
+
+        async def _stub(*a, **k):
+            return {"ok": True}
+
+        monkeypatch.setattr(ms, "_await_under_mcp_wait_bound", _stub)
+        monkeypatch.setattr(ms, "_enforce_mcp_tool_scope", lambda n: None)
+        monkeypatch.setattr(ms, "_emit_mcp_tool_call_telemetry",
+                            lambda *a, **k: None)
+        tok_o = _current_org_id.set("team-x")
+        tok_l = _current_org_limits.set({"key_id": "k1"})
+        try:
+            asyncio.run(ms._wrapped_call_tool(name, arguments))
+        finally:
+            _current_org_id.reset(tok_o)
+            _current_org_limits.reset(tok_l)
+        return calls
+
+    def test_a_stray_dry_run_on_a_non_preview_tool_is_not_metered(
+            self, monkeypatch):
+        """`arguments` is the PRE-validation dict and this metering runs
+        BEFORE the dispatch: a write tool that does not declare `dry_run`
+        rejects the key and never performs the read. Recording one would count
+        a call that did not happen."""
+        assert self._dispatch_reads(
+            monkeypatch, "tortoise_create_point", {"dry_run": True}) == []
+
+    def test_a_declared_dry_run_is_still_metered_through_the_seam(
+            self, monkeypatch):
+        assert self._dispatch_reads(
+            monkeypatch, "tortoise_delete", {"dry_run": True}
+        ) == [("k1", "team-x")]
+
+
+class TestPreviewToolSetIsDeclared:
+    """`_dry_run_tool_names()` is the metering gate (#4057 review P2): the read
+    counter must not be movable by a client-supplied argument naming a tool
+    that does not declare it. Pin the derivation against the REAL signatures
+    so the gate cannot go stale."""
+
+    def test_the_six_preview_tools_declare_dry_run(self):
+        import tortoise.mcp_server as m
+        names = m._dry_run_tool_names()
+        assert set(DESTRUCTIVE_TOOLS) <= names, sorted(names)
+
+    def test_a_write_tool_without_dry_run_is_not_in_the_set(self):
+        import tortoise.mcp_server as m
+        assert "tortoise_create_point" not in m._dry_run_tool_names()
+
+    def test_every_name_in_the_set_really_declares_dry_run(self):
+        import tortoise.mcp_server as m
+        for name in sorted(m._dry_run_tool_names()):
+            assert "dry_run" in inspect.signature(
+                getattr(m, name)).parameters, name
