@@ -3363,12 +3363,11 @@ class TortoiseSDK:
     ) -> dict:
         """Capture an agent session into the graph (#312 delta 4, #822).
 
-        Mirrors the hosted POST /v1/sessions logic minus quota/auth (ONE
-        divergence, deliberate and tracked: the hosted lane now resolves the
-        capture harness from the server's own record — #3681's
-        ``_observed_capture_harness`` — while this SDK path still stores the
-        caller-supplied ``harness``; selfhost/embedded has no server
-        credential lane to resolve it from. See the note at the
+        Mirrors the hosted POST /v1/sessions logic minus quota/auth. The
+        hosted lane resolves the capture harness from the server's own record
+        (#3681's ``_observed_capture_harness``); this SDK path stores the
+        caller-supplied ``harness`` (selfhost/embedded has no server
+        credential lane to resolve it from). See the note at the
         ``if harness:`` clause below):
         turns become episodic Points keyed {session_id}_t{i} (deterministic +
         idempotent), the M2 LLM extractor (epic #909) turns the conversation

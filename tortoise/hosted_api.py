@@ -8387,14 +8387,14 @@ async def capture_session(body: SessionRequest, request: Request, org: dict = De
 
     #1927: the session_recording OPT-OUT check is FIRST in the gate stack (before
     the quota 402) so disabled orgs do no quota work at all. The bookkeeping
-    keys are per LANE (#3681): an AGENT credential's non-2xx records
+    keys are per LANE (#3681): an AGENT credential's 2xx records
+    ``session_capture_receipt_{observed_harness}``, and its non-2xx records
     ``session_capture_last_error_{observed_harness}`` (the dashboard failure
-    sub-line reads this, NOT client state) and its 2xx records
-    ``session_capture_receipt_{observed_harness}`` — except the #3060
-    capacity 429 and the #3129 in-flight 409, which are server conditions. A
-    session-JWT (dashboard/browser) caller observes no harness: it records NO
-    per-harness last-error, and only the BARE ``session_capture_receipt`` —
-    the same bare member legacy no-harness hooks write.
+    sub-line reads this, NOT client state) — except the #3060 capacity 429 and
+    the #3129 in-flight 409, which are server conditions. A session-JWT
+    (dashboard/browser) caller observes no harness: it records NO per-harness
+    last-error, and only the BARE ``session_capture_receipt`` — the same bare
+    member legacy no-harness hooks write.
     """
     _require_scope(org, "graphs:write", "capture_session")
     try:
@@ -19179,11 +19179,19 @@ def _maybe_file_harness_connected(org_id: str) -> None:
         # Open the name the org-graph guard verified: `_make_sdk(namespace=)`
         # re-derives `org_{org_id}`, so for a legacy `team_{org_id}` org it
         # would MINT a different, absent graph and file the step where the
-        # projection never reads it (pin 4). None (probe failed / not listed)
-        # → the inline construction (fail-open), exactly as the PATCH handler
-        # does at #1997.
-        _sdk = (_open_org_graph_sdk(org_id)
-                or _make_sdk(namespace=org_id))
+        # projection never reads it (pin 4). None means NEITHER name is
+        # listed (or the registry probe failed) — and a WRITE must not mint a
+        # graph name that was never observed: minting `org_{org_id}` here
+        # would file the step into a graph the onboarding projection never
+        # reads, silently re-creating #3670 (the connected screen never
+        # appears) for that org. Skip, loudly — the caller's point write is
+        # never touched by this function.
+        _sdk = _open_org_graph_sdk(org_id)
+        if _sdk is None:
+            _logger.warning(
+                "onboarding auto-file (harness-connected) skipped: no listed "
+                "org graph to write (org=%s, step not filed)", org_id)
+            return
         try:
             _os.write_completed_step(
                 _sdk._get_proj(), org_id, "harness-connected",
@@ -19430,9 +19438,14 @@ def _open_org_graph_sdk(org_id: str) -> TortoiseSDK | None:
     keepalive key and every downstream `sdk._namespace` consumer stay
     byte-identical to before this helper existed.
 
-    None means "not listed" — it does NOT mean the probe failed. Callers keep
-    their `_make_sdk(namespace=org_id)` fallback for the fail-open case
-    (graph-up-unknown), exactly as the inline construction did.
+    None means "not listed" OR "the registry probe failed" —
+    ``_registry_existing_graphs`` returns None on a probe failure, and
+    ``if not listed`` treats that the same as an empty listing, so the two
+    are NOT distinguishable here without a second probe. READ callers keep
+    their `_make_sdk(namespace=org_id)` fallback (the read must proceed and
+    raise → 'unavailable'); a WRITE caller must instead SKIP, because minting
+    a name the probe never observed is exactly the pin-4 violation this
+    helper exists to prevent.
     """
     listed = _registry_existing_graphs()
     if not listed:
@@ -19877,23 +19890,12 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
 # allowlist — not "everything except the server-observed set" — so a future
 # step added to _CHECKPOINT_STEPS defaults to agent-only (fail-closed).
 #
-# ``catalog-presented`` is the ONE member, and it is NOT a live dashboard
-# surface. Since #3913 (owner ruling 2026-09-20) no dashboard path writes this
-# step: the B3 tripwire (#3704, which closed #3428/#2937) asserts exactly ONE
-# checkpoint call site across src/ — the fork write — and #3913 removed the
-# dashboard's catalog writer, so the tripwire also asserts no module
-# serializes ``catalog-presented``. Nor does completing the build fork require
-# the step: ``_GATE_BUILD`` (tortoise/onboarding/state.py) has been
-# {harness-connected, first-points-filed} since #3913. The member exists ONLY
-# because the production deploy is frozen at ``558c022c6`` (pre-#3913, held by
-# #4471): that bundle still POSTs ``{"step": "catalog-presented"}`` with a
-# session credential, so removing the exemption now would 403 the live
-# dashboard. It MUST be removed — emptying this allowlist, which is the
-# fail-closed default a future step inherits — once the deploy carrying #3913
-# reaches production.
-_DASHBOARD_WRITABLE_STEPS: frozenset[str] = frozenset({
-    "catalog-presented",
-})
+# It is EMPTY: no dashboard path has sent a STEP since the #3913 owner ruling
+# (2026-09-20), and every ``step`` write now requires an agent credential —
+# the fail-closed default this surface exists to establish. The mechanism
+# stays (a future exemption, if one is ever decided, is declared HERE and
+# nowhere else; the predicate below reads the allowlist, never the reverse).
+_DASHBOARD_WRITABLE_STEPS: frozenset[str] = frozenset()
 _CHECKPOINT_STEPS: frozenset[str] = frozenset({
     "harness-connected",      # W2: harness connected
     "first-points-filed",     # W3: org-anchor Subject filed (seed)
@@ -19932,10 +19934,9 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
     - step ∈ {harness-connected, first-points-filed, decide-completed,
       capture-disclosed, catalog-presented} — keyed-MERGE, first-write-wins
       (replay → noop), unknown step → 422.
-      #3671: the server-observed steps (all but ``catalog-presented``)
-      require an AGENT credential — a session-JWT step write is refused 403
-      ``agent_credential_required``. ``catalog-presented`` is exempt ONLY
-      because the deployed bundle is frozen pre-#3913 (see
+      #3671: EVERY step write requires an AGENT credential — a session-JWT
+      step write is refused 403 ``agent_credential_required`` (no dashboard
+      path has sent a step since the #3913 owner ruling; see
       ``_DASHBOARD_WRITABLE_STEPS``); the non-step FLOW ops below keep the
       dual-auth lane.
     - fork/compact → set-once (first write wins; same-value replay 200;
@@ -19986,18 +19987,8 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
     # AGENT credential (tt_/tk_ key, MCP/OAuth) may write them; a session
     # write is REFUSED loudly (403) rather than silently accepted.
     #
-    # ``catalog-presented`` is deliberately exempt from that gate, and the
-    # exemption is NOT a live surface: since #3913 (owner ruling 2026-09-20)
-    # no dashboard path writes it — the B3 tripwire (#3704, closing
-    # #3428/#2937) asserts exactly ONE checkpoint call site, the fork write,
-    # and #3913 removed the dashboard's catalog writer so the tripwire also
-    # asserts no module serializes this step — and ``_GATE_BUILD`` no longer
-    # contains it. The member exists ONLY because the deployed bundle is
-    # frozen at ``558c022c6`` (pre-#3913; deploy held by #4471) and that
-    # bundle still POSTs ``{"step": "catalog-presented"}`` with a session
-    # credential, so gating it now would 403 the live dashboard. This
-    # allowlist MUST be emptied (the fail-closed default) once the deploy
-    # carrying #3913 reaches production. Non-step FLOW ops
+    # ``_DASHBOARD_WRITABLE_STEPS`` is empty, so the gate covers EVERY step —
+    # ``catalog-presented`` included. Non-step FLOW ops
     # (fork/compact/member_progress/fork_unsure_at) keep their existing lanes
     # — the dashboard legitimately records the human's fork answer.
     if (body.step is not None

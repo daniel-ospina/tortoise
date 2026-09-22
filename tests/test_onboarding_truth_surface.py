@@ -150,28 +150,34 @@ class TestCheckpointStepRequiresAgentCredential:
         assert r.status_code == 200, r.text
         assert steps == ["harness-connected"]
 
-    def test_session_jwt_may_still_write_the_dashboard_catalog_step(
+    def test_session_jwt_cannot_write_the_catalog_step_either(
             self, monkeypatch):
-        """``catalog-presented`` is exempt from the agent gate for ONE reason,
-        and it is a LEGACY one: the production deploy is frozen at
-        ``558c022c6`` (pre-#3913, held by #4471), and that deployed bundle
-        still POSTs ``{"step": "catalog-presented"}`` with a session
-        credential — so gating the step now would 403 the live dashboard.
+        """``catalog-presented`` is NOT exempt from the agent gate.
 
-        It is NOT a live dashboard surface: since #3913 (owner ruling
-        2026-09-20) no dashboard path writes it (the B3 tripwire from #3704
-        asserts exactly ONE checkpoint call site, the fork write, and no
-        module serializes this step), and ``_GATE_BUILD`` no longer requires
-        it. The exemption MUST be removed — emptying the allowlist — once the
-        deploy carrying #3913 reaches production.
+        #3671: no dashboard path has sent a step since the #3913 owner ruling
+        (2026-09-20), so the session lane may write NO step — the fail-closed
+        default (``_DASHBOARD_WRITABLE_STEPS`` is empty). A future exemption
+        would be declared in that named allowlist, never in this predicate.
 
-        RED mutation: gate ``body.step is not None`` (drop the
-        ``_DASHBOARD_WRITABLE_STEPS`` exemption) → this session write returns
-        403 and the step setter is never called → both assertions fail; the
-        frozen live dashboard would 403 while the deploy freeze holds.
-        GREEN: the frozen bundle's step stays session-writable."""
+        RED mutation: add ``catalog-presented`` back to
+        ``_DASHBOARD_WRITABLE_STEPS`` → this session write returns 200 and
+        the step setter is called → all three assertions fail.
+        GREEN: the agent credential still writes it
+        (test_agent_credential_still_files_the_catalog_step)."""
         r, steps = self._post_step(
             monkeypatch, _SESSION, step="catalog-presented")
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"] == {
+            "message": "agent_credential_required",
+            "step": "catalog-presented"}
+        assert steps == []
+
+    def test_agent_credential_still_files_the_catalog_step(self, monkeypatch):
+        """The agent-side positive control for the case above: an AGENT
+        credential writes ``catalog-presented`` (it stays an accepted,
+        optional record and keeps its keyed-MERGE no-op replay)."""
+        r, steps = self._post_step(
+            monkeypatch, _AGENT, step="catalog-presented")
         assert r.status_code == 200, r.text
         assert steps == ["catalog-presented"]
 
@@ -489,6 +495,114 @@ async def test_stored_session_harness_owns_and_closes_its_data_sdk(
 # Part 3 — #3670: an agent-credentialed REST write files harness-connected
 # ═══════════════════════════════════════════════════════════════════
 
+def _stub_create_point_path(monkeypatch, *, opener=None, listed=None):
+    """Stub the ``create_point`` handler's collaborators for the auto-file.
+
+    The auto-file OWNS its SDK handle and must open the LISTED org-graph name
+    via ``_open_org_graph_sdk`` — never re-derive one via ``_make_sdk``. The
+    seam is therefore ``_open_org_graph_sdk``; ``_make_sdk`` is RECORDED only
+    to prove the auto-file never reaches it (a construction mints a name).
+
+    Returns ``(steps, opens, written)`` — the step ids written, the
+    ``_make_sdk`` constructions recorded, and the ``(proj, step)`` pairs
+    handed to the state writer (the proj IS the open key, so a write can be
+    attributed to the handle that performed it).
+
+    ``opener`` replaces ``_open_org_graph_sdk`` outright (the seam). ``listed``
+    patches ``_registry_existing_graphs`` instead, so the REAL
+    ``_open_org_graph_sdk`` selection logic runs.
+    """
+    steps: list[str] = []
+    opens: list[tuple] = []
+    written: list[tuple] = []
+
+    monkeypatch.setattr(ha, "_check_org_limit", lambda org, res: None)
+    monkeypatch.setattr(ha, "_graph_available", lambda oid: True)
+    monkeypatch.setattr(ha, "_get_onboarding_state", lambda oid: {})
+    monkeypatch.setattr(ha, "_org_proj", lambda oid: object())
+    monkeypatch.setattr(ha, "_maybe_apply_completion", lambda oid: False)
+    monkeypatch.setattr(ha, "_enqueue_dream", lambda *a, **k: None)
+    monkeypatch.setattr(ha, "_record_write_op", lambda org: None)
+
+    class _SdkHandle:
+        """Stand-in for the SDK the auto-file opens. `_get_proj` returns the
+        open key, so `written` records WHICH handle performed the write."""
+
+        def __init__(self, key):
+            self._key = key
+
+        def _get_proj(self):
+            return self._key
+
+        def close(self):
+            return None
+
+    real_make_sdk = ha._make_sdk
+
+    def _make_sdk(*, namespace=None, graph_name=None):
+        if namespace in (None, "registry") and graph_name is None:
+            # Background/registry construction (purge/retention sweeps) — keep
+            # it real so the app is unaffected; only an ORG-TENANT open is
+            # faked and recorded. Recording every call would drown the
+            # selection assertion in unrelated `_make_sdk()` traffic.
+            return real_make_sdk(namespace=namespace, graph_name=graph_name)
+        key = (("namespace", namespace) if namespace is not None
+               else ("graph_name", graph_name))
+        opens.append(key)
+        return _SdkHandle(key)
+
+    monkeypatch.setattr(ha, "_make_sdk", _make_sdk)
+    if listed is not None:
+        monkeypatch.setattr(ha, "_registry_existing_graphs",
+                            lambda: set(listed))
+    else:
+        monkeypatch.setattr(
+            ha, "_open_org_graph_sdk",
+            opener if opener is not None
+            else (lambda oid: _SdkHandle(("opener", oid))))
+
+    async def _noop(*a, **k):
+        return None
+
+    monkeypatch.setattr(ha, "_async_audit", _noop)
+    monkeypatch.setattr(ha, "_abuse_record_points", _noop)
+
+    def _writer(proj, oid, step, **kw):
+        steps.append(step)
+        written.append((proj, step))
+        return {"created": True}
+
+    monkeypatch.setattr(ha._os, "write_completed_step", _writer)
+
+    class _Proj:
+        def create_about_edge(self, *a, **k):
+            return None
+
+    class _Sdk:
+        _dirty_roots: tuple = ()
+
+        def create_point(self, **kw):
+            return {"id": "p-truth", "content": kw["content"]}
+
+        def _get_proj(self):
+            return _Proj()
+
+    monkeypatch.setattr(ha, "_data_sdk", lambda org: _Sdk())
+    return steps, opens, written
+
+
+def _post_point_request(credential):
+    """POST /v1/points under the given credential, clearing the override."""
+    _set_dependency(credential)
+    try:
+        with TestClient(app) as tc:
+            return tc.post(_resolved_path("create_point"),
+                           json={"content": "first memory",
+                                 "kind": "statement"})
+    finally:
+        app.dependency_overrides.clear()
+
+
 class TestAgentRestWriteFilesHarnessConnected:
     """RED mutation: drop the ``_credential_is_agent`` gate on the
     ``create_point`` auto-file → the session case files the step → the 'no
@@ -496,75 +610,46 @@ class TestAgentRestWriteFilesHarnessConnected:
     GREEN: the agent-credentialed REST write (the legitimate form) files the
     step."""
 
-    def _post_point(self, monkeypatch, credential):
-        steps: list[str] = []
-        monkeypatch.setattr(ha, "_check_org_limit", lambda org, res: None)
-        monkeypatch.setattr(ha, "_graph_available", lambda oid: True)
-        monkeypatch.setattr(ha, "_get_onboarding_state", lambda oid: {})
-        monkeypatch.setattr(ha, "_org_proj", lambda oid: object())
-        monkeypatch.setattr(ha, "_maybe_apply_completion", lambda oid: False)
-        monkeypatch.setattr(ha, "_enqueue_dream", lambda *a, **k: None)
-        monkeypatch.setattr(ha, "_record_write_op", lambda org: None)
-
-        class _SdkHandle:
-            """The auto-file now OWNS its SDK handle (review P2: `_org_proj`
-            leaked a connection per write) instead of routing through the
-            monkeypatched `_org_proj` — so the seam is `_make_sdk`."""
-
-            def _get_proj(self):
-                return object()
-
-            def close(self):
-                return None
-
-        monkeypatch.setattr(ha, "_make_sdk", lambda **kw: _SdkHandle())
-
-        async def _noop(*a, **k):
-            return None
-
-        monkeypatch.setattr(ha, "_async_audit", _noop)
-        monkeypatch.setattr(ha, "_abuse_record_points", _noop)
-
-        def _writer(proj, oid, step, **kw):
-            steps.append(step)
-            return {"created": True}
-
-        monkeypatch.setattr(ha._os, "write_completed_step", _writer)
-
-        class _Proj:
-            def create_about_edge(self, *a, **k):
-                return None
-
-        class _Sdk:
-            _dirty_roots: tuple = ()
-
-            def create_point(self, **kw):
-                return {"id": "p-truth", "content": kw["content"]}
-
-            def _get_proj(self):
-                return _Proj()
-
-        monkeypatch.setattr(ha, "_data_sdk", lambda org: _Sdk())
-        _set_dependency(credential)
-        try:
-            with TestClient(app) as tc:
-                r = tc.post(_resolved_path("create_point"),
-                            json={"content": "first memory", "kind": "statement"})
-        finally:
-            app.dependency_overrides.clear()
-        return r, steps
+    def _post_point(self, monkeypatch, credential, *, opener=None,
+                    listed=None):
+        steps, opens, written = _stub_create_point_path(
+            monkeypatch, opener=opener, listed=listed)
+        r = _post_point_request(credential)
+        return r, steps, opens, written
 
     def test_agent_credentialed_rest_write_files_the_step(self, monkeypatch):
-        r, steps = self._post_point(monkeypatch, _AGENT)
+        r, steps, opens, _written = self._post_point(monkeypatch, _AGENT)
         assert r.status_code == 200, r.text
         assert steps == ["harness-connected"]
+        assert opens == []  # never `_make_sdk` — no unobserved graph minted
 
     def test_session_credentialed_rest_write_files_nothing(self, monkeypatch):
         """The dashboard's own first-party write must NOT manufacture a
         connection the user never made (#3670 design constraint)."""
-        r, steps = self._post_point(monkeypatch, _SESSION)
+        r, steps, _opens, _written = self._post_point(monkeypatch, _SESSION)
         assert r.status_code == 200, r.text
         assert steps == []
+
+    def test_unobserved_org_graph_files_no_step_and_never_mints(
+            self, monkeypatch):
+        """A write must not MINT a graph whose name was never observed: when
+        ``_open_org_graph_sdk`` returns None (the registry probe failed, or
+        neither the canonical nor the pre-rename name is listed), the
+        auto-file SKIPS — no ``org_{org_id}`` is constructed and no step is
+        filed — while the caller's point write still succeeds (this function
+        must never fail its caller).
+
+        RED mutation: ``_open_org_graph_sdk(org_id) or _make_sdk(namespace=
+        org_id)`` → a handle is constructed and the step lands in an
+        unobserved graph → the 'no step', 'no write' and 'no mint' assertions
+        fail."""
+        r, steps, opens, written = self._post_point(
+            monkeypatch, _AGENT, opener=lambda oid: None)
+        assert r.status_code == 200, r.text
+        assert r.json()["id"] == "p-truth"   # the point write succeeded
+        assert steps == []
+        assert written == []
+        assert opens == []                    # no graph name minted
 
     def test_graph_bound_agent_write_files_no_org_level_step(
             self, monkeypatch):
@@ -594,14 +679,45 @@ class TestAgentRestWriteFilesHarnessConnected:
         # be the graph-bound skip.
         org_wide = {k: v for k, v in scoped.items() if k != "graph_id"}
         assert "graph_id" not in org_wide
-        r_wide, steps_wide = self._post_point(monkeypatch, org_wide)
+        r_wide, steps_wide, _o, _w = self._post_point(monkeypatch, org_wide)
         assert r_wide.status_code == 200, r_wide.text
         assert steps_wide == ["harness-connected"]
         # the graph-bound write files NO org-level step, but the point lands
-        r, steps = self._post_point(monkeypatch, scoped)
+        r, steps, _o2, _w2 = self._post_point(monkeypatch, scoped)
         assert r.status_code == 200, r.text
         assert r.json()["id"] == "p-truth"
         assert steps == []
+
+
+class TestHarnessConnectedOpenerSelection:
+    """#3670 / pin 4: the auto-file must write through the SDK opened for the
+    LISTED org-graph name. ``_make_sdk(namespace=org_id)`` re-derives
+    ``org_{org_id}``, so for a legacy ``team_{org_id}`` org it would MINT a
+    different, absent graph and file the step where the onboarding projection
+    never reads it. This drives the REAL ``_open_org_graph_sdk`` through a
+    stubbed registry listing, so both listed-name branches are exercised.
+
+    RED mutation: ``_open_org_graph_sdk`` returning a handle without
+    addressing the listed name (e.g. a bare ``_make_sdk(namespace=org_id)``)
+    → the legacy case opens ``org_org-truth`` instead of ``team_org-truth``
+    → the `opens` selection assertion fails."""
+
+    @pytest.mark.parametrize(("listed", "expected"), [
+        (["org_org-truth"], ("namespace", "org-truth")),
+        (["team_org-truth"], ("graph_name", "team_org-truth")),
+    ])
+    def test_step_lands_via_the_listed_org_graph_name(
+            self, monkeypatch, listed, expected):
+        steps, opens, written = _stub_create_point_path(
+            monkeypatch, listed=listed)
+        r = _post_point_request(_AGENT)
+        assert r.status_code == 200, r.text
+        # the REAL opener selected exactly the listed name
+        assert opens == [expected], (
+            f"opener selection for listed={listed}: {opens}")
+        # …and the step was written through THAT handle's projection
+        assert written == [(expected, "harness-connected")], written
+        assert steps == ["harness-connected"]
 
 
 def test_install_probe_server_owned_keys_are_derived_from_the_registry():
