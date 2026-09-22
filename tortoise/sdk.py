@@ -8,6 +8,22 @@ referenced in the builder capability catalog (onboarding) — catalog module
 'Session recorder' (``TortoiseSDK.capture_session`` is the SDK recorder
 facade) — tortoise/tool_registry.py CAPABILITY_CATALOG. If you add or rename
 an extractor/indexer, update the catalog reference.
+
+⛔ SURFACE APPROVAL MANDATE (#4282, owner ruling)
+    The public methods of ``TortoiseSDK`` — every ``def``/``async def`` in the
+    class body whose name does not begin with ``_`` — ARE the SDK surface. You
+    may NOT add, remove, or rename one without human approval. The surface is the
+    contract every agent and customer integration is built on, so changing it
+    materially affects customer outcomes. GET APPROVAL FROM DANIEL FIRST — repo
+    `AGENTS.md` → "USER QUESTIONS" / "DECISION RELAY" — and record it before the
+    PR. The full procedure is in `CONTRIBUTING.md` ("The MCP tool surface and
+    public SDK methods cannot grow by accident") and
+    `docs/product/sdk-surface-declaration.md`.
+
+    `tools/surface-guard.py` is a DRIFT control, NOT an approval gate: an expansion
+    that updates this class and `config/surface-manifest.yml` consistently PASSES
+    it. It cannot tell an approved addition from an unapproved one — Daniel's
+    review is what carries the approval.
 """
 from __future__ import annotations  # noqa: I001
 
