@@ -247,3 +247,45 @@ def test_identity_resolves_from_the_edge_and_vanishes_without_it(seeded,
         f"{mutated.get('retrieved_session_ids')!r}")
     assert f"[session {SID_0}]" not in mutated["evidence"]
     assert "[session ?]" in mutated["evidence"]
+
+
+# ── 3. #4106: an UNDATED fixture session records NO time ──────────────────
+
+def test_dateless_fixture_session_records_no_recorded_time(tmp_path):
+    """#4106: a session the fixture does NOT date must record NO session time.
+
+    The fixture tells the shared capture seeder ``now=None``, which since
+    #4156 means "record NO time" rather than "use the run clock". The
+    ask-path date annotation reads ``:Session.created_at``, so a run clock
+    there would render as the session's date — a fabricated fact in front of
+    a temporal question. NO recorded time is written (and nothing has to be
+    erased afterwards), so the reader's context carries NO date marker.
+    """
+    from tools.ask_spotcheck import _seed_memory
+
+    question = dict(QUESTION)
+    # one blank date, one unparseable — both mean "not recorded"
+    question["haystack_dates"] = ["", "not-a-date"]
+    sdk = TortoiseSDK(str(tmp_path / "undated.db"))
+    try:
+        _seed_memory(sdk, question)
+        proj = sdk._get_proj()
+        sessions = proj.g.query(
+            "MATCH (s:Session) RETURN s.id, s.created_at ORDER BY s.id"
+        ).result_set
+        assert [r[0] for r in sessions] == sorted([SID_0, SID_1]), sessions
+        assert all(r[1] is None for r in sessions), sessions
+        turns = proj.g.query(
+            "MATCH (t:Point) RETURN t.createdAt").result_set
+        assert turns and all(r[0] is None for r in turns), turns
+
+        hits = sdk.tortoise_fts_query("gym schedule", limit=40,
+                                      include_terminal=True)
+        ann = sdk.annotate_ask_hits(hits)
+        assert ann, "fixture must retrieve"
+        assert all(not h.get("session_date") for h in ann), ann
+        from tortoise.retrieval import render_context
+        evidence = render_context(ann)
+        assert "(session date" not in evidence, evidence
+    finally:
+        sdk.close()

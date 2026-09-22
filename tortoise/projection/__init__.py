@@ -1,6 +1,7 @@
 """Projection — fold the event log into the current graph.
 
-The log is the source of truth; a projection is a derived, rebuildable view.
+This is the reconstruction path: the log is folded into a derived, rebuildable
+view and is NOT the durability authority (see docs/durability-posture.md).
 `_apply_one` is the single source of fold semantics, shared by the pure `fold`
 (batch) and every incremental backend, so an incrementally-updated projection and
 `fold(read_all())` can never diverge.
@@ -28,7 +29,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple, Protocol, runtime_checkable
 
+from tortoise.env_truthy import env_flag  # #4097: the declared truthy contract
+
 logger = logging.getLogger(__name__)
+
+
+def _embedded_aof_enabled() -> bool:
+    """`TORTOISE_EMBEDDED_AOF` — the embedded AOF durability opt-in.
+
+    #4097: the single resolution point for that knob (``FalkorProjection.__init__``
+    uses it), through the declared truthy contract. `=on` used to be silently inert
+    (the pre-#4097 literal was {"1","true","yes"}).
+    """
+    return env_flag("TORTOISE_EMBEDDED_AOF", False)
 
 # Process-lifetime cache for FalkorProjection._get_falkordb_version (#1359
 # review P2): version detection costs two network RTTs (MODULE LIST + INFO
@@ -388,12 +401,23 @@ _SNAPSHOT_ENTRY_CHECK = {
     "session_snapshot": _validate_session_entry,
     "session_point_links": _validate_link_entry,
 }
-# Node properties a snapshot Point carries but `_upsert_point_props` does NOT
-# write (its SET list is fixed): restored verbatim in the pass-1b tail, because
-# `_upsert_point_props` would otherwise leave an invalidated Point EP-live
-# (#2488 ghost class) and a hash-less one invisible to every hash-keyed
-# dedup/terminal guard (#2971). Widening the SET list itself belongs to
-# #2948/#2958 — this keeps the repair inside the #2943 sidecar path.
+# Node properties a snapshot Point carries that the replay does not fully
+# reconstruct, restored by the pass-1b tail.
+#   * ``outdated``/``expiredAt``/``posterior_alpha``/``posterior_beta`` — not in
+#     `_upsert_point_props`'s fixed SET list; without them an invalidated Point
+#     comes back EP-live (#2488 ghost class). Restored VERBATIM, and only for a
+#     graph-only (synthetic) id — the original #2943 scope.
+#   * ``content_hash`` — the DERIVED dedup key (#2795/#2971). The replay writer
+#     writes it CONDITIONALLY (`coalesce($ch, n.content_hash)`, deriving no
+#     value for falsy content), so the tail restores it for ANY id — synthetic
+#     OR log-covered — but ONLY when no journal event owned the field. The
+#     gate treats a journaled write as the newer writer; that is the design
+#     assumption, and it is ORDER-BLIND for an UNJOURNALED write that
+#     postdates a journaled one (the snapshot is then newer) — a filed
+#     residual (#4252), deliberate here because the alternative re-breaks the
+#     issue's shape H.
+# Widening the SET list itself belongs to #2948/#2958 — this keeps the repair
+# inside the #2943 sidecar path.
 _REPLAY_GAP_PROPS = ("outdated", "expiredAt", "posterior_alpha",
                      "posterior_beta", "content_hash")
 
@@ -618,9 +642,10 @@ def _merge_entry(left: dict, fresh: dict, key: str) -> dict:
       a released quarantine or an older `content`/`status`.
     * Fresh-wins-everything throws away exactly what the leftover exists for.
       A partial replay recreates the node through `_upsert_point_props`, whose
-      fixed SET list omits `outdated`/`expiredAt`/`posterior_*`/`content_hash`
-      — so the fresh capture of that node has those properties ABSENT while
-      the leftover still carries the pre-wipe values.
+      CONDITIONAL `content_hash` write derives no value for falsy content (and
+      whose fixed SET list omits `outdated`/`expiredAt`/`posterior_*`) — so the
+      fresh capture of that node has those properties ABSENT while the leftover
+      still carries the pre-wipe values.
 
     `absences fill, presence wins` distinguishes them without guessing: a
     property the fresh capture lacks (or holds as null) is a replay gap; one
@@ -1119,7 +1144,14 @@ def _journal_append_product(graph_name: str) -> None:
 
 
 # ── Mixins ────────────────────────────────────────────────────────────────
-from tortoise.projection.entities import _EntityHandlers  # noqa: E402, I001
+from tortoise.projection.entities import (  # noqa: E402, I001
+    BELIEF_BOOL_PROPS,
+    BELIEF_PROPS,
+    _belief_bool_value_ok,
+    _belief_prop_value_ok,
+    _EntityHandlers,
+    _is_persistable_prop_value,
+)
 from tortoise.projection.edges import _EdgeHandlers  # noqa: E402
 from tortoise.projection.grounding import _GroundingMixin  # noqa: E402
 from tortoise.projection.propagation import _PropagationMixin  # noqa: E402
@@ -1182,6 +1214,114 @@ def _norm(ev: dict) -> dict:
     return ev
 
 
+# #3689: the four epistemic dims ``annotate_operator`` writes onto an Operator
+# Point. The SDK journals them under their NODE-property names
+# (``annotator_*``) as ``OperatorAnnotated`` / ``PointRevised`` extras; the
+# ``OperatorAnnotated`` :GraphEvent payload (docs/event-catalog.md) uses the
+# SHORT names (``bias``/``precision``/…), so a raw producer journaling the
+# documented payload shape is accepted too. The projection folded NEITHER
+# before #3689 — so a wipe+replay erased the annotation with NO warning
+# (the #3299 class: a live mutation with no effective journal fold).
+#
+# SCOPE (#2946): this is deliberately the ANNOTATOR subset, not the general
+# "PointRevised extras dropped on replay" class (#2946/#2795 own that design:
+# the handled-key semantics of `confidence`/`status`, the tags/TAGGED edge
+# ordering across pass 2, and a shared skip-set for this module-level fold).
+_ANNOTATOR_PROPS: tuple[str, ...] = (
+    "annotator_bias",
+    "annotator_precision",
+    "annotator_consistency",
+    "annotator_directness",
+)
+_ANNOTATOR_SHORT_ALIASES: dict[str, str] = {
+    "bias": "annotator_bias",
+    "precision": "annotator_precision",
+    "consistency": "annotator_consistency",
+    "directness": "annotator_directness",
+}
+
+
+def _annotator_value_ok(val) -> bool:
+    """True when a journaled annotator dim can be written to FalkorDB.
+
+    Shape rule first, so this stays in lockstep with the shared #2894/#2795
+    writer (``_is_persistable_prop_value``): maps/bytes/sets and over-deep
+    arrays are rejected there. On top of that, two classes are rejected at
+    PARAMETER PARSE even though they round-trip through JSONL — a non-finite
+    float (NaN/±Inf; ``1e400`` → ``inf``) and a string carrying NUL or a
+    lone surrogates (review P1). A rejection here lands in rebuild pass-1b
+    AFTER the wipe, so a malformed record must degrade to a DROPPED dim,
+    never an aborted recovery.
+
+    ``None`` is KEPT: a live ``update_point(x=None)`` clears the property,
+    and replay must match by clearing it too — dropping the key would leave
+    the prior value in place (a live/replay parity break).
+    """
+    if val is None:
+        return True
+    if not _is_persistable_prop_value(val):
+        return False
+    if isinstance(val, float):
+        return math.isfinite(val)
+    if isinstance(val, str):
+        if "\x00" in val:
+            return False
+        try:
+            val.encode("utf-8")
+        except UnicodeEncodeError:
+            return False  # lone surrogate (driver rejects at encode)
+        return True
+    if isinstance(val, (list, tuple)):
+        return all(_annotator_value_ok(x) for x in val)
+    return True
+
+
+def _writable_id(val) -> bool:
+    """True when ``val`` is a str FalkorDB can take as a query parameter.
+
+    The ``id`` rides as a Cypher parameter exactly like a dim value, so it
+    needs the SAME NUL/lone-surrogate gate — otherwise a corrupt journal line
+    with such an id aborts ``rebuild_all`` after the wipe (review P1; the
+    pre-existing PointRevised fold had the same latent hole).
+    """
+    return isinstance(val, str) and _annotator_value_ok(val)
+
+
+def _annotator_dims(ev: dict, *, aliases: bool = False) -> dict:
+    """Annotator dims PRESENT on a journal record, under their node-prop names.
+
+    Presence-conditional (#3689): only keys the record actually carries are
+    returned, so a partial ``update_point(annotator_bias=…)`` never clobbers
+    the sibling dims it did not write. Canonical (long) names always win.
+
+    ``aliases`` (default False) admits the :GraphEvent SHORT payload names
+    (``bias``/``precision``/…) as aliases — and MUST be True only for an
+    ``OperatorAnnotated`` record, whose documented payload uses them.
+    ``update_point`` journals a ``PointRevised`` with the caller's props
+    VERBATIM (``SET n += $props``), so a node prop literally named
+    ``precision`` is exactly the ``precision`` property — treating it as
+    ``annotator_precision`` would rename it on replay and silently clobber a
+    real annotator dim (and the retrieval ordering that reads it; review P1).
+    """
+    # #2894/#2795 + review P1: a journal record can carry a value FalkorDB
+    # cannot take (map/bytes/set, an array containing one, or a non-finite
+    # float). The rejection lands in rebuild pass-1b — AFTER the wipe, on the
+    # recovery path — so drop the dim here instead of aborting the rebuild
+    # (the shared PointAdded writer drops the whole prop the same way).
+    def _ok(val) -> bool:
+        return _annotator_value_ok(val)
+
+    dims: dict = {}
+    for key in _ANNOTATOR_PROPS:
+        if key in ev and _ok(ev[key]):
+            dims[key] = ev[key]
+    if aliases:
+        for short, key in _ANNOTATOR_SHORT_ALIASES.items():
+            if short in ev and key not in dims and _ok(ev[short]):
+                dims[key] = ev[short]
+    return dims
+
+
 # Recognized journal record types the projection folds NOWHERE — audit-only
 # markers plus the JSONL-only durability records replayed by a dedicated pass
 # or deliberately deferred. The ``else`` warning in ``apply``/``rebuild_all``
@@ -1192,7 +1332,6 @@ def _norm(ev: dict) -> dict:
 # real fold branch below (the branch would win anyway, but the set would then
 # mislead the next reader about what is unknown).
 _NO_PROJECTION_FOLD = frozenset({
-    "ConfidenceChanged",    # audit-only, no graph effect (pre-existing no-op)
     "IngestStarted",        # audit-only, no graph effect (pre-existing no-op)
     "BatchIdStamped",       # JSONL-only; replayed from the batch snapshot
                             # (rebuild_all pass-2b), not via this dispatcher
@@ -1219,7 +1358,47 @@ _NO_POINT_FOLD = _NO_PROJECTION_FOLD | frozenset({
     "DocumentCreated",
     "SourceCreated",
     "DirectEdgeRepoint",
+    # JSONL-only siblings of the two above: both have REAL fold branches in
+    # ``apply``/``rebuild_all``, but neither has a representation in this
+    # ``{id: point}`` index (a Session node is not a Point; the about* edge
+    # is a flat descriptor) — so without them every replayed record logged
+    # the ``unrecognized event type`` warning, contradicting the set's
+    # documented contract that the warning is reserved for a type OUTSIDE
+    # the vocabulary.
+    "EntityLinked",
+    "SessionRecorded",
 })
+
+
+# ── #3860: the ONE ownership identity — (kind, id) ────────────────────────
+# A node is owned by its (graph label, id) pair. Both the rebuild survivor
+# anchor (``last_recreate_seq``) and the replay fold (``_fold_entity_mutation``
+# → ``_delete_entity_by_id``) key on that pair, so a delete can never be
+# suppressed by — or match — a node of another kind. This table is the ONLY
+# source of the label→id-property mapping; a journal ``label`` is NEVER
+# interpolated into the Cypher label position (it must be a member of
+# ``_CANONICAL_ENTITY_LABELS``, else the fold falls back to the legacy id-wide
+# delete). Mirrored by the live writer ``sdk._delete_entity``.
+_CANONICAL_ENTITY_ID_PROPS: tuple[tuple[str, str], ...] = (
+    ("Point", "id"), ("Subject", "id"), ("Object", "id"),
+    ("Document", "id"), ("Source", "id"), ("Event", "eventId"),
+)
+_CANONICAL_ENTITY_LABELS: frozenset[str] = frozenset(
+    label for label, _ in _CANONICAL_ENTITY_ID_PROPS)
+_ENTITY_ID_PROP: dict[str, str] = {
+    label: prop for label, prop in _CANONICAL_ENTITY_ID_PROPS}
+_NON_POINT_ENTITY_LABELS: frozenset[str] = (
+    _CANONICAL_ENTITY_LABELS - {"Point"})
+
+
+def _owns_point(label: object) -> bool:
+    """True when an ``EntityMutated``-style ``label`` may own a POINT node.
+
+    #3860: a *known* non-Point canonical label does not own a Point; a
+    missing/unknown label keeps the legacy id-wide semantics, so it is
+    treated as possibly owning one (the fold falls back id-wide there too).
+    """
+    return not (isinstance(label, str) and label in _NON_POINT_ENTITY_LABELS)
 
 
 def _apply_one(points: dict[str, dict], ev: dict) -> None:
@@ -1254,13 +1433,46 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
     elif t == "PointRevised":
         # #331 (review r4): str-only lookup — dict.get(unhashable) raises.
         rid = ev.get("id")
-        p = points.get(rid) if isinstance(rid, str) else None
+        p = points.get(rid) if _writable_id(rid) else None
         if p:
-            if ev.get("new_content") is not None:
-                p["content"] = ev["new_content"]
+            # #3689 review P2: gate the content edit EXACTLY as
+            # ``_revise_point`` does — an UNWRITABLE new_content (NUL/lone-
+            # surrogate str, map, non-finite float, ...) is dropped there and
+            # must be dropped here too, or the pure fold and ``rebuild_all``
+            # silently disagree, breaking the #330 parity contract this module
+            # declares (``_apply_one`` is the single source of fold
+            # semantics).
+            new_content = ev.get("new_content")
+            if new_content is not None and _annotator_value_ok(new_content):
+                p["content"] = new_content
             # Phase 1: discard new_context for v2+ events (#49)
             if ev.get("new_context") is not None and ev.get("projection_version", 0) < 2:
                 p["context"] = ev["new_context"]
+            # #3689: fold the annotator dims carried as PointRevised extras
+            # (update_point's emit), canonical names only. Presence-
+            # conditional — never clobber a sibling dim the revision did not
+            # carry.
+            p.update(_annotator_dims(ev))
+            # #2884 FIX-4: fold the four belief props when the revision
+            # carries them. `update_point(confidence=...)` writes them LIVE
+            # (`SET n += $props`) and emits them in the PointRevised payload,
+            # but the replay fold built its SET clauses only from the
+            # content/annotator fields and silently discarded them — so a
+            # rebuild dropped a caller-set confidence. Same presence-
+            # conditional shape and the SAME value gate as
+            # `_fold_confidence_changed` / the ConfidenceChanged branch
+            # (#330 parity).
+            for _bk in BELIEF_PROPS:
+                if _bk in ev and _belief_prop_value_ok(_bk, ev[_bk]):
+                    p[_bk] = ev[_bk]
+    elif t == "OperatorAnnotated":
+        # #3689: the explicit annotation record — parity with apply() /
+        # rebuild_all pass-1b. A plain property write on the operator's
+        # ``{id: point}`` entry. Short payload aliases ARE admitted here.
+        rid = ev.get("id")
+        p = points.get(rid) if _writable_id(rid) else None
+        if p:
+            p.update(_annotator_dims(ev, aliases=True))
     elif t == "PointRetracted":
         # #689: tombstone instead of hard delete — retracted content stays
         # recoverable via raw graph queries. Historical data loss prior to
@@ -1280,13 +1492,46 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
             if isinstance(mid, str):
                 points.pop(mid, None)
     elif t == "EntityMutated":
-        # #3299: the write-surface mutation record. In-memory points are keyed
-        # by id, so `op=delete` drops the point; other ops (rename/restatus)
-        # are no-ops on this pure-point index until a sibling extends them.
+        # #3299/#3860: the write-surface mutation record. In-memory points are
+        # keyed by id, so `op=delete` drops the point; other ops (rename/
+        # restatus) are no-ops on this pure-point index until a sibling
+        # extends them. #3860: identity is (kind, id) — a delete naming a
+        # DIFFERENT canonical kind does not own a Point and must not pop it;
+        # a missing/unknown label keeps the legacy id-wide delete (parity
+        # with the graph fold's fallback).
         if ev.get("op") == "delete":
             rid = ev.get("id")
-            if isinstance(rid, str):
+            if isinstance(rid, str) and _owns_point(ev.get("label")):
                 points.pop(rid, None)
+    elif t == "ConfidenceChanged":
+        # #2884 D3: the EP/dream belief-state write-back — parity with the
+        # graph folds (`FalkorProjection.apply` / `rebuild_all`).
+        # Presence-conditional, exactly like `_fold_confidence_changed`: only
+        # keys the record carries are written; a key present with null writes
+        # null. `_belief_prop_value_ok` is the ONE value gate the graph fold
+        # also uses, so the pure fold and the graph fold cannot disagree on a
+        # corrupt line (#330 parity).
+        rid = ev.get("id")
+        p = points.get(rid) if _writable_id(rid) else None
+        if p:
+            for key in BELIEF_PROPS:
+                if key not in ev:
+                    continue
+                value = ev[key]
+                if not _belief_prop_value_ok(key, value):
+                    continue
+                p[key] = value
+            # #2884 A5: the boolean flag riding the same record
+            # (`assess_source`'s `outdated=true`) — same presence-conditional
+            # shape and its own strict bool gate, so the pure fold and the
+            # graph fold agree.
+            for key in BELIEF_BOOL_PROPS:
+                if key not in ev:
+                    continue
+                value = ev[key]
+                if not _belief_bool_value_ok(value):
+                    continue
+                p[key] = value
     elif t in _NO_POINT_FOLD:
         # Recognized, intentionally NOT folded by this point-only index:
         # audit markers, the JSONL-only records replayed by a dedicated pass,
@@ -1420,6 +1665,167 @@ class RebuildDroppedEpisodicPoints(RuntimeError):
 _JOURNAL_CREATING_EVENT_TYPES = frozenset({
     "PointAdded", "OperatorAdded", "PointPromoted", "OperatorPromoted",
 })
+
+
+# #3722 review (cycle 5) P2: the labels a journaled hard delete can actually
+# REMOVE. Replay's ``EntityMutated`` op=delete replays ``_delete_entity_by_id``
+# — #3860 SCOPED it to the record's own canonical ``label``, so a delete record
+# removes that ONE label; only a MISSING/unknown label falls back to the legacy
+# id-wide delete across all six. The live ``_delete_entity`` is the same six and
+# documents "Session/APIKey/Org/Tag nodes are intentionally NOT deleted".
+# ``PointsMerged`` deletes Points only. So a journaled hard delete can NEVER
+# remove a ``:Session`` node, and the staleness rule must not suppress a
+# Session-source link just because an unrelated Point/Object with the same id
+# was deleted later. #3722 review (cycle 6) P2: the reader keys these sets
+# PER LABEL under the id (``{id: {label: max_seq}}``), so a delete that cannot
+# remove a label never supplies that label's boundary seq either — unioning
+# them across deletes conflated an ``EntityMutated`` delete with a later
+# ``PointsMerged`` and over-suppressed a live link.
+_HARD_DELETE_LABELS = frozenset({
+    "Point", "Subject", "Object", "Document", "Source", "Event",
+})
+_POINTS_MERGED_LABELS = frozenset({"Point"})
+
+
+def journal_hard_delete_seqs(events) -> dict[str, dict[str, int]]:
+    """Per-``(id, label)`` journal seq of the LAST hard delete that can remove
+    that label — ``{id: {label: max_delete_seq}}``.
+
+    EXACT, not conservative: the inner map records, per label the delete can
+    actually REMOVE, the latest seq of such a delete, so
+    ``_hard_delete_suppresses`` is literally "is there a hard delete AFTER seq
+    L that can remove THIS label?" — ``entry.get(label) > L``.
+
+    The hard-delete EVENT TYPES are the same ones ``_journal_hard_deleted_ids``
+    derives (``EntityMutated`` op=delete, #3299; ``PointsMerged``, whose
+    merged-away ids replay through ``_delete``) — but the ID SETS can differ:
+    that helper gates each id by ``_owns_point`` (#3860), dropping an id whose
+    record names a known non-Point kind. (Envelope shape is NOT a difference:
+    both readers normalize, so a nested payload is seen either way — #3722.)
+    Retraction is deliberately
+    NOT included — ``_retract`` tombstones and the node survives. The OUTER
+    key is the id; the INNER keys are the labels that delete removes:
+
+    * ``EntityMutated`` op=delete replays ``_delete_entity_by_id``, which
+      #3860 scoped to the record's own canonical ``label`` — that label ALONE
+      gets the seq. A missing/unknown label falls back to the legacy id-wide
+      delete across ``_HARD_DELETE_LABELS`` (all six get the seq), matching
+      ``_delete_entity_by_id(label=None)``.
+    * ``PointsMerged`` replays ``_delete`` — a ``:Point`` only
+      (``_POINTS_MERGED_LABELS``), so only ``Point`` gets the seq.
+
+    A ``:Session`` source is therefore never suppressed — no journaled hard
+    delete can remove it — so a same-id delete of another label cannot drop a
+    live ``(Session)-[:aboutObject]->(Object)`` edge (live != replay).
+
+    #3722 review (cycle 6) P2 — the SHAPE must be per-``(id, label)``. An
+    earlier revision paired the MAX delete seq for an id with a label set
+    UNIONED across ALL of that id's deletes, so the boundary asked "could SOME
+    delete of this id remove this label?" while comparing against the LATEST
+    delete's seq. That is unsound whenever the latest delete is a
+    ``PointsMerged`` (removes Points only) while the label came from an
+    EARLIER ``EntityMutated`` — which at that revision recorded all six
+    labels, the fold being id-wide before #3860: it OVER-suppressed, silently
+    DROPPING a live edge on replay (an Object re-created under a
+    deleted-then-merged id lost its ``(Point)-[:aboutObject]->(Object)`` link
+    in every engine). Per-label max seq removes the cross-delete conflation
+    entirely — there is no residual over-approximation to document here.
+
+    Used by the ``EntityLinked`` fold: the fold is an unconditional
+    MATCH…MERGE, so without this boundary a link whose endpoint was deleted
+    and later re-created under the SAME id came back on replay while live had
+    no such edge (ids are reused routinely). The seq space is the enumerate
+    index over the SAME journal list the replay engines walk, so callers must
+    pass the full events list, un-filtered.
+
+    The payload is read from the NORMALIZED record (``_norm``), not the raw
+    envelope. ``_norm`` splices ``ev["point"]`` over the envelope, and THAT
+    is the shape ``apply()``'s ``PointsMerged`` branch and ``rebuild_all``'s
+    pass-1b branch delete through. The nested shape is a SUPPORTED journal
+    shape, pinned by
+    ``tests/test_projection.py::test_falkor_apply_points_merged_nested_format``
+    (#325) — ``{"type":"PointsMerged","point":{"keep_id":k,
+    "merge_ids":[x]}}``. Reading the RAW record missed the delete entirely
+    (returned ``{}``), so the staleness rule never suppressed a link whose
+    endpoint was merged away, and the deleted link resurrected on the
+    re-created point. A nested ``EntityMutated`` op=delete was hidden the
+    same way.
+    """
+    out: dict[str, dict[str, int]] = {}
+    for seq, ev in enumerate(events):
+        if not isinstance(ev, dict):
+            continue
+        # #3722 review (cycle 5): read the NORMALIZED record — the shape the
+        # replay folds actually delete through (see docstring SHAPE).
+        ev = _norm(ev)
+        t = ev.get("type")
+        if t == "EntityMutated" and ev.get("op") == "delete":
+            rid = ev.get("id")
+            if isinstance(rid, str):
+                # #3860: identity is (kind, id) — the fold is SCOPED to the
+                # record's own canonical label, so the labels THIS delete can
+                # remove are that label alone. A missing/unknown label falls
+                # back to the legacy id-wide delete, matching
+                # ``_delete_entity_by_id(label=None)``.
+                label = ev.get("label")
+                labels = ({label} if isinstance(label, str)
+                          and label in _CANONICAL_ENTITY_LABELS
+                          else _HARD_DELETE_LABELS)
+                _merge_hard_delete(out, rid, seq, labels)
+        elif t == "PointsMerged":
+            # #331: `or []` also covers an explicit "merge_ids": null.
+            for mid in ev.get("merge_ids") or []:
+                if isinstance(mid, str):
+                    _merge_hard_delete(out, mid, seq, _POINTS_MERGED_LABELS)
+    return out
+
+
+def _merge_hard_delete(out, rid, seq, labels) -> None:
+    """Record a hard delete of ``rid`` at ``seq``: per-label MAX seq.
+
+    ``labels`` is the set of labels THIS delete can remove, so each label's
+    slot is advanced INDEPENDENTLY — never unioned across deletes (#3722
+    review cycle 6: unioning is what conflated an ``EntityMutated`` delete
+    with a later ``PointsMerged``).
+    """
+    by_label = out.get(rid)
+    if by_label is None:
+        by_label = {}
+        out[rid] = by_label
+    for label in labels:
+        prev = by_label.get(label)
+        if prev is None or seq > prev:
+            by_label[label] = seq
+
+
+def _hard_delete_suppresses(hard_delete_seqs, endpoint_id, label,
+                            seq) -> bool:
+    """True when a recorded hard delete of ``(label, endpoint_id)`` lands AFTER
+    ``seq`` — exactly "a delete after L that can remove THIS label" (#3722
+    review cycle 6 P2; see ``journal_hard_delete_seqs``).
+
+    ``endpoint_id``/``label`` come from a journal FILE, so BOTH are type-gated:
+    a list/dict label would raise ``TypeError: unhashable`` on the membership
+    test, and a non-string id could never have been written (``_writable_id``)
+    so it cannot be stale.
+    """
+    if not isinstance(endpoint_id, str) or not isinstance(label, str):
+        return False
+    entry = hard_delete_seqs.get(endpoint_id)
+    if not entry:
+        return False
+    if isinstance(entry, dict):
+        del_seq = entry.get(label)
+        return del_seq is not None and del_seq > seq
+    if isinstance(entry, tuple):
+        # Cycle-5 ``{id: (max_seq, labels)}``: no in-repo producer emits this
+        # any more; the union it carries OVER-suppresses (cycle 6), so it is
+        # tolerated only for an external caller holding the old shape.
+        del_seq, labels = entry
+        return del_seq > seq and label in labels
+    # Pre-cycle-5 ``{id: int}`` (no labels): fall back to the id-only test over
+    # the removable-label set.
+    return entry > seq and label in _HARD_DELETE_LABELS
 
 
 class FalkorProjection(
@@ -1648,10 +2054,7 @@ class FalkorProjection(
             #    artifact — restores/migrates must remove a stale one at the
             #    target path (Redis loads AOF in preference to RDB).
             #  - :memory: is exempt (no file to persist).
-            aof_enabled = (
-                os.environ.get("TORTOISE_EMBEDDED_AOF", "").strip().lower()
-                in ("1", "true", "yes")
-            )
+            aof_enabled = _embedded_aof_enabled()
             aof_dir = (
                 os.path.basename(os.path.abspath(path)) + "-appendonlydir"
             ) if (path != ":memory:" and aof_enabled) else None
@@ -1870,8 +2273,9 @@ class FalkorProjection(
     def _auto_health_recover(self) -> None:
         """Health check on open + transparent JSONL recovery (embedded only).
 
-        The event log is the source of truth; the projection a derived view.
-        Two corruption modes are caught:
+        The projection is a derived view folded from the domain event log (the
+        reconstruction source — not the durability authority; see
+        docs/durability-posture.md). Two corruption modes are caught:
           1. Unresponsive graph (open succeeded, queries fail).
           2. Lost graph — 0 nodes while the adjacent JSONL log has events
              (redislite starts fresh when its RDB is corrupt, interrupted
@@ -2048,6 +2452,14 @@ class FalkorProjection(
             if ev.get("projection_version", 0) >= 2:
                 ev.pop("new_context", None)
             self._revise_point(ev, set_updated_at=True)
+        elif t == "OperatorAnnotated":
+            # #3689: fold the explicit annotation record. Inline (a
+            # non-terminalizing property SET — parity with the PointRevised
+            # branch directly above); the dims have no edge/graph-shape
+            # effect, so no deferred sweep is needed. No return: keep
+            # ``apply()``'s declared ``-> None`` contract (the fold-miss
+            # signal is consumed by rebuild_all pass-1b).
+            self._apply_annotator(ev)
         elif t == "PointRetracted":
             rid = ev.get("id")
             if isinstance(rid, str):
@@ -2100,6 +2512,21 @@ class FalkorProjection(
             return self._fold_entity_mutation(ev)
         elif t == "EventRecorded":
             return self._upsert_event(ev)
+        elif t == "EntityLinked":
+            # #3664: the capture entity-attachment replay consumer — an
+            # idempotent about* edge MERGE keyed on the flat logical ids
+            # (Session/Point -> Object). JSONL-only record (no GraphEvent).
+            # Folded INLINE here because ``apply`` sees one event and the live
+            # caller's endpoints already exist; the whole-journal apply()-based
+            # engines (``rebuild``/``recover_from_log``) buffer the type and
+            # call ``fold_deferred_entity_links`` after the pass, matching
+            # ``rebuild_all``'s trailing sweep on a forward-reference journal.
+            return self._fold_entity_linked(ev)
+        elif t == "SessionRecorded":
+            # #3664: the :Session node's journal carrier — the capture MERGE
+            # is a raw write, so without this a rebuild lost the node (and
+            # made any EntityLinked edge from it unreplayable).
+            return self._fold_session_recorded(ev)
         elif t == "SubjectAdded":
             self._upsert_subject(ev)
         elif t == "ObjectSuperseded":
@@ -2120,6 +2547,13 @@ class FalkorProjection(
             # popped here so it never reaches _persist_extra_props.
             return self._upsert_source(
                 ev, merge_run_id=ev.pop("_merge_run_id", None))
+        elif t == "ConfidenceChanged":
+            # #2884 D3: the EP/dream belief-state write-back. Inline (a
+            # non-terminalizing property SET — parity with the PointRevised
+            # branch above); no edge/graph-shape effect, so no deferred
+            # sweep. No return: keep ``apply()``'s declared ``-> None``
+            # contract.
+            self._fold_confidence_changed(ev)
         elif t in _NO_PROJECTION_FOLD:
             # Recognized, intentionally folded elsewhere or not at all: the
             # audit-only markers, the JSONL-only batch snapshot replayed in
@@ -2193,15 +2627,39 @@ class FalkorProjection(
         them journaled the destruction — so the #3947 invariant exempts them.
         Retraction is deliberately NOT in this set: ``_retract`` tombstones
         and the node survives, so it can never look like a lost Point.
+
+        Identity is ``(kind, id)``, not bare id (#3860): only a deleted record
+        that is (or may be) a Point exempts its id, so a foreign-kind delete
+        can never hide an unrecreatable episodic Point and fail this guard OPEN.
+
+        Each event is read in its NORMALIZED form (``_norm``), mirroring
+        ``journal_hard_delete_seqs``: in a NESTED record the ``EntityMutated``
+        payload (``id``/``op``/``label``) rides inside ``point`` while ``type``
+        stays on the envelope, so reading the raw envelope sees no ``op`` and
+        the delete is missed entirely — its id would then never be exempted
+        (#3722).
         """
         deleted: set[str] = set()
         for ev in events:
             if not isinstance(ev, dict):
                 continue
+            # #3722: read the NORMALIZED record — the shape the replay folds
+            # actually delete through (``_norm`` splices ``ev["point"]`` over
+            # the envelope). Reading the raw envelope missed a NESTED
+            # ``EntityMutated`` op=delete entirely, so its id was never
+            # exempted and the pre-wipe proof REFUSED a rebuild the replay
+            # would have completed (false block on a healthy store).
+            ev = _norm(ev)
             t = ev.get("type")
             if t == "EntityMutated" and ev.get("op") == "delete":
+                # #3860: identity is (kind, id) — only a POINT-kind delete (or
+                # an unknown/missing label, treated as possibly-Point) exempts
+                # a Point id from this roster. A foreign-kind record must not
+                # hide an unrecreatable episodic Point (the guard would then
+                # fail OPEN — permit the silent destruction it exists to
+                # refuse).
                 rid = ev.get("id")
-                if isinstance(rid, str):
+                if isinstance(rid, str) and _owns_point(ev.get("label")):
                     deleted.add(rid)
             elif t == "PointsMerged":
                 # #331: `or []` also covers an explicit "merge_ids": null.
@@ -2278,8 +2736,22 @@ class FalkorProjection(
         episodic_before = self._episodic_point_ids()
         self._assert_episodic_points_recreatable(episodic_before, events)
         self.g.query("MATCH (n) DETACH DELETE n")
-        for ev in events:
+        # #3664: this engine feeds ``apply()`` ONE record at a time, so an
+        # ``EntityLinked`` whose endpoint is created LATER in the journal would
+        # fold to nothing. Defer the type to a trailing sweep — the same
+        # forward-reference treatment ``rebuild_all`` gives it — so the replay
+        # engines agree. The fold is an idempotent MERGE, order-free by
+        # construction. Records are buffered WITH their journal seq so the
+        # sweep can apply the hard-delete staleness rule (#3722 review P2): a
+        # link whose endpoint was hard-deleted AFTER it must not resurrect.
+        hard_delete_seqs = journal_hard_delete_seqs(events)
+        entity_link_events: list[tuple[int, dict]] = []
+        for seq, ev in enumerate(events):
+            if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
+                entity_link_events.append((seq, ev))
+                continue
             self.apply(ev)
+        self.fold_deferred_entity_links(entity_link_events, hard_delete_seqs)
 
     def rebuild_all(self, log_dir: str) -> dict:
         """Rebuild from all .jsonl files in a directory. Returns counts.
@@ -2378,10 +2850,13 @@ class FalkorProjection(
                         continue  # log already covers this point
                     # Strip volatile properties the replay recomputes or that
                     # are not node properties. `content_hash` is NOT in this
-                    # list: `_upsert_point_props` never writes it (#2971), so
-                    # the sidecar is its only carrier and the pass-1b tail
-                    # re-applies it explicitly. `updatedAt` and `embedding`
-                    # are genuinely replay-owned.
+                    # list: it is `_upsert_point_props`'s CONDITIONAL write, and
+                    # the pass-1b tail is its carrier for the ids the journal
+                    # did not derive (see _REPLAY_GAP_PROPS). `embedding` is
+                    # not carried by the pre-wipe snapshot (the replay
+                    # re-derives it), while a rebuild restores it from the live
+                    # pre-wipe capture when one exists; `updatedAt` is
+                    # replay-owned.
                     clean = {k: v for k, v in props.items()
                              if k not in ("embedding", "updatedAt",
                                           "_nid", "_graph_id")}
@@ -2534,10 +3009,15 @@ class FalkorProjection(
         # final `events` (synthetic first, so their nodes exist before JSONL
         # events that may reference them).
         journal_events: list[dict] = []
-        for fname in sorted(os.listdir(log_dir)):
+        # #4042: per-journal-file ordinal, parallel to ``journal_events`` —
+        # the same-source-file chronology key the pass-1b content boundary
+        # needs (see ``event_source`` at the assembly below).
+        journal_source: list[int] = []
+        for file_idx, fname in enumerate(sorted(os.listdir(log_dir))):
             if fname.endswith('.jsonl'):
-                journal_events.extend(
-                    EventLog(os.path.join(log_dir, fname)).read_all())
+                chunk = EventLog(os.path.join(log_dir, fname)).read_all()
+                journal_events.extend(chunk)
+                journal_source.extend([file_idx] * len(chunk))
 
         # ── #2943: durable pre-wipe snapshot (crash-safe wipe+replay) ───
         # A leftover sidecar means a previous rebuild died after the wipe
@@ -2591,6 +3071,14 @@ class FalkorProjection(
         session_snapshot = merged["session_snapshot"]
         session_point_links = merged["session_point_links"]
         events = list(synthetic_events) + journal_events
+        # #4042: per-event source-file ordinal, parallel to ``events``.
+        # ``None`` marks a synthetic / pre-wipe-snapshot event (it came from
+        # no journal file), which never forms a same-source boundary. Built
+        # HERE, not at the read loop above: ``synthetic_events`` is
+        # reassigned by ``_union_prewipe_snapshot`` just before this line and
+        # its length can change on the #2943 recovery path.
+        event_source: list[int | None] = (
+            [None] * len(synthetic_events) + journal_source)
 
         # Guard the wipe BEFORE persisting the sidecar: a REFUSED wipe (a
         # non-test graph in server mode) must not leave a sidecar behind, or a
@@ -2715,10 +3203,96 @@ class FalkorProjection(
         # PointAdded — the pass-1b trailing-sweep survivor anchor (recorded
         # here because pass-1a sees PointAdded in journal order over the
         # SAME events list the pass-1b sweep's enumerate indexes).
-        last_recreate_seq: dict[str, int] = {}
+        #
+        # #3689 review P2: a SECOND anchor, ``last_ann_drop_seq``, is the
+        # equivalent boundary for the NON-terminalizing annotator folds —
+        # a real hard-delete (EntityMutated op=delete / PointsMerged) followed
+        # by a creation, tracked here in journal order. The two anchors differ
+        # on a bare same-id re-emission with NO delete: terminalizing folds
+        # treat any PointAdded as a boundary (a fresh snapshot clears the old
+        # terminal flags — pinned by tests/test_pointinvalidated_rebuild.py),
+        # but a bare re-emit only MERGEs live and never clears ``annotator_*``,
+        # so gating the annotator folds on it silently dropped a live-valid
+        # annotation (``update_entity``/raw-producer duplicate snapshot).
+        # #3860: the identity is ``(kind, id)`` — ``kind`` is the canonical
+        # graph label, so a delete for one KIND can never match or advance the
+        # boundary of another kind sharing the id.
+        last_recreate_seq: dict[tuple[str, str], int] = {}
+        # #3860: bare-id max over kinds — the LEGACY fallback anchor for a
+        # delete record with a missing/unknown label (the fold falls back
+        # id-wide there, so the anchor must too, else a legitimate
+        # delete→recreate Point is destroyed).
+        last_recreate_seq_any: dict[str, int] = {}
+        last_ann_drop_seq: dict[tuple[str, str], int] = {}
+        # #4042: same-journal-file chronology anchors for the pass-1b content
+        # boundary. #3860 composition: the key is ``((kind, id), source-file
+        # ordinal)`` — the #3860 kind scoping applied to the #4042 source
+        # ordinal. The ordinal is what makes POSITION chronology (true within
+        # one append-only JSONL, false across files — #21 pins that a revision
+        # in an earlier-sorted file must still fold onto a creation in a later
+        # file); the ``(kind, id)`` prefix is what keeps a foreign-kind node
+        # with the same id from supplying a boundary, exactly as it does for
+        # ``last_recreate_seq`` above. Every creation event in this branch is
+        # Point-labeled — PointAdded and OperatorAdded both hoist to a
+        # ``:Point`` node — so the kind is ``"Point"``, the same value main's
+        # creation branch writes into ``last_recreate_seq``. All four are
+        # filled in the pass-1a creation branch below.
+        #   ``last_create_seq_by_source``      — the id's last creation
+        #     (``n.content``/``n.updatedAt`` are written unconditionally, so
+        #     any later creation supersedes a revision's content).
+        #   ``last_recreate_seq_by_source``    — the id's last creation that
+        #     followed a hard delete; live that node was FRESH, so both
+        #     conditional derived fields were cleared.
+        #   ``last_embed_write_by_source`` / ``last_hash_write_by_source`` —
+        #     the last creation that actually WROTE each conditional derived
+        #     field (from ``_upsert_point_props``'s reported outcome).
+        last_create_seq_by_source: dict[tuple[tuple[str, str], int], int] = {}
+        last_recreate_seq_by_source: dict[tuple[tuple[str, str], int], int] = {}
+        last_embed_write_by_source: dict[tuple[tuple[str, str], int], int] = {}
+        last_hash_write_by_source: dict[tuple[tuple[str, str], int], int] = {}
+        # #4305: id-WIDE (cross-file) journal-owned derived markers for the
+        # pass-1b restore tail. The per-source anchors above are a WITHIN-file
+        # chronology boundary; the restore tail runs AFTER every journal file,
+        # so it needs the file-blind question "did ANY journaled event
+        # determine this field?".
+        #   ``journal_hash_write`` / ``journal_embed_write`` — a journaled
+        #     event wrote OR explicitly cleared that conditional derived field
+        #     for the id. The pre-wipe snapshot value is then the OLDER writer
+        #     and must NOT be re-applied over it (shape H, point_promoted,
+        #     revise_to_empty).
+        #   ``journal_deleted`` — the journal HARD-deleted the id, destroying
+        #     the incarnation the snapshot describes; its derived belongs to a
+        #     dead node and must not be restored (delete_then_falsy_recreate).
+        # A SYNTHETIC event never contributes here: its source ordinal is None,
+        # so it is not a journal writer.
+        journal_hash_write: set[str] = set()
+        journal_embed_write: set[str] = set()
+        journal_deleted: set[str] = set()
+        # (kind, id) pairs hard-deleted since their last creation — a
+        # following creation of the SAME kind is a RE-creation (new
+        # incarnation), not a bare upsert. #3860: keyed by (kind, id), so a
+        # foreign-kind delete cannot advance the POINT annotator boundary.
+        pending_deleted: set[tuple[str, str]] = set()
         for seq, ev in enumerate(events):
             ev = self._norm(ev)
             t = ev.get("type")
+            # #3689 review P2: observe hard deletes in the same ordered scan
+            # (EntityMutated delete is the #3299 record; PointsMerged deletes
+            # every merge_id in pass-1b) so a following creation can be told
+            # apart from a bare upsert.
+            if t == "EntityMutated" and ev.get("op") == "delete":
+                rid = ev.get("id")
+                # #3860: only a Point-kind delete (or a missing/unknown
+                # label, which the fold treats as possibly-Point) advances the
+                # POINT annotator boundary.
+                if isinstance(rid, str) and _owns_point(ev.get("label")):
+                    pending_deleted.add(("Point", rid))
+                continue
+            if t == "PointsMerged":
+                for mid in ev.get("merge_ids") or []:
+                    if isinstance(mid, str):
+                        pending_deleted.add(("Point", mid))
+                continue
             if t in ("PointAdded", "OperatorAdded"):
                 # #331 (review r3): ev.get — missing 'point' key handled by
                 # the isinstance guard, not KeyError.
@@ -2746,17 +3320,92 @@ class FalkorProjection(
                 # never clears outdated/CORRECTS, so seeding from it would
                 # silently drop a pre-promote invalidate fold).
                 if t in ("PointAdded", "OperatorAdded"):
-                    last_recreate_seq[p["id"]] = seq
+                    last_recreate_seq[("Point", p["id"])] = seq
+                    last_recreate_seq_any[p["id"]] = seq
+                # #3689 review P2: the annotator folds' drop boundary is a
+                # REAL delete→recreate, not a bare upsert (see above).
+                # #3689 review P2 + #3860: the annotator folds' drop boundary
+                # is a REAL delete→recreate of the SAME KIND.
+                # ``pending_deleted`` is keyed ``(kind, id)``, so
+                # ``is_recreate`` is True only for a Point-kind delete (or a
+                # missing/unknown label, which the fold treats as
+                # possibly-Point) — a foreign-kind delete cannot advance the
+                # Point annotator boundary. #4042 reuses ``is_recreate`` below
+                # for the recreate wipe and its per-source anchors.
+                is_recreate = ("Point", p["id"]) in pending_deleted
+                if is_recreate:
+                    last_ann_drop_seq[("Point", p["id"])] = seq
+                    pending_deleted.discard(("Point", p["id"]))
                 # Phase 1 stop-writes: strip context from v2+ events (#49)
                 # (identical to apply() — parity between rebuild and apply)
                 if ev.get("projection_version", 0) >= 2:
                     p.pop("context", None)
+                # #4042: a re-creation is a FRESH node live — the delete
+                # removed it, so `_upsert_point_props`'s conditional derived
+                # writers (`n.embedding = CASE WHEN $embedding IS NOT NULL …
+                # ELSE n.embedding END`, `n.content_hash = coalesce($ch, …)`)
+                # preserve NOTHING. The pass-1a hoist MERGEs onto the
+                # still-present node instead, so without this wipe the
+                # pre-delete incarnation's embedding/content_hash survive a
+                # recreate that writes none (falsy content, an operator, or
+                # an unavailable embedder). Targeted SET — the
+                # `_GuardedGraph` bulk-wipe guard is DETACH DELETE-only.
+                if is_recreate:
+                    self.g.query(
+                        "MATCH (n:Point {id:$id}) "
+                        "SET n.embedding = NULL, n.content_hash = NULL",
+                        params={"id": p["id"]})
                 # Property parity with apply()/apply_one (#330): the shared
                 # helper writes ALL node properties incl. authoredBy,
                 # embedding, validFrom/To, extractedFrom, provenanceSource.
-                self._upsert_point_props(p)
+                # #4042: it also reports which of the two CONDITIONAL derived
+                # fields it actually wrote — the pass-1b content boundary
+                # needs the outcome, never a `bool(content)` guess (the
+                # embedder can be unavailable while the hash still computes).
+                wrote_embedding, wrote_content_hash = (
+                    self._upsert_point_props(p))
+                # #4042: record this creation's per-source-file chronology
+                # anchors (see their declaration above). A synthetic event
+                # has `src is None` and never forms a boundary. #3860
+                # composition: the inner key is the kind-scoped ``(kind, id)``
+                # main uses for ``last_recreate_seq`` (both PointAdded and
+                # OperatorAdded hoist to a ``:Point`` node), so the full key is
+                # ``((kind, id), source-file ordinal)``.
+                src = event_source[seq]
+                if src is not None:
+                    key = (("Point", p["id"]), src)
+                    last_create_seq_by_source[key] = seq
+                    if is_recreate:
+                        last_recreate_seq_by_source[key] = seq
+                    if wrote_embedding:
+                        last_embed_write_by_source[key] = seq
+                    if wrote_content_hash:
+                        last_hash_write_by_source[key] = seq
+                    # #4305: the id-wide counterpart (see the sets'
+                    # declaration). A re-creation explicitly cleared both
+                    # conditional fields before the upsert, so it owns them
+                    # whether or not the upsert then wrote them back.
+                    if is_recreate or wrote_embedding:
+                        journal_embed_write.add(p["id"])
+                    if is_recreate or wrote_content_hash:
+                        journal_hash_write.add(p["id"])
 
         supersede_folds: list = []  # ObjectSuperseded replays (pass-1b fold sweep)
+        # #3664: EntityLinked records are deferred to a trailing sweep that
+        # runs after PASS 2 (see the sweep before pass 2b). The deferral is
+        # for the SOURCE endpoint: the TARGET is already created by pass-1b
+        # ObjectRegistered/DocumentCreated (the same dispatch loop that
+        # defers this type also folds `self._upsert_object(ev)`), but a
+        # Session SOURCE may exist only because pass 2's
+        # `_upsert_point_edges(contains_session=…)` recreated it
+        # (`_link_session`) — folding at the end of pass 1b matched only the
+        # TARGET endpoint, so it silently dropped the journaled
+        # `(Session)-[:aboutObject]->(Object)` edge whenever the journal had
+        # no `SessionRecorded` for it. The fold is an idempotent MERGE, so
+        # running it later changes nothing else. Records are buffered WITH
+        # their journal (enumerate) seq so the sweep can apply the hard-delete
+        # staleness rule (#3722 review P2) in the SAME seq space pass 1a uses.
+        entity_link_events: list[tuple[int, dict]] = []
         # #2488: ONE cross-family deferred list for point re-stamp folds —
         # PointSuperseded (#2423) + PointInvalidated (#2488) — carrying the
         # journal (enumerate) seq: the trailing sweep's survivor rule and
@@ -2773,6 +3422,46 @@ class FalkorProjection(
         # #2423: DirectEdgeRepoint descriptors (supersede's 2a-DIRECT transfer
         # journal) — replayed in pass-2b AFTER operator edges exist.
         direct_repoint_events: list = []
+        # #2884 A3 (supersede): the supersede family's BELIEF decay folds
+        # INLINE at the event's own journal seq, exactly as the invalidate
+        # family's does (`_decay_point_belief`). The trailing sweep runs AFTER
+        # the whole pass-1b loop, so a `decay_clause` left in
+        # `_fold_point_superseded` overwrote every LATER same-id belief writer
+        # (a journaled ConfidenceChanged, or a PointRevised carrying
+        # confidence): replay ended at the decayed 0.5 while live ended at the
+        # later writer's value (write != read — the same defect the invalidate
+        # fix closed).
+        #
+        # Resolve, PER OLD-ID, the surviving supersede whose decay applies —
+        # the LAST event not obsoleted by a REAL hard-delete boundary. The
+        # anchor is ``last_ann_drop_seq`` (advanced only by a real
+        # ``EntityMutated op=delete`` / ``PointsMerged`` creation), NOT the
+        # terminalizing ``last_recreate_seq``: a bare same-id re-emit MERGEs
+        # live and keeps belief state, so gating the decay on it would drop a
+        # decay live actually applied. Pass 1a has populated both anchors
+        # before this runs, over the SAME ``events`` list the sweep enumerates.
+        supersede_decay_seq: dict[str, int] = {}
+        for seq, ev in enumerate(events):
+            ev = self._norm(ev)
+            if ev.get("type") != "PointSuperseded":
+                continue
+            _sd_rid = ev.get("id")
+            # Mirror ``_fold_point_superseded``'s applicability guard
+            # (``if not oid or not new_id: return 0``) EXACTLY: the sweep fold
+            # IGNORES an event that lacks ``new_id``, so the inline decay must
+            # not fire for one either — live never decayed for such an event,
+            # and a decay here would be a belief write the graph never
+            # received. The falsy-id test matters as much as the type test: an
+            # EMPTY-STRING id passes ``isinstance(..., str)`` (and
+            # ``_writable_id``) but is skipped by the fold, so a type-only gate
+            # would decay a node the fold ignores.
+            if (not isinstance(_sd_rid, str) or not _sd_rid
+                    or not ev.get("new_id")):
+                continue
+            _sd_drop = last_ann_drop_seq.get(("Point", _sd_rid))
+            if _sd_drop is not None and seq <= _sd_drop:
+                continue
+            supersede_decay_seq[_sd_rid] = seq
         # Pass 1b: apply revisions + other non-edge events AFTER all nodes exist
         for seq, ev in enumerate(events):
             ev = self._norm(ev)
@@ -2792,7 +3481,20 @@ class FalkorProjection(
                     # regresses the tombstone's stamp below the retract's own
                     # rebuild stamp).
                     max_inline_seq[rid] = seq
-                    self._retract(rid)
+                    # #2884 A7: ``_retract`` carries ``decay_clause`` (a BELIEF
+                    # write) as well as the status tombstone, so this fold is a
+                    # belief writer and needs the SAME hard-delete boundary as
+                    # ``ConfidenceChanged``/``PointRevised``/both decay
+                    # families. Without it, a retract that predates a real
+                    # delete→recreate re-applies onto the fresh incarnation and
+                    # resurrects a belief the live graph never had (pass-1a
+                    # hoists every ``PointAdded``, so the fresh node already
+                    # exists by pass 1b). "retracted" is not lost for a bare
+                    # same-id re-emit: that advances no drop boundary, so the
+                    # tombstone still applies.
+                    _retr_anchor = last_ann_drop_seq.get(("Point", rid))
+                    if _retr_anchor is None or seq > _retr_anchor:
+                        self._retract(rid)
             elif t == "PointPromoted":
                 # #785: rebuild parity — re-apply the promoted snapshot.
                 p = ev.get("point")
@@ -2805,7 +3507,26 @@ class FalkorProjection(
                         max_inline_seq[p["id"]] = seq
                     if ev.get("projection_version", 0) >= 2:
                         p.pop("context", None)
-                    self._upsert_point_props(p)
+                    # #2884 A7: a promote snapshot is ``get_point(...)`` and so
+                    # carries the belief props — this fold is a belief writer
+                    # too. Gate the belief half on the same hard-delete
+                    # boundary: a promote that predates a real
+                    # delete→recreate must not overwrite the fresh
+                    # incarnation's belief with a dead one's. The non-belief
+                    # props (content, status, embedding, …) are unaffected —
+                    # they are the point of the fold (#785 parity).
+                    _prom_props = p
+                    _prom_anchor = last_ann_drop_seq.get(("Point", p["id"]))
+                    if _prom_anchor is not None and seq <= _prom_anchor:
+                        _prom_props = {k: v for k, v in p.items()
+                                       if k not in BELIEF_PROPS}
+                    wrote_embedding, wrote_content_hash = (
+                        self._upsert_point_props(_prom_props))
+                    # #4305: id-wide journal-owned derived marks.
+                    if wrote_embedding:
+                        journal_embed_write.add(p["id"])
+                    if wrote_content_hash:
+                        journal_hash_write.add(p["id"])
             elif t == "OperatorPromoted":
                 # #785/R16: fold/apply parity with the main handler
                 # (#2256 review P1): UPSERT the snapshot synthesized into
@@ -2815,7 +3536,14 @@ class FalkorProjection(
                 if isinstance(p, dict) and p.get("id"):
                     if ev.get("projection_version", 0) >= 2:
                         p.pop("context", None)
-                    self._upsert_point_props(_promotion_point_with_operator(p))
+                    op_p = _promotion_point_with_operator(p)
+                    wrote_embedding, wrote_content_hash = (
+                        self._upsert_point_props(op_p))
+                    # #4305: id-wide journal-owned derived marks.
+                    if wrote_embedding:
+                        journal_embed_write.add(p["id"])
+                    if wrote_content_hash:
+                        journal_hash_write.add(p["id"])
                 else:
                     oid = ev.get("id") or ev.get("event_id")
                     if oid is not None:
@@ -2828,6 +3556,10 @@ class FalkorProjection(
                 for mid in ev.get("merge_ids") or []:
                     # #331 (review r4): str-only ids.
                     if isinstance(mid, str):
+                        # #4305: a merge hard-deletes the id (see _delete) —
+                        # the snapshot's derived must not be restored onto a
+                        # node a later re-creation brings back.
+                        journal_deleted.add(mid)
                         self._delete(mid)
             elif t == "EntityMutated":
                 # #3299 pass-1b rebuild parity: apply() folds the
@@ -2851,41 +3583,43 @@ class FalkorProjection(
                 # was already superseded live by that re-creation, so it must
                 # not be folded (same anchor variable and comparison shape as
                 # the point_re_stamp_folds sweep below).
-                # RESIDUAL (P2-1, tracked separately — B5): this survivor
-                # anchor is ID-KEYED and LABEL-BLIND. ``last_recreate_seq`` is
-                # seeded from PointAdded/OperatorAdded by bare id, while the
-                # EntityMutated fold below (and the live delete it mirrors) is
-                # id-wide across all six labels. A cross-label id collision —
-                # a raw producer that reuses a non-namespaced id across, say,
-                # Point and Subject — can therefore OVER-SUPPRESS a legitimate
-                # delete: replay skips it and the other label's entity is
-                # resurrected, diverging from live. PRECONDITION: cross-label
-                # id collision via a non-namespaced raw producer; public id
-                # schemes are namespaced (pt_/sub-/obj-/doc-/ULID), so the SDK
-                # surface cannot reach it. Documented here, NOT fixed — do not
-                # mistake this anchor for label-correct.
+                # #3860: identity is (kind, id). The anchor consults the
+                # record's LABEL, so a Point/Operator creation can suppress
+                # ONLY a delete of the same kind — a foreign-kind node sharing
+                # the id no longer suppresses a legitimate delete. A missing/
+                # unknown label (malformed or pre-#3299 raw record) falls back
+                # to the any-kind max, preserving the legacy bare-id
+                # semantics because the fold falls back id-wide there too.
                 rid = ev.get("id")
-                anchor = (
-                    last_recreate_seq.get(rid)
-                    if isinstance(rid, str) else None)
+                # #4305: a journaled hard delete destroys the incarnation the
+                # pre-wipe snapshot describes, so its derived must not be
+                # restored later. #4305 review P1: use the SAME label→ownership
+                # predicate the fold below and `pending_deleted` use
+                # (`_owns_point`), NOT an inline canonical-label tuple —
+                # `_delete_entity_by_id` falls back to the legacy ID-WIDE delete
+                # for a non-canonical/non-str label, so such a record really
+                # does destroy the `:Point` and must be a restore barrier.
+                if (ev.get("op") == "delete" and isinstance(rid, str)
+                        and _owns_point(ev.get("label"))):
+                    journal_deleted.add(rid)
+                anchor = None
+                if isinstance(rid, str):
+                    label = ev.get("label")
+                    if isinstance(label, str) and label in _CANONICAL_ENTITY_LABELS:
+                        anchor = last_recreate_seq.get((label, rid))
+                    else:
+                        anchor = last_recreate_seq_any.get(rid)
                 if anchor is not None and seq <= anchor:
                     continue
                 matched = self._fold_entity_mutation(ev)
                 if matched == 0 and ev.get("op") == "delete":
-                    # P2-2 fold-miss signal (the journal claims a delete whose
+                    # Fold-miss signal (the journal claims a delete whose
                     # entity never re-existed on this replay — mirrors the
                     # ObjectSuperseded / PointSuperseded / PointInvalidated
-                    # 0-row warnings).
-                    # RESIDUAL (P2-2, tracked separately — B5): the SDK emits
-                    # ONE EntityMutated record per matched LABEL (sdk.py
-                    # ``_delete_entity``), but this fold is ID-WIDE across all
-                    # six labels — so a successful multi-label delete's SECOND
-                    # record matches 0 and trips this warning even though the
-                    # delete succeeded. PRECONDITION: a cross-label id
-                    # collision via a raw, non-namespaced producer; public ids
-                    # are namespaced, so the SDK surface cannot reach it. Kept
-                    # audible deliberately; see also the label-blind survivor
-                    # anchor above.
+                    # 0-row warnings). #3860: the fold is now kind-scoped, so
+                    # a multi-label live delete's per-label records each
+                    # match their own node instead of the second one matching
+                    # 0.
                     logger.warning(
                         "rebuild: EntityMutated delete fold matched no "
                         "entity (event_id=%s id=%r label=%r) — deleted "
@@ -2900,10 +3634,138 @@ class FalkorProjection(
                 # #2488: revise stamps updatedAt inline (the fold below) — a
                 # same-id revise later than an invalidate is the newer writer
                 # (the sweep skip_updated_at gate source).
+                rid = ev.get("id")
+                if isinstance(rid, str):
+                    max_inline_seq[rid] = seq
+                # #3689 review P1/P2: a PRE-recreation revise's annotator dims
+                # died with the deleted incarnation live — fold them only when
+                # the revision postdates the id's last HARD-DELETE boundary
+                # (``last_ann_drop_seq``). Without this gate the pass-1a hoist
+                # leaks the dead incarnation's dims onto the re-created node,
+                # diverging from the chronological apply()/fold() (#330);
+                # gating on the terminalizing ``last_recreate_seq`` anchor
+                # instead would over-suppress a bare same-id re-emit (which
+                # MERGEs live and never clears a dim).
+                ann_anchor = (
+                    last_ann_drop_seq.get(("Point", rid))
+                    if isinstance(rid, str) else None)
+                # #4042: the CONTENT/derived boundary is the id's last creation
+                # in the SAME journal file. Position IS chronology inside one
+                # append-only JSONL, so a later same-file creation
+                # demonstrably superseded this revision live:
+                # `_upsert_point_props` writes `n.content`/`n.updatedAt`
+                # UNCONDITIONALLY (content boundary), and writes
+                # `embedding`/`content_hash` conditionally — so each derived
+                # field is suppressed only when a later same-file creation
+                # actually wrote it, or when a re-creation cleared it. Cross-
+                # file order is NOT chronology (#21 pins that a revision in an
+                # earlier-sorted file must still fold), hence the same-source
+                # key and no cross-file gate. The annotator dims keep their
+                # OWN boundary above (a bare re-emit never clears a dim).
+                src = event_source[seq]
+                superseded = False
+                skip_embedding = False
+                skip_hash = False
+                if isinstance(rid, str) and src is not None:
+                    # #3860 composition: a PointRevised revises a ``:Point``,
+                    # so its anchor key carries the same kind-scoped inner key
+                    # the creation branch wrote — ``((kind, id), ordinal)``.
+                    key = (("Point", rid), src)
+                    create_seq = last_create_seq_by_source.get(key)
+                    superseded = create_seq is not None and create_seq > seq
+                    if superseded:
+                        skip_embedding = (
+                            last_recreate_seq_by_source.get(key, -1) > seq
+                            or last_embed_write_by_source.get(key, -1) > seq)
+                        skip_hash = (
+                            last_recreate_seq_by_source.get(key, -1) > seq
+                            or last_hash_write_by_source.get(key, -1) > seq)
+                wrote_embedding, wrote_content_hash = self._revise_point(
+                    ev, set_updated_at=True,
+                    skip_annotator_dims=(
+                        ann_anchor is not None and seq <= ann_anchor),
+                    # #2884 A7: the belief props ride the SAME real-hard-delete
+                    # boundary as the annotator dims — a pre-recreation
+                    # revision's belief value died with the deleted node live
+                    # (the pure fold POPS the entry on delete; the graph must
+                    # agree or #330 parity breaks). A bare same-id re-emit is
+                    # NOT a boundary (it MERGEs live and keeps belief state).
+                    skip_belief_props=(
+                        ann_anchor is not None and seq <= ann_anchor),
+                    skip_content=superseded,
+                    skip_embedding=skip_embedding,
+                    skip_hash=skip_hash)
+                if isinstance(rid, str):
+                    # #4305: id-wide journal-owned derived marks — the revision
+                    # wrote (or explicitly wiped) each field it was not told
+                    # to skip, so the snapshot must not overwrite it later.
+                    if wrote_embedding:
+                        journal_embed_write.add(rid)
+                    if wrote_content_hash:
+                        journal_hash_write.add(rid)
+            elif t == "OperatorAnnotated":
+                # #3689 pass-1b rebuild parity: apply() folds the explicit
+                # annotation record, and the rebuild chain needs the SAME
+                # branch — without it a journaled OperatorAnnotated falls to
+                # the unrecognized-type warning AND its dims are lost whenever
+                # it is the only carrier (a raw producer, or a PointRevised
+                # pruned from the journal).
+                #
+                # #3689 review P1/P2: pass-1a hoists EVERY creation before this
+                # loop, so an annotation that predates the id's last HARD-DELETE
+                # boundary would otherwise fold onto the re-created incarnation
+                # — its subject died with the deleted node live. Gate on
+                # ``last_ann_drop_seq`` (real delete→recreate), NOT the
+                # terminalizing ``last_recreate_seq``: a bare same-id re-emit
+                # has no dead incarnation and must not drop the annotation
+                # (#3689 review P2).
                 if isinstance(ev.get("id"), str):
-                    max_inline_seq[ev["id"]] = seq
-                # set_updated_at parity with apply() (#330)
-                self._revise_point(ev, set_updated_at=True)
+                    ann_anchor = last_ann_drop_seq.get(("Point", ev["id"]))
+                    if ann_anchor is not None and seq <= ann_anchor:
+                        continue
+                if self._apply_annotator(ev) == 0:
+                    # #3689: the defect was SILENT loss — an annotation that
+                    # cannot be folded must be audible, mirroring the
+                    # EntityMutated / PointSuperseded / PointInvalidated
+                    # fold-miss warnings.
+                    logger.warning(
+                        "rebuild: OperatorAnnotated fold matched no Point "
+                        "(event_id=%s id=%r) — operator not re-created by "
+                        "any journaled event, or the record carried no "
+                        "annotator dim",
+                        ev.get("event_id"), ev.get("id"))
+            elif t == "ConfidenceChanged":
+                # #2884 D3: pass-1b rebuild parity — the EP/dream write-back's
+                # durability record. Folded INLINE (chronological, journal
+                # order): pass-1a already re-created every Point, so the
+                # target always exists, and an id's LAST record must win (a
+                # dream stamp after an EP flush). The fold may match 0 rows
+                # when the target was hard-deleted / never re-created —
+                # audible, mirroring the PointSuperseded / EntityMutated /
+                # OperatorAnnotated fold-miss warnings.
+                #
+                # #2884 A7: gate on the SAME real-hard-delete boundary as the
+                # annotator dims (`last_ann_drop_seq`) — a belief write that
+                # predates a hard delete→recreate wrote onto an incarnation
+                # live DETACH DELETEd, so the re-created node never had it.
+                # Folding it would resurrect the dead node's belief; the pure
+                # fold POPS the entry on delete (#330 parity). NOT gated on
+                # the terminalizing `last_recreate_seq`: a bare same-id
+                # re-emit MERGEs live and keeps belief state, so dropping the
+                # fold there would lose a live-valid value.
+                _cc_rid = ev.get("id")
+                _cc_anchor = (
+                    last_ann_drop_seq.get(("Point", _cc_rid))
+                    if isinstance(_cc_rid, str) else None)
+                if _cc_anchor is not None and seq <= _cc_anchor:
+                    continue
+                if self._fold_confidence_changed(ev) == 0:
+                    logger.warning(
+                        "rebuild: ConfidenceChanged fold matched no Point "
+                        "(event_id=%s id=%r) — point not re-created by any "
+                        "journaled event (legacy journal, unjournaled "
+                        "producer, or delete race)",
+                        ev.get("event_id"), ev.get("id"))
             elif t == "EventRecorded":
                 self._upsert_event(ev)
             elif t == "SubjectAdded":
@@ -2949,7 +3811,18 @@ class FalkorProjection(
                 # re-point + DirectEdgeRepoint replay half is pass-2b —
                 # after pass-2 rebuilds edges from operator snapshots that
                 # still name the OLD input.)
+                #
+                # #2884 A3: the BELIEF-decay half (`decay_clause`) folds INLINE
+                # HERE too, at the surviving event's own journal seq (resolved
+                # by the ``supersede_decay_seq`` pre-pass above) — NOT in the
+                # trailing sweep. The sweep fold below no longer writes any
+                # belief prop, so inline and sweep are mutually exclusive by
+                # construction for the same event (only this branch writes the
+                # decay). The anchor is ``last_ann_drop_seq``, NOT
+                # ``last_recreate_seq`` (see the pre-pass).
                 if isinstance(ev.get("id"), str):
+                    if supersede_decay_seq.get(ev["id"]) == seq:
+                        self._decay_point_belief(ev["id"])
                     point_re_stamp_folds.append((seq, ev))
             elif t == "PointInvalidated":
                 # #2488 pass-1b rebuild parity: the POINT-side invalidate
@@ -2966,7 +3839,32 @@ class FalkorProjection(
                 # journal-append order. The fold applies outdated=true +
                 # validTo/expiredAt/updatedAt + CORRECTS only — it never
                 # writes status (an invalidated point stays status='live').
+                #
+                # #2884 A3: the BELIEF half (`decay_clause`) folds INLINE
+                # HERE, at the event's own journal position, NOT in the
+                # trailing sweep. The sweep runs after the whole pass-1b
+                # loop, so a decay applied there clobbers every LATER
+                # same-id inline belief writer (ConfidenceChanged / a
+                # PointRevised carrying confidence): replay ended at 0.5
+                # while live ended at the later writer's value. Inline
+                # application makes journal order decide, as live
+                # chronology does; the sweep keeps the stamp/CORRECTS half.
+                # #2884 A3b: the BELIEF decay anchors on the REAL hard-delete
+                # boundary (``last_ann_drop_seq``) — the same anchor the
+                # supersede pre-pass and the ConfidenceChanged fold use.
+                # ``last_recreate_seq`` is the STATUS half's anchor: it is
+                # advanced by ANY PointAdded, including a bare same-id re-emit
+                # that MERGEs live (``n.confidence = coalesce($cf,
+                # n.confidence)``) and therefore KEEPS the decayed belief.
+                # Gating belief on it suppressed the decay for that shape, so
+                # replay ended at the pre-invalidate value while live held the
+                # decayed one. The two families cannot hold opposite policies
+                # for one journal shape.
                 if isinstance(ev.get("id"), str):
+                    _inv_rid = ev["id"]
+                    _inv_anchor = last_ann_drop_seq.get(("Point", _inv_rid))
+                    if _inv_anchor is None or seq > _inv_anchor:
+                        self._decay_point_belief(_inv_rid)
                     point_re_stamp_folds.append((seq, ev))
             elif t == "DirectEdgeRepoint":
                 # #2423: supersede's 2a-DIRECT transfer emits a flat
@@ -2981,6 +3879,14 @@ class FalkorProjection(
                 direct_repoint_events.append(ev)
             elif t == "DocumentCreated":
                 self._upsert_document(ev)
+            elif t == "EntityLinked":
+                # #3664: defer to the trailing sweep (see declaration), with
+                # the journal seq the hard-delete staleness rule needs.
+                entity_link_events.append((seq, ev))
+            elif t == "SessionRecorded":
+                # #3664: the :Session node must exist before any deferred
+                # EntityLinked fold FROM it runs (the sweep below).
+                self._fold_session_recorded(ev)
             elif t == "SourceCreated":
                 # #330 parity with apply(): SourceCreated was dropped by rebuild.
                 self._upsert_source(ev)
@@ -2996,7 +3902,7 @@ class FalkorProjection(
                 # vocabulary must not be dropped silently.
                 logger.warning("unrecognized event type %r — skipped", t)
 
-        # Pass 1b fold sweep: ObjectSuperseded replays AFTER all object
+        # ── Pass 1b fold sweep: ObjectSuperseded replays AFTER all object
         # creation events (see the branch above). Warn on 0-row folds — a
         # fold that matched nothing during rebuild means the journal claims
         # a supersession whose Object never re-existed. Since #2194,
@@ -3062,7 +3968,7 @@ class FalkorProjection(
         supersede_last: dict[str, tuple[int, dict]] = {}
         invalidate_survivors: list[tuple[int, dict]] = []
         for fsq, ev in point_re_stamp_folds:
-            anchor = last_recreate_seq.get(ev["id"])
+            anchor = last_recreate_seq.get(("Point", ev["id"]))
             if anchor is not None and fsq <= anchor:
                 # Pre-re-creation fold — dropped (id-reuse survivor rule).
                 continue
@@ -3139,23 +4045,133 @@ class FalkorProjection(
                 params={"pid": pid, "bid": bid},
             )
 
-        # Pass 1b tail (#2943): re-apply the snapshot Point properties the
-        # replay itself cannot rebuild. See _REPLAY_GAP_PROPS — this is what
+        # Pass 1b tail (#2943, #4305): re-apply the snapshot Point properties
+        # the replay itself cannot rebuild. See _REPLAY_GAP_PROPS — this is what
         # keeps a graph-only Point that was invalidated (or hash-keyed) before
         # the wipe from coming back as a different node. Values are the
-        # pre-wipe capture's, i.e. the state of the node this wipe destroyed;
-        # the MATCH is a no-op for an id a journal event has since deleted.
+        # pre-wipe capture's, i.e. the state of the node this wipe destroyed.
+        # An id the journal HARD-deleted is SKIPPED entirely (the
+        # ``journal_deleted`` barrier below) — the snapshot describes the
+        # incarnation that delete destroyed, so it must not come back.
+        #
+        # #4305: the derived restore is FIELD-GATED by what the journal replay
+        # itself determined, instead of being re-applied unconditionally to
+        # every synthetic id. Three pre-existing losses drove this:
+        #   * a JOURNALED event that wrote (or explicitly cleared) a derived
+        #     field OWNS it — the snapshot value is the OLDER writer and must
+        #     not clobber it. Unconditional re-application was shape H (a
+        #     `PointRevised` with no creating record: the synthetic #548
+        #     `PointAdded`'s stale `content_hash` overwrote the revision's),
+        #     `point_promoted`, and `revise_to_empty`.
+        #   * an id whose journaled creation writes NO derived (falsy content,
+        #     an operator payload, an unwritable revision) has no journal
+        #     carrier at all — and when the id IS log-covered the #548
+        #     generator emits no synthetic event for it, so the pre-wipe
+        #     derived was lost entirely. Shapes G,
+        #     `falsy_reemit_then_nul_revise`, `point_added_truthy_operator`.
+        #   * an id the journal HARD-DELETED is a destroyed incarnation: the
+        #     snapshot's derived belongs to it and must NOT be restored
+        #     (`delete_then_falsy_recreate` — restoring it would be STRICTLY
+        #     worse than the pre-fix behaviour, which is why the delete is a
+        #     barrier rather than just another writer).
+        # The source map is the pre-wipe `:Point` capture (so LOG-COVERED ids
+        # are reachable), with the MERGED `synthetic_events` entries filling
+        # only the fields the capture leaves ABSENT. The capture is the
+        # PRIMARY source: it is the newer state, and for an id carried by BOTH
+        # a leftover sidecar and a live node that has since become log-covered
+        # there is no `_merge_entry` collision to resolve it — a GRAPH-ONLY live
+        # node does get a fresh synthetic entry, which `_merge_entry` already
+        # fresh-wins, but a log-covered one does not, so the pure-leftover entry
+        # would otherwise beat the newer live value. The synthetic half is what
+        # makes the #2943 sidecar-recovery
+        # path work: there the live capture is a partial replay whose
+        # `content_hash` the replay's CONDITIONAL writer left absent (falsy
+        # content), so only the sidecar has it.
+        restore_sources: dict[str, dict] = {
+            pid: dict(props) for pid, props in existing_points.items()}
+        synthetic_ids: set[str] = set()
         for ev in synthetic_events:
             sp = ev.get("point") if isinstance(ev, dict) else None
-            if not isinstance(sp, dict) or not isinstance(sp.get("id"), str):
+            if not (isinstance(sp, dict) and isinstance(sp.get("id"), str)):
                 continue
-            gap = {k: sp[k] for k in _REPLAY_GAP_PROPS
-                   if sp.get(k) is not None}
+            synthetic_ids.add(sp["id"])
+            dst = restore_sources.get(sp["id"])
+            if dst is None:
+                restore_sources[sp["id"]] = dict(sp)
+                continue
+            for k, v in sp.items():
+                if v is not None and dst.get(k) is None:
+                    dst[k] = v
+        restore_failures = 0
+        for pid, sp in restore_sources.items():
+            if pid in journal_deleted:
+                continue
+            gap: dict = {}
+            if pid in synthetic_ids:
+                # The non-derived _REPLAY_GAP_PROPS keep their ORIGINAL scope:
+                # only a graph-only (synthetic) id. Widening them would let a
+                # pre-wipe value overwrite a journaled invalidate/supersede
+                # fold, which is not this change's subject.
+                for k in _REPLAY_GAP_PROPS:
+                    if k != "content_hash" and sp.get(k) is not None:
+                        gap[k] = sp[k]
+            if (sp.get("content_hash") is not None
+                    and pid not in journal_hash_write):
+                gap["content_hash"] = sp["content_hash"]
+            emb = sp.get("embedding")
+            # #4305 review P2: only a numeric vector is writable through
+            # `vecf32()`. A corrupt/legacy store value (non-iterable, a string,
+            # mixed types) must DEGRADE to "not restored" rather than raise
+            # AFTER the wipe — the same recovery-path rule `_revise_point`
+            # follows for an unusable vector (#19).
+            restore_embedding = (
+                emb is not None
+                and pid not in journal_embed_write
+                and isinstance(emb, (list, tuple))
+                and all(isinstance(x, (int, float))
+                        and not isinstance(x, bool) for x in emb)
+            )
+            if not gap and not restore_embedding:
+                continue
+            clauses: list[str] = []
+            params: dict = {"pid": pid}
             if gap:
+                clauses.append("n += $props")
+                params["props"] = gap
+            if restore_embedding:
+                # `vecf32()` cast exactly like `_upsert_point_props`: the HNSW
+                # index rejects a bare list, and a bare-list write would leave
+                # the restored vector unsearchable.
+                clauses.append("n.embedding = vecf32($emb)")
+                params["emb"] = list(emb)
+            try:
                 self.g.query(
-                    "MATCH (n:Point {id:$pid}) SET n += $props",
-                    params={"pid": sp["id"], "props": gap},
+                    "MATCH (n:Point {id:$pid}) SET " + ", ".join(clauses),
+                    params=params,
                 )
+            except Exception as e:
+                # #4305 review P2: this runs AFTER the wipe, so a value the
+                # engine/driver rejects must not strand the rebuilt graph
+                # (#2943/#3689 recovery-path rule) — degrade to "not
+                # restored" and leave the replayed value in place. A
+                # SYSTEMATIC failure must not be indistinguishable from that
+                # benign degradation, hence the count + single ERROR summary
+                # after the loop.
+                restore_failures += 1
+                logger.warning(
+                    "rebuild: snapshot derived restore for id %r failed "
+                    "(%s: %s) — leaving the replayed value in place",
+                    pid, type(e).__name__, e,
+                )
+        if restore_failures:
+            logger.error(
+                "rebuild: %d snapshot derived restore(s) FAILED — the "
+                "pre-wipe derived of those id(s) was NOT restored. "
+                "Re-derive the value from its source of truth (e.g. re-write "
+                "the Point) if the indexed dedup key / vector matters. The "
+                "graph is otherwise rebuilt; see the per-id warnings above",
+                restore_failures,
+            )
 
         # ── #3947 review: restore the :Session containers + their CONTAINS
         # edges from the pre-wipe snapshot ──
@@ -3180,11 +4196,14 @@ class FalkorProjection(
         # a process death between the wipe and here IS recovered on the next
         # run (and by `recover_from_log`) — the sidecar-recovery test
         # exercises exactly that. The residual applies only to (a) a
-        # journal-only `rebuild()`, which has no sidecar at all (and yields
-        # the `_link_session` stub), and (b) a sidecar written next to a log
+        # journal-only `rebuild()` over a journal that carries NO
+        # `SessionRecorded` (a pre-#3664 journal, or a hosted/journal-less
+        # lane) — the `_link_session` stub is then the only Session state —
+        # and (b) a sidecar written next to a log
         # dir the embedded opener cannot see — see the warning above the
-        # sidecar write. The durable JOURNAL Session carrier remains
-        # #2296/#3722, and is deliberately NOT re-invented here.
+        # sidecar write. For a post-#3664 journal the durable carrier is the
+        # `SessionRecorded` record (folded by `_fold_session_recorded`), so a
+        # journaled capture no longer depends on this snapshot.
         for props in session_snapshot:
             sid = props.get("id")
             if not sid:
@@ -3262,6 +4281,34 @@ class FalkorProjection(
                     # disabling the guard for that class (review P2-1).
                     operator_created_seq.setdefault(p["id"], seq)
                 self._upsert_point_edges(p, contains_session=raw_contains_session)
+
+        # ── Pass 2 entity-link sweep (#3664) ──────────────────────────────
+        # Fold each deferred EntityLinked record into its idempotent about*
+        # edge. Placed HERE — after pass 2 recreated every `:Session`
+        # container (`_upsert_point_edges(contains_session=…)` →
+        # `_link_session`), and after the pre-wipe snapshot restore above —
+        # and BEFORE pass 2b's create-before-transfer sweep (which the
+        # DirectEdgeRepoint structural leg relies on: it re-points/deletes
+        # `about*` edges whose base edge must already exist). Folding at the
+        # end of pass 1b matched only the TARGET endpoint: a `:Session`
+        # source that exists solely because a PointAdded carried
+        # `contains_session` was not yet created there, so the journaled
+        # `(Session)-[:aboutObject]->(Object)` edge was silently lost.
+        #
+        # A 0-row fold means EITHER endpoint was never re-created by any
+        # journaled event (pre-#2194 journal, unjournaled producer, delete
+        # race) — honest: the journal could not reproduce that attachment.
+        # It is NOT a target-only condition: `_fold_entity_linked` MATCHes
+        # BOTH endpoints, so a missing SESSION/POINT SOURCE — the exact class
+        # this sweep move exists for — is the same 0-row outcome. No warning
+        # for it: unlike a supersession fold-miss (which means a claim of
+        # state was lost), an absent link endpoint is simply an absent
+        # entity. A MALFORMED record is different and DOES warn (inside the
+        # fold). A stale link suppressed by the hard-delete rule is a silent
+        # skip, counted as dropped and never applied (see
+        # `fold_deferred_entity_links`).
+        self.fold_deferred_entity_links(
+            entity_link_events, journal_hard_delete_seqs(events))
 
         # Pass 2b (#2423): PointSuperseded EDGE re-point replay +
         # DirectEdgeRepoint descriptor replay — AFTER pass-2 rebuilt operator
@@ -3598,6 +4645,13 @@ class FalkorProjection(
         # must not leave a sidecar that the next rebuild would re-merge). A
         # failure above leaves it in place deliberately: the graph may be
         # partially wiped, and the sidecar is the rescue data.
+        # #4305 review round 4: do NOT retain the sidecar on a restore failure.
+        # The artifact is a single graph-wide blob, so keeping it would re-merge
+        # pre-wipe truth for EVERY id it carries — including ids whose restore
+        # succeeded — and a later raw delete of any of them would be resurrected
+        # on every subsequent rebuild (never retiring for a permanently
+        # unwritable value). The failure is surfaced by the ERROR summary in the
+        # tail instead.
         if snapshot_pending:
             _clear_prewipe_snapshot(snapshot_path)
         node_count = self.g.query(
@@ -4178,9 +5232,20 @@ class FalkorProjection(
             # but NOT `db.idx.vector.createNodeIndex`). Record which API
             # succeeded on self._vector_index_api for the query path.
             if not getattr(self, '_is_embedded', False):
+                # #4194/#4280: the width is the ONE constant the STORE declares
+                # (`FalkorProjection.required_embedding_dim`), so a FRESH index
+                # creation and the write path cannot disagree — a bare literal
+                # here plus a rotated `EMBEDDING_DIM` would bless vectors the
+                # index cannot hold (the mismatched-vector trap).
+                # ⛔ This single-sources CREATION only: an EXISTING index is
+                # never reconciled (both 'already' branches below assume it is
+                # correct). A dimension change is still the documented
+                # drop-and-recreate operation, not a constant edit.
+                from ..embeddings import EMBEDDING_DIM
                 try:
                     self.g.query(
-                        "CALL db.idx.vector.createNodeIndex('Point', 'embedding', 384, 'HNSW')"
+                        "CALL db.idx.vector.createNodeIndex('Point', 'embedding', "
+                        f"{EMBEDDING_DIM}, 'HNSW')"
                     )
                     self._vector_index_api = 'procedure'
                 except Exception as e:
@@ -4197,7 +5262,8 @@ class FalkorProjection(
                         try:
                             self.g.query(
                                 "CREATE VECTOR INDEX FOR (p:Point) ON (p.embedding) "
-                                "OPTIONS {dimension: 384, similarityFunction: 'cosine'}"
+                                f"OPTIONS {{dimension: {EMBEDDING_DIM}, "
+                                "similarityFunction: 'cosine'}"
                             )
                             self._vector_index_api = 'cypher'
                         except Exception as e2:
@@ -4213,6 +5279,43 @@ class FalkorProjection(
             logging.getLogger(__name__).info(
                 "Skipping FTS and vector indexes: FalkorDB %s < 4.x",
                 '.'.join(map(str, _ver)))
+
+    @property
+    def required_embedding_dim(self) -> int | None:
+        """The embedding width THIS store can hold, for the write path to declare.
+
+        #4280: the width constraint belongs to the Point HNSW INDEX, so this
+        answers "does this store have one" — ``self._vector_index_api``, set by
+        ``_ensure_indexes`` (called from ``__init__``) to the API that actually
+        created or found the index. It stays ``None`` whenever no index exists:
+
+          * embedded (FalkorDBLite) — index creation is skipped by design
+            (see the vector-index block above: "Embedded mode (redislite) uses
+            brute-force vec.euclideanDistance instead");
+          * a FalkorDB engine older than 4.x — the whole index block is
+            skipped;
+          * index creation FAILED on a non-embedded store.
+
+        Every one of those three lanes reads through
+        ``search_engine.run_vector_query``'s DIMENSION-AGNOSTIC brute-force
+        branch, so a self-consistent encoder of any width is fully usable there
+        and is NOT dropped. Keying this on the deployment flag
+        (``_is_embedded``) instead of on the index's existence silently NULLed
+        usable vectors on cases 2 and 3 — the #4280 failure shape on another
+        lane (review finding, PR #4280).
+
+        With an index present the width is :data:`EMBEDDING_DIM`, the width the
+        index is created with — a stored vector of any other width is a broken
+        leg, not a near-miss. Callers pass this to
+        ``embeddings.encode_for_store`` / ``encode_batch_for_store`` — NOT to
+        the ``compute_embedding`` / ``compute_embeddings`` seam, which takes no
+        width (that seam is a widely-replaced interception point; see
+        ``encode_for_store``'s docstring).
+        """
+        if self._vector_index_api is None:
+            return None  # no Point vector index → brute-force, any width
+        from ..embeddings import EMBEDDING_DIM
+        return EMBEDDING_DIM
 
     def backfill_document_search_text(self) -> int:
         """#125: set _searchText=title on Documents missing it (idempotent).
@@ -4263,7 +5366,11 @@ class FalkorProjection(
         unset flag routes through the helper's False return).
         """
         db = getattr(self, "db", None)
-        if db is not None and atexit_fast_close(getattr(db, "client", db)):
+        # #4214: `at_exit=True` — reached only from the `atexit` registration
+        # (see `register_atexit_close`), so a spent exit budget stops the
+        # cascade instead of letting it block `Py_FinalizeEx`.
+        if db is not None and atexit_fast_close(getattr(db, "client", db),
+                                                at_exit=True):
             self._closed = True
             return
         self.close()
@@ -4274,73 +5381,224 @@ class FalkorProjection(
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
 
-    def _revise_point(self, ev: dict, set_updated_at: bool = False) -> None:
-        """Apply PointRevised event — update content, context, and re-compute embedding."""
+    def _apply_annotator(self, ev: dict) -> int:
+        """Replay an ``OperatorAnnotated`` record (#3689) — SET the dims it
+        carries onto the operator Point.
+
+        The durable counterpart of ``annotate_operator``'s live
+        ``update_point`` write. A non-terminalizing property write, so it
+        folds INLINE (parity with the ``PointRevised`` branch). Its pass-1b
+        survivor gate is ``last_ann_drop_seq`` — the REAL hard-delete→recreate
+        boundary — NOT the terminalizing folds' ``last_recreate_seq``
+        (``last_recreate_seq`` advances on any creation; a bare same-id re-emit
+        MERGEs live and never clears a dim, so gating the annotator fold on it
+        silently dropped a live-valid annotation; #3689 review P2). The gate
+        lives at the pass-1b call site; this method folds whatever the caller
+        admits. The dims have no edge/graph-shape effect, so pass 2 cannot
+        clobber them. Returns the matched node count (1 when the operator
+        exists; 0 = unwritable/absent id, no dim present, or the Point is
+        absent) — the fold-miss signal, mirroring ``_fold_entity_mutation``.
+        """
+        pid = ev.get("id")
+        if not _writable_id(pid):
+            return 0
+        dims = _annotator_dims(ev, aliases=True)
+        if not dims:
+            return 0
+        set_clauses = [f"n.{key} = ${key}" for key in dims]
+        res = self.g.query(
+            f"MATCH (n:Point {{id:$id}}) SET {', '.join(set_clauses)} "
+            f"RETURN n.id",
+            params={"id": pid, **dims},
+        )
+        return len(res.result_set or [])
+
+    def _revise_point(self, ev: dict, set_updated_at: bool = False,
+                      skip_annotator_dims: bool = False,
+                      skip_belief_props: bool = False,
+                      skip_content: bool = False,
+                      skip_embedding: bool = False,
+                      skip_hash: bool = False) -> tuple[bool, bool]:
+        """Apply PointRevised event — update content, context, and re-compute embedding.
+
+        ``skip_annotator_dims`` (#3689): suppress ONLY the annotator-dim
+        fold. ``rebuild_all`` sets it for a revision that predates the id's
+        last HARD-DELETE boundary (``last_ann_drop_seq`` — a real
+        delete→recreate; the dead incarnation's dims must not leak onto the
+        re-created node). A bare same-id re-emit is NOT such a boundary, so it
+        never suppresses a live-valid dim. Chronological callers (``apply()``)
+        leave it False. Content/embedding replay is unaffected.
+
+        ``skip_belief_props`` (#2884 A7): the same boundary and the same
+        reasoning, applied to the four belief properties. A revision that
+        predates a real delete→recreate wrote its belief value onto an
+        incarnation live DETACH-DELETEd, so the re-created node never had it;
+        folding it would resurrect a dead node's belief (#330 parity — the
+        pure fold POPS the entry on delete). ``rebuild_all`` sets it from the
+        SAME ``last_ann_drop_seq`` anchor; ``apply()`` leaves it False.
+
+        ``skip_content`` / ``skip_embedding`` / ``skip_hash`` (#4042): the
+        CONTENT/derived half of the same class, with a DIFFERENT boundary.
+        ``rebuild_all`` sets them for a revision that a creation LATER IN THE
+        SAME JOURNAL FILE superseded. `_upsert_point_props` writes
+        ``n.content``/``n.updatedAt`` UNCONDITIONALLY, so any later same-file
+        creation is a content boundary (``skip_content``). The two derived
+        fields are written CONDITIONALLY (``CASE``/``coalesce``), so each is
+        suppressed independently — only when a later same-file creation
+        actually wrote it, or when a re-creation cleared it (``skip_embedding``
+        / ``skip_hash``); a bare re-emit that wrote neither leaves the
+        revision's value live-valid. Chronological callers leave all three
+        False.
+
+        Returns ``(embedding_written, content_hash_written)`` (#4305) — the
+        same conditional-write outcome ``_upsert_point_props`` reports, and
+        for the same reason: a written field (an explicit ``None`` wipe
+        included) is a JOURNAL-OWNED value the #4305 restore tail must not
+        overwrite with the older pre-wipe snapshot. Every other caller ignores
+        the return.
+        """
         new_content = ev.get("new_content")
         new_context = ev.get("new_context")  # noqa: F841
         # #331 (review r3): NO event_id fallback — parity with _apply_one
         # (fold is the single source of truth, module contract).
         # #331 (review r4): str-only ids.
         pid = ev.get("id")
-        if not isinstance(pid, str):
-            # Malformed PointRevised — skip rather than crash (issue #325)
-            return
-        params: dict = {"id": pid, "c": new_content}
+        if not _writable_id(pid):
+            # Malformed PointRevised (non-str, or a NUL/lone-surrogate str the
+            # engine/driver reject as a param) — skip rather than crash a
+            # rebuild after the wipe (issue #325; #3689 review P1).
+            return False, False
+        if new_content is not None and not _annotator_value_ok(new_content):
+            # A content value FalkorDB cannot take as a parameter (NUL/lone-
+            # surrogate str, map, non-finite float, ...). Drop the content
+            # EDIT — `coalesce($c, n.content)` then keeps the stored content —
+            # but STILL fold the annotator dims below. Aborting here would
+            # strand the rebuilt graph after the wipe and block every retry
+            # (#3689 review P1; same parameter-writability class as the dims).
+            new_content = None
+        params: dict = {"id": pid}
+        set_clauses: list[str] = []
+        wrote_embedding = False
+        wrote_content_hash = False
 
-        # Re-compute embedding when content changes (even to empty — wipe stale).
-        # Always set params["embedding"] so SET overwrites any stale value;
-        # on compute failure, set to None rather than preserving old embedding (#19).
-        if new_content is not None:
-            try:
-                from tortoise.embeddings import compute_embedding
-                emb = compute_embedding(new_content) if new_content else None
-                params["embedding"] = emb  # None = wipe stale embedding for empty content
-            except Exception:
-                params["embedding"] = None  # wipe stale embedding on failure (#19)
+        # #4042: `n.content` is written UNCONDITIONALLY by
+        # `_upsert_point_props`, so a creation that superseded this revision
+        # already set it — `skip_content` omits the clause (and its
+        # `updatedAt` stamp below).
+        if not skip_content:
+            params["c"] = new_content
+            set_clauses.append("n.content = coalesce($c, n.content)")
 
-        set_clauses = ["n.content = coalesce($c, n.content)"]
         if new_content is not None:
-            # #2795: content_hash is derived from content — mirror the live
-            # update_point #1904 recompute so a replayed PointRevised cannot
-            # leave a STALE indexed dedup key behind (the writer now sets a
-            # hash on PointAdded, so a missed recompute here would be worse
-            # than the prior NULL). #2958 review: `is not None` is not a type
-            # gate — a non-str new_content from a corrupt/hand-edited JSONL
-            # line would raise inside sha256(text.encode) and kill the rebuild
-            # pass (the recovery path). NULL degrades to create_point's
-            # content-equality fallback; a stale present-but-wrong hash does
-            # not — so NULL is the correct failure value.
-            set_clauses.append("n.content_hash = $content_hash")
-            try:
-                params["content_hash"] = _content_hash(new_content)
-            except Exception:
-                params["content_hash"] = None
+            # Re-compute embedding when content changes (even to empty — wipe
+            # stale). Always set params["embedding"] so SET overwrites any
+            # stale value; on compute failure, set to None rather than
+            # preserving old embedding (#19). #4042: omitted when a later
+            # same-journal-file creation already wrote this field. #4194/#4280:
+            # route through `encode_for_store` (the dim-declaring write seam)
+            # so the stored width matches the Point HNSW index this store
+            # created — `compute_embedding` takes no width. The seam itself is
+            # still `compute_embedding` (module global), so installed encoder
+            # doubles keep intercepting.
+            if not skip_embedding:
+                try:
+                    from tortoise.embeddings import encode_for_store
+                    emb = (encode_for_store(
+                        new_content, self.required_embedding_dim)
+                        if new_content else None)
+                    params["embedding"] = emb  # None = wipe stale embedding for empty content
+                except Exception:
+                    params["embedding"] = None  # wipe stale embedding on failure (#19)
+                set_clauses.append("n.embedding = $embedding")
+                wrote_embedding = True
+            if not skip_hash:
+                # #2795: content_hash is derived from content — mirror the live
+                # update_point #1904 recompute so a replayed PointRevised cannot
+                # leave a STALE indexed dedup key behind (the writer now sets a
+                # hash on PointAdded, so a missed recompute here would be worse
+                # than the prior NULL). #2958 review: `is not None` is not a type
+                # gate — a non-str new_content from a corrupt/hand-edited JSONL
+                # line would raise inside sha256(text.encode) and kill the rebuild
+                # pass (the recovery path). NULL degrades to create_point's
+                # content-equality fallback; a stale present-but-wrong hash does
+                # not — so NULL is the correct failure value.
+                set_clauses.append("n.content_hash = $content_hash")
+                wrote_content_hash = True
+                try:
+                    params["content_hash"] = _content_hash(new_content)
+                except Exception:
+                    params["content_hash"] = None
         # Phase 2 #49: context removed — new_context no longer written
-        if "embedding" in params:
-            set_clauses.append("n.embedding = $embedding")
-        if set_updated_at:
+        if set_updated_at and not skip_content:
             set_clauses.append("n.updatedAt = $now")
             params["now"] = _now_iso()
+        # #3689: fold the annotator dims carried as PointRevised extras
+        # (update_point's emit) — apply()/rebuild previously dropped them, so
+        # rebuild_all silently erased annotate_operator's write. Presence-
+        # conditional (see _annotator_dims), canonical names only: the short
+        # :GraphEvent aliases belong to OperatorAnnotated, never to a
+        # PointRevised (whose keys ARE the node props — review P1).
+        if not skip_annotator_dims:
+            for key, val in _annotator_dims(ev).items():
+                set_clauses.append(f"n.{key} = ${key}")
+                params[key] = val
+        # #2884 FIX-4: fold the four belief props when the revision carries
+        # them (`update_point(confidence=…)` / `posterior_*` / `lastDreamedAt`).
+        # The live write is `SET n += $props`, and the PointRevised payload
+        # carries the value — but this fold built clauses only from
+        # content/context/embedding/hash/annotator dims, so a rebuild silently
+        # dropped the caller's belief state (write ≠ read). Presence-
+        # conditional and gated by the SAME `_belief_prop_value_ok` the
+        # `_fold_confidence_changed` / ConfidenceChanged folds use (#330
+        # parity). #2884 A7: suppressed by `skip_belief_props` on the same
+        # real-hard-delete anchor as the annotator dims — a pre-recreation
+        # revision's belief value died with the deleted incarnation live.
+        if not skip_belief_props:
+            for key in BELIEF_PROPS:
+                if key in ev and _belief_prop_value_ok(key, ev[key]):
+                    set_clauses.append(f"n.{key} = ${key}")
+                    params[key] = ev[key]
+
+        # #4042: every clause can now be suppressed at once (a superseded
+        # props-only revision carrying no dims). FalkorDB rejects a `SET` with
+        # an empty clause list — and this is the RECOVERY path, so that abort
+        # would strand the rebuilt graph after the wipe. Nothing to write is a
+        # no-op, not a crash.
+        if not set_clauses:
+            return False, False
 
         self.g.query(
             f"MATCH (n:Point {{id:$id}}) SET {', '.join(set_clauses)}",
             params=params,
         )
+        return wrote_embedding, wrote_content_hash
 
-    def _delete_entity_by_id(self, id_val: str) -> int:
-        """Hard-delete a canonical entity by id across all six labels.
+    def _delete_entity_by_id(self, id_val: str,
+                             label: str | None = None) -> int:
+        """Hard-delete a canonical entity by id.
 
-        The replay counterpart of the SDK's live ``_delete_entity`` (#3299):
-        the SAME six-label loop, so replay removes exactly what live removed.
+        The replay counterpart of the SDK's live ``_delete_entity`` (#3299).
         The id predicate is the identity as written (``id`` for
         Point/Subject/Object/Document/Source, ``eventId`` for Event) — never
         re-derived from a live node (the node is already gone). Returns the
         node count deleted (0 = a fold-miss: the entity was already absent).
+
+        #3860: identity is (kind, id). When ``label`` is one of the canonical
+        six the delete is SCOPED to that kind — a delete record owns only the
+        node kind it names, so it can never destroy a foreign-kind node that
+        happens to share the id. ``label=None`` (missing/unknown, i.e. a
+        malformed or pre-#3299 raw record) keeps the legacy id-wide delete
+        across all six labels, preserving the "a delete must survive replay"
+        guarantee for every record shape. The label is NEVER interpolated from
+        the journal: only members of ``_CANONICAL_ENTITY_ID_PROPS`` reach the
+        Cypher label position.
         """
+        if label is not None and label in _CANONICAL_ENTITY_LABELS:
+            branches = ((label, _ENTITY_ID_PROP[label]),)
+        else:
+            branches = _CANONICAL_ENTITY_ID_PROPS
         total = 0
-        for label, prop in (("Point", "id"), ("Subject", "id"),
-                            ("Object", "id"), ("Document", "id"),
-                            ("Source", "id"), ("Event", "eventId")):
+        for label, prop in branches:
             r = self.g.query(
                 f"MATCH (n:{label} {{{prop}:$id}}) DETACH DELETE n "
                 f"RETURN count(n)",
@@ -4356,11 +5614,17 @@ class FalkorProjection(
         ONE record type, dispatching on the ``op`` discriminator so replay
         reproduces the exact live end-state (the design chose this over one
         event type per label×operation). ``op="delete"`` hard-deletes the
-        canonical entity by id, mirroring the live ``_delete_entity`` —
-        the ontology §5 contract: delete hard-deletes, retract tombstones.
+        canonical entity, mirroring the live ``_delete_entity`` — the
+        ontology §5 contract: delete hard-deletes, retract tombstones.
         The sibling lanes (#3300 MCP Point delete, #3312 unjournaled update,
         #3377 unjournaled rename) extend this dispatch rather than adding
         record types.
+
+        #3860: the live ``_delete_entity`` is id-wide but emits ONE record per
+        MATCHED label; replaying each record scoped to its own label is
+        therefore the same net effect (N labels present live → N records → N
+        kind-scoped folds), while a record can no longer destroy a foreign-kind
+        node that merely shares the id.
 
         Returns the affected node count (0 for an unknown op or an
         already-absent entity) — the fold-miss signal, so a rebuild can warn
@@ -4375,13 +5639,13 @@ class FalkorProjection(
         if not isinstance(rid, str):
             # #331 parity: malformed id → skip, never crash the fold.
             return 0
-        # P2-3: the fold is INTENTIONALLY id-wide (all six labels) because
-        # the live ``_delete_entity`` it mirrors is id-wide too — there is no
-        # divergence today. The record carries ``label`` (the identity as
-        # written) but this op does not read it. Any FUTURE per-label op
-        # (retract / rename — #3312, #3377) MUST begin resolving
-        # ``ev["label"]`` here, or replay stops matching the live write.
-        return self._delete_entity_by_id(rid)
+        # #3860: identity is (kind, id). Scope the fold to the record's
+        # canonical label; a missing/unknown label falls back to the legacy
+        # id-wide delete (``label=None``). The raw label never reaches the
+        # Cypher label position — only the allowlisted branch does.
+        label = ev.get("label")
+        return self._delete_entity_by_id(
+            rid, label if isinstance(label, str) else None)
 
     def list_graphs(self) -> list[str]:
         """List all graph names in the database."""

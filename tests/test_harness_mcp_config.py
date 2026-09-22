@@ -459,21 +459,41 @@ class TestCaptureInstallSeam:
         literal_true = set(re.findall(r"(\w[\w-]*):\s*true\b", block))
         assert literal_true <= set(self._seam())
 
+    def _capture_install_body(self, harness: str) -> str:
+        """The harness's entry in HARNESS_CAPTURE_INSTALL, with a shared
+        constant (PI/CODEX/CURSOR_CAPTURE_INSTALL) expanded.  A harness whose
+        MCP copy is a JSON file (Cursor) carries its capture step here rather
+        than in HARNESS_INSTALL."""
+        block = self._object(self._src(), "HARNESS_CAPTURE_INSTALL")
+        m = re.search(
+            rf"\n\s*'?{re.escape(harness)}'?:\s*([A-Za-z_][A-Za-z0-9_]*)", block)
+        if not m:
+            return ""
+        name = m.group(1)
+        return self._constant_text(self._src(), name) or name
+
     def test_every_seam_harness_is_committed_and_installed(self):
         """The seam map is the general contract the other harnesses can be
-        checked against: declared ⟺ committed ⟺ installed."""
+        checked against: declared ⟺ committed ⟺ installed.
+
+        The install step may live in the MCP-setup copy (Pi/Codex embed it) or
+        in the capture-install surface (Cursor's copy is a JSON file).  Either
+        surface must name the declared artifact."""
         src = self._src()
         seam = self._seam()
         assert seam.get("pi") == "tortoise/pi-hooks/tortoise-capture.ts"
         assert seam.get("claude") == "tortoise/claude-hooks/session-end.sh"
+        assert seam.get("cursor") == "tortoise/cursor-hooks/session-end.sh"
         install = self._object(src, "HARNESS_INSTALL")
         for harness, artifact in seam.items():
             assert (REPO_ROOT / artifact).is_file(), (
                 f"HARNESS_CAPTURE_SEAM.{harness} names a missing artifact: {artifact}"
             )
-            body = self._expanded_install_body(install, harness)
+            body = (self._expanded_install_body(install, harness)
+                    + "\n" + self._capture_install_body(harness))
             assert artifact in body, (
-                f"HARNESS_INSTALL.{harness} does not install its declared seam {artifact}"
+                f"HARNESS_INSTALL/{harness} capture-install surface does not "
+                f"install its declared seam {artifact}"
             )
 
 

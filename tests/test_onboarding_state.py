@@ -1,7 +1,7 @@
 """Unit tests for the canonical onboarding state module (T1, #2001 W5).
 
 Pins (scope doc §4.1/§4.3, plan T1):
-- canonical step list (6), card subset (4, ⊆ canonical), per-key semantics table
+- canonical step list (6), card subset (3, ⊆ canonical), per-key semantics table
 - fork-aware completion gate (self/build/compact, compact-first, fork=None→'self')
 - validate_step_id
 - set-once/LWW/server-owned semantics constants
@@ -46,8 +46,8 @@ class TestCanonicalList:
     def test_card_subset_is_subset_of_canonical(self):
         assert set(CARD_STEPS) <= set(STEP_IDS)
 
-    def test_card_subset_has_four_members(self):
-        assert len(set(CARD_STEPS)) == 4
+    def test_card_subset_has_three_members(self):
+        assert len(set(CARD_STEPS)) == 3
 
     def test_capture_disclosed_not_counted_in_card(self):
         # "capture-disclosed before decide must NOT render '4 of 4'" — the
@@ -55,10 +55,10 @@ class TestCanonicalList:
         assert "capture-disclosed" not in CARD_STEPS
 
     def test_card_and_gate_steps_are_fork_aware(self):
-        # decide/catalog are fork-exclusive card rows; neither renders for the
-        # other fork.
+        # decide is the self-fork card row; catalog-presented is NOT a counted
+        # row (#3913 — the build fork renders no extra row).
         assert "decide-completed" in CARD_STEPS
-        assert "catalog-presented" in CARD_STEPS
+        assert "catalog-presented" not in CARD_STEPS
 
 
 class TestStepValidation:
@@ -131,12 +131,37 @@ class TestCompletionGate:
         done = {"team-named", "harness-connected", "first-points-filed"}
         assert completion_gate_satisfied(done, "self", False) is False
 
-    def test_build_uses_catalog_not_decide(self):
-        done = {"harness-connected", "first-points-filed", "catalog-presented"}
+    def test_build_completes_on_the_two_observed_acts(self):
+        # #3913 (owner ruling 2026-09-20): the build fork completes on the two
+        # acts the server OBSERVES — a harness reached the server and a first
+        # point was filed. `catalog-presented` ("Review the catalog") is NO
+        # LONGER required. RED on origin/main.
+        done = {"harness-connected", "first-points-filed"}
         assert completion_gate_satisfied(done, "build", False) is True
-        # decide alone can never complete a build fork
-        done2 = {"harness-connected", "first-points-filed", "decide-completed"}
-        assert completion_gate_satisfied(done2, "build", False) is False
+
+    def test_build_fail_closed_when_either_observed_act_missing(self):
+        # fail-closed: one of the two observed acts is not enough.
+        assert completion_gate_satisfied(
+            {"harness-connected"}, "build", False) is False
+        assert completion_gate_satisfied(
+            {"first-points-filed"}, "build", False) is False
+        assert completion_gate_satisfied(set(), "build", False) is False
+
+    def test_catalog_presented_never_required_and_never_blocks(self):
+        # the id stays ACCEPTED (existing orgs carry it in completed_steps),
+        # but the gate never requires it: absent and present both complete.
+        base = {"harness-connected", "first-points-filed"}
+        assert completion_gate_satisfied(base, "build", False) is True
+        assert completion_gate_satisfied(
+            base | {"catalog-presented"}, "build", False) is True
+        # catalog alone never completes a build fork
+        assert completion_gate_satisfied(
+            {"catalog-presented"}, "build", False) is False
+
+    def test_build_decide_alone_never_completes(self):
+        # decide remains a SELF-fork row — it can never complete a build fork.
+        assert completion_gate_satisfied(
+            {"decide-completed"}, "build", False) is False
 
     def test_compact_reduced_checklist(self):
         done = {"harness-connected", "first-points-filed"}
@@ -177,7 +202,7 @@ class TestCompletionGate:
         # NULL — a persisted fork evaluates its own gate regardless of the
         # marker (the checkpoint clears it on fork-set, but reads never trust
         # it).
-        done = {"harness-connected", "first-points-filed", "catalog-presented"}
+        done = {"harness-connected", "first-points-filed"}
         assert completion_gate_satisfied(
             done, "build", False, fork_unsure_at=True) is True
 
@@ -307,7 +332,10 @@ class TestModuleHygiene:
                           src, re.S)
         assert block, "SETUP_GUIDE_COUNTED not found in setupGuide.js"
         ids = re.findall(r"'([a-z0-9-]+)'", block.group(1))
-        assert len(ids) == 4
+        assert len(ids) == 3
         assert set(ids) <= set(STEP_IDS)
         assert "capture-disclosed" not in ids
         assert "team-named" not in ids
+        # #3913: the build fork renders no catalog row — the id stays canonical
+        # (accepted) but is never a counted card step.
+        assert "catalog-presented" not in ids

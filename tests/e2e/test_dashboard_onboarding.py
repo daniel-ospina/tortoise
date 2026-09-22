@@ -1,8 +1,9 @@
 """#1997 (W1) onboarding wizard e2e (RUN_DASHBOARD_E2E opt-in, two-origin harness).
 
 Journey coverage: the 4 HUMAN wizard steps (org-create →
-fork card → connect-consent → done), the fork checkpoint (self + build /
-catalog-presented), the connect step's key affordances, and the re-entry card.
+fork card → connect-consent → done), the fork checkpoint (self + build;
+the build pick records NO catalog-presented step — #3913), the connect step's
+key affordances, and the re-entry card.
 The done step exits WITHOUT patching onboarding_complete (accept-and-drop).
 
 #2710 / #2711 / #2755 / #2756 (2026-09-09 connect-step fixes) brought this spec
@@ -42,13 +43,11 @@ actually made, the clipboard assert compares against the card's own text, the
 build fork's FOURTH key row, and the catalog check is backed by a registry-only
 mock name (not the offline fallback).
 
-**CI lane (known gap — issue filed):** this spec is opt-in (`RUN_DASHBOARD_E2E`)
-and is NOT wired into `.github/workflows/ci.yml` — its `dashboard-e2e` step runs
-only `test_keys_table_mixed.py` + `test_graphs_management.py`. On CI the only
-automated guard for these four fixes is the static source-scan tripwire
-(`website/apps/dashboard/src/wizardConnectTripwire.test.js`), which cannot
-observe a runtime stray modal or a clipboard overwrite. Run this spec locally
-against a fresh `dist/` whenever the connect step changes.
+**CI lane:** this spec is opt-in (`RUN_DASHBOARD_E2E`) and, since #4221, IS
+wired into `.github/workflows/ci.yml` — the `dashboard-e2e` job's step runs it
+alongside `test_keys_table_mixed.py` / `test_graphs_management.py` /
+`test_ship_test_onboarding.py`, against the same two-origin harness. Run it
+locally against a fresh `dist/` whenever the connect step changes.
 """
 from __future__ import annotations
 
@@ -67,7 +66,9 @@ from tests.e2e.test_session_login_flow import (
     APP_HOST,
     AUTH_HOST,
     DASHBOARD_URL,
+    _bff_path,
     _goto_local_dashboard,
+    _is_bff_api,
     _preflight_local_servers,
     _proxy_body,
     _seed_local_session_cookie,
@@ -158,11 +159,14 @@ def _wire(page: Page, *, seed_objects: list = None,  # noqa: RUF013
         method = route.request.method
         # #1828: loadAll pins ?org_id= on overview reads — match on the
         # query-stripped path so /v1/team/keys?org_id=… still resolves.
-        path = url.split("?", 1)[0]
-        if "api.premiselabs.co" in url:
+        path = _bff_path(url)
+        if _is_bff_api(url):
             if path.endswith("/v1/organizations") and method == "GET":
+                # #2494: the mock's org row must carry the name in the field the
+                # dashboard reads (`org_name`) — otherwise the account menu's
+                # organization row renders "No organization".
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps([org_row]))
+                              body=json.dumps([{**org_row, "org_name": "Onboarding Test"}]))
                 return
             if path.endswith("/v1/team/keys") and method == "POST":
                 # #2710: the wizard's mint CTA rides this endpoint. The body is
@@ -253,7 +257,9 @@ def _wire(page: Page, *, seed_objects: list = None,  # noqa: RUF013
                 route.fulfill(status=409, content_type="application/json",
                               body=json.dumps({"detail": "Sub-team already created"}))
                 return
-            # #1997 (W1): fork set-once + catalog-presented checkpoint writes.
+            # #1997 (W1), revised by #3913: the fork checkpoint is the ONLY
+            # client write — `catalog-presented` must never appear here (the
+            # assertions below pin exactly that).
             if path.endswith("/v1/onboarding/state/checkpoint") and method == "POST":
                 body = json.loads(route.request.post_data or "{}")
                 cap["checkpoint"].append(body)
@@ -431,6 +437,29 @@ def test_first_timer_wizard_human_steps(page: Page) -> None:
     # exit ("Open my dashboard →"). No longer a same-named twin — review cycle 1
     # (P2-6): the done button was renamed to "Go to dashboard".
     page.locator(".wizard-actions").get_by_role("button", name="Go to dashboard").click()
+
+    # #2494: account menu expansion — after the dashboard loads ("Overview loaded"
+    # status), click the account menu trigger and verify both labeled sections
+    # (Personal Account with Log out, Organization with org name).
+    expect(page.locator("body")).to_contain_text("Overview loaded", timeout=10_000)
+    page.get_by_role("button", name=re.compile(r"^Account menu — .*")).click()
+    account_menu = page.locator('.account-menu')
+    expect(account_menu).to_be_visible(timeout=5_000)
+    # Personal Account section: identity, Profile button, Log out button.
+    expect(account_menu).to_contain_text("Personal Account")
+    expect(account_menu.get_by_role("button", name="Profile")).to_be_visible()
+    expect(account_menu.locator('.account-menu-logout')).to_be_visible()
+    expect(account_menu.locator('.account-menu-logout')).to_contain_text("Log out")
+    # Divider between sections.
+    expect(account_menu.locator('.account-menu-divider')).to_be_visible()
+    # Organization section: org name, create button.
+    expect(account_menu).to_contain_text("Organization")
+    expect(account_menu).to_contain_text("Onboarding Test")
+    expect(account_menu.get_by_role("button", name=re.compile(r"Create new organization"))).to_be_visible()
+    # Close the menu (Escape key).
+    page.locator('[aria-label^="Account menu —"]').press("Escape")
+    expect(account_menu).not_to_be_visible()
+
     assert not any("onboarding_complete" in p for p in cap["state"]), \
         f"done step must NOT patch onboarding_complete: {cap['state']}"
     # #2323: an org-holding journey NEVER mints a second org through the
@@ -1066,13 +1095,14 @@ def test_3218_key_row_states_the_visibility_window(page: Page) -> None:
         "exactly ONE visibility note may render (not one per key surface)"
 
 
-def test_first_timer_wizard_build_fork_marks_catalog(page: Page) -> None:
-    """#1997 (W1, review P1 regression): picking the BUILD fork on the fork
-    card must mark catalog-presented via the checkpoint (the render-time
-    effect cannot observe the fresh pick — React batches the fork-chosen +
-    advance states — so the handler fires it directly). The build-fork gate
-    (harness-connected + first-points-filed + catalog-presented) must be
-    evaluable. #2323: the org-holding journey never mints a second org.
+def test_first_timer_wizard_build_fork_records_no_catalog_presented(page: Page) -> None:
+    """#3913 (owner ruling 2026-09-20): picking the BUILD fork records the fork
+    and NO checkpoint step. The build-fork gate is the two acts the server
+    OBSERVES — harness-connected + first-points-filed — so the dashboard must
+    not write `catalog-presented` (the render-time effect is gone and the pick
+    handler's optional mark is gone with it). This is the runtime half of that
+    removal: the ONLY client checkpoint on the journey is the set-once fork.
+    #2323: the org-holding journey never mints a second org.
 
     The catalog pin is deliberately two-sided (#2763): the fork card renders the
     STATIC placeholder because the registry fetch is gated on the connect step
@@ -1111,11 +1141,49 @@ def test_first_timer_wizard_build_fork_marks_catalog(page: Page) -> None:
                 message="the registry catalog fetch (exactly once)")
     assert cap["capabilities"] == 1, \
         f"#2004 (W8): the registry catalog must be fetched exactly once: {cap['capabilities']}"
-    assert any(c.get("fork") == "build" for c in cap["checkpoint"]), \
-        f"build fork not checkpointed: {cap['checkpoint']}"
-    assert any(c.get("step") == "catalog-presented" for c in cap["checkpoint"]), \
-        f"catalog-presented not marked: {cap['checkpoint']}"
+    # #3913: the fork is the ONLY checkpoint the dashboard writes. The old
+    # assertion here was the opposite — it required the catalog-presented mark;
+    # that write is deleted, so the meaningful pin is now its ABSENCE, and the
+    # exact capture proves no OTHER step write was smuggled in beside the fork.
+    assert cap["checkpoint"] == [{"fork": "build"}], \
+        f"#3913: the build pick must record the fork and NO step: {cap['checkpoint']}"
+    assert [c for c in cap["checkpoint"] if c.get("step")] == [], \
+        f"#3913: no checkpoint step may be written by the dashboard: {cap['checkpoint']}"
+    # the PATCH surface is the other way a catalog mark could return.
+    assert [b for b in cap["state"] if b.get("catalog_presented")] == [], \
+        f"#3913: no PATCH may record catalog_presented: {cap['state']}"
     assert cap["org_create"] == [], f"#2323 violated: org_create fired: {cap['org_create']}"
+
+
+def test_build_fork_connected_on_the_two_observed_acts(page: Page) -> None:
+    """#3913: the wizard's build path reaches the connected done screen on a
+    projection carrying the two OBSERVED acts (harness-connected +
+    first-points-filed) and NOT `catalog-presented`, with no catalog row on the
+    way. This pins the UI path only — the wizard cursor advances client-side, so
+    it would walk the same way before the gate change. The assertions that
+    actually pin #3913 live elsewhere: the exact checkpoint capture in
+    `test_first_timer_wizard_build_fork_records_no_catalog_presented` above
+    (the fork is the ONLY thing written), the per-fork counted rows in the
+    dashboard JS unit tests, and the server-side gate in
+    test_capabilities_endpoint.py / test_onboarding_auto_complete.py."""
+    _seed_cookie(page, "u-bld-2acts")
+    proj = {"org_id": "team_o", "fork": "build", "status": "active",
+            "onboarding_complete": False,
+            "completed_steps": ["team-named", "harness-connected", "first-points-filed"],
+            "session_recording": True}
+    # The projection handed to the app carries ONLY the two observed acts. That is
+    # a fixture premise, not an assertion — the app-derived pin is the done screen
+    # below, which must render without a catalog step anywhere in it.
+    _wire(page, role="owner", onboarding_projection=proj)
+    _walk_to_fork(page)  # fork already chosen server-side → Continue is present
+    page.get_by_role("button", name="Continue →").click()
+    expect(page.locator("body")).to_contain_text("Connect your agent", timeout=10_000)
+    _advance_to_done(page)
+    expect(page.locator(".welcome-title")).to_have_text("You're all set", timeout=10_000)
+    done = page.locator("div.done")
+    expect(done).to_contain_text("Connected", timeout=10_000)
+    # No "catalog" text assert here: the done body contains none on any branch,
+    # so it would pass unchanged on origin/main and pin nothing (cycle-3 finding).
 
 
 # ── #3428/#2937 (lane B3, review cycle 2 P2-2): runtime coverage for the ──

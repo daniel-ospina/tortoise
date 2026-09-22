@@ -31,6 +31,10 @@ Env (restore):
 - TORTOISE_RESTORE_SWAP_TIMEOUT_S — explicit read bound (seconds) for the
   restore's GRAPH.COPY copies. Default 120, clamped to [60, 3600]. See
   _restore_swap_timeout_s.
+- TORTOISE_RESTORE_SWAP_SETTLE_S — how long, after that read bound expires,
+  the restore keeps polling the copy's DESTINATION for its outcome before
+  reporting a timeout (#4233). Default: the read bound. See
+  _restore_swap_settle_s.
 
 Env:
 - TORTOISE_BACKUP_KEY — base64 32-byte ACTIVE key for AES-256-GCM (encrypt
@@ -52,6 +56,7 @@ import math
 import os
 import re
 import secrets
+import time
 from datetime import datetime, timezone
 from typing import Callable, Protocol  # noqa: UP035
 
@@ -298,6 +303,12 @@ def dump_graph(g, graph_name: str | None = None) -> dict:
     ``node_count`` and ``edge_count`` therefore describe the SAME node set
     — every exported edge has BOTH endpoints in ``nodes``, so a fresh dump
     always links ``len(edges)/len(edges)``.
+
+    #3902: the ``:GraphEventMeta`` label stays excluded from ``nodes``
+    (#1625), but its counter is carried as the top-level ``event_meta`` key
+    (``{last_seq, first_seq}``) — it is the event log's ordering watermark,
+    not a runtime marker, and a restore that loses it re-issues a colliding
+    ``seq``. Absent when the graph has no counter node yet.
     """
     from tortoise.hosted_api import _is_export_skip_node
 
@@ -396,6 +407,11 @@ def dump_graph(g, graph_name: str | None = None) -> dict:
             graph_name, dropped_skipped, dropped_stale,
             len(nodes), len(edges),
         )
+    # #3902: read the counter LAST, after the content snapshot — a concurrent
+    # append after the event read bumps last_seq ahead of the dumped events
+    # (a gap, never a collision); reading it first could carry a counter
+    # BELOW an event that the dump captured.
+    event_meta = _read_event_meta(g)
     return {
         "format": DUMP_FORMAT,
         # #3895: the writer revision. Rev 2 = node and edge sets restricted to
@@ -415,7 +431,102 @@ def dump_graph(g, graph_name: str | None = None) -> dict:
         "unresolved_edge_count": dropped_stale,
         "nodes": nodes,
         "edges": edges,
+        # #3902: the event-log counter, read OUTSIDE the node set above.
+        **event_meta,
     }
+
+
+def _read_event_meta(g) -> dict:
+    """The per-graph event-log counter as the #3902 ``event_meta`` block.
+
+    ``:GraphEventMeta`` is excluded from the dump's node set by #1625
+    (runtime bookkeeping must not inflate ``node_count``), but ``last_seq``
+    is NOT runtime-only: it is the per-graph monotonic ``seq`` handed to
+    ``event_store.next_seq``, and ``first_seq`` is the purge cursor floor.
+    A restore that drops it rebuilds the ``:GraphEvent`` log and leaves
+    ``next_seq`` to MERGE a fresh counter at 1 — colliding with the restored
+    ``seq`` 1 and under-counting every later event (``events_poll`` cursors
+    and subscribers depend on the ordering key).
+
+    Returns ``{}`` for a graph with no counter node (never emitted an event),
+    so the dump shape is unchanged for those graphs.
+    """
+    rows = g.query(
+        "MATCH (m:GraphEventMeta) RETURN max(m.last_seq), max(m.first_seq)"
+    ).result_set
+    if not rows or rows[0][0] is None:
+        return {}
+    last_seq, first_seq = rows[0]
+    last_seq = int(last_seq)
+    return {
+        "event_meta": {
+            "last_seq": last_seq,
+            # A counter node always carries both (next_seq sets them
+            # together); the fallback keeps the _refresh_first_seq contract
+            # (first_seq = last_seq + 1 when the log is empty) for a
+            # hand-written/legacy node missing it.
+            "first_seq": int(first_seq) if first_seq is not None else last_seq + 1,
+        },
+    }
+
+
+def _restore_event_meta(g, event_meta) -> None:
+    """#3902: re-establish the per-graph event-log counter after a restore.
+
+    ``:GraphEventMeta`` is excluded from the dump's node set (#1625), so the
+    counter must be carried EXPLICITLY (``dump["event_meta"]``) and written
+    back here — otherwise ``next_seq`` MERGEs a fresh counter at 1 and
+    collides with the restored ``seq`` 1, after which every event is
+    under-counted by the restored event count (``events_poll`` cursor
+    ordering, subscription delivery and the ``first_seq`` purge watermark all
+    assume ``seq`` is per-graph monotonic and unique).
+
+    New dumps carry ``{last_seq, first_seq}`` and are written back exactly.
+    OLD dumps — every backup written before this fix — carry nothing, so the
+    counter is re-derived from the restored ``:GraphEvent`` log:
+    ``last_seq = max(restored seq)``, ``first_seq = min(restored seq)``. The
+    next ``next_seq`` then returns ``max(restored seq) + 1`` instead of a
+    colliding 1.
+
+    An empty log with no carried counter leaves the ``:GraphEventMeta`` node
+    absent, exactly like a graph that never emitted an event: ``next_seq``
+    creates it at 1 and ``_refresh_first_seq``'s empty-log contract
+    (``first_seq = last_seq + 1``) still holds. An empty log WITH a carried
+    counter (everything purged) restores the exact watermark — e.g.
+    ``last_seq=3, first_seq=4``, so ``next_seq`` continues at 4.
+
+    Runs in the temp graph, so the later ``GRAPH.COPY`` temp→live carries the
+    watermark (it is written before ``restore_graph`` returns, i.e. before
+    the caller's count verification and swap).
+    """
+    rows = g.query(
+        "MATCH (e:GraphEvent) RETURN max(e.seq), min(e.seq)"
+    ).result_set
+    max_seq, min_seq = (rows[0] if rows else (None, None))
+    max_seq = int(max_seq) if max_seq is not None else None
+    min_seq = int(min_seq) if min_seq is not None else None
+
+    last_seq: int | None = None
+    first_seq: int | None = None
+    if isinstance(event_meta, dict) and event_meta.get("last_seq") is not None:
+        last_seq = int(event_meta["last_seq"])
+        carried_first = event_meta.get("first_seq")
+        first_seq = int(carried_first) if carried_first is not None else last_seq + 1
+    elif max_seq is not None:  # old dump — re-derive from the restored log
+        last_seq = max_seq
+        first_seq = min_seq
+
+    if last_seq is None:
+        return  # old dump, no events, no counter — nothing to seed
+    if max_seq is not None:
+        # Monotonicity guard: whatever the dump claims, the ordering key must
+        # never sit below the restored log's top seq — that IS the collision
+        # this fix exists to prevent.
+        last_seq = max(last_seq, max_seq)
+    g.query(
+        "MERGE (m:GraphEventMeta) SET m.last_seq = $last, m.first_seq = $first",
+        params={"last": last_seq, "first": first_seq},
+    )
 
 
 def _first_live_node_id(g, ids: set[int]) -> int | None:
@@ -461,6 +572,12 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False) -> dict:
     dangling edge is NOT explained by the export-skip class (genuine
     corruption) must keep failing closed, and the reader cannot prove
     provenance for a pre-fix artifact.
+
+    #3902: after the edge phase the per-graph event-log counter is re-seeded
+    (see ``_restore_event_meta``) so a subsequent ``next_seq`` cannot collide
+    with a restored ``seq``. New dumps carry it exactly; old dumps (no
+    ``event_meta`` key) have it re-derived from the restored ``:GraphEvent``
+    log.
     """
     if not isinstance(dump, dict) or dump.get("format") != DUMP_FORMAT:
         raise ValueError(
@@ -653,6 +770,12 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False) -> dict:
             "pre-#3895 artifact)",
             len(unlinkable), missing_endpoints,
         )
+    # #3902: re-seed the per-graph event-log counter AFTER the edge phase and
+    # BEFORE the count verification / the caller's temp→live swap, so the
+    # GRAPH.COPY carries the watermark into the live graph. The counter node
+    # is export-skip state — it is excluded from the node count below.
+    _restore_event_meta(g, dump.get("event_meta"))
+
     # ACTUAL node count from the graph (not the dump bookkeeping) — the
     # verification gate must compare real graph state, mirroring the edge check.
     # #1625: count non-skip nodes by applying the SAME predicate as the dump
@@ -693,6 +816,24 @@ def _r2_endpoint_from_env() -> str:
     return f"https://{account}.r2.cloudflarestorage.com"
 
 
+def _r2_config_from_env() -> tuple[str, str, str, str]:
+    """Resolve the DEFAULT R2 settings from env, as
+    ``(endpoint, access_key_id, secret_access_key, bucket)``.
+
+    The endpoint is DERIVED from ``R2_ACCOUNT_ID`` (see
+    ``_r2_endpoint_from_env``), so the tuple changes iff any ``R2_*`` var does.
+    It is BOTH what ``R2Storage.__init__`` builds the default store from AND the
+    cache key ``hosted_api._backup_storage`` keys its process-wide store on
+    (#3968) — one function, so the key and the store can never disagree about
+    what "the same R2 config" means."""
+    return (
+        _r2_endpoint_from_env(),
+        os.environ.get("R2_ACCESS_KEY_ID", ""),
+        os.environ.get("R2_SECRET_ACCESS_KEY", ""),
+        os.environ.get("R2_BUCKET", ""),
+    )
+
+
 def _is_no_such_key_error(e: Exception) -> bool:
     """True when ``e`` is a botocore ClientError for a missing S3/R2 key."""
     try:
@@ -715,10 +856,11 @@ class R2Storage:
         secret_access_key: str | None = None,
         bucket: str | None = None,
     ):
-        self._endpoint = endpoint_url or _r2_endpoint_from_env()
-        self._ak = access_key_id or os.environ.get("R2_ACCESS_KEY_ID", "")
-        self._sk = secret_access_key or os.environ.get("R2_SECRET_ACCESS_KEY", "")
-        self._bucket = bucket or os.environ.get("R2_BUCKET", "")
+        env_endpoint, env_ak, env_sk, env_bucket = _r2_config_from_env()
+        self._endpoint = endpoint_url or env_endpoint
+        self._ak = access_key_id or env_ak
+        self._sk = secret_access_key or env_sk
+        self._bucket = bucket or env_bucket
         if not all([self._endpoint, self._ak, self._sk, self._bucket]):
             raise RuntimeError(
                 "R2 not configured — set R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, "
@@ -1778,6 +1920,57 @@ def _restore_swap_timeout_s() -> float:
     return v
 
 
+#: Floor for a POSITIVE settle value. Below this a value can only busy-spin
+#: (it is not a disable switch — a non-positive value falls back to the read
+#: bound, see :func:`_restore_swap_settle_s`).
+_RESTORE_SWAP_SETTLE_MIN_S = 0.05
+
+
+def _restore_swap_settle_s() -> float:
+    """Resolve the post-timeout OUTCOME-poll bound, in seconds.
+
+    ``TORTOISE_RESTORE_SWAP_SETTLE_S``. Empty, non-numeric, non-finite and
+    non-positive values all fall back to the read bound
+    (:func:`_restore_swap_timeout_s`) — a settle of ``0`` is NOT a "disable"
+    switch, because a restore that reports a failure without checking the
+    operation is the #4233 false-red. A positive value is then clamped to
+    ``[0.05, _RESTORE_SWAP_TIMEOUT_MAX_S]`` (each clamp logged, like the
+    read bound's resolver).
+
+    Why it exists (#4233): a client read bound ends the blocking READ; it does
+    not cancel the server-side ``GRAPH.COPY`` (#3813). Under a contended runner
+    the bound can expire while the copy is still progressing, and the wall
+    clock alone cannot distinguish that from a genuinely broken copy — so the
+    bound is a hypothesis and the destination's node and edge COUNTS are the
+    verdict. The
+    default equals the read bound, so each COPY's client-side budget is finite
+    at 2x that bound; a restore issues the pre-restore safety copy AND the
+    swap, and ``_graph_copy_or_diagnose`` may retry a wedged copy.
+    """
+    raw = os.environ.get("TORTOISE_RESTORE_SWAP_SETTLE_S")
+    if raw is None or not str(raw).strip():
+        return _restore_swap_timeout_s()
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("TORTOISE_RESTORE_SWAP_SETTLE_S=%r is not a number — "
+                       "using the read bound", raw)
+        return _restore_swap_timeout_s()
+    if not math.isfinite(v) or v <= 0:
+        logger.warning("TORTOISE_RESTORE_SWAP_SETTLE_S=%r is not a finite "
+                       "positive bound — using the read bound", raw)
+        return _restore_swap_timeout_s()
+    if v < _RESTORE_SWAP_SETTLE_MIN_S:
+        logger.warning("TORTOISE_RESTORE_SWAP_SETTLE_S=%r is below the %.2fs "
+                       "floor — clamping", raw, _RESTORE_SWAP_SETTLE_MIN_S)
+        return _RESTORE_SWAP_SETTLE_MIN_S
+    if v > _RESTORE_SWAP_TIMEOUT_MAX_S:
+        logger.warning("TORTOISE_RESTORE_SWAP_SETTLE_S=%r exceeds the %.0fs "
+                       "ceiling — clamping", raw, _RESTORE_SWAP_TIMEOUT_MAX_S)
+        return _RESTORE_SWAP_TIMEOUT_MAX_S
+    return v
+
+
 class RestoreCopyTimeoutError(RuntimeError):
     """A restore GRAPH.COPY outlived its own (generous) read bound (#3813).
 
@@ -1843,6 +2036,105 @@ def _issue_graph_copy(client, src_name: str, dst_name: str) -> None:
     client.execute_command("GRAPH.COPY", src_name, dst_name)
 
 
+#: Poll interval for the post-timeout OUTCOME wait. Small enough to catch a
+#: copy that lands just after the read bound, large enough not to hammer
+#: ``GRAPH.LIST`` for the whole settle window.
+_RESTORE_SWAP_SETTLE_POLL_S = 0.25
+
+
+def _restore_copy_settled(db, src_name: str, dst_name: str) -> bool:
+    """True when a timed-out copy's DESTINATION matches the SOURCE's counts.
+
+    For the restore's two copies — whose destination is either freshly deleted
+    (the swap) or brand new (the pre-restore safety copy) — a destination the
+    copy itself created, holding the source's node AND edge COUNTS, is the
+    operation's success condition (#4233). Both counts are re-read LIVE, so a
+    torn install (fewer nodes or edges) cannot be accepted. That is COUNT
+    parity, not byte/content equality: a destination whose counts match but
+    whose content differs would pass — acceptable because it cannot be a
+    pre-existing graph (``dst_preexisting`` refuses those) and a torn
+    ``GRAPH.COPY`` loses counts.
+    (The comparison is what makes the check sound; nothing here relies on the
+    engine's install ordering.)
+
+    Assumes a QUIESCED destination: a concurrent writer to a real (non-drill)
+    live graph can add nodes between the copy and this probe, which then reads
+    as a mismatch — the copy is reported as a timeout (a false NEGATIVE). THE
+    CONVERSE IS NOT EXCLUDED: because the evidence is COUNT parity, a
+    coincidental match from a concurrent writer (or a same-count different
+    content) would be accepted. It cannot be a PRE-EXISTING graph
+    (``_graph_present`` refuses those), but it is not a content fingerprint.
+    Refusing to settle when ``_graph_present`` cannot read the listing is
+    likewise a fail-closed false negative.
+
+    Deliberately never QUERIES a graph ``GRAPH.LIST`` does not name: a Cypher
+    read on a missing graph CREATES an empty one (verified on FalkorDB
+    4.20.4), and on the swap's freshly-deleted ``live_name`` that would leave
+    an empty live graph behind a FAILED restore — the wipe-then-empty class
+    the pre-restore safety copy exists to prevent.
+    """
+    try:
+        names = set(db.list_graphs() or [])
+        if dst_name not in names or src_name not in names:
+            return False
+        dst_g = db.select_graph(dst_name)
+        src_g = db.select_graph(src_name)
+        dst_nodes = int(dst_g.query(
+            "MATCH (n) RETURN count(n)").result_set[0][0])
+        src_nodes = int(src_g.query(
+            "MATCH (n) RETURN count(n)").result_set[0][0])
+        if dst_nodes != src_nodes:
+            return False
+        dst_edges = int(dst_g.query(
+            "MATCH ()-[r]->() RETURN count(r)").result_set[0][0])
+        src_edges = int(src_g.query(
+            "MATCH ()-[r]->() RETURN count(r)").result_set[0][0])
+    except Exception:
+        return False
+    return dst_edges == src_edges
+
+
+def _graph_present(db, name: str) -> bool:
+    """Whether ``name`` exists, FAIL-CLOSED to ``True`` on a probe failure.
+
+    Used only to decide whether a timed-out copy's destination could have been
+    produced by that copy: an unreadable listing must never authorize treating
+    a pre-existing graph as the copy's output. A probe failure is LOGGED so a
+    refusal it causes is distinguishable from a genuinely pre-existing
+    destination (both otherwise surface as the same timeout).
+    """
+    try:
+        return name in set(db.list_graphs() or [])
+    except Exception as e:
+        logger.warning(
+            "_graph_present(%s): graph listing failed (%s) — treating it as "
+            "PRESENT so an unreadable probe can never authorize a settle",
+            name, e,
+        )
+        return True
+
+
+def _await_restore_copy_settled(db, src_name: str, dst_name: str) -> bool:
+    """Poll :func:`_restore_copy_settled` until the settle bound expires.
+
+    A condition-based wait (#4233): returns as soon as the destination
+    matches the source's node and edge counts, so a copy that merely outlived
+    the read bound is
+    recognised as the SUCCESS it is. A poll can itself block while the server
+    is busy finishing the copy (the engine serves no other command from that
+    handler), so the wall clock is re-checked after every attempt — a completed
+    copy always wins over an expired deadline.
+    """
+    deadline = time.monotonic() + _restore_swap_settle_s()
+    while True:
+        if _restore_copy_settled(db, src_name, dst_name):
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(_RESTORE_SWAP_SETTLE_POLL_S, remaining))
+
+
 def _is_client_read_timeout(exc: BaseException) -> bool:
     """True when ``exc`` IS — or MASKS — a redis CLIENT read timeout (#3813).
 
@@ -1866,23 +2158,53 @@ def _is_client_read_timeout(exc: BaseException) -> bool:
 
 
 def _graph_copy_with_restore_bound(db, src_name: str, dst_name: str, *,
-                                   role: str, intact_name: str) -> None:
+                                   role: str, intact_name: str,
+                                   settled: list[bool] | None = None) -> None:
     """Run a long GRAPH.COPY for the restore over its own read bound (#3813).
 
-    Raises ``RestoreCopyTimeoutError`` when that bound expires, keeping the
-    originating timeout as ``__cause__``, so callers report a TIMEOUT rather
-    than a dead connection or a failed copy.
+    Runs over the restore's own read bound (#3813). Raises
+    ``RestoreCopyTimeoutError`` when that bound expires and the copy's outcome
+    is NOT proven complete (see ``settled`` below); keeping the originating
+    timeout as ``__cause__`` means callers report a TIMEOUT rather than a dead
+    connection or a failed copy.
+
+    ``settled`` (#4233): optional out-param. ``True`` is appended when the
+    bound expired but the copy's OUTCOME proved it completed, so a caller can
+    surface the overrun (the #3845 ``fork_slot`` precedent) instead of leaving
+    it only in the log.
     """
     client = _restore_copy_client(db)
+    # A timed-out copy may only be resolved by a destination IT produced. If
+    # the destination already existed when the copy was issued (the swap's
+    # best-effort live-delete failed), completing is not evidence of success,
+    # so the settle check is refused up front. Fail-closed: an unreadable
+    # listing counts as present.
+    dst_preexisting = _graph_present(db, dst_name)
     try:
         _issue_graph_copy(client, src_name, dst_name)
     except Exception as e:
-        if _is_client_read_timeout(e):
+        if not _is_client_read_timeout(e):
+            raise
+        # #4233: the read bound is not the operation's verdict — it ends OUR
+        # blocking read; the server-side GRAPH.COPY is not cancelled (#3813)
+        # and may still be running. Ask the OPERATION what happened before
+        # reporting a timeout, so a slow-but-correct copy (a contended runner)
+        # cannot false-red a restore that actually succeeded.
+        if (not dst_preexisting
+                and _await_restore_copy_settled(db, src_name, dst_name)):
+            logger.warning(
+                "%s: client read bound (%.0fs) expired, but the server-side "
+                "GRAPH.COPY completed — %s now matches the source's node and "
+                "edge counts",
+                role, _restore_swap_timeout_s(), dst_name,
+            )
+            if settled is not None:
+                settled.append(True)
+        else:
             raise RestoreCopyTimeoutError(
                 role=role, timeout_s=_restore_swap_timeout_s(),
                 intact_name=intact_name, dst_name=dst_name,
             ) from e
-        raise
     finally:
         try:
             # redis-py's ``Redis.close()`` is a NO-OP for the socket when a
@@ -1897,6 +2219,65 @@ def _graph_copy_with_restore_bound(db, src_name: str, dst_name: str, *,
             client.connection_pool.disconnect()
         except Exception:
             pass
+
+
+#: The cap-immune data-node count query. Module-level so a test can assert
+#: its ONE-ROW AGGREGATE shape (which is what makes it immune to the
+#: server-global ``RESULTSET_SIZE`` cap) WITHOUT mutating that server-global
+#: setting (#4233).
+_COUNT_DATA_NODES_QUERY = (
+    "MATCH (n) WHERE NOT any(l IN labels(n) WHERE l IN $skip_labels) "
+    "AND NOT ('Meta' IN labels(n) AND n.key IS NOT NULL "
+    "AND n.key IN $meta_keys) "
+    "RETURN count(n)"
+)
+
+
+def count_data_nodes(db, graph_name: str) -> int:
+    """Count a graph's USER nodes — the set :func:`dump_graph` filters to.
+
+    #1625/#4233: the projection's runtime bookkeeping (``EpMeta`` /
+    ``GraphEventMeta`` / ``TeamMeta`` label-wide, plus ``Meta`` nodes keyed
+    ``point_fts_v2`` / ``event_fts_v2``) is not content. Every DR ``node_count``
+    surface counts without it — the sweep manifest, the empty-backup-over-live
+    guard, drill verification — so re-baseline must too: a projection opened on
+    the org graph MERGEs its ``point_fts_v2`` marker into that graph, and a raw
+    ``MATCH (n)`` then reports 4 for a 3-point graph (the false-red that blocked
+    unrelated PRs). The DATA_LOSS_CANDIDATE detector
+    (``backup_sweep._backup_graph``) consumes the same ``node_count``, so excluding
+    the marker is also what keeps a marker-only change from reading as data
+    loss.
+
+    The count is a server-side AGGREGATE — one row, so it is immune to
+    FalkorDB's ``RESULTSET_SIZE`` cap (default 10000), which truncates a
+    non-aggregate ``MATCH (n) RETURN labels(n), properties(n)`` read and would
+    silently DEFLATE the count for a larger graph. Its skip classes are built
+    from the SAME ``_EXPORT_SKIP_LABELS`` / ``_EXPORT_SKIP_META_KEYS``
+    constants :func:`_is_export_skip_node` uses, and the Meta branch is
+    NULL-SAFE (``n.key IS NOT NULL AND n.key IN …``) to match the predicate's
+    Python semantics: a ``:Meta`` node with NO ``key`` is CONTENT there, and
+    Cypher three-valued logic would otherwise drop it from the count. The
+    equivalence holds for the scalar (string) ``key`` shape the schema writes;
+    a LIST-valued key makes the Python predicate raise (its own pre-existing
+    defect, #4525) while this count treats it as data. The parity is pinned by
+    ``tests/test_dr_endpoints.py::TestDrRebaseline::test_count_data_nodes_matches_the_dump_node_set``.
+
+    ⚠️ Above FalkorDB's ``RESULTSET_SIZE`` (default 10000) this is the
+    COMPLETE data-node count while ``dump_graph``'s own node read is truncated
+    (#4515) — so it is the more-correct value there, and the two surfaces
+    diverge by design until #4515 is fixed.
+    """
+    from tortoise.hosted_api import (
+        _EXPORT_SKIP_LABELS,
+        _EXPORT_SKIP_META_KEYS,
+    )
+    return int(db.select_graph(graph_name).query(
+        _COUNT_DATA_NODES_QUERY,
+        params={
+            "skip_labels": sorted(str(l) for l in _EXPORT_SKIP_LABELS),  # noqa: E741
+            "meta_keys": sorted(str(k) for k in _EXPORT_SKIP_META_KEYS),
+        },
+    ).result_set[0][0])
 
 
 def _restore_into_temp_verify_swap(
@@ -2068,6 +2449,7 @@ def _restore_into_temp_verify_swap(
     # failure chain). Best-effort — skipped when live is empty/missing.
     fork_slot: ForkSlotRecovery | None = None
     pre_g = None
+    pre_settled: list[bool] = []
     if live_nodes > 0:
         try:
             # #3845: a wedged module-fork slot refuses this copy too. The copy
@@ -2075,12 +2457,15 @@ def _restore_into_temp_verify_swap(
             # is what lets the swap below use a fork at all instead of the
             # fork-free fallback. #3813: a long server-side copy, so the copy
             # STEP runs over the restore's own read bound rather than an
-            # ordinary request's socket_timeout.
+            # ordinary request's socket_timeout. #4233: record an overrun here
+            # too, so an RTO breach caused by the pre-restore copy is
+            # attributable (it is the other half of the restore's copy budget).
             recovery = _graph_copy_or_diagnose(
                 live_g, pre_name, db=db, site="pre-restore safety copy",
                 copy=lambda: _graph_copy_with_restore_bound(
                     db, live_name, pre_name,
                     role="Pre-restore safety copy", intact_name=live_name,
+                    settled=pre_settled,
                 ),
             )
             if recovery is not None:
@@ -2108,6 +2493,7 @@ def _restore_into_temp_verify_swap(
     # DROPPED/lost — a missing graph raises on delete but the copy below seeds
     # it. A genuine delete failure surfaces as a copy failure ("destination key
     # already exists") and the verified temp graph remains intact.
+    swap_settled: list[bool] = []
     try:
         live_g.delete()
     except Exception as e:
@@ -2123,6 +2509,10 @@ def _restore_into_temp_verify_swap(
                 db, temp_name, live_name,
                 role="Restore swap",
                 intact_name=f"verified temp graph {temp_name}",
+                # #4233: record a copy that outlived the read bound but was
+                # proven complete, so the drill record can attribute an RTO
+                # breach (the #3845 fork_slot precedent).
+                settled=swap_settled,
             ),
         )
         if recovery is not None:
@@ -2208,6 +2598,13 @@ def _restore_into_temp_verify_swap(
         "restored": counts,
         "restored_at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
     }
+    if pre_settled or swap_settled:
+        # #4233: a GRAPH.COPY outlived the restore's read bound and was proven
+        # complete by its outcome — either the pre-restore safety copy or the
+        # swap. Reported distinctly (the #3845 `fork_slot` precedent) so a
+        # drill that breaches the RTO because of it is attributable, not just
+        # visible as a longer duration. The WARNING log names which copy.
+        result["copy_read_bound_overrun"] = True
     if fork_slot is not None:
         # #3845: report the wedge DISTINCTLY from a slow copy, and what was
         # done about it, so an operator sees "fork slot wedged" rather than a
@@ -2363,7 +2760,7 @@ def prune_backups(
     UTC DAY-bucket for ages between ``keep_hourly`` and ``keep_daily`` days
     (bounded by the daily horizon), then the ``keep_weekly`` weekly anchors.
     This bounds an org at hourly cadence to ~24 hourly + ~7 daily-anchors + 4
-    weekly (≈35 objects/pool) — #2373: the anchor granularity was hour-
+    weekly (≈35 objects/pool; windows: `docs/retention-and-deletion.md`) — #2373: the anchor granularity was hour-
     buckets (retaining ~172/pool over 7 days), contradicting this docstring,
     the DR runbook, and #2319's lock-window premise; day anchors restore the
     documented intent. Newest-first iteration keeps the newest backup of each

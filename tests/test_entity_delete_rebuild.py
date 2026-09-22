@@ -169,6 +169,30 @@ class TestDeleteSurvivesRebuild:
 
         assert _deletes(_journal(events), eid), "delete must be journaled"
 
+    def test_deleted_document_absent_after_rebuild(self, env):
+        """Document — the sixth canonical label (id is a server-minted ULID).
+        Completes per-shape coverage of the #3299 delete-survival guarantee
+        (#3860 acceptance criterion 1)."""
+        sdk, events = env
+        proj = sdk._get_proj()
+        title = "delete-me-document"
+        sdk.create_entity("document", title, documentKind="core:other",
+                          is_episodic=False)
+        rows = _rows(proj, "MATCH (d:Document {title:$t}) RETURN d.id", t=title)
+        assert rows, "seed Document must exist live"
+        did = rows[0][0]
+
+        assert sdk._delete_entity(did) is True
+        assert not _rows(proj, "MATCH (d:Document {title:$t}) RETURN d.id",
+                         t=title)
+
+        proj.rebuild_all(str(events))
+        assert not _rows(proj, "MATCH (d:Document {title:$t}) RETURN d.id",
+                         t=title), (
+            "deleted Document resurrected on rebuild_all — #3299/#3860")
+
+        assert _deletes(_journal(events), did), "delete must be journaled"
+
     def test_deleted_source_absent_after_rebuild(self, env):
         """Source is journaled on every write (``SourceCreated``) — its
         delete must be durable like the rest."""
@@ -359,3 +383,213 @@ def test_in_memory_fold_respects_delete():
          "label": "Point"},
     ]
     assert "p1" not in fold(events)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# #3860 — the survivor anchor is identity (kind + id), not bare id
+#
+# #3696's anchor (``last_recreate_seq``) matched a delete/replay pair by id
+# WITHOUT consulting the node label, so a hoisted Point/Operator creation
+# could suppress a *legitimate* delete of a DIFFERENT kind sharing the id —
+# and the id-wide replay fold could destroy a foreign-kind node the record
+# never owned. Identity is therefore (label, id) at BOTH the suppression gate
+# and the fold.
+#
+# MUTATION (stated, per the issue's acceptance criterion 3): drop the kind
+# dimension from the identity key — revert the anchor lookup to bare ``id``
+# and the fold to id-wide — and the three ``TestIdentityIsKindPlusId`` tests
+# below go RED.
+#
+# Producers: a non-namespaced id is reachable from the PUBLIC SDK —
+# ``create_source(url, ...)`` uses the raw URL as the Source id, and
+# ``create_point(..., id=<explicit>)`` accepts an arbitrary id.
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _ids(proj, cypher: str, **params):
+    return _rows(proj, cypher, **params)
+
+
+def _operator(sdk):
+    src = sdk.create_point("statement", "op-source")["id"]
+    tgt = sdk.create_point("statement", "op-target")["id"]
+    return sdk.create_operator("IMPL", src, [tgt])["id"]
+
+
+class TestIdentityIsKindPlusId:
+    """#3860: a delete can never match (or be suppressed by) a node it does
+    not own."""
+
+    def test_subject_delete_not_suppressed_by_later_point_same_id(self, env):
+        """T1 (no suppression) + T2 (no foreign destruction), public SDK.
+
+        A Subject's id is re-used by a raw/explicit-id Point AFTER the
+        Subject is deleted. Live: Source/Subject gone, Point present. The
+        bare-id anchor lets the Point's hoisted creation suppress the
+        Subject delete, and the id-wide fold would then have no record left
+        to remove the Point.
+        """
+        sdk, events = env
+        proj = sdk._get_proj()
+        name = "collide-subject-3860"
+        sdk.create_entity("subject", name, subjectKind="core:other",
+                          is_episodic=False)
+        sid = _entity_name_id("Subject", name)
+        assert _subject(proj, name), "seed Subject must exist live"
+
+        assert sdk._delete_entity(sid) is True
+        assert not _subject(proj, name)
+
+        # Foreign kind re-uses the SAME non-namespaced id, AFTER the delete.
+        sdk.create_point("statement", "collide-point", id=sid)
+        assert _point(proj, sid)
+
+        proj.rebuild_all(str(events))
+        assert not _subject(proj, name), (
+            "deleted Subject resurrected: the bare-id survivor anchor let a "
+            "foreign-kind (Point) creation suppress its delete — #3860")
+        assert _point(proj, sid), (
+            "live Point destroyed on replay: the fold matched a node it does "
+            "not own — #3860")
+
+    def test_source_url_delete_not_suppressed_by_later_point_same_id(self, env):
+        """T1 + T2 for the OTHER public non-namespaced producer: a Source's
+        id IS the raw ingestion URL (``create_source`` → ``_create_entity
+        ("Source", url, ...)``). No raw journal needed."""
+        sdk, events = env
+        proj = sdk._get_proj()
+        url = "https://collide.test/3860-source-url"
+        sdk.create_source(url, "document")
+        assert _ids(proj, "MATCH (s:Source {id:$i}) RETURN s.id", i=url)
+
+        assert sdk._delete_entity(url) is True
+        assert not _ids(proj, "MATCH (s:Source {id:$i}) RETURN s.id", i=url)
+
+        sdk.create_point("statement", "collide-point", id=url)
+        assert _point(proj, url)
+
+        proj.rebuild_all(str(events))
+        assert not _ids(proj, "MATCH (s:Source {id:$i}) RETURN s.id", i=url), (
+            "deleted Source (id == URL) resurrected — #3860")
+        assert _point(proj, url), (
+            "live Point destroyed on replay — #3860")
+
+    def test_rebuild_dispatch_arm_is_kind_scoped(self, env):
+        """The chronological ``apply()`` arm must be kind-scoped too, or the
+        two replay arms diverge.
+
+        The collision must exist in JOURNAL order for the delete record: the
+        Point is created BEFORE the delete is appended, so the chronological
+        arm has a same-id foreign-kind node to scope against. (The earlier
+        shape created the Point after the delete, leaving the arm nothing to
+        mis-scope against — so an id-wide regression slipped through.)
+        """
+        sdk, events = env
+        proj = sdk._get_proj()
+        url = "https://collide.test/3860-dispatch"
+        sdk.create_source(url, "document")
+        pid = sdk.create_point("statement", "collide-point", id=url)["id"]
+        assert _point(proj, pid), "seed Point must exist live"
+
+        # The Source delete is journaled AFTER the Point exists, so the
+        # chronological apply() arm has a foreign-kind node to scope against.
+        with open(events / "events.jsonl", "a") as fh:
+            fh.write(json.dumps({
+                "event_id": ulid(), "ts": datetime.now(UTC).isoformat(),
+                "type": "EntityMutated", "initiated_by": "raw-producer",
+                "projection_version": 2, "id": pid, "op": "delete",
+                "label": "Source",
+            }) + "\n")
+
+        proj.rebuild(EventLog(str(events / "events.jsonl")))
+        assert not _ids(proj, "MATCH (s:Source {id:$i}) RETURN s.id", i=url), (
+            "rebuild(EventLog) resurrected the deleted Source — #3860")
+        assert _point(proj, pid), (
+            "rebuild(EventLog) destroyed the live Point: the chronological "
+            "apply() arm is not kind-scoped — #3860")
+
+    def test_in_memory_fold_ignores_foreign_kind_delete(self):
+        """T2 on the third replay arm: ``_apply_one``'s index is point-only,
+        so a delete naming a DIFFERENT canonical kind must not pop a Point."""
+        from tortoise.projection import fold
+
+        events = [
+            {"type": "PointAdded", "point": {"id": "p1", "content": "x"}},
+            {"type": "EntityMutated", "id": "p1", "op": "delete",
+             "label": "Subject"},
+        ]
+        assert "p1" in fold(events), (
+            "a Subject delete popped the Point p1 — the in-memory fold matched "
+            "a node it does not own — #3860")
+
+    def test_unknown_mutation_label_falls_back_without_injection(self, env):
+        """An unknown/hostile ``label`` must never reach the Cypher label
+        position (it is query STRUCTURE); it falls back to the legacy id-wide
+        delete, so the delete still survives and nothing is injected."""
+        sdk, events = env
+        proj = sdk._get_proj()
+        pid = sdk.create_point("statement", "hostile-label")["id"]
+        assert _point(proj, pid)
+
+        with open(events / "events.jsonl", "a") as fh:
+            fh.write(json.dumps({
+                "event_id": ulid(),
+                "ts": datetime.now(UTC).isoformat(),
+                "type": "EntityMutated",
+                "initiated_by": "raw-producer",
+                "projection_version": 2,
+                "id": pid,
+                "op": "delete",
+                "label": "Point) DETACH DELETE (n",
+            }) + "\n")
+
+        proj.rebuild_all(str(events))
+        assert not _point(proj, pid), (
+            "unknown-label delete did not survive replay (legacy id-wide "
+            "fallback expected)")
+
+
+def test_foreign_kind_delete_does_not_advance_point_annotator_boundary(env):
+    """T4: the annotator drop boundary (``last_ann_drop_seq``) is a POINT
+    boundary. A foreign-kind delete record sharing the id must not mark the
+    Point as hard-deleted, or a live-valid annotation is silently dropped on
+    replay — a self-contradiction once the fold is kind-scoped.
+
+    Journal: OperatorAdded(X) → OperatorAnnotated(X) → EntityMutated(delete,
+    X, label=Subject) → bare OperatorAdded(X) re-emit. The bare re-emit MERGEs
+    and never clears annotator dims, so the dims are live-truth.
+    """
+    dims = ("annotator_bias", "annotator_precision",
+            "annotator_consistency", "annotator_directness")
+    sdk, events = env
+    proj = sdk._get_proj()
+    op = _operator(sdk)
+    sdk.annotate_operator(op, 0.4, 0.3, 0.2, 0.1)
+    pre = {k: (sdk.get_point(op) or {}).get(k) for k in dims}
+    assert all(v is not None for v in pre.values())
+
+    records = _journal(events)
+    snap = next(r["point"] for r in records
+                if r.get("type") == "OperatorAdded"
+                and r["point"]["id"] == op)
+    duplicate = dict(snap)
+    for k in (*dims, "embedding", "content_hash"):
+        duplicate.pop(k, None)
+    with open(events / "events.jsonl", "a") as fh:
+        fh.write(json.dumps({
+            "event_id": ulid(), "ts": datetime.now(UTC).isoformat(),
+            "type": "EntityMutated", "initiated_by": "raw-producer",
+            "projection_version": 2, "id": op, "op": "delete",
+            "label": "Subject",
+        }) + "\n")
+        fh.write(json.dumps({
+            "event_id": ulid(), "ts": datetime.now(UTC).isoformat(),
+            "type": "OperatorAdded", "initiated_by": "raw-producer",
+            "projection_version": 2, "point": duplicate,
+        }) + "\n")
+
+    proj.rebuild_all(str(events))
+    rebuilt = {k: (sdk.get_point(op) or {}).get(k) for k in dims}
+    assert rebuilt == pre, (
+        "a foreign-kind (Subject) delete advanced the POINT annotator "
+        "boundary and dropped a live-valid annotation — #3860")

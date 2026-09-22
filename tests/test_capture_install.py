@@ -763,8 +763,12 @@ def test_claude_install_refuses_an_in_root_symlinked_hooks_directory(tmp_path):
 
 
 def test_unknown_harness_is_refused(tmp_path):
-    """Mutation: return an empty successful result for an unknown harness."""
-    res = install_capture("cursor", root=tmp_path)
+    """Mutation: return an empty successful result for an unknown harness.
+
+    ``cursor`` used to be the unknown-harness stand-in; it is a real seam now
+    (#3819), so this uses a harness that genuinely has no capture seam.
+    """
+    res = install_capture("vim", root=tmp_path)
 
     assert not res.ok
     assert "no capture seam" in res.error
@@ -1235,7 +1239,14 @@ def test_codex_install_then_status_is_clean_and_upgrade_is_a_no_op(home):
     `get_layout("codex")` raises `unknown harness 'codex'`, so a stale
     installed hook is never flagged or repaired, and this REDs."""
     layout = hook_install.get_layout("codex")
-    assert hook_install.contract_version(layout) == 1, (
+    # The contract must be READABLE, not a particular generation: a literal
+    # here (this asserted ``== 1`` until #4544) goes stale silently on every
+    # deliberate install-contract bump — which is how this branch left two red
+    # assertions behind. Readability still REDs on the mutation the docstring
+    # names, and also if the marker is dropped or the layout's scripts disagree
+    # (`contract_version` -> ``None``). The shipped GENERATIONS are pinned
+    # deliberately, once, by `test_shipped_install_contract_generations`.
+    assert hook_install.contract_version(layout) is not None, (
         "the shipped codex hook carries no readable install contract")
 
     res = install_capture("codex", home=home)
@@ -1417,7 +1428,7 @@ def test_hooks_claude_also_survives_an_unresolvable_home(
     ("hooks_cmd", "currency"),
     [("status", "are current"), ("upgrade", "already current")],
 )
-@pytest.mark.parametrize("harness", ["codex", "claude"])
+@pytest.mark.parametrize("harness", ["codex", "claude", "cursor"])
 @pytest.mark.parametrize("home", ["~", "~/x"])
 def test_explicit_dir_keeps_an_unresolvable_home_irrelevant(
         tmp_path, harness, hooks_cmd, home, currency):
@@ -1457,6 +1468,10 @@ def test_explicit_dir_keeps_an_unresolvable_home_irrelevant(
     if harness == "codex":
         assert install_capture("codex", home=install_home).ok
         abs_dir = capture_install.codex_home(install_home)
+    elif harness == "cursor":
+        # #3819: cursor is HOME-scoped too — the same boundary must hold.
+        assert install_capture("cursor", home=install_home).ok
+        abs_dir = capture_install.cursor_home(install_home)
     else:
         assert install_capture("claude", root=proj).ok
         abs_dir = proj
@@ -1488,6 +1503,668 @@ def test_explicit_dir_keeps_an_unresolvable_home_irrelevant(
     assert "Could not determine home directory." in without_dir.stderr, (
         without_dir.stderr)
     assert "to repair" in without_dir.stderr, without_dir.stderr
+
+
+# ── cursor: the artifact + the ~/.cursor registration (#3819) ───────────
+
+
+def _cursor_json(home: Path) -> dict:
+    return json.loads((home / ".cursor" / "hooks.json").read_text())
+
+
+def _cursor_entries(home: Path) -> list[dict]:
+    return _cursor_json(home)["hooks"][capture_install.CURSOR_EVENT]
+
+
+def _cursor_commands(home: Path) -> list[str]:
+    return [e["command"] for e in _cursor_entries(home)
+            if isinstance(e.get("command"), str)]
+
+
+def _cursor_session_end_entries(*roots: Path) -> list[dict]:
+    """Every ``sessionEnd`` capture entry under ``roots``, wherever the
+    installer actually wrote it — so a mutation that resolves the root wrongly
+    REDs on the assertion, not on a hard-coded path the test guessed."""
+    entries: list[dict] = []
+    for root in roots:
+        if not root.exists():
+            continue
+        for hooks_json in sorted(root.rglob("hooks.json")):
+            data = json.loads(hooks_json.read_text())
+            entries.extend((data.get("hooks") or {}).get(
+                capture_install.CURSOR_EVENT) or [])
+    return entries
+
+
+def _cursor_session_end_commands(*roots: Path) -> list[str]:
+    return [e["command"] for e in _cursor_session_end_entries(*roots)
+            if isinstance(e.get("command"), str)]
+
+
+def test_cursor_install_writes_the_hook_and_merges_the_absolute_command(home):
+    """The Cursor seam: the shipped hook into ``~/.cursor/hooks/`` (0755)
+    and a ``sessionEnd`` registration in ``~/.cursor/hooks.json`` whose
+    command is the script's ABSOLUTE path.
+
+    Mutation: register a relative command (Cursor runs the hook from its own
+    cwd, so it never resolves) — this REDs."""
+    res = install_capture("cursor", home=home)
+
+    assert res.ok, res.error
+    installed = home / ".cursor" / "hooks" / capture_install.CURSOR_SCRIPT_NAME
+    assert installed.read_bytes() == (
+        _REPO_ROOT / "tortoise" / "cursor-hooks" / "session-end.sh").read_bytes()
+    assert installed.stat().st_mode & stat.S_IXUSR
+    assert _cursor_commands(home) == [str(installed)], _cursor_json(home)
+    assert os.path.isabs(_cursor_commands(home)[0])
+
+
+def test_cursor_entry_is_flat_not_nested(home):
+    """Cursor's ``.cursor/hooks.json`` entry is a FLAT script object. Its own
+    validator requires a string ``command`` on the entry itself; a nested
+    ``{"hooks": [...]}`` group FAILS validation and invalidates the WHOLE
+    file, so Cursor loads NO hooks — a silent no-capture.
+
+    Mutation: emit the Claude/Codex nested matcher-group shape (drop
+    ``flat_entry`` from the cursor layout) — this REDs."""
+    assert install_capture("cursor", home=home).ok
+
+    doc = _cursor_json(home)
+    # Cursor's validator REQUIRES a positive-integer `version` on the
+    # document.  Without it Cursor logs `Invalid user config: Config version
+    # must be a number`, rejects the WHOLE file and loads NO hooks — the
+    # install prints success and captures nothing (verified live, #3819).
+    assert doc.get("version") == 1, doc
+    entry = _cursor_entries(home)[0]
+    assert isinstance(entry.get("command"), str), entry
+    assert "hooks" not in entry, (
+        f"a nested matcher group would be rejected by Cursor: {entry}")
+    assert "matcher" not in entry, entry
+    assert entry.get("type") in (None, "command"), entry
+
+
+def test_cursor_install_writes_the_version_key_cursor_requires(home):
+    """Cursor's `hooks.json` needs a positive-integer `version`; without it the
+    WHOLE file is rejected and no hook fires.  `install` must emit it and
+    `hooks status` must report a MISSING one as blocking drift.
+
+    Mutation: drop the `version` set in `_merge_capture_hooks` — the fresh
+    install has no version and this REDs; drop the version finding in
+    `_settings_findings` — the stale-install half REDs."""
+    assert install_capture("cursor", home=home).ok
+    root = capture_install.cursor_home(home)
+    assert _cursor_json(home)["version"] == 1
+    assert hook_install.detect_install(root, "cursor") == []
+
+    # A file missing `version` (e.g. one an earlier buggy install wrote) is
+    # flagged blocking and repaired by `upgrade`.
+    doc = _cursor_json(home)
+    del doc["version"]
+    (home / ".cursor" / "hooks.json").write_text(json.dumps(doc))
+    findings = hook_install.detect_install(root, "cursor")
+    assert any(f.kind == "settings-invalid-version" and f.blocking
+               for f in findings), findings
+
+    result = hook_install.upgrade_install(root, "cursor")
+    assert result.ok, result.refused
+    assert _cursor_json(home)["version"] == 1
+    assert hook_install.detect_install(root, "cursor") == []
+
+
+def test_cursor_install_refuses_a_nested_session_end_entry(home):
+    """A nested matcher group under a flat event makes Cursor reject the WHOLE
+    file, so the merge must REFUSE rather than append a flat duplicate beside
+    it (the mixed list is the invalid shape).
+
+    Mutation: drop the `_flat_entry_is_harness_valid` guard in
+    `_merge_capture_hooks` — the installer appends beside the nested entry,
+    prints success, and this REDs."""
+    script = home / ".cursor" / "hooks" / capture_install.CURSOR_SCRIPT_NAME
+    (home / ".cursor").mkdir(parents=True)
+    (home / ".cursor" / "hooks.json").write_text(json.dumps({
+        "version": 1,
+        "hooks": {capture_install.CURSOR_EVENT: [{"hooks": [{
+            "type": "command", "command": str(script)}]}]},
+    }))
+
+    res = install_capture("cursor", home=home)
+
+    assert not res.ok, res.actions
+    assert "Cursor" in res.error and "manual" in res.error, res.error
+
+
+def test_cursor_install_refuses_a_document_cursor_would_reject(home):
+    """Cursor's validator iterates EVERY event and rejects the WHOLE file on an
+    unknown step, a non-list event, or any unparseable entry — including under
+    an event we do not merge.  The refusal must be whole-document, not scoped
+    to ``sessionEnd``.
+
+    Mutation: check only ``spec.event`` (the nested-entry-only guard) — an
+    invalid entry under another event installs "successfully" and this REDs."""
+    (home / ".cursor").mkdir(parents=True)
+    path = home / ".cursor" / "hooks.json"
+    # (a) an unparseable entry under a DIFFERENT event
+    path.write_text(json.dumps({"version": 1, "hooks": {
+        "afterFileEdit": [{"hooks": [{"type": "command", "command": "/x"}]}],
+    }}))
+    res = install_capture("cursor", home=home)
+    assert not res.ok, res.actions
+    assert "afterFileEdit" in res.error, res.error
+
+    # (b) an unknown event key
+    path.write_text(json.dumps({"version": 1, "hooks": {
+        "notARealStep": [{"command": "/bin/other"}],
+    }}))
+    res = install_capture("cursor", home=home)
+    assert not res.ok, res.actions
+    assert "unknown hook type" in res.error, res.error
+
+    # (c) a field Cursor's validator rejects (a non-numeric timeout)
+    path.write_text(json.dumps({"version": 1, "hooks": {
+        "sessionEnd": [{"command": "/bin/other", "timeout": "30s"}],
+    }}))
+    res = install_capture("cursor", home=home)
+    assert not res.ok, res.actions
+    assert "sessionEnd" in res.error, res.error
+
+
+def test_cursor_hooks_status_calls_a_malformed_entry_a_manual_fix(home):
+    """`hooks status` must NOT recommend `upgrade` for a malformed flat entry —
+    `upgrade` refuses on it, so the hint would point at a command that refuses.
+    `settings-unreadable-entry` belongs in the manual-fix set.
+
+    Mutation: drop `settings-unreadable-entry` from the `_manual` frozenset —
+    status recommends `hooks upgrade` and this REDs."""
+    (home / ".cursor").mkdir(parents=True)
+    (home / ".cursor" / "hooks.json").write_text(json.dumps(
+        {"version": 1, "hooks": {capture_install.CURSOR_EVENT: [
+            {"hooks": [{"type": "command", "command": "/x"}]}]}}))
+
+    r = _run(("hooks", "status", "--harness", "cursor",
+              "--dir", str(capture_install.cursor_home(home))),
+             {**os.environ, "HOME": str(home), "TORTOISE_DB_URI": "",
+              "TORTOISE_SECRET_PEPPER": "test-static-pepper"}, home)
+
+    assert r.returncode != 0, r.stdout
+    assert "manual fix" in r.stdout, r.stdout
+    assert "hooks upgrade" not in r.stdout, r.stdout
+
+
+def test_cursor_flat_validator_matches_cursor_null_and_float_semantics():
+    """Cursor's validator uses presence (``e.field !== void 0``) then
+    ``typeof``, so an explicit JSON ``null`` on matcher/timeout/failClosed/
+    model is REJECTED, while ``loop_limit: null`` and an integral ``version``
+    (``1.0`` — ``Number.isInteger(1.0)`` is true) are valid.
+
+    Mutation: test with ``is not None`` (conflating JSON null with absent) —
+    the null cases are accepted and this REDs; test version with
+    ``isinstance(int)`` — ``1.0`` is rejected and this REDs."""
+    from tortoise.hook_install import (  # noqa: I001
+        _flat_entry_is_harness_valid, _is_positive_int_value)
+    assert _flat_entry_is_harness_valid({"command": "/bin/other"})
+    assert _flat_entry_is_harness_valid({"command": "/bin/other",
+                                         "timeout": 30})
+    assert _flat_entry_is_harness_valid({"command": "/bin/other",
+                                         "loop_limit": None})
+    assert _flat_entry_is_harness_valid({"type": "prompt", "prompt": "hi"})
+    for bad in (
+        {"command": "/bin/other", "timeout": None},
+        {"command": "/bin/other", "matcher": None},
+        {"command": "/bin/other", "failClosed": None},
+        {"type": "prompt", "prompt": "hi", "model": None},
+        {"command": "/bin/other", "timeout": "30s"},
+        {"command": "/bin/other", "type": None},
+    ):
+        assert not _flat_entry_is_harness_valid(bad), bad
+    assert _is_positive_int_value(1)
+    assert _is_positive_int_value(1.0)
+    assert not _is_positive_int_value(0)
+    assert not _is_positive_int_value(True)
+    assert not _is_positive_int_value("1")
+
+
+def test_cursor_flat_validator_regex_and_loop_limit_semantics():
+    """The matcher is judged only in the SAFE direction: a JS-only-valid
+    matcher Python rejects must be ACCEPTED (a valid Cursor config must still
+    install), a Python-only construct JS rejects must be REFUSED, a matcher
+    BOTH engines reject must be REFUSED, an integral float ``loop_limit`` is
+    valid, and a matcher Python cannot compile must not escape as a traceback.
+
+    Mutation: drop the Python-only denylist — ``(?i)a`` is accepted and this
+    REDs; refuse on any Python ``re.error`` — the JS-only matcher is refused
+    and this REDs; accept without the JS-only marker check — ``(`` is accepted
+    and this REDs; use ``isinstance(int)`` for loop_limit — ``2.0`` is refused
+    and this REDs."""
+    from tortoise.hook_install import _flat_entry_is_harness_valid as ok
+    # JS-only but valid: named groups and a Unicode property escape
+    assert ok({"command": "/x", "matcher": "(?<name>a)"})
+    assert ok({"command": "/x", "matcher": "\\p{L}+"})
+    # an escaped quantifier is valid in BOTH engines
+    assert ok({"command": "/x", "matcher": "\\++"})
+    # Python-only: JS `new RegExp` throws on each of these
+    for bad in ("(?i)a", "(?>a)", "a*+", "(?P<n>a)", "(?-i:a)"):
+        assert not ok({"command": "/x", "matcher": bad}), bad
+    # a matcher BOTH engines reject, with no JS-only marker, is refused
+    for bad in ("(", "[", "a**"):
+        assert not ok({"command": "/x", "matcher": bad}), bad
+    # Cursor's own wildcard sentinel is always valid
+    assert ok({"command": "/x", "matcher": "*"})
+    # an integral float loop_limit is valid (JS Number.isInteger(2.0))
+    assert ok({"command": "/x", "loop_limit": 2.0})
+    assert not ok({"command": "/x", "loop_limit": 0})
+    # deeply nested groups must not escape as a traceback (they refuse)
+    assert ok({"command": "/x", "matcher": "(" * 600 + ")" * 600}) is False
+
+
+def test_cursor_upgrade_refuses_structure_even_when_version_is_bad(home):
+    """A document with BOTH a bad version and a structural defect is a MANUAL
+    fix: `upgrade` must REFUSE, not repair the version and leave a file Cursor
+    still rejects.
+
+    Mutation: report the version finding and skip the structural one (the
+    pre-fix ordering) — `upgrade` sets version=1, appends its entry, returns
+    ok, and this REDs."""
+    (home / ".cursor").mkdir(parents=True)
+    (home / ".cursor" / "hooks.json").write_text(json.dumps(
+        {"hooks": {capture_install.CURSOR_EVENT: [
+            {"hooks": [{"type": "command", "command": "/x"}]}]}}))
+    root = capture_install.cursor_home(home)
+
+    kinds = {f.kind for f in hook_install.detect_install(root, "cursor")}
+    assert "settings-unreadable-entry" in kinds, kinds
+    assert "settings-invalid-version" in kinds, kinds
+    result = hook_install.upgrade_install(root, "cursor")
+    assert result.refused is not None, result.actions
+
+
+def test_cursor_version_1_0_is_valid_and_not_rewritten(home):
+    """JS ``Number.isInteger(1.0)`` is true, so a user's ``"version": 1.0``
+    is valid; the installer must not report drift or rewrite it.
+
+    Mutation: use ``isinstance(version, int)`` — 1.0 reads as invalid, is
+    flagged/rewritten, and this REDs."""
+    (home / ".cursor").mkdir(parents=True)
+    (home / ".cursor" / "hooks.json").write_text(json.dumps(
+        {"version": 1.0, "hooks": {capture_install.CURSOR_EVENT: []}}))
+    root = capture_install.cursor_home(home)
+
+    findings = [f for f in hook_install.detect_install(root, "cursor")
+                if f.kind == "settings-invalid-version"]
+    assert findings == [], findings
+    assert install_capture("cursor", home=home).ok
+    assert _cursor_json(home)["version"] == 1.0
+
+
+def test_cursor_root_is_home_scoped_and_ignores_an_unrelated_env(
+        tmp_path, monkeypatch):
+    """Cursor resolves ``~/.cursor/hooks.json`` and has NO config-dir env var —
+    verified: the string ``CURSOR_HOME`` appears nowhere in Cursor 3.20.21's JS
+    bundle, asar or binary (`CursorHooksService` joins
+    ``pathService.userHome() / ".cursor"``).  The install must land in
+    ``$HOME/.cursor`` regardless of any ambient ``CURSOR_HOME``, or it writes a
+    file Cursor never reads — the silent no-capture class this seam exists to
+    prevent.
+
+    Mutation: declare ``root_env="CURSOR_HOME"`` on the cursor layout —
+    setting it redirects the install and this REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CURSOR_HOME", str(tmp_path / "elsewhere"))
+    layout = hook_install.get_layout("cursor")
+
+    assert layout.root_env is None, "Cursor has no config-dir env var"
+    assert hook_install.default_root(layout, home) == home / ".cursor"
+    assert install_capture("cursor", home=home).ok
+    assert (home / ".cursor" / "hooks.json").is_file()
+    assert not (tmp_path / "elsewhere").exists(), (
+        "an ambient CURSOR_HOME redirected the install away from ~/.cursor")
+
+
+def test_cursor_default_root_is_absolute_or_refuses(tmp_path, monkeypatch):
+    """The resolver always returns an ABSOLUTE root — the layout's
+    ``absolute_command`` invariant cannot hold otherwise.  A RELATIVE ``$HOME``
+    (``Path.home()`` returns it verbatim) makes the root relative, so it must
+    REFUSE loudly rather than register a command Cursor resolves somewhere
+    unknowable.
+
+    Mutation: return ``home / root_home_default`` without the absoluteness
+    guard — a relative home yields a relative root and this REDs."""
+    layout = hook_install.get_layout("cursor")
+    assert hook_install.default_root(layout, tmp_path / "home").is_absolute()
+    with pytest.raises(ValueError, match="absolute"):
+        hook_install.default_root(layout, Path("relhome"))
+
+
+def test_cursor_install_registers_an_absolute_command_and_status_clean(
+        tmp_path, monkeypatch):
+    """An install registers the script's ABSOLUTE path, and ``status``
+    recognizes that registration in the same run.
+
+    Mutation: register a relative command — the registered path is not
+    absolute and ``status`` reports ``settings-stale-command`` → this REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    resolved = home / ".cursor"
+
+    assert install_capture("cursor", home=home).ok
+
+    registered = _cursor_commands(home)
+    assert registered == [
+        str(resolved / "hooks" / capture_install.CURSOR_SCRIPT_NAME)], registered
+    assert os.path.isabs(registered[0]), registered
+    assert hook_install.detect_install(resolved, "cursor") == [], (
+        "the installer produced state the drift detector calls drifted")
+
+
+def test_cursor_reinstall_does_not_duplicate(tmp_path, monkeypatch):
+    """Installing twice leaves ONE ``sessionEnd`` registration.
+
+    Mutation: the detector does not recognize our own registration, so the
+    second install appends a duplicate → this REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    for _ in range(2):
+        assert install_capture("cursor", home=home).ok
+
+    assert len(_cursor_entries(home)) == 1, _cursor_json(home)
+
+
+# The `--dir`-vs-unresolvable-HOME boundary is covered for cursor by
+# `test_explicit_dir_keeps_an_unresolvable_home_irrelevant` (harness matrix
+# includes "cursor"), not duplicated here.
+
+
+def test_cursor_install_is_home_scoped_not_project_scoped(tmp_path):
+    """Cursor reads hook registrations from the HOME-scoped ``.cursor/
+    hooks.json`` (verified against Cursor 3.20.21's bundle); a project-local
+    ``<repo>/.cursor/hooks.json`` is gated on workspace trust and fires
+    nothing when untrusted. The installer must write HOME-scoped even when a
+    project ``root`` is supplied.
+
+    Mutation: write the registration into ``root/.cursor/hooks.json`` — the
+    install reports success while Cursor never reads it, and this REDs."""
+    home = tmp_path / "home"
+    proj = tmp_path / "proj"
+    home.mkdir()
+    proj.mkdir()
+
+    res = install_capture("cursor", root=proj, home=home)
+
+    assert res.ok, res.error
+    assert (home / ".cursor" / "hooks.json").is_file()
+    assert not (proj / ".cursor").exists(), (
+        "the capture seam must not be written to the untrusted project path")
+
+
+def test_cursor_install_is_a_clean_no_op_on_rerun(home):
+    """Re-running is the upgrade path and must be a byte-level no-op.
+
+    Mutation: append the registration unconditionally (a second run emits a
+    duplicate ``sessionEnd`` entry)."""
+    assert install_capture("cursor", home=home).ok
+    json_path = home / ".cursor" / "hooks.json"
+    script = home / ".cursor" / "hooks" / capture_install.CURSOR_SCRIPT_NAME
+    before = (json_path.stat().st_mtime_ns, script.stat().st_mtime_ns)
+
+    again = install_capture("cursor", home=home)
+
+    assert again.ok and again.changed is False, again.actions
+    assert (json_path.stat().st_mtime_ns, script.stat().st_mtime_ns) == before
+    assert len(_cursor_commands(home)) == 1, _cursor_json(home)
+
+
+def test_cursor_install_preserves_foreign_keys_events_and_hooks(home):
+    """Merge, never overwrite: an unrelated top-level key, another event, a
+    foreign hook in the SAME ``sessionEnd`` list, and the required ``version``
+    key all survive.
+
+    Mutation: write the document wholesale (the foreign hook is lost)."""
+    doc = {
+        "version": 1,
+        "editor": "cursor",
+        "hooks": {
+            "beforeSubmitPrompt": [{"command": "/bin/other"}],
+            "sessionEnd": [{"command": "/bin/other-end"}],
+        },
+    }
+    path = home / ".cursor" / "hooks.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(doc))
+
+    assert install_capture("cursor", home=home).ok
+
+    merged = _cursor_json(home)
+    assert merged["version"] == 1
+    assert merged["editor"] == "cursor"
+    assert merged["hooks"]["beforeSubmitPrompt"][0]["command"] == "/bin/other"
+    assert "/bin/other-end" in _cursor_commands(home)
+    assert len(_cursor_commands(home)) == 2, merged
+
+
+def test_cursor_install_repairs_a_stale_relative_command_in_place(home):
+    """A registration of ours whose command is relative/stale must be repaired
+    to the absolute path, not left as a silent no-capture.
+
+    Mutation: skip the repair loop in ``merge_cursor_capture_hooks`` — the
+    stale command survives and this REDs."""
+    script = home / ".cursor" / "hooks" / capture_install.CURSOR_SCRIPT_NAME
+    script.parent.mkdir(parents=True)
+    script.write_bytes((_REPO_ROOT / "tortoise" / "cursor-hooks"
+                        / "session-end.sh").read_bytes())
+    (home / ".cursor" / "hooks.json").write_text(json.dumps({"version": 1,
+        "hooks": {capture_install.CURSOR_EVENT: [{
+            "command": f"hooks/{capture_install.CURSOR_SCRIPT_NAME}"}]}}))
+
+    assert install_capture("cursor", home=home).ok
+
+    assert _cursor_commands(home) == [str(script)], _cursor_json(home)
+
+
+def test_cursor_install_refuses_a_foreign_script_and_keeps_it(home):
+    """A foreign file at OUR script path is another product's — refuse whole,
+    never clobber.
+
+    Mutation: write through the foreign file (it is destroyed while the
+    install reports success)."""
+    script = home / ".cursor" / "hooks" / capture_install.CURSOR_SCRIPT_NAME
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/bin/sh\n# someone else's hook\nexit 0\n")
+
+    res = install_capture("cursor", home=home)
+
+    assert not res.ok and "does not look like a Tortoise artifact" in res.error
+    assert "someone else's hook" in script.read_text()
+
+
+def test_cursor_install_preserves_a_differing_ours_script_as_bak(home):
+    """A DIFFERING copy that DOES look like ours (a stale/edited Tortoise
+    hook) is preserved as ``.bak`` before the shipped bytes replace it —
+    never destroyed silently.
+
+    Mutation: skip the backup in ``_install_script`` — this REDs."""
+    script = home / ".cursor" / "hooks" / capture_install.CURSOR_SCRIPT_NAME
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/usr/bin/env bash\n# tortoise-hook-version: 0\n"
+                      "# a local Tortoise edit\nexit 0\n")
+
+    assert install_capture("cursor", home=home).ok
+
+    backup = script.with_suffix(script.suffix + ".bak")
+    assert backup.is_file(), "the differing ours-like copy was not preserved"
+    assert "a local Tortoise edit" in backup.read_text()
+    assert script.read_bytes() == (
+        _REPO_ROOT / "tortoise" / "cursor-hooks" / "session-end.sh").read_bytes()
+
+
+def test_cursor_install_refuses_invalid_hooks_json(home):
+    """An unparsable ``hooks.json`` must never be clobbered.
+
+    Mutation: fall back to ``{}`` on a parse error — the user's file is
+    destroyed and this REDs."""
+    path = home / ".cursor" / "hooks.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{ not json")
+
+    res = install_capture("cursor", home=home)
+
+    assert not res.ok and "not valid JSON" in res.error
+    assert path.read_text() == "{ not json"
+
+
+def test_cursor_install_refuses_non_utf8_hooks_json(home):
+    """A non-UTF-8 ``hooks.json`` must be refused, never silently rewritten
+    (decoding with ``errors="replace"`` would corrupt the user's bytes on the
+    merge write-back).
+
+    Mutation: read with ``errors="replace"`` — the file is rewritten and this
+    REDs."""
+    path = home / ".cursor" / "hooks.json"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b'{"hooks": {"sessionEnd": [\xff\xfe]}}')
+
+    res = install_capture("cursor", home=home)
+
+    assert not res.ok and "not valid UTF-8" in res.error
+    assert path.read_bytes() == b'{"hooks": {"sessionEnd": [\xff\xfe]}}'
+
+
+def test_cursor_install_refuses_a_symlinked_intermediate_dir(home):
+    """A symlinked intermediate directory (``.cursor/hooks`` -> an in-root
+    dir) cannot be replaced by a regular file and is not an install
+    ``hooks status`` reads as current (`upgrade` refuses it) — so the install
+    must refuse it too, not write through and print success.
+
+    Mutation: accept the symlinked ``hooks/`` dir (the install writes through
+    it and reports success while ``status`` reports ``symlinked-install``) —
+    this REDs."""
+    real = home / ".cursor" / "real-hooks"
+    real.mkdir(parents=True)
+    (home / ".cursor" / "hooks").symlink_to(real, target_is_directory=True)
+
+    res = install_capture("cursor", home=home)
+
+    assert not res.ok, res.actions
+    assert "symbolic link" in res.error or "symlink" in res.error.lower()
+    assert not (real / capture_install.CURSOR_SCRIPT_NAME).exists()
+
+
+def test_cursor_dry_run_writes_nothing(tmp_path):
+    """``--dry-run`` is write-free.
+
+    Mutation: drop the ``dry_run`` gate on the script/settings writes — files
+    appear on disk and this REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+
+    res = install_capture("cursor", home=home, dry_run=True)
+
+    assert res.ok, res.error
+    assert res.changed is True
+    assert not (home / ".cursor").exists()
+
+
+def test_cursor_install_then_status_is_clean_and_upgrade_is_a_no_op(home):
+    """The Cursor seam ships the SAME version-marker/settings contract as
+    Claude/Codex, so it is covered by the layout registry — not an
+    install-only fork: `detect_install` reads the produced state as current
+    and `upgrade_install` changes nothing.
+
+    Mutation: drop the cursor entry from `hook_install.HARNESS_LAYOUTS` —
+    `get_layout("cursor")` raises `unknown harness 'cursor'`, so a stale
+    installed hook is never flagged or repaired, and this REDs."""
+    layout = hook_install.get_layout("cursor")
+    # Readable, not a literal generation — same reasoning as the codex seam
+    # above (#4544: cursor was bumped 1 -> 2 by #4314). The generations are
+    # pinned deliberately by `test_shipped_install_contract_generations`.
+    assert hook_install.contract_version(layout) is not None, (
+        "the shipped cursor hook carries no readable install contract")
+
+    res = install_capture("cursor", home=home)
+    assert res.ok, res.error
+    cursor_root = capture_install.cursor_home(home)
+
+    assert hook_install.detect_install(cursor_root, "cursor") == [], (
+        "the installer produced state the drift detector calls drifted")
+    upgrade = hook_install.upgrade_install(cursor_root, "cursor")
+    assert upgrade.refused is None, upgrade.refused
+    assert upgrade.actions == [], (
+        f"upgrade was not a no-op on a fresh install: {upgrade.actions}")
+
+    again = install_capture("cursor", home=home)
+    assert again.ok and again.changed is False, (
+        "re-installing over a status-current install was not a clean no-op")
+
+
+def test_cursor_hooks_status_reports_the_install_as_current(cli):
+    """`tortoise hooks status --harness cursor` names the harness instead of
+    rejecting it, and reads a fresh install as current.
+
+    Mutation: remove the cursor layout — the CLI exits 1 with `unknown harness
+    'cursor'` and this REDs."""
+    run, _root, home = cli
+    assert install_capture("cursor", home=home).ok
+
+    r = run("hooks", "status", "--harness", "cursor",
+            "--dir", str(capture_install.cursor_home(home)))
+
+    assert r.returncode == 0, r.stderr
+    assert "unknown harness" not in (r.stdout + r.stderr), r.stderr
+    assert "are current" in r.stdout, r.stdout
+
+
+def test_cursor_hooks_status_defaults_to_cursor_home_not_the_cwd(cli):
+    """With NO ``--dir``, `tortoise hooks status --harness cursor` resolves its
+    root from ``~/.cursor`` (``$HOME/.cursor``) — the only path Cursor reads
+    — not the cwd.
+
+    Mutation: resolve the default root from the cwd (``--dir .``) → the check
+    lands on a path with no install, reports ``missing-script`` +
+    ``missing-hook-entry``, and exits 1 → this REDs."""
+    run, root, home = cli
+    assert install_capture("cursor", home=home).ok
+    cursor_root = capture_install.cursor_home(home)
+
+    r = run("hooks", "status", "--harness", "cursor")  # no --dir
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "are current" in r.stdout, r.stdout
+    assert str(cursor_root) in r.stdout, r.stdout
+    # the untrusted project-local path Cursor never reads was not inspected
+    assert not (root / "hooks.json").exists()
+
+
+def test_cursor_hooks_upgrade_defaults_to_cursor_home_not_the_cwd(cli):
+    """With NO ``--dir``, `tortoise hooks upgrade --harness cursor` writes into
+    ``~/.cursor`` — the script plus an ABSOLUTE registration — and leaves the
+    project path untouched.
+
+    Mutation: resolve the default root from the cwd (``--dir .``) → the
+    upgrade writes ``<cwd>/hooks.json`` and ``<cwd>/hooks/`` with a RELATIVE
+    command, prints ``upgraded.``, and the real ``~/.cursor/hooks.json`` is
+    never created → this REDs (the #3819 silent no-capture)."""
+    run, root, home = cli
+    cursor_root = capture_install.cursor_home(home)
+    assert not cursor_root.exists()
+
+    r = run("hooks", "upgrade", "--harness", "cursor")  # no --dir
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    installed = cursor_root / "hooks" / capture_install.CURSOR_SCRIPT_NAME
+    assert installed.is_file(), r.stdout + r.stderr
+    assert _cursor_commands(home) == [str(installed)], _cursor_json(home)
+    assert os.path.isabs(_cursor_commands(home)[0])
+    # nothing landed in the project path the old default would have written
+    assert not (root / "hooks.json").exists(), r.stdout
+    assert not (root / "hooks").exists(), r.stdout
+
+
+# The `--dir`-vs-unresolvable-HOME boundary is covered for cursor by
+# `test_explicit_dir_keeps_an_unresolvable_home_irrelevant` (harness matrix
+# includes "cursor"), not duplicated here.
 
 
 # ── the CLI surface (`tortoise install <harness>`) ──────────────────────
@@ -1528,6 +2205,73 @@ def test_cli_install_codex_installs_capture_into_the_codex_home(tmp_path):
     assert str(codex_home / "hooks.json") in r.stdout, r.stdout
     assert "$CODEX_HOME/hooks.json" in r.stdout, r.stdout
     assert "TRUST" in r.stdout, r.stdout
+
+
+def test_cli_install_cursor_installs_capture_and_discloses_the_ide_only_limit(
+        tmp_path):
+    """`tortoise install cursor` installs the HOME-scoped capture seam and
+    DISCLOSES the IDE-only limitation on the install surface (owner ruling,
+    #3819) — never a buried footnote.
+
+    Mutation: drop cursor from the capture dispatch in `_cmd_install_hooks` —
+    no `sessionEnd` registration lands and this REDs."""
+    root = tmp_path / "proj"
+    home = tmp_path / "home"
+    cursor_home = home / ".cursor"
+    root.mkdir()
+    home.mkdir()
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "TORTOISE_DB_URI": "",
+        "TORTOISE_SECRET_PEPPER": "test-static-pepper",
+    }
+
+    r = _run(("install", "cursor", "--dir", str(root)), env, root)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (cursor_home / "hooks"
+            / capture_install.CURSOR_SCRIPT_NAME).is_file()
+    reg = json.loads((cursor_home / "hooks.json").read_text())
+    entry = reg["hooks"][capture_install.CURSOR_EVENT][0]
+    assert entry["command"].endswith(capture_install.CURSOR_SCRIPT_NAME)
+    assert "hooks" not in entry, "the entry must be flat (#3819)"
+    # cursor has no read seam — nothing may be written to a project cline path
+    assert not (root / ".cline").exists(), r.stdout
+    # the IDE-only disclosure is on the install surface
+    assert "IDE-ONLY" in r.stdout, r.stdout
+    assert "CLOUD" in r.stdout.upper(), r.stdout
+    assert "no editor-lifetime session boundary" in r.stdout, r.stdout
+
+
+def test_cli_install_cursor_uninstall_says_the_seam_remains(tmp_path):
+    """`tortoise install cursor --uninstall` must NOT route to the read-hook
+    surface (which exits 1 with "has no shell-hook read seam") while the
+    capture hook stays live — Cursor has no read seam, so the honest answer is
+    a note naming what to delete (#3819).
+
+    Mutation: drop the cursor uninstall branch — the command exits 1 with the
+    read-hook refusal and this REDs."""
+    root = tmp_path / "proj"
+    home = tmp_path / "home"
+    root.mkdir()
+    home.mkdir()
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "TORTOISE_DB_URI": "",
+        "TORTOISE_SECRET_PEPPER": "test-static-pepper",
+    }
+    assert _run(("install", "cursor", "--dir", str(root)), env, root).returncode == 0
+
+    r = _run(("install", "cursor", "--uninstall", "--dir", str(root)),
+             env, root)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "capture seam is left in place" in r.stdout, r.stdout
+    assert "tortoise-session-end.sh" in r.stdout, r.stdout
+    # it never inspected/rewrote a cline registration as if it were cursor's
+    assert not (root / ".cline").exists(), r.stdout
 
 
 def test_cli_install_codex_second_run_is_a_no_op(cli):
@@ -2399,3 +3143,33 @@ def test_every_capture_artifact_ships_in_the_wheel():
         assert covered(rel), (
             f"{artifact} is not matched by any package-data pattern "
             f"{patterns} — a wheel install would fail resolving it")
+
+
+# The shipped install-contract generations, one per harness that ships SHELL
+# hooks.  The marker is what makes a stale installed hook detectable, so it MUST
+# be bumped when what a hook writes changes, and bumping must be DELIBERATE.
+# Pinning the values here, ONCE, is what makes a revert RED (a silently reverted
+# marker mis-classifies current installs as stale, or stale ones as current) and
+# makes the next bump a deliberate edit of this table.  A literal at each
+# install assertion does neither: it goes stale silently, which is exactly how
+# #4314 left two red assertions behind (#4545).
+_EXPECTED_INSTALL_CONTRACT = {"claude": 4, "codex": 2, "cursor": 2}
+
+
+@pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
+def test_shipped_install_contract_generations(harness):
+    """#4314 changes what an installed hook writes (a capture-error breadcrumb)
+    and what the installer records, so every shipped generation moved — claude
+    3→4, codex 1→2, cursor 1→2.  Those numbers are a reviewed decision, not a
+    detail, so they are pinned once and explicitly.
+
+    `pi` is absent by construction: it ships a TypeScript extension rather than
+    shell hooks, declares no install contract, and has no `HarnessLayout`.
+    """
+    layout = hook_install.get_layout(harness)
+    assert hook_install.contract_version(layout) == (
+        _EXPECTED_INSTALL_CONTRACT[harness]), (
+        f"{harness} ships contract generation "
+        f"{hook_install.contract_version(layout)}, expected "
+        f"{_EXPECTED_INSTALL_CONTRACT[harness]} — if that bump was deliberate, "
+        f"update _EXPECTED_INSTALL_CONTRACT; if not, this is the revert")

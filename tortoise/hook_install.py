@@ -56,6 +56,7 @@ marker would destroy exactly the customizations this migration must protect).
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -79,6 +80,31 @@ _HOOK_VERSION_RE = re.compile(
 
 #: Where the shipped hook scripts live inside this package.
 _HOOKS_SOURCE_DIR = Path(__file__).resolve().parent / "claude-hooks"
+
+#: Where the installer records the module dir it installed FROM, relative to
+#: ``$HOME``.  An installed hook sits under ``~/.codex`` / ``~/.cursor`` /
+#: ``~/.claude``, so ``$(dirname "$0")/../..`` is ``$HOME`` — not a checkout —
+#: and a hook that trusted it captured nothing while still exiting 0 (#4314).
+HOOK_SRC_DIR_RELPATH = Path(".tortoise") / "hook-src-dir"
+
+#: The ``kind`` marker on the local ``capture-errors/<harness>.json``
+#: breadcrumb.  Two writers share that ONE path, so the reader must be able to
+#: tell them apart in BOTH directions:
+#:
+#: * the shipped shell hooks write :data:`KIND_INSTALL_INERT` when the installed
+#:   hook resolved no module dir (its install leg is inert);
+#: * ``tortoise.__main__._record_capture_error`` writes
+#:   :data:`KIND_CAPTURE_FAILURE` when a ``sessions import`` capture attempt
+#:   failed (an API outage, a parse failure, zero turns).
+#:
+#: The write condition and the read condition are the SAME condition: session
+#: verify accepts a breadcrumb as install-inert evidence ONLY when this marker
+#: is present and equal to ``KIND_INSTALL_INERT``, so a capture outage can
+#: never read as an inert install.  Conversely a reader looking for a capture
+#: failure must exclude the install-inert kind, so an inert install can never
+#: read as a failed capture.
+KIND_INSTALL_INERT = "install-inert"
+KIND_CAPTURE_FAILURE = "capture-failure"
 
 
 #: Substrings that identify a hook body as Tortoise's. Deliberately specific
@@ -143,6 +169,131 @@ def _atomic_write_text(dst: Path, text: str) -> None:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
         raise
+
+
+def _hook_src_dir_base(home: Path | None) -> Path:
+    """The base the ``hook-src-dir`` record is written under.
+
+    ``~/.tortoise`` by default.  The base is FAIL-SAFE: a call with no
+    resolved ``home`` that runs under pytest never writes to the developer
+    machine's real ``~/.tortoise`` — under pytest the base is derived
+    DETERMINISTICALLY from the test id, so every process of one test shares
+    one directory and none of them touches the real home.  Whether to RECORD
+    at all is a SEPARATE decision that keys on whether the installed hook can
+    resolve on its own (see ``_record_hook_src_dir`` and
+    ``_hook_needs_src_dir_record``), not on this fail-safe: ``upgrade_install``
+    at a repo-scoped ``--dir`` that is a checkout records nothing.
+
+    This is not hypothetical: the first cut of #4314 used ``Path.home()``
+    unconditionally and a single test run created
+    ``~/.tortoise/hook-src-dir`` on the developer's machine.
+    """
+    if home is not None:
+        return Path(home)
+    test_id = os.environ.get("PYTEST_CURRENT_TEST")
+    if test_id:
+        # ``PYTEST_CURRENT_TEST`` is ``"<nodeid> (call|setup|teardown)"`` —
+        # the phase suffix differs per phase, so hashing it verbatim gave one
+        # test three directories and a record written in ``setup`` was
+        # invisible in ``call``.  Strip the phase so ONE test == ONE dir.
+        node_id = test_id.rsplit(" (", 1)[0]
+        digest = hashlib.sha256(
+            node_id.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+        return Path(tempfile.gettempdir()) / "tortoise-hook-src-tests" / digest
+    return Path.home()
+
+
+def _record_hook_src_dir(home: Path | None = None) -> None:
+    """Record this package's module dir for the installed hooks to resolve.
+
+    The module dir is the directory that CONTAINS the ``tortoise`` package —
+    the repo root for a checkout, ``site-packages`` for a wheel install.  A
+    hook accepts a candidate only when ``<candidate>/tortoise`` exists, so this
+    record is what keeps an installed hook from falling through to its silent
+    no-op (#4314).
+
+    Best-effort and idempotent: a read-only ``~/.tortoise`` must never fail an
+    install, and a re-run whose record is already correct does not rewrite
+    (and does not churn the file's mtime).
+    """
+    base = _hook_src_dir_base(home)
+    target = base / HOOK_SRC_DIR_RELPATH
+    text = str(Path(__file__).resolve().parent.parent) + "\n"
+    try:
+        if target.is_file() and target.read_text(encoding="utf-8") == text:
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(target, text)
+    except (OSError, ValueError):
+        # Best-effort: this must NEVER fail an install. A non-UTF-8 record
+        # raises ``UnicodeDecodeError`` (a ``ValueError``) from the read — a
+        # class the old ``except OSError`` guard let escape, so
+        # `tortoise install` / `hooks upgrade` tracebacked AFTER the hooks
+        # were written (#3999, #4314).
+        pass
+
+
+def _record_hook_src_dir_best_effort(home: Path | None = None) -> None:
+    """``_record_hook_src_dir`` that can NEVER fail the caller's install.
+
+    ``_record_hook_src_dir`` already swallows the filesystem/decode failures
+    it can name; this wrapper is the belt-and-suspenders boundary the install
+    call sites need so no future raise-set member escapes a completed install
+    (#3999, #4314). ``MemoryError`` is deliberately propagated: resource
+    exhaustion is not a swallowed failure anywhere else in the install.
+    """
+    try:
+        _record_hook_src_dir(home)
+    except MemoryError:
+        raise
+    except Exception:
+        pass
+
+
+def _hook_needs_src_dir_record(layout: HarnessLayout, root: Path) -> bool:
+    """True when the installed hook's OWN ``../..`` cannot resolve ``tortoise``.
+
+    The ``hook-src-dir`` record exists for exactly one reason: the installed
+    hook falls back to ``$(dirname "$0")/../..`` when ``$TORTOISE_SRC_DIR`` and
+    the record are both absent, and from ``~/.codex/hooks`` / ``~/.cursor/
+    hooks`` that fallback is ``$HOME`` — not a checkout.  So the record is
+    NEEDED iff that fallback directory does not itself contain a ``tortoise/``
+    package.  The directory is derived from the ACTUAL install layout
+    (``layout.hooks_dir``), never a hardcoded assumption, so it is correct for
+    a two-level ``.claude/hooks`` and a one-level ``hooks`` alike.
+
+    This is a NEED-based rule, not a layout-based one, and that is deliberate:
+    the write condition (this function) and the read condition (the hook's
+    candidate loop) are the SAME condition.  It fixes Claude's project install
+    and every ``--dir`` HOME install (``~/.codex``, ``~/.cursor``,
+    ``~/.claude``) while still writing NOTHING for a repo-scoped ``--dir`` whose
+    ``../..`` IS a checkout — the #4110 case, where a HOME side effect is both
+    unnecessary and unwanted.
+    """
+    implied = (Path(root) / layout.hooks_dir).parent.parent
+    return not (implied / "tortoise").is_dir()
+
+
+def record_hook_src_dir_for_install(harness: str, *, root: Path,
+                                    home: Path | None = None) -> bool:
+    """Write the ``hook-src-dir`` record iff the installed hook needs it.
+
+    The ONE shared helper both entry points call (``install_capture`` and
+    ``upgrade_install``), so the two call sites can never drift: they write the
+    record under the same need condition the installed hook reads it under.
+    Best-effort and idempotent.  Returns whether a write was attempted.
+    """
+    layout = get_layout_optional(harness)
+    # A harness with no shell-hook layout has no `../..` fallback to rescue, so
+    # no record is needed — and this is the SAME condition the record's reader
+    # applies (WRITE == READ).  Before #4544 this raised `ValueError` for
+    # `pi`, which made `tortoise install pi` crash outright.
+    if layout is None:
+        return False
+    if not _hook_needs_src_dir_record(layout, Path(root)):
+        return False
+    _record_hook_src_dir_best_effort(home)
+    return True
 
 
 def _looks_like_our_script(path: Path) -> bool:
@@ -244,11 +395,22 @@ class HarnessLayout:
 
     ``root_env`` declares the env var a harness resolves its install root
     through when the caller passes NO explicit directory (``root_home_default``
-    is the ``$HOME``-relative fallback): Codex reads its hooks ONLY from
-    ``$CODEX_HOME`` (never a project-local file), so a cwd default would
-    inspect and "upgrade" a path Codex never reads while the real install stays
-    broken (#3818).  ``None`` keeps the cwd default — Claude's install is
-    project-scoped.
+    is the ``$HOME``-relative fallback).  Codex reads its hooks ONLY from
+    ``$CODEX_HOME``; Cursor has NO config-dir env var (verified — the string
+    ``CURSOR_HOME`` appears nowhere in Cursor 3.20.21's JS bundle, asar or
+    binary; it resolves ``pathService.userHome() / ".cursor"``), so the Cursor
+    layout declares ``root_env=None`` with ``root_home_default=".cursor"``: a
+    HOME-scoped root with no env override.  A layout with NEITHER (Claude)
+    keeps the cwd default — Claude's install is project-scoped.  A cwd default
+    for a HOME-scoped harness would inspect and "upgrade" a path it never
+    reads while the real install stays broken (#3818, #3819).
+
+    ``flat_entry`` selects the settings ENTRY shape.  Claude and Codex nest
+    the handler under a matcher group (``{"hooks": [{"type": "command", …}]}``);
+    Cursor's ``.cursor/hooks.json`` uses a FLAT script object
+    (``{"command": …, "timeout": …}``) and its own validator REJECTS a nested
+    entry (``Hook script command must be a string``), which invalidates the
+    WHOLE config so Cursor loads no hooks at all — a silent no-capture (#3819).
     """
 
     harness: str
@@ -259,6 +421,7 @@ class HarnessLayout:
     matcher: bool = True
     root_env: str | None = None
     root_home_default: str | None = None
+    flat_entry: bool = False
 
     def hooks_root(self, root: Path) -> Path:
         return root / self.hooks_dir
@@ -274,7 +437,8 @@ def _spec_command(layout: HarnessLayout, spec: HookScriptSpec,
     Claude's is the root-relative ``rel_command``; a harness with
     ``absolute_command`` (Codex) needs the script's absolute path, quoted the
     ONE way the installer quotes it (``shlex.quote``) so the drift detector,
-    ``upgrade`` and ``capture_install._install_codex`` agree byte-for-byte.
+    ``upgrade`` and ``capture_install._install_home_scoped`` agree
+    byte-for-byte.
     """
     if not layout.absolute_command or root is None:
         return spec.rel_command
@@ -297,6 +461,40 @@ def _claude_layout() -> HarnessLayout:
             HookScriptSpec(
                 "session-end.sh", "SessionEnd", 60,
                 f"{_CLAUDE_HOOKS_DIR}/session-end.sh",
+            ),
+        ),
+    )
+
+
+def _cursor_layout() -> HarnessLayout:
+    """The Cursor capture seam as a layout (#3819) — NOT a fork of the logic.
+
+    Cursor reads hook registrations from ``~/.cursor/hooks.json`` (verified
+    against the installed bundle: ``CursorHooksService`` resolves
+    ``pathService.userHome() / ".cursor" / "hooks.json"``, and there is NO
+    config-dir env var — ``CURSOR_HOME`` appears nowhere in the app bundle);
+    a project-local ``<repo>/.cursor/hooks.json`` is gated on workspace trust
+    and fires nothing when untrusted, so the HOME-scoped registration is the
+    reliable one.  Its entry is a FLAT ``{"command": …, "timeout": …}``
+    object (``flat_entry``), the script is registered by ABSOLUTE path (the
+    command runs from the hook cwd, not the install dir), and there is no
+    matcher key.  ``sessionEnd`` is an IDE-only event: Cursor's docs state
+    cloud agents have no editor-lifetime session boundary.
+    """
+    return HarnessLayout(
+        harness="cursor",
+        hooks_dir="hooks",
+        settings_file="hooks.json",
+        absolute_command=True,
+        matcher=False,
+        root_env=None,
+        root_home_default=".cursor",
+        flat_entry=True,
+        scripts=(
+            HookScriptSpec(
+                "tortoise-session-end.sh", "sessionEnd", None,
+                "hooks/tortoise-session-end.sh",
+                source_subdir="cursor-hooks", source_name="session-end.sh",
             ),
         ),
     )
@@ -331,11 +529,12 @@ def _codex_layout() -> HarnessLayout:
     )
 
 
-#: Shipped layouts.  Cursor (#3819) adds an entry here; Codex (#3818) already
-#: has one, so its seam is drift-checked and upgradeable like Claude's.
+#: Shipped layouts.  Every seam with an installer is registered here, so it
+#: is drift-checked and upgradeable like Claude's (#3818, #3819).
 HARNESS_LAYOUTS: dict[str, HarnessLayout] = {
     "claude": _claude_layout(),
     "codex": _codex_layout(),
+    "cursor": _cursor_layout(),
 }
 
 
@@ -349,30 +548,50 @@ def get_layout(harness: str) -> HarnessLayout:
         ) from None
 
 
+def get_layout_optional(harness: str) -> HarnessLayout | None:
+    """``get_layout`` for the harnesses that HAVE a shell-hook layout.
+
+    A ``HarnessLayout`` describes where SHELL hooks live: a ``hooks_dir`` to
+    derive the ``$(dirname "$0")/../..`` fallback from, a registration file,
+    shipped scripts.  A harness that installs a non-shell integration has no
+    such layout — ``pi`` ships a TypeScript extension (``tortoise/pi-hooks/
+    tortoise-capture.ts``), not a ``session-end.sh``.
+
+    Asking what such a harness's layout is must not be an ERROR, because the
+    only question the layout answers here is "does the installed hook need a
+    ``hook-src-dir`` record?" — and for a hook that is not a shell script
+    there is no ``../..`` fallback, so the answer is simply NO (#4544).
+    """
+    return HARNESS_LAYOUTS.get(harness)
+
+
 def default_root(layout: HarnessLayout, home: Path) -> Path:
     """The install root to use when the caller passes no explicit directory.
 
     Claude's install is project-scoped, so its default is the cwd (``.``).  A
-    layout with ``root_env`` resolves through that env var — for Codex the
-    documented ``${CODEX_HOME:-$HOME/.codex}`` — because Codex reads its hooks
-    only from the HOME-scoped ``hooks.json``: a cwd default would inspect and
-    "upgrade" the dead project-local path this seam replaces, and report
-    success while nothing is captured (#3818).
+    layout with a HOME-scoped root (``root_env`` and/or ``root_home_default``)
+    resolves through the env var when set — Codex's documented
+    ``${CODEX_HOME:-$HOME/.codex}`` — else ``$HOME/<root_home_default>``.
+    Cursor declares only ``root_home_default=".cursor"`` (no env var; Cursor
+    has none), so its root is ``~/.cursor``.  A cwd default for such a harness
+    would inspect and "upgrade" the dead project-local path this seam
+    replaces, and report success while nothing is captured (#3818, #3819).
 
     The returned root is ALWAYS absolute and ``~``-expanded.  Returning the
-    env value verbatim registered a command Codex could never resolve: a
+    env value verbatim registered a command the harness could never resolve: a
     literal ``CODEX_HOME=~/.codex`` (a tilde written into a config file is
     never shell-expanded) stayed a literal ``~`` directory, and a relative
-    ``CODEX_HOME=relcodex`` registered ``relcodex/hooks/...`` — which Codex
-    resolves against the SESSION cwd, so it silently captured nothing while
-    ``install`` printed success.  A relative env value is anchored at the same
-    HOME-scoped base the documented fallback uses, so the root is
+    ``CODEX_HOME=relcodex`` registered ``relcodex/hooks/...`` — which the
+    harness resolves against the SESSION cwd, so it silently captured nothing
+    while ``install`` printed success.  A relative env value is anchored at the
+    same HOME-scoped base the documented fallback uses, so the root is
     deterministic and ``install``/``status`` can never disagree (#3818).
     """
-    if layout.root_env is None:
+    if layout.root_env is None and not layout.root_home_default:
         return Path(".")
     home = Path(home).expanduser()
-    env = os.environ.get(layout.root_env, "").strip()
+    env = (os.environ.get(layout.root_env, "").strip()
+           if layout.root_env else "")
     root = (Path(env).expanduser() if env
             else home / (layout.root_home_default or ""))
     if not root.is_absolute():
@@ -380,12 +599,11 @@ def default_root(layout: HarnessLayout, home: Path) -> Path:
     if not root.is_absolute():
         # Truly unresolvable (not even the supplied home is absolute) —
         # refuse loudly rather than register a cwd-relative command that
-        # Codex will resolve somewhere unknowable.
+        # the harness will resolve somewhere unknowable.
         raise ValueError(
             f"cannot resolve an absolute install root for the {layout.harness} "
-            f"capture hook from ${layout.root_env}="
-            f"{os.environ.get(layout.root_env)!r} and home {home!r} — set "
-            f"${layout.root_env} to an absolute path")
+            f"capture hook from home {home!r} — set an absolute HOME"
+            + (f" or ${layout.root_env}" if layout.root_env else ""))
     return root
 
 
@@ -866,8 +1084,13 @@ def _token_is_our_script(tok: str, script_name: str, hooks_dir: str | None,
 
 def _invokes_script(command: str, script_name: str,
                     hooks_dir: str | None,
-                    root: str | os.PathLike[str] | None = None) -> bool:
+                    root: str | os.PathLike[str] | None = None,
+                    *, matched: list[str] | None = None) -> bool:
     """True when a command line EXECUTES our script under ``hooks_dir``.
+
+    ``matched``, when given, receives the raw token the classifier resolved as
+    our script (the first one, matching this predicate's first-hit semantics).
+    It is informational only and does not change the verdict.
 
     THE RULE: walk the token stream and ask, at each position, whether the token
     that BASH would resolve as an executed command names our hook.  A token is in
@@ -933,7 +1156,8 @@ def _invokes_script(command: str, script_name: str,
             # Trailing tokens after a ``-c`` command string are the child
             # shell's positional args ($0, $1, …), not commands.
             expect_cmd = False
-            if _invokes_script(tok, script_name, hooks_dir, root):
+            if _invokes_script(tok, script_name, hooks_dir, root,
+                               matched=matched):
                 return True
             continue
         if skip_next:
@@ -1018,6 +1242,8 @@ def _invokes_script(command: str, script_name: str,
             continue
         expect_cmd = False
         if _token_is_our_script(tok, script_name, hooks_dir, root):
+            if matched is not None:
+                matched.append(tok)
             return True
     return False
 
@@ -1025,12 +1251,20 @@ def _invokes_script(command: str, script_name: str,
 def _entry_command_dicts(entry: object, script_name: str | None = None,
                          hooks_dir: str | None = None,
                          root: str | os.PathLike[str] | None = None,
+                         *, flat: bool = False,
                          ) -> list[dict]:
     """EVERY child command dict in ``entry`` that invokes our script.
 
     A wrapper entry may hold the same command more than once; checking only
     the first would leave the second untimed (Claude Code cancels it at its
     1.5 s default) while ``detect_install`` reported the install current.
+
+    ``flat`` selects the Cursor shape: the ENTRY ITSELF is the command dict
+    (``{"command": …}``), with no ``hooks`` array.  That is not a cosmetic
+    difference — Cursor's validator rejects a nested entry and invalidates the
+    whole ``hooks.json``, so reading a flat entry as "not ours" would append a
+    duplicate that breaks the file, and writing a nested one would silently
+    disable every Cursor hook (#3819).
     """
     if not isinstance(entry, dict):
         return []
@@ -1051,6 +1285,19 @@ def _entry_command_dicts(entry: object, script_name: str | None = None,
         return script_name is None or _invokes_script(
             command, script_name, hooks_dir, root)
 
+    if flat:
+        # Cursor's schema accepts ``type`` omitted (defaults to "command") or
+        # "command"; anything else (a prompt hook) is not a command hook.
+        if entry.get("type") not in (None, "command"):
+            return []
+        command = entry.get("command")
+        if not isinstance(command, str):
+            return []
+        if script_name is not None and not _invokes_script(
+                command, script_name, hooks_dir, root):
+            return []
+        return [entry]
+
     inner = entry.get("hooks")
     if isinstance(inner, list):
         return [item for item in inner if _ok(item)]
@@ -1059,7 +1306,8 @@ def _entry_command_dicts(entry: object, script_name: str | None = None,
 
 def _entry_command_dict(entry: object, script_name: str | None = None,
                         hooks_dir: str | None = None,
-                        root: str | os.PathLike[str] | None = None) -> dict | None:
+                        root: str | os.PathLike[str] | None = None,
+                        *, flat: bool = False) -> dict | None:
     """The dict carrying ``command`` for a nested (matcher) entry.
 
     Claude Code requires ``{"type": "command", "command": …}`` inside an
@@ -1072,9 +1320,15 @@ def _entry_command_dict(entry: object, script_name: str | None = None,
     would miss a hook that is not first and leave the load-bearing ``timeout``
     unset).  Returns ``None`` for anything malformed rather than raising —
     malformed entries are treated as foreign and left untouched.
+
+    ``flat`` is Cursor's entry shape — the entry IS the command dict (#3819).
     """
     if not isinstance(entry, dict):
         return None
+    if flat:
+        found = _entry_command_dicts(entry, script_name, hooks_dir, root,
+                                     flat=True)
+        return found[0] if found else None
 
     inner = entry.get("hooks")
     if isinstance(inner, list):
@@ -1094,9 +1348,52 @@ def _entry_command_dict(entry: object, script_name: str | None = None,
 
 def _entry_is_ours(entry: object, script_name: str,
                    hooks_dir: str | None = None,
-                   root: str | os.PathLike[str] | None = None) -> bool:
+                   root: str | os.PathLike[str] | None = None,
+                   *, flat: bool = False) -> bool:
     """True when an entry invokes our ``script_name`` under ``hooks_dir``."""
-    return _entry_command_dict(entry, script_name, hooks_dir, root) is not None
+    return _entry_command_dict(entry, script_name, hooks_dir, root,
+                               flat=flat) is not None
+
+
+def registered_commands(root: str | os.PathLike[str],
+                        harness: str = "claude",
+                        ) -> list[tuple[str, str]]:
+    """Every ``(event, command)`` the harness will RUN for this installed seam.
+
+    Reads the harness's OWN registration file through the SAME loader helpers
+    ``detect_install`` classifies with (``_entry_command_dicts`` /
+    ``_entry_is_ours``), so the command ``tortoise session verify`` fires is
+    byte-identical to the one ``detect_install`` judged current — no second
+    parser that could disagree about which entry is ours.
+
+    Returns ``[]`` for a scripts-only layout (no settings file), an absent
+    file, an unreadable/malformed file, or when no entry invokes our script.
+    Read-only; never raises for a user file (a malformed file is simply no
+    registration to report).
+    """
+    layout = get_layout(harness)
+    settings_path = layout.settings_path(Path(root))
+    if settings_path is None:
+        return []
+    data, _refusal = _load_settings(settings_path)
+    if not isinstance(data, dict):
+        return []
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return []
+    commands: list[tuple[str, str]] = []
+    for spec in layout.scripts:
+        entries = hooks.get(spec.event)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            for inner in _entry_command_dicts(
+                    entry, spec.name, layout.hooks_dir, Path(root),
+                    flat=layout.flat_entry):
+                command = inner.get("command")
+                if isinstance(command, str) and command.strip():
+                    commands.append((spec.event, command))
+    return commands
 
 
 def _load_settings(path: Path | None) -> tuple[dict | None, str | None]:
@@ -1225,11 +1522,183 @@ def _expected_entry(layout: HarnessLayout, spec: HookScriptSpec,
     return f"{command} with timeout {spec.timeout}"
 
 
+#: Cursor's known hook steps (`r6o` in Cursor 3.20.21's bundle).  Cursor's
+#: validator iterates EVERY key under `hooks` and rejects the WHOLE file on an
+#: unknown one, so a flat document is invalid if it names a step Cursor does
+#: not know.
+_FLAT_KNOWN_EVENTS = frozenset({
+    "beforeShellExecution", "beforeMCPExecution", "afterShellExecution",
+    "afterMCPExecution", "beforeReadFile", "afterFileEdit",
+    "beforeTabFileRead", "afterTabFileEdit", "stop", "beforeSubmitPrompt",
+    "afterAgentResponse", "afterAgentThought", "sessionStart", "sessionEnd",
+    "preCompact", "subagentStart", "subagentStop", "preToolUse",
+    "postToolUse", "postToolUseFailure", "workspaceOpen",
+})
+
+
+def _is_positive_int_value(value: object) -> bool:
+    """True for a JSON positive integer the way JS ``Number.isInteger`` sees
+    it — an ``int >= 1``, or an integral ``float`` (``1.0`` is a valid Cursor
+    ``version``; ``json.loads`` yields a Python float for ``1.0``).
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return value >= 1
+    if isinstance(value, float):
+        return value.is_integer() and value >= 1
+    return False
+
+
+#: Regex syntax Python accepts but JS ``new RegExp`` REJECTS — a definite
+#: JS-invalid matcher (refuse).  Inline flags and scoped flag removal (``(?i``,
+#: ``(?-i:``), atomic groups (``(?>``), possessive quantifiers (``*+ ++ ?+
+#: {m,n}+``), and Python's own group syntax compile in Python and throw in JS,
+#: so accepting them would let a Cursor-invalid file through.  The possessive
+#: alternative requires an UNESCAPED quantifier char (``\++`` is valid in both
+#: engines).
+_PYTHON_ONLY_REGEX = re.compile(
+    r"\(\?(?:P<|P=|#|\(|-|[imsxaLu])"    # Python group syntax / inline flags
+    r"|\(\?>"                            # atomic group
+    r"|(?<!\\)(?:[*+?]|\{\d+(?:,\d*)?\})\+"  # possessive quantifier
+)
+
+#: Regex syntax JS ``new RegExp`` accepts but Python ``re`` REJECTS.  Used only
+#: when Python cannot compile a matcher: if one of these is present the matcher
+#: is ASSUMED JS-valid (do not block a valid Cursor config); otherwise a compile
+#: failure is a genuine refusal (both engines reject it).
+_JS_ONLY_REGEX = re.compile(r"\(\?<[A-Za-z_]|\\[pP]\{|\\k<|\\u\{")
+
+
+def _flat_entry_is_harness_valid(entry: object) -> bool:
+    """True when ``entry`` is a script object Cursor's ``hooks.json``
+    validator (``Uvd``/``Fvd``/``Bvd``/``Ovd`` in 3.20.21) ACCEPTS.
+
+    Cursor rejects the WHOLE document on a single bad entry, so a flat merge
+    that appends beside a nested/malformed entry is a silent no-capture —
+    which is why this predicate gates the merge.  It mirrors Cursor's own
+    field checks (command/prompt shape, ``matcher`` regex, numeric positive
+    ``timeout``, integer/null ``loop_limit``, boolean ``failClosed``, prompt
+    ``model``) rather than a subset: a partial validator CERTIFIES a foreign
+    entry Cursor will reject (#3819).
+
+    Presence, not ``None``, is the test.  Cursor checks ``e.field !== void 0``
+    then ``typeof``, so an explicit JSON ``null`` is present-and-wrong and is
+    REJECTED (``typeof null`` is ``"object"``) — except ``loop_limit``, which
+    Cursor explicitly allows to be ``null``.
+    """
+    if not isinstance(entry, dict):
+        return False
+    has_type = "type" in entry
+    htype = entry.get("type")
+    if htype == "prompt":
+        prompt = entry.get("prompt")
+        if not (isinstance(prompt, str) and prompt.strip()):
+            return False
+        if "model" in entry and not (
+                isinstance(entry["model"], str) and entry["model"].strip()):
+            return False
+    elif htype == "command" or not has_type:
+        if not isinstance(entry.get("command"), str):
+            return False
+    else:
+        return False
+    if "matcher" in entry:
+        matcher = entry["matcher"]
+        if not isinstance(matcher, str):
+            return False
+        if matcher not in ("", "*"):
+            # The two regex engines cannot be mirrored exactly, so judge only
+            # the SAFE direction: a Python-only construct is a definite
+            # JS-invalid matcher (REFUSE).  If Python cannot compile it, accept
+            # ONLY when the matcher carries a known JS-only construct
+            # (``(?<name>…)``, ``\p{L}``); a compile failure with no such
+            # marker means both engines reject it (REFUSE).  Never raise — a
+            # deeply nested pattern raises RecursionError, not re.error.
+            if _PYTHON_ONLY_REGEX.search(matcher):
+                return False
+            compiled = False
+            with contextlib.suppress(Exception):
+                re.compile(matcher)
+                compiled = True
+            if not compiled and not _JS_ONLY_REGEX.search(matcher):
+                return False
+    if "timeout" in entry:
+        timeout = entry["timeout"]
+        if (isinstance(timeout, bool)
+                or not isinstance(timeout, (int, float)) or timeout <= 0):
+            return False
+    if "loop_limit" in entry:
+        loop_limit = entry["loop_limit"]
+        if loop_limit is not None and (
+                isinstance(loop_limit, bool)
+                or not _is_positive_int_value(loop_limit)):
+            return False
+    fail_closed_present = "failClosed" in entry
+    return not (fail_closed_present
+                and not isinstance(entry["failClosed"], bool))
+
+
+def _flat_version_refusal(data: dict) -> str | None:
+    """A populated refusal when ``data`` lacks a valid positive-integer
+    ``version`` (JS ``Number.isInteger``), else ``None``."""
+    version = data.get("version")
+    if not _is_positive_int_value(version):
+        return (f'needs a positive integer "version" (found {version!r}) — '
+                "Cursor rejects the WHOLE file without it")
+    return None
+
+
+def _flat_structure_refusal(data: dict) -> str | None:
+    """A populated refusal when ``data`` has a structural problem Cursor's
+    validator rejects (an unknown event, a non-list event, an unparseable
+    entry) — ANYWHERE under ``hooks`` — else ``None``.
+
+    Deliberately INDEPENDENT of ``version``: a document can have both a bad
+    version and a structural defect, and the structural one is a manual fix
+    (``upgrade`` must refuse, not "repair" the version and leave the file
+    rejected) — so the two are reported as distinct findings.
+    """
+    hooks = data.get("hooks")
+    if hooks is None:
+        return None
+    if not isinstance(hooks, dict):
+        return '"hooks" is not a JSON object'
+    for event, entries in hooks.items():
+        if event not in _FLAT_KNOWN_EVENTS:
+            return (f'unknown hook type {event!r} — Cursor rejects the WHOLE '
+                    "file on an unknown step")
+        if not isinstance(entries, list):
+            return f'"{event}" entries are not a list'
+        for entry in entries:
+            if not _flat_entry_is_harness_valid(entry):
+                return (f'a "{event}" entry is not a script object Cursor '
+                        f"can parse ({entry!r})")
+    return None
+
+
 def _settings_findings(layout: HarnessLayout, data: dict,
                        root: str | os.PathLike[str] | None = None,
                        ) -> list[Finding]:
     hooks = data.get("hooks") or {}
     findings: list[Finding] = []
+    if layout.flat_entry:
+        # Cursor's validator rejects the WHOLE document — after which NO hook
+        # fires — on a missing/non-positive `version`, an unknown event key, a
+        # non-list event value, or any entry it cannot parse (verified live
+        # against Cursor 3.20.21, #3819).  The STRUCTURAL defect is reported
+        # separately and is a manual fix (`upgrade` refuses on it); only a bad
+        # version alone is repairable by `upgrade`.
+        structure = _flat_structure_refusal(data)
+        if structure:
+            findings.append(Finding(
+                "settings-unreadable-entry",
+                f"{layout.harness} hooks.json {structure}"))
+        version = _flat_version_refusal(data)
+        if version:
+            findings.append(Finding(
+                "settings-invalid-version",
+                f"{layout.harness} hooks.json {version}"))
     for spec in layout.scripts:
         entries = hooks.get(spec.event)
         expected_entry = _expected_entry(layout, spec, root)
@@ -1248,8 +1717,13 @@ def _settings_findings(layout: HarnessLayout, data: dict,
                 script=spec.name, event=spec.event,
             ))
             continue
+        if layout.flat_entry:
+            # (The whole-document refusal above already covers every event, so
+            # this is only reached when the document is valid.)
+            pass
         ours = [e for e in entries
-                if _entry_is_ours(e, spec.name, layout.hooks_dir, root)]
+                if _entry_is_ours(e, spec.name, layout.hooks_dir, root,
+                                  flat=layout.flat_entry)]
         if not ours:
             findings.append(Finding(
                 "missing-hook-entry",
@@ -1261,20 +1735,21 @@ def _settings_findings(layout: HarnessLayout, data: dict,
         expected_command = _spec_command(layout, spec, root)
         for entry in ours:
             for inner in _entry_command_dicts(entry, spec.name,
-                                              layout.hooks_dir, root):
-                # Codex runs the command from its own cwd, so a relative or
-                # stale-path registration is a silent no-capture — flag it as
-                # drift `upgrade` repairs (Claude's ``$CLAUDE_PROJECT_DIR``
-                # form is deliberately left alone, so this is gated on the
-                # absolute-command layout).
+                                              layout.hooks_dir, root,
+                                              flat=layout.flat_entry):
+                # The harness runs the command from its own cwd, so a relative
+                # or stale-path registration is a silent no-capture — flag it
+                # as drift `upgrade` repairs (Claude's
+                # ``$CLAUDE_PROJECT_DIR`` form is deliberately left alone, so
+                # this is gated on the absolute-command layout).
                 if (layout.absolute_command
                         and inner.get("command") != expected_command):
                     findings.append(Finding(
                         "settings-stale-command",
                         f"{spec.event} entry for {spec.name} runs "
                         f"{inner.get('command')!r}; expected the absolute "
-                        f"path {expected_command!r} (Codex resolves the "
-                        "command from the session cwd)",
+                        f"path {expected_command!r} ({layout.harness} "
+                        "resolves the command from its own cwd)",
                         script=spec.name, event=spec.event,
                     ))
                 if spec.timeout is None:
@@ -1515,7 +1990,8 @@ def is_installed(root: str | os.PathLike[str], harness: str = "claude") -> bool:
             for spec in layout.scripts:
                 entries = hooks.get(spec.event)
                 if isinstance(entries, list) and any(
-                    _entry_is_ours(e, spec.name, layout.hooks_dir, root)
+                    _entry_is_ours(e, spec.name, layout.hooks_dir, root,
+                                   flat=layout.flat_entry)
                     for e in entries
                 ):
                     return True
@@ -1556,6 +2032,19 @@ def _merge_settings(layout: HarnessLayout, data: dict, actions: list[str],
     changed.
     """
     changed = False
+    if layout.flat_entry:
+        # Cursor's `hooks.json` REQUIRES a positive-integer `version`; without
+        # it Cursor rejects the WHOLE file and loads no hooks.  Set it when
+        # absent/invalid, never overwrite a user's valid value.  (A valid
+        # `1.0` counts — JS `Number.isInteger(1.0)` is true.)
+        version = data.get("version")
+        if not _is_positive_int_value(version):
+            data["version"] = 1
+            actions.append(
+                f"settings: set \"version\" to 1 in {layout.harness} "
+                f"hooks.json (was {version!r}; Cursor rejects the whole file "
+                "without a positive integer version)")
+            changed = True
     hooks = data.get("hooks")
     if not isinstance(hooks, dict):
         hooks = {}
@@ -1566,16 +2055,26 @@ def _merge_settings(layout: HarnessLayout, data: dict, actions: list[str],
             entries = []
             hooks[spec.event] = entries
         ours = [e for e in entries
-                if _entry_is_ours(e, spec.name, layout.hooks_dir, root)]
+                if _entry_is_ours(e, spec.name, layout.hooks_dir, root,
+                                  flat=layout.flat_entry)]
         if not ours:
-            inner = {"type": "command",
-                     "command": _spec_command(layout, spec, root)}
-            if spec.timeout is not None:
-                inner["timeout"] = spec.timeout
-            fresh: dict = {"hooks": [inner]}
-            if layout.matcher:
-                fresh["matcher"] = ""
-            entries.append(fresh)
+            command = _spec_command(layout, spec, root)
+            if layout.flat_entry:
+                # Cursor's shape: the entry IS the command dict.  Nesting it
+                # would fail Cursor's validator and disable EVERY hook in the
+                # file — the silent no-capture this seam exists to prevent.
+                fresh = {"command": command}
+                if spec.timeout is not None:
+                    fresh["timeout"] = spec.timeout
+                entries.append(fresh)
+            else:
+                inner = {"type": "command", "command": command}
+                if spec.timeout is not None:
+                    inner["timeout"] = spec.timeout
+                fresh: dict = {"hooks": [inner]}
+                if layout.matcher:
+                    fresh["matcher"] = ""
+                entries.append(fresh)
             if spec.timeout is None:
                 actions.append(
                     f"settings: added {spec.event} entry for {spec.name}")
@@ -1588,7 +2087,8 @@ def _merge_settings(layout: HarnessLayout, data: dict, actions: list[str],
         expected_command = _spec_command(layout, spec, root)
         for entry in ours:
             for inner in _entry_command_dicts(entry, spec.name,
-                                              layout.hooks_dir, root):
+                                              layout.hooks_dir, root,
+                                              flat=layout.flat_entry):
                 if (layout.absolute_command
                         and inner.get("command") != expected_command):
                     actions.append(
@@ -1612,7 +2112,8 @@ def _merge_settings(layout: HarnessLayout, data: dict, actions: list[str],
 
 
 def upgrade_install(root: str | os.PathLike[str], harness: str = "claude",
-                    dry_run: bool = False) -> UpgradeResult:
+                    dry_run: bool = False,
+                    home: Path | None = None) -> UpgradeResult:
     """Install or upgrade the capture hooks at ``root``, in place.
 
     * scripts — re-copied from the shipped repo copy when missing or stale;
@@ -1659,9 +2160,13 @@ def upgrade_install(root: str | os.PathLike[str], harness: str = "claude",
         result.refused = f"Refusing: {error}"
         return result
     # A malformed event value (e.g. SessionEnd holding an object instead of a
-    # list) must be refused, never silently replaced by an empty list — that
-    # would destroy a user's hooks.
-    if any(f.kind == "unreadable-settings" for f in result.findings_before):
+    # list), or — for a flat (Cursor) layout — an entry the harness's own
+    # validator would reject, must be refused, never silently replaced by an
+    # empty list or merged alongside.  Appending a valid flat entry next to a
+    # nested one still leaves a file Cursor rejects, so the repair path must
+    # refuse it (the manual fix is to remove the bad entry) (#3819).
+    if any(f.kind in ("unreadable-settings", "settings-unreadable-entry")
+           for f in result.findings_before):
         result.refused = (
             "Refusing: the settings file has a malformed hooks entry — fix "
             "it manually, then re-run"
@@ -1822,6 +2327,17 @@ def upgrade_install(root: str | os.PathLike[str], harness: str = "claude",
             "hooks upgrade` after fixing the filesystem"
         )
         return result
+
+    # ── record where this install came FROM (best-effort) ───────────────
+    # The installed hooks resolve their module dir from $TORTOISE_SRC_DIR, then
+    # this record, then `../..` — and `../..` from an installed hook is $HOME.
+    # Written last (only after every real write landed) so a refused or
+    # dry-run upgrade leaves no misleading breadcrumb.  The ONE need-based rule
+    # (``record_hook_src_dir_for_install``) writes it for every harness whose
+    # installed hook cannot resolve `../..`, and writes NOTHING when `../..` is
+    # a checkout (#4110, #4314).
+    if result.ok and not dry_run:
+        record_hook_src_dir_for_install(harness, root=root, home=home)
 
     result.findings_after = detect_install(root, harness)
     return result

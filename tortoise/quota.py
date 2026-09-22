@@ -119,9 +119,47 @@ MAX_OPERATORS = 500
 # max_points/max_api_keys have NO constant here — they resolve from
 # tortoise.pricing.tier_limits (product/pricing.json) so a legacy org without
 # stored limits gets pricing-correct caps, never the stale 1000/20 consts that
-# contradicted pricing.json (#310 GAP-B, review fix 2). max_sessions has no
-# pricing.json field — flat 1000 across tiers (matches REST today).
-DEFAULT_MAX_SESSIONS = 1000
+# contradicted pricing.json (#310 GAP-B, review fix 2).
+#
+# max_sessions has NO constant here and NO pricing.json field either. The
+# flat 1000 was an INHERITED CODE FALLBACK, never a ratified product cap —
+# and the reason is checkable, not reconstructed: the plan that carried it
+# also designated its OWN canonical limits source, and that source has no
+# session field at all. `product/pricing.json` (canonical single source,
+# decision 1d: "product/pricing.json ... is canonical; pricing.md is
+# doc-generated from it") contains ZERO occurrences of "session" and no
+# sessions row in its tier table. What the plan recorded was KEEPING THE
+# EXISTING FALLBACK — as a fallback: 05-plan.md:570, "keep flat fallbacks
+# (1000/1000) in v1 OR fold into ops_allowance — decision: keep
+# points/sessions flat in v1; ops_allowance (write ops) is the billing
+# metric", restated at :598 ("points/sessions stay flat 1000/1000 in v1").
+# Keeping a fallback is not ratifying the value, and 05-plan.md:18's "human
+# gate #2 approved" reads in full "all 8 substeps, coherence CLEAN; human
+# gate #2 approved 2026-08-07; decomposed into #568-#578" — it approved the
+# plan's coherence to decompose, not a constant inside a tier table. The
+# default pre-dates the #329 security commit (f6ca5ebdb), whose scoping doc
+# only instructed preserving the existing resource in the shared helper
+# (docs/plans/scoping-329-problem.md:17 — a refactor-safety instruction, not
+# a cap ratification). It became a production ceiling because the limits
+# resolvers substituted the constant as their fallback wherever a stored
+# value was absent, and the lenient `if resource == "sessions"` branch in
+# enforce_org_limit supplied it to callers whose limits dict lacked the key
+# entirely (the MCP capture bridge).
+#
+# #4010 REMOVES that fallback (the 2026-09-19 correction on the issue
+# withdraws the earlier "recorded v1 decision / REOPEN" framing). Sessions
+# are UNLIMITED for every tier, and unlike every other limit a STORED
+# max_sessions value is deliberately NOT honoured as a cap (see
+# resolve_org_limits): a stored 1000 would otherwise keep the org capped
+# after the constant was deleted. This removes an unratified fallback that
+# should never have been enforcement; it is NOT a reopen of a v1 cap
+# decision, because nothing that RATIFIES a cap ever named it — no owner
+# ruling, no decision record, no `product/pricing.json` field. Approved docs
+# do carry 1000 forward as a default (`git grep -n max_sessions -- '*.md'`);
+# carrying a default forward is the inheritance this comment describes, not a
+# ratification. The owner confirms he never approved a 1k cap. Stale
+# 1000-as-cost-bound framing elsewhere: #4052. The P2-7 billing-metric
+# decision is untouched — write-ops remains the billing metric.
 
 # ── Documents cap: DERIVED-CONSTANT (T2-P2a, #1726 Slice 1) ────────────────
 # max_documents is DERIVED from max_points with a documented conversion
@@ -136,6 +174,9 @@ _DOCUMENTS_FROM_POINTS_FACTOR = 10
 _RESOURCE_LIMIT_KEYS = {
     "points": "max_points",
     "api_keys": "max_api_keys",
+    # #4010: the key is still carried so the resolved dict holds an EXPLICIT
+    # None for sessions ("present but unlimited") rather than a missing key
+    # (which is fail-closed). No constant ever supplies a value for it.
     "sessions": "max_sessions",
     "users": "max_users",
     "graphs": "max_graphs",
@@ -203,8 +244,16 @@ def resolve_org_limits(org_id: str) -> dict:
     Org node, as before.
 
     Missing Org → QuotaCheckError (fail-closed; the auth layer should
-    guarantee key→org mapping). Missing attributes → defaults
-    (aligned with product/pricing.json free tier).
+    guarantee key→org mapping).
+
+    CONTRACT (the return shape every caller must honour, #310 GAP-B / #4010):
+    the returned dict carries EVERY value of ``_RESOURCE_LIMIT_KEYS``. A key
+    that is PRESENT with value ``None`` means UNLIMITED (sessions is always
+    this, for every tier — #4010); a MISSING key is fail-closed in
+    ``enforce_org_limit`` (``QuotaCheckError`` → HTTP 500) for every resource.
+    A missing ATTRIBUTE on the row/column is resolved to a value here — it
+    never leaves the key absent. (The pre-#4010 rule of the same shape was
+    "missing attributes → defaults"; sessions has no default any more.)
     """
     if not org_id:
         raise QuotaCheckError("resolve_org_limits requires a org_id")
@@ -259,8 +308,11 @@ def resolve_org_limits(org_id: str) -> dict:
         # explicit None limit as unlimited; substituting finite caps would
         # hard-cap legacy/migrated rows). max_points override (GAP-B,
         # 20260817000001) takes precedence over graph_size_cap (the
-        # fallback), then pricing; max_api_keys/max_sessions fall back to
-        # pricing/defaults.
+        # fallback), then pricing; max_api_keys falls back to pricing.
+        # #4010: max_sessions is UNLIMITED for every tier — no pricing field,
+        # no constant, and (deliberately) no stored value honoured as a cap.
+        # The Supabase orgs row has no max_sessions column at all, so there is
+        # nothing to read even if we wanted to.
         mu = row.get("max_users")
         mg = row.get("max_graphs")
         # #1859 P3-2: max_points column (points-cap override, migration
@@ -278,7 +330,7 @@ def resolve_org_limits(org_id: str) -> dict:
             "max_points": (int(lim["max_graph_nodes"]) if anon_override
                             else (int(mp) if mp is not None else lim["max_graph_nodes"])),
             "max_api_keys": lim["max_api_keys"],
-            "max_sessions": DEFAULT_MAX_SESSIONS,
+            "max_sessions": None,
         }
     reg = _make_sdk(namespace="registry")
     rows = reg._get_registry().query(
@@ -289,7 +341,7 @@ def resolve_org_limits(org_id: str) -> dict:
     ).result_set
     if not rows:
         raise QuotaCheckError(f"Team {org_id!r} not found in registry")
-    tier, mu, mg, mp, mak, ms = rows[0]
+    tier, mu, mg, mp, mak, _ms = rows[0]
     tier = tier or "free"
     from tortoise.pricing import tier_limits
     lim = tier_limits(tier)
@@ -301,7 +353,15 @@ def resolve_org_limits(org_id: str) -> dict:
         "max_graphs": int(mg) if mg is not None else None,
         "max_points": int(mp) if mp is not None else lim["max_graph_nodes"],
         "max_api_keys": int(mak) if mak is not None else lim["max_api_keys"],
-        "max_sessions": int(ms) if ms is not None else DEFAULT_MAX_SESSIONS,
+        # #4010: sessions are unlimited for every tier — the flat 1000 was
+        # an inherited code fallback, never a ratified cap (see the module
+        # comment above). `_ms` (the stored t.max_sessions) is read so the
+        # removal is VISIBLE at the exact site that could re-introduce the
+        # cap — and then NOT honoured, because a stored 1000 must never
+        # re-cap an org (the trap this issue names). Clearing the stored rows
+        # is the defence-in-depth half; ignoring them here is the half that
+        # actually decides.
+        "max_sessions": None,
     }
 
 
@@ -330,7 +390,10 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
       + /v1/subjects gates check this resource, and Object/Subject carry
       only their own labels, so they must be counted here or the cap is
       vacuous for those writes)
-    - api_keys: active (non-revoked) APIKey nodes in registry
+    - api_keys: LIVE (non-revoked, non-expired) API keys that COUNT against
+      max_api_keys. A bootstrap (24h session) credential is cap-EXEMPT
+      (R13/#4140) and excluded; a NULL/legacy ``created_via`` is a DURABLE
+      row and COUNTS (fail-closed). In registry (Cypher) and Supabase.
     - sessions: Session nodes in tenant graph (MATCH (s:Session) — NOT the
       all-nodes count; #947 P0)
     - users: active Membership nodes in registry
@@ -349,7 +412,8 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
             # the count reads Supabase via the seam — post-flip the registry
             # is DELETED, so a registry count would fail-open (0 nodes) or
             # 500. Mirrors the registry predicates exactly:
-            #   api_keys: revoked_at IS NULL AND not expired (#2426/#2481 —
+            #   api_keys: revoked_at IS NULL AND not expired (#2426/#2481)
+            #             AND not created_via='bootstrap' (#4140/R13 —
             #             a REVOKED row is an audit tombstone (retained for
             #             audit + swept later, #685) that must NEVER consume
             #             the plan's max_api_keys budget; an expired-but-
@@ -358,12 +422,21 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
             #             them would hold a slot for a dead credential.
             #             Pre-#2426 durable keys never carried expiry. The
             #             expiry filter (expires_at IS NULL OR > now) mirrors
-            #             the bootstrap cap queries' own predicate; live rows
-            #             of every created_via count exactly as before. #2481
-            #             audit: this predicate is the ONE count shared by
-            #             every max_api_keys mint gate (hosted_api._mint_key
-            #             for POST /v1/team/keys + per-graph key mints,
-            #             REST _check_org_limit, MCP enforce_org_limit).),
+            #             the bootstrap cap queries' own predicate.
+            #             #4140 (R13): a bootstrap (24h session) key is
+            #             cap-EXEMPT — this count was the ONE outlier that
+            #             omitted the exclusion every recovery-mint lane
+            #             already carries (hosted_api.session_key both lanes,
+            #             sdk.signup_token_recover, recover_team_key), so a
+            #             session credential silently burned a paid durable
+            #             slot. The exclusion is NULL-TOLERANT: a NULL/legacy
+            #             created_via is a DURABLE row and COUNTS
+            #             (fail-closed). #2481 audit: this predicate is the
+            #             ONE count shared by the standalone max_api_keys
+            #             mint gates (hosted_api._mint_key for POST
+            #             /v1/team/keys + per-graph key mints, REST
+            #             _check_org_limit / enforce_org_limit — MCP carries
+            #             no api_keys gate).),
             #   users:    status IS NULL OR status = 'active'
             #   graphs:   the default graph derived from organizations.graph_name
             #             PLUS custom graph rows from the ``graphs`` table
@@ -377,21 +450,25 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
             #             provisioning INSERT lands (review P2, recorded).
             # Selfhost (registry mode) keeps the registry count.
             from tortoise.supabase_control import (  # noqa: I001
-                _parse_ts, get_control_plane, graph_metadata,
+                active_api_keys, get_control_plane, graph_metadata,
                 is_supabase_enabled,
             )
             if is_supabase_enabled():
                 cp = get_control_plane()
                 if resource == "api_keys":
-                    rows = cp.query(
-                        "api_keys", select=["id", "expires_at"],
-                        filters=[("org_id", "eq", org_id),
-                                 ("revoked_at", "is", None)],
-                    )
-                    now = datetime.now(UTC)
-                    return len([r for r in rows
-                                if (exp := _parse_ts(r.get("expires_at")))
-                                is None or exp > now])
+                    # #4140 (R13): bootstrap (24h session) rows are
+                    # cap-EXEMPT — the SAME predicate the recovery-mint lane
+                    # applies (hosted_api._session_key_supabase). Liveness
+                    # (non-revoked + non-expired) comes from the shared
+                    # active_api_keys() reader, so this count and the
+                    # recovery lane can never disagree on what is LIVE.
+                    # The bootstrap exclusion is applied in PYTHON, never as
+                    # a PostgREST `created_via=neq.bootstrap` filter: SQL
+                    # `<>` drops NULL rows, and a legacy row with a NULL
+                    # created_via is DURABLE and must still count
+                    # (fail-closed — #4140 adversarial T4).
+                    return len([r for r in active_api_keys(cp, org_id)
+                                if r.get("created_via") != "bootstrap"])
                 if resource == "users":
                     rows = cp.query(
                         "org_memberships", select=["status"],
@@ -406,8 +483,15 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
             if resource == "api_keys":
                 # #2426: expiry filter mirrors the supabase lane — expired
                 # durable keys never count against max_api_keys.
+                # #4140 (R13): bootstrap (24h session) rows are cap-EXEMPT
+                # — the SAME predicate the recovery-mint lane uses
+                # (hosted_api.session_key, registry lane). NULL created_via
+                # (legacy selfhost) COUNTS: Cypher `NULL <> 'bootstrap'` is
+                # NULL, so the explicit IS NULL arm is required (this is the
+                # over-exemption direction the cap must fail closed on).
                 rows = reg._get_registry().query(
                     "MATCH (k:APIKey {org_id: $tid}) WHERE k.revoked_at IS NULL "
+                    "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
                     "AND (k.expires_at IS NULL OR k.expires_at > $now) RETURN count(k)",
                     params={"tid": org_id, "now": datetime.now(UTC).isoformat()},
                 ).result_set
@@ -498,6 +582,9 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None) -> None:
     Args:
         limits: resolved org limits dict (from resolve_org_limits or the
             authenticated caller). None → skip (stdio/operator, no org).
+            A key that is PRESENT and None means UNLIMITED (skip); a MISSING
+            key is fail-closed (QuotaCheckError) for every resource — build
+            the dict from _RESOURCE_LIMIT_KEYS (#310 GAP-B / #4010).
         resource: "points" | "api_keys" | "sessions" | "users" | "graphs"
             | "documents".
         sdk: pre-built org SDK (REST callers already hold one) — optional.
@@ -547,12 +634,15 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None) -> None:
         # stored null) — skip enforcement (#683). Distinguish from a MISSING
         # key, which is fail-closed (#310 GAP-B): never silently fall back to
         # lenient caps.
+        # #4010: sessions is no longer the exception to that rule. The flat
+        # 1000 it fell back to was an inherited code fallback, never a
+        # ratified cap (see the module comment above), so it has no constant
+        # to fall back to and its resolved value is always the explicit None
+        # — the lenient `if resource == "sessions": limit =
+        # DEFAULT_MAX_SESSIONS` branch is deleted, not relocated.
         if limit_key in limits:
             return
-        if resource == "sessions":
-            limit = DEFAULT_MAX_SESSIONS
-        else:
-            raise QuotaCheckError(f"team limits missing {limit_key} for resource {resource!r}")
+        raise QuotaCheckError(f"team limits missing {limit_key} for resource {resource!r}")
     count = _count_resource(org_id, resource, sdk=sdk)
     if count >= limit:
         raise QuotaExceededError(

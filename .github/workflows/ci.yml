@@ -44,7 +44,7 @@ jobs:
         run: |
           BASE="${{ github.event.pull_request.base.sha }}"
           [ -n "$BASE" ] || BASE="origin/main"
-          CHANGED=$(git diff --name-only "$BASE...HEAD" 2>/dev/null || true)
+          CHANGED=$(git diff --no-renames --name-only "$BASE...HEAD" 2>/dev/null || true)
           echo "changed files vs $BASE:"
           echo "$CHANGED"
           cat > /tmp/ci-gates.py <<'PY'
@@ -149,7 +149,12 @@ jobs:
                   and not f.startswith("website/apps/"),
                   isfile("tests/e2e/test_welcome_page.py", "tests/e2e/conftest.py",
                          "tests/test_waitlist_subscribe.mjs",
-                         "tests/test_tenant_provision_cors.mjs"),
+                         "tests/test_tenant_provision_cors.mjs",
+                         # #4481: the blog SSR markdown renderer's harness. Its
+                         # subject (website/functions/blog/_lib.ts) already
+                         # matches the website/ prefix, but the harness itself
+                         # needs a path entry or a test-only PR would not run it.
+                         "tests/test_blog_markdown.mjs"),
                   # #3501: the BFF auth suites live here and had NO path entry,
                   # so a PR touching only them could not trigger the job that
                   # runs them — the job would be skipped, not failed.
@@ -244,9 +249,16 @@ jobs:
                   # the record cannot silently lose the cadence factor that
                   # qualifies every availability figure.
                   startswith(".github/scripts/availability-record"),
+                  # #4545: the post-deploy health gate's harness — extracted from
+                  # deploy-hosted.yml so the gate that decides whether a deploy
+                  # SUCCEEDED is testable. It pins the regression where the gate
+                  # asserted /health/ready once after polling the strictly
+                  # weaker db.ok, reddening healthy deploys.
+                  startswith(".github/scripts/deploy-health-gate"),
                   isfile(".github/workflows/availability-watchdog.yml"),
                   isfile(".github/workflows/welcome-e2e-monitor.yml"),
                   isfile(".github/workflows/availability-record.yml"),
+                  isfile(".github/workflows/deploy-hosted.yml"),
                   # a job-definition change re-runs its own suite (dashboard_e2e
                   # precedent) — review R12/Config.
                   isfile(".github/workflows/ci.yml"),
@@ -269,8 +281,24 @@ jobs:
               "dashboard_e2e": any_file(
                   isfile("tests/e2e/test_keys_table_mixed.py"),
                   isfile("tests/e2e/test_graphs_management.py"),
+                  # #4221: `test_session_login_flow.py` is the SHARED HARNESS
+                  # for every migrated dashboard spec (the two CI specs, the
+                  # ship-test guard, and the onboarding suite wired in below),
+                  # so a change to it must re-run this job even though its own
+                  # three tests are not part of the list. It was previously
+                  # listed here while NOTHING ran it — which is the inversion
+                  # #4221 flags; the entry is now load-bearing rather than idle.
                   isfile("tests/e2e/test_session_login_flow.py",
                          "tests/e2e/conftest.py"),
+                  # #4221: the onboarding wizard spec (36 collected cases) was
+                  # registered and green but never invoked. It is the one spec
+                  # of the four that #4221 named as never-run that still passes
+                  # end-to-end against the CURRENT app (see the issue's follow-up
+                  # for the other three), so it joins the job's pytest list and
+                  # needs this path entry — otherwise a PR touching ONLY it
+                  # skips the job (skipped, not failed). Same #3501 rationale as
+                  # the auth-suite entries under `website` above.
+                  isfile("tests/e2e/test_dashboard_onboarding.py"),
                   # #3806: the ship-test guard's browser half (real clean-browser
                   # walk against the built bundle) + the instrument it guards.
                   isfile("tests/e2e/test_ship_test_onboarding.py",
@@ -436,7 +464,13 @@ jobs:
       - name: Get changed markdown files
         id: changed
         run: |
-          FILES=$(git diff --name-only "${{ github.event.pull_request.base.sha }}"...HEAD -- '*.md' || true)
+          # `--no-renames` is deliberate here, though this is a lint-target list
+          # rather than a changed-set SELECTION set (so the pin that enforces the
+          # flag workflow-wide still applies to it): a rename's deleted .md source
+          # path is tolerated because markdownlint-cli exits 0 on a nonexistent
+          # path, and plain .md deletions already produce exactly such paths.
+          # See tests/test_ci_selection.py::test_every_changed_set_diff_disables_rename_detection.
+          FILES=$(git diff --no-renames --name-only "${{ github.event.pull_request.base.sha }}"...HEAD -- '*.md' || true)
           echo "files=$FILES" >> "$GITHUB_OUTPUT"
       - name: Markdownlint (changed files)
         if: steps.changed.outputs.files != ''
@@ -564,6 +598,22 @@ jobs:
       - uses: actions/checkout@v4
       - name: Availability record-only baseline (#3810)
         run: bash .github/scripts/availability-record.test.sh
+
+  deploy-health-gate:
+    needs: changes
+    if: needs.changes.outputs.watchdog_scripts == 'true'  # #4545: deploy-gate surface only
+    # #4545: the post-deploy health gate's harness. Self-contained: stubs curl,
+    # no network. It pins the regression that reddened HEALTHY deploys — the
+    # gate polled db.ok (the FalkorDB data plane) and then asserted
+    # /health/ready ONCE, but readiness is an AND of the Supabase control plane
+    # and the data plane, so db.ok does NOT imply ready. Case 3 fails against
+    # the pre-fix single-shot assertion and passes only with the readiness
+    # poll. Mirrors availability-record above.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy health gate poll (#4545)
+        run: bash .github/scripts/deploy-health-gate.test.sh
 
   entrypoint-guards:
     needs: changes
@@ -742,6 +792,19 @@ jobs:
       # this step reds welcome-e2e — it is load-bearing, not belt-and-braces.
       - name: Install wrangler on PATH (required by the #3501 auth suites)
         run: npm install -g wrangler@4.127.0
+      # #4054: the auth suites serve the dashboard's BUILT `dist/` root
+      # (tests/e2e/auth/conftest.py -> ensure_dashboard_dist()). Without a
+      # lockfile-pinned install here, that helper's `npm run build` has no local
+      # vite and fails; it used to run `npx vite build`, which silently did an
+      # AD-HOC install that omitted rollup's platform binary
+      # (`@rollup/rollup-linux-x64-gnu`, the npm optional-dependency gap) and
+      # errored the whole suite at fixture setup. `npm ci` is the same
+      # lockfile-pinned install dashboard-e2e and dashboard-js-tests use, and it
+      # is what provides the platform binary.
+      - name: Install dashboard dependencies (lockfile-pinned, #4054)
+        run: |
+          cd website/apps/dashboard
+          npm ci
       - name: Start wrangler pages dev preview (website/ = Pages root)
         run: |
           cd website
@@ -823,6 +886,8 @@ jobs:
         run: node --experimental-strip-types tests/test_waitlist_subscribe.mjs
       - name: Run tenant-provision CORS runtime harness (#1110)
         run: node --experimental-strip-types tests/test_tenant_provision_cors.mjs
+      - name: Run blog SSR markdown renderer harness (#4481)
+        run: node --experimental-strip-types tests/test_blog_markdown.mjs
 
   legal-e2e:
     runs-on: ubuntu-latest
@@ -908,6 +973,43 @@ jobs:
           cat /tmp/wrangler.log || true
           echo "--- /tmp/wrangler.pid: $(cat /tmp/wrangler.pid 2>/dev/null || echo missing) ---"
           exit 1
+      # #4054: the auth surface (/auth, /signup, /welcome, /invite-accept) moved
+      # to the `tortoise-dashboard` Pages project, so this suite needs a LOCAL
+      # app origin too. Without it the app-surface tests followed the marketing
+      # origin's 301 to DEPLOYED PRODUCTION and asserted against whatever main
+      # had last shipped (they passed that way, which is the worst outcome).
+      - name: Install + build the dashboard bundle (app origin, #4054)
+        run: |
+          cd website/apps/dashboard
+          npm ci
+          npm run build
+      - name: Start wrangler pages dev preview (dashboard dist = app origin, :8790)
+        run: |
+          cd website/apps/dashboard
+          # `--d1 SESSIONS`: the auth pages' session probe is `/api/session`,
+          # which resolves the HttpOnly `__Host-session` cookie against the D1
+          # `sessions` table. Without the binding a request carrying a cookie
+          # answers 503 ("store unreachable") instead of 401/200.
+          for attempt in 1 2; do
+            npx --yes wrangler@4.127.0 pages dev dist --port 8790 --ip 127.0.0.1 \
+              --compatibility-date=2024-09-23 --d1 SESSIONS \
+              > /tmp/wrangler-app.log 2>&1 &
+            echo $! > /tmp/wrangler-app.pid
+            for i in $(seq 1 240); do
+              if curl -fsS http://127.0.0.1:8790/ >/dev/null 2>&1; then
+                echo "wrangler (app) ready after ${i}s (attempt ${attempt})"
+                exit 0
+              fi
+              sleep 1
+            done
+            echo "attempt ${attempt} timed out — retrying"
+            kill $(cat /tmp/wrangler-app.pid) 2>/dev/null || true
+            pkill -f 'wrangler.*8790' 2>/dev/null || true
+            sleep 3
+          done
+          echo "::error::wrangler (app) dev server failed to start (2 attempts)"
+          tail -50 /tmp/wrangler-app.log || true
+          exit 1
       - name: Run legal pages E2E suite (#657)
         # LEGAL_E2E_SKIP_EXTERNAL_CRAWL=1: the third-party external-link
         # crawl fetches unauthenticated production URLs (github.com/LICENSE,
@@ -919,6 +1021,7 @@ jobs:
         # before (welcome-e2e collects it without RUN_LEGAL_E2E → self-skips).
         run: >
           RUN_LEGAL_E2E=1 BASE_URL=http://127.0.0.1:8788
+          APP_BASE_URL=http://127.0.0.1:8790
           TORTISE_HOST=http://127.0.0.1:8788 TORTISE_HOST_CHECK=1
           LEGAL_E2E_SKIP_EXTERNAL_CRAWL=1
           python -m pytest tests/e2e/test_legal_pages.py tests/e2e/test_signup_form_safety_e2e.py
@@ -933,7 +1036,9 @@ jobs:
         # runner VM, so pkill can't touch other jobs)
         run: |
           kill $(cat /tmp/wrangler.pid) 2>/dev/null || true
+          kill $(cat /tmp/wrangler-app.pid) 2>/dev/null || true
           pkill -f 'wrangler.*8788' 2>/dev/null || true
+          pkill -f 'wrangler.*8790' 2>/dev/null || true
           pkill workerd 2>/dev/null || true
           true
 
@@ -1012,8 +1117,15 @@ jobs:
         run: |
           cd website/apps/dashboard
           for attempt in 1 2; do
+            # #3501/#4054: `--d1 SESSIONS` is load-bearing. The dashboard's
+            # session gate is `/api/session`, which resolves the HttpOnly
+            # `__Host-session` cookie against the D1 `sessions` table; without
+            # the binding a request carrying that cookie answers 503 ("store
+            # unreachable") instead of 200, so the suite's seeded-session
+            # fixtures can never render the shell. The harness seeds the row it
+            # reads (tests/e2e/test_session_login_flow.py).
             npx --yes wrangler@4 pages dev dist --port 8790 --ip 127.0.0.1 \
-              --compatibility-date=2024-09-23 \
+              --compatibility-date=2024-09-23 --d1 SESSIONS \
               > /tmp/wrangler-dash.log 2>&1 &
             echo $! > /tmp/wrangler-dash.pid
             for i in $(seq 1 240); do
@@ -1031,11 +1143,28 @@ jobs:
           echo "::error::wrangler (dashboard) dev server failed to start"
           tail -50 /tmp/wrangler-dash.log || true
           exit 1
-      - name: Run keys-table mixed-fixture e2e (#2166/#2178) + ship-test guard (#3806)
+      # #4221: this step used to run three of the seven `RUN_DASHBOARD_E2E`
+      # specs, so the onboarding spec's 36 cases (plus 48 more across the three
+      # stale specs and the flow module named below) were registered, reported
+      # green, and never invoked. The onboarding spec joins the list here; the
+      # others are NOT wired because they are stale against the #3501 BFF
+      # session seam and the #4054 auth-origin move — wiring them would turn
+      # this job red on every run. Evidence and the follow-up are on #4221.
+      #   test_dashboard_identity.py    — 21/22 fail (seeds the retired
+      #                                   `sb-tortoise-auth-token`; mocks only
+      #                                   the legacy absolute api host)
+      #   test_dashboard_gate.py        — 15/19 fail (asserts the pre-#4054
+      #                                   prod-origin /auth redirect target)
+      #   test_dashboard_billing.py     — 4/4 fail (drives the moved /auth page
+      #                                   through the retired local :8788 origin)
+      #   test_session_login_flow.py    — 3/3 fail (same class); the module
+      #                                   itself is the shared harness, so it
+      #                                   stays in the change detector above
+      - name: Run dashboard e2e — keys-table (#2166/#2178), graphs, ship-test guard (#3806), onboarding (#4221)
         run: >
           RUN_DASHBOARD_E2E=1
           python -m pytest tests/e2e/test_keys_table_mixed.py tests/e2e/test_graphs_management.py
-          tests/e2e/test_ship_test_onboarding.py
+          tests/e2e/test_ship_test_onboarding.py tests/e2e/test_dashboard_onboarding.py
           -q -rs -p no:cacheprovider
         env:
           # Epic #1647 Task 10 (P4): URI-less e2e surface — the URI-required

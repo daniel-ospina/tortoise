@@ -390,7 +390,7 @@ Public repository that houses:
 | Reviewing a PR | `skills/code-review/SKILL.md` | Unreviewed code in production |
 | Finding bugs | `skills/find-bugs/SKILL.md` | Missed regressions |
 | Any non-trivial research | `skills/research/SKILL.md` | Shallow analysis, costly rework |
-| Dispatching work on any issue (worktree, branch, sub-agent, parallel workstream) | `python3 tools/collision_preflight.py <N>` — must exit 0 before dispatch | A second agent duplicates live work; overlapping PRs and a wasted dispatch cycle (#3061) |
+| Dispatching work on any issue (worktree, branch, sub-agent, parallel workstream) | `python3 tools/collision_preflight.py <N> --repo .` — must exit 0 before dispatch | A second agent duplicates live work; overlapping PRs and a wasted dispatch cycle (#3061) |
 
 ### ⛔ HARD RULE: Collision Pre-Flight Before Any Dispatch
 
@@ -398,8 +398,22 @@ Before spawning a workstream, opening a worktree, or dispatching a sub-agent for
 run the collision pre-flight — **all surfaces, untruncated**:
 
 ```bash
-python3 tools/collision_preflight.py <N>
+# from the target repo's worktree (`--repo .` pins the target to THIS repo):
+python3 tools/collision_preflight.py <N> --repo .
+# or name the repo explicitly (required when dispatching an issue that lives in
+# another repo — the tool RESOLVES the target, it never infers it from the cwd):
+python3 tools/collision_preflight.py <N> --repo owner/name
 ```
+
+**The target is established, never assumed (#4027).** Every repository-scoped `gh` call carries
+the resolved `owner/name` (the two deliberate exceptions are `gh repo view`, which *discovers* the
+slug and so has nothing to send yet, and `gh api user`, which identifies the lane's account and is
+not repository-scoped), and the verdict prints it together with the issue's **full title** — a verdict that
+does not name what it measured cannot be trusted. An issue **absent** from the target repo is
+`exit 2`, not CLEAN ("not found here" is not "no in-flight work"), and an omitted `--repo` whose
+number resolves in **more than one** sibling repo is **refused**, never guessed at. Issue numbers
+collide across the fleet (`#4027` exists in tortoise, eldato and swarm), so pass `--repo` — omitting
+it will refuse more often than not, by design.
 
 It checks open **and** recently-closed PRs (title / headRef; a PR **body** counts only as an
 explicit closing reference — `Closes`/`Fixes`/`Resolves #N` — because cross-reference prose such
@@ -429,6 +443,42 @@ the compliance row above declares the rule, the skills enforce it.
 PRs, a wasted dispatch cycle, and a consolidation decision that should never have been needed
 (#2985 vs PR #3005, #2952 vs PR #3018 — the incident in #3061). A truncated or partial check is
 worse than none: it manufactures false confidence. Never `grep`/`head`/`tail` a completeness check.
+
+### ⛔ HARD RULE: Confirm the Dispatch Landed — `cmux send` Success Is Not Delivery
+
+Never dispatch to a cmux pane with a bare `cmux send`. **Use `tools/cmux_dispatch.py`** — it is the
+only dispatch path that confirms the ARTIFACT rather than the send:
+
+```bash
+python3 tools/cmux_dispatch.py send --workspace <ws> --surface <surf> \
+    --label <lane> --file <brief.txt>        # exit 0 ONLY if it became a turn
+```
+
+`cmux send` exits 0 when *bytes were written to the terminal*, which is a different event from *the
+message became a conversation message*. Two live failure modes sit downstream of that syscall and
+are invisible to any exit code (#4292):
+
+1. **Send-during-boot race** — bytes written before pi's TUI takes over stdin sit unsent in the
+   composer (or are discarded).
+2. **The boot-block prompt** — a freshly-booted pi can be blocked on `Press any key to continue...`
+   (`dist/migrations.js::showDeprecationWarnings`, interactive mode, triggered by a non-fd/rg entry
+   under a `tools/` directory). That prompt consumes the bytes as its keypress: the pointer is
+   **eaten**, or its prefix is eaten and the remainder submitted as a **truncated turn**.
+
+The dispatcher waits for the pane to be safe to send (dismissing a boot-block prompt instead of
+feeding it the brief), sends text + a bare Enter, then confirms via
+`cmux list-workspaces --json` → `latest_submitted_message`, recovering automatically (release the
+composer with a bare Enter, or dismiss-and-re-send when the text was eaten). It exits non-zero with
+`sent-but-not-consumed` when the message never became a turn.
+
+**One-line check until every caller is migrated:** after dispatching, confirm the lane shows a
+`Working` spinner (`cmux read-screen --workspace <ws> --lines 6`) before assuming it started. A pane
+showing the pointer text above the status line with `0.0%` and no spinner has NOT started.
+
+**Consequence of skipping:** a silently-dead lane is indistinguishable from a working one until the
+work does not happen — or until a corrupted turn runs on a truncated brief. This cost a full
+dispatch cycle and was invisible to every pre-existing check; it is also the most likely explanation
+for three sends to one pane that were recorded as `OK` and never consumed.
 
 ### Key Directories
 

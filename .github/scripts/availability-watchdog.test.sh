@@ -117,6 +117,13 @@ assert_not_contains() { # <haystack> <needle> <label>
     *) ok "$3" ;;
   esac
 }
+assert_not_empty() { # <value> <label>
+  # A DERIVED value that came back empty must FAIL: every assert_contains is a
+  # `case` glob, so an empty needle matches any haystack. Without this, a
+  # quoted/folded/anchored source value silently vacates the assertions built
+  # on it — the guard would pass while checking nothing (found in review).
+  if [ -n "$1" ]; then ok "$2"; else bad "$2 (derived an EMPTY value — the guard would be vacuous)"; fi
+}
 
 FIX="$(mktemp -d)"
 trap 'rm -rf "$FIX"' EXIT
@@ -1717,9 +1724,9 @@ export WATCHDOG_NOW_EPOCH="$NOW"
 #   * PROBE_EXPECT_STATUS / PROBE_REQUIRE_HEADER did not exist and `is_prod`
 #     was a single-literal comparison, so the auth URL classified as a DRILL
 #     ([DRILL]-titled incident, no PROD page).
-AUTH_URL="https://tortoise.premiselabs.co/auth/start"
+AUTH_URL="https://app.premiselabs.co/auth/start"
 API_URL="https://api.premiselabs.co/v1/organizations"
-AUTH_TITLE_DOWN='[monitor] PROD DOWN — tortoise.premiselabs.co is not answering the availability probe'
+AUTH_TITLE_DOWN='[monitor] PROD DOWN — app.premiselabs.co is not answering the availability probe'
 PKCE_HEADERS=$'HTTP/2 302\r\nlocation: https://github.com/login/oauth/authorize?client_id=x&code_challenge=abc&code_challenge_method=s256\r\n'
 
 # Unit-call the pure helpers straight from the script (the WATCHDOG_LIB_ONLY
@@ -1804,7 +1811,7 @@ assert_contains "$(patched_body)" "down_runs=4" "empty restartable set: the prod
 # ── 86: a healthy 302 + the PKCE header on the auth target → UP ─────────────
 reset_case
 export PROBE_URL="$AUTH_URL"
-export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_HOST_LABEL="app.premiselabs.co"
 export PROBE_EXPECT_STATUS="302"
 export PROBE_REQUIRE_HEADER="code_challenge_method=s256"
 export STUB_PROBE_CODES="302"
@@ -1818,7 +1825,7 @@ assert_eq "$(cat "$STUB_TMP/probe.count")" "2" "auth healthy: one probe + one re
 # ── 87: the SAME 302 without the header is NOT UP (the #3616 class) ────────
 reset_case
 export PROBE_URL="$AUTH_URL"
-export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_HOST_LABEL="app.premiselabs.co"
 export PROBE_EXPECT_STATUS="302"
 export PROBE_REQUIRE_HEADER="code_challenge_method=s256"
 export STUB_PROBE_CODES="302"
@@ -1848,7 +1855,7 @@ assert_eq "$(cat "$STUB_TMP/probe.count")" "1" "auth: the header check is determ
 # wrong surface (review P3).
 reset_case
 export PROBE_URL="$AUTH_URL"
-export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_HOST_LABEL="app.premiselabs.co"
 export PROBE_EXPECT_STATUS="302"
 export PROBE_REQUIRE_HEADER="code_challenge_method=s256"
 export STUB_PROBE_CODES="200"          # answered, but OUTSIDE the allow-list
@@ -1879,7 +1886,7 @@ assert_contains "$(patched_body)" "authenticated API route" "api status mismatch
 # ── 88: a 503 on the auth target → DOWN and flyctl is NEVER called ─────────
 reset_case
 export PROBE_URL="$AUTH_URL"
-export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_HOST_LABEL="app.premiselabs.co"
 export PROBE_EXPECT_STATUS="302"
 export PROBE_REQUIRE_HEADER="code_challenge_method=s256"
 export STUB_PROBE_CODES="503"
@@ -1895,7 +1902,7 @@ assert_contains "$(patched_body)" "NO Fly machine" "auth: the incident body expl
 # The strongest possible case for a restart and it must still not happen.
 reset_case
 export PROBE_URL="$AUTH_URL"
-export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_HOST_LABEL="app.premiselabs.co"
 export PROBE_EXPECT_STATUS="302"
 export STUB_PROBE_CODES="503"
 export FLY_API_TOKEN="fly-token"
@@ -1912,30 +1919,30 @@ assert_contains "$(comments_all)" "NO Fly machine" "auth sustained: a human sees
 # ── 90: the auth URL is PROD (not DRILL) → PROD title with its OWN label ───
 reset_case
 export PROBE_URL="$AUTH_URL"
-export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_HOST_LABEL="app.premiselabs.co"
 export PROBE_EXPECT_STATUS="302"
 export STUB_PROBE_CODES="503"
 run_watchdog
 assert_contains "$(created_json)" "[monitor] PROD DOWN" "auth: the incident is PROD-titled (the URL is in the prod SET)"
 assert_not_contains "$(created_json)" "DRILL" "auth: the incident is NOT a drill"
-assert_contains "$(created_json)" "tortoise.premiselabs.co" "auth: the title carries the auth host — its OWN dedupe key"
+assert_contains "$(created_json)" "app.premiselabs.co" "auth: the title carries the auth host — its OWN dedupe key"
 
 # ── 90b: the auth run never adopts (or mutates) the API incident ───────────
 reset_case
 seed_issue down "$((NOW - 600))" 3 0 ""   # seeds an OPEN API incident (#42)
 export PROBE_URL="$AUTH_URL"
-export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_HOST_LABEL="app.premiselabs.co"
 export PROBE_EXPECT_STATUS="302"
 export STUB_PROBE_CODES="503"
 run_watchdog
 assert_eq "$(count_calls 'GH POST .*/issues$')" "1" "auth: the API incident is NOT adopted → the auth incident is filed fresh"
 assert_eq "$(count_calls 'GH PATCH repos/.*/issues/42$')" "0" "auth: the API incident (#42) is NEVER mutated (separate dedupe identity)"
-assert_contains "$(created_json)" "tortoise.premiselabs.co" "auth: the fresh incident carries the auth host"
+assert_contains "$(created_json)" "app.premiselabs.co" "auth: the fresh incident carries the auth host"
 
 # ── 91: the required-header match is CASE-INSENSITIVE ──────────────────────
 reset_case
 export PROBE_URL="$AUTH_URL"
-export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_HOST_LABEL="app.premiselabs.co"
 export PROBE_EXPECT_STATUS="302"
 export PROBE_REQUIRE_HEADER="code_challenge_method=s256"
 export STUB_PROBE_CODES="302"
@@ -1946,7 +1953,7 @@ assert_eq "$RC" "0" "auth: header name/value casing is irrelevant → still UP"
 # ── 92: a trailing slash still classifies as PROD ──────────────────────────
 reset_case
 export PROBE_URL="$AUTH_URL/"
-export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_HOST_LABEL="app.premiselabs.co"
 export PROBE_EXPECT_STATUS="302"
 export STUB_PROBE_CODES="503"
 run_watchdog
@@ -1969,7 +1976,7 @@ assert_eq "$(count_calls 'FLYCTL')" "0" "api regression: 503 with no token → n
 # ── 97: a malformed allow-list cannot make a 5xx healthy (end to end) ──────
 reset_case
 export PROBE_URL="$AUTH_URL"
-export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_HOST_LABEL="app.premiselabs.co"
 export PROBE_EXPECT_STATUS="302 503"    # 503 must NOT become healthy
 export STUB_PROBE_CODES="503"
 run_watchdog
@@ -2012,15 +2019,79 @@ assert_not_contains "$JOB_ENV" "TELEGRAM_BOT_TOKEN" "TELEGRAM_BOT_TOKEN is NOT j
 assert_not_contains "$JOB_ENV" "TELEGRAM_CHAT_ID" "TELEGRAM_CHAT_ID is NOT job-level (step env only, P3-6)"
 assert_not_contains "$JOB_ENV" "FLY_API_TOKEN" "FLY_API_TOKEN is NOT job-level (step env only)"
 assert_not_contains "$JOB_ENV" "GH_TOKEN" "GH_TOKEN is NOT job-level (step env only)"
+# GitHub env precedence is STEP > JOB > WORKFLOW, so refusing PROD_PROBE_URLS on
+# the step is not enough: a job-level value reaches the script just as well and
+# narrows the production set, classifying the auth probe a DRILL ([DRILL]-titled,
+# no page, self-heal disarmed) while the diff looks correct. Found in review — the
+# step-scoped refusal below passes with a job-level PROD_PROBE_URLS present.
+assert_not_contains "$JOB_ENV" "PROD_PROBE_URLS" \
+  "PROD_PROBE_URLS is NOT job-level either (env precedence: job-level reaches the script and silently drills the auth probe)"
+assert_not_contains "$JOB_ENV" "PROBE_HOST_LABEL" \
+  "PROBE_HOST_LABEL is NOT job-level (a job-level label renames another surface's incident to a host it never probes)"
+# …and the positional slice above is not enough on its own. GitHub applies a
+# top-level env: to EVERY job and step, and YAML key order is not semantic, so a
+# workflow-level PROD_PROBE_URLS placed AFTER `steps:` sits outside JOB_ENV — the
+# reviewer reproduced it (a top-level `env: PROD_PROBE_URLS: …` appended to the
+# file, guard still 0 failures, auth probe silently a DRILL). Assert on the whole
+# comment-stripped workflow instead; that closes step, job, workflow-anywhere and
+# second-job placements at once. (The one `PROD_PROBE_URLS` mention in the file is
+# a comment and is stripped — a comment must never satisfy its own guard.)
+assert_not_contains "$WORKFLOW_CODE" "PROD_PROBE_URLS" \
+  "PROD_PROBE_URLS is not set at ANY level of the watchdog workflow (the workflow's own comment is stripped, so it cannot satisfy this)"
 
 # ── 96: the workflow drives the auth surface as its OWN step (#3628) ───────
 AUTH_WORKFLOW="$SCRIPT_DIR/../workflows/availability-watchdog.yml"
 # Same comment-stripping rule as case 85: a comment must not satisfy the guard.
 AUTH_STEP="$(sed -n '/Probe the Pages auth surface/,/availability-watchdog.sh/p' "$AUTH_WORKFLOW" | grep -v '^[[:space:]]*#' || true)"
-assert_contains "$AUTH_STEP" "https://tortoise.premiselabs.co/auth/start" "the auth step targets /auth/start"
+assert_contains "$AUTH_STEP" "https://app.premiselabs.co/auth/start" "the auth step probes the SESSION-BEARING origin (/auth/start on app.*, #4054)"
 assert_contains "$AUTH_STEP" "PROBE_EXPECT_STATUS: '302'" "the auth step expects a 302"
 assert_contains "$AUTH_STEP" "PROBE_REQUIRE_HEADER: 'code_challenge_method=s256'" "the auth step requires the PKCE header"
-assert_contains "$AUTH_STEP" "PROBE_HOST_LABEL: tortoise.premiselabs.co" "the auth step passes its OWN host label (its own dedupe key)"
+# The host label is the incident DEDUPE KEY and `is_prod` is decided by SET
+# MEMBERSHIP over the URLs, so the URL, its label and the script's constant must
+# move TOGETHER. These are DERIVED, not pinned to a literal, because that is the
+# exact drift that stranded the probe: #4054 moved the BFF to app.* and left all
+# three behind, so a literal pin would have had to be edited in three places and
+# the guard would have gone on passing while sign-in was unmonitored.
+AUTH_PROBE_URL_STEP="$(printf '%s\n' "$AUTH_STEP" | sed -n "s|.*PROBE_URL:[[:space:]]*[\"']\{0,1\}\(https://[^ \"']*\)[\"']\{0,1\}.*|\1|p" | head -1)"
+AUTH_HOST="$(printf '%s' "$AUTH_PROBE_URL_STEP" | sed -n 's|https://\([^/]*\)/.*|\1|p')"
+# EMPTY DERIVATION MUST FAIL, not pass vacuously: assert_contains is a `case`
+# glob, so an empty needle matches ANY haystack — a quoted or folded PROBE_URL
+# would make both assertions below silently vacuous, which is the exact
+# silent-DRILL failure they exist to catch. (Found in review; reproduced with
+# the value quoted.)
+assert_not_empty "$AUTH_PROBE_URL_STEP" "the auth step's PROBE_URL is derivable (a quoted/folded value must not silently vacate these guards)"
+assert_not_empty "$AUTH_HOST" "the auth step's probe host is derivable from its PROBE_URL"
+assert_contains "$AUTH_STEP" "PROBE_HOST_LABEL: $AUTH_HOST" \
+  "the auth step's host label matches the host it actually probes (its dedupe key)"
+# …and the script must classify that same URL as PRODUCTION. PROD_PROBE_URLS is
+# built from AUTH_PROBE_URL; if only the workflow moves, the step still runs but
+# is classified a DRILL — [DRILL]-titled, no page, self-heal disarmed — while
+# looking correct in the diff. Setting PROD_PROBE_URLS in the step would do the
+# same thing through another route, so it is refused too.
+assert_contains "$(grep '^AUTH_PROBE_URL=' "$WATCHDOG" || true)" "$AUTH_PROBE_URL_STEP" \
+  "the watchdog script's AUTH_PROBE_URL matches the step's probe URL (else the run is silently a DRILL)"
+assert_not_contains "$AUTH_STEP" "PROD_PROBE_URLS" \
+  "the auth step does not set PROD_PROBE_URLS (a second route to a silent DRILL)"
+# A step-scoped guard cannot see a SECOND step: the old target can be re-added
+# under a new name ("legacy check", a copy-paste, another surface) and refile the
+# false PROD DEGRADED incident with every guard above still green. So assert the
+# INVENTORY, not just this step — no comment-stripped line in the workflow may
+# name the pre-#4054 auth target. (Review mutant: a second step carrying
+# PROBE_URL/PROBE_HOST_LABEL on the old host passed the step-scoped guard.)
+AUTH_WORKFLOW_CODE="$(grep -v '^[[:space:]]*#' "$AUTH_WORKFLOW" || true)"
+assert_not_contains "$AUTH_WORKFLOW_CODE" "tortoise.premiselabs.co/auth/start" \
+  "no second step re-adds the pre-#4054 auth target (a 'legacy' probe would refile the false incident)"
+# Banning the old URL is not enough: the LABEL is the exact-title dedupe key, so a
+# label left behind on a *different* line orphans the incident just as the URL did.
+# The reviewer's mutants that slipped past a URL-only inventory: a SECOND
+# PROBE_HOST_LABEL line in the auth step (YAML last-wins → the old host), a second
+# step with the new URL but the old label, and a label on another surface. The old
+# host has no legitimate occurrence in this workflow at all, so ban the HOST, and
+# require the auth step to carry exactly one label line.
+assert_not_contains "$AUTH_WORKFLOW_CODE" "tortoise.premiselabs.co" \
+  "the departed host appears nowhere in the watchdog workflow (a leftover PROBE_HOST_LABEL would orphan that surface's incident)"
+assert_eq "$(printf '%s\n' "$AUTH_STEP" | grep -c 'PROBE_HOST_LABEL:')" "1" \
+  "the auth step carries exactly ONE host label (a duplicate line is last-wins and could re-point the dedupe key)"
 assert_not_contains "$AUTH_STEP" "FLY_API_TOKEN" "the auth step gets NO Fly token (no restart path)"
 assert_contains "$AUTH_STEP" '!cancelled()' "the auth step runs even when the API probe failed (independent alerting)"
 assert_contains "$AUTH_STEP" "TELEGRAM_BOT_TOKEN: \${{ secrets.TELEGRAM_BOT_TOKEN }}" "the auth step can page too"
