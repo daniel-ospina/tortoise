@@ -440,7 +440,15 @@ SOURCE_PATTERNS = {
             # 0.1 entry directly above and the same reason: a generator-only edit
             # is swallowed by the flat `tools/` prefix and the gate never runs on
             # the PR that can break it (#4454 covers a docs-only hand-edit).
-            "tools/mcp_rename_table.py"),
+            "tools/mcp_rename_table.py",
+            # #4282 Phase 0.3b: `tools/sdk_rename_table.py` GENERATES
+            # `docs/product/sdk-rename-table.md`, and `test_sdk_rename_table.py`
+            # (registered in `api` AND `core`) is the drift gate. Same gap as the
+            # bridge table above: `tools/` is in NON_PYTHON_PREFIXES, so a
+            # generator-only edit selected NO surface and the gate never ran on
+            # the PR that can break it. A docs-only hand-edit of the generated
+            # file still skips the matrix by the docs-PR policy (tortoise #4454).
+            "tools/sdk_rename_table.py"),
     # eval (#1349): the probe, LongMemEval/mini-BEIR harnesses, threshold
     # tools, benchmark infra, and the backfill script all produce gate
     # evidence — their tests live in the eval surface (config/ci-surfaces.yml).
