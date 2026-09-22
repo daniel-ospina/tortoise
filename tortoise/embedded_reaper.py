@@ -1616,9 +1616,11 @@ def _is_path_based(registry: dict | None, dbdir_real: str,
     disengaged.
 
     #4546 SCOPE: reap()'s every-mode confirmation requirement still applies
-    to `path_based` unchanged, but its `unattributed` half exempts a
-    `dir_missing` record (the registry data dir is already gone, so no
-    on-disk user data remains — pre-#3767 behaviour).
+    to `path_based` unchanged, but in a FULL sweep its `unattributed` half
+    exempts a `dir_missing` record (the registry data dir is already gone, so
+    no on-disk user data remains — pre-#3767 behaviour). Under `--only-safe`
+    the exemption is unreachable: the earlier live-pid gate skips every
+    non-orphan-confirmed candidate first, so `--only-safe` is unchanged.
 
     CONSEQUENCE (#3767 review P2, documented not silent): `path_based` is ALSO
     the gate `_mark_orphan_confirmation` uses to admit the #3599 per-server
@@ -1873,10 +1875,13 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
         with no live suite markers (set by _mark_orphan_confirmation in
         _run_sweep).
     Path-based (user-data) servers additionally require confirmation in
-    EVERY mode (their data outlives the test tree). A `dir_missing` record is
-    exempt from the `unattributed` half of that requirement (#4546: its data
-    dir — and therefore all on-disk user data — is already gone); the
-    `path_based` half is NOT exempted. This preserves the
+    EVERY mode (their data outlives the test tree). In a FULL sweep
+    (`only_safe=False`) a `dir_missing` record is exempt from the
+    `unattributed` half of that requirement (#4546: its data dir — and
+    therefore all on-disk user data — is already gone); the `path_based` half
+    is NOT exempted, and under `--only-safe` the earlier live-pid gate still
+    skips every non-orphan-confirmed candidate, so `--only-safe` is unchanged.
+    This preserves the
     #1005 guarantee: a concurrent suite's between-tests idle server is
     never disturbed.
     """
@@ -1976,20 +1981,25 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
                 # in EVERY mode (not only under --only-safe). It remains
                 # reapable via the #1557/#1642 FIX 3 window.
                 #
-                # #4546 EXEMPTION — OVERRIDES: #1642 FIX 3's "a live server
-                # whose socket dir was unlinked still serves established
-                # connections, so a missing dir is never instant proof of
-                # orphanhood → keep the confirmation window" — for the
-                # `dir_missing` class ONLY, because that record's REGISTRY
-                # data dir (the pytest `tmp_path` tree) is already gone: no
+                # #4546 EXEMPTION — OVERRIDES: the #3767 rule that an
+                # `unattributed` server (no `.tortoise-owners` instrument)
+                # needs the #1557/#1642 FIX 3 confirmation window in EVERY
+                # mode — which itself carries #1642 FIX 3's "a directory that
+                # is gone keeps the confirmation window" stance — for a
+                # `dir_missing` record ONLY. `dir_missing` means the REGISTRY
+                # data dir (the pytest `tmp_path` tree) is already gone, so no
                 # on-disk user data remains for the window to protect, and
-                # pre-#3767 `main` fast-killed it. The exemption is scoped to
-                # the NEW `unattributed` signal this branch introduced; the
-                # pre-existing `path_based` arm is deliberately left intact,
-                # so a genuinely path-based (user-data) server still requires
-                # confirmation in EVERY mode exactly as before. #3767's target
-                # (unowned/foreign server, directory PRESENT, registry
-                # intact) reports `dir_missing=False` and keeps the gate.
+                # pre-#3767 `main` fast-killed the class. This does NOT touch
+                # #1642 FIX 3's socket-dir-unlinked window: such a record has
+                # no registry, so `_is_path_based` fail-closes True and the
+                # untouched `path_based` arm still gates it. The exemption is
+                # scoped to the NEW `unattributed` signal this branch
+                # introduced; the pre-existing `path_based` arm is
+                # deliberately left intact, so a genuinely path-based
+                # (user-data) server still requires confirmation in EVERY mode
+                # exactly as before. #3767's target (unowned/foreign server,
+                # directory PRESENT, registry intact) reports
+                # `dir_missing=False` and keeps the gate.
                 #
                 # NARROWNESS (#4546): keyed on the registry-data-dir property
                 # alone. Do NOT widen to `unattributed` generally — that

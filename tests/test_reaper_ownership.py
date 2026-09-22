@@ -19,7 +19,7 @@ This module pins the fix in BOTH directions:
     admitted. The reaper is NOT made inert.
 
 The claim itself (`_has_ownership_claim`) is: a PRESENT dir must be owned by
- the invoking euid (#4136's property, moved to admission) AND carry tortoise's
+the invoking euid (#4136's property, moved to admission) AND carry tortoise's
 own `.tortoise-owners` instrument (#3599); a dir-ABSENT server is admitted by
 the live pid's own argv naming it (#1642 FIX 3's pass-1 binding, #4136's
 unforgeable arm). The #1557 confirmation window is untouched.
