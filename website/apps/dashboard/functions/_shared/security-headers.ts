@@ -134,8 +134,11 @@ export const ADMIN_CSP = csp(
  * `STRICT_CSP` with a per-response nonce for the `/auth/confirm` interstitial —
  * the one self-rendered HTML page in the dashboard, and the one that can be
  * nonce-gated because it has no inline event handlers. This is the treatment the
- * MCP consent page already uses (`tortoise/hosted_api.py`), and it is stricter:
- * the consent page also allows a CDN, this page needs no external script.
+ * MCP consent page already uses (`tortoise/hosted_api.py`). It is NOT nonce-only:
+ * like the consent page it carries one extra host beside the nonce, and here that
+ * host is the platform-injected beacon origin (every policy must carry it — see
+ * the header). The page AUTHORS one inline script, and that one still needs the
+ * nonce; any script served from the beacon origin would run here un-nonced.
  */
 export function strictCspWithNonce(nonce: string): string {
   return csp(

@@ -775,31 +775,48 @@ test('every policy allows the platform-injected Cloudflare beacon', () => {
   const dashboard = loadDashboardHeaders()
   const marketing = loadMarketingHeaders()
 
-  // The policy LIST is derived, not transcribed — a hand-kept array is how a
-  // SIXTH policy expression ships unchecked while this test still says "every
-  // policy" (the round-1 review's finding). The VALUES stay literal, because
-  // the point of the test is to pin them.
-  const derived = Object.keys(dashboard)
-    .filter((k) => /_CSP$/.test(k) && typeof dashboard[k] === 'string')
-    .sort()
-  assert.deepEqual(
-    derived,
-    ['ADMIN_CSP', 'RELAXED_CSP', 'STRICT_CSP'],
-    'a CSP constant was added or renamed — extend this test, do not just update this list',
-  )
+  // The policy LIST is derived, not transcribed. A hand-kept array is how a SIXTH
+  // policy expression ships unchecked while this test still claims "every policy",
+  // and a NARROWER derivation has the same hole: a policy added to the marketing
+  // module, or exported as a FUNCTION rather than a constant, is invisible to
+  // `Object.keys(dashboard).filter(k => /_CSP$/.test(k))`. So every export of BOTH
+  // modules whose value is a string or a function must be classified here — as a
+  // policy to scan, or as a declared non-policy. The VALUES stay literal: pinning
+  // them is the entire point.
+  const modules = { dashboard, marketing }
+  const NON_POLICY_EXPORTS = new Set([
+    'dashboard.cspNonce', // returns a bare nonce, not a policy
+  ])
+  const policies = {
+    'marketing.RELAXED_CSP': () => marketing.RELAXED_CSP,
+    'dashboard.RELAXED_CSP': () => dashboard.RELAXED_CSP,
+    'dashboard.STRICT_CSP': () => dashboard.STRICT_CSP,
+    'dashboard.ADMIN_CSP': () => dashboard.ADMIN_CSP,
+    'dashboard.strictCspWithNonce': () => dashboard.strictCspWithNonce('TESTNONCE'),
+  }
 
-  const policies = [
-    ['marketing RELAXED_CSP', marketing.RELAXED_CSP],
-    ['dashboard RELAXED_CSP', dashboard.RELAXED_CSP],
-    ['STRICT_CSP', dashboard.STRICT_CSP],
-    ['ADMIN_CSP', dashboard.ADMIN_CSP],
-    ['strictCspWithNonce', dashboard.strictCspWithNonce('TESTNONCE')],
-  ]
+  const discovered = []
+  for (const [mod, exported] of Object.entries(modules)) {
+    for (const [key, value] of Object.entries(exported)) {
+      if (typeof value === 'string' || typeof value === 'function') {
+        discovered.push(`${mod}.${key}`)
+      }
+    }
+  }
+  assert.deepEqual(
+    discovered
+      .filter((name) => !(name in policies) && !NON_POLICY_EXPORTS.has(name))
+      .sort(),
+    [],
+    'unclassified export(s) in a policy module — classify each one: add it to ' +
+      '`policies` if it emits a CSP, or to NON_POLICY_EXPORTS if it does not',
+  )
 
   const SCRIPT_ORIGIN = 'https://static.cloudflareinsights.com'
   const RUM_ORIGIN = 'https://cloudflareinsights.com'
   const wrong = []
-  for (const [name, value] of policies) {
+  for (const [name, getValue] of Object.entries(policies)) {
+    const value = getValue()
     const parts = value.split('; ')
     const byDirective = new Map(
       parts.map((d) => {
@@ -831,7 +848,7 @@ test('every policy allows the platform-injected Cloudflare beacon', () => {
     // a nonce — but only while `'strict-dynamic'` is absent, because with it the
     // browser IGNORES every host-source in script-src and blocks the tag. The
     // comment used to assert that assumption; this asserts it instead.
-    if (tokens(scriptSrc).includes("'strict-dynamic'")) {
+    if (tokens(scriptSrc).some((t) => t.toLowerCase() === "'strict-dynamic'")) {
       wrong.push(
         `${name}: 'strict-dynamic' is present — it makes the browser ignore every ` +
           `host-source in script-src, so ${SCRIPT_ORIGIN} would NOT load the tag`,
