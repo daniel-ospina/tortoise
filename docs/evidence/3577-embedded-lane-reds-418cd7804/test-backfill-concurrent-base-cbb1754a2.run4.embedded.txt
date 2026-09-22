@@ -1,0 +1,14 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.12.13, pytest-9.1.1, pluggy-1.6.0 -- /Users/danielospina/Documents/GitHub/tortoise/.worktrees/j6-3577-land/.venv/bin/python
+rootdir: /Users/danielospina/Documents/GitHub/tortoise/.worktrees/j6-3577-land
+configfile: pyproject.toml
+plugins: playwright-0.9.0, timeout-2.4.0, asyncio-1.4.0, anyio-4.14.2, base-url-2.1.0
+timeout: 300.0s
+timeout method: signal
+timeout func_only: False
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 1 item
+
+tests/test_backfill_sources.py::test_e2e8_concurrent_backfill_and_index PASSED [100%]
+
+============================== 1 passed in 17.07s ==============================

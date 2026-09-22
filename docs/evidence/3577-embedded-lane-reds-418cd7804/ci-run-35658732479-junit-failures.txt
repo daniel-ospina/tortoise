@@ -1,0 +1,27 @@
+CI run 35658732479 (pull_request, head 418cd7804) — failing test ids extracted from the run's junit.xml ARTIFACTS.
+The workflow log is NOT a usable source on this repo (it echoes its own script -> only an unattributable 'FAILED may' token).
+
+==========================================================================================
+JOB: test (b) — EMBEDDED lane (TORTOISE_TEST_CARVE_OUT=1, no TORTOISE_DB_URI)
+  job id=106529553904  artifact id=10667423513 (name pytest-log-*)
+  totals: tests=6473 failures=3 errors=0 skipped=101
+  FAILED (3):
+    [failure] tests.test_rebuild_recreate_content_parity::test_bare_reemit_supersedes_revision
+        at tests/test_rebuild_recreate_content_parity.py:228
+        AssertionError: embedding derives from content and must not drift independently
+    [failure] tests.test_rebuild_recreate_content_parity::test_intermediate_derived_write_wins
+        at tests/test_rebuild_recreate_content_parity.py:273
+        AssertionError: embedding derives from content and must not drift independently
+    [failure] tests.test_rebuild_recreate_content_parity::test_bare_reemit_still_folds_annotator_dim
+        at tests/test_rebuild_recreate_content_parity.py:418
+        AssertionError: embedding derives from content and must not drift independently
+
+==========================================================================================
+JOB: test-slow (b) — EMBEDDED lane
+  job id=106529553726  artifact id=10667195687 (name pytest-log-*)
+  totals: tests=714 failures=1 errors=0 skipped=1
+  FAILED (1):
+    [failure] tests.test_backfill_sources::test_e2e8_concurrent_backfill_and_index
+        at tests/test_backfill_sources.py:889
+        assert (0 + 0) == 1
+

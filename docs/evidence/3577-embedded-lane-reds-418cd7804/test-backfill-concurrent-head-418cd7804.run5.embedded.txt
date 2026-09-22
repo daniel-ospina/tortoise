@@ -1,0 +1,118 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.12.13, pytest-9.1.1, pluggy-1.6.0 -- /Users/danielospina/Documents/GitHub/tortoise/.worktrees/j6-3577-land/.venv/bin/python
+rootdir: /Users/danielospina/Documents/GitHub/tortoise/.worktrees/j6-3577-land
+configfile: pyproject.toml
+plugins: playwright-0.9.0, timeout-2.4.0, asyncio-1.4.0, anyio-4.14.2, base-url-2.1.0
+timeout: 300.0s
+timeout method: signal
+timeout func_only: False
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 1 item
+
+tests/test_backfill_sources.py::test_e2e8_concurrent_backfill_and_index FAILED [100%]
+
+=================================== FAILURES ===================================
+___________________ test_e2e8_concurrent_backfill_and_index ____________________
+
+tmp_path = PosixPath('/private/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/pytest-of-danielospina/pytest-18418/test_e2e8_concurrent_backfill_0')
+
+    def test_e2e8_concurrent_backfill_and_index(tmp_path):
+        """E2E-8 concurrent backfill+index leg: legacy AgentSession Event
+        (session_legacy1, source_file=conv.md) + fixture conv.md whose frontmatter
+        sessionId is legacy1 → barrier-released CONCURRENT backfill_sources +
+        index_directory on PER-THREAD SDK instances against ONE shared embedded
+        daemon (marker-node warm-up proves daemon reuse; a sequential execution is
+        a test failure) → count(Source) == 1 (url MERGE convergence across two
+        different code paths), count(Event) == 1, count(references) == 1, honest
+        counters, second-run zero-create."""
+        c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
+        (c / "conv.md").write_text(SESSION_FIXTURE.format(sid="legacy1", n=1))
+        db = _db()
+        seed = TortoiseSDK(db, namespace="e2e-900")
+        try:
+            g = seed._get_proj().g
+            _create_legacy_event(g, event_id="session_legacy1",
+                                 kind="AgentSession", rel_path="conv.md",
+                                 file_hash=compute_file_hash(str(c / "conv.md")),
+                                 title="Conv")
+        finally:
+            seed.close()
+    
+        n = 2
+        # SDK instances constructed SEQUENTIALLY (never from racing threads —
+        # deterministic daemon reuse; a racing constructor could start a second
+        # daemon = split-brain)
+        sdks = [TortoiseSDK(db, namespace="e2e-900") for _ in range(n)]
+        barrier = threading.Barrier(n)
+        results: list[dict | None] = [None] * n
+        errors: list[BaseException] = []
+        reuse_holds = True
+    
+        def _worker(i: int) -> None:
+            nonlocal reuse_holds
+            sdk = sdks[i]
+            try:
+                barrier.wait(timeout=60)          # all SDKs constructed
+                if i == 0:
+                    harness.marker_warmup(sdk)    # warm the marker on the daemon
+                barrier.wait(timeout=60)          # marker written
+                if not harness.assert_marker_visible(sdk):
+                    reuse_holds = False           # daemon reuse does NOT hold
+                barrier.wait(timeout=60)          # reuse verified (or not)
+                if not reuse_holds:
+                    return
+                if i == 0:
+                    results[i] = sdk.backfill_sources(str(c))
+                else:
+                    results[i] = sdk.index_directory(str(c), extract_metadata=False)
+            except BaseException as e:  # noqa: BLE001, RUF100
+                errors.append(e)
+                try:  # noqa: SIM105
+                    barrier.wait(timeout=60)
+                except Exception:  # noqa: BLE001, RUF100
+                    pass
+            finally:
+                sdk.close()
+    
+        threads = [threading.Thread(target=_worker, args=(i,)) for i in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=600)
+        if errors:
+            raise errors[0]
+        if not reuse_holds:
+            pytest.skip("embedded daemon reuse does not hold on this platform — "
+                        "skipping the threads leg (§7 harness pin)")
+    
+        check = TortoiseSDK(db, namespace="e2e-900")
+        try:
+            g = check._get_proj().g
+            # url MERGE convergence across two different code paths
+            assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 1
+            assert g.query("MATCH (e:Event) RETURN count(e)").result_set[0][0] == 1
+            assert g.query("MATCH ()-[r:references]->() RETURN count(r)"
+                           ).result_set[0][0] == 1
+            assert _required_sweep(g) == 0
+            assert _hash_pair_sweep(g) == 0
+            # honest counters: created counts Sources created, linked counts
+            # Events whose edge was written (a fresh Source always counts in BOTH,
+            # as in the main fixture) — so the valid outcomes are (created=1,
+            # linked=1, skipped=0) if backfill won the race, or (0, 0, 1) if the
+            # index thread completed the unit first
+            bf = results[0]
+            assert bf["created"] in (0, 1) and bf["linked"] in (0, 1)
+            assert bf["skipped"] in (0, 1)
+>           assert bf["created"] + bf["skipped"] == 1
+E           assert (0 + 0) == 1
+
+tests/test_backfill_sources.py:977: AssertionError
+---------------------------- Captured stdout setup -----------------------------
+[redislite-hygiene] start sweep: {'reaped': 0}
+------------------------------ Captured log setup ------------------------------
+WARNING  tortoise.embedded_reaper:embedded_reaper.py:1565 unrecognized dir pattern, treating as protected: /private/tmp/pi-rdbchk.SivSOn
+--------------------------- Captured stdout teardown ---------------------------
+[redislite-hygiene] end sweep (other-suites=3): {'skipped': 'reaper-lock-held'}
+=========================== short test summary info ============================
+FAILED tests/test_backfill_sources.py::test_e2e8_concurrent_backfill_and_index
+============================== 1 failed in 28.30s ==============================
