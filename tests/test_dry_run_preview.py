@@ -572,17 +572,20 @@ class TestBlastRadius:
         assert any(t == old for _, t in kept), kept
         assert preview["edges_dropped"], "the successor self-edge must be delete-only"
 
-    def test_supersede_preview_agrees_when_the_repoint_target_already_exists(
+    def test_supersede_preview_agrees_when_a_same_type_repoint_target_exists(
             self, sdk):
         """The SECOND precondition of the divergence: a direct IMPL/NAND
-        self-loop is NECESSARY but not SUFFICIENT.
+        self-loop is NECESSARY but not SUFFICIENT — and the suppressor is
+        strictly SAME-TYPE.
 
-        The writer's out-pass repoints `(old)-[:IMPL]->(old)` to
-        `(new)->(old)` with a MERGE, so the divergence requires that edge NOT
-        to already exist. When it does, the MERGE collapses onto it, the
-        in-pass delete-onlys that PRE-EXISTING edge — which this preview also
-        counts, under `edges_dropped`, because its far endpoint is the
-        successor — and the two totals agree. Measured: preview 3, writer 3.
+        The writer's out-pass repoints `(old)-[:T]->(old)` to `(new)->(old)`
+        with a MERGE **typed by the self-loop's own type**
+        (`MERGE (new)-[nr:{rtype}]->(t)`), so the divergence requires no edge
+        `(new)-[:T]->(old)` of THAT type to already exist. When one does, the
+        MERGE collapses onto it, the in-pass delete-onlys that PRE-EXISTING
+        edge — which this preview also counts, under `edges_dropped`, because
+        its far endpoint is the successor — and the two totals agree.
+        Measured: preview 3, writer 3.
 
         Pins the fact behind the docstring's precondition, so a future author
         cannot quietly drop it back to "NOT equal when `old` carries a
@@ -605,6 +608,43 @@ class TestBlastRadius:
             "a pre-existing repoint target makes the writer's out-pass MERGE a "
             "no-op, so its double-booking does not occur and the two agree",
             preview["edges_transferred_from_old"], real["edges_transferred"])
+
+    def test_supersede_preview_still_diverges_on_an_opposite_type_edge(
+            self, sdk):
+        """The suppressor is ONLY a same-type edge — an opposite-type
+        pre-existing edge leaves the divergence intact.
+
+        The out-pass MERGE is typed by the self-loop's own rel type
+        (`MERGE (new)-[nr:{rtype}]->(t)`), so `(new)-[:NAND]->(old)` cannot
+        collapse an `(old)-[:IMPL]->(old)` repoint. The out-pass still
+        creates `(new)-[:IMPL]->(old)`, and the in-pass — which matches
+        `IMPL|NAND` — takes both it and the pre-existing NAND edge
+        delete-only. Writer 4, preview 3.
+
+        Without this leg the docstring can over-claim the condition as
+        "`(new)-[:IMPL|NAND]->(old)` does not already exist" and stay green.
+        """
+        old, new = _seed_point(sdk, "old"), _seed_point(sdk, "new")
+        x = _seed_point(sdk, "x")
+        sdk._get_proj().g.query(
+            "MATCH (a:Point {id:$o}) CREATE (a)-[:IMPL]->(a)", params={"o": old})
+        sdk.create_direct_edge("IMPL", old, x)
+        # The OPPOSITE type — must NOT suppress the divergence.
+        sdk.create_direct_edge("NAND", new, old)
+
+        from tortoise.mcp_server import _preview_supersede
+
+        preview = _preview_supersede(sdk, old, new)
+        real = sdk.supersede(old, new)
+
+        p, w = preview["edges_transferred_from_old"], real["edges_transferred"]
+        assert p == 3, ("preview: self-loop dropped + old->x merged + the "
+                        "pre-existing NAND edge dropped", p)
+        assert w == 4, ("writer: out self-loop + out old->x + in NAND + in the "
+                        "freshly created IMPL", w)
+        assert w > p, ("the opposite-type edge cannot collapse a MERGE typed by "
+                       "the self-loop's own type, so the writer still "
+                       "double-books", p, w)
 
     def test_supersede_preview_is_the_accurate_count_for_a_direct_self_loop(
             self, sdk):

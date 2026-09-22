@@ -4299,16 +4299,27 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
     graph with no direct IMPL/NAND self-loop at `old` it equals the number the
     writer reports as `edges_transferred`, and a differential test pins the two
     together there. It is NOT equal when BOTH of two conditions hold: `old`
-    carries a direct IMPL/NAND self-loop, AND the repoint target
-    `(new)-[:IMPL|NAND]->(old)` does not already exist. Then the writer is the
-    one that over-counts: its out-pass repoints `(old)-[:IMPL]->(old)` to
-    `(new)->(old)`, MERGEs that edge into existence, and its in-pass then
-    matches the freshly created edge and delete-onlys it, booking one removed
-    edge twice — while this preview dedups the two matches and counts the edge
-    ONCE. Both conditions are load-bearing: if `(new)-[:IMPL]->(old)` already
-    exists the out-pass MERGE collapses onto it, the in-pass delete-onlys that
-    pre-existing edge (which this preview also counts, under `edges_dropped`),
-    and the two totals agree. Each precondition has its own test. This
+    carries a direct IMPL/NAND self-loop of type `T`, AND no edge
+    `(new)-[:T]->(old)` of that SAME type already exists. Then the writer is the
+    one that over-counts: its out-pass repoints `(old)-[:T]->(old)` to
+    `(new)->(old)` and MERGEs that edge into existence — and the MERGE is typed
+    by `rtype`, the self-loop's OWN type (`sdk.py`, `MERGE (new)-[nr:{rtype}]->(t)`) —
+    and its in-pass then matches the freshly created edge and delete-onlys it,
+    booking one removed edge twice — while this preview dedups the two matches
+    and counts the edge ONCE. The TYPE matters: only a same-type edge suppresses
+    the divergence, because only a same-type edge collapses that MERGE. Measured
+    across all six states (self-loop type x pre-existing edge):
+
+        no pre-existing edge   preview 2  writer 3  DIFFER
+        same type              preview 3  writer 3  agree — the MERGE collapses onto
+                                                     it and the in-pass delete-onlys
+                                                     that pre-existing edge, which this
+                                                     preview also counts, under
+                                                     `edges_dropped`
+        opposite type          preview 3  writer 4  DIFFER — nothing to collapse onto,
+                                                     so the out-pass still creates
+
+    Each condition has its own test. This
     value is the accurate one; the self-loop is reported under `edges_dropped`
     with the reason "self-loop on the old node". It counts every row the write
     removes from old, INCLUDING the delete-only rows (`edges_dropped`: a
