@@ -167,6 +167,13 @@ jobs:
           # Absent → the page is skipped with a log line.
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # #3887: the SUSTAINED-incident escalation recipient. OPTIONAL — left
+          # empty, the script falls back to TELEGRAM_CHAT_ID, so this knob can
+          # point a sustained page at an on-call group without moving transition
+          # paging. STEP-level for the same credential containment as the other
+          # Telegram secrets (never job-level: that would also hand a durable
+          # bot token to actions/checkout and to the third-party flyctl setup).
+          ESCALATION_CHAT_ID: ${{ secrets.ESCALATION_CHAT_ID }}
         run: bash .github/scripts/availability-watchdog.sh
       # SECOND TARGET (#3628): the Pages auth surface. `!cancelled()` rather
       # than the default `success()` — the two surfaces fail INDEPENDENTLY, so
@@ -186,6 +193,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # #3887: the SUSTAINED-incident escalation recipient. OPTIONAL — left
+          # empty, the script falls back to TELEGRAM_CHAT_ID, so this knob can
+          # point a sustained page at an on-call group without moving transition
+          # paging. STEP-level for the same credential containment as the other
+          # Telegram secrets (never job-level: that would also hand a durable
+          # bot token to actions/checkout and to the third-party flyctl setup).
+          ESCALATION_CHAT_ID: ${{ secrets.ESCALATION_CHAT_ID }}
           PROBE_URL: https://app.premiselabs.co/auth/start
           PROBE_HOST_LABEL: app.premiselabs.co
           # Healthy = 302 with the PKCE challenge in the response headers. The

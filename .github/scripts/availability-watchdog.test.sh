@@ -181,7 +181,22 @@ case "$url" in
       printf '{"ok":false,"error_code":%s}' "$STUB_TELEGRAM_HTTP" > /dev/null
       exit 0
     fi
-    printf '{"ok":true}' > /dev/null
+    if [ "${STUB_TELEGRAM_OK:-1}" != "1" ]; then
+      # HTTP 2xx with the API's own verdict false: a bad chat id / a bot that was
+      # removed from the chat. curl exits 0; the ONLY signal is the body. The
+      # watchdog must treat this as NOT DELIVERED (the ok:true contract), so this
+      # knob is what makes the delivery check non-vacuous.
+      if [ -n "$out_file" ] && [ "$out_file" != "/dev/null" ]; then
+        printf '{"ok":false,"error_code":400,"description":"%s"}' \
+          "${STUB_TELEGRAM_DESC:-Bad Request: chat not found}" > "$out_file"
+      fi
+      exit 0
+    fi
+    # A real success body goes to -o FILE; `-o /dev/null` is not used by the
+    # watchdog any more, but honour it if a future caller uses it.
+    if [ -n "$out_file" ] && [ "$out_file" != "/dev/null" ]; then
+      printf '{"ok":true,"result":{}}' > "$out_file"
+    fi
     exit 0 ;;
   *generate_204*|*control.example*)
     # Runner-side egress control. Deliberately does NOT touch probe.count: the
@@ -391,10 +406,12 @@ reset_case() {
         STUB_PROBE_RC STUB_PROBE_STDERR STUB_PROBE_HEADERS \
         STUB_FLY_MACHINES STUB_FLY_LIST_FAIL STUB_FLY_RESTART_FAIL STUB_FLY_LEAK \
         STUB_FLY_LEAK_SHAPE STUB_FLY_SPLIT STUB_ISSUE_CREATED_AT \
-        STUB_TELEGRAM_FAIL STUB_TELEGRAM_HTTP STUB_TELEGRAM_DESC STUB_COMMENT_FAIL STUB_GET_BODY_FAIL \
+        STUB_TELEGRAM_FAIL STUB_TELEGRAM_HTTP STUB_TELEGRAM_DESC STUB_TELEGRAM_OK STUB_COMMENT_FAIL STUB_GET_BODY_FAIL \
         STUB_CONTROL_CODES \
         PROBE_URL FLY_API_TOKEN TELEGRAM_BOT_TOKEN \
-        TELEGRAM_CHAT_ID PROBE_HOST_LABEL STUB_PATCH_FAIL \
+        TELEGRAM_CHAT_ID ESCALATION_CHAT_ID ESCALATE_ENABLED \
+        ESCALATE_SUSTAINED_MINUTES ESCALATE_MIN_RUNS \
+        PROBE_HOST_LABEL STUB_PATCH_FAIL \
         PROBE_EXPECT_STATUS PROBE_REQUIRE_HEADER PROD_PROBE_URLS RESTARTABLE_PROBE_URLS \
         RECOVERY_CONFIRM_PROBES SUSTAINED_MIN_RUNS PROBE_ATTEMPTS \
         MAX_RESTARTS_PER_HOUR STALE_RESET_MINUTES CONTROL_URL 2>/dev/null || true
@@ -794,7 +811,13 @@ assert_eq "$(count_calls 'CURL telegram')" "0" "repeat run → does NOT re-page"
 reset_case
 seed_issue down "$((NOW - 7200))" 20 0 "$((NOW - 1500)) $((NOW - 1300))"
 # cap_notified_ts is part of the state block; seed a RECENT notification.
-printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 7200)) down_runs=20 last_down_ts=$((NOW - 60)) last_comment_ts=$((NOW - 60)) cap_notified_ts=$((NOW - 300)) restarts=$((NOW - 1500)),$((NOW - 1300)) -->\"}" > "$STUB_TMP/issue.json"
+# page_ok_ts is seeded alongside it (#3887): it is the CONFIRMED-human-page stamp
+# the sustained-escalation leg's cross-mechanism bound reads, so this fixture now
+# means "a human was actually paged 5 min ago" and silences BOTH the cap's own
+# re-notify window AND the new leg. Without it the leg correctly pages — a
+# sustained incident whose last page was an UNCONFIRMED attempt must not be read
+# as "the human already knows".
+printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 7200)) down_runs=20 last_down_ts=$((NOW - 60)) last_comment_ts=$((NOW - 60)) cap_notified_ts=$((NOW - 300)) escalate_state=sent escalate_ts=$((NOW - 300)) page_ok_ts=$((NOW - 300)) restarts=$((NOW - 1500)),$((NOW - 1300)) -->\"}" > "$STUB_TMP/issue.json"
 export STUB_SEARCH_MARKER='PROD%20DOWN'
 export STUB_SEARCH_JSON="$(search_json 42)"
 export STUB_PROBE_CODES="000"
@@ -2095,6 +2118,348 @@ assert_eq "$(printf '%s\n' "$AUTH_STEP" | grep -c 'PROBE_HOST_LABEL:')" "1" \
 assert_not_contains "$AUTH_STEP" "FLY_API_TOKEN" "the auth step gets NO Fly token (no restart path)"
 assert_contains "$AUTH_STEP" '!cancelled()' "the auth step runs even when the API probe failed (independent alerting)"
 assert_contains "$AUTH_STEP" "TELEGRAM_BOT_TOKEN: \${{ secrets.TELEGRAM_BOT_TOKEN }}" "the auth step can page too"
+
+# ════════════════════════════════════════════════════════════════════════════
+# #3887 — the sustained-incident ESCALATION LEG (leaves GitHub: a thresholded,
+# addressed page for the class the restart leg declines).
+#
+# Acceptance criteria covered here:
+#  (unit) decide_escalation: off | wait_sustained | wait_runs | wait_page_quiet |
+#         wait_reminder | page | remind
+#  (unit) normalize_escalation_knobs: derived defaults + the `>= restart` clamp
+#  (unit) parse_state: escalate_ts is trusted ONLY while escalate_state=sent;
+#         pending/failed/absent ⇒ retried; a FUTURE stamp is clamped to 0
+#  (unit) state-block field parity (declared vs rendered, both directions + order)
+#  (doc)  the runbook's state-block field list names every declared field
+#  (e2e a) one failing run ⇒ NO sustained page
+#  (e2e b) 3 runs + >=30 min ⇒ exactly ONE page
+#  (e2e c) inside the reminder window ⇒ no page
+#  (e2e d) channel unconfigured ⇒ NO delivery stamp + escalate_state=failed + a
+#          loud failure naming the channel (never "all clear")
+#  (e2e e) HTTP 2xx with ok:false ⇒ NOT delivered (the ok:true contract)
+#  (e2e f) a FUTURE escalate_ts ⇒ pages (a stamp that cannot be true never mutes)
+#  (e2e g) a page in the SAME run ⇒ no second page
+#  (e2e h) a confirmed page 10 min ago ⇒ no second page (cross-mechanism bound)
+#  (e2e i) sustained DEGRADED/UNEXPECTED ⇒ pages (the #3887 incident's class)
+#  (e2e j) ESCALATE_ENABLED=0 ⇒ no send, no stamp
+#  (e2e k) a failed state write ⇒ NO escalation send (no notify without a record)
+#  (e2e l) a sustained DRILL pages but still never restarts
+#  (e2e m) the public body/log never carry the recipient id
+#  (e2e n) a stale confirmed escalation ⇒ a REMINDER page
+#  (e2e o) ESCALATION_CHAT_ID really is a separate, working recipient
+# ════════════════════════════════════════════════════════════════════════════
+
+# Unit-call decide_escalation() through the script's own LIB_ONLY seam. The
+# function reads persisted STATE_* only, so a unit call drives every branch with
+# no probe, no issue and no network.
+esc_unit() { # <first_failure_ts> <down_runs> <escalate_ts> <escalate_state> <page_ok_ts> <now>
+  WATCHDOG_LIB_ONLY=1 bash -c '
+    source "$0"
+    normalize_escalation_knobs 10 2
+    STATE_FIRST_FAILURE_TS="$1"; STATE_DOWN_RUNS="$2"; STATE_ESCALATE_TS="$3"
+    STATE_ESCALATE_STATE="$4"; STATE_PAGE_OK_TS="$5"
+    decide_escalation "$6"
+  ' "$WATCHDOG" "$1" "$2" "$3" "$4" "$5" "$6"
+}
+
+# Unit-call parse_state() and print the escalation triple it derived.
+parse_esc() { # <body> -> "escalate_ts|escalate_state|page_ok_ts"
+  WATCHDOG_LIB_ONLY=1 bash -c '
+    source "$0"
+    parse_state "$1"
+    printf "%s|%s|%s" "$STATE_ESCALATE_TS" "$STATE_ESCALATE_STATE" "$STATE_PAGE_OK_TS"
+  ' "$WATCHDOG" "$1"
+}
+
+# Unit-call the knob normalizer with an arbitrary sustained pair.
+knobs_unit() { # <s_min> <s_runs> -> "minutes/runs"
+  WATCHDOG_LIB_ONLY=1 bash -c '
+    source "$0"
+    normalize_escalation_knobs "$1" "$2"
+    printf "%s/%s" "$ESCALATE_SUSTAINED_MINUTES" "$ESCALATE_MIN_RUNS"
+  ' "$WATCHDOG" "$1" "$2"
+}
+
+block_unit()  { WATCHDOG_LIB_ONLY=1 bash -c 'source "$0"; state_block down' "$WATCHDOG"; }
+fields_unit() { WATCHDOG_LIB_ONLY=1 bash -c 'source "$0"; printf "%s" "$STATE_FIELDS"' "$WATCHDOG"; }
+
+# ── unit: decide_escalation, every outcome ─────────────────────────────────
+assert_eq "$(esc_unit "$((NOW - 60))" 5 0 "" 0 "$NOW")" "wait_sustained" "esc: 1 min of failure → wait_sustained (a single tick cannot page)"
+assert_eq "$(esc_unit "$((NOW - 300))" 5 0 "" 0 "$NOW")" "wait_sustained" "esc: 5 min → wait_sustained (the wall-clock leg alone does not page)"
+assert_eq "$(esc_unit "$((NOW - 1900))" 2 0 "" 0 "$NOW")" "wait_runs" "esc: ≥30 min but only 2 observed runs → wait_runs (the run leg is required too)"
+assert_eq "$(esc_unit "$((NOW - 1900))" 3 0 "" 0 "$NOW")" "page" "esc: 30 min AND 3 runs → page (both legs satisfied)"
+assert_eq "$(esc_unit "$((NOW - 7200))" 20 0 "" 0 "$NOW")" "page" "esc: a long incident → page"
+assert_eq "$(esc_unit "$((NOW - 7200))" 20 0 "" "$((NOW - 300))" "$NOW")" "wait_page_quiet" "esc: a CONFIRMED human page 5 min ago → wait_page_quiet (no double page)"
+assert_eq "$(esc_unit "$((NOW - 7200))" 20 "$((NOW - 300))" sent 0 "$NOW")" "wait_reminder" "esc: this leg paged 5 min ago → wait_reminder"
+assert_eq "$(esc_unit "$((NOW - 9000))" 20 "$((NOW - 7200))" sent 0 "$NOW")" "remind" "esc: this leg paged 2 h ago → remind"
+assert_eq "$(esc_unit "$((NOW - 9000))" 20 "$((NOW - 7200))" sent "$((NOW - 100))" "$NOW")" "wait_page_quiet" "esc: a more recent confirmed page wins over the reminder window"
+assert_eq "$(ESCALATE_ENABLED=0 esc_unit "$((NOW - 7200))" 20 0 "" 0 "$NOW")" "off" "esc: ESCALATE_ENABLED=0 → off (operator kill switch)"
+assert_eq "$(ESCALATE_SUSTAINED_MINUTES=60 esc_unit "$((NOW - 1900))" 20 0 "" 0 "$NOW")" "wait_sustained" "esc: an explicit longer wall-clock threshold is honoured"
+assert_eq "$(ESCALATE_MIN_RUNS=5 esc_unit "$((NOW - 7200))" 3 0 "" 0 "$NOW")" "wait_runs" "esc: an explicit higher run threshold is honoured"
+# Both legs are REQUIRED — a burst of queued runs cannot fake the wall clock.
+assert_eq "$(esc_unit "$((NOW - 600))" 99 0 "" 0 "$NOW")" "wait_sustained" "esc: 99 runs in 10 min → STILL wait_sustained (runs alone cannot page)"
+
+# ── unit: the thresholds derive from the restart gate and clamp UP ──────────
+assert_eq "$(knobs_unit 10 2)" "30/3" "knobs: derived defaults 30 min / 3 runs at the wired sustained pair"
+assert_eq "$(knobs_unit 20 4)" "60/5" "knobs: the defaults SCALE with the sustained pair (one declared relation, not two literals)"
+assert_eq "$(ESCALATE_SUSTAINED_MINUTES=1 ESCALATE_MIN_RUNS=1 knobs_unit 10 2)" "10/2" "knobs: an explicit escalation threshold BELOW the restart gate is clamped UP (a human must never page before the automated action)"
+assert_eq "$(ESCALATE_SUSTAINED_MINUTES=99 ESCALATE_MIN_RUNS=9 knobs_unit 10 2)" "99/9" "knobs: an explicit LOOSER threshold is honoured (clamping only ever tightens)"
+assert_eq "$(ESCALATE_ENABLED=banana knobs_unit 10 2)" "30/3" "knobs: a non-boolean kill switch fails CLOSED toward paging"
+
+# ── unit: parse_state gates the stamp on its OUTCOME ───────────────────────
+assert_eq "$(parse_esc "<!-- watchdog-state kind=down first_failure_ts=$((NOW - 7200)) down_runs=20 escalate_state=sent escalate_ts=$((NOW - 600)) page_ok_ts=$((NOW - 300)) restarts= -->")" \
+  "$((NOW - 600))|sent|$((NOW - 300))" "parse: a CONFIRMED escalation is trusted, and page_ok_ts round-trips"
+assert_eq "$(parse_esc "<!-- watchdog-state kind=down first_failure_ts=$((NOW - 7200)) down_runs=20 escalate_state=pending escalate_ts=$((NOW - 600)) restarts= -->")" \
+  "0|pending|0" "parse: 'pending' (a run died before recording the outcome) ⇒ the stamp is NOT trusted ⇒ retried"
+assert_eq "$(parse_esc "<!-- watchdog-state kind=down first_failure_ts=$((NOW - 7200)) down_runs=20 escalate_state=failed escalate_ts=0 restarts= -->")" \
+  "0|failed|0" "parse: 'failed' ⇒ not trusted ⇒ retried next run"
+assert_eq "$(parse_esc "<!-- watchdog-state kind=down first_failure_ts=$((NOW - 7200)) down_runs=20 escalate_ts=$((NOW - 600)) restarts= -->")" \
+  "0||0" "parse: a stamp with NO recorded outcome ⇒ not trusted (fail loud, never silent)"
+assert_eq "$(parse_esc "<!-- watchdog-state kind=down first_failure_ts=$((NOW - 7200)) down_runs=20 escalate_state=sent escalate_ts=$((NOW + 86400)) page_ok_ts=$((NOW + 86400)) restarts= -->")" \
+  "0|sent|0" "parse: BOTH future stamps are clamped to 0 — a value that cannot be true never mutes the pager"
+assert_eq "$(parse_esc "<!-- watchdog-state kind=down first_failure_ts=$((NOW - 7200)) down_runs=20 escalate_state=suppress escalate_ts=$((NOW - 600)) restarts= -->")" \
+  "0||0" "parse: an unrecognised escalate_state is whitelisted AWAY (never an instruction)"
+assert_eq "$(parse_esc "<!-- watchdog-state kind=down first_failure_ts=invalid down_runs=20 restarts= -->")" "0||0" "parse: a body with no escalation fields at all ⇒ all zero (legacy bodies)"
+
+# ── unit: the state block's field list has a SINGLE declaration ────────────
+BLOCK="$(block_unit)"
+FIELDS="$(fields_unit)"
+assert_not_empty "$FIELDS" "parity: STATE_FIELDS is declared (a derived empty value would make every assertion vacuous)"
+for f in $FIELDS; do
+  assert_contains "$BLOCK" "$f=" "parity: state_block renders the declared field '$f'"
+done
+for tok in $(printf '%s' "$BLOCK" | tr ' ' '\n' | sed -n 's/^\([a-z_]*\)=.*/\1/p'); do
+  case " $FIELDS " in
+    *" $tok "*) ok "parity: rendered field '$tok' is declared in STATE_FIELDS" ;;
+    *) bad "parity: state_block renders '$tok', which STATE_FIELDS does NOT declare (the field list has drifted)" ;;
+  esac
+done
+# ORDER: `restarts` captures the remaining [^>]* tail, so it MUST be last — a
+# reorder would make it swallow the following fields, and the strict ledger
+# parser would then fail closed forever.
+assert_eq "$(printf '%s' "$BLOCK" | tr ' ' '\n' | sed -n 's/^\([a-z_]*\)=.*/\1/p' | tail -1)" "restarts" \
+  "parity: 'restarts' is the LAST rendered field (its parser captures the [^>]* tail)"
+# The DOCUMENTED declaration must not be the stale kind that already drifted.
+RUNBOOK="$SCRIPT_DIR/../../docs/infra-runbook.md"
+RUNBOOK_BLOCK="$(grep -m1 'watchdog-state kind=' "$RUNBOOK" || true)"
+assert_not_empty "$RUNBOOK_BLOCK" "doc parity: the runbook has a state-block line to check"
+for f in $FIELDS; do
+  assert_contains "$RUNBOOK_BLOCK" "$f=" "doc parity: the runbook's state-block line names '$f' (stale prose is how the last drift happened)"
+done
+
+# ── e2e(a): a single failing run must NOT produce a sustained page ──────────
+reset_case
+export STUB_PROBE_CODES="404"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+run_watchdog
+assert_contains "$OUT" "escalation outcome: wait_sustained" "e2e(a): one failing tick → wait_sustained (the leg is evaluated and says so)"
+assert_eq "$(count_calls 'CURL telegram')" "1" "e2e(a): only the ONE transition page fires (the sustained leg does not)"
+
+# ── e2e(b): 30 min + 3 observed runs ⇒ exactly ONE sustained page ──────────
+reset_case
+seed_issue down "$((NOW - 1800))" 3 0 ""
+export STUB_PROBE_CODES="000"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+run_watchdog
+assert_eq "$RC" "1" "e2e(b): a sustained incident still fails the run"
+assert_contains "$OUT" "escalation outcome: page" "e2e(b): the leg decides to page"
+assert_eq "$(count_calls 'CURL telegram')" "1" "e2e(b): EXACTLY ONE page for a sustained incident"
+assert_contains "$(grep 'CURL telegram' "$STUB_TMP/calls.log")" "HUMAN NEEDED" "e2e(b): the page says a human is needed"
+assert_contains "$(patched_body)" "escalate_state=sent" "e2e(b): the delivery is recorded durably as CONFIRMED"
+assert_contains "$(patched_body)" "page_ok_ts=$NOW" "e2e(b): the confirmed-page stamp is persisted"
+assert_contains "$(patched_body)" "### Escalation" "e2e(b): the body carries an Escalation section for the operator"
+assert_contains "$(patched_body)" "A human was paged" "e2e(b): the section reports that a human WAS reached"
+
+# ── e2e(c): no repeat inside the reminder window ───────────────────────────
+reset_case
+printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 7200)) down_runs=20 last_down_ts=$((NOW - 60)) last_comment_ts=0 cap_notified_ts=0 escalate_state=sent escalate_ts=$((NOW - 600)) page_ok_ts=0 restarts= -->\"}" > "$STUB_TMP/issue.json"
+export STUB_SEARCH_MARKER='PROD%20DOWN'
+export STUB_SEARCH_JSON="$(search_json 42)"
+export STUB_PROBE_CODES="000"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+run_watchdog
+assert_contains "$OUT" "escalation outcome: wait_reminder" "e2e(c): inside the window the leg says wait_reminder"
+assert_eq "$(count_calls 'CURL telegram')" "0" "e2e(c): NO page inside the reminder window"
+
+# ── e2e(n): a STALE confirmed escalation ⇒ a REMINDER ──────────────────────
+reset_case
+printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 25000)) down_runs=40 last_down_ts=$((NOW - 60)) last_comment_ts=0 cap_notified_ts=0 escalate_state=sent escalate_ts=$((NOW - 7200)) page_ok_ts=$((NOW - 7200)) restarts= -->\"}" > "$STUB_TMP/issue.json"
+export STUB_SEARCH_MARKER='PROD%20DOWN'
+export STUB_SEARCH_JSON="$(search_json 42)"
+export STUB_PROBE_CODES="000"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+run_watchdog
+assert_contains "$OUT" "escalation outcome: remind" "e2e(n): 2 h after the last confirmed page the leg REMINDS"
+assert_eq "$(count_calls 'CURL telegram')" "1" "e2e(n): the reminder is exactly ONE page (11 h of incident is not 11 h of pages)"
+assert_contains "$(grep 'CURL telegram' "$STUB_TMP/calls.log")" "STILL RUNNING" "e2e(n): the reminder says STILL RUNNING, not a fresh escalation"
+
+# ── e2e(i): sustained DEGRADED / UNEXPECTED pages — the #3887 incident's class
+reset_case
+seed_issue degraded "$((NOW - 1800))" 3 0 ""
+export STUB_PROBE_CODES="404"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+run_watchdog
+assert_eq "$RC" "1" "e2e(i): a sustained UNEXPECTED run still fails (never green while answered-wrongly)"
+assert_contains "$OUT" "escalation outcome: page" "e2e(i): the answered-wrongly class DOES reach the escalation leg"
+assert_eq "$(count_calls 'CURL telegram')" "1" "e2e(i): sustained DEGRADED → paged (the class that had NO coverage)"
+assert_eq "$(count_calls 'FLYCTL machine restart')" "0" "e2e(i): …and it still never restarts (a restart cannot fix answered-wrongly)"
+
+# ── e2e(d): channel UNCONFIGURED ⇒ no delivery stamp, durable failure, loud ─
+reset_case
+seed_issue down "$((NOW - 1800))" 3 0 ""
+export STUB_PROBE_CODES="000"
+unset TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID ESCALATION_CHAT_ID || true
+run_watchdog
+assert_eq "$RC" "1" "e2e(d): an unconfigured channel still fails the run"
+assert_contains "$OUT" "escalation outcome: page" "e2e(d): the leg DID decide to page (the failure is the channel, not the decision)"
+assert_contains "$OUT" "escalation REQUIRED and NOT DELIVERED" "e2e(d): the run names the undelivered escalation (never 'all clear')"
+assert_not_contains "$(patched_body)" "escalate_state=sent" "e2e(d): an undelivered page is NEVER recorded as sent"
+assert_contains "$(patched_body)" "escalate_state=failed" "e2e(d): the failure is DURABLE in the body"
+assert_contains "$(patched_body)" "NOT DELIVERED" "e2e(d): the body tells the operator a human was NOT reached"
+assert_eq "$(count_calls 'CURL telegram')" "0" "e2e(d): with no credentials there is no call to make"
+# Pin the ANNOTATION LEVEL, not just the wording: `fail` (::error::) is what makes
+# a broken pager a FAILED RUN. A `warn` here would leave the message in the log
+# while the run's only failure was the verdict — i.e. fail-SILENT, which is the
+# one outcome requirement 5 forbids.
+assert_contains "$OUT" "ERROR: ⛔ sustained-incident escalation REQUIRED and NOT DELIVERED" "e2e(d): the undelivered page is a run FAILURE, not a warning"
+
+# ── e2e(e): HTTP 200 with {"ok":false} is NOT delivery ─────────────────────
+reset_case
+seed_issue down "$((NOW - 1800))" 3 0 ""
+export STUB_PROBE_CODES="000"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+export STUB_TELEGRAM_OK=0
+export STUB_TELEGRAM_DESC="Bad Request: chat not found"
+run_watchdog
+assert_contains "$OUT" "REJECTED by the API" "e2e(e): a 2xx with ok:false is surfaced, not swallowed"
+assert_contains "$OUT" "escalation REQUIRED and NOT DELIVERED" "e2e(e): …and it is treated as an UNDELIVERED escalation"
+assert_contains "$(patched_body)" "escalate_state=failed" "e2e(e): an API-rejected page is never stamped as delivered"
+assert_not_contains "$OUT" "tg-token" "e2e(e): the bot token never appears in the PUBLIC run log"
+
+# ── e2e(e2): a TRANSPORT failure — curl echoes the token-bearing URL ───────
+# (`curl: (6) Could not resolve host: https://api.telegram.org/bot<TOKEN>/…`).
+# This is the only path that puts the token into the log's TEXT, so it is what
+# makes the redaction assertion non-vacuous.
+reset_case
+seed_issue down "$((NOW - 1800))" 3 0 ""
+export STUB_PROBE_CODES="000"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+export STUB_TELEGRAM_FAIL=1
+run_watchdog
+assert_contains "$OUT" "escalation REQUIRED and NOT DELIVERED" "e2e(e2): a transport failure is an undelivered escalation"
+assert_contains "$OUT" "ERROR: ⛔ sustained-incident escalation REQUIRED" "e2e(e2): …reported at ERROR level (a broken pager must fail the run)"
+assert_not_contains "$OUT" "tg-token" "e2e(e2): curl's echoed URL is scrubbed — the PUBLIC log carries no bot token"
+assert_contains "$OUT" "<redacted>" "e2e(e2): …the redaction placeholder is there instead"
+assert_not_contains "$(patched_body)" "escalate_state=sent" "e2e(e2): a transport failure is never recorded as sent"
+assert_contains "$(patched_body)" "escalate_state=failed" "e2e(e2): …it is recorded as failed for the next run"
+
+# ── e2e(f): a FUTURE escalate_ts is clamped ⇒ the leg still pages ──────────
+reset_case
+printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 1800)) down_runs=3 last_down_ts=$((NOW - 60)) last_comment_ts=0 cap_notified_ts=0 escalate_state=sent escalate_ts=$((NOW + 86400)) page_ok_ts=$((NOW + 86400)) restarts= -->\"}" > "$STUB_TMP/issue.json"
+export STUB_SEARCH_MARKER='PROD%20DOWN'
+export STUB_SEARCH_JSON="$(search_json 42)"
+export STUB_PROBE_CODES="000"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+run_watchdog
+assert_eq "$(count_calls 'CURL telegram')" "1" "e2e(f): a future stamp cannot mute the pager — the escalation still fires"
+
+# ── e2e(g): a page in the SAME run ⇒ no second page ────────────────────────
+reset_case
+printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 7200)) down_runs=20 last_down_ts=$((NOW - 60)) last_comment_ts=0 cap_notified_ts=$((NOW + 86400)) restarts=$((NOW - 1500)),$((NOW - 1300)) -->\"}" > "$STUB_TMP/issue.json"
+export STUB_SEARCH_MARKER='PROD%20DOWN'
+export STUB_SEARCH_JSON="$(search_json 42)"
+export STUB_PROBE_CODES="000"
+export FLY_API_TOKEN="fly-token"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+run_watchdog
+assert_contains "$OUT" "escalation outcome: suppressed" "e2e(g): a confirmed page earlier in the SAME run suppresses the leg"
+assert_contains "$(patched_body)" "page_ok_ts=$NOW" "e2e(g): a cap page's CONFIRMED delivery stamps page_ok_ts — the cross-mechanism bound's DURABLE memory (without this the bound dies with the run)"
+assert_eq "$(count_calls 'CURL telegram')" "1" "e2e(g): exactly ONE page for the incident in this run (the cap escalation's)"
+assert_eq "$(count_calls 'FLYCTL machine restart')" "0" "e2e(g): …and the cap still blocks the restart"
+
+# ── e2e(h): a confirmed page 10 min AGO ⇒ no second page ───────────────────
+reset_case
+printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 7200)) down_runs=20 last_down_ts=$((NOW - 60)) last_comment_ts=0 cap_notified_ts=0 page_ok_ts=$((NOW - 600)) restarts= -->\"}" > "$STUB_TMP/issue.json"
+export STUB_SEARCH_MARKER='PROD%20DOWN'
+export STUB_SEARCH_JSON="$(search_json 42)"
+export STUB_PROBE_CODES="000"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+run_watchdog
+assert_contains "$OUT" "escalation outcome: wait_page_quiet" "e2e(h): a confirmed page 10 min ago quiets the leg"
+assert_eq "$(count_calls 'CURL telegram')" "0" "e2e(h): NO second page across mechanisms inside the window"
+
+# ── e2e(j): ESCALATE_ENABLED=0 is an operator KILL SWITCH ──────────────────
+reset_case
+seed_issue down "$((NOW - 1800))" 3 0 ""
+export STUB_PROBE_CODES="000"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+export ESCALATE_ENABLED=0
+run_watchdog
+assert_contains "$OUT" "escalation outcome: off" "e2e(j): ESCALATE_ENABLED=0 → off"
+assert_eq "$(count_calls 'CURL telegram')" "0" "e2e(j): a kill switch sends nothing"
+assert_contains "$(patched_body)" "DISABLED" "e2e(j): …and the body says the escalation is deliberately disabled (not 'clear')"
+
+# ── e2e(k): no notification without a durable record ───────────────────────
+reset_case
+seed_issue down "$((NOW - 1800))" 3 0 ""
+export STUB_PROBE_CODES="000"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+export STUB_PATCH_FAIL=1
+run_watchdog
+assert_eq "$RC" "1" "e2e(k): a failed state write fails the run"
+assert_eq "$(count_calls 'CURL telegram')" "0" "e2e(k): …and NO escalation page is sent (the durable record gates the side effect)"
+
+# ── e2e(l): a sustained DRILL pages but must never restart ─────────────────
+reset_case
+printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 1800)) down_runs=3 last_down_ts=$((NOW - 60)) last_comment_ts=0 cap_notified_ts=0 restarts= -->\"}" > "$STUB_TMP/issue.json"
+export STUB_SEARCH_MARKER='DRILL%20DOWN'
+export STUB_SEARCH_JSON="$(search_json 900 "$DRILL_DOWN_TITLE_FIXTURE")"
+export PROBE_URL="https://staging.example.test/v1/organizations"
+export STUB_PROBE_CODES="000"
+export FLY_API_TOKEN="fly-token"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+run_watchdog
+assert_eq "$(count_calls 'FLYCTL machine restart')" "0" "e2e(l): a sustained DRILL never restarts production"
+assert_contains "$OUT" "escalation outcome: page" "e2e(l): …but it DOES exercise the escalation leg (this is how the leg is drilled)"
+
+# ── e2e(m): the public body/log never carry the recipient id ───────────────
+reset_case
+seed_issue down "$((NOW - 1800))" 3 0 ""
+export STUB_PROBE_CODES="000"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="99887766"
+export ESCALATION_CHAT_ID="99887766"
+run_watchdog
+assert_not_contains "$(patched_body)" "99887766" "e2e(m): the public incident body never publishes the chat id"
+assert_not_contains "$OUT" "99887766" "e2e(m): the run log never publishes the chat id"
+assert_contains "$OUT" "recipient=telegram-default" "e2e(m): the log names the recipient KIND instead of the id (both ids identical here)"
+assert_contains "$(grep 'CURL telegram' "$STUB_TMP/calls.log")" "chat_id=99887766" "e2e(m): …while the request IS addressed to the configured chat"
+
+# ── e2e(o): ESCALATION_CHAT_ID is a separate, working recipient ────────────
+reset_case
+seed_issue down "$((NOW - 1800))" 3 0 ""
+export STUB_PROBE_CODES="000"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="11111"
+export ESCALATION_CHAT_ID="22222"
+run_watchdog
+assert_contains "$(grep 'CURL telegram' "$STUB_TMP/calls.log")" "chat_id=22222" "e2e(o): the sustained page goes to ESCALATION_CHAT_ID"
+assert_not_contains "$(grep 'CURL telegram' "$STUB_TMP/calls.log")" "chat_id=11111" "e2e(o): …and NOT to the transition chat"
+assert_contains "$OUT" "recipient=telegram-override" "e2e(o): the log records that an override recipient is in use (by KIND, never the id)"
+assert_not_contains "$OUT" "22222" "e2e(o): …and never the override id itself"
 
 echo
 if [ "$FAIL" -eq 0 ]; then

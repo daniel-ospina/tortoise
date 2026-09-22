@@ -1061,7 +1061,7 @@ table either way.
    observation time, the failing-run count, the raw probe evidence, and the
    self-healing state. Read it first; add human notes as **comments**.
 4. The **first** line of the body is a state block:
-   `<!-- watchdog-state kind=down first_failure_ts=… down_runs=… last_down_ts=… last_comment_ts=… cap_notified_ts=… restarts=… -->`.
+   `<!-- watchdog-state kind=down first_failure_ts=… down_runs=… last_down_ts=… last_comment_ts=… cap_notified_ts=… ledger_state=… ledger_src=… escalate_state=… escalate_ts=… page_ok_ts=… restarts=… -->`.
    It drives the cooldown/velocity limits — do not hand-edit it. `restarts=`
    records restart **attempts** (a failed attempt still counts). The sustained
    window is additionally clamped to the issue's GitHub-assigned `created_at`,
@@ -1159,11 +1159,63 @@ Three further safeguards worth knowing:
 | Secret | Needed for | If missing |
 |---|---|---|
 | `FLY_API_TOKEN` | the automated restart of the **Fly API** target — **not** the Pages auth step, which is hard-disarmed regardless | **Already exists** (used by `deploy-hosted.yml`). If absent, the restart leg is skipped, the log says so, and the incident **body** (plus any comment that is not throttled away) names the secret — **alerting still works** |
-| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | optional paging on transitions | Page skipped with a log line (reuses the DR driver's secrets). Both probe steps get them at STEP level |
+| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | transition paging (**optional**) **and** the sustained-incident escalation leg (**required once an incident is sustained**) | A transition page is skipped with a log line. A **sustained** incident's escalation is **fail-closed**: the run FAILS with `escalation REQUIRED and NOT DELIVERED`, nothing is stamped as delivered, and the incident body records `escalate_state=failed` — a broken pager is never rendered as “all clear”. Both probe steps get them at STEP level |
+| `ESCALATION_CHAT_ID` | **optional** override of the sustained-escalation recipient | Defaults to `TELEGRAM_CHAT_ID`, so point it at an on-call group without moving transition paging |
 
 `GITHUB_TOKEN` is supplied by Actions and needs `issues: write` (granted in the
 workflow). A missing `GH_TOKEN` fails the run before probing — a monitor that
 cannot file is a deaf monitor.
+
+### 7.5a The sustained-incident escalation leg (#3887)
+
+**Why it exists.** Before #3887 every page was **transition-based**: one page
+when an incident was filed, and the only post-run-1 pages lived INSIDE the
+restart leg (`cap` / `heal_failed` / `no_egress`). A sustained *answered-wrongly*
+(`UNEXPECTED`) incident — the class a restart correctly declines — therefore
+reached a human **once, then never again**. On 2026-09-16 `GET /v1/organizations`
+answered 404 for **11 h 19 m**; one issue was filed, one page went out, and the
+loss ended only when an unrelated deploy landed.
+
+**What it does now.** When an incident (either verdict) has been failing for
+`ESCALATE_SUSTAINED_MINUTES` **AND** for `ESCALATE_MIN_RUNS` observed failing
+runs — **both** required — the watchdog pages a human, then reminds at most once
+per `CAP_RENOTIFY_MINUTES` while it stays failing.
+
+| Knob | Derived default | Meaning |
+|---|---|---|
+| `ESCALATE_ENABLED` | `1` | `0` is an operator **kill switch**: no sustained page, no stamp, logged loudly and stated in the incident body (a kill, never an “all clear”) |
+| `ESCALATE_SUSTAINED_MINUTES` | `3 × SUSTAINED_DOWN_MINUTES` = **30** | Wall-clock floor. Derived from the (normalized) sustained pair, and **clamped UP** if set below it: the human page must never fire before the automated action it escalates |
+| `ESCALATE_MIN_RUNS` | `SUSTAINED_MIN_RUNS + 1` = **3** | Observed failing runs. One bad probe satisfies neither leg |
+| `CAP_RENOTIFY_MINUTES` (shared) | `60` | The minimum gap between **confirmed human pages** of any kind, so a cap page and an escalation page cannot double-page — and the reminder interval while an incident stays failing |
+
+**Cadence, deliberately.** The probe's cron *intent* is 5 minutes, but its
+**measured** delivery is ~96 runs/day — one run per ~**15 min** (see
+`.github/scripts/availability-record.sh`). Three consecutive runs is therefore
+~45 min, so the run leg binds at the measured cadence and the 30-minute floor
+binds at the nominal one: the first page lands **30–45 min** into an 11-hour
+incident. Over 11 h 19 m a recipient gets roughly **11–12** pages, not 135 — and
+the reminder is a **state**, not a per-run event.
+
+**Fail-closed delivery.** A page is recorded as delivered only when the
+HTTP request succeeded **and** Telegram's own `ok` field is `true` — the same
+contract `tortoise/telegram_push.py` enforces. A 2xx with `ok:false` (a bad chat
+id, a bot removed from the chat) is **not** delivery. On an undelivered
+escalation the watchdog stamps nothing as delivered, records
+`escalate_state=failed` in the body, fails the run naming the channel, and
+**retries on the next run** — a failed page delivers nothing, so retrying is not
+a page storm, and silence is the one outcome a pager must never produce.
+
+**Two deliberate non-adoptions**, both stated so a later reader does not
+tidy them away:
+
+- **OVERRIDES: PagerDuty's “acknowledgment pauses further notifications.”**
+  Not adopted: the incident body is on a **public** repo and this watchdog's own
+  threat model treats it as human-editable, so an ack field would be a
+  fail-**open** mute on the pager. A bounded reminder interval is used instead.
+- **No acknowledgment field, and no independent heartbeat yet.** A heartbeat /
+  dead-man's-switch for the pager's own liveness (the canonical fail-closed
+  construction) is a different failure surface and is tracked separately in
+  tortoise **#4573**.
 
 ### 7.6 When restarts do not help
 
@@ -1271,12 +1323,27 @@ surface.
   worst, not the whole surface.
 - **A *total* runner-side network failure is INCONCLUSIVE, not DOWN** (the
   `CONTROL_URL` check). Alerting still fires; no restart is issued. The
-  escalation page is throttled (at most once per `CAP_RENOTIFY_MINUTES`) and the
-  per-run record is the incident **body** plus the RED workflow run — so "no
-  page this run" does not mean "no alert". Note the control can only detect a
-  TOTAL egress failure: a failure affecting only the probe's own host (its DNS
-  zone, a Cloudflare/ASN block on the runner IP) leaves the control green and
-  still reads as DOWN.
+  escalation page is throttled (at most once per `CAP_RENOTIFY_MINUTES` of
+  **confirmed** delivery) and the per-run record is the incident **body** plus
+  the RED workflow run — so "no page this run" does not mean "no alert". Note
+  the control can only detect a TOTAL egress failure: a failure affecting only
+  the probe's own host (its DNS zone, a Cloudflare/ASN block on the runner IP)
+  leaves the control green and still reads as DOWN.
+- **A sustained incident whose STATE CANNOT BE WRITTEN gets no escalation page.**
+  The escalation leg's idempotency stamp lives in the incident body, so on a
+  path that deliberately refuses to rewrite that body — the corrupt-`restarts=`
+  refusal, which refuses because rewriting would erase the ledger it cannot
+  trust, plus the `search`/body-read/create/body-write failure exits — the leg
+  cannot run: without a durable stamp a send would repeat on every run. Those
+  paths already end in a loud `fail` (and, on a first occurrence, a body
+  explaining the refusal), and the corrupt-ledger message now says explicitly
+  that **no escalation page was sent and why**, so the gap is named rather than
+  silent. Independent liveness for the pager itself is tortoise **#4573**.
+- **This leg covers the PAGER, not the MONITOR.** If the workflow is disabled,
+  the schedule is dropped, or the job never reaches the failing path, no
+  escalation can fire and there is no run log to read — “the pager is dead” then
+  looks exactly like “all clear”. That is the dead-man's-switch surface, not
+  this one: tortoise **#4573**.
 - **The dedupe search is a loose `in:title` term match**, not an exact phrase,
   **and an adopted item must clear three checks**: the search is constrained to
   `author:app/github-actions`; the returned item's `user.login` must be the
