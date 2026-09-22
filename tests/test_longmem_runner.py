@@ -432,6 +432,12 @@ def test_outcomes_to_report_golden_shape():
         # checkpoints render; the golden outcome ran with the arm OFF).
         "coverage_loop": None,
         "coverage_loop_stats": None,
+        # C4 (#2517/#2568, #2513): the source-session re-injection arm
+        # marker + per-outcome census — o.get-based projection, None on
+        # golden outcomes (absent until the outcome carries them;
+        # pre-feature checkpoints render; the golden outcome ran OFF).
+        "session_reinjection": None,
+        "session_reinjection_stats": None,
         # C5 (#2521, #2513): the aggregative-check arm marker + verdict —
         # o.get-based projection, None on golden outcomes (absent until the
         # outcome carries them under the arm; pre-feature checkpoints

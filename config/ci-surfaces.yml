@@ -484,6 +484,7 @@ surfaces:
   # sibling bridge-table registration documents for its own generated document.
   - test_sdk_surface.py
   - test_capture_cost_measurement.py
+  - test_eval_reinjection_cap_resume.py
   - test_capture_entity_attachment_3664.py
   - test_ci_expected_manifests.py
   - test_ci_guard_invocation.py
@@ -498,6 +499,7 @@ surfaces:
   # (the outcome counter lives in `core`, which has no SOURCE_PATTERN).
   - test_analytics_fallback_alert.py
   - test_client_status_vocabulary.py
+  - test_cmux_dispatch.py
   - test_embedder_provision.py
   - test_embedded_evidence.py
   - test_installer_preserves_foreign_skill_content.py
@@ -842,6 +844,10 @@ surfaces:
   - test_retired_tools.py  # #3883: a retired MCP name resolves and WARNS (16 names retired, #3863)
   - test_coverage_loop.py  # #2567: evidence-completeness loop E2E (C3-1, docker-lane)
   - test_coverage_loop_rules.py  # #2567: evidence-completeness loop hermetic rules
+  - test_session_reinjection_rules.py  # #2517: source-session re-injection hermetic rules (C4)
+  - test_build_cohorts_2517.py  # #2517: cohort-builder selectors + digest refusal + provenance sidecar (hermetic)
+  - test_guard_measured_revision.py  # #2517: measured-revision guard — one test per declared bypass class (hermetic)
+  - test_session_reinjection.py  # #2517: source-session re-injection E2E (C4, docker-lane)
   - test_entity_key_expansion.py  # #2518: entity/fact-augmented key expansion (C2, docker-lane)
   - test_evidence_assembly.py      # #2683: Slice-A evidence-package assembly hermetic rules
   - test_ask_retrieval_budget.py  # #4105: ask-lane reader window — resolved/tandem caps + honest byte ceiling (hermetic)
@@ -1158,6 +1164,10 @@ surfaces:
   - test_reader_abstention_calibration.py
   - test_coverage_loop.py  # #2567 (docker-lane leg, mirrors test_retrieval.py)
   - test_coverage_loop_rules.py  # #2567 (hermetic rules leg)
+  - test_session_reinjection_rules.py  # #2517 (hermetic rules leg, mirrors test_retrieval.py)
+  - test_build_cohorts_2517.py  # #2517 (hermetic cohort-builder leg, mirrors test_retrieval.py)
+  - test_guard_measured_revision.py  # #2517 (hermetic guard leg: the declared bypass surface on synthetic fixtures, mirrors the eval lane)
+  - test_session_reinjection.py  # #2517 (docker-lane leg, mirrors test_retrieval.py)
   - test_entity_key_expansion.py  # #2518 (docker-lane leg, mirrors test_retrieval.py)
   - test_evidence_assembly.py      # #2683 (hermetic rules leg, mirrors test_retrieval.py)
   - test_env_truthy.py  # #4097: env-truthiness contract + guard (registered in api/core/sdk/eval/ep/onboarding; the migration oracle pins `retrieval.ask_env_bool` as a migrated site)
@@ -1241,6 +1251,14 @@ surfaces:
   - test_cross_lens.py
   - test_embeddings.py
   - test_embeddings_filters.py
+  # #2517 (C4): the source-session re-injection rules + E2E — dual-registered
+  # because a change to tools/longmem_eval/ selects `eval`, and the arm is
+  # wired there (the hermetic rules leg also passes in the eval lane).
+  - test_session_reinjection_rules.py
+  - test_session_reinjection.py
+  - test_eval_reinjection_cap_resume.py  # #2513 (C4 cap/resume): pins the run.py fingerprint cap threading — eval-owned source, so dual-registered like test_eval_extraction_health.py
+  - test_build_cohorts_2517.py
+  - test_guard_measured_revision.py
   - test_embedder_probe.py
   - test_eval_extraction_health.py
   - test_labeled_pairs_schema.py
@@ -2053,4 +2071,27 @@ durations:
   test_website_static.py: 0.0
   test_weights.py: 0.0
   test_weights_mitigation.py: 0.0
+  # #2517 (C4 source-session re-injection): the five files this branch adds to
+  # the fast pool. Without an entry the coverage floor trips once the branch is
+  # merged onto a current main (61/579 unmeasured = 89.5%, FAIL).
+  #
+  # They are registered at 0.0 — the MINIMUM weight — deliberately. Their true
+  # per-file junit `testcase/@time` sums (from this branch's own FULL-MATRIX CI
+  # run 35571363631, head 070a503ce, whose pytest-log-test-a/-b artifacts carry
+  # a real docker-lane measurement for all five) are 0.061 / 0.534 / 3.405 /
+  # 2.864 / 0.802 s. Any weight that expresses that cost re-packs
+  # split_fast_gate's ~580-file LPT split and re-orders the fast halves, which
+  # was observed to expose order-dependent test-isolation failures in unrelated
+  # tests (filed from this land). At 0.0 the pack processes these files LAST and
+  # the existing files' half assignment is unchanged; the balance cost is <=7s
+  # of a ~4100s split (<0.2%). The true costs are kept here for the next
+  # refresh. An earlier revision used a 42.1s LOCAL sample for
+  # test_session_reinjection.py (14.7x the 2.864s CI figure); that tipped every
+  # bench/ file into half_a and failed
+  # test_push_legs_partitions_every_classified_file.
+  test_build_cohorts_2517.py: 0.0         # true CI junit sum 0.061 (11 tests)
+  test_eval_reinjection_cap_resume.py: 0.0  # true CI junit sum 0.534 (1 test)
+  test_guard_measured_revision.py: 0.0    # true CI junit sum 3.405 (58 tests)
+  test_session_reinjection.py: 0.0        # true CI junit sum 2.864 (20 tests)
+  test_session_reinjection_rules.py: 0.0  # true CI junit sum 0.802 (38 tests)
   test_backups_v1_alias.py: 0.01
