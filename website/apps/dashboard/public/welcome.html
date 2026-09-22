@@ -9,11 +9,13 @@
   <meta name="robots" content="noindex,nofollow">
   <link rel="icon" type="image/png" href="/logo.png">
   <!-- #3501: the client-side hard gate is REMOVED.
-       No BFF page loads the session bridge, so `readValidSession()` on this page
-       had nothing to read and the gate bounced on EVERY SUCCESSFUL LOGIN — an
-       unconditional redirect back to /auth. That is precisely the #3485 loop.
-       (The legacy `sb-tortoise-auth-token` cookie the MCP consent page writes is
-       still live on other surfaces — see docs/auth-architecture.md §2.1.)
+       `readValidSession()` reads the legacy parent-domain `sb-tortoise-auth-token`
+       cookie, which a BFF login never writes (the BFF session is the HttpOnly
+       `__Host-session`), so it returned null for a BFF login and the gate bounced on
+       EVERY SUCCESSFUL LOGIN — an unconditional redirect back to /auth. That is
+       precisely the #3485 loop. Removing the bridge and the gate together fixed it.
+       (The legacy cookie is still live on other surfaces — see
+       docs/auth-architecture.md §2.1.)
        /welcome is now decided SERVER-SIDE by functions/welcome.ts, which is the
        only place that can legitimately see the session: signed-in visitors are
        redirected to the app, signed-out visitors to /auth, and this page is
@@ -298,12 +300,11 @@
   </div>
 
   <!-- #3501: the client-side auth bridge is GONE.
-       No BFF page loads it, and the BFF session cookie is HttpOnly — so the bridge
-       could not see a session. The old bridge called
-       `window.createTortoiseSupabaseClient`, a factory defined in a script this
-       page never loaded, so every successful login fell into the "script
-       blocked" branch. That was the #3485 loop's sibling, reproduced here by
-       construction.
+       The page's session read resolved the legacy parent-domain
+       `sb-tortoise-auth-token` cookie, which a BFF login never writes (the BFF
+       session is the HttpOnly `__Host-session`) — so a signed-in visitor read as
+       signed OUT and was bounced to /auth. That was the #3485 loop's sibling,
+       reproduced here by construction.
        /welcome is now decided SERVER-SIDE (functions/welcome.ts): signed-in
        visitors are redirected straight to the app, signed-out visitors to /auth,
        and this page is served ONLY for ?reset=1 with a valid session. So the
@@ -323,8 +324,8 @@
       var inFlight = false;
 
       // The server serves this page only for ?reset=1 with a valid session, and
-      // the BFF session cookie is HttpOnly — so this page cannot detect a session
-      // itself. The panel is shown unconditionally rather than "detected".
+      // the BFF session cookie is HttpOnly — so this page cannot detect the BFF
+      // session itself. The panel is shown unconditionally rather than "detected".
       if (loading) loading.classList.add("hidden");
       if (errorState) errorState.classList.add("hidden");
       if (panel) panel.classList.remove("hidden");

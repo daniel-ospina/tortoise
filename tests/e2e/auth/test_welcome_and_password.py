@@ -4,9 +4,10 @@
 WHY THESE EXIST
 ---------------
 `welcome.html` used to decide in the browser whether a visitor was signed in, via
-a hard gate calling `readValidSession()`. Under the BFF there is no JS-readable
-session, so that returned null on EVERY load and bounced signed-in users to /auth
-— the #3485 loop, reproduced for every user.
+a hard gate calling `readValidSession()`. That function reads the legacy
+parent-domain `sb-tortoise-auth-token` cookie, which a BFF login never writes (the
+BFF session is the HttpOnly `__Host-session`), so it returned null for a BFF login
+and bounced signed-in users to /auth — the #3485 loop.
 
 The fix is that the server decides. These tests pin that decision, because the
 failure mode (a client that cannot see the session, bouncing anyway) is invisible
@@ -15,7 +16,8 @@ broken.
 
 They also pin the reset flow, which could not survive the migration untouched:
 the form used to call `supabaseClient.auth.updateUser()` from the browser, which
-can never work when the browser holds no session.
+can never work when the BFF session cookie is HttpOnly and the page has no
+client-readable credential of its own.
 """
 from __future__ import annotations
 

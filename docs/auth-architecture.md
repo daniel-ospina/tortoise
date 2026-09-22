@@ -61,7 +61,7 @@ the token regardless of which subdomain presented it.
 > parent-domain cookie described in the original 2026-08-19 note has been REMOVED: for that
 > session the browser holds only an HttpOnly `__Host-session` opaque handle issued by a
 > server-side BFF on the app origin, and the access/refresh tokens live in D1 (`SESSIONS`) and
-> never reach the browser. **One surface still runs the removed design:** the MCP consent page
+> never reach the browser. **The removed design is still being issued:** the MCP consent page
 > still issues a JS-readable parent-domain cookie, and two surfaces still accept it — the
 > blog-admin console (`/admin`, itself an app-origin BFF page) and the marketing-origin blog
 > Functions — so tokens DO reach the browser for a consent-page visitor (§2.1 "Legacy cohort",
@@ -72,7 +72,9 @@ the token regardless of which subdomain presented it.
 
 ### 2.1 The session
 
-- **Provider:** Supabase (GoTrue), JWT access + refresh tokens — held SERVER-side.
+- **Provider:** Supabase (GoTrue), JWT access + refresh tokens — held SERVER-side for the BFF
+  session. (A consent-page visitor's tokens are in the legacy cookie instead — see the
+  "Legacy cohort" bullet below.)
 - **Transport (current) — for the BFF session:** a server-side BFF on the app origin. For that
   session the browser receives only an opaque `__Host-session` (plus `__Host-authflow`) cookie:
   `HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=…`, with **no `Domain`
@@ -85,7 +87,7 @@ the token regardless of which subdomain presented it.
   TTL, not the refresh token's), and a cache of the access token (`access_token`,
   `access_token_expires_at`) plus a refresh-cooldown stamp (`token_rejected_at`) — the
   last three added by `_shared/auth/token.ts`, so a read path reuses the cached token
-  instead of calling GoTrue per request. The access token never leaves the server: it is
+  instead of calling GoTrue per request. The BFF's access token never leaves the server: it is
   minted/refreshed in-process by the Function and is never sent to the browser; the cookie
   is revocable immediately (the row is marked `revoked = 1`; nothing deletes it).
 - **OVERRIDES:** the standard cross-subdomain session — a `Domain=.premiselabs.co` cookie shared by
@@ -250,7 +252,8 @@ a database outage to the user as "you are signed out".
    consent page, XSS on ANY `premiselabs.co` subdomain can read a real Supabase
    session. Closing it needs both halves — stop issuing (**#3524**) and stop
    accepting (**#4178**). Note this is exactly the exposure §2.1's `OVERRIDES`
-   ruling exists to prevent, surviving on a surface the ruling did not cover.
+   ruling exists to prevent, surviving on a surface the ruling covers but which is not
+   yet fixed.
 2. **The dashboard's post-mount `getSession()` can still refresh the token
    over the network** for genuine session holders near expiry — by design
    (keeps sessions alive). Since #1567 the app chrome renders immediately

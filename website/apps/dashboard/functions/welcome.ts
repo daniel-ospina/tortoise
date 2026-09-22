@@ -4,9 +4,11 @@
  * WHY THE SERVER DECIDES
  * ----------------------
  * `welcome.html` used to decide this in the browser, via a hard gate that called
- * `readValidSession()`. No BFF page loads that session bridge, so the function had
- * nothing to read and the gate redirected to /auth on every successful login — the
- * #3485 loop, reproduced by construction.
+ * `readValidSession()`. That function reads the legacy parent-domain
+ * `sb-tortoise-auth-token` cookie, which a BFF login never writes (the BFF session is
+ * the HttpOnly `__Host-session`), so it returned null for a BFF login and the gate
+ * redirected to /auth on every successful one — the #3485 loop, reproduced by
+ * construction. Removing the bridge and the gate together is what fixed it.
  *
  * The BFF session cookie is HttpOnly. The server is the only thing that can
  * legitimately answer "is this visitor signed in?" — so the answer is a status
