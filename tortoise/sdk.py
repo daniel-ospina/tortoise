@@ -3368,7 +3368,7 @@ class TortoiseSDK:
         (#3681's ``_observed_capture_harness``); this SDK path stores the
         caller-supplied ``harness`` (selfhost/embedded has no server
         credential lane to resolve it from). See the note at the
-        ``if harness:`` clause below):
+        ``if harness:`` clause below.
         turns become episodic Points keyed {session_id}_t{i} (deterministic +
         idempotent), the M2 LLM extractor (epic #909) turns the conversation
         into epistemic Points (+ IMPL/NAND operators — provenance-grounded,
