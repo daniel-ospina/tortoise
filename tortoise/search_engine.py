@@ -296,7 +296,11 @@ class EpBreakdown:
 # (``createdAt``) are additive and OFF by default: the search point fetch reads
 # those columns only when this flag is set, so a default call is byte-identical
 # (the #3986 freeze carve-out — a default-off response field is not a surface
-# change, but MUST still be recorded in the manifest's ``response_fields``).
+# change. NO RECORDING SURFACE EXISTS for it: ``config/surface-manifest.yml`` has
+# no ``response_fields`` key and ``tools/surface_manifest.py`` derives none, so
+# this carve-out is ASSERTED here, not recorded in the manifest. Recording it
+# would need both a manifest key and its derivation path — a change to the
+# artifact and to the ``cut``/``check`` pair that owns it).
 SEARCH_PROVENANCE_FLAG_ENV = "TORTOISE_SEARCH_PROVENANCE"
 
 
@@ -308,7 +312,8 @@ def search_provenance_enabled() -> bool:
     OFF. A second copy of the vocabulary here is exactly the drift #4097 exists
     to prevent (and is build-red in ``tests/test_env_truthy.py``).
 
-    ⛔ KNOWN LIMITATION — the flag is a NO-OP on the degraded fallback path.
+    ⛔ KNOWN LIMITATION — the flag is a NO-OP on the degraded fallback path AND
+    on every non-Point entity type.
     The two fallback tiers (``fallback_snapshot.search_snapshot`` and
     ``fallback_tfidf``) build their ``SearchResult``s and return from
     ``TortoiseSDK`` BEFORE the flag-gated point fetch runs, so they carry
@@ -318,8 +323,14 @@ def search_provenance_enabled() -> bool:
     (``fallback_snapshot._SNAPSHOT_QUERY`` — id/content/pointKind/status/
     outdated/search_keys/has_answer, no provenance columns) and adding those to
     it is a separate, policy-governed change to the corpus it caches. A
-    degraded run therefore gets no provenance enrichment; the flag enriches the
-    normal (non-degraded) query path only.
+    degraded run therefore gets no provenance enrichment. The enrichment is
+    also POINT-ONLY: the flag-gated fetch and the two columns it reads
+    (``n.extractedFrom`` / ``n.createdAt``) sit inside the project search's
+    ``if entity_type == "point":`` branch, while ``SearchResult`` is constructed
+    for every entity type — so a normal (non-degraded) ``document`` / ``event``
+    / ``subject`` search carries no ``source_ref``/``captured_at`` either, and
+    ``to_dict`` emits no ``provenance`` block. The flag enriches the
+    non-degraded POINT query path only.
     """
     return is_truthy(os.environ.get(SEARCH_PROVENANCE_FLAG_ENV))
 

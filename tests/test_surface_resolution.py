@@ -62,8 +62,10 @@ pending-decision record, not a suppression list.
 The reds below are of two KINDS and must not read alike. A GENUINE defect is an
 entry that used to resolve and stopped. The EXPECTED surface change of #4282 is
 the canonical redesign — 98 -> 25 MCP tools and 150 -> 40 SDK methods — which
-rewrites the 99-entry registry this instrument pins and legitimately leaves
-entries unresolved. The failure messages therefore append the #4282 rendezvous
+rewrites the registry this instrument pins (82 entries today; the 99-entry
+figure below is `_BASELINE_ENTRY_COUNT`, the PRE-#4282 size the shrink is
+measured from, not the registry as it stands) and legitimately leaves entries
+unresolved. The failure messages therefore append the #4282 rendezvous
 context ONLY when the run's shape matches the redesign, gated on the registry
 having SHRUNK by >= ``_RESHAPE_MIN_ENTRIES`` (a defect does not rewrite the
 registry), so no small-scale genuine regression can be pre-excused as "the
@@ -159,7 +161,7 @@ _TARGETS = [(entry, *_resolve(entry)) for entry in TOOL_REGISTRY]
 # note is therefore gated on SHAPE, and the gate is deliberately conservative:
 # it can only open when the registry itself has SHRUNK by >= _RESHAPE_MIN_ENTRIES
 # from its pinned pre-#4282 size. A defect does not rewrite the registry —
-# renaming one SDK method leaves all 99 entries declared — so no small-scale
+# renaming one SDK method leaves the entry count where it was — so no small-scale
 # genuine regression can ever pick up the note. Inside that gate the note
 # additionally requires the surface to be HOLLOWED (>= _HOLLOWED_MIN_DEAD entries
 # unresolved in absolute terms, or >= a quarter of whatever the registry now is,
@@ -168,7 +170,7 @@ _TARGETS = [(entry, *_resolve(entry)) for entry in TOOL_REGISTRY]
 #
 # Residuals, stated rather than hidden:
 #  * a STAGED redesign that rewrites tortoise/sdk.py before the registry still
-#    measures 99 entries, so it is indistinguishable from a mass rename and stays
+#    has the pinned size, so it is indistinguishable from a mass rename and stays
 #    a plain defect report — the intended direction of the error;
 #  * once the gate opens it opens for the WHOLE run, so a genuine regression
 #    running alongside the redesign also carries the note — which is why the note

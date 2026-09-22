@@ -252,3 +252,34 @@ def test_provenance_flag_on_still_carries_capture_time_for_unlinked_points(sdk, 
     assert "provenance" in hit
     assert "source" not in hit["provenance"]
     assert hit["provenance"]["captured_at"]
+
+
+def test_provenance_flag_is_point_only(sdk, monkeypatch):
+    """The flag enriches POINT searches only — the other documented boundary.
+
+    The flag-gated fetch and the two columns it reads live in the project
+    search's ``if entity_type == "point":`` branch (``tortoise/sdk.py``), while
+    ``SearchResult`` is constructed for every entity type.  So a non-degraded
+    ``document``/``event``/``subject`` search carries no ``source_ref`` /
+    ``captured_at`` and ``to_dict`` emits no ``provenance`` block, however the
+    flag is set.  This is the second HALF of the boundary documented on
+    ``search_engine.search_provenance_enabled``; the degraded-fallback half is
+    the other.  Both directions are asserted, so the test cannot pass vacuously
+    on an empty result set.
+    """
+    monkeypatch.setenv("TORTOISE_SEARCH_PROVENANCE", "1")
+    p = sdk.create_point("statement", "beta ships in October",
+                         extractedFrom="https://example.com/beta-plan")
+    doc = sdk.create_document("Beta plan", "memo", content="beta memo body")
+
+    point_hits = sdk.tortoise_fts_query(query=None, kind="statement",
+                                        entity_type="point", limit=10)
+    point_hit = next(r for r in point_hits if r["id"] == p["id"])
+    assert "provenance" in point_hit, "the point leg must be enriched (non-vacuous)"
+
+    doc_hits = sdk.tortoise_fts_query(query=None, kind="memo",
+                                      entity_type="document", limit=10)
+    doc_hit = next(r for r in doc_hits if r["id"] == doc["id"])
+    assert "provenance" not in doc_hit, (
+        "a non-Point hit gained a provenance block — the flag is documented as "
+        "point-only; update the boundary note with the change")

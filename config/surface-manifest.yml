@@ -1,6 +1,6 @@
 manifest_version: 1
 issue: 3863
-cut_at_commit: 1e5a7f724
+cut_at_commit: 6a40d70b9f5d9331e55bd07104335942207b6d1b
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -261,10 +261,7 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  # PR #4173 changed the implementation served as `tortoise_recall`: the #3926
-  # typed-error guard refactor moved its fingerprint 32a22d4162be59b6 -> d625dc916f15d980.
-  # No tool was added, removed or renamed; landing PR #4173 is the approving act.
-  approval: '#4173 @daniel-ospina'
+  approval: null
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_search
@@ -314,10 +311,7 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  # PR #4173 changed the implementation served as `tortoise_suggest_entry_points`: the #3926
-  # typed-error guard refactor moved its fingerprint 4fc2d2c7d48e54e5 -> 564fb24731914250.
-  # No tool was added, removed or renamed; landing PR #4173 is the approving act.
-  approval: '#4173 @daniel-ospina'
+  approval: null
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_index_files
@@ -370,11 +364,7 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  # PR #4173 (#3926 typed-error guard) and PR #3949 (#3784 fail-closed decision
-  # observation) both changed the implementation served as `tortoise_create_point`.
-  # The merged implementation carries BOTH, at 6ac682bb45fbc1ab; no tool was added,
-  # removed or renamed, so both recorded approvals stand.
-  approval: '#4173 @daniel-ospina, #3949 @daniel-ospina'
+  approval: null
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_calibrate_summary
@@ -522,10 +512,7 @@ rows:
   recommended_family: memory
   proposed: true
   exemption: false
-  # PR #4173 changed the implementation served as `tortoise_delete`: the #3926
-  # typed-error guard refactor moved its fingerprint bc9ed3ffe618b1f1 -> 92890c80d0ad8e5e.
-  # No tool was added, removed or renamed; landing PR #4173 is the approving act.
-  approval: '#4173 @daniel-ospina'
+  approval: null
   class: agent-reachable
   cluster_canonical: tortoise_delete
   cluster_note: group `delete` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
@@ -1551,11 +1538,7 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  # Genuine served-surface change (#4009): the ERR_QUOTA 402-mapping added by
-  # fced38374 (#3665), carried by PR #3780 — 03a29c8a37a39663 -> 20fc9c5db96c8fd3.
-  # A line shift is not a fingerprint change since #4170, so no line-only row exists.
-  # Re-carried verbatim by the #3883 re-cut, which resets per-row approval to null.
-  approval: '#3780 @daniel-ospina'
+  approval: null
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_graph_set_recording
@@ -2050,11 +2033,7 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  # PR #4173 (#3926 typed-error guard) and PR #3949 (#3784 fail-closed decision
-  # observation) both changed the implementation served as `tortoise_file_decision`.
-  # The merged implementation carries BOTH, at 1a8c8a757eb40d30; no tool was added,
-  # removed or renamed, so both recorded approvals stand.
-  approval: '#4173 @daniel-ospina, #3949 @daniel-ospina'
+  approval: null
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_file_human_approval
@@ -2313,7 +2292,7 @@ rows:
   job: Public SDK method TortoiseSDK.apikey_list.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
@@ -2357,7 +2336,7 @@ rows:
   job: Public SDK method TortoiseSDK.apikey_verify.
   dependency: 'reached by no registered MCP tool; caller categories: engine'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: engine'
   recommended_family: null
@@ -2445,7 +2424,7 @@ rows:
   job: Public SDK method TortoiseSDK.backfill_about_entities.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
@@ -2467,7 +2446,7 @@ rows:
   job: Public SDK method TortoiseSDK.backfill_sources.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
@@ -2511,7 +2490,7 @@ rows:
   job: Public SDK method TortoiseSDK.batch_create_points.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
@@ -2577,7 +2556,7 @@ rows:
   job: Public SDK method TortoiseSDK.calibration_passed.
   dependency: 'reached by no registered MCP tool; caller categories: engine'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: engine'
   recommended_family: null
@@ -2665,7 +2644,7 @@ rows:
   job: Public SDK method TortoiseSDK.cleanup_expired_invitations.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
@@ -2710,7 +2689,7 @@ rows:
   job: Public SDK method TortoiseSDK.commit_session.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
@@ -2732,7 +2711,7 @@ rows:
   job: Public SDK method TortoiseSDK.complete_source.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
@@ -2776,7 +2755,7 @@ rows:
   job: Public SDK method TortoiseSDK.compute_reputation.
   dependency: 'reached by no registered MCP tool; caller categories: engine'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: engine'
   recommended_family: null
@@ -2798,7 +2777,7 @@ rows:
   job: Public SDK method TortoiseSDK.create_derivation.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
@@ -2820,7 +2799,7 @@ rows:
   job: Public SDK method TortoiseSDK.create_direct_edge.
   dependency: 'reached by no registered MCP tool; caller categories: engine'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: engine'
   recommended_family: null
@@ -2974,7 +2953,7 @@ rows:
   job: Public SDK method TortoiseSDK.create_or_update_point.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
@@ -3128,7 +3107,7 @@ rows:
   job: Public SDK method TortoiseSDK.delete_point_wrapped.
   dependency: 'reached by 1 registered tool(s): tortoise_delete_point'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3216,7 +3195,7 @@ rows:
   job: Public SDK method TortoiseSDK.dream_health_check.
   dependency: 'reached by 1 registered tool(s): tortoise_dream_health'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3238,7 +3217,7 @@ rows:
   job: Public SDK method TortoiseSDK.dream_health_state.
   dependency: 'reached by no registered MCP tool; caller categories: engine'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: engine'
   recommended_family: null
@@ -3370,7 +3349,7 @@ rows:
   job: Public SDK method TortoiseSDK.get_cross_lens_candidates.
   dependency: 'reached by 1 registered tool(s): tortoise_find_cross_lens_candidates'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3436,7 +3415,7 @@ rows:
   job: Public SDK method TortoiseSDK.get_org_structure.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
@@ -3458,7 +3437,7 @@ rows:
   job: Public SDK method TortoiseSDK.get_owned_entities.
   dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_get_governance (retired)'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
@@ -3503,7 +3482,7 @@ rows:
   job: Public SDK method TortoiseSDK.get_provenance_chain.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
@@ -3569,7 +3548,7 @@ rows:
   job: Public SDK method TortoiseSDK.graph_active_key_count.
   dependency: 'reached by no registered MCP tool; caller categories: tenant-rest'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: tenant-rest'
   recommended_family: null
@@ -3591,7 +3570,7 @@ rows:
   job: Public SDK method TortoiseSDK.graph_count.
   dependency: 'reached by no registered MCP tool; caller categories: tenant-rest'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: tenant-rest'
   recommended_family: null
@@ -3635,7 +3614,7 @@ rows:
   job: Public SDK method TortoiseSDK.graph_key_ids.
   dependency: 'reached by no registered MCP tool; caller categories: tenant-rest'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: tenant-rest'
   recommended_family: null
@@ -3679,7 +3658,7 @@ rows:
   job: Public SDK method TortoiseSDK.graph_restore.
   dependency: 'reached by no registered MCP tool; caller categories: tenant-rest'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: tenant-rest'
   recommended_family: null
@@ -3701,7 +3680,7 @@ rows:
   job: Public SDK method TortoiseSDK.graph_set_name.
   dependency: 'reached by no registered MCP tool; caller categories: tenant-rest'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: tenant-rest'
   recommended_family: null
@@ -3745,7 +3724,7 @@ rows:
   job: Public SDK method TortoiseSDK.index_directory.
   dependency: 'reached by 1 registered tool(s): tortoise_index_files'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3855,7 +3834,7 @@ rows:
   job: Public SDK method TortoiseSDK.invalidate_point.
   dependency: 'reached by 1 registered tool(s): tortoise_invalidate'
   lifecycle: active
-  used_by: skill-docs, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -4031,7 +4010,7 @@ rows:
   job: Public SDK method TortoiseSDK.link_source_to_entity.
   dependency: 'reached by no registered MCP tool; caller categories: engine, tenant-rest'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: engine, tenant-rest'
   recommended_family: null
@@ -4119,7 +4098,7 @@ rows:
   job: Public SDK method TortoiseSDK.list_drafts.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
@@ -4207,7 +4186,7 @@ rows:
   job: Public SDK method TortoiseSDK.list_relations.
   dependency: 'reached by no registered MCP tool; caller categories: engine'
   lifecycle: active
-  used_by: skill-docs, docs
+  used_by: tooling, skill-docs, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: engine'
   recommended_family: null
@@ -4295,7 +4274,7 @@ rows:
   job: Public SDK method TortoiseSDK.membership_create.
   dependency: 'reached by no registered MCP tool; caller categories: engine, tenant-rest'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: engine, tenant-rest'
   recommended_family: null
@@ -4317,7 +4296,7 @@ rows:
   job: Public SDK method TortoiseSDK.membership_delete.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
@@ -4339,7 +4318,7 @@ rows:
   job: Public SDK method TortoiseSDK.membership_get.
   dependency: 'reached by no registered MCP tool; caller categories: engine'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: engine'
   recommended_family: null
@@ -4361,7 +4340,7 @@ rows:
   job: Public SDK method TortoiseSDK.membership_list.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
@@ -4383,7 +4362,7 @@ rows:
   job: Public SDK method TortoiseSDK.membership_update_role.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
@@ -4405,7 +4384,7 @@ rows:
   job: Public SDK method TortoiseSDK.migrate_orgs_to_registry.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
@@ -4427,7 +4406,7 @@ rows:
   job: Public SDK method TortoiseSDK.mine_corpus.
   dependency: 'reached by 1 registered tool(s): tortoise_mine_conversations'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -4515,7 +4494,7 @@ rows:
   job: Public SDK method TortoiseSDK.org_delete.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
@@ -4537,7 +4516,7 @@ rows:
   job: Public SDK method TortoiseSDK.org_get.
   dependency: 'reached by no registered MCP tool; caller categories: engine, tenant-rest'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: engine, tenant-rest'
   recommended_family: null
@@ -4559,7 +4538,7 @@ rows:
   job: Public SDK method TortoiseSDK.org_list.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
@@ -4581,7 +4560,7 @@ rows:
   job: Public SDK method TortoiseSDK.org_update.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
@@ -4669,7 +4648,7 @@ rows:
   job: Public SDK method TortoiseSDK.quarantine_batch.
   dependency: 'reached by no registered MCP tool; caller categories: engine'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: engine'
   recommended_family: null
@@ -4757,7 +4736,7 @@ rows:
   job: Public SDK method TortoiseSDK.recall_state.
   dependency: 'reached by 1 registered tool(s): tortoise_recall'
   lifecycle: active
-  used_by: eval-harness, docs
+  used_by: eval-harness, tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -4823,7 +4802,7 @@ rows:
   job: Public SDK method TortoiseSDK.record_calibration.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
@@ -4845,7 +4824,7 @@ rows:
   job: Public SDK method TortoiseSDK.resolve_id.
   dependency: 'reached by no registered MCP tool; caller categories: engine'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: engine'
   recommended_family: null
@@ -4867,7 +4846,7 @@ rows:
   job: Public SDK method TortoiseSDK.restore_point_at.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
@@ -4911,7 +4890,7 @@ rows:
   job: Public SDK method TortoiseSDK.retrieval_legs.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
-  used_by: eval-harness, docs
+  used_by: eval-harness, tooling, docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
@@ -5131,7 +5110,7 @@ rows:
   job: Public SDK method TortoiseSDK.stale_points.
   dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_stale (retired)'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
@@ -5307,7 +5286,7 @@ rows:
   job: Public SDK method TortoiseSDK.test_guard.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: eval-harness, tooling, docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
@@ -5329,7 +5308,7 @@ rows:
   job: Public SDK method TortoiseSDK.topic_summarize.
   dependency: 'reached by no registered MCP tool; caller categories: engine, tenant-rest'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: engine, tenant-rest'
   recommended_family: null
@@ -5373,7 +5352,7 @@ rows:
   job: Public SDK method TortoiseSDK.trash_graphs.
   dependency: 'reached by no registered MCP tool; caller categories: tenant-rest'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: tenant-rest'
   recommended_family: null
