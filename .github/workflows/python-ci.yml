@@ -873,8 +873,9 @@ jobs:
     # pool's total weight, so no 2-way split can bring the legs within the
     # 1.25x ratio — the minimum achievable max-leg is the file itself on its own
     # leg (855.2s), and b is within 87s of that. Both legs stay far under the
-    # 75m pytest watchdog / 90m job cap. Rebalancing the remainder is filed as a
-    # follow-up rather than folded in here.
+    # 75m pytest watchdog / 90m job cap. Rebalancing the remaining 26 files (a
+    # and b were already 2.9x apart BEFORE this move — 252.9s vs 87.3s, against
+    # the 2026-08-19 comment above) is filed as #4724 rather than folded in here.
     # Each leg keeps the 75m watchdog + 5-min heartbeat + guaranteed-summary
     # tail (#798/#964); the drift-guard step pins the union of both legs to
     # config/ci-surfaces.yml `slow_files:` MINUS the epic #1647 carve-out
