@@ -926,7 +926,7 @@ def _validate_filter_ops(filters: list[tuple[str, str, object]] | None) -> None:
     """Raise ValueError for a filter op the fake does not implement.
 
     The fake's unsupported-op guard covers every method that APPLIES filters —
-    GET (in its own inline loop below), PATCH and DELETE (via this function) —
+    GET (in its own inline loop in ``_query_impl``), PATCH and DELETE (via this function) —
     regardless of body, row count, or whether an earlier filter short-circuits
     the scan.
 
