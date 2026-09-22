@@ -465,6 +465,12 @@ function stampCount(relPath) {
         else if (name === null) count += 1
       }
     }
+    // A third stamp shape: `h["Content-Security-Policy"] = CONST`.
+    if (node.type === 'AssignmentExpression' && node.left?.type === 'MemberExpression') {
+      const name = cspHeaderName(node.left.property)
+      if (name === 'content-security-policy' && isCspValue(node.right)) count += 1
+      else if (name === null && node.left.computed) count += 1
+    }
   })
   return count
 }
@@ -615,6 +621,14 @@ function stampConstants(relPath) {
         // may not stamp a CSP, so assuming it does not is a fail-open guess.
         else if (name === null) names.push('(unreadable header name)')
       }
+    }
+    // A third stamp shape: `h["Content-Security-Policy"] = <value>`. Modelled
+    // because a browser INTERSECTS a second CSP, and an assignment is the shape a
+    // `Headers` object is most often populated with after construction.
+    if (node.type === 'AssignmentExpression' && node.left?.type === 'MemberExpression') {
+      const name = cspHeaderName(node.left.property)
+      if (name === 'content-security-policy') record(node.right)
+      else if (name === null && node.left.computed) names.push('(unreadable header name)')
     }
   })
   return names
@@ -842,33 +856,72 @@ function walk(dir) {
 }
 
 function functionFiles() {
-  return [DASHBOARD_FUNCTIONS, MARKETING_FUNCTIONS]
+  return functionsRoots()
     .flatMap((root) => walk(join(repoRoot, root)))
     .filter((f) => SOURCE_EXTENSIONS.some((ext) => f.endsWith(`.${ext}`)))
     .map((f) => relative(repoRoot, f))
 }
 
 /**
- * Every `Content-Type` value in a file that is NOT a string literal — a variable,
- * a concatenation, a forwarded upstream value. Such a value cannot be classified
- * by a textual `html` scan, so the file has to be named instead (see
- * `NON_LITERAL_CT` in the completeness test).
+ * Every `functions/` tree under `website/` — DERIVED, not a literal list, so a new
+ * Pages project's tree is scanned rather than invisible to every check. A tree in
+ * a third project fails closed on its own: `auditedPolicyModule` maps only the two
+ * known modules, so a policy imported from anywhere else is rejected, and any HTML
+ * producer it adds must be classified like the rest.
+ */
+function functionsRoots() {
+  const roots = []
+  const visit = (abs) => {
+    for (const entry of readdirSync(abs, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      if (entry.name === 'node_modules' || entry.name === 'dist' || entry.name.startsWith('.')) continue
+      const child = join(abs, entry.name)
+      if (entry.name === 'functions') {
+        roots.push(relative(repoRoot, child))
+        continue
+      }
+      visit(child)
+    }
+  }
+  visit(join(repoRoot, 'website'))
+  return roots.sort()
+}
+
+/**
+ * Every `Content-Type` value in a file that is NOT a literal — a variable, a
+ * concatenation, an interpolated template. Such a value cannot be classified by a
+ * textual `html` scan, so the file has to be named instead (see `NON_LITERAL_CT` in
+ * the completeness test).
+ *
+ * Read from the AST, not a regex: a quoted-literal capture truncates at a comma (a
+ * media type may contain one) and cannot tell a concatenation that STARTS with a
+ * quote from a literal. The three positions a header can be set from are modelled,
+ * including `h["Content-Type"] = v` and an array-of-pairs `HeadersInit`.
  */
 function nonLiteralContentTypes(relPath) {
-  const src = commentStripped(relPath)
+  const ast = parseSource(readFileSync(join(repoRoot, relPath), 'utf8'), relPath)
   const out = []
-  const re =
-    /(?:\.(?:set|append)\(\s*["'`]Content-Type["'`]\s*,\s*|["'`]Content-Type["'`]\s*:\s*)([^,})\n]+)/gi
-  let match
-  while ((match = re.exec(src))) {
-    const value = match[1].trim()
-    // The WHOLE value must be ONE quoted string. Testing only its first character
-    // accepted a concatenation that STARTS with a quote — `"text/" + "ht" + "ml"`
-    // — which then also evaded the `html` mention scan. A backtick value WITH an
-    // interpolation is a runtime value too.
-    const literal = /^(?:"[^"]*"|'[^']*')$/.test(value) || (value.startsWith('`') && !value.includes('${'))
-    if (!literal) out.push(value.slice(0, 60))
+  const isLiteral = (node) =>
+    node?.type === 'StringLiteral' ||
+    (node?.type === 'TemplateLiteral' && (node.expressions ?? []).length === 0)
+  const check = (key, value) => {
+    if (cspHeaderName(key) !== 'content-type') return
+    if (!isLiteral(value)) out.push(value?.type ?? 'missing value')
   }
+  visitNodes(ast.program, (node) => {
+    if (node.type === 'ObjectProperty') check(node.key, node.value)
+    if (node.type === 'AssignmentExpression' && node.left?.type === 'MemberExpression') {
+      check(node.left.property, node.right)
+    }
+    // An array-of-pairs `HeadersInit`: `new Headers([['Content-Type', mime]])`.
+    if (node.type === 'ArrayExpression' && node.elements?.length === 2) {
+      check(node.elements[0], node.elements[1])
+    }
+    if (node.type === 'CallExpression' && node.callee?.type === 'MemberExpression') {
+      const method = nameOf(node.callee.property)
+      if (method === 'set' || method === 'append') check(node.arguments?.[0], node.arguments?.[1])
+    }
+  })
   return out
 }
 
@@ -1420,7 +1473,7 @@ test('the guard scans real files (no accidental empty pass)', () => {
   // The extension set is a completeness claim, so test it: every regular file in
   // these trees must be one this guard scans. A new `functions/x.js` would
   // otherwise be invisible to every check above.
-  const unscanned = [DASHBOARD_FUNCTIONS, MARKETING_FUNCTIONS]
+  const unscanned = functionsRoots()
     .flatMap((root) => walk(join(repoRoot, root)))
     .map((f) => relative(repoRoot, f))
     .filter((f) => !SOURCE_EXTENSIONS.some((ext) => f.endsWith(`.${ext}`)))
