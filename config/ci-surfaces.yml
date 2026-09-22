@@ -148,6 +148,7 @@ surfaces:
   - test_commit_schema.py
   - test_cross_subdomain_cookie_sync.py
   - test_cursor_mcp_exit_evidence.py  # B2(c) #3657/#3497: Cursor MCP connect -> per-harness capture receipt end-to-end (hermetic; drives real OAuth AS + mounted MCP)
+  - test_dashboard_client_paths_resolve.py  # #4446: the client's literal call paths vs the runtime route table + the Pages function tree; replaces the text scan dropped in `ed0079b73`
   - test_dashboard_login.py
   - test_direct_edge.py
   - test_dr_endpoints.py
@@ -1004,6 +1005,11 @@ surfaces:
   - test_w4_why_enrichment.py
   - test_weights.py
   onboarding:
+  # `test_dashboard_client_paths_resolve.py` is DUAL-REGISTERED (#4446): a change to
+  # `website/apps/dashboard/src/` selects THIS surface and not `api`, and that is the
+  # half of the invariant a client edit breaks — registering it only under `api` would
+  # leave the guard asleep exactly when the client moved.
+  - test_dashboard_client_paths_resolve.py
   # #4097: the env-truthiness non-divergence guard scans all of `tortoise/**`,
   # including `tortoise/onboarding/**`, and an `onboarding` surface match replaces
   # the `core` fallback (tools/ci_selection.py) — so the guard needs this arm too.
@@ -1578,6 +1584,7 @@ durations:
   test_orient_direct_consolidation.py: 4.2
   test_oauth_mcp.py: 4.1
   test_mcp_server.py: 4.0
+  test_dashboard_client_paths_resolve.py: 3.6
   test_dashboard_login.py: 3.8
   test_capture_phase_d_dedup.py: 3.7
   test_ci_selection.py: 3.7
