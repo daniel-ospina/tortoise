@@ -1476,6 +1476,11 @@ durations:
   test_signup_token_revoke.py: 8.0
   test_w4_why_enrichment.py: 8.0
   test_capture_loop_responsiveness.py: 7.7
+  # #3287: 17 cases — structural AST pins plus behavioural starvation tests that
+  # park real daemon-pool workers on threading.Event gates. Measured ~7.4s in
+  # the embedded lane. FIRST ESTIMATE; re-measure from the first post-merge
+  # junit artifact rather than trusting it.
+  test_selfhost_health_probe_executor.py: 7.4
   test_writer_inventory.py: 7.3
   test_decide.py: 7.2
   test_onboarding_endpoints.py: 7.2
