@@ -11,6 +11,7 @@ Runnable with: .venv/bin/python -m pytest tests/test_domain_validators.py -v
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -461,6 +462,8 @@ def graph_sdk():
     sdk = _make_sdk()
     yield sdk
     sdk.close()
+    # #4096: reclaim this fixture's temp tree on teardown.
+    shutil.rmtree(os.path.dirname(sdk._db_path), ignore_errors=True)
 
 
 class TestGraphValidators:
@@ -655,15 +658,15 @@ class TestValidateCLI:
 def _transport_context():
     """MCP tools require an initialized transport mode (#236 auth gate)."""
     from tortoise.mcp_auth import (  # noqa: I001
-        _current_team_id, _current_team_limits, _transport_mode,
+        _current_org_id, _current_org_limits, _transport_mode,
     )
     _transport_mode.set("stdio")
-    _current_team_id.set(None)
-    _current_team_limits.set(None)
+    _current_org_id.set(None)
+    _current_org_limits.set(None)
     yield
     _transport_mode.set(None)
-    _current_team_id.set(None)
-    _current_team_limits.set(None)
+    _current_org_id.set(None)
+    _current_org_limits.set(None)
 
 
 class TestMCPValidateTool:
@@ -706,16 +709,16 @@ class TestMCPValidateTool:
 @pytest.fixture
 def commit_client():
     from fastapi.testclient import TestClient  # noqa: I001
-    from tortoise.hosted_api import app, get_current_team
+    from tortoise.hosted_api import app, get_current_org
 
     os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
     os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
-        app.dependency_overrides[get_current_team] = lambda: {
-            "team_id": "test-team-405", "key_id": "k", "legacy_full_access": True, "tier": "free",
+        app.dependency_overrides[get_current_org] = lambda: {
+            "org_id": "test-team-405", "key_id": "k", "legacy_full_access": True, "tier": "free",
             "max_users": 1, "max_graphs": 1, "max_points": 10000,
-            "max_api_keys": 2, "max_sessions": 1000}
+            "max_api_keys": 2, "max_sessions": None}
         # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk) —
         # patch __init__ → temp DB + #1950 TORTOISE_DB_PATH pin + close-then-
         # clear at enter; pop-pin → restore __init__ → deterministic anchor

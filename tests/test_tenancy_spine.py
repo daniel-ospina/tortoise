@@ -48,7 +48,7 @@ def _spine_env(tmp_path):
     sdk._get_registry().query(
         "CREATE (t:Team {id:$id, tier:'pro', max_graphs:5, "
         "max_api_keys:20, graph_name: $gn})",
-        params={"id": tid, "gn": f"team_{tid}"},
+        params={"id": tid, "gn": f"org_{tid}"},
     )
     sdk._graph_create(tid, "default", kind="default")
     # One custom graph (the per-graph keys bind here) + one point in the
@@ -71,14 +71,14 @@ def _gen(spine_env):
     return spine_env
 
 
-def _mint_key(sdk, team_id, *, scopes, graph_id=None, deleg=None):
+def _mint_key(sdk, org_id, *, scopes, graph_id=None, deleg=None):
     """Raw APIKey node (the hosted mint matrix's DB shape)."""
     token = "tk_" + uuid.uuid4().hex
     sdk._get_registry().query(
-        "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
+        "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, "
         "key_prefix:$kp, created_by:'spine', graph_id:$gid, "
         "scopes:$scopes, delegation_depth:$dd})",
-        params={"id": f"k-{uuid.uuid4().hex[:8]}", "tid": team_id,
+        params={"id": f"k-{uuid.uuid4().hex[:8]}", "tid": org_id,
                 "kh": hash_api_key(token), "kp": token[:10],
                 "gid": graph_id, "scopes": scopes, "dd": deleg},
     )
@@ -198,7 +198,7 @@ def test_vanished_graph_fails_closed(spine_env):
 
 def test_backup_vanished_graph_fails_closed(spine_env):
     """Final-gate P1: a graph-bound key whose graph is GONE must NOT back up
-    the team DEFAULT graph (the old 'or team_graph_name' fallback widened a
+    the team DEFAULT graph (the old 'or org_graph_name' fallback widened a
     ghost key onto the default — a cross-graph read dump). Fails closed 403
     GRAPH_NOT_FOUND (not a 500)."""
     sdk, tid, _g, tc, _def_pt = spine_env

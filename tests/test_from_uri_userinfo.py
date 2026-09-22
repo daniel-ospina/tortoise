@@ -357,7 +357,20 @@ _GUARDED_DIRS = ("tortoise", "graph-scripts")
 #   * ``tortoise/config.py`` — it IS the single decoding rule (#3039).
 #   * ``graph-scripts/connectivity_gate.py`` — ``redact_uri`` masks a
 #     ``urlsplit`` result for display and never feeds a client.
-_ALLOWED = {"tortoise/config.py", "graph-scripts/connectivity_gate.py"}
+#   * ``tortoise/cimd.py`` — ``validate_client_id_url`` reads userinfo only to
+#     REJECT a client_id that carries a username/password; no parsed credential
+#     ever reaches a client (main-added; same display/validation-only class as
+#     the entry above).
+#   * ``tortoise/oauth.py`` — ``_redirect_uri_matches`` reads userinfo only to
+#     assert ``registered == presented`` for a loopback redirect URI (after
+#     ``_unsafe_redirect_uri_bytes``); the values are compared, never handed to
+#     a client. Main-added; same class as the entries above.
+_ALLOWED = {
+    "tortoise/config.py",
+    "graph-scripts/connectivity_gate.py",
+    "tortoise/cimd.py",
+    "tortoise/oauth.py",
+}
 
 # ``tests/`` is excluded wholesale — tests legitimately probe raw ``urlparse``
 # semantics (``test_sdk_props_coercion.py``) and the directory is an order of

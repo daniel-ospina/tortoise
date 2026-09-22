@@ -19,9 +19,9 @@
 | D2 | `_auto_health_recover` probe-fail (L701) | Auto-rebuild from adjacent JSONL (`recover_from_log`) | Raise RuntimeError ("health check failed on open") — fail loud | `test_d2_probe_failure_recovery` | Confirmed (carve-out lane) | Confirmed | ✓ |
 | D3 | Lost-graph check (L519) | 0 nodes + adjacent log → auto-recovery | Skipped — a remote graph is never rebuilt from a local log | `test_d3_lost_graph_recovery` | Confirmed (carve-out lane) | Confirmed | ✓ |
 | D4 | `_GuardedGraph` bulk-wipe guard (L70/L1219) | Guard disabled (per-instance temp DB) | Refuses bulk DETACH DELETE on non-test graphs | `test_d4_bulk_wipe_graph_guard` | Confirmed (D-4, `wipe_server` refusal) | Confirmed | ✓ |
-| D5 | Range index creation (L1214-1224) | `Point {id, pointKind, content_hash}` — is_operator absent (#522) | IDENTICAL range set — is_operator served by the D6 composite's leftmost prefix, never a D5 single index | `test_d5_range_index_identical` + `test_indexes.py::EXPECTED_RANGE_DOCKER` | Confirmed | Confirmed | ✓ |
-| D6 | Composite freshness index (L1244-1257) | Plain `(lastDreamedAt)` only — composite is #522-unsafe | Composite `(is_operator, lastDreamedAt)` | `test_d6_freshness_composite_mode_split` + `test_indexes.py::test_docker_lane_index_shape` | Confirmed (embedded: composite absent) | Confirmed (docker: composite) | ✓ |
-| D7 | Embedded repair sweep (L1308) | Drops every Point index containing is_operator on reopen (#522 fix) | Never runs — the composite is correct and survives re-init | `test_d7_embedded_repair_sweep` | Confirmed (carve-out lane) | Confirmed | ✓ |
+| D5 | Range index creation (L1214-1224) | `Point {id, pointKind, content_hash}` — is_operator absent (#522) | IDENTICAL range set — is_operator absent here too (#3154: NO engine indexes the boolean property) | `test_d5_range_index_identical` + `test_indexes.py::EXPECTED_RANGE_DOCKER` | Confirmed | Confirmed | ✓ |
+| D6 | Freshness index — no boolean property (#3154) | Plain `(lastDreamedAt)` only; is_operator never indexed (#522) | Plain `(lastDreamedAt)` only (#3154 retired the `(is_operator, lastDreamedAt)` composite — GRAPH.COPY drops the `false` postings of a copied boolean RANGE index, zeroing `is_operator = false` on copies whose index set carries it in the SDK-created position and leaving the copy destination unable to rebuild it) | `test_d6_freshness_index_excludes_boolean_property` + `test_indexes.py::test_docker_lane_index_shape` | Confirmed (plain lastDreamedAt, no is_operator) | Confirmed (plain lastDreamedAt, no is_operator) | ✓ |
+| D7 | Boolean-index purge (L1308) | Drops every Point index containing is_operator on reopen (#522 fix) | Same purge — #3154 extended it to docker/server (a legacy or GRAPH.COPY-destination graph must not keep a boolean index) | `test_d7_boolean_index_purge` | Confirmed (carve-out lane) | Confirmed (#3154: seeded legacy index dropped on reopen) | ✓ |
 | D8 | HNSW vector index (L1497) | No vector index; brute-force `vec.euclideanDistance` ordering (EXACT — pinned by bench smoke) | `CREATE VECTOR INDEX … HNSW` (`_vector_index_api` recorded); index-backed queries | `test_d8_hnsw_vector_index` | Confirmed (embedded: brute-force) | Confirmed (docker: HNSW) | ✓ |
 | D9 | Cross-lens `is_embedded` (sdk.py L6766/6784 → `run_vector_query`) | Brute-force over ENTIRE Point index — recall EXACT | HNSW-accelerated — recall ordering CAN differ (small-graph seed agrees); calibrated cosine band | `test_d9_cross_lens_calibration` + `test_cross_lens.py::test_docker_lane_cross_lens_calibrated` | Confirmed | Confirmed (docker-calibrated expectations) | ✓ |
 | D10 | Retrieval pool-floor flag (sdk.py L9616) | `is_embedded` forwarded to `run_vector_query` — same API | Same API, HNSW leg | `test_d10_retrieval_pool_floor_flag` | Confirmed | Confirmed | ✓ |
@@ -35,10 +35,10 @@
 ## Mode-split expectations shipped with this task (P1)
 
 - `tests/test_indexes.py`: `EXPECTED_RANGE_DOCKER` (D5 sibling — identical
-  range sets) + `EXPECTED_POINT_COMPOSITE_DOCKER` (D6) + the docker-gated
-  `test_docker_lane_index_shape`. `is_operator` is deliberately NOT added to
-  the D5 range set on either lane (the #522 regression guard, verified
-  `_ensure_indexes` L1214-1224).
+  range sets) + `EXPECTED_POINT_STALENESS_DOCKER` (D6, plain `lastDreamedAt`)
+  + the docker-gated `test_docker_lane_index_shape`. `is_operator` is absent
+  from the range set on BOTH lanes (#522 embedded, #3154 docker/server —
+  `EXPECTED_POINT_COMPOSITE_DOCKER` was retired with the composite).
 - `tests/test_cross_lens.py`: `test_docker_lane_cross_lens_calibrated` — the
   docker-calibrated similarity band for the SDK cross-lens surface (D9).
 - `tests/test_divergence_conformance.py`: the executable D1–D16 spec (E2E-8).
@@ -99,10 +99,12 @@
    - **test_indexes::test_navigation_parity_real_graph:** hardcoded the
      `tortoise` graph name in entityProfile/tortoise_traverse; the redirect
      derives per-path names → KeyError. Fixed to query `p.graph_name`.
-   - **test_indexes::test_embedded_reopen_false_equality_correct:** the D7
-     repair path is embedded-only (a PRE-#522 stale index cannot exist on
-     docker — the D6 composite already indexes is_operator). Marked
-     `embedded_only` (D-2=A mechanism: visible skip on docker).
+   - **test_indexes::test_embedded_reopen_false_equality_correct:** the test
+     drives the embedded `db_path` fixture, so it stays `embedded_only`; the
+     purge it exercises is no longer embedded-exclusive (#3154 extended it to
+     docker/server — see D7), but the docker leg is covered by
+     `test_d7_boolean_index_purge`. Marked `embedded_only` (D-2=A mechanism:
+     visible skip on docker).
    - **test_projection::test_retract_missing_point_noop:** docker's
      `_ensure_indexes` writes a `(:Meta{key:"point_fts_v2"})` marker for
      its FTS index (embedded skips FTS) → `MATCH (n)` counted 1. Fixed to

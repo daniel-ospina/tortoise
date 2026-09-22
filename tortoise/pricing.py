@@ -6,8 +6,8 @@ included_write_ops_per_month, max_graph_nodes, and overage eligibility. This
 module loads it at import time (cached) and exposes lookup helpers so
 hosted_api.py and sdk.py never hardcode limits.
 
-NOT a tier field: max_teams — multi-team is a user-level capability (per-team
-billing; team creation is rate-limited for abuse, not tier-capped).
+NOT a tier field: max_orgs — multi-org is a user-level capability (per-org
+billing; org creation is rate-limited for abuse, not tier-capped).
 """
 from __future__ import annotations
 

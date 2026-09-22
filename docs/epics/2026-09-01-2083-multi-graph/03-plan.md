@@ -32,7 +32,7 @@ Personas: **Dev** (developer building an app on Tortoise — the app_builder seg
 
 ### J1 — Dev provisions a graph for a new end-customer
 **Entry:** Dev has a pro-tier team + an existing key with `graphs:create`.
-**Flow:** Dev calls `POST /v1/teams/{team_id}/graphs {name: "acme-prod"}` → response 201 with graph metadata + per-graph key (plaintext, once) → Dev wires the key into the customer's app config → app writes/reads the customer's memory through the graph key.
+**Flow:** Dev calls `POST /v1/organizations/{org_id}/graphs {name: "acme-prod"}` → response 201 with graph metadata + per-graph key (plaintext, once) → Dev wires the key into the customer's app config → app writes/reads the customer's memory through the graph key.
 **Exit:** New end-customer memory graph live, isolated, key-accessible. Verification: E2E-1.
 
 ### J2 — Dev rotates/revokes a leaked customer key
@@ -81,11 +81,11 @@ System-level flows, handoff points, failure modes.
 ### W1 — Graph provisioning (key-driven mint)
 ```
 caller key (graphs:create scope, NOT minted-by-provisioning)
-  → resolve_api_key(token) → team_id + key + scopes + tier + limits
+  → resolve_api_key(token) → org_id + key + scopes + tier + limits
   → tier gate: pro+ (free/solo reject 402/409)
   → quota gate: graph_count < max_graphs (atomic count-then-insert; cap-reject 409 + X-Graph-Quota)
   → key-cap gate: minted key counts against max_api_keys — key-mint failure ROLLS BACK the graph (no graph-without-key, no orphan)
-  → registry: graphs row (Supabase) / Graph node (registry mode) + namespace team_{team_id}_{gid}
+  → registry: graphs row (Supabase) / Graph node (registry mode) + namespace org_{org_id}_{gid}
   → mint per-graph key: scope set = caller-chosen graph scopes minus escalation scopes
        (graphs:create / graphs:delete / keys:manage are NEVER inherited — fixed child policy)
   → minted keys carry delegation_depth 0 (SPKI deleg=0): they cannot mint. Only
@@ -123,12 +123,12 @@ under the same lock/transaction — no oversubscription), suspended team (blocke
 
 ### W4 — Request path with per-graph tenancy (data plane)
 ```
-per-graph key → resolve_api_key → team_id + graph_id + graph_namespace + scopes
+per-graph key → resolve_api_key → org_id + graph_id + graph_namespace + scopes
   → scope check per surface (ask/analyze/search/MCP/sessions/context)
   → app-layer ownership check on select_graph (authoritative — works with ACL OFF)
   → graph namespace selected; writes/reads land in the graph only
   → team-wide/legacy key (graph_id NULL) → default graph (back-compat)
-  → suspended team: 403 on BOTH control and data plane (existing get_current_team /
+  → suspended team: 403 on BOTH control and data plane (existing get_current_org /
        key-resolution contract, #1853/#1828 parity); the /v1/team/alerts appeal flow stays open
 Failure modes: cross-graph attempt (401/403 at app layer + NOPERM at ACL layer), read-only key write (403), deleted graph key (401), legacy key on multi-graph team (default graph only), suspended team (403 everywhere except alerts).
 ```
@@ -201,18 +201,18 @@ States covered: loading (existing shimmer), empty (existing "No graphs yet"), er
 ```sql
 -- graphs table (mirrors the registry Graph node; the hosted SOR for team→graph 1:N)
 CREATE TABLE public.graphs (
-  id          text PRIMARY KEY,          -- g_<16hex> — deterministic per (team_id, name) in Supabase mode (#765 zero-registry-writes)
-  team_id     text NOT NULL REFERENCES public.teams(id) ON DELETE CASCADE,
+  id          text PRIMARY KEY,          -- g_<16hex> — deterministic per (org_id, name) in Supabase mode (#765 zero-registry-writes)
+  org_id     text NOT NULL REFERENCES public.teams(id) ON DELETE CASCADE,
   name        text NOT NULL,
   kind        text NOT NULL DEFAULT 'custom',   -- 'default' | 'custom'
-  namespace   text NOT NULL,             -- team_{team_id}_{gid}
+  namespace   text NOT NULL,             -- org_{org_id}_{gid}
   status      text NOT NULL DEFAULT 'active',   -- 'active' | 'deleted' (v1: no archive — one-way state nothing consumes; delete = soft tombstone)
   recording   boolean,                   -- session_recording override; NULL = inherit team default (#1927 default-ON preserved)
   created_at  timestamptz NOT NULL DEFAULT now()
 );
 -- name reuse after soft-delete: partial unique index (tombstones don't squat names)
-CREATE UNIQUE INDEX IF NOT EXISTS uq_graphs_team_name_active
-  ON public.graphs (team_id, name) WHERE status <> 'deleted';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_graphs_org_name_active
+  ON public.graphs (org_id, name) WHERE status <> 'deleted';
 
 -- api_keys: graph scope + scopes (FLAT allowlist array) + delegation lineage
 ALTER TABLE public.api_keys
@@ -230,16 +230,16 @@ ALTER TABLE public.api_keys
 ```
 
 - **Semantics:** `scopes` = FLAT allowlist array (all-off default `[]` — Stripe rule; shape pinned by the verify gate so the escalation CHECK fires: `?|` on flat arrays matches any element). `graphs:write` implies `graphs:read` at enforcement. `graph_id` NULL + escalation scopes = team-management key. `graph_id` set = graph-bound key. **Delegation: `delegation_depth` 0 = minted (cannot hold escalation scopes — DB CHECK `chk_minted_key_no_escalation` covers graph-bound AND team-wide minted keys); NULL = owner-minted (may hold escalation scopes).**
-- **RLS:** service role (backend) full access; tenant-scoped reads via the established GUC pattern (`app.current_team_id` set post-key-resolution; unset GUC = 0 rows deny-by-default) — mirrors 0006/0007.
+- **RLS:** service role (backend) full access; tenant-scoped reads via the established GUC pattern (`app.current_org_id` set post-key-resolution; unset GUC = 0 rows deny-by-default) — mirrors 0006/0007.
 - **Integrity:** default-graph guard is CODE-enforced in both modes (Supabase: the default is derived from `teams.graph_name` — no row exists to constrain; registry: `kind='default'` node guarded at the lifecycle layer) — no delete of the default graph. Graph delete = soft-delete (`status='deleted'` tombstone) + code-side cascade (revoke keys, drop ACL user, free quota slot); `ON DELETE CASCADE` covers the team-delete cascade + hard cleanup; the FK never silently un-scopes a key (no SET NULL). Partial unique index allows name reuse after delete.
-- **Quota:** `graph_count(team_id)` = 1 (the default graph — always present: derived in Supabase mode, `kind='default'` node in registry mode) + `count(*) WHERE kind='custom' AND status='active'`. **Delete frees the slot (deleted rows excluded); v1 has no archive.** The default ALWAYS occupies slot 1 (free=1 → default only; solo=2 → default + 1 custom) — meter and cap use this ONE definition in both modes. **Caps: free=1, solo=2 finite; pro/team unlimited (DECIDED at Human Gate #2 2026-09-01 — pricing.json as-is, no change)**. Cap checked pre-insert; atomic count-then-insert (W5). **v1 ships cap-reject (409 + X-Graph-Quota header) only — the 80% soft-warning band is deferred (unreachable at free=1/solo=2; stays dormant unless a finite pro/team cap is ever set).**
+- **Quota:** `graph_count(org_id)` = 1 (the default graph — always present: derived in Supabase mode, `kind='default'` node in registry mode) + `count(*) WHERE kind='custom' AND status='active'`. **Delete frees the slot (deleted rows excluded); v1 has no archive.** The default ALWAYS occupies slot 1 (free=1 → default only; solo=2 → default + 1 custom) — meter and cap use this ONE definition in both modes. **Caps: free=1, solo=2 finite; pro/team unlimited (DECIDED at Human Gate #2 2026-09-01 — pricing.json as-is, no change)**. Cap checked pre-insert; atomic count-then-insert (W5). **v1 ships cap-reject (409 + X-Graph-Quota header) only — the 80% soft-warning band is deferred (unreachable at free=1/solo=2; stays dormant unless a finite pro/team cap is ever set).**
 - **Migration path:** existing teams keep `teams.graph_name` as the derived default (graph 0) — NO backfill row needed for the default; new graphs get rows. Reversible: drop tables/columns restores prior behavior (graph_metadata derives default only).
 
 ## 4.2 Registry mode (selfhost) — FalkorDB registry
 
-- `Graph` node already exists (sdk `_graph_create`: id, team_id, name, kind, namespace, created_at) — add `status` + `recording` properties (default/back-compat; no archive status in v1).
+- `Graph` node already exists (sdk `_graph_create`: id, org_id, name, kind, namespace, created_at) — add `status` + `recording` properties (default/back-compat; no archive status in v1).
 - `APIKey` node: add `graph_id`, `scopes`, `created_by_key_id`, `delegation_depth` properties (nullable graph_id = team-wide).
-- **Registry↔Supabase seam:** both modes emit the same registry-shaped row `{graph_id, team_id, name, kind, namespace, status}` — the existing `graph_metadata`/`graph_list` seam extends with status/recording. Shared seam test (test-design #2094 surface 10).
+- **Registry↔Supabase seam:** both modes emit the same registry-shaped row `{graph_id, org_id, name, kind, namespace, status}` — the existing `graph_metadata`/`graph_list` seam extends with status/recording. Shared seam test (test-design #2094 surface 10).
 
 ## 4.3 Entity summary
 
@@ -264,7 +264,7 @@ ALTER TABLE public.api_keys
 ```
                     ┌─────────────────── CONTROL PLANE ───────────────────┐
    Dashboard (React) │  Supabase (hosted): teams·api_keys·graphs·memberships│
-   + CLI/SDK callers │    └─ RLS: tenant GUC (app.current_team_id)          │
+   + CLI/SDK callers │    └─ RLS: tenant GUC (app.current_org_id)          │
         │            │  Registry (selfhost): Team/APIKey/Graph nodes       │
         │            │    └─ shared seam: resolve_api_key·graph_metadata·  │
         ▼            │       graph_list·graph_count (TORTOISE_CONTROL_     │
@@ -280,23 +280,23 @@ ALTER TABLE public.api_keys
  ┌─────────────────┐  is AUTHORITATIVE; passes with ACL OFF)              │
  │  FalkorDB        │                                                     │
  │  multi-graph     │── per-graph ACL user (defense-in-depth):            │
- │  team_{tid}_{gid}│   ~tenant_<gid> +GRAPH.QUERY +GRAPH.RO_QUERY +PING  │
+ │  org_{tid}_{gid}│   ~tenant_<gid> +GRAPH.QUERY +GRAPH.RO_QUERY +PING  │
  │  (+ default      │   deny GRAPH.LIST/KEYS/SCAN/CONFIG, secure default  │
- │   team_{tid})    │   user, aclfile+ACL SAVE (selfhost); custom ACL      │
+ │   org_{tid})    │   user, aclfile+ACL SAVE (selfhost); custom ACL      │
  └─────────────────┘   strings on hosted cloud                             │
 ```
 
 ## 5.2 Provisioning service (mint flow — W1)
 
 New endpoint + service function:
-`POST /v1/teams/{team_id}/graphs` → checks (tier ≥ pro → quota via atomic count-then-insert → team non-suspended) → writes graphs row/node → mints key (scopes = caller-chosen ∩ child policy) → creates ACL user (selfhost) → 201 with one-time reveal. **Rollback contract:** any failure after graphs write → delete graph + key (no orphan graphs — #1686/#1748 invariants; audit event on every mint).
+`POST /v1/organizations/{org_id}/graphs` → checks (tier ≥ pro → quota via atomic count-then-insert → team non-suspended) → writes graphs row/node → mints key (scopes = caller-chosen ∩ child policy) → creates ACL user (selfhost) → 201 with one-time reveal. **Rollback contract:** any failure after graphs write → delete graph + key (no orphan graphs — #1686/#1748 invariants; audit event on every mint).
 
 ## 5.3 Tenancy enforcement (the spine — W4)
 
 - `resolve_api_key` returns `graph_id` + `graph_namespace` + `scopes` (new).
 - A per-request middleware reads the resolved scope once and pushes it into the query path (authz as pre-filter, #2082 principle 7 — never post-filter).
-- All ~30 `_make_sdk(namespace=team_id)` call sites become `_make_sdk(namespace=<resolved graph_namespace>)`; ownership check on `select_graph`.
-- MCP: `_current_team_id` ContextVar extends to carry graph scope (per-graph keys in MCP tools).
+- All ~30 `_make_sdk(namespace=org_id)` call sites become `_make_sdk(namespace=<resolved graph_namespace>)`; ownership check on `select_graph`.
+- MCP: `_current_org_id` ContextVar extends to carry graph scope (per-graph keys in MCP tools).
 - Legacy/team-wide keys (graph_id NULL): resolve to the default graph (back-compat).
 
 ## 5.4 Key permission model (owner-approved, 2026-09-01)
@@ -327,9 +327,9 @@ New endpoint + service function:
 
 ```
 Input:  token (opaque — legacy tt_/tkm_ + new tk_ prefixes)
-Output: { team_id, key_id, tier, limits: {max_users, max_graphs, max_api_keys, max_points, max_sessions},
+Output: { org_id, key_id, tier, limits: {max_users, max_graphs, max_api_keys, max_points, max_sessions},
          graph_id: str|null,        // null = team-wide key → default graph
-         graph_namespace: str|null, // team_{team_id}_{gid} or team_{team_id}
+         graph_namespace: str|null, // org_{org_id}_{gid} or org_{org_id}
          scopes: string[],       // FLAT: ["graphs:read","graphs:write","team:manage","keys:manage"] — allowlist; write implies read
          legacy_full_access: bool,  // tkm_ class: all data-plane ops on the default graph + legacy management
          delegation_depth: int|null,// 0 = minted (cannot escalate); null = owner-minted
@@ -339,12 +339,12 @@ Errors:  None (401 on revoked/unknown) | raise on control-plane failure (fail-cl
 
 ## 6.2 Provisioning + lifecycle
 
-### POST /v1/teams/{team_id}/graphs + POST /v1/graphs (ONE provisioning service, two auth faces)
+### POST /v1/organizations/{org_id}/graphs + POST /v1/graphs (ONE provisioning service, two auth faces)
 ```
 Both endpoints route through the SAME service function — one tier gate, one quota gate, one mint,
 one rollback, one response envelope. POST /v1/graphs is a thin session-authed alias for the
-existing dashboard caller; POST /v1/teams/{team_id}/graphs is the key-driven path.
-Auth:   POST /v1/teams/{team_id}/graphs → key with graphs:create scope
+existing dashboard caller; POST /v1/organizations/{org_id}/graphs is the key-driven path.
+Auth:   POST /v1/organizations/{org_id}/graphs → key with graphs:create scope
         POST /v1/graphs → owner/admin session user + membership (existing)
 Body:   { "name": "acme-prod", "scopes": ["graphs:read","graphs:write"] }   // scopes = requested key scopes (default read)
 201:    { "graph": {"id":"g_…","name":"acme-prod","kind":"custom","namespace":"team_…","status":"active","created_at":"…"},
@@ -375,7 +375,7 @@ Errors: 403 default-graph delete (code guard) · 403 missing scope · 404 unknow
 
 ## 6.3 Key management
 
-### POST /v1/teams/{team_id}/keys (NEW — mint a key; graph-bound or team-wide)
+### POST /v1/organizations/{org_id}/keys (NEW — mint a key; graph-bound or team-wide)
 ```
 Auth:   key with keys:manage (or owner/admin session)
 Body:   { "graph_id"?: "g_…", "scopes": ["graphs:read"], "name"?: "ci-prod" }
@@ -386,7 +386,7 @@ Errors: 401/403 no keys:manage · 403 escalation scopes on MINTED key (child pol
         404 unknown graph/team · 409 max_api_keys · 422 invalid scope
 ```
 
-### GET /v1/teams/{team_id}/keys?graph_id=… + PATCH /v1/teams/{team_id}/keys/{key_id} + DELETE /v1/teams/{team_id}/keys/{key_id}
+### GET /v1/organizations/{org_id}/keys?graph_id=… + PATCH /v1/organizations/{org_id}/keys/{key_id} + DELETE /v1/organizations/{org_id}/keys/{key_id}
 ```
 GET:     list keys (per-key metadata + last_used_at; full per-request logs DEFERRED) — auth: keys:manage or membership
 PATCH:   shrink scopes only (expand = revoke+recreate) — auth: keys:manage
@@ -435,13 +435,13 @@ Setup anchors (per test-design #2094): both control-plane modes; live FalkorDB (
 
 ### E2E-1: Provision a graph with a per-graph key
 - Setup: pro team, key K1 with `graphs:create`.
-- Steps: `POST /v1/teams/{id}/graphs {name:"acme-prod"}` with K1 → 201; assert response contains graph.id, namespace `team_{tid}_g_{…}`, `key_plaintext` (tk_live_…), `revealed_once: true`; assert key row stores hash only (no plaintext).
+- Steps: `POST /v1/organizations/{id}/graphs {name:"acme-prod"}` with K1 → 201; assert response contains graph.id, namespace `org_{tid}_g_{…}`, `key_plaintext` (tk_live_…), `revealed_once: true`; assert key row stores hash only (no plaintext).
 - Assert: write a point + read it back via the minted key; second call with same body → 409; the minted key's scopes exclude escalation scopes; **ACL user asserted by CONFIG INSPECTION only (the ACL user exists with the configured permission set — `~tenant_<gid>` + GRAPH.QUERY/RO_QUERY/PING, no GRAPH.LIST/KEYS/SCAN/CONFIG; do NOT trigger the leak at runtime — GRAPH.LIST behavior is version-dependent (#2652), asserting on it would be flaky; the §5.5 stance holds).**
 - Surfaces (test-design #): 1 (graphs table), 4 (mint), 6 (ACL user created + permission set asserted).
 
 ### E2E-2: Per-graph key isolation — cross-graph denial
 - Setup: team with graphs A+B, keyA bound to A (read+write).
-- Steps: keyA attempts ask/analyze/search/MCP-tool/Direct-SDK against graph B → each denied (401/403) at the app layer. **Sessions/context derive the graph from the key (no request-side override surface is built — §6.4); the cross-graph assertion for those surfaces = the data-layer probe under keyA's session (`db.select_graph('team_{tid}_{B}')` → NOPERM) plus a negative-scope check (keyA has no access to B's namespace via any path).**
+- Steps: keyA attempts ask/analyze/search/MCP-tool/Direct-SDK against graph B → each denied (401/403) at the app layer. **Sessions/context derive the graph from the key (no request-side override surface is built — §6.4); the cross-graph assertion for those surfaces = the data-layer probe under keyA's session (`db.select_graph('org_{tid}_{B}')` → NOPERM) plus a negative-scope check (keyA has no access to B's namespace via any path).**
 - Data layer: with ACL OFF (proves app spine) the same attempts are denied; with ACL ON a graph-A-scoped FalkorDB credential gets NOPERM on B.
 - Assert: zero cross-graph reads/writes across all 7 surfaces.
 - Surfaces: 3, 6, 7, 8, 9.
@@ -499,14 +499,14 @@ Setup anchors (per test-design #2094): both control-plane modes; live FalkorDB (
 - Surfaces: 3, 7, 11.
 
 ### E2E-11: Concurrent provisioning — no oversubscription
-- Setup: solo team at 2 of 2; N=8 parallel `POST /v1/teams/{id}/graphs` requests (both modes).
+- Setup: solo team at 2 of 2; N=8 parallel `POST /v1/organizations/{id}/graphs` requests (both modes).
 - Steps: fire 8 concurrent mints.
 - Assert: exactly 0 succeed (2-of-2 cap) — or with the cap at 2 + 1 slot free, exactly 1 succeeds and 7 get 409; graph_count never exceeds the cap (atomic count-then-insert under one lock/transaction, W5); no orphan graph/ACL user from the rejected attempts.
 - Surfaces: 1, 4, 6, 11.
 
 ### E2E-12: Key management surfaces + session-user dashboard create
 - Setup: pro team; key with `keys:manage`; owner session user; dedicated team fixture.
-- Steps: `GET /v1/teams/{id}/keys` lists keys incl. `last_used_at` (updated after a call; full per-request logs deferred in v1); `PATCH /v1/teams/{id}/keys/{key_id}` shrink scopes (read+write → read) succeeds, and the shrunken key's writes 403; `PATCH` expand-attempt → 422; **session-user `POST /v1/graphs` (dashboard create, routed through the ONE provisioning service) returns `key_plaintext` + `revealed_once:true` (reveal modal contract) — minted once, hash-only stored, a second fetch shows no plaintext; the endpoint's tier/quota gating (402/409) matches the key-driven path; response log-redaction of `key_plaintext` verified (no plaintext in logs — R4).**
+- Steps: `GET /v1/organizations/{id}/keys` lists keys incl. `last_used_at` (updated after a call; full per-request logs deferred in v1); `PATCH /v1/organizations/{id}/keys/{key_id}` shrink scopes (read+write → read) succeeds, and the shrunken key's writes 403; `PATCH` expand-attempt → 422; **session-user `POST /v1/graphs` (dashboard create, routed through the ONE provisioning service) returns `key_plaintext` + `revealed_once:true` (reveal modal contract) — minted once, hash-only stored, a second fetch shows no plaintext; the endpoint's tier/quota gating (402/409) matches the key-driven path; response log-redaction of `key_plaintext` verified (no plaintext in logs — R4).**
 - Assert: key list/shrink/expand-reject surfaces work; dashboard-create reveal-once contract holds; gating parity between session-user and key-driven create.
 - Surfaces: 2, 3, 4, 12 (API-side of 12; modal UI in the ux layer).
 
@@ -559,7 +559,7 @@ Vocabulary audit: `tk_`/`tkm_` consistent everywhere; no `graphs:provision`, no 
 ## 8.3 Improvement opportunities
 
 - **Consolidate the quota source** into one helper (`graph_count` via the shared seam) so meter/banner/cap/API header all read the same number — the E2E-3/7/8 assertions depend on it.
-- **One provisioning service** (accepted): `POST /v1/teams/{id}/graphs` + `POST /v1/graphs` share one service function, envelope, quota gate, rollback (R17) — E2E-12 gating parity is then a single-path test.
+- **One provisioning service** (accepted): `POST /v1/organizations/{id}/graphs` + `POST /v1/graphs` share one service function, envelope, quota gate, rollback (R17) — E2E-12 gating parity is then a single-path test.
 - **v1 lifecycle = active/delete only** (accepted): archive dropped (one-way state nothing consumes; delete already soft-tombstones + cascades + frees quota). Deferred until a restore/retention need exists.
 - **80% soft-warning band deferred** (accepted): unreachable at free=1/solo=2; ships with a finite pro/team cap if Gate #2 sets one (R8).
 - **Key-model DB invariant extended** (accepted): `chk_minted_key_no_escalation` covers graph-bound AND team-wide minted keys via `delegation_depth` + `created_by_key_id`.

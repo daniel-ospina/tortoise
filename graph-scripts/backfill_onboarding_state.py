@@ -37,7 +37,7 @@ from tortoise.onboarding import state as _os  # noqa: E402
 
 
 def _iter_teams() -> list[dict]:
-    """Every existing (non-deleted) team as {team_id, legacy_complete}.
+    """Every existing (non-deleted) team as {org_id, legacy_complete}.
 
     Supabase control-plane mode: ``teams`` table rows (onboarding_state
     jsonb; placeholder id '' excluded). Registry mode: ``Team`` nodes
@@ -47,7 +47,7 @@ def _iter_teams() -> list[dict]:
         from tortoise.supabase_control import get_control_plane, is_supabase_enabled
         if is_supabase_enabled():
             rows = get_control_plane().query(
-                "teams", select=["id", "onboarding_state"],
+                "organizations", select=["id", "onboarding_state"],
                 filters=[("deleted_at", "is", None)],
             )
             out = []
@@ -56,7 +56,7 @@ def _iter_teams() -> list[dict]:
                 if not tid:
                     continue
                 state = r.get("onboarding_state") or {}
-                out.append({"team_id": tid,
+                out.append({"org_id": tid,
                             "legacy_complete": bool(
                                 (state or {}).get("onboarding_complete"))})
             return out
@@ -81,7 +81,7 @@ def _iter_teams() -> list[dict]:
             state = _json.loads(raw) if isinstance(raw, str) else (raw or {})
         except (TypeError, ValueError):
             state = {}
-        out.append({"team_id": r[0],
+        out.append({"org_id": r[0],
                     "legacy_complete": bool(
                         (state or {}).get("onboarding_complete"))})
     return out
@@ -109,18 +109,18 @@ def main() -> int:
 
     created = skipped_present = skipped_incomplete = recomputed = 0
     for t in teams:
-        team_id = t["team_id"]
+        org_id = t["org_id"]
         try:
             from tortoise.sdk import TortoiseSDK
-            graph = TortoiseSDK(namespace=team_id)._get_proj()
+            graph = TortoiseSDK(namespace=org_id)._get_proj()
             if args.recompute:
                 outcome = _os.recompute_completion(
-                    graph, team_id, t["legacy_complete"])
+                    graph, org_id, t["legacy_complete"])
                 if outcome.startswith("complete"):
                     recomputed += 1
-                    print(f"· {team_id}: recompute → {outcome}")
+                    print(f"· {org_id}: recompute → {outcome}")
                 continue
-            res = _os.backfill_org(graph, team_id, t["legacy_complete"],
+            res = _os.backfill_org(graph, org_id, t["legacy_complete"],
                                    dry_run=not args.apply)
             action = res["action"]
             if action == "created-complete":
@@ -130,9 +130,9 @@ def main() -> int:
             elif action == "skipped-not-complete":
                 skipped_incomplete += 1
             if action.startswith("would"):
-                print(f"· {team_id}: {action} (dry-run)")
+                print(f"· {org_id}: {action} (dry-run)")
         except Exception as e:  # noqa: BLE001, RUF100
-            print(f"✖ {team_id}: FAILED ({e})")
+            print(f"✖ {org_id}: FAILED ({e})")
 
     if args.recompute:
         print(f"\nDone: {len(teams)} org(s) scanned, {recomputed} completed "

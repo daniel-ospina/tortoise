@@ -60,7 +60,7 @@ Blog + CMS for tortoise.premiselabs.co — agent-publish → human-review, SSR p
    - `OPENROUTER_API_KEY` (AI generation — generate-seo #1861 / generate-cover #1863; server-side only)
    - `CF_API_TOKEN` + `CF_ZONE_ID` (edge-cache purge by URL — #1865; token needs Zone.Cache Purge permission)
    (NO `SUPABASE_JWT_SECRET` needed — the admin gate validates sessions via Supabase's /auth/v1/user endpoint)
-2. **Repo secrets** (for the deploy build step): `SUPABASE_URL`, `SUPABASE_ANON_KEY`, **`BLOG_E2E_AGENT_KEY`** (valid agent key for the lifecycle/meta E2E tests — provision `agent_name='blog-e2e'` in `blog_agent_keys`; without it those tests SKIP) (GitHub → Settings → Secrets).
+2. **Repo secrets** (for the deploy build step): `SUPABASE_URL`, `SUPABASE_ANON_KEY` (GitHub → Settings → Secrets). `BLOG_E2E_AGENT_KEY` (a valid agent key for the write E2E tests — provision `agent_name='blog-e2e'` in `blog_agent_keys`) is **not** used by the deploy job, which holds no write-capable key; the write tests run on demand via the `Blog write E2E (manual, #4220)` workflow (`.github/workflows/blog-write-e2e.yml`).
 3. **Supabase migration** applied: `20260827000001_blog_cms.sql` (supabase-deploy CI applies it; verify `blog_posts` exists).
 4. **Agent keys seeded**: `blog_agent_keys` INSERT (sha256 of the plaintext key, printed once) — the ops seed script.
 5. **Owner seeded**: `blog_admins` INSERT with the owner's auth user id.

@@ -27,6 +27,7 @@ Covers:
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 
@@ -43,6 +44,7 @@ def sdk():
     sdk = TortoiseSDK(db_path)
     yield sdk
     sdk.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 def _query(sdk, cypher: str, params: dict | None = None):
@@ -267,13 +269,13 @@ def test_audit_mcp_mirror(sdk, monkeypatch):
     """A13 MCP mirror: tortoise_list_batch / tortoise_list_batches route to
     the SDK through the in-process handler layer (stdio transport)."""
     import tortoise.mcp_server as mcp_mod  # noqa: I001
-    from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
+    from tortoise.mcp_auth import (_current_org_id, _current_org_limits,
                                    _transport_mode)
     _transport_mode.set("stdio")
-    _current_team_id.set(None)
-    _current_team_limits.set(None)
-    orig = mcp_mod._get_team_sdk
-    mcp_mod._get_team_sdk = lambda: sdk
+    _current_org_id.set(None)
+    _current_org_limits.set(None)
+    orig = mcp_mod._get_org_sdk
+    mcp_mod._get_org_sdk = lambda: sdk
     try:
         res = sdk.ingest(_full_bundle())
         bid = res["batch_id"]
@@ -287,9 +289,9 @@ def test_audit_mcp_mirror(sdk, monkeypatch):
         assert "error" in bad or "batch_id" in str(bad)
     finally:
         _transport_mode.set(None)
-        _current_team_id.set(None)
-        _current_team_limits.set(None)
-        mcp_mod._get_team_sdk = orig
+        _current_org_id.set(None)
+        _current_org_limits.set(None)
+        mcp_mod._get_org_sdk = orig
 
 
 def test_audit_tool_registry_surface():

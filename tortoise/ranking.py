@@ -34,6 +34,7 @@ from .search_engine import (  # noqa: E402, RUF100
     _beta_variance,
     _exclude_status_clause,
     CONTESTED_VARIANCE_THRESHOLD,
+    ep_measured_cypher,  # #3276: has_ep == EP measured (baseline prior != measured)
 )
 from .live import is_terminal_status  # #2490: terminal rows are never contested
 
@@ -424,10 +425,11 @@ class GraphRanker:
             "  / (coalesce(n.posterior_alpha, n.ep_alpha, 1.0) + coalesce(n.posterior_beta, n.ep_beta, 1.0)), "
             "  0.5) AS conf, degree, n.createdAt AS created, "
             "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
-            # #2490: aligned with StateRanker/GapsRanker — has_ep is the
-            # posterior-OR-prior expression (was ep_alpha-only here), plus
-            # the status/outdated columns for the Python-side terminal gate.
-            "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) AS has_ep, "
+            # #2490: aligned with StateRanker/GapsRanker — has_ep rides the
+            # status/outdated columns for the Python-side terminal gate.
+            # #3276: has_ep == EP measured (ep_measured_cypher) — a #2199
+            # baseline prior alone is prior-only, NOT measured.
+            f"  {ep_measured_cypher('n')} AS has_ep, "
             "  n.status, coalesce(n.outdated, false)"
         )
         rows = self.projection.g.query(cypher, params={"ids": ids}).result_set
@@ -715,7 +717,7 @@ class StateRanker:
             "RETURN n.id, "
             "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, "
             "  coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
-            "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) AS has_ep, "
+            f"  {ep_measured_cypher('n')} AS has_ep, "
             "  ep_degree + about_degree AS degree, "
             "  n.status, coalesce(n.outdated, false)"
         )
@@ -1018,7 +1020,7 @@ class GapsRanker:
             "RETURN n.id, "
             "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, "
             "  coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
-            "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) AS has_ep, "
+            f"  {ep_measured_cypher('n')} AS has_ep, "
             "  n.status, coalesce(n.outdated, false)",
             params={"ids": ids},
         ).result_set
