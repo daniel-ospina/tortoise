@@ -436,3 +436,83 @@ def test_reinstall_repairs_a_hook_that_lost_its_exec_bit(tmp_path):
     assert again.ok, again.error
     assert again.changed is True, again.actions
     assert installed.stat().st_mode & stat.S_IXUSR
+
+
+def _failing_tortoise(bindir: Path, log: Path, message: str) -> None:
+    """A `tortoise` that records its argv and FAILS with ``message`` on stderr.
+
+    Stands in for a real non-2xx capture — the 504 the deployed server returns
+    when its wait bound is exceeded (#4580, #4714)."""
+    script = bindir / "tortoise"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        f'printf "%s\\n" "$@" >> {log}\n'
+        f"echo '{message}' >&2\n"
+        f'echo DONE >> {log}\n'
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+
+
+def test_a_failed_capture_is_recorded_as_evidence_not_swallowed(tmp_path):
+    """#4714: a capture that fails must leave EVIDENCE, not silence.
+
+    The seam used to run `sessions import … || true`, so a non-2xx (the
+    server's 504 wait bound, #4580) vanished: no spool, no breadcrumb, no
+    receipt — the user was told nothing while nothing was captured. That is
+    the defect this test pins shut.
+
+    The hook must STILL exit 0 — fail-open is the contract: a capture failure
+    must never block the session. But the failure has to be RECORDED, and with
+    kind ``capture-failure`` rather than the recorder's ``install-inert``
+    default. `session verify` reads the kind, so recording a capture failure
+    as install-inert would report a HEALTHY install as INERT — the inversion
+    #4314 exists to prevent.
+
+    Mutation: restore ``|| true`` — the breadcrumb assertion REDs (silence).
+    Mutation: drop the third argument (the kind) — the kind assertion REDs.
+    """
+    home = tmp_path / "home"
+    bindir = tmp_path / "bin"
+    log = tmp_path / "argv.log"
+    home.mkdir()
+    bindir.mkdir()
+    # The REAL failure shape: the 504 body contains DOUBLE QUOTES. A
+    # quote-free message let an escaping bug through (the raw detail emitted
+    # invalid JSON that `session verify` could not parse, measured #4714), so
+    # the error text here must keep its quotes. No apostrophe: the helper
+    # wraps this in single quotes, so a `'` would truncate the fake's own
+    # script.
+    _failing_tortoise(
+        bindir, log,
+        'import failed (HTTP 504): {"detail":"The wait budget was exceeded"}')
+    rollout = tmp_path / "rollout-2026.jsonl"
+    rollout.write_text("{}\n", encoding="utf-8")
+
+    proc, _ = _run_hook(
+        json.dumps({"session_id": "01a0b5c6-fail", "transcript_path": str(rollout),
+                    "cwd": str(tmp_path), "hook_event_name": "SessionEnd",
+                    "reason": "other"}),
+        home=home, bindir=bindir)
+    assert proc.returncode == 0, (
+        "a failed capture must never break the session (fail-open)")
+
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if log.exists() and "DONE" in log.read_text(encoding="utf-8"):
+            break
+        time.sleep(0.1)
+    assert log.exists() and "DONE" in log.read_text(encoding="utf-8"), (
+        "the detached worker did not run")
+
+    crumb = home / ".tortoise" / "capture-errors" / "codex.json"
+    assert crumb.is_file(), (
+        "a failed capture left NO evidence — silence is the defect (#4714)")
+    record = json.loads(crumb.read_text(encoding="utf-8"))
+    assert record["kind"] == "capture-failure", record
+    assert "504" in record["detail"], record
+    assert record["harness"] == "codex", record
+    assert "wait budget" in record["detail"], (
+        "the error text must survive JSON-escaping — a raw interpolation of a "
+        "quote-bearing message emits INVALID JSON")

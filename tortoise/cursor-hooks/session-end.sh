@@ -82,7 +82,14 @@ _record_breadcrumb() {
   # keeps it distinguishable from a ``sessions import`` capture failure, which
   # writes the same file with ``kind: capture-failure`` (#4314). Best-effort:
   # a breadcrumb write can never break the exit-0 contract.
-  local harness="$1" detail="$2"
+  # The ``kind`` argument distinguishes WHO is recording, and the distinction
+  # is load-bearing: ``install-inert`` is the INSTALL leg's own evidence (an
+  # installer that fired but captured nothing), while ``capture-failure`` is a
+  # real capture failure. `session verify` READS the kind, so recording a
+  # capture failure as ``install-inert`` would report a HEALTHY install as
+  # INERT — precisely the inversion #4314 exists to prevent. It defaults to
+  # the install-inert kind, so the pre-existing callers are unchanged.
+  local harness="$1" detail="$2" kind="${3:-install-inert}"
   local receipt_dir crumb_dir stamp
   receipt_dir="${TORTOISE_IMPORT_RECEIPT_DIR:-${HOME:-/nonexistent}/.tortoise/import-receipts}"
   # Normalize to pathlib's `.parent` semantics (#4373 review). Python's
@@ -99,9 +106,21 @@ _record_breadcrumb() {
     *) crumb_dir="capture-errors" ;;
   esac
   stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  # JSON-escape the detail. A capture error is arbitrary server text and DOES
+  # contain double quotes — the 504 body is
+  # ``{"detail":"The server's wait budget … exceeded"}`` — so interpolating it
+  # raw emitted INVALID JSON and made the breadcrumb unparseable by
+  # `session verify` (measured #4714). Backslash first, then quote, then the
+  # newlines a multi-line error can carry. Pure shell: this function must run
+  # where python3 does not exist.
+  local esc="${detail//\\/\\\\}"
+  esc="${esc//\"/\\\"}"
+  esc="${esc//$'\n'/\\n}"
+  local esc_harness="${harness//\\/\\\\}"
+  esc_harness="${esc_harness//\"/\\\"}"
   mkdir -p "$crumb_dir" 2>/dev/null || true
-  printf '{\n  "harness": "%s",\n  "detail": "%s",\n  "recorded_at": "%s",\n  "kind": "install-inert"\n}\n' \
-    "$harness" "$detail" "$stamp" \
+  printf '{\n  "harness": "%s",\n  "detail": "%s",\n  "recorded_at": "%s",\n  "kind": "%s"\n}\n' \
+    "$esc_harness" "$esc" "$stamp" "$kind" \
     > "$crumb_dir/$harness.json" 2>/dev/null || true
 }
 
@@ -261,15 +280,29 @@ for pattern in cands:
   fi
 
   # `sessions import --harness cursor` is the canonical Cursor capture step:
-  # it parses the agent transcript with `parse_cursor`, POSTs the SAME
-  # `/v1/sessions` payload the Claude/Codex hooks send (harness + the REAL
-  # session_id as the idempotency key), and writes a local 2xx-only receipt.
-  # Fail-open: any failure exits 0 and files nothing rather than blocking the
-  # session.
+  # it parses the agent transcript with the HARNESS-AWARE `parse_transcript`
+  # dispatcher (`parse_cursor`), POSTs the SAME `/v1/sessions` payload the
+  # Claude/Codex hooks send (harness + the REAL session_id as the idempotency
+  # key), and stages the parsed session locally.
+  #
+  # #4714: the defect was NOT this command — it was the `|| true` below, which
+  # discarded a real failure so the user was told nothing while nothing was
+  # captured. The failure is now RECORDED as a `capture-failure` breadcrumb.
+  #
+  # Do NOT switch this to `session capture`: that command parses via
+  # `_parse_transcript(text)`, which is not harness-aware, so it finds ZERO
+  # turns in a cursor transcript ("No conversation turns found in transcript")
+  # and would turn a transient 504 into a PERMANENT silent no-capture. Measured
+  # 2026-09-22.
+  #
+  # Fail-open is preserved: the hook still exits 0 and never blocks the
+  # session — a capture failure must be EVIDENCE, not silence.
   if [ -n "$TORTOISE_BIN" ]; then
     ARGS=(sessions import --file "$TRANSCRIPT_PATH" --harness cursor)
     [ -n "$SESSION_ID" ] && ARGS+=(--session-id "$SESSION_ID")
-    "$TORTOISE_BIN" "${ARGS[@]}" >/dev/null 2>&1 || true
+    if ! _CAPTURE_ERR="$("$TORTOISE_BIN" "${ARGS[@]}" 2>&1)"; then
+      _record_breadcrumb cursor "capture failed: ${_CAPTURE_ERR:-no output}" capture-failure
+    fi
   else
     ARGS=(sessions import --file "$TRANSCRIPT_PATH" --harness cursor)
     [ -n "$SESSION_ID" ] && ARGS+=(--session-id "$SESSION_ID")
@@ -278,9 +311,11 @@ for pattern in cands:
     # not inject code) and never via ``-m``: CPython prepends the process CWD
     # ahead of PYTHONPATH for ``-m``, so a planted ``tortoise/`` package in
     # the agent's workspace would execute as the user (CWE-427, #4314).
-    "$PYTHON_BIN" -c \
+    if ! _CAPTURE_ERR="$("$PYTHON_BIN" -c \
       'import sys; sys.path[:] = [p for p in sys.path if p not in ("", ".")]; sys.path.insert(0, sys.argv[1]); from tortoise.__main__ import main; raise SystemExit(main(sys.argv[2:]))' \
-      "$TORTOISE_MODULE" "${ARGS[@]}" >/dev/null 2>&1 || true
+      "$TORTOISE_MODULE" "${ARGS[@]}" 2>&1)"; then
+      _record_breadcrumb cursor "capture failed: ${_CAPTURE_ERR:-no output}" capture-failure
+    fi
   fi
   exit 0
 fi
