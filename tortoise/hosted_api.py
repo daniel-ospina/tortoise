@@ -6346,10 +6346,16 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
     # fail-soft above). On failure it stays None — a read failure is NOT a
     # genuine zero, and the client must render no figure rather than a
     # falsely reassuring "0 / N (0%)".
+    # #3718 residual (`org_info`): `count_org_usage` runs a SYNC FalkorDB
+    # full-graph count — it MUST go through `asyncio.to_thread`, exactly like
+    # the `point_count` read above. Calling it inline would stall the event
+    # loop on every dashboard load (the same #2988/#3718 class this file
+    # already off-loads).
     nodes_used: int | None = None
     try:
         from tortoise.quota import count_org_usage
-        nodes_used = count_org_usage(org["org_id"], "points", sdk=sdk)
+        nodes_used = await asyncio.to_thread(
+            lambda: count_org_usage(org["org_id"], "points", sdk=sdk))
     except Exception:
         logging.getLogger("tortoise.api").warning(
             "org_info node usage unavailable (fail-soft): %s", org["org_id"],
