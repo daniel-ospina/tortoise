@@ -1098,284 +1098,88 @@ def _real_git_repo(
     return root, env
 
 
-def test_record_out_receipt_does_not_dirty_the_pin(tmp_path):
-    """(b) M5/D6: the tool's OWN receipt is excluded from `post_review_dirty`.
+# ── #4203: the record must not live in the measured tree (#4572 option (a)) ──
+#
+# The exclusion that used to hide `--record-out` from the pin was re-derived five
+# times and over-matched every time (substring; symlink resolution; glob; `X`→`X/…`
+# expansion; lexical-vs-kernel `link/../out`), each spelling a way for a genuinely
+# dirty tree to read clean (post_review_dirty False, exit 0 — #4540's class). The
+# owner ruled that the class is REMOVED, not guarded: the receipt must be outside
+# the measured tree. The pin now performs no path-based exclusion at all, so there
+# is nothing whose exactness has to be proven.
 
-    The previous version of this test fed a hand-written `? docs/evidence/<f>.json`
-    line — a shape real git NEVER emits for a fresh untracked directory (`git status
-    --porcelain=v2` collapses it to `? docs/evidence/`), so the per-file substring
-    filter never matched and `dirty` stayed `True` on exactly the documented re-run.
-    The test passed while the defect was live. This drives the REAL
-    `_porcelain_digest` against a REAL repo, so the collapsed-directory shape is the
-    one under test, and it covers both documented spellings of the receipt: a flat
-    file in a tracked directory, and a file inside a fresh untracked directory.
+
+def test_in_tree_record_out_is_refused(tmp_path, capsys):
+    """An in-tree `--record-out` is a usage error: exit 2, and NO record written.
+
+    This drives the PUBLIC entry point (`main`), so the path resolution the tool
+    actually uses is the one under test, with an ABSOLUTE in-tree path so the
+    assertion does not depend on the pytest cwd. The refusal fires before any
+    measurement, so no test selection runs and no record is emitted.
     """
-    root, env = _real_git_repo(tmp_path, {"tortoise/sdk.py": "x = 1\n", "README.md": "r\n"})
+    in_tree = ee.REPO_ROOT / "docs" / "evidence" / "3827-green.json"
+    before = in_tree.exists()
 
-    # Control: before any receipt exists the tree is clean, and the bare repo is the
-    # baseline every receipt-bearing digest must equal (the receipt is the ONLY
-    # difference, so excluding it exactly reproduces the clean digest).
-    clean_digest, clean_dirty = ee._porcelain_digest(root, exclude=None, env=env)
-    assert clean_dirty is False
+    rc = ee.main([
+        "run", "--selection", "family", "--n", "2",
+        "--record-out", str(in_tree),
+    ])
+    err = capsys.readouterr().err
 
-    flat = root / "README.json"  # receipt in an already-TRACKED parent directory
-    flat.write_text("{}\n")
-    _, dirty = ee._porcelain_digest(root, exclude=flat, env=env)
-    assert dirty is False
-    flat.unlink()  # each spelling must be the ONLY receipt under test
+    assert rc == 2, "an in-tree --record-out must be a usage error"
+    assert in_tree.exists() is before, "a refused invocation must write NO record"
+    assert str(in_tree) in err, "the message must name the offending path"
+    assert "inside the measured tree" in err, "the message must name what is wrong"
+    assert "copy or upload" in err, "the message must say what to do instead"
+    assert str(ee._default_record_out()) in err, "the message must name the default"
 
-    deep = root / "docs" / "evidence" / "3827-green.json"  # fresh UNTRACKED dir
-    deep.parent.mkdir(parents=True)
-    deep.write_text("{}\n")
-    deep_digest, dirty2 = ee._porcelain_digest(root, exclude=deep, env=env)
-    assert dirty2 is False, "a receipt in a fresh untracked dir must not dirty the pin"
-
-    # The deep receipt lives in the tree, yet excluding it alone must leave the
-    # digest byte-identical to the clean baseline — a filter that dropped anything
-    # ELSE would change it.
-    assert deep.is_file() and not flat.exists()
-    assert deep_digest == clean_digest
+    # The default itself is ACCEPTED — the refusal rejects an in-tree receipt, not
+    # records in general. This is the test's own falsifier: a refusal that rejected
+    # every --record-out, including the default, would still satisfy the asserts
+    # above.
+    ee._refuse_in_tree_record_out(ee._default_record_out(), ee.REPO_ROOT)
 
 
-def test_record_out_exclusion_keeps_an_editor_sibling(tmp_path):
-    """(a) #4540: excluding a receipt must not exclude the files beside it.
+def test_pin_detects_a_genuine_edit_and_ignores_the_out_of_tree_record(tmp_path, monkeypatch):
+    """The pin still FIRES on real dirt, and the tool's own record cannot perturb it.
 
-    The substring filter dropped every porcelain line CONTAINING the record-out, and
-    an editor sibling (`<record-out>.bak`) contains it — so a real dirty file read
-    as clean while the pin claimed the tree was untouched. `docs/` is TRACKED here
-    (`.gitkeep`), so both files are listed individually and the over-match is the
-    only reason the sibling could disappear.
+    Real git in a throwaway repo — no stubbing of `_git` / `_porcelain_digest`,
+    since the whole defect class came from wrong assumptions about git's behaviour.
+    The clean assertion is the falsifier for a vacuous version: if
+    `_porcelain_digest` always returned `False`, `clean` would pass but the edit and
+    untracked-directory assertions would not.
     """
-    root, env = _real_git_repo(tmp_path, {"docs/.gitkeep": "", "tortoise/sdk.py": "x = 1\n"})
-    rec_out = root / "docs" / "3827-green.json"
-    rec_out.write_text("{}\n")
-    (root / "docs" / "3827-green.json.bak").write_text("bak\n")
+    root, env = _real_git_repo(tmp_path, {"src/keep.py": "y = 1\n", "README.md": "r\n"})
 
-    _, dirty = ee._porcelain_digest(root, exclude=rec_out, env=env)
-    assert dirty is True, "a dirty <record-out>.bak must still dirty the pin"
+    clean, clean_dirty = ee._porcelain_digest(root, env=env)
+    assert clean_dirty is False, "a fresh checkout must read clean"
 
-
-def test_record_out_exclusion_is_exact_path(tmp_path):
-    """(a) #4540: the exclusion is the EXACT path, never a PREFIX of one.
-
-    A short `--record-out` (`tools/e`) is a substring of the dirty
-    `tools/embedded_evidence.py`, so the old filter removed the only dirty entry and
-    reported a clean tree — `post_review_dirty` False, exit 0. The record-out itself
-    is a tracked, clean file, so the tracked edit is the ONLY dirty entry here and
-    the assertion cannot be satisfied by some other leftover entry.
-    """
-    root, env = _real_git_repo(tmp_path, {"tools/embedded_evidence.py": "x = 1\n", "tools/e": "keep\n"})
-    (root / "tools" / "embedded_evidence.py").write_text("x = 2\n")  # tracked edit
-
-    _, prefixed = ee._porcelain_digest(root, exclude=root / "tools" / "e", env=env)
-    assert prefixed is True, (
-        "--record-out tools/e must not exclude the dirty tools/embedded_evidence.py"
+    # The tool writes its record to its temp default, outside the measured tree.
+    monkeypatch.setattr(ee.tempfile, "tempdir", str(tmp_path / "tmp"))
+    out = ee._default_record_out()
+    ee._write_record({"schema": "embedded-evidence/1", "verdict": {}}, out)
+    assert out.is_file()
+    assert not ee._written_location(out).is_relative_to(ee._written_location(root)), (
+        "the test's own premise: the record lands OUTSIDE the measured tree"
     )
 
+    after_record, still_dirty = ee._porcelain_digest(root, env=env)
+    assert still_dirty is False, "an out-of-tree record must not dirty the pin"
+    assert after_record == clean, "an out-of-tree record must not move the digest"
 
-# ── #4203: the --record-out exclusion may drop the RECEIPT and NOTHING else ──
-#
-# `_record_out_pathspec` failed its one-directional property (a genuinely dirty
-# tree must never read clean) three rounds running, each time with a different
-# way for the exclusion to name a set LARGER than the receipt:
-#
-#   1. a substring match over the porcelain lines (`--record-out tools/e` dropped
-#      the dirty `tools/embedded_evidence.py`);
-#   2. `Path.resolve()` FOLLOWING a symlink — a receipt at `docs/out` that is a
-#      symlink to a directory resolved to `docs`, and `:(exclude)docs` dropped the
-#      whole `docs/` subtree;
-#   3. no `literal` magic, so git GLOBBED the pathspec — `docs/out[12].json`
-#      matched `docs/out1.json` and `docs/out2.json`;
-#   4. the pathspec's own prefix expansion — `X` also matches every `X/…`, so a
-#      receipt at a path the index still holds files UNDER dropped the deletion
-#      `D X/a.txt` even though `X` was a regular file, not a directory.
-#
-# Each fix was correct for the spelling that reproduced it. This battery exists
-# instead: ONE table over every over-match shape found (plus the refusals), driving
-# REAL git and asserting the INVARIANT rather than a spelling.
-#
-# The invariant, per case: the dirty canary stays VISIBLE (`dirty` is True); and
-# either the exclusion drops EXACTLY the receipt (digest equals the same tree's
-# pre-receipt digest) or nothing is emitted at all (digest equals the same tree's
-# no-exclusion digest). A path dropped without being caught is a path an
-# attacker-supplied `--record-out` could hide behind.
+    # A genuine edit in the invoking checkout IS detected ...
+    (root / "src" / "keep.py").write_text("y = 2\n")
+    edited, dirty_edit = ee._porcelain_digest(root, env=env)
+    assert dirty_edit is True
+    assert edited != clean, "the digest must change when the tree changes"
 
-_BATTERY_TRACKED = {
-    "README.md": "r\n",
-    "docs/.gitkeep": "",
-    "docs/evidence/.gitkeep": "",
-    "docs/keep.txt": "keep\n",
-    "docs/out1.json": '{"n": 1}\n',
-    "docs/out2.json": '{"n": 2}\n',
-    "docs/sibling.json.bak": "bak\n",
-    "src/keep.py": "y = 1\n",
-    "tools/e": "keep\n",
-    "tools/embedded_evidence.py": "x = 1\n",
-}
-
-# Dirt present in EVERY case. `src/keep.py` is the CANARY: its disappearance is
-# what the `dirty is True` half catches. The other three are over-match targets
-# that only the digest-equality half catches — a globbed pathspec (or one naming a
-# directory) drops them while the canary keeps `dirty` True, so a battery with only
-# the canary would pass on the `out[12]` defect.
-_BATTERY_DIRT = {
-    "src/keep.py": "y = 2\n",
-    "docs/out1.json": '{"n": 10}\n',
-    "docs/out2.json": '{"n": 20}\n',
-    "docs/sibling.json.bak": "dirty\n",
-}
-
-# (id, receipt spec relative to the repo, how to materialise it, exclusion expected)
-_BATTERY_CASES = [
-    ("literal-file-in-a-tracked-dir", "docs/evidence/3827-green.json", "file", True),
-    ("file-in-a-fresh-untracked-dir", "docs/fresh/rec.json", "file", True),
-    ("tracked-file-overwritten", "tools/e", "file", True),
-    ("bak-sibling-of-the-receipt", "docs/sibling.json", "file", True),
-    ("path-is-a-prefix-of-a-dirty-one", "tools/embedded_evidence.py.q", "file", True),
-    ("glob-class", "docs/out[12].json", "file", True),
-    ("glob-question", "docs/out?.json", "file", True),
-    ("glob-star", "docs/out*.json", "file", True),
-    ("space-in-the-name", "docs/rec with space.json", "file", True),
-    ("double-quote-in-the-name", 'docs/rec"q".json', "file", True),
-    ("relative-to-the-invocation-dir", "docs/evidence/rel.json", "file-relative", True),
-    ("directory", "docs/adir", "dir", False),
-    ("symlink-to-a-directory", "docs/out", "symlink-dir", False),
-    ("symlink-into-the-repo-from-outside", "OUTSIDE-LINK", "outside-symlink", False),
-    ("nonexistent", "docs/never-written.json", "missing", False),
-    ("the-measured-root-itself", ".", "root", False),
-    ("an-ancestor-of-the-measured-root", "..", "parent", False),
-    ("absolute-path-outside-the-repo", "OUTSIDE-FILE", "outside-file", False),
-]
-
-
-def _materialise_receipt(root: Path, tmp_path: Path, spec: str, kind: str) -> Path:
-    """Create the receipt-bearing artifact for one battery case.
-
-    Returns the value to pass as `_porcelain_digest(exclude=...)`. `symlink-dir`
-    is the (A) trigger: a symlink whose target is `.` resolves, relative to its own
-    directory, to that DIRECTORY — so a `resolve()`-based exclusion named the parent
-    and dropped the subtree, while `_write_record`'s `os.replace` still succeeds
-    because `rename(2)` replaces the symlink rather than following it.
-    """
-    if kind == "root":
-        return root
-    if kind == "parent":
-        return root.parent
-    if kind == "outside-file":
-        p = tmp_path / "outside-receipt.json"
-        p.write_text("{}\n")
-        return p
-    if kind == "outside-symlink":
-        p = tmp_path / "outside-link.json"
-        os.symlink(str(root / "docs"), p)
-        return p
-    p = root / spec
-    if kind in ("file", "file-relative"):
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("{}\n")
-    elif kind == "missing":
-        pass
-    elif kind == "dir":
-        p.mkdir(parents=True)
-        (p / "inside.txt").write_text("inside\n")  # so git lists the subtree
-    elif kind == "symlink-dir":
-        os.symlink(".", p)
-    else:
-        raise AssertionError(f"unknown battery kind {kind!r}")
-    return p
-
-
-@pytest.mark.parametrize(
-    "spec,kind,should_exclude",
-    [c[1:] for c in _BATTERY_CASES],
-    ids=[c[0] for c in _BATTERY_CASES],
-)
-def test_record_out_exclusion_cannot_over_match(
-    tmp_path, monkeypatch, spec, kind, should_exclude
-):
-    """#4203 TERMINATION CRITERION — the exclusion may only ever drop the receipt.
-
-    Every case drives `_porcelain_digest` against REAL git with a genuinely dirty
-    third path. Nothing here stubs `_git`, `_porcelain_digest` or git: the whole
-    point of the class is that an assumption about git's pathspec semantics was
-    wrong three times, and a stub would encode the same wrong assumption.
-    """
-    root, env = _real_git_repo(tmp_path, _BATTERY_TRACKED)
-    for name, body in _BATTERY_DIRT.items():
-        (root / name).write_text(body)
-
-    # The reference: THIS tree, these dirts, BEFORE any receipt exists.
-    ref_digest, ref_dirty = ee._porcelain_digest(root, exclude=None, env=env)
-    assert ref_dirty is True, "the battery's own dirt must be real"
-
-    exclude = _materialise_receipt(root, tmp_path, spec, kind)
-    if kind == "file-relative":
-        monkeypatch.chdir(root)  # a RELATIVE `--record-out` names the invocation dir
-        exclude = Path(spec)
-
-    # The same tree with no exclusion at all — what a refusal must reproduce
-    # byte-for-byte, so a refusal can never be mistaken for a silent drop.
-    unexcluded_digest, _ = ee._porcelain_digest(root, exclude=None, env=env)
-
-    pathspec = ee._record_out_pathspec(root, exclude, env=env)
-    digest, dirty = ee._porcelain_digest(root, exclude=exclude, env=env)
-
-    assert dirty is True, f"--record-out {spec!r} ({kind}) hid the dirty canary"
-    if should_exclude:
-        # The INVARIANT first, the spelling second: what must hold is that nothing
-        # but the receipt was dropped. Asserting the pathspec form first would make
-        # the battery red on a cosmetic difference and hide whether the digest —
-        # the thing `dirty`/`tree_moved` are derived from — was ever affected.
-        assert digest == ref_digest, (
-            f"the exclusion for {spec!r} dropped a path other than the receipt"
-        )
-        rel = os.path.relpath(
-            os.path.abspath(os.fspath(exclude)), os.path.realpath(os.fspath(root))
-        ).replace(os.sep, "/")
-        assert pathspec == [f":(exclude,literal){rel}"], (
-            "an exclusion must name the receipt LITERALLY (no glob) at its "
-            f"LEXICAL path; got {pathspec!r}"
-        )
-    else:
-        assert digest == unexcluded_digest, (
-            f"refusing {spec!r} still dropped something from the pin"
-        )
-        assert pathspec == [], f"{spec!r} ({kind}) must not be excluded at all"
-
-
-def test_record_out_exclusion_refuses_a_path_git_holds_files_under(tmp_path):
-    """#4203 — the prefix expansion of an exclusion, which `literal` does NOT stop.
-
-    Git's pathspec `X` matches `X` **and every `X/…`**, and that expansion is
-    filesystem-independent: with `X` a REGULAR FILE in the worktree (so the
-    directory guard does not fire) the index can still hold `X/a.txt`, and then
-    `D X/a.txt` — real dirt — disappeared from the pin. `dirty` stayed True here
-    only because of the unrelated canary, so this is exactly the half of the
-    battery that the digest assertion, not the `dirty` assertion, is for.
-
-    `X/a.txt` is left in the INDEX (its worktree deletion is unstaged). The sibling
-    variant — removed from the index but still in HEAD, which `ls-files` alone does
-    not see and `ls-files --with-tree=HEAD` does — is covered by the same guard.
-    """
-    root, env = _real_git_repo(
-        tmp_path, {"docs/out/a.txt": "one\n", "src/keep.py": "y = 1\n"}
-    )
-    (root / "src" / "keep.py").write_text("y = 2\n")  # canary
-    (root / "docs" / "out" / "a.txt").unlink()  # tracked deletion (unstaged)
-    (root / "docs" / "out").rmdir()
-    (root / "docs" / "out").write_text("now a regular file\n")
-
-    before, before_dirty = ee._porcelain_digest(root, exclude=None, env=env)
-    assert before_dirty is True
-
-    receipt = root / "docs" / "out"
-    assert ee._record_out_pathspec(root, receipt, env=env) == [], (
-        "a path git holds files UNDER must not be excluded: `:(exclude)docs/out` "
-        "also drops `docs/out/a.txt`"
-    )
-    after, dirty = ee._porcelain_digest(root, exclude=receipt, env=env)
-    assert dirty is True
-    assert after == before, "the `D docs/out/a.txt` dirt must survive the refusal"
+    # ... and so is an untracked directory — the shape whose COLLAPSED porcelain
+    # entry made the old exclusion a permanent false-FAIL (#4203). `-uall` is what
+    # keeps it from collapsing; with no exclusion left it is simply dirt.
+    (root / "docs" / "evidence").mkdir(parents=True)
+    (root / "docs" / "evidence" / "green.json").write_text("{}\n")
+    _, dirty_untracked = ee._porcelain_digest(root, env=env)
+    assert dirty_untracked is True
 
 
 def test_measured_git_calls_ignore_the_runners_ambient_config(tmp_path, monkeypatch):
@@ -1401,7 +1205,7 @@ def test_measured_git_calls_ignore_the_runners_ambient_config(tmp_path, monkeypa
 
     # (1) the leak is REAL. A vacuous version of this test would be one where the
     #     hostile config is inert, so this assertion is the test's own falsifier.
-    _, leaked_dirty = ee._porcelain_digest(root, exclude=None)
+    _, leaked_dirty = ee._porcelain_digest(root)
     assert leaked_dirty is False, "the hostile ambient config must actually bite"
 
     # (2) `_git`'s `env` argument is the only thing between the measured call and a
@@ -1412,7 +1216,7 @@ def test_measured_git_calls_ignore_the_runners_ambient_config(tmp_path, monkeypa
     assert ee._git("rev-parse", "--git-dir", cwd=root, env=env).strip() != ""
 
     # (3) and it reaches the MEASURED call, not merely a direct `_git` probe.
-    _, isolated_dirty = ee._porcelain_digest(root, exclude=None, env=env)
+    _, isolated_dirty = ee._porcelain_digest(root, env=env)
     assert isolated_dirty is True
 
 
@@ -1520,7 +1324,7 @@ class TestConjunctFalsifiability:
 
         digests = list(measured_digests or [("sha256:tree-stable", False)] * (len(runs) + 1))
 
-        def _porcelain_digest(cwd, exclude=None):
+        def _porcelain_digest(cwd, env=None):
             if Path(cwd) == measured_path:
                 return digests.pop(0)
             return review_digest
