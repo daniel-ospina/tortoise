@@ -280,6 +280,11 @@ else
   # lost" there misdirects the reader at every ordinary regression.
   if [ "$FAIL" -gt 0 ]; then
     echo "  ❌ only $PASS of $expected_assertions assertions ran — a consequence of the failures above"
+  elif [ "$PASS" -gt "$expected_assertions" ]; then
+    # The INVERSE cause: a case was ADDED without bumping the constant above.
+    # Reporting "a case was LOST" here sends the reader hunting a deletion that
+    # never happened — the same one-diagnostic-two-causes defect, one branch on.
+    echo "  ❌ $PASS assertions ran, expected $expected_assertions — a case was ADDED: bump expected_assertions"
   else
     echo "  ❌ expected $expected_assertions assertions, got $PASS — a case was LOST"
   fi
