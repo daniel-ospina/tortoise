@@ -171,6 +171,21 @@ def _has_prop(sdk, label: str, id_val: str, key: str) -> bool:
     return bool(res) and res[0][0] is False
 
 
+def _append_raw(events, **rec) -> None:
+    """Append a hand-written journal line.
+
+    The ONLY door for a record `_emit_event` cannot write: it journals nothing
+    when neither `point=` nor `id=` is given, so an `id`-less
+    `ObjectSuperseded` (the legacy shape `_fold_object_superseded`'s #2164
+    ISSUE-B name fallback exists for) can only arrive as a raw line. Using it
+    here is the point: it is the realistic producer, not a synthetic one.
+    """
+    rec.setdefault("event_id", "raw-" + str(rec.get("type", "?")))
+    rec.setdefault("ts", "2026-01-01T00:00:00+00:00")
+    with open(events / "events.jsonl", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(rec) + "\n")
+
+
 def _fold_warnings(caplog) -> list[str]:
     return [r.getMessage() for r in caplog.records
             if _MISS in r.getMessage() or _UNKNOWN in r.getMessage()
@@ -773,6 +788,55 @@ class TestJournalWriteFailure:
         # 3. ...and the loss is real, so the assertion above is not vacuous.
         assert len(_mutations(events)) == before, \
             "the append really did fail — there must be no new record"
+
+
+# ══ Legacy / hand-written journal shapes ═══════════════════════════════
+
+class TestLegacyJournalShapes:
+    """Rows whose input can only come from a raw journal line.
+
+    These are the `rebuild_all`-deferral guard's own regression rows. They were
+    briefly dropped as "untested defensive code" — which was the wrong call and
+    for the wrong reason. The guard was never untestable: the FIRST attempt
+    failed only because a name-only `ObjectSuperseded` cannot be written by
+    `_emit_event` (no `point=`/`id=` → no JSONL line at all), so the probe was
+    exercising a `:GraphEvent`-only record that `rebuild_all` never reads.
+    Constructing the line directly — the way the other legacy rows in this file
+    do — tests exactly the path the name fallback exists for.
+
+    The defect these pin: the deferred `ObjectSuperseded` sweep applies AFTER an
+    inline `EntityMutated` state fold, so without consulting journal order the
+    sweep wins over a later state op (and a blanket re-fold would invert the
+    other direction). Both directions are asserted.
+    """
+
+    def test_legacy_name_keyed_supersede_beats_an_earlier_state_op(
+            self, env):
+        """Supersede journalled LAST must win — the guard must NOT re-fold."""
+        sdk, events = env
+        oid = sdk.create_entity("object", name="Legacy",
+                                objectKind="k")["node"]["id"]
+        sdk.update_entity(oid, status="archived")
+        _append_raw(events, type="ObjectSuperseded", name="Legacy",
+                    supersedes_by="other", session_id="s", evidence="e")
+
+        sdk._get_proj().rebuild_all(str(events))
+        assert _props(sdk, "Object", oid, "status")["status"] == "superseded", (
+            "the state fold overwrote a LATER name-keyed supersede")
+
+    def test_state_op_after_a_legacy_name_keyed_supersede_wins(self, env):
+        """The converse: the state op journalled LAST must win, so the guard
+        must re-fold it rather than being disabled entirely."""
+        sdk, events = env
+        oid = sdk.create_entity("object", name="Legacy",
+                                objectKind="k")["node"]["id"]
+        _append_raw(events, type="ObjectSuperseded", name="Legacy",
+                    supersedes_by="other", session_id="s", evidence="e")
+        sdk.update_entity(oid, status="archived")
+
+        sdk._get_proj().rebuild_all(str(events))
+        assert _props(sdk, "Object", oid, "status")["status"] == "archived", (
+            "the deferred supersede sweep clobbered a LATER state op")
 
 
 # ══ Green-on-arrival guards ════════════════════════════════════════════
