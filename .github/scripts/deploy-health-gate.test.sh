@@ -275,8 +275,15 @@ if [ "$PASS" -eq "$expected_assertions" ]; then
   PASS=$((PASS + 1))
   echo "  ✅ assertion count pinned at $expected_assertions (a lost case is not a green run)"
 else
+  # Distinguish the two causes: a shortfall with failures already recorded is a
+  # CONSEQUENCE of them, not an independent lost case. Reporting "a case was
+  # lost" there misdirects the reader at every ordinary regression.
+  if [ "$FAIL" -gt 0 ]; then
+    echo "  ❌ only $PASS of $expected_assertions assertions ran — a consequence of the failures above"
+  else
+    echo "  ❌ expected $expected_assertions assertions, got $PASS — a case was LOST"
+  fi
   FAIL=$((FAIL + 1))
-  echo "  ❌ expected $expected_assertions assertions, got $PASS — a case was lost"
 fi
 
 echo "──────────────────────────────────────────"
