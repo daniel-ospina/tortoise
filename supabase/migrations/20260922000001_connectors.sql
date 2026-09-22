@@ -39,7 +39,9 @@
 --     created_at            timestamptz — set once
 --     updated_at            timestamptz — updated on any change
 --
--- RLS: enabled; policies for org-member read/write scoped to org_id.
+-- RLS: enabled; policies for org-member reads scoped to org_id. There is no
+-- `authenticated` write grant (SELECT-only, like every other control-plane
+-- table) — every write goes through the service-role seam.
 -- credential_enc is protected at the COLUMN level (not by RLS): table-level
 -- grants are revoked from anon/authenticated and every column EXCEPT
 -- credential_enc is re-granted — the 0006 pattern. Only the service-role seam
@@ -125,24 +127,28 @@ CREATE POLICY connectors_delete_org ON public.connectors
 -- a bare `REVOKE SELECT (credential_enc)` is a NO-OP in Postgres while the role
 -- holds table-level SELECT (attacl stays NULL → table ACL fallback; verified
 -- against REL_17_STABLE aclchk.c). Revoke table-level access, then re-grant the
--- non-secret columns explicitly. credential_enc is excluded from SELECT, INSERT
--- and UPDATE; service_role keeps table-level ALL + BYPASSRLS, so the
--- service-role seam (supabase_control.connector_*) still reads the credential.
+-- non-secret columns explicitly. credential_enc is excluded, so a default
+-- PostgREST `select=*` is DENIED for anon/authenticated and the column stays
+-- readable only through the service-role seam.
+--
+-- SELECT-only, matching every other control-plane table in the tree
+-- (0006_teams, 0007_api_keys, 0008_invitations, 0009_team_memberships_extend,
+-- 20260901000001_graphs_and_key_scopes): `authenticated` gets NO INSERT /
+-- UPDATE / DELETE grant. This table is not the one exception — all writes go
+-- through the service-role seam (supabase_control.connector_*), which holds
+-- table-level ALL + BYPASSRLS from Supabase's default privileges.
+--
+-- The four RLS policies above are the author's declaration of intent and are
+-- RETAINED. The read policy still governs the column-scoped SELECT that IS
+-- granted. The write/update/delete policies are satisfied via the service-role
+-- path: with no table-level write privilege for `authenticated`, they have no
+-- direct client and are inert by design, not by omission.
 -- ============================================================================
 REVOKE ALL ON public.connectors FROM anon, authenticated, public;
 
 GRANT SELECT (id, org_id, source_type, config, sync_status, sync_cursor,
               last_sync_at, last_error, created_at, updated_at)
     ON public.connectors TO authenticated;
-
-GRANT INSERT (id, org_id, source_type, config, sync_status, sync_cursor,
-              last_sync_at, last_error, created_at, updated_at)
-    ON public.connectors TO authenticated;
-
-GRANT UPDATE (config, sync_status, sync_cursor, last_sync_at, last_error)
-    ON public.connectors TO authenticated;
-
-GRANT DELETE ON public.connectors TO authenticated;
 
 -- Updated-at trigger
 CREATE OR REPLACE FUNCTION public.update_connectors_updated_at()

@@ -104,13 +104,30 @@ DO $$ BEGIN
   PERFORM tests.assert(
     has_column_privilege('service_role','public.connectors','credential_enc','SELECT') = true,
     'credential_enc: service_role must keep SELECT');
-  -- the non-secret columns stay usable
+  -- the non-secret columns stay usable for SELECT
   PERFORM tests.assert(
     has_column_privilege('authenticated','public.connectors','config','SELECT') = true,
     'connectors.config: authenticated keeps SELECT');
+  -- #2642 re-review P2: this table follows the repo-wide SELECT-only
+  -- ownership model (0006/0007/0008/0009/20260901000001) — NO write grant for
+  -- `authenticated`; writes go through the service-role seam. This assertion
+  -- REPLACED `sync_status ... UPDATE = true`, which encoded the write grants
+  -- this migration no longer issues.
   PERFORM tests.assert(
-    has_column_privilege('authenticated','public.connectors','sync_status','UPDATE') = true,
-    'connectors.sync_status: authenticated keeps UPDATE');
+    has_column_privilege('authenticated','public.connectors','sync_status','UPDATE') = false,
+    'connectors.sync_status: authenticated must NOT have UPDATE');
+  PERFORM tests.assert(
+    has_table_privilege('authenticated','public.connectors','INSERT') = false,
+    'authenticated: no INSERT grant (SELECT-only ownership model)');
+  PERFORM tests.assert(
+    has_table_privilege('authenticated','public.connectors','UPDATE') = false,
+    'authenticated: no UPDATE grant (SELECT-only ownership model)');
+  PERFORM tests.assert(
+    has_table_privilege('authenticated','public.connectors','DELETE') = false,
+    'authenticated: no DELETE grant (SELECT-only ownership model)');
+  PERFORM tests.assert(
+    has_table_privilege('service_role','public.connectors','INSERT') = true,
+    'service_role: keeps INSERT (the write seam)');
   -- anon has no table-level access at all
   PERFORM tests.assert(
     has_table_privilege('anon','public.connectors','SELECT') = false,
@@ -171,6 +188,21 @@ DO $$ BEGIN
   BEGIN
     PERFORM credential_enc FROM public.connectors WHERE org_id='org-a-2636';
     RAISE EXCEPTION 'FAIL: authenticated must not be able to read credential_enc';
+  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+  -- #2642 re-review P2: SELECT-only grants mean a member's write is refused by
+  -- the ACL — the retained RLS write policies have no `authenticated` client.
+  BEGIN
+    UPDATE public.connectors SET sync_status='syncing' WHERE org_id='org-a-2636';
+    RAISE EXCEPTION 'FAIL: authenticated must not be able to UPDATE connectors';
+  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+  BEGIN
+    DELETE FROM public.connectors WHERE org_id='org-a-2636';
+    RAISE EXCEPTION 'FAIL: authenticated must not be able to DELETE connectors';
+  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+  BEGIN
+    INSERT INTO public.connectors (org_id, source_type)
+      VALUES ('org-a-2636','slack');
+    RAISE EXCEPTION 'FAIL: authenticated must not be able to INSERT connectors';
   EXCEPTION WHEN insufficient_privilege THEN NULL; END;
 END $$;
 RESET ROLE;
