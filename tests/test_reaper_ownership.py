@@ -165,31 +165,37 @@ def test_probless_ps_stdout_is_undeterminable_not_raising(monkeypatch, tmp_path)
 
 
 def test_uptime_and_cmdline_also_tolerate_a_mock(monkeypatch, tmp_path):
-    """The same guard covers the sibling `ps`/`lsof`/`pgrep` readers.
+    """The same guard covers the sibling captured-stdout readers.
 
-    `_process_start_time` was the one on the close path, but the module has
-    nine captured-stdout readers and only ONE of them (`_process_start_time`,
-    via `_parse_lstart`'s `re.match`) actually raises on a MagicMock — the
-    others fail *silently and in the wrong direction*, which is worse:
-    `_parse_etime(MagicMock())` returns `0.0` ("infinitely old, safe to
-    reap"), `_cmdline` returns the mock itself, `_parse_client_list` returns
-    `[]` ("zero clients" — the verdict that licences a kill), and
-    `"p<pid>" in MagicMock()` is `False`. Each is pinned here to its
-    "undeterminable" value, so a future revert of any single site reds
-    instead of quietly inverting a fail-closed probe.
+    `_process_start_time` was the one on the close path (pinned in the test
+    above), but the module has eight other readers that parse captured
+    `ps`/`lsof`/`pgrep`/`redis-cli` stdout, and only one of the whole set
+    raises on a MagicMock (`_parse_lstart`). The rest fail *silently*, and
+    for three of them the silent value is the wrong one — the ones asserted
+    below:
+
+    * `_uptime_seconds` -> `_parse_etime(MagicMock())` is `0.0`;
+    * `_cmdline` -> returns the mock itself;
+    * `_is_detached` -> `int(MagicMock()) == 1` and `1 in (0, 1)` is **True**,
+      i.e. the strongest orphan signal, from an unreadable `ps`;
+    * `_client_list`/`_active_client_count` -> `_parse_client_list(MagicMock())`
+      is `[]`, the "zero clients" verdict that licences a kill.
+
+    Deliberately NOT asserted: `_process_has_socket`, `_derive_real_pid_macos`,
+    `_pgrep_redis_servers` and `_batch_process_info`. A MagicMock happens to
+    yield their safe value already (`"p<pid>" in MagicMock()` is False, and
+    iterating `MagicMock().splitlines()` yields nothing), so asserting them
+    would pin the contract value while proving nothing about the guard — the
+    kind of assertion that reads as coverage and is not.
     """
     from unittest import mock
 
     monkeypatch.delitem(R._PROC_INFO_CACHE, os.getpid(), raising=False)
     with mock.patch("subprocess.run") as fake:
         fake.return_value.returncode = 0
-        assert R._uptime_seconds(os.getpid()) is None
-        assert R._cmdline(os.getpid()) == ""
-        assert R._process_has_socket(os.getpid(), "/tmp/nope.sock") is False
-        assert R._is_detached(os.getpid()) is False  # fail-closed, not True
-        assert R._derive_real_pid_macos("/tmp/nope.sock") is None
-        assert R._pgrep_redis_servers() == []
-        assert R._batch_process_info([os.getpid()]) == {}
+        assert R._uptime_seconds(os.getpid()) is None  # pre-guard: 0.0
+        assert R._cmdline(os.getpid()) == ""  # pre-guard: the mock itself
+        assert R._is_detached(os.getpid()) is False  # pre-guard: True
         # `returncode == 0` is redis-cli's own success word, so a non-text
         # stdout must not be parsed as "zero clients" — None is the
         # caller-safe "client state unknown".

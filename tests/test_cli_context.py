@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import sys
 import tempfile
 import time
@@ -117,52 +118,91 @@ def _embedded_daemon_alive(db_path: str) -> bool:
     return True
 
 
-def _leaked_daemon_pid(db_path: str) -> int | None:
-    """The positive pid in the daemon's own pidfile, or None.
-
-    Reclaim-only: the "is it alive" decision belongs to
-    `_embedded_daemon_alive`, which must stay fail-CLOSED. Here an unreadable
-    record only means "cannot reclaim" (None), never "not a leak".
-    """
+def _registry_field(db_path: str, field: str) -> str | None:
+    """A string field of the daemon's own `.settings` registry, or None."""
     import json
 
     try:
         with open(db_path + ".settings") as fh:
-            pidfile = json.load(fh).get("pidfile")
-        if not pidfile:
-            return None
-        with open(pidfile) as fh:
-            pid = int(fh.read().strip())
+            value = json.load(fh).get(field)
     except Exception:
         return None
-    return pid if pid > 0 else None
+    return value or None
 
 
-def _reclaim_leaked_daemon(db_path: str) -> bool:
-    """Terminate a leaked daemon if one is live; return whether one was found.
+def _pid_is_this_daemon(pid: int, unixsocket: str | None) -> bool:
+    """True only when `pid` really is a redis-server for THIS daemon.
 
-    Used as the SUBJECT of the pin's assertion (`assert not
-    _reclaim_leaked_daemon(db_path)`), so the cleanup runs before the assert
-    can fire. That ordering is load-bearing rather than tidy: on the reverted
-    build the shared-release branch reclaims nothing, so a red pin would
-    otherwise bequeath the very orphan it reports — one per retry, on a leg
-    whose leak threshold is 0 (#4496 review, P2).
+    The identity check the production reaper uses (#1642 FIX 5), reused here
+    because the reclaim must never signal a process it has not identified: a
+    pidfile can outlive its daemon, and a recycled pid belongs to an
+    unrelated process.
+    """
+    from tortoise.embedded_reaper import _cmdline, _socket_dir_from_cmdline
+
+    if "redis-server" not in _cmdline(pid):
+        return False
+    if unixsocket is None:
+        return True
+    return _socket_dir_from_cmdline(pid) == os.path.dirname(unixsocket)
+
+
+def _reclaim_leaked_daemon(db_path: str) -> int | None:
+    """Reclaim a leaked daemon; return None when there was none.
+
+    Used as the SUBJECT of the pin's assertion
+    (`leaked_pid = _reclaim_leaked_daemon(db_path)` then `assert leaked_pid is
+    None`), so the cleanup runs before the assert can fire. That ordering is
+    load-bearing rather than tidy: on the reverted build the shared-release
+    branch reclaims nothing, so a red pin would otherwise bequeath the very
+    orphan it reports — one per retry, on a leg whose leak threshold is 0
+    (#4496 review, P2).
+
+    Returns the reclaimed pid, or -1 for a live daemon whose pid could not be
+    determined (still a red — the value is only ever a diagnostic here).
+
+    Reclaimed through the registry's OWN `unixsocket` rather than by signal:
+    `SHUTDOWN NOSAVE` on that path can only reach the server listening on it,
+    so pid reuse cannot make this helper kill an unrelated process. The
+    pidfile pid is only a fallback, and only after `_pid_is_this_daemon`
+    identifies it (#4496 review cycle 2, P2).
     """
     if not _embedded_daemon_alive(db_path):
-        return False
-    pid = _leaked_daemon_pid(db_path)
-    if pid is not None:
-        for attempt in range(30):  # SIGTERM first, then SIGKILL
+        return None
+    # `pidfile` is the registry's PATH to the pidfile; the pid is its content.
+    pid = None
+    pidfile = _registry_field(db_path, "pidfile")
+    if pidfile:
+        try:
+            with open(pidfile) as fh:
+                pid = int(fh.read().strip())
+        except Exception:
+            pid = None
+        if pid is not None and pid <= 0:
+            pid = None
+    unixsocket = _registry_field(db_path, "unixsocket")
+    if unixsocket:
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                sock.settimeout(2.0)
+                sock.connect(unixsocket)
+                sock.sendall(b"SHUTDOWN NOSAVE\r\n")
+        except OSError:
+            pass
+        for _ in range(25):  # the daemon exits asynchronously
+            if not _embedded_daemon_alive(db_path):
+                return pid if pid is not None else -1
+            time.sleep(0.2)
+    if pid is not None and _pid_is_this_daemon(pid, unixsocket):
+        for attempt in range(10):  # SIGTERM first, then SIGKILL
             try:
                 os.kill(pid, signal.SIGTERM if attempt == 0 else signal.SIGKILL)
             except OSError:
                 break
             time.sleep(0.2)
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
+            if not _embedded_daemon_alive(db_path):
                 break
-    return True
+    return pid if pid is not None else -1
 
 
 class TestCliContext:
@@ -520,13 +560,14 @@ class TestCliOnboardDbTarget:
 
             # NEGATIVE: no LIVE daemon survives the call (see
             # `_embedded_daemon_alive` for why the DAEMON, not the registry,
-            # is the subject). `_reclaim_leaked_daemon` is the assertion's
-            # subject so that a red pin cleans up after itself.
-            assert not _reclaim_leaked_daemon(db_path), (
-                f"init leaked its embedded redis-server ({db_path}, #4579): "
-                "once the co-tenant release withdraws the owner record it "
-                "becomes an uninstrumented, dir-present orphan the #3767 "
-                "reaper refuses to fast-kill")
+            # is the subject). `_reclaim_leaked_daemon` is the subject of the
+            # assertion so that a red pin reclaims what it reports.
+            leaked_pid = _reclaim_leaked_daemon(db_path)
+            assert leaked_pid is None, (
+                f"init leaked its embedded redis-server (pid {leaked_pid}, "
+                f"{db_path}, #4579): once the co-tenant release withdraws the "
+                "owner record it becomes an uninstrumented, dir-present "
+                "orphan the #3767 reaper refuses to fast-kill")
         finally:
             if _gc_was_enabled:
                 gc.enable()
@@ -597,11 +638,12 @@ class TestCliOnboardDbTarget:
             if gc_was_enabled:
                 gc.enable()
 
-        assert not _reclaim_leaked_daemon(db_path), (
-            "init leaked its embedded redis-server under a mocked "
-            "subprocess.run (#4496): the reaper's ps probe raised, "
-            "cotenant_holds_server read that as a co-tenant, and the last "
-            "client declined the shutdown — leaving an uninstrumented, "
+        leaked_pid = _reclaim_leaked_daemon(db_path)
+        assert leaked_pid is None, (
+            f"init leaked its embedded redis-server (pid {leaked_pid}, "
+            "#4496) under a mocked subprocess.run: the reaper's ps probe "
+            "raised, cotenant_holds_server read that as a co-tenant, and the "
+            "last client declined the shutdown — leaving an uninstrumented, "
             "dir-present orphan the #3767 reaper refuses to fast-kill")
 
     @pytest.mark.parametrize("exc", [ImportError, RuntimeError])
@@ -649,9 +691,11 @@ class TestCliOnboardDbTarget:
             # The probe was released on the error return: no LIVE daemon may
             # survive it. Same order-independent daemon pin as the success-path
             # test above (a vanished pidfile is proof the daemon exited).
-            assert not _reclaim_leaked_daemon(db_path), (
-                f"init leaked its embedded redis-server ({db_path})"
-                " on an error return that followed the probe bind (#4579)")
+            leaked_pid = _reclaim_leaked_daemon(db_path)
+            assert leaked_pid is None, (
+                f"init leaked its embedded redis-server (pid {leaked_pid}, "
+                f"{db_path}) on an error return that followed the probe bind "
+                "(#4579)")
         finally:
             if _gc_was_enabled:
                 gc.enable()
