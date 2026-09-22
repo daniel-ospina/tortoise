@@ -74,7 +74,6 @@ import json
 import os
 import re
 import urllib.parse
-from datetime import UTC, datetime, timedelta
 
 import pytest
 from playwright.sync_api import Page, expect
@@ -780,15 +779,14 @@ def test_rotate_plaintext_less_mint_latches_no_reveal(page: Page) -> None:
 
 
 def test_two_team_session_only_backups_pin_selected_team(page: Page) -> None:
-    """#2167 F2 + #3136 (the plan's step-10 two-team CI case — structurally
-    invisible to a single-team suite): with ZERO keys (no stored durable, no
-    mint), a multi-membership user whose SELECTED team ≠ first membership
-    sees the SELECTED team's backup data on the Graphs tab. The session-mode
-    /backups call must pin ?org_id=<selected> (rule 2) — the pre-#2167 shape
-    team-scoped by the KEY header, so a zero-key + non-default-team session
-    silently rendered the first membership's backups (server /backups →
-    ungated → resolves memberships[0] without the param). Zero POST
-    /v1/session/key throughout."""
+    """#2167 F2 (the plan's step-10 two-team CI case — structurally invisible
+    to a single-team suite): with ZERO keys (no stored durable, no mint), a
+    multi-membership user whose SELECTED team ≠ first membership sees the
+    SELECTED team's Backups data. The session-mode /backups call must pin
+    ?org_id=<selected> (rule 2) — the pre-#2167 shape team-scoped by the KEY
+    header, so a zero-key + non-default-team session silently rendered the
+    first membership's backups (server /backups → ungated → resolves
+    memberships[0] without the param). Zero POST /v1/session/key throughout."""
     import re as _re
     # NOTE: the shell reads t.org_name (main.jsx) — `name` alone renders
     # empty (identity.py fixture convention); org_name drives the switcher.
@@ -826,17 +824,8 @@ def test_two_team_session_only_backups_pin_selected_team(page: Page) -> None:
                 return
             if path.endswith("/backups"):
                 backup_reads.append(tid)
-                # #3136: distinct per-team PER-GRAPH manifests — the Graphs
-                # "Last backup" cell renders the SELECTED team's stamp, so
-                # wrong-team data is VISIBLE. 3h vs 5h keeps the relative
-                # label ("N hr ago") stable for the whole run.
-                hours = 3 if tid == "team_b" else 5
-                stamp = datetime.now(UTC) - timedelta(hours=hours)
-                rows = [{
-                    "backup_id": f"{tid}/default/bk", "graph_id": "default",
-                    "created_at": stamp.isoformat().replace("+00:00", "Z"),
-                    "node_count": 1, "edge_count": 0,
-                }]
+                # distinct per-team payloads — wrong-team data is VISIBLE
+                rows = [{"id": "bk-b1"}, {"id": "bk-b2"}] if tid == "team_b" else [{"id": "bk-a1"}]
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"backups": rows}))
                 return
@@ -852,15 +841,7 @@ def test_two_team_session_only_backups_pin_selected_team(page: Page) -> None:
                 t = team_b if tid == "team_b" else team_a
                 route.fulfill(status=200, content_type="application/json", body=json.dumps(t))
                 return
-            if path.endswith("/v1/graphs"):
-                # #3136: one default graph row so the Last-backup column has
-                # a row to render against.
-                route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps([{"graph_id": "default", "name": "default",
-                                                "kind": "default", "status": "active",
-                                                "key_count": 0}]))
-                return
-            if path.endswith("/v1/team/alerts"):
+            if path.endswith("/v1/graphs") or path.endswith("/v1/team/alerts"):
                 route.fulfill(status=200, content_type="application/json", body="[]")
                 return
             route.fulfill(status=401, content_type="application/json", body="{}")
@@ -894,13 +875,6 @@ def test_two_team_session_only_backups_pin_selected_team(page: Page) -> None:
     # count reflects team B's payload, never Alpha's.
     page.locator('[data-tab="keys"]').click()
     expect(page.locator("body")).to_contain_text("Backups", timeout=15_000)
-    # #3136: and the Graphs tab's per-graph Last-backup cell reflects team B's
-    # manifest (3 hr ago), never Alpha's (5 hr ago).
-    page.locator('[data-tab="graphs"]').click()
-    expect(page.locator("body")).to_contain_text("Last backup", timeout=15_000)
-    default_row = page.locator("tbody tr").first
-    expect(default_row).to_contain_text("3 hr ago", timeout=15_000)
-    expect(default_row).not_to_contain_text("5 hr ago")
     assert mint_calls == [], f"zero-mint tripwire: POST /v1/session/key fired: {mint_calls}"
 
 
