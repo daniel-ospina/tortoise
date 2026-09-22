@@ -31,12 +31,10 @@
 #      success, so a redirecting /health/ready PASSED this gate — main logged
 #      the true status (`-w %{http_code}`) but never failed on it, so a 302
 #      sailed through as a success. Same class as #4545: passing an
-#      unobserved predicate.
-#   7b. the stub STREAMS A BODY, as real curl does, so dropping `-o /dev/null`
-#      is caught: curl would then capture "<body>200", which never equals
-#      "200" and would redden EVERY deploy.
-#   8. readiness with NO RESPONSE → exit 1, and the message names the 000
-#      sentinel, so a dead app is not reported as an unready one.
+#      unobserved predicate. (The stub also STREAMS A BODY, as real curl does,
+#      so dropping `-o /dev/null` is caught: curl would then capture
+#      "<body>200", which never equals "200" and would redden EVERY deploy —
+#      case 3 is that pin.)
 #   8. a BAD KNOB                → exit 2. A non-integer knob used to abort the
 #      shell inside the `$((...))` of the failure message (under `set -u`), so
 #      `exit 1` never ran and bash 3.2 exited 0 — GREEN on a dead DB. Without
@@ -45,6 +43,13 @@
 #      a real code and STILL exit non-zero (a transfer failure after the status
 #      line). The app answered, so readiness WAS observed; overwriting that 200
 #      with the 000 sentinel would redden a ready deploy — the #4545 symptom.
+#      Carries a READY_POLLS control so its state is NOT one case 8 leaves
+#      behind (otherwise this case could silently stop running and still pass).
+#  10. readiness with NO RESPONSE → exit 1, and the message names the 000
+#      sentinel, so a dead app is not reported as an unready one.
+#
+# The count of assertions is PINNED (see the summary): a case that is lost must
+# not be indistinguishable from a case that passed.
 #
 # POSITIVE CONTROLS: in case 3 readiness is polled MORE THAN ONCE, in case 6
 # /health is polled more than once, and in case 1 the app phase is shown to stop
@@ -239,12 +244,19 @@ run_gate "yes" 1 1
 assert_eq "$RC" "0" "a valid override still passes"
 
 echo "9. an observed code + a non-zero curl exit → still SUCCEEDS"
-# curl prints 200 then exits 56 (transfer failure after the status line). The
-# app answered, so readiness WAS observed. Overwriting it with 000 would loop
-# to exhaustion and redden a ready deploy.
-run_gate "yes" 1 0 200 no 56
+# First poll: 503, curl exits 56. Second: 200, curl ALSO exits 56 (a transfer
+# failure after the status line) — the app answered, so readiness WAS observed.
+# Overwriting that 200 with the 000 sentinel would loop to exhaustion and redden
+# a ready deploy.
+#
+# The READY_POLLS control is load-bearing: without it this case asserts only
+# RC==0 + "health/ready 200", which is EXACTLY the state case 8 leaves behind —
+# so the case could silently stop running (the missing-newline bug this file
+# just fixed) and the harness would still report ALL PASSED.
+run_gate "yes" 1 2 503 no 56
 assert_eq "$RC" "0" "exits 0 — the observed 200 is not overwritten by 000"
 assert_contains "$OUT" "health/ready 200" "reported readiness"
+assert_eq "$READY_POLLS" "2" "polled twice — a state case 8 cannot produce (positive control)"
 
 # NOTE: case 3 is ALSO the pin for `-o /dev/null` — the stub streams a body,
 # so dropping the flag makes the captured status "<body>200", which never
@@ -256,6 +268,17 @@ assert_eq "$RC" "1" "exits 1"
 assert_contains "$OUT" "last status 000" "distinguishes a dead app from an unready one"
 
 echo
+# A LOST case must not be indistinguishable from success: deleting a case
+# leaves FAIL=0 and merely a LOWER count, so the count is pinned too.
+expected_assertions=30
+if [ "$PASS" -eq "$expected_assertions" ]; then
+  PASS=$((PASS + 1))
+  echo "  ✅ assertion count pinned at $expected_assertions (a lost case is not a green run)"
+else
+  FAIL=$((FAIL + 1))
+  echo "  ❌ expected $expected_assertions assertions, got $PASS — a case was lost"
+fi
+
 echo "──────────────────────────────────────────"
 if [ "$FAIL" -eq 0 ]; then
   echo "✅ ALL PASSED — $PASS assertions"
