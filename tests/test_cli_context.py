@@ -368,6 +368,39 @@ class TestCliOnboardDbTarget:
         assert "Embedded mode initialized" in out
         assert "Embedded engine active" not in out  # no fallback gate — explicit choice
 
+    def test_init_closes_the_embedded_daemon_it_opened(self, monkeypatch, tmp_path):
+        """#4579: `tortoise init` closes the embedded clients it opens.
+
+        `_cmd_init` is an in-process entry point (`_cmd_onboard` invokes it
+        directly; agents/tests call `main(["init"])`) and it opens TWO
+        clients on ONE embedded daemon — the reachability probe projection
+        and the welcome-write `TortoiseSDK`. Left open, the #3653 co-tenant
+        release path withdraws each `.tortoise-owners` record WITHOUT
+        shutting the daemon down, so the daemon outlives the call
+        uninstrumented with its registry data dir present — exactly the
+        class #3767 deliberately refuses to fast-kill (the `test-slow (b)`
+        red leg before this fix).
+
+        redislite removes `<db>.settings` on the last-client close and keeps
+        it (with a live pidfile) while a daemon survives, so the registry's
+        ABSENCE is the direct, deterministic proof that the daemon is gone by
+        the time `_cmd_init` returns — not merely collected later by GC.
+        """
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        db_path = str(tmp_path / "init-closed.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _delenv_falkordb(monkeypatch)
+        from tortoise import __main__ as m
+
+        rc = m._cmd_init(mock.Mock(
+            path=None, cmd="init", yes=True, api_key=None, no_index=True))
+        assert rc == 0
+
+        assert not os.path.exists(db_path + ".settings"), (
+            "init left its embedded daemon running — redislite's registry "
+            "still exists (#4579); once the co-tenant release withdraws the "
+            "owner record it becomes an uninstrumented, dir-present orphan")
+
     def test_onboard_completion_gates_embedded_default(self, tmp_path, monkeypatch, capsys):
         """#2200: the `tortoise onboard` wizard completion must gate the
         canonical embedded default too — a no-Docker run never reaches
