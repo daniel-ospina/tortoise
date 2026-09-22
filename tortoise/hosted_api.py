@@ -1607,6 +1607,47 @@ _SCORECARD_EXECUTOR = ThreadPoolExecutor(
     thread_name_prefix="activation-scorecard")
 
 
+async def _run_with_close(executor: ThreadPoolExecutor, fn, sdk, /, *args, **kwargs):
+    """Run one blocking graph call on a DEDICATED executor; the item owns ``sdk.close()``.
+
+    #3718 (code review): the call AND ``sdk.close()`` are ONE worker hand-off.
+    Letting the coroutine's ``finally`` close instead runs the close on the
+    LOOP while the worker is still inside the call whenever the request is
+    cancelled — cancelling the await stops the AWAITABLE, not the thread
+    (CPython #87185, quoted at length in this file's #2988 timeout note: the
+    worker "is never cancelled and continues running forever despite the
+    timeout error") — and the SDK owns the projection/connection that call is
+    reading.
+
+    The close therefore travels WITH THE WORK ITEM rather than with the
+    future: the submitted closure closes ``sdk`` in its own ``finally``, so
+    whoever ends up running the call closes the SDK exactly once — on the
+    worker thread, so a cancellation can no longer tear the SDK down mid-call,
+    and no caller can forget it (``TortoiseSDK.close()`` is idempotent —
+    ``_t_closed``).
+
+    Not the ``add_done_callback`` shape: ``ThreadPoolExecutor.submit`` puts the
+    work item on the queue BEFORE ``_adjust_thread_count()`` can raise "can't
+    start new thread", so a submit ``RuntimeError`` does NOT prove the call
+    never ran. Attaching the close to the ITEM makes the submit outcome
+    irrelevant, and — as ``_run_dream_on_pool`` records in full below (#3773
+    round 3) — there is deliberately NO loop-side close on a submit failure:
+    closing a caller-supplied SDK there could tear it down under a call an
+    existing worker had already picked up (the CPython #87185 class this design
+    removes). A pre-enqueue failure instead strands the caller's SDK to GC —
+    bounded and transient, and the same lifecycle the sibling write handlers'
+    SDKs already have (they never close explicitly).
+    """
+    def _call_and_close():
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            sdk.close()
+
+    cfut = _submit_off_loop(executor, _call_and_close)
+    return await asyncio.wrap_future(cfut)
+
+
 async def _run_dream_on_pool(fn, sdk_factory, /, *args, **kwargs):
     """Run one long dream pass on the dream pool; the WORK ITEM owns the close.
 
@@ -5859,7 +5900,6 @@ async def list_points(
             raise HTTPException(status_code=400, detail=f"kind must be one of {sorted(allowed)}")
     _require_scope(org, "graphs:read", "list_points")
     sdk = _data_sdk(org)
-    proj = sdk._get_proj()
     conditions = ["n.is_operator = false"]
     # #432 Task 2: retracted points (status='retracted') are EXCLUDED from the
     # default listing surface — tombstone contract: retrievable by id via
@@ -5883,7 +5923,14 @@ async def list_points(
         + " AND ".join(conditions)
         + " RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit"
     )
-    rows = proj.g.query(query, params=params).result_set
+    # #3718 residual 2: the projection is SYNCHRONOUS FalkorDB (a blocking
+    # socket client) — `_get_proj()` opens/attaches it and `g.query` is the
+    # round trip — so BOTH ride one worker hand-off. Nothing between the two
+    # touches thread-unsafe state, and the query string/params were already
+    # built on the loop. Same `asyncio.to_thread` pattern the write handlers
+    # and /v1/search use.
+    rows = await asyncio.to_thread(
+        lambda: sdk._get_proj().g.query(query, params=params).result_set)
     results = []
     for r in rows:
         d = r[0]
@@ -5898,13 +5945,14 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
     """Get a single Point by ID."""
     _require_scope(org, "graphs:read", "get_point")
     sdk = _data_sdk(org)
-    proj = sdk._get_proj()
-    rows = proj.g.query(
-        "MATCH (p:Point {id: $id}) "
-        "WHERE p.status IS NULL OR p.status <> 'retracted' "
-        "RETURN properties(p)",
-        params={"id": point_id},
-    ).result_set
+    # #3718 residual 2: sync FalkorDB read off the loop (see list_points).
+    rows = await asyncio.to_thread(
+        lambda: sdk._get_proj().g.query(
+            "MATCH (p:Point {id: $id}) "
+            "WHERE p.status IS NULL OR p.status <> 'retracted' "
+            "RETURN properties(p)",
+            params={"id": point_id},
+        ).result_set)
     if not rows:
         raise HTTPException(status_code=404, detail="Point not found")
     props = dict(rows[0][0])
@@ -6035,10 +6083,17 @@ async def dream_health(
     region_attempts (C5) and warm-start savings (C4)."""
     _require_scope(org, "graphs:read", "dream_health")
     sdk = _data_sdk(org)
-    try:
-        return sdk.dream_health_check()
-    finally:
-        sdk.close()
+    # #3718 residual 2 (code review): `dream_health_check` first runs
+    # `_hydrate_dirty_roots()` — an UNBOUNDED all-`Point` `ep_dirty` scan with
+    # no index — so it is the "long/stallable" class the module's #3060
+    # criterion keeps OFF the shared default executor (the same scan, reached
+    # through `sdk.dream`, already runs on `_DREAM_EXECUTOR`). It therefore
+    # runs on that pool via `_run_with_close`, which also makes the close travel
+    # with the work item: with a plain `asyncio.to_thread(...)` + a loop-side
+    # `finally: sdk.close()`, cancelling the request would close the projection
+    # on the LOOP while the worker was still inside the scan (CPython #87185 —
+    # the same race `_run_dream_on_pool` was built to remove).
+    return await _run_with_close(_DREAM_EXECUTOR, sdk.dream_health_check, sdk)
 
 
 @app.get("/v1/search")
@@ -6143,10 +6198,12 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
     point_count = 0
     graph_ready = True
     try:
-        point_count = sdk._get_proj().g.query(
-            "MATCH (n:Point) WHERE NOT n.id IN $demo_ids RETURN count(n)",
-            params={"demo_ids": list(_DEMO_POINT_IDS)},
-        ).result_set[0][0]
+        # #3718 residual 2: sync FalkorDB read off the loop (see list_points).
+        point_count = await asyncio.to_thread(
+            lambda: sdk._get_proj().g.query(
+                "MATCH (n:Point) WHERE NOT n.id IN $demo_ids RETURN count(n)",
+                params={"demo_ids": list(_DEMO_POINT_IDS)},
+            ).result_set[0][0])
     except Exception:
         import logging
         logging.getLogger("tortoise.api").warning(
@@ -8251,25 +8308,30 @@ async def list_api_keys(graph_id: str | None = None,
     sdk = _make_sdk(namespace="registry")
     try:
         if graph_id is not None:
-            keys = sdk._get_registry().query(
-                "MATCH (k:APIKey {org_id: $tid, graph_id: $gid}) "
-                "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, "
-                "k.revoked_at, k.name, k.created_via, k.expires_at, "
-                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id, "
-                "k.created_by "
-                "ORDER BY k.created_at DESC",
-                params={"tid": org["org_id"], "gid": graph_id},
-            )
+            # #3718 residual 2: `_get_registry()` attaches the SYNC FalkorDB
+            # client (`_get_proj`) and `.query` is a blocking round trip — both
+            # ride one worker hand-off.
+            keys = await asyncio.to_thread(
+                lambda: sdk._get_registry().query(
+                    "MATCH (k:APIKey {org_id: $tid, graph_id: $gid}) "
+                    "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, "
+                    "k.revoked_at, k.name, k.created_via, k.expires_at, "
+                    "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id, "
+                    "k.created_by "
+                    "ORDER BY k.created_at DESC",
+                    params={"tid": org["org_id"], "gid": graph_id},
+                ))
         else:
-            keys = sdk._get_registry().query(
-                "MATCH (k:APIKey {org_id: $tid}) "
-                "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, k.revoked_at, "
-                "k.name, k.created_via, k.expires_at, "
-                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id, "
-                "k.created_by "
-                "ORDER BY k.created_at DESC",
-                params={"tid": org["org_id"]},
-            )
+            keys = await asyncio.to_thread(
+                lambda: sdk._get_registry().query(
+                    "MATCH (k:APIKey {org_id: $tid}) "
+                    "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, k.revoked_at, "
+                    "k.name, k.created_via, k.expires_at, "
+                    "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id, "
+                    "k.created_by "
+                    "ORDER BY k.created_at DESC",
+                    params={"tid": org["org_id"]},
+                ))
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("list_api_keys failed")
@@ -11212,9 +11274,12 @@ async def list_sessions(request: Request, org: dict = Depends(get_current_org_se
             "s.machine_id, s.model "
             "ORDER BY s.created_at DESC LIMIT 50"
         )
-        rows = sdk._get_proj().g.query(
-            query, params={"uid": actor_filter} if actor_filter else None
-        ).result_set
+        # #3718 residual 2: sync FalkorDB read off the loop (see list_points).
+        rows = await asyncio.to_thread(
+            lambda: sdk._get_proj().g.query(
+                query,
+                params={"uid": actor_filter} if actor_filter else None,
+            ).result_set)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").warning(
@@ -11304,7 +11369,10 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     _require_scope(org, "graphs:read", "get_session_detail")
     sdk = _data_sdk(org)
     try:
-        proj = sdk._get_proj()
+        # #3718 residual 2: `_get_proj()` opens/attaches the SYNC FalkorDB
+        # client — off-load the attach as well as the reads below, so the
+        # first (connect) request is not the one that blocks the loop.
+        proj = await asyncio.to_thread(sdk._get_proj)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").warning(
@@ -11315,12 +11383,13 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     # Session node — #2600: actor_user_id/harness APPENDED at the END so
     # the existing sess[0..2] (id/created_at/turns) mapping is unchanged.
     # #2599: machine_id and model appended after harness — sess[4]/sess[5].
-    sess_rows = proj.g.query(
-        "MATCH (s:Session {id:$sid}) RETURN s.id, s.created_at, "
-        "s.turn_count, s.actor_user_id, s.harness, "
-        "s.machine_id, s.model",
-        params={"sid": session_id},
-    ).result_set
+    sess_rows = await asyncio.to_thread(
+        lambda: proj.g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.id, s.created_at, "
+            "s.turn_count, s.actor_user_id, s.harness, "
+            "s.machine_id, s.model",
+            params={"sid": session_id},
+        ).result_set)
     if not sess_rows:
         raise HTTPException(status_code=404, detail="Session not found")
     sess = sess_rows[0]
@@ -11339,20 +11408,22 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     # pointKind is NULL for M2 conversation extraction — so the legacy
     # decision/statement filter would report 0; count every non-turn Point
     # wired to the session instead).
-    ext_rows = proj.g.query(
-        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
-        "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "
-        "RETURN count(p)",
-        params={"sid": session_id},
-    ).result_set
+    ext_rows = await asyncio.to_thread(
+        lambda: proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+            "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "
+            "RETURN count(p)",
+            params={"sid": session_id},
+        ).result_set)
     extracted_count = ext_rows[0][0] if ext_rows else 0
 
     # Turn points (events) — ordered by turn index embedded in the id
-    turn_rows = proj.g.query(
-        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
-        "RETURN t.id, t.content, t.createdAt ORDER BY t.id",
-        params={"sid": session_id},
-    ).result_set
+    turn_rows = await asyncio.to_thread(
+        lambda: proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
+            "RETURN t.id, t.content, t.createdAt ORDER BY t.id",
+            params={"sid": session_id},
+        ).result_set)
     turns = []
     for tr in turn_rows:
         tid = tr[0]
@@ -11371,13 +11442,14 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
 
     # Extracted points (#822: same non-turn filter as the count — M2 LLM
     # Points are untyped, reported as "statement" like the capture response).
-    ext_points_rows = proj.g.query(
-        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
-        "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "
-        "RETURN p.id, p.content, p.pointKind, p.createdAt "
-        "ORDER BY p.createdAt",
-        params={"sid": session_id},
-    ).result_set
+    ext_points_rows = await asyncio.to_thread(
+        lambda: proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+            "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "
+            "RETURN p.id, p.content, p.pointKind, p.createdAt "
+            "ORDER BY p.createdAt",
+            params={"sid": session_id},
+        ).result_set)
     extracted = []
     for er in ext_points_rows:
         extracted.append({
@@ -11394,11 +11466,12 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     # capture that never materialized the Source reports `source: null`,
     # never a fabricated stub.
     source = None
-    source_rows = proj.g.query(
-        "MATCH (src:Source {url:$url}) "
-        "RETURN src.url, src.sourceKind, src.eventId",
-        params={"url": f"session:{session_id}"},
-    ).result_set
+    source_rows = await asyncio.to_thread(
+        lambda: proj.g.query(
+            "MATCH (src:Source {url:$url}) "
+            "RETURN src.url, src.sourceKind, src.eventId",
+            params={"url": f"session:{session_id}"},
+        ).result_set)
     if source_rows:
         source = {
             "url": source_rows[0][0],
@@ -15232,17 +15305,18 @@ async def list_pending_invites_for_me(user: dict = Depends(get_current_user)):  
         return {"invites": pending_invitations_for_email(
             get_control_plane(), email)}
     sdk = _make_sdk(namespace="registry")
-    reg = sdk._get_registry()
     from datetime import datetime as _dt
     now = _dt.now(UTC).isoformat()
-    rows = reg.query(
-        "MATCH (i:Invitation {email:$email}) "
-        "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status = 'pending') "
-        "AND (i.expires_at IS NULL OR i.expires_at > $now) "
-        "MATCH (t:Team {id:i.org_id}) "
-        "RETURN i.id, i.org_id, t.name, i.role, i.inviter_email, i.expires_at",
-        params={"email": email, "now": now},
-    ).result_set
+    # #3718 residual 2: sync FalkorDB (registry graph) read off the loop.
+    rows = await asyncio.to_thread(
+        lambda: sdk._get_registry().query(
+            "MATCH (i:Invitation {email:$email}) "
+            "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status = 'pending') "
+            "AND (i.expires_at IS NULL OR i.expires_at > $now) "
+            "MATCH (t:Team {id:i.org_id}) "
+            "RETURN i.id, i.org_id, t.name, i.role, i.inviter_email, i.expires_at",
+            params={"email": email, "now": now},
+        ).result_set)
     return {"invites": [{
         "invitation_id": r[0], "org_id": r[1],
         "org_name": r[2] or r[1], "role": r[3],
@@ -15517,11 +15591,13 @@ async def list_members(org_id: str, user: dict = Depends(get_current_user)):  # 
         except Exception:
             raise HTTPException(status_code=500, detail="Internal server error")  # noqa: B904
     sdk = _make_sdk(namespace="registry")
-    rows = sdk._get_registry().query(
-        "MATCH (m:Membership {org_id:$tid}) WHERE m.status = 'active' OR m.status = 'invited' "
-        "RETURN m.user_id, m.role, m.status, m.invited_email",
-        params={"tid": org_id},
-    ).result_set
+    # #3718 residual 2: sync FalkorDB (registry graph) read off the loop.
+    rows = await asyncio.to_thread(
+        lambda: sdk._get_registry().query(
+            "MATCH (m:Membership {org_id:$tid}) WHERE m.status = 'active' OR m.status = 'invited' "
+            "RETURN m.user_id, m.role, m.status, m.invited_email",
+            params={"tid": org_id},
+        ).result_set)
     return [{"user_id": r[0], "role": r[1], "status": r[2],
              "email": r[3] or ""} for r in rows]
 
@@ -20146,7 +20222,11 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     # presence cannot be confirmed, and dropping would lose the client's
     # intent against the legacy fallback path.
     if (_ACCEPT_AND_DROP and "onboarding_complete" in updates
-            and _graph_has_org_namespace(org["org_id"])):
+            # #3718 residual 2 (review): `_graph_has_org_namespace` reads the
+            # server-wide graph list through the registry projection — sync
+            # FalkorDB I/O on this hot PATCH path, so off-load it too.
+            and await asyncio.to_thread(
+                _graph_has_org_namespace, org["org_id"])):
         try:
             # review (#1997): the SDK is explicitly closed (the projection
             # handle leaks a connection per PATCH otherwise — the writers'
@@ -20158,11 +20238,22 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
             # unchanged. Closed in the finally below either way.
             _node_sdk = (_open_org_graph_sdk(org["org_id"])
                          or _make_sdk(namespace=org["org_id"]))
-            try:
-                _node = _os.read_onboarding_node(
-                    _node_sdk._get_proj(), org["org_id"])
-            finally:
-                _node_sdk.close()
+            # The WORKER owns the close: it runs in the worker's own
+            # ``finally``, so the SDK is closed exactly once there whether the
+            # read succeeds, raises, or the request is cancelled (the worker
+            # keeps running — CPython #87185). A loop-side ``finally: close()``
+            # after the await would instead tear the projection down under a
+            # worker still inside the read on cancellation, and gating that
+            # close on a completion flag would leak the connection on the
+            # cancel path (both regression shapes caught in #3718 review).
+            def _read_node():
+                try:
+                    return _os.read_onboarding_node(
+                        _node_sdk._get_proj(), org["org_id"])
+                finally:
+                    _node_sdk.close()
+
+            _node = await asyncio.to_thread(_read_node)
         except Exception:
             _node = None
         if _node is not None:

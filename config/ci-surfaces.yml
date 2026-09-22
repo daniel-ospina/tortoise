@@ -36,6 +36,12 @@ surfaces:
   # the same reason: the file it guards is tortoise/hosted_api.py, which
   # selects the `api` surface.
   - test_graph_write_loop_responsiveness.py
+  # #3718 (read half): the REST graph-READ handlers must not run synchronous
+  # FalkorDB I/O on the event loop. Same dual registration as the three guards
+  # above and for the same reason: the file it guards is tortoise/hosted_api.py,
+  # which selects the `api` surface — a PR that re-inlined a read in that file
+  # alone would otherwise never run this guard.
+  - test_read_routes_loop_responsiveness.py
   # #3498: the control-plane auth/session HTTP must not run on the event loop.
   # Same dual registration as the three loop-responsiveness guards above, for
   # the same reason: the file it guards is tortoise/hosted_api.py (and
@@ -469,6 +475,7 @@ surfaces:
   # REPLACES the `core` fallback: a core-only entry would never run this guard
   # on a hosted_api.py-only (api) or onboarding/state.py-only change.
   - test_onboarding_telemetry_w11.py
+  - test_read_routes_loop_responsiveness.py  # #3718: REST graph-read off-loop (dual: api)
   # #4194: captured turn Points must carry the embedding the dense leg
   # searches. Registered here because this file pins the unpatterned engine
   # module `tortoise/search_engine.py` (run_vector_query /
@@ -1385,6 +1392,15 @@ durations:
   # machine (see #3653/#3685 for the embedded-redislite flake that inflates the
   # tail). A loose middle; re-measure rather than trusting it.
   test_graph_write_loop_responsiveness.py: 30.0
+  # #3718 (read half): 13 cases (9 parametrized read endpoints + the
+  # /v1/points freeze case + 3 AST-inventory cases); 10 of them block a graph
+  # call for ~2s while a 20ms ticker and a concurrent /health probe run, so it
+  # is dominated by wall-clock stalls, like its write-half sibling above.
+  # FIRST ESTIMATE (same class as the sibling, which measured 25-84s on this
+  # host); re-measure from the first post-merge junit artifact rather than
+  # trusting it (see #3653/#3685 for the embedded-redislite flake that inflates
+  # the tail).
+  test_read_routes_loop_responsiveness.py: 30.0
   test_cli_serve.py: 28.1
   test_redirect_seam.py: 27.3
   eval/retrieval/test_gate_1349.py: 26.0
