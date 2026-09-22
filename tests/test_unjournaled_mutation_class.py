@@ -12,13 +12,18 @@ lane closes the two that share a seam and cites the other two:
      Subject, Object, Document, Source or Event reverted to the creation
      snapshot on rebuild. (#3312 statuses, #3377 rename)  ← closed here
 
-     ⚠️ The producer covers all five labels; the FOLD can only match FOUR.
-     A `Document` mutation journals an `EntityMutated label="Document"` whose
-     fold can only warn, because `Document` creation goes through
-     `_create_entity` (inline `DocumentCreated` :GraphEvent, **no JSONL
-     record**) — pre-existing and tracked by **#2296**. That residual is
-     disclosed, not fixed here, and `test_non_point_labels_share_the_one_seam`
-     names it rather than claiming five working labels.
+     ⚠️ The producer covers all five labels; whether the FOLD can match them
+     depends on the CREATION door. `Document` creation via
+     `create_entity(type="document")` / `create_document` goes through
+     `_create_entity`, which writes an inline `DocumentCreated` :GraphEvent and
+     **no JSONL record** — so a mutation of a Document created THAT way journals
+     an `EntityMutated label="Document"` whose fold can only warn, and a rebuild
+     destroys the Document. Pre-existing and tracked by **#2296**. (The
+     ingest/frontmatter route DOES journal `DocumentCreated`, and a Document
+     created that way folds fine — so this is a caveat about the creation door,
+     not about the label.) Disclosed, not fixed here;
+     `test_non_point_labels_share_the_one_seam` names it rather than claiming
+     five universally-working labels.
   2. **One event type, two live end-states.** ``delete_point`` hard-deletes,
      ``retract_point`` tombstones, and BOTH emitted
      ``_emit_event("PointRetracted", …, id=id)``. The fold has exactly one
@@ -415,6 +420,28 @@ class TestPropertyMutationRoundTrip:
         assert _props(sdk, "Object", oid, "status")["status"] == "superseded", (
             "a supersede journalled LAST must win — the P1 fix must not simply "
             "re-apply every state fold")
+
+    def test_every_post_supersede_state_op_is_restored(self, env):
+        """#4743 review round 2 — the sweep clobbers the WHOLE inline history.
+
+        Round 1 re-applied only the LAST state op, so `sup -> status=archived ->
+        name=New` left `status` clobbered: the terminal event was the rename and
+        did not carry `status`, so `rebuild_all` read `superseded` while live and
+        `apply()` read `archived`.
+        """
+        sdk, events = env
+        oid = sdk.create_entity("object", name="O", objectKind="k")["node"]["id"]
+        sdk._emit_event("ObjectSuperseded", id=oid, name="O",
+                        supersedes_by="other", session_id="s", evidence="e")
+        sdk.update_entity(oid, status="archived")
+        sdk.update_entity(oid, name="NewName")
+        assert _props(sdk, "Object", oid, "status")["status"] == "archived"
+
+        sdk._get_proj().rebuild_all(str(events))
+        got = _props(sdk, "Object", oid, "name", "status")
+        assert got == {"name": "NewName", "status": "archived"}, (
+            "a post-supersede state op was lost — only the last one was "
+            f"replayed: {got}")
 
     def test_no_record_for_a_write_that_matched_nothing(self, env):
         """No phantom record: the producer mirrors ``_delete_entity``'s
