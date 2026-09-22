@@ -138,6 +138,25 @@ def main(argv: list[str]) -> int:
     if malformed:
         return die(f"malformed row(s) in the baseline: {malformed!r:.200}")
 
+    # A DUPLICATE NAME is unverified content, not a harmless repetition. This guard keys
+    # the SDK and retired sets by NAME (`baseline_sdk`, `baseline_retired_map`), so a second
+    # row reusing an existing name is silently DROPPED — a doctored duplicate of an SDK or
+    # retired row left the guard green (and the drift check in tools/surface_manifest.py
+    # green too) while the frozen baseline carried fabricated content. A tool-row duplicate
+    # is caught by the entry-count check below; these two were not caught by anything.
+    for field in ("rows", "retired"):
+        entries = doc.get(field)
+        if not isinstance(entries, list):
+            continue  # absence/shape is reported by the dedicated checks
+        names = [str(r.get("name")) for r in entries if isinstance(r, dict) and r.get("name")]
+        duplicates = sorted({n for n in names if names.count(n) > 1})
+        if duplicates:
+            return die(
+                f"the approved baseline's `{field}` carries duplicate name(s): {duplicates[:5]}. "
+                "A name-keyed comparison drops all but the last, so the duplicate is content "
+                "no check here verifies. Re-cut the baseline."
+            )
+
     # --- execute the declaration (never read it as text) ---------------------
     try:
         from tortoise import mcp_server

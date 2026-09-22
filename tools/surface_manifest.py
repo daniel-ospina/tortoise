@@ -119,6 +119,26 @@ def _read_manifest(path: Path | None = None) -> dict:
         raise SurfaceEvidenceUnreadable(
             f"{path} is malformed: expected a mapping carrying a `rows:` list."
         )
+    if doc.get("retired") is not None and not isinstance(doc.get("retired"), list):
+        raise SurfaceEvidenceUnreadable(
+            f"{path} is malformed: `retired:` must be a list (got "
+            f"{type(doc.get('retired')).__name__})."
+        )
+    # A DUPLICATE NAME is unverified content, not a harmless repetition. Every comparison
+    # in this file — here and in tools/surface-guard.py — keys rows by NAME, so a second
+    # row with an existing name is silently DROPPED: a doctored duplicate inserted before
+    # the true one left the drift check green, the rendered document claiming a fabricated
+    # `class`, and the guard green too (verified adversarially). Reject it as malformed
+    # evidence; a name set cannot show it, so it must be refused before any comparison.
+    for field in ("rows", "retired"):
+        names = [str(r.get("name")) for r in doc.get(field) or [] if isinstance(r, dict)]
+        duplicates = sorted({n for n in names if names.count(n) > 1})
+        if duplicates:
+            raise SurfaceEvidenceUnreadable(
+                f"{path} carries duplicate `{field}` name(s): {duplicates[:5]} "
+                f"({len(names) - len(set(names))} row(s) over). A name-keyed comparison drops "
+                "all but the last, so the duplicate is UNVERIFIED content. Re-cut the baseline."
+            )
     return doc
 
 
@@ -211,9 +231,19 @@ def load_order() -> dict:
         table = yaml.safe_load(ORDER_FILE.read_text(encoding="utf-8"))
     except Exception as exc:  # noqa: BLE001
         raise SurfaceEvidenceUnreadable(f"could not read {ORDER_FILE}: {exc}") from exc
-    if not isinstance(table, dict) or "keywords" not in table or "tokens" not in table:
+    if not isinstance(table, dict):
         raise SurfaceEvidenceUnreadable(
-            f"{ORDER_FILE} is malformed: expected a mapping carrying `keywords:` and `tokens:`."
+            f"{ORDER_FILE} is malformed: expected a mapping carrying `keywords:`, `tokens:` "
+            f"and `family_rank:` (got {type(table).__name__})."
+        )
+    missing = [k for k in ("keywords", "tokens", "family_rank") if k not in table]
+    if missing:
+        # `family_rank` is required by `build_doc`, not only by this lint: validating a
+        # SUBSET let a table missing it pass the read and then escape as a bare KeyError
+        # out of the derivation — the traceback the refusal contract exists to prevent.
+        raise SurfaceEvidenceUnreadable(
+            f"{ORDER_FILE} is malformed: missing {missing}. The derivation cannot order or "
+            "label a row without them."
         )
     return table
 
@@ -798,6 +828,18 @@ def build_doc(commit: str | None = None) -> dict:
     return doc
 
 
+def _display(path: Path) -> str:
+    """Repo-relative when possible, absolute otherwise.
+
+    `cmd_cut` writes to `MANIFEST_FILE`, which a test (or a future `--out`) may redirect
+    outside the checkout; `relative_to` raises there, and a print must not be what fails.
+    """
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
 def cmd_cut(args: argparse.Namespace) -> int:
     try:
         doc = build_doc(args.commit)
@@ -817,7 +859,7 @@ def cmd_cut(args: argparse.Namespace) -> int:
     # changed `served_from` cannot ride an old approval into `approved`. Preserving them
     # would silently reverse that decision, so the reset stays and the tool SAYS so, because
     # otherwise the next reader sees the wipe as a bug and "fixes" it back.
-    print(f"wrote {MANIFEST_FILE.relative_to(ROOT)}")
+    print(f"wrote {_display(MANIFEST_FILE)}")
     print(f"  tools={doc['counts']['tools']} sdk={doc['counts']['sdk_public_methods']} "
           f"retired={doc['counts']['retired']}")
     print(f"  keyword distribution: {doc['counts']['keyword_distribution']}")
@@ -1215,13 +1257,34 @@ def cmd_check(args: argparse.Namespace) -> int:
     # Malformed rows must fail CLEANLY, and this must run before any row access —
     # the previous placement sat after `r["name"]` has already been dereferenced, so a
     # malformed row crashed with a bare traceback and the property could never fire.
+    # Properties 1-9 index these keys directly, so a row that HAS a name but lacks one of
+    # them is malformed EVIDENCE, not a comparison result — it is reported and excluded
+    # rather than allowed to raise (verified: a row missing `keyword` or carrying a
+    # non-integer `family_rank` escaped as KeyError/TypeError instead of the refusal).
     problems: list[str] = []
-    malformed = [r for r in doc["rows"] if not isinstance(r, dict) or "name" not in r]
-    for r in malformed:
-        problems.append(f"malformed row (not a mapping with a name): {r!r}")
-    rows = [
-        r for r in doc["rows"] if isinstance(r, dict) and "name" in r and not str(r["name"]).startswith("sdk:")
-    ]
+    required = ("family", "family_rank", "keyword", "keyword_rank", "cluster")
+    rows = []
+    for r in doc["rows"]:
+        if not isinstance(r, dict) or "name" not in r:
+            problems.append(f"malformed row (not a mapping with a name): {r!r}")
+            continue
+        if str(r["name"]).startswith("sdk:"):
+            continue
+        missing = [k for k in required if k not in r]
+        if missing:
+            problems.append(f"malformed row {r['name']!r}: missing {missing} — re-cut the baseline")
+            continue
+        bad = [
+            k for k in ("family_rank", "keyword_rank")
+            if not isinstance(r[k], int)
+        ] + (["cluster"] if r["cluster"] is not None and not isinstance(r["cluster"], str) else [])
+        if bad:
+            problems.append(
+                f"malformed row {r['name']!r}: {bad} have types the check cannot order — "
+                "re-cut the baseline"
+            )
+            continue
+        rows.append(r)
 
     # 1. totality — every tool row carries exactly one derived keyword
     # 2. derivation agreement
@@ -1378,6 +1441,23 @@ def _derivation_problems(doc: dict, derived: dict) -> list[str]:
     for label, key in (("row", "rows"), ("retired row", "retired")):
         derived_rows = {str(r.get("name")): r for r in derived.get(key) or [] if isinstance(r, dict)}
         recorded_rows = {str(r.get("name")): r for r in doc.get(key) or [] if isinstance(r, dict)}
+        # ORDER FIRST. `cut` emits both lists in a defined order (the tools by family /
+        # keyword / cluster, the SDK rows and retired names alphabetically) and the
+        # nine structural properties only pin the non-`sdk:` subsequence of `rows` — so
+        # moving every `sdk:` row to the front of the frozen artifact passed the check
+        # with "ten properties hold" (verified). The emitted order is part of the
+        # artifact, so it is compared like any other derived content.
+        recorded_order = [str(r.get("name")) for r in doc.get(key) or [] if isinstance(r, dict)]
+        derived_order = [str(r.get("name")) for r in derived.get(key) or [] if isinstance(r, dict)]
+        if recorded_order != derived_order:
+            at = next(
+                (i for i, (a, b) in enumerate(zip(recorded_order, derived_order)) if a != b),
+                min(len(recorded_order), len(derived_order)),
+            )
+            problems.append(
+                f"the baseline's `{key}` are not in the derived order — first divergence at "
+                f"index {at}: recorded {recorded_order[at:at + 1]}, derived {derived_order[at:at + 1]}"
+            )
         for name in sorted(set(recorded_rows) | set(derived_rows)):
             recorded, fresh = recorded_rows.get(name), derived_rows.get(name)
             if recorded is None:

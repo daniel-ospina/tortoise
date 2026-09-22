@@ -55,15 +55,21 @@ compares the live declaration against the approved baseline in
 any added public SDK method, any removal, any **changed SDK binding** (which method a tool fronts), any
 change to how a tool is served (HTTP vs stdio-only), a registry whose entry count no longer matches the
 baseline (a duplicate name a name comparison cannot see), or an exemption that has become reachable. A
-missing, unreadable, or malformed baseline is also a failure, as is an unreadable served-surface
-declaration — the guard must never skip a check and still report success.
+missing, unreadable, or malformed baseline is also a failure — including a **duplicate row name**, which
+a name-keyed comparison silently drops and so cannot verify — as is an unreadable served-surface
+declaration: the guard must never skip a check and still report success.
 
 The baseline cannot be *edited* either. `tools/surface_manifest.py check` (the same required job) also
 **re-derives the whole baseline from the declaration** and reds on any difference outside the columns
 that are not a function of the code (`used_by`, `recommendation`, `basis`, `reason` — they read a
 machine-local call log — and the human `approval` fields). So hand-editing the baseline's `counts:`,
 a row's description, its `class`, or any other derived cell is a red build, not a shortcut: change the
-registry, then re-cut.
+registry, then re-cut. Two things have no automatic path and are updated by hand as part of that: the
+`approval` fields (a re-cut resets them to `null` and marks the baseline `pending-owner-approval`, so the
+owner re-approves — see "To propose an addition"), and `baseline_counts` in
+[`config/surface-order.yml`](config/surface-order.yml), the frozen keyword distribution the derived
+`counts:` is checked against. If an added tool moves that distribution, the check reds until the order
+table records the new expectation.
 
 **"Added tool" means the advertised surface, not just the registry.** A tool can reach agents without
 ever entering `TOOL_REGISTRY`, by three routes the guard checks separately, because each is invisible

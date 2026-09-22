@@ -379,17 +379,25 @@ def test_the_guard_reds_when_a_new_retirement_is_not_approved(tmp_path):
     assert "NEW RETIRED TOOL" in result.stdout
 
 
-def test_the_order_lint_reds_on_a_retired_mismatch(tmp_path, monkeypatch, derived_baseline):
-    """`check` owns the same contract on the generated artifact."""
+def test_the_order_lint_reds_on_a_retired_mismatch(tmp_path, monkeypatch, capsys, derived_baseline):
+    """`check` owns the same contract on the generated artifact.
+
+    Asserts the PROPERTY-9 message, not just the exit code: property 10 re-derives the same
+    input and would make this pass on its own, so an exit-code assertion alone stopped
+    isolating the retired-name contract (review finding).
+    """
     sm = _load_manifest_tool()
     monkeypatch.setattr(sm, "build_doc", lambda *a, **k: derived_baseline)
     doc = _manifest()
+    removed = doc["retired"][-1]["name"]
     doc["retired"] = doc["retired"][:-1]
     path = tmp_path / "manifest.yml"
     path.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110))
     monkeypatch.setattr(sm, "MANIFEST_FILE", path)
     rc = sm.cmd_check(argparse.Namespace())
     assert rc == 1, "the order lint passed a manifest whose retired block was incomplete"
+    out = capsys.readouterr().out
+    assert f"retired name {removed!r} is declared but not in the manifest" in out, out
 
 
 # --- AC13 property 10: the artifact is verified against the CODE, not itself -----
@@ -434,21 +442,27 @@ def _check(sm, doc: dict, tmp_path) -> tuple[int, str]:
     return rc, buf.getvalue()
 
 
-def test_the_check_reds_on_a_hand_edited_headline_count(checker, tmp_path):
-    """The headline number the baseline exists to freeze was compared by NOTHING."""
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(lambda d: d["counts"].__setitem__("tools", 999), id="headline-count"),
+        pytest.param(
+            lambda d: d["counts"]["keyword_distribution"].__setitem__("fetch", 999),
+            id="keyword-distribution",
+        ),
+    ],
+)
+def test_the_check_reds_on_a_hand_edited_count(checker, tmp_path, mutate):
+    """Hand-edits the baseline exists to freeze that NO property compared.
+
+    Both are the same comparison (`counts`) on different fields, so they are one
+    parametrized case rather than two tests that exercise one code path (review finding).
+    """
     doc = _manifest()
-    doc["counts"]["tools"] = 999
+    mutate(doc)
     rc, out = _check(checker, doc, tmp_path)
-    assert rc == 1, "a hand-edited `counts.tools` did not red the lint"
+    assert rc == 1, "a hand-edited count did not red the lint"
     assert "counts" in out and "999" in out, out
-
-
-def test_the_check_reds_on_a_hand_edited_keyword_distribution(checker, tmp_path):
-    doc = _manifest()
-    doc["counts"]["keyword_distribution"]["fetch"] = 999
-    rc, out = _check(checker, doc, tmp_path)
-    assert rc == 1, "a hand-edited keyword distribution did not red the lint"
-    assert "keyword_distribution" in out and "999" in out, out
 
 
 def test_the_check_reds_on_a_hand_edited_rendered_cell(checker, tmp_path):
@@ -536,8 +550,12 @@ def test_the_derivation_resets_approvals_BY_DESIGN(derived_baseline):
     A carry-over of the previous approvals across a re-cut (drafted because a naive cut
     zeroes six recorded approvals and their rationale comments, which reads like data
     loss) was REFUSED against that documented decision rather than adopted. This test
-    exists so the behaviour is not "fixed" later by someone reading only the code: the
-    reset is asserted, with the flow that requires it named.
+    exists so the behaviour is not "fixed" later by someone reading only the code.
+
+    Its SCOPE is the DERIVATION. `build_doc` cannot read the artifact, so a carry-over
+    reintroduced at the WRITE site — where it would actually live — leaves these
+    assertions green; that path is pinned separately, against the file `cut` leaves
+    behind, by `test_cut_resets_approvals_at_the_WRITE_SITE` (review finding).
     """
     assert derived_baseline["approval_status"] == "pending-owner-approval"
     assert derived_baseline["approval_principal"] is None
@@ -1016,3 +1034,183 @@ def test_the_usage_markers_are_not_inverted_and_every_row_is_well_formed_markdow
         "the 'in use' marker does not match the manifest's usage evidence "
         f"(rendered-only={sorted(marked_in_use - true_in_use)[:5]})"
     )
+
+
+# --- ROUND-2 REVIEW FINDINGS: fail-open content paths, closed with mutations ---------
+# Four fresh-context reviewers ran on this change. Their P1s were both real: (1) a
+# DUPLICATE row name silently dropped content from the drift comparison AND from the D2
+# guard, reproducibly green with a doctored duplicate; (2) the approval-reset test could
+# not observe the write site it claimed to pin. The P2s were malformed evidence escaping
+# as tracebacks, an uncompared row order, and the retired-name contract no longer being
+# isolated. Every test below is the mutation evidence for one of those fixes.
+
+
+def test_cut_resets_approvals_at_the_WRITE_SITE(monkeypatch, tmp_path, derived_baseline):
+    """The reset is the CONTROL (CONTRIBUTING.md, "To propose an addition" steps 2-4).
+
+    `cut` folds a change in and marks the baseline `pending-owner-approval`; the owner then
+    re-records `approval` per row. A carry-over of the previous approvals — drafted because
+    a naive re-cut zeroes six recorded approvals and reads like data loss — was REFUSED
+    against that documented decision, and the tool says so where it writes.
+
+    Asserting this on `build_doc` alone (as the sibling test did) is VACUOUS for this
+    contract: `build_doc` cannot read the artifact, so a carry-over reintroduced at the
+    WRITE site — which is where it would live — left the suite green (review finding). So
+    the previous artifact, carrying approvals, is placed AT THE PATH `cut` WRITES and the
+    file it leaves behind is read back.
+    """
+    sm = _load_manifest_tool()
+    path = tmp_path / "surface-manifest.yml"
+    prior = copy.deepcopy(_manifest())
+    for row in [*prior["rows"], *prior["retired"]]:
+        row["approval"] = "PR#1 @owner"
+    prior["approval_status"] = "approved"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 0
+
+    written = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert written["approval_status"] == "pending-owner-approval"
+    carried = [
+        r["name"]
+        for r in [*written["rows"], *written["retired"]]
+        if r.get("approval") is not None
+    ]
+    assert carried == [], (
+        "the write site carried the previous approvals across the re-cut, reversing the "
+        f"control CONTRIBUTING.md steps 2-4 rely on: {carried[:5]}"
+    )
+
+
+def test_cut_refuses_when_the_declaration_cannot_be_IMPORTED(monkeypatch, capsys, tmp_path):
+    """The REAL import branch — not a stand-in for it.
+
+    The sibling test substitutes a raising `build_doc`, so the import inside it never runs.
+    Here the declaration is unimportable in the interpreter, which is the failure the
+    refusal contract was written for, and the artifact must still be left alone.
+    """
+    sm = _load_manifest_tool()
+    target = tmp_path / "surface-manifest.yml"
+    monkeypatch.setattr(sm, "MANIFEST_FILE", target)
+    monkeypatch.setitem(sys.modules, "tortoise.tool_registry", None)
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 1
+    out = capsys.readouterr().out
+    assert "::error::" in out and "could not import the surface declaration" in out, out
+    assert not target.exists(), "a refused cut wrote the baseline anyway"
+
+
+@pytest.mark.parametrize(
+    "document, needle",
+    [
+        pytest.param({"retired": []}, "rows", id="no-rows-list"),
+        pytest.param({"rows": [], "retired": "tortoise_old"}, "retired", id="retired-not-a-list"),
+    ],
+)
+def test_the_check_refuses_a_malformed_document_shape(
+    tmp_path, monkeypatch, capsys, document, needle
+):
+    sm = _load_manifest_tool()
+    path = tmp_path / "manifest.yml"
+    path.write_text(yaml.safe_dump(document))
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    assert sm.cmd_check(argparse.Namespace()) == 1
+    out = capsys.readouterr().out
+    assert "::error::" in out and needle in out, out
+    assert "Traceback" not in out
+
+
+def test_the_check_refuses_an_order_table_missing_family_rank(tmp_path, monkeypatch, capsys):
+    """`family_rank` is required by the DERIVATION, not only by this lint.
+
+    Validating `keywords`/`tokens` alone let a table missing it pass the read and then
+    escape as a bare KeyError out of `build_doc` — the traceback the refusal contract
+    exists to prevent.
+    """
+    sm = _load_manifest_tool()
+    table = dict(sm.load_order())
+    table.pop("family_rank")
+    path = tmp_path / "surface-order.yml"
+    path.write_text(yaml.safe_dump(table))
+    monkeypatch.setattr(sm, "ORDER_FILE", path)
+    assert sm.cmd_check(argparse.Namespace()) == 1
+    out = capsys.readouterr().out
+    assert "::error::" in out and "family_rank" in out, out
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        pytest.param(lambda r: r.pop("keyword"), id="missing-column"),
+        pytest.param(lambda r: r.__setitem__("family_rank", "first"), id="non-integer-rank"),
+        pytest.param(lambda r: r.__setitem__("cluster", ["a", "list"]), id="non-string-cluster"),
+    ],
+)
+def test_the_check_reports_a_malformed_row_instead_of_tracing(checker, tmp_path, damage):
+    """A row that HAS a name but lacks a column the properties index is malformed EVIDENCE.
+
+    It escaped as a bare KeyError/TypeError (`r["keyword"]`, then the family_rank sort)
+    instead of the `::error::` refusal the contract promises.
+    """
+    doc = _manifest()
+    row = next(r for r in doc["rows"] if not str(r["name"]).startswith("sdk:"))
+    damage(row)
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 1, "a malformed row did not red the check"
+    assert "malformed row" in out, out
+    assert "Traceback" not in out
+
+
+def test_the_check_refuses_a_duplicate_row_name(checker, tmp_path):
+    """ADVERSARIAL P1: a duplicated `sdk:` row made the artifact's CONTENT unverified.
+
+    `_derivation_problems` keys rows by name, so a second row reusing an existing name is
+    silently DROPPED. A doctored duplicate inserted BEFORE the true row — carrying a
+    fabricated `class` and `job` — left both the drift check and the D2 guard GREEN
+    (reproduced through the real CLI). No structural property sees `sdk:` rows at all, so
+    nothing else noticed. Content that a name-keyed comparison cannot show must be refused.
+    """
+    doc = _manifest()
+    sdk = next(r for r in doc["rows"] if str(r["name"]).startswith("sdk:"))
+    doctored = dict(sdk, **{"class": "internal", "job": "fabricated by a duplicate row"})
+    doc["rows"].insert(0, doctored)
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 1, "a duplicate row name did not red the check"
+    assert "duplicate" in out, out
+
+
+def test_the_guard_refuses_a_duplicate_row_name(tmp_path):
+    """The D2 expansion gate keys `baseline_sdk` / `baseline_retired_map` by name too."""
+    doc = _manifest()
+    sdk = next(r for r in doc["rows"] if str(r["name"]).startswith("sdk:"))
+    doc["rows"].insert(0, dict(sdk, **{"class": "internal"}))
+    result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
+    assert result.returncode == 1, "a duplicate row name did not red the guard"
+    assert "duplicate" in result.stdout, result.stdout
+
+
+def test_the_guard_refuses_a_duplicate_retired_name(tmp_path):
+    doc = _manifest()
+    doc["retired"].insert(0, dict(doc["retired"][0], **{"use_instead": "fabricated"}))
+    result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
+    assert result.returncode == 1, "a duplicate retired name did not red the guard"
+    assert "duplicate" in result.stdout, result.stdout
+
+
+def test_the_check_reds_on_reordered_rows(checker, tmp_path):
+    """ORDER is content.
+
+    The nine structural properties pin only the NON-`sdk:` subsequence of `rows`, so moving
+    every `sdk:` row to the FRONT of the frozen artifact passed `check` reporting all ten
+    properties holding (adversarial finding). The derived order is compared like any other
+    derived value.
+    """
+    doc = _manifest()
+    sdk = [r for r in doc["rows"] if str(r["name"]).startswith("sdk:")]
+    rest = [r for r in doc["rows"] if not str(r["name"]).startswith("sdk:")]
+    assert sdk and rest, "the baseline must carry both kinds of row for this to mean anything"
+    doc["rows"] = [*sdk, *rest]
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 1, "reordering the artifact did not red the check"
+    assert "not in the derived order" in out, out

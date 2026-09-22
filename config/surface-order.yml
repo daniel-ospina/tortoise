@@ -71,6 +71,15 @@ family_rank:
 # cannot pass silently. To change the surface you update this file and the
 # manifest together, in a PR that carries the owner's approval.
 #
+# THE ONE VALUE THAT IS NOT DERIVED. Everything else in this file FEEDS the
+# derivation (the keyword set, the ranks, the token table); this is a FROZEN
+# EXPECTATION the derivation's output is compared against, and it has no
+# automatic path — a change to the keyword distribution requires editing the
+# registry AND recording the new expectation here (the drift check compares the
+# manifest's derived `counts.keyword_distribution` to the derivation, and this
+# table to the same numbers, so the two can only agree). It is deliberately not
+# removed by the #4282 drift gate for that reason: a frozen count that no code
+# can move is a change detector, not a duplicate.
 # #3849: `find` 7 -> 6 — `tortoise_ask` was the removed row (its name token
 # `ask` derives `find`), so the removal moves this count and nothing else.
 baseline_counts:
