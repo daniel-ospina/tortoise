@@ -758,9 +758,12 @@ def _iter_registered_orgs() -> list[dict]:
 
 #: How often the background refresher re-probes the DB. Keeps ``/health``'s
 #: ``db`` field fresh WITHOUT the request path doing any I/O. The resolver and
-#: the two constants are the SHARED ``monitoring`` spelling (#2988 moved them
-#: there when the selfhost liveness coordinator landed), re-exported here so
-#: existing importers/tests keep resolving them on this module.
+#: ``HEALTH_PROBE_REFRESH_S`` are the SHARED ``monitoring`` spelling (#2988 moved
+#: them there when the selfhost liveness coordinator landed), re-exported here so
+#: existing importers/tests keep resolving them on this module (the resolver
+#: arrives as ``_health_probe_interval``). ``monitoring.HEALTH_PROBE_MIN_INTERVAL_S``
+#: is the resolver's own lower clamp and stays on ``monitoring`` — nothing
+#: imported it from this module, so it is not re-exported.
 #:
 #: NOTE the log lines for a rejected ``TORTOISE_HEALTH_PROBE_INTERVAL`` now
 #: come from ``tortoise.monitoring`` — the resolver lives there, and its
