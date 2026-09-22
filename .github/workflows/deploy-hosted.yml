@@ -68,18 +68,25 @@ on:
   workflow_dispatch:
     inputs:
       # #1719 (Task 7): DB-health verification bypass for incident-fix deploys.
-      # Defaults TRUE during the incident window (RC3 FalkorDB restore is
-      # in flight — db.ok=false is the CURRENT prod state, and a fail-closed
-      # verification would redden every incident-fix run). Flip to false once
-      # the data plane is healthy so the verification guards every deploy
-      # again. Since #4538 it reports release health in its own job
+      # Defaults FALSE — re-armed by #4538 (2026-09-23). This input was 'true'
+      # ONLY as the RC3 FalkorDB-restore mitigation, a dated incident-window
+      # state with its own exit condition ("flip to false once the data plane
+      # is healthy"). That condition was evaluated and MET: sampling
+      # https://api.premiselabs.co/health on 2026-09-23 returned db.ok=true on
+      # every completed response (db latency 2.4-713.7 ms against the 1500 ms
+      # probe budget) with /health/ready 200 {"db":"connected",
+      # "control_plane":"connected"}, so fail-closed verification no longer
+      # reddens a healthy deploy. DO NOT "restore" the incident-window
+      # default: bypass per run with this input, or per window with the
+      # SKIP_DB_HEALTH_GATE repo variable (docs/infra-runbook.md §8.2).
+      # Since #4538 it reports release health in its own job
       # (`post-deploy-verify`) and does not colour the deploy job.
       # Emits a ::warning:: when bypassed (auditability — never silently
       # skipped).
       skip-db-health-gate:
         description: 'Skip the post-deploy DB health verification (incident-fix deploys)'
         required: false
-        default: 'true'
+        default: 'false'
         type: boolean
       # #1929: incident-fix deploys must not be blocked by a packaging-gate
       # flake (the smoke builds Dockerfile.hosted locally, incl. the HF
@@ -774,11 +781,11 @@ jobs:
         # the repo variable SKIP_DB_HEALTH_GATE='true' (code-review P2 — on
         # push-triggered runs the inputs context is null, so the variable
         # lane is the ONLY way to bypass; set it during the incident window,
-        # clear it when RC3 is restored).
+        # clear it when the data plane is healthy).
         if: ${{ ! (inputs.skip-db-health-gate || vars.SKIP_DB_HEALTH_GATE == 'true') }}
         run: bash .github/scripts/deploy-health-gate.sh
         shell: bash
       - name: Warn when DB health verification bypassed
         if: ${{ inputs.skip-db-health-gate || vars.SKIP_DB_HEALTH_GATE == 'true' }}
         run: |
-          echo "::warning::DB health verification SKIPPED (skip-db-health-gate input or SKIP_DB_HEALTH_GATE repo variable). Clear it once the data plane is healthy (RC3 restored)."
+          echo "::warning::DB health verification SKIPPED (skip-db-health-gate input or SKIP_DB_HEALTH_GATE repo variable). Clear it once the data plane is healthy."

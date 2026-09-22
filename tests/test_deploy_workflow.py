@@ -419,3 +419,29 @@ def test_array_pair_parser_accepts_the_brace_spelling(workflow_text):
     step = _steps()[_SET_STEP]
     assert "GITHUB_SHA" not in set(_secret_array_pairs(step["run"]).values())
     assert _array_pairs(step["run"]).get("TORTOISE_GIT_SHA") == "GITHUB_SHA"
+
+
+def test_skip_bypass_inputs_are_re_armed_by_default():
+    """#4538 — every `skip-*` dispatch input defaults to `false`.
+
+    A bypass is an incident-window STATE — set per run with the input, or per
+    window with the `SKIP_*` repo variable (docs/infra-runbook.md §8.2) — never
+    a committed default. `skip-db-health-gate` shipped `default: 'true'` as the
+    RC3 FalkorDB-restore mitigation and so skipped the release-health
+    verification on EVERY manual dispatch; #4538 re-armed it on 2026-09-23 once
+    the data plane was healthy, which is why the incident default must not be
+    "restored". A `'true'` default disarms a gate without any run saying so.
+    """
+    doc = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
+    # PyYAML parses the bare `on:` key as the boolean True (YAML 1.1 truthiness).
+    on = doc.get("on") or doc.get(True)
+    inputs = on["workflow_dispatch"]["inputs"]
+    skips = {name: spec for name, spec in inputs.items() if name.startswith("skip-")}
+    assert skips, "no skip-* dispatch inputs found — the anchor moved"
+    for name, spec in skips.items():
+        assert spec.get("type") == "boolean", f"{name} must stay a boolean input"
+        assert str(spec.get("default")).lower() == "false", (
+            f"{name} defaults to {spec.get('default')!r} — a bypass must be an "
+            "incident-window state (docs/infra-runbook.md §8.2), never the "
+            "committed default"
+        )

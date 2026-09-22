@@ -1477,13 +1477,17 @@ Rules that hold for every one of them:
   and `SKIP_DB_HEALTH_GATE` skips the whole health step — so nothing in it
   runs, and the bypass is not exit-class-limited.
 
-⚠️ **`SKIP_DB_HEALTH_GATE` is a special case: its dispatch input defaults to
-`true`.** `skip-db-health-gate.default: 'true'` in the workflow (#1719 — the
-default was set during the RC3 restore window, when `db.ok=false` was the live
-prod state). Clearing only the repo variable therefore does **not** re-arm the
-gate on a dispatch run; the input must also be passed as `false`. Flip the
-default once the data plane is healthy, so the verification guards every deploy
-again.
+**All four dispatch inputs default to `false`**, so clearing the repo variable
+re-arms the gate on a dispatch run for every gate in the table. That was *not*
+true between #1719 and #4538: `skip-db-health-gate.default` was `'true'` during
+the RC3 restore window (when `db.ok=false` was the live prod state), so clearing
+the variable alone left the health verification skipped and the input also had
+to be passed as `false`. That default was an incident-window mitigation with its
+own exit condition — re-arm once the data plane is healthy — and it was
+re-armed on 2026-09-23 (#4538) after sampling `/health` showed `db.ok=true` on
+every completed response. If the data plane is unhealthy again, bypass **per
+run** via the input or **per window** via the variable — the committed default
+stays `false`.
 
 ```bash
 gh variable list                                             # what is currently bypassed
