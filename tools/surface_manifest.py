@@ -701,7 +701,7 @@ def cmd_render(args: argparse.Namespace) -> int:
     document. Families are emitted in rank order; inside a family, rows are
     ordered by job keyword and then by cluster, so a group of near-duplicates
     lands on consecutive lines and can be judged as a group rather than hunted
-    for across 99 rows.
+    for across the whole list.
     """
     with MANIFEST_FILE.open() as fh:
         doc = yaml.safe_load(fh)
@@ -1046,10 +1046,12 @@ def cmd_render(args: argparse.Namespace) -> int:
     add("of the gap is real scope, not fat. Tool search adds a hop and a failure mode: an agent that does")
     add("not know a capability exists may not think to look for it, and \"the tool existed but was not")
     add("advertised\" is a worse failure than a long list. And the fix is not obviously worth its cost —")
-    # Computed, not hardcoded: this is the count of rows that REMOVE a name (`kill` +
-    # `merge`). It was the literal 25 — the number of `decided` rows, which also includes
-    # the 5 `fix-declaration` rows that clear a dead `sdk_method` string and remove no tool
-    # name — so the sentence overstated the shrink by five against its own 99 → 79 figure.
+    # Computed, not hardcoded: only the `kill` + `merge` rows REMOVE a name. The
+    # `fix-declaration` rows correct a dead `sdk_method` string and take no name off the
+    # surface, so counting every `decided` row would overstate the shrink. Both this
+    # count and the "→ N" figure above are derived from the rows, never literals — an
+    # earlier hardcoded version went stale the moment 4035 repaired the declarations and
+    # the `fix-declaration` bucket emptied.
     _name_removing = [r for r in tools if r.get("recommendation") in ("kill", "merge")]
     add(f"the {len(_name_removing)} rows above remove names where the declaration already says a name is redundant, which")
     add("shrinks the surface without inventing a discovery mechanism.")
