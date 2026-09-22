@@ -36,8 +36,6 @@ from . import file_indexer  # noqa: F401 — import-time sourceKind registration
 from .projection import FalkorProjection
 from .projection import _ANNOTATOR_PROPS as _ANNOTATOR_PROP_NAMES
 from .projection import is_missing_graph_error  # #2163: absent-graph family == success
-from .projection import clear_config_reset as _clear_config_reset_graph
-from .projection import read_config_reset as _read_config_reset_graph
 from .quota import MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS
 from .canonical import derive_batch_id
 import threading
@@ -20697,6 +20695,15 @@ class TortoiseSDK:
     # reason to make. The marker is an internal durability signal; the
     # operator surface is the CLI (see `tortoise/__main__.py`). Both delegate to
     # the module-level helpers so the reader/writer contract has ONE driver.
+    #
+    # The imports are FUNCTION-LOCAL, and that is load-bearing: the generated
+    # rename table (`docs/product/sdk-rename-table.md`) cites `sdk.py` LINE
+    # NUMBERS, so a two-line import at the top of this file re-stales every
+    # citation below it (`tests/test_sdk_rename_table.py::test_part_a_*`,
+    # `::test_check_mode_is_clean`) — a documentation-drift failure with no
+    # relation to this fix. These methods sit AFTER the last cited line, so
+    # importing here shifts nothing. (Same reason `_config_classes()` imports
+    # `PACK_INSTALL_LABEL` locally in `projection/__init__.py`.)
     def _config_reset_state(self) -> dict | None:
         """The sticky `config_reset` marker's properties, or None if never set.
 
@@ -20704,7 +20711,8 @@ class TortoiseSDK:
         known good": the marker is only written when the restore provably
         failed, or when a pre-preservation rescue file left the state unknown.
         """
-        return _read_config_reset_graph(self._get_proj().g)
+        from .projection import read_config_reset
+        return read_config_reset(self._get_proj().g)
 
     def _clear_config_reset(self) -> bool:
         """Clear the sticky `config_reset` marker; True when one was present.
@@ -20713,7 +20721,8 @@ class TortoiseSDK:
         the marker a reliable third state). Call it after re-provisioning the
         configuration the marker reported missing.
         """
-        return _clear_config_reset_graph(self._get_proj().g)
+        from .projection import clear_config_reset
+        return clear_config_reset(self._get_proj().g)
 
 
 class _V2SessionMock:
