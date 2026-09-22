@@ -920,24 +920,54 @@ def _worktree_at(ref: str, run_root: Path, name: str) -> tuple[Path, bool]:
     return wt, True
 
 
+def _record_out_pathspec(cwd: Path, exclude: Path | None) -> list[str]:
+    """Git pathspec entries that drop `exclude` from a status/diff scoped to `cwd`.
+
+    `--record-out` is a command-line argument, so a RELATIVE one names a path under
+    the invocation directory (`Path.cwd()`) — NOT under `cwd`, which is the tree
+    being measured and, for a `--ref` run, is a detached worktree the receipt is not
+    inside. Git resolves a pathspec relative to the directory git runs in (`cwd`),
+    and (measured against real git, not assumed) a pathspec that escapes the
+    repository is a hard `fatal` (rc 128) — so an exclusion is emitted only when the
+    receipt resolves INSIDE `cwd`. A pathspec list of exclusions ALONE is also an
+    error, so the caller supplies `.` as the include.
+
+    Returns `[]` when there is nothing safe to exclude (no receipt, a path outside
+    the measured tree, or the measured root itself — excluding that would exclude
+    the whole tree, a fail-open in the other direction).
+    """
+    if exclude is None:
+        return []
+    target = exclude if exclude.is_absolute() else (Path.cwd() / exclude)
+    try:
+        rel = target.resolve().relative_to(cwd.resolve())
+    except (OSError, ValueError):
+        return []
+    if not rel.parts:  # `exclude` IS `cwd`: excluding it would exclude everything
+        return []
+    return [f":(exclude){rel}"]
+
+
 def _porcelain_digest(cwd: Path, exclude: Path | None = None) -> tuple[str, bool]:
-    status = _git("status", "--porcelain=v2", cwd=cwd)
-    diff = _git("diff-index", "HEAD", cwd=cwd)
-    status_lines = status.splitlines()
-    diff_lines = diff.splitlines()
-    if exclude is not None:
-        # The resolved `--record-out` path is excluded from the pin (M5/D6): the
-        # tool's own receipt must not dirty the tree it measures. The filter has to
-        # apply to the `dirty` half too, not only to the digest blob — with `dirty`
-        # read from the UNFILTERED status, the previously written receipt (an
-        # untracked entry) made `pin.post_review_dirty` true on every documented
-        # re-run, so `certificate-not-bound-to-review-head` failed on exactly the
-        # re-run the check exists for.
-        ex = str(exclude.relative_to(cwd)) if exclude.is_relative_to(cwd) else str(exclude)
-        status_lines = [ln for ln in status_lines if ex not in ln]
-        diff_lines = [ln for ln in diff_lines if ex not in ln]
-    blob = ("\n".join(status_lines) + "\n" + "\n".join(diff_lines) + "\n").encode()
-    return "sha256:" + hashlib.sha256(blob).hexdigest(), bool("\n".join(status_lines).strip())
+    # The resolved `--record-out` path is excluded from the pin (M5/D6) BY GIT, as a
+    # pathspec — never by filtering the porcelain text. The substring filter this
+    # replaces held two reproduced defects (#4540), and because #4203 moved `dirty`
+    # onto the filtered lines, its over-broad match was no longer cosmetic:
+    #   (a) FAIL-OPEN: `ex` was matched with `in`, so `--record-out tools/e` dropped
+    #       the dirty `tools/embedded_evidence.py` from BOTH the digest and `dirty` —
+    #       a real edit read as a clean tree (post_review_dirty False, exit 0).
+    #   (b) SILENT NO-OP: `status` without `--untracked-files=all` collapses a fresh
+    #       untracked receipt directory to ONE entry (`? docs/evidence/`), which the
+    #       per-file filter never matched — so `dirty` stayed True on exactly the
+    #       documented re-run (the permanent false-FAIL #4203 was raised to close).
+    # Both die at the source when git does the exclusion: the pathspec is exact
+    # (measured: `:(exclude)tools/e` keeps `tools/embedded_evidence.py`) and `-uall`
+    # makes the receipt a path git can exclude at all.
+    pathspec = [".", *_record_out_pathspec(cwd, exclude)]
+    status = _git("status", "--porcelain=v2", "--untracked-files=all", "--", *pathspec, cwd=cwd)
+    diff = _git("diff-index", "HEAD", "--", *pathspec, cwd=cwd)
+    blob = (status + "\n" + diff + "\n").encode()
+    return "sha256:" + hashlib.sha256(blob).hexdigest(), bool(status.strip())
 
 
 def _snapshot_redis_logs(run_root: Path) -> list[Path]:
