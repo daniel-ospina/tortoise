@@ -127,6 +127,15 @@ STALE_QUARANTINE_SUFFIX = ".reaper-stale-"
 # tortoise/embedded_lifecycle.py and imports this name lazily (no import
 # cycle: embedded_reaper deliberately stays dependency-free).
 OWNERS_DIRNAME = ".tortoise-owners"
+# #4577: the owner-hold LOCK file inside `OWNERS_DIRNAME`. The writer holds a
+# SHARED `flock(LOCK_SH)` on it for the process's lifetime; the reaper probes
+# an EXCLUSIVE non-blocking lock. A held lock is a KERNEL FACT of liveness
+# (the kernel drops it when the holder dies) and supersedes the pid+start
+# inference as the PRIMARY signal — `_owner_records` is retained as the
+# fallback for owners created before the lock existed and for lock-less
+# paths. Declared here (the reaper owns the owner-record format) so the
+# writer and reader cannot drift.
+OWNER_LOCK_NAME = ".lock"
 # #1383 security review (Issue 3): ownership marker written into a
 # quarantine at rename time — the sweep only rmtrees dirs carrying it, so a
 # same-suffix foreign dir (another tool's temp naming, a planted decoy) is
@@ -1900,6 +1909,17 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
         # if we confirm on "no live owner", we must not kill on "a live
         # owner appeared". An uninstrumented server has no records (None ->
         # unchanged) and a socketless one cannot host a new record's dir.
+        # #4577: the same self-consistency re-check for the KERNEL lock — a
+        # live owner that attached since confirmation holds a shared flock
+        # on the owner dir's `.lock`. True -> never kill; False/None -> the
+        # record-based evidence chain below still decides (a free lock alone
+        # never authorizes a kill). Checked BEFORE `_owner_records` because
+        # it is the stronger signal and needs no pid/start parsing.
+        if _owner_lock_held(record["socket_path"]) is True:
+            logger.info(
+                "owner lock held (live owner), skipping: %s",
+                record["socket_path"])
+            continue
         owners_now = _owner_records(record["socket_path"])
         if owners_now is not None and owners_now[0] > 0:
             logger.info(
@@ -2777,6 +2797,84 @@ def _owner_pid_alive(pid: int) -> bool:
     return False
 
 
+def _owner_lock_held(socket_path: str) -> bool | None:
+    """Does a LIVE owner hold the server's owner lock? (#4577)
+
+    The kernel-fact version of the #1557 "a live owner must never be killed"
+    guarantee. The writer (`embedded_lifecycle.record_owner`) holds a SHARED
+    ``flock`` on ``<socket_dir>/.tortoise-owners/.lock`` for the process's
+    lifetime; the kernel releases it when the holder dies, so an EXCLUSIVE
+    non-blocking lock that FAILS to acquire proves a live owner with no pid
+    or start-time inference at all (no recycled-pid, no unreadable-`ps`,
+    no copied-record failure class).
+
+    Returns:
+      - ``True``: the probe was refused (``BlockingIOError`` / ``EAGAIN``)
+        because a live owner holds the shared lock. The caller must NEVER
+        confirm or kill that server.
+      - ``False``: the lock was acquired, so no live owner holds it. This is
+        NOT by itself authorization to kill — the caller still runs the
+        existing evidence chain (0-client double probe, window/`unattributed`
+        rules, euid provenance, `_owner_records`).
+      - ``None``: the lock file is missing or unreadable (an owner built
+        before this change, a symlink planted at ``.lock``, an I/O error) —
+        UNKNOWN, so the caller falls through to today's ``_owner_records``
+        path. Backward compatibility: "no lock file" is never "orphan".
+
+    ``O_NOFOLLOW`` so a symlink at ``.lock`` is never followed (#4098
+    discipline); a planted symlink therefore reads UNKNOWN rather than
+    resolving onto (and taking a lock on) whatever it points at. The probe
+    releases the exclusive lock it takes before returning, so it can never
+    block a later owner from claiming the server. Never raises.
+    """
+    import fcntl
+
+    if not socket_path:
+        return None  # defensive: this function's contract is "never raises"
+    path = os.path.join(os.path.dirname(socket_path), OWNERS_DIRNAME,
+                        OWNER_LOCK_NAME)
+    # #4577 review, #4098 discipline (same as `_lock_holder_pid`): never
+    # BLOCK on a planted non-regular file. `open(FIFO, O_RDONLY)` with no
+    # writer parks FOREVER, and this probe runs for every candidate in
+    # `_mark_orphan_confirmation` — including the conftest end-sweep, which
+    # arms NO SIGALRM watchdog — so one planted FIFO would hang the sweep
+    # and pin every orphan on the host. `O_NONBLOCK` makes the open
+    # non-blocking; the `S_ISREG` check rejects anything that is not the
+    # regular file this module writes.
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK
+                     | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None  # missing / symlink / unreadable -> UNKNOWN, fall back
+    try:
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return None  # planted FIFO/device -> UNKNOWN (#4098)
+        except OSError:
+            return None
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            # EWOULDBLOCK is EAGAIN on Linux/macOS; both spellings are
+            # checked so the verdict cannot flip with an errno alias. Any
+            # OTHER OSError means we cannot trust the probe -> UNKNOWN.
+            if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                return True  # a live owner holds the shared lock
+            return None
+        # Acquired: no live owner holds the server. Release at once — the
+        # probe must never leave a server locked against a future owner.
+        try:  # noqa: SIM105
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        return False
+    finally:
+        try:  # noqa: SIM105
+            os.close(fd)
+        except OSError:
+            pass
+
+
 def _owner_records(socket_path: str) -> tuple[int, int] | None:
     """(live_owners, total_owners) recorded for the server at ``socket_path``.
 
@@ -2887,15 +2985,23 @@ def _mark_orphan_confirmation(records: list[dict]) -> None:
     concurrent suite's between-tests idle server looks identical (#1557:
     all redislite servers daemonize to ppid=1). Orphanhood is confirmed by
     the FIRST signal that proves it, per server:
-      1. #3599: no live owner. tortoise.FalkorDB records one owner file per
-         owning process inside the server's socket dir; all owners provably
-         dead => orphan, independent of what other suites on the host are
-         doing. This is the signal that breaks the fleet deadlock: the
-         global gate below is permanently True on a host running many
+      1. #4577: no live lock HOLDER. A live owner process holds a shared BSD
+         flock on `<socket_dir>/.tortoise-owners/.lock`; the kernel drops it
+         when the holder dies, so "a live owner holds the server" is a FACT
+         rather than a pid+start reconstruction (no recycled-pid, no
+         unreadable-`ps`, no copied-record failure class). A HELD lock vetoes
+         confirmation outright, independent of anything else. A lock-less
+         owner (created before this change, or a symlinked/unreadable lock)
+         reads UNKNOWN and falls through to signal 2 — never to "orphan".
+      2. #3599: no live owner RECORD. tortoise.FalkorDB records one owner
+         file per owning process inside the server's socket dir; all owners
+         provably dead => orphan, independent of what other suites on the
+         host are doing. This is the signal that breaks the fleet deadlock:
+         the global gate below is permanently True on a host running many
          concurrent sessions, so nothing was ever confirmed and the
          only_safe cron was a no-op (#3599). Restricted to EPHEMERAL
          test-tree servers (`path_based` False).
-      2. #1642 FIX 3 fallback (uninstrumented spawns — no owner records, and
+      3. #1642 FIX 3 fallback (uninstrumented spawns — no owner records, and
          also the socket-dir-missing case): the 0-client state must have
          persisted >= ZERO_CLIENT_CONFIRM_MINUTES across sweeps AND no live
          suite markers may exist (FIX 4). A missing socket dir is NOT an
@@ -2964,6 +3070,18 @@ def _mark_orphan_confirmation(records: list[dict]) -> None:
         # (before AND after) before any _kill, EXCEPT on the socketless
         # fast path (dir gone + confirmed), which is why the dir-missing
         # signal must keep its window.
+        # #4577: the KERNEL-FACT liveness signal, checked FIRST. A live
+        # owner holds a shared flock on the owner dir's `.lock`; the kernel
+        # drops it when the process dies, so a held lock proves a live owner
+        # with none of the pid+start inference's failure classes. True ->
+        # never confirm (skip, and clear any window state). False/None ->
+        # the record-based chain below decides, UNCHANGED: a FREE lock does
+        # not by itself authorize a kill, and an owner built before this
+        # change has no lock file at all (backward compatible).
+        if _owner_lock_held(rec["socket_path"]) is True:
+            if state.pop(rec["socket_path"], None) is not None:
+                changed = True
+            continue
         owners = _owner_records(rec["socket_path"])
         if owners is not None and owners[0] > 0:
             if state.pop(rec["socket_path"], None) is not None:
