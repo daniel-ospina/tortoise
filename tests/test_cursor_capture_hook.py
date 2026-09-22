@@ -652,13 +652,21 @@ def test_a_failed_capture_is_recorded_as_evidence_not_swallowed(tmp_path):
     # exits, while the hook records the breadcrumb only AFTER reaping it — so
     # _wait_for_done returning does not imply the crumb exists and asserting on
     # it races.
+    # Poll until the content PARSES, not merely until the NAME exists: the hook
+    # writes with `>` (truncate) then printf, so a reader can catch an empty or
+    # partial file and raise JSONDecodeError — the same "assert on the artifact
+    # before it is complete" class this poll exists to close.
     crumb = home / ".tortoise" / "capture-errors" / "cursor.json"
     deadline = time.monotonic() + 10
-    while time.monotonic() < deadline and not crumb.is_file():
-        time.sleep(0.05)
-    assert crumb.is_file(), (
-        "a failed capture left NO evidence — silence is the defect (#4714)")
-    record = json.loads(crumb.read_text(encoding="utf-8"))
+    record = None
+    while time.monotonic() < deadline:
+        try:
+            record = json.loads(crumb.read_text(encoding="utf-8"))
+            break
+        except (OSError, ValueError):
+            time.sleep(0.05)
+    assert record is not None, (
+        "a failed capture left NO parseable evidence — silence is the defect (#4714)")
     assert record["kind"] == "capture-failure", record
     assert "504" in record["detail"], record
     assert record["harness"] == "cursor", record
@@ -666,6 +674,9 @@ def test_a_failed_capture_is_recorded_as_evidence_not_swallowed(tmp_path):
         "the error text must survive JSON-escaping — a raw interpolation of a "
         "quote-bearing message emits INVALID JSON")
     raw = crumb.read_text(encoding="utf-8")
+    assert "\\t" in raw, (
+        "POSITIVE CONTROL: the tab must actually reach the file as a \\t escape. "
+        "Without this the guard below passes vacuously if tab delivery ever breaks")
     assert "\t" not in raw, (
         "a raw tab in the JSON text is a control character and makes the file "
         "unparseable — it must be escaped or stripped. Assert on the RAW file: "

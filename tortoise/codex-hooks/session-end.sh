@@ -109,17 +109,24 @@ _record_breadcrumb() {
   esc="${esc//$'\n'/\\n}"
   esc="${esc//$'\r'/\\r}"
   esc="${esc//$'\t'/\\t}"
-  # Belt-and-braces for the REST of the C0 class (an ESC, a NUL, a form feed).
-  # `tr` is POSIX and every bit as available as `mkdir`/`date`, so this keeps
-  # the function pure-shell. Stripping is safe here: \n, \r and \t were
-  # already converted to their two-character escapes above, so the raw bytes
-  # deleted below are only the ones that have no JSON escape at all.
+  # JSON has escapes for BS and FF too, so use them rather than dropping the
+  # characters: escaping is lossless, and a discarded byte is evidence lost.
+  esc="${esc//$'\b'/\\b}"
+  esc="${esc//$'\f'/\\f}"
+  # Sweep whatever is left of the C0 class (NUL, VT, ESC and the rest), which
+  # has NO JSON escape at all. BS/FF were converted to their two-character
+  # escapes directly above and are therefore not raw bytes here. `tr` is POSIX
+  # and as available as the `mkdir`/`date` already used, so the function stays
+  # pure-shell — which matters, because this is also the evidence path for the
+  # branch reached BECAUSE python3 is missing.
   esc="$(printf '%s' "$esc" | tr -d '\000-\010\013\014\016-\037')"
   local esc_harness="${harness//\\/\\\\}"
   esc_harness="${esc_harness//\"/\\\"}"
   esc_harness="${esc_harness//$'\n'/\\n}"
   esc_harness="${esc_harness//$'\r'/\\r}"
   esc_harness="${esc_harness//$'\t'/\\t}"
+  esc_harness="${esc_harness//$'\b'/\\b}"
+  esc_harness="${esc_harness//$'\f'/\\f}"
   esc_harness="$(printf '%s' "$esc_harness" | tr -d '\000-\010\013\014\016-\037')"
   mkdir -p "$crumb_dir" 2>/dev/null || true
   printf '{\n  "harness": "%s",\n  "detail": "%s",\n  "recorded_at": "%s",\n  "kind": "%s"\n}\n' \
