@@ -986,8 +986,20 @@ def test_push_legs_partitions_every_classified_file():
     assert not (set(legs["slow"]) & carve), \
         "slow carve-out files run in the URI-unset carve-out job, never the slow legs"
     assert set(legs["carve_out"]) == carve, "carve_out leg must be exactly the config set"
-    # bench push_extra lands in half b
-    assert any(f.startswith("bench/") for f in legs["half_b"])
+    # #1485: push_extra rides the halves on index parity (even -> half_a,
+    # odd -> half_b). Asserted CONDITIONALLY, because the manifest's
+    # push_extra is EMPTY today: the bench files are registered as an `eval`
+    # surface, so they ride the duration split like every other classified
+    # file. Pinning "some bench file is in half_b" while push_extra is empty
+    # does not assert that rule — 97% of the pool sits at the 2.0s default
+    # weight, so adding ONE file reshuffles ~290 assignments and the bench
+    # files land wherever the LPT balance puts them. The partition itself is
+    # already pinned by the set-equality assertion above.
+    for i, f in enumerate(m.get("push_extra", [])):
+        leg = "half_a" if i % 2 == 0 else "half_b"
+        assert f.replace(".py", "") in set(legs[leg]), (
+            f"push_extra[{i}] {f} must ride {leg} — the #1485 spread rule"
+        )
 
 
 def test_carve_out_mirrors_test_no_redirect_stems():
