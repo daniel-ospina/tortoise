@@ -20,9 +20,21 @@ Pipeline (per org graph):
                   audit (#3154 — GRAPH.COPY can drop the `false` postings of a
                   copied boolean index)
                   → cleanup.
+                  Both GRAPH.COPY copies run over the restore's OWN read bound
+                  (#3813) — an ordinary request's socket_timeout forbids a copy
+                  longer than 60s at any legal configuration.
                   Any verification failure leaves the live graph untouched; a swap
                   failure leaves the verified temp + pre-restore copies recoverable.
   prune_backups:  keep N daily + M weekly (newest-first).
+
+Env (restore):
+- TORTOISE_RESTORE_SWAP_TIMEOUT_S — explicit read bound (seconds) for the
+  restore's GRAPH.COPY copies. Default 120, clamped to [60, 3600]. See
+  _restore_swap_timeout_s.
+- TORTOISE_RESTORE_SWAP_SETTLE_S — how long, after that read bound expires,
+  the restore keeps polling the copy's DESTINATION for its outcome before
+  reporting a timeout (#4233). Default: the read bound. See
+  _restore_swap_settle_s.
 
 Env:
 - TORTOISE_BACKUP_KEY — base64 32-byte ACTIVE key for AES-256-GCM (encrypt
@@ -40,15 +52,30 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import secrets
+import time
 from datetime import datetime, timezone
 from typing import Callable, Protocol  # noqa: UP035
+
+from tortoise.fork_slot import (
+    ForkSlotRecovery,
+    ForkSlotWedgedError,
+    fork_slot_is_wedged,
+    is_fork_refusal,
+    recover_fork_slot,
+)
 
 logger = logging.getLogger(__name__)
 
 DUMP_FORMAT = "tortoise-logical-dump-v1"
+# #3895: writer revision. Rev 1 = node list filtered, edge list NOT (an artifact
+# whose edges may reference nodes it does not carry — the unrestorable shape).
+# Rev 2 = both halves restricted to ONE node set: a rev-2 artifact cannot
+# contain a dangling edge, so a reader that finds one has CORRUPTION.
+_DUMP_REVISION = 2
 _MAGIC = b"TB1"
 _NONCE_LEN = 12
 _AES_KEY_SIZE = 32  # AES-256
@@ -202,6 +229,31 @@ def _sanitize_label(lbl: str) -> str:
     return lbl
 
 
+def _coerce_dump_id(value, what: str) -> int:
+    """Strict int coercion for a dump's ids (``dump_id`` / ``src`` / ``dst``).
+
+    #3895 review P1: a non-integer id in a dump is CORRUPTION. The bare
+    ``int()`` this replaces raised ``TypeError`` on a list/dict, which the
+    import endpoint does not catch (it maps ``ValueError``/``KeyError`` to a
+    422 + quarantine) — so a malformed artifact became a 500 with no
+    quarantine record instead of a pre-restore rejection.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(
+            f"Malformed dump {what}: {value!r} is not an integer id"
+        )
+    return value
+
+
+def _dump_node(internal_id, labels, props) -> dict:
+    """One export-shaped node row (``__dump_id`` bridge + JSON-safe props)."""
+    return {
+        "dump_id": int(internal_id),
+        "labels": [str(l) for l in (labels or [])],  # noqa: E741
+        "props": dict(props or {}),
+    }
+
+
 def dump_graph(g, graph_name: str | None = None) -> dict:
     """Export the complete graph (nodes + edges + props) as a JSON-safe dict.
 
@@ -214,44 +266,318 @@ def dump_graph(g, graph_name: str | None = None) -> dict:
     # exporting them inflates node_count and restore recreates them
     # spuriously. Meta {key:'calibration_milestone'} is DATA (Gate B state)
     # and is NOT excluded (key-scoped).
+
+    #3895 — BOTH halves are exported over the SAME node set. The node list is
+    filtered by ``_is_export_skip_node``, so the edge list must be restricted
+    to it as well: an edge whose endpoint is not in the exported node set can
+    never be re-linked on restore (``restore_graph``'s
+    ``MATCH (a {__dump_id:$s}), (b {__dump_id:$d})`` binds nothing, the edge is
+    silently lost, and the integrity gate refuses the whole artifact). Before
+    this fix the node loop filtered and the edge loop did not — a
+    9997-node / 10000-edge production artifact exported 313 edges that
+    referenced omitted nodes and was unrestorable *by construction*:
+
+    ``Edge restore incomplete: 9687/10000 linked — dump references missing
+    nodes``.
+
+    Two distinct ways an endpoint can be absent from the node list:
+
+    1. **Export-skipped bookkeeping.** The endpoint is one of the singleton
+       runtime markers #1625 excludes (``GraphEventMeta`` / ``TeamMeta`` /
+       ``EpMeta`` / ``Meta{point_fts_v2|event_fts_v2}``). The edge is dropped
+       and COUNTED (``skipped_edge_count``) — never silently. These markers
+       are not addressable by any edge-creating API (they carry no ``id`` /
+       ``eventId`` / ``url``, the keys ``create_edge``/``create_operator``
+       resolve endpoints by), so no *user* edge can have a marker endpoint.
+       This is the documented zero-relationship guard (``GraphEventMeta``
+       and ``GraphEvent`` nodes carry no edges; plan 2026-08-08-432).
+
+    2. **Read-window race.** The endpoint is real content CREATED between
+       the node read and the edge read (two separate queries — each is its
+       own transaction). Dropping it would be user-data loss, so such
+       endpoints are RECONCILED: re-read by ``id()`` and appended to the
+       node list before edges are filtered. This also makes the export
+       robust to a truncated node result-set (an endpoint absent from the
+       node snapshot is recovered rather than lost).
+
+    ``node_count`` and ``edge_count`` therefore describe the SAME node set
+    — every exported edge has BOTH endpoints in ``nodes``, so a fresh dump
+    always links ``len(edges)/len(edges)``.
+
+    #3902: the ``:GraphEventMeta`` label stays excluded from ``nodes``
+    (#1625), but its counter is carried as the top-level ``event_meta`` key
+    (``{last_seq, first_seq}``) — it is the event log's ordering watermark,
+    not a runtime marker, and a restore that loses it re-issues a colliding
+    ``seq``. Absent when the graph has no counter node yet.
     """
     from tortoise.hosted_api import _is_export_skip_node
-    nodes = []
+
+    nodes: list[dict] = []
+    nodes_by_id: dict[int, dict] = {}
+    skipped_ids: set[int] = set()
+
+    def _collect(internal_id, labels, props) -> None:
+        labels_list = [str(l) for l in (labels or [])]  # noqa: E741
+        props_dict = dict(props or {})
+        nid = int(internal_id)
+        if _is_export_skip_node(labels_list, props_dict):
+            skipped_ids.add(nid)
+            return
+        node = _dump_node(nid, labels_list, props_dict)
+        nodes.append(node)
+        nodes_by_id[nid] = node
+
     rows = g.query("MATCH (n) RETURN id(n), labels(n), properties(n)").result_set
     for internal_id, labels, props in rows:
-        labels_list = [str(l) for l in (labels or [])]  # noqa: E741
-        if _is_export_skip_node(labels_list, dict(props or {})):
-            continue
-        nodes.append({
-            "dump_id": int(internal_id),
-            "labels": labels_list,
-            "props": dict(props or {}),
-        })
-    edges = []
+        _collect(internal_id, labels, props)
+
+    raw_edges: list[tuple[int, int, str, dict]] = []
+    pending: set[int] = set()
     rows = g.query("MATCH (a)-[r]->(b) RETURN id(a), id(b), type(r), properties(r)").result_set
     for src, dst, rtype, props in rows:
-        edges.append({
-            "src": int(src),
-            "dst": int(dst),
-            "type": str(rtype),
-            "props": dict(props or {}),
-        })
+        s, d = int(src), int(dst)
+        raw_edges.append((s, d, str(rtype), dict(props or {})))
+        for endpoint in (s, d):
+            if endpoint not in nodes_by_id and endpoint not in skipped_ids:
+                pending.add(endpoint)
+
+    # Reconcile every endpoint that the node read did not see and that the
+    # skip predicate did not omit: it exists NOW (an edge cannot exist
+    # without its endpoints), it was created during the read window, and it
+    # is real content — export it instead of losing its edges. Chunked: the
+    # falkordb client inlines list params into the query header, so an
+    # unbounded IN-list is the same header-size hazard `_EMBED_BATCH` exists
+    # for.
+    ordered_pending = sorted(pending)
+    for i in range(0, len(ordered_pending), _EMBED_BATCH):
+        chunk = ordered_pending[i:i + _EMBED_BATCH]
+        for internal_id, labels, props in g.query(
+            "MATCH (n) WHERE id(n) IN $ids RETURN id(n), labels(n), properties(n)",
+            params={"ids": chunk},
+        ).result_set:
+            if int(internal_id) not in nodes_by_id:
+                _collect(internal_id, labels, props)
+
+    unresolved = {
+        endpoint
+        for s, d, _t, _p in raw_edges
+        for endpoint in (s, d)
+        if endpoint not in nodes_by_id and endpoint not in skipped_ids
+    }
+    if unresolved:
+        # Still unresolved AFTER a reconcile that asked for them by id. Two
+        # readings, and they must not be conflated:
+        #   * the node is LIVE but the read did not return it (a truncated
+        #     node result-set, or a failed/truncated reconcile) — the export
+        #     is TORN and dropping the edge would silently lose real data
+        #     in an artifact that then restores "green";
+        #   * the node is GONE (deleted between the two reads) — its edge is
+        #     stale, so dropping it is faithful to the live graph.
+        # Probe for existence to tell them apart. A probe is ONE row, so it
+        # cannot itself be truncated; a probe error propagates: never classify
+        # an edge on a read we could not complete.
+        live = _first_live_node_id(g, unresolved)
+        if live is not None:
+            raise ValueError(
+                f"dump_graph({graph_name}): node id {live} is LIVE but was not "
+                "returned by the node/reconcile read — refusing to write a "
+                "dump that silently drops the edge(s) incident to it. Re-run "
+                "the backup (a torn read must never look green)."
+            )
+
+    edges: list[dict] = []
+    dropped_skipped = 0
+    dropped_stale = 0
+    for s, d, rtype, props in raw_edges:
+        if s in nodes_by_id and d in nodes_by_id:
+            edges.append({"src": s, "dst": d, "type": rtype, "props": props})
+        elif s in skipped_ids or d in skipped_ids:
+            dropped_skipped += 1
+        else:
+            dropped_stale += 1  # endpoint probed ABSENT (stale edge)
+    if dropped_skipped or dropped_stale:
+        # Non-silent: the drop is logged AND persisted in the dump/manifest
+        # (the manifest is plaintext, the dump is encrypted — an operator
+        # must be able to audit this without the backup key).
+        logger.warning(
+            "dump_graph(%s): dropped %d edge(s) incident to export-skipped "
+            "bookkeeping nodes and %d stale edge(s) whose endpoint was "
+            "confirmed absent (deleted mid-read) — dump stays internally "
+            "consistent (node_count=%d, edge_count=%d)",
+            graph_name, dropped_skipped, dropped_stale,
+            len(nodes), len(edges),
+        )
+    # #3902: read the counter LAST, after the content snapshot — a concurrent
+    # append after the event read bumps last_seq ahead of the dumped events
+    # (a gap, never a collision); reading it first could carry a counter
+    # BELOW an event that the dump captured.
+    event_meta = _read_event_meta(g)
     return {
         "format": DUMP_FORMAT,
+        # #3895: the writer revision. Rev 2 = node and edge sets restricted to
+        # ONE node set (edges are a subset of nodes by endpoint), so a rev-2
+        # artifact CANNOT contain a dangling edge — a reader seeing one has
+        # CORRUPTION, not a legacy artifact, and must not salvage it.
+        "dump_revision": _DUMP_REVISION,
         "dumped_at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
         "graph_name": graph_name,
+        # node_count/edge_count are counted over the SAME node set — every
+        # edge has both endpoints in ``nodes`` (#3895).
         "node_count": len(nodes),
         "edge_count": len(edges),
+        # Audit trail for the exclusions (never silent).
+        "excluded_node_count": len(skipped_ids),
+        "skipped_edge_count": dropped_skipped,
+        "unresolved_edge_count": dropped_stale,
         "nodes": nodes,
         "edges": edges,
+        # #3902: the event-log counter, read OUTSIDE the node set above.
+        **event_meta,
     }
 
 
-def restore_graph(g, dump: dict) -> dict:
+def _read_event_meta(g) -> dict:
+    """The per-graph event-log counter as the #3902 ``event_meta`` block.
+
+    ``:GraphEventMeta`` is excluded from the dump's node set by #1625
+    (runtime bookkeeping must not inflate ``node_count``), but ``last_seq``
+    is NOT runtime-only: it is the per-graph monotonic ``seq`` handed to
+    ``event_store.next_seq``, and ``first_seq`` is the purge cursor floor.
+    A restore that drops it rebuilds the ``:GraphEvent`` log and leaves
+    ``next_seq`` to MERGE a fresh counter at 1 — colliding with the restored
+    ``seq`` 1 and under-counting every later event (``events_poll`` cursors
+    and subscribers depend on the ordering key).
+
+    Returns ``{}`` for a graph with no counter node (never emitted an event),
+    so the dump shape is unchanged for those graphs.
+    """
+    rows = g.query(
+        "MATCH (m:GraphEventMeta) RETURN max(m.last_seq), max(m.first_seq)"
+    ).result_set
+    if not rows or rows[0][0] is None:
+        return {}
+    last_seq, first_seq = rows[0]
+    last_seq = int(last_seq)
+    return {
+        "event_meta": {
+            "last_seq": last_seq,
+            # A counter node always carries both (next_seq sets them
+            # together); the fallback keeps the _refresh_first_seq contract
+            # (first_seq = last_seq + 1 when the log is empty) for a
+            # hand-written/legacy node missing it.
+            "first_seq": int(first_seq) if first_seq is not None else last_seq + 1,
+        },
+    }
+
+
+def _restore_event_meta(g, event_meta) -> None:
+    """#3902: re-establish the per-graph event-log counter after a restore.
+
+    ``:GraphEventMeta`` is excluded from the dump's node set (#1625), so the
+    counter must be carried EXPLICITLY (``dump["event_meta"]``) and written
+    back here — otherwise ``next_seq`` MERGEs a fresh counter at 1 and
+    collides with the restored ``seq`` 1, after which every event is
+    under-counted by the restored event count (``events_poll`` cursor
+    ordering, subscription delivery and the ``first_seq`` purge watermark all
+    assume ``seq`` is per-graph monotonic and unique).
+
+    New dumps carry ``{last_seq, first_seq}`` and are written back exactly.
+    OLD dumps — every backup written before this fix — carry nothing, so the
+    counter is re-derived from the restored ``:GraphEvent`` log:
+    ``last_seq = max(restored seq)``, ``first_seq = min(restored seq)``. The
+    next ``next_seq`` then returns ``max(restored seq) + 1`` instead of a
+    colliding 1.
+
+    An empty log with no carried counter leaves the ``:GraphEventMeta`` node
+    absent, exactly like a graph that never emitted an event: ``next_seq``
+    creates it at 1 and ``_refresh_first_seq``'s empty-log contract
+    (``first_seq = last_seq + 1``) still holds. An empty log WITH a carried
+    counter (everything purged) restores the exact watermark — e.g.
+    ``last_seq=3, first_seq=4``, so ``next_seq`` continues at 4.
+
+    Runs in the temp graph, so the later ``GRAPH.COPY`` temp→live carries the
+    watermark (it is written before ``restore_graph`` returns, i.e. before
+    the caller's count verification and swap).
+    """
+    rows = g.query(
+        "MATCH (e:GraphEvent) RETURN max(e.seq), min(e.seq)"
+    ).result_set
+    max_seq, min_seq = (rows[0] if rows else (None, None))
+    max_seq = int(max_seq) if max_seq is not None else None
+    min_seq = int(min_seq) if min_seq is not None else None
+
+    last_seq: int | None = None
+    first_seq: int | None = None
+    if isinstance(event_meta, dict) and event_meta.get("last_seq") is not None:
+        last_seq = int(event_meta["last_seq"])
+        carried_first = event_meta.get("first_seq")
+        first_seq = int(carried_first) if carried_first is not None else last_seq + 1
+    elif max_seq is not None:  # old dump — re-derive from the restored log
+        last_seq = max_seq
+        first_seq = min_seq
+
+    if last_seq is None:
+        return  # old dump, no events, no counter — nothing to seed
+    if max_seq is not None:
+        # Monotonicity guard: whatever the dump claims, the ordering key must
+        # never sit below the restored log's top seq — that IS the collision
+        # this fix exists to prevent.
+        last_seq = max(last_seq, max_seq)
+    g.query(
+        "MERGE (m:GraphEventMeta) SET m.last_seq = $last, m.first_seq = $first",
+        params={"last": last_seq, "first": first_seq},
+    )
+
+
+def _first_live_node_id(g, ids: set[int]) -> int | None:
+    """First id in ``ids`` that EXISTS in ``g`` right now, else None.
+
+    Used only to tell a TORN read (node live, not returned) from a STALE edge
+    (node deleted between the two reads) — #3895. One id per query, each
+    returning a single ``count()`` row: a one-row result cannot be truncated,
+    so this cannot itself miss a live node the way a chunked ``IN $ids`` could.
+    A query error propagates — the caller must never classify an edge on a read
+    it could not complete.
+    """
+    for node_id in sorted(ids):
+        n = g.query(
+            "MATCH (n) WHERE id(n) = $id RETURN count(n)", params={"id": node_id}
+        ).result_set[0][0]
+        if int(n) > 0:
+            return node_id
+    return None
+
+
+def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False) -> dict:
     """Rebuild the graph from a logical dump into graph handle ``g``.
 
-    Returns {"nodes": N, "edges": M}. Raises ValueError on unsafe labels/types or
-    unsupported dump format.
+    Returns ``{"nodes": N, "edges": M}``; with ``allow_dangling_edges=True``
+    the returned dict additionally carries ``dropped_edges`` and
+    ``dropped_edge_endpoints``.
+
+    Raises ValueError on unsafe labels/types, unsupported dump format, or an
+    edge whose endpoint is not in the dump's node list. The last one is the
+    #3895 integrity gate: a pre-fix dump exported edges over EVERY node while
+    its node list omitted the export-skip bookkeeping classes, so edges
+    incident to those markers reference nodes the dump does not carry and the
+    ``MATCH`` binds nothing. Dropping them silently would be partial data
+    loss invisible to verification — hence the refusal.
+
+    ``allow_dangling_edges`` is the explicit, non-silent repair-on-read path
+    for artifacts ALREADY WRITTEN by the pre-#3895 writer (the fixed writer
+    cannot retroactively add the omitted nodes to a file that exists). It
+    restores every linkable edge, DROPS the unlinkable ones, and reports the
+    exact count + endpoint ids in the return value (the callers surface them
+    in the restore/drill record). It is never the default: a dump whose
+    dangling edge is NOT explained by the export-skip class (genuine
+    corruption) must keep failing closed, and the reader cannot prove
+    provenance for a pre-fix artifact.
+
+    #3902: after the edge phase the per-graph event-log counter is re-seeded
+    (see ``_restore_event_meta``) so a subsequent ``next_seq`` cannot collide
+    with a restored ``seq``. New dumps carry it exactly; old dumps (no
+    ``event_meta`` key) have it re-derived from the restored ``:GraphEvent``
+    log.
     """
     if not isinstance(dump, dict) or dump.get("format") != DUMP_FORMAT:
         raise ValueError(
@@ -260,19 +586,92 @@ def restore_graph(g, dump: dict) -> dict:
         )
     nodes = dump.get("nodes", [])
     edges = dump.get("edges", [])
+    # Container types are part of the fail-closed contract: a non-list / a
+    # non-dict prop bag is CORRUPTION and must surface as a ValueError (the
+    # import endpoint maps ValueError to 422 + quarantine), never as an
+    # uncaught TypeError/500 with no quarantine record (#3895 review P1).
+    if not isinstance(nodes, list):
+        raise ValueError(f"Malformed dump: nodes is not a list ({nodes!r})")
+    if not isinstance(edges, list):
+        raise ValueError(f"Malformed dump: edges is not a list ({edges!r})")
+    # #3895: a rev-2 writer restricts BOTH halves to one node set, so it can
+    # never emit a dangling edge. Salvaging a rev-2 artifact would therefore
+    # mask CORRUPTION as a legacy artifact — refuse it. Revision is absent on
+    # every pre-fix artifact (rev 1) by definition.
+    revision = dump.get("dump_revision", 1)
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+        raise ValueError(f"Malformed dump dump_revision: {revision!r}")
+    if allow_dangling_edges and revision >= _DUMP_REVISION:
+        raise ValueError(
+            f"allow_dangling_edges is for pre-#3895 artifacts (dump_revision 1); "
+            f"this artifact declares dump_revision {revision}, whose writer cannot "
+            "emit a dangling edge — a dangling edge here is corruption, not a "
+            "legacy artifact. Refusing to salvage it."
+        )
 
+    # Validate EVERY node/edge before mutating the target graph: a malformed
+    # row or an unsafe relationship type must abort before any node is created
+    # (and as a ValueError — the import endpoint maps it to a 422 + quarantine,
+    # never an uncaught TypeError/500; #3895 review P1).
+    node_rows: list[tuple[int, list[str], dict]] = []
     for n in nodes:
-        if "dump_id" not in n:
-            raise ValueError("Dump node missing dump_id")
+        if not isinstance(n, dict) or "dump_id" not in n:
+            raise ValueError(f"Dump node missing dump_id: {n!r}")
         labels = n.get("labels") or []
-        safe_labels = ":".join(_sanitize_label(l) for l in labels)  # noqa: E741
-        props = dict(n.get("props") or {})
+        if not isinstance(labels, list):
+            raise ValueError(f"Malformed dump node labels: {labels!r}")
+        safe_labels = [_sanitize_label(l) for l in labels]  # noqa: E741
+        raw_props = n.get("props") or {}
+        if not isinstance(raw_props, dict):
+            raise ValueError(f"Malformed dump node props: {raw_props!r}")
+        props = dict(raw_props)
         if _DUMP_ID_PROP in props:
             raise ValueError(
                 f"Node props contain reserved property {_DUMP_ID_PROP!r} — "
                 "refusing to clobber it during restore"
             )
-        props[_DUMP_ID_PROP] = n["dump_id"]
+        node_rows.append((
+            _coerce_dump_id(n["dump_id"], "node dump_id"), safe_labels, props))
+
+    edge_rows: list[tuple[int, int, str, dict]] = []
+    for e in edges:
+        if not isinstance(e, dict) or not all(
+                k in e for k in ("src", "dst", "type")):
+            raise ValueError(f"Malformed dump edge (missing src/dst/type): {e!r}")
+        raw_props = e.get("props") or {}
+        if not isinstance(raw_props, dict):
+            raise ValueError(f"Malformed dump edge props: {raw_props!r}")
+        edge_rows.append((
+            _coerce_dump_id(e["src"], "edge src"),
+            _coerce_dump_id(e["dst"], "edge dst"),
+            _sanitize_label(e["type"]),
+            dict(raw_props),
+        ))
+
+    # The function REBUILDS a graph — it does not merge into one. Rejecting a
+    # dirty target keeps the returned counts coherent (they describe the dump's
+    # content) and keeps the graph-wide `__dump_id` cleanup from clobbering
+    # pre-existing nodes (#3895 review P1). Export-skip bookkeeping (the
+    # projection's FTS markers) is not content and is tolerated.
+    from tortoise.hosted_api import _is_export_skip_node
+    for row in g.query("MATCH (n) RETURN labels(n), properties(n)").result_set:
+        labels = [str(l) for l in (row[0] or [])]  # noqa: E741
+        if not _is_export_skip_node(labels, dict(row[1] or {})):
+            raise ValueError(
+                "restore_graph target graph is not empty — it rebuilds a graph "
+                "from a dump, it does not merge into an existing one. Restore "
+                "into a fresh temp graph instead."
+            )
+    # Baseline AFTER the emptiness check: a tolerated export-skip marker may
+    # carry an edge, so the graph's total edge count is not necessarily this
+    # restore's count (#3895 review P2).
+    baseline_edges = int(g.query(
+        "MATCH ()-[r]->() RETURN count(r)").result_set[0][0])
+
+    for dump_id, labels, props in node_rows:
+        props = dict(props)
+        props[_DUMP_ID_PROP] = dump_id
+        safe_labels = ":".join(labels)
         if safe_labels:
             g.query(f"CREATE (n:{safe_labels}) SET n = $p", params={"p": props})
         else:
@@ -284,9 +683,9 @@ def restore_graph(g, dump: dict) -> dict:
     # limits; a plain-list embedding would poison vector search — search_engine
     # documents this).
     embed_rows = [
-        {"id": n["dump_id"], "v": n["props"]["embedding"]}
-        for n in nodes
-        if isinstance(n.get("props", {}).get("embedding"), list)
+        {"id": dump_id, "v": props["embedding"]}
+        for dump_id, _labels, props in node_rows
+        if isinstance(props.get("embedding"), list)
     ]
     for i in range(0, len(embed_rows), _EMBED_BATCH):
         chunk = embed_rows[i:i + _EMBED_BATCH]
@@ -296,26 +695,87 @@ def restore_graph(g, dump: dict) -> dict:
             params={"rows": chunk},
         )
 
-    for e in edges:
-        if not all(k in e for k in ("src", "dst", "type")):
-            raise ValueError(f"Malformed dump edge (missing src/dst/type): {e!r}")
-        safe_type = _sanitize_label(e["type"])
+    # Which dump endpoints actually materialized? Computed structurally (one
+    # query) instead of one probe-MATCH per edge — a 10k-edge dump would
+    # otherwise pay 10k round-trips.
+    present_ids = {
+        int(row[0]) for row in g.query(
+            f"MATCH (n) WHERE n.{_DUMP_ID_PROP} IS NOT NULL "
+            f"RETURN n.{_DUMP_ID_PROP}"
+        ).result_set
+    }
+
+    def _linkable(row: tuple[int, int, str, dict]) -> bool:
+        return row[0] in present_ids and row[1] in present_ids
+
+    unlinkable = [row for row in edge_rows if not _linkable(row)]
+    missing_endpoints = sorted({
+        endpoint
+        for _s, _d, _t, _p in unlinkable
+        for endpoint in (_s, _d)
+        if endpoint not in present_ids
+    })
+
+    for s, d, safe_type, props in edge_rows:
+        if s not in present_ids or d not in present_ids:
+            continue
         g.query(
             f"MATCH (a {{{_DUMP_ID_PROP}:$s}}), (b {{{_DUMP_ID_PROP}:$d}}) "
             f"CREATE (a)-[r:{safe_type}]->(b) SET r = $p",
-            params={"s": e["src"], "d": e["dst"], "p": dict(e.get("props") or {})},
+            params={"s": s, "d": d, "p": props},
         )
 
     g.query(f"MATCH (n) WHERE n.{_DUMP_ID_PROP} IS NOT NULL REMOVE n.{_DUMP_ID_PROP}")
-    # Edge integrity: every dumped edge must have been linkable. A dangling
-    # src/dst (missing node) would otherwise be silently dropped while the
-    # caller reports len(edges) — partial data loss invisible to verification.
-    actual_edges = g.query("MATCH ()-[r]->() RETURN count(r)").result_set[0][0]
-    if int(actual_edges) != len(edges):
+    # Delta over THIS restore (the graph may hold tolerated skip-marker edges).
+    created_edges = int(g.query(
+        "MATCH ()-[r]->() RETURN count(r)").result_set[0][0]) - baseline_edges
+    total_edges = len(edge_rows)
+
+    if unlinkable and not allow_dangling_edges:
+        # Fail closed. The message names the exact count, the missing endpoint
+        # ids, and the only node class a pre-#3895 writer omitted — a bare
+        # "dump references missing nodes" is what made this undiagnosable.
+        shown = ", ".join(str(x) for x in missing_endpoints[:10])
+        more = "" if len(missing_endpoints) <= 10 else \
+            f" (+{len(missing_endpoints) - 10} more)"
         raise ValueError(
-            f"Edge restore incomplete: {actual_edges}/{len(edges)} linked — "
-            "dump references missing nodes"
+            f"Edge restore incomplete: {created_edges}/{total_edges} linked — "
+            f"{len(unlinkable)} edge(s) reference node id(s) absent from the "
+            f"dump's node list [{shown}{more}]. A pre-fix logical dump "
+            f"(#3895) exports edges over EVERY node while its node list "
+            f"omits the export-skip bookkeeping classes (GraphEventMeta, "
+            f"TeamMeta, EpMeta, Meta{{point_fts_v2, event_fts_v2}}), so an "
+            f"edge incident to one of those can never be linked. Re-write the "
+            f"artifact with the fixed writer for a complete restore, or run the "
+            f"pipeline-level salvage repair "
+            f"(restore_backup(..., allow_dangling_edges=True)) to restore the "
+            f"{created_edges} linkable edge(s) with these {len(unlinkable)} "
+            f"reported as dropped — it is not exposed on the customer restore "
+            f"route by design."
         )
+    # Invariant: the dump's node set and edge set agree (#3895). If the
+    # created count disagrees with what the dump promises to link, the dump
+    # is internally inconsistent — refuse rather than report a partial
+    # restore as complete.
+    if created_edges != total_edges - len(unlinkable):
+        raise ValueError(
+            f"Edge restore incomplete: {created_edges}/"
+            f"{total_edges - len(unlinkable)} linkable edge(s) created — "
+            f"dump/restore disagree on the edge set"
+        )
+    if unlinkable:
+        logger.warning(
+            "restore_graph: dropped %d unlinkable edge(s) referencing "
+            "absent node id(s) %s — allow_dangling_edges=True (legacy "
+            "pre-#3895 artifact)",
+            len(unlinkable), missing_endpoints,
+        )
+    # #3902: re-seed the per-graph event-log counter AFTER the edge phase and
+    # BEFORE the count verification / the caller's temp→live swap, so the
+    # GRAPH.COPY carries the watermark into the live graph. The counter node
+    # is export-skip state — it is excluded from the node count below.
+    _restore_event_meta(g, dump.get("event_meta"))
+
     # ACTUAL node count from the graph (not the dump bookkeeping) — the
     # verification gate must compare real graph state, mirroring the edge check.
     # #1625: count non-skip nodes by applying the SAME predicate as the dump
@@ -324,13 +784,18 @@ def restore_graph(g, dump: dict) -> dict:
     # TeamMeta node made actual = expected + 1 → RestoreVerificationError).
     # The dst projection's open re-creates the FTS Meta markers, which the
     # dump excludes; calibration_milestone is data and IS counted.
-    from tortoise.hosted_api import _is_export_skip_node
     actual_nodes = 0
     for row in g.query("MATCH (n) RETURN labels(n), properties(n)").result_set:
         labels = [str(l) for l in (row[0] or [])]  # noqa: E741
         if not _is_export_skip_node(labels, dict(row[1] or {})):
             actual_nodes += 1
-    return {"nodes": int(actual_nodes), "edges": int(actual_edges)}
+    result = {"nodes": int(actual_nodes), "edges": int(created_edges)}
+    if unlinkable:
+        # Only reachable with allow_dangling_edges=True — the strict path
+        # raised above. Reported, never silent.
+        result["dropped_edges"] = len(unlinkable)
+        result["dropped_edge_endpoints"] = missing_endpoints
+    return result
 
 
 # ── storage (S3-compatible / in-memory) ──────────────────────────────────────
@@ -349,6 +814,24 @@ def _r2_endpoint_from_env() -> str:
     if not account:
         return ""
     return f"https://{account}.r2.cloudflarestorage.com"
+
+
+def _r2_config_from_env() -> tuple[str, str, str, str]:
+    """Resolve the DEFAULT R2 settings from env, as
+    ``(endpoint, access_key_id, secret_access_key, bucket)``.
+
+    The endpoint is DERIVED from ``R2_ACCOUNT_ID`` (see
+    ``_r2_endpoint_from_env``), so the tuple changes iff any ``R2_*`` var does.
+    It is BOTH what ``R2Storage.__init__`` builds the default store from AND the
+    cache key ``hosted_api._backup_storage`` keys its process-wide store on
+    (#3968) — one function, so the key and the store can never disagree about
+    what "the same R2 config" means."""
+    return (
+        _r2_endpoint_from_env(),
+        os.environ.get("R2_ACCESS_KEY_ID", ""),
+        os.environ.get("R2_SECRET_ACCESS_KEY", ""),
+        os.environ.get("R2_BUCKET", ""),
+    )
 
 
 def _is_no_such_key_error(e: Exception) -> bool:
@@ -373,10 +856,11 @@ class R2Storage:
         secret_access_key: str | None = None,
         bucket: str | None = None,
     ):
-        self._endpoint = endpoint_url or _r2_endpoint_from_env()
-        self._ak = access_key_id or os.environ.get("R2_ACCESS_KEY_ID", "")
-        self._sk = secret_access_key or os.environ.get("R2_SECRET_ACCESS_KEY", "")
-        self._bucket = bucket or os.environ.get("R2_BUCKET", "")
+        env_endpoint, env_ak, env_sk, env_bucket = _r2_config_from_env()
+        self._endpoint = endpoint_url or env_endpoint
+        self._ak = access_key_id or env_ak
+        self._sk = secret_access_key or env_sk
+        self._bucket = bucket or env_bucket
         if not all([self._endpoint, self._ak, self._sk, self._bucket]):
             raise RuntimeError(
                 "R2 not configured — set R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, "
@@ -920,8 +1404,20 @@ def create_backup(
         "org_id": org_id,
         "graph_name": graph_name,
         "created_at": dump["dumped_at"],
+        # #3895: node_count and edge_count are counted over the SAME node set
+        # (every exported edge has both endpoints in the exported node list) —
+        # the manifest is plaintext and readable without the backup key, so an
+        # operator can trust the pair and audit the exclusions directly.
         "node_count": dump["node_count"],
         "edge_count": dump["edge_count"],
+        "excluded_node_count": dump.get("excluded_node_count", 0),
+        # #3895: the writer revision, so a reader can tell a legacy (rev 1)
+        # artifact — the only kind eligible for salvage — from a rev-2 one,
+        # whose writer cannot emit a dangling edge (a dangling edge there is
+        # corruption).
+        "dump_revision": dump.get("dump_revision", 1),
+        "skipped_edge_count": dump.get("skipped_edge_count", 0),
+        "unresolved_edge_count": dump.get("unresolved_edge_count", 0),
         "sha256": hashlib.sha256(blob).hexdigest(),
         "format": DUMP_FORMAT,
     }
@@ -1167,6 +1663,623 @@ def _audit_copied_boolean_indexes(
     return present
 
 
+def _graph_copy_or_diagnose(
+    graph,
+    dst_name: str,
+    *,
+    db,
+    site: str,
+    copy: Callable[[], None] | None = None,
+) -> ForkSlotRecovery | None:
+    """``graph.copy(dst_name)``, recovering a wedged module-fork slot (#3845).
+
+    A plain ``GRAPH.COPY`` is the only operation that forks a Redis MODULE
+    child. On the embedded lane that child can deadlock in the server's log
+    path (see :mod:`tortoise.fork_slot`), permanently occupying the single
+    module-fork slot — after which every later copy is refused and the whole
+    DR family stays red until a restart.
+
+    Detection is EVIDENCE-based, never a guess:
+
+    * a copy that raises the engine's fork-refusal response (``could not
+      fork``) is a wedge by construction; and
+    * a copy that failed for ANY other reason (the restore's OWN bound
+      excepted — see below) is *also* a wedge when our own daemon is still
+      carrying a module-fork child that has outlived
+      :data:`_FORK_CHILD_HUNG_AGE_S` — a child that old for a graph this
+      small is parked, not working.
+
+    On either signal the hung child(ren) of OUR socket are reaped (which is
+    what actually releases the slot — Redis's ``checkChildrenDone`` calls
+    ``resetChildState``), and the copy is retried on the freed slot. The retry
+    is inherently racy (a fresh fork can lose the same race), so it is BOUNDED:
+    when it keeps hitting the wedge the caller gets a
+    :class:`ForkSlotWedgedError` rather than an endless loop. Returns the
+    recovery when a wedge was handled, ``None`` on the clean path. Any other
+    copy failure is re-raised unchanged.
+
+    ``copy`` (#3813): the copy STEP to retry. Defaults to ``graph.copy(dst_name)``
+    — the wedge recovery here is otherwise orthogonal to *how* the copy is
+    issued. The restore sites pass ``_graph_copy_with_restore_bound`` so the
+    copy runs over the restore's own generous read bound while STILL getting
+    this detect→reap→retry recovery. On the restore path a CLIENT READ TIMEOUT
+    is never treated as a wedge: the server may still be copying, and reaping a
+    fork child to retry would issue a SECOND server-side fork while the first
+    may still be running (#3813) — as well as misreporting a timeout as a wedge
+    (#3845). Only the restore's own bound raises ``RestoreCopyTimeoutError``,
+    so the documented default ``copy is None`` path is untouched and keeps
+    #3924's ``is_fork_refusal(...) or fork_slot_is_wedged(...)``
+    classification (a plain read timeout there is still a wedge candidate).
+    """
+    last_recovery: ForkSlotRecovery | None = None
+    last_exc: BaseException | None = None
+    for attempt in range(1, _FORK_COPY_ATTEMPTS + 1):
+        try:
+            if copy is None:
+                graph.copy(dst_name)
+            else:
+                copy()
+            return last_recovery
+        except Exception as exc:
+            last_exc = exc
+            # #3813 x #3845: on the RESTORE path the copy runs over its own
+            # generous bound, and only that bound raises
+            # ``RestoreCopyTimeoutError`` (chaining the real client timeout as
+            # ``__cause__``). A client read timeout there is NEVER a wedge: the
+            # server may still be copying, so reaping the fork child and
+            # re-issuing would start a SECOND server-side fork while the first
+            # may still be running, and would misreport a timeout as a wedge.
+            # The check is deliberately the restore's OWN exception TYPE, not
+            # ``_is_client_read_timeout``: the documented ``copy is None``
+            # default path (#3924) must keep its ``is_fork_refusal(...) or
+            # fork_slot_is_wedged(...)`` classification unchanged.
+            if isinstance(exc, RestoreCopyTimeoutError):
+                raise
+            wedged = is_fork_refusal(exc) or fork_slot_is_wedged(
+                db, min_age_s=_FORK_CHILD_HUNG_AGE_S)
+            if not wedged:
+                raise  # an ordinary copy failure — not ours to reinterpret
+
+        # Wedge confirmed. Recover the SLOT (not just this call): until the
+        # hung child is reaped, every later GRAPH.COPY on this server is
+        # refused, so freeing it is the whole point.
+        recovery = recover_fork_slot(db)
+        if not recovery.recovered:
+            raise ForkSlotWedgedError(
+                site=site, dst_name=dst_name, recovery=recovery) from last_exc
+        last_recovery = recovery
+        logger.warning(
+            "#3845: %s fork slot was wedged — released it (%s); retrying "
+            "GRAPH.COPY -> %s (attempt %d/%d)",
+            site, recovery.detail, dst_name, attempt, _FORK_COPY_ATTEMPTS,
+        )
+
+    raise ForkSlotWedgedError(
+        site=site, dst_name=dst_name,
+        recovery=last_recovery or ForkSlotRecovery(
+            wedged=True, detail="every retry re-wedged the slot"),
+    ) from last_exc
+
+
+def _promote_payload_fork_free(
+    live_g,
+    payload: dict,
+    *,
+    live_name: str,
+    temp_name: str,
+    expected_nodes: int,
+    expected_edges: int,
+    allow_dangling_edges: bool = False,
+) -> dict:
+    """Install a VERIFIED payload into ``live_g`` with NO ``GRAPH.COPY``.
+
+    The last-resort path when the module-fork slot cannot be released: rebuild
+    the live graph from the authenticated payload through the SAME fork-free
+    logical path that built the verified temp graph. Correctness is not
+    weakened — this never reports success it did not achieve:
+
+    * the live graph must be EMPTY first (the logical restore APPENDS; the
+      pre-swap delete is best-effort, so emptiness is re-checked here);
+    * the restored counts must match the counts the temp graph was verified
+      against — node count exactly, and edges counted together with a legacy
+      payload's dropped unlinkable edges exactly as
+      :func:`_restore_into_temp_verify_swap`'s temp verification counts them
+      (``counts["edges"] + dropped_edges``), with ``allow_dangling_edges``
+      threaded through so the SAME payload the temp verify accepted is not
+      re-refused here, else it raises; and
+    * a failure names the verified temp graph as intact and the live graph as
+      NOT restored — the temp graph is never presented as the live one.
+    """
+    # Fail closed on a non-empty destination: restoring on top of existing
+    # nodes would duplicate data while still satisfying the count check only
+    # by luck. Re-delete, then confirm emptiness by reading the graph.
+    try:
+        live_g.delete()
+    except Exception as e:
+        logger.warning(
+            "#3845: live graph delete before fork-free promotion reported: %s", e)
+    try:
+        rows = live_g.query("MATCH (n) RETURN count(n)").result_set
+        live_now = int(rows[0][0]) if rows else 0
+    except Exception as e:
+        raise RuntimeError(
+            f"Restore swap failed (fork slot wedged; fork-free promotion could "
+            f"not verify {live_name} is empty) — verified temp graph "
+            f"{temp_name} intact"
+        ) from e
+    if live_now:
+        raise RuntimeError(
+            f"Restore swap failed (fork slot wedged; {live_name} still holds "
+            f"{live_now} nodes — refusing to append the restore) — verified "
+            f"temp graph {temp_name} intact"
+        )
+    promoted = restore_graph(
+        live_g, payload, allow_dangling_edges=allow_dangling_edges)
+    if (promoted.get("nodes") != expected_nodes
+            or promoted.get("edges") + int(promoted.get("dropped_edges", 0))
+            != expected_edges):
+        raise RestoreVerificationError(
+            f"Restore swap failed (fork slot wedged; fork-free promotion "
+            f"restored {promoted.get('nodes')}/{expected_nodes} nodes, "
+            f"{promoted.get('edges')} edges "
+            f"(+{int(promoted.get('dropped_edges', 0))} dropped unlinkable), "
+            f"expected {expected_edges} — verified temp "
+            f"graph {temp_name} intact"
+        )
+    return promoted
+
+
+#: A module-fork child older than this is parked, not working: a healthy
+#: ``GRAPH.COPY`` of a DR-sized graph completes in milliseconds. Used only to
+#: classify a FAILED copy as a wedge when the engine's refusal text is absent.
+_FORK_CHILD_HUNG_AGE_S = 2.0
+
+#: Bounded detect → reap → retry rounds for one copy. The retry forks again and
+#: can lose the very race it is recovering from, so an unbounded loop would be
+#: the wedge in a different costume; on exhaustion the caller gets a
+#: :class:`ForkSlotWedgedError`.
+_FORK_COPY_ATTEMPTS = 3
+
+
+# ── #3813: the restore's GRAPH.COPY must not inherit an ordinary request's
+#    read bound ────────────────────────────────────────────────────────────
+#
+# ``GRAPH.COPY`` is a LONG-RUNNING, SERVER-SIDE operation. FalkorDB forks a
+# child that encodes the source graph to a temp file, the parent decodes it
+# and installs the destination key, and the CLIENT is blocked for the whole
+# copy (FalkorDB ``cmd_copy.c``: ``_Graph_Copy`` → ``RedisModule_Fork``, then
+# ``LoadGraphFromFile`` → ``RedisModule_ReplyWithCString(ctx, "OK")``).
+#
+# On the ordinary client that read is governed by ``socket_timeout``, which
+# #2850 deliberately bounds at ``_DB_TIMEOUT_MAX_S`` = 60s: right for an
+# ordinary request (a stalled call must not park a thread — or, on the paths
+# that call the client synchronously from the event loop, the loop), WRONG for
+# a copy that legitimately outlives it. A restore of a large enough graph
+# therefore fails at ANY legal configuration — and it fails *misleadingly*:
+# when the read bound expires, redis-py tears the connection down mid-parse and
+# the originating ``redis.exceptions.TimeoutError: Timeout reading from
+# socket`` surfaces as ``ValueError: I/O operation on closed file``. That is a
+# CLIENT timeout reported as a dead connection, which the swap then reports as
+# a failed copy.
+#
+# The swap (and the pre-restore safety copy — the same class of operation) run
+# on a client whose read bound belongs to the operation: EXPLICIT, generous,
+# and still FINITE — ``None``/infinite is redis-py's "block forever", the
+# #2850 failure mode this module must not reintroduce.
+_RESTORE_SWAP_TIMEOUT_DEFAULT_S = 120.0
+#: Floor: must NOT be BELOW ``projection._DB_TIMEOUT_MAX_S`` (60s) — the
+#: largest read bound a *legal* ordinary configuration can reach. Equality at
+#: 60 is deliberate: an operator who sets exactly the ordinary ceiling gets no
+#: restore headroom, by choice. The DEFAULT (120s) is what supplies the
+#: headroom the swap exists for.
+_RESTORE_SWAP_TIMEOUT_MIN_S = 60.0
+#: Ceiling: keeps a wedged copy bounded. It is NOT inside the scheduled
+#: drill's committed RTO — the copy bounded here can itself outlive the
+#: 900s (``hosted_api._DRILL_RTO_S``) drill RTO.
+_RESTORE_SWAP_TIMEOUT_MAX_S = 3600.0
+
+
+def _restore_swap_timeout_s() -> float:
+    """Resolve the restore swap's own GRAPH.COPY read bound, in seconds.
+
+    ``TORTOISE_RESTORE_SWAP_TIMEOUT_S`` (default
+    ``_RESTORE_SWAP_TIMEOUT_DEFAULT_S``), clamped to
+    ``[_RESTORE_SWAP_TIMEOUT_MIN_S, _RESTORE_SWAP_TIMEOUT_MAX_S]``.
+
+    A non-numeric or non-finite value falls back to the default rather than
+    disabling the bound: ``float("inf")`` reaching redis-py's
+    ``sock.settimeout`` raises ``OverflowError`` (NOT caught by its
+    ``except OSError``), so an unbounded swap would brick the restore instead
+    of merely slowing it.
+    """
+    raw = os.environ.get("TORTOISE_RESTORE_SWAP_TIMEOUT_S")
+    if raw is None or not str(raw).strip():
+        return _RESTORE_SWAP_TIMEOUT_DEFAULT_S
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("TORTOISE_RESTORE_SWAP_TIMEOUT_S=%r is not a number — "
+                       "using %ss", raw, _RESTORE_SWAP_TIMEOUT_DEFAULT_S)
+        return _RESTORE_SWAP_TIMEOUT_DEFAULT_S
+    if not math.isfinite(v) or v <= 0:
+        logger.warning("TORTOISE_RESTORE_SWAP_TIMEOUT_S=%r is not a finite "
+                       "positive bound — using %ss (a non-finite socket "
+                       "timeout means 'block forever')",
+                       raw, _RESTORE_SWAP_TIMEOUT_DEFAULT_S)
+        return _RESTORE_SWAP_TIMEOUT_DEFAULT_S
+    if v < _RESTORE_SWAP_TIMEOUT_MIN_S:
+        logger.warning("TORTOISE_RESTORE_SWAP_TIMEOUT_S=%r is below the %.0fs "
+                       "floor — a legal ordinary bound already reaches that "
+                       "(projection._DB_TIMEOUT_MAX_S); clamping",
+                       raw, _RESTORE_SWAP_TIMEOUT_MIN_S)
+        return _RESTORE_SWAP_TIMEOUT_MIN_S
+    if v > _RESTORE_SWAP_TIMEOUT_MAX_S:
+        logger.warning("TORTOISE_RESTORE_SWAP_TIMEOUT_S=%r exceeds the %.0fs "
+                       "ceiling — clamping", raw, _RESTORE_SWAP_TIMEOUT_MAX_S)
+        return _RESTORE_SWAP_TIMEOUT_MAX_S
+    return v
+
+
+#: Floor for a POSITIVE settle value. Below this a value can only busy-spin
+#: (it is not a disable switch — a non-positive value falls back to the read
+#: bound, see :func:`_restore_swap_settle_s`).
+_RESTORE_SWAP_SETTLE_MIN_S = 0.05
+
+
+def _restore_swap_settle_s() -> float:
+    """Resolve the post-timeout OUTCOME-poll bound, in seconds.
+
+    ``TORTOISE_RESTORE_SWAP_SETTLE_S``. Empty, non-numeric, non-finite and
+    non-positive values all fall back to the read bound
+    (:func:`_restore_swap_timeout_s`) — a settle of ``0`` is NOT a "disable"
+    switch, because a restore that reports a failure without checking the
+    operation is the #4233 false-red. A positive value is then clamped to
+    ``[0.05, _RESTORE_SWAP_TIMEOUT_MAX_S]`` (each clamp logged, like the
+    read bound's resolver).
+
+    Why it exists (#4233): a client read bound ends the blocking READ; it does
+    not cancel the server-side ``GRAPH.COPY`` (#3813). Under a contended runner
+    the bound can expire while the copy is still progressing, and the wall
+    clock alone cannot distinguish that from a genuinely broken copy — so the
+    bound is a hypothesis and the destination's node and edge COUNTS are the
+    verdict. The
+    default equals the read bound, so each COPY's client-side budget is finite
+    at 2x that bound; a restore issues the pre-restore safety copy AND the
+    swap, and ``_graph_copy_or_diagnose`` may retry a wedged copy.
+    """
+    raw = os.environ.get("TORTOISE_RESTORE_SWAP_SETTLE_S")
+    if raw is None or not str(raw).strip():
+        return _restore_swap_timeout_s()
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("TORTOISE_RESTORE_SWAP_SETTLE_S=%r is not a number — "
+                       "using the read bound", raw)
+        return _restore_swap_timeout_s()
+    if not math.isfinite(v) or v <= 0:
+        logger.warning("TORTOISE_RESTORE_SWAP_SETTLE_S=%r is not a finite "
+                       "positive bound — using the read bound", raw)
+        return _restore_swap_timeout_s()
+    if v < _RESTORE_SWAP_SETTLE_MIN_S:
+        logger.warning("TORTOISE_RESTORE_SWAP_SETTLE_S=%r is below the %.2fs "
+                       "floor — clamping", raw, _RESTORE_SWAP_SETTLE_MIN_S)
+        return _RESTORE_SWAP_SETTLE_MIN_S
+    if v > _RESTORE_SWAP_TIMEOUT_MAX_S:
+        logger.warning("TORTOISE_RESTORE_SWAP_SETTLE_S=%r exceeds the %.0fs "
+                       "ceiling — clamping", raw, _RESTORE_SWAP_TIMEOUT_MAX_S)
+        return _RESTORE_SWAP_TIMEOUT_MAX_S
+    return v
+
+
+class RestoreCopyTimeoutError(RuntimeError):
+    """A restore GRAPH.COPY outlived its own (generous) read bound (#3813).
+
+    Deliberately its OWN type, with its own wording. A CLIENT read timeout is
+    neither a dead connection nor a failed copy — the server may still be
+    copying. The message states a TIMEOUT, names the graph that is left intact
+    and identifiable, and states that the destination was NOT restored, so a
+    timeout can never be read as a successful (or merely failed) swap.
+    """
+
+    def __init__(self, *, role: str, timeout_s: float, intact_name: str,
+                 dst_name: str) -> None:
+        self.role = role
+        self.timeout_s = timeout_s
+        self.intact_name = intact_name
+        self.dst_name = dst_name
+        super().__init__(
+            f"{role} timed out after {timeout_s:.0f}s — the server-side "
+            f"GRAPH.COPY may still be running; {intact_name} intact, "
+            f"{dst_name} NOT restored"
+        )
+
+
+def _restore_copy_client(db):
+    """A DB client whose READ BOUND belongs to the restore, not a request.
+
+    Derived from ``db``'s OWN connection — same server, same unix socket /
+    host+port, same credentials, same db index (the pool's
+    ``connection_class`` is preserved, so a unix-domain embedded client stays
+    one) — with an explicit generous ``socket_timeout`` (#3813) and NO retry.
+
+    No retry is deliberate on both counts: retrying multiplies the wait, and
+    it re-issues the copy (a second server-side fork) while the first may
+    still be running.
+    """
+    import redis as _redis
+    from redis.backoff import NoBackoff
+    from redis.retry import Retry as _Retry
+
+    base = getattr(db, "connection", None) or getattr(db, "client", None)
+    pool = getattr(base, "connection_pool", None)
+    if pool is None:
+        raise RuntimeError(
+            "restore copy needs a redis connection pool to derive its own "
+            f"read bound from; {type(db).__name__} exposes none"
+        )
+    kwargs = dict(pool.connection_kwargs)
+    # #3813: the one line that decouples the restore's copy from an ordinary
+    # request's read bound. Dropping it puts the copy back on the ordinary
+    # client (see tests/test_dr_endpoints.py::TestRestoreSwapReadBound).
+    kwargs["socket_timeout"] = _restore_swap_timeout_s()
+    kwargs["retry"] = _Retry(NoBackoff(), 0)
+    return _redis.Redis(connection_pool=_redis.ConnectionPool(
+        connection_class=pool.connection_class, **kwargs))
+
+
+def _issue_graph_copy(client, src_name: str, dst_name: str) -> None:
+    """``GRAPH.COPY src → dst`` over ``client`` (the swap's single seam).
+
+    Split out so where the bound applies is testable: the bound belongs to the
+    CLIENT the command is issued over, not to the command string.
+    """
+    client.execute_command("GRAPH.COPY", src_name, dst_name)
+
+
+#: Poll interval for the post-timeout OUTCOME wait. Small enough to catch a
+#: copy that lands just after the read bound, large enough not to hammer
+#: ``GRAPH.LIST`` for the whole settle window.
+_RESTORE_SWAP_SETTLE_POLL_S = 0.25
+
+
+def _restore_copy_settled(db, src_name: str, dst_name: str) -> bool:
+    """True when a timed-out copy's DESTINATION matches the SOURCE's counts.
+
+    For the restore's two copies — whose destination is either freshly deleted
+    (the swap) or brand new (the pre-restore safety copy) — a destination the
+    copy itself created, holding the source's node AND edge COUNTS, is the
+    operation's success condition (#4233). Both counts are re-read LIVE, so a
+    torn install (fewer nodes or edges) cannot be accepted. That is COUNT
+    parity, not byte/content equality: a destination whose counts match but
+    whose content differs would pass — acceptable because it cannot be a
+    pre-existing graph (``dst_preexisting`` refuses those) and a torn
+    ``GRAPH.COPY`` loses counts.
+    (The comparison is what makes the check sound; nothing here relies on the
+    engine's install ordering.)
+
+    Assumes a QUIESCED destination: a concurrent writer to a real (non-drill)
+    live graph can add nodes between the copy and this probe, which then reads
+    as a mismatch — the copy is reported as a timeout (a false NEGATIVE). THE
+    CONVERSE IS NOT EXCLUDED: because the evidence is COUNT parity, a
+    coincidental match from a concurrent writer (or a same-count different
+    content) would be accepted. It cannot be a PRE-EXISTING graph
+    (``_graph_present`` refuses those), but it is not a content fingerprint.
+    Refusing to settle when ``_graph_present`` cannot read the listing is
+    likewise a fail-closed false negative.
+
+    Deliberately never QUERIES a graph ``GRAPH.LIST`` does not name: a Cypher
+    read on a missing graph CREATES an empty one (verified on FalkorDB
+    4.20.4), and on the swap's freshly-deleted ``live_name`` that would leave
+    an empty live graph behind a FAILED restore — the wipe-then-empty class
+    the pre-restore safety copy exists to prevent.
+    """
+    try:
+        names = set(db.list_graphs() or [])
+        if dst_name not in names or src_name not in names:
+            return False
+        dst_g = db.select_graph(dst_name)
+        src_g = db.select_graph(src_name)
+        dst_nodes = int(dst_g.query(
+            "MATCH (n) RETURN count(n)").result_set[0][0])
+        src_nodes = int(src_g.query(
+            "MATCH (n) RETURN count(n)").result_set[0][0])
+        if dst_nodes != src_nodes:
+            return False
+        dst_edges = int(dst_g.query(
+            "MATCH ()-[r]->() RETURN count(r)").result_set[0][0])
+        src_edges = int(src_g.query(
+            "MATCH ()-[r]->() RETURN count(r)").result_set[0][0])
+    except Exception:
+        return False
+    return dst_edges == src_edges
+
+
+def _graph_present(db, name: str) -> bool:
+    """Whether ``name`` exists, FAIL-CLOSED to ``True`` on a probe failure.
+
+    Used only to decide whether a timed-out copy's destination could have been
+    produced by that copy: an unreadable listing must never authorize treating
+    a pre-existing graph as the copy's output. A probe failure is LOGGED so a
+    refusal it causes is distinguishable from a genuinely pre-existing
+    destination (both otherwise surface as the same timeout).
+    """
+    try:
+        return name in set(db.list_graphs() or [])
+    except Exception as e:
+        logger.warning(
+            "_graph_present(%s): graph listing failed (%s) — treating it as "
+            "PRESENT so an unreadable probe can never authorize a settle",
+            name, e,
+        )
+        return True
+
+
+def _await_restore_copy_settled(db, src_name: str, dst_name: str) -> bool:
+    """Poll :func:`_restore_copy_settled` until the settle bound expires.
+
+    A condition-based wait (#4233): returns as soon as the destination
+    matches the source's node and edge counts, so a copy that merely outlived
+    the read bound is
+    recognised as the SUCCESS it is. A poll can itself block while the server
+    is busy finishing the copy (the engine serves no other command from that
+    handler), so the wall clock is re-checked after every attempt — a completed
+    copy always wins over an expired deadline.
+    """
+    deadline = time.monotonic() + _restore_swap_settle_s()
+    while True:
+        if _restore_copy_settled(db, src_name, dst_name):
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(_RESTORE_SWAP_SETTLE_POLL_S, remaining))
+
+
+def _is_client_read_timeout(exc: BaseException) -> bool:
+    """True when ``exc`` IS — or MASKS — a redis CLIENT read timeout (#3813).
+
+    redis-py's RESP parser closes the socket when a read times out and then
+    seeks in the now-closed buffer, so the originating
+    ``redis.exceptions.TimeoutError: Timeout reading from socket`` arrives
+    chained behind ``ValueError: I/O operation on closed file`` — the exact
+    shape the embedded lane produced. Walk ``__cause__``/``__context__`` so
+    the classification never depends on which layer's exception surfaced, and
+    never on message text.
+    """
+    import redis as _redis
+    seen: set[int] = set()
+    e: BaseException | None = exc
+    while e is not None and id(e) not in seen:
+        seen.add(id(e))
+        if isinstance(e, (TimeoutError, _redis.exceptions.TimeoutError)):
+            return True
+        e = e.__cause__ or e.__context__
+    return False
+
+
+def _graph_copy_with_restore_bound(db, src_name: str, dst_name: str, *,
+                                   role: str, intact_name: str,
+                                   settled: list[bool] | None = None) -> None:
+    """Run a long GRAPH.COPY for the restore over its own read bound (#3813).
+
+    Runs over the restore's own read bound (#3813). Raises
+    ``RestoreCopyTimeoutError`` when that bound expires and the copy's outcome
+    is NOT proven complete (see ``settled`` below); keeping the originating
+    timeout as ``__cause__`` means callers report a TIMEOUT rather than a dead
+    connection or a failed copy.
+
+    ``settled`` (#4233): optional out-param. ``True`` is appended when the
+    bound expired but the copy's OUTCOME proved it completed, so a caller can
+    surface the overrun (the #3845 ``fork_slot`` precedent) instead of leaving
+    it only in the log.
+    """
+    client = _restore_copy_client(db)
+    # A timed-out copy may only be resolved by a destination IT produced. If
+    # the destination already existed when the copy was issued (the swap's
+    # best-effort live-delete failed), completing is not evidence of success,
+    # so the settle check is refused up front. Fail-closed: an unreadable
+    # listing counts as present.
+    dst_preexisting = _graph_present(db, dst_name)
+    try:
+        _issue_graph_copy(client, src_name, dst_name)
+    except Exception as e:
+        if not _is_client_read_timeout(e):
+            raise
+        # #4233: the read bound is not the operation's verdict — it ends OUR
+        # blocking read; the server-side GRAPH.COPY is not cancelled (#3813)
+        # and may still be running. Ask the OPERATION what happened before
+        # reporting a timeout, so a slow-but-correct copy (a contended runner)
+        # cannot false-red a restore that actually succeeded.
+        if (not dst_preexisting
+                and _await_restore_copy_settled(db, src_name, dst_name)):
+            logger.warning(
+                "%s: client read bound (%.0fs) expired, but the server-side "
+                "GRAPH.COPY completed — %s now matches the source's node and "
+                "edge counts",
+                role, _restore_swap_timeout_s(), dst_name,
+            )
+            if settled is not None:
+                settled.append(True)
+        else:
+            raise RestoreCopyTimeoutError(
+                role=role, timeout_s=_restore_swap_timeout_s(),
+                intact_name=intact_name, dst_name=dst_name,
+            ) from e
+    finally:
+        try:
+            # redis-py's ``Redis.close()`` is a NO-OP for the socket when a
+            # pool was supplied to the constructor (it returns early on
+            # ``auto_close_connection_pool=False``), releasing only a cached
+            # ``self.connection`` — which ``close()`` here never set. The
+            # derived pool owns the socket, so disconnect it deterministically;
+            # otherwise each derived client (one per copy attempt — the
+            # pre-restore and swap sites together can build up to 2 ×
+            # ``_FORK_COPY_ATTEMPTS`` per restore) leaks its socket until GC.
+            client.close()
+            client.connection_pool.disconnect()
+        except Exception:
+            pass
+
+
+#: The cap-immune data-node count query. Module-level so a test can assert
+#: its ONE-ROW AGGREGATE shape (which is what makes it immune to the
+#: server-global ``RESULTSET_SIZE`` cap) WITHOUT mutating that server-global
+#: setting (#4233).
+_COUNT_DATA_NODES_QUERY = (
+    "MATCH (n) WHERE NOT any(l IN labels(n) WHERE l IN $skip_labels) "
+    "AND NOT ('Meta' IN labels(n) AND n.key IS NOT NULL "
+    "AND n.key IN $meta_keys) "
+    "RETURN count(n)"
+)
+
+
+def count_data_nodes(db, graph_name: str) -> int:
+    """Count a graph's USER nodes — the set :func:`dump_graph` filters to.
+
+    #1625/#4233: the projection's runtime bookkeeping (``EpMeta`` /
+    ``GraphEventMeta`` / ``TeamMeta`` label-wide, plus ``Meta`` nodes keyed
+    ``point_fts_v2`` / ``event_fts_v2``) is not content. Every DR ``node_count``
+    surface counts without it — the sweep manifest, the empty-backup-over-live
+    guard, drill verification — so re-baseline must too: a projection opened on
+    the org graph MERGEs its ``point_fts_v2`` marker into that graph, and a raw
+    ``MATCH (n)`` then reports 4 for a 3-point graph (the false-red that blocked
+    unrelated PRs). The DATA_LOSS_CANDIDATE detector
+    (``backup_sweep._backup_graph``) consumes the same ``node_count``, so excluding
+    the marker is also what keeps a marker-only change from reading as data
+    loss.
+
+    The count is a server-side AGGREGATE — one row, so it is immune to
+    FalkorDB's ``RESULTSET_SIZE`` cap (default 10000), which truncates a
+    non-aggregate ``MATCH (n) RETURN labels(n), properties(n)`` read and would
+    silently DEFLATE the count for a larger graph. Its skip classes are built
+    from the SAME ``_EXPORT_SKIP_LABELS`` / ``_EXPORT_SKIP_META_KEYS``
+    constants :func:`_is_export_skip_node` uses, and the Meta branch is
+    NULL-SAFE (``n.key IS NOT NULL AND n.key IN …``) to match the predicate's
+    Python semantics: a ``:Meta`` node with NO ``key`` is CONTENT there, and
+    Cypher three-valued logic would otherwise drop it from the count. The
+    equivalence holds for the scalar (string) ``key`` shape the schema writes;
+    a LIST-valued key makes the Python predicate raise (its own pre-existing
+    defect, #4525) while this count treats it as data. The parity is pinned by
+    ``tests/test_dr_endpoints.py::TestDrRebaseline::test_count_data_nodes_matches_the_dump_node_set``.
+
+    ⚠️ Above FalkorDB's ``RESULTSET_SIZE`` (default 10000) this is the
+    COMPLETE data-node count while ``dump_graph``'s own node read is truncated
+    (#4515) — so it is the more-correct value there, and the two surfaces
+    diverge by design until #4515 is fixed.
+    """
+    from tortoise.hosted_api import (
+        _EXPORT_SKIP_LABELS,
+        _EXPORT_SKIP_META_KEYS,
+    )
+    return int(db.select_graph(graph_name).query(
+        _COUNT_DATA_NODES_QUERY,
+        params={
+            "skip_labels": sorted(str(l) for l in _EXPORT_SKIP_LABELS),  # noqa: E741
+            "meta_keys": sorted(str(k) for k in _EXPORT_SKIP_META_KEYS),
+        },
+    ).result_set[0][0])
+
+
 def _restore_into_temp_verify_swap(
     db,
     payload: dict,
@@ -1175,6 +2288,7 @@ def _restore_into_temp_verify_swap(
     expected_nodes: int | None = None,
     expected_edges: int | None = None,
     stamp: Callable[[], None] | None = None,
+    allow_dangling_edges: bool = False,
 ) -> dict:
     """Temp-graph restore → verify → atomic swap — the shared stage behind
     ``restore_backup`` and the hosted ``POST /v1/organizations/{org_id}/import``
@@ -1190,13 +2304,22 @@ def _restore_into_temp_verify_swap(
     ``stamp``: optional post-swap callback (control-plane metadata, best-effort
         at the caller): ``restore_backup`` stamps ``backup_restored_at`` via the
         registry; the import endpoint stamps its ``last_import_sha256`` ledger.
+    ``allow_dangling_edges`` (#3895): opt-in repair-on-read for artifacts
+        written by the pre-fix writer. The restore drops the edges whose
+        endpoints the dump omits, verifies the count against the payload with
+        those drops accounted for, and returns them in ``restored``
+        (``dropped_edges`` / ``dropped_edge_endpoints``). Default False — a
+        dangling edge the export-skip class does not explain keeps failing
+        closed.
 
     Flow: restore into ``{live_name}_restore_{ts}_{rnd}`` → verify node+edge
     counts → empty-backup-over-live guard → pre-restore safety copy of the
     live graph → delete live → GRAPH.COPY temp → live → cleanup staging and
     pre-restore copies. Any failure before the swap leaves the live graph
     untouched; a swap failure leaves the verified temp + pre-restore copies
-    recoverable.
+    recoverable. Both GRAPH.COPY copies run over the restore's OWN generous,
+    explicit read bound (#3813) — never an ordinary request's, which forbids a
+    copy longer than 60s at any legal configuration.
     """
     if expected_nodes is None:
         # #1625: derive the expected count from the AUTHENTICATED dump content
@@ -1234,7 +2357,8 @@ def _restore_into_temp_verify_swap(
     pre_name = f"{live_name}_pre_restore_{ts_str}"
     temp_g = db.select_graph(temp_name)
     try:
-        counts = restore_graph(temp_g, payload)
+        counts = restore_graph(
+            temp_g, payload, allow_dangling_edges=allow_dangling_edges)
     except Exception:
         # validation failure (unsafe label, dangling edge, malformed edge) —
         # drop the staging graph; the live graph was never touched
@@ -1258,13 +2382,14 @@ def _restore_into_temp_verify_swap(
             f"Restore verification failed: {counts['nodes']} nodes restored, "
             f"expected {expected_nodes} — live graph untouched"
         )
-    if counts["edges"] != expected_edges:
+    if counts["edges"] + int(counts.get("dropped_edges", 0)) != expected_edges:
         try:  # noqa: SIM105
             temp_g.delete()
         except Exception:
             pass
         raise RestoreVerificationError(
-            f"Restore verification failed: {counts['edges']} edges restored, "
+            f"Restore verification failed: {counts['edges']} edges restored "
+            f"(+{int(counts.get('dropped_edges', 0))} dropped unlinkable), "
             f"expected {expected_edges} — live graph untouched"
         )
 
@@ -1322,10 +2447,29 @@ def _restore_into_temp_verify_swap(
     # graph so the swap is reversible even if the process dies mid-window
     # (the 2026-08-05 "wipe followed by any write re-saves the empty state"
     # failure chain). Best-effort — skipped when live is empty/missing.
+    fork_slot: ForkSlotRecovery | None = None
     pre_g = None
+    pre_settled: list[bool] = []
     if live_nodes > 0:
         try:
-            live_g.copy(pre_name)
+            # #3845: a wedged module-fork slot refuses this copy too. The copy
+            # is best-effort, but the RECOVERY is not — releasing the slot here
+            # is what lets the swap below use a fork at all instead of the
+            # fork-free fallback. #3813: a long server-side copy, so the copy
+            # STEP runs over the restore's own read bound rather than an
+            # ordinary request's socket_timeout. #4233: record an overrun here
+            # too, so an RTO breach caused by the pre-restore copy is
+            # attributable (it is the other half of the restore's copy budget).
+            recovery = _graph_copy_or_diagnose(
+                live_g, pre_name, db=db, site="pre-restore safety copy",
+                copy=lambda: _graph_copy_with_restore_bound(
+                    db, live_name, pre_name,
+                    role="Pre-restore safety copy", intact_name=live_name,
+                    settled=pre_settled,
+                ),
+            )
+            if recovery is not None:
+                fork_slot = recovery
             pre_g = db.select_graph(pre_name)
             # #3154: a boolean index corrupted by this copy would silently
             # break `= false` predicates on the DR fallback copy. Repair and
@@ -1335,6 +2479,12 @@ def _restore_into_temp_verify_swap(
                 pre_g, graph_name=pre_name,
                 stage="pre-restore safety copy", raise_on_failure=False,
             )
+        except ForkSlotWedgedError as e:
+            # Best-effort copy; the swap below still gets its chance (and its
+            # own fork-free fallback). Report the wedge distinctly — never as
+            # a generic "copy failed".
+            fork_slot = e.recovery
+            logger.warning("pre-restore safety copy skipped — %s", e)
         except Exception as e:
             logger.warning("pre-restore copy failed (continuing): %s", e)
 
@@ -1343,12 +2493,70 @@ def _restore_into_temp_verify_swap(
     # DROPPED/lost — a missing graph raises on delete but the copy below seeds
     # it. A genuine delete failure surfaces as a copy failure ("destination key
     # already exists") and the verified temp graph remains intact.
+    swap_settled: list[bool] = []
     try:
         live_g.delete()
     except Exception as e:
         logger.warning("live graph delete failed (proceeding to copy): %s", e)
     try:
-        temp_g.copy(live_name)
+        # #3845: the swap's copy gets the detect→reap→retry wedge recovery;
+        # #3813: and it runs over the restore's OWN generous read bound, so a
+        # copy that outlives an ordinary request's socket_timeout still
+        # completes instead of being torn down.
+        recovery = _graph_copy_or_diagnose(
+            temp_g, live_name, db=db, site="restore swap",
+            copy=lambda: _graph_copy_with_restore_bound(
+                db, temp_name, live_name,
+                role="Restore swap",
+                intact_name=f"verified temp graph {temp_name}",
+                # #4233: record a copy that outlived the read bound but was
+                # proven complete, so the drill record can attribute an RTO
+                # breach (the #3845 fork_slot precedent).
+                settled=swap_settled,
+            ),
+        )
+        if recovery is not None:
+            fork_slot = recovery
+    except RestoreCopyTimeoutError as e:
+        # A CLIENT read timeout is NOT a dead connection and NOT a failed copy:
+        # the server may still be copying. Say *timeout*, leave the verified
+        # temp graph intact and identifiable, and never imply the live graph
+        # was restored. Handled BEFORE ForkSlotWedgedError so a timeout is
+        # never reinterpreted as a wedge (#3813).
+        logger.error(
+            "%s — the server-side copy may still be running; verified temp "
+            "graph %s intact, live graph %s NOT restored",
+            e, temp_name, live_name,
+        )
+        raise
+    except ForkSlotWedgedError as e:
+        # The module-fork slot is wedged and could not be released. Do NOT fail
+        # the restore on a fork primitive: promote the already-VERIFIED,
+        # authenticated payload into the live graph through the fork-free
+        # logical path (the one that built the temp graph). The result is
+        # re-verified against the same counts before success is reported.
+        fork_slot = e.recovery
+        logger.warning(
+            "#3845: restore swap: fork slot wedged and not recoverable — "
+            "falling back to a FORK-FREE promotion of the verified temp "
+            "graph %s into %s (%s)", temp_name, live_name, e.recovery.detail,
+        )
+        try:
+            _promote_payload_fork_free(
+                live_g, payload,
+                live_name=live_name, temp_name=temp_name,
+                expected_nodes=expected_nodes, expected_edges=expected_edges,
+                allow_dangling_edges=allow_dangling_edges,
+            )
+        except Exception as promo_exc:
+            logger.exception(
+                "fork-free promotion failed for %s — temp graph %s intact",
+                live_name, temp_name,
+            )
+            raise RuntimeError(
+                f"Restore swap failed (fork slot wedged; fork-free promotion "
+                f"failed) — verified temp graph {temp_name} intact: {promo_exc}"
+            ) from promo_exc
     except Exception as e:
         logger.exception(
             "GRAPH.COPY temp→live failed for %s — temp graph %s intact",
@@ -1386,10 +2594,23 @@ def _restore_into_temp_verify_swap(
         except Exception as e:  # best-effort metadata (#669 P3)
             logger.warning("restore stamp failed for %s: %s", live_name, e)
 
-    return {
+    result = {
         "restored": counts,
         "restored_at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
     }
+    if pre_settled or swap_settled:
+        # #4233: a GRAPH.COPY outlived the restore's read bound and was proven
+        # complete by its outcome — either the pre-restore safety copy or the
+        # swap. Reported distinctly (the #3845 `fork_slot` precedent) so a
+        # drill that breaches the RTO because of it is attributable, not just
+        # visible as a longer duration. The WARNING log names which copy.
+        result["copy_read_bound_overrun"] = True
+    if fork_slot is not None:
+        # #3845: report the wedge DISTINCTLY from a slow copy, and what was
+        # done about it, so an operator sees "fork slot wedged" rather than a
+        # misleading "copy failed".
+        result["fork_slot"] = fork_slot.as_dict()
+    return result
 
 
 def restore_backup(
@@ -1403,8 +2624,18 @@ def restore_backup(
     key: bytes | None = None,
     target_graph: str | None = None,
     drill: bool = False,
+    allow_dangling_edges: bool = False,
 ) -> dict:
     """Restore an org graph from a stored backup: verify → temp graph → swap.
+
+    ``allow_dangling_edges`` (#3895): opt-in repair-on-read for an artifact
+    written by the pre-fix dump writer — its edge list references nodes its
+    node list omits, so the strict path refuses the whole artifact. With this
+    flag the linkable edges are restored, the unlinkable ones are dropped, and
+    the exact count + endpoint ids are returned in ``restored``
+    (``dropped_edges`` / ``dropped_edge_endpoints``) — never silently. Default
+    False: a dangling edge not explained by the export-skip class still fails
+    closed.
 
     ``db``: falkordb Connection handle (e.g. ``sdk._get_proj().db``) — temp graph and
     the live graph live on the same server.
@@ -1503,6 +2734,7 @@ def restore_backup(
         db, payload,
         live_name=live_name,
         stamp=(None if drill else lambda: _stamp_backup_restored(registry, org_id)),
+        allow_dangling_edges=allow_dangling_edges,
     )
     result["backup_key"] = backup_key
     return result
@@ -1528,7 +2760,7 @@ def prune_backups(
     UTC DAY-bucket for ages between ``keep_hourly`` and ``keep_daily`` days
     (bounded by the daily horizon), then the ``keep_weekly`` weekly anchors.
     This bounds an org at hourly cadence to ~24 hourly + ~7 daily-anchors + 4
-    weekly (≈35 objects/pool) — #2373: the anchor granularity was hour-
+    weekly (≈35 objects/pool; windows: `docs/retention-and-deletion.md`) — #2373: the anchor granularity was hour-
     buckets (retaining ~172/pool over 7 days), contradicting this docstring,
     the DR runbook, and #2319's lock-window premise; day anchors restore the
     documented intent. Newest-first iteration keeps the newest backup of each

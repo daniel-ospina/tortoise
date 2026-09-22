@@ -12,6 +12,14 @@ Channels are gated on their secrets being set in env:
 - Telegram: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 Absent secret → channel skipped (logged once per process).
 
+Channel scope by kind (#3639, user decision 2026-09-16): **billing** events keep
+BOTH channels (the #310 decision above stands). **Abuse/security** events are
+TELEGRAM ONLY — the email leg was removed because abuse notifications bypass the
+Resend send budget (``email_notify.py`` documents that budget as invite-path
+only), so a flag storm consumed the entire transactional quota and starved
+user-facing email. There is deliberately no email fallback: a Telegram outage
+means a lost abuse alert.
+
 Sender identity (#1136): the Resend sender comes from RESEND_FROM_EMAIL — the
 single managed sender identity shared with the transactional invite sender
 (email_notify.py) — so one domain/identity is managed in env
@@ -42,6 +50,11 @@ KINDS = {"billing_upgrade", "billing_downgrade", "billing_payment_failed", "bill
          # #1709: recovery-velocity (keyless recovery mints per IP per window)
          "abuse_recovery_velocity"}
 
+# Ops incident KINDs (the alert_store sink) — deliberately NOT members of KINDS.
+# KINDS names business EVENTS; these name a failed DELIVERY of one. Keeping them
+# separate stops an egress outage from being deduped against a billing event.
+_BILLING_SEND_FAILED_KIND = "BILLING_SEND_FAILED"
+
 _skip_logged: set[str] = set()
 
 
@@ -67,6 +80,39 @@ def _skip_channel(channel: str, secret: str) -> bool:
             logger.warning("billing notify: %s channel skipped — secret not set", channel)
         return True
     return False
+
+
+def file_incident(kind: str, org_id: str = "", detail: dict | None = None) -> bool:
+    """File (or REUSE) an ops incident on the shared sink. NEVER raises.
+
+    The swallow is the point: every caller is a FAILURE path that must still
+    complete (a best-effort send leg), so a dead alert channel — sink disabled,
+    R2/GitHub/Telegram down — degrades to the log line the caller already
+    wrote rather than propagating. Returns True only when THIS call was the
+    filer; a dedup hit returns False, which is not an error.
+
+    Dedup is ``AlertStore.open_incident``'s per-``(kind, org_id)`` create-once
+    object, so a repeated failure of the same channel files ONE issue; recovery
+    deletes the object (delete-to-resolve), so a later outage is a NEW incident.
+    That is why repeated failures must not be filed by the caller — pass a
+    SUBJECT that identifies the outage, not the individual send.
+
+    Mirrors the ``abuse_suspended`` call site below (same
+    ``_backup_config_safe`` → ``_alert_store_from`` → ``open_incident`` path),
+    factored out because more than one send leg now needs it. The hosted_api
+    import is function-level for the reason stated at that call site: hosted_api
+    imports notify, so a module-level import would cycle.
+    """
+    try:
+        from tortoise import hosted_api as _ha
+        cfg = _ha._backup_config_safe()
+        if cfg is None:
+            return False  # sink disabled — the caller's own log is the record
+        store = _ha._alert_store_from(cfg)
+        return bool(store.open_incident(kind, org_id, detail or {}))
+    except Exception as e:  # noqa: BLE001, RUF100
+        logger.warning("notify: %s incident filing failed (%s)", kind, redact_safe(e))
+        return False
 
 
 def _email_text(kind: str, org: dict, details: dict) -> str:
@@ -127,6 +173,17 @@ def notify_billing_event(kind: str, org: dict, details: dict | None = None) -> N
             _send_resend(api_key, to, subject, f"<pre>{body}</pre>")
         except Exception as e:  # noqa: BLE001, RUF100
             logger.warning("billing notify: resend failed (%s)", redact_safe(e))
+            # Ops incident (GH issue + Telegram) — a billing notification that
+            # never left the building was previously visible only in a log
+            # line. Platform subject ("") on purpose: ONE Resend account serves
+            # every team, so keying by team would file one issue per affected
+            # team for a single outage. The team is still in the detail.
+            file_incident(_BILLING_SEND_FAILED_KIND, "", {
+                "channel": "resend",
+                "event_kind": kind,
+                "org_id": org.get("org_id", "?"),
+                "error": redact_safe(e),
+            })
 
     bot_token = _env("TELEGRAM_BOT_TOKEN")
     chat_id = _env("TELEGRAM_CHAT_ID")
@@ -137,50 +194,26 @@ def notify_billing_event(kind: str, org: dict, details: dict | None = None) -> N
             logger.warning("billing notify: telegram failed (%s)", redact_safe(e))
 
 
-def _abuse_email_text(kind: str, org: dict, details: dict) -> str:
-    lines = [
-        f"Tortoise Security — {kind}",
-        "",
-        f"Team id: {org.get('org_id', '?')}",
-    ]
-    if details.get("rule"):
-        lines.append(f"Rule: {details['rule']}")
-    if details.get("count") is not None:
-        lines.append(f"Count: {details['count']} (threshold {details.get('threshold')}"
-                     f" per {details.get('window_s')}s)")
-    if details.get("country"):
-        lines.append(f"Country: {details['country']}")
-    if details.get("ip"):
-        lines.append(f"IP: {details['ip']}")
-    if details.get("scope"):
-        lines.append(f"Scope: {details['scope']} ({details.get('id')})")
-    if details.get("appeal_url"):
-        lines.append(f"Appeal: {details['appeal_url']}")
-    return "\n".join(lines)
-
-
 def notify_abuse(kind: str, org: dict, details: dict | None = None) -> None:
-    """Abuse notification over both channels (#308). NEVER raises.
+    """Abuse notification — Telegram ONLY (#308, channel decision #3639).
 
-    Recipient: ``org.get('email')`` — missing OR NULL both fall back to the
-    BILLING_NOTIFY_TO ops inbox (anon agent-signup orgs have no org email;
-    the registry org dict has no 'email' key at all, so .get is mandatory).
-    Callers in async contexts invoke via asyncio.to_thread (#310 pattern).
+    NEVER raises. The Resend leg was removed 2026-09-16 (#3639): abuse
+    notifications are not counted by the Resend send budget
+    (``email_notify.py``: "Scope: INVITE path only — billing/abuse
+    notifications share the Resend account but are not counted"), so a flag
+    storm burned the whole transactional quota — 401 ``abuse_flag`` emails in
+    3 hours drove two consecutive days to a reported 200% of the daily cap and
+    starved invites/OTPs. Telegram is the channel for this use case; email is
+    intentionally no longer sent, so a Telegram failure loses the alert.
+
+    ``org`` is retained for the caller shape (``abuse.py`` passes org_id and
+    email); the ``email`` key is no longer read. Callers in async contexts
+    invoke via asyncio.to_thread (#310 pattern).
     """
     if kind not in KINDS or not kind.startswith("abuse_"):
         logger.warning("abuse notify: unknown kind %r ignored", kind)
         return
     details = details or {}
-
-    api_key = _env("RESEND_API_KEY")
-    to = org.get("email") or _env("BILLING_NOTIFY_TO")
-    if not _skip_channel("resend", api_key) and not _skip_channel("resend-recipient", to):
-        try:
-            subject = f"Tortoise Security — {kind}"
-            body = _abuse_email_text(kind, org, details).replace("\n", "<br>")
-            _send_resend(api_key, to, subject, f"<pre>{body}</pre>")
-        except Exception as e:  # noqa: BLE001, RUF100
-            logger.warning("abuse notify: resend failed (%s)", redact_safe(e))
 
     bot_token = _env("TELEGRAM_BOT_TOKEN")
     chat_id = _env("TELEGRAM_CHAT_ID")
@@ -202,7 +235,8 @@ def notify_abuse(kind: str, org: dict, details: dict | None = None) -> None:
 
     if kind == "abuse_suspended":
         # Ops incident alert (GH issue + Telegram) — best-effort: absence of
-        # backup config or any failure degrades to Resend+Telegram above.
+        # backup config or any failure degrades to the Telegram leg above
+        # (there is no email leg since #3639).
         # Function-level import: notify must never import hosted_api at
         # module level (hosted_api imports notify).
         try:

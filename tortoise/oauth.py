@@ -463,6 +463,89 @@ def get_client(cp, client_id: str) -> dict | None:
     return row
 
 
+def resolve_client(cp, client_id: str) -> dict | None:
+    """Client lookup for the authorize/token paths: registry first (DCR or
+    operator-issued), then **CIMD** (#2847).
+
+    CIMD is what lets a Claude connector obtain a client identity WITHOUT the
+    ``POST /register`` round-trip, so the DCR limiter stops being load-bearing
+    at directory scale. The metadata document is fetched under the full SSRF
+    control set in ``tortoise.cimd``; this function owns only the control-plane
+    side — persisting ONE ``oauth_clients`` row per distinct client_id URL,
+    which `oauth_codes`/`oauth_access_tokens`/`oauth_refresh_tokens` require by
+    foreign key.
+
+    Failure policy: a CIMD problem returns ``None`` (→ the caller's existing
+    "Unknown or revoked client_id"), never a 5xx — the fetch is attacker-
+    reachable, so its failures must not become an availability signal. That
+    includes a control-plane write failure on the provisioning insert, which is
+    why the persist sits inside the guard below.
+    """
+    row = get_client(cp, client_id)
+    if row is not None:
+        return row
+    from tortoise import cimd
+    if not cimd.is_cimd_client_id(client_id) or not cimd.cimd_enabled():
+        return None
+    try:
+        record = cimd.resolve_client_metadata(
+            client_id,
+            supported_scopes=set(SCOPES_ACCEPTED),
+            supported_grants=set(SUPPORTED_GRANTS),
+            default_scope=" ".join(SCOPES_SUPPORTED))
+        _persist_cimd_client(cp, record)
+    except Exception:
+        # Deliberately broad: a refused/blocked fetch — or a control-plane
+        # failure while provisioning — must land as an unknown client, not as
+        # a distinguishable error (no SSRF oracle, no 5xx).
+        return None
+    # #2847 review P1 — revocation fail-open. `_persist_cimd_client`'s duplicate
+    # re-read goes through the RAW `_client_row`, so a REVOKED CIMD client could
+    # come back non-None here while the registry path returns None: the consent
+    # page rendered and an authorization code was minted for a revoked client
+    # (the token endpoint still rejected, so no token was issued). Re-reading
+    # through the REVOKED-FILTERED accessor here — on the single resolver both
+    # /oauth/authorize and /oauth/token share — closes it whatever the insert
+    # did, and keeps this path's answer identical to the registry path's.
+    # Fail-closed when the row is absent: the FK on oauth_codes requires it.
+    return get_client(cp, client_id)
+
+
+def _persist_cimd_client(cp, record: dict) -> None:
+    """Insert the ``oauth_clients`` row a CIMD client needs for the FK, once.
+
+    Growth bound: one row per distinct client_id URL — ``O(client
+    implementations)`` (a handful), not ``O(connections)`` as DCR is. Claude's
+    URL is stable, so this is exactly one row, ever.
+
+    Concurrency: two simultaneous first-time authorizations of the same URL
+    race on the primary key; the loser's insert raises while the row is
+    present, which is not an error. A re-read that still finds nothing
+    re-raises, so a genuine control-plane failure is never silently absorbed.
+    The caller re-reads through the revoked-filtered accessor, so this function
+    deliberately returns nothing — its return value is not a trusted view.
+    """
+    row = {
+        "id": record["client_id"],
+        "client_secret_hash": None,
+        # The HOST, never the document's self-asserted client_name (Anthropic's
+        # consent-screen rule — a client must not name itself on our page).
+        "client_name": record["client_name"],
+        "redirect_uris": record["redirect_uris"],
+        "grant_types": record["grant_types"],
+        "response_types": record["response_types"],
+        "token_endpoint_auth_method": record["token_endpoint_auth_method"],
+        "scope": record["scope"],
+        "created_at": _now_iso(),
+        "revoked_at": None,
+    }
+    try:
+        cp.query("oauth_clients", method="POST", json_body=row)
+    except Exception:
+        if _client_row(cp, record["client_id"]) is None:
+            raise
+
+
 def register_client(cp, body: dict) -> dict:
     """RFC 7591 DCR — validate metadata, mint client_id (+ secret for
     confidential clients), persist, return the full registration response."""
@@ -558,7 +641,7 @@ def _verify_client_auth(cp, client_id: str, body: dict) -> dict:
     """
     if not client_id:
         raise OAuthError(401, "invalid_client", "client_id is required.")
-    row = _client_row(cp, client_id)
+    row = resolve_client(cp, client_id)
     if row is None or row.get("revoked_at") is not None:
         raise OAuthError(401, "invalid_client", "Unknown client_id.")
     method = row.get("token_endpoint_auth_method") or "none"
@@ -581,34 +664,45 @@ def validate_authorize_params(cp, *, client_id: str, redirect_uri: str | None,
                               code_challenge: str | None,
                               code_challenge_method: str | None) -> dict:
     """Validate the /oauth/authorize request. Returns the client row."""
-    client = get_client(cp, client_id)
-    if client is None:
-        raise OAuthError(400, "invalid_request", "Unknown or revoked client_id.")
-    if response_type != "code":
-        raise OAuthError(400, "invalid_request",
-                         "Only response_type=code is supported.")
-    # #2846: loopback ports are ignored (RFC 8252 §7.3); every other redirect
-    # keeps the exact-string rule. See `_redirect_uri_matches`.
-    #
-    # A non-list `redirect_uris` can only come from a legacy/hand-corrupted row
-    # (`register_client` requires a list and the column is jsonb). Normalize it
-    # to a single-element list so a bare string stays ONE uri: iterating the
-    # string directly would compare character by character and silently stop
-    # matching it at all.
-    registered_uris = client.get("redirect_uris") or []
-    if not isinstance(registered_uris, (list, tuple)):
-        registered_uris = [registered_uris]
-    if not any(_redirect_uri_matches(u, redirect_uri)
-               for u in registered_uris):
-        raise OAuthError(400, "invalid_request",
-                         "redirect_uri is not registered for this client.")
-    if not code_challenge or not _valid_pkce(code_challenge):
-        raise OAuthError(400, "invalid_request",
-                         "code_challenge (PKCE, 43-128 chars) is required.")
-    if code_challenge_method != "S256":
-        raise OAuthError(400, "invalid_request",
-                         "Only code_challenge_method=S256 is supported.")
-    return client
+    client = resolve_client(cp, client_id)
+    try:
+        if client is None:
+            raise OAuthError(400, "invalid_request", "Unknown or revoked client_id.")
+        if response_type != "code":
+            raise OAuthError(400, "invalid_request",
+                             "Only response_type=code is supported.")
+        # #2846: loopback ports are ignored (RFC 8252 §7.3); every other redirect
+        # keeps the exact-string rule. See `_redirect_uri_matches`.
+        #
+        # A non-list `redirect_uris` can only come from a legacy/hand-corrupted row
+        # (`register_client` requires a list and the column is jsonb). Normalize it
+        # to a single-element list so a bare string stays ONE uri: iterating the
+        # string directly would compare character by character and silently stop
+        # matching it at all.
+        registered_uris = client.get("redirect_uris") or []
+        if not isinstance(registered_uris, (list, tuple)):
+            registered_uris = [registered_uris]
+        if not any(_redirect_uri_matches(u, redirect_uri)
+                   for u in registered_uris):
+            raise OAuthError(400, "invalid_request",
+                             "redirect_uri is not registered for this client.")
+        if not code_challenge or not _valid_pkce(code_challenge):
+            raise OAuthError(400, "invalid_request",
+                             "code_challenge (PKCE, 43-128 chars) is required.")
+        if code_challenge_method != "S256":
+            raise OAuthError(400, "invalid_request",
+                             "Only code_challenge_method=S256 is supported.")
+        return client
+    except OAuthError as exc:
+        # #3669 finding 2: stamp the client resolved ABOVE onto the error
+        # (None when the client itself was unresolvable) so the
+        # /oauth/authorize handler can choose the redirect-vs-JSON shape
+        # WITHOUT resolving a second time. On the FAILURE path that second
+        # resolve cost a second CIMD fetch and a second rate-limit charge
+        # (the success path paid nothing — the fetch cache absorbed it),
+        # halving the effective failure budget.
+        exc.client = client
+        raise
 
 
 def consent_preview(cp, user_id: str, base: str, resource: str | None) -> dict:
@@ -836,8 +930,7 @@ def _quota_fields(cp, org_row: dict) -> dict:
     (#329): preserve None (unlimited, Team tier), fall back to pricing.
     #1859 P3-2: max_points column (points-cap override) takes precedence
     over graph_size_cap, then pricing — mirrors resolve_api_key."""
-    from tortoise.pricing import tier_limits  # noqa: I001
-    from tortoise.quota import DEFAULT_MAX_SESSIONS
+    from tortoise.pricing import tier_limits
     from tortoise.quota import derived_tier
     tier = derived_tier({**org_row, "id": org_row.get("id")})
     lim = tier_limits(tier)
@@ -857,7 +950,9 @@ def _quota_fields(cp, org_row: dict) -> dict:
                        if mp is not None
                        else int(lim["max_graph_nodes"])),
         "max_api_keys": lim["max_api_keys"],
-        "max_sessions": DEFAULT_MAX_SESSIONS,
+        # #4010: sessions are unlimited for every tier — no cap of any kind
+        # (the pre-#4010 DEFAULT_MAX_SESSIONS fallback is deleted).
+        "max_sessions": None,
         "suspended_at": org_row.get("suspended_at"),
         "flagged_at": org_row.get("flagged_at"),
         # #1765: prefer the owner's USER email (demotion — teams.email is a
@@ -1209,6 +1304,16 @@ def protected_resource_metadata(base: str) -> dict:
     }
 
 
+def _cimd_advertised() -> bool:
+    """#2847 — is the CIMD client-identity path advertised?
+
+    Reads the flag at CALL time (no cached metadata): the env is the reversible
+    lever, and a cached copy would make flipping it require a restart.
+    """
+    from tortoise import cimd
+    return bool(cimd.client_id_metadata_document_supported())
+
+
 def authorization_server_metadata(base: str) -> dict:
     """RFC 8414 Authorization Server Metadata (OAuth 2.1 profile)."""
     base = base.rstrip("/")
@@ -1221,6 +1326,11 @@ def authorization_server_metadata(base: str) -> dict:
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
+        # #2847: advertise the registration-free client-identity path. Claude
+        # selects CIMD only when this flag AND "none" above are both present
+        # (the CIMD client authenticates as a public client), otherwise it
+        # falls back to DCR and re-registers on every fresh connection.
+        "client_id_metadata_document_supported": _cimd_advertised(),
         "code_challenge_methods_supported": ["S256"],
         "scopes_supported": SCOPES_ACCEPTED,
     }
@@ -1328,6 +1438,10 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   // storage, so an ingested OAuth/email session must persist to the cookie
   // or the sign-in fallback loops. detectSessionInUrl stays true so the
   // provider redirect back with #access_token is ingested.
+  // #3503: this page is the ONE place it stays true — it does NOT load
+  // website/assets/supabase-session.js (that file's factory sets it false,
+  // because its load-time IIFE is the fragment consumer there), so this
+  // inline client is the sole consumer of the hash and must ingest it.
   const COOKIE_NAME = "sb-tortoise-auth-token";
   // #1704: parent-domain cookie storage — a faithful port of the
   // dashboard's supabaseStorage (website/assets/supabase-session.js):

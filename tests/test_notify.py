@@ -109,6 +109,91 @@ def test_resend_failure_swallowed(monkeypatch, caplog):
     assert any("resend failed" in r.message for r in caplog.records)
 
 
+def _install_alert_store(monkeypatch):
+    """Point the notify sink at a REAL AlertStore over MemoryStorage.
+
+    A real store (not a fake) so the dedup contract under test is the store's
+    own create-once behavior — same approach as tests/test_alert_store.py.
+    Returns (filed_titles, telegram_texts).
+    """
+    from tortoise import hosted_api as ha
+    from tortoise.alert_store import AlertStore
+    from tortoise.hosted_backup import MemoryStorage
+
+    filed: list[str] = []
+    pushed: list[str] = []
+
+    def file_issue(title, body):
+        filed.append(title)
+        return len(filed)
+
+    store = AlertStore(
+        MemoryStorage(),
+        file_issue=file_issue,
+        close_issue=lambda number, comment=None: None,
+        search_open=lambda kind, org_id="": [],
+        push_telegram=pushed.append,
+        repo="daniel-ospina/tortoise",
+    )
+    monkeypatch.setattr(ha, "_backup_config_safe", lambda: object())
+    monkeypatch.setattr(ha, "_alert_store_from", lambda cfg: store)
+    return filed, pushed
+
+
+def test_billing_send_failure_files_exactly_one_deduped_incident(monkeypatch, caplog):
+    """A swallowed Resend failure reaches the ops sink — ONCE.
+
+    Before this, a billing notification that never left the building existed
+    only as a log line. Repeated failures of the same channel must NOT file
+    repeatedly: that is AlertStore's per-(kind, org_id) create-once dedup.
+    """
+    filed, pushed = _install_alert_store(monkeypatch)
+
+    def boom(url, **kwargs):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(notify.httpx, "post", boom)
+    with caplog.at_level(logging.WARNING):
+        notify.notify_billing_event("billing_cancel", TEAM)  # must not raise
+        notify.notify_billing_event("billing_cancel", TEAM)  # same outage again
+
+    assert len(filed) == 1, f"expected one incident, got {filed}"
+    assert notify._BILLING_SEND_FAILED_KIND in filed[0]
+    assert len(pushed) == 1, pushed
+    # The original warning is preserved on BOTH failures.
+    assert sum("resend failed" in r.message for r in caplog.records) == 2
+
+
+def test_billing_send_failure_alert_never_raises(monkeypatch, caplog):
+    """A dead alert channel must not break the send path.
+
+    The sink is downstream of a best-effort notification; an R2/GitHub outage
+    while FILING must degrade to a log line, never propagate into the caller.
+    """
+    from tortoise import hosted_api as ha
+
+    def boom(cfg):
+        raise RuntimeError("r2 down")
+
+    def boom_post(url, **kwargs):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(ha, "_backup_config_safe", lambda: object())
+    monkeypatch.setattr(ha, "_alert_store_from", boom)
+    monkeypatch.setattr(notify.httpx, "post", boom_post)
+    with caplog.at_level(logging.WARNING):
+        notify.notify_billing_event("billing_cancel", TEAM)  # must not raise
+    assert any("incident filing failed" in r.message for r in caplog.records)
+
+
+def test_file_incident_returns_false_when_sink_disabled(monkeypatch):
+    """No backup config -> the sink is off; filing is a no-op, not an error."""
+    from tortoise import hosted_api as ha
+
+    monkeypatch.setattr(ha, "_backup_config_safe", lambda: None)
+    assert notify.file_incident("ANY_KIND") is False
+
+
 def test_telegram_failure_swallowed(monkeypatch, caplog):
     def boom(bot_token, chat_id, text, timeout=15.0):
         raise RuntimeError("tg down")
@@ -146,10 +231,10 @@ def test_unknown_kind_ignored(monkeypatch):
 
 
 def test_abuse_signup_velocity_kind_allowed_with_ip(monkeypatch):
-    """#1081: abuse_signup_velocity ∈ KINDS — notify_abuse must NOT hit the
-    unknown-kind early return, and the IP (the most actionable field of an
-    IP-scoped ops alert) renders in BOTH channels. Anon team (no email key)
-    → BILLING_NOTIFY_TO ops inbox fallback (notify.py:153)."""
+    """#1081 + #3639: abuse_signup_velocity ∈ KINDS — notify_abuse must NOT hit
+    the unknown-kind early return, and the IP (the most actionable field of an
+    IP-scoped ops alert) renders in the Telegram message. Telegram is the ONLY
+    channel for abuse since #3639, so a Resend call here is a regression."""
     calls = []
 
     def fake_post(url, **kwargs):
@@ -167,12 +252,10 @@ def test_abuse_signup_velocity_kind_allowed_with_ip(monkeypatch):
         sent.update(chat_id=chat_id, text=text)
 
     monkeypatch.setattr("tortoise.notify.telegram_send", fake_telegram_send)
+    notify._skip_logged.clear()
     notify.notify_abuse("abuse_signup_velocity", {"org_id": "team_123"},
                         {"ip": "203.0.113.7", "count": 3,
                          "threshold": 2, "window_s": 86400})
-    assert calls, "resend should be called for a known kind"
-    body = calls[0][1]["json"]
-    assert body["to"] == ["ops@premiselabs.co"]  # BILLING_NOTIFY_TO fallback
-    assert "abuse_signup_velocity" in body["subject"]
-    assert "203.0.113.7" in body["html"]  # IP renders in the email
+    assert calls == [], "abuse must not post to Resend (#3639)"
     assert sent and "203.0.113.7" in sent["text"]  # IP renders in Telegram
+    assert "abuse_signup_velocity" in sent["text"]

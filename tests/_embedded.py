@@ -16,15 +16,139 @@ RAW_EMBEDDED_ALLOWLIST in test_embedded_lifecycle.py.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
+import shutil
 import tempfile
+import threading
 
 import pytest
 
 from tortoise.config import is_db_uri
+from tortoise.env_truthy import is_truthy  # #4097: the declared truthy contract
 from tortoise.projection import FalkorProjection
+
+# #4096: session-scoped test trees created by fixtures in this module and in
+# tests/conftest.py. They are reclaimed by `conftest.py::_reclaim_session_tmpdirs`,
+# which `_redislite_hygiene` declares as a dependency so pytest's reverse-order
+# teardown runs it LAST — after `_redislite_hygiene` / `_server_graph_hygiene` have
+# used the socket/pid evidence inside these trees. A local `rmtree` in the shared
+# fixture's own finalizer would run first, destroy that evidence, and could orphan
+# a live redislite server (the #4068/#1005 class).
+SESSION_TMPDIRS: list[str] = []
+
+
+def register_session_tmpdir(path: str) -> None:
+    """Register a session-scoped test tree for end-of-session reclamation."""
+    SESSION_TMPDIRS.append(path)
+
+
+def reclaim_tmpdirs(dirs: list[str]) -> int:
+    """rmtree each tree in ``dirs`` (best-effort) and return the count.
+
+    Split out from the session reclaimer so the removal primitive is unit-
+    testable without draining the live ``SESSION_TMPDIRS`` registry mid-session.
+    """
+    for d in dirs:
+        shutil.rmtree(d, ignore_errors=True)
+    return len(dirs)
+
+
+def drain_session_tmpdirs() -> int:
+    """Drain + reclaim ``SESSION_TMPDIRS`` (the session reclaimer's body).
+
+    Split from the fixture so the drain-and-clear behaviour is unit-testable
+    without driving a session-scoped pytest fixture.
+    """
+    dirs, SESSION_TMPDIRS[:] = list(SESSION_TMPDIRS), []
+    return reclaim_tmpdirs(dirs)
+
+
+# ── #3546: ONE process-wide embedded construction lock ────────────────────
+# Consolidated here from the two per-file copies that #3511 installed
+# (`tests/test_import_endpoint.py`, `tests/test_export_delete.py`). The
+# invariant is PROCESS-wide while each copy was a module-scoped lock OBJECT —
+# two independent RLocks cannot serialize against each other, so every other
+# file that constructs an embedded projection without a prior construction on
+# its pinned path stayed exposed. `tests/test_invites_http.py` was one of
+# them: its `client` fixture enters `TestClient(app)` (arming the lifespan's
+# `tortoise-health-probe` constructor) before the `reg` fixture constructs the
+# seeder's projection, both on the same fresh temp db_path.
+#
+# The race (redislite `RedisMixin.__init__`): a NEW redis-server daemon is
+# started whenever `<db>.settings` is absent (or its recorded pid is dead).
+# Two constructions that interleave BEFORE either calls
+# `_save_setting_registry()` both take the fresh-start branch, each spawning a
+# daemon in its own tempdir; the LATER writer silently owns the registry, and
+# the loser's writes become invisible to every later opener. It surfaces as a
+# seed that reads back empty — e.g. a seeded Membership that an owner/admin
+# gate cannot see, so POST /v1/invites 403s instead of reaching its 402/200
+# branch (test_invites_http), or an import that looks like it wiped the graph
+# (`assert [] == ['old-0']`, test_import_endpoint #3505).
+#
+# Scope of the guarantee (this is NOT a global single-writer guarantee): the
+# lock serializes only IN-PROCESS `FalkorProjection.__init__` calls; two paths
+# stay outside it and can still add or remove a registry entry — (1) a
+# construction that raises inside `_start_redis()` (RedisLiteException /
+# RedisLiteServerStartError) after its daemon spawned but before
+# `_save_setting_registry()`, leaving an unregistered orphan; and (2)
+# redislite's `_cleanup()` last-client branch, which removes `<db>.settings`
+# and shuts the daemon down from `__del__`/atexit on any thread. Callers that
+# need more than the lock must therefore ALSO verify visibility at seed time
+# (the named `SeedVisibilityError` guard in test_import_endpoint's
+# `_seed_live_graph` is the reference shape).
+#
+# Two further classes sit outside the lock BY CONSTRUCTION — they are limits,
+# not coverage gaps to close here: (3) a construction made at test-module
+# IMPORT time, because the fixture installs at first test SETUP, after
+# collection has already imported every module; and (4) a raw redislite
+# `FalkorDB(path)` client, which never calls `FalkorProjection.__init__` — the
+# raw-layer files that build clients directly (RAW_EMBEDDED_ALLOWLIST in
+# test_embedded_lifecycle.py) do so because the construction IS their test
+# input. Subprocess constructions are likewise outside an IN-PROCESS lock.
+# A test that monkeypatches `FalkorProjection.__init__` itself (e.g.
+# test_pipeline_cli) replaces this wrapper for that test's duration; those
+# seams are function-scoped and single-threaded.
+#
+# Blast radius of the critical section: it spans the WHOLE `__init__`,
+# including redislite's blocking `subprocess.call` server start and the
+# post-start `_auto_health_recover()` / `_ensure_indexes()` work. A wedged
+# embedded start therefore stalls every in-process constructor, not just its
+# own thread. That wait is bounded by redislite's socket-wait `start_timeout`,
+# but NOT by any timeout on a hung `redis-server` binary — accepted
+# deliberately: a hung start is a louder failure than a silent second daemon.
+EMBEDDED_CONSTRUCTION_LOCK = threading.RLock()
+
+
+def serialize_embedded_construction(monkeypatch) -> None:
+    """Install THE process-wide `FalkorProjection.__init__` wrapper (#3546).
+
+    Called exactly once, by the session-scoped autouse
+    `_serialize_embedded_construction` fixture in `tests/conftest.py` — never
+    per file. Files must NOT install their own copy: a second lock object
+    cannot serialize against this one, which is the defect #3546 names.
+
+    `monkeypatch` is a `pytest.MonkeyPatch` instance owned by the caller (the
+    session fixture cannot use the function-scoped `monkeypatch` fixture), so
+    the caller controls undo. Idempotent: re-wrapping an already-wrapped
+    `__init__` is a no-op, so a duplicate install can never stack a redundant
+    critical section.
+    """
+    prev = FalkorProjection.__init__
+    if getattr(prev, "_tortoise_construction_serialized", False):
+        return
+
+    def _serialized_proj_init(self, *args, **kwargs):
+        # `return` forwarded deliberately: `__init__` must return None, so it
+        # is inert today, but it stays correct if this wrapper is ever reused
+        # for a factory or `__new__` (where dropping the result is a bug).
+        with EMBEDDED_CONSTRUCTION_LOCK:
+            return prev(self, *args, **kwargs)
+
+    _serialized_proj_init._tortoise_construction_serialized = True
+    monkeypatch.setattr(FalkorProjection, "__init__", _serialized_proj_init)
 
 
 # ── Epic #1686: worker-thread probe ───────────────────────────────────────
@@ -72,6 +196,10 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     "test_backup_e2e",
     "test_config",
     "test_embedded_concurrency",
+    # #2879: the embedded AOF durability drift pin measures an on-disk
+    # `<db>-appendonlydir` artifact — under the docker redirect it would
+    # construct against the server and see none (the opt-in half reds).
+    "test_embedded_durability_claim",
     "test_embedded_lifecycle",
     "test_embedded_lifecycle_fast_close",
     "test_eval_ingest_retry",
@@ -89,10 +217,38 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     "test_graph_integrity_gate",
     "test_guard",
     "test_hard_reject",
+    # #4047: the two #3845 fork-guard files carry a module-level
+    # ``pytestmark = pytest.mark.embedded_only`` — their SUBJECT is the embedded
+    # daemon (the module-fork wedge lives inside the bundled redis-server, and
+    # both the producer and the mitigation are embedded-daemon internals), so
+    # embedded-only is the honest classification and they must not be
+    # reclassified onto the server lane. They were registered on the docker
+    # api/core surfaces but ABSENT from this list and from
+    # ``config/ci-surfaces.yml`` ``carve_out``: a full selection COLLECTED them
+    # and every test SKIPPED via the embedded_only hook — a permanently green,
+    # permanently unexecuted gate on main. Registered here and in ``carve_out``
+    # so the URI-unset carve-out job runs them on every full selection.
+    "test_fork_safety_3845",
+    "test_fork_slot_wedge_3845",
+    # #3663: asserts PRODUCTION graph-name scoping (`org_{org_id}`) on the
+    # MCP ``tortoise_list_graphs`` HTTP filter, the namespace probe and its
+    # opener — which is only possible BECAUSE this stem is exempt. Without the
+    # exemption the redirect (the ``FalkorProjection.__init__`` block) would
+    # rename every path-built graph to a per-path ``test_*`` name, so under a
+    # server URI no production name would exist: the probe's ``own=True`` and
+    # the listing filter would assert FAIL, and the opener would return None.
+    # A hard RED, never a false pass. Same carve-out rationale as
+    # test_hosted_backup.
+    "test_cross_tenant_read_isolation",
     "test_hosted_backup",
     "test_migrate_db",
     "test_ops_safety",
     "test_per_session_census",
+    # #4028: the surface half asserts embedded brute-force floor semantics
+    # (the docker sig-A vector branch returns no absolute similarity, so the
+    # floor cannot be applied there) — it must construct a real embedded
+    # store, not a redirected server graph.
+    "test_precision_leak_4028",
     "test_pre_migration_safety",
     # #3350: the embedded lane's socket timeout / retry-bound assertions are
     # embedded-only (a redirected construction would run against the docker
@@ -142,10 +298,16 @@ def has_falkor() -> bool:
     if _HAS_FALKOR is None:
         try:
             from redislite.falkordb_client import FalkorDB  # noqa: F401
-            db_path = os.path.join(
-                tempfile.mkdtemp(prefix="tortoise_probe_"), "probe.db")
-            proj = FalkorProjection(db_path, graph_name="test")
-            proj.close()
+            tmpdir = tempfile.mkdtemp(prefix="tortoise_probe_")
+            try:
+                db_path = os.path.join(tmpdir, "probe.db")
+                proj = FalkorProjection(db_path, graph_name="test")
+                proj.close()
+            finally:
+                # #4096: reclaim the probe tree even if construction/close raises
+                # — one per process before _HAS_FALKOR caches, and the reaper
+                # never reaps a .db-only tree.
+                shutil.rmtree(tmpdir, ignore_errors=True)
             _HAS_FALKOR = True
         except Exception:
             _HAS_FALKOR = False
@@ -244,6 +406,17 @@ BACKEND_IDENTITY = BackendIdentity()
 # need no server) opt in via TORTOISE_TEST_CARVE_OUT=1. Lives HERE (not
 # conftest) for the same reason as _embedded_only_skip: an import via
 # `tests.conftest` re-executes conftest's top-level code mid-session.
+def _carve_out_opted_in() -> bool:
+    """The ``TORTOISE_TEST_CARVE_OUT`` opt-in, through the declared contract.
+
+    #4097: truthy spellings (1/true/yes/on) now opt in; unset/blank/falsy/garbage
+    do not. Previously only the exact string ``"1"`` did, so ``=true`` — what a
+    human or a CI author naturally writes — silently failed the URI gate. The
+    opt-in permits a URI-less embedded run; it deletes nothing.
+    """
+    return is_truthy(os.environ.get("TORTOISE_TEST_CARVE_OUT"))
+
+
 def _assert_p4_uri_required() -> None:
     """Epic #1647 Task 10 Step 1a (plan-review P1-9): fail the session when
     TORTOISE_DB_URI is unset UNLESS TORTOISE_TEST_CARVE_OUT=1 is set.
@@ -261,7 +434,7 @@ def _assert_p4_uri_required() -> None:
     (which would re-execute conftest's top-level code)."""
     if _uri_set_supported():
         return
-    if os.environ.get("TORTOISE_TEST_CARVE_OUT") == "1":
+    if _carve_out_opted_in():
         return
     pytest.fail(
         "default pytest requires TORTOISE_DB_URI (epic #1647 P4); run the "
@@ -713,12 +886,17 @@ def _proj_for_uri(uri: str):
     """A host-mode projection for a URI, constructed WITHOUT from_uri so the
     frame-gated journal append never fires from sweep code."""
     from urllib.parse import urlparse
+
+    from tortoise.config import parse_uri_userinfo
     parsed = urlparse(uri)
+    # #3039: decode userinfo through the single shared rule (urlparse does
+    # NOT percent-decode; the client constructor does not either).
+    username, password = parse_uri_userinfo(uri)
     return FalkorProjection(
         host=parsed.hostname or "localhost",
         port=parsed.port or 16379,
-        username=parsed.username or None,
-        password=parsed.password or None,
+        username=username,
+        password=password,
         graph_name=f"test_sweep_{os.urandom(4).hex()}",
         ssl=(parsed.scheme == "rediss"),
         skip_health_check=True,
@@ -865,6 +1043,14 @@ def _team_sweep_allowed(uri: str) -> bool:
     server is NOT an ownership record; the explicit opt-in is (CI's
     dedicated docker containers are fresh per job, so nothing accumulates
     there without the pass)."""
+    # OVERRIDES (#4097): env-truthiness truthy-set parsing ("1"/"true"/"yes"/"on").
+    # This gate requires the exact value "1": it is the SOLE authorization for an
+    # irreversible journal-blind DETACH DELETE + GRAPH.DELETE of the real-tenant
+    # org_*/team_* namespace (the `uri` parameter is dead — the #1884 URI inference
+    # was retracted — so no containment check compensates), and widening a
+    # destructive opt-in surface is not a vocabulary-coherence win. The refusal is
+    # logged with the exact required spelling, so the narrowing is discoverable.
+    # Pinned by tests/test_env_truthy.py::test_team_sweep_gate_is_narrow_by_design.
     return os.environ.get("TORTOISE_TEST_SWEEP_TEAM_STRAYS") == "1"
 
 
@@ -985,8 +1171,64 @@ def shared_proj():
     if not has_falkor():
         yield None
         return
-    db_path = os.path.join(
-        tempfile.mkdtemp(prefix="tortoise_shared_embedded_"), "shared.db")
+    tmpdir = tempfile.mkdtemp(prefix="tortoise_shared_embedded_")
+    register_session_tmpdir(tmpdir)
+    db_path = os.path.join(tmpdir, "shared.db")
     proj = FalkorProjection(db_path, graph_name="test")
     yield proj
     proj.close()
+
+
+@contextlib.contextmanager
+def fresh_embedded_proj(db_dir, *, graph_name: str | None = None, **kwargs):
+    """Function-scoped sanctioned embedded construction (#3769).
+
+    The per-test counterpart to ``shared_proj``. ``shared_proj`` is
+    ``scope="session"``, so its single server is built **once** and anything
+    read at construction time — including ``TORTOISE_EMBEDDED_AOF`` — is frozen
+    at the first case's value. A parametrised test would then observe the first
+    case's server, and its assertion would be vacuous **in exactly the way it
+    exists to prevent** (#3624 review: the default-off and opt-in-on cases must
+    not be able to see one another).
+
+    Constructs a FRESH server per call, on an explicit path inside the caller's
+    own directory, so construction-time flags are honoured per call and the
+    caller can inspect that directory for on-disk artifacts.
+
+    The raw construction lives HERE, at the seam — which is precisely the
+    rationale ``RAW_EMBEDDED_ALLOWLIST`` records for allowlisting
+    ``_embedded.py`` ("seam/helper — raw constructions ARE the
+    embedded-under-test input"). A consumer test therefore needs no
+    ``RAW_EMBEDDED_ALLOWLIST`` entry of its own.
+
+    It DOES, however, need a SECOND carve-out: the caller's test module stem
+    must be listed in ``TEST_NO_REDIRECT_STEMS``. Under a URI lane
+    (``TORTOISE_DB_URI`` + ``TORTOISE_TEST_MODE=1``) a stem that is not exempt
+    gets redirected — ``path`` is discarded and the construction connects to a
+    server — so there is no fresh embedded server and no on-disk artifact to
+    inspect. This seam therefore FAILS CLOSED on that case rather than yielding
+    a projection that would make an ``expect_aof=False`` assertion vacuous.
+
+    Teardown never masks the caller's assertion.
+    """
+    db_path = os.path.join(str(db_dir), "graph.db")
+    kwargs.setdefault("allow_nonstandard_path", True)
+    kwargs.setdefault("skip_health_check", True)
+    if graph_name is not None:
+        kwargs["graph_name"] = graph_name
+    proj = FalkorProjection(path=db_path, **kwargs)
+    if not getattr(proj, "_is_embedded", False):
+        with contextlib.suppress(Exception):
+            proj.close()
+        raise RuntimeError(
+            "fresh_embedded_proj is embedded-only: the caller's test module "
+            "must be listed in TEST_NO_REDIRECT_STEMS (tests/_embedded.py). "
+            "Otherwise the URI redirect flips this construction to a server, "
+            "`path` is discarded, and no on-disk artifact exists — which would "
+            "make an expect_absent assertion vacuous (#3769)"
+        )
+    try:
+        yield proj
+    finally:
+        with contextlib.suppress(Exception):
+            proj.close()

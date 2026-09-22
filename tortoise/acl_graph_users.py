@@ -93,11 +93,17 @@ def _admin_client():
     if not parsed.hostname:
         return None
     import redis
+
+    # #3039: decode userinfo through the single shared rule —
+    # urlparse does NOT percent-decode, redis.Redis(...) does not either
+    # (only redis.from_url does), so a raw read breaks auth silently.
+    from tortoise.config import parse_uri_userinfo
+    username, password = parse_uri_userinfo(uri)
     return redis.Redis(
         host=parsed.hostname,
         port=parsed.port or 16379,
-        username=parsed.username or None,
-        password=parsed.password or None,
+        username=username,
+        password=password,
         ssl=(parsed.scheme == "rediss"),
         socket_connect_timeout=3,
         socket_timeout=5,

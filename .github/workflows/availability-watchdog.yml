@@ -39,6 +39,15 @@
 # Harness: .github/scripts/availability-watchdog.test.sh (CI job
 # availability-watchdog; stubs curl/gh/flyctl, no network).
 #
+# TWO PRODUCTION TARGETS (#3628): the Fly API probe above, plus a SECOND,
+# DEDICATED step for the Cloudflare Pages auth surface (`GET /auth/start`).
+# During the #3616 sign-in outage only /auth/start revealed it — /welcome
+# answered 302 and /api/session answered 401 the whole time, so a bare liveness
+# probe of either was GREEN while nobody could sign in for ~35 minutes. The
+# auth step asserts 302 AND that the response carries the PKCE challenge; it is
+# production for alerting/identity but has no Fly machine, so it is
+# hard-disarmed from the restart leg (see RESTARTABLE_PROBE_URLS).
+#
 # Manual run / drill (disarms self-healing automatically): dispatch this
 # workflow with probe_url set to a non-production URL.
 name: availability-watchdog
@@ -81,8 +90,10 @@ jobs:
       # (availability-watchdog.sh DEFAULT_PROBE_URL). Duplicating the production
       # URL here would mean that changing one copy silently turns every
       # production run into a drill — no restarts, [DRILL]-titled incidents —
-      # and the string comparison against DEFAULT_PROBE_URL is the ONLY thing
-      # distinguishing a drill from production.
+      # and SET MEMBERSHIP in the script's PROD_PROBE_URLS set is the ONLY thing
+      # distinguishing a drill from production. (This replaced the old
+      # single-literal `PROBE_URL == DEFAULT_PROBE_URL` comparison; an
+      # unrecognised URL stays a DRILL, fail closed.)
       PROBE_URL: ${{ inputs.probe_url }}
       # Fly app. FLY_API_TOKEN is the established name (deploy-hosted.yml) and
       # is passed at STEP level (see the probe step) — NOT here: a job-level
@@ -156,4 +167,32 @@ jobs:
           # Absent → the page is skipped with a log line.
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: bash .github/scripts/availability-watchdog.sh
+      # SECOND TARGET (#3628): the Pages auth surface. `!cancelled()` rather
+      # than the default `success()` — the two surfaces fail INDEPENDENTLY, so
+      # an API outage must not suppress the auth alert (and vice versa: a
+      # failing auth probe still fails the job).
+      # NO FLY_API_TOKEN here: there is no Fly machine behind this surface, and
+      # the script hard-disarms the restart leg for it (an unknown URL stays a
+      # drill, and this URL is production-but-not-restartable). A 503 here
+      # means a missing/renamed binding — a restart of the API app cannot fix
+      # it and would restart an unrelated service.
+      # The host label is REQUIRED: the incident TITLE is the dedupe key, so
+      # without its own label the two production targets would share ONE issue.
+      - name: Probe the Pages auth surface (PKCE flow; never restartable)
+        if: ${{ !cancelled() }}
+        env:
+          # Same step-level credential containment as the API step above.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PROBE_URL: https://app.premiselabs.co/auth/start
+          PROBE_HOST_LABEL: app.premiselabs.co
+          # Healthy = 302 with the PKCE challenge in the response headers. The
+          # old hardcoded UP arms classified 3xx as UNEXPECTED, so a naive
+          # probe of this route would page on a HEALTHY site; the allow-list
+          # replaces ONLY the UP arms (000/5xx stay DOWN, other stays
+          # UNEXPECTED).
+          PROBE_EXPECT_STATUS: '302'
+          PROBE_REQUIRE_HEADER: 'code_challenge_method=s256'
         run: bash .github/scripts/availability-watchdog.sh

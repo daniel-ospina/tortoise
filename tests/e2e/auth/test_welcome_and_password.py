@@ -34,7 +34,14 @@ import pytest
 from bff_test_helpers import pick_free_port, require_toolchain, stop
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-WEBSITE_DIR = REPO_ROOT / "website"
+# The BFF moved to the DASHBOARD Pages project (issue #4054) — FROM
+# `website/functions/` (the `premise-labs` project) TO
+# `website/apps/dashboard/functions/` (the `tortoise-dashboard` project). A
+# Pages project's `functions/` directory must sit beside the site directory, so
+# `wrangler pages dev .` now runs from `website/apps/dashboard`, not `website/`.
+# Running from the old root logs "No Functions. Shimming..." and every /welcome
+# + /auth/* route 404s.
+DASHBOARD_DIR = REPO_ROOT / "website" / "apps" / "dashboard"
 MOCK = REPO_ROOT / "tests" / "e2e" / "auth" / "mock_supabase.mjs"
 
 APP_PORT = int(os.environ.get("AUTH_WP_APP_PORT", "8997"))
@@ -77,7 +84,7 @@ def stack():
 
     app = subprocess.Popen(
         [
-            shutil.which("wrangler"), "pages", "dev", ".",
+            shutil.which("wrangler"), "pages", "dev", "dist",
             "--port", str(APP_PORT), "--ip", "127.0.0.1",
             "--d1", "SESSIONS",
             "-b", f"SUPABASE_URL={MOCK_URL}",
@@ -90,7 +97,7 @@ def stack():
             # change from SCOPE.md §6.
             "-b", f"APP_ORIGIN={APP}",
         ],
-        cwd=str(WEBSITE_DIR),
+        cwd=str(DASHBOARD_DIR),
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
     )
     if not _wait(APP_PORT):
@@ -179,7 +186,19 @@ def test_signed_in_welcome_redirects_to_the_app(stack):
 
 
 def test_reset_landing_serves_the_panel(stack):
-    """?reset=1 with a valid session is the ONE rendered case."""
+    """?reset=1 with a valid session is the ONE rendered case.
+
+    #4054: `functions/welcome.ts` serves this with `env.ASSETS.fetch(request)`,
+    so the asset must exist in THIS project. `welcome.html` (the only file
+    containing `#reset-panel`) was moved to `website/apps/dashboard/public/`
+    with the rest of the auth surface, so the panel now resolves on the app
+    origin.
+
+    This asserts against the BUILT root (`dist/`) because that is what gets
+    deployed — see `tests/e2e/auth/conftest.py`. Against the source root the
+    page is not at `/welcome` at all and Pages answers with the SPA shell, which
+    would make this assertion silently check `index.html`.
+    """
     cookie = _session_cookie()
     status, body, _ = _req("/welcome?reset=1", cookie=cookie)
     assert status == 200, f"reset landing must render, got {status}"
