@@ -4605,7 +4605,9 @@ def _record_write_op(org: dict, nodes_written: int = 0) -> None:
     ``record_write_ops`` runs a blocking ``MERGE (m:MeteringRecord …)`` plus a
     ``MATCH``, and in Supabase mode a blocking control-plane RPC, on whatever
     thread calls it. The write handlers call it inline on the event loop (a
-    post-write residual #3773 out-scoped); off-loading it is tracked by #4451.
+    post-write residual #3773 out-scoped) — with ONE exception since #3718:
+    ``commit_session``'s call now rides inside its off-loaded commit region.
+    Off-loading the rest is tracked by #4451.
     """
     org_id = org.get("org_id", "")
     try:
@@ -21214,17 +21216,36 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
     # read→write scope bypass. Demo is a default-graph org surface.
     _reject_graph_bound_org_surface(org, "demo seed")
     _require_scope(org, "graphs:write", "demo seed")
-    sdk = _make_sdk(namespace=org["org_id"])
-    # #3718 residual (DATA plane): the projection attach and the sentinel read
-    # are SYNC FalkorDB socket I/O — both ride a worker hand-off so the demo
-    # path cannot freeze the loop for every concurrent request. (The seed below
-    # is its own SDK-backed helper and is off-loaded at its call site.)
-    proj = await asyncio.to_thread(sdk._get_proj)
-    existing = await asyncio.to_thread(
-        lambda: proj.g.query(
+    # #3718 residual (DATA plane): every step of the seed region below is SYNC
+    # FalkorDB socket I/O — `_make_sdk` (in embedded mode it probes the anchor
+    # and can open the DB), the projection attach, the sentinel read, the quota
+    # count and the ~13-Point seed. They run as ONE worker hand-off, NOT one per
+    # call: on the pre-#3718 code the whole run was a single no-`await`
+    # sequence, so splitting it would insert an interleaving point between the
+    # existence check and the seed that the original could not have — two
+    # concurrent POSTs could both pass the sentinel read, both seed, and both
+    # meter the write.
+    def _seed_demo_sync() -> dict:
+        sdk = _make_sdk(namespace=org["org_id"])
+        proj = sdk._get_proj()
+        existing = proj.g.query(
             "MATCH (p:Point {id: '_demo_sentinel'}) RETURN p.id"
-        ).result_set)
-    if existing:
+        ).result_set
+        if existing:
+            return {"existing": True, "created": None}
+        # #1922: quota-gate the seed like the MCP twin
+        # (tortoise_onboarding_demo_create → _enforce_quota("points")). The
+        # demo seed writes ~13 Points, so it must consume the points quota
+        # like any other Point-creating write — the REST surface was the
+        # 0-quota bypass (bug-hunt 2026-08-28 server P2-13). Idempotent
+        # re-calls short-circuit above and skip the gate (no write).
+        _check_org_limit(org, "points")
+        # The shared demo seeder (extracted from /internal/demo) opens its own
+        # SDK and writes ~13 Points.
+        return {"existing": False, "created": _seed_demo_graph(org["org_id"])}
+
+    out = await asyncio.to_thread(_seed_demo_sync)
+    if out["existing"]:
         # #3718: `_update_onboarding_state` routes to the tenant graph via
         # `_org_proj` -> `_make_sdk(...)._get_proj()` — SYNC, so it rides a
         # worker hand-off too (the probe in the lane guard finds it otherwise).
@@ -21234,20 +21255,7 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
                                       source="demo", point_count=15)
         return {"status": "already_seeded", "org_id": org["org_id"]}
 
-    # #1922: quota-gate the seed like the MCP twin
-    # (tortoise_onboarding_demo_create → _enforce_quota("points")). The demo
-    # seed writes ~13 Points, so it must consume the points quota like any
-    # other Point-creating write — the REST surface was the 0-quota bypass
-    # (bug-hunt 2026-08-28 server P2-13). Idempotent re-calls short-circuit
-    # above and skip the gate (no write).
-    # #3773 parity with create_point: the quota count is a SYNC graph read.
-    # #3718: `_seed_demo_graph` opens its own SDK and writes ~13 Points, so it
-    # runs on a worker too.
-    await _graph_offload(lambda: _check_org_limit(org, "points"),
-                         op="check_org_limit.points")
-
-    # Call the shared demo seeder (extracted from /internal/demo)
-    created = await asyncio.to_thread(_seed_demo_graph, org["org_id"])
+    created = out["created"]
 
     # #1922: meter the seed that actually ran — one write op billing 12
     # seeded points + the _demo_sentinel Point (net-new non-episodic nodes,
@@ -23237,7 +23245,9 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
               "repos_processed": 0, "errors": [], "quota_hit": False,
               "backfill_minted": 0, "cleared_truncated": False}
     try:
-        org_sdk = _make_sdk(namespace=org_id)
+        # #3718 residual (DATA plane): `_make_sdk` is not free in embedded
+        # mode — it probes the fallback anchor and can open/attach the DB.
+        org_sdk = await asyncio.to_thread(_make_sdk, namespace=org_id)
 
         # #1844: the index job is OBJECT-ONLY — it writes zero non-episodic
         # :Point nodes (the "points" quota resource counts ONLY
@@ -24279,7 +24289,9 @@ async def backups_create(org: dict = Depends(get_current_org_gated)):  # noqa: B
     sdk = None
     registry_sdk = None
     try:
-        sdk = _make_sdk(namespace=org_id)
+        # #3718 residual (DATA plane): `_make_sdk` probes the embedded anchor
+        # (and can open the DB) — SYNC, so it rides a worker hand-off.
+        sdk = await asyncio.to_thread(_make_sdk, namespace=org_id)
         # #669 post-flip: the backup stamp seam is dialect-aware — pass the
         # Supabase control plane in Supabase mode (the registry handle would
         # stamp the DELETED registry and auto-recreate the empty graph).
@@ -24447,7 +24459,8 @@ async def backups_restore(body: BackupRestoreRequest, request: Request, org: dic
     )
     async with lock:
         try:
-            sdk = _make_sdk(namespace=org_id)
+            # #3718 residual (DATA plane): `_make_sdk` is SYNC in embedded mode.
+            sdk = await asyncio.to_thread(_make_sdk, namespace=org_id)
             if not is_supabase_enabled():
                 # #3718 residual: eager registry connect + graph attach — SYNC.
                 registry_sdk = await asyncio.to_thread(_registry_sdk)

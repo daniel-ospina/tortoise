@@ -446,8 +446,11 @@ _OFFLOADED_ASYNC_BODIES = frozenset({
     # #3718 residual 3 — the DATA-plane seam outside the REST-converted
     # bodies. These were ``_KNOWN_INLINE_*_RESIDUAL`` until this change
     # off-loaded their projection attach / registry attach / graph round
-    # trips. Each is a single worker hand-off (a whole no-`await` sequence
-    # where one existed, so no interleaving point is added).
+    # trips. ``commit_session`` and ``delete_session`` each had a whole
+    # no-`await` SYNC sequence and move as ONE worker hand-off, so no
+    # interleaving point is added; the other ten off-load each sync call at
+    # its own site (so they DO gain await points), and `public_demo` — the one
+    # whose check-then-act had to stay atomic — is a single hand-off too.
     # Behavioural coverage for the lane lives in
     # ``tests/test_dataplane_lane_loop_responsiveness.py``.
     "_lifespan", "_run_indexing", "public_demo",
@@ -472,8 +475,10 @@ _KNOWN_INLINE_ROUTE_RESIDUAL = frozenset({
 #: Non-route async bodies with inline sync FalkorDB I/O — the per-request auth
 #: dependency `get_current_org` (6 sites, the single highest-traffic one), the
 #: membership/owner gates, the capture path (`_capture_session_impl`) and the
-#: lifecycle/backup helpers. Same declared residual; same burn-down. Scanned
-#: rather than ignored because a dependency body is still ON the loop.
+#: registry/backup helpers. (The lifecycle helpers `_lifespan`/`_run_indexing`
+#: were the other two members until #3718 residual 3 off-loaded them.) Same
+#: declared residual; same burn-down. Scanned rather than ignored because a
+#: dependency body is still ON the loop.
 _KNOWN_INLINE_HELPER_RESIDUAL = frozenset({
     "get_current_org", "_capture_session_impl", "_user_memberships",
     "_membership_org", "_org_node", "_count_active_free_memberships",

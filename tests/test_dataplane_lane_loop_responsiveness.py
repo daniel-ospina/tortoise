@@ -55,7 +55,6 @@ Re-run before treating such a failure as a regression.
 from __future__ import annotations
 
 import asyncio
-import os
 import threading
 import time
 
@@ -186,7 +185,14 @@ def _arm_dependencies(monkeypatch, *, internal: bool = False):
     app.dependency_overrides[get_current_org_session_ungated] = lambda: dict(team)
 
     if internal:
-        os.environ["FASTAPI_INTERNAL_KEY"] = _INTERNAL_KEY
+        # `monkeypatch.setenv`, NOT a raw `os.environ[...] =`: the raw form is
+        # never restored, so after any internal case ran the whole pytest
+        # session kept this key and the sibling modules that pin the shared
+        # secret at import time (`test_pack_state`, `test_writer_inventory`)
+        # 401'd on their own internal calls — order-dependent and it broke a
+        # registry-isolation test. (#3718 code-review P1, reproduced in one
+        # process.)
+        monkeypatch.setenv("FASTAPI_INTERNAL_KEY", _INTERNAL_KEY)
         monkeypatch.setenv("TORTOISE_BACKUP_STORAGE", "memory")
         # A REAL config object, not a stub: `_backup_mirror_storage` and
         # `_alert_store_from` read fields off it, and a stub without them

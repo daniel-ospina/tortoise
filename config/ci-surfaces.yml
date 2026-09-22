@@ -50,7 +50,14 @@ surfaces:
   # which selects the `api` surface — a PR that re-inlined a read in that file
   # alone would otherwise never run this guard.
   - test_read_routes_loop_responsiveness.py
-  # #3498: the control-plane auth/session HTTP must not run on the event loop.
+  # #3718 (DATA-plane residual): the sync `_get_proj()` residual outside the
+  # REST-converted bodies — session commit/delete, the demo seed, the backup
+  # DR lane and the two lifecycle helpers. Same dual registration as the loop
+  # guards above and for the same reason: the file it guards is
+  # tortoise/hosted_api.py, which selects the `api` surface, and an exact
+  # surface match REPLACES the `core` fallback — a PR that re-inlined one of
+  # these bodies would otherwise never run this guard.
+  - test_dataplane_lane_loop_responsiveness.py
   # Same dual registration as the three loop-responsiveness guards above, for
   # the same reason: the file it guards is tortoise/hosted_api.py (and
   # tortoise/monitoring.py), which selects the `api` surface.
@@ -551,6 +558,7 @@ surfaces:
   # on a hosted_api.py-only (api) or onboarding/state.py-only change.
   - test_onboarding_telemetry_w11.py
   - test_read_routes_loop_responsiveness.py  # #3718: REST graph-read off-loop (dual: api)
+  - test_dataplane_lane_loop_responsiveness.py  # #3718: DATA-plane residual off-loop (dual: api)
   # #4194: captured turn Points must carry the embedding the dense leg
   # searches. Registered here because this file pins the unpatterned engine
   # module `tortoise/search_engine.py` (run_vector_query /
@@ -1503,6 +1511,15 @@ durations:
   # trusting it (see #3653/#3685 for the embedded-redislite flake that inflates
   # the tail).
   test_read_routes_loop_responsiveness.py: 30.0
+  # #3718 (DATA-plane residual): 6 cases (4 parametrized lane cases + the
+  # /v1/sessions delete freeze case + the AST-inventory cases). Like its two
+  # #3718 siblings it blocks a graph call while a 20ms ticker and a concurrent
+  # /health probe run, so it is dominated by wall-clock stalls rather than CPU
+  # (measured 89s for this file PLUS the read-routes file on this host — the
+  # pair shares the embedded-redislite startup). FIRST ESTIMATE; re-measure
+  # from the first post-merge junit artifact (see #3653/#3685 for the flake
+  # that inflates the tail).
+  test_dataplane_lane_loop_responsiveness.py: 60.0
   test_cli_serve.py: 28.1
   test_redirect_seam.py: 27.3
   eval/retrieval/test_gate_1349.py: 26.0
