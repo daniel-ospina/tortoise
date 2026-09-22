@@ -95,7 +95,9 @@ def test_unsupported_filter_op_raises_on_patch_and_delete() -> None:
     behaviour production does not have — the same "CI green while prod
     differs" class this file exists to lock down.
 
-    REDs on: reverting ``_matches`` to the if-chain with no final op check.
+    REDs on: reverting ``_matches`` to the if-chain with no final op check, or
+    removing the DELETE branch's ``_validate_filter_ops`` (the two DELETEs added
+    for #2642 re-review P2 then return ``[]`` instead of raising).
     GREEN legitimate form: an op every branch covers (``eq``)."""
     f = FakeControlPlane(tables={"org_memberships": [
         {"org_id": "t1", "user_id": "00000000-0000-0000-0000-000000000001",
@@ -105,6 +107,24 @@ def test_unsupported_filter_op_raises_on_patch_and_delete() -> None:
         f.query("org_memberships", method="DELETE",
                 filters=[("org_id", "in", ["t1"])])
 
+    # ...but the row scan is not the DELETE guard's only line of defence. With
+    # no row to test (an EMPTY table) _matches is never called, so the guard
+    # must come from the branch itself (#2642 re-review P2).
+    with pytest.raises(ValueError, match="unsupported filter op"):
+        FakeControlPlane(tables={"org_memberships": []},
+                         uuid_fidelity=False).query(
+            "org_memberships", method="DELETE",
+            filters=[("org_id", "in", ["t1"])])
+
+    # Same gap when a row exists but an EARLIER filter already failed: _matches
+    # short-circuits before reaching the unsupported op, so the whole list must
+    # be validated up front, not only as the scan reaches each predicate
+    # (#2642 re-review P2).
+    with pytest.raises(ValueError, match="unsupported filter op"):
+        f.query("org_memberships", method="DELETE",
+                filters=[("org_id", "eq", "NOMATCH"),
+                         ("org_id", "in", ["t1"])])
+
     # The guard is NOT scoped to a non-empty body: the empty-body early
     # return scans no rows, so without an explicit pre-return validation it
     # carried the query past ``_matches`` and returned ``[]`` with no error
@@ -113,6 +133,15 @@ def test_unsupported_filter_op_raises_on_patch_and_delete() -> None:
     with pytest.raises(ValueError, match="unsupported filter op"):
         f.query("org_memberships", select=["org_id"], method="PATCH",
                 filters=[("org_id", "in", ["t1"])], json_body={})
+
+    # ...and the DELETE-branch validation must NOT reach POST, which ignores
+    # ``filters`` (it inserts the body). Hoisting ``_validate_filter_ops`` to
+    # the top of ``_query_impl`` would newly reject this query — the placement
+    # the #2642 re-review P2 prescription called out explicitly.
+    assert f.query("org_memberships", method="POST",
+                   filters=[("org_id", "in", ["t1"])],
+                   json_body={"org_id": "t1", "user_id": "u"}) == [
+        {"org_id": "t1", "user_id": "u"}]
 
     # the supported-op control: the same PATCH/DELETE path still works
     assert f.query("org_memberships", method="DELETE",
