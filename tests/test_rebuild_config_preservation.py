@@ -345,7 +345,7 @@ def test_config_snapshot_roundtrips_loader_and_union(monkeypatch, tmp_path):
     assert (_PACK_MANIFEST_LABEL, "fresh-only") in by_key
     assert _CONFIG_CLASS_BY_LABEL[_PACK_INSTALL_LABEL].identity_prop == "namespace"
 
-    # A fresh-only key is appended, not dropped — the cycle-2 P1 (a config
+    # A fresh-only key is appended, not dropped (a config
     # provisioned after an interrupted wipe would otherwise go into the
     # retry's OWN wipe with nothing to restore it from).
     loss = _union_prewipe_snapshot(
@@ -794,7 +794,7 @@ def test_retired_sidecar_does_not_resurrect_config_deleted_after_rebuild(graph):
 
 
 def test_leftover_config_wins_over_self_healed_defaults(graph):
-    """Decision (e) rule 1, BOTH directions in one run (the cycle-1 P1).
+    """Decision (e) rule 1, BOTH directions in one run.
 
     The self-heal (`get_tenant_packs` → `ensure_tenant_packs`) fires on the
     post-wipe partial graph and writes present values with a fresh
@@ -833,7 +833,7 @@ def test_leftover_config_wins_over_self_healed_defaults(graph):
 
 
 def test_fresh_only_config_key_survives_pending_leftover(graph):
-    """The loss direction of the same rule (the cycle-2 P1)."""
+    """The loss direction of the same rule."""
     events, sdk = graph
     _write_journal(events, [])
     _plant(Path(_sidecar_path(events)), _sidecar_payload(config_snapshot=[

@@ -1127,7 +1127,7 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
     #    writes present values with a fresh `installed_at`);
     #  * a FRESH-ONLY key — config provisioned after an interrupted wipe but
     #    before the retry — is APPENDED. Dropping it would put it into the
-    #    retry's own wipe with nothing to restore it from (the cycle-2 P1).
+    #    retry's own wipe with nothing to restore it from.
     #
     # `.get` on the fresh side mirrors the session sections (the offline union
     # tests call this with partial dicts, and absent means empty to the loader
