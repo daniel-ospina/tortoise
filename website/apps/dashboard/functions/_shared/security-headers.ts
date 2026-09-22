@@ -52,21 +52,30 @@
  * THE PLATFORM INJECTS A SCRIPT WE DID NOT WRITE
  * ----------------------------------------------
  * Cloudflare Web Analytics is enabled for this zone, so the EDGE injects
- * `https://static.cloudflareinsights.com/beacon.min.js/<version>` into every
- * HTML response — **for browser user-agents only**. That is why neither `curl`
- * nor a local `wrangler pages dev` preview ever shows it: a plain request gets
- * the un-injected document. The first version of this change shipped a CSP that
- * blocked it in production, and the post-merge `verify-legal` suite caught it as
- * 8 console-error failures across the signup and legal pages.
+ * `https://static.cloudflareinsights.com/beacon.min.js/<version>` into HTML
+ * responses. The trigger is the REQUEST's `Accept` header, not the User-Agent: a
+ * plain `curl` sends a wildcard `Accept` and gets the un-injected document, while
+ * `curl -H 'Accept: text/html' https://premiselabs.co/` shows the tag. That is
+ * the cheap pre-merge detector for this whole class — a local
+ * `wrangler pages dev` preview never sees it, because the preview is not the
+ * edge. The first version of this change shipped a policy that blocked it, and
+ * only the post-merge `verify-legal` suite (production, real browser, asserting
+ * zero console errors) noticed: 8 failures.
  *
- * The tag is SRI-pinned by the platform (`integrity="sha512-…"
- * crossorigin="anonymous"`) and version-named, so allowing its ORIGIN does not
- * concede arbitrary code execution: the browser refuses any body whose bytes do
- * not match that hash. The beacon reports to
- * `https://cloudflareinsights.com/cdn-cgi/rum`, hence the `connect-src` entry.
- * Every policy below therefore names both, and `securityHeaders.test.js` fails
- * if one does not — because the failure mode is silent (analytics lost, plus a
- * console error on a live page).
+ * What the SRI pin does and does NOT buy. The injected tag is SRI-pinned by the
+ * platform (`integrity="sha512-…" crossorigin="anonymous"`) and version-named,
+ * so the platform's OWN tag cannot be silently swapped for a modified build. It
+ * does NOT constrain this CSP entry: `script-src https://static.cloudflareinsights.com`
+ * is an ORIGIN allowance and CSP never consults a hash, so the entry also admits
+ * any OTHER script served from that origin — that widening is the residual
+ * recorded in the #3525 plan doc. Nor is the pin ours to rely on: it is emitted
+ * by the edge, so if Cloudflare's injection format changes, this policy becomes
+ * a blanket third-party-script allowance with no repo change and no failing test.
+ *
+ * The beacon reports to `https://cloudflareinsights.com/cdn-cgi/rum`, hence the
+ * `connect-src` entry — which has no hash mechanism at all. Every policy below
+ * names both, and `securityHeaders.test.js` fails if one does not, because the
+ * failure mode is silent (analytics lost, plus a console error on a live page).
  *
  * The guard `src/securityHeaders.test.js` asserts each constant is byte-identical
  * to its `_headers` counterpart, so the duplication above cannot drift.

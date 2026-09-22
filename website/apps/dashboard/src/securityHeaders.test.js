@@ -758,12 +758,15 @@ test('_headers values are byte-identical to the stamped constants', () => {
 // ── 4b. every policy admits the PLATFORM-INJECTED beacon ──────────────────
 //
 // Cloudflare Web Analytics is on for this zone, so the EDGE injects
-// `https://static.cloudflareinsights.com/beacon.min.js/<version>` into every
-// HTML response FOR BROWSER USER-AGENTS ONLY. Neither `curl` nor a local
-// `wrangler pages dev` preview ever shows it, so no local check can catch a
-// policy that omits it: the first version of this change blocked it in
-// production and only the post-merge `verify-legal` suite (against prod, in a
-// real browser) noticed — as 8 failures asserting zero console errors.
+// `https://static.cloudflareinsights.com/beacon.min.js/<version>` into HTML
+// responses. The trigger is the REQUEST's `Accept` header, not the User-Agent:
+// a plain `curl` sends `Accept: */*` and misses the tag, while
+// `curl -H 'Accept: text/html' https://premiselabs.co/` SHOWS it (that is the
+// cheap pre-merge detector for this whole class). A local
+// `wrangler pages dev` preview never sees it either, because it is not the edge
+// — which is why the first version of this change shipped a policy that blocked
+// it, and only the post-merge `verify-legal` suite (production, real browser,
+// asserting zero console errors) noticed: 8 failures.
 //
 // This test is that check, moved to CI time. It is deliberately about ORIGIN
 // PRESENCE, not about the tag being reachable (a unit test cannot reach the
@@ -771,6 +774,20 @@ test('_headers values are byte-identical to the stamped constants', () => {
 test('every policy allows the platform-injected Cloudflare beacon', () => {
   const dashboard = loadDashboardHeaders()
   const marketing = loadMarketingHeaders()
+
+  // The policy LIST is derived, not transcribed — a hand-kept array is how a
+  // SIXTH policy expression ships unchecked while this test still says "every
+  // policy" (the round-1 review's finding). The VALUES stay literal, because
+  // the point of the test is to pin them.
+  const derived = Object.keys(dashboard)
+    .filter((k) => /_CSP$/.test(k) && typeof dashboard[k] === 'string')
+    .sort()
+  assert.deepEqual(
+    derived,
+    ['ADMIN_CSP', 'RELAXED_CSP', 'STRICT_CSP'],
+    'a CSP constant was added or renamed — extend this test, do not just update this list',
+  )
+
   const policies = [
     ['marketing RELAXED_CSP', marketing.RELAXED_CSP],
     ['dashboard RELAXED_CSP', dashboard.RELAXED_CSP],
@@ -778,26 +795,67 @@ test('every policy allows the platform-injected Cloudflare beacon', () => {
     ['ADMIN_CSP', dashboard.ADMIN_CSP],
     ['strictCspWithNonce', dashboard.strictCspWithNonce('TESTNONCE')],
   ]
+
+  const SCRIPT_ORIGIN = 'https://static.cloudflareinsights.com'
+  const RUM_ORIGIN = 'https://cloudflareinsights.com'
   const wrong = []
   for (const [name, value] of policies) {
+    const parts = value.split('; ')
     const byDirective = new Map(
-      value.split('; ').map((d) => {
+      parts.map((d) => {
         const sp = d.indexOf(' ')
         return [d.slice(0, sp), d.slice(sp + 1)]
       }),
     )
-    // A nonce policy is exempt from nothing here: the edge tag carries no nonce,
-    // so a nonce-only `script-src` blocks it. Host sources are still honoured
-    // alongside a nonce (we do not use `strict-dynamic`), so naming the origin
-    // is exactly what makes the edge tag load.
-    if (!(byDirective.get('script-src') || '').includes('https://static.cloudflareinsights.com')) {
-      wrong.push(`${name}: script-src omits https://static.cloudflareinsights.com`)
+    // A repeated directive is malformed, and the two consumers disagree about it:
+    // this Map keeps the LAST while a browser honours the FIRST. Reject it rather
+    // than silently reading the wrong one.
+    if (byDirective.size !== parts.length) {
+      wrong.push(`${name}: duplicate directive — a browser honours the first, this scan the last`)
     }
-    if (!(byDirective.get('connect-src') || '').includes('https://cloudflareinsights.com')) {
-      wrong.push(`${name}: connect-src omits https://cloudflareinsights.com (the RUM endpoint)`)
+    const scriptSrc = byDirective.get('script-src') || ''
+    const connectSrc = byDirective.get('connect-src') || ''
+    const tokens = (directive) => directive.split(/\s+/).filter(Boolean)
+
+    // TOKEN match, never substring: `https://static.cloudflareinsights.com.evil.test`
+    // contains the origin as a prefix and would satisfy an `includes()` — a guard
+    // that passes on an origin the browser does not treat as ours.
+    if (!tokens(scriptSrc).includes(SCRIPT_ORIGIN)) {
+      wrong.push(`${name}: script-src omits ${SCRIPT_ORIGIN}`)
+    }
+    if (!tokens(connectSrc).includes(RUM_ORIGIN)) {
+      wrong.push(`${name}: connect-src omits ${RUM_ORIGIN} (the RUM endpoint)`)
+    }
+    // A nonce policy is exempt from nothing here: the edge tag carries no nonce,
+    // so a nonce-only `script-src` blocks it. Host sources ARE honoured alongside
+    // a nonce — but only while `'strict-dynamic'` is absent, because with it the
+    // browser IGNORES every host-source in script-src and blocks the tag. The
+    // comment used to assert that assumption; this asserts it instead.
+    if (tokens(scriptSrc).includes("'strict-dynamic'")) {
+      wrong.push(
+        `${name}: 'strict-dynamic' is present — it makes the browser ignore every ` +
+          `host-source in script-src, so ${SCRIPT_ORIGIN} would NOT load the tag`,
+      )
+    }
+    // `script-src-elem`/`script-src-attr`, when present, override `script-src` for
+    // <script src> / inline handlers. Naming the origin only in script-src would
+    // then be inert.
+    for (const override of ['script-src-elem', 'script-src-attr']) {
+      if (byDirective.has(override)) {
+        wrong.push(
+          `${name}: ${override} overrides script-src for the elements that matter — ` +
+            `this test cannot prove the tag loads; remove it or model it here`,
+        )
+      }
     }
   }
-  assert.deepEqual(wrong, [], `policies that would block the edge-injected beacon:\n  ${wrong.join('\n  ')}`)
+  assert.deepEqual(
+    wrong,
+    [],
+    `policies that would block the edge-injected beacon:\n  ${wrong.join('\n  ')}\n` +
+      `(if Cloudflare Web Analytics was turned OFF per #4706, flip this expectation ` +
+      `— do not re-add the origins)`,
+  )
 })
 
 // ── 5. no HTML-producing Function ships without a policy ───────────────────

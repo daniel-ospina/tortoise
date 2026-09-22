@@ -13,11 +13,14 @@
 #
 # `https://static.cloudflareinsights.com` is NOT ours: Cloudflare Web Analytics is
 # enabled for this zone, so the EDGE injects its SRI-pinned beacon
-# (`…/beacon.min.js/<version>`) into every HTML response for BROWSER user-agents
-# only — invisible to `curl` and to a local `wrangler pages dev` preview. Omitting
-# the origin blocks the tag on a live page (a console error, analytics lost); it is
-# listed here, with `https://cloudflareinsights.com` in connect-src for its RUM
-# endpoint, and the guard fails if either is dropped again.
+# (`…/beacon.min.js/<version>`) into responses whose REQUEST carries
+# `Accept: text/html` — not a User-Agent test, and not something a local
+# `wrangler pages dev` preview ever shows. Verify any policy change against the
+# DEPLOYED host with:
+#     curl -sH 'Accept: text/html' https://premiselabs.co/ | grep -c cloudflareinsights
+# Omitting the origin blocks the tag on a live page (a console error, analytics
+# lost); it is listed here, with `https://cloudflareinsights.com` in connect-src
+# for its RUM endpoint, and the guard fails if either is dropped again.
 #
 # `_headers` does NOT apply to Pages Functions responses (Cloudflare docs), so the
 # marketing Functions stamp the same value themselves — see

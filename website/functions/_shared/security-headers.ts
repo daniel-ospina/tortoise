@@ -19,10 +19,12 @@
  * `_headers` values are byte-identical, so the duplication cannot drift.
  *
  * `https://static.cloudflareinsights.com` is not ours: Cloudflare Web Analytics
- * is on for this zone, so the edge injects its SRI-pinned beacon into every HTML
- * response for browser user-agents only (invisible to `curl` and to local
- * previews). The dashboard copy of this file documents that in full; the guard
- * fails if any policy drops the beacon's script or RUM origin.
+ * is on for this zone, so the edge injects its SRI-pinned beacon into HTML
+ * responses whose REQUEST carries `Accept: text/html` (not a User-Agent test —
+ * `curl -H 'Accept: text/html' https://premiselabs.co/` shows the tag, while a
+ * plain `curl` and a local preview do not). The dashboard copy of this file
+ * documents the SRI caveats in full; the guard fails if any policy drops the
+ * beacon's script or RUM origin.
  */
 
 const csp = (...directives: string[]): string => directives.join("; ");
