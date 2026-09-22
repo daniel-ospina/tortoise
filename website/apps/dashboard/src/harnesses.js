@@ -1,13 +1,26 @@
 // #1643: per-harness MCP onboarding data (ported from welcome.html's
 // HARNESS_* constants). Single source for the wizard's harness chooser;
 // env-indirection configs keep the raw key out of config files (#529 J5/T7b).
-const MCP_URL = 'https://api.premiselabs.co/mcp/'
+// #984/#2849: the KEYED-harness URL — the CLI self-install surfaces
+// (claude / codex / codexDesktop / cursor / pi) register this slashed form
+// deliberately: it is a #984-era convention pinned by six assertions in
+// tests/test_harness_mcp_config.py. It is NOT the Claude connector URL.
+export const MCP_URL = 'https://api.premiselabs.co/mcp/'
 
-// #1701: ChatGPT's custom-connector URL — NO trailing slash. OpenAI's
-// connector validates an '/mcp' suffix, and bare POST /mcp dispatches
-// directly into the mounted MCP app (no 307). MCP_URL above keeps its
-// slash for the 6 keyed harnesses (byte-identical copy).
-const CHATGPT_MCP_URL = 'https://api.premiselabs.co/mcp'
+// #2865 (lifted from #2864's plan, Task 2 Step 3): the CANONICAL CONNECTOR
+// URL — no trailing slash. This is the exact value of the OAuth resource
+// indicator (`tortoise/oauth.py::mcp_resource_url` = base + '/mcp') that the
+// protected-resource-metadata document advertises, so a connector configured
+// with it matches `resource` byte-for-byte. Before #2864 the PRM said '/mcp'
+// while every connector surface said '/mcp/' — that mismatch is what #2849 was
+// filed for. CONNECTOR surfaces (the two Claude leaves + ChatGPT) must use
+// THIS value; keyed surfaces keep MCP_URL above. #2864 removed the
+// /mcp → /mcp/ 307 and `parse_resource` accepts both forms, so an existing
+// connector with the slashed URL keeps working — no re-add is required.
+export const CANONICAL_MCP_URL = 'https://api.premiselabs.co/mcp'
+
+// #1701: the name the shipped chatgpt copy still uses — same value.
+const CHATGPT_MCP_URL = CANONICAL_MCP_URL
 
 // #1701: the skills-as-prompt body shared by every filesystem-less harness
 // that therefore has no local skills to install — Claude Web, Claude Desktop
@@ -19,11 +32,16 @@ export const WORKFLOWS_PROMPT =
 // #1727 (Task 13): per-harness session-capture support gate — the single
 // source of truth consumed by BOTH the dashboard's per-harness sessions
 // toggle AND the conditional claude-web prompt paragraph below (flipped in
-// the same slice/commit as the dist rebuild). Values:
-//   true  — the harness has an executable filing path AND a server-visible
-//           signal (claude = SessionStart install-probe + end-hook capture;
-//           pi = extension-on-load probe + capture)
-//   false — disabled-with-reason: no install/capture path confirmed yet.
+// the same slice/commit as the dist rebuild).
+//
+// #3575: `true` is DERIVED from HARNESS_CAPTURE_SEAM below, never asserted.
+// A harness is capturable only when the product actually INSTALLS a capture
+// step: (a) HARNESS_CAPTURE_SEAM names an in-repo artifact, (b) that artifact
+// is committed, and (c) HARNESS_INSTALL[h] installs it. A `true` with no
+// installed step is a false PASS — the #3575 defect (Pi advertised capture
+// while HARNESS_INSTALL.pi delivered MCP config + skills only). All three
+// legs are pinned by harnesses.test.js and tests/test_harness_mcp_config.py.
+//
 // The Claude-Web filing-path spike verdict (Slice 2, Task 13): the MCP
 // custom-connector path CAN expose tortoise_session_capture to claude.ai
 // workflows prompts, but the plan pins that disclosure-only is NOT a
@@ -31,13 +49,48 @@ export const WORKFLOWS_PROMPT =
 // SERVER-VISIBLE web signal is confirmed (a web install-probe variant or
 // observed web-harness POSTs; workflows-prompt presence alone is client-
 // side and unpinnable). Until then web = false.
+//
+// The capture-INSTALL SEAM (#1727 T1): harness → the in-repo artifact
+// HARNESS_INSTALL[h] installs. A harness with a seam entry fires a
+// server-visible install-probe and files sessions with the same harness +
+// session_id + conversation shape. Which harnesses have it:
+//   claude = tortoise/claude-hooks/session-{start,end}.sh copied into
+//            .claude/hooks + wired in .claude/settings.json
+//            (SessionStart install-probe + SessionEnd capture)
+//   codex  = tortoise/codex-hooks/session-end.sh copied into
+//            $CODEX_HOME/hooks + wired in $CODEX_HOME/hooks.json
+//            (SessionEnd capture; the detaching hook is Codex 0.154.0's
+//            ~1 s SessionEnd budget, measured live)
+//   pi     = tortoise/pi-hooks/tortoise-capture.ts copied into
+//            ~/.pi/agent/extensions/ (extension session_start install-probe +
+//            session_shutdown capture; recording ON by default)
+//   cursor = tortoise/cursor-hooks/session-end.sh copied into
+//            ~/.cursor/hooks + wired in hooks.json under
+//            "sessionEnd" (Cursor 3.20.21 reads hooks.json from the HOME-scoped
+//            .cursor/ dir; the entry is a FLAT {"command": …} object).
+//            IDE-ONLY: cloud agents have no editor-lifetime session boundary.
+// No other harness has a seam: claude-desktop is backfill-import only, and
+// web/chatgpt are cloud-hosted.
+export const HARNESS_CAPTURE_SEAM = {
+  claude: 'tortoise/claude-hooks/session-end.sh',
+  codex: 'tortoise/codex-hooks/session-end.sh',
+  cursor: 'tortoise/cursor-hooks/session-end.sh',
+  pi: 'tortoise/pi-hooks/tortoise-capture.ts',
+}
+
+const CAPTURE_SEAM_HARNESSES = new Set(Object.keys(HARNESS_CAPTURE_SEAM))
+
 export const HARNESS_CAPTURE_SUPPORT = {
-  claude: true,
+  claude: CAPTURE_SEAM_HARNESSES.has('claude'),
   'claude-desktop': false,  // backfill import only (Task 15) — no live install path
   'claude-web': false,      // disabled-with-reason pending the Task 13 spike signal
-  codex: false,             // backfill import only (Task 15) — no live install path
-  cursor: false,            // cursor spike verdict: unsupported for capture
-  pi: true,
+  codex: CAPTURE_SEAM_HARNESSES.has('codex'),
+  // #3819: capture is possible for LOCAL/IDE sessions (sessionEnd + a
+  // transcript_path/agent-transcripts store). `true` here is DERIVED from the
+  // seam, never asserted; the IDE-only limitation is disclosed on the install
+  // surface, not encoded as a false here.
+  cursor: CAPTURE_SEAM_HARNESSES.has('cursor'),
+  pi: CAPTURE_SEAM_HARNESSES.has('pi'),
   chatgpt: false,        // #1701: cloud-hosted — no server-visible filing signal
 }
 
@@ -68,18 +121,26 @@ const PI_MCP_CONFIG_ENV = {
 // button for that value. A function of (harness, key) so steps can embed
 // the real key (Cursor's export step).
 export const HARNESS_STEPS = (harness, key) => ({
+  // #2865: Claude Web connects key-less over OAuth (HARNESS_OAUTH) — no
+  // Request-headers field, no API key. The canonical no-slash URL matches the
+  // server's resource indicator.
   'claude-web': [
     'Go to claude.ai > Settings > Connectors',
     'Add custom connector and name it "Tortoise"',
-    { label: 'Server URL', code: MCP_URL, copy: MCP_URL },
-    'In Request headers (advanced): Authorization: Bearer <your-key>',
+    { label: 'Server URL', code: CANONICAL_MCP_URL, copy: CANONICAL_MCP_URL },
+    'No API key is needed — leave Request headers empty.',
+    'Sign in to Tortoise when Claude opens the authorization page and click Authorize, then pick your Organization.',
     'Paste the prompt below into a Claude Web chat — it gives Claude the Tortoise workflows:',
-    '(Claude connects from its own cloud — your key is stored by Anthropic. No local skills on web — the prompt gives Claude the workflows.)',
+    '(Claude connects from its own cloud — the authorization lives with Anthropic, not on your machine. No local skills on web — the prompt gives Claude the workflows.)',
   ],
   cursor: [
     { label: 'Export the key — add this line to your shell profile (~/.zshrc or ~/.bashrc) so it persists:', code: `export TORTOISE_API_KEY=${key}`, copy: `export TORTOISE_API_KEY=${key}` },
     'Create .cursor/mcp.json in this project with the JSON below — the config references the env var, not the key:',
     { label: 'Install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding):', code: `curl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness cursor`, copy: `curl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness cursor` },
+    // #3819 (owner ruling): the IDE-only limitation is disclosed on the
+    // install/connect surface, not buried in a footnote.
+    { label: 'Install session capture (the sessionEnd hook):', code: 'tortoise install cursor', copy: 'tortoise install cursor' },
+    "Session capture is IDE-ONLY: local desktop-editor sessions are captured, but CURSOR CLOUD AGENT sessions are not — Cursor's docs: 'Cloud agents have no editor-lifetime session boundary. sessionEnd is tied to the IDE session, not a cloud agent chat.'",
   ],
   chatgpt: [
     'Enable Developer mode: chatgpt.com → Settings → Security and login → Developer mode (Plus/Pro/Business/Enterprise/Education).',
@@ -97,10 +158,12 @@ export const HARNESS_STEPS = (harness, key) => ({
 // paste into the agent). NOT part of the copied content.
 export const HARNESS_INTRO = {
   claude: 'Run these commands in your terminal:',
-  'claude-desktop': 'Open Claude Desktop → Settings → Connectors → Add custom connector, then enter the Server URL and the Authorization: Bearer <key> request header. (For local stdio servers only, advanced users can still edit ~/Library/Application Support/Claude/claude_desktop_config.json on macOS, or %APPDATA%\\Claude\\claude_desktop_config.json on Windows, from Settings → Developer in the app.)',
+  // #2865: both Claude connector surfaces are key-less OAuth — the intro names
+  // the sign-in, never a Bearer request header.
+  'claude-desktop': 'Open Claude Desktop → Settings → Connectors → Add custom connector, name it "Tortoise" and enter the Server URL. No API key is needed: Claude opens Tortoise\u2019s sign-in page on the first connection — sign in and click Authorize. (For local stdio servers only, advanced users can still edit ~/Library/Application Support/Claude/claude_desktop_config.json on macOS, or %APPDATA%\\Claude\\claude_desktop_config.json on Windows, from Settings → Developer in the app.)',
   // #2361 review-r1 (UX-3): Claude Web had no intro — the copy button said
   // 'Copy prompt' but nothing explained where the prompt goes.
-  'claude-web': 'Start a new chat at claude.ai (or the Claude web app) and paste the prompt below into it — that conversation becomes your connected agent. The prompt keeps the key literal: do not share the chat or the key.',
+  'claude-web': 'Start a new chat at claude.ai (or the Claude web app) and paste the prompt below into it — that conversation becomes your connected agent.',
   codex: 'Run these commands in your terminal:',
   // #2328: Desktop variant intro (no terminal).
   codexDesktop: 'Edit ~/.codex/config.toml (create it if missing) — Codex Desktop and the CLI share this file. Copy the block, paste it in, then fully quit and reopen Codex Desktop:',
@@ -126,6 +189,15 @@ const HARNESS_EXTRA_NAMES = { codexDesktop: 'Codex Desktop' }
 
 export const harnessDisplayName = (id) => HARNESS_NAMES[id] || HARNESS_EXTRA_NAMES[id] || id
 
+// #3428 (lane B3, review cycle 1 P2-1): the connect step's fallback sentence
+// ("Head back to your agent") is reserved for a harness we genuinely cannot
+// name. `HARNESS_NAMES[id] || 'your agent'` sent a Codex Desktop user to the
+// neutral fallback even though the surface IS known (HARNESS_EXTRA_NAMES), and
+// `harnessDisplayName` is unusable unguarded because it falls back to the RAW
+// id. This returns a display name for a KNOWN harness and null otherwise — the
+// caller owns the user-facing fallback copy.
+export const knownHarnessName = (id) => HARNESS_NAMES[id] || HARNESS_EXTRA_NAMES[id] || null
+
 // Harnesses with no local file system for the file-based skills or shell
 // profile (Claude Desktop/Web connect from the app/cloud — MCP only).
 export const HARNESS_SKILLLESS = ['claude-desktop', 'claude-web', 'chatgpt']
@@ -133,6 +205,100 @@ export const HARNESS_SKILLLESS = ['claude-desktop', 'claude-web', 'chatgpt']
 // Harnesses whose install copy embeds the skill-install step in a self-
 // contained prompt (Pi) — nothing extra is appended after the copy.
 export const HARNESS_SKILLS_IN_PROMPT = ['pi']
+
+// #3575: the Pi capture-INSTALL step — the in-repo extension that makes Pi
+// sessions land in Tortoise Cloud. Shared by HARNESS_INSTALL.pi (the setup
+// prompt) and HARNESS_CAPTURE_INSTALL.pi (the Memory-sources inline row) so
+// the two surfaces can never drift. Recording is ON by default (ToS-covered
+// — the same default as the Claude hooks); the server refuses the capture
+// POST with a 409 while the organization has agent sessions switched off
+// (Memory sources > Agent sessions). The extension fires an install-probe on
+// load (harness + timestamp only, no content) and files the session when it
+// ends. It has no agent-infra dependency and needs no local tortoise CLI.
+export const PI_CAPTURE_INSTALL = `# Session capture for Pi (#1727 T1, #3575): install the in-repo capture
+# extension. Recording is ON by default (ToS-covered) — switch it off in
+# Memory sources > Agent sessions (the server then returns a 409). The
+# extension probes on load (harness + timestamp only, no content) and files
+# each session on exit. Install from your Tortoise checkout
+# (github.com/daniel-ospina/tortoise):
+mkdir -p ~/.pi/agent/extensions
+# #3713 collision guard: Pi's loader treats a top-level tortoise-capture.ts
+# AND a tortoise-capture/index.ts as TWO extensions (no basename dedupe).
+# A pre-existing agent-infra tortoise-capture/ registers its own agent_end
+# capture, so both POST the same session_id — doubled work, and the loser can
+# 409. Disable the legacy entry before installing this one. NON-DESTRUCTIVE:
+# unlink a symlink (the agent-infra checkout is untouched), or move a real
+# directory to a dot-prefixed name Pi's loader SKIPS (it ignores dotfiles) —
+# never a recursive delete.
+if [ -L ~/.pi/agent/extensions/tortoise-capture ]; then
+  rm ~/.pi/agent/extensions/tortoise-capture
+elif [ -d ~/.pi/agent/extensions/tortoise-capture ]; then
+  mv ~/.pi/agent/extensions/tortoise-capture ~/.pi/agent/extensions/.tortoise-capture.disabled
+fi
+cp <path-to-tortoise>/tortoise/pi-hooks/tortoise-capture.ts ~/.pi/agent/extensions/tortoise-capture.ts
+# Backfill past Pi sessions with:
+tortoise sessions import --harness pi --file <session.jsonl>`
+
+// #3818: the Codex capture-INSTALL step — the in-repo SessionEnd hook that
+// makes Codex sessions land in Tortoise Cloud. Shared by HARNESS_INSTALL.codex
+// (the setup prompt) and HARNESS_CAPTURE_INSTALL.codex (the Memory-sources
+// inline row) so the two surfaces can never drift. The registration is
+// HOME-scoped ($CODEX_HOME/hooks.json): verified live against Codex CLI
+// 0.154.0, a project-local .codex/hooks.json fires nothing. Codex runs a hook
+// only once it is trusted; the CLI's SessionEnd budget is ~1 s, so the shipped
+// hook detaches the capture POST and returns immediately.
+export const CODEX_CAPTURE_INSTALL = `# Session capture (#3818): recording is on by default (ToS-covered); the
+# SessionEnd hook files every session to Tortoise Cloud unless your
+# organization switches it off (Memory sources > Agent sessions — the server
+# returns a 409 while disabled). Codex reads hook registrations from
+# $CODEX_HOME/hooks.json — the CODEX_HOME override moves the whole config
+# tree, default ~/.codex — and NOT from a project .codex/, so this seam is
+# home-scoped. Install from your Tortoise checkout
+# (github.com/daniel-ospina/tortoise):
+mkdir -p "\${CODEX_HOME:-$HOME/.codex}/hooks"
+cp <path-to-tortoise>/tortoise/codex-hooks/session-end.sh "\${CODEX_HOME:-$HOME/.codex}/hooks/tortoise-session-end.sh"
+chmod +x "\${CODEX_HOME:-$HOME/.codex}/hooks/tortoise-session-end.sh"
+# then merge a SessionEnd command hook into "\${CODEX_HOME:-$HOME/.codex}/hooks.json"
+# (create the file if missing). The command MUST be the script's ABSOLUTE path
+# — Codex runs the hook from the session's cwd — and the entry is Codex's
+# nested matcher-group shape (the exact JSON is in the shipped hook's header).
+# Codex resolves no "timeout" key; the shipped hook detaches its capture POST
+# and returns immediately, which is what fits Codex's ~1 s SessionEnd budget.
+# Codex runs a hook only after you trust it: the first interactive run shows a
+# review prompt (Hooks menu). Non-interactive runs need
+#   codex exec --dangerously-bypass-hook-trust
+# Or just run: tortoise install codex`
+
+// #3819: the Cursor capture-INSTALL step — the in-repo sessionEnd hook that
+// makes LOCAL Cursor desktop-editor sessions land in Tortoise Cloud. Shown in
+// the Memory-sources inline row; the connect-wizard step (HARNESS_STEPS.cursor)
+// carries the same disclosure. The registration is HOME-scoped
+// (`~/.cursor/hooks.json`, Cursor's own user-scoped hook source; Cursor
+// has NO config-dir env var — `CURSOR_HOME` does not exist) — a
+// project-local `.cursor/hooks.json` is gated on workspace trust. Cursor's
+// entry is a FLAT {"command": …} script object; its validator rejects a
+// nested matcher group and invalidates the whole hooks.json.
+export const CURSOR_CAPTURE_INSTALL = `# Session capture for Cursor (#3819): recording is on by default (ToS-covered);
+# the sessionEnd hook files each LOCAL desktop-editor session to Tortoise Cloud
+# unless your organization switches it off (Memory sources > Agent sessions —
+# the server returns a 409 while disabled). Install from your Tortoise checkout
+# (github.com/daniel-ospina/tortoise):
+tortoise install cursor
+# ...or by hand: copy tortoise/cursor-hooks/session-end.sh into
+# "~/.cursor/hooks/" and add it under "sessionEnd" in
+# "~/.cursor/hooks.json" as a FLAT script object:
+#   {"command": "<abs-path>/tortoise-session-end.sh"}
+# (Cursor's validator rejects a NESTED matcher-group entry and then loads
+#  NO hooks at all — the entry must be flat.) The document ALSO needs a
+#  numeric "version" (e.g. "version": 1): without it Cursor rejects the
+#  whole hooks.json and loads no hooks. Run "tortoise hooks upgrade --harness
+#  cursor" to set the version and the flat entry for you.
+#
+# ** IDE-ONLY — Cursor CLOUD AGENT sessions are NOT captured. **
+# Cursor's docs: "Cloud agents have no editor-lifetime session boundary.
+# sessionEnd is tied to the IDE session, not a cloud agent chat." The desktop
+# editor is the supported capture surface for this seam; a cloud-agent chat
+# has no sessionEnd to hook.`
 
 // #1710: the copyable payload is EXACTLY what the user pastes into the
 // harness target (terminal / config file / chat). The lead-in instructions
@@ -152,7 +318,10 @@ cp <path-to-tortoise>/tortoise/claude-hooks/session-start.sh .claude/hooks/sessi
 cp <path-to-tortoise>/tortoise/claude-hooks/session-end.sh .claude/hooks/session-end.sh
 chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh
 # then merge into .claude/settings.json:
-# { "hooks": { "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-start.sh" }] }], "SessionEnd": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-end.sh" }] }] } }`,
+# #3754: the explicit timeout is load-bearing — Claude Code cancels a SessionEnd
+# hook at its 1.5s default; the budget rises to the highest per-hook timeout (60
+# is the documented ceiling). session-end.sh measured 9.26s on a real run.
+# { "hooks": { "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-start.sh", "timeout": 60 }] }], "SessionEnd": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-end.sh", "timeout": 60 }] }] } }`,
   // #2827: these constants are NOT wired to any live surface — they are only
   // reachable from the archived LEGACY_WIZARD_ARCHIVED render in main.jsx and
   // from harnesses.test.js. A remote HTTP MCP server must NOT be documented as
@@ -160,8 +329,11 @@ chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh
   // local stdio servers only, so a "type"/"headers" shape silently does
   // nothing (no server, no error). These connector field values are what the
   // user actually pastes into the Connectors UI.
-  'claude-desktop': (key) =>
-    `Connector name: Tortoise\nServer URL:   ${MCP_URL}\nRequest headers:\n  Authorization: Bearer ${key}`,
+  // #2865: key-less OAuth — deleting the Bearer line is the whole point of the
+  // issue (Anthropic's "Request headers" field is beta and absent on many
+  // accounts). The `key` argument is kept so every caller keeps one signature.
+  'claude-desktop': () =>
+    `Tortoise — Claude Desktop (OAuth, no API key)\nClaude Desktop reaches a remote MCP server through the Connectors UI:\n1. Open Claude Desktop → Settings → Connectors → Add custom connector.\n2. Name: Tortoise\n3. Server URL: ${CANONICAL_MCP_URL}\n4. Leave Request headers empty — no API key is needed. Claude opens\n   Tortoise's sign-in page on the first connection: sign in, click Authorize,\n   then pick the Organization you're onboarding.\n5. Start a new chat and paste the Tortoise workflows prompt — it gives Claude\n   the Tortoise workflows. Then say "Set up Tortoise" so the agent calls\n   tortoise_health to verify, and click "I've connected it — Continue" in the\n   dashboard connect step (the click only advances — the connection itself is\n   confirmed by your agent's first successful write).`,
   'claude-web': () => {
     const base = WORKFLOWS_PROMPT
     // The session-filing paragraph is gated on HARNESS_CAPTURE_SUPPORT — the
@@ -172,7 +344,7 @@ chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh
     return base + filing
   },
   codex: (key) =>
-    `export TORTOISE_API_KEY=${key}\ncodex mcp add tortoise --url ${MCP_URL} --bearer-token-env-var TORTOISE_API_KEY`,
+    `export TORTOISE_API_KEY=${key}\ncodex mcp add tortoise --url ${MCP_URL} --bearer-token-env-var TORTOISE_API_KEY\n\n${CODEX_CAPTURE_INSTALL}`,
   cursor: () =>
     `${JSON.stringify(CURSOR_MCP_CONFIG_ENV, null, 2)}`,
   pi: (key) =>
@@ -181,7 +353,17 @@ chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh
 2. Create or merge .mcp.json in this project with:
 ${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}
 3. Run: curl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness pi
-4. Reload Pi (run "/reload" — tortoise connects eagerly at startup).
+
+${PI_CAPTURE_INSTALL}
+
+4. Restart Pi from a NEW terminal — quit Pi fully, open a new terminal
+   window, and start Pi there. A "/reload" is NOT enough: Pi reads the key
+   from the environment of the shell that LAUNCHED it, so a reload (or a
+   restart in the same old terminal) silently keeps the stale or empty
+   value. You get a 401, or connect to a previous organization with no
+   warning at all. ('/reload' re-scans configs, skills, and MCP
+   registrations, and tortoise connects eagerly at startup — the config
+   doesn't mark it lazy — so no separate connect step is needed.)
    Then call tortoise_health — when it passes, tell me "Tortoise is
    connected". The first time you write a memory or file a decision,
    onboarding auto-completes (no separate ceremony needed).`,
@@ -222,10 +404,13 @@ export const HARNESS_COPY_LABEL = {
 }
 
 // #1694: per-harness label for the post-copy Continue affordance — for
-// harnesses with manual UI steps (Claude Web), copying ≠ setup done, so
-// the button says what copying actually achieved.
+// harnesses with manual UI steps (the Claude connectors, Claude Web), copying
+// ≠ setup done, so the button says what copying actually achieved.
+// #2865: both Claude connector leaves are OAuth now — the user completes the
+// connector + Authorize in Claude, so "I've connected it" is the honest label.
 export const HARNESS_CONTINUE_LABEL = {
-  'claude-web': "I've pasted it — Continue →",
+  'claude-desktop': "I've connected it — Continue →",
+  'claude-web': "I've connected it — Continue →",
   chatgpt: "I've connected it — Continue →",
 }
 
@@ -243,26 +428,31 @@ cp <path-to-tortoise>/tortoise/claude-hooks/session-start.sh .claude/hooks/sessi
 cp <path-to-tortoise>/tortoise/claude-hooks/session-end.sh .claude/hooks/session-end.sh
 chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh
 # then merge into .claude/settings.json:
-# { "hooks": { "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-start.sh" }] }], "SessionEnd": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-end.sh" }] }] } }`,
-  pi: `5. Session capture (#1727 T1): enable session capture in the Pi extension
-settings. The extension fires an install-probe on load (harness + timestamp
-only, no content) and files sessions to Tortoise Cloud when capture is
-enabled. Backfill past sessions with:
-tortoise sessions import --harness pi --file <session.jsonl>
-(local receipt written only on a 2xx).`,
+# #3754: the explicit timeout is load-bearing — Claude Code cancels a SessionEnd
+# hook at its 1.5s default; the budget rises to the highest per-hook timeout (60
+# is the documented ceiling). session-end.sh measured 9.26s on a real run.
+# { "hooks": { "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-start.sh", "timeout": 60 }] }], "SessionEnd": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-end.sh", "timeout": 60 }] }] } }`,
+  // #3575: the SAME constant HARNESS_INSTALL.pi installs — the in-repo
+  // extension, not an agent-infra settings toggle. Shared so the Memory-
+  // sources row and the setup prompt can never drift.
+  pi: PI_CAPTURE_INSTALL,
+  // #3818: the Codex SessionEnd capture hook — same sharing rule as Pi.
+  codex: CODEX_CAPTURE_INSTALL,
+  // #3819: the Cursor sessionEnd capture hook — same sharing rule.
+  cursor: CURSOR_CAPTURE_INSTALL,
 }
 
 // #1728 Slice 3 (Task 16/17): per-harness disabled-with-reason copy for the
 // sessions rows — pinned in the plan (web = "session capture for web is in
 // progress — not available yet" until the Task 13 spike verdict flips
-// HARNESS_CAPTURE_SUPPORT; codex/claude-desktop = backfill import only until
-// an install path exists; cursor = spike verdict). Never hidden rows —
-// disabled with an honest reason.
+// HARNESS_CAPTURE_SUPPORT; claude-desktop = backfill import only until an
+// install path exists (codex got one in #3818, cursor in #3819)). The
+// reason map covers the DISABLED harnesses only — a supported harness renders
+// the capture step, never a reason. Never hidden rows — disabled with an
+// honest reason.
 export const HARNESS_CAPTURE_REASON = {
   'claude-desktop': 'backfill import only — no live install path yet',
   'claude-web': 'session capture for web is in progress — not available yet',
-  codex: 'backfill import only — no live install path yet',
-  cursor: 'unsupported for session capture',
   chatgpt: "ChatGPT connects from its own cloud — session capture isn't available for it",
 }
 
@@ -295,7 +485,10 @@ export const HARNESS_ORDER = ['claude', 'claude-desktop', 'claude-web', 'codex',
 // per-harness payload (UNIVERSAL_COMMAND, wizardPromptText, HARNESS_NAMES,
 // capture support) stays keyed exactly as before — this is a UI grouping, not
 // a vocabulary change (DE2E-5's 7-harness contract is untouched).
-// ChatGPT stays out: it is key-less OAuth (#2698) and has its own path.
+// ChatGPT stays out: it has no Claude/Codex-style surface split and its
+// Developer-mode path is not reachable from the dashboard chooser (#2698).
+// #2865: Claude's Desktop/Web surfaces ARE key-less OAuth (HARNESS_OAUTH) and
+// stay here, so every role can reach them — including members.
 export const HARNESS_FAMILIES = Object.freeze([
   Object.freeze({
     id: 'claude',
@@ -365,10 +558,13 @@ export const HARNESS_SELF_INSTALL = ['claude', 'codex', 'cursor', 'pi']
 
 export const HARNESS_TEACH_HUMAN = ['claude-desktop', 'claude-web', 'chatgpt']
 
-// #1701: OAuth-only harnesses (ChatGPT) — no API key, no tt_ token. The
-// wizard connect step renders these key-less (no key-mint, no universal
-// command).
-export const HARNESS_OAUTH = ['chatgpt']
+// OAuth-only harnesses — no API key, no tt_ token: the wizard connect step
+// renders these key-less (no key-mint, no key row). #1701 added chatgpt;
+// #2865 added the two Claude connector leaves, whose Bearer recipe was
+// unreachable on accounts without Anthropic's beta "Request headers" field.
+// This is a VOCABULARY export, not a render gate — the live connect step
+// branches on it directly (main.jsx), so a change here must be mirrored there.
+export const HARNESS_OAUTH = ['claude-desktop', 'claude-web', 'chatgpt']
 
 // The skill installer line every config-writing harness command appends
 // (v2 SKILLS includes tortoise-onboarding + the 3 core skills).
@@ -444,28 +640,36 @@ bearer_token_env_var = "TORTOISE_API_KEY"
    env var, never the key):
 ${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}
 3. Run: curl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness pi
-4. Reload Pi (run \"/reload\" — tortoise connects eagerly at startup).
+4. Restart Pi from a NEW terminal (quit Pi fully, open a new terminal
+   window, and start Pi there). A \"/reload\" is NOT enough — Pi reads the
+   key from the environment of the shell that launched it, so a reload
+   keeps the stale or empty value. ('/reload' re-scans configs, skills, and
+   MCP registrations, and tortoise connects eagerly at startup — the config
+   doesn't mark it lazy — so no separate connect step is needed.)
    Then call tortoise_health — when it passes, tell me "Tortoise is
    connected".`,
-  'claude-desktop': (key) =>
-    `# Tortoise — universal setup command (Claude Desktop — manual setup)
+  // #2865: key-less OAuth. `key` is accepted (one signature for every harness)
+  // but deliberately unused — neither of these surfaces takes a credential.
+  'claude-desktop': () =>
+    `# Tortoise — universal setup command (Claude Desktop — OAuth, no API key)
 # Claude Desktop is filesystem-less for remote MCP: use the Connectors UI, NOT
 # claude_desktop_config.json (that file only accepts local stdio servers, so an
 # mcpServers block with a type/headers remote shape silently does nothing).
 # YOU complete these steps, then the agent verifies:
 1. Open Claude Desktop → Settings → Connectors → Add custom connector.
 2. Connector name: Tortoise
-3. Server URL:   ${MCP_URL}
-4. Request headers:
-     Authorization: Bearer ${key}
+3. Server URL:   ${CANONICAL_MCP_URL}
+4. Leave Request headers empty — no API key is needed. On the first
+   connection Claude opens Tortoise's sign-in page: sign in, click Authorize,
+   then pick the Organization you're onboarding.
 5. Start a new chat, paste the Tortoise workflows prompt, then say "Set up
-   Tortoise" — the agent calls tortoise_health to verify. Click "I've set it up
-   — Continue" in the dashboard connect step when it passes (that writes the
-   harness-connected checkpoint).`,
-  'claude-web': (key) =>
-    `Tortoise — universal setup command (Claude Web — manual setup)\nClaude Web runs in Anthropic's cloud — no local files. Complete the connector\nsteps below, then the agent (with the connector's tortoise_* tools) verifies:\n1. Go to claude.ai > Settings > Connectors > Add custom connector, name it "Tortoise".\n2. Server URL: ${MCP_URL}\n3. Request headers (advanced): Authorization: Bearer ${key}  (stored by Anthropic)\n4. In a Claude Web chat, say "Set up Tortoise" — the agent calls tortoise_health\n   to verify, then click "I've pasted it — Continue" in the dashboard connect\n   step (that writes the harness-connected checkpoint).`,
+   Tortoise" — the agent calls tortoise_health to verify. Click "I've connected
+   it — Continue" in the dashboard connect step when it passes (the click only
+   advances — the agent's first successful write is what confirms it).`,
+  'claude-web': () =>
+    `Tortoise — universal setup command (Claude Web — OAuth, no API key)\nClaude Web runs in Anthropic's cloud — no local files. Complete the connector\nsteps below, then the agent (with the connector's tortoise_* tools) verifies:\n1. Go to claude.ai > Settings > Connectors > Add custom connector, name it "Tortoise".\n2. Server URL: ${CANONICAL_MCP_URL}\n3. Leave Request headers empty — no API key is needed. On the first connection\n   Claude opens Tortoise's sign-in page: sign in, click Authorize, then pick the\n   Organization you're onboarding.\n4. In a Claude Web chat, say "Set up Tortoise" — the agent calls tortoise_health\n   to verify, then click "I've connected it — Continue" in the dashboard connect\n   step (the click only advances — the agent's first successful write is what\n   confirms it).`,
   chatgpt: () =>
-    `Tortoise — ChatGPT (Developer mode, OAuth)\n1. Enable Developer mode: chatgpt.com → Settings → Security and login →\n   Developer mode (Plus/Pro/Business/Enterprise/Education).\n2. Open chatgpt.com/plugins → the + button → create a Developer-mode app.\n3. MCP server URL: ${CHATGPT_MCP_URL}  (no API key — choose OAuth; ChatGPT\n   discovers Tortoise's authorization server automatically).\n4. Click Scan Tools — sign in to Tortoise when prompted and click Authorize.\n   When Tortoise prompts you to choose an organization, pick the one you're onboarding for.\n5. The tortoise_* tools appear (Developer mode). In the SAME ChatGPT chat,\n   paste the prompt below — it gives ChatGPT the Tortoise workflows:\n\n${WORKFLOWS_PROMPT}\n\nAfter you paste it, ask ChatGPT a Tortoise question (e.g. "are we connected?")\nand confirm it answers from the connected MCP tools, then click "I've\nconnected it — Continue →" in the dashboard connect step (that writes the\nharness-connected checkpoint).`,
+    `Tortoise — ChatGPT (Developer mode, OAuth)\n1. Enable Developer mode: chatgpt.com → Settings → Security and login →\n   Developer mode (Plus/Pro/Business/Enterprise/Education).\n2. Open chatgpt.com/plugins → the + button → create a Developer-mode app.\n3. MCP server URL: ${CHATGPT_MCP_URL}  (no API key — choose OAuth; ChatGPT\n   discovers Tortoise's authorization server automatically).\n4. Click Scan Tools — sign in to Tortoise when prompted and click Authorize.\n   When Tortoise prompts you to choose an organization, pick the one you're onboarding for.\n5. The tortoise_* tools appear (Developer mode). In the SAME ChatGPT chat,\n   paste the prompt below — it gives ChatGPT the Tortoise workflows:\n\n${WORKFLOWS_PROMPT}\n\nAfter you paste it, ask ChatGPT a Tortoise question (e.g. "are we connected?")\nand confirm it answers from the connected MCP tools, then click "I've\nconnected it — Continue →" in the dashboard connect step (the click only\nadvances — the agent's first successful write is what confirms it).`,
 }
 
 export const UNIVERSAL_COMMAND_HARNESSES = HARNESS_ORDER

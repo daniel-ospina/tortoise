@@ -98,7 +98,14 @@ from .report import (
     print_comparison,
     save_report,
 )
-from .rerank import _TRUTHY, RERANK_MODEL_DEFAULT, _env_int, rerank_enabled
+from .rerank import (
+    _TRUTHY,
+    RERANK_MODEL_DEFAULT,
+    _clamp_int,
+    _env_float,
+    _env_int,
+    rerank_enabled,
+)
 from .retrieve import (
     DATA_AVAILABILITY_GATE_REASONS,
     DEFAULT_CONTEXT_ITEM_CAP,
@@ -106,6 +113,7 @@ from .retrieve import (
     DEFAULT_EVIDENCE_BOOST_SOURCE,
     DEFAULT_EVIDENCE_BOOST_VERBATIM,
     DEFAULT_MAX_CHUNKS_PER_SESSION,
+    DEFAULT_REINJECTION_TOTAL_ITEMS,
     DEFAULT_RETRIEVAL_BUDGET_MS,
     DEFAULT_TR_TOP_K,
     EVAL_RETRIEVAL_BUDGET_MS,
@@ -431,6 +439,42 @@ def _resolve_rerank(*, rerank: bool | None, rerank_model: str | None,
         "model": model, "rerank_pool": pool,
         "per_session_cap": cap, "mmr_lambda": lam,
     }
+
+
+def _resolve_reinjection_total_cap(arm_on: bool,
+                                   explicit: int | None = None) -> int | None:
+    """C4 (#2513): the resolved source-session injection TOTAL budget — the
+    volume guard on the re-injection sweep, resolved ONCE before the loop.
+
+    Contract (the sibling-knob precedent, ``_resolve_rerank`` /
+    ``context_item_cap``): the run path passes the resolved value to
+    ``retrieve_for_question`` and stamps it on BOTH the checkpoint
+    fingerprint and the methodology record, so a cap-10 checkpoint can
+    never be resumed by a cap-15 run — two injection volumes must not blend
+    into one artifact that declares one config.
+
+    Off-path hygiene (the evidence_boost multiplier precedent): an arm-OFF
+    run resolves ``None`` — it never reads the env, never records a stray
+    env value, and never stamps an inert knob on the fingerprint. The cap
+    key's conditional presence only avoids recording an inert value; the
+    always-present ``session_reinjection`` / ``session_reinjection_guard``
+    bools are what refuse a fingerprint-bearing pre-C4 resume
+    (``CheckpointStaleError``, the safe direction).
+    Arm-ON
+    resolution is explicit > env > product constant, and BOTH sides go
+    through the SAME ``rerank._clamp_int`` (garbage / non-integer / <1
+    falls back to ``DEFAULT_REINJECTION_TOTAL_ITEMS``) — so the run path
+    and a direct caller can never resolve the knob differently. #2513
+    (delta-review P2): the explicit value used to bypass the clamp
+    entirely (explicit 0 resolved to 0 and served a silent zero-injection
+    arm; '15' raised a TypeError swallowed by the fail-open handler).
+    """
+    if not arm_on:
+        return None
+    if explicit is not None:
+        return _clamp_int(explicit, DEFAULT_REINJECTION_TOTAL_ITEMS)
+    return _env_int("TORTOISE_LME_REINJECTION_TOTAL_CAP",
+                    DEFAULT_REINJECTION_TOTAL_ITEMS)
 
 
 # R3 (#1542): the embedder pinned for the eval pre-flight — now derived from
@@ -1110,11 +1154,11 @@ def _build_cli_extractor_model(*, spec: str | None,
     built the SAME way the factory does (``_session_worker_spec_tuning``
     resolves the registry entry's real wire id + expressible tuning; the
     unset case stays UNCAPPED, matching the session_workers=1 owner
-    decision). NOTE: the live ``ingest_haystack_v2`` on main currently
-    shadows the parallel factory path with a sequential copy (pre-existing
-    duplicate, tracked separately — #1744), so workers fall back to the
-    shared ``extractor_model``; the fingerprint-vs-served guard remains the
-    safety invariant and records the serving config either way. A spec'd
+    decision). #1744 deleted the shadowing sequential duplicate, so
+    ``session_workers > 1`` now actually runs the parallel worker-factory
+    path and the workers serve the per-worker models this build
+    fingerprints; the fingerprint-vs-served guard remains the safety
+    invariant and records the serving config. A spec'd
     run therefore fingerprints identically across a session-workers toggle
     only when the router resolves a SINGLE lane
     matching the registry adapter (the same effective config — resume
@@ -1240,6 +1284,25 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        # the fingerprint gate; the 2×2 with #2518 stays
                        # reconstructable).
                        coverage_loop: bool | None = None,
+                       # C4 (#2517/#2568, #2513): the source-session
+                       # re-injection arm + its guard ablation — ALWAYS
+                       # present as resolved bools (the sibling-arm
+                       # convention), so a fingerprint-bearing pre-feature
+                       # checkpoint refuses on resume and an arm/guard flip
+                       # can never cross.
+                       session_reinjection: bool = False,
+                       session_reinjection_guard: bool = True,
+                       # C4 (#2513, delta-review P1): the RESOLVED injection
+                       # total budget — conditional presence (None when the
+                       # arm is OFF: an inert knob never gates a checkpoint,
+                       # the evidence_boost-multiplier precedent). When the
+                       # arm is ON the cap is ALWAYS stamped, so a cap-10
+                       # checkpoint can never be resumed by a cap-15 run —
+                       # the two injection volumes must not blend into one
+                       # artifact that declares one config. The env is not
+                       # part of any fingerprint, so a lazily re-read cap
+                       # could not gate resume at all.
+                       reinjection_total_cap: int | None = None,
                        # C5 (#2521, #2513): the aggregative-intent coverage-
                        # check arm — conditional presence like the other C2/C5
                        # knobs (a flagged checkpoint resumed without the arm
@@ -1249,13 +1312,25 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        # #1786 (P1-1/P1-2/P2-4): the write-path retry knobs —
                        # ALWAYS present (results-relevant by construction: a
                        # question that dies at 0 write retries survives at 2 —
-                       # the same class as max_retries). A pre-feature
-                       # checkpoint therefore refuses via CheckpointStaleError
+                       # the same class as max_retries). A fingerprint-bearing
+                       # pre-feature checkpoint therefore refuses via
+                       # CheckpointStaleError
                        # (the SAFE direction — Task 8 requires a fresh
                        # checkpoint anyway).
                        ingest_write_retries: int = INGEST_WRITE_RETRIES,
                        ingest_question_retries: int = INGEST_QUESTION_RETRIES,
                        resume_attempts_cap: int = RESUME_ATTEMPTS_CAP,
+                       # #1744 (review P1): ``--session-workers > 1`` is a
+                       # GRAPH-CONTENT-affecting knob — the batched
+                       # A-all → B-parallel → C-all phase order drops the
+                       # cross-session NOOP / DELETE / supersession
+                       # consolidation records the interleaved sequential
+                       # path writes. ALWAYS present (the retry-constant
+                       # precedent): a fingerprint-bearing pre-#1744
+                       # checkpoint carries no key, so a resume under the new
+                       # defaults refuses via CheckpointStaleError (the SAFE
+                       # direction) instead of silently crossing the toggle.
+                       session_workers: int = 1,
                        # #1786 (R5): the eval's HYBRID-arm retrieval deadline
                        # (ms) — conditional presence (present iff non-default:
                        # the eval always passes EVAL_RETRIEVAL_BUDGET_MS, so a
@@ -1267,6 +1342,11 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
 
     ``workers`` is deliberately EXCLUDED (per-question isolation makes
     results workers-invariant) but recorded in ``methodology.workers``.
+    #1744 (review P1): ``session_workers`` IS included — unlike ``workers``
+    it is NOT results-invariant: the parallel phase order batches extraction
+    ahead of payload writes, so cross-session NOOP / DELETE / supersession
+    consolidation (E7 / E2E-11) is not visible to the workers. It is
+    therefore graph-content-affecting and must gate resume.
     R6 (#1545, D9): the full effective rerank config rides the fingerprint
     (``rerank_config``) — a config-mismatched resume is refused by the
     existing fingerprint gate (a baseline checkpoint resumed with
@@ -1281,11 +1361,10 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
     member fingerprint; multi-lane wrappers are shape-prefixed routing:/rotating:)
     — never an address-bearing repr. SESSION_WORKERS: ``--session-workers
     > 1`` requests per-worker models via the ingest_v2 ``model_factory``
-    (note: the live ``ingest_haystack_v2`` on main currently shadows the
-    parallel factory path with a sequential copy — pre-existing duplicate,
-    tracked separately (#1744) — so workers fall back to the shared
-    ``extractor_model``; the fingerprint-vs-served guard remains the safety
-    invariant and records the serving config either way).
+    (since #1744 the live ``ingest_haystack_v2`` runs the parallel factory
+    path — the shadowing sequential duplicate is deleted — so workers serve
+    the per-worker models this config fingerprints; the fingerprint-vs-served
+    guard remains the safety invariant).
     ``_build_cli_extractor_model`` builds the fingerprinted model and
     run_main threads the resolved spec + tuning into the factory so the
     workers serve EXACTLY what the fingerprint records (a spec'd run
@@ -1311,6 +1390,17 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
     OPENROUTER_API_KEY-only) refuses with CheckpointStaleError — safe
     direction, the env changes what the default path serves.
     """
+    # #2976: resolve the temporal-leg arm state once, up front — it is
+    # env-only from the harness, so the fingerprint must read the env (the
+    # default OFF path leaves every temporal_leg* key below absent →
+    # byte-identical to the pre-#2976 fingerprint).
+    from tortoise.temporal_leg import (
+        DEFAULT_TEMPORAL_LEG_LIMIT,
+        DEFAULT_TEMPORAL_LEG_WEIGHT,
+    )
+    _temporal_leg_on = (
+        (os.environ.get("TORTOISE_LME_TEMPORAL_LEG") or "").strip().lower()
+        in _TRUTHY)
     return {
         "git_sha": git_sha(),
         "python": sys.version.split()[0],
@@ -1327,14 +1417,30 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
         "judge_rubric_id_hash": _sha16(JUDGE_RUBRIC_ID),
         "rerank": rerank_config,
         # #1786 (P1-1/P1-2): the three retry constants are ALWAYS present —
-        # a deliberate default-fingerprint change so a pre-feature checkpoint
-        # resumed under post-feature DEFAULTS refuses instead of silently
+        # a deliberate default-fingerprint change so a fingerprint-bearing
+        # pre-feature checkpoint resumed under post-feature DEFAULTS refuses
+        # instead of silently
         # changing retry semantics (0 retries → 2 write retries + 1 R2 + 2
         # resumes). ``--retry-failed`` is NOT fingerprinted (a recorded
         # resume-mode, methodology + checkpoint field — Task 2 Step 1).
+        # #1744 (review P1): ``session_workers`` is ALWAYS present for the
+        # same reason — since the parallel path is live it changes graph
+        # content (cross-session consolidation is dropped when batched), so
+        # an unrecorded toggle would silently cross regimes on resume.
         "ingest_write_retries": ingest_write_retries,
         "ingest_question_retries": ingest_question_retries,
         "resume_attempts_cap": resume_attempts_cap,
+        "session_workers": session_workers,
+        # C4 (#2517/#2568, #2513): the source-session re-injection arm +
+        # its guard ablation — ALWAYS present (the retry-constant
+        # precedent): a fingerprint-bearing pre-feature checkpoint carries
+        # no key, so a resume under the new defaults refuses via
+        # CheckpointStaleError (the safe direction) instead of silently
+        # crossing the arm; an
+        # arm-ON checkpoint can never be resumed with the arm OFF, nor
+        # the guard flipped either way.
+        "session_reinjection": session_reinjection,
+        "session_reinjection_guard": session_reinjection_guard,
     } | {
         # C1/C2/C5 (#1745): the effective reader-context + evidence-boost
         # knobs ride the fingerprint (present only when the caller passes
@@ -1352,19 +1458,56 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
             ("evidence_boost_source", evidence_boost_source),
             ("entity_key_expansion", entity_key_expansion),
             ("coverage_loop", coverage_loop),
+            # C4 (#2513): the resolved injection total budget — conditional
+            # presence like the sibling knobs (absent for an arm-OFF run:
+            # the knob is inert there, so no inert value is recorded). This
+            # key is NOT what makes a pre-C4 checkpoint resumable — the
+            # always-present arm/guard bools above are what refuse a
+            # fingerprint-bearing pre-C4 resume. When the arm is ON the cap is
+            # always stamped, so a cap change (10 vs 15 vs the product
+            # default) refuses the resume in either direction via the
+            # key-union in ``_fingerprint_diffs``.
+            # #2513 (delta-review P2): the key name is IDENTICAL to the
+            # methodology record's (``session_reinjection_total_cap``) — a
+            # key-for-key cross-check of the checkpoint fingerprint against
+            # the report must find the same name, because that hand
+            # cross-check is how this class of defect gets verified (the
+            # two names diverging means the cross-check silently finds
+            # nothing).
+            ("session_reinjection_total_cap", reinjection_total_cap),
             # C5 (#2521, #2513): the aggregative-intent coverage-check arm
             # — conditional presence like the C2 knob (a flagged checkpoint
             # resumed without the arm is refused by the fingerprint gate).
             ("aggregative_flag", aggregative_flag),
             ("max_chunks_per_session", max_chunks_per_session),
             # #1786 (R5): the eval's hybrid retrieval budget — conditional
-            # presence (the eval always passes 1500, so a pre-feature /
-            # 500-ms-budget checkpoint refuses via CheckpointStaleError).
+            # presence (the eval always passes 1500, so a fingerprint-bearing
+            # pre-feature / 500-ms-budget checkpoint refuses via
+            # CheckpointStaleError).
             ("retrieval_budget_ms", retrieval_budget_ms),
             # #2578 (Task 1): the TR item-cap knob — conditional presence
-            # (absent at the 12 default → pre-feature checkpoints resume
-            # byte-identically; a 16-checkpoint resumed at 12 refuses).
+            # (absent at the 12 default, so the key itself perturbs nothing;
+            # a post-C4 checkpoint resumes byte-identically, a fingerprint-
+            # bearing pre-C4 one is refused by the always-present arm/guard
+            # bools; a 16-checkpoint resumed at 12 refuses).
             ("tr_top_k", tr_top_k),
+            # #2976: the temporal retrieval-leg arm — conditional presence
+            # ONLY when the env resolves ON, so the default fingerprint
+            # stays byte-identical while an arm-ON checkpoint can never be
+            # resumed with the arm OFF (or vice versa): the key-union in
+            # ``_fingerprint_diffs`` refuses either direction. The budget
+            # and weight are stamped with it because they change WHICH
+            # items are promoted (hence the fused order) — a LIMIT=1
+            # checkpoint must not resume under LIMIT=4.
+            ("temporal_leg", True if _temporal_leg_on else None),
+            ("temporal_leg_limit",
+             _env_int("TORTOISE_LME_TEMPORAL_LEG_LIMIT",
+                      DEFAULT_TEMPORAL_LEG_LIMIT) if _temporal_leg_on
+             else None),
+            ("temporal_leg_weight",
+             _env_float("TORTOISE_LME_TEMPORAL_LEG_WEIGHT",
+                        DEFAULT_TEMPORAL_LEG_WEIGHT) if _temporal_leg_on
+             else None),
         ) if v is not None}),
     }
 
@@ -1796,8 +1939,11 @@ def _load_checkpoint(path: str | None,
 
     M7 (#1527, D7): the loaded checkpoint's fingerprint must match the
     effective run config — a mismatch raises ``CheckpointStaleError`` naming
-    the differing fields (refuse stale resume). A legacy v1 checkpoint
-    (no ``fingerprint`` key) is refused too. #1349: the checkpoint also
+    the differing fields (refuse stale resume). A markerless legacy
+    checkpoint (no ``format``/``run_key`` markers, hence no ``fingerprint``
+    key) is refused too; a fingerprintless checkpoint that carries the
+    ``format`` marker plus a matching ``run_key`` (the #1349 vector-arm path)
+    falls through the fingerprint gate and resumes. #1349: the checkpoint also
     carries the per-model ``run_key`` (``{surface}__{retriever}__{model}__
     {prompt}``) — a cross-surface (embedded↔hnsw) or cross-model resume is
     impossible by construction. The read happens under an exclusive flock
@@ -2285,6 +2431,22 @@ class CheckpointPersistError(RuntimeError):
     """
 
 
+class ArmConflictError(RuntimeError):
+    """Two arms that own the SAME pool order are armed together (#2517 §0.2).
+
+    C3-1's guard and C4's guard both re-order the pool, and the stage order
+    between them is arbitrary — rather than let a run be order-dependent,
+    the run REFUSES the combination. Raised at ARM RESOLUTION (before the
+    question loop, outside every fail-open region) so it can never be
+    swallowed into N per-question "non-fatal" failures, and re-raised by the
+    per-question handler and ``_run_main`` so it always aborts the run.
+    """
+
+    def __init__(self, detail: str):
+        super().__init__(detail)
+        self.detail = detail
+
+
 #: Watchdog rolling-window length (questions) — the latency and gate-red
 #: windows are GLOBAL across workers (plan cycle2-P2-24).
 _WATCHDOG_WINDOW = 10
@@ -2602,24 +2764,30 @@ def extractor_prompt_digest() -> str:
 
 def ingest_cache_fingerprint(*, question: dict, extractor_model: Any,
                              code_hash: str, prompt_digest: str,
-                             chunk_turns: int) -> str:
+                             chunk_turns: int, session_workers: int) -> str:
     """Deterministic per-question INGEST fingerprint (#2080): sha256 over
     (extractor code version + extraction model id + extraction prompt
-    hash + question id + question content + chunk_turns).
+    hash + question id + question content + chunk_turns + session_workers).
 
     ``extractor_model`` uses the SAME identity source as the outcome
     checkpoint (``_model_id`` — M7 #1739: wire id + tuning; the
     session_workers>1 run fingerprints the worker-factory config).
     ``chunk_turns`` rides the digest because it changes the raw-chunk leg
-    (R1 #1540 graph content); the full question JSON rides it so a dataset
-    revision under a stable qid cannot false-hit a stale graph. Identical
-    inputs → identical hash across processes (no repr/address)."""
+    (R1 #1540 graph content); #1744 (review P1) ``session_workers`` rides
+    it for the SAME reason — >1 selects the batched phase order, which
+    drops cross-session NOOP / DELETE / supersession consolidation records
+    the interleaved sequential path writes. Two toggles that produce
+    different graphs MUST NOT share a cache marker. The full question JSON
+    rides it so a dataset revision under a stable qid cannot false-hit a
+    stale graph. Identical inputs → identical hash across processes (no
+    repr/address)."""
     qid = str(question.get("question_id") or "?")
     content = json.dumps(question, sort_keys=True, default=str)
     h = hashlib.sha256()
     for part in (code_hash,
                  _model_id(extractor_model) or "none",
-                 prompt_digest, qid, content, str(int(chunk_turns))):
+                 prompt_digest, qid, content, str(int(chunk_turns)),
+                 str(int(session_workers))):
         h.update(part.encode("utf-8", "replace"))
         h.update(b"\x1f")
     return h.hexdigest()
@@ -2979,9 +3147,10 @@ def gc_in_window(gc_events: list, si: int) -> bool:
 
 class _PerSessionCensus:
     """Task 3 per-session census — interleaves with ingest via the shared
-    query-wrapper seam (retrieve.install_gate_fault_proxy; the #1744
-    dual-copy caveat: the replay runs with ``session_workers=1`` sequential,
-    so the shared live copy is the one exercised). Detects session
+    query-wrapper seam (retrieve.install_gate_fault_proxy; the census needs
+    per-session interleaving, so the replay runs ``session_workers=1`` — the
+    batched parallel path writes every session's raw leg up front and would
+    blur the session boundary). Detects session
     boundaries by the deterministic id pattern ``lme:{qid}:s{si}`` in write
     params; after each session's Phase A (raw turn/chunk) batch and Phase C
     (payload) batch, runs a per-session census (read-verified — a partial
@@ -3186,8 +3355,19 @@ class _ReplayLoadWorkers:
 
     def _worker(self, i: int) -> None:
         import random as _random
+        sdk = None
+        cleanup = None
         try:
-            sdk = self.sdk_factory()
+            # #3599: the factory contract is `(sdk, cleanup)`. Accept a bare
+            # SDK too — a legacy single-value factory would otherwise raise
+            # `TypeError` into the broad handler below and silently no-op
+            # the whole load worker (the failure this contract change is
+            # reviewed against).
+            produced = self.sdk_factory()
+            if isinstance(produced, tuple):
+                sdk, cleanup = produced
+            else:
+                sdk, cleanup = produced, None
             proj = sdk._get_proj()
             qid = f"replay-load-{i}"
             while not self._stop.is_set():
@@ -3200,6 +3380,18 @@ class _ReplayLoadWorkers:
                         params={"id": pid, "q": qid, "si": si})
         except Exception:  # noqa: BLE001, RUF100
             pass
+        finally:
+            # #3599: a load worker's embedded server must not outlive the
+            # worker. Previously the factory returned only the SDK, so the
+            # TemporaryDirectory was dropped on the floor (GC'd while its
+            # server was still live) and the SDK was never closed — one
+            # orphaned redislite server per --load-worker per run.
+            if sdk is not None:
+                with contextlib.suppress(Exception):
+                    sdk.close()
+            if cleanup is not None:
+                with contextlib.suppress(Exception):
+                    cleanup()
 
 
 # ── falsification-trigger predicate (Task 5 consumes; pure) ────────────────
@@ -3288,6 +3480,24 @@ def run_evaluation(
     # methodology — a looped checkpoint resumed without the arm is refused
     # by the fingerprint gate (same contract as evidence_boost).
     coverage_loop: bool | None = None,
+    # C4 (#2517/#2568, #2513): source-session re-injection — tri-state
+    # (explicit flag > ``TORTOISE_LME_SESSION_REINJECTION`` env > OFF, the
+    # #1745 fail-safe default), plus the guard ablation
+    # (``session_reinjection_guard``; None = ON). Resolved once,
+    # fingerprinted (always-present resolved bools), and recorded in the
+    # methodology. A both-arms-ON run (coverage_loop AND
+    # session_reinjection) is REFUSED at resolution — two owners of the
+    # same pool order are never left order-dependent.
+    session_reinjection: bool | None = None,
+    session_reinjection_guard: bool | None = None,
+    # C4 (#2513, delta-review P1): the RESOLVED injection total budget
+    # (explicit value > ``TORTOISE_LME_REINJECTION_TOTAL_CAP`` env > the
+    # product constant ``DEFAULT_REINJECTION_TOTAL_ITEMS``), resolved ONCE
+    # here — before the loop — and stamped on BOTH the checkpoint
+    # fingerprint and the methodology record (the TORTOISE_LME_CONTEXT_ITEMS
+    # / _RERANK_CAP contract). None while the arm is OFF: the knob is inert,
+    # never read, never fingerprinted, never recorded as a stray env value.
+    reinjection_total_cap: int | None = None,
     # C5 (#2521, #2513): aggregative-intent detection + per-facet coverage
     # check — tri-state (explicit flag > ``TORTOISE_LME_AGGREGATIVE_FLAG``
     # env > OFF, the #1745 fail-safe default). The A/B switch that MEASURES
@@ -3438,6 +3648,33 @@ def run_evaluation(
     if coverage_loop is None:
         cl_env = (os.environ.get("TORTOISE_LME_COVERAGE_LOOP") or "")
         coverage_loop = cl_env.strip().lower() in _TRUTHY
+    # C4 (#2517/#2568, #2513): resolve the source-session re-injection arm
+    # + its guard ablation ONCE, before the loop — same contract as the
+    # sibling arms (methodology == actual == fingerprint; fail-safe OFF:
+    # only 1/true/yes/on enables).
+    if session_reinjection is None:
+        sr_env = (os.environ.get("TORTOISE_LME_SESSION_REINJECTION") or "")
+        session_reinjection = sr_env.strip().lower() in _TRUTHY
+    if session_reinjection_guard is None:
+        session_reinjection_guard = True
+    # C4 (#2513, delta-review P1): the injection total budget is a
+    # results-affecting knob (it is the volume guard the re-injection sweep
+    # varies) — resolve it ONCE, before the loop, and thread the SAME value
+    # into the fingerprint, the methodology and every question's fetch. A
+    # lazily re-read cap (the pre-fix shape) is invisible to the fingerprint
+    # gate: a cap-10 checkpoint would be resumed by a cap-15 run and the two
+    # volumes would blend into one artifact declaring one config.
+    reinjection_total_cap = _resolve_reinjection_total_cap(
+        bool(session_reinjection), reinjection_total_cap)
+    # §0.2: C3-1 and C4 both own the pool order — REFUSE the both-ON
+    # combination HERE (arm resolution, before the question loop and
+    # outside every fail-open region), so the refusal aborts the run
+    # instead of degrading into per-question failures.
+    if coverage_loop and session_reinjection:
+        raise ArmConflictError(
+            "coverage_loop (C3-1) and session_reinjection (C4) both re-order "
+            "the retrieval pool — arm them separately (this run refuses the "
+            "combination at arm resolution)")
     # C5 (#2521, #2513): resolve the aggregative-intent coverage-check arm
     # tri-state ONCE, before the loop — same contract as the C2 knobs: a
     # None with the TORTOISE_LME_AGGREGATIVE_FLAG env set must not record
@@ -3560,6 +3797,23 @@ def run_evaluation(
         # fingerprint — a looped checkpoint resumed without the arm is
         # refused by the fingerprint gate (2×2 arm isolation with #2518).
         coverage_loop=bool(coverage_loop),
+        # C4 (#2517/#2568, #2513): the resolved re-injection arm + guard
+        # ablation ride the fingerprint as ALWAYS-PRESENT resolved bools
+        # (the sibling-arm convention) — a fingerprint-bearing pre-feature
+        # checkpoint refuses on resume (CheckpointStaleError, the safe
+        # direction), and an arm-ON checkpoint can never be resumed with the
+        # arm OFF or the guard flipped.
+        session_reinjection=bool(session_reinjection),
+        session_reinjection_guard=bool(session_reinjection_guard),
+        # C4 (#2513): the resolved injection total budget rides the
+        # fingerprint as a CONDITIONAL member (absent while the arm is OFF
+        # — the knob is inert there, so no inert value is recorded; a
+        # fingerprint-bearing pre-C4 checkpoint is refused by the
+        # always-present arm/guard bools, not by this key). Arm-ON: always
+        # stamped, so the cap the
+        # checkpoint was produced under can never differ silently from the
+        # cap a resume serves (10 vs 15 vs the product default all refuse).
+        reinjection_total_cap=reinjection_total_cap,
         # C5 (#2521, #2513): the resolved aggregative-check arm rides the
         # fingerprint — a flagged checkpoint resumed without the arm is
         # refused by the fingerprint gate (A/B arm isolation).
@@ -3567,16 +3821,27 @@ def run_evaluation(
         max_chunks_per_session=max_chunks_per_session,
         # #1786 (P1-1/P1-2/P2-4): the three retry knobs (ALWAYS present —
         # results-relevant) + the hybrid retrieval budget (conditional
-        # presence — the eval always passes the non-default 1500). All four
-        # stale pre-feature checkpoints via CheckpointStaleError.
+        # presence — the eval always passes the non-default 1500). Each
+        # stales a fingerprint-bearing pre-feature checkpoint via
+        # CheckpointStaleError.
         ingest_write_retries=ingest_write_retries,
         ingest_question_retries=ingest_question_retries,
         resume_attempts_cap=resume_attempts_cap,
+        # #1744 (review P1): the graph-content-affecting session-parallel
+        # toggle — ALWAYS present, so a fingerprint-bearing pre-#1744
+        # checkpoint (no key) refuses on resume rather than silently crossing
+        # the mode. Recorded
+        # as the EFFECTIVE ingest value: the per-session census lane forces
+        # ingest to sequential, so recording the outer value would fingerprint
+        # a regime that did not actually run.
+        session_workers=(1 if per_session_census else session_workers),
         retrieval_budget_ms=retrieval_budget_ms,
         # #2578 (Task 1): conditional presence — the DEFAULT tr_top_k (12)
-        # fingerprints as absent so pre-feature checkpoints resume
-        # byte-identically; a non-default value fingerprints (mismatched
-        # resumes refused by the existing fingerprint gate).
+        # fingerprints as absent, so the key itself perturbs nothing; a
+        # post-C4 checkpoint resumes byte-identically (a fingerprint-bearing
+        # pre-C4 one is refused by the always-present arm/guard bools); a
+        # non-default value fingerprints (mismatched resumes refused by the
+        # existing gate).
         tr_top_k=(tr_top_k if tr_top_k != DEFAULT_TR_TOP_K else None),
     )
     done, prior_failures = _load_checkpoint(checkpoint, fingerprint,
@@ -3691,7 +3956,12 @@ def run_evaluation(
                 question=question, extractor_model=extractor_model,
                 code_hash=ingest_code_fingerprint(),
                 prompt_digest=extractor_prompt_digest(),
-                chunk_turns=chunk_turns)
+                chunk_turns=chunk_turns,
+                # #1744 (review P1): the cache marker distinguishes the
+                # graph-content-affecting parallel toggle (the cache is
+                # DISARMED on the per-session census lane, so the outer
+                # value is exactly what this ingest serves).
+                session_workers=session_workers)
         try:
             # #1786 (code-review F9 cycle 2): acquire-then-claim INSIDE the
             # try — (a) the limiter slot is released by the outer finally even
@@ -3837,17 +4107,14 @@ def run_evaluation(
                                     chunk_turns=chunk_turns,
                                     # Pilot #1549: session-parallel extraction
                                     # within a question (the LLM phase is the
-                                    # wall-clock dominant cost). NOTE: the live
-                                    # ingest_haystack_v2 on main shadows the
-                                    # parallel worker-factory path with a
-                                    # sequential copy (pre-existing duplicate,
-                                    # tracked separately — #1744), so workers
-                                    # currently fall back to the shared
-                                    # extractor_model — which is exactly what
-                                    # the fingerprint records. The per-session
-                                    # census replay forces ``session_workers=1``
-                                    # for deterministic measurement (#1744
-                                    # caveat).
+                                    # wall-clock dominant cost). #1744 deleted
+                                    # the shadowing duplicate, so the workers
+                                    # now actually serve the per-worker factory
+                                    # models this run fingerprints. The
+                                    # per-session census replay forces
+                                    # ``session_workers=1`` — the batched
+                                    # parallel path would blur the session
+                                    # boundary the census measures.
                                     session_workers=(
                                         1 if per_session_census
                                         else session_workers),
@@ -4001,6 +4268,20 @@ def run_evaluation(
                             # loop arm (resolved above; OFF by default — the
                             # sealed A/B decides adoption).
                             coverage_loop=coverage_loop,
+                            # C4 (#2517/#2568, #2513): the source-session
+                            # re-injection arm + guard ablation (resolved
+                            # above; OFF by default — the sealed A/B
+                            # decides adoption).
+                            session_reinjection=session_reinjection,
+                            session_reinjection_guard=session_reinjection_guard,
+                            # C4 (#2513): the SAME resolved cap the
+                            # checkpoint fingerprint and the methodology
+                            # record carry — never re-resolved per question
+                            # (a lazy re-read is invisible to the
+                            # fingerprint gate and would blend two
+                            # injection volumes into one artifact).
+                            session_reinjection_total_cap=(
+                                reinjection_total_cap),
                             # C5 (#2521, #2513): the aggregative-intent
                             # coverage-check arm (resolved above; OFF by
                             # default — records the per-outcome verdict
@@ -4193,6 +4474,11 @@ def run_evaluation(
                         # back to the unfiltered pool (never starve the reader).
                         "tr_constraint": ret.get("tr_constraint"),
                         "tr_window_fallback": ret.get("tr_window_fallback", False),
+                        # #2976: the temporal retrieval leg per question (the
+                        # arm marker + recovered anchors + leg depth — the
+                        # ON/OFF A/B surface). Read via .get so pre-feature
+                        # checkpoints resume with None.
+                        "temporal_leg_stats": ret.get("temporal_leg_stats"),
                         # C4 (#1745): the reader-surface evidence metric
                         # (context-level; the metric C1 actually moves).
                         "reader_evidence@k": ret.get("reader_evidence@k"),
@@ -4224,6 +4510,18 @@ def run_evaluation(
                         # pre-feature checkpoints).
                         "coverage_loop": ret.get("coverage_loop"),
                         "coverage_loop_stats": ret.get("coverage_loop_stats"),
+                        # C4 (#2517/#2568, #2513): the source-session
+                        # re-injection arm marker + per-outcome census
+                        # (seeded sessions, injected/merged counts per
+                        # session, dropped-by-cap, fetch health, total-cap
+                        # hit, the resolved guard bool, latency) — the
+                        # flip census and the guard ablation both read it
+                        # (read via .get — absent on pre-feature
+                        # checkpoints).
+                        "session_reinjection": ret.get(
+                            "session_reinjection"),
+                        "session_reinjection_stats": ret.get(
+                            "session_reinjection_stats"),
                         # C5 (#2521, #2513): the aggregative-check arm marker
                         # + the per-outcome verdict — the marker reconstructs
                         # which arm ran; the verdict (present under the arm
@@ -4414,7 +4712,8 @@ def run_evaluation(
                     # record a bogus failure entry and continue the run — the
                     # watchdog would never abort). Re-raise so the dispatch
                     # handler records the run-level marker and aborts.
-                    if isinstance(e, (WatchdogAbortError, CheckpointPersistError)):
+                    if isinstance(e, (WatchdogAbortError, CheckpointPersistError,
+                                      ArmConflictError)):
                         raise
                     # M2 (#1523, D4): a fatal-class provider error mid-run means the
                     # key died (billing cap hit, revocation) — continuing would
@@ -4543,10 +4842,12 @@ def run_evaluation(
     # cycle4-P1-13(d)); the Task 3 load-injection workers run concurrently
     # with the per-session-census replay questions.
     _load_workers = (_ReplayLoadWorkers(
+        # #3599: return (sdk, cleanup) TOGETHER — the worker closes both in a
+        # finally. The old form kept only [0], discarding the
+        # TemporaryDirectory (GC'd while its redislite server was live) and
+        # leaking one embedded server per --load-worker.
         lambda: _make_question_sdk(db_uri=db_uri, namespace=None,
-                                   work_dir=work_dir)[0] if db_uri
-        else _make_question_sdk(db_uri=None, namespace=None,
-                                work_dir=work_dir)[0],
+                                   work_dir=work_dir),
         replay_load_workers)
         if (per_session_census and replay_load_workers > 0) else None)
     if _load_workers is not None:
@@ -4661,6 +4962,22 @@ def run_evaluation(
             # which of the 2×2 arms produced them; the §5 gate deltas are
             # denominated on the recorded arm).
             "coverage_loop": bool(coverage_loop),
+            # C4 (#2517/#2568, #2513): the source-session re-injection arm
+            # + its guard ablation — recorded verbatim in the methodology
+            # (published numbers carry which arm produced them; the guard
+            # bool distinguishes the injection-only ablation).
+            "session_reinjection": bool(session_reinjection),
+            "session_reinjection_guard": bool(session_reinjection_guard),
+            # C4 (#2513): the resolved injection total budget — recorded so
+            # a published number carries the volume guard it was produced
+            # under (the sweep's arms differ ONLY by this value). The
+            # product default is recorded when the arm is OFF (the
+            # evidence_boost-multiplier precedent: an inert knob never lets
+            # a stray env value into the methodology).
+            "session_reinjection_total_cap": (
+                reinjection_total_cap
+                if reinjection_total_cap is not None
+                else DEFAULT_REINJECTION_TOTAL_ITEMS),
             # C5 (#2521, #2513): the aggregative-intent coverage-check arm
             # — recorded verbatim in the methodology (published numbers
             # carry which A/B arm produced them; OFF by default — the C3-3
@@ -4675,6 +4992,14 @@ def run_evaluation(
             "ingest_write_retries": ingest_write_retries,
             "ingest_question_retries": ingest_question_retries,
             "resume_attempts_cap": resume_attempts_cap,
+            # #1744 (review P1): the session-parallel ingest toggle recorded
+            # verbatim so a reader can tell which phase regime (interleaved
+            # vs batched) produced a number — it changes graph content via
+            # cross-session consolidation, so it is fingerprinted too.
+            # Recorded as the EFFECTIVE value: the per-session census lane
+            # forces ingest to sequential, so the outer value would name a
+            # regime that did not run.
+            "session_workers": (1 if per_session_census else session_workers),
         },
         # R5 (#1544) D7: TR knob values recorded verbatim in the
         # methodology (the run protocol step-2/6 knob sweeps consume them;
@@ -4838,6 +5163,10 @@ def outcomes_to_report(
                 # the §8 per-outcome markers ride the projection (read via
                 # o.get — absent on pre-feature checkpoints).
                 "coverage_loop", "coverage_loop_stats",
+                # C4 (#2517/#2568, #2513): the source-session re-injection
+                # arm marker + per-outcome census ride the projection
+                # (read via o.get — absent on pre-feature checkpoints).
+                "session_reinjection", "session_reinjection_stats",
                 # C5 (#2521, #2513): the aggregative-check arm marker + the
                 # per-outcome verdict ride the projection (read via o.get —
                 # absent until the outcome carries them; pre-feature
@@ -4883,6 +5212,15 @@ def outcomes_to_report(
                 # s4_reemit reads them from the published outcomes).
                 "s2_out_tokens", "s4_out_tokens", "s4_merge",
             )} | {"legs": list(o.get("legs") or []),
+                  # #2976: the temporal retrieval-leg arm + per-question
+                  # markers are projected ONLY when the outcome carries them
+                  # (conditional pattern, like rerank_pass/measure_facts — a
+                  # pre-feature outcome never gains a null key and the
+                  # published report stays byte-compatible with existing
+                  # consumers). The arm is env-driven from run.py; the
+                  # per-question markers reconstruct ON vs OFF.
+                  **({"temporal_leg_stats": o["temporal_leg_stats"]}
+                     if o.get("temporal_leg_stats") is not None else {}),
                   # False default: a pre-R5 checkpoint had no TR path — no
                   # filter ran, so the fallback flag is honestly False.
                   "tr_window_fallback": bool(o.get("tr_window_fallback", False)),
@@ -5326,6 +5664,46 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="disable the C3-1 coverage-completeness loop even "
                          "when TORTOISE_LME_COVERAGE_LOOP is set (tri-state: "
                          "explicit flags beat the env)")
+    # C4 (#2517/#2568, #2513): source-session re-injection — tri-state
+    # --session-reinjection / --no-session-reinjection (None default so the
+    # TORTOISE_LME_SESSION_REINJECTION env still applies; OFF by default in
+    # code). The A/B switch for the reader-surface + pool-rank-cut lever;
+    # the guard ablation (--no-session-reinjection-guard) still re-caps
+    # through the shared contract but skips the session-diverse reorder, so
+    # a flip is attributable to the guard rather than the fetched items.
+    # A both-arms-ON run (this + --coverage-loop) is REFUSED at arm
+    # resolution (both own the pool order).
+    sr = p.add_mutually_exclusive_group()
+    sr.add_argument("--session-reinjection", dest="session_reinjection",
+                    action="store_true", default=None,
+                    help="enable the C4 source-session re-injection "
+                         "(seed the reader-reachable pool head by rank, "
+                         "fetch each seeded session's remaining verbatim "
+                         "material — the product's episodic turns by "
+                         "default — in ONE batched query, splice them "
+                         "additively after the session's last base hit; "
+                         "default: env "
+                         "TORTOISE_LME_SESSION_REINJECTION — OFF by default "
+                         "in code, #2517)")
+    sr.add_argument("--no-session-reinjection", dest="session_reinjection",
+                    action="store_false", default=None,
+                    help="disable the C4 source-session re-injection even "
+                         "when TORTOISE_LME_SESSION_REINJECTION is set "
+                         "(tri-state: explicit flags beat the env)")
+    srg = p.add_mutually_exclusive_group()
+    srg.add_argument("--session-reinjection-guard",
+                     dest="session_reinjection_guard", action="store_true",
+                     default=None,
+                     help="apply the C4 session-diverse window guard "
+                          "(default: ON — --no-session-reinjection-guard is "
+                          "the injection-only ablation)")
+    srg.add_argument("--no-session-reinjection-guard",
+                     dest="session_reinjection_guard", action="store_false",
+                     help="skip the C4 session-diverse reorder (the "
+                          "injection-only ablation; the C5 re-cap still "
+                          "applies through the same shared contract — it "
+                          "binds injected CHUNKS, not the default turn "
+                          "grain)")
     # C5 (#2521, #2513): aggregative-intent detection + per-facet coverage
     # check — tri-state --aggregative-flag / --no-aggregative-flag (None
     # default so the TORTOISE_LME_AGGREGATIVE_FLAG env still applies; OFF
@@ -5723,6 +6101,15 @@ def _run_spot_check(args, instances: list[dict], *, ks, top_k, db_uri) -> dict:
 
 def run_main(argv: list[str] | None = None) -> dict[str, Any]:
     _assert_python_version()
+    # #3599: the embedded lane spawns one redislite server per question (and
+    # per --load-worker). atexit covers a clean interpreter exit, but a
+    # DEFAULT-disposition SIGTERM/SIGHUP (external `timeout`, CI cancel, a
+    # watchdog) kills the process without running atexit and orphans every
+    # one of them. The other embedded entry points (__main__, mcp_server,
+    # selfhost) install this guard; the eval lane — the highest-fan-out
+    # embedded spawner in the repo — did not. Idempotent and never raises.
+    from tortoise.embedded_lifecycle import install_embedded_signal_cleanup
+    install_embedded_signal_cleanup()
     parser = _build_parser()
     args = parser.parse_args(argv)
     # M7 #1739 / #1742: session-parallel extraction exists only on the v2
@@ -5857,6 +6244,24 @@ def _run_main(parser: argparse.ArgumentParser, args,
     else:
         cl_env = (os.environ.get("TORTOISE_LME_COVERAGE_LOOP") or "")
         coverage_loop = cl_env.strip().lower() in _TRUTHY
+    # C4 (#2517/#2568, #2513): source-session re-injection + guard
+    # ablation — tri-state (CLI flag > TORTOISE_LME_SESSION_REINJECTION env
+    # > OFF — fail-safe: only 1/true/yes/on enables, mirroring the sibling
+    # arms). Resolved once and threaded into run_evaluation (methodology ==
+    # actual).
+    if args.session_reinjection is not None:
+        session_reinjection = args.session_reinjection
+    else:
+        sr_env = (os.environ.get("TORTOISE_LME_SESSION_REINJECTION") or "")
+        session_reinjection = sr_env.strip().lower() in _TRUTHY
+    if args.session_reinjection_guard is not None:
+        session_reinjection_guard = args.session_reinjection_guard
+    else:
+        session_reinjection_guard = True
+    # §0.2: the both-arms-ON refusal is raised by ``run_evaluation`` at arm
+    # resolution (before the question loop) and caught in ``_run_main`` —
+    # kept in ONE place so the check cannot diverge from the driver's env
+    # resolution.
     # C5 (#2521, #2513): aggregative-intent detection + per-facet coverage
     # check — tri-state (CLI flag > TORTOISE_LME_AGGREGATIVE_FLAG env >
     # OFF — fail-safe: only 1/true/yes/on enables, mirroring the C2 gates
@@ -6008,9 +6413,11 @@ def _run_main(parser: argparse.ArgumentParser, args,
     # is reusable after close(), so no double-close hazard with the
     # fingerprint guard's served model. (Per-worker model_factory models are
     # built inside ingest_v2.py's worker threads when the parallel path is
-    # live — out of run.py's reach and out of PR scope; on main the
-    # sequential copy shadows that path (pre-existing duplicate, tracked
-    # separately), so the shared extractor_model extracts instead.)
+    # live — out of run.py's lexical reach, but since #1744 that path is
+    # live whenever ``session_workers > 1`` and ingest_v2 attaches THIS
+    # run-level collector to each worker model — see
+    # ``ingest_v2._attach_ingest_usage`` — so their token/cost rows are
+    # attributed to the question rather than lost.)
     try:
         # M2 (#1523): the pre-flight gate runs AFTER reader/judge/extractor_model
         # are built and BEFORE anything in the question loop starts. --mock skips
@@ -6066,6 +6473,11 @@ def _run_main(parser: argparse.ArgumentParser, args,
                 # (tri-state resolved above; OFF by default — the sealed
                 # #2519 A/B decides adoption).
                 coverage_loop=coverage_loop,
+                # C4 (#2517/#2568, #2513): the source-session re-injection
+                # arm + guard ablation (tri-state resolved above; OFF by
+                # default — the sealed A/B decides adoption).
+                session_reinjection=session_reinjection,
+                session_reinjection_guard=session_reinjection_guard,
                 # C5 (#2521, #2513): the aggregative-intent coverage-check
                 # arm (tri-state resolved above; OFF by default — records
                 # the per-outcome verdict under the arm; the C3-3 routing
@@ -6091,9 +6503,10 @@ def _run_main(parser: argparse.ArgumentParser, args,
                 # --retry-failed resume mode (default off) + the eval's
                 # elevated HYBRID-arm retrieval deadline (1500 ms via the
                 # _elevated_timeout_ms seam — the vector arm keeps
-                # VECTOR_TIMEOUT_MS=5000). All four fingerprint keys stale
-                # pre-feature checkpoints (CheckpointStaleError — the SAFE
-                # direction; Task 8 requires a fresh checkpoint anyway).
+                # VECTOR_TIMEOUT_MS=5000). All four fingerprint keys stale a
+                # fingerprint-bearing pre-feature checkpoint
+                # (CheckpointStaleError — the SAFE direction; Task 8 requires
+                # a fresh checkpoint anyway).
                 retry_failed=args.retry_failed,
                 ingest_write_retries=INGEST_WRITE_RETRIES,
                 ingest_question_retries=INGEST_QUESTION_RETRIES,
@@ -6128,6 +6541,13 @@ def _run_main(parser: argparse.ArgumentParser, args,
                   f"{MODEL_ENCODE_FAILED_EXIT} (never report empty recall as a "
                   f"result)", file=sys.stderr)
             raise SystemExit(MODEL_ENCODE_FAILED_EXIT) from e
+        except ArmConflictError as e:
+            # §0.2: the arm-resolution refusal must ABORT with a clean
+            # message + non-zero exit — never a bare traceback, never N
+            # per-question "non-fatal" failure entries.
+            print("[longmem_eval] RUN ABORTED — arm conflict: "
+                  f"{e}", file=sys.stderr)
+            raise SystemExit(1) from e
 
         out = args.output or str(default_report_path(args.split))
         save_report(report, out)

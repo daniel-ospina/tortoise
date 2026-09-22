@@ -84,7 +84,7 @@ test('#2475: toggle handler flips the CURRENT state and merges the server PATCH 
     'PATCH body must be { enabled: next }')
   // …and the response is MERGED ({ ...prev, ...t }), so the persisted value
   // the server returns becomes the rendered state without a client rewrite.
-  assert.ok(body.includes('if (t && t.team_id) setTeam((prev) => ({ ...prev, ...t }))'),
+  assert.ok(body.includes('if (t && t.org_id) setTeam((prev) => ({ ...prev, ...t }))'),
     'successful PATCH must merge the server-returned flag into team state')
   // no client-side literal true anywhere in the handler (or the whole file).
   assert.ok(!src.includes('dashboard_key_login: true'),

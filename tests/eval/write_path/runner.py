@@ -187,7 +187,7 @@ def render_store_lines(session_id: str, conversation: list[dict], harness: str) 
     for turn in conversation:
         role = turn.get("role", "user")
         content = turn.get("content", "")
-        if harness in ("codex", "pi"):
+        if harness == "codex":
             part_type = "input_text" if role == "user" else "output_text"
             record = {
                 "type": "response_item",
@@ -195,6 +195,18 @@ def render_store_lines(session_id: str, conversation: list[dict], harness: str) 
                     "type": "message",
                     "role": role,
                     "content": [{"type": part_type, "text": content}],
+                },
+            }
+        elif harness == "pi":
+            # #3667: Pi has its OWN store shape (type == "message" →
+            # message.{role,content}), NOT codex's `payload` shape. The pi
+            # branch must render the REAL Pi record or the round-trip parses
+            # 0 turns and the graded pi lane is vacuous.
+            record = {
+                "type": "message",
+                "message": {
+                    "role": role,
+                    "content": [{"type": "text", "text": content}],
                 },
             }
         elif harness == "claude-desktop":
@@ -247,10 +259,10 @@ def _row_to_point(row: tuple) -> dict:
     """Map a MEMORY_ROW_QUERY result row to a SessionPoint for grading.
 
     Column order (see MEMORY_ROW_QUERY): id, content, eventId, extractedFrom,
-    status, confidence, lastDreamedAt, pointKind, is_episodic.
+    status, confidence, lastDreamedAt, pointKind, is_episodic, is_operator.
     """
     (pid, content, event_id, extracted_from, status,
-     confidence, last_dreamed, point_kind, is_episodic) = row
+     confidence, last_dreamed, point_kind, is_episodic, is_operator) = row
     return {
         "point_id": pid,
         "content": content or "",
@@ -259,6 +271,7 @@ def _row_to_point(row: tuple) -> dict:
         "status": status,
         "point_kind": point_kind,
         "is_episodic": is_episodic,
+        "is_operator": bool(is_operator),
         "event_id": event_id,
     }
 
@@ -281,14 +294,35 @@ SESSION_TURN_QUERY = (
 # on some paths — the id pattern is the reliable turn/claim discriminator.
 def _turn_id_pattern(session_id: str) -> str:
     return re.compile(rf"^{re.escape(session_id)}_t\d+$")
+# The single projection every consumer of _row_to_point must share.  Keep it a
+# named constant: a duplicated copy in another module silently drops a column the
+# moment this one grows (harness cell_points did exactly that when is_operator
+# landed — p.id..p.is_operator is TEN columns, and a 9-column copy raises
+# "ValueError: not enough values to unpack (expected 10, got 9)").
+MEMORY_ROW_COLUMNS = (
+    "p.id, p.content, p.eventId, p.extractedFrom, p.status, "
+    "p.confidence, p.lastDreamedAt, p.pointKind, p.is_episodic, p.is_operator"
+)
 MEMORY_ROW_QUERY = (
     "MATCH (p:Point) WHERE p.eventId IN $eids "
-    "RETURN p.id, p.content, p.eventId, p.extractedFrom, p.status, "
-    "p.confidence, p.lastDreamedAt, p.pointKind, p.is_episodic"
+    f"RETURN {MEMORY_ROW_COLUMNS}"
 )
 OPERATOR_EDGE_QUERY = (
     "MATCH (a:Point)-[r]->(b:Point) "
     "WHERE a.id IN $ids AND b.id IN $ids "
+    "RETURN type(r), a.id, b.id"
+)
+# #2552: cross-session CORRECTS — the planted SUPERSEDE is CROSS-SESSION by
+# construction (a point-level supersession only forms when the superseded
+# claim already exists in-graph; the scoping note 2026-09-07-2514-).  The
+# session-scoped OPERATOR_EDGE_QUERY above requires BOTH endpoints in the
+# session's ``seen`` set, so a CORRECTS whose TARGET lives in the earlier
+# session was invisible to the audit — the cross-session SUPERSEDE graded
+# ``edge_missing`` even when the write path wired it correctly.  Surface
+# every CORRECTS whose SOURCE is in this session (the new/active endpoint).
+CORRECTS_EDGE_QUERY = (
+    "MATCH (a:Point)-[r:CORRECTS]->(b:Point) "
+    "WHERE a.id IN $ids "
     "RETURN type(r), a.id, b.id"
 )
 # #2514: reified operator-mediated edges — operator nodes are :Point
@@ -343,6 +377,14 @@ def snapshot_session(sdk, session_id: str) -> dict:
         if r[0] and turn_pattern.match(r[0])
     }
     points: list[dict] = []
+    # #2552 (layer-2 WIRE — the structural leg): reified operator Points are
+    # stamped with the sessionCaptured eventId by the capture path (sdk.
+    # capture_session) so they ENTER the eventId-keyed memory layer — but they
+    # are structure, not claims. They are split out here so the claim-level
+    # survival/leakage/provenance metrics keep their pinned semantics while
+    # the operator surface carries the retrievability assertion
+    # (``operator_nodes`` — every operator node, with its eventId).
+    operator_nodes: list[dict] = []
     seen: set[str] = set()
     if eids:
         rows = g.query(
@@ -356,6 +398,9 @@ def snapshot_session(sdk, session_id: str) -> dict:
             seen.add(pid)
             if grading.is_turn_echo(point.get("content") or ""):
                 continue
+            if point.get("is_operator"):
+                operator_nodes.append(point)
+                continue
             points.append(point)
     # Operator edges among the memory layer (the REPHRASE dedup surface + the
     # raw IMPL/NAND counts the report audits).
@@ -366,10 +411,28 @@ def snapshot_session(sdk, session_id: str) -> dict:
         edge_rows = g.query(
             OPERATOR_EDGE_QUERY, params={"ids": list(seen)}
         ).result_set
+        # #2552: operators are structure, not claims — excluded from the
+        # point→point ``direct_edges`` surface (an unfiltered query would
+        # admit every point→operator INPUT edge once operators are in
+        # ``seen``).
+        operator_id_set = {p["point_id"] for p in operator_nodes}
         for etype, a, b in edge_rows:
             operator_counts[etype] = operator_counts.get(etype, 0) + 1
             if etype == "REPHRASE":
                 rephrase_edges.append((a, b))
+            if a not in operator_id_set and b not in operator_id_set:
+                direct_edges.append(
+                    {"rel_type": etype, "from_id": a, "to_id": b})
+        # #2552: cross-session CORRECTS among this session's source points
+        # (deduped against the session-scoped edges above).
+        known_edges = {(e["rel_type"], e["from_id"], e["to_id"])
+                       for e in direct_edges}
+        for etype, a, b in g.query(
+                CORRECTS_EDGE_QUERY, params={"ids": list(seen)}).result_set:
+            key = (etype, a, b)
+            if key in known_edges:
+                continue
+            known_edges.add(key)
             direct_edges.append({"rel_type": etype, "from_id": a, "to_id": b})
     # #2514: the reified-operator surface (operator nodes + mitigation Points
     # touching this session's memory points) — additive snapshot keys the
@@ -405,6 +468,14 @@ def snapshot_session(sdk, session_id: str) -> dict:
         "direct_edges": direct_edges,
         "operator_edges": operator_edges,
         "mitigations": mitigations,
+        # #2552: operators that entered the retrievable memory layer
+        # (eventId-stamped) — the structural surface the runner audit
+        # asserts on. An operator node ABSENT here on a capture that wrote
+        # operators is the pre-fix drop (no eventId → not retrievable).
+        "operator_nodes": operator_nodes,
+        "operators_total": len(operator_nodes),
+        "operators_provenanced": sum(
+            1 for p in operator_nodes if p.get("event_id")),
     }
 
 
@@ -480,7 +551,10 @@ def run_benchmark(
      "metrics", "session_results": [...], "notes": [...]}`` — plus, on a
     completed run, the additive ``operator_audit`` (issue #2514 planted-
     operator layer-2 grading: ``{planted, edge_correct, content_ok,
-    by_session}`` — NOT a gated metric in this change).
+    operators_total, operators_provenanced, by_session}`` — NOT a gated
+    metric in this change). ``operators_*`` is the #2552 structural probe:
+    reified operator Points that entered the retrievable memory layer
+    (eventId-stamped by the capture path).
     On a pre-flight failure or a control-lane violation the report comes back
     with run_status "failed" + the named origin — it NEVER raises mid-run
     (the umbrella aggregates receipts).
@@ -664,6 +738,20 @@ def run_benchmark(
                 operator_audit = grading.grade_planted_operators(
                     golds, points_by_session, surfaces_by_session
                 )
+                # #2552 (layer-2 WIRE — the structural leg): operator nodes
+                # that entered the retrievable memory layer. The structural
+                # fix stamps the capture's operators with the
+                # sessionCaptured eventId, so every operator the write path
+                # committed is retrievable and provenanced; a total > 0 with
+                # provenanced < total is the pre-fix drop signature.
+                operator_audit["operators_total"] = sum(
+                    s.get("operators_total", 0)
+                    for s in surfaces_by_session.values()
+                )
+                operator_audit["operators_provenanced"] = sum(
+                    s.get("operators_provenanced", 0)
+                    for s in surfaces_by_session.values()
+                )
                 for result in session_results:
                     sid = result["session_id"]
                     owned = [
@@ -684,6 +772,14 @@ def run_benchmark(
                         "edge whose endpoint claim was distilled still grades "
                         "edge_correct"
                     )
+                notes.append(
+                    "operator persistence (#2552): "
+                    f"{operator_audit['operators_provenanced']}/"
+                    f"{operator_audit['operators_total']} reified operator "
+                    "Points entered the retrievable memory layer "
+                    "(eventId-stamped) — a lower numerator is the structural "
+                    "drop the layer-2 WIRE fix closed"
+                )
     finally:
         if owned_sdk:
             _close_and_wipe(sdk)
@@ -951,6 +1047,10 @@ def build_receipt(report: dict, *, justification: str | None = None) -> dict:
             "planted": audit.get("planted"),
             "edge_correct": audit.get("edge_correct"),
             "content_ok": audit.get("content_ok"),
+            # #2552: operator persistence — operators that entered the
+            # retrievable memory layer (eventId-stamped).
+            "operators_total": audit.get("operators_total"),
+            "operators_provenanced": audit.get("operators_provenanced"),
         }
     return receipt
 

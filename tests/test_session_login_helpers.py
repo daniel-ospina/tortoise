@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT))
 from tests.fake_control_plane import FakeControlPlane  # noqa: E402
 
 # ── mint_target_user_for_key (supabase_control.py) ──────────────────────────
-# Fixtures use REAL UUIDs — team_memberships.user_id is a uuid column and
+# Fixtures use REAL UUIDs — org_memberships.user_id is a uuid column and
 # prod JWT subjects are always UUIDs (a non-UUID literal would 22P02 on the
 # PostgREST cast — the exact bug class the shape-gate fixes). Identity-anchor
 # rows (anon-/reg- strings) stay non-UUID in the identity-path tests.
@@ -29,15 +29,15 @@ _OTHER_UUID = str(_uuid.uuid4())
 
 
 def _cp_with_members(rows: list[dict]) -> FakeControlPlane:
-    return FakeControlPlane(tables={"team_memberships": rows})
+    return FakeControlPlane(tables={"org_memberships": rows})
 
 
 def test_mint_target_returns_active_member_uuid() -> None:
     from tortoise.supabase_control import mint_target_user_for_key
 
     cp = _cp_with_members([
-        {"team_id": "t1", "user_id": _OWNER_UUID, "role": "owner", "status": "active"},
-        {"team_id": "t1", "user_id": _MEMBER_UUID, "role": "member", "status": "active"},
+        {"org_id": "t1", "user_id": _OWNER_UUID, "role": "owner", "status": "active"},
+        {"org_id": "t1", "user_id": _MEMBER_UUID, "role": "member", "status": "active"},
     ])
     assert mint_target_user_for_key(cp, _MEMBER_UUID, "t1") == _MEMBER_UUID
     assert mint_target_user_for_key(cp, _OWNER_UUID, "t1") == _OWNER_UUID
@@ -50,7 +50,7 @@ def test_mint_target_returns_none_without_query_for_non_uuid() -> None:
     from tortoise.supabase_control import mint_target_user_for_key
 
     cp = _cp_with_members([
-        {"team_id": "t1", "user_id": _OWNER_UUID, "role": "owner", "status": "active"},
+        {"org_id": "t1", "user_id": _OWNER_UUID, "role": "owner", "status": "active"},
     ])
     for non_uuid in ("api", "anon-abc", "reg-xyz", "user-1"):
         before = cp.query_count
@@ -66,14 +66,14 @@ def test_mint_target_none_for_non_uuid_or_inactive() -> None:
     from tortoise.supabase_control import mint_target_user_for_key
 
     cp = _cp_with_members([
-        {"team_id": "t1", "user_id": _OWNER_UUID, "role": "owner", "status": "active"},
+        {"org_id": "t1", "user_id": _OWNER_UUID, "role": "owner", "status": "active"},
     ])
     # a UUID not on the team → None (query ran — the guard must NOT block
     # UUID-shaped values)
     assert mint_target_user_for_key(cp, _OTHER_UUID, "t1") is None
     # inactive membership → None
     cp2 = _cp_with_members([
-        {"team_id": "t1", "user_id": _LEFT_UUID, "role": "member", "status": "inactive"},
+        {"org_id": "t1", "user_id": _LEFT_UUID, "role": "member", "status": "inactive"},
     ])
     assert mint_target_user_for_key(cp2, _LEFT_UUID, "t1") is None
 

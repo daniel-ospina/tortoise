@@ -10,6 +10,7 @@
 | Hindsight (Vectorize) | [hindsight.md](hindsight.md) | Agent memory system (LLM-at-write, TEMPR retrieval) | 1 | ✅ Complete |
 | Honcho (Plastic Labs) | [honcho.md](honcho.md) | Agent memory (reasoning-based, pure-usage pricing) | 1 | ⚠️ Partial — thin stub |
 | **Mem0** | [mem0.md](mem0.md) | Agent memory infrastructure (Apache-2.0 SDK + cloud; co-occurrence "graph") | 1 | ✅ Complete (rewritten 2026-09-11) |
+| **Supermemory** | [supermemory.md](supermemory.md) | Agent memory + retrieval (vector-graph + "dreaming" derived facts/profiles) | 1 | ⚠️ Bootstrap — mechanism captured; §7–11 incomplete (2026-09-11) |
 | **Cognee** | [letta-cognee.md](letta-cognee.md) | Open-source knowledge-graph memory engine (Python) — `contradicts` edge + bi-temporal validity | 1 | ✅ Complete |
 | **Kumiho** | [kumiho.md](kumiho.md) | Graph-native cognitive memory — formal AGM belief revision over a versioned property graph | 1 | ✅ Complete |
 | **Letta** (formerly MemGPT) | [letta-cognee.md](letta-cognee.md) | Stateful-agent harness + agent-managed memory (git-backed Markdown filesystem) | 1 | ✅ Complete (combined profile) |

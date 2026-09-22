@@ -21,8 +21,32 @@ so orphans are cleaned within 2-3 spawn cycles).
 > state ≥ 10 min with no live suite markers — the #1642 FIX 3
 > discriminator that #1557's blanket live-pid protection lacked) plus
 > stale_socket leftovers, so a running test suite's servers are never
-> disturbed. The singleton lock (~/.tortoise/.reaper.lock) makes concurrent
+> disturbed. The singleton lock (`<tempdir>/.tortoise-reaper-<uid>/.reaper.lock`) makes concurrent
 > runs safe.
+>
+> **Discovery is scoped (#4068).** Pass 2 enumerates depth-1 tempdir entries
+> in the ephemeral namespace with an in-process `os.scandir` — no `find`
+> subprocess, no depth-2 lstat storm — and logs a WARNING with a partial set
+> if its budget expires (the sweep summary then reads `SCAN TRUNCATED`). The
+> scoped set is exactly the set every **removal** path already requires, and
+> live servers are enumerated name-independently by pass 1, so nothing
+> removable or killable is skipped. `--full-scan` (env
+> `TORTOISE_REAPER_FULL_SCAN=1`) restores the pre-#4068 **un-scoped**
+> enumeration for operator forensics; it can reach nothing an earlier release
+> could not, and the scheduled sweep stays scoped.
+>
+> **Provenance guard (#4136) — strict-only.** Every destruction path (the
+> SIGTERM admission, the stale-dir rename/rmtree, the quarantine sweep, and
+> the kill path's tempdir cleanup) acts only on a candidate directory owned
+> by the **invoking effective uid**, re-checked at the point of action. This
+> closes the T2/T3/T4 primitives of #4098's threat model on a shared
+> world-writable tempdir: evidence authored by another local uid can no
+> longer authorize a kill or an rmtree. The schedule above is documented as,
+> and installed as, a **user** cron/launchd job — unaffected. A **root-run**
+> sweep now reaps nothing (a non-root user's tempdir entries are not
+> root-owned): there is deliberately **no override, config flag, or
+> allowlist** to act on another uid's directory. Run the schedule as the
+> user whose orphans you want reaped.
 
 ## Cron (Linux / macOS with cron)
 
@@ -77,7 +101,7 @@ Load: `launchctl load ~/Library/LaunchAgents/com.tortoise.embedded-reaper.plist`
   The install script schedules with `--timeout 300` (a 10-min cadence has
   room for a 5-min sweep; the 120s default is too tight for a multi-hundred
   orphan backlog on a loaded box — observed abort mid-cleanup).
-- Singleton lock (`~/.tortoise/.reaper.lock`) prevents cron/manual overlap.
+- Singleton lock (`<tempdir>/.tortoise-reaper-<uid>/.reaper.lock`) prevents cron/manual overlap.
 - Only **no-path tempdir orphans** are killed; path-based servers (stable
   singleton, CWD leaks) are NEVER touched (that's Child 2's migration job).
 - `--no-dry-run` also **rmtrees dead-pid leftover dirs** (`stale_socket`
