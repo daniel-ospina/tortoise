@@ -58,6 +58,13 @@ baseline (a duplicate name a name comparison cannot see), or an exemption that h
 missing, unreadable, or malformed baseline is also a failure, as is an unreadable served-surface
 declaration — the guard must never skip a check and still report success.
 
+The baseline cannot be *edited* either. `tools/surface_manifest.py check` (the same required job) also
+**re-derives the whole baseline from the declaration** and reds on any difference outside the columns
+that are not a function of the code (`used_by`, `recommendation`, `basis`, `reason` — they read a
+machine-local call log — and the human `approval` fields). So hand-editing the baseline's `counts:`,
+a row's description, its `class`, or any other derived cell is a red build, not a shortcut: change the
+registry, then re-cut.
+
 **"Added tool" means the advertised surface, not just the registry.** A tool can reach agents without
 ever entering `TOOL_REGISTRY`, by three routes the guard checks separately, because each is invisible
 to the others:

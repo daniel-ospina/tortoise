@@ -19,6 +19,21 @@ itself and the expansion gate could never go red.
 
 `cut` is run by a human, once, with an explicit --commit. `render`, `check` and
 `guard` are safe to run anywhere, including CI.
+
+THE BASELINE IS VERIFIED AGAINST THE CODE, NOT AGAINST ITSELF
+    `check` re-derives the whole baseline with the SAME function `cut` writes
+    (`build_doc`) and fails on any difference outside the keys whose value is not a
+    function of the code alone (`NON_DERIVABLE_ROW_KEYS` / `NON_DERIVABLE_DOC_KEYS`,
+    each with its reason stated where it is declared). Without that, the artifact's
+    own numbers were the one thing nothing checked: a hand-edited `counts.tools: 999`
+    passed both this lint and the D2 expansion gate (measured).
+
+UNAVAILABLE EVIDENCE IS A REFUSAL, NEVER A SKIP
+    Every read of the baseline, the order table or the declaration raises
+    `SurfaceEvidenceUnreadable` and exits non-zero with `::error::`. A gate that cannot
+    read its evidence must not report success (the #1382 class), and a `cut` that cannot
+    read the artifact it is about to overwrite must not silently discard the approvals
+    recorded in it.
 """
 
 from __future__ import annotations
@@ -62,6 +77,73 @@ sys.path.insert(0, str(ROOT))
 ORDER_FILE = ROOT / "config" / "surface-order.yml"
 MANIFEST_FILE = ROOT / "config" / "surface-manifest.yml"
 RENDERED_FILE = ROOT / "docs" / "product" / "mcp-sdk-surface.md"
+
+
+class SurfaceEvidenceUnreadable(Exception):
+    """The evidence a check needs could not be read — a failure, never a skip.
+
+    The sibling `tools/sdk_surface.py` refuses in exactly this contract. This tool used
+    to raise a bare `FileNotFoundError` / `yaml` traceback out of `open()`, which is a
+    non-zero exit that says nothing about which evidence was missing — and, from `cut`,
+    a way to overwrite the baseline having read none of it.
+    """
+
+
+def _refuse(exc: SurfaceEvidenceUnreadable) -> int:
+    print(f"::error::{exc}")
+    print(f"REFUSED {exc}")
+    return 1
+
+
+def _read_manifest(path: Path | None = None) -> dict:
+    """Read the frozen baseline, or refuse. Never returns a partial document.
+
+    `path` is resolved at CALL time (never bound as a default), so a caller that
+    redirects `MANIFEST_FILE` — the tests do, and so would any future tool — reads the
+    file it redirected to. A default argument bound at import time silently read the
+    original, which is how a redirection can look effective and verify nothing.
+    """
+    if path is None:
+        path = MANIFEST_FILE
+    if not path.exists():
+        raise SurfaceEvidenceUnreadable(
+            f"the approved surface baseline is missing at {path}. The tool cannot verify "
+            "(or re-cut) the surface without it; a check that cannot read its evidence "
+            "must not report success."
+        )
+    try:
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001 — any read/parse failure is a refusal
+        raise SurfaceEvidenceUnreadable(f"could not read {path}: {exc}") from exc
+    if not isinstance(doc, dict) or not isinstance(doc.get("rows"), list):
+        raise SurfaceEvidenceUnreadable(
+            f"{path} is malformed: expected a mapping carrying a `rows:` list."
+        )
+    return doc
+
+
+# --- what a re-derivation CANNOT reproduce -----------------------------------
+# `check` re-derives the baseline from code and reds on any difference, which is what
+# makes a hand-edited manifest a failure rather than a fact. These keys are excluded
+# from that comparison because their value is not a function of the code alone:
+#
+#   * `~/.tortoise/analytics_fallback.jsonl` is a MACHINE-LOCAL call log. It supplies
+#     the `agents` / `never called` prefix of `used_by` and the wording of `reason`, so
+#     neither column is reproducible on another checkout — measured with the log absent:
+#     132 `used_by` and 25 `reason` rows differ, and those are the ONLY row keys that do.
+#     `recommendation` and `basis` are computed from the same observed-call signal, so
+#     they are excluded even where today's rows happen to agree.
+#   * `approval` / `approval_status` / `approval_principal` / `approval_pr` are a HUMAN
+#     recording — a PR number and a principal — not a derivation.
+#   * `cut_at_commit` is provenance: `cut` records the commit it ran at.
+#
+# The exclusion is a DENY-list applied to BOTH sides, so a key the generator grows later
+# is compared by default (it is present on one side only) and reds until it is
+# deliberately classified here.
+NON_DERIVABLE_ROW_KEYS = frozenset({"used_by", "recommendation", "basis", "reason", "approval"})
+NON_DERIVABLE_DOC_KEYS = frozenset(
+    {"cut_at_commit", "approval_status", "approval_principal", "approval_pr"}
+)
 
 # The four consumer-class values the guard derives from caller file paths. The
 # fifth, `control-plane`, is a judgement (it is about what a method DOES —
@@ -114,8 +196,26 @@ def tracked_python() -> list[str]:
 
 
 def load_order() -> dict:
-    with ORDER_FILE.open() as fh:
-        return yaml.safe_load(fh)
+    """The ordering/keyword table, or a refusal — never a bare traceback.
+
+    The lint's pass/fail must not be satisfiable by editing the rows it checks, so this
+    table is a separate file; that makes it evidence, and evidence that cannot be read is
+    a failure (see `SurfaceEvidenceUnreadable`).
+    """
+    if not ORDER_FILE.exists():
+        raise SurfaceEvidenceUnreadable(
+            f"the ordering table is missing at {ORDER_FILE}. The lint cannot derive a keyword "
+            "or an order without it."
+        )
+    try:
+        table = yaml.safe_load(ORDER_FILE.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        raise SurfaceEvidenceUnreadable(f"could not read {ORDER_FILE}: {exc}") from exc
+    if not isinstance(table, dict) or "keywords" not in table or "tokens" not in table:
+        raise SurfaceEvidenceUnreadable(
+            f"{ORDER_FILE} is malformed: expected a mapping carrying `keywords:` and `tokens:`."
+        )
+    return table
 
 
 def derive_keyword(name: str, description: str, tokens_to_keyword: dict[str, str]) -> str:
@@ -370,10 +470,22 @@ def _component_fingerprint(fn) -> str | None:
     return f"{rel}:{_code_digest(code)}"
 
 
-def cmd_cut(args: argparse.Namespace) -> int:
-    from tortoise.mcp_server import __name__ as _  # noqa: F401  (import check)
-    from tortoise.sdk import TortoiseSDK
-    from tortoise.tool_registry import GROUP_BY_NAME, RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+def build_doc(commit: str | None = None) -> dict:
+    """Derive the baseline from the declaration. THE single derivation.
+
+    `cut` writes what this returns; `check` compares the committed artifact against it.
+    One function, so the generator and the verifier cannot hold two opinions about what
+    the surface is — the failure mode the sibling `tools/sdk_surface.py` names when it
+    explains why it imports `_sdk_targets` instead of re-implementing it.
+    """
+    try:
+        from tortoise.mcp_server import __name__ as _  # noqa: F401  (import check)
+        from tortoise.sdk import TortoiseSDK
+        from tortoise.tool_registry import GROUP_BY_NAME, RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+    except Exception as exc:  # noqa: BLE001 — an unimportable declaration is a refusal
+        raise SurfaceEvidenceUnreadable(
+            f"could not import the surface declaration: {type(exc).__name__}: {exc}"
+        ) from exc
 
     order = load_order()
     keywords = order["keywords"]
@@ -667,7 +779,7 @@ def cmd_cut(args: argparse.Namespace) -> int:
     doc = {
         "manifest_version": 1,
         "issue": 3863,
-        "cut_at_commit": args.commit or subprocess.run(
+        "cut_at_commit": commit or subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True
         ).stdout.strip(),
         "allowed_transforms": transform_names,
@@ -683,14 +795,35 @@ def cmd_cut(args: argparse.Namespace) -> int:
         "retired": retired_out,
         "rows": tools_out + sdk_rows,
     }
-    with MANIFEST_FILE.open("w") as fh:
-        yaml.safe_dump(doc, fh, sort_keys=False, allow_unicode=True, width=110, default_flow_style=False)
+    return doc
 
+
+def cmd_cut(args: argparse.Namespace) -> int:
+    try:
+        doc = build_doc(args.commit)
+    except SurfaceEvidenceUnreadable as exc:
+        return _refuse(exc)
+
+    MANIFEST_FILE.write_text(
+        yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110, default_flow_style=False),
+        encoding="utf-8",
+    )
+
+    # NOT CARRIED FORWARD, DELIBERATELY: this writes `approval_status: pending-owner-approval`
+    # and `approval: null` on every row, exactly as `build_doc` produces them. Carrying the
+    # previous approvals over a re-cut looks like protecting the audit record, and it was
+    # drafted and then REFUSED: CONTRIBUTING.md ("To propose an addition", steps 2-4) makes
+    # the reset the control — a re-cut forces the owner to re-approve the baseline, so a
+    # changed `served_from` cannot ride an old approval into `approved`. Preserving them
+    # would silently reverse that decision, so the reset stays and the tool SAYS so, because
+    # otherwise the next reader sees the wipe as a bug and "fixes" it back.
     print(f"wrote {MANIFEST_FILE.relative_to(ROOT)}")
-    print(f"  tools={len(tools_out)} sdk={len(sdk_out)} retired={len(retired_out)}")
-    print(f"  keyword distribution: {keyword_counts}")
-    print(f"  distinct declared bindings: {len({t['sdk_method'] for t in tools_out if t['sdk_method']})}")
-    print(f"  dead declared bindings: {sorted({t['sdk_method'] for t in tools_out if t['sdk_method'] and not hasattr(TortoiseSDK, t['sdk_method'])})}")
+    print(f"  tools={doc['counts']['tools']} sdk={doc['counts']['sdk_public_methods']} "
+          f"retired={doc['counts']['retired']}")
+    print(f"  keyword distribution: {doc['counts']['keyword_distribution']}")
+    print(f"  distinct declared bindings: "
+          f"{len({r['sdk_method'] for r in doc['rows'] if r.get('sdk_method')})}")
+    print("  approvals reset to null — re-record them per row (CONTRIBUTING.md, step 4)")
     return 0
 
 
@@ -703,8 +836,10 @@ def cmd_render(args: argparse.Namespace) -> int:
     lands on consecutive lines and can be judged as a group rather than hunted
     for across 99 rows.
     """
-    with MANIFEST_FILE.open() as fh:
-        doc = yaml.safe_load(fh)
+    try:
+        doc = _read_manifest()
+    except SurfaceEvidenceUnreadable as exc:
+        return _refuse(exc)
     rows = doc["rows"]
     tools = [r for r in rows if not str(r["name"]).startswith("sdk:")]
     sdk = [r for r in rows if str(r["name"]).startswith("sdk:")]
@@ -1061,14 +1196,22 @@ def cmd_render(args: argparse.Namespace) -> int:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    """AC13's lint: nine properties over the declared set."""
-    from tortoise.tool_registry import GROUP_BY_NAME, RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+    """AC13's lint: nine structural properties, plus a tenth derived from the code."""
+    try:
+        order = load_order()
+        doc = _read_manifest()
+        from tortoise.tool_registry import GROUP_BY_NAME, RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+    except SurfaceEvidenceUnreadable as exc:
+        return _refuse(exc)
+    except Exception as exc:  # noqa: BLE001 — an unimportable declaration is a refusal
+        return _refuse(
+            SurfaceEvidenceUnreadable(
+                f"could not import the surface declaration: {type(exc).__name__}: {exc}"
+            )
+        )
 
-    order = load_order()
     verbs = order["keywords"]
     tokens_to_keyword = {t: kw for kw, toks in order["tokens"].items() for t in toks}
-    with MANIFEST_FILE.open() as fh:
-        doc = yaml.safe_load(fh)
     # Malformed rows must fail CLEANLY, and this must run before any row access —
     # the previous placement sat after `r["name"]` has already been dereferenced, so a
     # malformed row crashed with a bare traceback and the property could never fire.
@@ -1178,13 +1321,82 @@ def cmd_check(args: argparse.Namespace) -> int:
         for name in sorted(set(declared_retired) & row_names):
             problems.append(f"{name!r} is BOTH a surface row and a retired name")
 
+    # 10. the artifact matches a fresh derivation from the CODE -------------------
+    # Properties 1-9 check the artifact against ITSELF (order, clusters, families) and
+    # against two hand-authored tables (`surface-order.yml`, `retired`). None of them
+    # compared it to the declaration, so the baseline's headline numbers and every
+    # derived column could be edited by hand while BOTH this lint and the D2 expansion
+    # gate stayed green (measured: `counts.tools: 999` plus a doctored
+    # `keyword_distribution` passed both). The baseline is frozen — freezing it is what
+    # `cut` did — so a hand-edit is a failure to report, not a fact to accept.
+    #
+    # COST: this is the whole derivation, ~14 s CPU against ~0.4 s for properties 1-9,
+    # because it imports the declaration and scans every tracked module for callers. That
+    # is the price of the artifact being verified against the code at all; the CI job that
+    # runs this has a 10-minute bound and the check is required.
+    if not doc.get("cut_at_commit"):
+        problems.append("the baseline records no `cut_at_commit`; it must name the commit it was cut at")
+    try:
+        derived = build_doc()
+    except SurfaceEvidenceUnreadable as exc:
+        return _refuse(exc)
+    problems.extend(_derivation_problems(doc, derived))
+
     for p in problems:
         print(f"FAIL {p}")
     if problems:
         print(f"\n{len(problems)} problem(s)")
         return 1
-    print(f"OK — {len(rows)} tool rows, {len(retired) if isinstance(retired, list) else 0} retired, nine properties hold")
+    print(
+        f"OK — {len(rows)} tool rows, {len(retired) if isinstance(retired, list) else 0} retired, "
+        "ten properties hold (nine structural, one derived-from-code)"
+    )
     return 0
+
+
+def _project_row(row: dict) -> dict:
+    return {k: v for k, v in row.items() if k not in NON_DERIVABLE_ROW_KEYS}
+
+
+def _derivation_problems(doc: dict, derived: dict) -> list[str]:
+    """Every difference between the committed baseline and a fresh derivation.
+
+    Compared by row NAME, so a rename is one removal plus one addition rather than a
+    silent re-point. The projected dict is compared WHOLE, so a key the generator grows
+    later is present on one side only and reds by default — an unclassified column cannot
+    escape verification by being new.
+    """
+    problems: list[str] = []
+    for key in sorted(set(doc) | set(derived)):
+        if key in NON_DERIVABLE_DOC_KEYS or key in ("rows", "retired"):
+            continue
+        if doc.get(key) != derived.get(key):
+            problems.append(
+                f"the baseline's `{key}` does not match the code: recorded {doc.get(key)!r}, "
+                f"derived {derived.get(key)!r}"
+            )
+    for label, key in (("row", "rows"), ("retired row", "retired")):
+        derived_rows = {str(r.get("name")): r for r in derived.get(key) or [] if isinstance(r, dict)}
+        recorded_rows = {str(r.get("name")): r for r in doc.get(key) or [] if isinstance(r, dict)}
+        for name in sorted(set(recorded_rows) | set(derived_rows)):
+            recorded, fresh = recorded_rows.get(name), derived_rows.get(name)
+            if recorded is None:
+                problems.append(f"{label} `{name}` is derived from the code but is not in the baseline")
+                continue
+            if fresh is None:
+                problems.append(f"{label} `{name}` is in the baseline but is not derived from the code")
+                continue
+            a, b = _project_row(recorded), _project_row(fresh)
+            if a == b:
+                continue
+            keys = sorted(set(a) | set(b))
+            differing = [k for k in keys if a.get(k) != b.get(k)]
+            problems.append(
+                f"{label} `{name}` was hand-edited — {', '.join(differing)}: recorded "
+                f"{{{', '.join(f'{k}={a.get(k)!r}' for k in differing)}}}, derived "
+                f"{{{', '.join(f'{k}={b.get(k)!r}' for k in differing)}}}"
+            )
+    return problems
 
 
 def main() -> int:

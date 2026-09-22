@@ -4,7 +4,8 @@ These tests are the machine half of the acceptance criteria:
 
 * AC1  — the list is generated from the declaration and is in sync with it
 * AC11 — the baseline covers the declaration, and the gate fails closed
-* AC13 — the ordering lint's eight properties hold
+* AC13 — the ordering lint's ten properties hold, including the tenth: the artifact is
+         verified against a fresh DERIVATION, not only against itself
 
 They are deliberately fast and dependency-free: they execute the declaration and
 compare it to the checked-in baseline. No database, no network, no subprocess
@@ -13,11 +14,14 @@ pytest run.
 
 from __future__ import annotations
 
+import argparse
+import copy
 import pathlib
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -375,16 +379,253 @@ def test_the_guard_reds_when_a_new_retirement_is_not_approved(tmp_path):
     assert "NEW RETIRED TOOL" in result.stdout
 
 
-def test_the_order_lint_reds_on_a_retired_mismatch(tmp_path, monkeypatch):
+def test_the_order_lint_reds_on_a_retired_mismatch(tmp_path, monkeypatch, derived_baseline):
     """`check` owns the same contract on the generated artifact."""
     sm = _load_manifest_tool()
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: derived_baseline)
     doc = _manifest()
     doc["retired"] = doc["retired"][:-1]
     path = tmp_path / "manifest.yml"
     path.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110))
     monkeypatch.setattr(sm, "MANIFEST_FILE", path)
-    rc = sm.cmd_check(__import__("argparse").Namespace())
+    rc = sm.cmd_check(argparse.Namespace())
     assert rc == 1, "the order lint passed a manifest whose retired block was incomplete"
+
+
+# --- AC13 property 10: the artifact is verified against the CODE, not itself -----
+# The lint's first nine properties compare the baseline to itself (order, clusters,
+# families) and to two hand-authored tables. None compared it to the declaration, so the
+# baseline's headline numbers and every derived column could be hand-edited while both
+# this lint and the D2 expansion gate stayed green — measured: `counts.tools: 999` plus a
+# doctored `keyword_distribution` passed both. These tests are the mutation evidence for
+# the property that closes it.
+
+
+@pytest.fixture(scope="module")
+def derived_baseline() -> dict:
+    """The real derivation, computed ONCE for the whole module (~20s).
+
+    The mutation tests patch `build_doc` with this cache so each one costs milliseconds;
+    the unpatched, end-to-end derivation is exercised by the subprocess
+    `test_the_order_lint_passes` above, which reds the moment the committed artifact and
+    the code part company.
+    """
+    return _load_manifest_tool().build_doc()
+
+
+@pytest.fixture
+def checker(monkeypatch, derived_baseline):
+    """`check` bound to a redirected manifest, against the real derivation."""
+    sm = _load_manifest_tool()
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: derived_baseline)
+    return sm
+
+
+def _check(sm, doc: dict, tmp_path) -> tuple[int, str]:
+    path = tmp_path / "manifest.yml"
+    path.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110))
+    sm.MANIFEST_FILE = path
+    import io
+    from contextlib import redirect_stdout
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = sm.cmd_check(argparse.Namespace())
+    return rc, buf.getvalue()
+
+
+def test_the_check_reds_on_a_hand_edited_headline_count(checker, tmp_path):
+    """The headline number the baseline exists to freeze was compared by NOTHING."""
+    doc = _manifest()
+    doc["counts"]["tools"] = 999
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 1, "a hand-edited `counts.tools` did not red the lint"
+    assert "counts" in out and "999" in out, out
+
+
+def test_the_check_reds_on_a_hand_edited_keyword_distribution(checker, tmp_path):
+    doc = _manifest()
+    doc["counts"]["keyword_distribution"]["fetch"] = 999
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 1, "a hand-edited keyword distribution did not red the lint"
+    assert "keyword_distribution" in out and "999" in out, out
+
+
+def test_the_check_reds_on_a_hand_edited_rendered_cell(checker, tmp_path):
+    """MEMBERSHIP is not CONTENT.
+
+    Every name-only check passes while the description that renders into the document the
+    owner reviews — `job`, the cell the table is built from — says something else. A guard
+    that only proves a row EXISTS does not protect what the row says.
+    """
+    doc = _manifest()
+    row = next(r for r in doc["rows"] if not str(r["name"]).startswith("sdk:"))
+    row["job"] = "a description no derivation produces"
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 1, "a hand-edited rendered cell did not red the lint"
+    assert "job" in out and row["name"] in out, out
+
+
+def test_the_check_reds_on_a_derived_column_the_guard_never_sees(checker, tmp_path):
+    """`class` is derived (an AST caller scan), is rendered, and no other gate reads it."""
+    doc = _manifest()
+    row = next(r for r in doc["rows"] if str(r["name"]).startswith("sdk:"))
+    row["class"] = "definitely-not-derived"
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 1, "a hand-edited `class` did not red the lint"
+    assert "class" in out and row["name"] in out, out
+
+
+def test_the_check_reds_on_an_unclassified_new_column(checker, tmp_path):
+    """A key the generator grows later is compared by DEFAULT, so it cannot escape.
+
+    The exclusion is a deny-list applied to both sides: a column that is present on one
+    side only reds until it is deliberately classified as non-derivable.
+    """
+    doc = _manifest()
+    doc["rows"][0]["sneaky_new_column"] = "x"
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 1, "an unclassified column was accepted"
+    assert "sneaky_new_column" in out, out
+
+
+def test_the_declared_non_derivable_keys_all_exist_on_a_derived_row(derived_baseline):
+    """The exclusion set cannot rot into a list of keys nobody emits.
+
+    If a key is renamed, its exclusion must be renamed with it — otherwise the exclusion
+    silently stops excluding anything and the comparison reds (loudly, which is the point)
+    or, worse, the key it was written for is no longer covered by the reason recorded for it.
+    """
+    sm = _load_manifest_tool()
+    row_keys = {k for r in derived_baseline["rows"] for k in r}
+    assert sm.NON_DERIVABLE_ROW_KEYS <= row_keys, (
+        "these exclusions name keys no derived row carries: "
+        f"{sorted(sm.NON_DERIVABLE_ROW_KEYS - row_keys)}"
+    )
+    assert sm.NON_DERIVABLE_DOC_KEYS < set(derived_baseline), (
+        "these doc-level exclusions name keys the derivation does not emit: "
+        f"{sorted(sm.NON_DERIVABLE_DOC_KEYS - set(derived_baseline))}"
+    )
+
+
+def test_the_check_refuses_when_the_baseline_is_missing(tmp_path, monkeypatch, capsys):
+    """A check that cannot read its evidence must REFUSE, not traceback and not pass."""
+    sm = _load_manifest_tool()
+    monkeypatch.setattr(sm, "MANIFEST_FILE", tmp_path / "does-not-exist.yml")
+    assert sm.cmd_check(argparse.Namespace()) == 1
+    out = capsys.readouterr().out
+    assert "::error::" in out and "missing" in out, out
+
+
+def test_the_check_refuses_when_the_ordering_table_is_missing(tmp_path, monkeypatch, capsys):
+    sm = _load_manifest_tool()
+    monkeypatch.setattr(sm, "ORDER_FILE", tmp_path / "no-order.yml")
+    assert sm.cmd_check(argparse.Namespace()) == 1
+    out = capsys.readouterr().out
+    assert "::error::" in out and "ordering table" in out, out
+
+
+def test_the_derivation_resets_approvals_BY_DESIGN(derived_baseline):
+    """The reset is the CONTROL, not an oversight — CONTRIBUTING.md makes it so.
+
+    "To propose an addition" steps 2-4: `cut` folds the change in and marks the baseline
+    `pending-owner-approval`, and the owner then records `approval` per row. The reset is
+    what forces re-approval of the whole baseline, so a changed `served_from` cannot ride
+    an old approval into `approved`.
+
+    A carry-over of the previous approvals across a re-cut (drafted because a naive cut
+    zeroes six recorded approvals and their rationale comments, which reads like data
+    loss) was REFUSED against that documented decision rather than adopted. This test
+    exists so the behaviour is not "fixed" later by someone reading only the code: the
+    reset is asserted, with the flow that requires it named.
+    """
+    assert derived_baseline["approval_status"] == "pending-owner-approval"
+    assert derived_baseline["approval_principal"] is None
+    assert derived_baseline["approval_pr"] is None
+    reset = [
+        r for r in [*derived_baseline["rows"], *derived_baseline["retired"]]
+        if r.get("approval") is not None
+    ]
+    assert reset == [], f"a re-cut carried approvals forward: {reset[:5]}"
+
+
+def test_each_declared_non_derivable_row_key_is_actually_excluded(derived_baseline):
+    """Every key the comparison excludes must be excluded for a REASON that is tested.
+
+    The exclusion set is the only place the drift gate can be weakened without touching
+    the comparison itself: drop one key and a hand-edit to that key stops reding. So the
+    expected set is a LITERAL here — iterating `NON_DERIVABLE_ROW_KEYS` would let a dropped
+    key delete its own coverage, which is exactly the survivor this test first recorded
+    (mutation M3: `reason` dropped from the set, suite still green).
+    """
+    sm = _load_manifest_tool()
+    assert sm.NON_DERIVABLE_ROW_KEYS == {
+        "used_by",
+        "recommendation",
+        "basis",
+        "reason",
+        "approval",
+    }, "the exclusion set changed — every key must be justified where it is declared"
+    row = copy.deepcopy(derived_baseline["rows"][0])
+    for key in sorted(sm.NON_DERIVABLE_ROW_KEYS):
+        mutated = copy.deepcopy(row)
+        mutated[key] = "a value no derivation produces"
+        assert sm._derivation_problems(
+            {"rows": [mutated], "retired": []}, {"rows": [row], "retired": []}
+        ) == [], f"`{key}` is declared non-derivable but a change to it reds the check"
+
+
+def test_each_declared_non_derivable_doc_key_is_actually_excluded(derived_baseline):
+    sm = _load_manifest_tool()
+    assert sm.NON_DERIVABLE_DOC_KEYS == {
+        "cut_at_commit",
+        "approval_status",
+        "approval_principal",
+        "approval_pr",
+    }
+    for key in sorted(sm.NON_DERIVABLE_DOC_KEYS):
+        mutated = dict(derived_baseline)
+        mutated[key] = "a value no derivation produces"
+        assert sm._derivation_problems(mutated, derived_baseline) == [], (
+            f"`{key}` is declared non-derivable but a change to it reds the check"
+        )
+
+
+def test_a_nonderivable_key_is_still_seen_when_it_is_the_ONLY_difference(derived_baseline):
+    """The exclusion must not swallow the keys around it.
+
+    `used_by` is excluded; a change to the row's NAME is not. If the comparison stripped
+    whole rows instead of named keys, this would pass silently.
+    """
+    sm = _load_manifest_tool()
+    row = copy.deepcopy(derived_baseline["rows"][0])
+    renamed = copy.deepcopy(row)
+    renamed["name"] = "tortoise_not_a_real_tool"
+    problems = sm._derivation_problems(
+        {"rows": [renamed], "retired": []}, {"rows": [row], "retired": []}
+    )
+    assert problems, "a renamed row slipped through the projection"
+
+
+def test_cut_refuses_when_the_declaration_cannot_be_read(monkeypatch, capsys, tmp_path):
+    """`cut` overwrites the frozen baseline, so unreadable evidence must write NOTHING.
+
+    Stands in for the import/registry failure, which needs a broken interpreter to
+    reproduce: the contract under test is that the failure is reported as a refusal and
+    the artifact is left alone.
+    """
+    sm = _load_manifest_tool()
+    target = tmp_path / "surface-manifest.yml"
+    monkeypatch.setattr(sm, "MANIFEST_FILE", target)
+
+    def _boom(*a, **k):
+        raise sm.SurfaceEvidenceUnreadable("the declaration is unreadable")
+
+    monkeypatch.setattr(sm, "build_doc", _boom)
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 1
+    out = capsys.readouterr().out
+    assert "::error::" in out and "unreadable" in out, out
+    assert not target.exists(), "a refused cut wrote the baseline anyway"
 
 
 def test_the_guard_reds_on_a_duplicate_registry_entry():
