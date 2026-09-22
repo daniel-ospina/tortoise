@@ -217,6 +217,103 @@ const CSP_CONSTANTS = new Set(['RELAXED_CSP', 'STRICT_CSP', 'ADMIN_CSP'])
 /** Every name a policy binding may carry (the constants plus the nonce factory). */
 const POLICY_NAMES = new Set([...CSP_CONSTANTS, 'strictCspWithNonce'])
 
+// ── the beacon allowances, shared by §3 (served interstitial) and §4b ────────
+//
+// Cloudflare Web Analytics is on for this zone, so the edge injects an SRI-pinned
+// `https://static.cloudflareinsights.com/beacon.min.js/<version>` tag into HTML
+// responses whose REQUEST carries `Accept: text/html` (not a User-Agent test), and
+// the beacon reports to `https://cloudflareinsights.com/cdn-cgi/rum`.
+const BEACON_SCRIPT_ORIGIN = 'https://static.cloudflareinsights.com'
+const BEACON_RUM_ORIGIN = 'https://cloudflareinsights.com'
+
+/**
+ * The pinned value of every policy expression, keyed the same way as the scan in
+ * §4b. The per-directive checks can only prove the beacon is PRESENT; they say
+ * nothing about a token added ALONGSIDE it, and a weakening written into a
+ * constant and its `_headers` copies together is internally consistent — §4's
+ * byte-identity test compares the copies to each other, so it stays green
+ * (verified: adding `'unsafe-eval'` or `*` to `STRICT_CSP` and its four `_headers`
+ * blocks passed the whole suite). A pin is what makes "a policy changed" a
+ * reviewed edit: a legitimate change (a new tag origin, or #4706 dropping the
+ * beacon) updates this table in the same commit, which is the operational
+ * constraint the plan doc already states.
+ *
+ * The interstitial's entry uses the nonce sentinel `TESTNONCE`, so it is the
+ * value §3 compares against the SERVED policy with its per-response nonce masked
+ * out. That is why the served check cannot be satisfied by the sentinel alone.
+ */
+const PINNED_POLICIES = {
+  'marketing.RELAXED_CSP':
+    "default-src 'self'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com https://cdnjs.cloudflare.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://connect.facebook.net https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com https://*.supabase.co https://api.premiselabs.co https://us.i.posthog.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://www.google-analytics.com https://region1.google-analytics.com https://connect.facebook.net https://www.facebook.com https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+  'dashboard.RELAXED_CSP':
+    "default-src 'self'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com https://cdnjs.cloudflare.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://connect.facebook.net https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com https://*.supabase.co https://api.premiselabs.co https://us.i.posthog.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://www.google-analytics.com https://region1.google-analytics.com https://connect.facebook.net https://www.facebook.com https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+  'dashboard.STRICT_CSP':
+    "default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+  'dashboard.ADMIN_CSP':
+    "default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com https://*.supabase.co wss://*.supabase.co; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+  'dashboard.strictCspWithNonce':
+    "default-src 'self'; script-src 'nonce-TESTNONCE' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+}
+
+/**
+ * Everything wrong with one policy VALUE, as a list. Shared by §4b (all five
+ * declared policies) and §3 (the SERVED interstitial policy, nonce masked), so a
+ * nonce-keyed branch cannot be checked by one and missed by the other.
+ */
+function policyProblems(name, value) {
+  const wrong = []
+  const parts = value.split('; ')
+  const byDirective = new Map(
+    parts.map((d) => {
+      const sp = d.indexOf(' ')
+      return [d.slice(0, sp), d.slice(sp + 1)]
+    }),
+  )
+  // A repeated directive is malformed, and the two consumers disagree about it:
+  // this Map keeps the LAST while a browser honours the FIRST. Reject it rather
+  // than silently reading the wrong one.
+  if (byDirective.size !== parts.length) {
+    wrong.push(`${name}: duplicate directive — a browser honours the first, this scan the last`)
+  }
+  const scriptSrc = byDirective.get('script-src') || ''
+  const connectSrc = byDirective.get('connect-src') || ''
+  const tokens = (directive) => directive.split(/\s+/).filter(Boolean)
+
+  // TOKEN match, never substring: `https://static.cloudflareinsights.com.evil.test`
+  // contains the origin as a prefix and would satisfy an `includes()` — a guard
+  // that passes on an origin the browser does not treat as ours.
+  if (!tokens(scriptSrc).includes(BEACON_SCRIPT_ORIGIN)) {
+    wrong.push(`${name}: script-src omits ${BEACON_SCRIPT_ORIGIN}`)
+  }
+  if (!tokens(connectSrc).includes(BEACON_RUM_ORIGIN)) {
+    wrong.push(`${name}: connect-src omits ${BEACON_RUM_ORIGIN} (the RUM endpoint)`)
+  }
+  // A nonce policy is exempt from nothing here: the edge tag carries no nonce, so
+  // a nonce-only `script-src` blocks it. Host sources ARE honoured alongside a
+  // nonce — but only while `'strict-dynamic'` is absent, because with it the
+  // browser IGNORES every host-source in script-src and blocks the tag. The
+  // comment used to assert that assumption; this asserts it instead.
+  if (tokens(scriptSrc).some((t) => t.toLowerCase() === "'strict-dynamic'")) {
+    wrong.push(
+      `${name}: 'strict-dynamic' is present — it makes the browser ignore every ` +
+        `host-source in script-src, so ${BEACON_SCRIPT_ORIGIN} would NOT load the tag`,
+    )
+  }
+  // `script-src-elem`, when present, overrides `script-src` for `<script src>`
+  // elements — the injected tag is one, so naming the origin only in `script-src`
+  // would be inert. `script-src-attr` governs inline event handlers and
+  // `javascript:` URLs ONLY: it cannot affect a `<script src>` element, so its
+  // presence is not a beacon risk and must NOT redden this (adding it is a
+  // legitimate hardening of the `'unsafe-inline'` policies).
+  if (byDirective.has('script-src-elem')) {
+    wrong.push(
+      `${name}: script-src-elem overrides script-src for <script src> — ` +
+        `this scan cannot prove the tag loads; remove it or model it here`,
+    )
+  }
+  return wrong
+}
+
 function isCspValue(node) {
   if (!node) return false
   if (node.type === 'Identifier') return CSP_CONSTANTS.has(node.name)
@@ -456,7 +553,22 @@ function stampConstants(relPath) {
   const ast = parseSource(readFileSync(join(repoRoot, relPath), 'utf8'), relPath)
   const names = []
   const record = (node) => {
-    if (!isCspValue(node)) return
+    if (!isCspValue(node)) {
+      // A stamp whose value is NOT a policy binding — a string literal, a member
+      // expression, an unmodelled call — is invisible to every name-based check,
+      // and a browser INTERSECTS two CSP headers, so a beacon-less literal added
+      // beside a valid named stamp narrows the policy and blocks the beacon with
+      // every assertion green. Record the non-binding as a name the caller's
+      // "exactly one policy" assertion cannot match, so it fails closed instead.
+      if (node) {
+        names.push(
+          node.type === 'StringLiteral'
+            ? `"${String(node.value).slice(0, 40)}"`
+            : `(${node.type})`,
+        )
+      }
+      return
+    }
     names.push(node.type === 'CallExpression' ? node.callee.name : node.name)
   }
   visitNodes(ast.program, (node) => {
@@ -840,20 +952,6 @@ test('the /auth/confirm interstitial is nonce-gated and uncacheable', async () =
     /unsafe-inline/,
     'script-src must not fall back to unsafe-inline',
   )
-  // The policy DRIVEN here is the one a user gets, not the
-  // `strictCspWithNonce('TESTNONCE')` sentinel §4b pins by value: a function whose
-  // origin set varied with the nonce value would satisfy the sentinel and serve a
-  // beacon-less interstitial in production. Assert both origins on the response.
-  assert.match(
-    scriptSrc,
-    /https:\/\/static\.cloudflareinsights\.com/,
-    'the SERVED interstitial policy must carry the beacon origin beside the nonce',
-  )
-  assert.match(
-    csp,
-    /connect-src [^;]*https:\/\/cloudflareinsights\.com/,
-    'the SERVED interstitial policy must carry the RUM origin',
-  )
   assert.match(csp, /style-src [^;]*'unsafe-inline'/, 'styles stay inline (inline <style> block)')
 
   // Extract without constraining the character class — otherwise the assertion
@@ -862,6 +960,20 @@ test('the /auth/confirm interstitial is nonce-gated and uncacheable', async () =
   const nonce = /'nonce-([^']+)'/.exec(csp)?.[1]
   assert.ok(nonce, 'the policy must carry a nonce')
   assert.match(nonce, /^[A-Za-z0-9+/]+={0,2}$/, 'the nonce must be base64')
+
+  // The policy this page SERVES must be the pinned interstitial policy, with only
+  // the per-response nonce masked out. §4b pins the `TESTNONCE` SENTINEL, and a
+  // branch keyed on the nonce value satisfies that sentinel while serving
+  // something else — a `script-src-elem` override, `'strict-dynamic'`, a dropped
+  // `object-src` — which the sentinel's own scan can never see. This surface has no
+  // `_headers` counterpart, so the response is the check; comparing the whole value
+  // (not just the two origins) means the served policy is held to the same pin.
+  const served = csp.replace(`'nonce-${nonce}'`, "'nonce-TESTNONCE'")
+  assert.equal(
+    served,
+    PINNED_POLICIES['dashboard.strictCspWithNonce'],
+    'the SERVED interstitial policy (per-response nonce masked) must equal the pinned policy',
+  )
 
   const html = await res.text()
   assert.ok(
@@ -1003,10 +1115,13 @@ test('every policy allows the platform-injected Cloudflare beacon', () => {
 
   const discovered = []
   for (const [mod, exported] of Object.entries(modules)) {
+    // EVERY export is classified, not only the string/function ones: an
+    // object-wrapped policy is invisible to a `typeof` filter, and the moment one
+    // is reachable through a stamp the value scan is the wrong instrument to
+    // catch it. Classifying every export fails closed on a shape this list does
+    // not model.
     for (const [key, value] of Object.entries(exported)) {
-      if (typeof value === 'string' || typeof value === 'function') {
-        discovered.push(`${mod}.${key}`)
-      }
+      if (value !== undefined) discovered.push(`${mod}.${key}`)
     }
   }
   assert.deepEqual(
@@ -1018,98 +1133,28 @@ test('every policy allows the platform-injected Cloudflare beacon', () => {
       '`policies` if it emits a CSP, or to NON_POLICY_EXPORTS if it does not',
   )
 
-  const SCRIPT_ORIGIN = 'https://static.cloudflareinsights.com'
-  const RUM_ORIGIN = 'https://cloudflareinsights.com'
-
-  // The policies are also PINNED BY VALUE. The per-directive checks below prove the
-  // beacon is present; they say nothing about a token added ALONGSIDE it, and a
-  // weakening written into the constant and its `_headers` copies together is
-  // internally consistent — §4's byte-identity test compares the two copies to each
-  // other, so it stays green (verified: adding `'unsafe-eval'` or `*` to STRICT_CSP
-  // and its four `_headers` blocks passed the whole suite). A pin is the only shape
-  // that makes "a policy changed" a reviewed edit: a legitimate change (a new tag
-  // origin, or #4706 dropping the beacon) updates this table in the same commit,
-  // which is the operational constraint the plan doc already states.
-  const PINNED = {
-    'marketing.RELAXED_CSP':
-      "default-src 'self'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com https://cdnjs.cloudflare.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://connect.facebook.net https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com https://*.supabase.co https://api.premiselabs.co https://us.i.posthog.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://www.google-analytics.com https://region1.google-analytics.com https://connect.facebook.net https://www.facebook.com https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
-    'dashboard.RELAXED_CSP':
-      "default-src 'self'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com https://cdnjs.cloudflare.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://connect.facebook.net https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com https://*.supabase.co https://api.premiselabs.co https://us.i.posthog.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://www.google-analytics.com https://region1.google-analytics.com https://connect.facebook.net https://www.facebook.com https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
-    'dashboard.STRICT_CSP':
-      "default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
-    'dashboard.ADMIN_CSP':
-      "default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com https://*.supabase.co wss://*.supabase.co; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
-    'dashboard.strictCspWithNonce':
-      "default-src 'self'; script-src 'nonce-TESTNONCE' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
-  }
+  // The policies are also PINNED BY VALUE (see PINNED_POLICIES). A pin is what
+  // makes "a policy changed" a reviewed edit; and §3 compares the SERVED
+  // interstitial against the same table, so the sentinel below is not the only
+  // thing standing between a nonce-keyed branch and production.
   assert.deepEqual(
-    Object.keys(PINNED).sort(),
+    Object.keys(PINNED_POLICIES).sort(),
     Object.keys(policies).sort(),
-    'the PINNED table must cover exactly the policies scanned below',
+    'the PINNED_POLICIES table must cover exactly the policies scanned below',
   )
-  const changed = Object.entries(PINNED)
+  const changed = Object.entries(PINNED_POLICIES)
     .filter(([name, expected]) => policies[name]() !== expected)
     .map(([name]) => name)
   assert.deepEqual(
     changed,
     [],
     `these policies no longer match their pinned value — if the change is intended, update ` +
-      `PINNED in the SAME commit (never to make a weakening test pass):\n  ${changed.join('\n  ')}`,
+      `PINNED_POLICIES in the SAME commit (never to make a weakening test pass):\n  ${changed.join('\n  ')}`,
   )
 
-  const wrong = []
-  for (const [name, getValue] of Object.entries(policies)) {
-    const value = getValue()
-    const parts = value.split('; ')
-    const byDirective = new Map(
-      parts.map((d) => {
-        const sp = d.indexOf(' ')
-        return [d.slice(0, sp), d.slice(sp + 1)]
-      }),
-    )
-    // A repeated directive is malformed, and the two consumers disagree about it:
-    // this Map keeps the LAST while a browser honours the FIRST. Reject it rather
-    // than silently reading the wrong one.
-    if (byDirective.size !== parts.length) {
-      wrong.push(`${name}: duplicate directive — a browser honours the first, this scan the last`)
-    }
-    const scriptSrc = byDirective.get('script-src') || ''
-    const connectSrc = byDirective.get('connect-src') || ''
-    const tokens = (directive) => directive.split(/\s+/).filter(Boolean)
-
-    // TOKEN match, never substring: `https://static.cloudflareinsights.com.evil.test`
-    // contains the origin as a prefix and would satisfy an `includes()` — a guard
-    // that passes on an origin the browser does not treat as ours.
-    if (!tokens(scriptSrc).includes(SCRIPT_ORIGIN)) {
-      wrong.push(`${name}: script-src omits ${SCRIPT_ORIGIN}`)
-    }
-    if (!tokens(connectSrc).includes(RUM_ORIGIN)) {
-      wrong.push(`${name}: connect-src omits ${RUM_ORIGIN} (the RUM endpoint)`)
-    }
-    // A nonce policy is exempt from nothing here: the edge tag carries no nonce,
-    // so a nonce-only `script-src` blocks it. Host sources ARE honoured alongside
-    // a nonce — but only while `'strict-dynamic'` is absent, because with it the
-    // browser IGNORES every host-source in script-src and blocks the tag. The
-    // comment used to assert that assumption; this asserts it instead.
-    if (tokens(scriptSrc).some((t) => t.toLowerCase() === "'strict-dynamic'")) {
-      wrong.push(
-        `${name}: 'strict-dynamic' is present — it makes the browser ignore every ` +
-          `host-source in script-src, so ${SCRIPT_ORIGIN} would NOT load the tag`,
-      )
-    }
-    // `script-src-elem`, when present, overrides `script-src` for `<script src>`
-    // elements — the injected tag is one, so naming the origin only in
-    // `script-src` would be inert. `script-src-attr` governs inline event
-    // handlers and `javascript:` URLs ONLY: it cannot affect a `<script src>`
-    // element, so its presence is not a beacon risk and must NOT redden this test
-    // (adding it is a legitimate hardening of the `'unsafe-inline'` policies).
-    if (byDirective.has('script-src-elem')) {
-      wrong.push(
-        `${name}: script-src-elem overrides script-src for <script src> — ` +
-          `this test cannot prove the tag loads; remove it or model it here`,
-      )
-    }
-  }
+  const wrong = Object.entries(policies).flatMap(([name, getValue]) =>
+    policyProblems(name, getValue()),
+  )
   assert.deepEqual(
     wrong,
     [],

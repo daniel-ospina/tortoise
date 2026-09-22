@@ -79,7 +79,10 @@ def _other_errors(console: list[str], failed: list[str]) -> list[str]:
 
 def main(argv: list[str]) -> int:
     urls = argv[1:] or DEFAULT_URLS
-    if any(u.startswith("https://") for u in urls) and os.environ.get("ALLOW_PROD") != "1":
+    # `.lower()`: a scheme is case-insensitive (RFC 3986), and Chromium navigates
+    # `HTTPS://…`, so a case-sensitive test would let an un-opted-in run reach
+    # production through an upper-case URL.
+    if any(u.lower().startswith("https://") for u in urls) and os.environ.get("ALLOW_PROD") != "1":
         print("refusing https targets without ALLOW_PROD=1 (read-only, but be explicit)")
         return 2
 
