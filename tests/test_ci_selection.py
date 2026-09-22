@@ -1002,22 +1002,31 @@ def test_push_legs_partitions_every_classified_file():
             f"push_extra[{i}] {f} must ride {leg} — the #1485 spread rule"
         )
     # …and the rule is genuinely exercised while push_extra is empty: prove
-    # the parity spread on a synthetic manifest rather than assume it — for
-    # each entry BOTH the leg it lands in and that it lands in no other leg
-    # (a duplicated entry passes a presence-only probe; measured).
+    # the parity spread on a synthetic manifest rather than assume it. Each
+    # entry must ride its parity leg and EXACTLY ONE leg — a duplicate into the
+    # sibling half (double-run) or a leak into the slow/carve-out legs is a
+    # real defect and must not pass. `classified` (not `fast`) is the collision
+    # guard, so a probe name that is a slow or carve-out file cannot silently
+    # coincide with a real one.
     probe_names = ("bench/probe_even", "bench/probe_odd")
-    assert not (set(probe_names) & fast), (
+    assert not (set(f"{n}.py" for n in probe_names) & classified), (
         "probe names would collide with a classified file: "
-        f"{set(probe_names) & fast}"
+        f"{set(f'{n}.py' for n in probe_names) & classified}"
     )
     probe = {**m, "push_extra": [f"{n}.py" for n in probe_names]}
     probe_legs = push_legs(probe)
-    assert probe_names[0] in set(probe_legs["half_a"]) and \
-        probe_names[0] not in set(probe_legs["half_b"]), \
-        "#1485: push_extra[0] must ride half_a and no other leg"
-    assert probe_names[1] in set(probe_legs["half_b"]) and \
-        probe_names[1] not in set(probe_legs["half_a"]), \
-        "#1485: push_extra[1] must ride half_b and no other leg"
+    probe_legs_of = {
+        n: sorted(leg for leg, files in probe_legs.items() if n in set(files))
+        for n in probe_names
+    }
+    assert probe_legs_of[probe_names[0]] == ["half_a"], (
+        "#1485: push_extra[0] must ride half_a and exactly one leg — found "
+        f"{probe_legs_of[probe_names[0]]}"
+    )
+    assert probe_legs_of[probe_names[1]] == ["half_b"], (
+        "#1485: push_extra[1] must ride half_b and exactly one leg — found "
+        f"{probe_legs_of[probe_names[1]]}"
+    )
 
 
 def test_carve_out_mirrors_test_no_redirect_stems():
