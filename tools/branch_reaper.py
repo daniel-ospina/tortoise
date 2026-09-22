@@ -563,7 +563,10 @@ def classify(
         elif name in prs["open"]:
             row["verdict"], row["reason"] = VERDICT_PRESERVE, "open-pr"
             row["pr_number"] = prs["open"][name][0]["number"]
-        elif name in prs.get("open_bases", ()):
+        elif name in prs["open_bases"]:
+            # `prs["open_bases"]` not `.get(...)`: a fail-open default here would
+            # silently disable the base veto if `fetch_prs` ever stopped emitting
+            # the key, and this is a delete-decision input.
             # This branch is the BASE of an open PR. Deleting it would break a
             # live PR even when the branch itself is an ancestor of the main ref
             # (rule 3 would otherwise call it SAFE). Rule 2 checked only the PR
@@ -1405,6 +1408,11 @@ def _run_main(args) -> int:
             # prunes. `--no-backup` is the explicit opt-out.
             backup_bundle = args.backup_bundle
             if args.no_backup:
+                if backup_bundle is not None:
+                    print("branch_reaper: --no-backup and --backup-bundle are mutually "
+                          "exclusive — --no-backup means 'write no bundle'.",
+                          file=sys.stderr)
+                    return EXIT_USAGE
                 print("branch_reaper: --no-backup — the recovery record holds only SHAs, "
                       "which do NOT survive object pruning (`gc.pruneExpire`, 2 weeks by "
                       "default). Once pruned, the deleted tips are unrecoverable.",

@@ -745,6 +745,33 @@ cat "$d/${{state}}_pages.json"
             br._make_backup_bundle(
                 str(self.repo), str(self.repo / "a" / ".." / "b.bundle"), [])
 
+    def test_a_bare_empty_page_list_aborts(self):
+        # A valid `--paginate --slurp` payload always has at least one page, so a
+        # bare `[]` is malformed — reading it as "zero PRs" drops every veto.
+        _git(self.repo, "branch", "victim", self.main_sha)
+        (self.repo / "g.txt").write_text("g\n")
+        _git(self.repo, "add", "g.txt")
+        _git(self.repo, "commit", "-m", "advance")
+        _git(self.repo, "update-ref", "refs/remotes/origin/main",
+             _git_out(self.repo, "rev-parse", "HEAD"))
+        self.write_fixtures(open_pages=[])
+        rc, out, err = self.run_tool(["--apply", "--no-backup"], repo=self.driver)
+        self.assertEqual(rc, 2, err + out)
+        self.assertIn("victim", self.branches())
+
+    def test_no_backup_conflicts_with_an_explicit_bundle_path(self):
+        # `--no-backup` means "write no bundle"; a contradictory explicit path is
+        # a usage error, not a silent write plus a false warning.
+        sha = self.commit_on("merged/b", "work")
+        self.add_pr("merged", "merged/b", sha)
+        self.write_fixtures()
+        dest = self.tmp / "b.bundle"
+        rc, out, err = self.run_tool(
+            ["--apply", "--no-backup", "--backup-bundle", str(dest)], repo=self.driver)
+        self.assertEqual(rc, 3, err + out)
+        self.assertFalse(dest.exists())
+        self.assertIn("merged/b", self.branches())
+
     def test_backup_bundle_written_before_deletion(self):
         sha = self.commit_on("merged/branch", "merged work")
         self.add_pr("merged", "merged/branch", sha)
