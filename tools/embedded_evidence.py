@@ -1236,12 +1236,74 @@ def _tool_version() -> str:
 
 
 def _write_record(rec: dict, out: Path) -> None:
-    out.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(out.parent), prefix=".rec-", suffix=".tmp")
-    with os.fdopen(fd, "w") as fh:
-        json.dump(_jsonable(rec), fh, indent=2, sort_keys=False)
-        fh.write("\n")
-    os.replace(tmp, out)
+    """Write `rec` to `out` atomically, via a temp in `out`'s PHYSICAL parent.
+
+    The temp must be created in the parent the KERNEL will use, not the lexical
+    one. `mkstemp` normalises its `dir` with `os.path.abspath` — LEXICALLY — while
+    `os.replace(tmp, out)` resolves every directory component of `out` through
+    symlinks. With a symlink followed by `..` the two disagree:
+
+        tree/lnk -> <outside>
+        out = tree/lnk/../destdir
+
+    kernel-resolves the destination to `<outside>/../destdir` (outside the tree,
+    so the pre-write refusal is correctly silent), while `abspath` collapses
+    `lnk/..` to `<tree>` — so the temp file, holding the COMPLETE record JSON, was
+    created INSIDE the measured tree and left there when `os.replace` failed
+    (#4585). `realpath` resolves `..` AFTER the symlink, exactly as the kernel
+    does, so the temp and the destination share one parent.
+
+    If the write or the replace fails, the temp is unlinked before the error is
+    re-raised: a partial record must not survive as dirt in a tree the pin
+    measures. `os.unlink` is best-effort — the caller (`main`) sweeps any
+    `.rec-*` residue that this cleanup could not remove.
+    """
+    parent = Path(os.path.realpath(os.path.dirname(os.fspath(out))))
+    parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(parent), prefix=".rec-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(_jsonable(rec), fh, indent=2, sort_keys=False)
+            fh.write("\n")
+        os.replace(tmp, out)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _sweep_record_residue(*measured_roots: Path) -> list[Path]:
+    """Delete `.rec-*.tmp` files inside a measured tree; return what was removed.
+
+    A temp file holds the COMPLETE record JSON, so a survivor is exactly the
+    "the tool's own record is part of the dirt it measures" condition #4203 exists
+    to eliminate. `_write_record` now creates the temp in the destination's
+    physical parent and unlinks it on failure, so this is the BACKSTOP for residue
+    that cleanup could not remove (its `os.unlink` failed, or an earlier invocation
+    crashed). The sweep is non-recursive and name-prefixed (`mkstemp`'s `.rec-`),
+    which is where the lexical collapse placed the temp; it never touches anything
+    else the tree contains.
+    """
+    removed: list[Path] = []
+    for root in measured_roots:
+        root_real = Path(os.path.realpath(os.fspath(root)))
+        if not root_real.is_dir():
+            continue
+        try:
+            candidates = sorted(root_real.glob(".rec-*.tmp"))
+        except OSError:
+            # Best-effort: the sweep runs inside the write-failure handler, so it
+            # must not turn a refusal into a traceback.
+            continue
+        for candidate in candidates:
+            try:
+                os.unlink(candidate)
+            except OSError:
+                continue
+            removed.append(candidate)
+    return removed
 
 
 def _default_record_out() -> Path:
@@ -1755,17 +1817,37 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     out = args.record_out or _default_record_out()
+    measured_roots = [REPO_ROOT, Path(rec["pin"]["measured_root"])]
     try:
         _write_record(rec, out)
         # #4203: the pre-write refusal PREDICTS the destination; this OBSERVES it.
         # A record that slipped past the prediction is deleted and refused here, so
         # no future spelling of the path can leave the tool's own record as dirt in
         # a tree it is measuring.
-        _verify_record_landed_outside(
-            out, REPO_ROOT, Path(rec["pin"]["measured_root"]),
-        )
+        _verify_record_landed_outside(out, *measured_roots)
     except UsageError as exc:
         print(f"usage error: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        # #4585: a failed write is a REFUSAL, never a traceback. The environment
+        # made certification impossible, so the exit code is 2 (environment error)
+        # — but the operator must be told WHAT failed, WHY it matters and WHAT to
+        # do, and any `.rec-*` temp left inside a measured tree must be swept: the
+        # temp holds a complete record, and leaving it would make the tool's own
+        # bytes part of the dirt the pin measures.
+        swept = _sweep_record_residue(*measured_roots)
+        detail = (
+            f"removed {len(swept)} temp file(s) from the measured tree"
+            if swept else "no temp residue was found in the measured tree"
+        )
+        print(
+            f"error: could not write the record to {out}: {exc}. "
+            "The record was NOT written, so no certification exists for this "
+            f"head ({detail}). Write the record outside the measured tree (the "
+            f"default is {_default_record_out()}) and re-run; if the destination "
+            "already exists it must be a FILE, not a directory.",
+            file=sys.stderr,
+        )
         return 2
     print(json.dumps({
         "record": str(out),
