@@ -324,6 +324,43 @@ class ReaperTestCase(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("INCOMPLETE", err)
 
+    def test_absent_gh_binary_is_incomplete_exit_2(self):
+        # The sibling of test_missing_worktree_engine_is_incomplete_exit_2, for
+        # the `gh` surface. An ABSENT gh is an UNQUERYABLE surface, so it must
+        # take the documented INCOMPLETE / exit 2. Without the OSError arm in
+        # _run it escaped as FileNotFoundError -> exit 1 + a traceback, a
+        # contract the exit-code table does not contain.
+        self.commit_on("merged/branch", "merged work")
+        self.write_fixtures()
+        rc, out, err = self.run_tool(
+            ["--apply"], repo=self.driver,
+            env_extra={"BRANCH_REAPER_GH": str(self.tmp / "no-such-gh")})
+        self.assertEqual(rc, 2, err + out)
+        self.assertIn("INCOMPLETE", err)
+        self.assertIn("cannot execute", err)
+        self.assertIn("merged/branch", self.branches())
+
+    def test_toplevel_oserror_is_incomplete_exit_2(self):
+        # The true top-level boundary (`main`) with NOTHING deleted: an OSError
+        # raised anywhere inside `_run_main` that the two richer handlers do not
+        # wrap — `resolve_repo`'s `os.getcwd()`, or a `build_report` failure —
+        # must be the documented exit 2, never a traceback with an undocumented 1.
+        # (The out-of-range clock that used to drive this now formats defensively
+        # instead of raising, so it is forced here directly.)
+        br = self._load_tool()
+        real_run = br._run_main
+        br._LANDED = False
+
+        def boom(_args):
+            raise OSError(2, "No such file or directory")
+
+        br._run_main = boom
+        try:
+            rc = br.main(["--repo", str(self.repo), "--slug", "owner/repo"])
+        finally:
+            br._run_main = real_run
+        self.assertEqual(rc, 2, rc)
+
     def test_missing_worktree_engine_is_incomplete_exit_2(self):
         # P2-4(b): the DOCUMENTED contract for a missing engine is INCOMPLETE /
         # exit 2 (fail closed, nothing deleted). Without the isfile guard, bash
@@ -440,6 +477,32 @@ cat "$d/${{state}}_pages.json"
         self.assertIn("merged/branch", self.branches())
 
     # ── TOCTOU + recovery ───────────────────────────────────────────────────
+
+    def test_a_refused_deletion_returns_exit_4(self):
+        # Pins the CLI contract for EXIT_PARTIAL. Nothing pinned it, so a
+        # regression that left the refused->EXIT_PARTIAL tail unreachable turned
+        # the documented exit 4 into a silent 0 with the suite still green.
+        br = self._load_tool()
+        sha = self.commit_on("merged/branch", "merged work")
+        self.add_pr("merged", "merged/branch", sha)
+        self.write_fixtures()
+        real_delete = br.delete_branches
+
+        def refuse(repo_root, rows, *, backup_bundle, results=None, **kwargs):
+            out = real_delete(repo_root, rows, backup_bundle=backup_bundle,
+                              results=results)
+            for r in results or []:
+                r["result"] = "refused"
+            return out
+
+        br.delete_branches = refuse
+        try:
+            with self._stub_env():
+                rc = br.main(["--repo", str(self.driver), "--slug", "owner/repo",
+                              "--apply"])
+        finally:
+            br.delete_branches = real_delete
+        self.assertEqual(rc, 4, rc)
 
     def test_ref_moved_between_classify_and_delete_is_refused(self):
         # Import the module and call the delete phase directly with a stale OID,
@@ -619,6 +682,46 @@ cat "$d/${{state}}_pages.json"
         self.assertIn("merged/branch", self.branches())
         self.assertTrue(late_wt.exists())
 
+    def test_held_at_bundle_time_tip_is_still_in_the_bundle(self):
+        # The mirror of the test above. The bundle used to be built from
+        # `targets` MINUS the branches held at that instant, while the delete
+        # phase re-reads held branches AFTERWARDS. A branch held at bundle time
+        # whose worktree is released during the (up to 900 s) `git bundle create`
+        # was therefore deleted while ABSENT from the bundle — the one case the
+        # bundle exists to prevent. All targets are now bundled; bundling a
+        # branch that ends up preserved is harmless.
+        br = self._load_tool()
+        sha_a = self.commit_on("merged/a", "work a")
+        sha_b = self.commit_on("merged/b", "work b")
+        self.add_pr("merged", "merged/a", sha_a)
+        self.add_pr("merged", "merged/b", sha_b)
+        self.write_fixtures()
+        held_wt = self.tmp / "wt-held-at-bundle-time"
+        _git(self.repo, "worktree", "add", str(held_wt), "merged/b")
+        bundle = self.tmp / "backup.bundle"
+        real_run = br._run
+
+        def run_releasing_worktree(cmd, **kwargs):
+            if "bundle" in cmd and "create" in cmd and held_wt.exists():
+                _git(self.repo, "worktree", "remove", "--force", str(held_wt))
+            return real_run(cmd, **kwargs)
+
+        br._run = run_releasing_worktree
+        try:
+            with self._stub_env():
+                rc = br.main(["--repo", str(self.driver), "--slug", "owner/repo",
+                              "--apply", "--backup-bundle", str(bundle)])
+        finally:
+            br._run = real_run
+        self.assertEqual(rc, 0, rc)
+        self.assertTrue(bundle.exists() and bundle.stat().st_size > 0)
+        # merged/b became unheld during the bundle write, so the delete phase
+        # deleted it — and its tip must therefore be IN the bundle.
+        self.assertNotIn("merged/b", self.branches())
+        heads = _run(["git", "-C", str(self.repo), "bundle", "list-heads",
+                      str(bundle)]).stdout
+        self.assertIn(sha_b, heads)
+
     def test_worktree_created_in_the_delete_window_is_restored(self):
         # The residual the batch re-read cannot cover: a worktree created between
         # the guard read and its branch's `update-ref -d`. The post-delete
@@ -674,6 +777,85 @@ cat "$d/${{state}}_pages.json"
         self.assertEqual(rc, br.EXIT_INCOMPLETE_AFTER_DELETE, err.getvalue())
         self.assertIn("AFTER DELETION", err.getvalue())
         self.assertIn("merged/branch", self.branches())
+
+    def test_toplevel_handler_applies_the_after_deletion_distinction(self):
+        # The BOUNDARY's own distinction, not the two inner handlers'. An
+        # exception raised AFTER both of them have returned — the post-delete
+        # output block, e.g. a broken pipe on `--apply --json | head` — reaches
+        # only `main`, which must still say 6 and not 2 ("Nothing was deleted")
+        # over a real deletion.
+        br = self._load_tool()
+        real_run = br._run_main
+
+        def boom(_args):
+            # Set DURING the run: `main` resets `_LANDED` at its top now, so the
+            # flag has to be raised by the run itself, as a real deletion does.
+            br._LANDED = True
+            raise OSError(32, "Broken pipe")
+
+        br._run_main = boom
+        try:
+            rc = br.main(["--repo", str(self.repo), "--slug", "owner/repo"])
+        finally:
+            br._run_main = real_run
+            br._LANDED = False
+        self.assertEqual(rc, 6, rc)
+
+    def test_post_delete_build_report_oserror_returns_exit_6(self):
+        # `--apply` with NO `--report`. `build_report` used to sit BETWEEN the two
+        # after-deletion handlers, so an OSError from it following a real deletion
+        # reached only the top-level catch and returned exit 2 — whose documented
+        # meaning, "Nothing was deleted", is false at that point. It must be 6.
+        br = self._load_tool()
+        sha = self.commit_on("merged/branch", "merged work")
+        self.add_pr("merged", "merged/branch", sha)
+        self.write_fixtures()
+        real_build = br.build_report
+
+        def boom(*_a, **_k):
+            raise OSError(84, "Value too large to be stored in data type")
+
+        br.build_report = boom
+        try:
+            with self._stub_env():
+                rc = br.main(["--repo", str(self.driver), "--slug", "owner/repo",
+                              "--apply"])
+        finally:
+            br.build_report = real_build
+        self.assertEqual(rc, 6, rc)
+        self.assertNotIn("merged/branch", self.branches())
+
+    def test_post_delete_report_write_oserror_returns_exit_6(self):
+        # The OSError arm of the same POST-delete window as the symlink test
+        # below, not the symlink guard. Before the boundary catch, an unwritable
+        # surface here exited 1 with a traceback and dropped the
+        # after-deletion signal entirely — for a tool that has just deleted
+        # branches, that is the signal that must not be lost.
+        br = self._load_tool()
+        sha = self.commit_on("merged/branch", "merged work")
+        self.add_pr("merged", "merged/branch", sha)
+        self.write_fixtures()
+        report_dir = self.tmp / "rpt-dir"
+        report_dir.mkdir()
+        report = report_dir / "r.md"
+        real_delete = br.delete_branches
+
+        def delete_then_lock(repo_root, rows, *, backup_bundle, results=None, **kwargs):
+            out = real_delete(repo_root, rows, backup_bundle=backup_bundle,
+                              results=results)
+            os.chmod(report_dir, 0o555)
+            return out
+
+        br.delete_branches = delete_then_lock
+        try:
+            with self._stub_env():
+                rc = br.main(["--repo", str(self.driver), "--slug", "owner/repo",
+                              "--apply", "--report", str(report)])
+        finally:
+            br.delete_branches = real_delete
+            os.chmod(report_dir, 0o755)
+        self.assertEqual(rc, 6, rc)
+        self.assertNotIn("merged/branch", self.branches())
 
     def test_post_delete_report_write_failure_returns_exit_6(self):
         # The POST-delete report-write handler, distinct from the mid-loop one:

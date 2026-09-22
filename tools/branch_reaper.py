@@ -100,17 +100,23 @@ Safety
 Exit codes (a delegate code is never passed through unmodified)
 -------------------------------------------------------------
   0  complete (dry-run or apply)
-  2  INCOMPLETE — a surface was truncated/unqueryable, or the worktree engine
-     was missing/unrunnable. Nothing was deleted.
-  3  usage error, or ``--apply`` refused from the main checkout
+  2  INCOMPLETE — a surface was truncated/unqueryable, the worktree engine was
+     missing/unrunnable, or a filesystem surface was unwritable/unsearchable.
+     Nothing was deleted. (`argparse` also exits 2 of its own accord on a syntax
+     error, before this tool's own code path runs — so 2 can arrive without this
+     tool having classified anything. See 3 for the tool's OWN usage refusal.)
+  3  usage error raised by this tool, or ``--apply`` refused from the main checkout
   4  partial failure — at least one deletion was refused, or the worktree
-     engine reported >=1 FAILED removal
-  5  internal error (unexpected engine exit, malformed output)
+     engine reported >=1 FAILED removal (the engine's exit code is remapped, not
+     its output parsed)
+  5  internal error (unexpected engine exit)
   6  INCOMPLETE AFTER DELETION — the run aborted after at least one branch may
      have been deleted: a mid-loop timeout, a FIRST target whose killed
      ``update-ref -d`` may already have landed (a deleted-or-unknown
-     ``aborted``), a worktree-held branch that could not be restored, or a report
-     path that became a symlink between the pre-delete and post-delete writes.
+     ``aborted``), a worktree-held branch that could not be restored, a report
+     path that became a symlink between the pre-delete and post-delete writes,
+     or a POST-delete report write that failed (unwritable, ENOSPC, EIO) — that
+     last one is the case this code exists to keep from degrading into exit 1.
      Exit 2's "Nothing was deleted" contract does NOT hold here; the pre-delete
      recovery record holds every classified tip, so ``git branch <name> <sha>``
      restores any of them.
@@ -182,6 +188,13 @@ def _run(cmd: list[str], *, cwd: str | None = None, timeout: int = 120) -> subpr
     except subprocess.TimeoutExpired as exc:
         raise Incomplete(
             f"command timed out after {timeout}s: {' '.join(cmd[:2])}") from exc
+    except OSError as exc:
+        # An ABSENT or non-executable binary is an UNQUERYABLE SURFACE, not a
+        # crash: with no `gh` the PR-state gate cannot run at all, which is this
+        # tool's documented INCOMPLETE (exit 2) — not an exit-1 traceback. The
+        # in-file precedent is the worktree engine, which guards the same
+        # "binary missing" class with `os.path.isfile` -> Incomplete.
+        raise Incomplete(f"cannot execute {cmd[0]!r}: {exc}") from exc
 
 
 def _gh_bin() -> str:
@@ -191,7 +204,12 @@ def _gh_bin() -> str:
 def _now() -> int:
     raw = os.environ.get("BRANCH_REAPER_NOW")
     if raw:
-        return int(raw)
+        try:
+            return int(raw)
+        except ValueError as exc:
+            # A malformed clock is a bad input, not a crash: surface it as the
+            # documented INCOMPLETE rather than a ValueError traceback.
+            raise Incomplete(f"BRANCH_REAPER_NOW is not an integer: {raw!r}") from exc
     import time
 
     return int(time.time())
@@ -489,12 +507,23 @@ def _write_text_safe(path: str, text: str) -> None:
     p = Path(path)
     if p.is_symlink():
         raise Incomplete(f"refusing to write through a symlink: {path}")
-    p.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=p.name + ".tmp.", dir=str(p.parent))
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=p.name + ".tmp.", dir=str(p.parent))
+    except OSError as exc:
+        raise Incomplete(f"cannot write {path}: {exc}") from exc
     try:
         with os.fdopen(fd, "w") as fh:
             fh.write(text)
         os.replace(tmp, p)
+    except OSError as exc:
+        # An unwritable surface (EACCES/ENOSPC/EROFS/EIO) is the documented
+        # INCOMPLETE, not a traceback. This matters most AFTER a delete phase:
+        # the post-delete report write is the exit-6 signal, and an OSError
+        # escaping here used to lose it.
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise Incomplete(f"cannot write {path}: {exc}") from exc
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
@@ -532,9 +561,12 @@ def _make_backup_bundle(repo_root: str, path: str, targets: list[dict]) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise Incomplete(f"cannot create bundle directory {dest.parent}: {exc}") from exc
-    fd, tmp = tempfile.mkstemp(prefix=dest.name + ".tmp.", dir=str(dest.parent))
-    os.close(fd)
-    os.unlink(tmp)  # git bundle create must create the file itself
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=dest.name + ".tmp.", dir=str(dest.parent))
+        os.close(fd)
+        os.unlink(tmp)  # git bundle create must create the file itself
+    except OSError as exc:
+        raise Incomplete(f"cannot prepare bundle path {dest}: {exc}") from exc
     prefix = f"refs/branch-reaper-backup/{os.getpid()}-{os.urandom(4).hex()}"
     refs: list[str] = []
     try:
@@ -554,7 +586,10 @@ def _make_backup_bundle(repo_root: str, path: str, targets: list[dict]) -> None:
         expected = {r["oid"] for r in targets}
         if got != expected:
             raise Incomplete("backup bundle does not expose the expected tips")
-        os.replace(tmp, dest)
+        try:
+            os.replace(tmp, dest)
+        except OSError as exc:
+            raise Incomplete(f"cannot move bundle into place at {dest}: {exc}") from exc
     finally:
         try:
             if os.path.exists(tmp):
@@ -570,10 +605,35 @@ def _make_backup_bundle(repo_root: str, path: str, targets: list[dict]) -> None:
 
 # ── reporting ───────────────────────────────────────────────────────────────
 
+#: True once ANY branch may have been deleted. Read by the TOP-LEVEL handler in
+#: `main`, so the after-deletion distinction is a property of the BOUNDARY rather
+#: than of each call-site tuple. It lived in two call-site handlers for three
+#: review rounds, and each round found one more path that reached the boundary and
+#: returned exit 2 — whose documented meaning, "Nothing was deleted", was by then
+#: false (a broken pipe on the post-delete output block; a post-apply
+#: `build_report`; a clock that raised a type the handlers did not catch).
+_LANDED = False
+
+
+def _mark_landed(results: list[dict] | None) -> None:
+    """Record that deletions landed, for the top-level handler to consult."""
+    global _LANDED
+    if _landed_results(results):
+        _LANDED = True
+
+
 def _fmt_ts(ts: int) -> str:
     import datetime
 
-    return datetime.datetime.fromtimestamp(ts, datetime.UTC).strftime("%Y-%m-%d")
+    try:
+        return datetime.datetime.fromtimestamp(ts, datetime.UTC).strftime("%Y-%m-%d")
+    except (OSError, OverflowError, ValueError):
+        # A REPORTING date, never a decision input, and it raises THREE types
+        # across the out-of-range-clock surface: OSError (the middle band),
+        # ValueError (year > 9999) and OverflowError (ts >= 2**63). A bad clock
+        # must not abort a run that has already classified — or, worse, already
+        # deleted (that path lost the exit-6 signal and returned an undocumented 1).
+        return f"(unrepresentable: {ts})"
 
 
 def build_report(rows: list[dict], worktrees: list[dict], ancestors: set[str],
@@ -848,8 +908,13 @@ def delete_branches(repo_root: str, rows: list[dict],
     batch = max(1, batch)
     targets = [r for r in rows if r["verdict"] == VERDICT_SAFE]
     if backup_bundle:
-        _make_backup_bundle(repo_root, backup_bundle,
-                            [r for r in targets if r["branch"] not in _held_branches(repo_root)])
+        # ALL targets, not just the currently-unheld ones. A branch that is held
+        # at THIS instant can have its worktree released while the (up to 900 s)
+        # `git bundle create` runs; the delete phase re-reads held branches, so
+        # that branch is then deleted while absent from the bundle. Bundling a
+        # branch that ends up preserved is harmless — missing one that gets
+        # deleted is the case the bundle exists to prevent.
+        _make_backup_bundle(repo_root, backup_bundle, targets)
     held: set[str] = set()
     try:
         for i, r in enumerate(targets):
@@ -946,12 +1011,28 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    # A single top-level handler: ANY Incomplete (from resolve_repo, the main
-    # checkout probe, enumeration, dirty probes, or the post-teardown re-read)
-    # must surface as the documented exit 2, never an uncaught traceback.
+    # `_LANDED` is module-level state read by the handler below; reset it per call
+    # so a second in-process `main()` (the test suite, or an embedder) cannot
+    # inherit a previous run's deletions and report exit 6 for an unrelated
+    # abort. The production CLI is one-shot, but the leak is silent when it bites.
+    global _LANDED
+    _LANDED = False
+    # The true top-level handler: ANY Incomplete or OSError from anything below —
+    # `resolve_repo`'s `os.getcwd()`, the main-checkout probe, enumeration, dirty
+    # probes, `build_report`, the delete phase, the report writes, the post-delete
+    # output block, or the post-teardown re-read — must surface as the documented
+    # exit code, never an uncaught traceback. This is the BOUNDARY; the two richer
+    # handlers inside `_run_main` add detail, but the after-deletion distinction
+    # is applied HERE too, from `_LANDED`, so no path can return "nothing was
+    # deleted" (2) after something was.
     try:
         return _run_main(args)
-    except Incomplete as exc:
+    except (Incomplete, OSError) as exc:
+        if _LANDED:
+            print(f"branch_reaper: INCOMPLETE AFTER DELETION — {exc}. At least one branch "
+                  f"was deleted or left in an unknown state. The pre-delete recovery "
+                  f"record holds every classified tip.", file=sys.stderr)
+            return EXIT_INCOMPLETE_AFTER_DELETE
         print(f"branch_reaper: INCOMPLETE — {exc}.", file=sys.stderr)
         return EXIT_INCOMPLETE
 
@@ -1071,13 +1152,20 @@ def _run_main(args) -> int:
             # snapshot above is for the report and the recovery record only.
             delete_branches(repo_root, rows, backup_bundle=args.backup_bundle,
                             results=apply_results)
+            _mark_landed(apply_results)
             free_after = _disk_free_kb(repo_root)
             if free_before is not None and free_after is not None:
                 disk = {"before_kb": free_before, "after_kb": free_after,
                         "delta_kb": free_after - free_before}
             if any(r["result"] == "refused" for r in apply_results):
                 result = EXIT_PARTIAL
-        except Incomplete as exc:
+        except (Incomplete, OSError) as exc:
+            # ORDER MATTERS: Python matches handlers in source order, so this
+            # clause MUST precede the `except BaseException` below. Placing
+            # `BaseException` first made this handler dead and put the
+            # refused->EXIT_PARTIAL tail inside unreachable code — silently
+            # turning the documented exit 4 into a 0. Caught by review.
+            _mark_landed(apply_results)
             landed = _landed_results(apply_results)
             if landed:
                 print(f"branch_reaper: INCOMPLETE AFTER DELETION — {exc}. "
@@ -1088,19 +1176,39 @@ def _run_main(args) -> int:
             print(f"branch_reaper: INCOMPLETE — {exc}. Delete phase aborted; the "
                   f"pre-delete recovery record is on disk.", file=sys.stderr)
             return EXIT_INCOMPLETE
+        except BaseException:
+            # Everything else — recorded then propagated. A raise from inside the
+            # delete phase still leaves `apply_results` holding what landed, and
+            # the top-level handler in `main` must not report "nothing was
+            # deleted" over a real deletion.
+            _mark_landed(apply_results)
+            raise
 
-    report = build_report(rows, worktrees, ancestors, repo_root=repo_root, slug=slug,
-                          main_ref_used=ref,
-                          include_closed_unmerged=args.include_closed_unmerged,
-                          engine_output=engine_output, apply_results=apply_results, disk=disk,
-                          recovery=recovery, detached_ts=detached_ts)
     try:
+        # INSIDE the try, not before it. `build_report` sits after the delete
+        # phase, so an OSError from it (its timestamp formatting raises for an
+        # out-of-range clock) is an AFTER-DELETION failure and must take the 6
+        # branch below. Between the two handlers it reached only the top-level
+        # catch and returned exit 2 — whose documented meaning, "Nothing was
+        # deleted", is false by then.
+        report = build_report(rows, worktrees, ancestors, repo_root=repo_root, slug=slug,
+                              main_ref_used=ref,
+                              include_closed_unmerged=args.include_closed_unmerged,
+                              engine_output=engine_output, apply_results=apply_results, disk=disk,
+                              recovery=recovery, detached_ts=detached_ts)
         if args.report:
             _write_text_safe(args.report, report)
-    except Incomplete as exc:
-        print(f"branch_reaper: {exc}", file=sys.stderr)
-        if _landed_results(apply_results):
+    except (Incomplete, OSError) as exc:
+        # Same token, same after-deletion distinction, same boundary catch as the
+        # handler above — this is the POST-delete write, so an OSError here is
+        # precisely the case whose exit-6 signal used to be lost to a traceback.
+        landed = _landed_results(apply_results)
+        if landed:
+            print(f"branch_reaper: INCOMPLETE AFTER DELETION — {exc}. "
+                  f"{len(landed)} branch(es) were deleted. The pre-delete recovery "
+                  f"record holds every classified tip.", file=sys.stderr)
             return EXIT_INCOMPLETE_AFTER_DELETE
+        print(f"branch_reaper: INCOMPLETE — {exc}", file=sys.stderr)
         return EXIT_INCOMPLETE
     if args.json:
         print(json.dumps({"repo": repo_root, "slug": slug, "main_ref": ref,
