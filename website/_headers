@@ -11,9 +11,17 @@
 # to `website/functions/_shared/security-headers.ts::RELAXED_CSP`;
 # `website/apps/dashboard/src/securityHeaders.test.js` fails CI if it drifts.
 #
+# `https://static.cloudflareinsights.com` is NOT ours: Cloudflare Web Analytics is
+# enabled for this zone, so the EDGE injects its SRI-pinned beacon
+# (`…/beacon.min.js/<version>`) into every HTML response for BROWSER user-agents
+# only — invisible to `curl` and to a local `wrangler pages dev` preview. Omitting
+# the origin blocks the tag on a live page (a console error, analytics lost); it is
+# listed here, with `https://cloudflareinsights.com` in connect-src for its RUM
+# endpoint, and the guard fails if either is dropped again.
+#
 # `_headers` does NOT apply to Pages Functions responses (Cloudflare docs), so the
 # marketing Functions stamp the same value themselves — see
 # `website/functions/_middleware.ts` and `website/functions/blog/_lib.ts`.
 /*
   Strict-Transport-Security: max-age=31536000; includeSubDomains
-  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://connect.facebook.net https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://*.supabase.co https://api.premiselabs.co https://us.i.posthog.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://www.google-analytics.com https://region1.google-analytics.com https://connect.facebook.net https://www.facebook.com https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com https://cdnjs.cloudflare.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://connect.facebook.net https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com https://*.supabase.co https://api.premiselabs.co https://us.i.posthog.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://www.google-analytics.com https://region1.google-analytics.com https://connect.facebook.net https://www.facebook.com https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'

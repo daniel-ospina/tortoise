@@ -755,6 +755,51 @@ test('_headers values are byte-identical to the stamped constants', () => {
   }
 })
 
+// ── 4b. every policy admits the PLATFORM-INJECTED beacon ──────────────────
+//
+// Cloudflare Web Analytics is on for this zone, so the EDGE injects
+// `https://static.cloudflareinsights.com/beacon.min.js/<version>` into every
+// HTML response FOR BROWSER USER-AGENTS ONLY. Neither `curl` nor a local
+// `wrangler pages dev` preview ever shows it, so no local check can catch a
+// policy that omits it: the first version of this change blocked it in
+// production and only the post-merge `verify-legal` suite (against prod, in a
+// real browser) noticed — as 8 failures asserting zero console errors.
+//
+// This test is that check, moved to CI time. It is deliberately about ORIGIN
+// PRESENCE, not about the tag being reachable (a unit test cannot reach the
+// edge): remove the origin and this fails, which is the regression that shipped.
+test('every policy allows the platform-injected Cloudflare beacon', () => {
+  const dashboard = loadDashboardHeaders()
+  const marketing = loadMarketingHeaders()
+  const policies = [
+    ['marketing RELAXED_CSP', marketing.RELAXED_CSP],
+    ['dashboard RELAXED_CSP', dashboard.RELAXED_CSP],
+    ['STRICT_CSP', dashboard.STRICT_CSP],
+    ['ADMIN_CSP', dashboard.ADMIN_CSP],
+    ['strictCspWithNonce', dashboard.strictCspWithNonce('TESTNONCE')],
+  ]
+  const wrong = []
+  for (const [name, value] of policies) {
+    const byDirective = new Map(
+      value.split('; ').map((d) => {
+        const sp = d.indexOf(' ')
+        return [d.slice(0, sp), d.slice(sp + 1)]
+      }),
+    )
+    // A nonce policy is exempt from nothing here: the edge tag carries no nonce,
+    // so a nonce-only `script-src` blocks it. Host sources are still honoured
+    // alongside a nonce (we do not use `strict-dynamic`), so naming the origin
+    // is exactly what makes the edge tag load.
+    if (!(byDirective.get('script-src') || '').includes('https://static.cloudflareinsights.com')) {
+      wrong.push(`${name}: script-src omits https://static.cloudflareinsights.com`)
+    }
+    if (!(byDirective.get('connect-src') || '').includes('https://cloudflareinsights.com')) {
+      wrong.push(`${name}: connect-src omits https://cloudflareinsights.com (the RUM endpoint)`)
+    }
+  }
+  assert.deepEqual(wrong, [], `policies that would block the edge-injected beacon:\n  ${wrong.join('\n  ')}`)
+})
+
 // ── 5. no HTML-producing Function ships without a policy ───────────────────
 
 test('every HTML-producing Function stamps the CSP on each HTML-producing path', () => {

@@ -49,6 +49,25 @@
  * load NEW tag origins at any time — adding a tag means updating this constant
  * in the same change.
  *
+ * THE PLATFORM INJECTS A SCRIPT WE DID NOT WRITE
+ * ----------------------------------------------
+ * Cloudflare Web Analytics is enabled for this zone, so the EDGE injects
+ * `https://static.cloudflareinsights.com/beacon.min.js/<version>` into every
+ * HTML response — **for browser user-agents only**. That is why neither `curl`
+ * nor a local `wrangler pages dev` preview ever shows it: a plain request gets
+ * the un-injected document. The first version of this change shipped a CSP that
+ * blocked it in production, and the post-merge `verify-legal` suite caught it as
+ * 8 console-error failures across the signup and legal pages.
+ *
+ * The tag is SRI-pinned by the platform (`integrity="sha512-…"
+ * crossorigin="anonymous"`) and version-named, so allowing its ORIGIN does not
+ * concede arbitrary code execution: the browser refuses any body whose bytes do
+ * not match that hash. The beacon reports to
+ * `https://cloudflareinsights.com/cdn-cgi/rum`, hence the `connect-src` entry.
+ * Every policy below therefore names both, and `securityHeaders.test.js` fails
+ * if one does not — because the failure mode is silent (analytics lost, plus a
+ * console error on a live page).
+ *
  * The guard `src/securityHeaders.test.js` asserts each constant is byte-identical
  * to its `_headers` counterpart, so the duplication above cannot drift.
  */
@@ -62,11 +81,11 @@ const csp = (...directives: string[]): string => directives.join("; ");
  */
 export const RELAXED_CSP = csp(
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://connect.facebook.net https://challenges.cloudflare.com",
+  "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com https://cdnjs.cloudflare.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://connect.facebook.net https://challenges.cloudflare.com",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: https:",
   "font-src 'self' data:",
-  "connect-src 'self' https://*.supabase.co https://api.premiselabs.co https://us.i.posthog.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://www.google-analytics.com https://region1.google-analytics.com https://connect.facebook.net https://www.facebook.com https://challenges.cloudflare.com",
+  "connect-src 'self' https://cloudflareinsights.com https://*.supabase.co https://api.premiselabs.co https://us.i.posthog.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://www.google-analytics.com https://region1.google-analytics.com https://connect.facebook.net https://www.facebook.com https://challenges.cloudflare.com",
   "frame-src https://challenges.cloudflare.com",
   "object-src 'none'",
   "base-uri 'none'",
@@ -77,11 +96,11 @@ export const RELAXED_CSP = csp(
 /** The dashboard SPA document (`/`, `/team`, `/team/`, `/index.html`). */
 export const STRICT_CSP = csp(
   "default-src 'self'",
-  "script-src 'self'",
+  "script-src 'self' https://static.cloudflareinsights.com",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "font-src 'self' data:",
-  "connect-src 'self'",
+  "connect-src 'self' https://cloudflareinsights.com",
   "object-src 'none'",
   "base-uri 'none'",
   "frame-ancestors 'none'",
@@ -91,11 +110,11 @@ export const STRICT_CSP = csp(
 /** The `/admin` console shell — `STRICT_CSP` plus the Supabase origins it uses. */
 export const ADMIN_CSP = csp(
   "default-src 'self'",
-  "script-src 'self'",
+  "script-src 'self' https://static.cloudflareinsights.com",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: https:",
   "font-src 'self' data:",
-  "connect-src 'self' https://*.supabase.co wss://*.supabase.co",
+  "connect-src 'self' https://cloudflareinsights.com https://*.supabase.co wss://*.supabase.co",
   "object-src 'none'",
   "base-uri 'none'",
   "frame-ancestors 'none'",
@@ -112,11 +131,11 @@ export const ADMIN_CSP = csp(
 export function strictCspWithNonce(nonce: string): string {
   return csp(
     "default-src 'self'",
-    `script-src 'nonce-${nonce}'`,
+    `script-src 'nonce-${nonce}' https://static.cloudflareinsights.com`,
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:",
     "font-src 'self' data:",
-    "connect-src 'self'",
+    "connect-src 'self' https://cloudflareinsights.com",
     "object-src 'none'",
     "base-uri 'none'",
     "frame-ancestors 'none'",

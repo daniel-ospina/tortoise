@@ -17,6 +17,12 @@
  * responses, so the two must stay in step. `src/securityHeaders.test.js` in the
  * dashboard asserts this constant, the dashboard's `RELAXED_CSP`, and the two
  * `_headers` values are byte-identical, so the duplication cannot drift.
+ *
+ * `https://static.cloudflareinsights.com` is not ours: Cloudflare Web Analytics
+ * is on for this zone, so the edge injects its SRI-pinned beacon into every HTML
+ * response for browser user-agents only (invisible to `curl` and to local
+ * previews). The dashboard copy of this file documents that in full; the guard
+ * fails if any policy drops the beacon's script or RUM origin.
  */
 
 const csp = (...directives: string[]): string => directives.join("; ");
@@ -24,11 +30,11 @@ const csp = (...directives: string[]): string => directives.join("; ");
 /** Static assets (`website/_headers` `/*`) and every Function-rendered HTML page. */
 export const RELAXED_CSP = csp(
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://connect.facebook.net https://challenges.cloudflare.com",
+  "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com https://cdnjs.cloudflare.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://connect.facebook.net https://challenges.cloudflare.com",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: https:",
   "font-src 'self' data:",
-  "connect-src 'self' https://*.supabase.co https://api.premiselabs.co https://us.i.posthog.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://www.google-analytics.com https://region1.google-analytics.com https://connect.facebook.net https://www.facebook.com https://challenges.cloudflare.com",
+  "connect-src 'self' https://cloudflareinsights.com https://*.supabase.co https://api.premiselabs.co https://us.i.posthog.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://www.google-analytics.com https://region1.google-analytics.com https://connect.facebook.net https://www.facebook.com https://challenges.cloudflare.com",
   "frame-src https://challenges.cloudflare.com",
   "object-src 'none'",
   "base-uri 'none'",
