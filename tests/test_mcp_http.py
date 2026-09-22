@@ -986,11 +986,20 @@ class TestOnboardingToolGating:
         # read on a PROCESS-lifetime pool, so a read submitted by an earlier
         # test can land inside this test's window. Org names are per-test
         # unique, and the TTL assertion is about THIS org's reads.
+        #
+        # Stub the SYNC projection (not ``_get_onboarding_state``): its graph leg
+        # intermittently reports 'unavailable' when the shared embedded DB is
+        # contended, which makes the real return an env-dependent fail-open
+        # ``False`` — a PRE-EXISTING flake (``origin/main``'s own version of this
+        # test asserts ``is True`` off the same stub and the same unchanged
+        # ``_get_onboarding_projection``; measured 1 failure in 5 runs here). The
+        # claim under test is the CACHE, so the offload seam stays in play while
+        # the environment dependency is removed.
         calls = []
         def _state(org_id):
             calls.append(org_id)
             return {"onboarding_complete": True}
-        monkeypatch.setattr("tortoise.hosted_api._get_onboarding_state", _state)
+        monkeypatch.setattr("tortoise.hosted_api._get_onboarding_projection", _state)
         mcp_server._onboarding_state_cache.clear()
         tok = mcp_auth._current_org_id.set("cache-team")
         try:
@@ -1011,7 +1020,10 @@ class TestOnboardingToolGating:
         def _state(org_id):
             calls.append(org_id)
             return {"onboarding_complete": True}
-        monkeypatch.setattr("tortoise.hosted_api._get_onboarding_state", _state)
+        # Sync projection stubbed, not ``_get_onboarding_state`` — same
+        # pre-existing embedded-DB flake as above; this test asserts the TTL,
+        # not the projection.
+        monkeypatch.setattr("tortoise.hosted_api._get_onboarding_projection", _state)
         monkeypatch.setattr(mcp_server, "_ONBOARDING_STATE_TTL", 0.0)
         mcp_server._onboarding_state_cache.clear()
         tok = mcp_auth._current_org_id.set("ttl-team")
@@ -1102,6 +1114,12 @@ class TestOnboardingToolGating:
 
             task = asyncio.ensure_future(_ticker())
             await asyncio.sleep(0)
+            # Reset AFTER the ticker has spun once: scheduled-then-yielded means
+            # `ticks` is already 1 before the gate is entered, so counting from
+            # zero here is what makes the assertion below measure the READ (a
+            # faithful simulated revert measured TICKS=1 at this point, and
+            # `assert ticks >= 1` on the un-reset counter therefore passed).
+            ticks = 0
             try:
                 verdict = await mcp_server._org_onboarding_complete()
             finally:
@@ -1122,14 +1140,12 @@ class TestOnboardingToolGating:
             f"thread={seen['thread']!r}"
         )
         expected = int(stall_s / 0.02)
-        # A free loop yields ~expected ticks; a gate back ON the loop yields 0.
-        # The floor is 1, not a fraction of `expected`: the measurement was
-        # taken on a box at loadavg ~140 running this file's other tests, where
-        # in-process GIL/scheduler starvation stretched 20 ms wake-ups 25-fold
-        # (2 ticks observed where a control process managed 46-49) and a
-        # `expected // 10` floor produced a FALSE red on a correctly-offloaded
-        # gate. `>= 1` still fails on the regression (which yields 0) without
-        # reddening a loaded runner.
+        # Counted DURING the read (reset above): a free loop yields ~expected; a
+        # gate back ON the loop — and therefore every tick here — yields 0, which
+        # is the regression. Floor of 1, not a fraction of `expected`: on this box
+        # at loadavg ~140 the read itself still managed 2 ticks, while
+        # in-process GIL starvation stretched 20 ms wake-ups ~25-fold and a
+        # `expected // 10` floor false-redded a correctly-offloaded gate.
         assert ticks >= 1, (
             f"the loop never ticked during a {stall_s}s gate read (a free loop "
             f"yields ~{expected}) — the gate is back ON the event loop; route "
@@ -1254,6 +1270,31 @@ class TestOnboardingToolGating:
             f"8 concurrent gate misses performed {len(calls)} reads ({calls}) "
             "— concurrent callers must share ONE resolution (#2924)"
         )
+
+    def test_inflight_cleanup_does_not_evict_a_live_replacement(self):
+        """#2924 review: evicting a settled task must check IDENTITY.
+
+        The failed-read path leaves no cache entry, so the next caller can
+        install a replacement while the settled task's done-callbacks are still
+        queued. A bare ``pop(org_id, None)`` then removes the LIVE replacement,
+        and the caller after that starts a duplicate read — two resolutions in
+        flight for one org, on the blip the single-flight exists to absorb. This
+        is a direct unit falsifier: it fails against a bare pop and passes
+        against the identity check.
+        """
+        from tortoise import mcp_server
+
+        settled, replacement = object(), object()
+        mcp_server._onboarding_gate_inflight.clear()
+        mcp_server._onboarding_gate_inflight["evict-team"] = replacement
+        try:
+            mcp_server._drop_gate_inflight("evict-team", settled)
+            assert mcp_server._onboarding_gate_inflight.get("evict-team") is replacement, (
+                "a settled task's cleanup evicted the LIVE task registered under "
+                "the same org — the next caller starts a duplicate read (#2924)"
+            )
+        finally:
+            mcp_server._onboarding_gate_inflight.clear()
 
 
 # ── #2300: graph-bound keys vs team-level onboarding/GitHub state ────────

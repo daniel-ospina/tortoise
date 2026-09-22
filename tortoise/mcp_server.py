@@ -3170,6 +3170,21 @@ _ONBOARDING_STATE_TTL = 60.0
 _onboarding_gate_inflight: dict[str, asyncio.Task[bool]] = {}
 
 
+def _drop_gate_inflight(org_id: str, task: object) -> None:
+    """Drop ``task`` from the in-flight map — ONLY if it is still the entry.
+
+    #2924 review: a bare ``pop(org_id)`` is a real bug, not a simplification.
+    The failed-read path deliberately leaves no cache entry, so the NEXT caller
+    (same loop batch, same org) can install a replacement while the settled
+    task's done-callbacks are still queued; a bare pop then evicts the LIVE
+    replacement, and a third caller starts a duplicate read — two resolutions in
+    flight for one org, on exactly the control-plane blip the single-flight
+    exists to stop amplifying.
+    """
+    if _onboarding_gate_inflight.get(org_id) is task:
+        _onboarding_gate_inflight.pop(org_id, None)
+
+
 async def _resolve_onboarding_gate(org_id: str) -> bool:
     """Resolve the gate ONCE, for every concurrent caller (#2924).
 
@@ -3223,7 +3238,7 @@ async def _org_onboarding_complete() -> bool:
         task = asyncio.ensure_future(_resolve_onboarding_gate(org_id))
         _onboarding_gate_inflight[org_id] = task
         task.add_done_callback(
-            lambda _t, _org=org_id: _onboarding_gate_inflight.pop(_org, None))
+            lambda _t, _org=org_id: _drop_gate_inflight(_org, _t))
     try:
         # shield: one caller hanging up must not cancel the shared resolution
         # out from under the others.
