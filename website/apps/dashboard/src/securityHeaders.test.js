@@ -380,16 +380,19 @@ function resolveImportPath(relPath, specifier) {
 function badPolicyBindings(relPath) {
   const ast = parseSource(readFileSync(join(repoRoot, relPath), 'utf8'), relPath)
   const bad = []
-  const patternNames = (node) => {
+  const patternNames = (node, what = 'destructured local binding') => {
     if (!node) return
     if (node.type === 'Identifier') {
-      if (POLICY_NAMES.has(node.name)) bad.push(`${node.name} (destructured local binding)`)
+      if (POLICY_NAMES.has(node.name)) bad.push(`${node.name} (${what})`)
       return
     }
-    if (node.type === 'ObjectPattern') node.properties.forEach((p) => patternNames(p.value ?? p.argument ?? p))
-    if (node.type === 'ArrayPattern') node.elements.forEach(patternNames)
-    if (node.type === 'RestElement') patternNames(node.argument)
-    if (node.type === 'AssignmentPattern') patternNames(node.left)
+    if (node.type === 'ObjectPattern') node.properties.forEach((p) => patternNames(p.value ?? p.argument ?? p, what))
+    if (node.type === 'ArrayPattern') node.elements.forEach((e) => patternNames(e, what))
+    if (node.type === 'RestElement') patternNames(node.argument, what)
+    if (node.type === 'AssignmentPattern') patternNames(node.left, what)
+    // `constructor(private ADMIN_CSP: string)` — the parameter PROPERTY wraps the
+    // pattern the binding actually uses.
+    if (node.type === 'TSParameterProperty') patternNames(node.parameter, what)
   }
   visitNodes(ast.program, (node) => {
     if (node.type === 'ImportDeclaration') {
@@ -424,9 +427,16 @@ function badPolicyBindings(relPath) {
       return
     }
     if (node.type === 'VariableDeclarator') {
-      patternNames(node.id)
+      patternNames(node.id, 'destructured local binding')
       return
     }
+    // PARAMETER patterns bind a name just as a declaration does, and the stamp
+    // scan keys on the NAME: a helper whose parameter is called `RELAXED_CSP`,
+    // called with a beacon-less literal, passes `stampConstants` while shipping
+    // that literal. A parameter is never the shared import, so any policy NAME
+    // bound as one is bad.
+    if (node.params) node.params.forEach((p) => patternNames(p, 'parameter binding'))
+    if (node.type === 'CatchClause') patternNames(node.param, 'catch binding')
     if ((node.type === 'FunctionDeclaration' || node.type === 'ClassDeclaration') && node.id) {
       if (POLICY_NAMES.has(node.id.name)) {
         bad.push(`${node.id.name} (local ${node.type === 'FunctionDeclaration' ? 'function' : 'class'} declaration)`)
@@ -829,6 +839,20 @@ test('the /auth/confirm interstitial is nonce-gated and uncacheable', async () =
     scriptSrc,
     /unsafe-inline/,
     'script-src must not fall back to unsafe-inline',
+  )
+  // The policy DRIVEN here is the one a user gets, not the
+  // `strictCspWithNonce('TESTNONCE')` sentinel §4b pins by value: a function whose
+  // origin set varied with the nonce value would satisfy the sentinel and serve a
+  // beacon-less interstitial in production. Assert both origins on the response.
+  assert.match(
+    scriptSrc,
+    /https:\/\/static\.cloudflareinsights\.com/,
+    'the SERVED interstitial policy must carry the beacon origin beside the nonce',
+  )
+  assert.match(
+    csp,
+    /connect-src [^;]*https:\/\/cloudflareinsights\.com/,
+    'the SERVED interstitial policy must carry the RUM origin',
   )
   assert.match(csp, /style-src [^;]*'unsafe-inline'/, 'styles stay inline (inline <style> block)')
 
