@@ -956,6 +956,52 @@ def test_never_configured_vs_wiped_distinguishable(graph):
     assert result2["config_reset"] is True
 
 
+def test_v1_leftover_stages_the_marker_into_the_written_payload(graph,
+                                                              monkeypatch):
+    """T2's marker must reach the SIDECAR, not only the restore leg.
+
+    The payload is derived from `merged`, so staging the marker into the local
+    `config_snapshot` alone would write an EMPTY config section while the graph
+    still ends up marked. A crash between the sidecar write and the replay then
+    leaves a v2 file — for which T2's `version < 2` test is false — so the
+    retry would restore nothing and report `config_reset=False` on a graph whose
+    config state is UNKNOWN: the third state silently lost in exactly the
+    window the sidecar exists for (code-review cycle 1, P2).
+    """
+    from tortoise.projection import _load_prewipe_snapshot, read_config_reset
+
+    events, sdk = graph
+    _write_journal(events, [])
+    _plant(Path(_sidecar_path(events)), _sidecar_payload(
+        version=1, batch_snapshot=[{"id": "b-legacy"}]))
+
+    written = _capture_writes(monkeypatch)
+    sdk._get_proj().rebuild_all(str(events))
+
+    assert written, "no sidecar payload was written"
+    staged = [e for e in written[0]["config_snapshot"]
+              if e["label"] == "Meta"
+              and e["props"].get("key") == "config_reset"]
+    assert staged, (
+        "the T2 marker did not reach the written payload — a crash before the "
+        f"replay would lose it (payload config_snapshot={written[0]['config_snapshot']!r})")
+    assert staged[0]["props"]["reason"] == "legacy_sidecar_no_config_record"
+    assert read_config_reset(_g(sdk)) is not None
+
+    # And the marker survives the sidecar-RECOVERY path: replay exactly the
+    # payload that was written, on a graph whose config is gone.
+    path = _sidecar_path(events)
+    _plant(Path(path), written[0])
+    _g(sdk).query("MATCH (n:Meta {key:'config_reset'}) DETACH DELETE n")
+    assert read_config_reset(_g(sdk)) is None
+    _plant(Path(path), _load_prewipe_snapshot(path) or written[0])
+    sdk._get_proj().rebuild_all(str(events))
+    recovered = read_config_reset(_g(sdk))
+    assert recovered is not None, (
+        "a v2 sidecar carrying the staged marker must restore it on recovery")
+    assert recovered["reason"] == "legacy_sidecar_no_config_record"
+
+
 def test_rebuild_all_returns_config_restored_counts(graph):
     """The additive return keys: counts of `(label, identity)` pairs."""
     events, sdk = graph
@@ -1001,7 +1047,10 @@ def test_cmd_rebuild_reports_config_state(tmp_path, capsys):
     out = capsys.readouterr()
     assert rc in (None, 0)
     assert "Config:" in out.out
-    assert "1 of 1" in out.out or "authoritative entr" in out.out
+    # NOT `or`-guarded: the static format string would satisfy a disjunct, so an
+    # `or` here cannot fail and would not pin the counts the operator reads.
+    assert "1 of 1" in out.out, out.out
+    assert "1 authoritative entr" in out.out, out.out
 
 
 def test_recover_from_log_refuses_nonempty_graph_with_config(graph):

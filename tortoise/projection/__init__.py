@@ -3509,11 +3509,21 @@ class FalkorProjection(
         if (leftover is not None and not config_snapshot
                 and (not isinstance(leftover_version, int)
                      or leftover_version < 2)):
-            config_snapshot = [{
+            # Assign into `merged` AND the local: the pre-wipe PAYLOAD is
+            # derived from `merged`, while the restore leg reads the local. A
+            # local-only rebind would leave `payload["config_snapshot"] == []`,
+            # so a crash between the sidecar write and the replay would leave a
+            # v2 sidecar with no config section — and the retry's T2 test
+            # (`version < 2`) is then FALSE, so the marker would never be
+            # restored and a state-UNKNOWN graph would report `config_reset
+            # = False`, i.e. "never configured". That is precisely the window
+            # the sidecar exists for (plan-review #1, code-review cycle 1).
+            merged["config_snapshot"] = [{
                 "label": "Meta",
                 "props": _config_reset_props(
                     None, "legacy_sidecar_no_config_record"),
             }]
+            config_snapshot = merged["config_snapshot"]
             logger.error(
                 "rebuild: the leftover pre-wipe snapshot at %s predates config "
                 "preservation (version %r) and carries no config record, so "
