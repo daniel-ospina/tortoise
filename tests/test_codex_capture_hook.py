@@ -27,7 +27,7 @@ from tortoise.hook_install import count_canonical_markers, read_hook_version
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOK = REPO_ROOT / "tortoise" / "codex-hooks" / "session-end.sh"
-VERSION_MARKER = "# tortoise-hook-version: 1"
+VERSION_MARKER = "# tortoise-hook-version: 2"
 
 #: A VERBATIM copy of the live Codex rollout captured on 2026-09-18:
 #: ~/.codex/sessions/2026/09/18/
@@ -98,11 +98,11 @@ def _run_hook(stdin_json: str, *, home: Path, bindir: Path, timeout: float = 15)
 def test_hook_artifact_carries_the_version_marker():
     """The install contract is one marker, column-0, one per file.
 
-    Mutation: delete ``# tortoise-hook-version: 1`` from the shipped hook — the
+    Mutation: delete ``# tortoise-hook-version: 2`` from the shipped hook — the
     install then has no generation to compare and this REDs."""
     text = HOOK.read_text(encoding="utf-8")
     assert text.startswith(f"#!/usr/bin/env bash\n{VERSION_MARKER}\n"), text[:120]
-    assert read_hook_version(HOOK) == 1
+    assert read_hook_version(HOOK) == 2
     assert count_canonical_markers(HOOK) == 1, (
         "exactly one column-0 marker (an in-body mention is not a declaration)")
 

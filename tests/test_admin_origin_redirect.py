@@ -4,10 +4,16 @@ WHY THIS EXISTS
 ---------------
 #4054 moved the session (`__Host-session`, host-only by construction) to
 app.premiselabs.co; #4171 moved the blog admin console there with it. The old
-URL must keep working, but the redirect must be a **single-hop 301 straight to
-the app origin** — `SCOPE.md` §4 W2 / F12 forbid a chained permanent redirect
-(the next hop could change and the first link would keep asserting the old
-target forever).
+URL must keep working, but the redirect must be a **single-hop** one straight to
+the app origin — `SCOPE.md` §4 W2 forbids a chained redirect (the next hop could
+change and the first link would keep asserting a stale target), and §12/F12
+require the redirect itself be non-permanent (a 301 is browser-persistent and
+deploy-unreachable).
+
+**302** — the status for a NEW branch (#4409). `SCOPE.md` §12: “302, never a new
+301”. A 301 is browser-persistent and cannot be reclaimed by a later deploy,
+which is the trade-off §12 records; the `OVERRIDES` marker carrying it is on
+#3501, #3521 and #4409.
 
 The routing lives in `website/functions/_middleware.ts` (the `premise-labs`
 project), which is the one file every request passes through. It is executed
@@ -88,8 +94,24 @@ def _case(path: str, host: str = TORTOISE_HOST, method: str = "GET") -> dict:
     ["/admin", "/admin/", "/admin/blog", "/admin/blog/edit", "/admin#/edit/1"],
 )
 def test_admin_redirects_to_the_app_origin_in_one_hop(path: str) -> None:
+    """302, not 301 — resolved in #4409.
+
+    This branch was added UNDER a rule that already existed (§12 was written with
+    the #3501 scoping), so it is a NEW branch and the ruling fixes its status:
+    §12 “302, never a new 301” — with no “chained” qualifier — plus §1's in-scope
+    list naming `/admin` among the surfaces moving to `app.*`. The earlier 301
+    here read W2's “never a chained new 301” as forbidding only chained ones,
+    which does not survive §12's plain text. The OVERRIDES marker on
+    #3501/#3521 states it plainly ("New branches: 302"); it post-dates this
+    branch, so the misreading was available at the time — recorded here so the
+    next lane does not re-make it. `/admin` is an authenticated operator surface
+    with no SEO stake, so a permanent signal buys nothing.
+    """
     (res,) = _run([_case(path)])
-    assert res["status"] == 301, f"{path} -> {res['status']}, want a single-hop 301"
+    assert res["status"] == 302, (
+        f"{path} -> {res['status']}, want a single-hop 302 (§12/F12: a NEW branch "
+        "for the moved surface is 302)"
+    )
     assert res["location"] == f"{APP_ORIGIN}/admin", (
         f"{path} -> {res['location']!r}; want exactly {APP_ORIGIN + '/admin'!r} "
         "(a chained or off-origin target is the failure this guards)"
@@ -98,9 +120,9 @@ def test_admin_redirects_to_the_app_origin_in_one_hop(path: str) -> None:
 
 
 def test_company_host_admin_also_redirects_to_the_app_origin() -> None:
-    """The console was never on premiselabs.co; both marketing hosts must 301."""
+    """The console was never on premiselabs.co; both marketing hosts must redirect."""
     (res,) = _run([_case("/admin", host=COMPANY_HOST)])
-    assert res["status"] == 301 and res["location"] == f"{APP_ORIGIN}/admin", res
+    assert res["status"] == 302 and res["location"] == f"{APP_ORIGIN}/admin", res
 
 
 def test_blog_api_is_not_redirected() -> None:
@@ -110,7 +132,7 @@ def test_blog_api_is_not_redirected() -> None:
     here); the assertion is that it is NOT the /admin redirect.
     """
     (res,) = _run([_case("/blog/api/purge", method="POST")])
-    assert res["status"] != 301, f"/blog/api/purge was 301'd: {res}"
+    assert res["status"] not in (301, 302), f"/blog/api/purge was redirected: {res}"
     assert res["location"] is None, f"/blog/api/purge carried a Location: {res}"
     assert res["next"] == "next", "/blog/api/purge did not fall through to the next handler"
 
@@ -118,7 +140,7 @@ def test_blog_api_is_not_redirected() -> None:
 def test_admin_is_not_a_prefix_false_positive() -> None:
     """`/administer` must NOT redirect — the guard is a path-prefix, not a string one."""
     (res,) = _run([_case("/administrator")])
-    assert res["status"] != 301, f"/administrator was treated as /admin: {res}"
+    assert res["location"] is None, f"/administrator was treated as /admin: {res}"
 
 
 # ---------------------------------------------------------------------------
@@ -130,17 +152,17 @@ def test_admin_is_not_a_prefix_false_positive() -> None:
 #   tortoise.premiselabs.co/auth/start -> 404
 #   app.premiselabs.co/auth/start      -> 302 (correct)
 #
-# 302 and NOT 301, which is a deliberate departure from the ordinary
-# "moved ⇒ 301" practice and the reason the OVERRIDES marker for it lives on
-# #3501/#3521 and in `SCOPE.md` §12: a 301 is browser-persistent and cannot be
-# reclaimed by a later deploy, so a NEW branch for the moved surface is 302
-# (§12 "302, never a new 301"; F12 "302 only").
+# 302 and NOT 301, a deliberate departure from the ordinary "moved ⇒ 301"
+# practice: a 301 is browser-persistent and cannot be reclaimed by a later
+# deploy, so a NEW branch for the moved surface is 302 (`SCOPE.md` §12 "302,
+# never a new 301"; OVERRIDES marker on #3501/#3521/#4409).
 #
-# The already-served `/auth` 301 below is grandfathered and asserted AS-IS so a
-# future change to it is a visible edit, not a silent drift. The `/admin` 301 in
-# the tests above predates this and reads W2 as permitting a single-hop 301;
-# that difference is real and is tracked separately rather than quietly retuned
-# here — changing a shipped permanent redirect is its own decision.
+# Both moved subtrees answer 302: `/auth/*` (#4346) and `/admin` (#4409).
+#
+# The `/auth` exact-path 301 is pinned AS-IS — it is the one redirect here that
+# #4054 already shipped, so it is in browsers' caches and changing it is its own
+# decision rather than a side effect of another. The pin below makes a change to
+# it a visible edit instead of a silent drift.
 # ---------------------------------------------------------------------------
 
 AUTH_ENDPOINTS = [
@@ -211,8 +233,8 @@ def test_company_host_auth_endpoints_also_302_to_the_app_origin() -> None:
 def test_the_exact_auth_rule_is_grandfathered_at_301() -> None:
     """Pinned AS-IS, on purpose.
 
-    §12's *falsified-if* column reads "the served 301 can be reclaimed", so this
-    one is kept. Asserting it here means a future change to it is visible.
+    Shipped by #4054, so it is already in browsers' caches; changing it is its
+    own decision. The pin makes any change a visible edit, not a silent drift.
     """
     (res,) = _run([_case("/auth")])
     assert res["status"] == 301 and res["location"] == f"{APP_ORIGIN}/auth", (
