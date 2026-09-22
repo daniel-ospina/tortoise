@@ -76,12 +76,16 @@ install guard.
 `tortoise/pi-hooks/` selects `core` via the `tortoise/` fallback, so the guard runs on the PR that
 edits the seam.
 
-The two `node`-backed checks need **Node ≥ 22.6** (`--experimental-strip-types`; a no-op on ≥ 22.18).
-Locally they *skip* when Node is missing or older, because the source-level pins above still ran. In
-**CI they FAIL instead of skipping** — the installed-artifact check is the only executable proof that
-the seam works at its install location, so a runner that cannot run it must fail by name rather than
+The `node`-backed checks need **Node ≥ 22.6** (`--experimental-strip-types`; a no-op on ≥ 22.18). The
+python-ci `test` lane installs it explicitly (`actions/setup-node@v4`, Node 22), so the requirement is
+owned by the lane rather than inherited from whatever the runner image ships. Locally they *skip* when
+Node is missing or older, because the source-level pins above still ran. In **CI the two
+installed-artifact checks FAIL instead of skipping** — they are the only executable proof that the
+seam works at its install location, so a runner that cannot run them must fail by name rather than
 report green with the check silently absent (the same ruling the embedder step and
-`bff_test_helpers.require_toolchain` apply).
+`bff_test_helpers.require_toolchain` apply). The pre-existing source-suite check
+(`test_extension_behavioral_suite`) keeps its own skip contract and is deliberately **not** routed
+through that gate.
 
 ### Manual-only
 
@@ -101,10 +105,12 @@ credential (at 2026-09-22, the **B1 lane**, which owns objective 1's exit eviden
    `--no-extensions` disables discovery **and** settings-registered extensions, so the probe is
    single-producer even on a host carrying the legacy `tortoise-capture/` (`#3713`).
 3. **Pass condition = `retrievable` — read the specific captured content back.** A row in
-   `GET /v1/sessions` alone proves only `captured` (the write landed), never `retrievable`; read the
-   session back by id (`GET /v1/sessions/{id}` — turns + extracted points) or via
-   `GET /v1/search?q=…` (the parameterized read the scoping evidence measured). The
-   `[tortoise-capture] captured session(s) → <apiUrl> (filed N≥1)` line is
+   `GET /v1/sessions` alone proves only `captured` (the write landed), never `retrievable`. The
+   authoritative session-scoped read is `GET /v1/sessions/{id}` (turns + extracted points). The
+   alternative the scoping evidence measured — `GET /v1/search?q=<a distinctive phrase from the
+   captured turns>` — is a **graph-wide** ranked read, not a session read: it proves `retrievable`
+   only when a hit's `sessionId` equals the probed session's id, never from a non-empty result set
+   alone. The `[tortoise-capture] captured session(s) → <apiUrl> (filed N≥1)` line is
    supporting evidence (a 2xx is implied, not printed).
 4. **A read-back 504 is `UNMEASURABLE` — never PASS, never FAIL** (the read path is query-dependent,
    `#4661`). **No receipt line while the session IS present in `GET /v1/sessions` is the `#4675`

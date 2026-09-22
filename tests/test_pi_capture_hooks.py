@@ -225,8 +225,15 @@ def _require_node() -> str:
     Node must fail by name instead of silently dropping them and reporting
     green.  That is the same ruling the embedder step (#2573) and
     ``bff_test_helpers.require_toolchain`` (#3501) apply: a runner that cannot
-    run the required check fails HERE rather than degrading unnoticed.
+    run the required check fails HERE rather than degrading unnoticed.  The
+    python-ci ``test`` lane provisions Node 22 (``actions/setup-node``), so the
+    requirement is owned by the lane, not inherited from the runner image.
     Locally the skip is kept, because the source-level pins above still ran.
+
+    The pre-existing ``test_extension_behavioral_suite`` above deliberately
+    keeps its own unconditional skip: this gate is for the checks this PR ADDS,
+    and widening it to the older suite is a separate change against that
+    suite's contract (recorded in the scoping artifact).
     """
     in_ci = bool(os.environ.get("CI"))
     node = shutil.which("node")

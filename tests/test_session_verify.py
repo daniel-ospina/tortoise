@@ -1019,16 +1019,22 @@ def test_pi_is_honestly_unverifiable(hosted, setup):
     assert "not firable by this command" in detail
     # The over-broad absolutes must never return: the seam IS fired headlessly
     # by its own suite (the source seam) and by the installed-artifact probe.
-    assert "cannot be executed headlessly" not in detail
-    assert "cannot be fired headlessly" not in detail
-    assert "no headless trigger" not in detail
     # …and the same rule binds the module DOCSTRING, which no other assertion
-    # reads.  Its opening clause was the last place the absolute survived: it
-    # grouped Pi with harnesses whose seam "cannot be fired headlessly" while
-    # the reason string ten lines below denied exactly that (#4620 review).
+    # reads — its opening clause was the last place the absolute survived, and
+    # it grouped Pi with harnesses whose seam "cannot be fired headlessly" while
+    # the reason string below denied exactly that (#4620 review).  Apply the SAME
+    # phrase list to BOTH texts, so a reword cannot re-acquire one absolute in
+    # one place while leaving the pin green.
     from tortoise import session_verify as _sv
 
-    assert "cannot be fired headlessly" not in (_sv.__doc__ or "")
+    absolutes = (
+        "cannot be executed headlessly",
+        "cannot be fired headlessly",
+        "no headless trigger",
+    )
+    for phrase in absolutes:
+        assert phrase not in detail, phrase
+        assert phrase not in (_sv.__doc__ or ""), phrase
 
 
 # ── hermeticity: root resolution is home-scoped, env only where one exists ──

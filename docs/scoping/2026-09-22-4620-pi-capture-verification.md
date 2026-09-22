@@ -205,3 +205,14 @@ Node-availability skips — so on such a runner the new check is a silent no-op.
 from the existing behavioral test, not introduced here, and CI's `ubuntu-latest` ships Node ≥ 22.6
 (verified), so it runs today. Recorded, not fixed here (changing the skip to a fail is its own
 change against the existing test's contract).
+
+**Amended 2026-09-22 (code-review round 2) — the deferral is scoped to the PRE-EXISTING suite.**
+That deferral stands for `test_extension_behavioral_suite`, whose contract this scope does not touch.
+It does **not** apply to the two installed-artifact checks this scope ADDS: they now **fail closed
+under CI** (`pytest.fail`, not `pytest.skip`, when `os.environ["CI"]` is set), because a fail-open
+guard on the only executable proof that the seam works as installed is precisely the defect this
+scope exists to close — shipping it would reproduce the gap under review. The python-ci `test` lane
+also provisioned Node 22 (`actions/setup-node@v4`) in the same round, so the requirement is owned by
+the lane rather than inherited from the runner image. Both directions verified: stub `node`
+v20.11.0 + `CI=true` → the two checks FAIL by name; real Node 22.23.2 + `CI=true` → 8 passed,
+0 skipped (the behavioral suite still skips, and its `1 skipped` stays visible in the run).
