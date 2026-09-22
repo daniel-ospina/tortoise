@@ -3517,7 +3517,7 @@ class FalkorProjection(
             # (`version < 2`) is then FALSE, so the marker would never be
             # restored and a state-UNKNOWN graph would report `config_reset
             # = False`, i.e. "never configured". That is precisely the window
-            # the sidecar exists for (plan-review #1, code-review cycle 1).
+            # the sidecar exists for.
             merged["config_snapshot"] = [{
                 "label": "Meta",
                 "props": _config_reset_props(

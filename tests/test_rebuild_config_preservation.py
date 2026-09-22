@@ -966,7 +966,7 @@ def test_v1_leftover_stages_the_marker_into_the_written_payload(graph,
     leaves a v2 file — for which T2's `version < 2` test is false — so the
     retry would restore nothing and report `config_reset=False` on a graph whose
     config state is UNKNOWN: the third state silently lost in exactly the
-    window the sidecar exists for (code-review cycle 1, P2).
+    window the sidecar exists for.
     """
     from tortoise.projection import _load_prewipe_snapshot, read_config_reset
 
