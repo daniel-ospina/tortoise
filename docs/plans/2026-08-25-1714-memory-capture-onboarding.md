@@ -442,19 +442,9 @@ Objective 1's Pi leg has two halves with different verification statuses:
   and fired by `tests/test_pi_capture_hooks.py` (CI-selected for a `tortoise/pi-hooks/` change). The
   claim that "nothing loads the extension's seam in a test" is false.
 - **Manual-only.** That a real `pi` process loads the installed extension and calls
-  `turn_end` / `session_shutdown` against the live API. Procedure —
-  `pi --no-extensions -e ~/.pi/agent/extensions/tortoise-capture.ts -p "<trivial prompt>"` on a
-  non-dogfood install, run by a maintainer with a live `pi` install and a capture credential (at
-  2026-09-22 the B1 lane, objective-1's exit-evidence owner) — is in `tortoise/pi-hooks/README.md`
-  § Verification. **Pass condition = `retrievable`** — read the specific captured content back.
-  `GET /v1/sessions/{id}` is the authoritative session-scoped read; `GET /v1/search?q=…` is
-  **graph-wide**, so it counts only when a hit's `sessionId` is the probed session's. A row in
-  `GET /v1/sessions` alone is **not** sufficient. A read-back 504 is **UNMEASURABLE**, and a missing
-  receipt for a session that IS present is the `#4675` false negative — never FAIL.
-
-**Blockers on a live verdict:** `#4661` (read path 504s), `#4675` (post-commit-504 false negative),
-and `#3713` (launch-blocking for the claim *"Pi capture works"* — recorded decision 2026-09-22T17:20Z
-— **not** for a clean-machine install; its sequencing blocker `#3971` has merged as `73acefddf`).
-Until `#4661` / `#4675` are resolved the live leg yields **no verdict**, so this objective must not be
-read as verified for Pi. Automating the probe is `#4710`; a version-contract stale-install detector is
-`#4680`.
+  `turn_end` / `session_shutdown` against the live API. **Canonical: `tortoise/pi-hooks/README.md`
+  § Verification** — the procedure, its precondition, its actor, the pass condition and the
+  `#4661`/`#4675`/`#3713` blocker list live THERE and are deliberately not restated here. The one
+  decision a reader of this objective needs: the pass condition is `retrievable` — the specific
+  captured content read back, session-bound — and until `#4661` / `#4675` clear, the live leg yields
+  **no verdict**, so this objective must not be read as verified for Pi.

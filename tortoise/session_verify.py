@@ -152,16 +152,17 @@ HEADLESS_FIRABLE: dict[str, bool] = {
 #:
 #: Pi's entry is deliberately SCOPED ("not firable by this command") and
 #: PLAIN TEXT (it is printed verbatim into a report line).  The over-broad
-#: absolutes this replaced — "cannot be executed headlessly", "no headless
-#: trigger" — were false: the seam's handlers are fired headlessly by its own
-#: suite, and `pi -p` is non-interactive.  A test pins the absence of those
-#: phrases from EVERY Pi-touching line of this module — the report string, this
-#: ruling, and the module docstring — not from the report string alone
+#: absolutes it replaced — each denying that this seam could be executed or
+#: fired headlessly, or that any headless entry point existed — were false: the
+#: seam's handlers are fired headlessly by its own suite, and `pi -p` is
+#: non-interactive.  A test pins the absence of those phrases from this ENTIRE
+#: module — the report string, this ruling, the enum, and the module docstring —
+#: so a wrapped continuation line cannot hide one
 #: (`tests/test_session_verify.py::test_pi_is_honestly_unverifiable`).
 UNVERIFIABLE_REASON: dict[str, str] = {
     "cursor": (
         "Cursor's sessionEnd hook is IDE-only — it fires from a local "
-        "desktop-editor session; there is no headless trigger on this "
+        "desktop-editor session; there is no headless entry point on this "
         "machine."),
     "pi": (
         "Pi's capture seam is a TypeScript extension loaded in-process by Pi "
@@ -219,12 +220,14 @@ def resolve_install_root(harness: str,
     ``~/.codex``), Cursor's ``~/.cursor`` (no env override — Cursor has none),
     Claude's cwd (project-scoped).  Pi has no ``HarnessLayout`` (its seam is
     not a scripted hook), so its root is the extension directory
-    ``~/.pi/agent/extensions``.
+    ``~/.pi/agent/extensions`` — DELEGATED to ``capture_install.pi_home``, the
+    module that WRITES the seam, so the verifier and the installer cannot
+    disagree about where it lives.
     """
     if install_dir is not None:
         return Path(install_dir)
     if harness == "pi":
-        return Path(home) / ".pi" / "agent" / "extensions"
+        return capture_install.pi_home(Path(home))
     layout = hook_install.get_layout(harness)
     return hook_install.default_root(layout, Path(home))
 

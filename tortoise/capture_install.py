@@ -650,6 +650,20 @@ def cursor_home(home: Path) -> Path:
         hook_install.get_layout("cursor"), home)
 
 
+def pi_home(home: Path) -> Path:
+    """Resolve Pi's extension root: ``~/.pi/agent/extensions``.
+
+    Pi has NO ``HarnessLayout`` (its seam is not a scripted hook, so
+    ``hook_install.default_root`` cannot answer for it), which is exactly why
+    this directory must live HERE, beside ``PI_EXTENSION_NAME``: this module
+    WRITES the seam, so it is the only legitimate owner of where the seam goes.
+    ``session_verify.resolve_install_root`` and the tests delegate to it, so a
+    relocation cannot leave a verifier or a test reading a path the installer no
+    longer writes.
+    """
+    return Path(home) / ".pi" / "agent" / "extensions"
+
+
 def _merge_capture_hooks(data: dict, *, script_name: str, event: str,
                          command: str, root: str | os.PathLike[str],
                          hooks_dir: str, flat: bool) -> dict:
@@ -970,7 +984,7 @@ def _install_claude(root: Path, *, dry_run: bool) -> InstallResult:
 
 def _install_pi(home: Path, *, dry_run: bool) -> InstallResult:
     harness = "pi"
-    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir = pi_home(home)
     dst = ext_dir / PI_EXTENSION_NAME
     legacy = ext_dir / LEGACY_PI_DIRNAME
     legacy_disabled = ext_dir / PI_DISABLED_DIRNAME

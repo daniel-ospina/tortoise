@@ -116,9 +116,10 @@ ambient credential (`_scrubbed_env`), no real spool (explicit `spoolDir`).
 **Intent:** Remove the absolute over-claim that restates the stale premise; replace it with a **scoped**
 statement that neither over- nor under-claims.
 **Acceptance:** `test_pi_is_honestly_unverifiable` passes with the new assertions; the pin fails if the
-reason stops naming the suite / the residual, or if **any** of the banded absolutes returns in **any**
-Pi-touching line of the module (the reason, the `HEADLESS_FIRABLE` ruling comment, the enum, or the
-docstring's Pi sentences).
+reason stops naming the suite / the residual, or if **any** of the banded absolutes returns **anywhere**
+in `tortoise/session_verify.py` — the reason, the `HEADLESS_FIRABLE` ruling comment, the enum, or the
+module docstring. The phrases are reserved for the Pi ruling, so no other harness may use them either;
+Cursor's own reason says "no headless entry point".
 
 **Files:**
 - Modify: `tortoise/session_verify.py` (`UNVERIFIABLE_REASON["pi"]`, the `HEADLESS_FIRABLE` comment, the module-docstring sentence)
@@ -140,13 +141,13 @@ docstring's Pi sentences).
    )
    for phrase in absolutes:
        assert phrase not in detail, phrase
-   # and the same rule for every Pi-touching line of the module, so the
-   # HEADLESS_FIRABLE ruling comment is covered too — not just the reason:
-   pi_lines = [ln for ln in inspect.getsource(session_verify).splitlines()
-               if re.search(r"\b[Pp]i\b", ln)]
-   for line in pi_lines:
-       for phrase in absolutes:
-           assert phrase not in line, (phrase, line)
+   # the WHOLE module, not a line filter: a line-local scan let a wrapped
+   # continuation line (the docstring's honesty paragraph) carry an absolute
+   # unscanned — the sentence the pin was written for:
+   source = inspect.getsource(session_verify)
+   assert "Pi's capture seam" in source, "module source not read — pin is vacuous"
+   for phrase in absolutes:
+       assert phrase not in source, phrase
    ```
    RED against the current string.
 2. Reword `UNVERIFIABLE_REASON["pi"]` to (keeping `"extension"`; the string is PLAIN TEXT — no

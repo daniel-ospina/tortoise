@@ -30,7 +30,6 @@ import pytest
 
 from tortoise import capture_install
 from tortoise.capture_install import install_capture
-from tortoise.session_verify import resolve_install_root
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOKS = REPO_ROOT / "tortoise" / "pi-hooks"
@@ -44,17 +43,17 @@ NODE_TS_FLAG = "--experimental-strip-types"
 
 
 def _installed_seam_path(tmp_home: Path) -> Path:
-    """Where the installer puts the Pi seam — RESOLVED, never re-typed.
+    """Where the installer puts the Pi seam — taken from the installer itself.
 
-    Both halves come from the shipping code: the directory from
-    ``session_verify.resolve_install_root`` (the ONE shared resolver) and the
-    filename from ``capture_install.PI_EXTENSION_NAME``. A literal path here
-    would be a third hand-maintained copy of the install layout, so a correct
-    rename/relocation in the shipping code would redden this gate with a
-    message that blames the installer for a consistent change.
+    Both halves come from ``capture_install``, the module that WRITES the
+    artifact: the directory from ``capture_install.pi_home`` and the filename
+    from ``capture_install.PI_EXTENSION_NAME``. Re-typing either here would be a
+    hand-maintained copy of the install layout, so a correct relocation in the
+    shipping code would redden this gate with a message that blames the
+    installer for a consistent change — and a test that re-typed the directory
+    could load a stale path while the installer wrote elsewhere.
     """
-    return (resolve_install_root("pi", home=tmp_home)
-            / capture_install.PI_EXTENSION_NAME)
+    return capture_install.pi_home(tmp_home) / capture_install.PI_EXTENSION_NAME
 
 
 def _src() -> str:
@@ -357,7 +356,8 @@ def test_installed_seam_loads_and_fires():
     node = _require_node()
     with tempfile.TemporaryDirectory() as tmp:
         tmp_home = Path(tmp)
-        install_capture("pi", home=tmp_home)
+        result = install_capture("pi", home=tmp_home)
+        assert result.ok, result.error or "install refused"
         installed = _installed_seam_path(tmp_home)
         assert installed.is_file(), f"installer wrote no seam at {installed}"
         proc = _run_installed_probe(tmp_home, installed, node)
@@ -391,7 +391,8 @@ def test_installed_seam_probe_fails_when_the_artifact_is_not_self_contained():
     node = _require_node()
     with tempfile.TemporaryDirectory() as tmp:
         tmp_home = Path(tmp)
-        install_capture("pi", home=tmp_home)
+        result = install_capture("pi", home=tmp_home)
+        assert result.ok, result.error or "install refused"
         installed = _installed_seam_path(tmp_home)
         installed.write_text(
             installed.read_text(encoding="utf-8")
