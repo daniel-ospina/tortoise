@@ -1396,8 +1396,11 @@ surface.
 (#1095), Fly machine orphan/crash-loop (#1896), Fly secret provenance (#4126),
 pack-catalog smoke (#1929), and post-release DB health (#1719 — since #4538 it
 runs in its own `post-deploy-verify` job and does not colour the deploy job).
-Each can be bypassed for an incident-fix deploy — and **a bypass is an
-incident-window state, not a setting.**
+Some can be bypassed for an incident-fix deploy — and **a bypass is an
+incident-window state, not a setting.** **Not every gate is bypassable:** the
+migration-drift gate has no `if:` guard and no `SKIP_` lane by design (the #1001
+P0 recurred while a migration was missing from prod, so a missing token or an
+error must fail the deploy).
 
 ### 8.1 The Fly secret-provenance gate (#4126)
 
@@ -1412,10 +1415,13 @@ sessions — invisible to every other gate, because a name no file mentions cann
 be compared against anything.
 
 - **Declared inventory (the contract):** `.github/scripts/fly-managed-secrets.txt`
-  — every Fly secret, with its managing source. **Read that file for the source
-  grammar; it is authoritative and is not restated here.**
-- **Checker (hermetic, offline):** `.github/scripts/check-fly-secret-drift.py`
-  (tests: `tests/test_fly_secret_drift.py`).
+  — every Fly secret, with its managing source, the entry format, and each
+  token's constraints. **That file is authoritative for the grammar; the token
+  table below is a one-line orientation only, not the contract.**
+- **Checker:** `.github/scripts/check-fly-secret-drift.py` — in production it
+  reads the live list via `flyctl secrets list --app <app> --json` (the
+  `FLY_SECRETS_FILE` seam is what makes the test suite hermetic; tests:
+  `tests/test_fly_secret_drift.py`).
 - **Workflow step:** `Check Fly secret provenance (fail-closed)`. It runs before
   the migration-drift gate so its output is visible on every deploy attempt, not
   only on one that gets as far as Fly.
@@ -1457,13 +1463,27 @@ procedure sets the variable.
 
 Rules that hold for every one of them:
 
-- **A bypass skips ONLY the violation class (exit 1).** Exit 2 (could not
-  determine state) is never bypassable.
 - **A bypass is never silent** — each emits a `::warning::` naming the gate it
   skipped, so a run stays auditable after the fact.
 - **Set the variable for the incident window and CLEAR IT AFTER.** A bypass left
   set means that gate guards no deploy — check it first when a gate seems never
   to fire.
+- **How much a bypass skips depends on the gate's shape.** The two guards whose
+  wrapper translates the checker's exit code — provenance (#4126) and machines
+  (#1896) — are bypassed for **exit 1 only** (undeclared/stale declarations,
+  fleet violations); their **exit 2** (could not determine state) can **never**
+  be bypassed and always blocks the deploy. The other two are a plain
+  step/job-level `if:` — `SKIP_PACK_SMOKE` skips the whole packaging-smoke job,
+  and `SKIP_DB_HEALTH_GATE` skips the whole health step — so nothing in it
+  runs, and the bypass is not exit-class-limited.
+
+⚠️ **`SKIP_DB_HEALTH_GATE` is a special case: its dispatch input defaults to
+`true`.** `skip-db-health-gate.default: 'true'` in the workflow (#1719 — the
+default was set during the RC3 restore window, when `db.ok=false` was the live
+prod state). Clearing only the repo variable therefore does **not** re-arm the
+gate on a dispatch run; the input must also be passed as `false`. Flip the
+default once the data plane is healthy, so the verification guards every deploy
+again.
 
 ```bash
 gh variable list                                             # what is currently bypassed
