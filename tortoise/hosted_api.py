@@ -22812,14 +22812,17 @@ async def get_connector(
     connector_id: str,
     org: dict = Depends(get_current_org_session_ungated),  # noqa: B008
 ):
-    """Get a single connector by id."""
+    """Get a single connector by id, scoped to the caller's org."""
     from tortoise.supabase_control import (
         connector_by_id as _sb_conn_by_id,
         get_control_plane,
         is_supabase_enabled,
     )
+    org_id = org["org_id"]
     if is_supabase_enabled():
-        row = _sb_conn_by_id(get_control_plane(), connector_id)
+        # org_id is passed INTO the seam: the query runs on the service-role
+        # key (RLS bypassed), so the filter is the only tenancy boundary.
+        row = _sb_conn_by_id(get_control_plane(), org_id, connector_id)
         if not row:
             raise HTTPException(status_code=404, detail="Connector not found")
         return {"connector": row}
@@ -22832,15 +22835,21 @@ async def update_connector(
     body: ConnectorUpdateRequest,
     org: dict = Depends(get_current_org_session_ungated),  # noqa: B008
 ):
-    """Update connector config/sync state."""
+    """Update connector config/sync state, scoped to the caller's org."""
     from tortoise.supabase_control import (
         connector_update as _sb_conn_update,
         get_control_plane,
         is_supabase_enabled,
     )
+    org_id = org["org_id"]
     if is_supabase_enabled():
         updates = body.model_dump(exclude_none=True)
-        _sb_conn_update(get_control_plane(), connector_id, **updates)
+        if not _sb_conn_update(get_control_plane(), org_id, connector_id,
+                               **updates):
+            # No row in THIS org matched — a foreign id is indistinguishable
+            # from an absent one (matches the neighbouring index-job and
+            # invitation endpoints, which 404 on a cross-org id).
+            raise HTTPException(status_code=404, detail="Connector not found")
         return {"status": "updated"}
     raise HTTPException(status_code=501, detail="Self-host not yet implemented")
 
@@ -22850,14 +22859,16 @@ async def delete_connector(
     connector_id: str,
     org: dict = Depends(get_current_org_session_ungated),  # noqa: B008
 ):
-    """Delete a connector (disconnect source, clean up)."""
+    """Delete a connector (disconnect source, clean up), scoped to the org."""
     from tortoise.supabase_control import (
         connector_delete as _sb_conn_delete,
         get_control_plane,
         is_supabase_enabled,
     )
+    org_id = org["org_id"]
     if is_supabase_enabled():
-        _sb_conn_delete(get_control_plane(), connector_id)
+        if not _sb_conn_delete(get_control_plane(), org_id, connector_id):
+            raise HTTPException(status_code=404, detail="Connector not found")
         return {"status": "deleted"}
     raise HTTPException(status_code=501, detail="Self-host not yet implemented")
 

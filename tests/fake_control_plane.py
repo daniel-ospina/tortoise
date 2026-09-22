@@ -819,6 +819,12 @@ class FakeControlPlane:
                 self._trigger_key_create(row.get("org_id", ""),
                                          row.get("id", ""),
                                          row.get("created_via"))
+            # PostgREST honours ?select= on an INSERT with
+            # `Prefer: return=representation` too — the projection is what
+            # keeps a write path from echoing a column the read path withholds
+            # (e.g. connectors.credential_enc, #2642 re-review P1).
+            if select is not None:
+                return [{k: row.get(k) for k in select}]
             return [row]
         if method == "DELETE":
             # PostgREST row-delete semantics (used by the #302 purge).
