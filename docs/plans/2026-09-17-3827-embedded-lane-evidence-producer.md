@@ -118,7 +118,7 @@ reason).
 - **an unwritable `--record-out` parent** (or a directory / a tracked file) ⇒ **exit 2** —
   `test_unwritable_record_out_parent_is_exit_2`, `test_record_out_directory_is_exit_2`,
   `test_tracked_record_out_is_exit_2` (Task 7/9).
-- **`--record-out` omitted** ⇒ **not an error**: it defaults to `LEDGER_DIR/record.json` (D6, M46), recorded
+- **`--record-out` omitted** ⇒ **not an error**: it defaults to `LEDGER_ROOT/record.json` (D6, M46), recorded
   as `record_out_source: "default"` — `test_record_out_defaults_to_ledger_record_json` (Task 9).
 
 **Bug-pattern flags (from `test-design`):**
@@ -662,7 +662,7 @@ LEDGER_HISTORY_BOUND = 20                                              # M60: pr
   (M56):** an unwritable ledger root, `TMPDIR` empty (falls back via `tempfile.gettempdir()`) or set to a
   non-writable path, and a `--record-out` that is a **directory** (an unwritable parent is already in D8)
   — each leaves `git status --porcelain` empty. An **omitted** `--record-out` has a stated default:
-  `LEDGER_DIR / "record.json"` (M46), recorded as `record_out_source: "default"`.
+  `LEDGER_ROOT / "record.json"` (M46), recorded as `record_out_source: "default"`.
 - **Retention and cleanup (M60 / C13).** Every per-run `mkdtemp` is removed by the run's `try/finally` —
   after a full invocation no per-run root survives (D17 measures orphans; it does not reap, so the runner
   owns this). The ledger is bounded: at most `LEDGER_HISTORY_BOUND = 20` retained **invocation** directories
@@ -2095,7 +2095,7 @@ producer is defined and positive-tested (`--record-role`, `closing` **only** wit
 red **and an explicit `--pairing-ref`** — M52/C1/C2); every write-path failure edge exits 2 with no
 traceback (relative `--ledger-root` inside the
 measured root, unwritable ledger root, `--record-out` a directory, `TMPDIR` empty/unwritable — M56); an
-omitted `--record-out` defaults to `LEDGER_DIR/record.json` and is recorded as such (M46); the per-run
+omitted `--record-out` defaults to `LEDGER_ROOT/record.json` and is recorded as such (M46); the per-run
 `mkdtemp` roots are removed after the invocation and the ledger history is bounded
 (`LEDGER_HISTORY_BOUND = 20`, mirroring the docker streak's `runs[:20]` — M60); the record envelope agrees
 with **`tools/ci_timing.py`'s generator**, not its 43-byte committed fixture (C17/M62).
@@ -2134,7 +2134,7 @@ ancestry)` — labelling a pinned HEAD or a commit after the fix `last-before-fi
 passes);
 `test_pairing_ref_must_be_strict_ancestor` (**C1**: same-as-measured / descendant / unrelated ref ⇒
 exit 2);
-`test_record_out_defaults_to_ledger_record_json` (M46: omitted `--record-out` ⇒ `LEDGER_DIR/record.json`,
+`test_record_out_defaults_to_ledger_record_json` (M46: omitted `--record-out` ⇒ `LEDGER_ROOT/record.json`,
 recorded);
 `test_exit_code_equals_persisted_and_process_returncode` (**moved from Task 7 — C20(a)**: persist a record
 for each of the 0/1/2/3 branches; assert `exit_code(persisted_verdict) == persisted exit_code ==
@@ -2504,13 +2504,19 @@ hand-written record cannot close (D20: content-bound by digest, not authenticate
    is visible where the fix lands — **the remaining handoff action**.
 3. `#3827` closes **only** on the paired, rate-changed record (D9) — never on a green-only certificate and
    never on a green against `carve-out`/`whole-suite`.
-4. **Re-issue #3867's body (C2 — owner action).** Its current text says an in-repo `--record-out` is
-   *"refused by design"* and describes a vague copy step; both are superseded by M5 option (a) (the
-   in-repo receipt is allowed and excluded from the pin) and by C1/C2 (the closing invocation is
-   `run --selection family --n 10 --ref <fix-commit> --pairing-ref <sha> --record-role closing`). The
-   re-issued body must carry that exact command, the `--pairing-ref` strict-ancestor rule, and the
-   `closes_issue`/exit-code contract — so the issue that owns the GREEN half does not instruct its
-   assignee to run an unreachable path.
+4. **#3867's body is now CORRECT on the record-out point — do not re-issue it for that reason.**
+   Its text says an in-repo `--record-out` is *"refused by design"*; #4572 option (a) **restored**
+   exactly that behaviour (a resolved `--record-out` landing inside the measured tree is a usage error —
+   exit 2, no record written — and there is **no** path-based exclusion). The M5 ruling that superseded
+   it ("the in-repo receipt is allowed and excluded from the pin") was itself reversed, because the
+   exclusion over-matched in five spellings; the class was removed rather than guarded. #3867 does still
+   need re-issuing, for a different reason: the closing invocation must carry
+   `--surface <SHIPPING_SURFACES member> --surface-assertion <resolving-test-id>` (#4203) in addition to
+   `--pairing-ref` and `--record-role closing` — i.e.
+   `run --selection family --n 10 --ref <fix-commit> --pairing-ref <sha> --record-role closing --surface <member> --surface-assertion <test-id>`
+   with `--record-out` omitted (it defaults outside the measured tree) — along with the `--pairing-ref`
+   strict-ancestor rule and the `closes_issue`/exit-code contract, so the issue that owns the GREEN half
+   does not instruct its assignee to run an unreachable path.
 
 ---
 

@@ -1109,6 +1109,19 @@ def _real_git_repo(
 # is nothing whose exactness has to be proven.
 
 
+def test_record_out_defaults_to_ledger_record_json():
+    """M46/D6: an omitted --record-out defaults under LEDGER_ROOT, outside every measured tree.
+
+    The doc declared this test and cited it as coverage; it did not exist (the #4203 class).
+    The default must also never land inside the repo, or the tool's own receipt would become
+    part of the dirt it measures.
+    """
+    default = ee._default_record_out()
+    assert default.name == "record.json"
+    assert default.parent.name == "pi-embedded-evidence"
+    assert not default.is_relative_to(ee.REPO_ROOT), default
+
+
 def test_in_tree_record_out_is_refused(tmp_path, monkeypatch, capsys):
     """An in-tree `--record-out` is a usage error: exit 2, and NO record written.
 
