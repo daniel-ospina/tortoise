@@ -294,6 +294,12 @@ def _probe_sdk():
         _PROBE_SDK_CACHE["sdk"] = sdk
         _PROBE_SDK_CACHE["key"] = key
     if old is not None:
+        # Residual (shared with ``hosted_api._probe_sdk``, tracked by #3683):
+        # ``HealthProbe`` allows two overlapping workers during a SUPERSEDE of a
+        # wedged probe, so closing the old handle here can overlap a worker
+        # still querying it. The window is bounded by the supersede cap, and the
+        # alternative (leaking every replaced connection) is worse. The
+        # STARTUP reset is ordered to avoid it (see ``_lifespan``).
         try:  # noqa: SIM105
             old.close()
         except Exception:
@@ -318,7 +324,11 @@ def _probe_db() -> dict:
     try:
         sdk = _probe_sdk()
     except Exception as exc:  # noqa: BLE001, RUF100 — probe_db never raises
-        _probe_sdk_reset()
+        # Do NOT close the cache here: construction raised BEFORE the cache was
+        # touched, so a reset would only close an existing handle another
+        # (superseded) worker may still be querying — a spurious degraded for a
+        # reachable graph. The next call rebuilds; a successful rebuild closes
+        # the superseded handle under the lock (see ``_probe_sdk``).
         return {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
     return probe_db(sdk, setup_timeout=probe_setup_timeout())
 
@@ -392,9 +402,12 @@ async def _health_probe_loop() -> None:
     never die: a raise here would freeze the reported DB verdict forever.
 
     The refresh is a FIXED CADENCE, not ``probe_duration + interval``: the
-    sleep subtracts the run's own elapsed time, so a slow (cold) probe cannot
-    push the cycle past ``PROBE_STALE_AFTER`` and make a reachable graph read
-    degraded between refreshes (#3243 review).
+    sleep subtracts the run's own elapsed time, so the cycle is
+    ``max(health_probe_interval(), probe_duration)`` rather than their sum. A
+    slow (cold) probe therefore cannot compound the cycle; the remaining worst
+    case (a cold probe longer than ``PROBE_STALE_AFTER``, allowed by the
+    operator knob up to 300 s) is covered by the coordinator's freshness
+    window — see ``_liveness_probe_stale_after``.
     """
     loop = asyncio.get_running_loop()
     while True:
@@ -482,8 +495,12 @@ async def _lifespan(app: FastAPI):
     # the same reason (a stale handle from a previous target/DB). The task is
     # CREATED (not awaited) before the MCP lifespan, so it cannot delay the
     # bind (#2953's discipline; creating a task starts nothing).
-    _probe_sdk_reset()
+    # Reset the COORDINATOR before dropping the cached connection: the reset
+    # invalidates any in-flight worker's generation, so a worker still holding
+    # the old handle cannot record a verdict after we close it (ordering is the
+    # race fix; see ``_probe_sdk``).
     _HEALTH_PROBE.reset()
+    _probe_sdk_reset()
     refresher = asyncio.get_running_loop().create_task(_health_probe_loop())
     try:
         async with mcp_http_app.lifespan(mcp_http_app):
