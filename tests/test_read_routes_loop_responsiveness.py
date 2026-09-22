@@ -387,6 +387,9 @@ def test_read_route_does_not_freeze_the_event_loop(client, monkeypatch):
 # `_run_with_close`, `_run_dream_on_pool`, `_cp_offload`, ...) are not on the
 # loop and are skipped — including a callable REFERENCE argument at any
 # position (the callable is arg 0 for `to_thread`, arg 1 for `run_in_executor`).
+# A locally defined function is scanned only when it is INVOKED on the loop;
+# one handed to a boundary as a reference (possibly wrapped in
+# `functools.partial`) runs in the worker and is skipped.
 _GRAPH_SEAM_CALLEES = frozenset({"_get_proj", "_get_registry", "dream_health_check"})
 _OFFLOAD_BOUNDARY_CALLEES = frozenset({
     "to_thread", "_run_off_loop", "_submit_off_loop", "_run_dream_on_pool",
@@ -398,10 +401,11 @@ _OFFLOAD_BOUNDARY_CALLEES = frozenset({
 #: Async bodies this change OFF-LOADS. A subset assertion: a rename or a
 #: refactor that drops one back onto the loop fails `test_graph_io_is_offloaded`.
 #: NOTE: the assertion is about the SEAMS THE SCAN SEES. ``patch_onboarding_state``
-#: has its detected seams off-loaded (the ``read_onboarding_node`` read and the
-#: ``_graph_has_org_namespace`` probe), but its later onboarding WRITES still run
-#: through sync helpers the scan cannot see — those are part of the residual, not
-#: covered by this set.
+#: has them off-loaded — the ``_node_sdk._get_proj()`` read inside the nested
+#: ``_read_node`` closure (reached because the closure is INVOKED on the loop)
+#: and the ``_graph_has_org_namespace`` probe handed to ``to_thread`` by
+#: reference — but its later onboarding WRITES still run through sync helpers
+#: the scan cannot see; those are part of the residual, not covered by this set.
 _OFFLOADED_ASYNC_BODIES = frozenset({
     "list_points", "get_point", "org_info", "list_sessions",
     "get_session_detail", "dream_health",
@@ -422,6 +426,11 @@ _KNOWN_INLINE_ROUTE_RESIDUAL = frozenset({
     "session_key", "public_demo", "github_callback", "backups_create",
     "backups_restore", "backups_sweep", "backups_purge", "backups_rebaseline",
     "backups_drill", "backups_drill_scheduled", "webhooks_stripe",
+    # Surfaced when the nested-closure rule landed (#4455 review P1): its only
+    # registry seams sit inside the ``_registry_invite`` / ``_org_name``
+    # closures, which ARE invoked bare on the loop. A genuine pre-existing
+    # inline site, not visible before because every nested def was skipped.
+    "invite_info",
 })
 
 #: Non-route async bodies with inline sync FalkorDB I/O — the per-request auth
@@ -476,29 +485,115 @@ def _graph_bound_names(node: ast.AST) -> set[str]:
     return names
 
 
+def _offload_boundary_eager_children(call: ast.Call):
+    """Arguments of an offload-boundary call that are evaluated EAGERLY.
+
+    A callable REFERENCE (Lambda / Name / Attribute) is handed to the worker
+    and skipped — at ANY position, since the callable sits at index 0 for
+    ``to_thread`` but at index 1 for ``run_in_executor`` / ``_run_with_close``.
+    Every other argument (a Call, a comprehension, ...) is evaluated on the
+    loop, so the caller must still scan it.
+    """
+    for arg in call.args:
+        if isinstance(arg, (ast.Lambda, ast.Name, ast.Attribute)):
+            continue
+        yield arg
+    for kw in call.keywords:
+        if isinstance(kw.value, (ast.Lambda, ast.Name, ast.Attribute)):
+            continue
+        yield kw.value
+
+
+def _direct_nested_invocations(statements, nested_names: set[str],
+                               descend: set[str]) -> set[str]:
+    """Nested-def names INVOKED (``name(...)``) on the loop.
+
+    Only a bare CALL is an invocation: a callable REFERENCE handed to an
+    offload boundary (``asyncio.to_thread(_read)``) runs in the worker and is
+    not one — which is what keeps an off-loaded closure out of the scan. The
+    walk descends into the bodies of nested defs already known to run on the
+    loop (``descend``) so a chain of nested invocations is followed.
+    """
+    found: set[str] = set()
+
+    def walk(current: ast.AST) -> None:
+        if isinstance(current, ast.Call):
+            if _callee_name(current.func) in _OFFLOAD_BOUNDARY_CALLEES:
+                for child in _offload_boundary_eager_children(current):
+                    walk(child)
+                return
+            name = _callee_name(current.func)
+            if name in nested_names:
+                found.add(name)
+        for child in ast.iter_child_nodes(current):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.ClassDef)):
+                if getattr(child, "name", None) in descend:
+                    for stmt in child.body:
+                        walk(stmt)
+                continue
+            walk(child)
+
+    for stmt in statements:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            if getattr(stmt, "name", None) in descend:
+                for inner in stmt.body:
+                    walk(inner)
+            continue
+        walk(stmt)
+    return found
+
+
+def _nested_defs_invoked_on_loop(node: ast.AsyncFunctionDef,
+                                 nested_names: set[str]) -> set[str]:
+    """Nested defs of ``node`` whose body RUNS ON THE LOOP (fixpoint).
+
+    The route body runs on the loop, so a nested def it invokes by name runs
+    there too — and so do the defs that one invokes. A def reached only as a
+    callable REFERENCE to an offload boundary never enters the set.
+    """
+    on_loop: set[str] = set()
+    while True:
+        invoked = _direct_nested_invocations(node.body, nested_names, on_loop)
+        newly = invoked - on_loop
+        if not newly:
+            return on_loop
+        on_loop |= newly
+
+
 def _has_inline_graph_io(node: ast.AsyncFunctionDef) -> list[int]:
     """Line numbers of sync-FalkorDB seams NOT inside an offload boundary."""
     bound = _graph_bound_names(node)
     hits: list[int] = []
 
+    # Nested (locally defined) functions. A nested def's body is ON the loop
+    # only when it is INVOKED there; one that is merely handed to an offload
+    # boundary as a callable REFERENCE runs in the worker and is not scanned.
+    # The earlier revision skipped EVERY nested def in both loops, which made
+    # this guard vacuous for any handler whose seams sit inside a closure:
+    # `patch_onboarding_state`'s `_read_node` is the one that mattered — reverting
+    # its offload to a bare `_read_node()` left this function returning []
+    # (#4455 review P1, mutation-reproduced).
+    nested_names = {
+        sub.name
+        for sub in ast.walk(node)
+        if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and sub is not node
+    }
+    on_loop_nested = _nested_defs_invoked_on_loop(node, nested_names)
+
     def visit(current: ast.AST) -> None:
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                ast.ClassDef)):
+            if getattr(current, "name", None) in on_loop_nested:
+                for stmt in current.body:
+                    visit(stmt)
+            return
         if isinstance(current, ast.Call):
             if _callee_name(current.func) in _OFFLOAD_BOUNDARY_CALLEES:
-                # An argument that is a callable REFERENCE (Lambda / Name /
-                # Attribute) runs on the worker — skip it, at ANY position (the
-                # callable sits at index 0 for ``to_thread`` but at index 1 for
-                # ``run_in_executor`` / ``_run_with_close``). Every other
-                # argument (a Call, a comprehension, ...) is evaluated EAGERLY
-                # on the loop, so it must still be scanned.
-                for arg in current.args:
-                    if isinstance(arg, (ast.Lambda, ast.Name, ast.Attribute)):
-                        continue
-                    visit(arg)
-                for kw in current.keywords:
-                    if isinstance(kw.value,
-                                  (ast.Lambda, ast.Name, ast.Attribute)):
-                        continue
-                    visit(kw.value)
+                for child in _offload_boundary_eager_children(current):
+                    visit(child)
                 return
             name = _callee_name(current.func)
             if name in _GRAPH_SEAM_CALLEES:
@@ -509,14 +604,9 @@ def _has_inline_graph_io(node: ast.AsyncFunctionDef) -> list[int]:
                         and base.attr == "g") or (isinstance(base, ast.Name) and base.id in bound):
                     hits.append(current.lineno)
         for child in ast.iter_child_nodes(current):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                  ast.ClassDef)):
-                continue
             visit(child)
 
     for stmt in getattr(node, "body", []):
-        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            continue
         visit(stmt)
     return hits
 
@@ -566,6 +656,68 @@ def test_graph_handle_binding_rule_detects_offload_wrapped_binding():
     ).body[0]
     assert _graph_bound_names(wrapped) == {"proj"}
     assert _has_inline_graph_io(wrapped) == [3]
+
+
+def test_nested_closure_invocation_rule():
+    """A nested def is scanned only when it is INVOKED on the loop.
+
+    The round-2 revision scans a locally defined function's body when it is
+    called bare (``_read()`` — on the loop) and skips it when it is only
+    handed to an offload boundary as a callable REFERENCE
+    (``asyncio.to_thread(_read)``, ``run_in_executor(pool, _read)``, or a
+    ``functools.partial`` wrapping) — which runs in the worker. Before this,
+    ``patch_onboarding_state`` returned ``[]`` either way, so its off-load
+    assertion was vacuous (#4455 review P1, mutation-reproduced).
+    """
+    invoked = ast.parse(
+        "async def _probe():\n"
+        "    def _read():\n"
+        "        return sdk._get_proj()\n"
+        "    node = _read()\n"
+    ).body[0]
+    assert _has_inline_graph_io(invoked) == [3], (
+        "a nested def invoked bare on the loop was not scanned (#4455 review)")
+
+    offloaded = ast.parse(
+        "async def _probe():\n"
+        "    def _read():\n"
+        "        return sdk._get_proj()\n"
+        "    node = await asyncio.to_thread(_read)\n"
+    ).body[0]
+    assert _has_inline_graph_io(offloaded) == [], (
+        "a nested def handed to an offload boundary as a reference was scanned "
+        "— the off-load assertion would be wrong (#4455 review)")
+
+    executor = ast.parse(
+        "async def _probe():\n"
+        "    def _read():\n"
+        "        return sdk._get_proj()\n"
+        "    node = await loop.run_in_executor(pool, _read)\n"
+    ).body[0]
+    assert _has_inline_graph_io(executor) == [], (
+        "a nested def passed at arg 1 of run_in_executor was scanned as inline "
+        "(#4455 review)")
+
+    partial = ast.parse(
+        "async def _probe():\n"
+        "    def _read():\n"
+        "        return sdk._get_proj()\n"
+        "    node = await _run_with_close(\n"
+        "        _DREAM_EXECUTOR, functools.partial(ctx.run, _read), timeout=1)\n"
+    ).body[0]
+    assert _has_inline_graph_io(partial) == [], (
+        "a nested def wrapped in functools.partial for an offload boundary was "
+        "scanned as inline (#4455 review)")
+
+    seam_free = ast.parse(
+        "async def _probe():\n"
+        "    def _clean():\n"
+        "        return 1\n"
+        "    return _clean()\n"
+    ).body[0]
+    assert _has_inline_graph_io(seam_free) == [], (
+        "a seam-free nested def invoked on the loop produced a false positive "
+        "(#4455 review)")
 
 
 def test_async_body_inventory_is_visible():
