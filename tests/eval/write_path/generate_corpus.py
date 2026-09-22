@@ -147,7 +147,13 @@ def _operator(op_id: str, kind: str, from_anchor: str, from_turn: int,
 # Corpus floor for the planted-operator (layer-2) gold (issue #2514): every
 # operator kind the issue names must be planted at least once across the
 # corpus, and each planted edge must be unambiguous in its transcript.
-MIN_PLANTED_OPERATOR_EDGES = 4
+#
+# #2552 (measurement power): raised 4 -> 15. A 4-edge denominator swung
+# 0, 1, 1, 1, 2 / 4 across runs on IDENTICAL code (recorded on #2552,
+# 2026-09-21), so no behavioural claim could be separated from LLM
+# variance. The floor is set to the corpus's actual count so a silent
+# shrink cannot re-open that hole.
+MIN_PLANTED_OPERATOR_EDGES = 15
 REQUIRED_OPERATOR_KINDS = {"SUPERSEDE", "NEGATE", "MITIGATES", "SUPPORTS"}
 
 
@@ -217,6 +223,18 @@ WP01 = {
         _hazard("h_02", "the hydrate stage was clean, I already audited it", "diego", turn=21),
         _hazard("h_03", "he knows the queue internals from the last incident", "diego", turn=25),
     ],
+    "planted_operators": [
+        _operator("op_01", "SUPPORTS",
+                  "two workers grabbed the same batch twice from the ingest queue and each marked its own copy complete", 9,
+                  "nothing prevents two workers from claiming one batch", 10,
+                  relation_turn=10,
+                  reason="reproduction observation (t9) supports the root-cause claim (t10) — ONTOLOGY §3.1 IMPL 'A supports/implies B' + §8 supports|IMPL (evidence supports claim); the assistant turn states the relation explicitly ('Confirmed root cause:'). from = observation/evidence, to = claim."),
+        _operator("op_02", "MITIGATES",
+                  "A lease row keyed by batch id with a thirty-second expiry and a compare-and-swap update on completion", 12,
+                  "you have a duplicate-processing race", 8,
+                  relation_turn=12,
+                  reason="the single-owner lease mechanism (t12) closes the duplicate-processing-race claim (t8) — ONTOLOGY §3.9 mitigated_by (registered) + §5 Problem-family note ('the problem is closed by an action'); MITIGATES is the write path's GRADED relevance dampener on the operator edge, never a refutation. from = the measure's claim, to = the problem claim. FLAGGED (scoping finding F1): core §3.1 has no first-class point-to-point 'action reduces risk' operator, so the gold asserts the write path's MITIGATES form (mitigation Point on the operator edge)."),
+    ],
 }
 
 WP02 = {
@@ -269,6 +287,13 @@ WP02 = {
     "hazards": [
         _hazard("h_01", "the team signed off last Friday", "jonah", turn=1),
         _hazard("h_02", "their integration team is small and they were already asking for scoped credentials", "jonah", turn=11),
+    ],
+    "planted_operators": [
+        _operator("op_01", "MITIGATES",
+                  "Short-lived keys mean a leak is a one-day problem, not a quarterly audit finding", 7,
+                  "The current team tokens never expire, which is exactly how the leaked token stayed valid for weeks", 6,
+                  relation_turn=7,
+                  reason="the twenty-four-hour key lifetime with boundary rotation (t7) reduces the never-expiring-token risk claim (t6) — ONTOLOGY §3.9 mitigated_by + §5; MITIGATES is the write path's graded dampener on the operator edge (w_eff = w * (1 - strength)), never a refutation of the risk. from = the measure's claim, to = the risk claim. FLAGGED (scoping finding F1) as on wp01 op_02."),
     ],
 }
 
@@ -327,6 +352,23 @@ WP03 = {
         _hazard("h_01", "roughly thirty percent of alerts are unactionable because the ownership lookup fails", "maya", turn=5),
         _hazard("h_02", "Tomas wants to watch the first two weeks of ownership-based routing before we expand", "maya", turn=21),
     ],
+    "planted_operators": [
+        _operator("op_01", "MITIGATES",
+                  "We route ember alerts by service ownership instead of by page group", 7,
+                  "Roughly thirty percent of alerts are unactionable because the ownership lookup fails", 5,
+                  relation_turn=7,
+                  reason="ownership-based routing (t7, 'the core of the redesign') reduces the unactionable-page claim (t5) — ONTOLOGY §3.9 mitigated_by + §5; the measure's claim is the from endpoint, the problem claim the to endpoint. FLAGGED (scoping finding F1) as on wp01 op_02."),
+        _operator("op_02", "MITIGATES",
+                  "A service with no owner row falls to the default rotation and we flag it in the weekly ownership report", 9,
+                  "they will fall through any ownership-based router", 8,
+                  relation_turn=9,
+                  reason="the default-rotation fallback plus weekly ownership report (t9) closes the ownership-based-router gap claim (t8, the assistant's explicit risk) — ONTOLOGY §3.9 mitigated_by; 'No silent drops, every alert still lands somewhere' states the dampening. FLAGGED (scoping finding F1) as on wp01 op_02."),
+        _operator("op_03", "MITIGATES",
+                  "auto-suppress alerts during declared maintenance windows", 15,
+                  "Maintenance windows are the other classic noise source", 14,
+                  relation_turn=15,
+                  reason="maintenance-window auto-suppression (t15) reduces the named noise-source claim (t14, the assistant's 'the other classic noise source') — ONTOLOGY §3.9 mitigated_by. The user's 'Yes' + 'ember reading them costs us nothing' states the relation. FLAGGED (scoping finding F1) as on wp01 op_02."),
+    ],
 }
 
 WP04 = {
@@ -377,6 +419,23 @@ WP04 = {
     "hazards": [
         _hazard("h_01", "he flagged the sidebar as a risk in the design review", "priya", turn=15),
         _hazard("h_02", "the number we promised the account teams", "priya", turn=19),
+    ],
+    "planted_operators": [
+        _operator("op_01", "SUPPORTS",
+                  "The spike correlates with the October 5 release, the one that added the related-memory sidebar", 3,
+                  "the sidebar feature is the prime suspect", 4,
+                  relation_turn=4,
+                  reason="the release-correlation observation (t3) supports the prime-suspect claim (t4) — ONTOLOGY §3.1 IMPL + §8 supports|IMPL; the assistant turn states the relation ('So the sidebar feature is the prime suspect.'). from = observation/evidence, to = claim."),
+        _operator("op_02", "MITIGATES",
+                  "A ten-minute TTL cache will absorb nearly all of the repeat traffic", 12,
+                  "The N+1 embedding calls are what blew up the p95", 5,
+                  relation_turn=12,
+                  reason="the batch lookup plus ten-minute TTL cache (t12) reduces the N+1 latency cause claim (t5) — ONTOLOGY §3.9 mitigated_by; t12 states the dampening ('the batch call only runs on a cache miss'). from = the measure's claim, to = the problem claim. FLAGGED (scoping finding F1) as on wp01 op_02."),
+        _operator("op_03", "MITIGATES",
+                  "Invalidate the cache entry for a team whenever a write lands in that team's graph", 17,
+                  "stale related items if the underlying memory changes between refreshes", 16,
+                  relation_turn=17,
+                  reason="write-triggered invalidation (t17) closes the cache-staleness risk the assistant names in t16 ('One risk with the cache: stale related items') — ONTOLOGY §3.9 mitigated_by; t17 keeps the TTL as a backstop rather than the primary consistency mechanism. FLAGGED (scoping finding F1) as on wp01 op_02."),
     ],
 }
 
@@ -433,6 +492,18 @@ WP05 = {
     "hazards": [
         _hazard("h_01", "Aisha kept pushing us to check the config diff instead", "sam", turn=5),
         _hazard("h_02", "their account team accepted", "sam", turn=15),
+    ],
+    "planted_operators": [
+        _operator("op_01", "NEGATE",
+                  "The config partition was the root cause", 7,
+                  "The initial investigation blamed the search index", 5,
+                  relation_turn=7,
+                  reason="the config-partition root cause (t7) contradicts the search-index blame the initial investigation ran with (t5) — ONTOLOGY §3.1 NAND 'A contradicts B'; the assistant states the relation ('So the config diff was the real cause.'). The two attributions cannot both be the root cause. Extraction NANDs default unidirectional (#909): from = the counter-claim, to = the claim it refutes."),
+        _operator("op_02", "SUPPORTS",
+                  "We rolled the config back to the previous partition at 12:40pm and traffic normalized within thirteen minutes", 9,
+                  "The config partition was the root cause", 7,
+                  relation_turn=9,
+                  reason="the rollback-and-recovery observation (t9: traffic normalized within thirteen minutes of reverting the partition) supports the config-partition root-cause claim (t7) — ONTOLOGY §3.1 IMPL + §8 supports|IMPL; the assistant turn states the relation ('Config partition confirmed.'). from = observation/evidence, to = claim."),
     ],
 }
 

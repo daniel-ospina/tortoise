@@ -242,16 +242,29 @@ VALUE_FIDELITY_RULE = (
 )
 
 
-# #2552 (layer-2 operator-emission semantics — the remaining waves after the
-# #2556 persistence fix, measured 0/4 on the #2514 operator corpus): the
-# operator-structure rule block. Rendered into BOTH mapping stages (S2/S4)
-# from the SAME {anti_routine} slot as its siblings. The product semantics
-# are DECIDED (scoping findings F1/F2 — do not revisit): a mitigation
-# attacks the OPERATOR (the connection) as a graded dampener
-# (w_eff = w * (1 - strength)), never a refutation; a same-session decision
-# reversal is state/validity semantics; a CROSS-SESSION point correction is
-# a CORRECTS supersession — point-level "supersedes" refs resolve against
-# the S3 search results, so they are cross-session by construction.
+# #2552 (layer-2 operator-emission semantics): the operator-structure rule
+# block. Rendered into BOTH mapping stages (S2/S4) from the SAME
+# {anti_routine} slot as its siblings.
+#
+# What is DECIDED, and must not be re-litigated (these are the adopted
+# product semantics, recorded in ``docs/ONTOLOGY.md`` §3.9 / §3.1 and the
+# #2315 product decision of 2026-09-07): a mitigation attacks the OPERATOR
+# (the connection) as a graded dampener (w_eff = w * (1 - strength)), never a
+# refutation; a same-session decision reversal is state/validity semantics;
+# a CROSS-SESSION point correction is a CORRECTS supersession — point-level
+# "supersedes" refs resolve against the S3 search results, so they are
+# cross-session by construction.
+#
+# What is FLAGGED, and therefore NOT decided here (the corpus's own scoping
+# findings F1/F2, ``docs/scoping/2026-09-07-2514-operator-corpus.md``): the
+# core §3.1 Point→Point vocabulary registers IMPL / NAND / hasPart / CORRECTS
+# only — there is no first-class Point→Point "action reduces risk" operator
+# (F1), and §2's state-centric model does not clearly require a Point-level
+# CORRECTS for an in-SESSION reversal (F2).  The rule block below asserts the
+# write path's forms because they are the IMPLEMENTED ones; it is not an
+# ontology ruling.  An earlier version of this comment called the mapping
+# "F1/F2-validated", which read as a settlement of both.  The mapping is a
+# separate, out-of-scope question; do not treat this block as its answer.
 OPERATOR_SEMANTICS_RULE = (
     "OPERATOR STRUCTURE (direction, relevance, supersede — #2552):\n"
     "- NAND IS DIRECTED (extraction default #909 — new-claim-attacks-existing):\n"
@@ -3719,6 +3732,13 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
       - Layer-1 integrity: operators whose src/dst/target reference no emitted
         point/event are DROPPED with a warning (mirrors _stream_to_payload);
         MITIGATES strengths clamp to [0.10, 0.50] with a warning.
+        ⚠️ #2552 MINT-BEFORE-WIRE: before that check runs, an operator endpoint
+        that names no emitted point/event is materialized as a statement Point
+        carrying the model's own reference text, and a MITIGATES's declared
+        ``target_edge`` IMPL is materialized when the model did not separately
+        emit it. So the drop now fires only on a genuinely unresolvable ref
+        (empty, or the degenerate self-edge) — not on the prompt's
+        "CREATE the point first" instruction being skipped by the model.
 
     Returns {"payload", "chain_notes", "link_before_create", "warnings",
              "minted_kinds", "stats"}.
@@ -4093,6 +4113,69 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             return event_ids[r]
         return ""
 
+    # ── MINT-BEFORE-WIRE (#2552, dependency order 3.5) ────────────────────
+    # The OPERATOR REFERENCING hard rule in the S2/S4 prompts instructs the
+    # model that "If an endpoint of an IMPL/NAND/MITIGATES relation has no
+    # point yet, CREATE the point first and reference it". Nothing in this
+    # seam enforced the second half: `_resolve` below is a strict consumer of
+    # the model's own `points` array, so an operator naming an endpoint the
+    # model did not also emit as a point/event was DROPPED — the edge was lost
+    # with a warning and the model's non-compliance became silent recall loss.
+    # Measured on the #2514 operator corpus (2026-09-16): 2 of 4 planted edges
+    # failed at the ENDPOINT stage (`from_content_missing` /
+    # `to_content_missing`) before any kind or direction question arose.
+    #
+    # This pre-pass materializes such an endpoint as a statement Point (the
+    # only extraction point kind — ONTOLOGY §2 state-centric model) whose
+    # content is the model's OWN reference text, verbatim: nothing is
+    # invented and no fuzzy binding is attempted — a ref that does not resolve
+    # under the existing normalized-equality rule is minted exactly as the
+    # model wrote it. It runs BEFORE the operator pass so the ordinary
+    # `_resolve` path then wires the operator unchanged. Known cost: a ref the
+    # model wrote as an ENTITY name (the prompt forbids entity endpoints)
+    # mints a degenerate claim Point — bounded, counted, and warned.
+    minted_endpoints: list[str] = []
+
+    def _mint_endpoint(ref: str, where: str) -> str:
+        content = str(ref or "").strip()[:1000]
+        if not content:
+            return ""
+        n = _norm(content)
+        if n in point_ids:
+            return point_ids[n]
+        pid = _content_id("pt", content)
+        payload_points.append({
+            "id": pid, "content": content, "pointKind": "statement",
+            "reason": "NEW", "confidence": 0.5, "c_cal": 0.5,
+            "about_entities": [], "source_ref": "session.md", "quote": "",
+            "search_keys": [], "status": "draft",
+        })
+        point_ids[n] = pid
+        minted_endpoints.append(pid)
+        warnings.append(
+            f"operator endpoint minted (#2552 mint-before-wire): {where} "
+            f"named {content[:60]!r} but no emitted point/event carried it — "
+            "materialized as a statement Point so the operator wires")
+        return pid
+
+    for _op in embed_list.get("operators", []) or []:
+        if not isinstance(_op, dict):
+            continue
+        _op_type = str(_op.get("op_type", "")).upper()
+        if _op_type not in ("IMPL", "NAND", "MITIGATES"):
+            continue
+        for _side in ("src", "dst"):
+            _ref = str(_op.get(_side, "") or "")
+            if _ref and not _resolve(_ref):
+                _mint_endpoint(_ref, f"{_op_type} {_side}")
+        if _op_type == "MITIGATES":
+            _target = _op.get("target") or _op.get("target_edge") or {}
+            if isinstance(_target, dict):
+                for _side in ("src", "dst"):
+                    _ref = str(_target.get(_side, "") or "")
+                    if _ref and not _resolve(_ref):
+                        _mint_endpoint(_ref, f"MITIGATES target_edge {_side}")
+
     payload_operators: list[dict] = []
     emitted_edges: set[tuple[str, str, str]] = set()
     mitigates_pending: list[dict] = []
@@ -4153,6 +4236,27 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                             f"('{o.get('src', '')[:40]}'→'{o.get('dst', '')[:40]}') "
                             "clamped")
             strength = min(0.50, max(0.10, strength))
+        declared_target_missing = (
+            bool(t_src and t_dst) and t_src != t_dst
+            and (t_src, t_dst, "IMPL") not in emitted_edges)
+        if declared_target_missing:
+            # #2552 mint-before-wire (the IMPL pair): the OUTPUT_CONTRACT
+            # declares a MITIGATES as ONE operator entry carrying its
+            # ``target_edge`` — it never asks the model to ALSO repeat that
+            # IMPL as its own operator entry, so a contract-compliant
+            # emission was dropped here unconditionally. The model asserted
+            # the edge by naming it in ``target_edge``: materialize it. Only
+            # the degenerate case (a missing endpoint, or a self-edge) still
+            # drops.
+            payload_operators.append({
+                "src": t_src, "dst": t_dst, "op_type": "IMPL",
+                "direction": "unidirectional"})
+            emitted_edges.add((t_src, t_dst, "IMPL"))
+            warnings.append(
+                "MITIGATES target edge materialized (#2552 mint-before-"
+                f"wire): the declared target IMPL ({t_src[:40]!r} → "
+                f"{t_dst[:40]!r}) was not emitted as its own operator "
+                "— added so the dampener has its target")
         if not (t_src and t_dst and (t_src, t_dst, "IMPL") in emitted_edges):
             warnings.append(f"MITIGATES target edge not emitted ({t_src!r}→{t_dst!r} "
                             "IMPL) — dropped")
@@ -4250,6 +4354,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         "stats": {
             "entities": len(payload_entities), "events": len(payload_events),
             "points": len(payload_points), "operators": len(payload_operators),
+            "operator_endpoints_minted": len(minted_endpoints),
             "tier_a_points": tier_a_points,
             "noops": len(noops),
             "deletions": len(deletions),

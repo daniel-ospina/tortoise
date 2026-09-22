@@ -1712,15 +1712,47 @@ class TestS5:
                                                       "content": "x"}])
         assert "supersessions" in out2
 
-    def test_unresolved_operator_dropped(self):
+    def test_unresolved_operator_endpoint_is_minted(self):
+        """#2552 mint-before-wire: the S2/S4 OPERATOR REFERENCING hard rule
+        tells the model that "If an endpoint of an IMPL/NAND/MITIGATES
+        relation has no point yet, CREATE the point first and reference it".
+        The seam enforced only the REFERENCE half — an endpoint naming a claim
+        the model did not also emit was dropped, so a non-compliant emission
+        lost the EDGE silently. Measured on the #2514 corpus: 2 of 4 planted
+        edges failed at the endpoint stage before any kind question arose.
+
+        Now the endpoint is materialized as a statement Point carrying the
+        model's OWN reference text (nothing invented) and the operator wires.
+        """
         embed = json.loads(json.dumps(S2_FIXTURE))
         embed["operators"].append({"src": "not a real content",
                                    "dst": "also not", "op_type": "IMPL"})
         result = v2.execute_embed(embed, {}, session_id="s1")
-        assert len(result["payload"]["operators"]) == 2  # dropped
-        assert any("did not resolve" in w for w in result["warnings"])
+        # Pass 1 emits IMPL/NAND in input order; pass 2 appends MITIGATES —
+        # so the appended IMPL is index 1 and the fixture's MITIGATES is last.
+        assert [o["op_type"] for o in result["payload"]["operators"]] == \
+            ["IMPL", "IMPL", "MITIGATES"]
+        minted = {p["content"]: p for p in result["payload"]["points"]}
+        assert minted["not a real content"]["pointKind"] == "statement"
+        assert minted["also not"]["pointKind"] == "statement"
+        op = result["payload"]["operators"][1]
+        assert op["src"] == minted["not a real content"]["id"]
+        assert op["dst"] == minted["also not"]["id"]
+        assert not any("did not resolve" in w for w in result["warnings"])
+        assert any("endpoint minted" in w for w in result["warnings"])
+        assert result["stats"]["operator_endpoints_minted"] == 2
 
-    def test_mitigates_unresolved_target_dropped(self):
+    def test_mitigates_unminted_target_endpoints_minted_and_impl_materialized(self):
+        """#2552, the measured `wp07_op_03 MITIGATES -> edge_missing` case.
+
+        The OUTPUT_CONTRACT declares a MITIGATES as ONE operator entry
+        carrying its ``target_edge`` — it never asks the model to ALSO repeat
+        that IMPL as its own operator entry, and `commit_ops`
+        (`apply_payload_operators`) resolves the mitigation against the
+        payload's IMPL set. A contract-compliant MITIGATES was therefore
+        ALWAYS dropped. Now the declared target IMPL is materialized (the
+        model asserted the edge by naming it) and the dampener has a target.
+        """
         embed = json.loads(json.dumps(S2_FIXTURE))
         embed["operators"] = [
             {"src": "single-flash with granularity is the working path",
@@ -1728,9 +1760,99 @@ class TestS5:
              "target_edge": {"src": "ghost", "dst": "ghost2", "op_type": "IMPL"},
              "strength": 0.3}]
         result = v2.execute_embed(embed, {}, session_id="s1")
-        assert result["payload"]["operators"] == []
-        assert any("MITIGATES target edge not emitted" in w
-                   for w in result["warnings"])
+        types = [o["op_type"] for o in result["payload"]["operators"]]
+        assert types == ["IMPL", "MITIGATES"]
+        ids = {p["content"]: p["id"] for p in result["payload"]["points"]}
+        assert "ghost" in ids and "ghost2" in ids
+        assert result["payload"]["operators"][0] == {
+            "src": ids["ghost"], "dst": ids["ghost2"], "op_type": "IMPL",
+            "direction": "unidirectional"}
+        assert not any("target edge not emitted" in w for w in result["warnings"])
+        assert result["stats"]["operator_endpoints_minted"] == 2
+
+    def test_minted_endpoint_is_deduped_and_invents_nothing(self):
+        """#2552: two operators naming the SAME unminted endpoint mint ONE
+        Point (content-addressed dedup, same id space as the write path), and
+        the minted Point fabricates no provenance — no quote, no source turn,
+        no entities. Content is exactly the model's own reference text.
+        """
+        embed = json.loads(json.dumps(S2_FIXTURE))
+        embed["points"] = []
+        embed["events"] = []
+        embed["operators"] = [
+            {"src": "the missing claim", "dst": "the other missing claim",
+             "op_type": "IMPL"},
+            {"src": "the missing claim", "dst": "a third missing claim",
+             "op_type": "NAND"},
+        ]
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        pts = r["payload"]["points"]
+        contents = [p["content"] for p in pts]
+        assert contents.count("the missing claim") == 1
+        assert sorted(contents) == ["a third missing claim",
+                                    "the missing claim",
+                                    "the other missing claim"]
+        for p in pts:
+            assert p["pointKind"] == "statement"
+            assert p["quote"] == ""
+            assert "source_turn_id" not in p
+            assert p["about_entities"] == []
+            assert p["id"] == v2._content_id("pt", p["content"])
+        assert r["stats"]["operator_endpoints_minted"] == 3  # not 4 — deduped
+        # Two operators, three distinct endpoints, all wired.
+        assert [o["op_type"] for o in r["payload"]["operators"]] == ["IMPL", "NAND"]
+
+    def test_planted_supports_lane_no_longer_reports_to_content_missing(self):
+        """#2552 measured case (wp06 op_01 SUPPORTS -> `to_content_missing`).
+
+        The model names the planted claim as an operator endpoint but does not
+        also emit it as a point. Through ``execute_embed`` ALONE — the real
+        fold the product lane runs, with no gold-derived monkeypatch — the
+        edge must survive AND the minted Point must carry the planted anchor,
+        or the corpus grader can only ever report `to_content_missing`.
+        """
+        obs = ("two workers grabbed the same batch twice from the ingest queue "
+               "and each marked its own copy complete")
+        claim = "nothing prevents two workers from claiming one batch"
+        embed = {
+            "entities": [], "events": [],
+            "points": [{"content": obs, "pointKind": "statement"}],
+            "operators": [{"src": obs, "dst": claim, "op_type": "IMPL"}],
+        }
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        ids = {p["content"]: p["id"] for p in r["payload"]["points"]}
+        assert claim in ids  # the endpoint the grader anchors on now exists
+        assert [o["op_type"] for o in r["payload"]["operators"]] == ["IMPL"]
+        assert r["payload"]["operators"][0]["src"] == ids[obs]
+        assert r["payload"]["operators"][0]["dst"] == ids[claim]
+
+    def test_planted_mitigates_lane_no_longer_reports_edge_missing(self):
+        """#2552 measured case (wp07 op_03 MITIGATES -> `edge_missing`): both
+        endpoints were present and NO edge was emitted. A MITIGATES naming an
+        action claim + a risk claim with its declared target_edge, and no
+        separately-emitted IMPL, must now reach the write path as the
+        IMPL + MITIGATES pair the payload contract requires.
+        """
+        action = "a lagging region's renewal cannot clobber a live lease"
+        risk = "clock skew between regions can make lease expiry unsafe"
+        embed = {
+            "entities": [], "events": [],
+            "points": [{"content": action, "pointKind": "statement"},
+                       {"content": risk, "pointKind": "statement"}],
+            "operators": [{"src": action, "dst": risk, "op_type": "MITIGATES",
+                           "strength": 0.4,
+                           "target": {"src": risk, "dst": action,
+                                      "op_type": "IMPL"}}],
+        }
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        ids = {p["content"]: p["id"] for p in r["payload"]["points"]}
+        assert [o["op_type"] for o in r["payload"]["operators"]] == \
+            ["IMPL", "MITIGATES"]
+        mit = r["payload"]["operators"][1]
+        assert mit["src"] == ids[action] and mit["dst"] == ids[risk]
+        assert mit["target"] == {"src": ids[risk], "dst": ids[action],
+                                 "op_type": "IMPL"}
+        assert r["stats"]["operator_endpoints_minted"] == 0
 
     def test_tier_a_point_passes_through_with_quote(self):
         """E2 (D4/D6): a Tier-A embed point yields a payload point with
@@ -5141,13 +5263,17 @@ class TestOperatorSemantics2552:
         assert not any("MITIGATES target edge not emitted" in w for w in r["warnings"])
 
     def test_mitigates_without_target_edge_drops_loudly_not_fabricated(self):
-        """op_03 honesty: a MITIGATES whose target edge was not emitted is
-        dropped with a warning (the write path has nothing to dampen) —
-        the deterministic fold never fabricates a target operator."""
+        """op_03 honesty, narrowed by #2552: a MITIGATES that DECLARES no
+        target edge at all is dropped with a warning — the fold never invents
+        a target operator out of nothing. (A MITIGATES that declares a target
+        edge whose endpoints are unminted is a different case: #2552 mints the
+        endpoints and materializes the DECLARED edge — see
+        test_mitigates_unminted_target_endpoints_minted_and_impl_materialized.
+        The distinction is declaration: nothing declared is never invented.)
+        """
         risk = "clock skew between regions can make lease expiry unsafe"
         action = ("the skew-tolerant grace period is in place so a lagging "
                   "region's renewal cannot clobber a live lease")
-        obs = "the region clock drifted eleven seconds"
         embed = {
             "entities": [], "events": [],
             "points": [
@@ -5156,13 +5282,13 @@ class TestOperatorSemantics2552:
             ],
             "operators": [
                 {"src": action, "dst": risk, "op_type": "MITIGATES",
-                 "target_edge": {"src": obs, "dst": risk, "op_type": "IMPL"},
                  "strength": 0.3},
             ],
         }
         r = v2.execute_embed(embed, {}, session_id="s1")
         assert r["payload"]["operators"] == []
         assert any("MITIGATES target edge not emitted" in w for w in r["warnings"])
+        assert r["stats"]["operator_endpoints_minted"] == 0
 
     def test_decision_reversal_point_supersedes_folds_corrects_record(self):
         """op_04: the direct decision-reversal path — a NEW point whose
