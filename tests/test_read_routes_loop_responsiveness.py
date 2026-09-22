@@ -443,6 +443,18 @@ _OFFLOADED_ASYNC_BODIES = frozenset({
     # registry legs via ``asyncio.to_thread`` (the sibling registry reads'
     # house style) and the Supabase control-plane legs via ``_cp_offload``.
     "invite_info",
+    # #3718 residual 3 — the DATA-plane seam outside the REST-converted
+    # bodies. These were ``_KNOWN_INLINE_*_RESIDUAL`` until this change
+    # off-loaded their projection attach / registry attach / graph round
+    # trips. Each is a single worker hand-off (a whole no-`await` sequence
+    # where one existed, so no interleaving point is added).
+    # Behavioural coverage for the lane lives in
+    # ``tests/test_dataplane_lane_loop_responsiveness.py``.
+    "_lifespan", "_run_indexing", "public_demo",
+    "commit_session", "delete_session",
+    "backups_create", "backups_restore", "backups_sweep",
+    "backups_purge", "backups_rebaseline", "backups_drill",
+    "backups_drill_scheduled",
 })
 
 #: FastAPI route handlers STILL running sync FalkorDB I/O inline. Declared,
@@ -451,13 +463,10 @@ _OFFLOADED_ASYNC_BODIES = frozenset({
 #: `test_graph_io_is_offloaded`; a NEW inline route fails the same assertion.
 _KNOWN_INLINE_ROUTE_RESIDUAL = frozenset({
     "provision_tenant", "register_user", "create_api_key", "revoke_api_key",
-    "toggle_api_key_enabled", "commit_session", "delete_session",
-    "delete_graph", "invite_to_org", "accept_invite", "invite_otp",
-    "resend_invite", "expire_invite", "decline_invite", "remove_member",
-    "change_member_role", "import_org", "reconcile", "agent_signup",
-    "session_key", "public_demo", "github_callback", "backups_create",
-    "backups_restore", "backups_sweep", "backups_purge", "backups_rebaseline",
-    "backups_drill", "backups_drill_scheduled", "webhooks_stripe",
+    "toggle_api_key_enabled", "delete_graph", "invite_to_org", "accept_invite",
+    "invite_otp", "resend_invite", "expire_invite", "decline_invite",
+    "remove_member", "change_member_role", "import_org", "reconcile",
+    "agent_signup", "session_key", "github_callback", "webhooks_stripe",
 })
 
 #: Non-route async bodies with inline sync FalkorDB I/O — the per-request auth
@@ -466,13 +475,13 @@ _KNOWN_INLINE_ROUTE_RESIDUAL = frozenset({
 #: lifecycle/backup helpers. Same declared residual; same burn-down. Scanned
 #: rather than ignored because a dependency body is still ON the loop.
 _KNOWN_INLINE_HELPER_RESIDUAL = frozenset({
-    "_lifespan", "get_current_org", "_capture_session_impl", "_user_memberships",
+    "get_current_org", "_capture_session_impl", "_user_memberships",
     "_membership_org", "_org_node", "_count_active_free_memberships",
     "_owned_free_org_ids", "_create_org_registry_lane",
     "_apply_graph_recording_override", "_apply_graph_rename", "_graph_row_probe",
     "_rollback_restore_name_race", "_trash_name_conflict",
     "_require_owner_admin", "_require_owner", "_registry_mismatch_accept_v2",
-    "_registry_accept_by_id", "_quarantine_import", "_run_indexing",
+    "_registry_accept_by_id", "_quarantine_import",
 })
 
 

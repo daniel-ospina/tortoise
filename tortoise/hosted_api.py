@@ -1391,7 +1391,12 @@ async def _lifespan(app):
                         # the shared seam, and _make_sdk's process-lifetime
                         # keepalive anchor keeps the embedded server alive
                         # (#1475/#1607).
-                        _boot_gc_drill_graphs(_make_sdk(namespace=None)._get_proj().db)
+                        # #3718 residual (DATA plane): the data-plane handle AND
+                        # the sweep are SYNC FalkorDB work — one worker hand-off
+                        # so a boot with many stale `_drill_*` graphs cannot hold
+                        # the event loop while it opens the DB and deletes them.
+                        await asyncio.to_thread(
+                            lambda: _boot_gc_drill_graphs(_make_sdk(namespace=None)._get_proj().db))
                     except Exception as exc:
                         # #2922 review: a separate operation, so a separate
                         # message. Reporting a drill-graph GC failure as "the
@@ -11113,116 +11118,127 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         )
 
     _require_scope(org, "graphs:write", "commit_session")
-    sdk = _data_sdk(org)
-    proj = sdk._get_proj()
-    store = CommitRecordStore(sdk)
+    sdk = await _data_sdk_offloaded(org)
 
-    # [2] L1 replay — a fully_written :CommitRecord is the idempotency proof:
-    # 200 {duplicate:true}, zero writes, zero write-ops billed (PL4). A
-    # record with status held|partial is NOT fully written (PL3).
-    record = store.get(payload.client_commit_id)
-    if record is not None and record.status == "fully_written":
-        return _commit_response(payload, duplicate=True, warnings=warnings)
+    # #3718 residual (DATA plane): everything below is SYNCHRONOUS FalkorDB
+    # socket I/O — the L1 replay read, L2 reconciliation, the :CommitRecord
+    # MERGE serialization point, the Session/Point writes and the telemetry
+    # reads. On the loop it was ONE no-`await` sequence, so a SINGLE worker
+    # hand-off keeps the ordering (a per-call hand-off would add interleaving
+    # points the original did not have) and the exception semantics identical.
+    # `_record_write_op` rides along: it is blocking too (#4451) and is
+    # strictly downstream of the write it meters.
+    def _commit_sync() -> dict:
+        proj = sdk._get_proj()
+        store = CommitRecordStore(sdk)
 
-    # [3] L2 reconciliation IN MEMORY (W-3 [3]) + budget adjudication on the
-    # reconciled net-new delta — computed BEFORE any write (the ceiling check
-    # must count net-new, which only the reconciliation knows).
-    state = _load_commit_graph_state(sdk, payload)
-    plan = plan_commit(payload, state, record)
-
-    # :CommitRecord MERGE = the atomic concurrency serialization point (W-3
-    # [2], DE2E-7 neg a): the loser of the MERGE sees the winner's record →
-    # duplicate (if fully_written) or completes the remainder (held|partial).
-    rec, created = store.acquire(
-        payload.client_commit_id, session_id=payload.session_id,
-        status="partial", write_ops_billed=0)
-    if not created:
-        rec = store.get(payload.client_commit_id) or rec
-        if rec.status == "fully_written":
+        # [2] L1 replay — a fully_written :CommitRecord is the idempotency proof:
+        # 200 {duplicate:true}, zero writes, zero write-ops billed (PL4). A
+        # record with status held|partial is NOT fully written (PL3).
+        record = store.get(payload.client_commit_id)
+        if record is not None and record.status == "fully_written":
             return _commit_response(payload, duplicate=True, warnings=warnings)
-        plan = plan_commit(payload, state, rec)  # PL3: ceiling-only
-    if plan.duplicate:
-        return _commit_response(payload, duplicate=True, warnings=warnings)
 
-    # [4a] Sessions presence contract — NOT a cap. #4010 made sessions
-    # unlimited for every tier, so every resolver supplies an explicit None
-    # and this call cannot 402; it remains the fail-closed presence check
-    # (#310 GAP-B) that a limits dict built without the key does not slip
-    # past. Replays already returned above: quota never gates a duplicate
-    # (zero writes).
-    _check_org_limit(org, "sessions")
+        # [3] L2 reconciliation IN MEMORY (W-3 [3]) + budget adjudication on the
+        # reconciled net-new delta — computed BEFORE any write (the ceiling check
+        # must count net-new, which only the reconciliation knows).
+        state = _load_commit_graph_state(sdk, payload)
+        plan = plan_commit(payload, state, record)
 
-    # [4b] Budget — the authoritative §6.1 semantics live in adjudicate_budget.
-    if plan.budget.outcome == "fail":
-        # Ceiling exceeded (>50): nothing written; the record stays partial
-        # (re-submission 402s deterministically — DE2E-7 Session B/C).
-        raise HTTPException(status_code=402, detail=plan.budget.reason)
+        # :CommitRecord MERGE = the atomic concurrency serialization point (W-3
+        # [2], DE2E-7 neg a): the loser of the MERGE sees the winner's record →
+        # duplicate (if fully_written) or completes the remainder (held|partial).
+        rec, created = store.acquire(
+            payload.client_commit_id, session_id=payload.session_id,
+            status="partial", write_ops_billed=0)
+        if not created:
+            rec = store.get(payload.client_commit_id) or rec
+            if rec.status == "fully_written":
+                return _commit_response(payload, duplicate=True, warnings=warnings)
+            plan = plan_commit(payload, state, rec)  # PL3: ceiling-only
+        if plan.duplicate:
+            return _commit_response(payload, duplicate=True, warnings=warnings)
 
-    now = datetime.now(UTC).isoformat()
-    if plan.budget.outcome == "held":
-        # >25 (first adjudication only, PL3): items NOT written — the held
-        # count lives on the Session counter (value_nodes_held, §4.1 — NOT on
-        # the record); re-submission checks the 50-ceiling only. Bills zero
-        # write-ops (write_ops_billed: 0 on the record, PL4).
+        # [4a] Sessions presence contract — NOT a cap. #4010 made sessions
+        # unlimited for every tier, so every resolver supplies an explicit None
+        # and this call cannot 402; it remains the fail-closed presence check
+        # (#310 GAP-B) that a limits dict built without the key does not slip
+        # past. Replays already returned above: quota never gates a duplicate
+        # (zero writes).
+        _check_org_limit(org, "sessions")
+
+        # [4b] Budget — the authoritative §6.1 semantics live in adjudicate_budget.
+        if plan.budget.outcome == "fail":
+            # Ceiling exceeded (>50): nothing written; the record stays partial
+            # (re-submission 402s deterministically — DE2E-7 Session B/C).
+            raise HTTPException(status_code=402, detail=plan.budget.reason)
+
+        now = datetime.now(UTC).isoformat()
+        if plan.budget.outcome == "held":
+            # >25 (first adjudication only, PL3): items NOT written — the held
+            # count lives on the Session counter (value_nodes_held, §4.1 — NOT on
+            # the record); re-submission checks the 50-ceiling only. Bills zero
+            # write-ops (write_ops_billed: 0 on the record, PL4).
+            proj.g.query(
+                "MERGE (s:Session {id:$sid}) "
+                "SET s.is_episodic=true, s.created_at=coalesce(s.created_at, $now), "
+                "    s.value_nodes_held = coalesce(s.value_nodes_held, 0) + $n, "
+                "    s.updated_at=$now",
+                params={"sid": payload.session_id, "n": len(plan.budget.held_point_ids),
+                        "now": now},
+            )
+            store.update(payload.client_commit_id, status="held")
+            _store_commit_telemetry(proj, payload.client_commit_id, payload,
+                                    warn=plan.budget.warn, plan=plan)
+            return _commit_response(
+                payload, duplicate=False, held=list(plan.budget.held_point_ids),
+                warn=plan.budget.warn, warnings=warnings)
+
+        # [5] Graph writes — fail-closed: any write error → redacted 500 (the
+        # client retries with the same client_commit_id — safe by L1; the record
+        # stays partial).
+        try:
+            _execute_commit_writes(sdk, payload, plan)
+        except HTTPException:
+            raise
+        except Exception:
+            _logger.exception(
+                "commit write failed (fail-closed 500): team=%s session=%s",
+                org["org_id"], payload.session_id)
+            raise HTTPException(  # noqa: B904
+                status_code=500,
+                detail="Commit write failed — the commit is replay-safe (retry "
+                       "with the same client_commit_id; L1 idempotency). Details "
+                       "logged server-side (fail-closed, redacted).")
+
+        # :CommitRecord → fully_written + billing (the single +1 for this logical
+        # payload — PL4) + content-free telemetry (W-7).
+        store.update(payload.client_commit_id, status="fully_written")
         proj.g.query(
-            "MERGE (s:Session {id:$sid}) "
-            "SET s.is_episodic=true, s.created_at=coalesce(s.created_at, $now), "
-            "    s.value_nodes_held = coalesce(s.value_nodes_held, 0) + $n, "
-            "    s.updated_at=$now",
-            params={"sid": payload.session_id, "n": len(plan.budget.held_point_ids),
-                    "now": now},
+            "MATCH (r:CommitRecord {client_commit_id:$cid}) "
+            "SET r.write_ops_billed=1",
+            params={"cid": payload.client_commit_id},
         )
-        store.update(payload.client_commit_id, status="held")
         _store_commit_telemetry(proj, payload.client_commit_id, payload,
                                 warn=plan.budget.warn, plan=plan)
+
+        # [6] Metering — write_ops +1 per NON-duplicate commit call; nodes_written
+        # += net-new non-episodic (cost driver; supersede-only deltas exempt, R-14).
+        _record_write_op(org, nodes_written=plan.reconcile.net_new)
+
+        merged = (
+            sum(1 for pr in plan.reconcile.points if pr.action == "merge")
+            + sum(1 for er in plan.reconcile.entities if er.action == "merge")
+            + sum(1 for op in plan.reconcile.operators if op.action == "merge")
+        )
         return _commit_response(
-            payload, duplicate=False, held=list(plan.budget.held_point_ids),
-            warn=plan.budget.warn, warnings=warnings)
-
-    # [5] Graph writes — fail-closed: any write error → redacted 500 (the
-    # client retries with the same client_commit_id — safe by L1; the record
-    # stays partial).
-    try:
-        _execute_commit_writes(sdk, payload, plan)
-    except HTTPException:
-        raise
-    except Exception:
-        _logger.exception(
-            "commit write failed (fail-closed 500): team=%s session=%s",
-            org["org_id"], payload.session_id)
-        raise HTTPException(  # noqa: B904
-            status_code=500,
-            detail="Commit write failed — the commit is replay-safe (retry "
-                   "with the same client_commit_id; L1 idempotency). Details "
-                   "logged server-side (fail-closed, redacted).")
-
-    # :CommitRecord → fully_written + billing (the single +1 for this logical
-    # payload — PL4) + content-free telemetry (W-7).
-    store.update(payload.client_commit_id, status="fully_written")
-    proj.g.query(
-        "MATCH (r:CommitRecord {client_commit_id:$cid}) "
-        "SET r.write_ops_billed=1",
-        params={"cid": payload.client_commit_id},
-    )
-    _store_commit_telemetry(proj, payload.client_commit_id, payload,
-                            warn=plan.budget.warn, plan=plan)
-
-    # [6] Metering — write_ops +1 per NON-duplicate commit call; nodes_written
-    # += net-new non-episodic (cost driver; supersede-only deltas exempt, R-14).
-    _record_write_op(org, nodes_written=plan.reconcile.net_new)
-
-    merged = (
-        sum(1 for pr in plan.reconcile.points if pr.action == "merge")
-        + sum(1 for er in plan.reconcile.entities if er.action == "merge")
-        + sum(1 for op in plan.reconcile.operators if op.action == "merge")
-    )
-    return _commit_response(
-        payload, duplicate=False,
-        nodes_created=plan.reconcile.net_new,
-        nodes_merged=merged,
-        warn=plan.budget.warn,
-        warnings=warnings,
-    )
+            payload, duplicate=False,
+            nodes_created=plan.reconcile.net_new,
+            nodes_merged=merged,
+            warn=plan.budget.warn,
+            warnings=warnings,
+        )
+    return await asyncio.to_thread(_commit_sync)
 
 
 @app.get("/v1/sessions")
@@ -11807,76 +11823,94 @@ async def delete_session(session_id: str, org: dict = Depends(get_current_org_se
     mid-delete outage self-heals on the retry.
     """
     _require_scope(org, "graphs:write", "delete_session")
-    sdk = _data_sdk(org)
-    proj = sdk._get_proj()
+    # #3718 residual (DATA plane): the SDK open, the existence/provenance
+    # reads, the four DETACH DELETE statements and the receipt reconcile are
+    # all SYNCHRONOUS FalkorDB socket I/O, and on the loop they were ONE
+    # no-`await` sequence. A SINGLE worker hand-off keeps that sequence
+    # uninterleaved (a per-query hand-off would open interleaving points
+    # between the existence check and the deletes) and keeps the 404 /
+    # receipt-reconcile semantics.
+    sdk = await _data_sdk_offloaded(org)
     url = f"session:{session_id}"
+    org_id = org["org_id"]
 
-    # 1) existence (the Session node is the API-visible handle — GET detail's
-    #    404 contract: same detail string). A 404 STILL reconciles the
-    #    receipts — a re-delete after a partial prior delete must finish the
-    #    orphan cleanup the first attempt never reached.
-    sess_rows = proj.g.query(
-        "MATCH (s:Session {id:$sid}) RETURN s.id, s.harness",
-        params={"sid": session_id},
-    ).result_set
-    if not sess_rows:
-        _reconcile_capture_receipts(proj, org["org_id"])
-        raise HTTPException(status_code=404, detail="Session not found")
+    def _delete_session_sync() -> dict:
+        proj = sdk._get_proj()
 
-    # 2) provenance event ids FIRST (before the Point delete below — the
-    #    sessionCaptured Event is stamped onto the extracted Points via
-    #    p.eventId, so the gather must run while the Points still exist;
-    #    the Source's own eventId is the fallback leg for the Source-absent
-    #    materialization path). A missing Event-write leaves no eventId —
-    #    nothing to match, no dangling.
-    ev_rows = proj.g.query(
-        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
-        "WHERE p.eventId IS NOT NULL RETURN DISTINCT p.eventId",
-        params={"sid": session_id},
-    ).result_set
-    src_rows = proj.g.query(
-        "MATCH (src:Source {url:$url}) RETURN src.eventId",
-        params={"url": url},
-    ).result_set
-    event_ids = [r[0] for r in ev_rows if r[0]]
-    if src_rows and src_rows[0][0]:
-        event_ids.append(src_rows[0][0])
-    event_ids = list(dict.fromkeys(event_ids))
+        # 1) existence (the Session node is the API-visible handle — GET detail's
+        #    404 contract: same detail string). A 404 STILL reconciles the
+        #    receipts — a re-delete after a partial prior delete must finish the
+        #    orphan cleanup the first attempt never reached.
+        sess_rows = proj.g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.id, s.harness",
+            params={"sid": session_id},
+        ).result_set
+        if not sess_rows:
+            # #3718: the 404 STILL reconciles the receipts (see below) — the
+            # caller raises the 404 from this result, so the sequence stays
+            # inside the single worker hand-off.
+            return {"found": False,
+                    "cleaned": _reconcile_capture_receipts(proj, org_id)}
 
-    # 3) turn + extracted Points wired via CONTAINS (owned by this Session;
-    #    DETACH DELETE also drops their aboutObject edges — the linked
-    #    WorkItem/Object entities themselves survive: deleting a transcript
-    #    never deletes the issue/entity it referenced).
-    proj.g.query(
-        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) DETACH DELETE p",
-        params={"sid": session_id},
-    )
+        # 2) provenance event ids FIRST (before the Point delete below — the
+        #    sessionCaptured Event is stamped onto the extracted Points via
+        #    p.eventId, so the gather must run while the Points still exist;
+        #    the Source's own eventId is the fallback leg for the Source-absent
+        #    materialization path). A missing Event-write leaves no eventId —
+        #    nothing to match, no dangling.
+        ev_rows = proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+            "WHERE p.eventId IS NOT NULL RETURN DISTINCT p.eventId",
+            params={"sid": session_id},
+        ).result_set
+        src_rows = proj.g.query(
+            "MATCH (src:Source {url:$url}) RETURN src.eventId",
+            params={"url": url},
+        ).result_set
+        event_ids = [r[0] for r in ev_rows if r[0]]
+        if src_rows and src_rows[0][0]:
+            event_ids.append(src_rows[0][0])
+        event_ids = list(dict.fromkeys(event_ids))
 
-    # 4) the sessionCaptured provenance Event(s) by the collected ids.
-    if event_ids:
+        # 3) turn + extracted Points wired via CONTAINS (owned by this Session;
+        #    DETACH DELETE also drops their aboutObject edges — the linked
+        #    WorkItem/Object entities themselves survive: deleting a transcript
+        #    never deletes the issue/entity it referenced).
         proj.g.query(
-            "MATCH (e:Event) WHERE e.eventId IN $ids DETACH DELETE e",
-            params={"ids": event_ids},
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) DETACH DELETE p",
+            params={"sid": session_id},
         )
 
-    # 5) the agentSession Source stub (url = session:{id}) + the Session.
-    proj.g.query(
-        "MATCH (src:Source {url:$url}) DETACH DELETE src",
-        params={"url": url},
-    )
-    proj.g.query(
-        "MATCH (s:Session {id:$sid}) DETACH DELETE s",
-        params={"sid": session_id},
-    )
+        # 4) the sessionCaptured provenance Event(s) by the collected ids.
+        if event_ids:
+            proj.g.query(
+                "MATCH (e:Event) WHERE e.eventId IN $ids DETACH DELETE e",
+                params={"ids": event_ids},
+            )
 
-    # 6) receipt cleanup by recompute (AFTER the graph removal). The removal
-    #    steps above are individually atomic but the SEQUENCE is not — a
-    #    failure between them leaves a partial deletion; the reconcile is
-    #    guarded (best-effort) so a mid-delete outage can never 500 AFTER
-    #    the Session is gone and strand an orphaned receipt, and the 404
-    #    re-delete path above finishes any skipped pass.
-    cleaned = _reconcile_capture_receipts(proj, org["org_id"])
-    return {"deleted": True, "cleaned_receipts": cleaned}
+        # 5) the agentSession Source stub (url = session:{id}) + the Session.
+        proj.g.query(
+            "MATCH (src:Source {url:$url}) DETACH DELETE src",
+            params={"url": url},
+        )
+        proj.g.query(
+            "MATCH (s:Session {id:$sid}) DETACH DELETE s",
+            params={"sid": session_id},
+        )
+
+        # 6) receipt cleanup by recompute (AFTER the graph removal). The removal
+        #    steps above are individually atomic but the SEQUENCE is not — a
+        #    failure between them leaves a partial deletion; the reconcile is
+        #    guarded (best-effort) so a mid-delete outage can never 500 AFTER
+        #    the Session is gone and strand an orphaned receipt, and the 404
+        #    re-delete path above finishes any skipped pass.
+        cleaned = _reconcile_capture_receipts(proj, org_id)
+        return {"found": True, "cleaned": cleaned}
+
+    out = await asyncio.to_thread(_delete_session_sync)
+    if not out["found"]:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"deleted": True, "cleaned_receipts": out["cleaned"]}
 
 
 # ── Session endpoints (E2/E5/E6/E7) — JWT-authed, JWKS-verified (D1 #568) ──
@@ -21181,12 +21215,21 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
     _reject_graph_bound_org_surface(org, "demo seed")
     _require_scope(org, "graphs:write", "demo seed")
     sdk = _make_sdk(namespace=org["org_id"])
-    proj = sdk._get_proj()
-    existing = proj.g.query(
-        "MATCH (p:Point {id: '_demo_sentinel'}) RETURN p.id"
-    ).result_set
+    # #3718 residual (DATA plane): the projection attach and the sentinel read
+    # are SYNC FalkorDB socket I/O — both ride a worker hand-off so the demo
+    # path cannot freeze the loop for every concurrent request. (The seed below
+    # is its own SDK-backed helper and is off-loaded at its call site.)
+    proj = await asyncio.to_thread(sdk._get_proj)
+    existing = await asyncio.to_thread(
+        lambda: proj.g.query(
+            "MATCH (p:Point {id: '_demo_sentinel'}) RETURN p.id"
+        ).result_set)
     if existing:
-        _update_onboarding_state(org["org_id"], demo_created=True)
+        # #3718: `_update_onboarding_state` routes to the tenant graph via
+        # `_org_proj` -> `_make_sdk(...)._get_proj()` — SYNC, so it rides a
+        # worker hand-off too (the probe in the lane guard finds it otherwise).
+        await asyncio.to_thread(
+            _update_onboarding_state, org["org_id"], demo_created=True)
         await _track_onboarding_event(org, "first_memory_created",
                                       source="demo", point_count=15)
         return {"status": "already_seeded", "org_id": org["org_id"]}
@@ -21197,10 +21240,14 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
     # other Point-creating write — the REST surface was the 0-quota bypass
     # (bug-hunt 2026-08-28 server P2-13). Idempotent re-calls short-circuit
     # above and skip the gate (no write).
-    _check_org_limit(org, "points")
+    # #3773 parity with create_point: the quota count is a SYNC graph read.
+    # #3718: `_seed_demo_graph` opens its own SDK and writes ~13 Points, so it
+    # runs on a worker too.
+    await _graph_offload(lambda: _check_org_limit(org, "points"),
+                         op="check_org_limit.points")
 
     # Call the shared demo seeder (extracted from /internal/demo)
-    created = _seed_demo_graph(org["org_id"])
+    created = await asyncio.to_thread(_seed_demo_graph, org["org_id"])
 
     # #1922: meter the seed that actually ran — one write op billing 12
     # seeded points + the _demo_sentinel Point (net-new non-episodic nodes,
@@ -21212,7 +21259,8 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
     if created.get("status") == "demo_created":
         _record_write_op(org, nodes_written=created.get("points", 0) + 1)
 
-    _update_onboarding_state(org["org_id"], demo_created=True)
+    await asyncio.to_thread(
+        _update_onboarding_state, org["org_id"], demo_created=True)
     return {"status": "seeded", "org_id": org["org_id"],
             "points_created": created}
 
@@ -23208,8 +23256,11 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
         # the one-time migration forever (P2, PR #1792). ──
         if not state.get("github_legacy_backfill_done"):
             try:
-                totals["backfill_minted"] = indexer.backfill_legacy_closed(
-                    org_sdk._get_proj())
+                # #3718 residual (DATA plane): `backfill_legacy_closed` walks
+                # the graph, and its `_get_proj()` attach is the first sync
+                # step — both ride one worker hand-off.
+                totals["backfill_minted"] = await asyncio.to_thread(
+                    lambda: indexer.backfill_legacy_closed(org_sdk._get_proj()))
             except Exception as e:
                 _logger.warning(
                     "legacy -closed backfill failed (team=%s): %s", org_id, e)
@@ -24240,8 +24291,10 @@ async def backups_create(org: dict = Depends(get_current_org_gated)):  # noqa: B
             registry_sdk = None
             cp_source = get_control_plane()
         else:
-            registry_sdk = _registry_sdk()
-            cp_source = registry_sdk._get_registry()
+            # #3718 residual: `_registry_sdk()` eagerly connects to the
+            # registry graph and `_get_registry()` attaches it — both SYNC.
+            registry_sdk = await asyncio.to_thread(_registry_sdk)
+            cp_source = await asyncio.to_thread(registry_sdk._get_registry)
         # #924: graph name resolved from the control plane via the SAME seam
         # as the sweep (org_graph_name) — Supabase mode reads teams.graph_name
         # (SDK org creation names graphs org_{name}, NOT org_{id}; #768/#770),
@@ -24255,7 +24308,10 @@ async def backups_create(org: dict = Depends(get_current_org_gated)):  # noqa: B
         # resolves graph_namespace=None — the `or` fallback would widen a
         # ghost key onto the org DEFAULT graph (cross-graph read dump).
         # Mirror _data_sdk: vanish → 403, never a demotion.
-        default_name = org_graph_name(cp_source, org_id)
+        # #3718: the control-plane read is blocking in BOTH lanes — a
+        # FalkorDB round trip in registry mode, a PostgREST call in Supabase.
+        default_name = await asyncio.to_thread(
+            org_graph_name, cp_source, org_id)
         if org.get("graph_id"):
             graph_name = org.get("graph_namespace")
             if not graph_name:
@@ -24277,8 +24333,10 @@ async def backups_create(org: dict = Depends(get_current_org_gated)):  # noqa: B
             # hostage to namespace spelling. Unresolved (vanished) graphs
             # fail closed 403, mirroring the ghost-key guard above.
             try:
-                g_row = resolve_active_graph(cp_source, org_id,
-                                             org.get("graph_id"))
+                # #3718: same blocking control-plane read class as above.
+                g_row = await asyncio.to_thread(
+                    resolve_active_graph, cp_source, org_id,
+                    org.get("graph_id"))
             except ValueError as e:
                 raise HTTPException(
                     status_code=403,
@@ -24300,15 +24358,19 @@ async def backups_create(org: dict = Depends(get_current_org_gated)):  # noqa: B
 
         from tortoise.projection import FalkorProjection
         db_uri = _os.environ.get("TORTOISE_DB_URI")
-        proj = sdk._get_proj()
+        # #3718 residual (DATA plane): the projection attach AND the URI-lane
+        # dump projection open are both SYNC connects.
+        proj = await asyncio.to_thread(sdk._get_proj)
         if db_uri:
-            dump_proj = FalkorProjection.from_uri(db_uri, graph_name=graph_name)
+            dump_proj = await asyncio.to_thread(
+                FalkorProjection.from_uri, db_uri, graph_name=graph_name)
         elif getattr(proj, "_path", None):
             # Embedded: re-open the same DB on the resolved graph name.
-            dump_proj = FalkorProjection(
-                path=proj._path, graph_name=graph_name,
-                skip_health_check=True,
-            )
+            dump_proj = await asyncio.to_thread(
+                lambda: FalkorProjection(
+                    path=proj._path, graph_name=graph_name,
+                    skip_health_check=True,
+                ))
         else:
             # No path (unusual) — bind the existing db handle to the graph.
             from tortoise.projection import _GuardedGraph
@@ -24387,9 +24449,11 @@ async def backups_restore(body: BackupRestoreRequest, request: Request, org: dic
         try:
             sdk = _make_sdk(namespace=org_id)
             if not is_supabase_enabled():
-                registry_sdk = _registry_sdk()
+                # #3718 residual: eager registry connect + graph attach — SYNC.
+                registry_sdk = await asyncio.to_thread(_registry_sdk)
             cp_source = (get_control_plane() if is_supabase_enabled()
-                         else registry_sdk._get_registry())
+                         else await asyncio.to_thread(
+                             registry_sdk._get_registry))
             # #924/#2313: resolve the restore target from the ACTIVE-graph
             # seam. The artifact's key shape names its graph: legacy flat and
             # the "default" segment are the org DEFAULT surface (the only
@@ -24412,12 +24476,17 @@ async def backups_restore(body: BackupRestoreRequest, request: Request, org: dic
                     "supported — graph-bound restore required"
                 )
             _graph_id = _parsed_graph or "default"
-            _row = resolve_active_graph(cp_source, org_id, _graph_id)
+            # #3718: the active-graph resolve is a blocking control-plane read,
+            # and `sdk._get_proj().db` used to be evaluated EAGERLY on the loop
+            # as an argument to the off-loaded `restore_backup` — it belongs
+            # inside the worker with the call it feeds.
+            _row = await asyncio.to_thread(
+                resolve_active_graph, cp_source, org_id, _graph_id)
             graph_name = _row["graph_name"]
             result = await asyncio.to_thread(
-                restore_backup, sdk._get_proj().db, cp_source,
-                _backup_storage(),
-                body.backup_key, org_id=org_id, graph_name=graph_name,
+                lambda: restore_backup(
+                    sdk._get_proj().db, cp_source, _backup_storage(),
+                    body.backup_key, org_id=org_id, graph_name=graph_name),
             )
             # Rebuild indexes on the restored live graph (range/FTS/vector) —
             # the logical dump + GRAPH.COPY restores data, not schema. Off the
@@ -24430,17 +24499,24 @@ async def backups_restore(body: BackupRestoreRequest, request: Request, org: dic
                 db_uri = os.environ.get("TORTOISE_DB_URI")
                 if db_uri:
                     from tortoise.projection import FalkorProjection
-                    dump_proj = FalkorProjection.from_uri(db_uri, graph_name=graph_name)
+                    # #3718: the URI-lane dump projection is a SYNC connect.
+                    dump_proj = await asyncio.to_thread(
+                        FalkorProjection.from_uri, db_uri,
+                        graph_name=graph_name)
                 else:
-                    proj = sdk._get_proj()
-                    if getattr(proj, "_path", None):
-                        from tortoise.projection import FalkorProjection
-                        dump_proj = FalkorProjection(
-                            path=proj._path, graph_name=graph_name,
-                            skip_health_check=True,
-                        )
-                    else:
-                        dump_proj = proj
+                    # #3718: `_get_proj()` attach + the embedded re-open are
+                    # both SYNC — one worker hand-off.
+                    def _open_embedded_proj():
+                        proj = sdk._get_proj()
+                        if getattr(proj, "_path", None):
+                            from tortoise.projection import FalkorProjection
+                            return FalkorProjection(
+                                path=proj._path, graph_name=graph_name,
+                                skip_health_check=True,
+                            )
+                        return proj
+
+                    dump_proj = await asyncio.to_thread(_open_embedded_proj)
                 await asyncio.to_thread(dump_proj._ensure_indexes)
             except Exception as e:
                 _logger.warning(
@@ -24680,10 +24756,13 @@ async def backups_sweep(request: Request):
     # seam. `_registry_sdk()._get_registry()` is the pre-#669 resolution — the
     # post-flip graph is DELETED, so the sweep enumerated 0 orgs, reported a
     # benign `no_teams`, and backed nothing up from the flip until now.
-    registry = _control_plane_source()
+    # #3718 residual: the control-plane resolve AND the data-plane handle are
+    # SYNC FalkorDB/PostgREST work — both ride worker hand-offs so a slow
+    # control plane or a graph connect cannot hold the event loop.
+    registry = await asyncio.to_thread(_control_plane_source)
     # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
     # the registry namespace (see _control_plane_source's docstring).
-    db = _make_sdk(namespace=None)._get_proj().db
+    db = await asyncio.to_thread(lambda: _make_sdk(namespace=None)._get_proj().db)
     storage = _backup_storage()
     try:
         mirror = _backup_mirror_storage(cfg)
@@ -24750,10 +24829,11 @@ async def backups_purge(request: Request, body: dict | None = None):
     # #2823/#2340: dialect-aware control plane. `run_graph_purge` enumerates
     # orgs through the same seam — off the raw registry handle it purged 0
     # orgs in Supabase mode (expired trash never erased).
-    registry = _control_plane_source()
+    # #3718 residual: control-plane resolve + data-plane handle — off the loop.
+    registry = await asyncio.to_thread(_control_plane_source)
     # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
     # the registry namespace (see _control_plane_source's docstring).
-    db = _make_sdk(namespace=None)._get_proj().db
+    db = await asyncio.to_thread(lambda: _make_sdk(namespace=None)._get_proj().db)
     storage = _backup_storage()
     grace_days = int((body or {}).get("grace_days")
                      or _TRASH_GRACE_DAYS)
@@ -25050,13 +25130,16 @@ async def backups_rebaseline(request: Request, body: dict):
     # #2823/#2340: dialect-aware control plane — `resolve_active_graph`
     # enumerates the org's graphs through this source; the raw registry handle
     # 400s/409s ACTIVE Supabase-lane graphs.
-    registry = _control_plane_source()
+    # #3718 residual: control-plane resolve + data-plane handle — off the loop.
+    registry = await asyncio.to_thread(_control_plane_source)
     # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
     # the registry namespace (see _control_plane_source's docstring).
-    db = _make_sdk(namespace=None)._get_proj().db
+    db = await asyncio.to_thread(lambda: _make_sdk(namespace=None)._get_proj().db)
     storage = _backup_storage()
     try:
-        row = resolve_active_graph(registry, org_id, graph_id)
+        # #3718: the active-graph resolve is a blocking control-plane read.
+        row = await asyncio.to_thread(
+            resolve_active_graph, registry, org_id, graph_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Re-baseline rejected: {e}")  # noqa: B904
     except RuntimeError as e:
@@ -25311,10 +25394,11 @@ async def backups_drill(request: Request, body: dict):
     _LAST_DRILL_AT = _time.time()
 
     # #2823/#2340: dialect-aware control plane (see re-baseline).
-    registry = _control_plane_source()
+    # #3718 residual: control-plane resolve + data-plane handle — off the loop.
+    registry = await asyncio.to_thread(_control_plane_source)
     # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
     # the registry namespace (see _control_plane_source's docstring).
-    db = _make_sdk(namespace=None)._get_proj().db
+    db = await asyncio.to_thread(lambda: _make_sdk(namespace=None)._get_proj().db)
     storage = _backup_storage()
     try:
         return await asyncio.to_thread(
@@ -25355,10 +25439,11 @@ async def backups_drill_scheduled(request: Request):
 
     # #2823/#2340: dialect-aware control plane — the scheduled drill resolves
     # its candidate's active graph through this source.
-    registry = _control_plane_source()
+    # #3718 residual: control-plane resolve + data-plane handle — off the loop.
+    registry = await asyncio.to_thread(_control_plane_source)
     # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
     # the registry namespace (see _control_plane_source's docstring).
-    db = _make_sdk(namespace=None)._get_proj().db
+    db = await asyncio.to_thread(lambda: _make_sdk(namespace=None)._get_proj().db)
     storage = _backup_storage()
     alerts = _alert_store_from(cfg)
     try:
