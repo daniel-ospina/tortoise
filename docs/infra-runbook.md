@@ -164,6 +164,40 @@ curl https://api.premiselabs.co/health
 fly ssh console -a tortoise-api -C "python -c 'from tortoise.sdk import TortoiseSDK; sdk = TortoiseSDK(namespace=\"registry\"); print(sdk.db.ping())'"
 ```
 
+### 4.1 What a client must observe on `/health` — the effect and its budget (#3811)
+
+`/health` is the liveness surface. A client that starts against the hosted
+service must observe, **within the client's own startup budget**:
+
+| observed | value |
+|---|---|
+| HTTP status | **200** on the healthy path, with the body below. A dead *downstream* is `status: degraded` in the body — never a handler-generated non-200 (health truth lives in the body, not in a 5xx). **Limit, stated:** `/health` is *not* exempt from the outermost `WaitBoundMiddleware` (`_TRANSPORT_WAIT_BOUND_EXEMPT` covers only `POST /v1/context`), so a request that does not complete inside its **10 s** wait bound (`tortoise/mcp_auth.py::_TRANSPORT_WAIT_BOUND_S`) is answered **504 + `Retry-After`** instead of hanging (#4412). That refusal is legible, but a no-retry client cannot act on it — 200-inside-the-budget is the requirement; the refusal is the legible-failure floor, not a substitute. |
+| body | a JSON object carrying `status` (`"ok"` \| `"degraded"`) and `db` (`{"ok": bool, "latency_ms": …, "error": …}`). The deploy gate reads `db.ok` **by value**, never by spelling (#4470). |
+| latency | **< 15 s** — the client's own eager-startup deadline. In practice **< 10 s**, because the app's own wait bound refuses first. |
+
+**The budget's source is the client, not this document.** Pi's `mcp-client`
+connects **eagerly at session start**: one attempt per eager server, a hard
+15 000 ms per-server budget and **no retry** (`DEFAULT_CONNECTION_TIMEOUT_MS =
+15000`, `~/.pi/agent/extensions/mcp-client/index.ts`; §6.11). 15 s is the
+wall-clock envelope in which the service must be answerable for a client to
+start at all — there is no second attempt. `/health` is the surface whose stall
+is the **same held event loop** that fails that connect (#2924: “/health hangs
+>8 s” means the loop was held, and the client's first request times out inside
+the same window).
+
+**Stated plainly:** the client's eager request targets `/mcp`, not `/health`.
+`/health` reports whether the process is answerable at all, so a `/health`
+response past the client's single attempt is by construction a client-visible
+startup failure.
+
+**Executed, not asserted against source text.**
+`tests/test_health_client_effect.py` starts the real app on a real port, issues
+the real request, and asserts the resolved status/body/latency — and re-runs it
+with the data-plane probe wedged past the budget, so a handler that inherits the
+stall (the #2924 shape) reds. It complements
+`tests/test_health_ready_nonblocking.py`, which pins nonblocking *structure*
+in-process and names no client-visible budget.
+
 ## 4.5 Local Development — Local Stays Local
 
 **Best practice: a self-hosted/local instance is intentionally local.** Do not

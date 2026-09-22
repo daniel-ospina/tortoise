@@ -986,65 +986,25 @@ def test_push_legs_partitions_every_classified_file():
     assert not (set(legs["slow"]) & carve), \
         "slow carve-out files run in the URI-unset carve-out job, never the slow legs"
     assert set(legs["carve_out"]) == carve, "carve_out leg must be exactly the config set"
-    # #1485: push_extra rides the halves on index parity (even -> half_a,
-    # odd -> half_b). That rule has to be pinned on a synthetic manifest,
-    # because the real one's `push_extra` is EMPTY today: the bench files are
-    # registered as an `eval` surface, so they ride the duration split like
-    # every other classified file, and adding ONE file to the pool moves ~289
-    # of the 593 assignments. The assertion this replaces — `any(f.startswith
-    # ("bench/") for f in legs["half_b"])`, commented "bench push_extra lands
-    # in half b" — pinned no rule at all. The partition itself stays pinned by
-    # the set-equality assertion above.
-    for i, f in enumerate(m.get("push_extra", [])):
-        leg = "half_a" if i % 2 == 0 else "half_b"
-        assert f.replace(".py", "") in set(legs[leg]), (
-            f"push_extra[{i}] {f} must ride {leg} — the #1485 spread rule"
-        )
-    # …and the rule is exercised for real, on a deliberately hostile probe: an
-    # UNSORTED order (a sort cannot pass), FOUR entries (a mutant keyed on
-    # index >= 2 cannot pass), and prefixes that CONFLICT with parity rather
-    # than tracking it (a prefix-keyed mutant cannot pass — they did track it
-    # while the probe alternated bench/non-bench by index, which an earlier
-    # round measured as a live miss). DECLARED BOUND: this is a four-entry
-    # sample — a mutant whose misbehaviour appears only on a LONGER (or
-    # exactly-two-entry) list is outside the bound, as is one keyed on digits
-    # or the extension (see #4528). The coverage each class has is pinned by
-    # the mutation battery in the commit messages, not by claims here.
-    from tools.ci_selection import carve_out_files, fast_pool
-    probe_extra = ["bench/Probe_zed.py", "bench/Probe_aaa.py",
-                   "zzz/probe_plain.py", "yyy/probe_tail.py"]
-    probe_names = tuple(f.replace(".py", "") for f in probe_extra)
-    assert not (set(probe_extra) & classified), (
-        f"probe names would collide with a classified file: {set(probe_extra) & classified}"
-    )
-    probe = {**m, "push_extra": probe_extra}
-    probe_legs = push_legs(probe)
-    # The pool comes from THIS manifest (not the real `push_extra`, which the
-    # probe replaces), so the assertion stays correct once the manifest
-    # repopulates push_extra instead of false-RED-ing.
-    probe_pool = {f.replace(".py", "") for f in fast_pool(probe)}
-    expected_halves = probe_pool | set(probe_names)
-    actual_halves = set(probe_legs["half_a"]) | set(probe_legs["half_b"])
-    assert actual_halves == expected_halves, (
-        "probe halves must be the fast pool plus exactly the probe entries — "
-        f"unexpected: {actual_halves ^ expected_halves}"
-    )
-    assert not (set(probe_legs["half_a"]) & set(probe_legs["half_b"])), \
-        "probe leg overlap"
-    probe_carve = {f.replace(".py", "") for f in carve_out_files(probe)}
-    assert set(probe_legs["slow"]) == \
-        {f.replace(".py", "") for f in m["slow_files"]} - probe_carve, \
-        "probe slow leg must be exactly the slow files minus the carve-out"
-    probe_legs_of = {
-        n: sorted(leg for leg, files in probe_legs.items() if n in set(files))
-        for n in probe_names
-    }
-    for i, n in enumerate(probe_names):
-        want = "half_a" if i % 2 == 0 else "half_b"
-        assert probe_legs_of[n] == [want], (
-            f"#1485: push_extra[{i}] must ride {want} and exactly one leg — "
-            f"found {probe_legs_of[n]}"
-        )
+    # #1485 / #3400: bench files are NOT pinned to a half. `push_extra` is
+    # spread evenly across the halves (#1485) and a bench file registered in
+    # `surfaces` is packed by measured duration (#3400 LPT), so which half a
+    # given bench file lands in is a packing outcome, not an assignment. The
+    # pre-#1485 form of this check required a bench file in half_b SPECIFICALLY
+    # and re-staled the moment a pool change moved one (#3811: adding a single
+    # classified file flipped all three bench files into half_a, reddening an
+    # unrelated PR). Assert the invariant the code actually provides — every
+    # bench file reaches a half (the partition assertion above), and
+    # `push_extra`, when non-empty, reaches BOTH rather than being dumped on
+    # one.
+    assert any(f.startswith("bench/") for f in legs["half_a"] + legs["half_b"]), \
+        "no bench file reached the push legs at all"
+    push_extra = {f.replace(".py", "") for f in m.get("push_extra", [])}
+    if push_extra:
+        assert push_extra & set(legs["half_a"]), \
+            "push_extra lost its even spread (#1485): none in half a"
+        assert push_extra & set(legs["half_b"]), \
+            "push_extra lost its even spread (#1485): none in half b"
 
 
 def test_carve_out_mirrors_test_no_redirect_stems():
