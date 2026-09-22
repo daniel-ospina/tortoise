@@ -99,6 +99,10 @@ def main(argv: list[str]) -> int:
             page.on("console", lambda m, c=console: c.append(f"[{m.type}] {m.text}"))
             page.on("pageerror", lambda e, c=console: c.append(f"[pageerror] {e}"))
             page.on("requestfailed", lambda r, f=failed: f.append(f"{r.url} :: {r.failure}"))
+            resp = None
+            csp = ""
+            kind = "?"
+            goto_error: Exception | None = None
             try:
                 resp = page.goto(url, wait_until="load", timeout=45_000)
                 csp = (resp.headers.get("content-security-policy") or "") if resp is not None else ""
@@ -107,12 +111,25 @@ def main(argv: list[str]) -> int:
                 kind = "STRICT" if "connect-src 'self'" in csp and "posthog" not in csp else (
                     "RELAXED" if csp else "NONE"
                 )
-                # Read AFTER the settle, not before. The beacon sends its RUM
-                # payload on `load`/`visibilitychange` via `navigator.sendBeacon`,
-                # so a `connect-src` refusal arrives after `domcontentloaded` — a
-                # read taken before the wait silently drops exactly the
-                # `connect-src` class this script exists to detect, and prints OK.
+                # A bounded settle for post-`load` refusals — but the READ must
+                # not happen here. The beacon sends its RUM payload on
+                # `load`/`visibilitychange` via `navigator.sendBeacon`, and the
+                # `visibilitychange` half fires at teardown; a snapshot taken
+                # before the page is torn down drops every refusal emitted after
+                # the settle and prints OK on it. So: settle, end the lifecycle,
+                # THEN read (see `ctx.close()` below).
                 page.wait_for_timeout(3_500)
+            except Exception as exc:
+                goto_error = exc
+            # End the page lifecycle BEFORE reading. `close()` fires
+            # `visibilitychange`/`pagehide` and the handlers above keep appending
+            # while it does, so the drained lists include the teardown-time
+            # refusals too.
+            ctx.close()
+            if goto_error is not None:
+                blocked = [f"[goto-failed] {goto_error}"]
+                others = []
+            else:
                 blocked = _violations(console, failed)
                 # A response with NO policy refuses nothing, so a total CSP loss
                 # would otherwise read as `OK NONE` and exit 0. Absence is a
@@ -120,10 +137,6 @@ def main(argv: list[str]) -> int:
                 if not csp:
                     blocked.append("[no-csp] response carried NO Content-Security-Policy")
                 others = _other_errors(console, failed)
-            except Exception as exc:
-                blocked = [f"[goto-failed] {exc}"]
-                others = []
-                kind = "?"
             status = "OK" if not blocked else f"{len(blocked)} BLOCKED"
             print(f"{status:>10}  {kind:<8} {url}")
             for b in blocked:
@@ -132,7 +145,6 @@ def main(argv: list[str]) -> int:
             for o in others:
                 print(f"            (non-CSP error) {o[:200]}")
             dirty += 1 if blocked else 0
-            ctx.close()
         browser.close()
 
     print(f"\n{dirty} of {len(urls)} surface(s) reported a CSP violation")

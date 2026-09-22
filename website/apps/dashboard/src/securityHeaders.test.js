@@ -43,9 +43,9 @@
 //     indirection and a template-built `` `set-cookie${""}` `` are all caught;
 //     the files allowed to name it without being writers are the three
 //     hop-by-hop STRIP-LIST proxies, and their exemption is pinned (below);
-//   - the CSP stamp scan counts AST SHAPE — an object property or a
-//     `headers.set/append` argument — so a stamp-shaped string, regex or template
-//     cannot inflate the count;
+//   - the CSP stamp scan counts AST SHAPE — an object property, a
+//     `headers.set/append` argument, or a member assignment — so a stamp-shaped
+//     string, regex or template cannot inflate the count;
 //   - the two audited writers are exempt from the umbrella, and their exemption
 //     is paid for structurally: a cookie write inside a function that builds a
 //     `Response` must pair it with `no-store` (so a new cacheable helper fails
@@ -140,8 +140,9 @@ const STRICT_PATHS = ['/', '/team', '/team/', '/index.html']
 
 /**
  * The CSP stamp scan reads AST SHAPE (see `stampCount`), not text: a stamp is an
- * object property `"Content-Security-Policy": <const>` or a
- * `headers.set/append("Content-Security-Policy", <const>)` call. A whole-file
+ * object property `"Content-Security-Policy": <const>`, a
+ * `headers.set/append("Content-Security-Policy", <const>)` call, or an
+ * `h["Content-Security-Policy"] = <const>` assignment. A whole-file
  * regex was tried first and rejected — it counted a stamp-shaped string or regex
  * as a stamp, so a file with zero live stamps could pass.
  *
@@ -331,6 +332,23 @@ function nameOf(node) {
 }
 
 /**
+ * The method name of a `h.set(...)` / `h.append(...)` call in EVERY spelling,
+ * including the optional-chained ones (`h?.set(…)`, `h.set?.(…)`), or null.
+ *
+ * `@babel/parser` gives an optional chain two different node types —
+ * `OptionalCallExpression` with an `OptionalMemberExpression` callee — so a scan
+ * that checks only `CallExpression`/`MemberExpression` silently drops that
+ * spelling. The regex this AST reader replaced matched it, so dropping it is a
+ * REGRESSION in coverage, not a tightening.
+ */
+function headerCallMethod(node) {
+  if (node?.type !== 'CallExpression' && node?.type !== 'OptionalCallExpression') return null
+  const callee = node.callee
+  if (callee?.type !== 'MemberExpression' && callee?.type !== 'OptionalMemberExpression') return null
+  return nameOf(callee.property)
+}
+
+/**
  * The lower-cased CSP header name when `node` is a STRING LITERAL, else null.
  *
  * Header names are case-insensitive (RFC 9110), so a `"content-security-policy"`
@@ -341,9 +359,17 @@ function nameOf(node) {
  * policy and blocks the beacon.
  */
 function cspHeaderName(node) {
-  return node?.type === 'StringLiteral' || node?.type === 'Literal'
-    ? String(node.value).toLowerCase()
-    : null
+  if (node?.type === 'StringLiteral' || node?.type === 'Literal') {
+    return String(node.value).toLowerCase()
+  }
+  // A template key with NO interpolation IS the same literal: `h.set(`Content-Type`, m)`.
+  // An interpolation-free template was read by the regex this AST reader replaced,
+  // so dropping it would be a regression, not a tightening. An INTERPOLATED
+  // template stays unreadable on purpose: the callers fail closed on null.
+  if (node?.type === 'TemplateLiteral' && node.expressions?.length === 0) {
+    return String(node.quasis?.[0]?.value?.cooked ?? '').toLowerCase()
+  }
+  return null
 }
 
 /**
@@ -437,10 +463,11 @@ function functionNodes(ast) {
  * STRING or REGEX as a stamp, so a file with zero live stamps could pass
  * (review deleted a file's only stamp and added
  * `const NOTE = 'x "Content-Security-Policy": RELAXED_CSP'`). Counting only the
- * two shapes that actually stamp a header — an object property
- * `"Content-Security-Policy": <const>`, and a `headers.set/append("Content-Security-Policy", <const>)`
- * call — cannot be inflated by any string, template or regex, because text is
- * not a property or an argument. A header name BUILT as an expression (a variable,
+ * three shapes that actually stamp a header — an object property
+ * `"Content-Security-Policy": <const>`, a `headers.set/append("Content-Security-Policy", <const>)`
+ * call, and an `h["Content-Security-Policy"] = <const>` assignment — cannot be
+ * inflated by any string, template or regex, because text is
+ * not a property, an argument or an assignment target. A header name BUILT as an expression (a variable,
  * a concat, a computed key) counts as an UNATTRIBUTABLE stamp — fail-closed, and
  * the surplus above the expected count names the file.
  */
@@ -457,13 +484,11 @@ function stampCount(relPath) {
       else if (node.computed && name === null) count += 1
       return
     }
-    if (node.type === 'CallExpression' && node.callee?.type === 'MemberExpression') {
-      const method = nameOf(node.callee.property)
-      if (method === 'set' || method === 'append') {
-        const name = cspHeaderName(node.arguments?.[0])
-        if (name === 'content-security-policy' && isCspValue(node.arguments?.[1])) count += 1
-        else if (name === null) count += 1
-      }
+    const method = headerCallMethod(node)
+    if (method === 'set' || method === 'append') {
+      const name = cspHeaderName(node.arguments?.[0])
+      if (name === 'content-security-policy' && isCspValue(node.arguments?.[1])) count += 1
+      else if (name === null) count += 1
     }
     // A third stamp shape: `h["Content-Security-Policy"] = CONST`.
     if (node.type === 'AssignmentExpression' && node.left?.type === 'MemberExpression') {
@@ -612,15 +637,13 @@ function stampConstants(relPath) {
       if (node.computed && name === null) names.push('(unreadable header name)')
       return
     }
-    if (node.type === 'CallExpression' && node.callee?.type === 'MemberExpression') {
-      const method = nameOf(node.callee.property)
-      if (method === 'set' || method === 'append') {
-        const name = cspHeaderName(node.arguments?.[0])
-        if (name === 'content-security-policy') record(node.arguments?.[1])
-        // An UNREADABLE header name (a variable, a concat) means this call may or
-        // may not stamp a CSP, so assuming it does not is a fail-open guess.
-        else if (name === null) names.push('(unreadable header name)')
-      }
+    const method = headerCallMethod(node)
+    if (method === 'set' || method === 'append') {
+      const name = cspHeaderName(node.arguments?.[0])
+      if (name === 'content-security-policy') record(node.arguments?.[1])
+      // An UNREADABLE header name (a variable, a concat) means this call may or
+      // may not stamp a CSP, so assuming it does not is a fail-open guess.
+      else if (name === null) names.push('(unreadable header name)')
     }
     // A third stamp shape: `h["Content-Security-Policy"] = <value>`. Modelled
     // because a browser INTERSECTS a second CSP, and an assignment is the shape a
@@ -917,10 +940,8 @@ function nonLiteralContentTypes(relPath) {
     if (node.type === 'ArrayExpression' && node.elements?.length === 2) {
       check(node.elements[0], node.elements[1])
     }
-    if (node.type === 'CallExpression' && node.callee?.type === 'MemberExpression') {
-      const method = nameOf(node.callee.property)
-      if (method === 'set' || method === 'append') check(node.arguments?.[0], node.arguments?.[1])
-    }
+    const method = headerCallMethod(node)
+    if (method === 'set' || method === 'append') check(node.arguments?.[0], node.arguments?.[1])
   })
   return out
 }
@@ -1334,7 +1355,7 @@ test('every HTML-producing Function stamps the CSP on each HTML-producing path',
   assert.deepEqual(
     wrong,
     [],
-    'an HTML-producing path lost its Content-Security-Policy stamp (a stamp must be an object property or a headers.set/append argument — a header name built as an expression is not counted)',
+    'an HTML-producing path lost its Content-Security-Policy stamp (a stamp must be an object property, a headers.set/append argument, or a member assignment — a header name built as an expression is not counted)',
   )
 })
 
