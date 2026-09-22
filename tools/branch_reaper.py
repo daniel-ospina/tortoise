@@ -60,6 +60,14 @@ Safety
   or unqueryable surface makes the whole run INCOMPLETE and deletes NOTHING — so
   the ancestor rule can never fire on a branch whose open PR fell off a page.
 * **TOCTOU.** Deletion uses the ATOMIC compare-and-delete primitive
+  (``update-ref -d <ref> <expected-oid>``), so a branch that MOVED after
+  classification is refused, never deleted. The checked-out set is RE-READ
+  before the delete loop, so a worktree created during the (up to 900 s) bundle
+  write still protects its branch. The PR surface itself is fetched ONCE, before
+  that same window: a PR opened for an already-SAFE ancestor branch during it is
+  not seen, so the open-PR veto is not applied and the ref is deleted. That race
+  is inherent — PR state can change at any point — and is bounded: an ancestor
+  branch's commits survive on ``main``, and the tip is in the recovery bundle.
   ``git update-ref -d refs/heads/<b> <classified-oid>``: it fails without
   deleting if the ref no longer equals the classified tip. ``update-ref`` does
   NOT itself refuse a branch checked out in a worktree, so the checked-out guard
@@ -450,12 +458,27 @@ def fetch_prs(slug: str, *, max_pages: int, per_page: int) -> dict:
         if res.returncode != 0:
             raise Incomplete(
                 f"gh pr enumeration ({state}) failed: {res.stderr.strip() or 'non-zero exit'}")
+        if not res.stdout.strip():
+            # An exit-0 EMPTY body is not "zero PRs". A valid `--paginate --slurp`
+            # payload is never empty (an empty page is `[[]]`), so this branch
+            # would silently drop EVERY PR surface — every open-PR veto and every
+            # open-base veto — and let ancestry delete an open-PR branch at exit
+            # 0. That is the same fail-open as a malformed record, one level up.
+            raise Incomplete(
+                f"gh pr enumeration ({state}) returned an empty body with exit 0 — "
+                f"an empty slurp payload is never valid, and treating it as no PRs "
+                f"would drop every veto")
         try:
-            pages = json.loads(res.stdout) if res.stdout.strip() else []
+            pages = json.loads(res.stdout)
         except json.JSONDecodeError as exc:
             raise Incomplete(f"gh pr enumeration ({state}) returned malformed JSON: {exc}") from exc
         if not isinstance(pages, list):
             raise Incomplete(f"gh pr enumeration ({state}) returned {type(pages).__name__}, expected list")
+        if not pages:
+            # A bare `[]` is likewise never a valid slurp body.
+            raise Incomplete(
+                f"gh pr enumeration ({state}) returned an empty page list — "
+                f"a valid slurp payload always has at least one page")
         if len(pages) >= max_pages:
             raise Incomplete(
                 f"gh pr enumeration ({state}) hit the {max_pages}-page cap — TRUNCATED")

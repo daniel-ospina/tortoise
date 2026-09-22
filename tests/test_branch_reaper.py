@@ -719,6 +719,32 @@ cat "$d/${{state}}_pages.json"
             self.assertFalse(br._valid_slug(bad), bad)
         self.assertTrue(br._valid_slug("owner/repo"))
 
+    def test_an_empty_gh_body_aborts_instead_of_dropping_every_veto(self):
+        # An exit-0 EMPTY body is not "zero PRs" — a valid `--paginate --slurp`
+        # payload is never empty. Treating it as such drops every open-PR and
+        # open-base veto and lets ancestry delete an open-PR branch at exit 0.
+        _git(self.repo, "branch", "victim", self.main_sha)
+        (self.repo / "g.txt").write_text("g\n")
+        _git(self.repo, "add", "g.txt")
+        _git(self.repo, "commit", "-m", "advance")
+        _git(self.repo, "update-ref", "refs/remotes/origin/main",
+             _git_out(self.repo, "rev-parse", "HEAD"))
+        empty = self.gh_dir / "gh-empty"
+        empty.write_text("#!/bin/sh\nexit 0\n")
+        empty.chmod(0o755)
+        self.write_fixtures()
+        rc, out, err = self.run_tool(["--apply", "--no-backup"], repo=self.driver,
+                                     env_extra={"BRANCH_REAPER_GH": str(empty)})
+        self.assertEqual(rc, 2, err + out)
+        self.assertIn("victim", self.branches())
+
+    def test_the_bundle_path_rejects_dotdot_too(self):
+        # Both write paths must refuse `..`, not just the report path.
+        br = self._load_tool()
+        with self.assertRaises(br.Incomplete):
+            br._make_backup_bundle(
+                str(self.repo), str(self.repo / "a" / ".." / "b.bundle"), [])
+
     def test_backup_bundle_written_before_deletion(self):
         sha = self.commit_on("merged/branch", "merged work")
         self.add_pr("merged", "merged/branch", sha)
