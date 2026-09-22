@@ -423,38 +423,31 @@ def _has_ownership_claim(dbdir_real: str,
     naming it, is refused.
 
     RECONCILIATION with #4577's held-lock LIVENESS signal (main `845f47f53`):
-    `_owner_lock_held()` is deliberately NOT consulted here. The two
-    mechanisms answer different questions — #4577 asks "is an owner ALIVE?"
-    (a kernel fact), #3767 asks "is this dir OURS to reap?" (attribution) —
-    and a held lock is a liveness proof, not an admission claim. Two reasons,
-    the first decisive:
-
-      * Admission is PERMISSIVE in effect (it makes a dir a KILL candidate),
-        and a dir admitted on the lock arm would be unconditionally vetoed by
-        `reap()`'s ``_owner_lock_held(...) is True`` check — a held lock is
-        exactly what makes `reap()` skip. The arm could therefore never
-        produce a kill; it would only widen #3767's gate for zero reaping
-        gain, against the #4546 requirement that the gate stay narrow.
-      * It would also add no reachability the record arm lacks. The writer's
-        ordering (`record_owner` writes the record BEFORE taking the lock,
-        `forget_owner` releases the lock BEFORE unlinking the record) puts
-        the lock's held-interval inside the record's lifetime — but PER SOCKET
-        DIRECTORY, not absolutely: the stamp is ``<pid>-<start>`` with no
-        socket identity, so one process owning TWO sockets in ONE directory
-        shares a single record file and the first `forget_owner` unlinks it
-        while the second socket's shared flock is still held. That reachable
-        "held lock, no recognisable record" state is refused HERE (fail
-        CLOSED — the dir stays `protected`, never a kill candidate), which
-        loses nothing: a live lock holder must never be killed anyway. It is
-        also the state a lock arm would gratuitously admit, and a same-uid
-        foreign app that plants `.tortoise-owners/.lock` and flocks it could
-        satisfy such an arm too.
+    `_owner_lock_held()` is deliberately NOT consulted here. #4577 answers
+    "is an owner ALIVE?" (a kernel fact); this function answers "is this dir
+    OURS to reap?" (attribution) — a held lock is a liveness proof, not an
+    admission claim. The decisive reason is outcome-based: admission is
+    PERMISSIVE in effect (it makes a dir a KILL candidate), and a dir admitted
+    on a lock arm would be vetoed by `reap()`'s
+    ``_owner_lock_held(...) is True`` check — a held lock is exactly what
+    makes `reap()` skip — so the arm could never produce a kill; it would only
+    widen #3767's gate for zero reaping gain (against the #4546 requirement
+    that the gate stay narrow).
 
     So the lock is authorised where it belongs — at DESTRUCTION, not at
     admission — and `_owner_record_dir_present` stays consistent with it by
-    ignoring dotted names, so the new `.lock` file cannot silently satisfy
-    this claim (pinned by `tests/test_reaper_ownership.py::
+    ignoring dotted names, so the new `.lock` file cannot satisfy this claim
+    (pinned by `tests/test_reaper_ownership.py::
     test_owner_lock_file_alone_is_not_an_ownership_claim`).
+
+    CAVEAT on the adjacent claim: the writer's ordering (`record_owner` takes
+    the record before the lock; `forget_owner` releases the lock before
+    unlinking the record) does NOT make "held lock, no recognisable record"
+    unreachable — the stamp ``<pid>-<start>`` carries no socket identity, so
+    one process owning two sockets in one directory shares a record and the
+    first `forget_owner` can unlink it while the second socket's flock is
+    still held. That state is refused here, and it must be: a live lock holder
+    must never be killed.
 
     NOTE (#3767): this decides ADMISSION only; it does NOT replace #4136's
     action-time `_dir_owned_by_euid` re-checks (`_kill_provenance_refusal`,
