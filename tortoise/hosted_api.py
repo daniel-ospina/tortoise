@@ -82,6 +82,7 @@ from tortoise.hosted_backup import (
 )
 from tortoise.mcp_server import create_http_app
 from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
+    CONTROL_PLANE_OFFLOAD_TIMEOUT_S,  # #2924: the gate's fail-open request bound
     PROBE_HARD_TIMEOUT,
     PROBE_STALE_AFTER,
     ControlPlaneOffloadError,
@@ -5316,7 +5317,7 @@ def _graph_unavailable() -> HTTPException:
     )
 
 
-async def _graph_offload(fn, *, op: str):
+async def _graph_offload(fn, *, op: str, timeout: float | None = None):
     """#3773: run ONE synchronous DATA-PLANE graph helper off the event loop.
 
     Thin hosted-side wrapper over the #3498 seam (``_cp_offload`` ->
@@ -5352,11 +5353,18 @@ async def _graph_offload(fn, *, op: str):
     are identifiable by op — but they share the 512-entry buffer, so a graph
     burst can evict PostgREST records. Splitting the buffer per pool is a
     follow-up, not part of #3773.
+
+    ``timeout`` (#2924) overrides the lane bound for a caller whose FAILURE
+    MODE is not a degraded write but a fail-open fallback: the onboarding gate
+    vetoes nothing when it fails, it only keeps the onboarding tools visible, so
+    it is willing to trade a cold-projection false-open for never parking a
+    graph worker for the lane's full cold-start allowance. Callers that write
+    leave it unset.
     """
     ctx = contextvars.copy_context()
     return await _cp_offload(
         functools.partial(ctx.run, fn), op=op, pool="graph",
-        timeout=graph_offload_timeout_s(),
+        timeout=graph_offload_timeout_s() if timeout is None else timeout,
         unavailable=_graph_unavailable)
 
 
@@ -20063,7 +20071,11 @@ async def _get_onboarding_projection_off_loop(org_id: str) -> dict:
     """
     return await _graph_offload(
         lambda: _get_onboarding_projection(org_id),
-        op="onboarding_projection")
+        op="onboarding_projection",
+        # #2924: the gate's contract is fail-open, so a hung or cold graph must
+        # not park a graph worker for the lane's cold-start allowance — the
+        # seam's standard REQUEST bound is the right price here.
+        timeout=CONTROL_PLANE_OFFLOAD_TIMEOUT_S)
 
 
 # #1727 (Slice 2, Task 11): PATCH-field → state-key translation for the

@@ -15,11 +15,10 @@ import os
 # #67: TORTOISE_SECRET_PEPPER is mandatory for auth module import.
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
+import asyncio
 import tempfile  # noqa: F401
 import threading
 import time
-
-import asyncio
 
 import pytest
 
@@ -1122,10 +1121,81 @@ class TestOnboardingToolGating:
             f"thread={seen['thread']!r}"
         )
         expected = int(stall_s / 0.02)
-        assert ticks >= expected // 3, (
+        # A free loop yields ~expected ticks; a gate back ON the loop yields
+        # 0-2. The floor is deliberately far below both so a loaded CI runner
+        # (this repo runs ~12 lanes on 10 CPUs, where a 20 ms timer wake-up can
+        # stretch severalfold) cannot false-alarm the detector.
+        assert ticks >= max(3, expected // 10), (
             f"the loop managed only {ticks} ticks during a {stall_s}s gate "
             f"read (a free loop yields ~{expected}) — the gate is back ON the "
             "event loop; route it through _graph_offload (#2924)"
+        )
+
+    def test_gate_fails_open_when_the_offload_itself_fails(self, monkeypatch):
+        """#2924: an OFFLOAD failure must fail OPEN, not 503 ``tools/list``.
+
+        The new failure surface this change introduces is the seam itself:
+        ``_graph_offload`` maps a saturated pool or a missed wait bound to
+        ``_graph_unavailable()`` (an ``HTTPException(503)``). The gate is
+        surface cosmetics — its documented contract is fail-open, and the
+        onboarding tools must stay listable during a graph-capacity blip. The
+        pre-existing e2e guard raises a ``RuntimeError`` from the helper, which
+        exercises the *propagation* path, not this mapping; without this case a
+        future narrowing of the gate's ``except`` would turn a saturated graph
+        pool into a 503 for the whole ``tools/list`` request.
+        """
+        from fastapi import HTTPException
+
+        import tortoise.hosted_api as ha
+        from tortoise import mcp_auth, mcp_server
+
+        async def _refused(org_id):
+            raise HTTPException(status_code=503, detail="graph_unavailable")
+
+        monkeypatch.setattr(ha, "_get_onboarding_projection_off_loop", _refused)
+        mcp_server._onboarding_state_cache.clear()
+        tok = mcp_auth._current_org_id.set("offload-fail-team")
+        try:
+            assert asyncio.run(mcp_server._org_onboarding_complete()) is False
+        finally:
+            mcp_auth._current_org_id.reset(tok)
+            mcp_server._onboarding_state_cache.clear()
+        assert "offload-fail-team" not in mcp_server._onboarding_state_cache, (
+            "a failed offload must not be cached as False"
+        )
+
+    def test_gate_offload_uses_the_request_bound_not_the_lane_bound(self):
+        """#2924: the gate buys a SHORT bound, not the graph lane's cold-start one.
+
+        ``_graph_offload``'s default bound is ``probe_setup_timeout()`` + a
+        margin (~30 s) because a cold projection is a legitimate ~28-round-trip
+        phase for a WRITE lane. The gate vetoes nothing when it fails — it only
+        keeps the onboarding tools visible — so parking a graph worker (and the
+        ``tools/list`` response) for that long to avoid a harmless false-open is
+        the wrong trade. Pin the override so it cannot silently revert.
+        """
+        import tortoise.hosted_api as ha
+        from tortoise import monitoring
+
+        seen = {}
+
+        async def _fake_graph_offload(fn, *, op, timeout=None):
+            seen["timeout"] = timeout
+            seen["op"] = op
+            return {"onboarding_complete": True}
+
+        original = ha._graph_offload
+        ha._graph_offload = _fake_graph_offload
+        try:
+            result = asyncio.run(ha._get_onboarding_projection_off_loop("bound-team"))
+        finally:
+            ha._graph_offload = original
+
+        assert result == {"onboarding_complete": True}
+        assert seen["op"] == "onboarding_projection"
+        assert seen["timeout"] == monitoring.CONTROL_PLANE_OFFLOAD_TIMEOUT_S
+        assert seen["timeout"] < monitoring.graph_offload_timeout_s(), (
+            "the gate fell back to the graph lane's cold-projection bound"
         )
 
 
