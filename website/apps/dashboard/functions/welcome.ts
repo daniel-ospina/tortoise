@@ -9,7 +9,10 @@
  * session into it — and a BFF login writes only the HttpOnly `__Host-session`, so
  * a browser holding no legacy session read as signed OUT and the gate redirected
  * it to /auth: the #3485 loop, reproduced by construction for that visitor. One
- * who had been through the MCP consent page held the cookie and was NOT bounced.
+ * whose legacy cookie still held an unexpired session was NOT bounced; one whose
+ * cookie had expired was, because `readValidSession()` treats a past `expires_at`
+ * as invalid — the consent page's client never refreshes on its own
+ * (`autoRefreshToken: false`).
  * Removing the bridge and the gate together is what fixed it.
  *
  * The BFF session cookie is HttpOnly. The server is the only thing that can

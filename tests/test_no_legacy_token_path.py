@@ -3,9 +3,7 @@
 THE INVARIANT
 -------------
 Under the BFF, the browser holds exactly one credential: an HttpOnly `__Host-session`
-cookie it cannot read. (A JS-readable legacy `sb-tortoise-auth-token` cookie is also still
-issued by the MCP consent page and still accepted on surfaces outside this gate's scope —
-tracked on #4178.) Therefore:
+cookie it cannot read. Therefore:
 
   (A) No browser-reachable surface may READ or HOLD session material — no JS-readable
       session cookie, no localStorage/sessionStorage token, no `supabase.auth` client session.
@@ -349,11 +347,9 @@ def test_welcome_page_does_not_load_a_client_auth_library():
     """(A) `/welcome` must not load supabase-js or build a client.
 
     /welcome is gated SERVER-SIDE by functions/welcome.ts. The page must render, not
-    authenticate. It called `window.createTortoiseSupabaseClient`, whose session read
-    resolves the legacy parent-domain `sb-tortoise-auth-token` cookie — after first
-    migrating any legacy localStorage session into it — and a BFF login writes only the
-    HttpOnly `__Host-session`, so a browser holding no legacy session read as signed
-    out. That is the #3485 loop's sibling.
+    authenticate. It previously called `window.createTortoiseSupabaseClient` — a factory
+    defined in a script the page never loaded — so every successful login fell into the
+    "temporarily unavailable" branch. That is the #3485 loop's sibling.
     """
     # #4054: /welcome moved to the APP origin with the rest of the BFF surfaces
     # (it is served by `functions/welcome.ts` from the dashboard project).
