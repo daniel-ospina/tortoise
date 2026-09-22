@@ -21219,12 +21219,17 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
     # #3718 residual (DATA plane): every step of the seed region below is SYNC
     # FalkorDB socket I/O — `_make_sdk` (in embedded mode it probes the anchor
     # and can open the DB), the projection attach, the sentinel read, the quota
-    # count and the ~13-Point seed. They run as ONE worker hand-off, NOT one per
-    # call: on the pre-#3718 code the whole run was a single no-`await`
-    # sequence, so splitting it would insert an interleaving point between the
-    # existence check and the seed that the original could not have — two
-    # concurrent POSTs could both pass the sentinel read, both seed, and both
-    # meter the write.
+    # count and the ~13-Point seed. They run as ONE worker hand-off, so the
+    # region's statements stay uninterleaved WITHIN the request.
+    #
+    # ⚠️ ONE HAND-OFF IS NOT MUTUAL EXCLUSION: `asyncio.to_thread` submits to
+    # the loop's shared pool, so two concurrent POSTs run this in two threads.
+    # On the pre-#3718 code the single-threaded loop serialized them for free
+    # (one request per thread, no `await` inside the region); moving it to a
+    # worker removes that accidental serialization, so the check-then-act below
+    # needs an explicit lock — a per-org lock across the hand-off (the
+    # `_org_restore_lock` pattern; #3718 round-2 review, empirically reproduced
+    # with a two-party barrier on `_seed_demo_graph`).
     def _seed_demo_sync() -> dict:
         sdk = _make_sdk(namespace=org["org_id"])
         proj = sdk._get_proj()
@@ -21244,7 +21249,8 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
         # SDK and writes ~13 Points.
         return {"existing": False, "created": _seed_demo_graph(org["org_id"])}
 
-    out = await asyncio.to_thread(_seed_demo_sync)
+    async with await _demo_seed_lock(org["org_id"]):
+        out = await asyncio.to_thread(_seed_demo_sync)
     if out["existing"]:
         # #3718: `_update_onboarding_state` routes to the tenant graph via
         # `_org_proj` -> `_make_sdk(...)._get_proj()` — SYNC, so it rides a
@@ -23247,6 +23253,9 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
     try:
         # #3718 residual (DATA plane): `_make_sdk` is not free in embedded
         # mode — it probes the fallback anchor and can open/attach the DB.
+        # The relink pass below is its own sync graph walk with a fresh attach,
+        # so it rides a worker too (a sync helper is invisible to the AST
+        # guard, which walks async bodies).
         org_sdk = await asyncio.to_thread(_make_sdk, namespace=org_id)
 
         # #1844: the index job is OBJECT-ONLY — it writes zero non-episodic
@@ -23346,8 +23355,9 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
         # on index COMPLETION — sessions captured before their entities
         # materialized now resolve (the capture-time links were honest
         # no-matches then). Owned by the completion hook, never a separate
-        # endpoint.
-        _relink_sessions_after_index(org_id)
+        # endpoint. #3718: SYNC (`_make_sdk` + `_get_proj` + a session scan +
+        # per-session linking), so it rides a worker; best-effort, returns None.
+        await asyncio.to_thread(_relink_sessions_after_index, org_id)
     except GitHubFetchError as e:
         # Mid-walk 401/429 / unresolved org (T1-P13 + P2): honest "failed"
         # status with a readable error; the cursor was NOT advanced past
@@ -24269,6 +24279,22 @@ _BACKUP_LOCKS_GUARD = asyncio.Lock()
 async def _org_restore_lock(org_id: str) -> asyncio.Lock:
     async with _BACKUP_LOCKS_GUARD:
         return _BACKUP_RESTORE_LOCKS.setdefault(org_id, asyncio.Lock())
+
+
+#: Per-org mutual exclusion for the demo seed's check-then-act (#3718). Needed
+#: BECAUSE the seed region is off-loaded: `asyncio.to_thread` runs it on a
+#: thread from the loop's shared pool, so two concurrent POSTs no longer
+#: serialize the way the pre-#3718 inline code did — one hand-off keeps the
+#: region's statements uninterleaved WITHIN a request, but it is not mutual
+#: exclusion between requests. (Round-2 review reproduced the race with a
+#: two-party barrier on `_seed_demo_graph`.)
+_DEMO_SEED_LOCKS: dict[str, asyncio.Lock] = {}
+_DEMO_SEED_LOCKS_GUARD = asyncio.Lock()
+
+
+async def _demo_seed_lock(org_id: str) -> asyncio.Lock:
+    async with _DEMO_SEED_LOCKS_GUARD:
+        return _DEMO_SEED_LOCKS.setdefault(org_id, asyncio.Lock())
 
 
 @app.post("/backups", status_code=201)

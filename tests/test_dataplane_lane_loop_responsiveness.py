@@ -428,3 +428,68 @@ def test_delete_session_does_not_freeze_the_event_loop(client, monkeypatch):
         "run proves nothing about a request served DURING the blocking window "
         "(#3718)")
     assert response.status_code == 200, response.text[:200]
+
+
+def test_public_demo_seed_is_serialized_per_org(client, monkeypatch):
+    """#3718: one worker hand-off is NOT mutual exclusion for ``public_demo``.
+
+    ``asyncio.to_thread`` submits the seed region to the loop's SHARED pool, so
+    two concurrent POST /v1/demo requests run it in two threads. The pre-#3718
+    inline code was serialized by the single-threaded loop — the sentinel read
+    could not interleave with another request's seed. Off-loading the region
+    removes that accident, so the check-then-act needs the explicit per-org
+    lock. Without it both requests enter ``_seed_demo_graph``, and since the
+    sentinel is written with CREATE (not MERGE) that means two sentinel nodes
+    and two metered write ops.
+
+    Round-2 review reproduced exactly that with a two-party barrier; this is
+    that probe as a permanent test. It measures MAX CONCURRENT seed entries, so
+    it reddens only if the lock is gone — not merely because the pool is busy.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app
+
+    _arm_dependencies(monkeypatch)
+    # Fresh lock map: an ``asyncio.Lock`` binds to the loop that first contends
+    # for it, and this test drives its own loop.
+    monkeypatch.setattr(ha_mod, "_DEMO_SEED_LOCKS", {})
+
+    gate = threading.Lock()
+    state = {"concurrent": 0, "max": 0}
+    # A real two-party barrier, not a sleep: it releases only when BOTH
+    # requests are inside the seed simultaneously, so the reading is not a
+    # timing guess. The timeout is what makes a LOCKED run fail fast instead of
+    # hanging — the second party never arrives, so ``wait`` raises.
+    entered = threading.Barrier(2, timeout=3)
+
+    def _slow_seed(org_id):
+        with gate:
+            state["concurrent"] += 1
+            state["max"] = max(state["max"], state["concurrent"])
+        try:
+            entered.wait()
+        except threading.BrokenBarrierError:
+            pass
+        finally:
+            with gate:
+                state["concurrent"] -= 1
+        return {"status": "demo_created", "points": 12}
+
+    monkeypatch.setattr(ha_mod, "_seed_demo_graph", _slow_seed)
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            return await asyncio.gather(ac.post("/v1/demo"),
+                                        ac.post("/v1/demo"))
+
+    responses = asyncio.run(_run())
+
+    assert state["max"] >= 1, (
+        "neither concurrent POST /v1/demo reached the seeder, so this run "
+        f"proves nothing (statuses={[r.status_code for r in responses]})")
+    assert state["max"] == 1, (
+        f"two concurrent POST /v1/demo both ran the seed (max concurrent "
+        f"entries={state['max']}) — the per-org lock is gone, so the sentinel "
+        f"check is a check-then-act across a thread hand-off (#3718)")
