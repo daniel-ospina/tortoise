@@ -73,6 +73,12 @@ surfaces:
   # change. Dual-registered with `onboarding` (the step-edge `created`
   # contract) and `core` (the analytics.py seam).
   - test_onboarding_telemetry_w11.py
+  # #3670/#3671/#3681: the onboarding truth-surface tests. Dual-registered
+  # under `api` as well as `core` for the same reason as the boot/health guards
+  # above: the file they pin (tortoise/hosted_api.py) selects the `api`
+  # surface, and `core` is only matched when nothing else matched — so `api`
+  # is what makes these run on an api-only change to the file they guard.
+  - test_onboarding_truth_surface.py
   # #3287: the selfhost health probes must not ride the loop's SHARED default
   # executor — a starved readiness probe returned a false 503 for a healthy DB
   # (measured 6020 ms, probe never ran), which fails publish-selfhost.yml. Dual
@@ -571,6 +577,7 @@ surfaces:
   - test_rebuild_turn_points_3947.py
   - test_rebuild_recreate_content_parity.py  # #4042: a pre-recreation PointRevised must not leak content/embedding/content_hash onto a re-created same-id Point (live apply()/fold() parity; same-journal-file content boundary)
   - test_rebuild_graph_only_derived_parity.py  # #4305: rebuild_all must not lose live-valid content_hash/embedding for a graph-only Point on a falsy re-emit, nor let the synthetic #548 tail clobber it (live apply() parity, 21 shapes)
+  - test_onboarding_truth_surface.py  # #3670/#3671/#3681: dual-registered (api+core) — pins tortoise/hosted_api.py
   - test_restore_container_recovery.py
   - test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan
   - test_session_attribution.py
@@ -1448,6 +1455,11 @@ durations:
   test_backup_watcher_health.py: 2.0
   eval/retrieval/test_integration.py: 855.2
   test_onboarding_state_split.py: 182.5
+  # #3746: the new onboarding truth-surface file. 31 docker-lane cases, junit
+  # sum 3.6s in run 35705184320 (`test (a)`), the same artifact source the
+  # block above cites. Without a row it packed at the flat 2.0s default and
+  # tipped durations coverage to 89.9%, under the 90% floor (#3400).
+  test_onboarding_truth_surface.py: 4.0
   eval/write_path/test_write_path_benchmark.py: 112.3
   test_tortoise_client.py: 110.7
   eval/retrieval/test_run.py: 109.3
