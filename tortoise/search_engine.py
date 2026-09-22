@@ -13,6 +13,8 @@ from collections import Counter
 from dataclasses import dataclass, asdict, field
 from typing import Any, Literal
 
+from .env_truthy import is_truthy
+
 # #1391: terminal (no-longer-current) Point statuses EXCLUDED from every
 # default read surface (FTS/vector/structural/operator + sdk query paths).
 # #689 excluded only 'retracted'; supersede_point writes 'superseded' +
@@ -301,12 +303,25 @@ SEARCH_PROVENANCE_FLAG_ENV = "TORTOISE_SEARCH_PROVENANCE"
 def search_provenance_enabled() -> bool:
     """Resolve the additive search-provenance flag. Default OFF.
 
-    Truthy values: 1/true/yes/on; anything else (including unset) is off.
+    Delegates to the single declared env-truthiness contract (#4097):
+    :func:`tortoise.env_truthy.is_truthy` — unset, blank, and garbage all read
+    OFF. A second copy of the vocabulary here is exactly the drift #4097 exists
+    to prevent (and is build-red in ``tests/test_env_truthy.py``).
+
+    ⛔ KNOWN LIMITATION — the flag is a NO-OP on the degraded fallback path.
+    The two fallback tiers (``fallback_snapshot.search_snapshot`` and
+    ``fallback_tfidf``) build their ``SearchResult``s and return from
+    ``TortoiseSDK`` BEFORE the flag-gated point fetch runs, so they carry
+    neither ``source_ref`` nor ``captured_at`` and ``to_dict`` emits no
+    ``provenance`` block however the flag is set. This is a boundary, not an
+    oversight: the snapshot keeps a deliberately LEAN projection
+    (``fallback_snapshot._SNAPSHOT_QUERY`` — id/content/pointKind/status/
+    outdated/search_keys/has_answer, no provenance columns) and adding those to
+    it is a separate, policy-governed change to the corpus it caches. A
+    degraded run therefore gets no provenance enrichment; the flag enriches the
+    normal (non-degraded) query path only.
     """
-    v = os.environ.get(SEARCH_PROVENANCE_FLAG_ENV)
-    if v is None:
-        return False
-    return v.strip().lower() in ("1", "true", "yes", "on")
+    return is_truthy(os.environ.get(SEARCH_PROVENANCE_FLAG_ENV))
 
 
 @dataclass
@@ -2351,6 +2366,9 @@ def fallback_tfidf(query: str, points: list[dict], limit: int = 10) -> list[dict
                 # embedded fallback hits too (``self.query`` nodes carry
                 # ``has_answer``; absent = False).
                 has_answer=bool(meta.get(r["id"], {}).get("has_answer")),
+                # ⛔ No ``source_ref``/``captured_at`` here — this tier is a
+                # no-op for TORTOISE_SEARCH_PROVENANCE; see the KNOWN
+                # LIMITATION note on ``search_provenance_enabled`` above.
             ).to_dict()
             for r in results
         ]

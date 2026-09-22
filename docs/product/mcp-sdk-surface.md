@@ -411,9 +411,8 @@ deciding 82 rows one at a time is not a reasonable thing to ask of you.
 **But these 82 lines are not all the same kind of statement, and the difference matters:**
 
 - **11 rows execute a decision Tortoise has already made.** The declaration itself
-  names one tool canonical and the other a duplicate; it marks the deprecated ones and names
-  their replacement; it asserts an SDK method that does not exist. Correcting these follows from
-  what we already decided to be. **These are recommendations in the strong sense.**
+  names one tool canonical and the other a duplicate. Correcting these follows from what we
+  already decided to be. **These are recommendations in the strong sense.**
 - **71 rows only describe what is being done** — called, referenced, or not.
   Usage is not a decision, and it does not get to decide what we are. A tool nobody calls may
   be exactly what we decided Tortoise is, for a user we have not reached yet; a tool everyone
@@ -440,14 +439,14 @@ Called by agents, or referenced by an eval harness, internal tooling, or a skill
 **This says we use them; it does not say we should.** Which of these we keep is a statement
 about what Tortoise is, and that is yours to make, not a reading of our own logs.
 
-**Net effect if you accept the three concrete actions and none of the judgement calls:**
+**Net effect if you accept the one concrete action and none of the judgement calls:**
 82 tool names → **71**. Nothing an agent can
 call disappears — the folded names are the same capability under a name the code already
 designates as canonical.
 
 ## On the numbers alone
 
-- **0 entries declare an SDK method that does not exist:** .
+- **0 entries declare an SDK method that does not exist.**
 - **39 SDK methods are reached by no agent path** — no MCP tool, no CLI verb, no tool handler, which is what `no-caller-found` means here. Of those, **11** are called from the tenant REST surface, so they are reachable by a client but not by an agent inside the gate; the remaining 28 have no caller outside tests at all.
 - **21 SDK methods are reachable only from our own engine, our tooling, or the tenant REST surface** — reachable by something, but by no agent path inside the gate. (Methods reachable ONLY from tenant REST are counted in the class above, not here.)
 - **Only 3 tools are referenced by an eval harness** (`tortoise_recall`, `tortoise_search`, `tortoise_check_structure`) — so almost none of this surface is covered by an evaluation.

@@ -237,14 +237,18 @@ def test_provenance_flag_is_absent_by_default_and_additive_when_on(sdk, monkeypa
     assert on == off, "the flag must be purely additive — every other key is byte-identical"
 
 
-def test_provenance_flag_off_omits_the_block_for_unlinked_points(sdk, monkeypatch):
-    """An unlinked point has no source/capture provenance to add — the block is
-    still omitted even with the flag ON (no empty shell)."""
+def test_provenance_flag_on_still_carries_capture_time_for_unlinked_points(sdk, monkeypatch):
+    """An unlinked point has no SOURCE to add, but its capture time is always
+    present — so with the flag ON the block IS present and omits only ``source``
+    (never an empty shell).
+
+    The flag is additive, not conditional on the point being linked: it emits
+    whatever provenance the point actually has, and a point is always created
+    with a ``createdAt``.
+    """
     p = sdk.create_point("statement", "orphan claim with no source")
     monkeypatch.setenv("TORTOISE_SEARCH_PROVENANCE", "1")
     hit = next(r for r in _scan(sdk) if r["id"] == p["id"])
-    # captured_at is always present on a created point, so the block exists here
-    # (source omitted, capture time present) — the block is never an empty shell.
     assert "provenance" in hit
     assert "source" not in hit["provenance"]
     assert hit["provenance"]["captured_at"]

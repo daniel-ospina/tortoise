@@ -911,9 +911,8 @@ def cmd_render(args: argparse.Namespace) -> int:
     add(f"**But these {len(tools)} lines are not all the same kind of statement, and the difference matters:**")
     add("")
     add(f"- **{len([r for r in tools if r.get('basis') == 'decided'])} rows execute a decision Tortoise has already made.** The declaration itself")
-    add("  names one tool canonical and the other a duplicate; it marks the deprecated ones and names")
-    add("  their replacement; it asserts an SDK method that does not exist. Correcting these follows from")
-    add("  what we already decided to be. **These are recommendations in the strong sense.**")
+    add("  names one tool canonical and the other a duplicate. Correcting these follows from what we")
+    add("  already decided to be. **These are recommendations in the strong sense.**")
     add(f"- **{len([r for r in tools if r.get('basis') == 'observed'])} rows only describe what is being done** — called, referenced, or not.")
     add("  Usage is not a decision, and it does not get to decide what we are. A tool nobody calls may")
     add("  be exactly what we decided Tortoise is, for a user we have not reached yet; a tool everyone")
@@ -979,7 +978,14 @@ def cmd_render(args: argparse.Namespace) -> int:
     add("**This says we use them; it does not say we should.** Which of these we keep is a statement")
     add("about what Tortoise is, and that is yours to make, not a reading of our own logs.")
     add("")
-    add("**Net effect if you accept the three concrete actions and none of the judgement calls:**")
+    # The count of CONCRETE-ACTION sections that actually RENDER — Cut (kills),
+    # Fold in (merges), Correct (fixes). It was hardcoded to "three", which went
+    # false the moment a bucket emptied and left the sentence referring to
+    # actions the document does not contain.
+    _n_actions = sum(1 for _bucket in (kills, merges, fixes) if _bucket)
+    _action_word = {0: "no", 1: "the one", 2: "the two", 3: "the three"}[_n_actions]
+    add(f"**Net effect if you accept {_action_word} concrete "
+        f"action{'s' if _n_actions != 1 else ''} and none of the judgement calls:**")
     add(f"{len(tools)} tool names → **{len(tools) - len(kills) - len(merges)}**. Nothing an agent can")
     add("call disappears — the folded names are the same capability under a name the code already")
     add("designates as canonical.")
@@ -987,8 +993,13 @@ def cmd_render(args: argparse.Namespace) -> int:
     add("## On the numbers alone")
     add("")
     dead = [r for r in tools if "WHICH DOES NOT EXIST" in (r.get("dependency") or "")]
-    add(f"- **{len(dead)} entries declare an SDK method that does not exist:** "
-        + ", ".join(f"`{r['name']}`" for r in dead) + ".")
+    if dead:
+        add(f"- **{len(dead)} entries declare an SDK method that does not exist:** "
+            + ", ".join(f"`{r['name']}`" for r in dead) + ".")
+    else:
+        # Guard the empty case: `", ".join([])` is `""`, which rendered a
+        # dangling sentence tail — "...does not exist:** ." (#4583).
+        add("- **0 entries declare an SDK method that does not exist.**")
     _ncf = classes.get("no-caller-found", [])
     _rest = [r for r in _ncf if "tenant-rest" in (r.get("dependency") or "")]
     add(f"- **{len(_ncf)} SDK methods are reached by no agent path** — no MCP tool, no CLI verb, no "
