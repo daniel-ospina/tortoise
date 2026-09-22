@@ -1324,6 +1324,18 @@ tier1:
 - test_weights.py
 - test_writer_inventory.py
 slow_files:
+# #4711/#4712: `eval/retrieval/test_integration.py` is the single most expensive
+# file in the suite and it ran in the FAST lane. MEASURED from the junit
+# artifact of green main run 35779482728 (`45aa52f70`): **1465.9s = 24.4 min**
+# — 1.71x its stale declared 855.2s, and 24.4% of half_a's whole budget. Its
+# presence alone put half_a at 2965.5s (49.3 min) against the 55-minute
+# watchdog, i.e. 5.7 minutes of headroom, while half_b sat at 1357.5s
+# (22.6 min) — a real 2.18:1 split that the placeholder-symmetric durations
+# map concealed (the halves were declared 1:1 at 2450s each). Moving it here
+# takes half_a to ~24.8 min against half_b's 22.6, restoring a real 1.1:1
+# balance and ~30 min of headroom, WITHOUT raising any timeout. This file is
+# genuinely slow (an eval integration surface), not mis-classified.
+- eval/retrieval/test_integration.py
 - test_about_edges.py
 - test_backfill_sources.py
 - test_billing.py
@@ -1468,7 +1480,6 @@ durations:
   # main run that includes it. Measured locally 2026-09-21: 13.7s for the file
   # (7 tests, DB-free, app-boot-free) on a loaded machine.
   test_backup_watcher_health.py: 2.0
-  eval/retrieval/test_integration.py: 855.2
   test_onboarding_state_split.py: 182.5
   # #3746: the new onboarding truth-surface file. 31 docker-lane cases, junit
   # sum 3.6s in run 35705184320 (`test (a)`), the same artifact source the
