@@ -1,7 +1,9 @@
 """Hermetic regression tests for the embedded-lane evidence producer (#3827).
 
-No graph, no Redis, no subprocess: every test drives the tool's pure classifier
-and derivation surfaces. The regression class these exist for is
+No graph, no Redis. The classifier/derivation tests drive the tool's pure
+surfaces; the `_porcelain_digest` tests (#4540) additionally drive REAL git
+against a throwaway repo — stubbing the porcelain there is how two defects
+shipped green. The regression class these exist for is
 DUPLICATED VOCABULARY — a second hand-maintained list that silently drifts from
 the canonical one:
 
@@ -29,6 +31,8 @@ exercising the happy path.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from pathlib import Path
 from typing import ClassVar
 
@@ -1037,38 +1041,114 @@ class TestRecordConstructionReadsTheCanonicalConstants:
         assert "red-file-list-differs" in reasons
 
 
-def test_record_out_receipt_does_not_dirty_the_pin(monkeypatch, tmp_path):
-    """M5/D6: the tool's OWN receipt is excluded from `post_review_dirty`.
+def _real_git_repo(tmp_path: Path, tracked: dict[str, str]) -> Path:
+    """A throwaway git repo with `tracked` committed — for REAL porcelain.
 
-    `_porcelain_digest` filtered the record-out line from the DIGEST blob but
-    computed `dirty` from the UNFILTERED `git status`, so the previously written
-    `--record-out` receipt (untracked) made every documented re-run report
-    `post_review_dirty: true` and fail `certificate-not-bound-to-review-head`.
-    This drives the REAL `_porcelain_digest` — the producer-level tests monkeypatch
-    it, which is exactly why they could not catch this.
+    The two tests below must not stub `_git`: a hand-written porcelain line is
+    exactly how #4540 shipped green. `git` is run with the ambient global/system
+    config disabled so a runner's `commit.gpgsign` / `core.hooksPath` cannot reach
+    into the fixture repo.
     """
-    rec_out = tmp_path / "docs" / "evidence" / "3827-green.json"
-    receipt = "? docs/evidence/3827-green.json"
-    edit = "1 .M N... 100644 100644 100644 abc abc tortoise/sdk.py"
+    root = tmp_path / "repo"
+    root.mkdir()
+    env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
 
-    def _git(*a, cwd=None):
-        if a[0] == "status":
-            return receipt
-        return ""
+    def run(*a: str) -> None:
+        subprocess.run(
+            ["git", *a], cwd=str(root), capture_output=True, text=True,
+            check=True, env=env,
+        )
 
-    monkeypatch.setattr(ee, "_git", _git)
-    receipt_digest, dirty = ee._porcelain_digest(tmp_path, exclude=rec_out)
+    run("init", "-q", "-b", "main")
+    run("config", "user.email", "test@example.invalid")
+    run("config", "user.name", "test")
+    for name, content in tracked.items():
+        p = root / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
+    run("add", "--", *tracked)
+    run("commit", "-qm", "init")
+    return root
+
+
+def test_record_out_receipt_does_not_dirty_the_pin(tmp_path):
+    """(b) M5/D6: the tool's OWN receipt is excluded from `post_review_dirty`.
+
+    The previous version of this test fed a hand-written `? docs/evidence/<f>.json`
+    line — a shape real git NEVER emits for a fresh untracked directory (`git status
+    --porcelain=v2` collapses it to `? docs/evidence/`), so the per-file substring
+    filter never matched and `dirty` stayed `True` on exactly the documented re-run.
+    The test passed while the defect was live. This drives the REAL
+    `_porcelain_digest` against a REAL repo, so the collapsed-directory shape is the
+    one under test, and it covers both documented spellings of the receipt: a flat
+    file in a tracked directory, and a file inside a fresh untracked directory.
+    """
+    root = _real_git_repo(tmp_path, {"tortoise/sdk.py": "x = 1\n", "README.md": "r\n"})
+
+    # Control: before any receipt exists the tree is clean, and the bare repo is the
+    # baseline every receipt-bearing digest must equal (the receipt is the ONLY
+    # difference, so excluding it exactly reproduces the clean digest).
+    clean_digest, clean_dirty = ee._porcelain_digest(root, exclude=None)
+    assert clean_dirty is False
+
+    flat = root / "README.json"  # receipt in an already-TRACKED parent directory
+    flat.write_text("{}\n")
+    _, dirty = ee._porcelain_digest(root, exclude=flat)
     assert dirty is False
+    flat.unlink()  # each spelling must be the ONLY receipt under test
 
-    def _git_dirty(*a, cwd=None):
-        if a[0] == "status":
-            return receipt + "\n" + edit
-        return ""
+    deep = root / "docs" / "evidence" / "3827-green.json"  # fresh UNTRACKED dir
+    deep.parent.mkdir(parents=True)
+    deep.write_text("{}\n")
+    deep_digest, dirty2 = ee._porcelain_digest(root, exclude=deep)
+    assert dirty2 is False, "a receipt in a fresh untracked dir must not dirty the pin"
 
-    monkeypatch.setattr(ee, "_git", _git_dirty)
-    edited_digest, dirty2 = ee._porcelain_digest(tmp_path, exclude=rec_out)
-    assert dirty2 is True
-    assert receipt_digest != edited_digest
+    # The deep receipt lives in the tree, yet excluding it alone must leave the
+    # digest byte-identical to the clean baseline — a filter that dropped anything
+    # ELSE would change it.
+    assert deep.is_file() and not flat.exists()
+    assert deep_digest == clean_digest
+
+
+def test_record_out_exclusion_keeps_an_editor_sibling(tmp_path):
+    """(a) #4540: excluding a receipt must not exclude the files beside it.
+
+    The substring filter dropped every porcelain line CONTAINING the record-out, and
+    an editor sibling (`<record-out>.bak`) contains it — so a real dirty file read
+    as clean while the pin claimed the tree was untouched. `docs/` is TRACKED here
+    (`.gitkeep`), so both files are listed individually and the over-match is the
+    only reason the sibling could disappear.
+    """
+    root = _real_git_repo(tmp_path, {"docs/.gitkeep": "", "tortoise/sdk.py": "x = 1\n"})
+    rec_out = root / "docs" / "3827-green.json"
+    rec_out.write_text("{}\n")
+    (root / "docs" / "3827-green.json.bak").write_text("bak\n")
+
+    _, dirty = ee._porcelain_digest(root, exclude=rec_out)
+    assert dirty is True, "a dirty <record-out>.bak must still dirty the pin"
+
+
+def test_record_out_exclusion_is_exact_path(tmp_path):
+    """(a) #4540: the exclusion is the EXACT path, never a PREFIX of one.
+
+    A short `--record-out` (`tools/e`) is a substring of the dirty
+    `tools/embedded_evidence.py`, so the old filter removed the only dirty entry and
+    reported a clean tree — `post_review_dirty` False, exit 0. The record-out itself
+    is a tracked, clean file, so the tracked edit is the ONLY dirty entry here and
+    the assertion cannot be satisfied by some other leftover entry.
+    """
+    root = _real_git_repo(tmp_path, {"tools/embedded_evidence.py": "x = 1\n", "tools/e": "keep\n"})
+    (root / "tools" / "embedded_evidence.py").write_text("x = 2\n")  # tracked edit
+
+    _, prefixed = ee._porcelain_digest(root, exclude=root / "tools" / "e")
+    assert prefixed is True, (
+        "--record-out tools/e must not exclude the dirty tools/embedded_evidence.py"
+    )
 
 
 # ── #4203: every conjunct flips in BOTH directions on a PRODUCED record ──────
