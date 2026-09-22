@@ -899,25 +899,25 @@ def test_hosted_api_create_object_rejects_unknown_status_with_422(tmp_path):
     This test fails loudly in that case: it asserts 422 AND asserts not 500.
 
     VERIFY-2 P0-2 (slot 1, EMPIRICAL): a bare `TestClient(app)` CANNOT reach the
-    handler. `/v1/objects` is `Depends(get_current_team_session_ungated)`, so an
+    handler. `/v1/objects` is `Depends(get_current_org_session_ungated)`, so an
     unauthenticated POST returns `401 {"detail":"Missing session token"}` — the
     test never exercised the guard. It also needs a team-limits dict, because
     the guard sits AFTER `_check_team_limit(team, "points")`, which 500s on a
     stub team (`Quota check failed: team limits missing max_points`). So this
     test must install the SAME override the repo's own route tests use —
-    `app.dependency_overrides[get_current_team]` plus a populated `TEST_TEAM`
+    `app.dependency_overrides[get_current_org]` plus a populated `TEST_TEAM`
     limits dict — exactly as `tests/test_hosted_api.py` does.
     """
     from fastapi.testclient import TestClient
-    from tortoise.hosted_api import app, get_current_team
+    from tortoise.hosted_api import app, get_current_org
     from tests.test_hosted_api import TEST_TEAM
 
-    app.dependency_overrides[get_current_team] = lambda: TEST_TEAM
+    app.dependency_overrides[get_current_org] = lambda: TEST_TEAM
     try:
         client = TestClient(app)
         _post_objects(client, TEST_TEAM)
     finally:
-        app.dependency_overrides.pop(get_current_team, None)
+        app.dependency_overrides.pop(get_current_org, None)
 
 
 
@@ -3838,7 +3838,7 @@ The verifier built Tasks 1–6 plus the full test file in the worktree, ran it a
 **The P0 trajectory across the four verify cycles: 0 → 2 → 2 → 0.** Cycles 2 and 3 each found their P0s *inside the tests that the previous cycle had added*, and it is worth recording what the last three actually were, because none was a wording problem:
 
 - **Cycle 2 P0-1** — `test_retracted_object_excluded_from_structural_leg` passed `kind="other"` while the fixture stored `objectKind="core:other"`; `run_structural_query` builds `WHERE n.objectKind = $kind`, so the test's own live control returned `[]` and it could never pass.
-- **Cycle 2 P0-2** — the hosted-API 422 test used a bare `TestClient(app)`, which returns **401** on a route gated by `get_current_team_session_ungated`, and also needed a populated team-limits dict (`_check_team_limit` 500s on a stub team).
+- **Cycle 2 P0-2** — the hosted-API 422 test used a bare `TestClient(app)`, which returns **401** on a route gated by `get_current_org_session_ungated`, and also needed a populated team-limits dict (`_check_team_limit` 500s on a stub team).
 - **Cycle 3 P0-1** — and this one is a **design** fix, not a test fix: `POST /v1/objects`' guard tested only `body.status not in OBJECT_STATUS_VALUES`, but **`retracted` IS a member of that vocabulary**, so it fell through to `sdk.create_object`, whose new `_create_entity` guard raised `ValueError`, which the handler's own blanket `except Exception` converted to a **500** — the exact "client error reported as a server fault" defect the change exists to remove, for the one status the task's prose says must be rejected. The guard now rejects `retracted` explicitly.
 - **Cycle 3 P0-2** — the post-filter pin was satisfied by the leg-level filters and never reached the block it claimed to pin; it needed `include_terminal=True` so `result_ids` is non-empty. **Verified in both directions**: green as written, and **red when the label gate is reverted** — i.e. finally falsifiable.
 

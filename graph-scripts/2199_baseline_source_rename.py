@@ -108,7 +108,11 @@ def target_graphs(uri: str, explicit: list[str] | None) -> tuple[list[str], list
     targets = []
     excluded = []
     for g in all_graphs:
-        if g == uri_graph or g.endswith("_tortoise") or g.startswith("team_"):
+        # #3543: tenant graphs are `org_*` post-rename and `team_*` before
+        # it (no data migration rewrites the namespace) — target both so a
+        # re-run still reaches every hosted tenant graph.
+        if (g == uri_graph or g.endswith("_tortoise")
+                or g.startswith(("org_", "team_"))):
             targets.append(g)
         else:
             excluded.append(g)

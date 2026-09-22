@@ -8,6 +8,7 @@ Uses TF-IDF fallback (sklearn) — no sentence_transformers dependency.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 
@@ -21,14 +22,46 @@ from tortoise.sdk import TortoiseSDK
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
-@pytest.fixture
-def sdk():
-    return _new_sdk()
+# #4096: every `_new_sdk()` call site registers its SDK here. This module's SDK
+# tests declare `sdk=None` with an in-body fallback (so the module stays
+# direct-run compatible), which means pytest never injects a `sdk` fixture — so
+# ownership of the temp tree has to sit with the call sites, not with a fixture
+# that never runs. `_reclaim_registered_sdks` drains this: **close first**, then
+# reclaim (never remove a tree under a live redislite server — #3685/#4068).
+_NEW_SDKS: list[TortoiseSDK] = []
+
+
+def _reclaim_registered_sdks():
+    """Close + reclaim every `_new_sdk()` tree registered since the last drain.
+
+    Called by the autouse pytest reclaimer AND by `_run_all()` — the direct-run
+    entrypoint executes no fixtures, so without the second call site every
+    `python3 tests/test_tortoise_search.py` run would leak its trees and pin the
+    SDKs/servers alive until interpreter exit.
+    """
+    while _NEW_SDKS:
+        sdk = _NEW_SDKS.pop()
+        try:  # noqa: SIM105
+            sdk.close()
+        except Exception:
+            pass
+        tree = os.path.dirname(sdk._db_path) if sdk._db_path else None
+        if tree:
+            shutil.rmtree(tree, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def _reclaim_search_trees():
+    """#4096: close + reclaim every `_new_sdk()` tree this test created."""
+    yield
+    _reclaim_registered_sdks()
 
 
 def _new_sdk():
     db_path = os.path.join(tempfile.mkdtemp(prefix="tortoise_search_test_"), "test.db")
-    return TortoiseSDK(db_path)
+    sdk = TortoiseSDK(db_path)
+    _NEW_SDKS.append(sdk)
+    return sdk
 
 
 # ── search_points (unit — no DB) ─────────────────────────────────────
@@ -427,12 +460,35 @@ def test_sdk_fts_query_vector_scores_populated():
     )
 
 
+def test_new_sdk_trees_are_reclaimed():
+    """#4096: `_new_sdk()` registers its tree, and the reclaimer removes it +
+    empties the registry. Drives the fixture's own generator the way pytest does
+    (setup, then teardown) so it is deterministic and fails if `_new_sdk`
+    stops registering or `_reclaim_registered_sdks` stops reclaiming."""
+    sdk = _new_sdk()
+    tree = os.path.dirname(sdk._db_path)
+    assert os.path.isdir(tree), "_new_sdk did not create its tree"
+    assert sdk in _NEW_SDKS, "_new_sdk did not register its SDK for reclamation"
+    gen = _reclaim_search_trees.__wrapped__()
+    next(gen)  # fixture setup
+    with pytest.raises(StopIteration):
+        next(gen)  # fixture teardown
+    assert not os.path.exists(tree), f"_new_sdk tree left behind: {tree}"
+    assert _NEW_SDKS == []
+
+
 # ── runner ───────────────────────────────────────────────────────────
 
 def _run_all():
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            fn()
+    try:
+        for name, fn in sorted(globals().items()):
+            if name.startswith("test_") and callable(fn):
+                fn()
+    finally:
+        # #4096: the direct-run entrypoint executes no pytest fixtures, so drain
+        # here too — otherwise a direct run leaks its trees and pins the
+        # SDKs/servers alive until interpreter exit.
+        _reclaim_registered_sdks()
     print("\nall tortoise_search tests passed")
 
 

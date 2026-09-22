@@ -1,11 +1,11 @@
 """Stripe billing mirror for Tortoise Hosted (#310).
 
 Architecture: Stripe is the authority for *money*; the FalkorDB registry
-Team node is the authority for *enforcement*. This module provides the thin
+Org node is the authority for *enforcement*. This module provides the thin
 Stripe API wrapper (``StripeClient`` over httpx — form-encoded, timeouts), the
 validated price catalog (``PriceCatalog`` from the ``STRIPE_PRICE_IDS`` env
 JSON), lazy-grace tier resolution (``effective_tier``), the atomic tier+limits
-writer (``apply_limits``), and boot mirror repair (``reconcile_team``).
+writer (``apply_limits``), and boot mirror repair (``reconcile_org``).
 
 Config degradation is LAZY by design (review fix 12): missing
 ``STRIPE_PRICE_IDS`` / ``STRIPE_SECRET_KEY`` / ``STRIPE_WEBHOOK_SECRET`` never
@@ -37,12 +37,12 @@ __all__ = [  # noqa: RUF022
     "BillingError", "BillingConfigError", "StripeAPIError",
     "PriceCatalog", "StripeClient",
     "effective_tier", "apply_limits", "subscription_plan",
-    "mirror_subscription", "reconcile_team",
+    "subscription_period_bounds",
+    "mirror_subscription", "reconcile_org",
 ]
 
 _STRIPE_API = "https://api.stripe.com/v1"
 _ACTIVE_STATUSES = ("active", "trialing", "past_due")
-_MAX_SESSIONS = 1000  # flat across tiers (matches today's effective default)
 
 
 class BillingError(Exception):
@@ -285,20 +285,20 @@ class StripeClient:
             raise StripeAPIError("stripe create_customer returned no id")
         return cid
 
-    def create_checkout_session(self, team_id: str, price_id: str, customer: str,
+    def create_checkout_session(self, org_id: str, price_id: str, customer: str,
                                 success_url: str, cancel_url: str) -> str:
         """POST /v1/checkout/sessions (mode=subscription) → checkout url.
 
-        Binds the team via ``client_reference_id`` + ``metadata.team_id`` so
-        the webhook can map the session to a team without trusting email.
+        Binds the org via ``client_reference_id`` + ``metadata.org_id`` so
+        the webhook can map the session to an org without trusting email.
         """
         data = self._request("POST", "checkout/sessions", params={
             "mode": "subscription",
             "customer": customer,
             "line_items[0][price]": price_id,
             "line_items[0][quantity]": "1",
-            "client_reference_id": team_id,
-            "metadata[team_id]": team_id,
+            "client_reference_id": org_id,
+            "metadata[org_id]": org_id,
             "success_url": success_url,
             "cancel_url": cancel_url,
         })
@@ -314,12 +314,12 @@ class StripeClient:
     ) -> tuple[str, str]:
         """#2789: Checkout for an organization that does NOT exist yet.
 
-        Deliberately not ``create_checkout_session``: there is no team row to
+        Deliberately not ``create_checkout_session``: there is no org row to
         bind and no reusable Stripe customer. Two differences matter:
 
         - ``customer_email`` instead of ``customer`` — in subscription mode
           Stripe CREATES the Customer at completion. An ABANDONED checkout
-          therefore leaves literally nothing behind: no team row, no
+          therefore leaves literally nothing behind: no org row, no
           membership, no graph, not even an orphaned Stripe customer.
         - the pre-minted org id rides BOTH ``client_reference_id`` (the
           existing webhook binding — the event echoes it back) and metadata
@@ -337,7 +337,7 @@ class StripeClient:
             "line_items[0][quantity]": "1",
             "client_reference_id": new_org_id,
             "metadata[new_org]": "1",
-            "metadata[team_id]": new_org_id,
+            "metadata[org_id]": new_org_id,
             "metadata[user_id]": user_id,
             "metadata[org_name]": org_name,
             "metadata[tier]": tier,
@@ -425,7 +425,7 @@ class StripeClient:
 
 # ── Tier resolution / mirror writes ─────────────────────────────────────────
 
-def effective_tier(team: dict, now: float | None = None) -> str:
+def effective_tier(org: dict, now: float | None = None) -> str:
     """Lazy grace resolution: the ONLY time-based degrade is ``past_due`` past
     ``grace_until`` → ``free``.
 
@@ -438,9 +438,9 @@ def effective_tier(team: dict, now: float | None = None) -> str:
     """
     if now is None:
         now = time.time()
-    stored = team.get("tier") or "free"
-    if team.get("subscription_status") == "past_due":
-        grace_until = team.get("grace_until")
+    stored = org.get("tier") or "free"
+    if org.get("subscription_status") == "past_due":
+        grace_until = org.get("grace_until")
         if grace_until is not None:
             try:
                 if now > float(grace_until):
@@ -450,27 +450,31 @@ def effective_tier(team: dict, now: float | None = None) -> str:
     return stored
 
 
-def apply_limits(sdk, team_id: str, tier: str) -> None:
-    """Atomic tier + limits SET on the registry Team node (one Cypher write).
+def apply_limits(sdk, org_id: str, tier: str) -> None:
+    """Atomic tier + limits SET on the registry Org node (one Cypher write).
 
     GAP-B mapping: ``max_points := tier_limits(tier)["max_graph_nodes"]`` —
     the points quota counter counts graph nodes (see module docstring).
-    ``max_sessions`` is 1000 flat across tiers.
+    ``max_sessions`` is written as **NULL (unlimited)** for every tier: the
+    flat 1000 was an inherited code fallback, never a ratified cap (#4010 —
+    see the module comment in ``tortoise/quota.py``). Writing the NULL here
+    also CLEARS any stored cap on the next tier change — the data half of the
+    same fix (one-shot sweep: graph-scripts/clear_max_sessions_4010.py).
 
-    #771 review P1: Supabase mode PATCHes the teams row (tier + the quota
+    #771 review P1: Supabase mode PATCHes the orgs row (tier + the quota
     columns 0006 carries: max_users/max_graphs/ops_allowance/graph_size_cap;
-    max_api_keys/max_sessions fall back to pricing defaults in quota.py) —
-    the registry twin only for selfhost.
+    max_api_keys falls back to pricing and max_sessions is unlimited in
+    quota.py) — the registry twin only for selfhost.
     """
     from tortoise.pricing import tier_limits
 
     lim = tier_limits(tier)
     try:
         from tortoise.supabase_control import (  # noqa: I001
-            get_control_plane, is_supabase_enabled, update_team_billing,
+            get_control_plane, is_supabase_enabled, update_org_billing,
         )
         if is_supabase_enabled():
-            update_team_billing(get_control_plane(), team_id, {
+            update_org_billing(get_control_plane(), org_id, {
                 "tier": tier,
                 "max_users": lim["max_users_per_team"],
                 "max_graphs": lim["max_graphs_per_team"],
@@ -485,15 +489,69 @@ def apply_limits(sdk, team_id: str, tier: str) -> None:
         "t.max_graphs=$max_graphs, t.max_api_keys=$max_api_keys, "
         "t.max_points=$max_points, t.max_sessions=$max_sessions",
         params={
-            "id": team_id,
+            "id": org_id,
             "tier": tier,
             "max_users": lim["max_users_per_team"],
             "max_graphs": lim["max_graphs_per_team"],
             "max_api_keys": lim["max_api_keys"],
             "max_points": lim["max_graph_nodes"],
-            "max_sessions": _MAX_SESSIONS,
+            # #4010: unlimited for every tier — NULL, never a number.
+            "max_sessions": None,
         },
     )
+
+
+def _subscription_items(sub: dict) -> list:
+    """A Stripe subscription's item rows, for either payload shape.
+
+    Stripe returns ``items`` as a ``{'data': [...]}`` envelope; fixtures and
+    older payloads use a flat list. Anything else (a scalar, a missing key,
+    ``None``) yields ``[]`` — NEVER an ``AttributeError``: this helper runs on
+    webhook payloads, so a malformed shape must not raise. (#4216 review: the
+    first version called ``.get`` on any truthy non-dict and 500'd the
+    checkout route, before the metadata-tier fallback could run.)
+    """
+    # Guard the SUBJECT as well as the value: a non-dict ``sub`` must yield
+    # ``[]`` too (``hosted_api._price_id_from`` passes the raw payload in).
+    items = sub.get("items") if isinstance(sub, dict) else None
+    if isinstance(items, list):
+        rows = items
+    elif isinstance(items, dict):
+        rows = items.get("data") or []
+    else:
+        rows = []
+    return rows if isinstance(rows, list) else []
+
+
+def subscription_period_bounds(sub: dict) -> tuple:
+    """The subscription's billing period bounds — ``(start, end)`` — or
+    ``(None, None)`` when the payload carries neither.
+
+    #4216: Stripe API ``2025-03-31.basil`` moved ``current_period_start`` /
+    ``current_period_end`` OFF the top-level Subscription resource and onto its
+    subscription ITEMS. Read the top level first (pre-Basil, and the shape the
+    registry twin has always stored), then fall back to ``items[0]``. WITHOUT
+    the fallback a Basil-or-later account silently writes NO window and the
+    paying org stays unmeterable — the defect this fixes.
+
+    Values are returned AS-IS (whatever the API version emitted: a Unix epoch
+    int pre-Basil, an ISO-8601 string on newer versions, or ``None``); each
+    caller's own truthiness/None guard decides whether to write. A non-dict
+    ``sub`` yields ``(None, None)``.
+    """
+    if not isinstance(sub, dict):
+        return None, None
+    start = sub.get("current_period_start")
+    end = sub.get("current_period_end")
+    if start is None or end is None:
+        item = next(iter(_subscription_items(sub)), {})
+        if not isinstance(item, dict):
+            item = {}
+        if start is None:
+            start = item.get("current_period_start")
+        if end is None:
+            end = item.get("current_period_end")
+    return start, end
 
 
 def subscription_plan(sub: dict) -> tuple[str, str]:
@@ -514,9 +572,9 @@ def subscription_plan(sub: dict) -> tuple[str, str]:
     return catalog.tier_for_price(price_id), catalog.interval_for_price(price_id)
 
 
-def mirror_subscription(sdk, team_id: str, sub: dict, *,
+def mirror_subscription(sdk, org_id: str, sub: dict, *,
                         customer_email: str | None = None) -> dict:
-    """Authoritative push of a Stripe Subscription onto the Team mirror.
+    """Authoritative push of a Stripe Subscription onto the Org mirror.
 
     Order: resolve price→tier (raises on unknown price BEFORE any write) →
     ``apply_limits`` → idempotent status/period SET. Used by boot reconcile and
@@ -533,20 +591,39 @@ def mirror_subscription(sdk, team_id: str, sub: dict, *,
         tier, interval = "free", "monthly"
     else:
         tier, interval = subscription_plan(sub)
-    apply_limits(sdk, team_id, tier)
+    apply_limits(sdk, org_id, tier)
     params: dict = {
-        "id": team_id,
+        "id": org_id,
         "status": status,
-        "period_end": sub.get("current_period_end"),
         "cancel_at_period_end": bool(sub.get("cancel_at_period_end")),
     }
     set_fields = (
-        "SET t.subscription_status=$status, t.current_period_end=$period_end, "
-        "t.cancel_at_period_end=$cancel_at_period_end"
+        "SET t.subscription_status=$status, t.cancel_at_period_end=$cancel_at_period_end"
     )
     if sub.get("id"):
         set_fields += ", t.subscription_id=$subscription_id"
         params["subscription_id"] = sub["id"]
+    # #4216: read the bounds through the top-level-then-item helper, so a
+    # Basil-or-later Stripe account (period fields on the subscription ITEMS)
+    # still writes a window. Each bound is written ONLY when the payload
+    # carries it, so a partial subscription object can never NULL OUT a bound
+    # already stored.
+    #
+    # A payload that carries ONE bound and not the other leaves a half-known
+    # REGISTRY anchor here (this writer owns the ``:Team`` graph twin). That is
+    # NOT repaired by ``20260919000001`` — that migration updates the Supabase
+    # ``organizations`` row, a different lane this writer never touches. The
+    # half-known twin is REPORTED, not silent (the meter refuses it and
+    # ``cohort_cost`` raises the #3981 alert) and is COMPLETED by the next
+    # authoritative push — a later ``mirror_subscription`` or
+    # ``customer.subscription.updated`` payload carrying the missing bound.
+    period_start, period_end = subscription_period_bounds(sub)
+    if period_start:
+        set_fields += ", t.current_period_start=$period_start"
+        params["period_start"] = period_start
+    if period_end:
+        set_fields += ", t.current_period_end=$period_end"
+        params["period_end"] = period_end
     if customer_email:
         set_fields += ", t.customer_email=$customer_email"
         params["customer_email"] = customer_email
@@ -556,11 +633,11 @@ def mirror_subscription(sdk, team_id: str, sub: dict, *,
     return {"tier": tier, "interval": interval, "status": status}
 
 
-def reconcile_team(sdk, team_id: str, force: bool = False) -> dict:
+def reconcile_org(sdk, org_id: str, force: bool = False) -> dict:
     """Best-effort mirror repair from Stripe (boot reconcile, Task 8).
 
-    - Team has ``subscription_id`` → GET subscription → mirror.
-    - elif Team has ``stripe_customer_id`` (missed checkout event blind spot)
+    - Org has ``subscription_id`` → GET subscription → mirror.
+    - elif Org has ``stripe_customer_id`` (missed checkout event blind spot)
       → LIST subscriptions → first active/trialing/past_due → mirror.
     - else no-op.
 
@@ -574,21 +651,21 @@ def reconcile_team(sdk, team_id: str, force: bool = False) -> dict:
     reg = sdk._get_registry()
     rows = reg.query(
         "MATCH (t:Team {id:$id}) RETURN t.subscription_id, t.stripe_customer_id",
-        params={"id": team_id},
+        params={"id": org_id},
     ).result_set
     if not rows:
-        raise BillingError(f"reconcile_team: team {team_id!r} not found in registry")
+        raise BillingError(f"reconcile_org: org {org_id!r} not found in registry")
     sub_id, customer_id = rows[0]
     if not sub_id and not customer_id:
-        return {"team_id": team_id, "action": "noop"}
+        return {"org_id": org_id, "action": "noop"}
     client = StripeClient()
     if sub_id:
         sub = client.get_subscription(sub_id)
-        summary = mirror_subscription(sdk, team_id, sub)  # gates tier on status
-        return {"team_id": team_id, "action": "mirror_subscription", **summary}
+        summary = mirror_subscription(sdk, org_id, sub)  # gates tier on status
+        return {"org_id": org_id, "action": "mirror_subscription", **summary}
     subs = client.list_subscriptions(customer_id)
     for sub in subs:
         if sub.get("status") in _ACTIVE_STATUSES:
-            summary = mirror_subscription(sdk, team_id, sub)
-            return {"team_id": team_id, "action": "mirror_customer_first_active", **summary}
-    return {"team_id": team_id, "action": "noop"}
+            summary = mirror_subscription(sdk, org_id, sub)
+            return {"org_id": org_id, "action": "mirror_customer_first_active", **summary}
+    return {"org_id": org_id, "action": "noop"}

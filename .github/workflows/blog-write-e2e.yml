@@ -1,0 +1,144 @@
+# Blog write E2E + residue purge — manual only (#4220).
+#
+# WHY THIS WORKFLOW EXISTS
+# The two blog tests that CREATE rows used to run in `deploy-pages.yml`
+# (`verify-blog`, `needs: deploy`) against PRODUCTION on every deploy. They
+# created a post each and deliberately left it as a draft, so every deploy
+# deposited two synthetic rows in the editorial review queue, forever — and
+# `meta-contract-<n>` re-randomised per process, so no two runs even collided.
+# A deploy must not mutate production content; those tests now run here, on
+# demand. The read-only checks (SSR, feed, sitemap, robots, admin gate,
+# anonymous-write refusal) stay in the deploy job and still run every deploy.
+#
+# TWO MODES
+#   lifecycle (default) — run the write tests: create → publish → unpublish →
+#     remove. Each test DELETEs the row it created in a `finally:` and asserts
+#     it is gone. Target defaults to production; override base_url /
+#     tortoise_host to point at a preview deployment.
+#   purge — delete the `meta-contract-*` / `lifecycle-e2e-*` rows that already
+#     accumulated (graph-scripts/4220_blog_residue_cleanup.py). DRY-RUN unless
+#     `execute` is ticked. Guards: the prefix must be a known test prefix, and
+#     every statement is scoped to `created_by = 'blog-e2e'`, so editorial
+#     content is never touched.
+#
+# NO push / PR / schedule trigger — this workflow writes to production and must
+# only ever run because a human asked for it.
+name: Blog write E2E (manual, #4220)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "lifecycle = run the create/publish tests; purge = delete accumulated test rows"
+        type: choice
+        options: [lifecycle, purge]
+        default: lifecycle
+      prefix:
+        description: "purge: which residue to remove"
+        type: choice
+        options: ["both", "meta-contract-", "lifecycle-e2e-"]
+        default: both
+      execute:
+        description: "purge: actually DELETE (leave unchecked to dry-run)"
+        type: boolean
+        default: false
+      base_url:
+        description: "lifecycle: company origin under test"
+        type: string
+        default: "https://premiselabs.co"
+      tortoise_host:
+        description: "lifecycle: blog (tortoise) origin under test"
+        type: string
+        default: "https://tortoise.premiselabs.co"
+
+# Serialise: the lifecycle tests use stable slugs, so two concurrent runs would
+# collide on the same row. Queue rather than cancel (a cancelled run could leave
+# a row behind — the very thing #4220 is about).
+concurrency:
+  group: blog-write-e2e
+  cancel-in-progress: false
+
+jobs:
+  lifecycle:
+    if: inputs.mode == 'lifecycle'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Require the E2E agent key
+        # Fail loudly here rather than letting the tests silently SKIP (they skip
+        # without a key) — a green run that asserted nothing is the #4220 class
+        # of defect one layer up.
+        # #4361: the secret is bound in `env:` and read as a QUOTED shell
+        # variable. `${{ secrets.X }}` must never appear in a `run:` body —
+        # GitHub substitutes it into the shell SOURCE before bash parses it, so
+        # a value containing `"` loses its quotes (the #4334 outage) and one
+        # containing `$(…)`/backticks would EXECUTE. An expanded variable's
+        # contents are data, never re-parsed.
+        env:
+          BLOG_E2E_AGENT_KEY: ${{ secrets.BLOG_E2E_AGENT_KEY }}
+        run: |
+          if [ -z "$BLOG_E2E_AGENT_KEY" ]; then
+            echo "::error::BLOG_E2E_AGENT_KEY repo secret is required (provision agent_name='blog-e2e' in blog_agent_keys)"
+            exit 1
+          fi
+      - name: Guard the write key — tortoise_host allowlist
+        # BLOG_E2E_AGENT_KEY is a PRODUCTION write-capable key and is sent as
+        # X-Agent-Key to `tortoise_host`, a free-text input. A typo (or a paste
+        # of the wrong URL) would hand the key to an arbitrary host, so only the
+        # known blog origins may receive it. *.pages.dev is deliberately NOT a
+        # bare wildcard — any Cloudflare user can own a `<name>.pages.dev`, so
+        # the wildcard is scoped to THIS project's preview deployments.
+        env:
+          TORTOISE_HOST_INPUT: ${{ inputs.tortoise_host }}
+        run: |
+          host="${TORTOISE_HOST_INPUT%/}"
+          case "$host" in
+            https://tortoise.premiselabs.co|https://*.premiselabs.co|https://*.premise-labs.pages.dev|http://127.0.0.1:*|http://localhost:*)
+              echo "write-key host allowed: $host" ;;
+            *)
+              echo "::error::tortoise_host '$TORTOISE_HOST_INPUT' is not allowlisted (tortoise.premiselabs.co | *.premiselabs.co | *.premise-labs.pages.dev | localhost) — refusing to send BLOG_E2E_AGENT_KEY there"
+              exit 1 ;;
+          esac
+      - name: Install e2e deps
+        run: |
+          pip install pytest requests playwright pytest-playwright
+          pip install -e .
+      - name: Run the blog write E2E against the target
+        env:
+          RUN_BLOG_E2E: '1'
+          ALLOW_PROD: '1'
+          # carve-out: this suite is requests-only (no embedded DB server);
+          # without it the session-start fixture fails on the P4 URI gate.
+          TORTOISE_TEST_CARVE_OUT: '1'
+          BASE_URL: ${{ inputs.base_url }}
+          TORTISE_HOST: ${{ inputs.tortoise_host }}
+          BLOG_E2E_AGENT_KEY: ${{ secrets.BLOG_E2E_AGENT_KEY }}
+        run: |
+          python3 -m pytest tests/e2e/test_blog.py -v -m blog_write
+
+  purge:
+    if: inputs.mode == 'purge'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Purge blog E2E residue (dry-run unless execute is ticked)
+        env:
+          # Management API SQL — the same access path as the #2146 cleanup.
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          extra=""
+          if [ "${{ inputs.execute }}" = "true" ]; then
+            extra="--execute"
+          else
+            echo "::notice::dry-run (execute unchecked) — listing only, nothing deleted"
+          fi
+          python3 graph-scripts/4220_blog_residue_cleanup.py \
+            --prefix "${{ inputs.prefix }}" $extra

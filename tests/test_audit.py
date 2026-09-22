@@ -566,7 +566,7 @@ def test_mcp_handler_returns_same_report(sdk, monkeypatch):
     _edge(sdk, "op1", "ev", "IMPL")
 
     token = _transport_mode.set("http")
-    monkeypatch.setattr(ms, "_get_team_sdk", lambda: sdk)
+    monkeypatch.setattr(ms, "_get_org_sdk", lambda: sdk)
     try:
         report = ms.tortoise_audit()
         assert isinstance(report, dict)

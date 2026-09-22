@@ -4,7 +4,7 @@
 // tags/meta_title/meta_description from the article content + Tortoise SEO
 // strategy. The editor calls this with the user's PKCE session (Bearer token);
 // the function verifies the session + blog_admins membership (same fail-closed
-// port as functions/admin/[[path]].ts). The post body is used ONLY to build
+// port as website/apps/dashboard/functions/admin/[[path]].ts). The post body is used ONLY to build
 // the prompt and is never echoed back (prompt-injection surface stays
 // server-side).
 //
@@ -170,8 +170,16 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   if (!env.OPENROUTER_API_KEY) {
     return json({ error: "not_configured", message: "OPENROUTER_API_KEY missing" }, 503);
   }
-  const userId = await requireAdmin(env, request);
-  if (!userId) return json({ error: "unauthorized", message: "Session expired or not an admin — refresh and log in again" }, 401);
+  const admin = await requireAdmin(env, request);
+  if (!admin.ok) {
+    // A store/database fault is NOT "you are signed out". Answering 401 here
+    // would sign an admin out because a lookup blipped — the #3485 class.
+    if (admin.reason === "unavailable") {
+      return json({ error: "unavailable", message: "Session store or admin lookup unavailable — try again shortly" }, 503);
+    }
+    return json({ error: "unauthorized", message: "Session expired or not an admin — refresh and log in again" }, 401);
+  }
+  const userId = admin.userId;
   if (rateLimited(userId)) return json({ error: "rate_limited", message: "Rate limit reached — try again shortly" }, 429);
 
   let input: { title?: unknown; body?: unknown; tags?: unknown };

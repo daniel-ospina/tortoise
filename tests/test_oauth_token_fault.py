@@ -116,16 +116,16 @@ def _no_silent_faults():
 
 def _seed_base_tables(cp) -> None:
     """oauth_clients (id=_CLIENT_ID, token_endpoint_auth_method='none'), teams
-    (id='t1'), team_memberships (user_id=_U1 UUID, team_id='t1', status='active')."""
+    (id='t1'), org_memberships (user_id=_U1 UUID, org_id='t1', status='active')."""
     cp.tables.setdefault("oauth_clients", []).append({
         "id": _CLIENT_ID, "client_name": "test", "redirect_uris": [_REDIRECT],
         "scope": "mcp", "token_endpoint_auth_method": "none",
         "created_at": "2026-01-01T00:00:00+00:00"})
-    cp.tables.setdefault("teams", []).append({
+    cp.tables.setdefault("organizations", []).append({
         "id": "t1", "tier": "Team", "suspended_at": None, "flagged_at": None,
         "email": "t@example.com"})
-    cp.tables.setdefault("team_memberships", []).append({
-        "user_id": _U1, "team_id": "t1", "role": "owner", "status": "active"})
+    cp.tables.setdefault("org_memberships", []).append({
+        "user_id": _U1, "org_id": "t1", "role": "owner", "status": "active"})
 
 
 def _live(cp, table: str) -> list[dict]:
@@ -141,7 +141,7 @@ def _s256(verifier: str) -> str:
 
 
 def _seed_code(cp, code="code-1", *, verifier=None, client_id=_CLIENT_ID,
-               user_id=_U1, team_id="t1", redirect_uri=_REDIRECT, used_at=None,
+               user_id=_U1, org_id="t1", redirect_uri=_REDIRECT, used_at=None,
                expires_in=600) -> str:
     """Insert an oauth_codes row and RETURN the PKCE verifier (a code seeded without
     its verifier 400s on PKCE before ever reaching the injected fault). Uses the
@@ -149,7 +149,7 @@ def _seed_code(cp, code="code-1", *, verifier=None, client_id=_CLIENT_ID,
     verifier = verifier or _pkce()[0]
     cp.tables.setdefault("oauth_codes", []).append({
         "code_hash": _sha256(code), "client_id": client_id, "user_id": user_id,
-        "team_id": team_id, "redirect_uri": redirect_uri,
+        "org_id": org_id, "redirect_uri": redirect_uri,
         "code_challenge": _s256(verifier), "code_challenge_method": "S256",
         "scope": "mcp", "resource": None,
         "expires_at": _expires_iso(expires_in), "used_at": used_at,
@@ -163,7 +163,7 @@ def _seed_refresh_token(cp, token="rt-1", **over) -> tuple[str, str]:
     and the claim PATCH address it by `id`."""
     token = over.pop("token", token)
     row = {"id": over.pop("id", secrets.token_urlsafe(16)), "token_hash": _sha256(token),
-           "client_id": _CLIENT_ID, "user_id": _U1, "team_id": "t1", "scope": "mcp",
+           "client_id": _CLIENT_ID, "user_id": _U1, "org_id": "t1", "scope": "mcp",
            "expires_at": _expires_iso(REFRESH_TOKEN_TTL_S), "revoked_at": None,
            "rotated_from": None, "created_at": _expires_iso(0), **over}
     cp.tables.setdefault("oauth_refresh_tokens", []).append(row)
@@ -176,7 +176,7 @@ def _seed_access_token(cp, *, refresh_id: str) -> str:
     row_id = secrets.token_urlsafe(16)
     cp.tables.setdefault("oauth_access_tokens", []).append({
         "id": row_id, "token_hash": _sha256("at-" + row_id), "client_id": _CLIENT_ID,
-        "user_id": _U1, "team_id": "t1", "scope": "mcp",
+        "user_id": _U1, "org_id": "t1", "scope": "mcp",
         "expires_at": _expires_iso(3600), "revoked_at": None,
         "refresh_token_id": refresh_id, "created_at": _expires_iso(0)})
     return row_id
@@ -344,7 +344,7 @@ def test_real_seam_maps_status_and_unparseable_body(capture_server, status, payl
 # ── Task 3: `_issue_tokens` — 3-lane taxonomy, structural no-leak guarantee ──
 
 def _mint(cp, **over):
-    return oauth._issue_tokens(cp, client_id="c1", user_id="u1", team_id="t1",
+    return oauth._issue_tokens(cp, client_id="c1", user_id="u1", org_id="t1",
                                scope="mcp", resource=None, **over)
 
 
@@ -540,7 +540,16 @@ def test_post_consume_team_read_failure_restores_the_code_and_retry_succeeds(fau
     """matrix row 3 — TODAY: 500, used_at stays set, retry → 400."""
     tc, cp = fault_client
     v = _seed_code(cp, "c5", client_id=_CLIENT_ID, redirect_uri=_REDIRECT)
-    cp.fail_query(table="teams", method="GET", times=1)
+    # Scope the fault to the PRODUCTION call shape. A table-wide
+    # `organizations` GET fault is racy: the app's startup boot sweep
+    # (`tortoise-boot-sweep`) queries organizations with select=["id","name"]
+    # and can consume it before the token exchange's `_assert_org_usable`
+    # (select=["suspended_at","tier"]). Main scoped the `organizations` arm of
+    # test_exactly_one_capture_per_conversion_path for exactly this reason;
+    # this site and the one further down still used the table-wide form, so
+    # their assertions flipped 503 -> 200 on CI (#4464).
+    cp.fail_query(table="organizations", method="GET",
+                  select=["suspended_at", "tier"], times=1)
     r1 = _post_code(tc, cp, "c5", v)
     assert r1.status_code == 503 and r1.json()["error"] == "temporarily_unavailable"
     assert cp.tables["oauth_codes"][0]["used_at"] is None
@@ -605,8 +614,8 @@ def test_bad_pkce_never_re_arms_the_code(fault_client):
 @pytest.mark.parametrize("table,select", [
     ("oauth_clients", None),        # FIRST read on the path — the :726 leak
     ("oauth_refresh_tokens", None),  # the refresh-token SELECT
-    ("teams", None),                # _assert_team_usable
-    ("team_memberships", None),     # membership_for_user_team — S4 call site #4
+    ("organizations", None),                # _assert_team_usable
+    ("org_memberships", None),     # membership_for_user_org — S4 call site #4
     ("oauth_access_tokens", ["id"]),  # prev_access
 ])
 def test_refresh_pre_mint_read_failure_is_503_not_500(fault_client, table, select):
@@ -622,7 +631,7 @@ def test_refresh_pre_mint_read_failure_is_503_not_500(fault_client, table, selec
 def test_refresh_membership_revoke_failure_still_returns_403_invalid_grant(fault_client):
     tc, cp = fault_client
     _rid, rt = _seed_refresh_token(cp, "rt-mem")
-    cp.tables["team_memberships"] = []     # `setdefault` would be a NO-OP: the fixture seeded one
+    cp.tables["org_memberships"] = []     # `setdefault` would be a NO-OP: the fixture seeded one
     cp.fail_query(table="oauth_refresh_tokens", method="PATCH",
                   match=lambda t, m, sel, f: m == "PATCH" and not sel,
                   times=1, after_mutation=True)   # the revoke commits, then raises
@@ -634,7 +643,7 @@ def test_refresh_membership_revoke_failure_still_returns_403_invalid_grant(fault
 def test_refresh_suspension_family_revoke_failure_still_returns_403(fault_client):
     tc, cp = fault_client
     _rid, rt = _seed_refresh_token(cp, "rt-susp")
-    cp.tables["teams"][0]["suspended_at"] = "2026-01-01T00:00:00+00:00"
+    cp.tables["organizations"][0]["suspended_at"] = "2026-01-01T00:00:00+00:00"
     cp.fail_query(table="oauth_refresh_tokens", method="PATCH", times=1)  # _revoke_team_family
     assert _post_refresh(tc, cp, rt).status_code == 403
 
@@ -700,7 +709,7 @@ def test_row7_prev_access_revoke_failure_delivers_a_USABLE_pair(fault_client, ca
     assert "prev-access revoke failed" in caplog.text
 
 
-@pytest.mark.parametrize("table", ["oauth_clients", "teams"])
+@pytest.mark.parametrize("table", ["oauth_clients", "organizations"])
 @pytest.mark.parametrize("grant", ["code", "refresh"])
 def test_exactly_one_capture_per_conversion_path(monkeypatch, fault_client, table, grant):
     calls = []
@@ -710,7 +719,17 @@ def test_exactly_one_capture_per_conversion_path(monkeypatch, fault_client, tabl
 
     monkeypatch.setattr("tortoise.sentry.capture_exception", _cap)
     tc, cp = fault_client
-    cp.fail_query(table=table, method="GET", times=1)
+    # Scope the fault to the PRODUCTION call shape. A table-wide
+    # `organizations` GET fault is racy: the app's startup boot sweep
+    # (`tortoise-boot-sweep`) queries organizations with select=["id","name"]
+    # and can consume it before the token exchange's `_assert_org_usable`
+    # (select=["suspended_at","tier"]) — offloading the grant widens that
+    # window. FakeControlPlane recommends a shape predicate for exactly this.
+    if table == "organizations":
+        cp.fail_query(table=table, method="GET",
+                      select=["suspended_at", "tier"], times=1)
+    else:
+        cp.fail_query(table=table, method="GET", times=1)
     if grant == "code":                                        # pre-consume
         v = _seed_code(cp, f"cap-{table}")
         _post_code(tc, cp, f"cap-{table}", v)
@@ -774,7 +793,11 @@ def test_capture_exception_raising_does_not_break_the_typed_error(monkeypatch, f
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("sentry down")))
     tc, cp = fault_client
     v = _seed_code(cp, "sentry", client_id=_CLIENT_ID, redirect_uri=_REDIRECT)
-    cp.fail_query(table="teams", method="GET", times=1)
+    # Scoped to the production call shape for the same reason as the other two
+    # shape-predicated sites in this file — a table-wide `organizations` GET
+    # fault races the startup boot sweep's select=["id","name"] query (#4464).
+    cp.fail_query(table="organizations", method="GET",
+                  select=["suspended_at", "tier"], times=1)
     r = _post_code(tc, cp, "sentry", v)
     assert r.status_code == 503 and r.json()["error"] == "temporarily_unavailable"
 
