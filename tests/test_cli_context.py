@@ -385,8 +385,11 @@ class TestCliOnboardDbTarget:
         `<db>.settings` registry is removed only by the client that STARTED
         the daemon, so registry-absence is order-dependent (an attaching
         client shuts the daemon down but leaves the registry behind). If the
-        registry survives, its recorded pid must be DEAD — that is the
-        order-independent statement of "no daemon outlived the call".
+        registry survives, a READABLE pid must be dead; a vanished pidfile is
+        itself proof the daemon exited (Redis removes its own pidfile on
+        graceful shutdown), so its absence is not the failure signal. Both
+        close orders therefore pass, and the unfixed code fails on the
+        positive assertion (no clean SAVE = no db file).
         """
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         db_path = str(tmp_path / "init-closed.db")
@@ -398,12 +401,20 @@ class TestCliOnboardDbTarget:
             path=None, cmd="init", yes=True, api_key=None, no_index=True))
         assert rc == 0
 
-        # POSITIVE: init really stood the embedded store up (the welcome
-        # write landed), so the negative assertion below cannot pass
-        # vacuously if the resolved target ever drifts elsewhere.
-        assert os.path.exists(db_path), "init did not create the embedded db"
+        # POSITIVE: the clean close saved the RDB to the target path (init
+        # does not flush it synchronously; the file appears on the SAVE
+        # shutdown). With no close the file is absent while a live daemon
+        # still holds the store, so this also reds the mutation.
+        assert os.path.exists(db_path), "init did not save the embedded db"
 
-        # NEGATIVE: no LIVE daemon survives the call.
+        # NEGATIVE: no LIVE daemon survives the call. redislite's
+        # `<db>.settings` registry is removed only by the client that STARTED
+        # the daemon, so registry-absence is order-dependent (an attaching
+        # client shuts the daemon down but leaves the registry behind). Pin
+        # the DAEMON instead: if the registry survives, a READABLE pid that
+        # is still alive is the leak. A missing pidfile is itself proof the
+        # daemon exited — Redis removes its own pidfile on graceful shutdown
+        # — so absence of a pid must not be read as failure.
         settings = db_path + ".settings"
         if os.path.exists(settings):
             import json as _json
@@ -416,21 +427,19 @@ class TestCliOnboardDbTarget:
                     pid = int(_Path(pidfile).read_text().strip())
             except Exception:
                 pid = None
-            assert pid is not None, (
-                "init left its redislite registry but no readable pidfile — "
-                "cannot prove the daemon is gone (#4579)")
-            alive = True
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                alive = False
-            except PermissionError:
+            if pid is not None:
                 alive = True
-            assert not alive, (
-                f"init leaked its embedded redis-server (pid {pid}, #4579): "
-                "once the co-tenant release withdraws the owner record it "
-                "becomes an uninstrumented, dir-present orphan the #3767 "
-                "reaper refuses to fast-kill")
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    alive = False
+                except PermissionError:
+                    alive = True
+                assert not alive, (
+                    f"init leaked its embedded redis-server (pid {pid}, "
+                    "#4579): once the co-tenant release withdraws the owner "
+                    "record it becomes an uninstrumented, dir-present orphan "
+                    "the #3767 reaper refuses to fast-kill")
 
     def test_onboard_completion_gates_embedded_default(self, tmp_path, monkeypatch, capsys):
         """#2200: the `tortoise onboard` wizard completion must gate the

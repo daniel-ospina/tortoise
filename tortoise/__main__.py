@@ -536,9 +536,22 @@ def _cmd_init(args):
 
     graph_ready = False
     uri_mode = False
-    # #4579: bound before the mode branches so the probe-error returns below
-    # can release a probe that was created before the failure.
+    # #4579: bound before the mode branches so every error return below can
+    # release a probe that was created before the failure.
     _proj = None
+
+    def _close_probe() -> None:
+        """#4579: release the reachability probe (idempotent, never raises).
+
+        Every error return in the two mode branches routes through here —
+        including the `except ImportError` arms, which are declared FIRST and
+        therefore also catch an ImportError raised by a LATER statement
+        (`_proj.g.query`, the `_mark_embedded_opened` import, the fallback
+        notice import) after the probe is already bound.
+        """
+        with contextlib.suppress(Exception):
+            if _proj is not None:
+                _proj.close()
 
     if is_db_uri(target):
         # 1. URI mode — connect to the configured URI target itself (never a
@@ -554,6 +567,7 @@ def _cmd_init(args):
         except ImportError:
             print(f"  ❌ falkordb not installed — required for URI mode")  # noqa: F541
             print(f"     pip install falkordb")  # noqa: F541
+            _close_probe()
             return 1
         except Exception as e:
             err = str(e).lower()
@@ -562,9 +576,7 @@ def _cmd_init(args):
             else:
                 print(f"  ❌ FalkorDB unreachable ({e})")
             print("     Fix TORTOISE_DB_URI, or unset it to use embedded mode.")
-            with contextlib.suppress(Exception):
-                if _proj is not None:
-                    _proj.close()
+            _close_probe()
             return 1
     else:
         # 2. Fallback: embedded mode (SQLite-backed) at the resolved path
@@ -613,14 +625,13 @@ def _cmd_init(args):
             print(f"  ❌ Embedded mode unavailable — falkordblite not installed.")  # noqa: F541
             print(f"     pip install falkordb        # for Docker mode (FalkorProjection)")  # noqa: F541
             print(f"     pip install falkordblite    # for embedded mode (FalkorProjection)")  # noqa: F541
+            _close_probe()
             return 1
         except Exception as e:
             # #4579: release a probe that succeeded before a later step in
             # this branch failed — otherwise it can outlive the call and,
             # collected late, leave the daemon running uninstrumented.
-            with contextlib.suppress(Exception):
-                if _proj is not None:
-                    _proj.close()
+            _close_probe()
             print(f"  ❌ Embedded mode init failed: {e}")
             return 1
 
