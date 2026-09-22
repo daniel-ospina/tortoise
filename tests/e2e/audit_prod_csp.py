@@ -56,8 +56,13 @@ DEFAULT_URLS = [
 
 
 def _violations(console: list[str], failed: list[str]) -> list[str]:
-    """CSP refusals, from either the console or a failed request."""
-    hits = [m for m in console if "Content Security Policy" in m or "Refused to" in m]
+    """CSP refusals, from either the console or a failed request.
+
+    Matched on the CSP phrases, NOT a bare ``Refused to`` — Chrome's strict-MIME
+    refusal (``Refused to apply style … MIME type``) is a different class and
+    must not read as a CSP violation.
+    """
+    hits = [m for m in console if "Content Security Policy" in m or "violates the following" in m]
     return hits + [f"{f} (request failed)" for f in failed if "csp" in f.lower()]
 
 
@@ -93,15 +98,12 @@ def main(argv: list[str]) -> int:
             page.on("requestfailed", lambda r, f=failed: f.append(f"{r.url} :: {r.failure}"))
             try:
                 resp = page.goto(url, wait_until="load", timeout=45_000)
-                if resp is not None:
-                    csp = resp.headers.get("content-security-policy") or ""
-                    # `connect-src 'self'` with no third-party host is the strict
-                    # policy; anything with posthog is the relaxed one.
-                    kind = "STRICT" if "connect-src 'self'" in csp and "posthog" not in csp else (
-                        "RELAXED" if csp else "NONE"
-                    )
-                else:
-                    kind = "?"
+                csp = (resp.headers.get("content-security-policy") or "") if resp is not None else ""
+                # `connect-src 'self'` with no third-party host is the strict
+                # policy; anything with posthog is the relaxed one.
+                kind = "STRICT" if "connect-src 'self'" in csp and "posthog" not in csp else (
+                    "RELAXED" if csp else "NONE"
+                )
                 # Read AFTER the settle, not before. The beacon sends its RUM
                 # payload on `load`/`visibilitychange` via `navigator.sendBeacon`,
                 # so a `connect-src` refusal arrives after `domcontentloaded` — a
@@ -109,6 +111,11 @@ def main(argv: list[str]) -> int:
                 # `connect-src` class this script exists to detect, and prints OK.
                 page.wait_for_timeout(3_500)
                 blocked = _violations(console, failed)
+                # A response with NO policy refuses nothing, so a total CSP loss
+                # would otherwise read as `OK NONE` and exit 0. Absence is a
+                # failure, not a label.
+                if not csp:
+                    blocked.append("[no-csp] response carried NO Content-Security-Policy")
                 others = _other_errors(console, failed)
             except Exception as exc:
                 blocked = [f"[goto-failed] {exc}"]

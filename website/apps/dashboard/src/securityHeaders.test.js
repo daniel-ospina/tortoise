@@ -348,6 +348,26 @@ function stampCount(relPath) {
 }
 
 /**
+ * CSP constant/call names LOCALLY declared in a file. A stamp resolved only by
+ * NAME is satisfiable by a local redefinition: a file that declares its own
+ * `const ADMIN_CSP = "…script-src 'self'…"` (e.g. a copy carried into a new
+ * Pages project, which cannot import across project roots) omits the beacon
+ * while every name-based assertion still passes — the exact regression re-ships
+ * green. The audited policies must be IMPORTED from the shared module.
+ */
+function localCspBindings(relPath) {
+  const ast = parseSource(readFileSync(join(repoRoot, relPath), 'utf8'), relPath)
+  const shadowed = []
+  visitNodes(ast.program, (node) => {
+    if (node.type === 'VariableDeclarator' && node.id?.type === 'Identifier') {
+      const name = node.id.name
+      if (CSP_CONSTANTS.has(name) || name === 'strictCspWithNonce') shadowed.push(name)
+    }
+  })
+  return shadowed
+}
+
+/**
  * The CSP constant/call names stamped in a file, in source order. `stampCount`
  * proves the stamps are live; this proves WHICH policy they name (see
  * `HTML_SITE_POLICY`). Same AST shapes as `stampCount`, so the two cannot
@@ -973,6 +993,13 @@ test('each HTML-producing site stamps the policy constant its surface is entitle
     const found = new Set(stampConstants(rel))
     if (found.size !== 1 || !found.has(expected)) {
       wrong.push(`${rel}: expected ${expected}, found ${[...found].join(', ') || '(none)'}`)
+    }
+    const shadowed = localCspBindings(rel)
+    if (shadowed.length) {
+      wrong.push(
+        `${rel}: locally declares ${shadowed.join(', ')} — the policy must be IMPORTED ` +
+          `from the shared module; a local copy omits the beacon while this name check passes`,
+      )
     }
   }
   assert.deepEqual(
