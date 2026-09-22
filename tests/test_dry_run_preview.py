@@ -572,6 +572,40 @@ class TestBlastRadius:
         assert any(t == old for _, t in kept), kept
         assert preview["edges_dropped"], "the successor self-edge must be delete-only"
 
+    def test_supersede_preview_agrees_when_the_repoint_target_already_exists(
+            self, sdk):
+        """The SECOND precondition of the divergence: a direct IMPL/NAND
+        self-loop is NECESSARY but not SUFFICIENT.
+
+        The writer's out-pass repoints `(old)-[:IMPL]->(old)` to
+        `(new)->(old)` with a MERGE, so the divergence requires that edge NOT
+        to already exist. When it does, the MERGE collapses onto it, the
+        in-pass delete-onlys that PRE-EXISTING edge — which this preview also
+        counts, under `edges_dropped`, because its far endpoint is the
+        successor — and the two totals agree. Measured: preview 3, writer 3.
+
+        Pins the fact behind the docstring's precondition, so a future author
+        cannot quietly drop it back to "NOT equal when `old` carries a
+        self-loop" without this test going red.
+        """
+        old, new = _seed_point(sdk, "old"), _seed_point(sdk, "new")
+        x = _seed_point(sdk, "x")
+        sdk._get_proj().g.query(
+            "MATCH (a:Point {id:$o}) CREATE (a)-[:IMPL]->(a)", params={"o": old})
+        sdk.create_direct_edge("IMPL", old, x)
+        # THE precondition: the repoint target already exists.
+        sdk.create_direct_edge("IMPL", new, old)
+
+        from tortoise.mcp_server import _preview_supersede
+
+        preview = _preview_supersede(sdk, old, new)
+        real = sdk.supersede(old, new)
+
+        assert preview["edges_transferred_from_old"] == real["edges_transferred"], (
+            "a pre-existing repoint target makes the writer's out-pass MERGE a "
+            "no-op, so its double-booking does not occur and the two agree",
+            preview["edges_transferred_from_old"], real["edges_transferred"])
+
     def test_supersede_preview_is_the_accurate_count_for_a_direct_self_loop(
             self, sdk):
         """The one graph where the preview and the writer DISAGREE, and the
