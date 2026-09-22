@@ -189,7 +189,8 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
     signup = {"status": None, "body": ""}
     # Tripwire for the BFF contract (#4054): these Supabase endpoints must never
     # be reached FROM THE BROWSER. Before the move the page called them
-    # directly; now it must not — the browser holds only the HttpOnly handle.
+    # directly; now it must not — for the BFF session the browser holds only the
+    # HttpOnly handle.
     browser_to_supabase: list[str] = []
 
     def _on_response(resp):
