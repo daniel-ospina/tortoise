@@ -294,12 +294,12 @@ def _probe_sdk():
         _PROBE_SDK_CACHE["sdk"] = sdk
         _PROBE_SDK_CACHE["key"] = key
     if old is not None:
-        # Residual (shared with ``hosted_api._probe_sdk``, tracked by #3683):
-        # ``HealthProbe`` allows two overlapping workers during a SUPERSEDE of a
-        # wedged probe, so closing the old handle here can overlap a worker
-        # still querying it. The window is bounded by the supersede cap, and the
-        # alternative (leaking every replaced connection) is worse. The
-        # STARTUP reset is ordered to avoid it (see ``_lifespan``).
+        # ``old`` was already displaced from the cache under the lock, so no
+        # caller can obtain it again; closing it here only affects a superseded
+        # worker still querying it, whose write ``HealthProbe._run`` discards on
+        # the ``_seq`` check (selfhost probes are single-flight apart from that
+        # supersede window). The alternative — leaking every replaced
+        # connection — is worse.
         try:  # noqa: SIM105
             old.close()
         except Exception:
@@ -324,11 +324,11 @@ def _probe_db() -> dict:
     try:
         sdk = _probe_sdk()
     except Exception as exc:  # noqa: BLE001, RUF100 — probe_db never raises
-        # Do NOT close the cache here: construction raised BEFORE the cache was
-        # touched, so a reset would only close an existing handle another
-        # (superseded) worker may still be querying — a spurious degraded for a
-        # reachable graph. The next call rebuilds; a successful rebuild closes
-        # the superseded handle under the lock (see ``_probe_sdk``).
+        # Mirror ``hosted_api._probe_db``: a failed construction leaves the
+        # cache untouched, so this only drops a handle whose holder (if any) is
+        # a SUPERSEDED worker — already discarded by the ``_seq`` check, so it
+        # cannot surface as a spurious degraded.
+        _probe_sdk_reset()
         return {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
     return probe_db(sdk, setup_timeout=probe_setup_timeout())
 
@@ -495,12 +495,15 @@ async def _lifespan(app: FastAPI):
     # the same reason (a stale handle from a previous target/DB). The task is
     # CREATED (not awaited) before the MCP lifespan, so it cannot delay the
     # bind (#2953's discipline; creating a task starts nothing).
-    # Reset the COORDINATOR before dropping the cached connection: the reset
-    # invalidates any in-flight worker's generation, so a worker still holding
-    # the old handle cannot record a verdict after we close it (ordering is the
-    # race fix; see ``_probe_sdk``).
-    _HEALTH_PROBE.reset()
+    # Drop the cached connection BEFORE resetting the coordinator. The order is
+    # load-bearing: ``_probe_sdk_reset`` clears the cache and THEN closes, so a
+    # worker that starts in the gap rebuilds a fresh handle instead of being
+    # handed one that is about to be closed — and the ``reset`` immediately
+    # after discards any prior-instance worker's late write (``_seq`` bump).
+    # Reversed, an in-gap worker would get the new generation AND the old handle,
+    # recording a spurious ``degraded`` for a reachable graph.
     _probe_sdk_reset()
+    _HEALTH_PROBE.reset()
     refresher = asyncio.get_running_loop().create_task(_health_probe_loop())
     try:
         async with mcp_http_app.lifespan(mcp_http_app):
