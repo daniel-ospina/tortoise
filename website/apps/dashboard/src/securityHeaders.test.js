@@ -214,6 +214,9 @@ const COOKIE_WRITE =
  */
 const CSP_CONSTANTS = new Set(['RELAXED_CSP', 'STRICT_CSP', 'ADMIN_CSP'])
 
+/** Every name a policy binding may carry (the constants plus the nonce factory). */
+const POLICY_NAMES = new Set([...CSP_CONSTANTS, 'strictCspWithNonce'])
+
 function isCspValue(node) {
   if (!node) return false
   if (node.type === 'Identifier') return CSP_CONSTANTS.has(node.name)
@@ -355,16 +358,44 @@ function stampCount(relPath) {
  * while every name-based assertion still passes — the exact regression re-ships
  * green. The audited policies must be IMPORTED from the shared module.
  */
-function localCspBindings(relPath) {
+function badPolicyBindings(relPath) {
   const ast = parseSource(readFileSync(join(repoRoot, relPath), 'utf8'), relPath)
-  const shadowed = []
+  const bad = []
+  const patternNames = (node) => {
+    if (!node) return
+    if (node.type === 'Identifier') {
+      if (POLICY_NAMES.has(node.name)) bad.push(`${node.name} (destructured local binding)`)
+      return
+    }
+    if (node.type === 'ObjectPattern') node.properties.forEach((p) => patternNames(p.value ?? p.argument ?? p))
+    if (node.type === 'ArrayPattern') node.elements.forEach(patternNames)
+    if (node.type === 'RestElement') patternNames(node.argument)
+    if (node.type === 'AssignmentPattern') patternNames(node.left)
+  }
   visitNodes(ast.program, (node) => {
-    if (node.type === 'VariableDeclarator' && node.id?.type === 'Identifier') {
-      const name = node.id.name
-      if (CSP_CONSTANTS.has(name) || name === 'strictCspWithNonce') shadowed.push(name)
+    if (node.type === 'ImportDeclaration') {
+      const src = String(node.source?.value ?? '')
+      for (const spec of node.specifiers ?? []) {
+        if (spec.type !== 'ImportSpecifier') continue
+        const local = spec.local?.name
+        const imported = spec.imported?.name ?? spec.imported?.value
+        if (!POLICY_NAMES.has(local)) continue
+        if (imported !== local) bad.push(`${local} (aliased import of ${imported})`)
+        else if (!/_shared\/security-headers(\.ts)?$/.test(src)) bad.push(`${local} (imported from ${src})`)
+      }
+      return
+    }
+    if (node.type === 'VariableDeclarator') {
+      patternNames(node.id)
+      return
+    }
+    if ((node.type === 'FunctionDeclaration' || node.type === 'ClassDeclaration') && node.id) {
+      if (POLICY_NAMES.has(node.id.name)) {
+        bad.push(`${node.id.name} (local ${node.type === 'FunctionDeclaration' ? 'function' : 'class'} declaration)`)
+      }
     }
   })
-  return shadowed
+  return bad
 }
 
 /**
@@ -994,11 +1025,11 @@ test('each HTML-producing site stamps the policy constant its surface is entitle
     if (found.size !== 1 || !found.has(expected)) {
       wrong.push(`${rel}: expected ${expected}, found ${[...found].join(', ') || '(none)'}`)
     }
-    const shadowed = localCspBindings(rel)
+    const shadowed = badPolicyBindings(rel)
     if (shadowed.length) {
       wrong.push(
-        `${rel}: locally declares ${shadowed.join(', ')} — the policy must be IMPORTED ` +
-          `from the shared module; a local copy omits the beacon while this name check passes`,
+        `${rel}: ${shadowed.join(', ')} — the policy must be IMPORTED under its own ` +
+          `name from the shared module; any other binding omits or swaps the beacon origins`,
       )
     }
   }
