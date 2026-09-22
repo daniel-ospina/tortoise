@@ -149,7 +149,7 @@ reason stops naming the suite / the residual, or if **either** absolute sentence
    `pi -p` is non-interactive and Task 1 fires the installed artifact headlessly.
 3. Add one clarifying sentence to the `HEADLESS_FIRABLE` comment block and the module-docstring
    "HONEST DISCLOSURE" paragraph, the same distinction.
-4. Re-run `uv run pytest tests/test_session_verify.py -k pi_is_honestly_unverifiable -q` → green.
+4. Re-run `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_session_verify.py -k pi_is_honestly_unverifiable -q` → green.
 
 ## Task 3 — recorded decision in the seam README
 
@@ -178,7 +178,7 @@ executably verified, (b) what is manual-only, (c) the exact procedure **with its
   non-dogfood install. `--no-extensions` makes the probe single-producer.
   **Pass condition = `retrievable` (owner ruling, B1 report): read the SPECIFIC CAPTURED CONTENT
   back.** `GET /v1/sessions/{id}` returns the session's turns + extracted points (and/or
-  `/v1/context?query=…` returns its points) — that is the test. A row in `GET /v1/sessions` alone is
+  `GET /v1/search?q=…` returns its points) — that is the test. A row in `GET /v1/sessions` alone is
   **necessary, not sufficient** (it proves `captured` — the write landed — never `retrievable`); it is
   *supporting evidence*, exactly like the
   `[tortoise-capture] captured session(s) → <apiUrl> (filed N≥1)` line (a 2xx is implied, not printed).
@@ -221,7 +221,7 @@ executably verified, (b) what is manual-only, (c) the exact procedure **with its
   the seam logic + installed artifact ARE executably verified (cite `tortoise-capture.test.ts` and
   `tests/test_pi_capture_hooks.py`); the real-`pi`-process leg is **manual-only**, its pass condition
   is **`retrievable` — the specific captured content read back** (`GET /v1/sessions/{id}` turns +
-  points / `/v1/context?query=…`; a list row is not sufficient), and a read-back 504 is UNMEASURABLE
+  points / `GET /v1/search?q=…`; a list row is not sufficient), and a read-back 504 is UNMEASURABLE
   (procedure + actor + `#3713`/`#4661`/`#4675`), citing `tortoise/pi-hooks/README.md`.
 - A **Pi/session-capture row is added to `#1714`'s `### Verification Checklist`** (its stated
   done-state; it has no such row today), naming the executable check and the manual residual.

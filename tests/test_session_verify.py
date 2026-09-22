@@ -1010,14 +1010,25 @@ def test_pi_is_honestly_unverifiable(hosted, setup):
     assert "extension" in detail
     assert "tortoise-capture.test.ts" in detail
     assert "tests/test_pi_capture_hooks.py" in detail
-    assert "installed" in detail
+    # ⛔ Not `"installed"`: `_unverifiable_link` builds the detail as
+    # "<link> not exercised: <reason>", and the link IS "installed" — so that
+    # substring is supplied by the PREFIX and the assertion could never fail
+    # (#4620 review).  Anchor on a phrase only the reason can supply.
+    assert "installed artifact" in detail
     assert "manual-only" in detail
     assert "not firable by this command" in detail
     # The over-broad absolutes must never return: the seam IS fired headlessly
-    # by its own suite (source + installed artifact).
+    # by its own suite (the source seam) and by the installed-artifact probe.
     assert "cannot be executed headlessly" not in detail
     assert "cannot be fired headlessly" not in detail
     assert "no headless trigger" not in detail
+    # …and the same rule binds the module DOCSTRING, which no other assertion
+    # reads.  Its opening clause was the last place the absolute survived: it
+    # grouped Pi with harnesses whose seam "cannot be fired headlessly" while
+    # the reason string ten lines below denied exactly that (#4620 review).
+    from tortoise import session_verify as _sv
+
+    assert "cannot be fired headlessly" not in (_sv.__doc__ or "")
 
 
 # ── hermeticity: root resolution is home-scoped, env only where one exists ──

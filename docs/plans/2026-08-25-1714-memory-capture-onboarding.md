@@ -447,7 +447,7 @@ Objective 1's Pi leg has two halves with different verification statuses:
   non-dogfood install, run by a maintainer with a live `pi` install and a capture credential (at
   2026-09-22 the B1 lane, objective-1's exit-evidence owner) — is in `tortoise/pi-hooks/README.md`
   § Verification. **Pass condition = `retrievable`** — read the specific captured content back
-  (`GET /v1/sessions/{id}` turns + points, or `/v1/context?query=…`); a row in `GET /v1/sessions`
+  (`GET /v1/sessions/{id}` turns + points, or `GET /v1/search?q=…`); a row in `GET /v1/sessions`
   alone is **not** sufficient. A read-back 504 is **UNMEASURABLE**, and a missing receipt for a
   session that IS present is the `#4675` false negative — never FAIL.
 

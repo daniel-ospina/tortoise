@@ -76,6 +76,13 @@ install guard.
 `tortoise/pi-hooks/` selects `core` via the `tortoise/` fallback, so the guard runs on the PR that
 edits the seam.
 
+The two `node`-backed checks need **Node ≥ 22.6** (`--experimental-strip-types`; a no-op on ≥ 22.18).
+Locally they *skip* when Node is missing or older, because the source-level pins above still ran. In
+**CI they FAIL instead of skipping** — the installed-artifact check is the only executable proof that
+the seam works at its install location, so a runner that cannot run it must fail by name rather than
+report green with the check silently absent (the same ruling the embedder step and
+`bff_test_helpers.require_toolchain` apply).
+
 ### Manual-only
 
 **That a real `pi` process loads the installed extension and calls `turn_end` / `session_shutdown`
@@ -96,7 +103,8 @@ credential (at 2026-09-22, the **B1 lane**, which owns objective 1's exit eviden
 3. **Pass condition = `retrievable` — read the specific captured content back.** A row in
    `GET /v1/sessions` alone proves only `captured` (the write landed), never `retrievable`; read the
    session back by id (`GET /v1/sessions/{id}` — turns + extracted points) or via
-   `/v1/context?query=…`. The `[tortoise-capture] captured session(s) → <apiUrl> (filed N≥1)` line is
+   `GET /v1/search?q=…` (the parameterized read the scoping evidence measured). The
+   `[tortoise-capture] captured session(s) → <apiUrl> (filed N≥1)` line is
    supporting evidence (a 2xx is implied, not printed).
 4. **A read-back 504 is `UNMEASURABLE` — never PASS, never FAIL** (the read path is query-dependent,
    `#4661`). **No receipt line while the session IS present in `GET /v1/sessions` is the `#4675`

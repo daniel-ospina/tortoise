@@ -151,7 +151,7 @@ procedure for objective 1's done-state. C is a real improvement but a separate, 
 > `turn_end`/`session_shutdown`. Procedure: on a **non-dogfood** install, run
 > `pi --no-extensions -e ~/.pi/agent/extensions/tortoise-capture.ts -p "<trivial prompt>"` and assert
 > the session is **retrievable** — the specific captured content read back (`GET /v1/sessions/{id}`
-> turns + extracted points / `/v1/context?query=…`); a row in `GET /v1/sessions` alone proves only
+> turns + extracted points / `GET /v1/search?q=…`); a row in `GET /v1/sessions` alone proves only
 > `captured`, never `retrievable` (owner ruling, B1 report). A read-back 504 is **UNMEASURABLE**
 > (never PASS/FAIL), and no receipt line while the session is present is the `#4675` post-commit-504
 > false negative (the client's terminality rule), not a seam failure. Run by a maintainer with a live

@@ -218,11 +218,33 @@ console.log("PROBE_JSON:" + JSON.stringify({ handlers: Object.keys(handlers), ca
 
 
 def _require_node() -> str:
-    """The `node` binary, or a skip — mirrors `test_extension_behavioral_suite`."""
+    """The `node` binary — a local skip, but a FAILURE under CI.
+
+    ⛔ #4620 review: the installed-artifact checks below are the only
+    EXECUTABLE proof that the seam works as installed, so in CI a missing/old
+    Node must fail by name instead of silently dropping them and reporting
+    green.  That is the same ruling the embedder step (#2573) and
+    ``bff_test_helpers.require_toolchain`` (#3501) apply: a runner that cannot
+    run the required check fails HERE rather than degrading unnoticed.
+    Locally the skip is kept, because the source-level pins above still ran.
+    """
+    in_ci = bool(os.environ.get("CI"))
     node = shutil.which("node")
     if node is None:
+        if in_ci:
+            pytest.fail(
+                "node is REQUIRED in CI: it is the only way the installed Pi "
+                "capture seam is loaded and fired (#4620). Install node >= 22.6 "
+                "in this lane rather than letting the check vanish silently."
+            )
         pytest.skip("node not available — the source pins above still ran")
     if not _node_supports_ts(node):
+        if in_ci:
+            pytest.fail(
+                f"node at {node} is older than 22.6 and cannot strip TypeScript "
+                "types, so the installed-seam check would be skipped — it FAILS "
+                "in CI instead (#4620)."
+            )
         pytest.skip("node < 22.6 cannot strip TypeScript types — source pins still ran")
     return node
 
