@@ -61,7 +61,7 @@ export function buildDocsJobBody(scope, org) {
 }
 
 // #1893 (scope-verify P1/P2): gating predicates for the one-shot hydration
-// and the persist path — pure so the null-teamId dead-path, the
+// and the persist path — pure so the null-orgId dead-path, the
 // repos-fetch-failure prune hazard, and the persist gate are node-tested.
 //
 // shouldHydrate: true only when repos loaded, onboarding resolved, the
@@ -70,11 +70,11 @@ export function buildDocsJobBody(scope, org) {
 // resolved (state, so the effect re-fires when the mount gate populates it
 // — the ref would leave the effect inert on a null-team dead-path), and
 // this team has not been hydrated yet (one-shot per team session).
-export function shouldHydrate({ reposLoaded, onboarding, reposLoadFailed, currentTeamId, hydratedTeamId }) {
+export function shouldHydrate({ reposLoaded, onboarding, reposLoadFailed, currentOrgId, hydratedOrgId }) {
   if (!reposLoaded || !onboarding) return false
   if (reposLoadFailed) return false
-  if (!currentTeamId) return false
-  if (hydratedTeamId === currentTeamId) return false
+  if (!currentOrgId) return false
+  if (hydratedOrgId === currentOrgId) return false
   return true
 }
 

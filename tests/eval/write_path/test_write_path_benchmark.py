@@ -45,7 +45,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
-from tests.eval.write_path import corpus, runner, schema  # noqa: E402
+from tests.eval.write_path import corpus, generate_corpus, runner, schema  # noqa: E402
 from tests.eval.write_path.judge import JUDGE_PIN_MECHANICAL  # noqa: E402
 
 # Module wall-clock cap.  #2514 extended the corpus from 5 to 7 sessions
@@ -143,11 +143,28 @@ def test_bpre_lane_full_corpus_replay_emits_and_grades(sdk_factory):
     assert report["metrics"]["salient_unit_survival_macro"] <= 1.0
     assert report["metrics"]["provenance_accuracy"] == 1.0
     # #2514 operator-edge audit: the echo lane structurally writes no operator
-    # edges — the planted 4 are graded 0 edge_correct (audit dimension on the
-    # completed run; the operator bar is a product-lane bar, see scoping note).
-    assert report["operator_audit"]["planted"] == 4
-    assert report["operator_audit"]["edge_correct"] == 0
-    assert 1 <= report["operator_audit"]["content_ok"] <= 4
+    # edges — the planted edges are graded by the cue-word relation stage, so
+    # only a few match (the audit dimension on the completed run; the operator
+    # bar is a product-lane bar, see scoping note).
+    #
+    # Pinned to the corpus FLOOR (a LOWER BOUND, so `>=`) AND tied to the
+    # gold-derived ACTUAL count. Two different jobs, and neither is a literal,
+    # so growing the corpus reddens nothing:
+    #   * `>=` catches a total that drops BELOW the floor. The equality cannot
+    #     (both sides read the same gold content, so they shrink together).
+    #   * `== corpus.planted_operator_count()` catches an AUDIT that stops
+    #     covering the corpus — the grader counts only the sessions the runner
+    #     selected and collapses duplicate ids, while this count iterates the
+    #     corpus itself. The floor cannot catch that.
+    # NEITHER catches a within-floor shrink of the committed gold; that is
+    # ``validate_committed``'s per-kind-floor job.
+    assert report["operator_audit"]["planted"] >= \
+        generate_corpus.MIN_PLANTED_OPERATOR_EDGES
+    assert report["operator_audit"]["planted"] == corpus.planted_operator_count()
+    assert report["operator_audit"]["edge_correct"] < \
+        report["operator_audit"]["planted"]
+    assert 1 <= report["operator_audit"]["content_ok"] <= \
+        report["operator_audit"]["planted"]
     # Every session contributed a graded gold + memory points + control 1.0.
     seen_sessions = {r["session_id"] for r in report["session_results"]}
     assert seen_sessions == set(corpus.session_ids())
@@ -161,7 +178,14 @@ def test_bpre_lane_full_corpus_replay_emits_and_grades(sdk_factory):
     assert runner.validate_receipt(receipt) == []
     assert receipt["judge_pin"] == JUDGE_PIN_MECHANICAL
     assert receipt["corpus_hash"] == corpus.compute_fixtures_hash()
-    assert receipt["operator_audit"]["planted"] == 4
+    # The receipt must CARRY the audit (it is the publish artifact).
+    # ``build_receipt`` REBUILDS an explicit projection rather than copying the
+    # report's block, so this equality is a real cross-object check — a
+    # projection that drops or substitutes the key fails here. Pinned to the
+    # gold-derived count (an independent source), never to the report's own
+    # field and never to a literal.
+    assert "operator_audit" in receipt
+    assert receipt["operator_audit"]["planted"] == corpus.planted_operator_count()
 
 
 def test_bpre_lane_determinism_and_provenance_regression_fails(sdk_factory, tmp_path):

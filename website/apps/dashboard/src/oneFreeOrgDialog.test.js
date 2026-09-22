@@ -122,13 +122,13 @@ test('#2789: the dialog is driven by the structured code, never by detail string
   assert.match(flat, /e\?\.code === 'one_free_org_limit'/,
     'the create handler must branch on the structured `code`')
   // …using the server's org id for the Upgrade action.
-  assert.match(flat, /setCreateTeamLimitTeamId\(e\?\.teamId \|\| \(ownedFreeOrgs\[0\]\?\.team_id \?\? ''\)\)/,
-    'the blocked detail\'s team_id (the owned free org) must feed the Upgrade action')
-  // And api() lifts code/team_id off a dict detail.
+  assert.match(flat, /setCreateTeamLimitOrgId\(e\?\.orgId \|\| \(ownedFreeOrgs\[0\]\?\.org_id \?\? ''\)\)/,
+    'the blocked detail\'s org_id (the owned free org) must feed the Upgrade action')
+  // And api() lifts code/org_id off a dict detail.
   assert.match(flat, /if \(coded && typeof coded\.code === 'string'\) err\.code = coded\.code/,
     'api() must surface detail.code on the thrown Error')
-  assert.match(flat, /if \(coded && typeof coded\.team_id === 'string'\) err\.teamId = coded\.team_id/,
-    'api() must surface detail.team_id on the thrown Error')
+  assert.match(flat, /if \(coded && typeof coded\.org_id === 'string'\) err\.orgId = coded\.org_id/,
+    'api() must surface detail.org_id on the thrown Error')
 })
 
 test('#2789: the third action reaches the session-scoped paid-new-org checkout', () => {
@@ -136,14 +136,14 @@ test('#2789: the third action reaches the session-scoped paid-new-org checkout',
     'the purchase flow must call the new-org checkout endpoint')
   assert.match(flat, /body: JSON\.stringify\(\{ name, price_id: priceId \}\)/,
     'the new-org checkout takes the intended name + the server-resolved price id')
-  // The client does NOT consume the response's team_id — the PRE-MINTED id
+  // The client does NOT consume the response's org_id — the PRE-MINTED id
   // rides the success URL because the SERVER built that URL. What the client
   // must get right is the MATCH: the poll compares against the URL params.
   assert.match(flat, /const newOrgId = params\.get\('new_org'\)/,
     'the success-return effect must read ?new_org=<id>')
   assert.match(flat, /const newOrgName = params\.get\('new_org_name'\)/,
     'the success-return effect must read ?new_org_name=<name>')
-  assert.match(flat, /\.find\(\(t\) => t && \(t\.team_id === newOrgId \|\| \(newOrgName && t\.team_name === newOrgName\) \|\| \(newOrgNamePrefix && !knownOrgIds\.has\(t\.team_id\) && String\(t\.team_name \|\| ''\)\.startsWith\(newOrgNamePrefix\)\)\)\)/,
+  assert.match(flat, /\.find\(\(t\) => t && \(t\.org_id === newOrgId \|\| \(newOrgName && t\.org_name === newOrgName\) \|\| \(newOrgNamePrefix && !knownOrgIds\.has\(t\.org_id\) && String\(t\.org_name \|\| ''\)\.startsWith\(newOrgNamePrefix\)\)\)\)/,
     'the poll must match the id, the intended name, OR the collision-disambiguated name ("<name> <id>") — the pre-minted id is not the real id on the registry (selfhost) lane, and a name collision makes the webhook rename the org')
   // …and the prefix must be TRUNCATED like the server does, or a 56–64 char
   // name can never match (the disambiguated name is `name[:55] + " " + id[:8]`).
@@ -177,7 +177,7 @@ test('#2789: the third action reaches the session-scoped paid-new-org checkout',
     'the give-up notice must not promise the exact (possibly disambiguated) name')
   assert.match(flat, /role="dialog" aria-modal="true" aria-labelledby=\{createTeamMode/,
     'the dialog keeps the #2392 role/aria-modal contract')
-  assert.match(flat, /if \(switches === 1\) switchTeam\(match\.team_id\)/,
+  assert.match(flat, /if \(switches === 1\) switchTeam\(match\.org_id\)/,
     'the switch must use the MATCHED team id (lane-agnostic) and fire once')
   assert.match(flat, /Your new organization is being set up/,
     'a poll that gives up must TELL the user (paid + no switch) instead of silently staying put')

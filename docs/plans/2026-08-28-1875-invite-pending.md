@@ -9,7 +9,7 @@
 **Team:** organisation-design-team
 **Role:** product-implementer
 
-**Architecture:** Backend tier/capacity gate (both lanes), invitee-side pending/accept/decline endpoints reading the AUTHORITATIVE invitations source (NOT team_memberships — cycle-1 P1), a token-less accept (cycle-3 P1), the #1880 ghost-cleanup helper in decline, and a dashboard account-menu "Invites" section.
+**Architecture:** Backend tier/capacity gate (both lanes), invitee-side pending/accept/decline endpoints reading the AUTHORITATIVE invitations source (NOT org_memberships — cycle-1 P1), a token-less accept (cycle-3 P1), the #1880 ghost-cleanup helper in decline, and a dashboard account-menu "Invites" section.
 
 ### Pattern Research
 
@@ -40,7 +40,7 @@
 
 ### Failure Modes
 - **Token-less accept**: the pending list cannot carry a token (hash-only storage) — accept must be token-less with email-match authz (cycle-3 P1).
-- **Capacity source**: active members + PENDING INVITATIONS (authoritative) — never team_memberships(status='invited') (cycle-1 P1: supabase never writes those rows; registry leaves stale fakes).
+- **Capacity source**: active members + PENDING INVITATIONS (authoritative) — never org_memberships(status='invited') (cycle-1 P1: supabase never writes those rows; registry leaves stale fakes).
 - **Decline backend**: net-new invitee revoke (cycle-1 P1 — no invitee-side decline existed).
 - **Free-cap on accept**: mode-aware #1877 helper; only when the target team lacks an active subscription (cycle-2 P2).
 - **Existing test breakage**: `test_free_tier_402` asserts "Team tier" in detail — message changes → update (cycle-2 P2).
@@ -78,7 +78,7 @@ Research-backed + user decisions (2026-08-28); no new decisions requiring fresh 
 
 **Step 1 — Failing tests:** free/solo → 402 with the UPGRADE message; pro → 1 invite OK, 2nd blocked; team → unlimited; supabase pro lane; capacity counts active + pending (a consumed invite frees the seat); expired pending invites NOT counted. **Existing test updates named:** `test_free_tier_402` (asserts `"Team tier" in detail` @ ~175) + the module docstring (@ ~9) updated for the new message.
 
-**Step 2 — Implement:** replace `tier != "team"` checks with: `tier in (free, solo)` → 402 upgrade; `tier == "pro"` → capacity = active members (supabase: team_memberships active; registry: Membership active) + pending invitations (supabase: invitations pending+not-expired; registry: Invitation nodes pending) < max_users(2) → else 402 at-capacity message; `tier == "team"` or max_users None → unlimited. Supabase branch gains the capacity check (had none); registry replaces `_check_team_limit(limits, "users")` (active-only) with the active+pending count for Pro.
+**Step 2 — Implement:** replace `tier != "team"` checks with: `tier in (free, solo)` → 402 upgrade; `tier == "pro"` → capacity = active members (supabase: org_memberships active; registry: Membership active) + pending invitations (supabase: invitations pending+not-expired; registry: Invitation nodes pending) < max_users(2) → else 402 at-capacity message; `tier == "team"` or max_users None → unlimited. Supabase branch gains the capacity check (had none); registry replaces `_check_team_limit(limits, "users")` (active-only) with the active+pending count for Pro.
 
 **Step 3 — Green.**
 

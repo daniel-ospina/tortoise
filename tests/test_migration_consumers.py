@@ -23,15 +23,57 @@ def _env_isolation(monkeypatch):
 
 def test_session_continuity_resolves_db_path(monkeypatch):
     """session_continuity demo uses resolve_db_path() when only
-    TORTOISE_DB_PATH is set (no more 'Set TORTOISE_DB_URI' dead-end)."""
+    TORTOISE_DB_PATH is set (no more 'Set TORTOISE_DB_URI' dead-end).
+
+    Behavioural: the ``__main__`` demo block is executed with a spy
+    ``SessionContinuity`` and ``TORTOISE_DB_URI`` unset, so the embedded
+    branch must hand the *result of* ``resolve_db_path()`` to the
+    constructor.  A hardcoded path, or a resolution call stranded on a dead
+    branch (``resolve_db_path() if False else "/tmp/x.db"``), fails here — a
+    source-substring check passes both, which is why this is not one.
+    """
     monkeypatch.setenv("TORTOISE_DB_PATH", "/sc-canonical.db")
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     src = open("tortoise/session_continuity.py").read()  # noqa: SIM115
     assert "resolve_db_path" in src
-    assert 'os.environ.get("TORTOISE_DB_URI")' not in src.split("def ")[-1].split("if __name__")[0] or True
-    # The demo block must call resolve_db_path, not read TORTOISE_DB_URI
-    demo_block = src.split('if __name__')[1] if 'if __name__' in src else src
-    assert "resolve_db_path()" in demo_block
+    marker = 'if __name__ == "__main__":'
+    assert marker in src, "session_continuity demo entrypoint moved — update this test"
+    demo_block = marker + src.split(marker, 1)[1]
+
+    resolved = "/sentinel/canonical-resolved.db"
+    calls: list[int] = []
+
+    def _fake_resolve_db_path(*_args, **_kwargs):
+        calls.append(1)
+        return resolved
+
+    monkeypatch.setattr("tortoise.config.resolve_db_path", _fake_resolve_db_path)
+
+    constructed: dict[str, object] = {}
+
+    class _SpySessionContinuity:
+        def __init__(self, db_path=None):
+            constructed["db_path"] = db_path
+
+        def start(self, _topic="General"):
+            return "session-spy"
+
+        def capture(self, *_args, **_kwargs):
+            return None
+
+        def end(self):
+            return None
+
+    # Executing the demo block (not importing the module) is what lets the
+    # spy stand in for the real SessionContinuity, which would open a DB.
+    exec(compile(demo_block, "<session_continuity __main__>", "exec"),
+         {"SessionContinuity": _SpySessionContinuity, "__name__": "__main__"})
+
+    assert calls == [1], "demo's embedded branch must call resolve_db_path()"
+    assert constructed["db_path"] == resolved, (
+        "the constructed SessionContinuity must receive resolve_db_path()'s "
+        f"result, got {constructed['db_path']!r}"
+    )
 
 
 def test_migrate_kinds_resolves_db_path(monkeypatch):
@@ -47,7 +89,12 @@ def test_tortoise_client_diagnostic_reports_db_path(monkeypatch):
     monkeypatch.setenv("TORTOISE_DB_PATH", "/tc-canonical.db")
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     src = open("tortoise/tortoise_client.py").read()  # noqa: SIM115
-    assert 'os.environ.get("TORTOISE_DB_URI") or os.environ.get("TORTOISE_DB_PATH"' in src
+    # Anchor on the EXPRESSION, not its line wrapping: `ruff format` reflows the
+    # URI-or-PATH fallback across lines without changing the diagnostic payload,
+    # so flatten whitespace before matching (stale line-anchor broke when
+    # 7b452c0c7 reformatted this call).
+    flat = " ".join(src.split())
+    assert 'os.environ.get("TORTOISE_DB_URI") or os.environ.get("TORTOISE_DB_PATH"' in flat
 
 
 def test_init_docker_mode_does_not_set_db_path_env(monkeypatch):
