@@ -37,10 +37,18 @@
 #      "200" and would redden EVERY deploy.
 #   8. readiness with NO RESPONSE → exit 1, and the message names the 000
 #      sentinel, so a dead app is not reported as an unready one.
-#   9. POSITIVE CONTROLS: in case 3 readiness is polled MORE THAN ONCE and in
-#      case 6 /health is polled more than once — proving the polls ran, rather
-#      than the gate passing because a phase was skipped. (A test that cannot
-#      fail proves nothing.)
+#   8. a BAD KNOB                → exit 2. A non-integer knob used to abort the
+#      shell inside the `$((...))` of the failure message (under `set -u`), so
+#      `exit 1` never ran and bash 3.2 exited 0 — GREEN on a dead DB. Without
+#      this case, DELETING the validator leaves every assertion here green.
+#   9. an observed code + a non-zero curl exit → still SUCCEEDS. curl can print
+#      a real code and STILL exit non-zero (a transfer failure after the status
+#      line). The app answered, so readiness WAS observed; overwriting that 200
+#      with the 000 sentinel would redden a ready deploy — the #4545 symptom.
+#
+# POSITIVE CONTROLS: in case 3 readiness is polled MORE THAN ONCE, in case 6
+# /health is polled more than once, and in case 1 the app phase is shown to stop
+# rather than fall through. (A test that cannot fail proves nothing.)
 #
 # Case 3 is the one that matters: it is the difference between "the deploy
 # succeeded" and "the deploy was merely early".
@@ -71,7 +79,7 @@ assert_not_contains() { # <haystack> <needle> <label>
 }
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+trap 'find "$WORK" -depth -mindepth 1 -delete 2>/dev/null; rmdir "$WORK" 2>/dev/null' EXIT
 STUB_BIN="$WORK/bin"
 mkdir -p "$STUB_BIN"
 
@@ -120,12 +128,14 @@ case "$url" in
     has_f=0
     for a in "$@"; do case "$a" in -*f*) has_f=1 ;; esac; done
     if [ "$has_f" = "1" ] && [ "$code" -ge 400 ]; then exit 22; fi
-    exit 0
+    # `curl` can print a real status and STILL exit non-zero (a transfer failure
+    # after the status line). STUB_READY_EXIT models that.
+    exit "${STUB_READY_EXIT:-0}"
     ;;
   */health)
     n=$(bump health_n)
     [ "${STUB_APP_REACHABLE:-yes}" = "yes" ] || exit 22
-    # NOTE: `backup_watcher.ok` is TRUE in BOTH branches — the body carries a
+    # NOTE: `backup_watcher.ok` is TRUE in BOTH arms — the body carries a
     # second `"ok": true` exactly as the real /health does (#4470), so a
     # text-matching reader would go green while db.ok is false.
     if [ "${STUB_DB_OK_ON_HEALTH_N:-0}" -gt 0 ] && [ "$n" -ge "${STUB_DB_OK_ON_HEALTH_N}" ]; then
@@ -141,7 +151,7 @@ STUB
 chmod +x "$STUB_BIN/curl"
 
 # ── driver ──────────────────────────────────────────────────────────────────
-# run_gate <app_reachable> <db_ok_on_health_n> <ready_ok_on_ready_n> [ready_code] [ready_no_response]
+# run_gate <app_reachable> <db_ok_on_health_n> <ready_ok_on_ready_n> [ready_code] [ready_no_response] [ready_exit]
 #   → sets OUT (combined stdout+stderr), RC, HEALTH_POLLS, READY_POLLS
 run_gate() {
   local state="$WORK/state-$$-$RANDOM"
@@ -154,6 +164,7 @@ run_gate() {
     STUB_READY_OK_ON_READY_N="$3" \
     STUB_READY_CODE="${4:-503}" \
     STUB_READY_NO_RESPONSE="${5:-no}" \
+    STUB_READY_EXIT="${6:-0}" \
     GATE_BASE="https://stub.invalid" \
     APP_PROBES=2 APP_PROBE_SLEEP=0 \
     DB_TRIES=3 DB_SLEEP=0 \
@@ -214,11 +225,32 @@ run_gate "yes" 1 0 302
 assert_eq "$RC" "1" "exits 1 on a redirect"
 assert_contains "$OUT" "last status 302" "reports the OBSERVED status"
 
+echo "8. a BAD KNOB → exit 2 (NOT the bash-3.2 fail-open)"
+# Deleting the validator leaves every other assertion green, so this case is the
+# only CI pin on the fail-open fix.
+bad_knob_rc=0
+OUT=$(GATE_BASE="https://stub.invalid" DB_TRIES=abc bash "$GATE" 2>&1) || bad_knob_rc=$?
+assert_eq "$bad_knob_rc" "2" "a non-integer knob exits 2"
+assert_contains "$OUT" "DB_TRIES must be a non-negative integer" "names the bad knob"
+assert_not_contains "$OUT" "db.ok" "never reaches a poll (fails before touching the endpoint)"
+
+# and a VALID override still works, so the guard is not a blanket refusal
+run_gate "yes" 1 1
+assert_eq "$RC" "0" "a valid override still passes"
+
+echo "9. an observed code + a non-zero curl exit → still SUCCEEDS"
+# curl prints 200 then exits 56 (transfer failure after the status line). The
+# app answered, so readiness WAS observed. Overwriting it with 000 would loop
+# to exhaustion and redden a ready deploy.
+run_gate "yes" 1 0 200 no 56
+assert_eq "$RC" "0" "exits 0 — the observed 200 is not overwritten by 000"
+assert_contains "$OUT" "health/ready 200" "reported readiness"
+
 # NOTE: case 3 is ALSO the pin for `-o /dev/null` — the stub streams a body,
 # so dropping the flag makes the captured status "<body>200", which never
 # equals "200", and case 3 fails.
 
-echo "8. readiness with NO response → FAILS and names the sentinel"
+echo "10. readiness with NO response → FAILS and names the sentinel"
 run_gate "yes" 1 0 503 yes
 assert_eq "$RC" "1" "exits 1"
 assert_contains "$OUT" "last status 000" "distinguishes a dead app from an unready one"
