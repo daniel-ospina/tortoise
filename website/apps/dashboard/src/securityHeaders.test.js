@@ -24,7 +24,7 @@
 // WHAT EACH ASSERTION IS ANCHORED TO (learned in review)
 // -----------------------------------------------------
 // Each check is anchored to what the runtime uses, or to a cross-check that keeps
-// a string-level scan non-vacuous — because a string check has failure modes it
+// a source-level scan non-vacuous — because a source scan has failure modes it
 // cannot see: a commented-out line, and a value moved to a block nobody visits
 // (the value is still in the file). So:
 //   - the interstitial is checked by CALLING it and reading the real response
@@ -33,20 +33,34 @@
 //     to the surface (`/*` for marketing, `/*` + the four SPA paths);
 //   - the four strict SPA paths are cross-checked against `public/_redirects`,
 //     the file that decides which request paths serve the app document;
-//   - the guarded-site list is cross-checked against every file that emits
-//     `text/html`, so a new HTML producer cannot be added unguarded;
-//   - the cookie-writer scan is an UMBRELLA over any `set-cookie` string literal
-//     (any quote style, any case), so a call shape, an object key, an
-//     array-of-pairs `HeadersInit` and a `const H = "Set-Cookie"` indirection are
-//     all caught; the only files allowed to name the literal without being
-//     writers are the three hop-by-hop STRIP-LIST proxies, and their exemption
-//     is pinned (see `STRIP_LIST_FILES`);
-//   - the scan walks BOTH projects' function trees;
-//   - the scans read COMMENT-STRIPPED sources via `stripComments`, which skips
-//     string AND regex literals (the tree uses `/[&<>"']/`) — the stripper itself
-//     is pinned by its own test, because a desynced stripper silently becomes a
-//     no-op (found in review: the first version lost 40+ comment lines in
-//     `blog/_lib.ts` and let a commented-out stamp count).
+//   - the guarded-site list is cross-checked against every file that builds
+//     `text/html` OR names a `.html` asset, so a new HTML producer — including
+//     the `welcome.ts` asset-serving pattern, which has no `text/html` literal —
+//     cannot be added unguarded;
+//   - the cookie-writer scan is an UMBRELLA over a bare `set-cookie` substring
+//     (any case, any quote style, any construction), so a call shape, an object
+//     key, an array-of-pairs `HeadersInit`, a `const H = "Set-Cookie"`
+//     indirection and a template-built `` `set-cookie${""}` `` are all caught;
+//     the files allowed to name it without being writers are the three
+//     hop-by-hop STRIP-LIST proxies, and their exemption is pinned (below);
+//   - the two audited writers additionally have their cookie-WRITE count pinned,
+//     so a new cacheable response helper added to an audited module fails;
+//   - the scan walks BOTH projects' function trees, over every JS/TS extension.
+//
+// SOURCE SCANNING NEEDS A REAL LEXER, NOT A STATE MACHINE
+// ------------------------------------------------------
+// `stripComments` is a hand-rolled quote/regex scanner's job only if it is right
+// about every construct — and it was wrong three times in review: it lost track
+// of a quote inside a regex character class (`.replace(/[&<>"']/g)` in
+// `confirm.ts`), of a nested template literal (`_lib.ts`), and of a `//` after a
+// `:` (a ternary or object key). Each desync silently left comments in the
+// "stripped" source, so a commented-out stamp still counted and the guard passed
+// with the stamp dead. It is therefore NOT hand-rolled: `commentStrippedSource`
+// deletes the exact comment ranges `@babel/parser` reports, changing nothing
+// else — no transformation of code, so the scans below see the original source
+// spelling. (esbuild's `transform` was tried and rejected: it preserves comments
+// inside object literals, which is exactly where every stamp lives.)
+//
 // Declared exception: the stamp COUNT is source-level, so a deliberately dead
 // stamp still counts (see `STAMP`, and the plan doc's `## Residuals`).
 import { test } from 'node:test'
@@ -54,7 +68,8 @@ import assert from 'node:assert/strict'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { buildSync, transformSync } from 'esbuild'
+import { buildSync } from 'esbuild'
+import { parse } from '@babel/parser'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const dashboardRoot = join(here, '..')
@@ -74,9 +89,10 @@ const MARKETING_FUNCTIONS = 'website/functions'
  * The HTML-producing sites and the number of CSP stamps each must carry.
  *
  * A named list, not a heuristic: `welcome.ts` serves an HTML asset through
- * `env.ASSETS.fetch` and contains no `text/html` literal, so no string-keyed
- * scan would find it. Test 7 cross-checks the other direction — every file that
- * DOES emit `text/html` must appear here — so a new producer fails this guard.
+ * `env.ASSETS.fetch` and contains no `text/html` literal (it names the
+ * `welcome.html` path instead), so no `text/html`-keyed scan would find it. Test
+ * 7 cross-checks the other direction — every file that builds `text/html` OR
+ * names a `.html` asset must appear here — so a new producer fails this guard.
  *
  * The COUNT is what makes it bite: `admin/[[path]].ts` constructs the shell
  * response on THREE separate return paths (the ASSETS passthrough, the
@@ -100,29 +116,46 @@ const STRICT_PATHS = ['/', '/team', '/team/', '/index.html']
  * constant name: `"Content-Security-Policy": ADMIN_CSP` or
  * `headers.set("Content-Security-Policy", RELAXED_CSP)`. Anchoring on the
  * header key keeps an import line (`import { RELAXED_CSP } …`) from counting as
- * a stamp. A deliberately dead stamp (`if (false) headers.set(…, CONST)`) still
- * counts — source analysis cannot see reachability, and no runtime harness here
- * drives all six handlers; that residual is accepted and stated in the PR.
+ * a stamp.
+ *
+ * KNOWN FALSE POSITIVE (fail-closed): refactoring the header NAME into a local
+ * constant (`const CSP_HEADER = "Content-Security-Policy"; headers.set(CSP_HEADER,
+ * RELAXED_CSP)`) keeps the response correct but no longer matches — the guard
+ * cannot resolve an identifier. It fails loudly naming the file; extend this
+ * regex in the same change. A deliberately dead stamp
+ * (`if (false) headers.set(…, CONST)`) still counts: source analysis cannot see
+ * reachability, and no runtime harness here drives all six handlers.
  */
 const STAMP =
   /Content-Security-Policy["']?\s*[,:]\s*(RELAXED_CSP|STRICT_CSP|ADMIN_CSP|strictCspWithNonce)\b/g
 
-/** The two audited files; every other writer of a cookie is an offender. */
-const AUDITED_COOKIE_WRITERS = new Set([DASHBOARD_SESSION_TS, DASHBOARD_CONFIRM_TS])
+/**
+ * The two audited cookie writers, each with its exact count of cookie-WRITE
+ * statements.
+ *
+ * The count is the pin that closes a hole found in review: exempting these
+ * modules by path alone meant a NEW cacheable response helper added to one of
+ * them (`textCacheable()` in `session.ts`) was never exercised and never
+ * flagged. With the count pinned, any added write statement fails here and the
+ * author must classify it.
+ */
+const AUDITED_COOKIE_WRITERS = new Map([
+  [DASHBOARD_SESSION_TS, 2],
+  [DASHBOARD_CONFIRM_TS, 1],
+])
 
 /**
  * The three hop-by-hop proxy files strip an UPSTREAM `set-cookie`; they name the
  * header in a comma-terminated array entry and never write a cookie themselves.
  * They are the only files allowed to name the literal without being writers.
  *
- * The exemption is pinned by SHAPE, not by a list of known write forms: each of
- * these files must name the literal EXACTLY ONCE, as a comma-terminated array
- * entry, and must not match `COOKIE_WRITE`. Pinning with `COOKIE_WRITE` alone
- * was a hiding place — an aliased writer
+ * The exemption is pinned by SHAPE: each must name `set-cookie` EXACTLY ONCE, as
+ * a comma-terminated array entry, and match no write form. Pinning with the
+ * write form alone was a hiding place — an aliased writer
  * (`const H = "Set-Cookie"; headers.set(H, v)`) added to one of these files
- * matched neither the exemption pin nor (being skipped) the umbrella. The
- * exactly-once rule closes that: a second mention of the literal fails the pin
- * whatever shape it takes.
+ * matched neither the pin nor (being skipped) the umbrella. The exactly-once
+ * rule closes it: a second mention of the token fails the pin whatever shape it
+ * takes.
  */
 const STRIP_LIST_FILES = new Set([
   'website/apps/dashboard/functions/api/v1/[[path]].ts',
@@ -130,135 +163,68 @@ const STRIP_LIST_FILES = new Set([
   'website/apps/dashboard/functions/blog/api/[[path]].ts',
 ])
 
-/** One `set-cookie` literal, any quote style, any case. */
-const COOKIE_LITERAL_OCCURRENCE = /(["'`])set-cookie\1/gi
-
 /**
- * A `set-cookie` STRING LITERAL — the umbrella the offender scan uses.
+ * The UMBRELLA the offender scan uses: a bare `set-cookie` substring, any case.
  *
- * Deliberately NOT anchored to a call or key shape. The original bare-token scan
- * (`.includes('Set-Cookie')`) caught an indirection
- * (`const H = "Set-Cookie"; headers.set(H, v)`) and an array-of-pairs
- * `HeadersInit` (`new Headers([["Set-Cookie", v]])`); the shape-anchored regex
- * that later replaced it silently lost both — the regression caught in this
- * guard's review. The umbrella is also deliberately FAIL-CLOSED OVER ANY MENTION,
- * not just writes: a read-only use (`res.headers.get("set-cookie")`) in a new
- * file fails too. That is intended — a new file that names the header must be
- * classified once, as an audited writer or as a strip-list proxy — and the
- * failure message says so. No `/g`, so `.test()` is stateless.
+ * Deliberately NOT anchored to a quote or a call/key shape. The original
+ * bare-token scan caught an indirection (`const H = "Set-Cookie"; headers.set(H,
+ * v)`) and an array-of-pairs `HeadersInit`; the shape-anchored regex that
+ * replaced it silently lost both, and a quoted-literal regex then lost the
+ * template-built `` `set-cookie${""}` `` form — regressions caught in this
+ * guard's review. A bare substring catches every construction that still spells
+ * the token.
+ *
+ * It is also deliberately FAIL-CLOSED OVER ANY MENTION, not just writes: a
+ * read-only use (`res.headers.get("set-cookie")`) in a new file fails too. That
+ * is intended — a new file that names the header must be classified once, as an
+ * audited writer or as a strip-list proxy — and the failure message says so.
+ * The only known evasion is a fully obfuscated name (`"set-" + "cookie"`); that
+ * is a documented residual (the plan doc's `## Residuals`), not a hole this
+ * scan can close.
  */
-const COOKIE_LITERAL = /(["'`])set-cookie\1/i
+const COOKIE_MENTION = /set-cookie/i
 
-/**
- * The WRITE forms, used to pin the STRIP-LIST proxies: the call
- * (`.append(`/`.set(` + literal), the object-literal key (literal + `:`), and
- * the array-of-pairs element (`[[` + literal).
- */
+/** A `set-cookie` WRITE statement — the call, the object key, the pairs element. */
 const COOKIE_WRITE =
-  /\.(?:append|set)\(\s*["'`]set-cookie["'`]|["'`]set-cookie["'`]\s*:|\[\s*\[\s*["'`]set-cookie["'`]/i
+  /\.(?:append|set)\(\s*["'`]set-cookie["'`]|["'`]set-cookie["'`]\s*:|\[\s*\[\s*["'`]set-cookie["'`]/gi
 
 /**
- * A `/` at these positions starts a regex literal, not division. The standard
- * "previous significant character" rule; newline is included so a regex at the
- * start of a line is not mistaken for division.
+ * `commentStrippedSource` for a repo-relative path.
+ *
+ * The plugin set follows the extension: TypeScript for `.ts`, plus the JSX
+ * plugin for `.tsx`/`.jsx` (in a `.ts` file the JSX plugin would make a
+ * `<Foo>bar` type assertion ambiguous, so it is not enabled there).
  */
-const REGEX_MAY_FOLLOW = new Set([
-  '(', ',', '=', ':', '[', '!', '&', '|', '?', '{', '}', ';', '+', '-', '*', '%', '~', '^', '<', '>', '\n', '',
-])
+function commentStripped(relPath) {
+  return commentStrippedSource(readFileSync(join(repoRoot, relPath), 'utf8'), relPath)
+}
 
 /**
- * Remove `//` and block comments, skipping string AND regex literals.
+ * Remove comments by deleting the exact ranges `@babel/parser` reports.
  *
- * The regex-literal awareness is load-bearing: this tree writes
- * `.replace(/[&<>"']/g, …)` (`confirm.ts`), and a `"` inside that character
- * class would otherwise open a phantom string and desync the scanner for the
- * rest of the file — leaving all subsequent comments in the "stripped" output.
- * That desync made the first version of this helper a silent no-op on
- * `blog/_lib.ts` (43 of 55 comment lines survived), so a commented-out stamp
- * still counted. `//` is a comment start unless the preceding character is `:`
- * (a URL scheme — though a URL normally lives inside a string, which the quote
- * branch already copies verbatim).
- *
- * This is a scanner, not a parser; its own behaviour is pinned by a test.
+ * Nothing else is touched — no code is transformed, re-printed or minified — so
+ * the scans see the original source spelling (a stamped header key and the
+ * constant beside it keep their identifiers, which a minifying pass would not
+ * guarantee). A parse failure throws, which fails every test that scans: that is
+ * the intended fail-closed direction.
  */
-function stripComments(source) {
-  const out = []
-  let i = 0
-  const n = source.length
-  let last = ''
-  const emit = (ch) => {
-    out.push(ch)
-    if (!/\s/.test(ch) || ch === '\n') last = ch
+function commentStrippedSource(source, relPath = 'file.ts') {
+  const jsx = /\.[jt]sx$/.test(relPath)
+  const ast = parse(source, {
+    sourceType: 'module',
+    plugins: jsx ? ['typescript', 'jsx'] : ['typescript'],
+  })
+  const ranges = (ast.comments ?? [])
+    .map((c) => [c.start, c.end])
+    .sort((a, b) => a[0] - b[0])
+  let out = ''
+  let at = 0
+  for (const [start, end] of ranges) {
+    if (start < at) continue
+    out += `${source.slice(at, start)} ` // a space keeps token separation
+    at = end
   }
-  while (i < n) {
-    const c = source[i]
-    const next = source[i + 1]
-    if (c === '/' && next === '/' && last !== ':') {
-      const nl = source.indexOf('\n', i)
-      i = nl === -1 ? n : nl
-      continue
-    }
-    if (c === '/' && next === '*') {
-      const end = source.indexOf('*/', i + 2)
-      i = end === -1 ? n : end + 2
-      out.push(' ') // keep token separation (`a/*c*/b` must not become `ab`)
-      continue
-    }
-    if (c === '/' && REGEX_MAY_FOLLOW.has(last)) {
-      out.push(c)
-      i += 1
-      let inClass = false
-      while (i < n) {
-        const rc = source[i]
-        out.push(rc)
-        if (rc === '\\') {
-          i += 1
-          if (i < n) out.push(source[i])
-          i += 1
-          continue
-        }
-        if (rc === '[') inClass = true
-        else if (rc === ']') inClass = false
-        else if (rc === '\n') break // unterminated — bail rather than eat the file
-        else if (rc === '/' && !inClass) {
-          i += 1
-          break
-        }
-        i += 1
-      }
-      while (i < n && /[a-z]/i.test(source[i])) {
-        out.push(source[i])
-        i += 1
-      }
-      last = 'x'
-      continue
-    }
-    if (c === '"' || c === "'" || c === '`') {
-      const quote = c
-      emit(c)
-      i += 1
-      while (i < n) {
-        if (source[i] === '\\') {
-          emit(source[i])
-          i += 1
-          if (i < n) {
-            emit(source[i])
-            i += 1
-          }
-          continue
-        }
-        emit(source[i])
-        const done = source[i] === quote
-        i += 1
-        if (done) break
-      }
-      last = 'x'
-      continue
-    }
-    emit(c)
-    i += 1
-  }
-  return out.join('')
+  return out + source.slice(at)
 }
 
 function loadTs(entry) {
@@ -337,10 +303,8 @@ function normaliseCsp(value) {
   return value.replace(/\s+/g, ' ').replace(/;\s*$/, '').trim()
 }
 
-/** The comment-stripped source of a file, relative to the repo root. */
-function commentStripped(relPath) {
-  return stripComments(readFileSync(join(repoRoot, relPath), 'utf8'))
-}
+/** Every JS/TS source file under both Pages projects' `functions/` trees. */
+const SOURCE_EXTENSIONS = ['ts', 'tsx', 'js', 'jsx', 'mjs']
 
 function walk(dir) {
   const out = []
@@ -356,57 +320,75 @@ function walk(dir) {
   return out
 }
 
-/** Every `.ts` file under both Pages projects' `functions/` trees. */
-function functionTsFiles() {
+function functionFiles() {
   return [DASHBOARD_FUNCTIONS, MARKETING_FUNCTIONS]
     .flatMap((root) => walk(join(repoRoot, root)))
-    .filter((f) => f.endsWith('.ts'))
+    .filter((f) => SOURCE_EXTENSIONS.some((ext) => f.endsWith(`.${ext}`)))
     .map((f) => relative(repoRoot, f))
 }
 
-// ── 1. the comment stripper the scans depend on ─────────────────────────────
+// ── 1. the comment stripper every source scan depends on ────────────────────
 
-test('stripComments removes comments and keeps code, regex literals included', () => {
+test('commentStrippedSource removes comments and keeps code', () => {
   // Pinned directly, because every other source-level check depends on it and a
-  // desynced stripper turns them into silent no-ops (found in review).
+  // desynced stripper turns them into silent no-ops. Each construct below broke
+  // an earlier hand-rolled scanner:
+  //   - a quote inside a regex character class (`confirm.ts`),
+  //   - a nested template literal (`blog/_lib.ts`),
+  //   - `//` inside a template literal's string content (the interstitial's
+  //     embedded JS — NOT a comment, and must survive),
+  //   - a `//` after a `:` (ternary / object key),
+  //   - a comment inside an OBJECT LITERAL (where every stamp lives — the case
+  //     esbuild's `transform` failed to strip).
   const src = [
-    'const a = 1// trailing comment with no space',
-    'const url = "https://example.com/x" // and a real comment',
+    'const a = 1 // trailing comment',
+    'const url = "https://example.com/x" // after a string',
     'const re = /[&<>"\']/g',
     'const cls = /[/*]/',
-    'const t = `tpl ${x} // not a comment`',
-    '/*',
-    '"Content-Security-Policy": RELAXED_CSP,',
+    'const t = `<ul>${items.map((it) => `<li>${it}</li>`).join("")}</ul>`',
+    'const html = `<script>// "Content-Security-Policy": ADMIN_CSP,</script>`',
+    'const o = {',
+    '  // "Content-Security-Policy": RELAXED_CSP,',
+    '  live: 1,',
+    '}',
+    '/* block',
+    'const hidden = {',
+    '  "Content-Security-Policy": ADMIN_CSP,',
+    '}',
     '*/',
-    '"Content-Security-Policy": ADMIN_CSP,',
+    'const live = {',
+    '  "Content-Security-Policy": STRICT_CSP,',
+    '}',
   ].join('\n')
-  const out = stripComments(src)
+  const out = commentStrippedSource(src)
 
   assert.doesNotMatch(out, /trailing comment/, 'a `//` comment after code must be removed')
-  assert.doesNotMatch(out, /and a real comment/, 'a `//` comment after a string must be removed')
+  assert.doesNotMatch(out, /after a string/, 'a `//` comment after a string must be removed')
   assert.match(out, /https:\/\/example\.com/, 'a URL inside a string must survive')
   assert.match(out, /\[&<>"'\]/, 'a regex character class containing quotes must survive')
   assert.match(out, /\[\/\*\]/, 'a regex character class containing `/*` must survive')
-  assert.match(out, /not a comment/, 'a `//` inside a template literal must survive')
+  assert.match(out, /<li>/, 'a nested template literal must survive')
+  assert.match(
+    out,
+    /<script>\/\//,
+    'a `//` INSIDE a template literal is string content, not a comment — it must survive',
+  )
+  assert.match(out, /live: 1/, 'code after an object-literal comment must survive')
+  assert.doesNotMatch(out, /RELAXED_CSP/, 'the object-literal comment hid a stamp; it must be gone')
+  assert.doesNotMatch(out, /hidden/, 'the block comment hid a statement; it must be gone')
   assert.equal(
     (out.match(/Content-Security-Policy/g) ?? []).length,
-    1,
-    'the block-commented stamp must be removed and the live one kept',
+    2,
+    'exactly two mentions may remain: the template-literal string content (not a comment) and the live object',
   )
-})
 
-test('the stripped source still parses (the scanner is not eating code)', () => {
-  // Far stronger than a length heuristic: a scanner that desyncs on a string or
-  // regex literal, or drops a real token, leaves unbalanced quotes/braces that
-  // esbuild refuses. (Test 1 pins the rules; this pins the blast radius over
-  // every guarded file — much of this tree is comment-heavy by design, so a
-  // length threshold would be meaningless.)
-  for (const rel of functionTsFiles()) {
-    assert.doesNotThrow(
-      () => transformSync(commentStripped(rel), { loader: 'ts' }),
-      `${rel}: the comment-stripped source no longer parses — the scanner is eating code`,
-    )
-  }
+  // Idempotent and non-destructive: stripping the stripped source changes
+  // nothing, so the pass is a comment remover and not a rewriter.
+  assert.equal(
+    commentStrippedSource(out).replace(/\s+/g, ' '),
+    out.replace(/\s+/g, ' '),
+    'stripping must be idempotent',
+  )
 })
 
 // ── 2. every cookie-carrying response is uncacheable ────────────────────────
@@ -430,34 +412,31 @@ test('json() and redirect() carry no-store on every cookie-bearing response', as
 })
 
 test('the only cookie writers are the two audited files', () => {
-  // Pin the scans themselves against vacuity: the two audited files must match
-  // BOTH regexes — `COOKIE_LITERAL`, which the offender scan uses, and
-  // `COOKIE_WRITE`, which the strip-list pin uses. Pinning only `COOKIE_WRITE`
-  // left the umbrella unprotected (replacing it with a never-matching regex kept
-  // every test green — found in review).
-  for (const rel of AUDITED_COOKIE_WRITERS) {
-    assert.match(
-      commentStripped(rel),
-      COOKIE_LITERAL,
-      `${rel} must be recognised as naming set-cookie (the umbrella is broken)`,
-    )
-    assert.match(
-      commentStripped(rel),
-      COOKIE_WRITE,
-      `${rel} must be recognised as a cookie writer (the exemption pin is broken)`,
+  // Pin the scans against vacuity: each audited file must actually match the
+  // umbrella the offender scan uses, and carry exactly its recorded number of
+  // cookie-WRITE statements. Pinning only the write regex left the umbrella
+  // unprotected (replacing it with a never-matching regex kept every test
+  // green), and pinning the path without a count left a new cookie-emitting
+  // helper in an audited module invisible.
+  for (const [rel, writes] of AUDITED_COOKIE_WRITERS) {
+    const src = commentStripped(rel)
+    assert.match(src, COOKIE_MENTION, `${rel} must be recognised as naming set-cookie`)
+    assert.equal(
+      (src.match(COOKIE_WRITE) ?? []).length,
+      writes,
+      `${rel} must carry exactly ${writes} cookie-WRITE statement(s) — a new one must be classified`,
     )
   }
 
   // The three strip-list proxies are exempt from the umbrella, so pin the
-  // exemption by SHAPE: exactly one mention of the literal, as a
-  // comma-terminated array entry, and no write form. An aliased writer added to
-  // one of these files fails the exactly-once rule (a second mention) whatever
-  // shape it takes — the hole found in review.
+  // exemption by SHAPE: exactly one mention of the token, as a comma-terminated
+  // array entry, and no write form. An aliased writer added to one of these
+  // files fails the exactly-once rule (a second mention) whatever shape it
+  // takes.
   for (const rel of STRIP_LIST_FILES) {
     const src = commentStripped(rel)
-    const mentions = src.match(COOKIE_LITERAL_OCCURRENCE) ?? []
     assert.equal(
-      mentions.length,
+      (src.match(/set-cookie/gi) ?? []).length,
       1,
       `${rel} must name set-cookie exactly once (its strip-list entry) — a second mention must be classified`,
     )
@@ -474,9 +453,9 @@ test('the only cookie writers are the two audited files', () => {
   }
 
   const offenders = []
-  for (const rel of functionTsFiles()) {
+  for (const rel of functionFiles()) {
     if (AUDITED_COOKIE_WRITERS.has(rel) || STRIP_LIST_FILES.has(rel)) continue
-    if (COOKIE_LITERAL.test(commentStripped(rel))) offenders.push(rel)
+    if (COOKIE_MENTION.test(commentStripped(rel))) offenders.push(rel)
   }
   assert.deepEqual(
     offenders,
@@ -576,22 +555,33 @@ test('every HTML-producing Function stamps the CSP on each HTML-producing path',
     const found = (commentStripped(rel).match(STAMP) ?? []).length
     if (found !== expected) wrong.push(`${rel}: expected ${expected} stamp(s), found ${found}`)
   }
-  assert.deepEqual(wrong, [], 'an HTML-producing path lost its Content-Security-Policy stamp')
+  assert.deepEqual(
+    wrong,
+    [],
+    'an HTML-producing path lost its Content-Security-Policy stamp (if the header name was refactored into a constant, extend STAMP)',
+  )
 })
 
-test('every file that emits text/html is in the guarded site list', () => {
+test('every file that emits or serves HTML is in the guarded site list', () => {
   // The completeness half of the list above: the literal is allowed to be a
   // hand-written list, but adding a new HTML producer must fail HERE instead of
-  // shipping unguarded. `welcome.ts` has no `text/html` literal (it serves an
-  // asset), so it is deliberately not required by this direction.
+  // shipping unguarded. The predicate covers both shapes — a constructed
+  // `text/html` body, and a Function that serves an HTML ASSET by naming it
+  // (`welcome.ts`'s `new URL("/welcome.html", …)`, which has no `text/html`
+  // literal). A pure asset passthrough (`blog/[[path]].ts` forwards arbitrary
+  // favicon/og-image requests to `ASSETS.fetch`) names no `.html` path and is
+  // correctly not a requirement.
   const guarded = new Set(HTML_SITES.map(([rel]) => rel))
-  const producers = functionTsFiles().filter((rel) => commentStripped(rel).includes('text/html'))
+  const producers = functionFiles().filter((rel) => {
+    const src = commentStripped(rel)
+    return src.includes('text/html') || /\.html["'`]/.test(src)
+  })
   assert.ok(
-    producers.length >= 5,
+    producers.length >= 6,
     `expected to find the HTML producers, found ${producers.length} — the scan is broken`,
   )
   const unguarded = producers.filter((rel) => !guarded.has(rel))
-  assert.deepEqual(unguarded, [], 'these files build HTML but are not in HTML_SITES')
+  assert.deepEqual(unguarded, [], 'these files build or serve HTML but are not in HTML_SITES')
 })
 
 test('the strict path set covers every 200-rewrite that serves the app document', () => {
@@ -618,9 +608,22 @@ test('the strict path set covers every 200-rewrite that serves the app document'
 
 test('the guard scans real files (no accidental empty pass)', () => {
   // A guard that silently iterates nothing is a no-op gate. Assert the
-  // enumeration found the files it is supposed to protect.
-  const files = functionTsFiles()
+  // enumeration found the files it is supposed to protect, and that it covers
+  // every JS/TS extension Pages Functions can be written in.
+  const files = functionFiles()
   assert.ok(files.length > 20, `expected the functions trees to be scanned, found ${files.length}`)
+  // The extension set is a completeness claim, so test it: every regular file in
+  // these trees must be one this guard scans. A new `functions/x.js` would
+  // otherwise be invisible to every check above.
+  const unscanned = [DASHBOARD_FUNCTIONS, MARKETING_FUNCTIONS]
+    .flatMap((root) => walk(join(repoRoot, root)))
+    .map((f) => relative(repoRoot, f))
+    .filter((f) => !SOURCE_EXTENSIONS.some((ext) => f.endsWith(`.${ext}`)))
+  assert.deepEqual(
+    unscanned,
+    [],
+    'these files sit in a Functions tree but are not scanned — add their extension to SOURCE_EXTENSIONS',
+  )
   for (const rel of [DASHBOARD_SESSION_TS, DASHBOARD_CONFIRM_TS, MARKETING_HEADERS_TS]) {
     assert.ok(statSync(join(repoRoot, rel)).isFile(), `${rel} must exist`)
   }
