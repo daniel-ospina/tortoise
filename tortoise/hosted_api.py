@@ -20196,13 +20196,12 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     harness = updates.pop("harness", None)
     section = updates.pop("section", None)
     if harness in _HARNESS_ANALYTICS_VALUES and section in _SECTION_ANALYTICS_VALUES:
-        # #3498: the analytics write builds a fresh httpx.Client per event —
-        # a blocking PostgREST call; off the loop.
-        await _cp_offload(
-            lambda: _track_analytics_event(
-                org["org_id"], "artifact_copied",
-                {"harness": harness, "section": section}),
-            op="analytics_event", best_effort=True)
+        # #3498/#4015: the analytics write builds a fresh httpx.Client per
+        # event — a blocking PostgREST call; off the loop via the shared entry
+        # point.
+        await _emit_analytics_off_loop(
+            org["org_id"], "artifact_copied",
+            {"harness": harness, "section": section})
     elif harness is not None or section is not None:
         # #3821: an enum-invalid beacon used to produce NO event and NO
         # observer — indistinguishable from a beacon that never fired. The
@@ -21659,6 +21658,17 @@ def _track_analytics_event(org_id: str, event_name: str,
         delivered = False
         try:
             import httpx
+            # #4015: the client is built PER EVENT, deliberately. For the
+            # funnel sites it goes through ``_emit_analytics_off_loop`` → the
+            # telemetry pool, so a fresh TCP+TLS handshake costs a telemetry
+            # WORKER SLOT, never an event-loop stall — it is not the defect this
+            # issue names. (The capture-cost lane reaches this helper on the
+            # loop's shared default executor instead; either way, off-loop.)
+            # Reusing a pooled client is a throughput optimisation for those
+            # pools and needs its own measurement plus a lifecycle it does not
+            # have today (lazy construction gated on ``configured``, because
+            # this sink must keep serving a HALF-CONFIGURED env and degrade to
+            # the JSONL — the #3677/#3820 contract); tracked as #4462.
             with httpx.Client(timeout=_ANALYTICS_POST_TIMEOUT_S) as client:
                 resp = client.post(
                     f"{url}/rest/v1/analytics_events",
@@ -22279,6 +22289,61 @@ def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
     }
 
 
+async def _emit_analytics_off_loop(org_id: str, event_name: str,
+                                   properties: dict | None = None) -> None:
+    """#4015: the shared off-loop entry point for a hosted funnel-event emit.
+
+    It is the one entry point for the sites that #4352 routed through
+    ``_cp_offload``; the capture-cost lane (``_emit_capture_ledger``) keeps its
+    own ``asyncio.to_thread`` path — still off-loop, but on the loop's SHARED
+    default executor, which the abuse hooks and the selfhost readiness probe
+    also use, so it is not isolated the way this pool is — and ``mcp_server``
+    its own retained emitter. Moving the capture lane onto this pool is #4468.
+
+    ``_track_analytics_event`` is a synchronous ``httpx.Client`` POST and
+    ``hosted_api`` runs a SINGLE uvicorn worker, so calling it inline from an
+    ``async def`` handler stalls EVERY concurrent request for the duration of a
+    Supabase round-trip (the #2988 / #3498 class). This routes it through the
+    #3498 offload seam (``run_control_plane_call``, via ``_cp_offload``) on the
+    dedicated ``telemetry`` pool: the auth-critical ``auth`` pool can never be
+    parked by an analytics burst, and the event loop is never occupied.
+
+    ``best_effort=True`` bounds FAILURE, not LATENCY — this emit is AWAITED,
+    so a saturated telemetry pool can add up to the seam's
+    ``CONTROL_PLANE_OFFLOAD_TIMEOUT_S`` (10 s) to ONE request before it returns
+    (the bound is per call; a request that emits at several sites pays it per
+    site). The emit is not fire-and-forget because the #3821 strict-mode
+    escape below must be able to propagate, and a detached dispatch cannot
+    carry it. The wait bound swallows an OFFLOAD failure — a missed bound or a
+    saturated telemetry backlog — because telemetry must never gate the request
+    path with an ERROR.
+
+    The bound is deliberately BELOW the wrapped call's own worst case, which
+    inverts the seam's usual "outer bound above inner bound" rule and is an
+    accepted exception here: ``_ANALYTICS_POST_TIMEOUT_S`` is an httpx
+    PER-PHASE timeout, so one POST can hold its worker for ~3x that. A
+    `wait_for` expiry abandons the await, never the daemon thread (CPython
+    #87185), so under sustained slow emits a worker keeps running for the
+    remainder while the caller has already moved on. The trade is explicit:
+    bounding the WORKER instead would make a slow-but-healthy telemetry sink
+    gate a user request for longer than the seam's own budget allows.
+
+    The ONE exception that still escapes is the #3821 strict-mode
+    ``UnregisteredTelemetryKey``: that guard exists precisely so a misregistered
+    prop cannot be silently swallowed, and the onboarding wrapper
+    (``_track_onboarding_event``) depends on the escape.
+
+    A caller whose failure path is UNRECOVERABLE guards the call itself: the
+    Stripe webhook fires the billing notification FIRST and wraps this emit,
+    because a raise there would land in its ``except Exception`` → a 500 AFTER
+    the event was claimed, and the retry sees ``is_first=False`` — see
+    ``webhooks_stripe``.
+    """
+    await _cp_offload(
+        lambda: _track_analytics_event(org_id, event_name, properties),
+        op="analytics_event", best_effort=True)
+
+
 async def _track_onboarding_event(org: dict, event_name: str, **props) -> None:
     """Convenience: track with the current org, swallowing errors.
 
@@ -22288,16 +22353,14 @@ async def _track_onboarding_event(org: dict, event_name: str, **props) -> None:
     Everything else is still swallowed (analytics must never break the
     onboarding flow).
 
-    #3498: async because the write it wraps is a blocking PostgREST call —
-    ``_track_analytics_event`` builds a fresh ``httpx.Client(timeout=5)`` per
+    #3498/#4015: async because the write it wraps is a blocking PostgREST call
+    — ``_track_analytics_event`` builds a fresh ``httpx.Client(timeout=5)`` per
     event, which used to run ON the event loop from every async caller. The
-    strict-mode ``UnregisteredTelemetryKey`` still escapes (it is raised in the
-    worker thread and re-raised through ``await``)."""
+    emit goes through the shared off-loop entry point; the strict-mode
+    ``UnregisteredTelemetryKey`` still escapes (it is raised in the worker
+    thread and re-raised through ``await``)."""
     try:
-        await _cp_offload(
-            lambda: _track_analytics_event(
-                org["org_id"], event_name, props or None),
-            op="analytics_event", best_effort=True)
+        await _emit_analytics_off_loop(org["org_id"], event_name, props or None)
     except UnregisteredTelemetryKey:
         raise
     except Exception:
@@ -22507,11 +22570,9 @@ async def github_callback(code: str | None = None, state: str | None = None,
     welcome_url = f"{email_link_base()}/welcome.html"
 
     if error:
-        await _cp_offload(
-            lambda: _track_analytics_event(
-                "", "onboarding_error",
-                {"step": "github_connect", "error_type": "oauth_denied"}),
-            op="analytics_event", best_effort=True)
+        await _emit_analytics_off_loop(
+            "", "onboarding_error",
+            {"step": "github_connect", "error_type": "oauth_denied"})
         return RedirectResponse(f"{welcome_url}?github=denied", status_code=302)
 
     # Validate state — 404 on missing/invalid (don't leak existence)
@@ -22586,11 +22647,9 @@ async def github_callback(code: str | None = None, state: str | None = None,
         import asyncio as _asyncio
         _asyncio.get_event_loop().create_task(
             _run_indexing(job_id, org_id, org, None))
-    await _cp_offload(
-        lambda: _track_analytics_event(
-            org_id, "question_answered",
-            {"question_id": "github_connect", "answer": "yes"}),
-        op="analytics_event", best_effort=True)
+    await _emit_analytics_off_loop(
+        org_id, "question_answered",
+        {"question_id": "github_connect", "answer": "yes"})
     return RedirectResponse(f"{welcome_url}?github=connected", status_code=302)
 
 
@@ -26222,11 +26281,22 @@ async def webhooks_stripe(request: Request):
             org_tier,
             webhook_event_marker,
         )
+        # #4015: the tier is a READ, so it is taken BEFORE the claim in both
+        # branches. The claim is what makes every ``is_first``-gated side
+        # effect fire AT MOST ONCE — a retry after a claim sees
+        # ``is_first=False`` forever — so an abort between the claim and the
+        # notification (a tier-read failure included) drops the notification
+        # PERMANENTLY. Read first: a failure leaves the event unclaimed and
+        # Stripe's retry reprocesses it.
         if is_supabase_enabled():
             cp = get_control_plane()
-            is_first = webhook_event_marker(cp, event_id, etype)
             tier = org_tier(cp, org_id)
+            is_first = webhook_event_marker(cp, event_id, etype)
         else:
+            tier_rows = sdk._get_registry().query(
+                "MATCH (t:Team {id:$id}) RETURN t.tier", params={"id": org_id}
+            ).result_set
+            tier = tier_rows[0][0] if tier_rows else None
             seen_rows = sdk._get_registry().query(
                 "MATCH (w:WebhookEvent {event_id:$id}) RETURN w.first_seen",
                 params={"id": event_id},
@@ -26237,25 +26307,41 @@ async def webhooks_stripe(request: Request):
                     "CREATE (w:WebhookEvent {event_id:$id, first_seen:$now, type:$type})",
                     params={"id": event_id, "now": _now_iso(), "type": etype},
                 )
-            tier_rows = sdk._get_registry().query(
-                "MATCH (t:Team {id:$id}) RETURN t.tier", params={"id": org_id}
-            ).result_set
-            tier = tier_rows[0][0] if tier_rows else None
         if is_first and notify_kind:
-            # Audit + analytics + notifications — first processing only.
-            await _async_audit(
-                request, org_id, notify_kind,
-                resource_type="team", resource_id=org_id,
-            )
-            await _cp_offload(
-                lambda: _track_analytics_event(org_id, notify_kind, {
-                    "plan": tier, "tier": tier, "status": etype,
-                }),
-                op="analytics_event", best_effort=True)
+            # #4015: the billing NOTIFICATION is the first side effect after
+            # the claim, because it is the unrecoverable one: once claimed, a
+            # re-delivery can never re-fire it, and everything downstream of
+            # this line is best-effort. ``notify_billing_event`` is documented
+            # never-raise (tortoise/notify.py), so it cannot abort itself; the
+            # audit and telemetry legs — either of which could otherwise 500
+            # the webhook AND strand the notification — follow it. (#4352 had
+            # already moved the analytics POST behind ``_cp_offload``; what
+            # this change adds here is the notify-first order and the guards.)
             notify_billing_event(
                 notify_kind, {"org_id": org_id, "tier": tier},
                 {"subscription_status": etype},
             )
+            try:
+                await _async_audit(
+                    request, org_id, notify_kind,
+                    resource_type="team", resource_id=org_id,
+                )
+            except Exception as exc:  # noqa: BLE001, RUF100 — never 500 a webhook
+                _logger.warning("webhook: audit failed (non-fatal): %s",
+                                _safe_log(exc))
+            # The emit's own FAIL-SOFT guard, on top of the offload's
+            # best-effort contract: ``_emit_analytics_off_loop`` still
+            # re-raises the #3821 strict-mode registration guard (dev/CI only)
+            # because the onboarding lane relies on that escape, and a raise
+            # here would 500 a delivery whose notification is already spent.
+            try:
+                await _emit_analytics_off_loop(org_id, notify_kind, {
+                    "plan": tier, "tier": tier, "status": etype,
+                })
+            except Exception as exc:  # noqa: BLE001, RUF100 — never 500 a webhook
+                _logger.warning(
+                    "webhook: analytics emit failed (non-fatal): %s",
+                    _safe_log(exc))
         return JSONResponse(status_code=200, content={"detail": "processed"})
     except Exception as e:
         _logger.error("webhook: processing failed (%s)", _safe_log(e))
