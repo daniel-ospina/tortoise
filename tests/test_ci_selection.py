@@ -1116,11 +1116,12 @@ def test_duration_integrity():
     bad2 = dict(m)
     bad2["durations"] = {"not_a_real_file.py": 10.0}
     assert duration_issues(bad2) != []
-    # an unclassified key fails even when it also looks like a lane file
-    bad3 = dict(m)
-    bad3["slow_files"] = ["not_a_real_slow_file.py"]
-    bad3["durations"] = {"not_a_real_slow_file.py": 10.0}
-    assert duration_issues(bad3) != []
+    # NOTE (code-review, PR #4728): do NOT add a case here that lists an
+    # unclassified key in `slow_files` too. `duration_issues` no longer reads
+    # `slow_files` at all, so such a case is byte-identical to `bad2` above and
+    # its assertion cannot fail for the reason its comment would claim. The
+    # lane-membership question is pinned by `slow_file_issues` (which DOES read
+    # `slow_files`), not here.
 
 
 # ── #3400: duration-balanced full-matrix halves + durations coverage ──────

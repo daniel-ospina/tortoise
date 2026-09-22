@@ -148,14 +148,23 @@ SHARED_MODULES = (
     # core, so a change to the entry point still runs the full matrix.
     #
     # The SUBMODULES are deliberately NOT listed here:
-    #   * `entities.py`, `grounding.py`, `propagation.py` — no consumer outside
-    #     the package (direct importers of `entities.py` are the core-owned
-    #     tests/test_projection.py and test_capture_entity_attachment_3664.py;
-    #     `grounding.py` and `propagation.py` are imported only by the package's
-    #     own `__init__`). They fall through select()'s `tortoise/` branch to the
-    #     `core` surface, which is the surface that owns the test_projection*.py
-    #     pins — so an `entities.py` change no longer costs the full matrix and
-    #     still runs everything that constrains it.
+    #   * `entities.py`, `grounding.py`, `propagation.py` — no DIRECT consumer
+    #     outside the package: their only importers are the package's own
+    #     `__init__` (grounding/propagation) plus the core-owned
+    #     tests/test_projection.py and test_capture_entity_attachment_3664.py
+    #     (entities). They fall through select()'s `tortoise/` branch to `core`,
+    #     the surface that owns the test_projection*.py pins, so an
+    #     `entities.py` change selects 304 files instead of the full matrix.
+    #     ⚠️ This IS a deliberate coverage REDUCTION and should be read as one:
+    #     these modules are composed into this package's `__init__`, which sdk
+    #     and api consume, so a submodule regression is caught here only by the
+    #     `core` pins — the sdk/api suites (test_sdk.py, test_hosted_api.py) wait
+    #     for the next main push, not the PR. #4713's brief accepted exactly this
+    #     trade, and its acceptance criterion ("a change to entities.py no longer
+    #     selects the full matrix, and the surfaces that genuinely consume
+    #     projection still select test_projection*.py") is met. If the sdk/api
+    #     suites should also run, mirror the `edges.py` treatment below for these
+    #     three — that is a separate decision, not a bug in this one.
     #   * `edges.py` — has ONE named source consumer,
     #     `tortoise/sdk.py` (DERIVABLE_STRUCTURAL_RELS, STRUCTURAL_REL_LABELS,
     #     stub_key, _VALID_EDGE_PREDICATES). It is wired to the `sdk` surface via
@@ -171,9 +180,12 @@ SHARED_MODULES = (
     # onboarding (test_abuse.py, test_action_endpoints_dual_auth.py,
     # test_agent_signup_idempotency.py, tests/e2e/hosted/test_03_billing_upgrade.py).
     "tests/fake_control_plane.py",
-    # The dependency set: an edit can change what EVERY surface installs at test
-    # time (and `pip install -e .` resolves it for every lane).
+    # `pyproject.toml` is the dependency source of truth (consumed by every
+    # lane's `pip install -e .` / `uv sync` step), so an edit changes what every
+    # surface installs at test time.
     "pyproject.toml",
+    # `requirements.txt` is the pinned mirror of the same dependency set, read by
+    # the same install steps — surface-independent for the same reason.
     "requirements.txt",
     # CI topology: an edit changes which suites and lanes run at all — no
     # surface-local change of any file can express that.
@@ -1437,13 +1449,23 @@ def duration_issues(manifest: dict) -> list[str]:
     for name in durations:
         # #4712: the map used to be fast-gate-ONLY — a `slow_files` key was
         # rejected outright ("must be fast-gate", #1473) because the original
-        # consumer was the fast pool's LPT pack. The two lanes that exist
-        # BECAUSE they are expensive therefore carried no cost data at all,
-        # which is how the repo's heaviest file (eval/retrieval/
-        # test_integration.py — 855.2s declared, 1297.9s measured) sat unnoticed
-        # inside the FAST lane (#4711). #4712 supersedes that restriction: the
-        # map is now the suite's per-file cost table and slow/carve keys are
+        # consumer was the fast pool's LPT pack. So the two lanes that exist
+        # BECAUSE they are expensive carried no cost data at all, and nothing
+        # could see either of them regressing. #4712 supersedes that restriction:
+        # the map is now the suite's per-file cost table and slow/carve keys are
         # admitted.
+        #
+        # Scope note (do not over-read this): a FAST file's weight was already
+        # visible before #4712 — including the heaviest file in the repo,
+        # eval/retrieval/test_integration.py, which sat in `fast_pool` with its
+        # own 855.2s entry. #4711's defect was that file's CLASSIFICATION (absent
+        # from `slow_files`), not a missing weight, and #4712 does not by itself
+        # prevent a repeat. Nor is a lane key read by anything yet: every
+        # consumer of this map (`split_fast_gate`, `duration_coverage_issues`)
+        # iterates `fast_pool()` explicitly, and the #1266 balance check is fed
+        # the DERIVED fast halves (`workflow_matrix_issues` is empty here, so
+        # `parse_matrix_halves` never runs). Giving the lane keys a reader — a
+        # slow-leg balance/staleness gate — is #4724.
         #
         # OVERRIDES: #1473's "a durations key must not be a slow file" — the
         # lanes whose whole reason for existing is cost now carry their

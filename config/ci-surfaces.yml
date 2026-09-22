@@ -1421,6 +1421,14 @@ durations:
 # duration_coverage_issues() floors coverage at 90% (#3400).
 # Regenerate from tools/ci_timing.py / the run's junit artifacts.
 #
+# #4712: PROVENANCE IS NOW TWO RUNS. Everything down to the `#4711/#4712`
+# block below is the original run above (34725816431) and covers the FAST pool;
+# the keys appended at the END of this map come from run 35735193291
+# (head 26207c42) and cover the slow_files / carve_out lanes. The original
+# header line above ("the fast-file pool of that run") therefore describes only
+# the first group — the map is no longer fast-only, and no gate reads a lane key
+# yet (see #4724).
+#
 # #4221: the six `test_shared_state_*.py` files (moved out of
 # tortoise/shared_state/tests/, where no CI lane collected them) enter the fast
 # pool for the first time here. They have NO CI junit measurement — a file that
@@ -2136,13 +2144,20 @@ durations:
   test_backups_v1_alias.py: 0.01
 # #4711/#4712: the two lanes that exist BECAUSE they are expensive carried no
 # weights at all (0/33 slow_files and 3/30 carve_out before this block), so
-# none of the consumers above could see the files most likely to dominate a
-# run. Measured from the junit.xml artifacts of main run 35735193291
+# nothing could see either lane's cost or catch one of them regressing. (Scope
+# note: the heaviest FAST file was already visible in this map before #4711 —
+# that defect was its classification, not a missing weight. And no gate READS
+# these lane keys yet; see the duration_issues scope note and #4724.)
+# Measured from the junit.xml artifacts of main run 35735193291
 # (head 26207c42) — the newest green push at the time of writing. Each value
 # is the sum of that file's testcase `time` attributes (so per-test teardown
 # is included); keys are `tests/`-relative, matching the map above.
 # `slow_files` runs in the 2-leg test-slow job, `carve_out` in the single
 # URI-unset test-carve-out job (#1647). NOT hand-timed: see #4712.
+# ⚠️ `eval/retrieval/test_integration.py` is NOT in this block: it keeps its
+# pre-#4711 entry of 855.2 further up the map, although that same run measured
+# it at 1297.9s in the fast lane. The stale value is refreshed with the re-pack
+# in #4724 (left as-is here deliberately, per #4711).
   bench/test_smoke_embedded.py: 30.7
   test_about_edges.py: 8.3
   test_backfill_sources.py: 1.0

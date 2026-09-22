@@ -867,13 +867,17 @@ jobs:
     # (2026-09-22): leg a = 252.9s (4.2m), leg b = 87.3s (1.5m) — the halves had
     # drifted far from the 2026-08-19 balance, and leg a's weight is one file
     # (test_hosted_api.py, 114.6s). #4711 then moves the repo's heaviest file
-    # here: eval/retrieval/test_integration.py (855.2s declared) is placed on
-    # the LIGHTER leg b, so the new split is a ≈ 252.9s / b ≈ 942.5s. That is
-    # deliberately NOT a further rebalance: the new file exceeds half the slow
-    # pool's total weight, so no 2-way split can bring the legs within the
-    # 1.25x ratio — the minimum achievable max-leg is the file itself on its own
-    # leg (855.2s), and b is within 87s of that. Both legs stay far under the
-    # 75m pytest watchdog / 90m job cap. Rebalancing the remaining 26 files (a
+    # here: eval/retrieval/test_integration.py is placed on the LIGHTER leg b.
+    # Two measures of that file are in play and neither changes the conclusion:
+    # its DECLARED weight is 855.2s (what the map holds, so the new split is
+    # a ≈ 252.9s / b ≈ 942.5s), while the same run's junit measured it at
+    # 1297.9s (b ≈ 1385s, 23.1m) — refreshing that stale entry is #4724. Either
+    # way the move is deliberately NOT a further rebalance: the file outweighs
+    # half the slow pool, so no 2-way split can bring the legs within the 1.25x
+    # ratio — the minimum achievable max-leg is the file alone on its own leg
+    # (855.2s declared / 1297.9s measured), and b is within 87s of the declared
+    # optimum. All four figures stay far under the 75m pytest watchdog / 90m job
+    # cap. Rebalancing the remaining 26 files (a
     # and b were already 2.9x apart BEFORE this move — 252.9s vs 87.3s, against
     # the 2026-08-19 comment above) is filed as #4724 rather than folded in here.
     # Each leg keeps the 75m watchdog + 5-min heartbeat + guaranteed-summary
