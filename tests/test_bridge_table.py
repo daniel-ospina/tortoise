@@ -712,3 +712,470 @@ def test_retired_rows_lead_to_their_replacement_destination() -> None:
             f"{r['use_instead']} leads to {DESTINATION[r['use_instead']]!r} — the "
             f"retirement warning and the bridge table disagree about one journey"
         )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# THE DESTINATION CITATIONS (#4282, defect class of PR #4477)
+#
+# The `Destination` column's evidence is the beta doc's own disposition row. A read
+# that stops at the clause AGREEING with the row drops the clause that contradicts
+# it — and because a truncated prefix of a real sentence is still a real substring,
+# a bare `quote in text` test cannot see the difference. `_maximal` is the fix, and
+# the tests below derive the boundary rule THEMSELVES: `tools.bridge_table._maximal`
+# is the implementation under test, so importing it would move both sides of the
+# assertion together.
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _part_d_citations() -> dict[str, str]:
+    """`tool -> its rendered maximal citation`, read out of the generated document."""
+    doc = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
+    assert "## Part D" in doc, (
+        "the generated doc has no Part D — the citation corpus is unreachable, so a "
+        "truncated citation is invisible to every reader"
+    )
+    d1 = doc.split("#### D1")[1].split("#### D2")[0]
+    # The documented-hop block uses the same bullet+quote shape, so cut it off first.
+    d1 = d1.split("**Documented hops.**")[0]
+    rows = re.findall(r"^- `([^`]+)` · rows (.+)$", d1, re.M)
+    quotes = re.findall(r"^  > (.+)$", d1, re.M)
+    assert rows, "Part D1 rendered no citation rows — the citation guard is unarmed"
+    # A rendered row with no quote (or vice versa) would silently shift the zip below.
+    assert len(quotes) == len(rows), (
+        f"Part D1 has {len(rows)} citation rows but {len(quotes)} quotes"
+    )
+    out: dict[str, str] = {}
+    for (docname, toollist), quote in zip(rows, quotes, strict=True):
+        assert docname in ("beta-sdk-surface.md",), f"unexpected citation doc {docname!r}"
+        for t in re.findall(r"`([a-z_][a-z0-9_]*)`", toollist):
+            assert t not in out, f"{t} is cited twice in Part D1"
+            out[t] = quote
+    return out
+
+
+def _is_maximal(quote: str, text: str) -> bool:
+    """The maximality rule, re-derived — a quote must end at a region boundary.
+
+    Boundaries: a cell/row `|`, a line end, the document end, or a sentence end. A quote
+    stopping mid-clause is a right-truncation, and the cut is where a contradiction hides.
+    """
+    idx = text.find(quote)
+    assert idx >= 0, f"citation is not in its doc at all: {quote[:60]!r}"
+    after = text[idx + len(quote):]
+    if after == "" or after.startswith("\n") or quote.endswith("|"):
+        return True
+    return re.search(r"[.!?][\"')\]\u201d`*_]*$", quote) is not None
+
+
+def _section(doc: str, heading: str) -> str:
+    """The body of `heading`, up to the next heading of the same-or-higher level."""
+    assert heading in doc, f"the generated doc has no {heading!r} section"
+    return re.split(r"\n#{2,4} ", doc.split(heading)[1])[0]
+
+
+def _cited_findings() -> tuple[set[str], set[str], set[str]]:
+    """(unsupported, clause-only, ambiguous) from the RENDERED doc — the oracle subject."""
+    doc = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
+    d2 = _section(doc, "#### D2 —")
+    d2b = _section(doc, "#### D2b —")
+    d3 = _section(doc, "#### D3 —")
+    unsupported = set(re.findall(r"^- \*\*`([a-z_][a-z0-9_]*)`\*\*", d2, re.M))
+    clause_only = set(re.findall(r"^- \*\*`([a-z_][a-z0-9_]*)`\*\*", d2b, re.M))
+    ambiguous = set(re.findall(r"^\| `([a-z_][a-z0-9_]*)` \|", d3, re.M))
+    return unsupported, clause_only, ambiguous
+
+
+def test_rendered_citations_are_present_and_maximal() -> None:
+    """Every citation in the rendered doc must reach a region boundary, in its own doc.
+
+    The end-to-end half of the rule: a generator that starts emitting a citation cut at
+    the clause that agrees with its row would render a document that *looks* sourced here.
+    """
+    beta = (ROOT / "docs" / "product" / "beta-sdk-surface.md").read_text(encoding="utf-8")
+    cites = _part_d_citations()
+    # Non-vacuity: a corpus that shrank to nothing cannot fail the loop below.
+    assert len(cites) >= 20, (
+        f"only {len(cites)} citations rendered — the corpus shrank, and an empty or tiny "
+        "corpus makes every maximality assertion below vacuous"
+    )
+    bad = [f"{t}: {q[:90]!r}" for t, q in cites.items() if not _is_maximal(q, beta)]
+    assert not bad, (
+        "these rendered citations stop mid-clause, so a clause is being hidden from the "
+        "reader — and the dropped clause is where a contradiction lives:\n  "
+        + "\n  ".join(bad)
+    )
+
+
+def test_a_truncated_citation_is_rejected_by_the_build(monkeypatch) -> None:
+    """The guard must RED on a truncated citation, and must not write the doc.
+
+    The fixture is the named failure mode itself: the `get_source_reliability` row cut at
+    the `;` that introduces `reads via \\`list_sources\\`` — the clause that decides the
+    row's destination. The cut is a real substring of the doc, so `quote in text` accepts
+    it; `_maximal` must not.
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    beta = (ROOT / "docs" / "product" / "beta-sdk-surface.md").read_text(encoding="utf-8")
+    full = _part_d_citations()["tortoise_get_source_reliability"]
+    cut = full[: full.index(";")]
+    assert cut != full, "the truncation fixture is no longer truncating anything"
+    assert cut in beta, "the truncated fixture is no longer a substring of the doc"
+    assert not _is_maximal(cut, beta), (
+        "the independent boundary oracle accepts the truncated fixture — the fixture "
+        "no longer demonstrates a mid-clause cut"
+    )
+
+    # 1. The predicate. `tortoise_get_source_reliability` is exactly the row that needs
+    #    this clause: without it the row reads as supported by `manage_source_trust`.
+    assert not bt._maximal(cut, beta), "`_maximal` accepted a mid-clause truncation"
+    assert bt._maximal(full, beta), "`_maximal` rejected its own maximal citation"
+
+    # 2. The wired path — the guard must fail the BUILD, not merely exist.
+    before = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
+    bad = {"tortoise_get_source_reliability": {"doc": "beta-sdk-surface.md", "quote": cut}}
+    errs = bt._citation_errors(bad)
+    assert any("TRUNCATED CITATION" in e for e in errs), (
+        f"`_citation_errors` did not flag the truncation: {errs}"
+    )
+    monkeypatch.setattr(bt, "_doc_citations", lambda: bad)
+    monkeypatch.setattr(sys, "argv", ["bridge_table.py"])
+    assert bt.main() == 1, "the generator's main() did not fail the build on a truncated citation"
+    after = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
+    assert after == before, "the generator WROTE the document despite a truncated citation"
+    # A guard that resolves nothing cannot fail. Assert the armed case is non-empty too.
+    assert bt._doc_citations(), "the citation guard resolved no citations at all"
+
+
+# The destination-anchor rule, re-derived in the test — deliberately NOT imported from
+# `tools.bridge_table`. A target named after the arrow is a destination only when the text
+# before it is the arrow itself, a clause separator, or a destination preposition. A name
+# mid-sentence ("the batch form of `mine_knowledge_from_session`", "— `explore_connections`
+# answers that question") is a comparison or an aside, not an alternative destination.
+_DEST_LEAD = re.compile(r"(?:→|[;,]+\s*|\b(?:on|via|to|into|toward|towards)\s+)\**\s*$")
+_FOLDS_LITERAL = {"list_sources": "list_knowledge"}
+
+
+def _recompute_citation_rows() -> dict[str, dict]:
+    """tool -> {dest, named, prefix, quote}, from the RENDERED corpus plus the map.
+
+    The generator's `_citation_findings` is not imported, so a mangled rendered cell or a
+    map edit that erases a finding cannot move both sides of an assertion together.
+    """
+    sys.path.insert(0, str(ROOT))
+    from tools.bridge_table import DESTINATION
+
+    folds = dict(_FOLDS_LITERAL)
+    keep = {d.split(":", 1)[-1] for d in DESTINATION.values()} | set(folds)
+
+    def resolve(names: list[str]) -> list[str]:
+        out: list[str] = []
+        for n in names:
+            r = folds.get(n, n)
+            if r not in out:
+                out.append(r)
+        return out
+
+    def targets(quote: str, first_clause: bool) -> list[str]:
+        segs = quote.split("→")[1:]
+        if first_clause:
+            segs = [re.split(r"[;.]", segs[0], maxsplit=1)[0]] if segs else []
+        names: list[str] = []
+        for s in segs:
+            for m in re.finditer(r"`([A-Za-z_][A-Za-z0-9_]*)\s*(?:\([^`]*\))?`", s):
+                if m.group(1) not in keep:
+                    continue
+                before = s[: m.start()]
+                if before.strip() == "" or _DEST_LEAD.search(before):
+                    names.append(m.group(1))
+        return names
+
+    out: dict[str, dict] = {}
+    for tool, quote in _part_d_citations().items():
+        out[tool] = {
+            "tool": tool,
+            "quote": quote,
+            "dest": DESTINATION[tool],
+            "named": resolve(targets(quote, first_clause=False)),
+            "prefix": resolve(targets(quote, first_clause=True)),
+        }
+    return out
+
+
+def _recompute_citation_sets(
+    rows: dict[str, dict],
+) -> tuple[set[str], set[str], set[str]]:
+    unsupported: set[str] = set()
+    clause_only: set[str] = set()
+    ambiguous: set[str] = set()
+    for tool, r in rows.items():
+        if r["dest"] not in r["named"]:
+            unsupported.add(tool)
+        elif r["dest"] not in r["prefix"]:
+            clause_only.add(tool)
+        if len(r["named"]) > 1:
+            ambiguous.add(tool)
+    return unsupported, clause_only, ambiguous
+
+
+def test_part_d_findings_match_an_independent_recomputation() -> None:
+    """D2 / D2b / D3 must list exactly what the citations and the map imply.
+
+    Recomputed here from the RENDERED corpus plus the map — the generator's own
+    `_citation_findings` is not imported — so emptying any of those sections reds this
+    test instead of passing as "nothing to report".
+
+    The membership sets are pinned as LITERALS (P2-1). A map edit that makes a finding
+    agree with the doc — `tortoise_invalidate` re-pointed at `update_knowledge` — drops D2
+    4->3, and the rendered set and the recomputed set moved TOGETHER, so only a literal pin
+    can see it.
+    """
+    rows = _recompute_citation_rows()
+    unsupported, clause_only, ambiguous = _recompute_citation_sets(rows)
+
+    # Non-vacuity, and the named failure mode this rule exists to produce: the clause-only
+    # row must be present, so a rule that reports "nothing" is a broken rule.
+    assert clause_only == {"tortoise_get_source_reliability"}, (
+        "expected exactly the `get_source_reliability` row to be supported only beyond its "
+        f"citation's first clause; computed {sorted(clause_only)}"
+    )
+    assert unsupported, "no citation disagrees with its row — the audit found nothing"
+    assert unsupported == {
+        "tortoise_invalidate", "tortoise_paginated_query",
+        "tortoise_query", "tortoise_query_points_by_tag",
+    }, f"D2 membership changed: {sorted(unsupported)}"
+    # The destination-anchor rule removed the three prose false positives; a regression to
+    # scanning the whole post-arrow segment re-adds them here.
+    assert ambiguous == {
+        "tortoise_annotate_operator", "tortoise_assess_source", "tortoise_belief_timeline",
+        "tortoise_get_source_reliability", "tortoise_mitigate_operator",
+        "tortoise_operator_action", "tortoise_provenance", "tortoise_session_context",
+        "tortoise_set_source_tier",
+    }, f"D3 membership changed: {sorted(ambiguous)}"
+
+    got = _cited_findings()
+    for label, want, have in (
+        ("D2 (disagree)", unsupported, got[0]),
+        ("D2b (clause-only)", clause_only, got[1]),
+        ("D3 (ambiguous)", ambiguous, got[2]),
+    ):
+        assert have == want, (
+            f"{label} does not list what the citations imply.\n"
+            f"  listed but not implied: {sorted(have - want)}\n"
+            f"  implied but not listed: {sorted(want - have)}"
+        )
+
+
+def test_part_d_rendered_cells_are_pinned_to_the_recomputation() -> None:
+    r"""Every Part D cell and every Part D count is compared to a recomputation (P1).
+
+    Pinning only membership left the rendered prose free. Each mutation below changed the
+    document, left `--check` green, and left the suite at 16 passed:
+
+    * D2 could say `map says \`search_knowledge\`` for a row whose map says
+      `supersede_knowledge`, contradicting Part B two screens up (whose Destination IS
+      pinned);
+    * D2b could SWAP "the first clause names X, the full citation names Y", contradicting
+      the D1 quote rendered directly above it;
+    * D3's `Destination (map)` / `Citation names` / `First clause names` columns could be
+      wrong on every row;
+    * the D1 headline count could be typed as `25 citations` while D1 lists 19 groups.
+
+    This compares each rendered cell — and each rendered count — to a value recomputed from
+    the rendered corpus plus the map.
+    """
+    rows = _recompute_citation_rows()
+    unsupported, clause_only, ambiguous = _recompute_citation_sets(rows)
+    cites = _part_d_citations()
+    doc = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
+
+    def name_list(cell: str) -> list[str]:
+        return [f"`{n}`" for n in re.findall(r"`([a-z_][a-z0-9_]*)`", cell)]
+
+    # ── D2 rows: dest + named + the rendered quote ─────────────────
+    d2 = _section(doc, "#### D2 —")
+    parsed_d2: dict[str, dict] = {}
+    for m in re.finditer(
+        r"^- \*\*`([a-z_][a-z0-9_]*)`\*\* — map says `([^`]+)`; citation names ([^\n]+)\n"
+        r"  > ([^\n]+)$",
+        d2, re.M,
+    ):
+        tool = m.group(1)
+        assert tool not in parsed_d2, f"{tool} rendered twice in D2"
+        parsed_d2[tool] = {
+            "dest": m.group(2),
+            "named": name_list(m.group(3)),
+            "quote": m.group(4),
+        }
+    assert "**D2 is a LOWER BOUND" in d2, (
+        "D2's lower-bound caveat is missing — the section then reads EXHAUSTIVE, when its "
+        "predicate cannot decide clause attribution (the `tortoise_assess_source` reading)"
+    )
+    assert set(parsed_d2) == unsupported, (
+        f"D2 rendered {sorted(parsed_d2)} but the recomputation says {sorted(unsupported)}"
+    )
+    for tool, cell in parsed_d2.items():
+        want = rows[tool]
+        assert cell["dest"] == want["dest"], (
+            f"D2 says {tool}'s map destination is {cell['dest']!r}; the map says {want['dest']!r}"
+        )
+        assert cell["named"] == [f"`{n}`" for n in want["named"]], (
+            f"D2 says {tool}'s citation names {cell['named']}; recomputed {want['named']}"
+        )
+        assert cell["quote"] == want["quote"], (
+            f"D2 renders a different quote for {tool} than the corpus recomputation"
+        )
+
+    # ── D2b rows: clause attribution must not be swapped ───────────
+    d2b = _section(doc, "#### D2b —")
+    parsed_d2b: dict[str, dict] = {}
+    for m in re.finditer(
+        r"^- \*\*`([a-z_][a-z0-9_]*)`\*\* — map says `([^`]+)`; the first clause names "
+        r"([^\n]+?), the full citation names ([^\n]+)\n  > ([^\n]+)$",
+        d2b, re.M,
+    ):
+        tool = m.group(1)
+        parsed_d2b[tool] = {
+            "dest": m.group(2),
+            "prefix": name_list(m.group(3)),
+            "named": name_list(m.group(4)),
+            "quote": m.group(5),
+        }
+    assert set(parsed_d2b) == clause_only, (
+        f"D2b rendered {sorted(parsed_d2b)} but the recomputation says {sorted(clause_only)}"
+    )
+    for tool, cell in parsed_d2b.items():
+        want = rows[tool]
+        assert cell["dest"] == want["dest"]
+        # EXACT ORDER: this is precisely the clause-attribution claim, and swapping the two
+        # sides was green while the bullet contradicted the D1 quote directly above it.
+        assert cell["prefix"] == [f"`{n}`" for n in want["prefix"]], (
+            f"D2b says the first clause of {tool} names {cell['prefix']}; recomputed "
+            f"{want['prefix']} (swapped with the full citation?)"
+        )
+        assert cell["named"] == [f"`{n}`" for n in want["named"]], (
+            f"D2b says the full citation of {tool} names {cell['named']}; recomputed "
+            f"{want['named']}"
+        )
+        assert cell["quote"] == want["quote"]
+
+    # ── D3 rows: every column ──────────────────────────────────────
+    d3 = _section(doc, "#### D3 —")
+    parsed_d3: dict[str, dict] = {}
+    for m in re.finditer(
+        r"^\| `([a-z_][a-z0-9_]*)` \| `([^`]+)` \| ([^|]+)\| ([^|]+)\|$", d3, re.M
+    ):
+        parsed_d3[m.group(1)] = {
+            "dest": m.group(2),
+            "named": name_list(m.group(3)),
+            "prefix": name_list(m.group(4)),
+        }
+    assert set(parsed_d3) == ambiguous, (
+        f"D3 rendered {sorted(parsed_d3)} but the recomputation says {sorted(ambiguous)}"
+    )
+    for tool, cell in parsed_d3.items():
+        want = rows[tool]
+        assert cell["dest"] == want["dest"], (
+            f"D3 says {tool}'s map destination is {cell['dest']!r}; the map says {want['dest']!r}"
+        )
+        assert cell["named"] == [f"`{n}`" for n in want["named"]], (
+            f"D3 says {tool}'s citation names {cell['named']}; recomputed {want['named']}"
+        )
+        assert cell["prefix"] == [f"`{n}`" for n in want["prefix"]], (
+            f"D3 says {tool}'s first clause names {cell['prefix']}; recomputed {want['prefix']}"
+        )
+
+    # ── Derived citations are WHOLE rows by construction (P2-2) ────
+    beta = (ROOT / "docs" / "product" / "beta-sdk-surface.md").read_text(encoding="utf-8")
+    sys.path.insert(0, str(ROOT))
+    from tools.bridge_table import _registry_rows
+
+    method_of = {r["name"]: r["sdk_method"] for r in _registry_rows()}
+    for tool, q in cites.items():
+        # The citation ASSIGNED to a tool must name that tool's sdk_method. Without this a
+        # D1 grouping could hand tool A tool B's row (both maximal, both whole rows) and
+        # every maximality/set assertion above would still pass.
+        first_cell = q.strip().strip("|").split("|")[0]
+        cited_names = re.findall(r"`([a-z_][a-z0-9_]*)`", first_cell)
+        assert method_of.get(tool) in cited_names, (
+            f"D1 assigns {tool} a citation that does not name its sdk_method "
+            f"{method_of.get(tool)!r}: {first_cell.strip()[:80]!r}"
+        )
+        assert q.endswith("|"), f"{tool}'s citation does not end at a row boundary: {q[-40:]!r}"
+        assert f"\n{q}\n" in beta, (
+            f"{tool}'s citation is not a WHOLE line of beta-sdk-surface.md — it is a prefix or "
+            "a truncation, which is exactly what 'whole region by construction' must prevent"
+        )
+
+    # ── Every Part D count ─────────────────────────────────────────
+    n_registry = len(_registry_rows())
+    n_cited = len(cites)
+    n_groups = len(set(cites.values()))
+    m = re.search(
+        r"\*\*(\d+) citations cover (\d+) of the (\d+) registry rows\.\*\* The other \*\*(\d+)\*\*",
+        doc,
+    )
+    assert m, "D1's headline counts are missing or changed shape"
+    assert tuple(int(g) for g in m.groups()) == (
+        n_groups, n_cited, n_registry, n_registry - n_cited,
+    ), f"D1 headline is {m.groups()}, recomputed {(n_groups, n_cited, n_registry, n_registry - n_cited)}"
+
+    m = re.search(
+        r"\*\*(\d+) rows disagree with their own citation;\s*(\d+) are supported only\s*"
+        r"beyond the first clause;\s*(\d+) sit under an ambiguous citation\.\*\*",
+        doc,
+    )
+    assert m, "the Part D summary counts are missing or changed shape"
+    assert tuple(int(g) for g in m.groups()) == (
+        len(unsupported), len(clause_only), len(ambiguous),
+    ), f"Part D summary is {m.groups()}"
+
+
+def test_the_named_failure_mode_is_visible_in_the_document() -> None:
+    """The clause that decides `get_source_reliability` must be RENDERED, not summarised.
+
+    This is the whole point of quoting maximally: the row's destination (`list_knowledge`)
+    is reachable only through `; reads via \\`list_sources\\``. If the document shows only
+    the clause that agrees, a reader cannot audit the row at all — so pin the continuation
+    and the hop that resolves it.
+    """
+    doc = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
+    assert "; reads via `list_sources`." in doc, (
+        "the citation for the source-trust family is truncated in the document: the clause "
+        "that decides `get_source_reliability`'s destination is missing"
+    )
+    assert "folds into **row 4 `list_knowledge(kind='source')`**" in doc, (
+        "the documented hop from `list_sources` to `list_knowledge` is not rendered"
+    )
+
+
+def test_doc_citations_do_not_drop_a_shared_sdk_method(tmp_path, monkeypatch) -> None:
+    """A method declared by two registry tools must cite BOTH (latent drop, P2-5).
+
+    `tortoise_get_point` and `tortoise_get_operator` both declare `get_point`. Keying the
+    method->tool lookup by a plain dict kept only the LAST tool, so a disposition row naming
+    `get_point` would cite one tool and silently drop the other. No disposition row names
+    `get_point` TODAY, so the defect is latent — which is exactly why a synthetic row is the
+    only way to exercise the fix and keep it from regressing.
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    declared = sorted(r["name"] for r in bt._registry_rows() if r["sdk_method"] == "get_point")
+    assert len(declared) >= 2, f"expected >=2 registry tools declaring `get_point`, got {declared}"
+
+    synthetic = tmp_path / "beta.md"
+    synthetic.write_text(
+        "| names | count | dest |\n"
+        "|---|---|---|\n"
+        "| `get_point` | 1 | → `get_entity`. |\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bt, "BETA_DOC", synthetic)
+    cites = bt._doc_citations()
+    missing = [n for n in declared if n not in cites]
+    assert not missing, (
+        f"the shared `get_point` binding dropped {missing} from the citations — the "
+        "method->tool lookup is last-wins again"
+    )
