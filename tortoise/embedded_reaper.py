@@ -422,6 +422,33 @@ def _has_ownership_claim(dbdir_real: str,
     instrument cannot be established, or an absent dir with no live pid
     naming it, is refused.
 
+    RECONCILIATION with #4577's held-lock LIVENESS signal (main `845f47f53`):
+    `_owner_lock_held()` is deliberately NOT consulted here. The two
+    mechanisms answer different questions — #4577 asks "is an owner ALIVE?"
+    (a kernel fact), #3767 asks "is this dir OURS to reap?" (attribution) —
+    and a held lock is a liveness proof, not an admission claim:
+
+      * `record_owner` writes the record file BEFORE it takes the lock, and
+        `forget_owner` releases the lock BEFORE it unlinks the record, so the
+        lock's held-interval is strictly INSIDE the record file's lifetime: a
+        held lock implies a present record, and "held lock, no record" is a
+        state tortoise's own writer never produces. An arm admitting it would
+        admit precisely the state we cannot create ourselves — the most
+        suspicious one, not the most trustworthy (a same-uid foreign app that
+        plants `.tortoise-owners/.lock` and flocks it could satisfy it).
+      * Admission is PERMISSIVE in effect (it makes a dir a KILL candidate),
+        and a dir admitted on the lock arm would be unconditionally vetoed by
+        `reap()`'s ``_owner_lock_held(...) is True`` check — a held lock is
+        exactly what makes `reap()` skip. The arm could therefore never
+        produce a kill; it would only widen #3767's gate for zero reaping
+        gain, against requirement #4546 that the gate stay narrow.
+
+    So the lock is authorised where it belongs — at DESTRUCTION, not at
+    admission — and `_owner_record_dir_present` stays consistent with it by
+    ignoring dotted names, so the new `.lock` file cannot silently satisfy
+    this claim (pinned by `tests/test_reaper_ownership.py::
+    test_owner_lock_file_alone_is_not_an_ownership_claim`).
+
     NOTE (#3767): this decides ADMISSION only; it does NOT replace #4136's
     action-time `_dir_owned_by_euid` re-checks (`_kill_provenance_refusal`,
     `_cleanup_tempdir`, `_remove_stale_socket_dir` guard 5.5). A

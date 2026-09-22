@@ -519,3 +519,50 @@ def test_path_based_dir_missing_server_is_not_fast_killed(monkeypatch):
         acted = R.reap([dict(rec)], dry_run=False, only_safe=False)
         assert acted == []
         assert killed == [], "a path_based server must keep the gate"
+
+
+# ── #4577 × #3767: LIVENESS is not ADMISSION ────────────────────────────────
+
+def test_owner_lock_file_alone_is_not_an_ownership_claim(tmp_path):
+    """#4577 × #3767 reconciliation: a HELD owner lock is a LIVENESS signal,
+    not an admission claim.
+
+    `OWNER_LOCK_NAME` (main `845f47f53`, #4577) lives inside
+    `OWNERS_DIRNAME`, so the flock change dropped a new file into the very
+    directory #3767's claim reads. If the claim counted it, the lock would
+    SILENTLY widen the admission gate: a `.lock`-only `.tortoise-owners` dir
+    is a state tortoise's own writer never produces (`record_owner` writes the
+    record BEFORE the lock; `forget_owner` releases the lock BEFORE unlinking
+    the record), so admitting it would admit the fabricated-only case.
+
+    It need not be an admission claim: main's `reap()` already vetoes
+    `_owner_lock_held(...) is True` at DESTRUCTION, which is where a liveness
+    fact belongs. This test pins the separation in both halves:
+      * `_owner_record_dir_present` ignores dotted names, so a
+        `.tortoise-owners` dir holding only `.lock` carries NO claim; and
+      * `_has_ownership_claim` therefore REFUSES the dir.
+
+    RED if the lock arm is added to the claim (e.g. `if _owner_lock_held(...)
+    is True: return None`) or if the dotted-name skip in
+    `_owner_record_dir_present` is dropped.
+    """
+    import fcntl
+
+    d = tmp_path / "tmpLOCKONLY"
+    d.mkdir()
+    od = d / R.OWNERS_DIRNAME
+    od.mkdir()
+    lock = od / R.OWNER_LOCK_NAME
+    lock.write_text("")
+    fd = os.open(str(lock), os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH)   # a "live owner" holds it
+        sock = str(d / "redis.socket")
+        assert R._owner_lock_held(sock) is True, (
+            "precondition: the held shared lock must read as a live owner")
+        assert R._owner_record_dir_present(str(d)) is False, (
+            "the `.lock` file alone must not satisfy the ownership claim")
+        refusal = R._has_ownership_claim(str(d), os.getpid())
+        assert refusal is not None and R.OWNERS_DIRNAME in refusal, refusal
+    finally:
+        os.close(fd)
