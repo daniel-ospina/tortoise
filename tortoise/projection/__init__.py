@@ -5230,12 +5230,22 @@ class FalkorProjection(
             # inflate the counts the operator reads.
             and entry is not config_unknown_staged
         }
+        # The staged marker is out of the COUNTS above but must stay inside the
+        # VERIFICATION. If its own restore write failed, the graph is
+        # state-UNKNOWN with no marker on it, and `config_reset` (built from
+        # the read below) would say False — a clean "never configured" for an
+        # unknown state, which is the false "restored" this whole state exists
+        # to prevent. Verify it, so the incident is re-recorded with
+        # reason='restore_incomplete' rather than disappearing.
+        config_verify_set = set(config_expected_set)
+        if config_unknown_staged is not None:
+            config_verify_set.add(_config_key(config_unknown_staged))
         config_verified = True
         config_missing: set = set()
         try:
             live_config = {_config_key(entry)
                            for entry in _capture_config_snapshot(self.g)}
-            config_missing = config_expected_set - live_config
+            config_missing = config_verify_set - live_config
         except Exception as e:
             config_verified = False
             logger.error(
@@ -5245,18 +5255,20 @@ class FalkorProjection(
                 "state is unproven (#2814)",
                 type(e).__name__, e,
             )
-        if config_expected_set and (not config_verified or config_missing):
+        if config_verify_set and (not config_verified or config_missing):
             logger.error(
                 "rebuild: post-restore verification FAILED — %d of %d "
-                "captured config identit(ies) are ABSENT from the rebuilt "
-                "graph%s. This is a TRUE POSITIVE, not a silent success: the "
-                "pre-wipe configuration of those identities is gone (the "
-                "wipe is unconditional and only the journal is replayed). "
-                "Recording the sticky `config_reset` marker with "
-                "reason='restore_incomplete' — re-provision the "
-                "configuration, then clear the marker (#2814)",
-                len(config_missing) if config_verified else len(config_expected_set),
-                len(config_expected_set),
+                "expected config identit(ies) are ABSENT from the rebuilt "
+                "graph%s (the `config_reset` marker counts here when one was "
+                "staged, but never in the reported counts). This is a TRUE "
+                "POSITIVE, not a silent success: the pre-wipe configuration "
+                "of those identities is gone (the wipe is unconditional and "
+                "only the journal is replayed). Recording the sticky "
+                "`config_reset` marker with reason='restore_incomplete' — "
+                "re-provision the configuration, then clear the marker "
+                "(#2814)",
+                len(config_missing) if config_verified else len(config_verify_set),
+                len(config_verify_set),
                 f" ({sorted(config_missing)})" if config_missing else "",
             )
             try:
@@ -5297,15 +5309,23 @@ class FalkorProjection(
         # line means every pre-wipe episodic Point was recreatable.
         return {"events": len(events), "nodes": node_count, "edges": edge_count,
                 # #2814: additive. `config_expected`/`config_restored` are
-                # COUNTS of (label, identity) pairs; `config_reset` is a BOOL
-                # saying the sticky third-state marker is present — named
-                # distinctly from `:Meta{key:'config_reset'}` itself so one
-                # string does not carry two meanings.
+                # COUNTS of (label, identity) pairs (the staged marker is in
+                # neither); `config_reset` is a BOOL — named distinctly from
+                # `:Meta{key:'config_reset'}` itself so one string does not
+                # carry two meanings. It is fail-SAFE: an UNREADABLE marker
+                # also reports True, because `None` must not mean both "never
+                # set" and "could not be read". `config_reset_read_failed`
+                # therefore distinguishes the two for callers that must not
+                # assert the marker IS present — the CLI's warning says the
+                # state is unproven rather than naming a marker it could not
+                # see, and `_clear_config_reset()` re-reads unguarded, so
+                # "clear the marker" needs the read to work.
                 "config_expected": len(config_expected_set),
                 "config_restored": len(config_expected_set - config_missing)
                 if config_verified else 0,
                 "config_reset": (config_reset_marker is not None
-                                 or config_reset_read_failed)}
+                                 or config_reset_read_failed),
+                "config_reset_read_failed": config_reset_read_failed}
 
     def query(self, cypher: str, **params):
         # P0 guard (#99): refuse bulk graph-wipe on non-test graphs.

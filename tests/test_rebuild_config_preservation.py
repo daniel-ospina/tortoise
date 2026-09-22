@@ -1214,3 +1214,53 @@ def test_unreadable_marker_is_not_reported_as_absent(graph, monkeypatch):
     assert result["config_reset"] is True, (
         "an unreadable marker must fail SAFE (report the incident), never "
         "report `config_reset: False`")
+    assert result["config_reset_read_failed"] is True
+
+
+def test_staged_marker_that_fails_to_restore_stays_in_the_verification(graph,
+                                                                     monkeypatch):
+    """If T2's staged marker does not come back, the state must NOT read as
+    `config_reset: False`.
+
+    The marker is correctly excluded from the reported COUNTS (it asserts
+    unprovability, it is not captured configuration), but excluding it from the
+    post-restore VERIFICATION as well removes the only identity that can notice
+    its own restore failing: the graph is then state-UNKNOWN with no marker on
+    it, and the operator is told a clean `0 of 0` — "never configured". That is
+    the same false "restored" this state exists to prevent, re-entering through
+    the marker itself.
+
+    Injection: filtering the marker out of the verification read is what a
+    failed restore write looks like to T1 (the restore leg merges from the
+    captured entries; the verification re-reads the graph).
+    """
+    from tortoise import projection as pr
+    from tortoise.projection import read_config_reset
+
+    events, sdk = graph
+    _write_journal(events, [])
+    _plant(Path(_sidecar_path(events)), _sidecar_payload(
+        version=1, batch_snapshot=[{"id": "b-legacy"}]))
+    g = _g(sdk)
+    real_capture = pr._capture_config_snapshot
+
+    def _capture_without_the_marker(graph_):
+        return [
+            e for e in real_capture(graph_)
+            if not (e.get("label") == "Meta"
+                    and (e.get("props") or {}).get("key") == "config_reset")
+        ]
+
+    monkeypatch.setattr(pr, "_capture_config_snapshot",
+                        _capture_without_the_marker)
+    result = sdk._get_proj().rebuild_all(str(events))
+
+    assert result["config_reset"] is True, (
+        "a staged marker that did not restore must be re-recorded, not read "
+        "as `config_reset: False`")
+    marker = read_config_reset(g)
+    assert marker is not None and marker["reason"] == "restore_incomplete"
+    # ... and it still does not inflate the counts the operator reads.
+    assert result["config_expected"] == 0
+    assert result["config_restored"] == 0
+    assert result["config_reset_read_failed"] is False
