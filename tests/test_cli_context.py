@@ -457,6 +457,76 @@ class TestCliOnboardDbTarget:
             if _gc_was_enabled:
                 gc.enable()
 
+    def test_init_releases_the_probe_when_a_later_import_raises(
+            self, monkeypatch, tmp_path):
+        """#4579: an ImportError raised AFTER the probe binds still releases it.
+
+        The `except ImportError` arms are declared BEFORE `except Exception`,
+        so an ImportError from a statement that runs after
+        `_proj = FalkorProjection(db_path)` — `_proj.g.query`, the
+        `_mark_embedded_opened` import, the fallback-notice import — lands in
+        the ImportError arm. Without an explicit close the cyclic probe
+        outlives the call and its daemon is left uninstrumented with its data
+        dir present — exactly the class #3767 refuses to fast-kill. The SDK
+        mark is forced to raise so the test exercises that arm deterministically.
+
+        GC is disabled so the release is attributable to the explicit close,
+        not to a `weakref.finalize` GC-close.
+        """
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        db_path = str(tmp_path / "init-mark-error.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        _delenv_falkordb(monkeypatch)
+
+        import gc
+
+        import tortoise.sdk as _sdk
+
+        def _boom(_path):
+            raise ImportError("simulated missing dep after the probe bound")
+
+        monkeypatch.setattr(_sdk, "_mark_embedded_opened", _boom)
+
+        from tortoise import __main__ as m
+
+        _gc_was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            rc = m._cmd_init(mock.Mock(
+                path=None, cmd="init", yes=True, api_key=None, no_index=True))
+            assert rc == 1
+
+            # The probe was released on the error return: no LIVE daemon may
+            # survive it. Same order-independent daemon pin as the success-path
+            # test above (a vanished pidfile is proof the daemon exited).
+            settings = db_path + ".settings"
+            if os.path.exists(settings):
+                import json as _json
+                from pathlib import Path as _Path
+                pid = None
+                try:
+                    reg = _json.loads(_Path(settings).read_text())
+                    pidfile = reg.get("pidfile")
+                    if pidfile and os.path.exists(pidfile):
+                        pid = int(_Path(pidfile).read_text().strip())
+                except Exception:
+                    pid = None
+                if pid is not None:
+                    alive = True
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        alive = False
+                    except PermissionError:
+                        alive = True
+                    assert not alive, (
+                        f"init leaked its embedded redis-server (pid {pid})"
+                        " on an error return that followed the probe bind "
+                        "(#4579)")
+        finally:
+            if _gc_was_enabled:
+                gc.enable()
+
     def test_onboard_completion_gates_embedded_default(self, tmp_path, monkeypatch, capsys):
         """#2200: the `tortoise onboard` wizard completion must gate the
         canonical embedded default too — a no-Docker run never reaches
