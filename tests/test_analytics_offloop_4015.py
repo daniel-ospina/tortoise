@@ -26,8 +26,8 @@ lives in ``tests/test_health_ready_nonblocking.py``
 ``_track_analytics_event``); the ``best_effort`` op-set invariant lives in
 ``tests/test_control_plane_offload_3498.py``
 (``test_never_raise_offload_sites_pass_best_effort``). This file adds the shape
-pin that the ONE direct call site is inside the off-loop entry point's
-offloaded callable.
+pin that no direct call site of that helper sits ON the event loop — every
+one lives in a declared lane, each bound to its dispatch mechanism.
 """
 
 from __future__ import annotations
@@ -449,20 +449,39 @@ def test_stripe_webhook_analytics_offload_failure_does_not_500(monkeypatch):
     )
 
 
-# ── the shape pin: ONE direct call site, inside the off-loop entry point ────
+# ── the shape pin: no direct call site may sit ON the event loop ───────────
 
 
 def test_track_analytics_event_is_only_called_from_the_off_loop_entry_point():
-    """#4015 AC1 (shape): ``hosted_api`` has exactly ONE **direct-call** site
-    for the blocking helper, and it lives INSIDE the callable the offload seam
-    is handed — so the site is off-loop by construction rather than by
-    argument. A new direct call (the regression this issue exists for) adds a
-    second site and fails here.
+    """#4015 AC1 (shape): every **direct-call** site of the blocking helper in
+    ``hosted_api`` sits in a DECLARED off-loop lane, each bound to the dispatch
+    mechanism that takes it off the loop — so the site is off-loop by
+    construction rather than by argument. A direct call in any other function
+    (the regression this issue exists for) fails here.
+
+    Two lanes are declared (``declared_lanes`` below):
+
+    * ``_emit_analytics_off_loop`` — the #4015 entry point, whose direct call
+      must live INSIDE the callable the ``_cp_offload`` seam is handed, with
+      ``best_effort=True``;
+    * ``_write`` (nested in ``_emit_wait_bound_breach``) — main's #4412
+      transport-wait-bound breach emit. It is SYNC and fire-and-forget, so it
+      cannot await the async entry point; it dispatches to the SAME telemetry
+      control-plane pool directly
+      (``control_plane_worker("telemetry").submit(_write)``), which puts it
+      off the request path by another route. The pin VERIFIES that dispatch
+      rather than trusting the lane's name.
 
     The two halves are BOUND (#4015 review): asserting only that the helper
     contains SOME ``_cp_offload(..., best_effort=True)`` call left a mutation
     green — moving the direct call out of the lambda while keeping a dummy
     ``_cp_offload(lambda: None, ...)`` put the blocking POST back on the loop.
+
+    The lane CHECK itself is not a bare name-based escape hatch: declaring
+    ``_write`` only admits a direct call there, and the lane's own dispatch to
+    the telemetry pool is asserted separately below. main's #4412 added that
+    second OFF-loop lane; this pin forbids an ON-loop direct call, which is the
+    defect #4015 names — it does not forbid a second off-loop route.
 
     Out of this pin's scope by design: partial-application lanes — the
     capture-cost ``asyncio.to_thread(_track_analytics_event, …)`` and
@@ -493,16 +512,34 @@ def test_track_analytics_event_is_only_called_from_the_off_loop_entry_point():
               and isinstance(n.func, ast.Name)
               and n.func.id == "_track_analytics_event"]
     assert direct, "_track_analytics_event is no longer called at all?"
-    assert len(direct) == 1, (
-        "every analytics emit must go through _emit_analytics_off_loop, but "
+
+    # Declared off-loop lanes (see the docstring). A direct call whose
+    # ENCLOSING function is not one of these is an undeclared emit — the
+    # on-loop regression #4015 exists for.
+    declared_lanes = {"_emit_analytics_off_loop", "_write"}
+    sites_by_lane: dict = {}
+    for _node in direct:
+        sites_by_lane.setdefault(
+            getattr(_nearest_func(_node), "name", None), []).append(_node)
+    undeclared = sorted(set(sites_by_lane) - declared_lanes)
+    assert not undeclared, (
+        "analytics emit(s) outside every declared off-loop lane — "
         "_track_analytics_event is called from: "
-        f"{[(getattr(_nearest_func(n), 'name', '?'), n.lineno) for n in direct]}"
-        " (#4015)"
+        f"{[(name, [n.lineno for n in nodes]) for name, nodes in sites_by_lane.items()]}"
+        f"; undeclared lane(s): {undeclared} (#4015)"
     )
-    site = direct[0]
+    assert "_emit_analytics_off_loop" in sites_by_lane, (
+        "the #4015 off-loop entry point no longer emits at all (#4015)"
+    )
+    assert len(sites_by_lane["_emit_analytics_off_loop"]) == 1, (
+        "_emit_analytics_off_loop must contain exactly ONE direct "
+        "_track_analytics_event call: "
+        f"{[n.lineno for n in sites_by_lane['_emit_analytics_off_loop']]}"
+    )
+    site = sites_by_lane["_emit_analytics_off_loop"][0]
     enclosing = _nearest_func(site)
     assert enclosing is not None and enclosing.name == "_emit_analytics_off_loop", (
-        f"the one direct call site is in {getattr(enclosing, 'name', 'module')!r} "
+        f"the direct call site is in {getattr(enclosing, 'name', 'module')!r} "
         f"(line {site.lineno}) — it must be the off-loop entry point (#4015)"
     )
 
@@ -531,3 +568,39 @@ def test_track_analytics_event_is_only_called_from_the_off_loop_entry_point():
         "the analytics emit lost best_effort=True — telemetry would be able "
         "to fail a request (#3498 review P1)"
     )
+
+    # The second declared lane's off-loop guarantee (main's #4412): its direct
+    # call must be SUBMITTED to the telemetry control-plane worker pool. Without
+    # this, `declared_lanes` would be a bare name-based escape hatch.
+    if "_write" in sites_by_lane:
+        assert len(sites_by_lane["_write"]) == 1, (
+            "the `_write` telemetry lane must hold exactly one direct call: "
+            f"{[n.lineno for n in sites_by_lane['_write']]}"
+        )
+        write_fn = _nearest_func(sites_by_lane["_write"][0])
+        lane_fn = parents.get(write_fn)
+        while lane_fn is not None and not isinstance(
+                lane_fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            lane_fn = parents.get(lane_fn)
+        assert lane_fn is not None, (
+            "the `_write` telemetry lane is not nested in a lane function "
+            "(#4015)"
+        )
+        submit_calls = [
+            c for c in ast.walk(lane_fn)
+            if isinstance(c, ast.Call)
+            and isinstance(c.func, ast.Attribute) and c.func.attr == "submit"
+        ]
+        assert any(
+            isinstance(c.func.value, ast.Call)
+            and isinstance(c.func.value.func, ast.Name)
+            and c.func.value.func.id == "control_plane_worker"
+            and c.func.value.args
+            and isinstance(c.func.value.args[0], ast.Constant)
+            and c.func.value.args[0].value == "telemetry"
+            for c in submit_calls
+        ), (
+            f"the `_write` analytics lane in {lane_fn.name!r} is not dispatched "
+            "to the telemetry control-plane pool — the blocking POST could be "
+            "back on the event loop (#4015)"
+        )
