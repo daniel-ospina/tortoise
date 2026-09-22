@@ -600,11 +600,16 @@ def test_run_carries_operator_edge_audit_dimension(tmp_path, monkeypatch):
     audit = report["operator_audit"]
     assert audit is not None
     # Pinned to the corpus FLOOR (a LOWER BOUND, so `>=`) AND tied to the
-    # gold-derived ACTUAL count. The floor alone cannot catch a silent
-    # per-session shrink that still clears every floor; the equality alone
-    # cannot catch one either (both sides come from the same golds). Together
-    # they do both — and neither is a literal, so a grown corpus reddens
-    # nothing.
+    # gold-derived ACTUAL count. Two different jobs, and neither is a literal,
+    # so a grown corpus reddens nothing:
+    #   * `>=` catches a total that drops BELOW the floor. The equality cannot
+    #     (both sides read the same gold content, so they shrink together).
+    #   * `== corpus.planted_operator_count()` catches an AUDIT that stops
+    #     covering the corpus — the grader counts only the sessions the runner
+    #     selected and collapses duplicate ids, while this count iterates the
+    #     corpus itself. The floor cannot catch that.
+    # NEITHER catches a within-floor shrink of the committed gold; that is
+    # ``validate_committed``'s per-kind-floor job.
     assert audit["planted"] >= generate_corpus.MIN_PLANTED_OPERATOR_EDGES
     assert audit["planted"] == corpus.planted_operator_count()
     assert audit["edge_correct"] < audit["planted"]  # m2 cue-word relations
@@ -632,8 +637,19 @@ def test_run_carries_operator_edge_audit_dimension(tmp_path, monkeypatch):
         if op.get("expected_kind") == "SUPERSEDE"
     ]
     assert len(supersedes) >= 1
+    # Scope the TARGET assertion to the CROSS-SESSION SUPERSEDE. A second
+    # planted SUPERSEDE is a legitimate measurement-power extension (see
+    # ``MIN_PLANTED_OPERATOR_KINDS``), and one whose ``to`` is its own session
+    # — the schema's default — carries ``to_session == owner_session``, so
+    # "every SUPERSEDE targets wp06" would be the same hardcoded-corpus-shape
+    # defect the rest of this commit removes.
+    cross_session_supersedes = [
+        op for op in supersedes
+        if op.get("from_session") != op.get("to_session")
+    ]
+    assert cross_session_supersedes, supersedes
     assert all(op.get("to_session") == "wp06_quarry_rollout"
-               for op in supersedes)
+               for op in cross_session_supersedes)
     assert any(op.get("expected_kind") == "SUPERSEDE"
                for op in owned_by.get("wp07_bluepeak_followup", []))
     # The receipt must CARRY the audit block (it is the publish artifact).

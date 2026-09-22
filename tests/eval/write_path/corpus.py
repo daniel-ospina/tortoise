@@ -103,6 +103,20 @@ def planted_operator_count(
                for s in sel)
 
 
+def operator_session_ids(root: Path = WRITE_PATH_DIR) -> list[str]:
+    """The sessions that carry planted operator gold (the operator lanes'
+    scope).
+
+    One home for the rule, sitting next to ``planted_operator_count``: the
+    operator lane and the corpus suite each used to spell this comprehension
+    out, so "which sessions carry planted operators" had two encodings that
+    had to be kept in sync by hand (code-review finding). Sorted, because
+    ``session_ids`` is.
+    """
+    return [s for s in session_ids(root)
+            if load_gold(s, root).get("planted_operators")]
+
+
 def compute_fixtures_hash(root: Path = WRITE_PATH_DIR) -> str:
     """sha256 over every fixture + gold file (``sha256:<hex>`` of the joined digest).
 

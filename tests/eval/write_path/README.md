@@ -210,8 +210,10 @@ standing leakage bar.
 
 ### ⛔ Three lanes, three different questions (#2552)
 
-The audit denominator is **15** planted edges.  Do not read one lane's number
-as another's:
+The audit denominator is ``corpus.planted_operator_count()`` — **15** planted
+edges today.  It is DERIVED, never a literal: a lane or test that needs the
+number calls the helper (see the rule above).  Do not read one lane's number as
+another's:
 
 | Lane | What it grades | How to run |
 |---|---|---|

@@ -170,9 +170,14 @@ MIN_PLANTED_OPERATOR_KINDS = {
 # (the code-review finding this closes).
 MIN_PLANTED_OPERATOR_EDGES = sum(MIN_PLANTED_OPERATOR_KINDS.values())
 REQUIRED_OPERATOR_KINDS = set(MIN_PLANTED_OPERATOR_KINDS)
-# The kind VOCABULARY has one source: ``schema.PLANTED_OPERATOR_KIND_VALUES``
-# is what ``validate_gold`` enforces. Link them at import so a vocabulary
-# change fails loudly here instead of in a distant test (code-review finding).
+# The kind vocabulary has one source for the FLOORS: ``validate_gold``
+# enforces ``schema.PLANTED_OPERATOR_KIND_VALUES``, so linking the per-kind map
+# to it at import makes a vocabulary change fail loudly here instead of in a
+# distant test (code-review finding). Scope of the link: the floor map and the
+# schema ONLY. The GRADER dispatches on the same kind names through its own
+# literals (``grading.operator_edge_detail``) and is deliberately untouched by
+# this PR — the grader is out of #2552's scope — so it is filed as a
+# follow-up rather than silently claimed as covered.
 if set(MIN_PLANTED_OPERATOR_KINDS) != set(schema.PLANTED_OPERATOR_KIND_VALUES):
     raise AssertionError(
         "MIN_PLANTED_OPERATOR_KINDS and schema.PLANTED_OPERATOR_KIND_VALUES "

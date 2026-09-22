@@ -60,12 +60,12 @@ from tests.eval.write_path import corpus, generate_corpus, runner  # noqa: E402
 # meant a session added with planted operators was never captured — and BOTH
 # sides of this lane's denominator assertion came from that same literal, so
 # the lane stayed green while silently dropping coverage of the new edges
-# (code-review finding). ``session_ids()`` is sorted, so wp06 is still captured
-# before wp07 and the cross-session SUPERSEDE still resolves.
-OPERATOR_SESSIONS = [
-    s for s in corpus.session_ids()
-    if corpus.load_gold(s).get("planted_operators")
-]
+# (code-review finding). ``corpus.session_ids()`` is sorted, so wp06 is still
+# captured before wp07 and the cross-session SUPERSEDE still resolves. The rule
+# lives in ``corpus`` next to ``planted_operator_count`` so this lane and the
+# corpus suite share ONE home for it instead of two identical comprehensions
+# (code-review finding).
+OPERATOR_SESSIONS = corpus.operator_session_ids()
 # Derived from the sealed golds, never a literal (the THIRD instance of the
 # hardcoded-denominator defect the #2552 gold growth exposed).
 PLANTED_OPERATOR_EDGES = corpus.planted_operator_count(OPERATOR_SESSIONS)
@@ -268,8 +268,18 @@ def test_deterministic_planted_operator_lane_grades_at_least_three(
         _failure_detail(audit)
     # The cross-session SUPERSEDE is the audit leg #2552 also repairs (the
     # session-scoped edge query could not see a CORRECTS whose target lives
-    # in the earlier session).
-    assert audit["results"]["wp07_bluepeak_followup_op_04"]["edge_correct"], \
+    # in the earlier session). Located by its PROPERTY (kind + endpoints in
+    # different sessions), never by the generated op id: ids come from
+    # ``sorted(ops, key=(relation_turn, id))``, so inserting an operator with
+    # an earlier relation_turn renames ``..._op_04`` and would redden this lane
+    # for no regression — the same hardcoded-corpus-shape defect class.
+    cross_session_supersedes = [
+        d for d in audit["results"].values()
+        if d.get("expected_kind") == "SUPERSEDE"
+        and d.get("from_session") != d.get("to_session")
+    ]
+    assert cross_session_supersedes, _failure_detail(audit)
+    assert all(d["edge_correct"] for d in cross_session_supersedes), \
         _failure_detail(audit)
     # STRUCTURAL leg: every operator the write path committed entered the
     # eventId-keyed memory layer.
@@ -336,7 +346,8 @@ def _fold_emission(gold: dict) -> tuple[dict, int, int]:
     IMPL as well (each MITIGATES contributes TWO payload operators — the
     declared target IMPL plus the dampener itself).  SUPERSEDE is excluded —
     it is not an operator entry on this seam (it rides the point-level
-    ``supersedes`` ref → CORRECTS), so 14 of the 15 planted edges are in scope.
+    ``supersedes`` ref → CORRECTS), so ``PLANTED_OPERATOR_EDGES -
+    PLANTED_SUPERSEDES`` planted edges are in scope.
     """
     operators: list[dict] = []
     mitigates = 0

@@ -148,11 +148,16 @@ def test_bpre_lane_full_corpus_replay_emits_and_grades(sdk_factory):
     # bar is a product-lane bar, see scoping note).
     #
     # Pinned to the corpus FLOOR (a LOWER BOUND, so `>=`) AND tied to the
-    # gold-derived ACTUAL count. The floor alone cannot catch a silent
-    # per-session shrink that still clears every floor; the equality alone
-    # cannot catch one either (both sides are computed from the same golds).
-    # Together they do both — and neither is a literal, so growing the corpus
-    # reddens nothing.
+    # gold-derived ACTUAL count. Two different jobs, and neither is a literal,
+    # so growing the corpus reddens nothing:
+    #   * `>=` catches a total that drops BELOW the floor. The equality cannot
+    #     (both sides read the same gold content, so they shrink together).
+    #   * `== corpus.planted_operator_count()` catches an AUDIT that stops
+    #     covering the corpus — the grader counts only the sessions the runner
+    #     selected and collapses duplicate ids, while this count iterates the
+    #     corpus itself. The floor cannot catch that.
+    # NEITHER catches a within-floor shrink of the committed gold; that is
+    # ``validate_committed``'s per-kind-floor job.
     assert report["operator_audit"]["planted"] >= \
         generate_corpus.MIN_PLANTED_OPERATOR_EDGES
     assert report["operator_audit"]["planted"] == corpus.planted_operator_count()

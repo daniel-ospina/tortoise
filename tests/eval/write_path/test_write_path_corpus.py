@@ -1190,9 +1190,7 @@ def test_compare_run_judge_pin_mismatch_is_inconclusive() -> None:
 # validate_gold time; cross-session endpoints — the SUPERSEDE planted
 # wp07 → wp06 — ground corpus-wide).
 
-OPERATOR_SESSIONS = [
-    s for s in COMMITTED_SESSIONS if corpus.load_gold(s).get("planted_operators")
-]
+OPERATOR_SESSIONS = corpus.operator_session_ids()
 
 
 def test_committed_operator_gold_kind_coverage_and_id_hygiene() -> None:
@@ -1301,7 +1299,7 @@ def test_operator_floor_adapters_actually_fire(tmp_path) -> None:
     sid = next(
         s for s in COMMITTED_SESSIONS
         if any(op.get("expected_kind") == "SUPERSEDE"
-               for op in corpus.load_gold(s)["planted_operators"])
+               for op in (corpus.load_gold(s).get("planted_operators") or []))
     )
 
     # Adapter 1 — on the DISK (validate_committed, collects).
