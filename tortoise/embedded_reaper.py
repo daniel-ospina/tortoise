@@ -1615,6 +1615,11 @@ def _is_path_based(registry: dict | None, dbdir_real: str,
     every-mode orphan-confirmation requirement the pre-#3767 `return False`
     disengaged.
 
+    #4546 SCOPE: reap()'s every-mode confirmation requirement still applies
+    to `path_based` unchanged, but its `unattributed` half exempts a
+    `dir_missing` record (the registry data dir is already gone, so no
+    on-disk user data remains — pre-#3767 behaviour).
+
     CONSEQUENCE (#3767 review P2, documented not silent): `path_based` is ALSO
     the gate `_mark_orphan_confirmation` uses to admit the #3599 per-server
     fast confirmation (`no_live_owner = ... and not path_based`), so a
@@ -1868,7 +1873,10 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
         with no live suite markers (set by _mark_orphan_confirmation in
         _run_sweep).
     Path-based (user-data) servers additionally require confirmation in
-    EVERY mode (their data outlives the test tree). This preserves the
+    EVERY mode (their data outlives the test tree). A `dir_missing` record is
+    exempt from the `unattributed` half of that requirement (#4546: its data
+    dir — and therefore all on-disk user data — is already gone); the
+    `path_based` half is NOT exempted. This preserves the
     #1005 guarantee: a concurrent suite's between-tests idle server is
     never disturbed.
     """
@@ -1967,7 +1975,29 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
                 # us, so it needs the same confirmation as a user-data server
                 # in EVERY mode (not only under --only-safe). It remains
                 # reapable via the #1557/#1642 FIX 3 window.
-                if record.get("path_based") or record.get("unattributed"):
+                #
+                # #4546 EXEMPTION — OVERRIDES: #1642 FIX 3's "a live server
+                # whose socket dir was unlinked still serves established
+                # connections, so a missing dir is never instant proof of
+                # orphanhood → keep the confirmation window" — for the
+                # `dir_missing` class ONLY, because that record's REGISTRY
+                # data dir (the pytest `tmp_path` tree) is already gone: no
+                # on-disk user data remains for the window to protect, and
+                # pre-#3767 `main` fast-killed it. The exemption is scoped to
+                # the NEW `unattributed` signal this branch introduced; the
+                # pre-existing `path_based` arm is deliberately left intact,
+                # so a genuinely path-based (user-data) server still requires
+                # confirmation in EVERY mode exactly as before. #3767's target
+                # (unowned/foreign server, directory PRESENT, registry
+                # intact) reports `dir_missing=False` and keeps the gate.
+                #
+                # NARROWNESS (#4546): keyed on the registry-data-dir property
+                # alone. Do NOT widen to `unattributed` generally — that
+                # would admit a dir-present foreign server, which is the
+                # negative control in tests/test_reaper_ownership.py.
+                if record.get("path_based") or (
+                        record.get("unattributed")
+                        and not record.get("dir_missing")):
                     logger.info(
                         "path-based/unattributed server not orphan-confirmed, "
                         "skipping %s", record.get("socket_path"))

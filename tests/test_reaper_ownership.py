@@ -19,10 +19,19 @@ This module pins the fix in BOTH directions:
     admitted. The reaper is NOT made inert.
 
 The claim itself (`_has_ownership_claim`) is: a PRESENT dir must be owned by
-the invoking euid (#4136's property, moved to admission) AND carry tortoise's
+ the invoking euid (#4136's property, moved to admission) AND carry tortoise's
 own `.tortoise-owners` instrument (#3599); a dir-ABSENT server is admitted by
 the live pid's own argv naming it (#1642 FIX 3's pass-1 binding, #4136's
 unforgeable arm). The #1557 confirmation window is untouched.
+
+#4546 (OVERRIDES #1642 FIX 3 for the `dir_missing` class ONLY): the
+`unattributed` gate in `reap()` exempts a `dir_missing` record — a LIVE server
+whose REGISTRY data dir (the pytest `tmp_path` tree) is already gone, so no
+on-disk user data remains and pre-#3767 `main` fast-killed it. The exemption is
+exactly that property: `test_dir_missing_unattributed_residue_is_still_fast_killed`
+(positive) and `test_unattributed_no_path_server_is_not_fast_killed` (the
+dir-PRESENT negative control) are its two mutation guards. The pre-existing
+`path_based` arm is NOT exempted.
 """
 from __future__ import annotations
 
@@ -89,6 +98,16 @@ def _no_path_registry(d: Path, pid: int | None = None) -> None:
         f"dbfilename 'redis.db'\ndir '{d}'\npidfile '{d}/redis.pid'\n")
 
 
+def _no_path_registry_missing_data_dir(d: Path, gone: Path) -> None:
+    """Same registry shape, but its `dir` names a path that no longer exists
+    — the #4546 residue (`pytest` `tmp_path` teardown removed the data dir
+    while the socket dir survived). `dir_missing` is derived from THIS field.
+    """
+    (d / "redis.pid").write_text(f"{os.getpid()}\n")
+    (d / "redis.config").write_text(
+        f"dbfilename 'redis.db'\ndir '{gone}'\npidfile '{d}/redis.pid'\n")
+
+
 # ── NEGATIVE CONTROL — an unowned dir is NOT ours ────────────────────────────
 
 def test_registryless_unowned_dir_is_not_a_candidate():
@@ -145,6 +164,10 @@ def test_unattributed_no_path_server_is_not_fast_killed(monkeypatch):
         assert rec["classification"] == "candidate"
         assert rec["path_based"] is False  # registry says no-path...
         assert rec["unattributed"] is True  # ...but nothing claims it as OURS
+        # #4546 mutation guard: this is the DIR-PRESENT class (#3767's
+        # target). Its `dir_missing` is False, so the #4546 exemption must NOT
+        # reach it — widening the exemption beyond `dir_missing` REDs here.
+        assert rec["dir_missing"] is False
         killed: list[int] = []
         monkeypatch.setattr(R, "_kill",
                             lambda pid, timeout: killed.append(pid))
@@ -326,3 +349,39 @@ def test_1005_dir_missing_owned_server_is_still_admitted():
         assert rec["dir_missing"] is True
         assert rec["classification"] == "candidate"
         assert rec["unattributed"] is False
+
+
+def test_dir_missing_unattributed_residue_is_still_fast_killed(monkeypatch):
+    """#4546 (OVERRIDES #1642 FIX 3's "a missing dir is not proof of
+    orphanhood → keep the window" FOR THE `dir_missing` CLASS ONLY).
+
+    The pytest-residue shape: a LIVE server whose REGISTRY data dir (the
+    `tmp_path` tree) was deleted while its SOCKET dir survives, carrying no
+    `.tortoise-owners` instrument. It reports `dir_missing=True` +
+    `unattributed=True` (`path_based=False`), so before #4546 the branch's
+    NEW `unattributed` gate skipped it and it survived a full sweep — the
+    `test-slow (b)` orphan-count regression. It must be fast-killed in a FULL
+    sweep exactly as pre-#3767 `main` did; no on-disk user data remains once
+    the registry data dir is gone.
+
+    RED if the #4546 exemption is removed (the `unattributed` arm skips it).
+    This is NOT the socket-dir-absent class: the socket dir is PRESENT here.
+    """
+    with _short_base() as base:
+        d = _socket_dir(base, "tmpRESIDUE")   # socket dir PRESENT
+        gone = base / "gone-data"             # the deleted tmp_path data dir
+        assert not gone.exists()
+        _no_path_registry_missing_data_dir(d, gone)
+        rec = R._classify_dir(str(d), str(d / "redis.socket"),
+                              known_pid=os.getpid())
+        assert rec is not None
+        assert rec["classification"] == "candidate"
+        assert rec["dir_missing"] is True      # registry data dir gone
+        assert rec["unattributed"] is True     # no instrument in socket dir
+        assert rec["path_based"] is False
+        killed: list[int] = []
+        monkeypatch.setattr(R, "_kill",
+                            lambda pid, timeout: killed.append(pid))
+        monkeypatch.setattr(R, "_active_client_count", lambda _s: 0)
+        R.reap([dict(rec)], dry_run=False, only_safe=False)
+        assert killed == [os.getpid()], killed
