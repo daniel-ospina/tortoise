@@ -36,6 +36,8 @@ from . import file_indexer  # noqa: F401 — import-time sourceKind registration
 from .projection import FalkorProjection
 from .projection import _ANNOTATOR_PROPS as _ANNOTATOR_PROP_NAMES
 from .projection import is_missing_graph_error  # #2163: absent-graph family == success
+from .projection import clear_config_reset as _clear_config_reset_graph
+from .projection import read_config_reset as _read_config_reset_graph
 from .quota import MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS
 from .canonical import derive_batch_id
 import threading
@@ -20685,6 +20687,33 @@ class TortoiseSDK:
             params={"key": self._CALIBRATION_MARKER_KEY},
         ).result_set
         return bool(rows)
+
+    # ── #2814: rebuild config third state ─────────────────────────
+    # PRIVATE on purpose: `tools/sdk_rename_table.py::_validate` fails any
+    # PUBLIC SDK method with no canonical group/disposition row, so a public
+    # name here would expand the advertised SDK surface and require
+    # `docs/product/canonical-sdk-methods.md` + `beta-sdk-surface.md` + a
+    # regenerated rename table — a surface expansion a data-loss fix has no
+    # reason to make. The marker is an internal durability signal; the
+    # operator surface is the CLI (see `tortoise/__main__.py`). Both delegate to
+    # the module-level helpers so the reader/writer contract has ONE driver.
+    def _config_reset_state(self) -> dict | None:
+        """The sticky `config_reset` marker's properties, or None if never set.
+
+        None means "no reset recorded" — which is NOT the same as "config is
+        known good": the marker is only written when the restore provably
+        failed, or when a pre-preservation rescue file left the state unknown.
+        """
+        return _read_config_reset_graph(self._get_proj().g)
+
+    def _clear_config_reset(self) -> bool:
+        """Clear the sticky `config_reset` marker; True when one was present.
+
+        The only way to clear it: `rebuild_all` never does (that is what makes
+        the marker a reliable third state). Call it after re-provisioning the
+        configuration the marker reported missing.
+        """
+        return _clear_config_reset_graph(self._get_proj().g)
 
 
 class _V2SessionMock:
