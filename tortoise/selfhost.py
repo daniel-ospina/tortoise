@@ -395,7 +395,10 @@ async def _health_probe_loop() -> None:
 
     Single-flight and hard-bounded (``HealthProbe.run`` returns within
     ``_HEALTH_PROBE``'s timeout even against a black-holed DB), and it must
-    never die: a raise here would freeze the reported DB verdict forever.
+    never die: a raise here would leave the verdict unrefreshed until the read
+    path's own self-heal supersedes it (``snapshot()`` starts a fresh bounded
+    probe once the last one ages past the refresh budget), never "forever" —
+    but staleness until then is still a lie this loop exists to prevent.
 
     The refresh is a FIXED CADENCE, not ``probe_duration + interval``: the
     sleep subtracts the run's own elapsed time, so the cycle is
