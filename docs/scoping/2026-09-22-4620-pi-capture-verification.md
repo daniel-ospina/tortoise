@@ -47,13 +47,13 @@ it is recorded (below), never faked.
 
 1. **The seam suite passes, hermetically.** `node --test tortoise/pi-hooks/tortoise-capture.test.ts`
    → `# tests 51 / # pass 51 / # fail 0`, in a scrubbed `HOME` with no capture credential.
-2. **It fires the real handlers.** `tortoise-capture.test.ts:36-46` imports `./tortoise-capture.ts`
+2. **It fires the real handlers.** `tortoise-capture.test.ts:49-50` imports `./tortoise-capture.ts`
    (the real module); `:305-314` fires `session_start` and asserts the probe POST; `:354-375` fires
    `session_shutdown` and asserts `url ≈ /v1/sessions`, `harness="pi"`, `session_id`, `source`,
    `model`, `conversation` — via an injected `fetch`.
 3. **CI-enforced.** `tests/test_ci_selection.py::test_pi_hooks_change_selects_the_capture_guard`
    proves a `tortoise/pi-hooks/` change selects `core` and includes `test_pi_capture_hooks.py`;
-   `config/ci-surfaces.yml:951` (core) and `:1104` (onboarding) register it; a real CI run
+   `config/ci-surfaces.yml:952` (core) and `:1105` (onboarding) register it; a real CI run
    (`docs/evidence/3770-…/ci-run-35588858762-test-b-pytest.log:1682-1687`) shows the whole file
    PASSED including `test_extension_behavioral_suite`.
 4. **The installed artifact loads and fires** — the runnable attempt proving framing (4) is
@@ -127,9 +127,10 @@ procedure for objective 1's done-state. C is a real improvement but a separate, 
    (51/51, the sibling resolves) while the *installed* single-file copy raises
    `ERR_MODULE_NOT_FOUND` (verified RED). `tests/test_capture_install.py` covers only bytes; the
    `agent-infra` grep in `test_extension_has_no_agent_infra_dependency` covers only that one name.
-   Because the seam is fail-open, such an import would silently file nothing. Skipped only when Node
-   cannot strip TypeScript, exactly as the existing behavioral test — and, like it, the skip is
-   inherited behaviour, with a residual noted at the end of this doc.
+   Because the seam is fail-open, such an import would silently file nothing. When Node cannot strip
+   TypeScript the check FAILS under CI and skips only locally — it does **not** inherit the older
+   behavioral suite's silent-skip contract, whose deferral still governs that suite alone (see
+   § Known residual of this scope's own test).
 2. **`tortoise/session_verify.py`** — reword `UNVERIFIABLE_REASON["pi"]`, the `HEADLESS_FIRABLE`
    comment block (`:120-128`), and the module-docstring sentence so they say what is true: the
    seam's *handler logic* is exercised by the seam's own hermetic suite
@@ -149,22 +150,12 @@ procedure for objective 1's done-state. C is a real improvement but a separate, 
 ### Recorded decision (issue option 2, for the residual only)
 
 > **Residual (manual-only):** that a real `pi` process loads the installed extension and invokes
-> `turn_end`/`session_shutdown`. Procedure: on a **non-dogfood** install, run
-> `pi --no-extensions -e ~/.pi/agent/extensions/tortoise-capture.ts -p "<trivial prompt>"` and assert
-> the session is **retrievable** — the specific captured content read back. `GET /v1/sessions/{id}` is
-> the authoritative session-scoped read; `GET /v1/search?q=…` is **graph-wide**, so it counts only
-> when a hit's `sessionId` is the probed session's. A row in `GET /v1/sessions` alone proves only
-> `captured`, never `retrievable` (owner ruling, B1 report). A read-back 504 is **UNMEASURABLE**
-> (never PASS/FAIL), and no receipt line while the session is present is the `#4675` post-commit-504
-> false negative (the client's terminality rule), not a seam failure. Run by a maintainer with a live
-> `pi` install and a capture credential (at 2026-09-22, the **B1 lane** — objective-1's exit-evidence
-> owner; report `~/.pi/agent/state/lane-reports/B1-LIVE-FOUR-HARNESS-2026-09-22.md`).
-> `--no-extensions` is what makes the probe single-producer
-> (it disables discovery *and* settings-registered extensions — verified in pi's
-> `resource-loader.js`; `#3713`'s own isolation control used this flag on the very host that carries
-> the duplicate and got a clean 2xx), so a clean host is **not** required. Not CI-able (needs a live
-> harness + an LLM call); the content read-back ("retrievable") is blocked by `#4661`, and receipt
-> terminality by `#4675`. Automating this
+> `turn_end`/`session_shutdown`. **The procedure, its actor, and its pass condition are stated once,
+> canonically, in `tortoise/pi-hooks/README.md` § Verification** — deliberately not restated here,
+> because a restated procedure drifts from its home. What this decision turns on: the pass condition
+> is **retrievable** (the specific captured content read back, session-bound), a read-back 504 is
+> **UNMEASURABLE** — never PASS, never FAIL — and the live leg is blocked by `#4661` (read path) and
+> `#4675` (receipt terminality). Not CI-able (needs a live harness + an LLM call). Automating this
 > probe is `#4710`.
 
 ## `#3713` — recorded call (issue requirement)

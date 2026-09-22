@@ -28,7 +28,9 @@ from pathlib import Path
 
 import pytest
 
+from tortoise import capture_install
 from tortoise.capture_install import install_capture
+from tortoise.session_verify import resolve_install_root
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOKS = REPO_ROOT / "tortoise" / "pi-hooks"
@@ -39,6 +41,20 @@ EXTENSION_TEST = HOOKS / "tortoise-capture.test.ts"
 #: no-op (accepted) on >= 22.18, where stripping is the default. Passing it
 #: explicitly keeps the `_node_supports_ts` (>= 22.6) guard true.
 NODE_TS_FLAG = "--experimental-strip-types"
+
+
+def _installed_seam_path(tmp_home: Path) -> Path:
+    """Where the installer puts the Pi seam — RESOLVED, never re-typed.
+
+    Both halves come from the shipping code: the directory from
+    ``session_verify.resolve_install_root`` (the ONE shared resolver) and the
+    filename from ``capture_install.PI_EXTENSION_NAME``. A literal path here
+    would be a third hand-maintained copy of the install layout, so a correct
+    rename/relocation in the shipping code would redden this gate with a
+    message that blames the installer for a consistent change.
+    """
+    return (resolve_install_root("pi", home=tmp_home)
+            / capture_install.PI_EXTENSION_NAME)
 
 
 def _src() -> str:
@@ -223,14 +239,16 @@ def _require_node() -> str:
     ⛔ #4620 review: the installed-artifact checks below are the only
     EXECUTABLE proof that the seam works as installed, so in CI a missing/old
     Node must fail by name instead of silently dropping them and reporting
-    green.  That is the same ruling the embedder step (#2573) and
-    ``bff_test_helpers.require_toolchain`` (#3501) apply: a runner that cannot
-    run the required check fails HERE rather than degrading unnoticed.  Every
-    lane that executes this file provisions Node 22 (``actions/setup-node``) —
-    today the python-ci ``test`` job and the post-merge-validation ``validate``
-    job — so the requirement is owned by the lanes, not inherited from the
-    runner image.  Locally the skip is kept, because the source-level pins above
-    still ran.
+    green.  The shape used here (``pytest.fail`` when ``CI`` is set, else
+    ``pytest.skip``) is the one ``tests/test_pack_shipping_wheel.py`` already
+    uses for a toolchain-gated pack gate; the fail-never-skip ruling it serves
+    is ``bff_test_helpers.require_toolchain`` (#3501), which always fails and
+    takes an explicit named opt-out (``AUTH_ALLOW_NO_TOOLCHAIN``) rather than a
+    CI branch.  This gate is SELF-ENFORCING — it fails whenever ``CI`` is set,
+    so no CI lane can execute this file without a usable Node and still report
+    green — which is why the provisioning (``actions/setup-node@v4``, Node 22)
+    is not restated here as a claim that has to be kept in sync.  Locally the
+    skip is kept, because the source-level pins above still ran.
 
     The pre-existing ``test_extension_behavioral_suite`` above deliberately
     keeps its own skip (it is not escalated to a CI failure): this gate is for
@@ -340,7 +358,7 @@ def test_installed_seam_loads_and_fires():
     with tempfile.TemporaryDirectory() as tmp:
         tmp_home = Path(tmp)
         install_capture("pi", home=tmp_home)
-        installed = tmp_home / ".pi" / "agent" / "extensions" / "tortoise-capture.ts"
+        installed = _installed_seam_path(tmp_home)
         assert installed.is_file(), f"installer wrote no seam at {installed}"
         proc = _run_installed_probe(tmp_home, installed, node)
         assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
@@ -374,7 +392,7 @@ def test_installed_seam_probe_fails_when_the_artifact_is_not_self_contained():
     with tempfile.TemporaryDirectory() as tmp:
         tmp_home = Path(tmp)
         install_capture("pi", home=tmp_home)
-        installed = tmp_home / ".pi" / "agent" / "extensions" / "tortoise-capture.ts"
+        installed = _installed_seam_path(tmp_home)
         installed.write_text(
             installed.read_text(encoding="utf-8")
             + '\nimport { __x } from "./helper.ts";\n',

@@ -155,7 +155,9 @@ HEADLESS_FIRABLE: dict[str, bool] = {
 #: absolutes this replaced — "cannot be executed headlessly", "no headless
 #: trigger" — were false: the seam's handlers are fired headlessly by its own
 #: suite, and `pi -p` is non-interactive.  A test pins the absence of those
-#: phrases (`tests/test_session_verify.py::test_pi_is_honestly_unverifiable`).
+#: phrases from EVERY Pi-touching line of this module — the report string, this
+#: ruling, and the module docstring — not from the report string alone
+#: (`tests/test_session_verify.py::test_pi_is_honestly_unverifiable`).
 UNVERIFIABLE_REASON: dict[str, str] = {
     "cursor": (
         "Cursor's sessionEnd hook is IDE-only — it fires from a local "

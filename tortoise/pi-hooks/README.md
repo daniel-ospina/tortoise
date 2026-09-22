@@ -65,11 +65,15 @@ install guard.
 
 ## Verification — what is executable, what is manual-only
 
+**This section is the canonical statement of the Pi verification status.** The scoping/plan docs and
+the `#1714` record point here for the procedure and the pass condition rather than restating them — a
+restated procedure drifts from its home.
+
 ### Executably verified (hermetic, runs in CI)
 
 | Check | What it proves |
 |---|---|
-| `node --experimental-strip-types --test tortoise/pi-hooks/tortoise-capture.test.ts` | 51 hermetic tests: `extractTurns`, truncation, payload, credential precedence, the spool, and the real `session_start` / `session_shutdown` handlers fired against a mock `pi` with an injected `fetch` (no network, no LLM) |
+| `node --experimental-strip-types --test tortoise/pi-hooks/tortoise-capture.test.ts` | the extension's full hermetic suite — `extractTurns`, truncation, payload, credential precedence, the spool, and the real `session_start` / `session_shutdown` handlers fired against a mock `pi` with an injected `fetch` (no network, no LLM) |
 | `tests/test_pi_capture_hooks.py` | the source pins **plus the installed artifact**: it installs the seam into a temp `HOME` and loads/fires the file `capture_install` writes, asserting the capture receipt. A sibling anti-vacuity test proves that check would fail on a non-self-contained install |
 
 `tests/test_pi_capture_hooks.py` is registered under `core` (and `onboarding`); a change under
@@ -77,17 +81,17 @@ install guard.
 edits the seam.
 
 The `node`-backed checks need **Node ≥ 22.6** (`--experimental-strip-types`; a no-op on ≥ 22.18).
-Every lane that executes `tests/test_pi_capture_hooks.py` provisions it explicitly — today the
-python-ci `test` job and the post-merge-validation `validate` job, both via `actions/setup-node@v4`
-(Node 22) — so the requirement is owned by the lane rather than inherited from whatever the runner
-image ships. Locally they *skip* when Node is missing or older, because the source-level pins above
-still ran. In **CI the two
-installed-artifact checks FAIL instead of skipping** — they are the only executable proof that the
-seam works at its install location, so a runner that cannot run them must fail by name rather than
-report green with the check silently absent (the same ruling the embedder step and
-`bff_test_helpers.require_toolchain` apply). The pre-existing source-suite check
-(`test_extension_behavioral_suite`) keeps its own skip contract and is deliberately **not** routed
-through that gate.
+Locally they *skip* when Node is missing or older, because the source-level pins above still ran. In
+**CI the two installed-artifact checks FAIL instead of skipping** — they are the only executable proof
+that the seam works at its install location, so a runner that cannot run them must fail by name rather
+than report green with the check silently absent. The gate is self-enforcing: it fails whenever `CI`
+is set, so no CI lane can execute this file without a usable Node and still report green — which is why
+the lane that provisions Node (`actions/setup-node@v4`, Node 22) is not restated here as a claim to
+keep in sync. The shape is the one `tests/test_pack_shipping_wheel.py` uses for its toolchain-gated
+pack gate; the fail-never-skip ruling it serves is `bff_test_helpers.require_toolchain` (#3501), which
+always fails and takes an explicit named opt-out (`AUTH_ALLOW_NO_TOOLCHAIN`) rather than a CI branch.
+The pre-existing source-suite check (`test_extension_behavioral_suite`) keeps its own skip contract and
+is deliberately **not** routed through that gate.
 
 ### Manual-only
 

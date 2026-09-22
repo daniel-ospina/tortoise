@@ -24,8 +24,10 @@ verified RED individually.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -1019,12 +1021,16 @@ def test_pi_is_honestly_unverifiable(hosted, setup):
     assert "not firable by this command" in detail
     # The over-broad absolutes must never return: the seam IS fired headlessly
     # by its own suite (the source seam) and by the installed-artifact probe.
-    # …and the same rule binds the module DOCSTRING, which no other assertion
-    # reads — its opening clause was the last place the absolute survived, and
-    # it grouped Pi with harnesses whose seam "cannot be fired headlessly" while
-    # the reason string below denied exactly that (#4620 review).  Apply the SAME
-    # phrase list to BOTH texts, so a reword cannot re-acquire one absolute in
-    # one place while leaving the pin green.
+    # They must not survive anywhere the Pi ruling lives — the report string,
+    # the `HEADLESS_FIRABLE` comment a maintainer reads when deciding whether
+    # `pi` may be fired, the enum itself, and the docstring's Pi sentences.
+    # Only the reason string was pinned before, so an absolute could return in
+    # that comment with this gate green (#4620 review). Scan every line of the
+    # module that mentions the harness. Lines mentioning ONLY other harnesses
+    # are deliberately out of scope: "no headless trigger" is TRUE of Cursor
+    # (`UNVERIFIABLE_REASON["cursor"]` says so), so banning it module-wide
+    # would redden this Pi-honesty gate for an accurate sentence about a
+    # different harness.
     from tortoise import session_verify as _sv
 
     absolutes = (
@@ -1034,7 +1040,13 @@ def test_pi_is_honestly_unverifiable(hosted, setup):
     )
     for phrase in absolutes:
         assert phrase not in detail, phrase
-        assert phrase not in (_sv.__doc__ or ""), phrase
+    pi_lines = [ln for ln in inspect.getsource(_sv).splitlines()
+                if re.search(r"\b[Pp]i\b", ln)]
+    # Non-vacuity: if the scan found nothing, the pin would pass trivially.
+    assert any("Pi" in ln for ln in pi_lines), "no Pi-touching source lines matched"
+    for line in pi_lines:
+        for phrase in absolutes:
+            assert phrase not in line, (phrase, line)
 
 
 # ── hermeticity: root resolution is home-scoped, env only where one exists ──

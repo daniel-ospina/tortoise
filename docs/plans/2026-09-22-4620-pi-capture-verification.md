@@ -116,12 +116,13 @@ ambient credential (`_scrubbed_env`), no real spool (explicit `spoolDir`).
 **Intent:** Remove the absolute over-claim that restates the stale premise; replace it with a **scoped**
 statement that neither over- nor under-claims.
 **Acceptance:** `test_pi_is_honestly_unverifiable` passes with the new assertions; the pin fails if the
-reason stops naming the suite / the residual, or if **either** absolute sentence returns.
+reason stops naming the suite / the residual, or if **any** of the banded absolutes returns in **any**
+Pi-touching line of the module (the reason, the `HEADLESS_FIRABLE` ruling comment, the enum, or the
+docstring's Pi sentences).
 
 **Files:**
 - Modify: `tortoise/session_verify.py` (`UNVERIFIABLE_REASON["pi"]`, the `HEADLESS_FIRABLE` comment, the module-docstring sentence)
 - Modify: `tests/test_session_verify.py` (`test_pi_is_honestly_unverifiable`)
-
 **Steps (TDD):**
 1. **Red:** in `test_pi_is_honestly_unverifiable` (its final assert already uses
    `report["links"]["installed"]["detail"]` — bind `detail = report["links"]["installed"]["detail"]`
@@ -139,7 +140,13 @@ reason stops naming the suite / the residual, or if **either** absolute sentence
    )
    for phrase in absolutes:
        assert phrase not in detail, phrase
-       assert phrase not in (session_verify.__doc__ or ""), phrase
+   # and the same rule for every Pi-touching line of the module, so the
+   # HEADLESS_FIRABLE ruling comment is covered too — not just the reason:
+   pi_lines = [ln for ln in inspect.getsource(session_verify).splitlines()
+               if re.search(r"\b[Pp]i\b", ln)]
+   for line in pi_lines:
+       for phrase in absolutes:
+           assert phrase not in line, (phrase, line)
    ```
    RED against the current string.
 2. Reword `UNVERIFIABLE_REASON["pi"]` to (keeping `"extension"`; the string is PLAIN TEXT — no
@@ -171,8 +178,8 @@ executably verified, (b) what is manual-only, (c) the exact procedure **with its
 
 **Steps:** add the section:
 - **Executable:** `node --experimental-strip-types --test tortoise/pi-hooks/tortoise-capture.test.ts`
-  (51 hermetic tests, fires the real handlers); `tests/test_pi_capture_hooks.py` (source pins + the
-  installed-artifact fired check + its anti-vacuity mutation test). `tests/test_pi_capture_hooks.py` is
+  (the extension's full hermetic suite, which fires the real handlers); `tests/test_pi_capture_hooks.py`
+  (source pins + the installed-artifact fired check + its anti-vacuity mutation test). `tests/test_pi_capture_hooks.py` is
   **registered under `core` (and `onboarding`); a `tortoise/pi-hooks/` change selects `core` via the
   `tortoise/` fallback**. The installed artifact as `install_capture` writes it is loaded and fired by
   that check (into a temp `HOME`, not the operator's live file).
@@ -180,34 +187,13 @@ executably verified, (b) what is manual-only, (c) the exact procedure **with its
   `node --experimental-strip-types --test tortoise/pi-hooks/tortoise-capture.test.ts` (or note
   "Node ≥ 22.18, else pass the flag"), so the README does not carry two conflicting instructions.
 - **Manual-only:** that a real `pi` process loads the installed extension against the live API.
-  Procedure: with `TORTOISE_API_KEY` set and the org's Agent-sessions toggle on (else the server 409s
-  and no receipt prints), run
-  `pi --no-extensions -e ~/.pi/agent/extensions/tortoise-capture.ts -p "<trivial prompt>"` on a
-  non-dogfood install. `--no-extensions` makes the probe single-producer.
-  **Pass condition = `retrievable` (owner ruling, B1 report): read the SPECIFIC CAPTURED CONTENT
-  back.** `GET /v1/sessions/{id}` returns the session's turns + extracted points — that is the
-  authoritative test; `GET /v1/search?q=…` is a **graph-wide** read, so it counts only when a hit's
-  `sessionId` is the probed session's. A row in `GET /v1/sessions` alone is
-  **necessary, not sufficient** (it proves `captured` — the write landed — never `retrievable`); it is
-  *supporting evidence*, exactly like the
-  `[tortoise-capture] captured session(s) → <apiUrl> (filed N≥1)` line (a 2xx is implied, not printed).
-  **A read-back 504 is `UNMEASURABLE` — never PASS, never FAIL** (the read path is query-dependent,
-  `#4661`). **No receipt line while the session IS present ⇒ the `#4675` post-commit-504 false
-  negative, NOT a seam failure — never FAIL, and never PASS on the list row alone; attempt the
-  content read-back, else `UNMEASURABLE`.**
-  Run by a maintainer with a live `pi` install and a capture credential — at 2026-09-22 the **B1
-  lane**, owner of objective-1's exit evidence
-  (`~/.pi/agent/state/lane-reports/B1-LIVE-FOUR-HARNESS-2026-09-22.md`, cited by `#4620` and named in
-  the `#1714` comment Task 5 posts).
-- **Blockers:** `#4661` (read path — a read-back 504 is UNMEASURABLE); **`#4675`** (a post-commit 504
-  is indistinguishable from a pre-commit one, so the client records no receipt for a session that did
-  land — the client's *terminality* rule, resolved by a confirming read once `#4661` permits it);
-  `#3713` —
-  launch-blocking for the Pi claim per its recorded decision (2026-09-22T17:20Z), **not** for a
-  clean-machine install, and its sequencing blocker `#3971` has merged as `73acefddf`. Until `#4661`
-  and `#4675` are resolved the live leg can yield **no verdict** (UNMEASURABLE), so objective 1's
-  done-state must not read as verified. Automating the probe is `#4710`; the version-contract route
-  is `#4680`.
+  **Canonical: `tortoise/pi-hooks/README.md` § Verification** — the procedure, its actor, its pass
+  condition, the UNMEASURABLE rule and the blocker list live THERE and are deliberately not restated
+  here. The one decision a reader of this plan needs: the pass condition is `retrievable` (the specific
+  captured content read back, session-bound), and until `#4661`/`#4675` clear the live leg yields **no
+  verdict**, so objective 1's done-state must not read as verified. `#3713` is launch-blocking for the
+  Pi *claim* only; its sequencing blocker `#3971` merged as `73acefddf`. Automating the probe is
+  `#4710`; the version-contract route is `#4680`.
 
 ## Task 4 — docs index
 
