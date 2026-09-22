@@ -168,6 +168,26 @@ def test_connector_update_foreign_org_is_noop_and_false() -> None:
     assert mine["config"] == {"repo": "alpha2"}
 
 
+def test_connector_update_empty_body_reads_existence_org_scoped() -> None:
+    """An empty update body reads existence FIRST, scoped to the org.
+
+    PostgREST makes zero updates for ``{}``, so the PATCH representation is
+    ``[]`` whether or not the row exists — it cannot establish existence.
+    REDs on: inferring existence from ``bool(rows)`` of the PATCH (the
+    own-org call returns False), and on dropping the org term from the
+    existence read (a foreign id returns True).
+    """
+    rec = _RecordingCP(_cp())
+    assert sc.connector_update(rec, ORG_A, CONN_A) is True
+    _, kw = rec.last()
+    assert kw.get("method") != "PATCH"
+    assert ("org_id", "eq", ORG_A) in kw["filters"]
+    assert ("id", "eq", CONN_A) in kw["filters"]
+
+    cp = _cp()
+    assert sc.connector_update(cp, ORG_A, CONN_B) is False
+
+
 def test_connector_delete_foreign_org_is_noop_and_false() -> None:
     """A foreign-org DELETE removes nothing and reports False.
 
@@ -286,6 +306,37 @@ def test_patch_foreign_connector_404_and_row_unchanged(client) -> None:
     assert ok.status_code == 200, ok.text
     mine = next(x for x in cp.tables["connectors"] if x["id"] == CONN_A)
     assert mine["config"] == {"repo": "alpha3"}
+
+
+def test_patch_empty_body_own_connector_200(client) -> None:
+    """An empty update body still succeeds for the caller's OWN connector.
+
+    ``{}`` (and the equivalent ``{"config": null}``, which
+    ``exclude_none=True`` reduces to ``{}``) makes PostgREST perform zero
+    updates and answer ``[]`` under ``return=representation``, so the
+    representation cannot establish existence. REDs on: inferring existence
+    from ``bool(rows)`` — that 404s the caller's own connector.
+    """
+    tc, _ = client
+    for payload in ({}, {"config": None}):
+        r = tc.patch(f"/v1/connectors/{CONN_A}", json=payload)
+        assert r.status_code == 200, (payload, r.text)
+        assert r.json() == {"status": "updated"}
+
+
+def test_patch_empty_body_foreign_connector_404(client) -> None:
+    """An empty-body PATCH on a FOREIGN id still 404s and touches nothing.
+
+    The existence read is org-scoped, so "nothing to update" never becomes an
+    existence oracle. REDs on: dropping the org term from the existence read
+    (200 for a foreign id).
+    """
+    tc, cp = client
+    r = tc.patch(f"/v1/connectors/{CONN_B}", json={})
+    assert r.status_code == 404, r.text
+    assert r.json()["detail"] == "Connector not found"
+    other = next(x for x in cp.tables["connectors"] if x["id"] == CONN_B)
+    assert other["config"] == {"repo": "beta"}
 
 
 def test_delete_foreign_connector_404_and_row_present(client) -> None:
