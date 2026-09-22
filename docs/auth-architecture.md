@@ -103,15 +103,17 @@ the token regardless of which subdomain presented it.
     writes that **legacy** cookie with `document.cookie` plus a `Domain=.premiselabs.co` attribute
     (`:1498`), i.e. **parent-domain and JS-readable**, after `signInWithPassword` /
     `signInWithOAuth` / `refreshSession`.
-    Removing it is **#3524** (`SCOPE.md` §4 W3) and §7's ordering guard keeps
-    `oauth.py:1335-1360` until that ships — so it is still issuing today.
+    Removing it is **#3524** (`SCOPE.md` §4 W3); `SCOPE.md` §7's ordering guard defers deleting
+    this writer until #3524 ships (`_CONSENT_HTML` — `oauth.py:1445` / `:1467` / `:1498`; §7 states
+    the range as `1335-1360`, the enclosing consent-page block) — so it is still issuing today.
   - **Accepted by** two live surfaces:
     1. the blog-admin console's **data layer** — `website/apps/blog-admin/src/lib/supabase.ts`
        (`STORAGE_KEY`) is the supabase-js storage adapter, and with `persistSession: true`
        supabase-js recovers the session from it on init, so the console's direct Supabase calls
-       (5 `.from()` builder sites, `src/lib/blog-api.ts:41-84`, plus 3 Storage sites,
-       `IMAGE_BUCKET`, `:442-475` — 11 PostgREST and 3 Storage operations) authenticate off
-       **this** cookie rather than the BFF; and
+       (11 PostgREST operation entry points over 5 `.from()` builder sites,
+       `src/lib/blog-api.ts:42-85`, plus 2 authenticated Storage calls — `upload` `:443`,
+       `remove` `:476`; `getPublicUrl` `:449` builds a URL locally and sends no credential)
+       authenticate off **this** cookie rather than the BFF; and
     2. `website/functions/blog/_shared/admin-auth.ts` — `getAccessToken` falls back to this cookie
        when no `Authorization: Bearer` is presented (always, on the marketing origin, which never
        receives the host-only `__Host-session`).

@@ -20,7 +20,7 @@ auth pages, dashboard, and billing. Written 2026-08-14 from the current
 | Host | Serves | Deployment |
 | --- | --- | --- |
 | `premiselabs.co` | Company page (`website/index.html`) | Cloudflare Pages project `premise-labs` |
-| `tortoise.premiselabs.co` | Product page (`website/product.html` at `/`), docs, FAQ (`/faq`), blog, legal — **no session ever**; the auth surfaces redirect to the app origin (302, except the `/auth` exact path — see the redirect notes below) | Cloudflare Pages project `premise-labs` (same project, host-routed) |
+| `tortoise.premiselabs.co` | Product page (`website/product.html` at `/`), docs, FAQ (`/faq`), blog, legal — **no session is minted here**; the blog Functions still *accept* the legacy `sb-tortoise-auth-token` cookie on a fallback path (see the auth bullet below). The auth surfaces redirect to the app origin (302, except the `/auth` exact path — see the redirect notes below) | Cloudflare Pages project `premise-labs` (same project, host-routed) |
 | `app.premiselabs.co` | **The one session-bearing origin (#4054):** the BFF, the dashboard SPA, `/auth*`, `/welcome`, `/invite-accept`, `/admin`, `/api/v1`, `/blog/api` | Cloudflare Pages project `tortoise-dashboard` (separate) |
 | `api.premiselabs.co` | Hosted API (FastAPI, `tortoise/hosted_api.py`) | Fly.io app `tortoise-y4mjjq` |
 
@@ -74,8 +74,8 @@ Host routing lives in `website/functions/_middleware.ts`:
   `Domain=.premiselabs.co`, JS-readable) and still **accepted** by two live
   surfaces: the blog-admin console's supabase-js data layer
   (`website/apps/blog-admin/src/lib/supabase.ts`, which recovers the session from
-  it on init) and `website/functions/blog/_shared/admin-auth.ts`'s Bearer
-  fallback. So a JS-readable parent-domain session is in play, which is exactly
+  it on init) and `website/functions/blog/_shared/admin-auth.ts`'s legacy cookie
+  fallback (Bearer first, then the cookie). So a JS-readable parent-domain session is in play, which is exactly
   what this `OVERRIDES` ruling exists to prevent. Stop issuing: **#3524**. Stop
   accepting: **#4178**. See `docs/auth-architecture.md` §2.1 “Legacy cohort” and
   §4 item 1 (which is OPEN, not closed).

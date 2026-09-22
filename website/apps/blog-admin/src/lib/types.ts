@@ -1,7 +1,8 @@
 /**
  * Minimal Supabase Database type for the blog admin SPA — blog_posts only.
- * Matches migration 20260827000001 (issue #1793). The admin SPA rides the
- * user's own PKCE session (RLS: is_admin() allowlist), never service-role.
+ * Matches migration 20260827000001 (issue #1793). The admin SPA rides the legacy
+ * `sb-tortoise-auth-token` session cookie via `src/lib/supabase.ts` (a RETAINED legacy
+ * surface, #4178 — not the BFF session), with RLS on the is_admin() allowlist and never service-role.
  */
 
 // NOTE: BlogPostRow is a `type` alias (NOT an interface) deliberately — TS only

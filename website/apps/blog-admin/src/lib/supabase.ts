@@ -6,14 +6,16 @@
  * same-origin `/api/session` probe (`session.ts`). This module is the DATA layer
  * only — `sb-tortoise-auth-token` (JSON, same shape supabase-js persists:
  * { access_token, refresh_token, ... }) carries the credential for the direct
- * PostgREST + Storage calls the console makes itself: 5 `.from()` builder sites
- * (`blog-api.ts:41-84`) + 3 Storage sites (`:442-475`) — 11 PostgREST and 3 Storage
- * operations. It is ISSUED by the MCP consent page in `tortoise/oauth.py`
- * (`/oauth/authorize`, `Domain=.premiselabs.co`, JS-readable) and recovered here
+ * PostgREST + Storage calls the console makes itself: 11 PostgREST operation entry points over
+ * 5 `.from()` builder sites (`blog-api.ts:42-85`), plus 2 authenticated Storage calls
+ * (`upload` `:443`, `remove` `:476`; `getPublicUrl` `:449` builds a URL locally). It is ISSUED by
+ * the MCP consent page in `tortoise/oauth.py`
+ * (`/oauth/authorize`, `Domain=.premiselabs.co`, JS-readable), re-written here by `writeCookie`
+ * on refresh, and recovered here
  * on init by supabase-js (`persistSession: true`). That is a RETAINED legacy
  * surface (`SCOPE.md` §4 W2, backlog #4178) — the admin gate
  * does NOT verify this cookie (it resolves the BFF session), and the same-origin
- * `/blog/api/*` proxy is what carries the BFF credential for those calls. Do not
+ * `/blog/api/*` proxy is what carries the BFF credential for the calls that have migrated. Do not
  * add a new caller without migrating it through the BFF.
  *
  * Storage adapter (parent-domain cookie; localStorage only as a dev fallback):

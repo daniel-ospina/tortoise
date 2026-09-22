@@ -1,8 +1,9 @@
 /**
  * blog-api — typed functions over supabase-js for the Tortoise blog CMS.
  *
- * All reads/writes ride the USER's PKCE session (RLS: blog_posts admin_all
- * policy gates on is_admin() membership — migration 20260827000001).
+ * All reads/writes ride the legacy `sb-tortoise-auth-token` session cookie via
+ * `src/lib/supabase.ts` — a RETAINED legacy surface (#4178), not the BFF session
+ * (RLS: blog_posts admin_all policy gates on is_admin() membership — migration 20260827000001).
  * No service-role keys client-side.
  *
  * Status model (plan W4): draft → published → archived (terminal);
