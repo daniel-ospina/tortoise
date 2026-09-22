@@ -219,6 +219,7 @@ def test_production_entry_points_thread_the_token():
     checks = {
         REPO_ROOT / "tortoise" / "__main__.py": "tortoise rebuild CLI",
         REPO_ROOT / "tortoise" / "migrate_db.py": "migrate_db",
+        REPO_ROOT / "tortoise" / "consistency.py": "recover_from_log",
         REPO_ROOT / "validation" / "validate_tortoise_ep.py": "validation script",
     }
     for path, label in checks.items():
