@@ -188,11 +188,56 @@ class _Boom(RuntimeError):
     ``ControlPlaneOffloadError``)."""
 
 
+class _Rows:
+    """The bare ``.result_set`` shape the registry queries are read through."""
+
+    def __init__(self, rows):
+        self.result_set = rows
+
+
+class _FakeRegistry:
+    """The selfhost lane's registry twin, keyed on the CYPHER the handler
+    actually issues — so it records the real call order instead of assuming
+    it. The tier read fails on demand."""
+
+    def __init__(self, order: list[str], tier_raises: bool):
+        self.order = order
+        self.tier_raises = tier_raises
+
+    def query(self, cypher, params=None):
+        c = " ".join(cypher.split())
+        if "t.tier" in c:
+            self.order.append("tier")
+            if self.tier_raises:
+                raise _Boom("registry tier read failed")
+            return _Rows([("pro",)])
+        if c.startswith("MATCH (w:WebhookEvent"):
+            self.order.append("claim")
+            return _Rows([])  # never seen → first processing
+        if c.startswith("CREATE (w:WebhookEvent"):
+            self.order.append("claim-create")
+            return _Rows([])
+        raise AssertionError(f"unexpected registry cypher: {cypher!r}")
+
+
+class _FakeRegistrySDK:
+    def __init__(self, registry: _FakeRegistry):
+        self._registry = registry
+
+    def _get_registry(self):
+        return self._registry
+
+
 def _wire_stripe_webhook(monkeypatch, order: list[str], *,
                          analytics_raises=False, audit_raises=False,
-                         tier_raises=False):
-    """Drive ``webhooks_stripe`` to its first-processing block, in Supabase
-    mode, with every seam stubbed and recorded into ``order``."""
+                         tier_raises=False, registry_mode=False):
+    """Drive ``webhooks_stripe`` to its first-processing block, with every
+    seam stubbed and recorded into ``order``.
+
+    Supabase mode is the default; ``registry_mode=True`` swaps the seam for a
+    fake registry SDK (``ha._make_sdk``) so the SELFHOST branch is exercised
+    instead — the lane whose ordering the Supabase tests cannot pin (#4459
+    review P3)."""
     import tortoise.billing as billing
     import tortoise.notify as nt
     import tortoise.supabase_control as sc
@@ -214,7 +259,7 @@ def _wire_stripe_webhook(monkeypatch, order: list[str], *,
         pass
 
     monkeypatch.setattr(sc, "get_control_plane", lambda: _Cp())
-    monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+    monkeypatch.setattr(sc, "is_supabase_enabled", lambda: not registry_mode)
 
     def _marker(cp, event_id, etype):
         order.append("claim")
@@ -253,6 +298,15 @@ def _wire_stripe_webhook(monkeypatch, order: list[str], *,
             raise _Boom("supabase unreachable")
 
     monkeypatch.setattr(ha, "_track_analytics_event", _emit)
+
+    if registry_mode:
+        # The registry (selfhost) branch reads the tier from the Teams node
+        # and claims via the WebhookEvent node on the SAME registry handle,
+        # so one fake covers the ordering question the test asks.
+        registry = _FakeRegistry(order, tier_raises)
+        monkeypatch.setattr(
+            ha, "_make_sdk",
+            lambda *, namespace=None, graph_name=None: _FakeRegistrySDK(registry))
     return event
 
 
@@ -319,6 +373,46 @@ def test_stripe_webhook_tier_read_failure_leaves_the_event_unclaimed(
         "retry would see is_first=False and the notification is lost (#4015)"
     )
     assert "notify" not in order
+
+
+def test_stripe_webhook_registry_tier_read_failure_leaves_the_event_unclaimed(
+        monkeypatch):
+    """The SELFHOST (registry) twin of the test above — the same reorder, in
+    the OTHER branch (``is_supabase_enabled()`` false), which the Supabase
+    seam wiring cannot reach (#4459 review P3).
+
+    Both branches take the tier read BEFORE the claim; a passing Supabase
+    test says nothing about the registry one, so moving the registry tier
+    query back BELOW the ``seen_rows`` claim left every test green while
+    reintroducing the defect: the ``WebhookEvent`` node is created, the tier
+    read then raises, the route 500s, and Stripe's retry sees the event as
+    already-seen — the notification is dropped permanently.
+
+    RED (mutation): reorder the registry branch's tier query below the claim
+    → ``claim``/``claim-create`` appear in ``order`` before the failure.
+    """
+    order: list[str] = []
+    _wire_stripe_webhook(monkeypatch, order, tier_raises=True,
+                         registry_mode=True)
+
+    resp = asyncio.run(ha.webhooks_stripe(_stripe_request({})))
+
+    assert resp.status_code == 500, (
+        f"the registry-lane tier-read failure must surface as an honest, "
+        f"retryable 500: {resp.status_code} {getattr(resp, 'body', b'')!r}"
+    )
+    assert "tier" in order, (
+        "the registry-lane tier read was never attempted — the branch under "
+        "test is not the one being exercised"
+    )
+    assert "claim" not in order and "claim-create" not in order, (
+        f"the tier read failed but the event was already CLAIMED in the "
+        f"registry lane: {order} — Stripe's retry would see it as seen and "
+        f"the billing notification is lost forever (#4015)"
+    )
+    assert "notify" not in order, (
+        f"no notification may fire off a failed tier read: {order}"
+    )
 
 
 def test_stripe_webhook_analytics_offload_failure_does_not_500(monkeypatch):
