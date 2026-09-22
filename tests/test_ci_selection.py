@@ -1002,13 +1002,22 @@ def test_push_legs_partitions_every_classified_file():
             f"push_extra[{i}] {f} must ride {leg} — the #1485 spread rule"
         )
     # …and the rule is genuinely exercised while push_extra is empty: prove
-    # the parity spread on a synthetic manifest rather than assume it.
-    probe = {**m, "push_extra": ["bench/probe_even.py", "bench/probe_odd.py"]}
+    # the parity spread on a synthetic manifest rather than assume it — for
+    # each entry BOTH the leg it lands in and that it lands in no other leg
+    # (a duplicated entry passes a presence-only probe; measured).
+    probe_names = ("bench/probe_even", "bench/probe_odd")
+    assert not (set(probe_names) & fast), (
+        "probe names would collide with a classified file: "
+        f"{set(probe_names) & fast}"
+    )
+    probe = {**m, "push_extra": [f"{n}.py" for n in probe_names]}
     probe_legs = push_legs(probe)
-    assert "bench/probe_even" in set(probe_legs["half_a"]), \
-        "#1485: push_extra[0] must ride half_a"
-    assert "bench/probe_odd" in set(probe_legs["half_b"]), \
-        "#1485: push_extra[1] must ride half_b"
+    assert probe_names[0] in set(probe_legs["half_a"]) and \
+        probe_names[0] not in set(probe_legs["half_b"]), \
+        "#1485: push_extra[0] must ride half_a and no other leg"
+    assert probe_names[1] in set(probe_legs["half_b"]) and \
+        probe_names[1] not in set(probe_legs["half_a"]), \
+        "#1485: push_extra[1] must ride half_b and no other leg"
 
 
 def test_carve_out_mirrors_test_no_redirect_stems():
