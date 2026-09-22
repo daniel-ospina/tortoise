@@ -45,6 +45,7 @@ import tortoise
 # a monkeypatch/override of the canonical constant reaches BOTH surfaces instead
 # of leaving a stale copy in this module.
 from tortoise import mcp_auth as _mcp_auth
+from tortoise import monitoring as _monitoring  # #2924: call-time bound read
 from tortoise.abuse import _int_env  # #1081 signup limiter env knobs (SignupVelocityTracker)
 from tortoise.alert_store import OpenOutcome, ResolveOutcome  # #3820 resolve/open tri-state
 from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op without key)
@@ -82,7 +83,6 @@ from tortoise.hosted_backup import (
 )
 from tortoise.mcp_server import create_http_app
 from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
-    CONTROL_PLANE_OFFLOAD_TIMEOUT_S,  # #2924: the gate's fail-open request bound
     PROBE_HARD_TIMEOUT,
     PROBE_STALE_AFTER,
     ControlPlaneOffloadError,
@@ -20075,7 +20075,11 @@ async def _get_onboarding_projection_off_loop(org_id: str) -> dict:
         # #2924: the gate's contract is fail-open, so a hung or cold graph must
         # not park a graph worker for the lane's cold-start allowance — the
         # seam's standard REQUEST bound is the right price here.
-        timeout=CONTROL_PLANE_OFFLOAD_TIMEOUT_S)
+        # #2924 review: read the constant at CALL time, not import time — the
+        # seam's bound tests monkeypatch ``monitoring``, and the lane bound
+        # (``graph_offload_timeout_s()``) resolves at call time for the same
+        # reason.
+        timeout=_monitoring.CONTROL_PLANE_OFFLOAD_TIMEOUT_S)
 
 
 # #1727 (Slice 2, Task 11): PATCH-field → state-key translation for the

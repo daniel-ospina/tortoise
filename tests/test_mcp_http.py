@@ -1069,7 +1069,8 @@ class TestOnboardingToolGating:
         Two signals, because they fail for different reasons: the observed
         thread name is the DIRECT falsifier (a blocking read on ``MainThread``),
         and the tick count is the INVARIANT a user feels (``/health`` keeps
-        answering while the read is in flight).
+        answering while the read is in flight). The tick assertion is kept WEAK
+        on purpose — see its comment.
         """
         from tortoise import mcp_auth, mcp_server
 
@@ -1121,14 +1122,18 @@ class TestOnboardingToolGating:
             f"thread={seen['thread']!r}"
         )
         expected = int(stall_s / 0.02)
-        # A free loop yields ~expected ticks; a gate back ON the loop yields
-        # 0-2. The floor is deliberately far below both so a loaded CI runner
-        # (this repo runs ~12 lanes on 10 CPUs, where a 20 ms timer wake-up can
-        # stretch severalfold) cannot false-alarm the detector.
-        assert ticks >= max(3, expected // 10), (
-            f"the loop managed only {ticks} ticks during a {stall_s}s gate "
-            f"read (a free loop yields ~{expected}) — the gate is back ON the "
-            "event loop; route it through _graph_offload (#2924)"
+        # A free loop yields ~expected ticks; a gate back ON the loop yields 0.
+        # The floor is 1, not a fraction of `expected`: the measurement was
+        # taken on a box at loadavg ~140 running this file's other tests, where
+        # in-process GIL/scheduler starvation stretched 20 ms wake-ups 25-fold
+        # (2 ticks observed where a control process managed 46-49) and a
+        # `expected // 10` floor produced a FALSE red on a correctly-offloaded
+        # gate. `>= 1` still fails on the regression (which yields 0) without
+        # reddening a loaded runner.
+        assert ticks >= 1, (
+            f"the loop never ticked during a {stall_s}s gate read (a free loop "
+            f"yields ~{expected}) — the gate is back ON the event loop; route "
+            "it through _graph_offload (#2924)"
         )
 
     def test_gate_fails_open_when_the_offload_itself_fails(self, monkeypatch):
@@ -1196,6 +1201,58 @@ class TestOnboardingToolGating:
         assert seen["timeout"] == monitoring.CONTROL_PLANE_OFFLOAD_TIMEOUT_S
         assert seen["timeout"] < monitoring.graph_offload_timeout_s(), (
             "the gate fell back to the graph lane's cold-projection bound"
+        )
+
+    def test_concurrent_gate_misses_share_one_resolution(self, monkeypatch):
+        """#2924 review: concurrent misses for ONE org must not STAMPEDE.
+
+        Making the gate ``async`` introduced a window that the old synchronous
+        call did not have: the gate now awaits BETWEEN the cache lookup and the
+        cache fill, so N concurrent ``tools/list`` requests (one per MCP client
+        session) all miss and each submit its own graph-pool read. The pool is
+        small and also carries graph WRITES, and the stampede lands exactly when
+        the read is slow — a fail-open cosmetics gate must not be able to
+        occupy it. The in-flight map must make 8 concurrent misses one read.
+        """
+        import tortoise.hosted_api as ha
+        from tortoise import mcp_auth, mcp_server
+
+        calls = []
+        release = threading.Event()
+
+        def _slow_projection(org_id):
+            calls.append(org_id)
+            release.wait(10)
+            return {"onboarding_complete": True}
+
+        monkeypatch.setattr(ha, "_get_onboarding_projection", _slow_projection)
+        mcp_server._onboarding_state_cache.clear()
+        mcp_server._onboarding_gate_inflight.clear()
+        tok = mcp_auth._current_org_id.set("stampede-team")
+
+        async def _scenario():
+            tasks = [
+                asyncio.ensure_future(mcp_server._org_onboarding_complete())
+                for _ in range(8)
+            ]
+            # Let whoever gets there first SUBMIT; the other 7 must join it
+            # rather than submit their own.
+            await asyncio.sleep(0.3)
+            release.set()
+            return await asyncio.gather(*tasks)
+
+        try:
+            results = asyncio.run(_scenario())
+        finally:
+            release.set()
+            mcp_auth._current_org_id.reset(tok)
+            mcp_server._onboarding_state_cache.clear()
+            mcp_server._onboarding_gate_inflight.clear()
+
+        assert results == [True] * 8
+        assert calls == ["stampede-team"], (
+            f"8 concurrent gate misses performed {len(calls)} reads ({calls}) "
+            "— concurrent callers must share ONE resolution (#2924)"
         )
 
 
