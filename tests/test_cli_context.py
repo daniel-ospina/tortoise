@@ -119,7 +119,13 @@ def _embedded_daemon_alive(db_path: str) -> bool:
 
 
 def _registry_field(db_path: str, field: str) -> str | None:
-    """A string field of the daemon's own `.settings` registry, or None."""
+    """A string field of the daemon's own `.settings` registry, or None.
+
+    Non-string values are None rather than passed through: a corrupted
+    registry must not raise out of the reclaim (its sibling oracle
+    `_embedded_daemon_alive` hardens the same input, and a raise would turn a
+    clean red into an ERROR *and* leave the daemon unreclaimed).
+    """
     import json
 
     try:
@@ -127,7 +133,7 @@ def _registry_field(db_path: str, field: str) -> str | None:
             value = json.load(fh).get(field)
     except Exception:
         return None
-    return value or None
+    return value if isinstance(value, str) and value else None
 
 
 def _pid_is_this_daemon(pid: int, unixsocket: str | None) -> bool:
@@ -137,14 +143,24 @@ def _pid_is_this_daemon(pid: int, unixsocket: str | None) -> bool:
     because the reclaim must never signal a process it has not identified: a
     pidfile can outlive its daemon, and a recycled pid belongs to an
     unrelated process.
+
+    Both sides of the socket-dir comparison are realpath'd:
+    `_socket_dir_from_cmdline` returns a resolved path, while the registry's
+    `unixsocket` is redislite's raw `mkdtemp` path — on macOS those differ by
+    the `/private` prefix for every tempdir, so comparing them unresolved
+    makes this gate always False and silently disables the fallback it guards.
+
+    With no `unixsocket` on record the identity degrades to "is a
+    redis-server", so it is only a weak guard there; the socket path is the
+    identity that makes pid reuse impossible.
     """
     from tortoise.embedded_reaper import _cmdline, _socket_dir_from_cmdline
 
     if "redis-server" not in _cmdline(pid):
         return False
     if unixsocket is None:
-        return True
-    return _socket_dir_from_cmdline(pid) == os.path.dirname(unixsocket)
+        return True  # weak identity — see docstring
+    return _socket_dir_from_cmdline(pid) == os.path.dirname(os.path.realpath(unixsocket))
 
 
 def _reclaim_leaked_daemon(db_path: str) -> int | None:
@@ -163,9 +179,10 @@ def _reclaim_leaked_daemon(db_path: str) -> int | None:
 
     Reclaimed through the registry's OWN `unixsocket` rather than by signal:
     `SHUTDOWN NOSAVE` on that path can only reach the server listening on it,
-    so pid reuse cannot make this helper kill an unrelated process. The
-    pidfile pid is only a fallback, and only after `_pid_is_this_daemon`
-    identifies it (#4496 review cycle 2, P2).
+    so pid reuse cannot make this helper kill an unrelated process on the
+    socket path. The pidfile pid is only a fallback, and only after
+    `_pid_is_this_daemon` identifies it as a redis-server for this exact
+    socket dir (#4496 review cycles 2 and 3).
     """
     if not _embedded_daemon_alive(db_path):
         return None
@@ -187,7 +204,7 @@ def _reclaim_leaked_daemon(db_path: str) -> int | None:
                 sock.settimeout(2.0)
                 sock.connect(unixsocket)
                 sock.sendall(b"SHUTDOWN NOSAVE\r\n")
-        except OSError:
+        except (OSError, TypeError):
             pass
         for _ in range(25):  # the daemon exits asynchronously
             if not _embedded_daemon_alive(db_path):

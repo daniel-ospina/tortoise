@@ -170,16 +170,18 @@ def test_uptime_and_cmdline_also_tolerate_a_mock(monkeypatch, tmp_path):
     `_process_start_time` was the one on the close path (pinned in the test
     above), but the module has eight other readers that parse captured
     `ps`/`lsof`/`pgrep`/`redis-cli` stdout, and only one of the whole set
-    raises on a MagicMock (`_parse_lstart`). The rest fail *silently*, and
-    for three of them the silent value is the wrong one — the ones asserted
-    below:
+    raises on a MagicMock (`_parse_lstart`). The rest fail *silently*, which
+    is worse — the value they hand back is wrong:
 
-    * `_uptime_seconds` -> `_parse_etime(MagicMock())` is `0.0`;
-    * `_cmdline` -> returns the mock itself;
+    * `_cmdline` returns the mock itself;
     * `_is_detached` -> `int(MagicMock()) == 1` and `1 in (0, 1)` is **True**,
       i.e. the strongest orphan signal, from an unreadable `ps`;
     * `_client_list`/`_active_client_count` -> `_parse_client_list(MagicMock())`
-      is `[]`, the "zero clients" verdict that licences a kill.
+      is `[]`, the "zero clients" verdict that licences a kill;
+    * `_uptime_seconds` -> `_parse_etime(MagicMock())` is `0.0`, which is the
+      *youngest* possible uptime — a wrong value, but it lands on the SAFE
+      side of `_cooldown_check`'s `uptime < min_uptime` comparison, so it is
+      pinned as an inversion-adjacent case rather than a fail-open one.
 
     Deliberately NOT asserted: `_process_has_socket`, `_derive_real_pid_macos`,
     `_pgrep_redis_servers` and `_batch_process_info`. A MagicMock happens to
