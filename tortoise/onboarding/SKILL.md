@@ -61,7 +61,7 @@ Branch on what you find:
 |---|---|
 | `completed_steps` already contains `harness-connected` | Tell the user their agent is already connected; stop (idempotent). Post-completion re-entry is a no-op — the onboarding tools retire from tools/list once the org completes. |
 | `fork` is `null` (never chosen) | **Do NOT guess or persist a fork** — the fork card is a human decision, once per organization (presentation fork, never a billing gate). Tell the user the fork card is waiting in the dashboard wizard and re-read the state after they choose. |
-| `fork` is `'build'` | Connect as usual; the build fork's completion gate is catalog-based (catalog-presented), not decide-based — no decide nudge required later. |
+| `fork` is `'build'` | Connect as usual; the build fork completes on the two acts the server OBSERVES — `harness-connected` + `first-points-filed` — never on a catalog render, and not decide-based — so no decide nudge is required later. |
 | `fork` is `'self'` | Connect as usual; the decide nudge (section 4) applies later. |
 | First connect on a fresh org | Proceed to section 2. |
 
@@ -373,18 +373,25 @@ Guide the human through:
    steps for Desktop/Web) or re-run the
    universal command. Never claim connected on a failed `tortoise_health`.
 3. On success — **write the harness-connected checkpoint** (idempotent
-   first-write-wins keyed-MERGE; replay is a no-op, so the dashboard's
-   Continue button and this write can both fire safely):
+   first-write-wins keyed-MERGE; replay is a no-op, so re-running this write
+   is safe):
    - Hosted CLI agents: `curl -s -X POST
      https://api.premiselabs.co/v1/onboarding/state/checkpoint -H
      "Authorization: Bearer $TORTOISE_API_KEY" -H "Content-Type:
      application/json" -d '{"step":"harness-connected"}'`
-   - Claude Desktop / Claude Web: you have no REST/curl surface — the human
-     clicks **"Done — Continue to dashboard"** in the dashboard connect step;
-     that click writes the same checkpoint (session-authed). Tell them to do
-     that once `tortoise_health` succeeds here.
+   - Claude Desktop / Claude Web: you have no REST/curl surface, and **no
+     dashboard click connects anything** — the server writes this same
+     checkpoint itself on your first successful graph write
+     (`tortoise_create_point` / `tortoise_file_decision` →
+     `_maybe_onboarding_auto_complete()`). File a first memory and the
+     dashboard reflects it on its own: the done step (step 3) shows Connected
+     the moment your agent files. The connect step does NOT advance by itself
+     — the poll runs only on the done step, so the user still clicks
+     Continue/Skip to leave the connect step. Never tell the human a click
+     connects them.
 4. Report to the user: "✅ Tortoise is connected and verified." The Setup
-   guide card on the dashboard advances.
+   guide card on the dashboard advances from the server-observed connection —
+   never from a dashboard click (lane B3, 2026-09-16).
 
 **Failure modes:** config write invalid → teach-human fallback (above);
 connection verify fails → retry with diagnostic + honest error (never a
@@ -469,12 +476,19 @@ Owned here (epic #1976 §3 + §8 timing pin). At the user's FIRST capture —
 the first time a session/conversation is filed to the graph — the agent says
 ONE line, non-blocking:
 
-> "Heads up: I'll remember this session so you can recall it later. View/delete in Settings → Memory sources."
+> "Heads up: I'll remember this session so you can recall it later. View/delete in Settings → Captured sessions."
 
 Contract notes:
 - **Timing:** first capture only, in-conversation, one line, non-blocking.
   Recording is default-ON (ToS-covered); this is disclosure, NOT a consent
   ceremony (no re-gate — the off-switch stays quiet-409, #1927).
+- **Destination (#2002):** `Settings → Captured sessions` — the capture
+  view/delete home (`<h3 id="settings-capture-heading">`). NOT
+  `Settings → Memory sources`, which is the SIBLING home holding the four
+  source toggles: it lists no sessions and offers no delete. The epic design
+  docs (#1976 §W4/W6) describe it as "Memory sources → Agent sessions", but
+  #2180 shipped both homes as siblings, so the announcement names the
+  view/delete home directly. Do not "restore" the older wording.
 - **Checkpoint:** the announcement's completion writes the `capture-disclosed`
   NODE CHECKPOINT (`{"step":"capture-disclosed"}` via the checkpoint
   surface) — it is never a card-counted step (the Setup guide renders it

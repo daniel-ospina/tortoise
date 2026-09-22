@@ -45,15 +45,15 @@ aboutObjects: tortoise-hosted-platform
 
 **Intent:** Land the Supabase-side substrate — `graphs` table + api_keys scope columns + the escalation CHECK — as a pure additive migration following the newest convention (timestamp prefix, IF NOT EXISTS / DROP-ADD idempotency, service-role grants only, no authenticated grant changes — mirrors 20260825000001 which added `name` without new grants).
 
-**Acceptance:** Migration applies cleanly on top of 20260830000001; re-apply (rollback drill) is safe; graphs table has RLS GUC read policy + service_role ALL; partial unique index `(team_id, name) WHERE status <> 'deleted'`; CHECK fires on direct INSERT of escalation scope with deleg=0 (graph-bound AND team-wide); graph_id FK ON DELETE CASCADE; scopes default `[]`.
+**Acceptance:** Migration applies cleanly on top of 20260830000001; re-apply (rollback drill) is safe; graphs table has RLS GUC read policy + service_role ALL; partial unique index `(org_id, name) WHERE status <> 'deleted'`; CHECK fires on direct INSERT of escalation scope with deleg=0 (graph-bound AND team-wide); graph_id FK ON DELETE CASCADE; scopes default `[]`.
 
 **Files:**
 - Create: `supabase/migrations/20260901000001_graphs_and_key_scopes.sql`
 
 **Steps:**
-1. `CREATE TABLE IF NOT EXISTS public.graphs` (id text PK, team_id FK→teams ON DELETE CASCADE, name, kind default 'custom', namespace, status default 'active', recording bool NULL, created_at) — per plan §4.1 DDL.
-2. `CREATE UNIQUE INDEX IF NOT EXISTS uq_graphs_team_name_active ON public.graphs (team_id, name) WHERE status <> 'deleted'`.
-3. RLS: `ENABLE ROW LEVEL SECURITY`; `graph_guc_read` FOR SELECT TO authenticated USING (team_id = current_setting('app.current_team_id', true)); `graph_service_role_all` FOR ALL TO service_role. Column grants: REVOKE ALL from anon/authenticated/public; GRANT SELECT (id, team_id, name, kind, namespace, status, recording, created_at) TO authenticated (mirror 0006 pattern).
+1. `CREATE TABLE IF NOT EXISTS public.graphs` (id text PK, org_id FK→teams ON DELETE CASCADE, name, kind default 'custom', namespace, status default 'active', recording bool NULL, created_at) — per plan §4.1 DDL.
+2. `CREATE UNIQUE INDEX IF NOT EXISTS uq_graphs_org_name_active ON public.graphs (org_id, name) WHERE status <> 'deleted'`.
+3. RLS: `ENABLE ROW LEVEL SECURITY`; `graph_guc_read` FOR SELECT TO authenticated USING (org_id = current_setting('app.current_org_id', true)); `graph_service_role_all` FOR ALL TO service_role. Column grants: REVOKE ALL from anon/authenticated/public; GRANT SELECT (id, org_id, name, kind, namespace, status, recording, created_at) TO authenticated (mirror 0006 pattern).
 4. `ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS graph_id text REFERENCES public.graphs(id) ON DELETE CASCADE` (NULL = team-wide → default).
 5. `ADD COLUMN IF NOT EXISTS scopes jsonb NOT NULL DEFAULT '[]'::jsonb` + comment pinning FLAT-by-decision.
 6. `ADD COLUMN IF NOT EXISTS created_by_key_id text REFERENCES public.api_keys(id) ON DELETE SET NULL`.
@@ -84,7 +84,7 @@ aboutObjects: tortoise-hosted-platform
 
 **Intent:** Selfhost (registry mode) carries the same properties and returns the same resolve shape, so consumers are mode-agnostic (plan §4.2 + surface 10).
 
-**Acceptance:** `_graph_create` registry branch stores `status:'active'` (+ recording:null absent → default); `api_key_create` stores optional graph_id/scopes/created_by_key_id/delegation_depth; registry resolve path (hosted_api get_current_team registry branch) returns the same five new dict keys with the same D2 legacy rule; nodes without the props (pre-C1 selfhost graphs) resolve with safe defaults.
+**Acceptance:** `_graph_create` registry branch stores `status:'active'` (+ recording:null absent → default); `api_key_create` stores optional graph_id/scopes/created_by_key_id/delegation_depth; registry resolve path (hosted_api get_current_org registry branch) returns the same five new dict keys with the same D2 legacy rule; nodes without the props (pre-C1 selfhost graphs) resolve with safe defaults.
 
 **Files:**
 - Modify: `tortoise/sdk.py` (`_graph_create` :12078, `api_key_create` :12450/12605, `apikey_list` :12482)
@@ -95,7 +95,7 @@ aboutObjects: tortoise-hosted-platform
 1. `_graph_create` registry CREATE: add `status:'active'` to the CREATE params (recording stays absent = NULL default).
 2. `apikey_create` (sdk.py:12439; CREATE at :12461, recovery-mint at :12620): accept `graph_id=None, scopes=None, created_by_key_id=None, delegation_depth=None` kwargs; include non-None values in the CREATE string (back-compat: old callers unchanged). Same for the recovery-mint at :12620 if it shares the pattern.
 3. `apikey_list` (def :12478 / RETURN :12482): add graph_id/scopes/delegation_depth to RETURN + output rows (dashboard/C7 parity; additive).
-4. Registry resolve (hosted_api registry branch — ALL THREE MATCH/RETURN sites): the key MATCHes at :1321 (prefix-filtered), :1329 (revoked/expiry fallback) and :1348 (legacy full-scan) each RETURN `k.team_id, k.id, k.key_hash, k.created_by` — widen ALL THREE to also return `k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id` (absent on old nodes → None), and update ALL THREE tuple-unpacking loops (:1333, :1340, :1358) to 8-tuples. Do NOT widen one site and leave the others — silent per-path drift. Also extend the team MATCH at :1390 with `t.graph_name` (currently absent — returns tier/max_*/suspended/flagged/email/subscription only) and widen its tuple unpack at :1397-1400.
+4. Registry resolve (hosted_api registry branch — ALL THREE MATCH/RETURN sites): the key MATCHes at :1321 (prefix-filtered), :1329 (revoked/expiry fallback) and :1348 (legacy full-scan) each RETURN `k.org_id, k.id, k.key_hash, k.created_by` — widen ALL THREE to also return `k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id` (absent on old nodes → None), and update ALL THREE tuple-unpacking loops (:1333, :1340, :1358) to 8-tuples. Do NOT widen one site and leave the others — silent per-path drift. Also extend the team MATCH at :1390 with `t.graph_name` (currently absent — returns tier/max_*/suspended/flagged/email/subscription only) and widen its tuple unpack at :1397-1400.
 5. Build the same five dict keys: graph_namespace = the Graph node's namespace by graph_id (one MATCH on graph_id when set; fail-soft None), else `t.graph_name` from the widened team MATCH. Legacy rule (D2) shared: `legacy_full_access = (delegation_depth is None) and (scopes is None or scopes == [])`.
 
 ### Task 4: Seam extension — `graph_metadata`, `graph_list`, `graph_count`
@@ -110,9 +110,9 @@ aboutObjects: tortoise-hosted-platform
 - Test: `tests/test_supabase_control.py`, `tests/test_graph_diagnostics.py` or adjacent graph tests (extend)
 
 **Steps:**
-1. `graph_metadata`: after the teams.graph_name read, ALSO query `graphs` WHERE team_id AND status='active' (ORDER BY created_at); build default row `{graph_id:'default', team_id, name:'default', kind:'default', namespace: graph_name, status:'active'}` first, then custom rows `{graph_id, team_id, name, kind, namespace, status}`. Empty-graphs-table (pre-C1 schema) → degrade to default-only (drift-safe: the graphs query is wrapped in try/except → log + default-only, never 500 the dashboard).
+1. `graph_metadata`: after the teams.graph_name read, ALSO query `graphs` WHERE org_id AND status='active' (ORDER BY created_at); build default row `{graph_id:'default', org_id, name:'default', kind:'default', namespace: graph_name, status:'active'}` first, then custom rows `{graph_id, org_id, name, kind, namespace, status}`. Empty-graphs-table (pre-C1 schema) → degrade to default-only (drift-safe: the graphs query is wrapped in try/except → log + default-only, never 500 the dashboard).
 2. `graph_list` registry branch: RETURN adds `g.status` (+`g.recording`); output rows gain both (None-safe).
-3. `graph_count`: Supabase branch — `1 + count(*) WHERE team_id AND kind='custom' AND status='active'`; registry branch unchanged (existing MATCH count — note: `team_create` :12055 creates the `kind='default'` Graph node, so the registry count already includes the default; verified no double-count). NOTE for C3: registry `graph_count` (:12153-12159) has no status filter — correct for C1 (no delete yet), but C3's soft-delete must filter `status <> 'deleted'` in the registry MATCH to avoid registry↔Supabase overcount drift.
+3. `graph_count`: Supabase branch — `1 + count(*) WHERE org_id AND kind='custom' AND status='active'`; registry branch unchanged (existing MATCH count — note: `team_create` :12055 creates the `kind='default'` Graph node, so the registry count already includes the default; verified no double-count). NOTE for C3: registry `graph_count` (:12153-12159) has no status filter — correct for C1 (no delete yet), but C3's soft-delete must filter `status <> 'deleted'` in the registry MATCH to avoid registry↔Supabase overcount drift.
 4. Test files PINNED: extend `tests/test_supabase_control.py` (graph_metadata + graph_count Supabase branches) and the existing registry graph_list coverage in `tests/test_graph_diagnostics.py`; confirm the exact file during implementation from the current test layout.
 
 ### Task 5: pgTAP suite `supabase/tests/20260901000001_graphs_and_key_scopes.sql`
@@ -127,7 +127,7 @@ aboutObjects: tortoise-hosted-platform
 **Steps (mirror 20260827000001 harness conventions — tests.assert helper, service_role seeding, cleanup):**
 1. Schema presence: graphs table + 4 api_keys columns + CHECK constraint + partial unique index exist.
 2. CHECK enforcement (surface 2): direct INSERT escalation scope with deleg=0 → violation, graph-bound AND team-wide; deleg NULL + escalation scope → allowed (owner).
-3. Partial unique: insert same (team_id,name) twice active → violation; delete first → reuse allowed.
+3. Partial unique: insert same (org_id,name) twice active → violation; delete first → reuse allowed.
 4. FK cascade: delete team → graphs rows cascade; delete graph → its keys cascade.
 5. RLS: GUC set → own team's graphs only; unset → 0 rows; anon → 0; service_role → all.
 6. Default graph: no row required (graph_name derivation is Python-side — suite asserts the table accepts a custom row + the partial index).

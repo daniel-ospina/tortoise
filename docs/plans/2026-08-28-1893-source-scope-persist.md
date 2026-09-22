@@ -20,7 +20,7 @@ aboutObjects: tortoise
 **Team:** epistemic-team
 **Role:** product-implementer
 
-**Architecture:** Approach 1 — write-on-change PATCH + one-shot hydration. The dashboard wraps the two scope setters: every user change `setScope(next)` AND fire-and-forget PATCHes `{github_issues_scope: next.repos}` / `{github_docs_scope: [{repo, branch}…]}` through a single FIFO promise queue (serializing the server's whole-state non-atomic RMW). A one-shot hydration effect — gated on `reposLoaded && onboarding && !reposLoadFailed`, keyed on the `currentTeamId` **state** (not the ref — the ref is populated in the mount-gate path that races the onboarding chain; keying on state guarantees a re-fire when the team resolves, closing the null-teamId dead-path) — reconciles the persisted scope against the live org repo list and seeds the selectors exactly once per team session (never inside `refreshOnboarding()`, which re-fires on mount, connect, toggles, and `finishWelcomeLoads`). Server registers the two keys in both default-state dicts + the PATCH model (allowlist-derived), and validates scope payloads at the PATCH boundary reusing `_validate_repo_scope` + `_is_safe_branch` (400 semantics, consistent with the index endpoints). Pure reconcile/serialize/job-body/gating helpers move to `src/sourceScope.js` for `node --test` coverage (captureStatus.js / sessionKey.js precedent — no vitest/jsdom).
+**Architecture:** Approach 1 — write-on-change PATCH + one-shot hydration. The dashboard wraps the two scope setters: every user change `setScope(next)` AND fire-and-forget PATCHes `{github_issues_scope: next.repos}` / `{github_docs_scope: [{repo, branch}…]}` through a single FIFO promise queue (serializing the server's whole-state non-atomic RMW). A one-shot hydration effect — gated on `reposLoaded && onboarding && !reposLoadFailed`, keyed on the `currentOrgId` **state** (not the ref — the ref is populated in the mount-gate path that races the onboarding chain; keying on state guarantees a re-fire when the team resolves, closing the null-orgId dead-path) — reconciles the persisted scope against the live org repo list and seeds the selectors exactly once per team session (never inside `refreshOnboarding()`, which re-fires on mount, connect, toggles, and `finishWelcomeLoads`). Server registers the two keys in both default-state dicts + the PATCH model (allowlist-derived), and validates scope payloads at the PATCH boundary reusing `_validate_repo_scope` + `_is_safe_branch` (400 semantics, consistent with the index endpoints). Pure reconcile/serialize/job-body/gating helpers move to `src/sourceScope.js` for `node --test` coverage (captureStatus.js / sessionKey.js precedent — no vitest/jsdom).
 
 ### Solution Diamond (approaches evaluated)
 
@@ -53,7 +53,7 @@ Standard-tier condensed map (test-design skill — surfaces from the touched cod
 | 5 | Dashboard hydration effect + persist wiring | build + code-review (+ manual clickthrough) | `npm run build` passes; selectors restore after reload (no jsdom harness — sessionKey/captureStatus precedent substitutes pure-node tests for the derivations) |
 | 6 | dist bundle | build | `npm run build` regenerates committed `dist/` |
 
-**Bug pattern flags:** non-atomic whole-state RMW (`_update_onboarding_state`) → single shared client-side FIFO queue; omit-empty (job builders) vs explicit-`[]` (persist path) contract split; pydantic `None`-filter must not drop `[]` (`[] is not None` — safe); one-shot hydration must not re-seed after `refreshOnboarding()` re-fires; hydration must not early-return on a null `teamId` that never changes again (key on `currentTeamId` state); a failed `repos` fetch must never be indistinguishable from a genuinely empty org (skip hydration, don't prune, don't latch); pre-hydration user interaction must not be clobbered by seeding.
+**Bug pattern flags:** non-atomic whole-state RMW (`_update_onboarding_state`) → single shared client-side FIFO queue; omit-empty (job builders) vs explicit-`[]` (persist path) contract split; pydantic `None`-filter must not drop `[]` (`[] is not None` — safe); one-shot hydration must not re-seed after `refreshOnboarding()` re-fires; hydration must not early-return on a null `orgId` that never changes again (key on `currentOrgId` state); a failed `repos` fetch must never be indistinguishable from a genuinely empty org (skip hydration, don't prune, don't latch); pre-hydration user interaction must not be clobbered by seeding.
 
 ### Journey Test Map
 
@@ -256,7 +256,7 @@ def _validate_scope_payload(updates: dict) -> dict:
     # (400 on invalid; valid values stored in NORMALIZED form — issues
     # strip/dedupe, docs ""/None branch → null; [] = explicit clear).
     updates = _validate_scope_payload(updates)
-    state = _update_onboarding_state(team["team_id"], **updates)
+    state = _update_onboarding_state(team["org_id"], **updates)
 ```
 
 Note: `_validate_repo_scope` is defined below the handler (module-level, resolved at call time — fine). Docs branches are NORMALIZED at persist (`""`/None → `None`), matching the `index_docs` consumer exactly (hosted_api.py:11262-11299); issues repos are strip/dedupe-normalized by `_validate_repo_scope`; `[]` (explicit clear) is stored as `[]` — the persist path NEVER omits empty (unlike the job builders, where absent = all).
@@ -340,27 +340,27 @@ test('buildDocsJobBody: omit-empty; org preserved', () => {
 })
 
 // ── gating predicates (#1893, scope-verify P1/P2): the one-shot hydration
-// and persist gating decisions are PURE and node-tested — the null-teamId
+// and persist gating decisions are PURE and node-tested — the null-orgId
 // dead-path, the repos-fetch-failure prune hazard, and the persist gate.
 
 test('shouldHydrate: false before repos load or onboarding resolves', () => {
-  assert.equal(shouldHydrate({ reposLoaded: false, onboarding: null, reposLoadFailed: false, currentTeamId: 't1', hydratedTeamId: null }), false)
-  assert.equal(shouldHydrate({ reposLoaded: true, onboarding: null, reposLoadFailed: false, currentTeamId: 't1', hydratedTeamId: null }), false)
+  assert.equal(shouldHydrate({ reposLoaded: false, onboarding: null, reposLoadFailed: false, currentOrgId: 't1', hydratedOrgId: null }), false)
+  assert.equal(shouldHydrate({ reposLoaded: true, onboarding: null, reposLoadFailed: false, currentOrgId: 't1', hydratedOrgId: null }), false)
 })
 
 test('shouldHydrate: false while repos fetch failed (never prune on a failed fetch)', () => {
-  assert.equal(shouldHydrate({ reposLoaded: true, onboarding: {}, reposLoadFailed: true, currentTeamId: 't1', hydratedTeamId: null }), false)
+  assert.equal(shouldHydrate({ reposLoaded: true, onboarding: {}, reposLoadFailed: true, currentOrgId: 't1', hydratedOrgId: null }), false)
 })
 
-test('shouldHydrate: false until the team resolves (no null-teamId dead-path)', () => {
-  assert.equal(shouldHydrate({ reposLoaded: true, onboarding: {}, reposLoadFailed: false, currentTeamId: null, hydratedTeamId: null }), false)
+test('shouldHydrate: false until the team resolves (no null-orgId dead-path)', () => {
+  assert.equal(shouldHydrate({ reposLoaded: true, onboarding: {}, reposLoadFailed: false, currentOrgId: null, hydratedOrgId: null }), false)
 })
 
 test('shouldHydrate: true exactly once per team; false once hydrated', () => {
-  assert.equal(shouldHydrate({ reposLoaded: true, onboarding: {}, reposLoadFailed: false, currentTeamId: 't1', hydratedTeamId: null }), true)
-  assert.equal(shouldHydrate({ reposLoaded: true, onboarding: {}, reposLoadFailed: false, currentTeamId: 't1', hydratedTeamId: 't1' }), false)
+  assert.equal(shouldHydrate({ reposLoaded: true, onboarding: {}, reposLoadFailed: false, currentOrgId: 't1', hydratedOrgId: null }), true)
+  assert.equal(shouldHydrate({ reposLoaded: true, onboarding: {}, reposLoadFailed: false, currentOrgId: 't1', hydratedOrgId: 't1' }), false)
   // a team switch re-hydrates (new team id)
-  assert.equal(shouldHydrate({ reposLoaded: true, onboarding: {}, reposLoadFailed: false, currentTeamId: 't2', hydratedTeamId: 't1' }), true)
+  assert.equal(shouldHydrate({ reposLoaded: true, onboarding: {}, reposLoadFailed: false, currentOrgId: 't2', hydratedOrgId: 't1' }), true)
 })
 
 test('shouldPersist: gated on hydration having completed', () => {
@@ -445,7 +445,7 @@ export function buildDocsJobBody(scope, org) {
 }
 
 // #1893 (scope-verify P1/P2): gating predicates for the one-shot hydration
-// and the persist path — pure so the null-teamId dead-path, the
+// and the persist path — pure so the null-orgId dead-path, the
 // repos-fetch-failure prune hazard, and the persist gate are node-tested.
 //
 // shouldHydrate: true only when repos loaded, onboarding resolved, the
@@ -454,11 +454,11 @@ export function buildDocsJobBody(scope, org) {
 // resolved (state, so the effect re-fires when the mount gate populates it
 // — the ref would leave the effect inert on a null-team dead-path), and
 // this team has not been hydrated yet (one-shot per team session).
-export function shouldHydrate({ reposLoaded, onboarding, reposLoadFailed, currentTeamId, hydratedTeamId }) {
+export function shouldHydrate({ reposLoaded, onboarding, reposLoadFailed, currentOrgId, hydratedOrgId }) {
   if (!reposLoaded || !onboarding) return false
   if (reposLoadFailed) return false
-  if (!currentTeamId) return false
-  if (hydratedTeamId === currentTeamId) return false
+  if (!currentOrgId) return false
+  if (hydratedOrgId === currentOrgId) return false
   return true
 }
 
@@ -508,17 +508,17 @@ import {
 
 **Step 2: Add refs + wrapped setters + persist queue** immediately after the `issuesScope` useState (main.jsx:321):
 
-> ⛔ Placement rule (scope-verify P1): the refs/handlers block references `currentTeamId` in the hydration EFFECT's deps array — the deps array is evaluated at RENDER time, so the effect must be placed AFTER the `const [currentTeamId, setCurrentTeamId] = React.useState(null)` declaration at **main.jsx:466** (referencing it before that line is a temporal-dead-zone `ReferenceError` on every render — build passes but the app crashes on load). Recommended: refs + handlers + queue at ~321 (they reference only `setIssuesScope`/`setDocsScope`/`api`/serializers), `reposLoadFailed` state at ~321, and the hydration effect immediately after main.jsx:466 (all referenced bindings — `reposLoaded` 318, `onboarding` 297, `reposList` 317, `currentTeamId` 466 — are then in scope).
+> ⛔ Placement rule (scope-verify P1): the refs/handlers block references `currentOrgId` in the hydration EFFECT's deps array — the deps array is evaluated at RENDER time, so the effect must be placed AFTER the `const [currentOrgId, setCurrentOrgId] = React.useState(null)` declaration at **main.jsx:466** (referencing it before that line is a temporal-dead-zone `ReferenceError` on every render — build passes but the app crashes on load). Recommended: refs + handlers + queue at ~321 (they reference only `setIssuesScope`/`setDocsScope`/`api`/serializers), `reposLoadFailed` state at ~321, and the hydration effect immediately after main.jsx:466 (all referenced bindings — `reposLoaded` 318, `onboarding` 297, `reposList` 317, `currentOrgId` 466 — are then in scope).
 
 ```js
   // #1893: persist source-scope selections as allowlisted onboarding_state
   // keys (github_issues_scope / github_docs_scope). scopeReadyRef gates the
   // persist path — nothing persists until the initial GET resolves + the
-  // one-shot hydration below has seeded. hydratedTeamIdRef keys hydration
+  // one-shot hydration below has seeded. hydratedOrgIdRef keys hydration
   // to ONE pass per team session: refreshOnboarding() re-fires after every
   // reindex/docs run + finishWelcomeLoads, so seeding inside it would
   // clobber newer selections with the stale server value.
-  const hydratedTeamIdRef = React.useRef(null)
+  const hydratedOrgIdRef = React.useRef(null)
   const scopeReadyRef = React.useRef(false)
   // #1893 (scope-verify P1): PER-KEY pre-hydration touch tracking — a touch
   // on ONE key must never suppress seeding of the OTHER, and must never
@@ -565,15 +565,15 @@ import {
   }
 ```
 
-**Step 2b: One-shot hydration effect** — placed immediately AFTER the `currentTeamId` state declaration (main.jsx:466) so the deps array never evaluates a temporal-dead-zone binding:
+**Step 2b: One-shot hydration effect** — placed immediately AFTER the `currentOrgId` state declaration (main.jsx:466) so the deps array never evaluates a temporal-dead-zone binding:
 
 ```js
   // #1893 one-shot hydration: reconcile the persisted scope against the
   // live org repo list, exactly once per team session. Gated on the pure
   // shouldHydrate predicate (reposLoaded && onboarding && !reposLoadFailed
-  // && currentTeamId && not-yet-hydrated) — never seeds the default empty
+  // && currentOrgId && not-yet-hydrated) — never seeds the default empty
   // before the GET resolves, never prunes on a failed repos fetch, and
-  // NEVER dead-paths on a null team: currentTeamId is STATE (populated by
+  // NEVER dead-paths on a null team: currentOrgId is STATE (populated by
   // the mount gate / team switcher), so the effect re-fires the moment the
   // team resolves. PER-KEY seeding: a key the user touched pre-hydration is
   // NOT seeded (their choice wins) and is persisted now; a key they did NOT
@@ -582,8 +582,8 @@ import {
   // switch re-enables seeding for the new team.
   React.useEffect(() => {
     if (!shouldHydrate({ reposLoaded, onboarding, reposLoadFailed,
-        currentTeamId, hydratedTeamId: hydratedTeamIdRef.current })) return
-    hydratedTeamIdRef.current = currentTeamId
+        currentOrgId, hydratedOrgId: hydratedOrgIdRef.current })) return
+    hydratedOrgIdRef.current = currentOrgId
     if (!scopeTouchedRef.current.issues) {
       setIssuesScope(reconcileIssuesScope(onboarding.github_issues_scope, reposList))
     } else {
@@ -598,7 +598,7 @@ import {
     scopeTouchedRef.current = { issues: false, docs: false }
     scopeReadyRef.current = true
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reposLoaded, onboarding, reposList, currentTeamId, reposLoadFailed])
+  }, [reposLoaded, onboarding, reposList, currentOrgId, reposLoadFailed])
 ```
 
 **Step 3: Swap the two MemorySources wiring sites** (main.jsx:3598-3599 and main.jsx:4121-4122):
@@ -690,7 +690,7 @@ test-routing (standard tier, domain=code, UX=low): unit server tests (docker lan
 4. **Reconcile behavior at seed:** intersect persisted names with `reposList`; prune stale; pruned-to-empty = all (`[]`). Branch values are reconciled against the live org repo list but NOT against `branchLists` at seed (lazy-loaded, may be absent) — instead, the branch auto-seed effect resets a stale persisted branch to default when the picker HAS loaded options and the branch is gone (`shouldResetBranch`), preventing a blank picker + failing docs job. `""`/`None` branch → default picker option (omitted from the branches map).
 5. **Persist timing:** fire-and-forget with `.catch(() => {})`, gated on `shouldPersist(scopeReadyRef.current)` (set only after the first successful hydration; never before the initial GET resolves). No retry/backoff — a failed persist is silent; the next change re-persists the full list. Accepted: a transient PATCH failure means the selection survives only in memory until the next change (network-failure edge, not the REAUTH-incident class the issue targets).
 6. **`branchLists` auto-seed nuance (accepted):** if branches load before a persist fires, the serialized docs scope may include the auto-seeded `defaultBranch` value (main.jsx:1077-1092) instead of `""` — harmless: it equals the server's default fallback and reconciles identically.
-7. **First-membership pinning (KNOWN LIMITATION, deliberately out of scope):** the onboarding surface — GET/PATCH `/v1/onboarding/state`, `/v1/onboarding/github/repos`, `/v1/onboarding/github/branches` — never threads `?team_id=`; the server resolves `?team_id=, else the FIRST membership` (`_session_user_team`, hosted_api.py:1422). This is PRE-EXISTING for the entire onboarding surface (`github_connected`, `session_recording`, etc. share the anchor) and is deliberately NOT fixed here (threading `team_id` is a cross-cutting auth-resolution change beyond this standard task and collides with #1894). Consequence for #1893: for a multi-team user whose selected team != first membership, the scope selectors read/write the FIRST membership's onboarding_state (the same anchor the rest of the MemorySources panel already uses). The hydration latch keyed on `currentTeamId` re-arms on a team switch, which re-runs hydration against the SAME (first-membership) state — harmless re-seed/re-persist of identical data, and a user's post-hydration choice is preserved (it was already persisted). NOT asserted as per-team; documented so a future `?team_id=` threading change must revisit the touch-flag + latch logic.
+7. **First-membership pinning (KNOWN LIMITATION, deliberately out of scope):** the onboarding surface — GET/PATCH `/v1/onboarding/state`, `/v1/onboarding/github/repos`, `/v1/onboarding/github/branches` — never threads `?org_id=`; the server resolves `?org_id=, else the FIRST membership` (`_session_user_org`, hosted_api.py:1422). This is PRE-EXISTING for the entire onboarding surface (`github_connected`, `session_recording`, etc. share the anchor) and is deliberately NOT fixed here (threading `org_id` is a cross-cutting auth-resolution change beyond this standard task and collides with #1894). Consequence for #1893: for a multi-team user whose selected team != first membership, the scope selectors read/write the FIRST membership's onboarding_state (the same anchor the rest of the MemorySources panel already uses). The hydration latch keyed on `currentOrgId` re-arms on a team switch, which re-runs hydration against the SAME (first-membership) state — harmless re-seed/re-persist of identical data, and a user's post-hydration choice is preserved (it was already persisted). NOT asserted as per-team; documented so a future `?org_id=` threading change must revisit the touch-flag + latch logic.
 8. **Registration-table format ripple:** the tuple-form `_STATE_KEY_TABLE` is a breaking shape change for any concurrent PR adding rows — coordinated with #1894 (see table above).
 
 ---
@@ -699,7 +699,7 @@ test-routing (standard tier, domain=code, UX=low): unit server tests (docker lan
 
 Two parallel plan verifiers reviewed this plan against the rebased branch (origin/main @ 5c761815). Both converged on one P1 + minor P2s. Fixes folded into the implementation below:
 
-- **[P1] Team-node provisioning in the three new pytest tests.** The `client` fixture overrides `get_current_team` only — it does NOT provision a Team node, and `_write_onboarding_state` is a `MATCH (t:Team {id:$id}) SET ...` that is a SILENT NO-OP without the node (`_get_onboarding_state` returns defaults). As written, all three scope tests passed without any persistence — the PATCH→GET round-trip evidence (O/I/T T1) was hollow. **Fix applied:** each test provisions `test-team-1` via the established `_make_sdk(namespace="registry")._get_registry().query("CREATE (t:Team {id:$id, onboarding_state:$st})", ...)` pattern (mirrors `test_install_probe_round_trip`), and:
+- **[P1] Team-node provisioning in the three new pytest tests.** The `client` fixture overrides `get_current_org` only — it does NOT provision a Team node, and `_write_onboarding_state` is a `MATCH (t:Team {id:$id}) SET ...` that is a SILENT NO-OP without the node (`_get_onboarding_state` returns defaults). As written, all three scope tests passed without any persistence — the PATCH→GET round-trip evidence (O/I/T T1) was hollow. **Fix applied:** each test provisions `test-team-1` via the established `_make_sdk(namespace="registry")._get_registry().query("CREATE (t:Team {id:$id, onboarding_state:$st})", ...)` pattern (mirrors `test_install_probe_round_trip`), and:
   - `test_scope_keys_explicit_empty_round_trip` adds an intermediate GET asserting `["repo-a"]` between the seed PATCH and the clear PATCH (pins the seed phase, not just the clear).
   - `test_scope_branch_normalized_to_null` adds a real GET between the two PATCHes asserting `branch is None`, then re-PATCHes that GET value (pins persist + stability, not just the in-memory response).
   - `test_scope_keys_invalid_400` seeds a valid scope first, then asserts the 400s leave the valid seed intact via GET (pins "nothing stored", non-vacuous).

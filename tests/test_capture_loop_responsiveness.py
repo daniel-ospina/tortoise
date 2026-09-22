@@ -11,7 +11,7 @@ per retry). That froze the SINGLE event loop, so:
 2. ``tortoise-y4mjjq`` runs one machine, so the proxy found no healthy
    candidate and dropped ALL traffic
    (``[PR01] no known healthy instances found for route tcp/443``);
-3. every dashboard boot call (``/v1/user/identity``, ``/v1/teams``,
+3. every dashboard boot call (``/v1/user/identity``, ``/v1/organizations``,
    ``/v1/onboarding/state``) failed together → the user-visible
    "Failed to fetch".
 
@@ -25,10 +25,12 @@ app, not the proxy or the network.
 
 The tests below assert the INVARIANT (other requests keep being served while
 a capture is stalled) — a future refactor that reintroduces a blocking call on
-the loop fails here regardless of shape. (Two deliberate exceptions pin the
+the loop fails here regardless of shape. (One deliberate exception pins the
 implementation the invariant depends on: the capture pool's thread-name prefix
-in the mechanism test, and the `/health` probe actually running in the liveness
-test — both are noted where they appear.)
+in the mechanism test. The second exception this file used to carry — the
+`/health` probe actually running in the liveness test — was REMOVED by #2850,
+which made the handler collect NO request-path I/O; asserting the probe ran
+would now pin the superseded design rather than the guarantee. See that test.)
 """
 from __future__ import annotations
 
@@ -46,7 +48,7 @@ import pytest
 # fixture (temp-DB SDK patching + the session-recording consent seed), which
 # also installs the module-level env (pepper/encryption key) on import.
 from tests.test_hosted_api import (
-    TEST_TEAM_ID,
+    TEST_ORG_ID,
 )
 from tests.test_hosted_api import (
     client as client,
@@ -64,11 +66,20 @@ LOOP_BUDGET_S = 3.0
 # loop yields 0 (the next tick can only happen once the freeze releases); a
 # free loop yields ~STALL_S/0.05 ≈ 80.
 MIN_TICKS_IN_STALL = 10
+# Bound on the wait for the fake to report that the capture entered its stall,
+# before the /health probe is issued (the liveness test below). Generous and
+# only reached on the failure path: the endpoint's pre-stall synchronous setup
+# is legitimately slow on a loaded runner (measured ~4.75s for a max-size
+# 500-turn capture, #3086), and a capture that never starts must fail on the
+# `"entered" in state` assertion rather than hang the suite.
+STALL_START_WAIT_S = 60.0
 # NOTE: this endpoint ALSO does bounded synchronous graph work on the event
-# loop (turn upserts, session MERGE, tenant-vocab build). That is a SEPARATE,
-# tracked defect — measured at ~4.75s for a max-size 500-turn capture (#3086)
-# — and is deliberately not what this file measures: these tests pin the
-# extraction (unbounded, provider-dependent) and the liveness-pool isolation.
+# loop (turn upserts, session MERGE, tenant-vocab build, and the ~15 per-request
+# SDK/projection schema bootstraps). That is a SEPARATE, tracked defect —
+# measured at ~4.75s for a max-size 500-turn capture (#3086) — and the tests
+# ABOVE deliberately do not measure it (they pin the extraction — unbounded,
+# provider-dependent — and the liveness-pool isolation). The tests at the
+# BOTTOM of this file measure the capture WRITE half of that window (#3086).
 
 _CONV = [
     {"role": "user",
@@ -154,8 +165,9 @@ def test_capture_extraction_runs_off_the_event_loop(client, monkeypatch, mode):
         f"(#3060)")
     assert str(seen["thread"]).startswith("capture-extract"), (
         f"[{mode}] the extraction ran on {seen['thread']!r}, not the dedicated "
-        f"capture pool — long stalls there can starve /health's probe and the "
-        f"auth middleware out of the shared default executor (#3060)")
+        f"capture pool — long stalls there would occupy the SHARED default "
+        f"executor's workers and starve every other ``to_thread`` caller out "
+        f"of it (the auth middleware's abuse hooks among them) (#3060)")
 
 
 def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
@@ -176,7 +188,14 @@ def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
       stall still shows up here as one long interval.
     * the ``/health`` request completes BEFORE the stall ends AND AFTER the
       extraction entered it, i.e. the API answered DURING the freeze window
-      rather than queued behind it (or served before it began).
+      rather than queued behind it (or served before it began). The probe is
+      issued only once the fake reports the stall has STARTED: the endpoint's
+      pre-stall synchronous setup can run for seconds on a loaded runner (and
+      #4304 lengthens it), so issuing the probe concurrently made the two
+      assertions race the setup — on a slow runner the probe was answered
+      before the stall began and the run proved nothing (harness race, not a
+      regression). Waiting on the fake's own ``entered`` marker puts the probe
+      inside the freeze window by construction.
 
     Mutation check (must stay true): calling the extraction inline
     (`return fn(*args, **kwargs)` instead of dispatching to the pool) makes the
@@ -217,7 +236,24 @@ def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
             await asyncio.sleep(0.05)
             capture = asyncio.create_task(
                 ac.post("/v1/sessions", json={"conversation": _CONV}))
-            await asyncio.sleep(0.05)  # let the capture reach the extraction
+            # Issue the probe only once the capture is INSIDE its stall. The
+            # endpoint does bounded synchronous setup BEFORE the extraction
+            # starts (seconds on a loaded runner — the very interval the
+            # tick-interval check above excludes). Probing concurrently races
+            # that setup: on a slow runner the probe is already answered before
+            # the stall begins, so `health_done > entered` fails while proving
+            # nothing about liveness (#3060). Waiting on the fake's own
+            # `entered` marker makes the probe land inside the freeze window by
+            # construction, so both assertions measure what they claim to.
+            # Bounded, and it also stops as soon as the capture has SETTLED
+            # without reaching the extraction (a fast endpoint error), so a
+            # failure here stays fast instead of burning the whole bound before
+            # the `"entered" in state` assertion reports it.
+            _stall_deadline = time.perf_counter() + STALL_START_WAIT_S
+            while ("entered" not in state
+                   and not capture.done()
+                   and time.perf_counter() < _stall_deadline):
+                await asyncio.sleep(0.05)
             health = await ac.get("/health")
             health_done = time.perf_counter()
             cap = await capture
@@ -273,43 +309,205 @@ def test_health_answers_while_the_default_executor_is_saturated(
     """#3060 review finding: liveness must not queue behind the shared pool.
 
     The first revision moved the extraction to `asyncio.to_thread`, which uses
-    the loop's SHARED default executor — the same one /health's DB probe (and
-    the auth middleware's abuse hooks) use. Six-plus concurrent stalls (prod
-    runs 2 vCPU → `min(32, cpu+4)` workers) would therefore leave the probe
-    queued for minutes, miss Fly's 15s check timeout, and drop the machine
-    exactly as in the original outage — one level down, with nothing blocking
-    the loop at all.
+    the loop's SHARED default executor — at the time, also the pool /health's DB
+    probe (and the auth middleware's abuse hooks) rode. Six-plus concurrent
+    stalls (prod runs 2 vCPU → `min(32, cpu+4)` workers) would therefore leave
+    that probe queued for minutes, miss Fly's 15s check timeout, and drop the
+    machine exactly as in the original outage — one level down, with nothing
+    blocking the loop at all.
 
     This test occupies EVERY default-executor worker with a blocking task and
     then requires /health to answer within a short budget. `wait_for` (rather
-    than a bare await) is the assertion: if the probe queues, the request does
-    not answer at all and this fails, instead of the suite hanging.
+    than a bare await) is the assertion: if the response is blocked on the
+    saturated pool it never arrives, so this fails instead of the suite hanging.
+
+    #2850 (P0) then removed the last request-path I/O: the handler now reads an
+    in-memory `_HEALTH_PROBE.snapshot()` and returns, so "does the handler probe
+    on the request path?" is the WRONG question — the design answer is "never".
+    This test previously asserted the opposite (`assert probed`: the request must
+    have run the probe), which pinned the pre-#2850 design and now fails by
+    construction. The contract that survives, and is asserted below, is the one
+    that actually matters: liveness answers within budget while every shared
+    executor worker is saturated. The snapshot's own self-heal probe runs on a
+    single bounded daemon thread and is pinned off for this window (see the
+    quiesce note below), so it cannot mask or counterfeit a regression here.
+
+    The contract asserted is not "the probe runs on the request path" (the
+    pre-#2850 assertion) but "the request path takes no DB I/O and no executor
+    hand-off that reaches either witnessed seam, inside the request window".
+    Three assertions guard that contract; none covers every shape:
+
+    * BUDGET (``elapsed < HEALTH_BUDGET_S``, via ``wait_for``). Catches a probe
+      that runs SYNCHRONOUSLY on the loop and an UNBOUNDED
+      ``await asyncio.to_thread(_probe_db)``: both keep the handler from
+      returning, so the request times out before either witness below is ever
+      consulted.
+    * INVOCATION WITNESS (``probe_calls``). ``_HEALTH_PROBE``'s probe function
+      resolves ``ha_mod._probe_db`` at CALL time, so replacing that symbol means
+      any probe that reaches this seam is recorded, then blocks far past the
+      budget and raises. Catches hand-offs that START A WORKER THREAD — the
+      module's own ``_HEALTH_PROBE.wait()``/``begin()`` (a raw
+      ``HEALTH_PROBE_THREAD_NAME`` thread), a thread that spoofs that name, or a
+      direct ``executor.submit(_probe_db)`` on a dedicated executor — because
+      the record is taken before the sleep and no thread name is filtered. It is
+      NOT timing-independent: a bounded hand-off that times out before its
+      worker ever starts leaves no record (see the submission witness, which
+      covers that case). The record is only sound because the background
+      refresher is QUIESCED for the window (below), so an invocation can only
+      come from the request path.
+    * SUBMISSION WITNESS (``submissions``). Records every
+      ``asyncio.BaseEventLoop.run_in_executor`` submission for the request
+      window, whichever executor it targets (the SHARED default pool or a
+      DEDICATED one). This is the one that catches the documented pre-#2850
+      shape re-introduced with a cached fallback:
+      ``await asyncio.wait_for(asyncio.to_thread(_probe_db), timeout=...)``
+      (and its ``loop.run_in_executor(None, _probe_db)`` twin) submits to the
+      SHARED, fully saturated pool, so the worker NEVER STARTS, the invocation
+      witness never fires, the timeout falls back to the cached snapshot, and
+      the request still answers inside budget. A dedicated-executor hand-off is
+      caught here too, at submit time, before any worker scheduling. The
+      submission is recorded at the submit call itself, so it does not depend
+      on the worker ever running — which is what makes it independent of how
+      promptly that worker would have been scheduled.
+
+    OUT OF SCOPE (not "gaps" in the guard, just its edge): I/O or a hand-off
+    that reaches neither seam and does not block the handler — a direct
+    ``_get_proj().g.query(...)``, a callable doing its own DB I/O handed to a
+    raw thread or a separate executor, or any submission made after the request
+    window (the patch is uninstalled). The budget catches those only if the
+    handler blocks. The deferred ``loop.call_later(0.5, ...)`` shape escapes
+    because its timer does not fire before the loop closes; a post-window
+    submit that DOES fire is caught by the INVOCATION witness once the pooled
+    hogs are released — an accident of test lifetime, not a guarantee. The
+    submission witness records by ENTRY POINT, not callable identity, so a NEW
+    callable routed through ``to_thread``/``run_in_executor`` IS caught.
+
+    Recording every caller (rather than
+    filtering out the refresher's thread NAME) is deliberate: the one name a
+    filter excludes is exactly the worker the module's own ``wait()``/``run()``
+    start, so a ``_HEALTH_PROBE.wait()`` in the handler — or a hand-off that
+    simply names its thread ``HEALTH_PROBE_THREAD_NAME`` — walked straight
+    through the previous revision.
+
+    Finally the response is tied to the PRIMED snapshot by a distinctive
+    sentinel (below): a handler returning a hardcoded healthy payload passes
+    neither the sentinel nor ``db.ok``.
     """
     import tortoise.hosted_api as ha_mod
-    from tortoise.hosted_api import app
+    from tortoise.hosted_api import _HEALTH_PROBE, app
 
-    # Spy on the probe: latency + `db.ok` alone are satisfied by a /health that
-    # never probes at all (review finding — proven by stubbing the submission
-    # path), so assert the probe RAN before judging how fast the answer was.
+    # Prime the process-global `_HEALTH_PROBE` with a SENTINEL result BEFORE
+    # saturating the pool. The sentinel does two jobs:
+    #
+    # 1. It makes the response provably the snapshot. `_view_locked` returns a
+    #    COPY (`dict(self._result)`) of whatever the probe produced, so a
+    #    marker key on that result survives the read and appears verbatim under
+    #    `db` in the response. Without it, a handler returning a hardcoded
+    #    `{"status":"ok","db":{"ok":True,...},"probe":{...,
+    #    "result_age_s":0.0,...}}` satisfies every other assertion while never
+    #    touching the probe at all (review finding).
+    # 2. It makes the run deterministic rather than order-dependent.
+    #    `snapshot()` deliberately NEVER waits (that is its whole point,
+    #    #2850), so without a completed result `db.ok` and
+    #    `probe.result_age_s` would depend on whether some earlier test in the
+    #    file happened to warm the shared probe. Observed directly: a full-file
+    #    run answered `{"status":"degraded","db":{"ok":false,
+    #    "error":"probe in flight (0.4s)"}}` while the identical test passed in
+    #    isolation. `wait()` is the module's own blocking entry point,
+    #    documented "for non-async probes/tests".
+    #
+    # `reset()` first, so a probe the lifespan refresher started with the REAL
+    # `_probe_db` cannot be the result `wait()` joins (it would lack the
+    # sentinel). `reset()` abandons any such worker as a daemon thread and
+    # invalidates its write by sequence, so the `wait()` below is the probe
+    # that produces the completed result.
+    _PRIMED_SENTINEL = "primed-snapshot-sentinel-3458"
 
-    probed: list[int] = []
-    _real_probe = ha_mod._probe_db
+    def _sentinel_probe() -> dict:
+        return {"ok": True, "latency_ms": 0.0, "error": None,
+                "primed_sentinel": _PRIMED_SENTINEL}
 
-    def _spy_probe():
-        probed.append(1)
-        return _real_probe()
-
-    monkeypatch.setattr(ha_mod, "_probe_db", _spy_probe)
+    monkeypatch.setattr(ha_mod, "_probe_db", _sentinel_probe)
+    _HEALTH_PROBE.reset()
+    primed = _HEALTH_PROBE.wait()
+    assert primed.get("ok") is True, primed
+    assert primed.get("primed_sentinel") == _PRIMED_SENTINEL, primed
 
     HOG_WAIT_S = 30.0
-    # Derived from the probe's OWN documented worst case (1.5s timeout + 0.1s
-    # retry delay + 1.5s retry, monitoring.py:24/31) plus 1s slack, so a
-    # slow-but-healthy probe can never red the suite and the bound stays
-    # honest if those constants change (review finding: a hardcoded 4.0 sat
-    # 0.9s above the design's own worst case). Below the production probe
-    # budget (5s), so the verdict comes from design, not timer ordering.
-    from tortoise.monitoring import PROBE_RETRY_DELAY, PROBE_TIMEOUT
+    # Derived from the probe's OWN documented worst case — ``PROBE_TIMEOUT``
+    # bounds ONE attempt and a transient connect failure retries once after
+    # ``PROBE_RETRY_DELAY``, i.e. ``2 * PROBE_TIMEOUT + PROBE_RETRY_DELAY`` —
+    # plus 1s slack, so a slow-but-healthy probe can never red the suite and
+    # the bound stays honest if those symbols change (review finding: a
+    # hardcoded 4.0 sat 0.9s above the design's own worst case). Below the
+    # production probe budget (5.6s), so the verdict comes from design, not
+    # timer ordering.
+    from tortoise.monitoring import (
+        PROBE_RETRY_DELAY,
+        PROBE_TIMEOUT,
+    )
     HEALTH_BUDGET_S = 2 * PROBE_TIMEOUT + PROBE_RETRY_DELAY + 1.0
+
+    # #2850's contract is stronger than "answers fast here": the request path
+    # must perform NO I/O and NO thread hand-off at all. Two records guard the
+    # seams this test can actually see — an INVOCATION record on the
+    # coordinator's `_probe_db` seam, and a SUBMISSION record on the event
+    # loop's executor entry point — because neither alone covers every shape
+    # (the catch split is stated in the docstring).
+    #
+    # The invocation record comes from replacing `ha_mod._probe_db`: the
+    # coordinator's lambda resolves that symbol at CALL time, so any probe that
+    # reaches THIS seam is recorded (every invocation, no thread-name filter),
+    # then blocks far past the budget and raises. It does NOT cover DB I/O on
+    # the request path that reaches the database by another route (see the
+    # docstring's OUT OF SCOPE paragraph).
+    #
+    # QUIESCE THE REFRESHER — verified, not assumed. This test enters the
+    # `client` fixture, and that fixture wraps the app in `TestClient(app)`,
+    # which RUNS the lifespan: `_lifespan` arms `_health_probe_loop` as
+    # `app.state._health_probe_task`. Instrumented on this very test, that task
+    # is live and pending (`<Task pending ... coro=<_health_probe_loop()>>`)
+    # throughout the body — so the background refresher IS armed, and its
+    # `run()` calls `begin()` UNCONDITIONALLY (`snapshot()`'s read path is the
+    # gated one). Neutralise that entry point and pin the refresh budget, so no
+    # legitimate non-request caller can start a probe in the window at ANY
+    # configured interval. The request path uses `snapshot()` and the prime used
+    # `wait()` — never `run()` — so neither is affected. With the refresher
+    # quiesced and `primed` above just completing a probe, nothing but the
+    # request path can reach the seam, so an empty record is a real guarantee.
+    #
+    # The stub returns `{}` DELIBERATELY: `_health_probe_loop` discards `run()`'s
+    # return value, so `{}` is a sentinel meaning "neutralised", not a probe
+    # result. A mutant that surfaces `run()`'s return into the response would
+    # serve that `{}` — no `ok`, no sentinel — and is caught by the
+    # `db.get("ok")` / sentinel assertions below, which use `.get` so it fails
+    # on a described assertion rather than an incidental `KeyError: 'ok'`.
+    probe_calls: list[str] = []
+
+    async def _no_refresher_probe(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr(ha_mod._HEALTH_PROBE, "run", _no_refresher_probe)
+    # Pin the refresh budget far above this window: `snapshot()`'s
+    # `begin(if_stale=True)` self-heal must not start a probe either, which at
+    # a small operator period it otherwise legitimately could.
+    monkeypatch.setattr(ha_mod, "_health_probe_interval", lambda: 3600.0)
+
+    def _blocking_probe(*args, **kwargs):
+        # INVOCATION WITNESS — record EVERY invocation BEFORE the sleep. A
+        # bounded hand-off that the handler times out of leaves its
+        # AssertionError stranded on an unretrieved Future, so the raise alone
+        # cannot prove the request path was clean; this record can. No
+        # thread-name filter (the refresher is quiesced above), so a hand-off
+        # that names its thread `HEALTH_PROBE_THREAD_NAME` is still recorded.
+        probe_calls.append(threading.current_thread().name)
+        # Any request-path probe that reaches this seam now blocks far past the
+        # budget.
+        time.sleep(HEALTH_BUDGET_S * 2)
+        raise AssertionError(
+            "the /health REQUEST PATH invoked the DB probe "
+            "(#2850: it must not)")
+    monkeypatch.setattr(ha_mod, "_probe_db", _blocking_probe)
 
     async def _run():
         release = threading.Event()
@@ -321,40 +519,86 @@ def test_health_answers_while_the_default_executor_is_saturated(
         # More hogs than the pool has workers, so every worker is taken.
         workers = max(4, (os.cpu_count() or 1) + 4)
         hogs = [loop.run_in_executor(None, _hog) for _ in range(workers + 4)]
+
+        # SUBMISSION WITNESS — record every executor submission made during the
+        # REQUEST window (the hogs above go through this same entry point and
+        # must not be recorded, so the patch goes on AFTER they are submitted,
+        # and is restored in a `finally` so it can never leak to another test).
+        submissions: list[str] = []
+        _orig_run_in_executor = asyncio.BaseEventLoop.run_in_executor
+
+        def _record_submission(_self, _ex, _fn, *a, **k):
+            submissions.append(getattr(_fn, "__name__", repr(_fn)))
+            return _orig_run_in_executor(_self, _ex, _fn, *a, **k)
+
         try:
             await asyncio.sleep(0.3)  # let the hogs claim every worker
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(transport=transport,
                                          base_url="http://test") as ac:
-                started = time.perf_counter()
+                asyncio.BaseEventLoop.run_in_executor = _record_submission
                 try:
-                    r = await asyncio.wait_for(ac.get("/health"),
-                                               timeout=HEALTH_BUDGET_S)
-                except TimeoutError:
-                    raise AssertionError(
-                        f"/health did not answer within {HEALTH_BUDGET_S}s "
-                        f"while every default-executor worker was busy — the "
-                        f"liveness probe is sharing a pool with long/stallable "
-                        f"work, so a few stalled captures would starve it and "
-                        f"Fly would drop the machine exactly as in #3060"
-                    ) from None
-                return r, time.perf_counter() - started
+                    started = time.perf_counter()
+                    try:
+                        r = await asyncio.wait_for(ac.get("/health"),
+                                                   timeout=HEALTH_BUDGET_S)
+                    except TimeoutError:
+                        waited = time.perf_counter() - started
+                        raise AssertionError(
+                            f"/health did not answer within {HEALTH_BUDGET_S}s "
+                            f"(still waiting after {waited:.2f}s) while every "
+                            f"default-executor worker was busy — /health must "
+                            f"serve from the in-memory `_HEALTH_PROBE.snapshot()` "
+                            f"and take NO thread hand-off (#2850), so a saturated "
+                            f"shared pool must not delay it; a delay here means "
+                            f"liveness has been put back on the shared executor, "
+                            f"the shape that dropped the machine in #3060"
+                        ) from None
+                    return r, time.perf_counter() - started, submissions
+                finally:
+                    asyncio.BaseEventLoop.run_in_executor = _orig_run_in_executor
         finally:
             release.set()
             await asyncio.gather(*hogs, return_exceptions=True)
 
-    r, elapsed = asyncio.run(_run())
+    r, elapsed, submissions = asyncio.run(_run())
 
     assert r.status_code == 200, r.text
-    assert probed, (
-        "the /health DB probe never ran — a short-circuiting liveness handler "
-        "would otherwise pass this test")
-    assert r.json()["db"]["ok"] is True, r.text
+    # Served from the `_HEALTH_PROBE` snapshot rather than a trivial stub: the
+    # probe was primed above, so the response must carry its observability
+    # metadata WITH A REAL AGE (`HealthProbe.info()`) AND the sentinel that
+    # snapshot's probe result carried.
+    #
+    # Deliberately stronger than key presence. `info()` emits a `probe` dict
+    # whose `result_age_s` stays None until a probe completes, so this cannot be
+    # satisfied by a `{"status": "ok", "db": {"ok": True}}` stub with no
+    # `probe` key, by the pre-#2850 response shape (which carried no `probe` key
+    # at all), or by a `probe` dict that is present but never completed
+    # (`result_age_s is None`). A bare `"probe" in r.json()` check would pass
+    # the last of those. The SENTINEL is the additional, stronger tie: only a
+    # response that echoes `_HEALTH_PROBE`'s completed result can carry
+    # `primed_sentinel`, so a handler with a hardcoded healthy payload fails
+    # here even with a fabricated `probe` block. `.get` is used so a miss fails
+    # on this described assertion, not an incidental `KeyError`.
+    assert r.json()["probe"].get("result_age_s") is not None, r.text
+    assert r.json()["db"].get("primed_sentinel") == _PRIMED_SENTINEL, r.text
+    assert r.json()["db"].get("ok") is True, r.text
+    assert not probe_calls, (
+        f"/health invoked the DB probe on the request path: {probe_calls} "
+        f"(#2850: the request path must take no I/O and no thread hand-off)")
+    assert not submissions, (
+        f"the /health request path submitted work to an executor: {submissions} "
+        f"— the pre-#2850 shape (asyncio.to_thread(_probe_db) or "
+        f"run_in_executor(None, _probe_db) with a bounded timeout and a "
+        f"cached-snapshot fallback) queues on the SHARED pool, so its worker "
+        f"never starts and the invocation witness cannot see it (#3060)")
     assert elapsed < HEALTH_BUDGET_S, (
-        f"/health took {elapsed:.2f}s while every default-executor worker was "
-        f"busy — the liveness probe is sharing a pool with long/stallable "
-        f"work, so a few stalled captures would starve it and Fly would drop "
-        f"the machine exactly as in #3060")
+        f"/health took {elapsed:.2f}s (budget {HEALTH_BUDGET_S}s) while every "
+        f"default-executor worker was busy — /health must serve from the "
+        f"in-memory `_HEALTH_PROBE.snapshot()` and take NO thread hand-off "
+        f"(#2850), so a saturated shared pool must not delay it; a delay here "
+        f"means liveness has been put back on the shared executor, the shape "
+        f"that dropped the machine in #3060")
 
 
 def test_capture_capacity_limit_fails_fast_instead_of_queueing(
@@ -424,7 +668,7 @@ def test_capture_capacity_limit_fails_fast_instead_of_queueing(
     # must not land in the team-visible last-error slot (the dashboard sub-line
     # reads it, and the advertised retry would then clear it — misreporting
     # capacity as a team fault and masking any genuine prior error).
-    state = ha_mod._get_onboarding_state(TEST_TEAM_ID)
+    state = ha_mod._get_onboarding_state(TEST_ORG_ID)
     assert state.get(f"session_capture_last_error_{_HARNESS}") in (None, ""), state
 
 
@@ -598,9 +842,9 @@ def test_mcp_capture_path_reserves_admission(client, monkeypatch):
         _current_graph_id,
         _current_graph_namespace,
         _current_legacy_full_access,
+        _current_org_id,
+        _current_org_limits,
         _current_scopes,
-        _current_team_id,
-        _current_team_limits,
     )
     from tortoise.mcp_server import tortoise_session_capture
 
@@ -619,12 +863,13 @@ def test_mcp_capture_path_reserves_admission(client, monkeypatch):
         # The MCP tool reads the RESOLVED team from ContextVars (mcp_auth); a
         # fresh thread starts with an empty context, so set them there (same
         # shape as the delivery-tenancy MCP test).
-        ctx_vars = [_current_team_id, _current_team_limits, _current_graph_id,
+        ctx_vars = [_current_org_id, _current_org_limits, _current_graph_id,
                     _current_graph_namespace, _current_scopes,
                     _current_legacy_full_access]
         toks = [v.set(val) for v, val in zip(
             ctx_vars,
-            [TEST_TEAM_ID, {}, None, None, ["graphs:read", "graphs:write"],
+            [TEST_ORG_ID, {"max_points": 100000, "max_sessions": None},
+             None, None, ["graphs:read", "graphs:write"],
              False],
             strict=True)]
         try:
@@ -769,7 +1014,7 @@ def test_same_session_retry_during_an_in_flight_capture_is_refused(
                 # Sampled BEFORE the first capture is released, so a receipt
                 # written by the second request is unambiguous evidence.
                 receipt_during = ha_mod._get_onboarding_state(
-                    TEST_TEAM_ID).get(receipt_key)
+                    TEST_ORG_ID).get(receipt_key)
             finally:
                 release.set()
             first_resp = await first
@@ -940,7 +1185,7 @@ def test_cancelled_after_extraction_marks_the_attempt_failed(client, monkeypatch
     drained = asyncio.run(_run())
     assert drained == [], drained
 
-    rows = ha_mod._make_sdk(namespace=TEST_TEAM_ID)._get_proj().g.query(
+    rows = ha_mod._make_sdk(namespace=TEST_ORG_ID)._get_proj().g.query(
         "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, s.capture_extractor",
         params={"sid": "s-postextract-cancel-3129"}).result_set
     assert rows, "the capture never merged its Session row"
@@ -1150,7 +1395,7 @@ def test_cancelled_capture_keeps_the_key_and_leaves_a_retryable_attempt(
         f"{getattr(while_parked, 'status_code', 'a timeout')} — it must be "
         f"refused at admission, not queued (#3129)")
     assert drained == [], drained
-    rows = ha_mod._make_sdk(namespace=TEST_TEAM_ID)._get_proj().g.query(
+    rows = ha_mod._make_sdk(namespace=TEST_ORG_ID)._get_proj().g.query(
         "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, s.capture_extractor",
         params={"sid": "s-cancel-3129"}).result_set
     assert rows, "the capture never merged its Session row"
@@ -1224,7 +1469,7 @@ def test_cancelled_m2_capture_records_the_m2_lane(client, monkeypatch):
     assert held == [key], held
     assert drained == [], drained
 
-    rows = ha_mod._make_sdk(namespace=TEST_TEAM_ID)._get_proj().g.query(
+    rows = ha_mod._make_sdk(namespace=TEST_ORG_ID)._get_proj().g.query(
         "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, s.capture_extractor",
         params={"sid": "s-m2-cancel-3129"}).result_set
     assert rows, "the m2 capture never merged its Session row"
@@ -1250,12 +1495,12 @@ def test_in_flight_session_keys_are_scoped_to_their_tenant():
     import tortoise.hosted_api as ha_mod
     from tortoise.hosted_api import _capture_session_key, _reserve_capture_slot
 
-    team_a = {"team_id": "team-a", "graph_id": None}
-    team_b = {"team_id": "team-b", "graph_id": None}
+    team_a = {"org_id": "team-a", "graph_id": None}
+    team_b = {"org_id": "team-b", "graph_id": None}
     key_a = _capture_session_key(team_a, "shared-id")
     key_b = _capture_session_key(team_b, "shared-id")
     key_a_g1 = _capture_session_key(
-        {"team_id": "team-a", "graph_id": "g_1"}, "shared-id")
+        {"org_id": "team-a", "graph_id": "g_1"}, "shared-id")
     assert _capture_session_key(team_a, None) is None
     assert len({key_a, key_b, key_a_g1}) == 3, (key_a, key_b, key_a_g1)
 
@@ -1271,3 +1516,245 @@ def test_in_flight_session_keys_are_scoped_to_their_tenant():
         slot_a.release()
     assert baseline == ha_mod._CAPTURE_IN_FLIGHT, ha_mod._CAPTURE_IN_FLIGHT
     assert ha_mod._CAPTURE_SESSIONS == {}, ha_mod._CAPTURE_SESSIONS
+
+# ── #3086: the capture WRITE path must not block the loop either ───────────
+#
+# The tests above pin the EXTRACTION off the loop and deliberately exclude the
+# endpoint's own synchronous graph work (the module note at the top: "that is a
+# SEPARATE, tracked defect — measured at ~4.75s for a max-size 500-turn
+# capture (#3086)"). THESE tests pin that window.
+#
+# Before #3086 the per-turn store was a loop DUPLICATED between
+# `tortoise/sdk.py` and `tortoise/hosted_api.py`, and each iteration issued TWO
+# FalkorDB round-trips ON the event loop — a node `MERGE` then a `CONTAINS`
+# edge `MERGE` for `{session_id}_t{i}` — i.e. ~1000 blocking calls for a
+# 500-turn capture on a single-loop API. The fix is ONE shared writer
+# (`_write_capture_turns`) that collapses the store to a single
+# `UNWIND $turns` transaction, called from both lanes and run off the loop on
+# the capture pool by the hosted lane.
+#
+# WHY THESE ASSERTIONS AND NOT A WALL-CLOCK GAP: a full-request loop-gap
+# budget is not a valid discriminator on a shared/loaded runner. Measured on
+# this box, the whole-request worst gap is 6-15s for a 2-TURN capture — the
+# floor is dominated by per-request SDK/projection schema bootstraps (~15
+# on-loop `_get_proj()` constructions, ~430 on-loop queries — the issue's own
+# "~450 non-turn queries") plus runner scheduling, neither of which scales
+# with the turn count and neither of which is this issue's seam. A gap budget
+# therefore passes and fails the same way pre- and post-fix, which is exactly
+# the "a green test that measures a different window is not evidence" trap.
+# These tests instead measure the SAME whole-request window and assert the
+# property that actually regressed: the work the capture puts ON the event
+# loop must not scale with the number of turns.
+CAPTURE_TURNS_LARGE = 500
+CAPTURE_TURNS_SMALL = 50
+# The on-loop query count is dominated by the fixed SDK/projection bootstraps
+# (~430), identical for both sizes. The per-turn loop added ~2 queries per
+# turn, so the pre-fix delta between these two sizes was ~900; a batched store
+# adds a constant. 60 is generous for a constant and an order of magnitude
+# below the per-row shape it must catch.
+ON_LOOP_QUERY_DELTA_BUDGET = 60
+# Same reasoning as a TIME bound: 900 on-loop round-trips at the ~2.6ms/query
+# the issue measured is ~2.3s of hard blocking, versus a constant that is
+# ~0 — but the COUNT is what this test asserts (see the note at the assertion
+# on why an on-loop TIME budget is not a valid discriminator on this lane).
+
+
+def _capture_conv(turns: int) -> list[dict]:
+    return [
+        {"role": "user" if i % 2 == 0 else "assistant",
+         "content": f"turn {i} " + ("the database schema needs work " * 3)}
+        for i in range(turns)
+    ]
+
+
+def _measure_on_loop_graph_work(monkeypatch, turns: int, sid: str):
+    """Run one real hosted capture, returning the GRAPH work the loop did.
+
+    The graph class's ``query`` is wrapped for the duration, so every
+    round-trip is attributed to the thread that made it. Only ``MainThread``
+    (the event loop — ``TestClient``'s lifespan portal and the monitoring
+    threads have their own names) is counted: that is precisely the work a
+    stalled loop cannot interleave.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app
+
+    monkeypatch.setattr(
+        TortoiseSDK, "_extract_session_v2",
+        lambda _self, windowed, session_id, now, **kw: ([], {}))
+
+    graph_cls = type(ha_mod._make_sdk(namespace="registry")._get_proj().g)
+    orig_query = graph_cls.query
+    records: list[tuple[str, float]] = []
+    cyphers: list[str] = []
+    writer_threads: list[str] = []
+    orig_writer = ha_mod._write_capture_turns
+
+    def _timed_query(self, cypher, *args, **kwargs):
+        started = time.perf_counter()
+        try:
+            return orig_query(self, cypher, *args, **kwargs)
+        finally:
+            records.append((threading.current_thread().name,
+                            time.perf_counter() - started))
+            cyphers.append(" ".join(cypher.split()))
+
+    def _wrapped_writer(*args, **kwargs):
+        writer_threads.append(threading.current_thread().name)
+        return orig_writer(*args, **kwargs)
+
+    monkeypatch.setattr(graph_cls, "query", _timed_query)
+    monkeypatch.setattr(ha_mod, "_write_capture_turns", _wrapped_writer)
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            return await ac.post("/v1/sessions",
+                                 json={"conversation": _capture_conv(turns),
+                                       "session_id": sid})
+
+    resp = asyncio.run(_run())
+    monkeypatch.setattr(graph_cls, "query", orig_query)
+    monkeypatch.setattr(ha_mod, "_write_capture_turns", orig_writer)
+    on_loop = [d for name, d in records if name == "MainThread"]
+    return resp, len(on_loop), sum(on_loop), writer_threads, cyphers
+
+
+def test_capture_write_does_not_scale_loop_blocking_with_turns(
+        client, monkeypatch):
+    """#3086: the capture's ON-LOOP graph work is constant in turn count.
+
+    Same whole-request window (setup included) for both sizes, so the fixed
+    per-request cost — which is NOT this issue's seam — cancels in the delta
+    and the remaining signal is exactly the per-turn store.
+
+    Mutation check (must stay true): restoring the per-turn loop (node MERGE +
+    CONTAINS MERGE per turn) ON the loop puts ~900 extra on-loop queries on the
+    500-turn capture, failing the count delta; and
+    keeping a per-row walk but merely moving it into an off-loop writer still
+    fails the single-`UNWIND` assertion below (the batching win is lost even
+    though the loop stops blocking). No WALL-CLOCK gap budget is asserted: on
+    a shared/loaded runner the whole-request gap is dominated by the fixed
+    per-request SDK/bootstrap cost (measured 6-15s even for a 2-TURN capture)
+    and by runner scheduling, so a gap budget passes and fails identically
+    pre- and post-fix — the "measures a different window" trap.
+    """
+    small_resp, small_q, _, _, _ = _measure_on_loop_graph_work(
+        monkeypatch, CAPTURE_TURNS_SMALL, "loop-scale-small-3086")
+    assert small_resp.status_code == 200, small_resp.text[:300]
+    large_resp, large_q, _, writer_threads, cyphers = \
+        _measure_on_loop_graph_work(
+            monkeypatch, CAPTURE_TURNS_LARGE, "loop-scale-large-3086")
+    assert large_resp.status_code == 200, large_resp.text[:300]
+
+    assert writer_threads, (
+        "the hosted capture never called the shared turn writer — the turn "
+        "store is forked again or the write did not happen (#3086)")
+    assert all(name.startswith("capture-extract") for name in writer_threads), (
+        f"the turn writer ran on {writer_threads!r}, not the dedicated capture "
+        f"pool — the per-turn graph work is back on the event loop (#3086)")
+
+    # The store is ONE batched transaction whatever thread runs it: exactly one
+    # `UNWIND $turns` statement and none of the old per-row node writes. This
+    # is what a per-row walk moved off the loop would break (the batching win
+    # would be silently lost).
+    batched = [c for c in cyphers if "UNWIND $turns AS turn" in c]
+    per_row = [c for c in cyphers if "MERGE (t:Point {id:$id})" in c]
+    assert len(batched) == 1, (
+        f"a {CAPTURE_TURNS_LARGE}-turn capture issued {len(batched)} "
+        f"`UNWIND $turns` statement(s) — the turn store is no longer a single "
+        f"batched transaction (#3086)")
+    assert not per_row, (
+        f"the per-row turn write is back ({len(per_row)} statement(s)) — "
+        f"batching was reverted to one graph round-trip per turn (#3086)")
+
+    q_delta = large_q - small_q
+    assert q_delta < ON_LOOP_QUERY_DELTA_BUDGET, (
+        f"a {CAPTURE_TURNS_LARGE}-turn capture put {large_q} graph queries on "
+        f"the event loop vs {small_q} for {CAPTURE_TURNS_SMALL} turns "
+        f"(delta {q_delta}, budget {ON_LOOP_QUERY_DELTA_BUDGET}) — the turn "
+        f"store is per-row again: ~1000 blocking round-trips for 500 turns "
+        f"freeze the single event loop and take /health down with it (#3086)")
+
+    # The on-loop TIME delta is deliberately NOT asserted (it is measured and
+    # reported in the message above for diagnostics). On this lane the on-loop
+    # time is dominated by the fixed per-request SDK/bootstrap cost, which
+    # varies by seconds run to run — measured +1.24s between a 50- and a
+    # 500-turn capture with ZERO extra queries. A time threshold that reds on a
+    # correctly-fixed tree is a bad gate; the COUNT delta is deterministic
+    # (pre-fix +876, post-fix constant) and is what actually scales with turns.
+
+
+def test_capture_turn_store_is_one_batched_implementation(client, monkeypatch):
+    """#3086: the SDK and hosted lanes share ONE turn writer, and it is
+    idempotent.
+
+    * IDENTITY — the hosted module must call the SDK's writer (the same
+      function object), not a private copy. A future re-fork fails here.
+    * IDEMPOTENCY — a re-capture of the same session_id must leave exactly one
+      turn Point per ``{session_id}_t{i}``. A single ``UNWIND $turns``
+      statement means a partial failure can only be a partial BATCH, so
+      per-row idempotency on the deterministic ids is what makes a retry
+      converge instead of duplicating (#3086).
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise import sdk as sdk_mod
+    from tortoise.hosted_api import app
+
+    writer = getattr(sdk_mod, "_write_capture_turns", None)
+    assert writer is not None, (
+        "the shared batched turn writer (_write_capture_turns) is missing "
+        "from tortoise/sdk.py (#3086)")
+    assert getattr(ha_mod, "_write_capture_turns", None) is writer, (
+        "the hosted capture lane does not call the SDK's turn writer — the "
+        "per-turn store is forked again (the drift class #3086 deletes)")
+
+    monkeypatch.setattr(
+        TortoiseSDK, "_extract_session_v2",
+        lambda _self, windowed, session_id, now, **kw: ([], {}))
+
+    sid = "batched-3086"
+
+    async def _post():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            return await ac.post(
+                "/v1/sessions",
+                json={"conversation": _capture_conv(CAPTURE_TURNS_SMALL),
+                      "session_id": sid})
+
+    first = asyncio.run(_post())
+    assert first.status_code == 200, first.text[:300]
+    second = asyncio.run(_post())
+    assert second.status_code == 200, second.text[:300]
+
+    sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
+    rows = sdk._get_proj().g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
+        "WHERE t.is_episodic = true RETURN count(t)",
+        params={"sid": sid}).result_set
+    turn_count = rows[0][0] if rows else 0
+    assert turn_count == CAPTURE_TURNS_SMALL, (
+        f"a re-capture of {CAPTURE_TURNS_SMALL} turns left {turn_count} turn "
+        f"Points — the batched writer's per-row MERGE must be idempotent on "
+        f"the deterministic {{sid}}_t{{i}} ids (#3086)")
+
+    # The node shape the shared writer produces (the loop it replaced wrote
+    # exactly these) — a re-capture that changed any of them would silently
+    # break the read path.
+    props = sdk._get_proj().g.query(
+        "MATCH (t:Point {id:$tid}) RETURN t.content, t.pointKind, t.speaker, "
+        "t.is_episodic, t.status, t.is_operator, t.content_hash IS NOT NULL",
+        params={"tid": f"{sid}_t0"}).result_set
+    assert props, "the shared writer created no turn node"
+    content, point_kind, speaker, is_episodic, status, is_operator, has_hash = \
+        props[0]
+    assert point_kind == "event", point_kind
+    assert speaker == "user", speaker
+    assert is_episodic is True, is_episodic
+    assert status == "draft", status
+    assert is_operator is False, is_operator
+    assert has_hash is True, "the turn carries no content_hash"
+    assert content.startswith("[user] turn 0 "), content

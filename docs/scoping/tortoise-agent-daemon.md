@@ -85,7 +85,7 @@ E2E-4 / §1.1 item 3.
 
 **Server-side (the "attribution plumbing" — the real missing piece):**
 
-1. **Make the resolver return the human.** `resolve_oauth_access_token` (oauth.py:722) currently selects `user_id`/`client_id` but returns only the team dict via `_quota_fields` — the actor is DROPPED. Same for the key lanes (Supabase `resolve_api_key` has `created_by`; registry path has `k.created_by`). Change: attach `actor_user_id` (+ `client_id` for OAuth) to the resolved team dict, and expose it through `get_current_team*` + MCP resolution (ContextVar) so every downstream handler can stamp without touching every endpoint's signature.
+1. **Make the resolver return the human.** `resolve_oauth_access_token` (oauth.py:722) currently selects `user_id`/`client_id` but returns only the team dict via `_quota_fields` — the actor is DROPPED. Same for the key lanes (Supabase `resolve_api_key` has `created_by`; registry path has `k.created_by`). Change: attach `actor_user_id` (+ `client_id` for OAuth) to the resolved team dict, and expose it through `get_current_org*` + MCP resolution (ContextVar) so every downstream handler can stamp without touching every endpoint's signature.
 2. **Stamp the actor on sessions + index it.** `_capture_session_impl`
    (hosted_api.py:6486+) writes the Session node (`MERGE (s:Session …)` with
    `created_at/turn_count/harness`) — add the server-resolved `actor_user_id`

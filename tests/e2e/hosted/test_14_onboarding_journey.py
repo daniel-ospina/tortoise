@@ -11,7 +11,8 @@ Covers:
   1. signup → org → fork → connect → seed → decide one sitting (mock agent
      via checkpoint calls + merged GET states) → gate-complete wire.
   2. Dismissal alone never completes (no decide edge).
-  3. build fork: decide does NOT complete; catalog-presented does.
+  3. build fork: completes on the two observed acts (harness-connected +
+     first-points-filed); decide AND catalog-presented complete nothing.
   4. Grandfathered wire stability (DE2E-6): legacy wizard PATCH completes →
      wire true (guard); the FIRST agent step edge flips control to the node.
   5. Checkpoint created/noop signals (the W11 surface; event emission is
@@ -29,13 +30,13 @@ skip_unless_hosted_e2e()
 
 
 def _register(api, tag: str) -> tuple[str, dict]:
-    """Register a fresh org; returns (team_id, auth headers)."""
+    """Register a fresh org; returns (org_id, auth headers)."""
     email = f"w5-{tag}-{uuid.uuid4().hex[:8]}@e2e.premise-labs.dev"
     r = api.post("/v1/register", data={"email": email, "password": "E2ePass-303-x"})
     assert r.status == 200, r.text()
     body = r.json()
     headers = {"Authorization": f"Bearer {body['api_key']}"}
-    return body["team_id"], headers
+    return body["org_id"], headers
 
 
 def _get_state(api, headers: dict) -> dict:
@@ -55,7 +56,7 @@ def test_full_self_journey_one_sitting(api):
     node exists at first read (version=1, team-named auto-satisfied);
     fork set-once; step edges keyed-MERGE with honest created/noop signals;
     the fork-aware gate completes the org (status + wire)."""
-    _team_id, headers = _register(api, "self")
+    _org_id, headers = _register(api, "self")
     # first read: eager-init node (registry lane init in the SAME statement
     # as TeamMeta) — FLOW keys present, operational keys present
     st = _get_state(api, headers)
@@ -104,7 +105,7 @@ def test_full_self_journey_one_sitting(api):
 
 
 def test_dismissal_alone_never_completes(api):
-    _team_id, headers = _register(api, "dismiss")
+    _org_id, headers = _register(api, "dismiss")
     _checkpoint(api, headers, {"fork": "self"})
     _checkpoint(api, headers, {"step": "harness-connected"})
     _checkpoint(api, headers, {"step": "first-points-filed"})
@@ -117,20 +118,27 @@ def test_dismissal_alone_never_completes(api):
     assert st["last_decide_attempt"] == "dismissed"
 
 
-def test_build_fork_uses_catalog_not_decide(api):
-    _team_id, headers = _register(api, "build")
+def test_build_fork_completes_on_the_two_observed_acts(api):
+    _org_id, headers = _register(api, "build")
     _checkpoint(api, headers, {"fork": "build"})
     _checkpoint(api, headers, {"step": "harness-connected"})
-    _checkpoint(api, headers, {"step": "first-points-filed"})
-    # decide does NOT complete a build org (catalog is the build gate step)
+    # #3913: ONE observed act is not enough (fail-closed)
+    r = api.get("/v1/onboarding/state", headers=headers)
+    assert r.json()["onboarding"]["status"] == "active"
+    # decide does NOT complete a build org — asserted while the org is still
+    # ACTIVE. (Asserting `complete` after first-points-filed completed it is a
+    # tautology: it proves nothing about the decide edge.)
     r = _checkpoint(api, headers, {"step": "decide-completed"})
     assert r.json()["onboarding"]["status"] == "active"
-    # catalog-presented (dashboard PATCH surface) completes it
+    # the second observed act completes the build fork
+    r = _checkpoint(api, headers, {"step": "first-points-filed"})
+    assert r.json()["onboarding"]["status"] == "complete"
+    assert r.json()["onboarding"]["onboarding_complete"] is True
+    # catalog-presented stays an accepted, optional record on the complete org
     r = api.patch("/v1/onboarding/state", headers=headers,
                   data={"catalog_presented": True})
     assert r.status == 200, r.text()
     assert r.json()["onboarding"]["status"] == "complete"
-    assert r.json()["onboarding"]["onboarding_complete"] is True
 
 
 def test_grandfathered_wire_stable_then_node_governs(api):
@@ -139,7 +147,7 @@ def test_grandfathered_wire_stable_then_node_governs(api):
     echo node-governed); the wire follows the node. The raw-writer
     grandfathered branch (legacy jsonb true, pre-W1 org) is asserted in
     test_onboarding_state_split.py (HTTP can't raw-write)."""
-    _team_id, headers = _register(api, "gf")
+    _org_id, headers = _register(api, "gf")
     # legacy wizard completion attempt — the legacy jsonb write is inert on
     # node-present orgs post-W1 (the wizard no longer even calls it)
     r = api.patch("/v1/onboarding/state", headers=headers,
@@ -156,7 +164,7 @@ def test_grandfathered_wire_stable_then_node_governs(api):
 
 
 def test_unknown_step_and_extra_rejected(api):
-    _team_id, headers = _register(api, "neg")
+    _org_id, headers = _register(api, "neg")
     r = _checkpoint(api, headers, {"step": "bogus-step"})
     assert r.status == 422
     r = _checkpoint(api, headers, {"step": "capture-disclosed", "fork": "self"})

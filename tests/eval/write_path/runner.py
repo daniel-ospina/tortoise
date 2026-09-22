@@ -187,7 +187,7 @@ def render_store_lines(session_id: str, conversation: list[dict], harness: str) 
     for turn in conversation:
         role = turn.get("role", "user")
         content = turn.get("content", "")
-        if harness in ("codex", "pi"):
+        if harness == "codex":
             part_type = "input_text" if role == "user" else "output_text"
             record = {
                 "type": "response_item",
@@ -195,6 +195,18 @@ def render_store_lines(session_id: str, conversation: list[dict], harness: str) 
                     "type": "message",
                     "role": role,
                     "content": [{"type": part_type, "text": content}],
+                },
+            }
+        elif harness == "pi":
+            # #3667: Pi has its OWN store shape (type == "message" →
+            # message.{role,content}), NOT codex's `payload` shape. The pi
+            # branch must render the REAL Pi record or the round-trip parses
+            # 0 turns and the graded pi lane is vacuous.
+            record = {
+                "type": "message",
+                "message": {
+                    "role": role,
+                    "content": [{"type": "text", "text": content}],
                 },
             }
         elif harness == "claude-desktop":
@@ -282,10 +294,18 @@ SESSION_TURN_QUERY = (
 # on some paths — the id pattern is the reliable turn/claim discriminator.
 def _turn_id_pattern(session_id: str) -> str:
     return re.compile(rf"^{re.escape(session_id)}_t\d+$")
+# The single projection every consumer of _row_to_point must share.  Keep it a
+# named constant: a duplicated copy in another module silently drops a column the
+# moment this one grows (harness cell_points did exactly that when is_operator
+# landed — p.id..p.is_operator is TEN columns, and a 9-column copy raises
+# "ValueError: not enough values to unpack (expected 10, got 9)").
+MEMORY_ROW_COLUMNS = (
+    "p.id, p.content, p.eventId, p.extractedFrom, p.status, "
+    "p.confidence, p.lastDreamedAt, p.pointKind, p.is_episodic, p.is_operator"
+)
 MEMORY_ROW_QUERY = (
     "MATCH (p:Point) WHERE p.eventId IN $eids "
-    "RETURN p.id, p.content, p.eventId, p.extractedFrom, p.status, "
-    "p.confidence, p.lastDreamedAt, p.pointKind, p.is_episodic, p.is_operator"
+    f"RETURN {MEMORY_ROW_COLUMNS}"
 )
 OPERATOR_EDGE_QUERY = (
     "MATCH (a:Point)-[r]->(b:Point) "

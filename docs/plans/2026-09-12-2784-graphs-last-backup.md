@@ -340,8 +340,8 @@ and close `</table>` with a matching `</div>`.
 
 ```jsx
   React.useEffect(() => {
-    if (tab === 'graphs' && currentTeamId) loadBackups('').catch(() => {})
-  }, [tab, currentTeamId])
+    if (tab === 'graphs' && currentOrgId) loadBackups('').catch(() => {})
+  }, [tab, currentOrgId])
 ```
 
 Mutation hooks in `createGraph`/`deleteGraphRow`/`restoreTrashRow` are deliberately **not** added: per review they cannot change the rendered value (a new graph has no manifest by definition; a deleted/restored graph's manifests are already in the unfiltered pool), so they would be dead work. The remaining gap — a backup completed *while* the Graphs tab sits open — is bounded by the tab-visit refetch plus the cell's own 30s ticker, and is filed as a follow-up in Task 5 if it survives review.
@@ -422,7 +422,7 @@ Three fresh reviewers ran on the diff (Bug-Scan Deep; Integration/Architecture; 
 
 | # | Finding | Resolution |
 |---|---------|------------|
-| 1 | The tab refetch plus `switchTeam`'s own load produced **two concurrent `/backups` reads** on a team switch made while the Graphs tab is open (same-team responses can land out of order) | The effect fires on the tab **transition** only (`prevTabForBackupsRef`) and reads the team from `teamIdRef`; the dep omission is documented (adding `loadBackups` would refetch after its own setState) |
+| 1 | The tab refetch plus `switchTeam`'s own load produced **two concurrent `/backups` reads** on a team switch made while the Graphs tab is open (same-team responses can land out of order) | The effect fires on the tab **transition** only (`prevTabForBackupsRef`) and reads the team from `orgIdRef`; the dep omission is documented (adding `loadBackups` would refetch after its own setState) |
 | 2 | A failed **refresh** destroyed a good payload — the catch unconditionally nulled `backupInfo` + set `error`, so a 503 on tab entry flipped the column **and** the API-Keys `BackupsCard` to `—` | The catch now transitions to `error` only when nothing successful is held; switch/logout still wipe first, so their `—` behaviour is unchanged |
 | 3 | `graphBackupSummary` used a plain object as a map keyed by server input — `__proto__`/`constructor` would write through `Object.prototype` (pollution + the graph's manifests silently unbucketed) | `Object.create(null)`; a unit case feeds both keys and asserts `Object.prototype` is untouched |
 | 4 | The **dist-sync guard could not detect drift** (merged every `index-*.js`, immutable markers) | It now reads only the bundle `dist/index.html` references, requires exactly one bundle, and derives expected copy from the **live module** — proven by watching it fail on the stale bundle |

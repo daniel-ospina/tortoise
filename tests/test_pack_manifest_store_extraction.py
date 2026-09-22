@@ -44,24 +44,24 @@ from fastapi.testclient import TestClient
 import tortoise.hosted_api as ha_mod
 import tortoise.sdk as sdk_mod
 from tests._http_fixtures import patched_tortoise_sdk
-from tortoise.hosted_api import app, get_current_team
+from tortoise.hosted_api import app, get_current_org
 
-TEST_TEAM_ID = f"team-{uuid.uuid4().hex[:8]}"
+TEST_ORG_ID = f"team-{uuid.uuid4().hex[:8]}"
 TEST_TEAM = {
-    "team_id": TEST_TEAM_ID,
+    "org_id": TEST_ORG_ID,
     "key_id": "test-key-001",
     # C5 #2114 (#2260): legacy tt_ class — scope-less key_id dicts 403 the
     # data-plane gates otherwise (mirrors the #2241 migration pattern).
     "legacy_full_access": True,
     "tier": "free",
     "max_users": 1, "max_graphs": 1, "max_points": 10000,
-    "max_api_keys": 2, "max_sessions": 1000,
+    "max_api_keys": 2, "max_sessions": None,
 }
-TEST_TEAM_B = {"team_id": f"team-{uuid.uuid4().hex[:8]}", "key_id": "test-key-002",
+TEST_TEAM_B = {"org_id": f"team-{uuid.uuid4().hex[:8]}", "key_id": "test-key-002",
                # C5 #2114 (#2260): legacy tt_ class (see TEST_TEAM note).
                "legacy_full_access": True,
                "tier": "free", "max_users": 1, "max_graphs": 1,
-               "max_points": 10000, "max_api_keys": 2, "max_sessions": 1000}
+               "max_points": 10000, "max_api_keys": 2, "max_sessions": None}
 
 # The #1935 fixture shape: a declared object kind WITHOUT a kindDef (the
 # tenant-kind parity surface — FIX M declared-kind acceptance).
@@ -140,7 +140,7 @@ def mock_extractor(monkeypatch):
 def client():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
-        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
         # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk).
         # sdk_mod.TortoiseSDK is hosted_api.TortoiseSDK (same class object) —
         # the helper's hosted_api patch applies identically; it adds the
@@ -151,8 +151,8 @@ def client():
             yield TestClient(app)
 
 
-def _team_sdk(team_id: str = TEST_TEAM_ID):
-    return ha_mod._make_sdk(namespace=team_id)
+def _team_sdk(org_id: str = TEST_ORG_ID):
+    return ha_mod._make_sdk(namespace=org_id)
 
 
 def _count_object_kind_nodes(sdk, object_kind: str) -> int:
@@ -287,12 +287,12 @@ class TestCrossTenantNegative:
 
             def _route_patch(self, db_path_arg=None, *, namespace=None,
                              **kwargs):
-                target = db_b if namespace == TEST_TEAM_B["team_id"] else db_a
+                target = db_b if namespace == TEST_TEAM_B["org_id"] else db_a
                 _orig(self, target, namespace=namespace)
 
             _orig = sdk_mod.TortoiseSDK.__init__
             sdk_mod.TortoiseSDK.__init__ = _route_patch
-            app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
+            app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
             try:
                 c_a = TestClient(app)
                 assert _upload(c_a, VALID_MANIFEST) == 201
@@ -304,12 +304,12 @@ class TestCrossTenantNegative:
                 r_a = c_a.post("/v1/sessions", json={"conversation": conv})
                 assert r_a.status_code == 200, r_a.text
                 assert _count_object_kind_nodes(
-                    ha_mod._make_sdk(namespace=TEST_TEAM_ID),
+                    ha_mod._make_sdk(namespace=TEST_ORG_ID),
                     "tenant-ops:contract") >= 1
 
                 # Tenant B captures the same conversation.
                 mock_extractor.s2_prompts = []
-                app.dependency_overrides[get_current_team] = \
+                app.dependency_overrides[get_current_org] = \
                     lambda: dict(TEST_TEAM_B)
                 c_b = TestClient(app)
                 r_b = c_b.post("/v1/sessions", json={"conversation": conv})
@@ -324,12 +324,12 @@ class TestCrossTenantNegative:
                     "tenant B's extraction prompt must never carry A's kinds"
                 # B's graph has no tenant-ops node.
                 assert _count_object_kind_nodes(
-                    ha_mod._make_sdk(namespace=TEST_TEAM_B["team_id"]),
+                    ha_mod._make_sdk(namespace=TEST_TEAM_B["org_id"]),
                     "tenant-ops:contract") == 0, \
                     "tenant B's graph must never mint tenant A's kinds"
                 # B's master lacks A's kinds.
                 from tortoise.extractor_v2 import build_master_list
-                b_master = build_master_list(sdk=ha_mod._make_sdk(namespace=TEST_TEAM_B["team_id"]))
+                b_master = build_master_list(sdk=ha_mod._make_sdk(namespace=TEST_TEAM_B["org_id"]))
                 assert "tenant-ops:contract" not in b_master["pack_kinds"], \
                     "tenant B's master must not contain tenant A's kinds"
             finally:
@@ -350,7 +350,7 @@ class TestMemoization:
         assert pms._graph_identity(_team_sdk()) != "default"
         assert (pms._graph_identity(_team_sdk())
                 != pms._graph_identity(
-                    ha_mod._make_sdk(namespace=TEST_TEAM_B["team_id"]))), \
+                    ha_mod._make_sdk(namespace=TEST_TEAM_B["org_id"]))), \
             "each tenant must own a distinct memo key"
 
     def test_fleet_cap_eviction_does_not_crash(self, client, monkeypatch):
