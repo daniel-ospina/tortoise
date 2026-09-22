@@ -25,8 +25,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tools.ask_spotcheck import seed_capture_turn_store
 from tortoise.reader import reader_prompt_constants
 from tortoise.retrieval import (
-    DEFAULT_CONTEXT_ITEM_CAP,
-    DEFAULT_CONTEXT_TOKEN_CAP,
     assemble_context,
     render_context,
 )
@@ -40,7 +38,8 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _seed(sdk: TortoiseSDK, seeds: list[dict]) -> None:
+def _seed(sdk: TortoiseSDK, seeds: list[dict], *,
+          embed: bool = False) -> None:
     """Seed the fixture's memory in the CAPTURE shape (#3914).
 
     Each seed is ONE TURN of its own session, written through
@@ -69,6 +68,17 @@ def _seed(sdk: TortoiseSDK, seeds: list[dict]) -> None:
     takes neither, and a ``kind`` knob would let a seed silently opt out of
     the turn shape — the very defect this seeder existed to stop teaching.
     No committed fixture uses either key (unused dead branches removed).
+
+    ⛔ ``embed`` defaults to **False** here, unlike the shared seeder's own
+    default. These are COMMITTED goldens (``tests/fixtures/ask_llm_transcripts/``)
+    recorded on the PRE-#4194 store, and they are also the frozen
+    instrument's known-GREEN substrate (``ask_shape_rate.known_green``) —
+    seeding a vector changes the assembled context and would rewrite the
+    recorded ``user_message`` byte-for-byte, i.e. it would move the ruler's
+    own control. Re-recording the transcripts on the embedded store is a
+    deliberate NEW-instrument change, not a seeder repair (W7A). The D3
+    instrument's own fixture (``ask_spotcheck._seed_memory``) embeds, so the
+    dense leg IS visible where it is measured.
     """
     proj = sdk._get_proj()
     ids: dict[str, str] = {}
@@ -86,7 +96,8 @@ def _seed(sdk: TortoiseSDK, seeds: list[dict]) -> None:
             sdk, sid,
             [{"role": seed.get("role") or "user",
               "content": seed["content"]}],
-            now=f"{sdate}T10:00:00Z" if sdate else None)
+            now=f"{sdate}T10:00:00Z" if sdate else None,
+            embed=embed)
         if not turn_ids:
             # Capture's pre-mutation blank gate — nothing was written.
             continue
@@ -109,16 +120,27 @@ def _seed(sdk: TortoiseSDK, seeds: list[dict]) -> None:
 
 def _render_user_message(sdk: TortoiseSDK, question: str,
                          question_date: str, seeds: list[dict]) -> str:
-    hits = sdk.tortoise_fts_query(question, limit=DEFAULT_CONTEXT_ITEM_CAP,
+    # #4105: resolve the SAME caps the ask lane resolves — the committed
+    # transcripts must be reproducible by the pipeline they replay, and the
+    # hardcoded 40/40/8000/32768 would regenerate a different user_message
+    # once the lane's defaults moved.
+    from tortoise.retrieval import resolve_ask_retrieval_caps
+    caps = resolve_ask_retrieval_caps()
+    hits = sdk.tortoise_fts_query(question, limit=caps["limit"],
+                                  pool_size=caps["pool_size"],
                                   include_terminal=True)
     annotated = sdk.annotate_ask_hits(hits)
     from tortoise.retrieval import dedup_pool
     deduped = dedup_pool(annotated, max_chunks_per_session=3)
     assembled = assemble_context(
-        deduped, top_k=DEFAULT_CONTEXT_ITEM_CAP,
-        max_context_tokens=DEFAULT_CONTEXT_TOKEN_CAP,
+        deduped, top_k=caps["context_item_cap"],
+        max_context_tokens=caps["context_token_cap"],
         question_date=question_date,
-        context_item_cap=DEFAULT_CONTEXT_ITEM_CAP, byte_cap=32768)
+        context_item_cap=caps["context_item_cap"],
+        byte_cap=caps["context_byte_cap"],
+        # #4105: the ask lane opts in to the non-ASCII surcharge; this
+        # generator must assemble exactly as the lane it snapshots does.
+        nonascii_token_surcharge=True)
     evidence = render_context(assembled, question_date=question_date)
     from tortoise.reader import detect_question_type
     qtype = detect_question_type(question)

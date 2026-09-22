@@ -285,6 +285,40 @@ from dataclasses import dataclass, field  # noqa: E402
 from datetime import UTC as _UTC, date as _date, datetime as _datetime  # noqa: E402
 from typing import Protocol  # noqa: E402
 
+# #3317: the Object statuses the RESOLVER will not resolve — the resolver's
+# view of the Object-SEARCH exclusion boundary (deliberately NARROWER than
+# the read-surface object tuple ``commit_ops._RECALL_OBJECT_EXCLUDED_STATUS``
+# = superseded / deprecated / archived / retracted):
+#
+# * ``superseded`` MUST resolve — the state render ("STATE (couch):
+#   superseded by sofa") IS the answer to the canonical current-state
+#   question, and excluding it makes that question stop firing
+#   (RED: test_resolver_docker_exact_and_both_halves).
+# * ``outdated`` must not enter the OBJECT-RESOLUTION predicate: it is the
+#   POINT vocabulary and the object read/search surface deliberately
+#   surfaces it (#2977 scope §1 D3). (This is about the resolver's set
+#   only — the successor-EXISTENCE probe lower in this file keeps its own,
+#   WIDER, deliberately-divergent view; see
+#   ``_RECALL_OBJECT_EXCLUDED_STATUSES``.)
+# * ``deprecated`` / ``archived`` Objects still resolve and render their own
+#   status verbatim (``STATE (x): deprecated`` — never "current", which is
+#   R17 P3-3's requirement, satisfied by the verbatim state read).
+#
+# A ``retracted`` Object is a REMOVED Object (#2977): it has no current
+# state to report, so there is nothing to resolve — #2977's target (c),
+# "invisible to the read surfaces". The literal matches the established
+# "exclude retracted" idiom (``hosted_api.py:5011/:5023/:5047``).
+#
+# ⛔ TRANSITIONAL BINDING (#2977 Task 5, unlanded): the canonical home for
+# this value is ``commit_ops.OBJECT_SEARCH_EXCLUDED_STATUS = {retracted}``
+# (docs/plans/2026-09-11-2977-object-retraction.md:2602; the rationale at
+# :2594-2601 names the resolver's FTS leg as a consumer of that concept).
+# That symbol does not exist in code yet, so the set is stated here rather
+# than imported from nowhere. When Task 5 lands, this constant must be
+# RE-POINTED at it — and this leg's Python filter becomes redundant once the
+# search lane itself excludes the vocabulary.
+_RESOLVER_UNRESOLVABLE_OBJECT_STATUSES = frozenset({"retracted"})
+
 
 @dataclass(frozen=True)
 class SubjectCandidate:
@@ -469,12 +503,52 @@ def docker_resolver_port(sdk) -> ResolverPort:
     Object id/name index (one batched query), FTS via
     ``tortoise_fts_query(entity_type='object')``, alias via one anchored
     search_keys query. Function-level imports keep the module import-safe
-    (no sdk import at module scope)."""
+    (no sdk import at module scope).
+
+    #3317: every leg of THIS PORT excludes the UNRESOLVABLE Object statuses
+    (``_RESOLVER_UNRESOLVABLE_OBJECT_STATUSES`` — today ``retracted``), so
+    resolution here cannot return a removed Object. (Scoped to this port:
+    the sibling Object-anchor resolvers — ``aggregate.py``,
+    ``coverage_loop.py`` — remain status-blind; #2977 Task 5 owns the
+    search-lane vocabulary.) The exact + alias legs carry it as a Cypher
+    conjunct (the graph filters; the batched exact probe stays one query).
+    The FTS leg CANNOT take that conjunct — ``search_engine`` gates its
+    terminal clause on ``label == 'Point'`` so an Object FTS hit still
+    carries a terminal status — and its rows are filtered here instead,
+    through the SAME constant so the two can never drift.
+    """
     proj = sdk._get_proj()
+    # Object-scoped predicate, stated inline rather than routed through
+    # ``search_engine._exclude_status_clause``: that helper composes the
+    # POINT predicate (it ANDs the legacy ``outdated`` flag, coerce-false),
+    # and the Object lane deliberately has no such flag. (#2977 Task 5 gives
+    # ``live._terminal_excluded`` an ``excluded`` + ``include_outdated_flag``
+    # parameter, and its Object lanes take that flagless shape — the
+    # parameter does not exist on main yet.) Derived from the constant so the
+    # Cypher and the Python (FTS) check share one vocabulary.
+    #
+    # WELL-FORMED AT ANY CARDINALITY: an emptied constant must not leave a
+    # dangling `AND` in either query — the resulting Cypher error is swallowed
+    # by ``resolve_subjects``' per-leg `except`, which would turn the
+    # connected-assembly lane off silently. Empty set = no exclusion.
+    status_predicate = " AND ".join(
+        f"(o.status IS NULL OR o.status <> '{s}')"
+        for s in sorted(_RESOLVER_UNRESOLVABLE_OBJECT_STATUSES))
+    status_filter = f"AND ({status_predicate}) " if status_predicate else ""
+    #
+    # KNOWN RESIDUALS, owned by #4061 (not absorbed here): the FTS leg filters
+    # AFTER ``tortoise_fts_query``'s own ``limit`` truncation (the other two
+    # legs filter pre-bound), so >=limit matching rows can starve a live
+    # candidate; and its Python check — like both Cypher legs — ADMITS a hit
+    # with no ``status`` (the entity write path treats an absent status as
+    # live, ``live.py``); the Cypher legs simply cannot be affected by the
+    # batch content-fetch degradation, which is what drops ``status``.
 
     def exact_objects(names: list[str]) -> list[dict]:
         rows = proj.g.query(
-            "MATCH (o:Object) WHERE o.name IN $names OR o.id IN $names "
+            "MATCH (o:Object) "
+            "WHERE (o.name IN $names OR o.id IN $names) "
+            f"{status_filter}"
             "RETURN o.id, o.name",
             params={"names": names}).result_set
         return [{"id": r[0], "name": r[1]} for r in rows]
@@ -483,8 +557,12 @@ def docker_resolver_port(sdk) -> ResolverPort:
         # raises on embedded (no fulltext index) — the resolver degrades
         hits = sdk.tortoise_fts_query(term, entity_type="object",
                                       limit=limit)
+        # #3317: this leg has no Cypher conjunct available (see docstring),
+        # so the shared constant does the exclusion on the returned rows
         return [{"id": h.get("id", ""), "name": h.get("content", "")}
-                for h in hits or []]
+                for h in hits or []
+                if (h.get("status") or "")
+                not in _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES]
 
     def alias_objects(term: str, limit: int = 8) -> list[dict]:
         tokens = [t for t in re.split(r"[^a-z0-9]+", term.lower())
@@ -495,6 +573,7 @@ def docker_resolver_port(sdk) -> ResolverPort:
             "MATCH (p:Point)-[:aboutObject]->(o:Object) "
             "WHERE p.search_keys IS NOT NULL AND "
             "ANY(t IN $tokens WHERE toLower(p.search_keys) CONTAINS t) "
+            f"{status_filter}"
             "RETURN o.id, o.name, collect(p.id) LIMIT $limit",
             params={"tokens": tokens, "limit": limit}).result_set
         return [{"id": r[0], "name": r[1]} for r in rows]
@@ -509,10 +588,15 @@ def docker_resolver_port(sdk) -> ResolverPort:
 
 # ══════════════════════════════════════════════════════════════════════════
 # #2165 Task 4 — typed walker + slice builder (R2/R3-8/R12, R17 P3-1/
-# P3-6; P3-3 DEFERRED: the _RECALL_OBJECT_EXCLUDED_STATUS Object-status
-# exclusion tuple binds at RESOLVE/RENDER time (Task 5) — it is NEVER
-# applied to a resolved subject's own state row (the superseded couch's
-# state IS the answer) nor to Points). One batched typed walk (never
+# P3-6; P3-3: TWO Object-status vocabularies now exist in this file and they
+# are NOT the same set — (a) the RESOLVE-time set
+# (``_RESOLVER_UNRESOLVABLE_OBJECT_STATUSES`` = {retracted}, the Object-SEARCH
+# boundary per #2977's ``OBJECT_SEARCH_EXCLUDED_STATUS``; the resolver's legs
+# apply it, see `docker_resolver_port`), and (b) the RENDER/probe-time set
+# (``_RECALL_OBJECT_EXCLUDED_STATUSES``, five statuses including ``outdated``,
+# used only by `_probe_visible_successors`). Neither is EVER applied to a
+# resolved subject's OWN state row (the superseded couch's state IS the
+# answer) nor to Points). One batched typed walk (never
 # row-level N+1, never blind BFS): state slice
 # (Object status/supersededBy/supersededAt in ONE statement), dated spine
 # (aboutObject Points ∪ Event-aboutObject edges ∪ ask-lane eventId
@@ -674,6 +758,16 @@ def docker_walker_port(sdk) -> WalkerPort:
     proj = sdk._get_proj()
 
     def state_rows(object_ids: list[str]) -> list[dict]:
+        # #3317 decision: this read is NOT a resolution leg — it is the state
+        # read for ids the RESOLVER already admitted (and the WalkerPort
+        # contract for a caller passing an explicit id). It therefore carries
+        # NO status conjunct: ``o.status`` is read VERBATIM so an admitted
+        # subject renders its own truth ("STATE (couch): superseded by sofa",
+        # "STATE (x): deprecated"). Filtering here would not prevent a
+        # retracted Object from resolving (resolution already happened) — it
+        # would only DELETE the honest state line of an admitted subject,
+        # silently hiding status. The unresolvable-status guard belongs
+        # upstream, at the legs — see docker_resolver_port.
         rows = proj.g.query(
             "MATCH (o:Object) WHERE o.id IN $ids "
             "RETURN o.id, o.name, o.status, o.supersededBy, o.supersededAt",
@@ -1032,10 +1126,16 @@ class _AssembledBlock:
     slices: dict
     admission: dict
     post_cap_lines: list
+    #: The `assemble_context` drop census for the fired path (items_selected,
+    #: dropped_by_token_cap/dropped_by_byte_cap, byte_cap, stopped_by) — so
+    #: run_ask_lane() can emit the SAME honest-budget warning on the fired
+    #: path that it emits on the legacy path (#4105). Empty when no assembly
+    #: ran (fired=False) or an older caller did not pass a stats dict.
+    cap_stats: dict = field(default_factory=dict)
     # NOTE: evidence/context_tokens are NOT computed here — run_ask_lane()/the
     # assembled path render post_cap_lines through the SHARED
     # render_context/estimate path so the alignment invariant
-    # (context_tokens == estimate_tokens(evidence)) holds by construction.
+    # (context_tokens == estimate_tokens_ask(evidence)) holds by construction.
 
 
 @dataclass
@@ -1101,7 +1201,13 @@ def _assemble_connected(sdk, question: str, *, question_date: str | None = None,
     guard) -> assemble_context(caps). NEVER raises untyped: the
     run_ask_lane() envelope maps any raise to AskRetrievalUnavailable.
     """
-    from tortoise.retrieval import assemble_context
+    from tortoise.retrieval import (
+        assemble_context,
+        resolve_byte_cap_from_caps,
+        resolve_item_cap_from_caps,
+        resolve_limit_from_caps,
+        resolve_token_cap_from_caps,
+    )
     if caps is None:
         from tortoise.retrieval import resolve_ask_retrieval_caps
         caps = resolve_ask_retrieval_caps()
@@ -1121,10 +1227,17 @@ def _assemble_connected(sdk, question: str, *, question_date: str | None = None,
         return _AssembledBlock(fired=False, shape=None, subjects=(),
                                slices={}, admission={}, post_cap_lines=[])
     candidates = list(resolved.candidates)
+    # ALL FOUR caps resolve through the validated dict-seam resolvers — an
+    # absent/non-numeric/out-of-range entry falls back to the default exactly
+    # as the env seam does, rather than reaching assemble_context and raising
+    # (which would fail the whole ask). Sanitising only token/byte left this
+    # the last unvalidated seam of the same class (#4105 review).
+    limit = resolve_limit_from_caps(caps)
+    item_cap = resolve_item_cap_from_caps(caps)
     slices = collect_slices(
         docker_walker_port(sdk), candidates, shape=shape,
         question_date=question_date,
-        per_subject_cap=caps.get("limit") or 200)
+        per_subject_cap=limit)
     verified = _probe_visible_successors(sdk, slices)
     hits = synthesize_hits(slices, shape=shape, candidates=candidates,
                            halves=terms, successors_verified=verified,
@@ -1160,12 +1273,31 @@ def _assemble_connected(sdk, question: str, *, question_date: str | None = None,
         from tortoise.why import enrich_items, w4_enrichment_enabled
         if w4_enrichment_enabled():
             hits = enrich_items(sdk._get_proj(), hits)
+    # #4105 review fix: for a LEGACY caps dict (one that predates
+    # ``context_byte_cap``) the token budget and the byte ceiling come from
+    # ONE validated resolution — the byte ceiling is DERIVED from that dict's
+    # token cap when neither the dict nor ``TORTOISE_ASK_CONTEXT_BYTE_CAP``
+    # pins one (never the 32 KiB literal, which would re-open the silent
+    # no-op on exactly this seam), and the token budget is the SAME sanitised
+    # value. Precedence is explicit dict key → byte env → derived, matching
+    # ``resolve_byte_cap_from_caps``' own contract. An absent key resolves the
+    # same env knob the env seam uses, so a caps dict with no token cap
+    # resolves like ``caps=None``.
+    token_cap = resolve_token_cap_from_caps(caps)
+    byte_cap = resolve_byte_cap_from_caps(caps)
+    cap_stats: dict = {}
     selected = assemble_context(
-        hits, top_k=caps.get("context_item_cap", 40),
-        max_context_tokens=caps.get("context_token_cap", 8000),
+        hits, top_k=item_cap,
+        max_context_tokens=token_cap,
         question_date=question_date,
-        context_item_cap=caps.get("context_item_cap", 40),
-        byte_cap=32768)
+        context_item_cap=item_cap,
+        byte_cap=byte_cap,
+        # #4105: opt in to the non-ASCII token surcharge — this is the ask
+        # lane's connected path, so the bound must hold on CJK/emoji pools
+        # too. The shared function's DEFAULT (and thus the eval re-export,
+        # #2070) stays pre-#4105 byte-identical.
+        nonascii_token_surcharge=True,
+        stats=cap_stats)
     if not selected:
         # P1-1: both halves resolved but the assembly has NOTHING to say
         # (content-less subjects) — firing would replace legacy evidence
@@ -1182,4 +1314,5 @@ def _assemble_connected(sdk, question: str, *, question_date: str | None = None,
         slices={"state_rows": list(slices.state_rows),
                 "timeline_rows": list(slices.timeline_rows),
                 "evidence_rows": list(slices.evidence_rows)},
-        admission=dict(slices.admission), post_cap_lines=selected)
+        admission=dict(slices.admission), post_cap_lines=selected,
+        cap_stats=cap_stats)

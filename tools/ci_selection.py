@@ -423,7 +423,32 @@ SOURCE_PATTERNS = {
             # test_1162_add_operator_local_svbp.py). Paired with CORE_ALSO:
             # its pinning tests are registered across api, core AND ep, so the
             # named-surface match must not drop `core` (see CORE_ALSO).
-            "tortoise/api.py"),
+            "tortoise/api.py",
+            # #4282: `tools/bridge_table.py` GENERATES `docs/product/bridge-table.md`
+            # and `test_bridge_table.py` (registered in `api`) is the drift gate
+            # that keeps them honest. `tools/` is in NON_PYTHON_PREFIXES, so a
+            # generator-only edit selected NO surface (`surfaces: []`, `full:
+            # false`) and the gate never ran on precisely the PR that can break
+            # it. Named here because a SOURCE_PATTERNS match beats the
+            # non-python skip. A docs-only hand-edit of the generated file still
+            # skips the matrix by the repo's deliberate docs-PR policy — see
+            # tortoise #4454.
+            "tools/bridge_table.py",
+            # #4282 Phase 0.3: `tools/mcp_rename_table.py` GENERATES
+            # `docs/product/mcp-rename-table.md` and `test_mcp_rename_table.py`
+            # (registered in `api` + `core`) is the drift gate. Same shape as the
+            # 0.1 entry directly above and the same reason: a generator-only edit
+            # is swallowed by the flat `tools/` prefix and the gate never runs on
+            # the PR that can break it (#4454 covers a docs-only hand-edit).
+            "tools/mcp_rename_table.py",
+            # #4282 Phase 0.3b: `tools/sdk_rename_table.py` GENERATES
+            # `docs/product/sdk-rename-table.md`, and `test_sdk_rename_table.py`
+            # (registered in `api` AND `core`) is the drift gate. Same gap as the
+            # bridge table above: `tools/` is in NON_PYTHON_PREFIXES, so a
+            # generator-only edit selected NO surface and the gate never ran on
+            # the PR that can break it. A docs-only hand-edit of the generated
+            # file still skips the matrix by the docs-PR policy (tortoise #4454).
+            "tools/sdk_rename_table.py"),
     # eval (#1349): the probe, LongMemEval/mini-BEIR harnesses, threshold
     # tools, benchmark infra, and the backfill script all produce gate
     # evidence — their tests live in the eval surface (config/ci-surfaces.yml).
@@ -460,7 +485,17 @@ SOURCE_PATTERNS = {
 # would run only the selected surface's half of them. A path listed here adds
 # `core` alongside its matched surface(s) — narrower than promoting the whole
 # module to SHARED_MODULES (which forces the full matrix).
-CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py")
+# Paths listed here ADD `core` alongside whatever surface they matched.
+#
+# #4207/#4351: `tools/skip-guard.py` is the file the frozen-nodeid manifest is
+# enforced by, and BOTH of its pinning tests (`tests/test_skip_guard.py`,
+# `tests/test_ci_expected_manifests.py`) are `core`-registered. `tools/` IS in
+# NON_PYTHON_PREFIXES (a tools-only change is treated as non-python-relevant), and
+# the file matches no SOURCE_PATTERN either, so a follow-up change to
+# `--manifest-only` alone selected only tier-1 smoke — the pin for the code being
+# changed would not have run. That is the #1349/#3332/#3616 silent-drop class, on
+# the file this PR modifies.
+CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.py")
 
 # Paths that are NOT python-relevant (docs/config PRs skip the matrix).
 NON_PYTHON_PREFIXES = (
@@ -549,6 +584,25 @@ TOOL_CARVEOUTS = (
     # tier-1 smoke) and its own wiring/behaviour tests would never run on the
     # PR that edits it.
     "tools/embedder_provision.py",
+    # #4290: the finding-provenance gate (tools/finding_provenance.py) owns
+    # tests/test_finding_provenance.py. Same silent-drop class as the
+    # collision-preflight carve-out above: the flat "tools/" prefix in
+    # NON_PYTHON_PREFIXES swallows the path, `changed` comes back empty, and
+    # select() takes the docs-only return — so the gate's own falsification
+    # suite would never run on the PR that changes the gate. No SOURCE_PATTERNS
+    # entry matches it, so it lands in the unknown-path branch -> FULL matrix
+    # (fail closed). Pinned by
+    # test_ci_selection.test_finding_provenance_tool_change_fails_closed_to_full.
+    "tools/finding_provenance.py",
+    # #3827: the embedded-lane evidence harness owns
+    # tests/test_embedded_evidence.py. Same silent-drop class as the preflight
+    # carve-out above: no SOURCE_PATTERNS entry matches the path, so a
+    # harness-only change is swallowed by the flat "tools/" prefix, `changed`
+    # comes back empty, and select() takes the docs-only return — the harness's
+    # own guard test never runs on the PR that edits the harness. That is the
+    # exact "proxy silent in the case it exists to cover" class this harness is
+    # written to detect, so it must not apply to the harness itself.
+    "tools/embedded_evidence.py",
 )
 
 

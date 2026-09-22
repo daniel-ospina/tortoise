@@ -20,7 +20,7 @@ auth pages, dashboard, and billing. Written 2026-08-14 from the current
 | Host | Serves | Deployment |
 | --- | --- | --- |
 | `premiselabs.co` | Company page (`website/index.html`) | Cloudflare Pages project `premise-labs` |
-| `tortoise.premiselabs.co` | Product page (`website/product.html` at `/`), docs, FAQ (`/faq`), blog, legal — **no session ever**; the auth surfaces 301 to the app origin | Cloudflare Pages project `premise-labs` (same project, host-routed) |
+| `tortoise.premiselabs.co` | Product page (`website/product.html` at `/`), docs, FAQ (`/faq`), blog, legal — **no session ever**; the auth surfaces redirect to the app origin (302, except the `/auth` exact path — see the redirect notes below) | Cloudflare Pages project `premise-labs` (same project, host-routed) |
 | `app.premiselabs.co` | **The one session-bearing origin (#4054):** the BFF, the dashboard SPA, `/auth*`, `/welcome`, `/invite-accept`, `/admin`, `/api/v1`, `/blog/api` | Cloudflare Pages project `tortoise-dashboard` (separate) |
 | `api.premiselabs.co` | Hosted API (FastAPI, `tortoise/hosted_api.py`) | Fly.io app `tortoise-y4mjjq` |
 
@@ -34,11 +34,15 @@ Host routing lives in `website/functions/_middleware.ts`:
 - `tortoise.*` root → `product.html` (rewritten), everything else serves its own asset
 - `premiselabs.co` + preview hosts root → `index.html` (company page)
 - `/product` on non-tortoise hosts → 404 (product page never leaks onto the company host)
-- **auth surfaces 301 to the app origin — and WHICH layer does it depends on the host:**
+- **auth surfaces redirect to the app origin — and WHICH layer does it depends on the host:**
   - the middleware's `APP_ONLY` branch (`/auth`, `/signup`, `/welcome`, `/invite-accept` + `.html`
     twins) runs **only** on the exact `premiselabs.co` host (`COMPANY_HOSTS`),
-  - `/auth` and `/auth.html` 301 **unconditionally**, and `/admin` 301s **unconditionally** (those
-    cover `tortoise.*` and previews/dev, so a request never falls through to a deleted asset),
+  - `/auth` and `/auth.html` 301 **unconditionally** — the redirect #4054 shipped, left alone because
+    it is already in browsers' caches and changing it is its own decision — while `/auth/*` answers
+    **302** (`#4346`) and `/admin` **302**s (`#4409`), all **unconditionally** (those cover
+    `tortoise.*` and previews/dev, so a request never falls through to a deleted asset). A NEW
+    branch for a moved surface is 302, not 301: a 301 is browser-persistent and deploy-unreachable.
+    Three surfaces, two answers, and the difference is deliberate
   - on the tortoise host the other three (`/signup`, `/welcome`, `/invite-accept` + twins) are 301'd
     by the **static** `website/_redirects`, not by the middleware. Deleting those rules breaks the
     tortoise host — the middleware does not cover it.
@@ -75,7 +79,7 @@ Host routing lives in `website/functions/_middleware.ts`:
 | Page | File | Purpose |
 | --- | --- | --- |
 | Company | `website/index.html` | Premise Labs brand page, waitlist form |
-| Product | `website/product.html` | Tortoise marketing: features, pricing (Free/Solo/Pro/Team), self-hosted section |
+| Product | `website/product.html` | Tortoise marketing: features, pricing (Free/Solo/Builder/Team), self-hosted section |
 | Self-hosted | `website/self-hosted.html` | Self-hosted setup guide at `/self-hosted` (install, daemon, onboarding, MCP connect, role memory); guarded by `test_harness_mcp_config.py`, crawled by `tests/e2e/test_legal_pages.py` |
 | Blog | `website/functions/blog/[[path]].ts` (SSR at `/blog` + `/blog/:slug`) · `website/functions/blog/sitemap.xml.ts` (`/blog/sitemap.xml`) · `website/functions/blog/feed.xml.ts` (`/blog/feed.xml`) · `website/functions/blog/api/posts/[[path]].ts` (agent publish/edit, `/blog/api/posts`) · `website/blog/` (favicon, og-image) | Tortoise blog: server-rendered markdown posts (Supabase `blog_posts`), agent-published with review queue, PostHog + consent |
 | Docs | `website/docs.html` | Static docs: what/how/quickstart/MCP/API |
@@ -168,10 +172,10 @@ are canonical in `product/pricing.json`:
 | --- | --- | --- | --- | --- | --- |
 | Free | 0 | 1 | 1 | 2 | 10k |
 | Solo | 9 | 2 | 1 | 5 | 10k |
-| Pro | 25 | ∞ | 2 | 10 | 50k |
+| Builder | 25 | ∞ | 2 | 10 | 50k |
 | Team | 149 | ∞ | ∞ | 20 | 200k |
 
-Overage: $5 per additional 10k write ops (Pro + Team). Billing is **per team**,
+Overage: $5 per additional 10k write ops (Builder + Team). Billing is **per team**,
 not per seat (#310/#432).
 
 ---
@@ -208,7 +212,8 @@ The user-approved end state for the auth/marketing surfaces:
 
 1. **deploy** — verifies the onboarding skill mirror, syncs DNS, deploys
    `website/` → Pages project `premise-labs`. `admin/` is **not** staged here: the
-   middleware 301s `/admin` to the app origin before any asset is read (#4171).
+   middleware 302s `/admin` to the app origin before any asset is read (#4171;
+   the status is 302 not 301 per `SCOPE.md` §12 — #4409).
 2. **deploy-dashboard** — two separate builds: `npm ci && npm run build` in
    `website/apps/dashboard` (the dashboard SPA), then the **blog admin** SPA in
    `website/apps/blog-admin`, copied into `website/apps/dashboard/dist/admin/`

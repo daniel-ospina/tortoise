@@ -559,13 +559,23 @@ class TestHealthEndpoints:
         import tortoise.hosted_api as ha_mod
         import tortoise.monitoring as monitoring
 
-        # (a) registered, and OUTERMOST. Starlette's add_middleware INSERTS at
+        # (a) registered, and second-outermost: WaitBoundMiddleware (#3834) is
+        # registered last and so wraps it. Starlette's add_middleware INSERTS at
         # index 0, so the LAST-registered middleware is first in the list.
         classes = [m.cls for m in ha_mod.app.user_middleware]
         assert ha_mod.InFlightMiddleware in classes, (
             "InFlightMiddleware is not installed — the idle gate always reads 0")
-        assert classes[0] is ha_mod.InFlightMiddleware, (
-            f"the gauge must wrap everything (registered last): {classes!r}")
+        # #3834: WaitBoundMiddleware is now registered LAST (outermost), so the
+        # gauge sits immediately inside it. That order is REQUIRED, not
+        # incidental: the bound ABANDONS (never cancels) a breached handler, and
+        # the gauge must keep counting that handler until it genuinely finishes.
+        # Reversing the two would release the gauge at the 10 s refusal while the
+        # abandoned work still runs — the exact #2850 mis-read. The gauge still
+        # wraps every handler and every short-circuiting middleware.
+        assert classes[0] is ha_mod.WaitBoundMiddleware, (
+            f"the wait bound must be outermost (registered last): {classes!r}")
+        assert classes[1] is ha_mod.InFlightMiddleware, (
+            f"the gauge must wrap every handler (registered second-outermost): {classes!r}")
 
         # (b) a REAL request through the module-level app: the gauge is >= 1
         # WHILE the handler runs, and released afterwards. ``/health`` is read
@@ -4630,6 +4640,94 @@ class TestBackupStorageSeam:
 
         monkeypatch.setenv("TORTOISE_BACKUP_STORAGE", "s3-ish")
         with pytest.raises(RuntimeError, match="unknown"):
+            _ha._backup_storage()
+
+    def test_r2_mode_returns_shared_singleton(self, monkeypatch):
+        """#3968 — the R2 path is a process-wide singleton too.
+
+        N successive `_backup_storage()` calls must construct ONE `R2Storage`
+        (and therefore one boto3 client via `_s3()`), not N. This is the
+        indicator the issue names: the #3820 process-start-UNKNOWN resolve
+        retries one read per delivered write, and each retry used to pay a full
+        client construction."""
+        from tortoise import hosted_api as _ha
+
+        monkeypatch.delenv("TORTOISE_BACKUP_STORAGE", raising=False)
+        monkeypatch.setenv("R2_ACCOUNT_ID", "acct")
+        monkeypatch.setenv("R2_ACCESS_KEY_ID", "ak")
+        monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "sk")
+        monkeypatch.setenv("R2_BUCKET", "bkt")
+        monkeypatch.setattr(_ha, "_R2_BACKUP_STORE", None)
+        monkeypatch.setattr(_ha, "_R2_BACKUP_STORE_CONFIG", None)
+
+        real = _ha.R2Storage
+        built: list = []
+
+        def _spy(*a, **k):
+            store = real(*a, **k)
+            built.append(store)
+            return store
+
+        monkeypatch.setattr(_ha, "R2Storage", _spy)
+        stores = [_ha._backup_storage() for _ in range(5)]
+
+        assert len(built) == 1, (
+            "N calls must construct the R2 store ONCE (#3968); "
+            f"built {len(built)}"
+        )
+        assert all(s is stores[0] for s in stores), "callers must share one store"
+        assert isinstance(stores[0], real)
+
+    def test_r2_mode_rebuilds_when_config_changes(self, monkeypatch):
+        """Credential freshness — the cache key is the resolved R2 config.
+
+        A changed `R2_*` env (a rotation, or a test's monkeypatch) must rebuild
+        rather than serve a store pinned to the old credentials."""
+        from tortoise import hosted_api as _ha
+
+        monkeypatch.delenv("TORTOISE_BACKUP_STORAGE", raising=False)
+        monkeypatch.setenv("R2_ACCOUNT_ID", "acct")
+        monkeypatch.setenv("R2_ACCESS_KEY_ID", "ak")
+        monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "sk")
+        monkeypatch.setenv("R2_BUCKET", "bkt-a")
+        monkeypatch.setattr(_ha, "_R2_BACKUP_STORE", None)
+        monkeypatch.setattr(_ha, "_R2_BACKUP_STORE_CONFIG", None)
+
+        a = _ha._backup_storage()
+        b = _ha._backup_storage()
+        assert a is b, "an unchanged config must reuse the cached store"
+
+        monkeypatch.setenv("R2_BUCKET", "bkt-b")
+        c = _ha._backup_storage()
+        assert c is not a, "a changed R2 config must NOT serve the cached store"
+        assert (a._bucket, c._bucket) == ("bkt-a", "bkt-b")
+
+        # R2_ACCOUNT_ID changes the DERIVED endpoint, so it must invalidate too.
+        monkeypatch.setenv("R2_ACCOUNT_ID", "acct-2")
+        d = _ha._backup_storage()
+        assert d is not c, "a changed R2_ACCOUNT_ID (→ endpoint) must invalidate the cache"
+        assert d._endpoint == "https://acct-2.r2.cloudflarestorage.com"
+
+    def test_r2_mode_fail_closed_survives_a_populated_cache(self, monkeypatch):
+        """A cached store must never mask a now-incomplete config.
+
+        The key is compared before any cache return, so removing an `R2_*` var
+        still raises the fail-closed RuntimeError — the cache cannot outlive
+        the config that justified it."""
+        from tortoise import hosted_api as _ha
+
+        monkeypatch.delenv("TORTOISE_BACKUP_STORAGE", raising=False)
+        monkeypatch.setenv("R2_ACCOUNT_ID", "acct")
+        monkeypatch.setenv("R2_ACCESS_KEY_ID", "ak")
+        monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "sk")
+        monkeypatch.setenv("R2_BUCKET", "bkt")
+        monkeypatch.setattr(_ha, "_R2_BACKUP_STORE", None)
+        monkeypatch.setattr(_ha, "_R2_BACKUP_STORE_CONFIG", None)
+
+        assert _ha._backup_storage() is not None  # cache now populated
+
+        monkeypatch.delenv("R2_ACCOUNT_ID", raising=False)
+        with pytest.raises(RuntimeError, match="R2 not configured"):
             _ha._backup_storage()
 
 
