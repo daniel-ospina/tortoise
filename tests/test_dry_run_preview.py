@@ -564,12 +564,60 @@ class TestBlastRadius:
             f"preview said {preview['edges_created_at_new']} net-new edges, "
             f"the graph gained {len(net_new)}")
         # The old-side count matches the SDK counter on a graph with no
-        # parallel edges (the only kind any SDK write path can mint).
+        # parallel edges AND no direct self-loop at `old` (see the self-loop
+        # leg below, where the writer double-books and the preview is right).
         assert preview["edges_transferred_from_old"] == real["edges_transferred"]
         assert preview["edges_created_at_new"] >= 4
         kept = {(e["from"], e["to"]) for e in preview["edges_kept_attached"]}
         assert any(t == old for _, t in kept), kept
         assert preview["edges_dropped"], "the successor self-edge must be delete-only"
+
+    def test_supersede_preview_is_the_accurate_count_for_a_direct_self_loop(
+            self, sdk):
+        """The one graph where the preview and the writer DISAGREE, and the
+        preview is the one that is right.
+
+        A direct `(old)-[:IMPL]->(old)` self-loop is removed by the write, so
+        it is one edge — but the writer books it twice. Its out-pass repoints
+        `(old)-[:IMPL]->(old)` to `(new)->(old)` (`transferred += 1`), then its
+        in-pass matches the edge it just created and takes the
+        far-endpoint-is-the-successor delete-only branch (`transferred += 1`
+        again). The preview dedups the two passes (`seen_direct`) and counts
+        the edge once. This pins the exact, documented drift so nobody
+        "fixes" the preview toward the writer's inflated number.
+
+        The self-loop is minted by Cypher, not by `create_direct_edge` — that
+        API refuses `source_id == target_id`. The graph can still carry one
+        (raw Cypher / an import), which is why the preview has the branch.
+        """
+        old, new = _seed_point(sdk, "old"), _seed_point(sdk, "new")
+        x = _seed_point(sdk, "x")
+        sdk._get_proj().g.query(
+            "MATCH (a:Point {id:$o}) CREATE (a)-[:IMPL]->(a)",
+            params={"o": old})
+        sdk.create_direct_edge("IMPL", old, x)  # one ordinary transferred edge
+
+        from tortoise.mcp_server import _preview_supersede
+
+        before_at_old = _edge_keys_at(sdk, old)
+        preview = _preview_supersede(sdk, old, new)
+        real = sdk.supersede(old, new)
+        after_at_old = _edge_keys_at(sdk, old)
+
+        # GROUND TRUTH: two edges were incident to `old` (the self-loop and the
+        # ordinary IMPL out), and the write removed both — nothing remains.
+        assert len(before_at_old) == 2, before_at_old
+        assert len(after_at_old) == 0, after_at_old
+        # The preview reports exactly that. The writer's own counter is the
+        # one that is wrong (it books the self-loop in both 2a-DIRECT passes),
+        # so pin the DIRECTION of the drift — the writer over-counts — rather
+        # than its exact inflated value: a writer-side fix must not redden a
+        # test about the preview.
+        assert preview["edges_transferred_from_old"] == 2, preview
+        assert real["edges_transferred"] > preview["edges_transferred_from_old"], real
+        dropped = [d for d in preview["edges_dropped"] if d["other"] == old]
+        assert dropped, preview["edges_dropped"]
+        assert "self-loop" in dropped[0]["reason"], dropped
 
     def test_supersede_preview_reports_the_edges_remaining_at_old(self, sdk):
         """The transfer set is NOT the whole blast radius at `old`: an edge the

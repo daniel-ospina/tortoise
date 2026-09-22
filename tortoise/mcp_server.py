@@ -4295,12 +4295,19 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
     An edge whose far endpoint IS the successor is delete-only (no phantom
     self-edge) — reported under `edges_dropped`.
 
-    `edges_transferred_from_old` is the writer's own old-side count — the
-    number it reports as `edges_transferred` (the two are the same value by
-    construction, and a differential test pins them together). It counts every
-    row the write removes from old, INCLUDING the delete-only rows (`edge.
-    dropped`: a self-loop, or a far endpoint that is the successor / not a
-    Point) that the writer also books as "transferred" while creating nothing.
+    `edges_transferred_from_old` is the writer's own old-side count — on any
+    graph with no direct IMPL/NAND self-loop at `old` it equals the number the
+    writer reports as `edges_transferred`, and a differential test pins the two
+    together there. It is NOT equal when `old` carries a self-loop, and the
+    writer is the one that over-counts: its out-pass repoints
+    `(old)-[:IMPL]->(old)` to `(new)->(old)`, then its in-pass matches that
+    freshly created edge and delete-onlys it, booking one removed edge twice —
+    while this preview dedups the two matches and counts the edge ONCE. This
+    value is the accurate one; the self-loop is reported under `edges_dropped`
+    with the reason "self-loop on the old node". It counts every row the write
+    removes from old, INCLUDING the delete-only rows (`edges_dropped`: a
+    self-loop, or a far endpoint that is the successor / not a Point) that the
+    writer also books as "transferred" while creating nothing.
     It is therefore NOT "the edges that arrive at the successor": those are
     `edges_created_at_new` + `edges_already_present_at_new`.
     `edges_remaining_at_old` is the complementary count — the edges incident to
