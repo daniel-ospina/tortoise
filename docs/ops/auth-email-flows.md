@@ -79,9 +79,12 @@ exist at all. The hosted signup path creates accounts with `email_confirm=true` 
 
 1. `GET /auth/confirm?token_hash=…&type=…` — verifies the token server-side (`verifyOtp`), checks the response
    shape, and persists a **pending** record. It mints **no session** and renders a page naming the account.
-2. `POST /auth/confirm` — CSRF-guarded and bound to the pending record by a host-only `__Host-authflow` cookie.
-   It consumes the record (single-use) and mints one `__Host-session`. Recovery additionally revokes the user's
-   other sessions (F15) and lands on `/welcome?reset=1`; every other type lands on `/welcome`.
+2. `POST /auth/confirm` — CSRF-guarded, and bound to the pending record by TWO things that must agree: a host-only
+   `__Host-authflow` cookie, and the `pending` id the page itself displayed. The cookie is per-browser, not per-tab,
+   and every verified GET overwrites it, so the cookie alone would let a second link opened in another tab redirect
+   the consent given on this page to a different account. A mismatch is refused (`400`), never coerced. The route
+   then consumes the record (single-use, fail-closed) and mints one `__Host-session`. Recovery additionally revokes
+   the user's other sessions (F15) and lands on `/welcome?reset=1`; every other type lands on `/welcome`.
 
 The GET-then-POST shape is what makes the link work **cross-device** without a silent login: the cookie is
 created by the GET and consumed by the POST, both in the same browser, so no flow cookie has to pre-exist.

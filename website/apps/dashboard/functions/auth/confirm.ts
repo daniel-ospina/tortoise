@@ -247,6 +247,12 @@ function emailInterstitial(email: string | null, pendingId: string, kind: string
     "Content-Type": "text/html; charset=utf-8",
     "Cache-Control": "no-store",
     "Strict-Transport-Security": HSTS,
+    // A consent page is only worth anything if the user reads WHICH account it
+    // names, so it must not be framed. (`_headers` does not reach Functions
+    // output, hence the explicit stamp. Not currently exploitable without this —
+    // a framed cross-site POST carries no `SameSite=Lax` cookie and would 400.)
+    "X-Frame-Options": "DENY",
+    "Content-Security-Policy": "frame-ancestors 'none'",
   });
   headers.append("Set-Cookie", buildCookie(FLOW_COOKIE, pendingId, RECOVERY_MAX_AGE_S));
   return new Response(html, { status: 200, headers });
@@ -410,7 +416,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
       return json(
         {
           error: "revocation_failed",
-          message: "Could not invalidate existing sessions. Please try the reset link again.",
+          message: "Could not invalidate existing sessions. Request a new reset link.",
         },
         { status: 503 },
       );
