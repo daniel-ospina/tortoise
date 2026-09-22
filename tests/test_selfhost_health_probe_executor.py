@@ -508,21 +508,34 @@ def test_liveness_coordinator_bound_sits_above_its_probe_total():
     )
 
 
-def test_liveness_coordinator_window_covers_its_cycle():
-    """A result older than ``stale_after`` is discarded, so the freshness
-    window must cover the worst-case refresh cycle (``max(interval,
-    probe_bound)``) or a REACHABLE graph reads degraded between refreshes —
-    the #3243 lie in steady state. Pin the window against BOTH terms of that
-    cycle, resolved for real (a window pinned only against the probe bound is
-    true by construction, since the bound is what the window is taken from)."""
+def test_liveness_coordinator_window_follows_a_raised_allowance(monkeypatch):
+    """The freshness window must FOLLOW the cold-start allowance, not sit at a
+    fixed ``PROBE_STALE_AFTER``.
+
+    ``snapshot()`` discards a result older than ``stale_after``, so a window
+    frozen at the 30 s platform default discards the verdict of a REACHABLE
+    cold start once ``TORTOISE_PROBE_SETUP_TIMEOUT`` pushes ``probe_duration``
+    past 30 s — the #3243 false degrade, in steady state. Raise the allowance
+    (the resolver reads it at CALL time) and pin that the window moved with it:
+    a window taken from a fixed bound, or frozen at import time, fails here.
+    """
     import tortoise.monitoring as mon
     from tortoise import selfhost as sh
 
-    worst_cycle = max(mon.health_probe_interval(), sh._HEALTH_PROBE._timeout)
-    assert sh._HEALTH_PROBE._stale_after >= worst_cycle, (
-        f"staleness window {sh._HEALTH_PROBE._stale_after}s is below the "
-        f"worst-case refresh cycle {worst_cycle}s — a slow-but-valid probe "
-        "would be discarded as stale (#3243)"
+    assert sh._liveness_probe_stale_after() >= mon.PROBE_STALE_AFTER, (
+        "the window is below the platform default it must never undercut"
+    )
+
+    monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", "300")
+    raised = sh._liveness_probe_stale_after()
+    assert raised > mon.PROBE_STALE_AFTER, (
+        f"the window stayed at {raised}s under a 300s cold-start allowance — a "
+        "reachable graph whose cold start exceeds the platform default would "
+        "be discarded as stale between refreshes (#3243)"
+    )
+    assert raised >= sh._liveness_probe_hard_timeout(), (
+        f"the window {raised}s no longer covers the coordinator's own bound "
+        f"{sh._liveness_probe_hard_timeout()}s at that allowance (#3243)"
     )
 
 

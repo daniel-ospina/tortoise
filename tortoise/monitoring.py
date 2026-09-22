@@ -1374,9 +1374,11 @@ class HealthProbe:
         """Resolve the self-heal gate to a float (round-4 review P2).
 
         ``refresh_budget`` may be a float (tests, fixed coordinators) or a
-        zero-arg callable that returns one (``_HEALTH_PROBE`` wires it to
-        ``_health_probe_interval()`` so the gate always equals the refresher's
-        ACTUAL, operator-resolved period rather than the import-time default).
+        zero-arg callable that returns one (the selfhost ``_HEALTH_PROBE``
+        wires it to ``monitoring.health_probe_interval`` — the shared resolver
+        since #2988, re-exported by ``hosted_api`` as ``_health_probe_interval``
+        — so the gate always equals the refresher's ACTUAL, operator-resolved
+        period rather than the import-time default).
         A callable that raises falls back to ``PROBE_STALE_AFTER`` — the gate
         must never break an unauthenticated ``/health`` read.
         """

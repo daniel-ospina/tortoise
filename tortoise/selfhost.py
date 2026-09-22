@@ -560,9 +560,11 @@ async def health():
     /health uses — and returns. Nothing on the request path submits work to the
     loop's DEFAULT ThreadPoolExecutor (or to any pool), so a saturated executor,
     a black-holed DB, or a cold-starting large graph cannot delay this response
-    by a microsecond. (``snapshot()`` may start the ONE bounded single-flight
-    probe daemon thread — its self-heal path, non-blocking and gated on the
-    refresh budget — but it never waits on that thread.) Freshness comes from
+    by a microsecond. (``snapshot()`` may start up to one bounded single-flight
+    probe daemon thread per read — its self-heal path, and it never waits on
+    that thread: an idle coordinator's heal is gated on the refresh budget,
+    while a WEDGED probe may be superseded, capped at ``PROBE_MAX_SUPERSEDES``.)
+    Freshness comes from
     the background ``_health_probe_loop`` refresher.
 
     #3243: that decoupling is what lets the REFRESHER, which is off the request
