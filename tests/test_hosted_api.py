@@ -4228,7 +4228,7 @@ class TestQuotaFailClosed:
         from tortoise.quota import QuotaCheckError  # noqa: I001
         import tortoise.quota as quota_mod
 
-        def _fail_count(_limits, _resource, sdk=None):
+        def _fail_count(_limits, _resource, sdk=None, **_kwargs):
             raise QuotaCheckError("simulated count query failure")
 
         monkeypatch.setattr(quota_mod, "enforce_org_limit", _fail_count)
@@ -4246,7 +4246,7 @@ class TestQuotaFailClosed:
         from tortoise.quota import QuotaExceededError  # noqa: I001
         import tortoise.quota as quota_mod
 
-        def _fail_exceeded(_limits, _resource, sdk=None):
+        def _fail_exceeded(_limits, _resource, sdk=None, **_kwargs):
             raise QuotaExceededError("Team points limit reached (1000)")
 
         monkeypatch.setattr(quota_mod, "enforce_org_limit", _fail_exceeded)

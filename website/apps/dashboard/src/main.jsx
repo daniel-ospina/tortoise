@@ -1138,6 +1138,14 @@ function claimIntentInFlight() {
   // class "a click must not destroy the one-time secret"). Cleared on the
   // reveal's own Copy & done and on logout/team switch.
   const [rotatedKey, setRotatedKey] = React.useState(null)
+  // #4355: the rotate partial-state disclosure. `POST /v1/team/keys/{id}/rotate`
+  // creates the replacement FIRST and then CLAIM-revokes the old row; when the
+  // destructive leg could not be completed AND its rollback also failed, the
+  // response carries `replaced_revoked:false` + a `warning` and BOTH keys are
+  // live. That is a state the user has to act on (the "what is live" surfaces
+  // and the count are now one too high), so it gets its own persistent notice
+  // rather than riding the transient `error` slot that `loadAll` overwrites.
+  const [rotateNotice, setRotateNotice] = React.useState('')
   // key-create modal state
   const [keyModalOpen, setKeyModalOpen] = React.useState(false)
   const [keyModalBusy, setKeyModalBusy] = React.useState(false)
@@ -1694,7 +1702,8 @@ function claimIntentInFlight() {
   // .expires_at (when present) for the expiry echo.
   async function mintKey(activeKey, name, expiresInDays) {
     // #2167 rule 4: session-mode durable-key CREATE (shared by createKey +
-    // #2211's wizardMintDurableKey + regenerateKey's rotate mint) rides the
+    // #2211's wizardMintDurableKey — #4355 moved rotate OFF this path, onto
+    // the cap-neutral POST /v1/team/keys/{id}/rotate) rides the
     // session JWT + pins ?org_id=<selected> (multi-membership correctness —
     // server honors it membership-checked with a suspension 403, zero server
     // changes) and NEVER merges a key-preference header (a held key must not
@@ -4308,6 +4317,7 @@ function claimIntentInFlight() {
     // #4330 (review cycle 2, P2): the dialog's cap notice is per-session data.
     setKeyModalCapNotice('')
     setRotatedKey(null) // #2735: the rotate reveal is one-time plaintext — never survives logout
+    setRotateNotice('') // #4355: the rotate partial-state notice belongs to the old user's keys
     // #1082: clear the claim intent on logout (a stale pasted key must not
     // auto-claim the next user's session).
     setClaimKey('')
@@ -4993,6 +5003,7 @@ function claimIntentInFlight() {
     setNewKey(null)        // Round-16: the plaintext key card was shown once on the old team
     setNewKeyExpiresAt(null) // #2426: expiry echo rides the show-once card
     setRotatedKey(null)    // #2735: the rotate reveal is one-time plaintext — never survives a team switch
+    setRotateNotice('')    // #4355: a partial-state warning is about THIS team's keys — never the new team's
     setNewKeyName('')      // key-label: a typed label must not leak onto another team's mint
     setNewKeyExpiryDate('') // #2426: a picked Custom date must not leak onto another team's mint
     setEditingKeyId(null)  // key-label: close any in-flight inline rename across teams
@@ -6018,17 +6029,26 @@ function claimIntentInFlight() {
   }
 
   async function regenerateKey(keyId) {
-    // #1147/#2229: rotate = mint the REPLACEMENT first (the old key still
-    // authorizes the request), then revoke the old — a single mint (no
-    // bootstrap-pool growth), session-authed. The old row's label carries
-    // into the replacement mint so an in-place rotate keeps the row's
-    // identity. Available on every tier: regenerating does not grow the key
-    // count.
-    // #2246 (ADR-010): rotate is now available on EVERY durable row (uniform
-    // table actions) and NEVER installs the replacement into the browser — no
-    // localStorage/teamKeysRef/apiKey write. The replacement is shown once
-    // (setRotatedKey) for the user to configure into their agent; the old key
-    // is revoked.
+    // #4355: rotate is ONE server call — `POST /v1/team/keys/{id}/rotate`.
+    //
+    // Why the two-call shape is gone. It used to `mintKey()` then
+    // `revokeKey(keyId, {skipConfirm:true})` — both against the SAME capped
+    // `POST /v1/team/keys` / `DELETE` pair. The mint leg therefore ran while
+    // the old row still held its slot, so a team AT `max_api_keys` had its
+    // replacement refused 402 and the rotate simply failed — the issue this
+    // endpoint closes. The single call is CAP-NEUTRAL BY CONSTRUCTION: the
+    // replacement consumes the slot the displaced row releases (the server
+    // proves the old row is one the count actually charged, then admits the
+    // mint against the post-release count). `POST /v1/team/keys` itself is
+    // unchanged and still 402s at the cap — rotate is not an exemption.
+    //
+    // The server owns the ordering that used to live here (create first, then
+    // revoke), so the client no longer has a window between the two legs. What
+    // it keeps is the stale-response rule below: a team switch during the RTT
+    // must not land this team's reveal (or its warning) under the new team's
+    // header. The replacement is still never installed into the browser (no
+    // localStorage/teamKeysRef/apiKey write) — it is shown once via
+    // `setRotatedKey`, and the old key is revoked by the same call (#2246).
     if (busy) return
     const row0 = (keys || []).find((k) => (k.id || k.key_id) === keyId)
     const rowName = (row0 && row0.name) || 'this API key'
@@ -6038,6 +6058,9 @@ function claimIntentInFlight() {
     // #2426: the confirm ALSO states the replacement's expiry — the old
     // key's lifetime span is re-applied from mint-time with a fresh clock
     // (Cloudflare 'resets relative to now' semantics); Never stays Never.
+    // The span still rides the body as `expires_in`; a null span sends no
+    // expiry at all, and the SERVER then inherits the displaced row's exact
+    // `expires_at` (never widening an expiring key to a Never one).
     const rowLifetime = lifetimeDaysFromRow(row0)
     const replacementExpiry = rowLifetime
       ? `The replacement expires ${fmtExpiryDate(new Date(Date.now() + rowLifetime * _MS_PER_DAY).toISOString())} (the same ${rowLifetime}-day lifetime as this key).`
@@ -6046,26 +6069,41 @@ function claimIntentInFlight() {
     setCapNotice('')
     setError('')
     setBusy(true)
+    // Round-20 (P2)/#4355: capture the team at call — the request is a mutate
+    // that revokes a row, and a mid-flight switch must neither land this
+    // team's reveal/warning under the new team's header nor publish its error
+    // there. Declared OUTSIDE the try so the catch's stale-response guard
+    // reads the same value.
+    const _teamAtCall = currentOrgId
     try {
-      const _teamAtCall = currentOrgId
-      // #2229: label carry-over — the row may leave the closure list mid-
-      // flight (switch/refresh) — degrade to an unlabeled mint.
+      // #2229/#4355: label carry-over — the row may leave the closure list
+      // mid-flight (switch/refresh) — degrade to an unlabeled rotate. The
+      // expiry re-application (#2426) rides the SAME body.
       const oldRow = (keys || []).find((k) => (k.id || k.key_id) === keyId)
-      // #2426: rotate re-applies the old row's lifetime span (expires_in
-      // days from expires_at − created_at; Never → null → no param).
-      const mk = await mintKey('', (oldRow && oldRow.name) || undefined,
-                               lifetimeDaysFromRow(oldRow))
-      // Round-29 (review P1): NEVER revoke without a confirmed target — if
-      // the team moved during the mint RTT, bail BEFORE the destructive leg
-      // (the old row may not belong to the now-selected team). The minted
-      // replacement stays as a visible team-A durable (same accepted orphan
-      // semantics as createKey's identity guard).
+      // #2230/#2167 rule 4: pin the SELECTED team — without it the server
+      // resolves the session team from memberships[0] and a multi-membership
+      // owner rotates against the wrong team's key set (mirrors the revoke
+      // DELETE + the toggle/rename PATCH pins).
+      const q = (sessionTokenRef.current && _teamAtCall) ? `?org_id=${encodeURIComponent(_teamAtCall)}` : ''
+      const rbody = {}
+      const carryName = (oldRow && oldRow.name) || undefined
+      if (carryName) rbody.name = carryName
+      const carryDays = lifetimeDaysFromRow(oldRow)
+      if (carryDays != null && !Number.isNaN(carryDays)) rbody.expires_in = carryDays
+      const mk = await api(`/v1/team/keys/${keyId}/rotate${q}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        useSession: true,
+        body: JSON.stringify(rbody),
+      })
+      // #4342/#4355: the single call has already revoked the old key AND (when
+      // it could) revoked the displaced row — so a team switch across this RTT
+      // must not land the reveal or the partial-state notice under the new
+      // team's header. Bail after reloading the true state instead.
       if (orgIdRef.current !== _teamAtCall) return
-      await revokeKey(keyId, { skipConfirm: true })
-      if (orgIdRef.current !== _teamAtCall) return
-      // #4342: a 2xx mint that carries no revealable plaintext is NOT a
-      // reveal. The secret is unrecoverable at this point AND the OLD key was
-      // revoked on the line above, so the only honest outcome is to say so —
+      // #4342: a 2xx rotate that carries no revealable plaintext is NOT a
+      // reveal. The secret is unrecoverable at this point AND the old key was
+      // revoked by the call above, so the only honest outcome is to say so —
       // never to latch `rotatedKey` with a falsy (or non-string, or blank)
       // plaintext, which rendered an empty `.key-value` box whose copy wrote
       // the empty string (the #4330 class on the rotate surface; `mintGraphKey`
@@ -6076,15 +6114,34 @@ function claimIntentInFlight() {
       if (!plaintext) {
         // Refresh FIRST, then surface the reason: `loadAll` owns the same
         // `error` slot and overwrites it from its own catch, so a compound
-        // failure (the rotate legs succeeded, the refresh did not) would
-        // otherwise replace the one message that tells the user their old key
-        // is gone and which row to clean up. The identity guard mirrors the
+        // failure (the rotate succeeded, the refresh did not) would otherwise
+        // replace the one message that tells the user their old key is gone
+        // and which row to clean up. The identity guard mirrors the
         // stale-response rule — a switch during the refresh must not carry this
         // team's error under the new team's header.
         await loadAll('')
         if (orgIdRef.current !== _teamAtCall) return
         setError(`The server did not return the replacement key\u2019s value, so it cannot be shown. ${rowName} has already been revoked, so applications using the old key have stopped working. Refresh the list, revoke the unused replacement row, and create a new key.`)
         return
+      }
+      // #4355: the server states whether the displaced row was actually
+      // revoked. When the destructive leg could not be completed AND its
+      // rollback also failed, BOTH keys are live — the server still returns
+      // the live replacement's plaintext (the only alternative is losing a
+      // live secret) and a warning. Surface it as its own persistent notice:
+      // this is a state the user has to clean up, and it is exactly what the
+      // other "what is live" surfaces now over-count by one.
+      setRotateNotice(mk && mk.warning ? String(mk.warning) : '')
+      // #2246 (review, P2)/#4355: the SAME row-truth prefix clear `revokeKey`
+      // performs. The server revoked the displaced row inside this call, so an
+      // in-memory welcome/connect plaintext belonging to THAT row must not
+      // outlive it — otherwise the overview "live" claim and the connect
+      // snippet keep embedding a credential this rotate just killed. (The
+      // rotate replacement itself is shown once via setRotatedKey and is never
+      // installed into the browser, so nothing else needs clearing.)
+      if (row0 && row0.key_prefix) {
+        if (welcomeKey && welcomeKey.startsWith(row0.key_prefix)) setWelcomeKey('')
+        if (wizardDurableKey && wizardDurableKey.startsWith(row0.key_prefix)) setWizardDurableKey('')
       }
       // #2246: no held install — the replacement is shown once and managed
       // from the table like any other durable. #2735: its OWN reveal state
@@ -6094,14 +6151,15 @@ function claimIntentInFlight() {
       setRotatedKey({ plaintext: plaintext, expiresAt: (mk && mk.expires_at) || null })
       await loadAll('')
     } catch (e) {
-      if (orgIdRef.current === currentOrgId) {
-        if (e.status === 402) {
-          // #2229: rotate-specific cap copy — see rotateCapNoticeFrom.
-          setCapNotice(rotateCapNoticeFrom(e.message, team))
-          setError('')
-        } else {
-          setError(e.message)
-        }
+      if (orgIdRef.current !== _teamAtCall) return // stale switch — not our state, not our error
+      // #4355: a rotate 402 means the org is OVER its limit (a 1-for-1
+      // rotation is admitted BY construction, so the notice's copy describes
+      // the over-cap state, not the old mint-then-revoke mechanism).
+      if (e.status === 402) {
+        setCapNotice(rotateCapNoticeFrom(e.message, team))
+        setError('')
+      } else {
+        setError(e.message)
       }
     } finally {
       setBusy(false)
@@ -6251,10 +6309,11 @@ function claimIntentInFlight() {
       // welcomeKey/wizardDurableKey alive past their row's death: the
       // overview "live" claims and the connect step keep embedding the
       // REVOKED key (an empty-tail the effect cannot see). The direct
-      // prefix clear closes it. Also covers regenerateKey's rotate (it
-      // revokes the old row via revokeKey skipConfirm) — the replacement
-      // is shown via setRotatedKey, and the welcome plaintext must not
-      // survive its own row's rotation.
+      // prefix clear closes it. #4355 note: rotate no longer reaches here (it
+      // is ONE call to /rotate, which revokes the displaced row server-side),
+      // so `regenerateKey` performs this SAME prefix clear itself — the
+      // replacement is shown via setRotatedKey, and the welcome plaintext must
+      // not survive its own row's rotation.
       if (row0 && row0.key_prefix) {
         if (welcomeKey && welcomeKey.startsWith(row0.key_prefix)) setWelcomeKey('')
         if (wizardDurableKey && wizardDurableKey.startsWith(row0.key_prefix)) setWizardDurableKey('')
@@ -8895,6 +8954,19 @@ function claimIntentInFlight() {
             {/* #1148-ux review: "Lost your key? Generate a new one" removed — the + New key button already covers it. */}
             {/* #4330: the SAME notice component the create-key modal renders. */}
             {capNotice && <CapNotice text={capNotice} team={team} checkoutPending={checkoutPending} onUpgrade={upgrade} />}
+
+            {/* #4355: the rotate partial-state disclosure. `replaced_revoked:false`
+                means the replacement was created but the displaced row could not
+                be revoked AND its rollback failed — BOTH keys are live, so the
+                count is one over what the user intended and the table lists a
+                key they meant to retire. Rendered as its own persistent notice
+                (not the transient `error` slot, which `loadAll` overwrites). */}
+            {rotateNotice && (
+              <p className="small" role="alert" data-rotate-notice
+                 style={{ margin: '0 0 1rem', color: 'var(--warn, #b45309)' }}>
+                {rotateNotice}
+              </p>
+            )}
 
             {/* #2735: rotate's replacement reveal. #2667 moved create-key
                 into the Create API key modal and DELETED the standalone

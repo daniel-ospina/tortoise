@@ -4611,10 +4611,15 @@ async def get_current_org_session_ungated(request: Request) -> dict:
     return await get_current_org_session(request, gate_key_login=False)
 
 
-def _check_org_limit(org: dict, resource: str) -> None:
+def _check_org_limit(org: dict, resource: str, *,
+                     slot_credit: int = 0) -> None:
     """Enforce per-org limits. Raises 402 (payment required) when at capacity.
 
     resource: 'points' | 'api_keys' | 'sessions' | 'users' | 'graphs'
+    slot_credit (#4355): slots this same operation RELEASES — the rotate
+    primitive passes 1 so the admission check is evaluated post-release. Only
+    the rotate path may pass a non-zero credit, and only after
+    ``quota.api_key_occupies_slot`` proved the displaced row is counted.
 
     Fail-closed decision (#686)
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -4638,7 +4643,7 @@ def _check_org_limit(org: dict, resource: str) -> None:
         return  # internal/no-org context — skip
     from tortoise.quota import QuotaCheckError, QuotaExceededError, enforce_org_limit
     try:
-        enforce_org_limit(org, resource)
+        enforce_org_limit(org, resource, slot_credit=slot_credit)
     except QuotaExceededError as e:
         raise HTTPException(status_code=402, detail=str(e))  # noqa: B904
     except QuotaCheckError as e:
@@ -7785,7 +7790,8 @@ def _mint_key(org_id: str, *, graph_id: str | None = None,
               created_via: str = "provisioned",
               name: str | None = None,
               expires_at: str | None = None,
-              acl_strict: bool = False) -> dict:
+              acl_strict: bool = False,
+              cap_slot_credit: int = 0) -> dict:
     """C3 (#2112) — the ONE low-level key write (registry + Supabase).
     Generalized from C2's _mint_graph_key (D14 — never re-implemented):
     graph_id is OPTIONAL (None = org-wide key → default graph), scopes
@@ -7803,6 +7809,8 @@ def _mint_key(org_id: str, *, graph_id: str | None = None,
     appears ONLY in this return (reveal-once: the caller puts it in the 201
     envelope / mint response and nowhere else; hash-only stored). Raises
     _KeyCapExceeded when the org is at max_api_keys (caller maps 409).
+    ``cap_slot_credit`` (#4355) is the replacement-aware rotate's released-slot
+    credit — see the gate below; it defaults to 0 and no other caller sets it.
     C4 (#2113) ACL seam fires for graph-bound mints (fail-soft no-op).
     """
     import uuid
@@ -7838,7 +7846,17 @@ def _mint_key(org_id: str, *, graph_id: str | None = None,
     max_keys = _org_node_sync_limits(org_id).get("max_api_keys")
     if max_keys is not None:
         count = _count_resource(org_id, "api_keys")
-        if count >= int(max_keys):
+        # #4355 ``cap_slot_credit``: the replacement-aware rotate primitive
+        # passes 1 when the SAME operation releases one counted slot, so the
+        # new key is admitted against the POST-release count (at N/N:
+        # N-1 >= N is false → the 1-for-1 replacement mints). It is a PRIVATE
+        # keyword, default 0, and ONLY the rotate path passes it — and only
+        # after quota.api_key_occupies_slot proved the displaced row is counted
+        # exactly once, so the credit can never conjure a slot the cap never
+        # charged. Every other caller (plain mint, per-graph mint, rotate's
+        # plain sibling) keeps the unmodified `count >= max_keys` gate, which
+        # is what keeps a plain POST /v1/team/keys 402ing at N/N.
+        if count - cap_slot_credit >= int(max_keys):
             raise _KeyCapExceeded()
 
     # C4 (#2113) ACL seam — fires for graph-bound mints BEFORE the key write
@@ -8022,6 +8040,138 @@ def _acl_user_drop_hook(graph_id: str) -> None:
         _logger.warning("ACL user drop failed for graph %s (non-blocking): %s", graph_id, e)
 
 
+async def _key_created_analytics(org: dict, kid: str, key_prefix: str) -> None:
+    """#528 analytics for a freshly-minted key — the ONE actor-resolution +
+    ``api_key_created`` emit shared by ``create_api_key`` and the #4355
+    replacement-aware rotate (which creates a key and must not be invisible to
+    the analytics that count key creation).
+
+    Actor id from the org's active memberships when resolvable (one seam
+    query), else an org_id-prefixed id (request.state only carries org_id
+    here). The registry lane reads the Membership graph instead. Resolution
+    failures degrade to the org-prefixed id — analytics is fail-safe and must
+    never fail a committed mint.
+    """
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        cp = get_control_plane()
+        try:
+            rows = cp.query(
+                "org_memberships",
+                select=["user_id", "identity"],
+                filters=[("org_id", "eq", org["org_id"]),
+                         ("status", "eq", "active")],
+            )
+            actor = next((r.get("user_id") or r.get("identity")
+                          for r in rows if r.get("user_id") or r.get("identity")),
+                         None)
+            distinct_id = actor or f"team:{org['org_id']}"
+        except Exception:
+            distinct_id = f"team:{org['org_id']}"
+    else:
+        sdk = _make_sdk(namespace="registry")
+        try:
+            actor = sdk._get_registry().query(
+                "MATCH (m:Membership {org_id:$tid}) RETURN m.user_id LIMIT 1",
+                params={"tid": org["org_id"]},
+            ).result_set
+            distinct_id = actor[0][0] if actor else f"team:{org['org_id']}"
+        except Exception:
+            distinct_id = f"team:{org['org_id']}"
+    await asyncio.to_thread(
+        api_key_created,
+        distinct_id, org["org_id"], key_prefix, kid, "org_keys",
+    )
+
+
+def _rotatable_key_row(org_id: str, key_id: str) -> dict | None:
+    """#4355: read the displaceable row's CLASS + label (both auth lanes).
+
+    Returns ``{org_id, name, graph_id, scopes, delegation_depth,
+    created_by_key_id, created_via, expires_at, revoked_at}`` or None when the
+    id does not resolve. Ownership (403) and slot-occupancy (409) are checked
+    by the caller with the shared helpers — this is only the field read.
+    ``expires_at`` rides it so a body-omitted expiry inherits the displaced
+    row's expiry verbatim instead of widening the replacement to Never.
+    """
+    from tortoise.supabase_control import (
+        api_key_by_id,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        return api_key_by_id(get_control_plane(), key_id)
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (k:APIKey {id: $id}) RETURN k.org_id, k.name, k.graph_id, "
+        "k.scopes, k.delegation_depth, k.created_by_key_id, k.created_via, "
+        "k.expires_at, k.revoked_at",
+        params={"id": key_id},
+    ).result_set
+    if not rows:
+        return None
+    return {
+        "org_id": rows[0][0], "name": rows[0][1], "graph_id": rows[0][2],
+        "scopes": rows[0][3], "delegation_depth": rows[0][4],
+        "created_by_key_id": rows[0][5], "created_via": rows[0][6],
+        "expires_at": rows[0][7], "revoked_at": rows[0][8],
+    }
+
+
+def _claim_key_revocation(org_id: str, key_id: str, now: str) -> bool:
+    """#4355: conditionally revoke a LIVE row and report whether THIS call
+    claimed it — the single-statement guard that admits exactly one concurrent
+    rotation of a given row (and detects a concurrent plain revoke).
+
+    Supabase: ``PATCH api_keys?id=eq.X&revoked_at=is.null`` with a ``select``
+    (``Prefer: return=representation``) → ``[]`` when the WHERE matched
+    nothing. Registry: the Cypher twin, whose own matched-row count is the
+    claim (the existing CAS idiom, cf. the accept-rotate lane). A False result
+    is NOT an error — the caller compensates and refuses.
+    """
+    from tortoise.supabase_control import (
+        claim_api_key_revocation,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        return claim_api_key_revocation(get_control_plane(), key_id, now)
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (k:APIKey {org_id: $tid, id: $id}) WHERE k.revoked_at IS NULL "
+        "SET k.revoked_at = $now RETURN k.id",
+        params={"tid": org_id, "id": key_id, "now": now},
+    ).result_set
+    return bool(rows)
+
+
+def _force_revoke_key_row(org_id: str, key_id: str, now: str) -> None:
+    """#4355: UNCONDITIONAL revoke of a row by id — the rotate compensation.
+
+    Used only to roll back the replacement this call just created when the
+    destructive leg could not be claimed. It must not be conditional: the row
+    is ours, it is live, and the whole point is to leave no orphan live
+    credential. (The ordinary :func:`revoke_api_key` endpoint keeps its own
+    idempotent semantics; this is a private helper.)
+    """
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import revoke_api_key as _sb_revoke
+    if is_supabase_enabled():
+        _sb_revoke(get_control_plane(), key_id, now)
+        return
+    sdk = _make_sdk(namespace="registry")
+    sdk._get_registry().query(
+        "MATCH (k:APIKey {org_id: $tid, id: $id}) SET k.revoked_at = $now",
+        params={"tid": org_id, "id": key_id, "now": now},
+    )
+
+
 @app.post("/v1/team/keys")
 async def create_api_key(request: Request, response: Response, org: dict = Depends(get_current_org_session)):  # noqa: B008
     """Generate a new API key for the org.
@@ -8051,10 +8201,6 @@ async def create_api_key(request: Request, response: Response, org: dict = Depen
     must not mint deleg-NULL owner-class keys — the escalation root of
     #2297's P1); the KEY-auth lane is unchanged (C2 deleg + D13 class gates).
     """
-    from tortoise.supabase_control import (
-        get_control_plane,
-        is_supabase_enabled,
-    )
     # C2 (#2111) one-level-deep guard: a MINTED (deleg=0) caller key can
     # NEVER mint another key — the child policy (deleg=0 keys cannot
     # escalate) covers this capability surface, not just scope columns
@@ -8265,46 +8411,9 @@ async def create_api_key(request: Request, response: Response, org: dict = Depen
     key_prefix = minted["key_prefix"]
     now = minted["created_at"]
 
-    if is_supabase_enabled():
-        cp = get_control_plane()
-        # #528 analytics — actor id from the org's active memberships when
-        # resolvable (one seam query), else a org_id-prefixed id (request.
-        # state only carries org_id here). Registry path below reads the
-        # Membership graph instead.
-        try:
-            rows = cp.query(
-                "org_memberships",
-                select=["user_id", "identity"],
-                filters=[("org_id", "eq", org["org_id"]),
-                         ("status", "eq", "active")],
-            )
-            actor = next((r.get("user_id") or r.get("identity")
-                          for r in rows if r.get("user_id") or r.get("identity")),
-                         None)
-            distinct_id = actor or f"team:{org['org_id']}"
-        except Exception:
-            distinct_id = f"team:{org['org_id']}"
-        await asyncio.to_thread(
-            api_key_created,
-            distinct_id, org["org_id"], key_prefix, kid, "org_keys",
-        )
-    else:
-        sdk = _make_sdk(namespace="registry")
-        # #528 analytics — actor user id from the org's Membership graph when
-        # resolvable (key creation is rare; one extra registry lookup), else a
-        # org_id-prefixed id (request.state only carries org_id here).
-        try:
-            actor = sdk._get_registry().query(
-                "MATCH (m:Membership {org_id:$tid}) RETURN m.user_id LIMIT 1",
-                params={"tid": org["org_id"]},
-            ).result_set
-            distinct_id = actor[0][0] if actor else f"team:{org['org_id']}"
-        except Exception:
-            distinct_id = f"team:{org['org_id']}"
-        await asyncio.to_thread(
-            api_key_created,
-            distinct_id, org["org_id"], key_prefix, kid, "org_keys",
-        )
+    # #528 analytics — actor id from the org's active memberships when
+    # resolvable, else an org_id-prefixed id (shared with the #4355 rotate).
+    await _key_created_analytics(org, kid, key_prefix)
 
     # Log audit event (both modes — after the key lands)
     await _async_audit(
@@ -8342,6 +8451,239 @@ async def create_api_key(request: Request, response: Response, org: dict = Depen
         resp["graph_id"] = minted.get("graph_id")
         resp["scopes"] = minted.get("scopes")
         resp["delegation_depth"] = minted.get("delegation_depth")
+    return resp
+
+
+@app.post("/v1/team/keys/{key_id}/rotate")
+async def rotate_api_key(key_id: str, request: Request, response: Response,
+                         org: dict = Depends(get_current_org_session)):  # noqa: B008
+    """#4355 — the replacement-aware rotate primitive: ONE server call that
+    creates a replacement key and revokes the displaced row, so a 1-for-1
+    rotation is CAP-NEUTRAL BY CONSTRUCTION.
+
+    Why this exists. The dashboard's rotate was two calls against the same
+    mint endpoint (`POST /v1/team/keys` then `DELETE /v1/team/keys/{id}`), so
+    at the `max_api_keys` cap the MINT leg 402'd before the old row was
+    revoked and a replacement that would have kept the count at N was refused.
+    Unconditionally exempting the mint would nullify the cap for EVERY mint —
+    the hole #2699 rejected. Instead the replacement CONSUMES THE SLOT BEING
+    RELEASED: the mint is admitted against the post-release count
+    (`cap_slot_credit=1`), and the displaced row is proven first to occupy a
+    counted slot (`quota.api_key_occupies_slot`, the SAME predicate
+    `quota._count_resource("api_keys")` uses). A revoked/expired/bootstrap row
+    is refused 409 precisely because the cap never charged it, so it cannot buy
+    a free key. `POST /v1/team/keys` itself is UNCHANGED and still 402s at N/N.
+
+    Caller authorisation mirrors the siblings exactly: the C2 one-level-deep
+    `deleg=0` guard (as `create_api_key`), `keys:manage` (as `revoke_api_key`),
+    the #2297 POLICY A owner/admin session gate, and the fail-closed
+    `_ensure_key_in_pinned_org` ownership check (as `DELETE`). The lookup runs
+    AFTER every caller gate, so a refused caller gets no existence oracle.
+
+    Privilege class. The replacement is NOT shaped by the request body: it
+    inherits the DECLARED ROW's class (graph_id, scopes, delegation_depth,
+    lineage), so rotate can neither widen nor silently demote a credential —
+    the shape CVE-2024-37282 (Elastic) / CVE-2026-56216 (Capgo) established as
+    the escalation class for rotation endpoints. A non-owner caller (a scoped
+    deleg-NULL key with keys:manage — the only other reachable class) gets at
+    most a deleg=0 child with the inherited scopes ∩ `_MINTABLE_SCOPES`, i.e.
+    strictly no more than it could already mint. `scopes`/`graph_id` in the
+    rotate body are 422 — the body cannot set privilege.
+
+    Ordering and atomicity (stated, never claimed beyond the implementation).
+    CREATE first, then CLAIM-REVOKE: a create-leg failure or crash leaves the
+    caller with the OLD key still live — never with neither. The revoke is a
+    conditional write (`revoked_at IS NULL`) whose own matched-row count is the
+    claim, so of N concurrent rotates of one row exactly one wins; a loser
+    compensates its replacement away and 409s, keeping the live count at N.
+    The response carries `replaced_revoked`; when the destructive leg could not
+    be completed AND its compensation also failed, the live replacement's
+    plaintext is still returned (reveal-once: the only alternative is losing a
+    live secret). There is NO cross-lane transaction and none is claimed — see
+    the #4355 scoping comment for the declared residuals.
+    """
+    from tortoise.quota import api_key_occupies_slot
+
+    # ── Caller gates (identical order to the siblings; before ANY lookup) ──
+    _reject_minted_delegated_key(org, "rotate API keys")
+    _require_keys_manage(org, "rotate API keys")
+    await _require_owner_admin_if_session(org)
+
+    # ── Body: label + expiry ONLY (the replacement's class is inherited) ──
+    payload: dict = {}
+    raw = b""
+    try:
+        raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+        parsed = _json.loads(raw) if raw else {}
+        payload = parsed if isinstance(parsed, dict) else {}
+    except HTTPException:
+        raise
+    except Exception:
+        # Mirror the mint's fail-closed expiry parse: a body that REQUESTED an
+        # expiry must never silently degrade to an inheriting/Never key.
+        if raw and (b"expires_in" in raw or b"expires_at" in raw):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "expires_in/expires_at could not be read — send expires_in "
+                    "(1-366 days) or an ISO-8601 expires_at"
+                ),
+            ) from None
+        payload = {}
+    if payload.get("scopes") is not None or payload.get("graph_id") is not None:
+        # The replacement INHERITS the displaced row's graph + scopes. Accepting
+        # a body-supplied class here would reintroduce the scoped-key →
+        # unrestricted-key escalation class this endpoint exists to avoid.
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "rotate inherits the existing key's graph and scopes — "
+                "scopes/graph_id must not be sent"
+            ),
+        )
+    name = _clean_key_label(payload.get("name"))
+    expires_at = _validate_mint_expiry(payload)
+
+    # ── Target verification (ownership first — no existence oracle) ──
+    row = await asyncio.to_thread(_rotatable_key_row, org["org_id"], key_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+    _ensure_key_in_pinned_org(org["org_id"], row.get("org_id"), required=True)
+    occupies = await asyncio.to_thread(
+        api_key_occupies_slot, org["org_id"], key_id)
+    if not occupies:
+        # Revoked / expired / bootstrap (cap-exempt) rows are NOT counted by
+        # max_api_keys, so releasing one frees no slot. Crediting it would let
+        # a dead row id mint a free key — a real cap hole. Fail closed.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "API key is not active — rotate requires a live key that "
+                "occupies a key slot"
+            ),
+        )
+
+    # ── Replacement class: inherited from the target, capped by caller class ──
+    target_graph = row.get("graph_id")
+    target_scopes = list(row.get("scopes") or [])
+    is_owner_class = (org.get("key_id") is None
+                      or bool(org.get("legacy_full_access")))
+    if is_owner_class:
+        # Faithful replacement: the owner may mint anything, so the target's
+        # class is preserved verbatim (a legacy tt_ stays tt_, a tk_ keeps its
+        # graph/scopes, a deleg=0 child stays deleg=0 with its lineage).
+        final_scopes = target_scopes
+        delegation_depth = row.get("delegation_depth")
+        caller_key_id = row.get("created_by_key_id")
+    else:
+        # A scoped deleg-NULL caller can only ever mint deleg=0 children; the
+        # replacement is exactly that, with the target's scopes ∩ the child
+        # policy (strictly ≤ what this caller could already mint).
+        final_scopes = [s for s in target_scopes
+                        if s in _MINTABLE_SCOPES] or ["graphs:read"]
+        delegation_depth = 0
+        caller_key_id = org.get("key_id")
+    if target_graph is not None:
+        _ensure_graph_exists(org["org_id"], target_graph)
+    # Inherited metadata — a body-omitted value must never WIDEN the replacement
+    # (an omitted expiry inheriting None would mint a Never key in place of an
+    # expiring one).
+    if name is None:
+        name = _clean_key_label(row.get("name"))
+    if expires_at is None:
+        expires_at = row.get("expires_at")
+    created_via = row.get("created_via") or "provisioned"
+
+    # ── Cap: the replacement consumes the released slot ──
+    # Both gates are credited, so at N/N `N-1 >= N` is false and the 1-for-1
+    # rotation mints. The credit is sound only because `occupies` above proved
+    # the displaced row is counted exactly once.
+    _check_org_limit(org, "api_keys", slot_credit=1)
+    try:
+        minted = _mint_key(
+            org["org_id"], graph_id=target_graph, scopes=final_scopes,
+            delegation_depth=delegation_depth, caller_key_id=caller_key_id,
+            session_user_id=org.get("session_user_id"), prefix=None,
+            created_via=created_via, name=name, expires_at=expires_at,
+            cap_slot_credit=1,
+        )
+    except _KeyCapExceeded:
+        raise HTTPException(
+            status_code=402,
+            detail="API key limit reached.",
+        ) from None
+
+    kid = minted["id"]
+    api_key = minted["key_plaintext"]
+    key_prefix = minted["key_prefix"]
+    now = minted["created_at"]
+
+    # ── Destructive leg: a CLAIM, so exactly one concurrent rotate wins ──
+    replaced_revoked = True
+    warning = None
+    try:
+        claimed = await asyncio.to_thread(
+            _claim_key_revocation, org["org_id"], key_id, now)
+    except Exception:
+        _logger.exception("rotate: claim-revoke of %s failed", key_id)
+        claimed = False
+    if not claimed:
+        # The row was revoked between our check and the claim (a concurrent
+        # rotate or a plain revoke won). Never leave an orphan live
+        # replacement behind: roll our new row back.
+        compensated = True
+        try:
+            await asyncio.to_thread(
+                _force_revoke_key_row, org["org_id"], kid, now)
+        except Exception:
+            compensated = False
+            _logger.exception("rotate: compensation of %s failed", kid)
+        if compensated:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "API key is no longer active — it was revoked while this "
+                    "rotation ran; the replacement was rolled back. Retry or "
+                    "rotate another key."
+                ),
+            )
+        # Both legs failed: the replacement is LIVE. Reveal it — the only
+        # alternative is a live secret nobody can see. The old row is also
+        # still live (never neither key); the count is +1 until it is cleaned.
+        replaced_revoked = False
+        warning = (
+            "The replacement was created, but the previous key could not be "
+            "revoked and the rollback failed — both are currently active. "
+            "Revoke the key you no longer need from the table."
+        )
+
+    await _key_created_analytics(org, kid, key_prefix)
+    await _async_audit(
+        request, org["org_id"], "api_key_rotate",
+        resource_type="api_key", resource_id=kid,
+        detail={"replaced_key_id": key_id, "replaced_revoked": replaced_revoked},
+    )
+    # #308 (R2): a rotate is a mint — the velocity evaluation must run here
+    # exactly as it does on the mint path (its own comment names rotation).
+    await _abuse_evaluate_keys(org["org_id"])
+
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    resp = {
+        "id": kid,
+        "key": api_key,
+        "key_prefix": key_prefix,
+        "created_at": now,
+        "name": name,
+        "graph_id": minted.get("graph_id"),
+        "scopes": minted.get("scopes"),
+        "delegation_depth": minted.get("delegation_depth"),
+        "replaced_key_id": key_id,
+        "replaced_revoked": replaced_revoked,
+    }
+    if expires_at is not None:
+        resp["expires_at"] = expires_at
+    if warning is not None:
+        resp["warning"] = warning
     return resp
 
 
