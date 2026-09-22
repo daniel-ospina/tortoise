@@ -1239,7 +1239,16 @@ def test_codex_install_then_status_is_clean_and_upgrade_is_a_no_op(home):
     `get_layout("codex")` raises `unknown harness 'codex'`, so a stale
     installed hook is never flagged or repaired, and this REDs."""
     layout = hook_install.get_layout("codex")
-    assert hook_install.contract_version(layout) == 1, (
+    # The contract must be READABLE, not a particular generation: pinning a
+    # literal here (this asserted ``== 1`` until #4544) goes stale on every
+    # deliberate install-contract bump. #4314 bumped codex 1 -> 2 (the hook now
+    # leaves a capture-error breadcrumb), and that bump is the point of the
+    # change — a stale install must be detectable. This still REDs on the
+    # mutation the docstring names, and also if the marker is dropped from the
+    # shipped script or the layout's scripts disagree (`contract_version` ->
+    # ``None``). The single-generation invariant across ALL harnesses is pinned
+    # once, by `test_hook_upgrade.py`'s `_CURRENT`.
+    assert hook_install.contract_version(layout) is not None, (
         "the shipped codex hook carries no readable install contract")
 
     res = install_capture("codex", home=home)
@@ -2070,7 +2079,9 @@ def test_cursor_install_then_status_is_clean_and_upgrade_is_a_no_op(home):
     `get_layout("cursor")` raises `unknown harness 'cursor'`, so a stale
     installed hook is never flagged or repaired, and this REDs."""
     layout = hook_install.get_layout("cursor")
-    assert hook_install.contract_version(layout) == 1, (
+    # Readable, not a literal generation — same reasoning as the codex seam
+    # above (#4544: cursor was bumped 1 -> 2 by #4314).
+    assert hook_install.contract_version(layout) is not None, (
         "the shipped cursor hook carries no readable install contract")
 
     res = install_capture("cursor", home=home)

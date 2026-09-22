@@ -1116,10 +1116,17 @@ def install_capture(
     # writes nothing (#4110, #4314).
     if result.ok and not dry_run:
         resolved_home = Path(home) if home is not None else Path.home()
-        effective_root = (
-            Path(root) if harness == "claude"
-            else hook_install.default_root(
-                hook_install.get_layout(harness), resolved_home))
+        # #4544: a harness with no shell-hook layout (`pi` — a TypeScript
+        # extension, not a `session-end.sh`) has no hooks_dir for the `../..`
+        # fallback to be derived from, so `get_layout` would raise and the
+        # whole install would crash.  Only a layout-bearing harness has a
+        # non-trivial `default_root`; for the others the record is skipped by
+        # `record_hook_src_dir_for_install` itself.
+        _layout = hook_install.get_layout_optional(harness)
+        if _layout is None or harness == "claude":
+            effective_root = Path(root)
+        else:
+            effective_root = hook_install.default_root(_layout, resolved_home)
         # Best-effort and unable to fail the install: a record-write raise
         # (``OSError``, ``UnicodeDecodeError``, …) must never turn a landed
         # install into a traceback (#3999, #4314).

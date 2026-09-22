@@ -283,7 +283,14 @@ def record_hook_src_dir_for_install(harness: str, *, root: Path,
     record under the same need condition the installed hook reads it under.
     Best-effort and idempotent.  Returns whether a write was attempted.
     """
-    if not _hook_needs_src_dir_record(get_layout(harness), Path(root)):
+    layout = get_layout_optional(harness)
+    # A harness with no shell-hook layout has no `../..` fallback to rescue, so
+    # no record is needed — and this is the SAME condition the record's reader
+    # applies (WRITE == READ).  Before #4544 this raised `ValueError` for
+    # `pi`, which made `tortoise install pi` crash outright.
+    if layout is None:
+        return False
+    if not _hook_needs_src_dir_record(layout, Path(root)):
         return False
     _record_hook_src_dir_best_effort(home)
     return True
@@ -539,6 +546,23 @@ def get_layout(harness: str) -> HarnessLayout:
         raise ValueError(
             f"unknown harness {harness!r} — known layouts: {known}"
         ) from None
+
+
+def get_layout_optional(harness: str) -> HarnessLayout | None:
+    """``get_layout`` for the harnesses that HAVE a shell-hook layout.
+
+    A ``HarnessLayout`` describes where SHELL hooks live: a ``hooks_dir`` to
+    derive the ``$(dirname "$0")/../..`` fallback from, a registration file,
+    shipped scripts.  A harness that installs a non-shell integration has no
+    such layout — ``pi`` ships a TypeScript extension (``tortoise/pi-hooks/
+    tortoise-capture.ts``), not a ``session-end.sh``.
+
+    Asking what such a harness's layout is must not be an ERROR, because the
+    only question the layout answers here is "does the installed hook need a
+    ``hook-src-dir`` record?" — and for a hook that is not a shell script
+    there is no ``../..`` fallback, so the answer is simply NO (#4544).
+    """
+    return HARNESS_LAYOUTS.get(harness)
 
 
 def default_root(layout: HarnessLayout, home: Path) -> Path:
