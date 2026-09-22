@@ -26,6 +26,7 @@ import pathlib
 import re
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import NamedTuple
 
 import tortoise.mcp_server as mcp_server
 import tortoise.sdk as sdk_module
@@ -66,6 +67,43 @@ DANGLING_SDK_DECLARATIONS: frozenset[str] = frozenset({
     "analyze", "entity_profile", "get_tenant_packs", "health",
     "upsert_tenant_manifest",
 })
+
+class DeclaredBindingDivergence(NamedTuple):
+    """One recorded declared-binding divergence (#4337).
+
+    Records the WHOLE divergence — the declared method, the public destinations the
+    handler actually reaches, and why — not just the tool name.  A name-only ledger
+    would be a blanket exemption: the tool could re-diverge to a *different* method
+    and stay green.  Recording both sides means the entry cannot outlive the
+    specific defect it records.
+    """
+    declared: str
+    reached: frozenset[str]
+    reason: str
+
+
+# Entries whose handler does NOT reach the SDK method the entry declares — the
+# DECLARED-BINDING DIVERGENCE class (#4337).  A declaration that merely RESOLVES is
+# not a declaration that is USED.  Both entries passed every check here, because no
+# arm compared the DECLARATION against the operations the handler reaches.
+#
+# KNOWN BOUND, inherited from `handler_operations`: it records an attribute
+# REFERENCE to an SDK method, not a call.  A handler that merely names its declared
+# method in dead code (`if False: return _get_org_sdk().query`) would satisfy the
+# arm.  Both real defects are genuine calls to *other* methods with no mention of
+# the declared one, so both are caught; tightening the reach semantics is a
+# `handler_operations` change that would move every other check that consumes it,
+# and is deliberately not done here.
+DECLARED_BINDING_DIVERGENCES: dict[str, DeclaredBindingDivergence] = {
+    "tortoise_operator_action": DeclaredBindingDivergence(
+        "operator_action", frozenset({"annotate_operator", "mitigate_operator"}),
+        "declares operator_action; the handler branches on action= to "
+        "mitigate_operator / annotate_operator and never calls it"),
+    "tortoise_traverse": DeclaredBindingDivergence(
+        "traverse", frozenset(),
+        "declares traverse; the handler calls navigation.tortoise_traverse(proj.db, "
+        "...) and reaches no public SDK method"),
+}
 
 # Operations a handler reaches that are reads with no registry binding (they
 # need no binding).  Enumerated so the binding-resolution guard is scoped.
@@ -859,8 +897,13 @@ def write_classification_violations(entries, mcp_src: str | None = None) -> list
 
 
 def binding_resolution_violations(entries, mcp_src: str | None = None) -> list[str]:
-    """Every declared sdk_method resolves, every entry has a handler, and no
-    handler hides a call behind dynamic dispatch."""
+    """Every declared sdk_method resolves AND IS REACHED, every entry has a
+    handler, and no handler hides a call behind dynamic dispatch.
+
+    Resolution alone is not enough (#4337): a name that exists on ``TortoiseSDK``
+    can still be a name the handler never calls.  Declaring a method is a claim
+    about what a tool does; reaching it is the fact.
+    """
     methods = sdk_method_names()
     funcs = set(_module_level_funcs(_mcp_tree(mcp_src)))
     out: list[str] = []
@@ -873,6 +916,47 @@ def binding_resolution_violations(entries, mcp_src: str | None = None) -> list[s
             out.append(f"{e.name}: no module-level handler (register_all skips it)")
         for site in handler_operations(e.name, mcp_src).unresolved:
             out.append(f"{e.name}: {site}")
+    # The declared binding must be REACHED, not merely resolvable (#4337).
+    # Independent of the resolution arm above, and exact in both directions.
+    for e in entries:
+        # A LEDGERED entry is checked even when its declaration does not resolve:
+        # otherwise a ledgered binding that drifts to an already-exempt dangling
+        # name (or to empty) would be skipped here and pass the liveness arm too,
+        # leaving a stale entry green — the exact case this ledger exists to close.
+        recorded = DECLARED_BINDING_DIVERGENCES.get(e.name)
+        if recorded is None and (not e.sdk_method or e.sdk_method not in methods):
+            continue
+        # TWO sets, deliberately.  PRESENCE of the declared method is asked of the
+        # RAW reach set (a declared private SDK method is still a real binding —
+        # filtering first would report it unreached and could never clear its
+        # ledger entry).  The ledger's DESTINATION comparison uses the PUBLIC set,
+        # because a private helper call (`_get_proj`) is not a binding claim: the
+        # filter is load-bearing for `tortoise_traverse` (raw `{_get_proj}` vs
+        # public `{}`) and a no-op for `tortoise_operator_action`.
+        reached = frozenset(handler_operations(e.name, mcp_src).operations)
+        public_reached = frozenset(x for x in reached if not x.startswith("_"))
+        if e.name not in funcs:
+            # no handler at all — the first arm reports that; asserting a missing
+            # handler "never reaches" its declaration is noise, not a finding.
+            continue
+        if recorded is None:
+            if e.sdk_method in reached:
+                continue
+            out.append(
+                f"{e.name}: declares sdk_method {e.sdk_method!r} that its handler never "
+                f"reaches (reaches: {sorted(public_reached) or 'nothing public'}) — #4337")
+            continue
+        # Ledgered: the ledger must still describe THIS divergence exactly.
+        if e.sdk_method in reached:
+            out.append(
+                f"{e.name}: listed in DECLARED_BINDING_DIVERGENCES but its handler "
+                f"now reaches {e.sdk_method!r} — delete the ledger entry")
+        elif e.sdk_method != recorded.declared or public_reached != recorded.reached:
+            out.append(
+                f"{e.name}: DECLARED_BINDING_DIVERGENCES records declared="
+                f"{recorded.declared!r} reached={sorted(recorded.reached)} but it is now "
+                f"declared={e.sdk_method!r} reached={sorted(public_reached)} "
+                f"— update the entry")
     # every guard-relevant operation a handler reaches must be bound to a tool
     guard_relevant = (sdk_graph_mutators() | sdk_operator_only_mutators()
                       | sdk_filesystem_methods())
@@ -947,6 +1031,24 @@ def declared_set_violations(entries, sdk_src: str | None = None) -> list[str]:
     for op in sorted(INTERNAL_PATH_READERS):
         if op not in methods:
             out.append(f"INTERNAL_PATH_READERS entry {op!r} does not resolve")
+    # DECLARED_BINDING_DIVERGENCES liveness (#4337).  The divergence arm iterates
+    # the ENTRIES, so a ledger key whose registry entry was removed or renamed is
+    # never visited and would persist unexamined.  This function is the home for
+    # declared-set liveness, and the ledger arm follows the SAME subset semantics
+    # the binding arms here already have: the ledger is compared against whatever
+    # `entries` it is handed, so a caller passing a filtered registry sees the
+    # same treatment for the ledger as for any other declared set.  (Not every arm
+    # below is subset-sensitive — `READ_THROUGH_WRITE_METHODS` and
+    # `INTERNAL_PATH_READERS` check only resolution and bound-entry properties —
+    # but the ones that ask for a tool binding are, and a filtered caller is
+    # expected to know it passed a filtered set.)  The divergence arm cannot host
+    # this check: it is also called on probe SUBSETS, where the real ledger keys
+    # are legitimately absent.
+    known = {e.name for e in entries}
+    for name in sorted(set(DECLARED_BINDING_DIVERGENCES) - known):
+        out.append(
+            f"DECLARED_BINDING_DIVERGENCES entry {name!r} has no registry entry "
+            f"— delete the ledger entry")
     return out
 
 

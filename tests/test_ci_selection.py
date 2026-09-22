@@ -41,6 +41,29 @@ def test_docs_only_runs_tier1():
     assert set(r["test_files"]) == _tier1()
 
 
+def test_docs_scanning_gates_stay_in_tier1():
+    # #4309: a docs-only PR runs *only* tier1.
+    #
+    # A gate whose whole job is to stop a claim being re-scattered across the
+    # doc tree is silent on the exact change it exists to catch unless it is
+    # registered in `tier1` — every other surface needs a Python path to be
+    # selected. #4283 registered the durability gate in `tier1` + `core` for
+    # exactly this reason; the older #4179 retention gate stayed out of `tier1`
+    # and so ran no part of its scan on a docs-only edit (e.g. to
+    # docs/retention-and-deletion.md), letting a new unlinked retention claim
+    # merge green. Pin both: dropping either from `tier1` re-opens that hole.
+    tier1 = _tier1()
+    assert "test_retention_promise.py" in tier1, (
+        "#4179 retention/deletion anti-scatter gate must stay in tier1 — a "
+        "docs-only PR runs only tier1, so without it a new unlinked retention "
+        "claim in docs/ merges green (#4309)"
+    )
+    assert "test_durability_posture.py" in tier1, (
+        "#2881 durability gate must stay in tier1 — same docs-only silent-drop "
+        "class (#4309)"
+    )
+
+
 def test_public_site_surface_change_selects_onboarding_and_skips_slow():
     """#3332: a public *site surface* change selects `onboarding`.
 
@@ -986,8 +1009,25 @@ def test_push_legs_partitions_every_classified_file():
     assert not (set(legs["slow"]) & carve), \
         "slow carve-out files run in the URI-unset carve-out job, never the slow legs"
     assert set(legs["carve_out"]) == carve, "carve_out leg must be exactly the config set"
-    # bench push_extra lands in half b
-    assert any(f.startswith("bench/") for f in legs["half_b"])
+    # #1485 / #3400: bench files are NOT pinned to a half. `push_extra` is
+    # spread evenly across the halves (#1485) and a bench file registered in
+    # `surfaces` is packed by measured duration (#3400 LPT), so which half a
+    # given bench file lands in is a packing outcome, not an assignment. The
+    # pre-#1485 form of this check required a bench file in half_b SPECIFICALLY
+    # and re-staled the moment a pool change moved one (#3811: adding a single
+    # classified file flipped all three bench files into half_a, reddening an
+    # unrelated PR). Assert the invariant the code actually provides — every
+    # bench file reaches a half (the partition assertion above), and
+    # `push_extra`, when non-empty, reaches BOTH rather than being dumped on
+    # one.
+    assert any(f.startswith("bench/") for f in legs["half_a"] + legs["half_b"]), \
+        "no bench file reached the push legs at all"
+    push_extra = {f.replace(".py", "") for f in m.get("push_extra", [])}
+    if push_extra:
+        assert push_extra & set(legs["half_a"]), \
+            "push_extra lost its even spread (#1485): none in half a"
+        assert push_extra & set(legs["half_b"]), \
+            "push_extra lost its even spread (#1485): none in half b"
 
 
 def test_carve_out_mirrors_test_no_redirect_stems():

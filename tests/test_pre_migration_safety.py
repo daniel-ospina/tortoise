@@ -100,10 +100,19 @@ def test_proj():
     uri = os.environ.get("TORTOISE_DB_URI", "")
     if uri.startswith("docker://"):
         parsed, graph_name = _docker_projection_target(uri)
+        # #3039 (from main): decode userinfo through the single shared rule —
+        # urlparse does NOT percent-decode, and this fixture previously also
+        # dropped the username entirely. Kept ALONGSIDE the helper above rather
+        # than replaced by it: the helper parses host/port and refuses a
+        # non-test graph name (this branch's whole point), while this supplies
+        # the decoded credentials. Both halves are load-bearing.
+        from tortoise.config import parse_uri_userinfo
+        username, password = parse_uri_userinfo(uri)
         proj = FalkorProjection(
             host=parsed.hostname or "localhost",
             port=parsed.port or 6379,
-            password=parsed.password or None,
+            username=username,
+            password=password,
             graph_name=graph_name,
         )
     else:

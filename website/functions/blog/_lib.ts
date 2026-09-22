@@ -9,6 +9,8 @@
 //   SUPABASE_ANON_KEY  public anon key (client-safe — public reads only)
 // Local dev: wrangler pages dev reads .env / .dev.vars
 
+import { RELAXED_CSP } from "../_shared/security-headers.ts";
+
 // ── Types ──────────────────────────────────────────────────────────────────
 export interface BlogPost {
   id: string;
@@ -441,7 +443,15 @@ export function shareBarHtml(url: string, title: string): string {
 export function ok(html: string, cache: string): Response {
   return new Response(html, {
     status: 200,
-    headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": cache, ...HSTS },
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": cache,
+      // #3525: `_headers` does not apply to Pages Functions responses, and this
+      // is one. The blog page is a pre-#3501 page (inline style, JSON-LD and
+      // the consent loader), so it takes the project's relaxed policy.
+      "Content-Security-Policy": RELAXED_CSP,
+      ...HSTS,
+    },
   });
 }
 

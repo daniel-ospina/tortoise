@@ -21,6 +21,11 @@
 //   catalog performs NO write — the dashboard records no `catalog-presented`
 //   step edge (the build fork completes on the two acts the server OBSERVES).
 
+// #3724: the not-connected OBSERVATION phrase is ONE source shared with the
+// Overview's connection card (connectionObservation.js) — the two surfaces
+// state the same server fact and used to drift apart as two literals.
+import { NO_CONNECTION_OBSERVED, SETUP_PAUSED_NO_CONNECTION_OBSERVED } from './connectionObservation.js'
+
 export const WIZARD_STEPS = Object.freeze([
   {
     id: 'org-create',
@@ -95,8 +100,8 @@ export function wizardStageLabel(step, { hasOrg = false, paused = false, connect
     // both call sites pass it (that call shape is pinned in
     // wizardArchived.test.js) and it records the fork input; it is simply no
     // longer a discriminator.
-    if (paused) return 'Setup paused — no connection observed yet'
-    return 'No connection observed yet'
+    if (paused) return SETUP_PAUSED_NO_CONNECTION_OBSERVED
+    return NO_CONNECTION_OBSERVED
   }
   if (step === 0 && hasOrg) return 'Your Organization'
   return WIZARD_STEPS[step]?.label ?? ''
