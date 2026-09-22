@@ -1460,12 +1460,9 @@ def duration_issues(manifest: dict) -> list[str]:
         # eval/retrieval/test_integration.py, which sat in `fast_pool` with its
         # own 855.2s entry. #4711's defect was that file's CLASSIFICATION (absent
         # from `slow_files`), not a missing weight, and #4712 does not by itself
-        # prevent a repeat. Nor is a lane key read by anything yet: every
-        # consumer of this map (`split_fast_gate`, `duration_coverage_issues`)
-        # iterates `fast_pool()` explicitly, and the #1266 balance check is fed
-        # the DERIVED fast halves (`workflow_matrix_issues` is empty here, so
-        # `parse_matrix_halves` never runs). Giving the lane keys a reader — a
-        # slow-leg balance/staleness gate — is #4724.
+        # prevent a repeat. #4724 adds a lane-key VALUE consumer (a slow-leg
+        # balance/staleness gate); until then these keys are a declarative cost
+        # table.
         #
         # OVERRIDES: #1473's "a durations key must not be a slow file" — the
         # lanes whose whole reason for existing is cost now carry their
@@ -1473,9 +1470,11 @@ def duration_issues(manifest: dict) -> list[str]:
         #
         # This is a WIDENING of what may appear, never a relaxation of the
         # checks: every key must still be a CLASSIFIED test file, and every
-        # value numeric and finite (below). No consumer changes shape —
-        # `split_fast_gate` and `duration_coverage_issues` both iterate the fast
-        # pool explicitly, so a lane key can never be packed into a fast half.
+        # value numeric and finite (below). A lane key can never be packed into
+        # a fast half — the weight consumers work off the fast pool
+        # (`split_fast_gate` is passed it by `push_legs`;
+        # `duration_coverage_issues` computes it via `fast_pool()`), never off
+        # this whole map.
         if name not in classified:
             issues.append(f"durations key {name} is not classified in the manifest")
         # P2 (#3407 review): validate the VALUE, not just the key. Both guards
