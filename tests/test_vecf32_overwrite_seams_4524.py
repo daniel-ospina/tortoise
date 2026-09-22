@@ -38,6 +38,7 @@ import pytest
 
 from tests._embedded import fresh_embedded_proj
 from tortoise.embeddings import EMBEDDING_DIM
+from tortoise.sdk import _TURN_WRITE_CYPHER
 
 pytestmark = pytest.mark.embedded_only
 
@@ -196,3 +197,37 @@ def test_event_plain_merge_embedding_overwrite_lands(tmp_path, monkeypatch):
                 {"eid": "evt-1"}))
     for i, (got, want) in enumerate(zip(stored, vectors)):
         _assert_landed(got, want, "Event(plain)", i)
+
+
+def test_turn_write_cypher_embedding_overwrite_lands(tmp_path):
+    """``_TURN_WRITE_CYPHER`` — the ONE shared capture turn writer.
+
+    Both capture lanes (``TortoiseSDK.capture_session`` and hosted
+    ``_capture_session_impl``) write turns through this single statement, so a
+    silently-discarded overwrite here has the widest blast radius of any seam in
+    this file: the node keeps its OLD vector while holding the NEW text, and the
+    rotation self-heal the statement exists to provide never runs.
+
+    This guard drives the PRODUCTION statement constant rather than hand-written
+    Cypher, so it binds the real seam. Vectors come from ``_vector(i)``, whose
+    per-component deltas are small — that is the regime the engine discards. A
+    full-magnitude change lands even unpatched, so a guard built on one would be
+    vacuous: measured, ``[1,0,...] -> [0,1,...]`` lands with the clear removed,
+    while ``[1,0,...] -> [0.95,0.05,...]`` goes stale.
+    """
+    vectors = [_vector(i) for i in range(_WRITES)]
+    with fresh_embedded_proj(tmp_path) as proj:
+        proj.g.query("CREATE (s:Session {id: 'turn-4524'})")
+        stored = []
+        for i, vec in enumerate(vectors):
+            proj.g.query(_TURN_WRITE_CYPHER, params={
+                "sid": "turn-4524",
+                "now": "2026-01-01T00:00:00Z",
+                "turns": [{"id": "turn-1", "c": f"text-{i}", "k": "turn",
+                           "speaker": "user", "s": "completed",
+                           "ch": f"h-{i}", "emb": list(vec)}],
+            })
+            stored.append(_read_vector(
+                proj, "MATCH (t:Point {id:'turn-1'}) RETURN t.embedding", {}))
+    for i, (got, want) in enumerate(zip(stored, vectors)):
+        _assert_landed(got, want, "Turn(_TURN_WRITE_CYPHER)", i)
