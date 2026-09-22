@@ -599,7 +599,11 @@ def test_run_carries_operator_edge_audit_dimension(tmp_path, monkeypatch):
     assert report["run_status"] == "completed", report.get("log")
     audit = report["operator_audit"]
     assert audit is not None
-    assert audit["planted"] == generate_corpus.MIN_PLANTED_OPERATOR_EDGES
+    # Pinned to the corpus FLOOR with `>=`, never an exact value:
+    # MIN_PLANTED_OPERATOR_EDGES is a LOWER BOUND (generate_corpus fails when
+    # `total < floor`), so an equality here reddens this lane the moment the
+    # corpus GROWS — the denominator-mismatch symptom #2552 set out to remove.
+    assert audit["planted"] >= generate_corpus.MIN_PLANTED_OPERATOR_EDGES
     assert audit["edge_correct"] < audit["planted"]  # m2 cue-word relations
     assert 1 <= audit["content_ok"] <= audit["planted"]
     # #2552: the committed operator topology entered the retrievable layer.
@@ -618,13 +622,17 @@ def test_run_carries_operator_edge_audit_dimension(tmp_path, monkeypatch):
     supersede = owned_by["wp07_bluepeak_followup"][2]
     assert supersede["expected_kind"] == "SUPERSEDE"
     assert supersede["to_session"] == "wp06_quarry_rollout"
-    # The receipt carries the audit (audit trail for the sealed run). Assert
-    # the SAME contract as the report-level checks above — a hardcoded 4 here
-    # is the denominator bug this PR exists to fix (#2552 code-review P0).
+    # The receipt must CARRY the audit block (it is the publish artifact) and
+    # the carried denominator must clear the corpus floor. Not an equality
+    # against `audit["planted"]`: `build_receipt` copies the block verbatim, so
+    # such an assertion cannot independently fail — the repeated "guard that
+    # cannot fail" finding (#4261).
     receipt = runner.build_receipt(report)
     assert runner.validate_receipt(receipt) == []
-    assert receipt["operator_audit"]["planted"] == audit["planted"]
+    assert "operator_audit" in receipt
+    assert receipt["operator_audit"]["planted"] >= \
+        generate_corpus.MIN_PLANTED_OPERATOR_EDGES
     assert (receipt["operator_audit"]["edge_correct"]
-            == audit["edge_correct"] < audit["planted"])
+            < receipt["operator_audit"]["planted"])
     assert (receipt["operator_audit"]["operators_provenanced"]
             == receipt["operator_audit"]["operators_total"] > 0)

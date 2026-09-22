@@ -61,7 +61,14 @@ OPERATOR_SESSIONS = [
     "wp04_aurora_perf", "wp05_retro_writeup", "wp06_quarry_rollout",
     "wp07_bluepeak_followup",
 ]
-PLANTED_OPERATOR_EDGES = 15
+# Derived from the sealed golds, never a literal. A private literal here was
+# the THIRD instance of the hardcoded-denominator defect the #2552 gold growth
+# exposed (the other two were the summary lanes); growing the corpus must not
+# require editing this file.
+PLANTED_OPERATOR_EDGES = sum(
+    len(corpus.load_gold(s).get("planted_operators") or [])
+    for s in OPERATOR_SESSIONS
+)
 
 pytestmark = pytest.mark.timeout(900)
 

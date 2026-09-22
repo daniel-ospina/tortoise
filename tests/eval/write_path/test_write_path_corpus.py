@@ -1210,7 +1210,7 @@ def test_committed_operator_gold_kind_coverage_and_id_hygiene() -> None:
                 cross_session += 1
     assert kinds == set(schema.PLANTED_OPERATOR_KIND_VALUES), kinds
     assert len(op_ids) == len(set(op_ids)), "duplicate planted-operator ids"
-    assert len(op_ids) >= 4
+    assert len(op_ids) >= generate_corpus.MIN_PLANTED_OPERATOR_EDGES
     # The #2514 cross-session SUPERSEDE is planted (a point-level CORRECTS
     # only forms when the superseded claim already exists in-graph).
     assert cross_session >= 1
@@ -1244,6 +1244,38 @@ def test_committed_operator_gold_validates_and_grounds(session_id: str) -> None:
             )
         own_turn = fixture["conversation"][op["relation_turn"] - 1]["content"]
         assert own_turn  # relation_turn in range of the own session
+
+
+def test_operator_floor_issues_flags_a_thin_kind() -> None:
+    """#2552 code review: the per-kind floor's FIRING path is verified, not
+    assumed. A corpus that CLEARS the total floor while starving one kind is
+    exactly what a total-only floor accepted — the per-kind check must report
+    it, with a message that names the thin kind.
+
+    This also pins the shared helper: ``_assert_operator_floors`` (fresh
+    render, raises) and ``validate_committed`` (on-disk, collects) both call
+    ``_operator_floor_issues``, so they cannot drift on what they count or on
+    how they treat a malformed entry.
+    """
+    ops = [
+        {"expected_kind": kind}
+        for kind, floor in generate_corpus.MIN_PLANTED_OPERATOR_KINDS.items()
+        for _ in range(floor)
+    ]
+    assert generate_corpus._operator_floor_issues([ops], label="corpus") == []
+
+    # Drop every SUPERSEDE but keep the TOTAL above the floor, so only the
+    # per-kind check can fire.
+    thinned = [op for op in ops if op["expected_kind"] != "SUPERSEDE"]
+    thinned += [{"expected_kind": "MITIGATES"}] * 2
+    issues = generate_corpus._operator_floor_issues([thinned], label="corpus")
+    assert any("per-kind floor" in i and "SUPERSEDE=0" in i for i in issues), issues
+    assert not any("floor (issue #2514)" in i for i in issues), issues
+
+    # Non-list / non-dict entries are SKIPPED (the shared guard), never an
+    # AttributeError — a malformed corpus is the schema validation's finding.
+    assert generate_corpus._operator_floor_issues(
+        [None, "nope", [1, 2], ops], label="corpus") == []
 
 
 def test_operator_gold_schema_rejects_bad_kind_and_self_loop() -> None:

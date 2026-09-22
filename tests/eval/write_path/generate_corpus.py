@@ -153,9 +153,7 @@ def _operator(op_id: str, kind: str, from_anchor: str, from_turn: int,
 # 2026-09-21), so no behavioural claim could be separated from LLM
 # variance. The floor is set to the corpus's actual count so a silent
 # shrink cannot re-open that hole.
-MIN_PLANTED_OPERATOR_EDGES = 15
-REQUIRED_OPERATOR_KINDS = {"SUPERSEDE", "NEGATE", "MITIGATES", "SUPPORTS"}
-
+#
 # #2552 (code review): the TOTAL floor does not guard the PER-KIND denominators
 # the lane README names as the residual variance problem (SUPERSEDE 1,
 # NEGATE 2). A total-only floor accepts an edit that drops a SUPERSEDE while
@@ -165,6 +163,11 @@ REQUIRED_OPERATOR_KINDS = {"SUPERSEDE", "NEGATE", "MITIGATES", "SUPPORTS"}
 MIN_PLANTED_OPERATOR_KINDS = {
     "SUPPORTS": 4, "MITIGATES": 8, "NEGATE": 2, "SUPERSEDE": 1,
 }
+# DERIVED, never hand-written: the total floor and the kind set are functions
+# of the per-kind map, so the three cannot come to describe different corpora
+# (the code-review finding this closes).
+MIN_PLANTED_OPERATOR_EDGES = sum(MIN_PLANTED_OPERATOR_KINDS.values())
+REQUIRED_OPERATOR_KINDS = set(MIN_PLANTED_OPERATOR_KINDS)
 
 
 # ── Session authoring ───────────────────────────────────────────────────────
@@ -893,26 +896,37 @@ def render_corpus() -> dict[str, bytes]:
     return outputs
 
 
-def _assert_operator_floors(outputs: dict[str, bytes]) -> None:
-    """Issue #2514 floor: the corpus plants every operator kind at least once
-    (SUPERSEDE/NEGATE/MITIGATES/SUPPORTS) across the seeded golds.
+def _operator_floor_issues(op_lists: list, *, label: str) -> list[str]:
+    """The SINGLE source of the issue-#2514 operator-floor contract.
+
+    Both the render path (``_assert_operator_floors`` — raises) and the
+    committed-corpus validation (``validate_committed`` — collects) call this,
+    so the two cannot drift on which entries they count (the code-review
+    finding this closes: one copy guarded non-dict entries and the other did
+    not).
+
+    ``op_lists`` is a list of ``planted_operators`` lists. Non-list and
+    non-dict entries are SKIPPED rather than raising — a malformed corpus is
+    reported by the schema validation, and this check must not turn it into an
+    ``AttributeError``.
     """
-    kinds: set[str] = set()
-    counts: dict[str, int] = {}
+    kinds: set = set()
+    counts: dict = {}
     total = 0
-    for rel, data in outputs.items():
-        if not rel.startswith("gold/") or not rel.endswith(".gold.json"):
+    for ops in op_lists:
+        if not isinstance(ops, list):
             continue
-        gold = json.loads(data)
-        ops = gold.get("planted_operators") or []
-        total += len(ops)
-        kinds.update(op.get("expected_kind") for op in ops)
         for op in ops:
-            k = op.get("expected_kind")
-            counts[k] = counts.get(k, 0) + 1
+            if not isinstance(op, dict):
+                continue
+            total += 1
+            kind = op.get("expected_kind")
+            kinds.add(kind)
+            counts[kind] = counts.get(kind, 0) + 1
+    issues: list[str] = []
     if total < MIN_PLANTED_OPERATOR_EDGES:
-        raise AssertionError(
-            f"corpus has {total} planted operator edges < "
+        issues.append(
+            f"{label} has {total} planted operator edges < "
             f"{MIN_PLANTED_OPERATOR_EDGES} floor (issue #2514)"
         )
     thin = sorted(
@@ -921,16 +935,35 @@ def _assert_operator_floors(outputs: dict[str, bytes]) -> None:
         if counts.get(k, 0) < floor
     )
     if thin:
-        raise AssertionError(
-            f"corpus planted operators below the per-kind floor: {thin} "
+        issues.append(
+            f"{label} planted operators below the per-kind floor: {thin} "
             "— a thin kind is a denominator that cannot carry a signal"
         )
     missing = sorted(REQUIRED_OPERATOR_KINDS - kinds)
     if missing:
-        raise AssertionError(
-            f"corpus planted operators missing kinds {missing} — every issue-#2514 "
-            "operator kind must be planted at least once"
+        issues.append(
+            f"{label} planted operators missing kinds {missing} — every "
+            "issue-#2514 operator kind must be planted at least once"
         )
+    return issues
+
+
+def _assert_operator_floors(outputs: dict[str, bytes]) -> None:
+    """Issue #2514 floor on a FRESH RENDER: every operator kind planted at
+    least once (SUPERSEDE/NEGATE/MITIGATES/SUPPORTS), the total edge count at
+    or above ``MIN_PLANTED_OPERATOR_EDGES``, and every per-kind floor met.
+    Kind coverage and edge count are one contract — ``_operator_floor_issues``.
+    """
+    issues = _operator_floor_issues(
+        [
+            json.loads(data).get("planted_operators") or []
+            for rel, data in outputs.items()
+            if rel.startswith("gold/") and rel.endswith(".gold.json")
+        ],
+        label="corpus",
+    )
+    if issues:
+        raise AssertionError("; ".join(issues))
 
 
 # ── Disk write + CLI ────────────────────────────────────────────────────────
@@ -1094,41 +1127,17 @@ def validate_committed(root: Path | None = None) -> list[str]:
     # Issue #2514 floors hold on the COMMITTED files (kind coverage + edge
     # count).  The render-time assertion guards fresh renders; this re-checks
     # the on-disk corpus so a hand-edit cannot silently drop the coverage.
-    kinds: set[str] = set()
-    counts: dict[str, int] = {}
-    total = 0
-    for session_id in sorted(golds):
-        gold = schema.read_json(golds[session_id])
-        ops = gold.get("planted_operators") or []
-        if not isinstance(ops, list):
-            continue
-        total += len(ops)
-        kinds.update(op.get("expected_kind") for op in ops if isinstance(op, dict))
-        for op in ops:
-            if isinstance(op, dict):
-                k = op.get("expected_kind")
-                counts[k] = counts.get(k, 0) + 1
-    if total < MIN_PLANTED_OPERATOR_EDGES:
-        issues.append(
-            f"committed corpus has {total} planted operator edges < "
-            f"{MIN_PLANTED_OPERATOR_EDGES} floor (issue #2514)"
+    # BOTH go through ``_operator_floor_issues``, so neither can drift on what
+    # it counts.
+    issues.extend(
+        _operator_floor_issues(
+            [
+                schema.read_json(golds[session_id]).get("planted_operators") or []
+                for session_id in sorted(golds)
+            ],
+            label="committed corpus",
         )
-    thin = sorted(
-        f"{k}={counts.get(k, 0)} < {floor}"
-        for k, floor in MIN_PLANTED_OPERATOR_KINDS.items()
-        if counts.get(k, 0) < floor
     )
-    if thin:
-        issues.append(
-            f"committed corpus planted operators below the per-kind floor: "
-            f"{thin} — a thin kind is a denominator that cannot carry a signal"
-        )
-    missing_kinds = sorted(REQUIRED_OPERATOR_KINDS - kinds)
-    if missing_kinds:
-        issues.append(
-            f"committed corpus planted operators missing kinds {missing_kinds} "
-            "— every issue-#2514 operator kind must be planted at least once"
-        )
     return issues
 
 

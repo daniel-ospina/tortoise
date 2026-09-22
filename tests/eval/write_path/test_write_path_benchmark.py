@@ -145,10 +145,14 @@ def test_bpre_lane_full_corpus_replay_emits_and_grades(sdk_factory):
     # #2514 operator-edge audit: the echo lane structurally writes no operator
     # edges — the planted edges are graded by the cue-word relation stage, so
     # only a few match (the audit dimension on the completed run; the operator
-    # bar is a product-lane bar, see scoping note). The denominator is pinned
-    # to the corpus floor, never a literal — #2552 grew it 4 -> 15 and a
-    # hardcoded 4 here is the exact denominator bug this lane's sibling fixed.
-    assert report["operator_audit"]["planted"] == \
+    # bar is a product-lane bar, see scoping note).
+    #
+    # Pinned to the corpus FLOOR and compared with `>=`, never an exact value:
+    # MIN_PLANTED_OPERATOR_EDGES is a LOWER BOUND (generate_corpus fails when
+    # `total < floor`), so an equality here would redden this lane the moment
+    # the corpus GROWS — the very denominator-mismatch symptom the #2552 fix
+    # set out to eliminate. (A hardcoded 4 was the original form of that bug.)
+    assert report["operator_audit"]["planted"] >= \
         generate_corpus.MIN_PLANTED_OPERATOR_EDGES
     assert report["operator_audit"]["edge_correct"] < \
         report["operator_audit"]["planted"]
@@ -167,8 +171,14 @@ def test_bpre_lane_full_corpus_replay_emits_and_grades(sdk_factory):
     assert runner.validate_receipt(receipt) == []
     assert receipt["judge_pin"] == JUDGE_PIN_MECHANICAL
     assert receipt["corpus_hash"] == corpus.compute_fixtures_hash()
-    assert receipt["operator_audit"]["planted"] == \
-        report["operator_audit"]["planted"]
+    # The receipt must CARRY the audit block (it is the publish artifact), and
+    # the carried denominator must clear the corpus floor. NOT an equality
+    # against `report["operator_audit"]["planted"]`: `build_receipt` copies that
+    # field verbatim, so such an assertion cannot independently fail — the
+    # repeated "guard that cannot fail" finding (#4261).
+    assert "operator_audit" in receipt
+    assert receipt["operator_audit"]["planted"] >= \
+        generate_corpus.MIN_PLANTED_OPERATOR_EDGES
 
 
 def test_bpre_lane_determinism_and_provenance_regression_fails(sdk_factory, tmp_path):
