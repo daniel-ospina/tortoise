@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tortoise-hook-version: 3
+# tortoise-hook-version: 4
 # Tortoise session capture for Claude Code — SessionEnd hook (#564).
 #
 # The `tortoise-hook-version` marker above is the install-contract generation
@@ -34,12 +34,55 @@
 
 set -euo pipefail
 
+# ── The local capture-error breadcrumb ───────────────────────────────────
+# Mirrors `tortoise.__main__._record_capture_error` (same file layout, same
+# `TORTOISE_IMPORT_RECEIPT_DIR` override) for the one case that helper cannot
+# cover: the module dir did not resolve, so the Python helper is unreachable.
+# A hook that captures nothing must leave EVIDENCE, never silence (#4314).
+# Best-effort: a breadcrumb write can never break the exit-0 contract.
+_record_breadcrumb() {
+  # PURE SHELL, no python3: this is also the evidence path for the "resolved a
+  # module dir but found no interpreter" branch, which is reached BECAUSE
+  # python3 is missing — a python3-written breadcrumb could never run there.
+  # The ``install-inert`` kind marks this as the INSTALL leg's own evidence and
+  # keeps it distinguishable from a ``sessions import`` capture failure, which
+  # writes the same file with ``kind: capture-failure`` (#4314). Best-effort:
+  # a breadcrumb write can never break the exit-0 contract.
+  local harness="$1" detail="$2"
+  local receipt_dir crumb_dir stamp
+  receipt_dir="${TORTOISE_IMPORT_RECEIPT_DIR:-${HOME:-/nonexistent}/.tortoise/import-receipts}"
+  # Normalize to pathlib's `.parent` semantics (#4373 review). Python's
+  # `Path(x).parent` DROPS trailing slashes before taking the parent; `${x%/*}`
+  # does not — so `…/import-receipts/` made the shell write
+  # `…/import-receipts/capture-errors/` while `session verify` read
+  # `…/capture-errors/`, leaving the breadcrumb invisible and an INERT install
+  # reading PROVEN. That is the exact false-PROVEN this seam exists to remove.
+  while [ "${receipt_dir%/}" != "$receipt_dir" ] && [ "$receipt_dir" != "/" ]; do
+    receipt_dir="${receipt_dir%/}"
+  done
+  case "$receipt_dir" in
+    */*) crumb_dir="${receipt_dir%/*}/capture-errors" ;;
+    *) crumb_dir="capture-errors" ;;
+  esac
+  stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  mkdir -p "$crumb_dir" 2>/dev/null || true
+  printf '{\n  "harness": "%s",\n  "detail": "%s",\n  "recorded_at": "%s",\n  "kind": "install-inert"\n}\n' \
+    "$harness" "$detail" "$stamp" \
+    > "$crumb_dir/$harness.json" 2>/dev/null || true
+}
+
 # Claude Code passes SessionEnd hook metadata as JSON on stdin:
 # {"session_id": "...", "transcript_path": "...", "cwd": "..."}
 # #1727 (Task 14, T1-P11): the REAL session_id is forwarded as the capture
 # idempotency key (re-POSTs of the same session_id converge to one Session);
 # harness='claude' is passed for per-harness receipts.
-META="$(python3 -c 'import json,sys
+META="$(python3 -c 'import sys
+# CWE-427: drop the process cwd from sys.path BEFORE importing anything
+# non-builtin. ``python -c`` puts cwd at sys.path[0], so a planted ./json.py
+# in the session workspace would otherwise execute at every SessionEnd. `sys`
+# is a builtin module and cannot be shadowed, so importing it first is safe.
+sys.path[:] = [p for p in sys.path if p not in ("", ".")]
+import json
 try:
     d = json.load(sys.stdin)
     print(d.get("transcript_path") or "")
@@ -56,7 +99,12 @@ SESSION_ID="$(printf '%s\n' "$META" | sed -n '2p')"
 TMP="$(mktemp -t tortoise_session_end.XXXXXX)"
 trap 'rm -f "$TMP"' EXIT
 python3 - "$TRANSCRIPT_PATH" "$TMP" << 'PYEOF'
-import json, sys
+import sys
+# CWE-427: `python3 -` sets sys.path[0] = '' (the cwd), so a planted ./json.py
+# in the session workspace would execute here at every SessionEnd. `sys` is a
+# builtin and cannot be shadowed, so it is safe to import before the drop.
+sys.path[:] = [p for p in sys.path if p not in ("", ".")]
+import json
 src, dst = sys.argv[1], sys.argv[2]
 out = []
 try:
@@ -91,15 +139,36 @@ PYEOF
 
 [ -s "$TMP" ] || exit 0  # nothing parseable — skip silently
 
-# Prefer a local install; fall back to the repo checkout (mirrors session-start.sh).
+# Prefer a local install; fall back to the installer's recorded checkout.
 TORTOISE_BIN="$(command -v tortoise || true)"
+# A candidate module dir is accepted ONLY when it actually holds a
+# `tortoise/` package. Candidate order: $TORTOISE_SRC_DIR, the installer's
+# recorded module dir, then `../..` — the LAST resort, because from an
+# installed hook that is `$HOME`, which is not a checkout (#4314).
+TORTOISE_MODULE=""
+for CANDIDATE in "${TORTOISE_SRC_DIR:-}" \
+                 "$(cat "${HOME:-/nonexistent}/.tortoise/hook-src-dir" 2>/dev/null || true)" \
+                 "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd || true)"; do
+  if [ -n "$CANDIDATE" ] && [ -d "$CANDIDATE/tortoise" ]; then
+    TORTOISE_MODULE="$CANDIDATE"
+    break
+  fi
+done
+if [ -z "$TORTOISE_BIN" ] && [ -z "$TORTOISE_MODULE" ]; then
+  # No binary and no module dir: record the breadcrumb (the SAME shape and
+  # location `session capture` writes) and exit 0 — an inert install must
+  # leave evidence instead of silence (#4314).
+  _record_breadcrumb claude \
+    "the installed Claude hook could not resolve a tortoise module dir (checked TORTOISE_SRC_DIR, \$HOME/.tortoise/hook-src-dir, and ../..), found no tortoise binary, and captured nothing"
+  exit 0
+fi
 if [ -z "$TORTOISE_BIN" ]; then
-  TORTOISE_MODULE="${TORTOISE_SRC_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-  if [ ! -d "$TORTOISE_MODULE/tortoise" ]; then
+  PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 || true)}"
+  if [ -z "$PYTHON_BIN" ]; then
+    _record_breadcrumb claude \
+      "the installed Claude hook resolved a tortoise module dir but found no python3 interpreter, and captured nothing"
     exit 0
   fi
-  PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 || true)}"
-  [ -z "$PYTHON_BIN" ] && exit 0
   # #280 item 3: reconciliation sweep — periodically scan the local corpus
   # (~/.tortoise/docs/conversations/) for unindexed/stale session files and
   # re-index them. Fired BEFORE capture (Round-10 P3): a hosted-capture
@@ -114,35 +183,48 @@ if [ -z "$TORTOISE_BIN" ]; then
   # AND the legacy sweep's embedding behavior (--metadata). The corpus dir is
   # passed POSITIONALLY, resolved via session_corpus_dir() (honors
   # TORTOISE_SESSION_CORPUS else ~/.tortoise/docs/conversations).
-  SWEEP_CORPUS="$("$PYTHON_BIN" -c "
-import sys, os
-sys.path.insert(0, '$TORTOISE_MODULE')
+  SWEEP_CORPUS="$("$PYTHON_BIN" -c '
+import sys
+# CWE-427: drop the process cwd from sys.path BEFORE importing anything
+# non-builtin. ``python -c`` puts cwd at sys.path[0], so a planted ./os.py in
+# the agent workspace would otherwise execute. The module dir arrives via
+# argv (never the source) and is prepended AFTER the cwd is removed.
+sys.path[:] = [p for p in sys.path if p not in ("", ".")]
+sys.path.insert(0, sys.argv[1])
 from tortoise.session_indexer import session_corpus_dir
-print(session_corpus_dir())" 2>/dev/null || true)"
+print(session_corpus_dir())' "$TORTOISE_MODULE" 2>/dev/null || true)"
   [ -z "$SWEEP_CORPUS" ] && SWEEP_CORPUS="$HOME/.tortoise/docs/conversations"
-  nohup "$PYTHON_BIN" -c "
-import sys, os
-sys.path.insert(0, '$TORTOISE_MODULE')
+  TORTOISE_SWEEP_CORPUS="$SWEEP_CORPUS" \
+    nohup "$PYTHON_BIN" -c '
+import sys
+sys.path[:] = [p for p in sys.path if p not in ("", ".")]
+sys.path.insert(0, sys.argv[1])
+import os
 from tortoise.__main__ import main
 # TORTOISE_INDEX_CHILD_STDERR debug-redirect is OPT-IN: only when the
 # operator set it (never force-write a file at every session close —
 # review-gate P2). truncate-on-open + fail-safe inside the CLI.
-os.environ.setdefault('TORTOISE_INDEX_CHILD_STDERR', '')
-raise SystemExit(main(['index', 'directory', '$SWEEP_CORPUS', '--metadata']))
-" >/dev/null 2>&1 &
+os.environ.setdefault("TORTOISE_INDEX_CHILD_STDERR", "")
+raise SystemExit(main(["index", "directory",
+                       os.environ["TORTOISE_SWEEP_CORPUS"], "--metadata"]))' \
+    "$TORTOISE_MODULE" >/dev/null 2>&1 &
   # #1727 (Task 14): harness + the real session_id (idempotency key) pass
-  # through to the capture payload — via env (the session id is untrusted
-  # shell input; never interpolated into the -c string).
+  # through to the capture payload — via env (the session id and every path
+  # are untrusted shell input; never interpolated into the -c string).
   TORTOISE_HOOK_SESSION_ID="$SESSION_ID" \
-  "$PYTHON_BIN" -c "
-import sys, os
-sys.path.insert(0, '$TORTOISE_MODULE')
+  TORTOISE_CAPTURE_FILE="$TMP" \
+  "$PYTHON_BIN" -c '
+import sys
+sys.path[:] = [p for p in sys.path if p not in ("", ".")]
+sys.path.insert(0, sys.argv[1])
+import os
 from tortoise.__main__ import main
-argv = ['session', 'capture', '--file', '$TMP', '--harness', 'claude']
-if os.environ.get('TORTOISE_HOOK_SESSION_ID'):
-    argv += ['--session-id', os.environ['TORTOISE_HOOK_SESSION_ID']]
+argv = ["session", "capture", "--file", os.environ["TORTOISE_CAPTURE_FILE"],
+        "--harness", "claude"]
+if os.environ.get("TORTOISE_HOOK_SESSION_ID"):
+    argv += ["--session-id", os.environ["TORTOISE_HOOK_SESSION_ID"]]
 raise SystemExit(main(argv))
-" 2>/dev/null || exit 0
+' "$TORTOISE_MODULE" 2>/dev/null || exit 0
 else
   # Round-10 P3: sweep first (capture failure must not disable reindexing).
   # The corpus dir is resolved via session_corpus_dir() (honors
@@ -151,9 +233,16 @@ else
   # resolution silently fell back to the default corpus and ignored a
   # configured TORTOISE_SESSION_CORPUS — the corpus-dir divergence class
   # the plan condemns, review-gate P1).
-  SWEEP_CORPUS="$(python3 -c "
+  SWEEP_CORPUS="$(python3 -c '
+import sys
+# CWE-427: the corpus resolver imports tortoise by NAME, so the cwd must be off
+# sys.path first - a planted ./tortoise/ in the session workspace would
+# otherwise be imported and executed here. NOTE: this heredoc-style source is
+# SINGLE-quoted on purpose: inside a double-quoted shell string the quotes in
+# ("", ".") close the string and the source is mangled into a SyntaxError.
+sys.path[:] = [p for p in sys.path if p not in ("", ".")]
 from tortoise.session_indexer import session_corpus_dir
-print(session_corpus_dir())" 2>/dev/null || true)"
+print(session_corpus_dir())' 2>/dev/null || true)"
   [ -z "$SWEEP_CORPUS" ] && SWEEP_CORPUS="$HOME/.tortoise/docs/conversations"
   # CHILD_STDERR debug-redirect is OPT-IN: only when the operator set it
   # (never force-write a file at every session close)

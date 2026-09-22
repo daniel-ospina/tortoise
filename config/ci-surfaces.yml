@@ -331,6 +331,12 @@ surfaces:
   # `session verify` wiring in tortoise/__main__.py, which selects `api`.
   # Same dual registration as test_capture_install.py.
   - test_session_verify.py
+  # #4314: an inert harness install must not read as health — the shipped
+  # hooks resolve a recorded module dir (never `../..` alone), record a
+  # breadcrumb instead of silent-silence, and `session verify` reports INERT
+  # rather than PROVEN on rc=0 with no downstream effect. Same dual
+  # registration as test_session_verify.py (mechanism = core; CLI = api).
+  - test_4314_inert_hooks.py
   # #3795/#3801: the `tortoise hooks` CLI surface lives in tortoise/__main__.py
   # (api-classified source) — dual-registered so a CLI-wiring regression runs
   # this guard. See the core entry for the mechanism half.
@@ -593,6 +599,12 @@ surfaces:
   # `session verify` wiring in tortoise/__main__.py, which selects `api`.
   # Same dual registration as test_capture_install.py.
   - test_session_verify.py
+  # #4314: an inert harness install must not read as health — the shipped
+  # hooks resolve a recorded module dir (never `../..` alone), record a
+  # breadcrumb instead of silent-silence, and `session verify` reports INERT
+  # rather than PROVEN on rc=0 with no downstream effect. Same dual
+  # registration as test_session_verify.py (mechanism = core; CLI = api).
+  - test_4314_inert_hooks.py
   # #3795/#3801: capture-hook install drift detection + in-place upgrade. Its
   # sources are `tortoise/hook_install.py` and `tortoise/claude-hooks/` — an
   # ENGINE path classified `core` (any unmatched `tortoise/` prefix). Dual-
@@ -1401,6 +1413,11 @@ durations:
   eval/write_path/test_write_path_benchmark.py: 112.3
   test_tortoise_client.py: 110.7
   eval/retrieval/test_run.py: 109.3
+  # #4314: the inert-hooks guard. Measured locally in the carve-out lane
+  # (`uv run pytest tests/test_4314_inert_hooks.py -q`, 169.8s — the round-2
+  # fix adds real-hook guards for the install-inert marker and the CWE-427
+  # pre-path vector); refresh from a CI junit run once it has one.
+  test_4314_inert_hooks.py: 170.0
   test_platform_seams.py: 73.3
   test_2952_degraded_read.py: 70.0   # #2952 (B)+(C): docker-lane warm-up/degraded-read suite
   test_quota.py: 65.3
