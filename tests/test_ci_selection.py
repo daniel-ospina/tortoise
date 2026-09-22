@@ -1002,13 +1002,17 @@ def test_push_legs_partitions_every_classified_file():
         )
     # …and the rule is exercised for real, on a deliberately hostile probe: an
     # UNSORTED order (a sort cannot pass), FOUR entries (a mutant keyed on
-    # index >= 2 cannot pass), and a non-`bench/` prefix (a bench-prefix-keyed
-    # mutant cannot pass). DECLARED BOUND: the probe pins a four-entry sample;
-    # a mutant whose misbehaviour only appears on a LONGER synthetic list is
-    # outside this probe's bound (see #4528).
+    # index >= 2 cannot pass), and prefixes that CONFLICT with parity rather
+    # than tracking it (a prefix-keyed mutant cannot pass — they did track it
+    # while the probe alternated bench/non-bench by index, which an earlier
+    # round measured as a live miss). One name carries an uppercase letter, so
+    # a case-normalising mutant cannot pass either. DECLARED BOUND: this is a
+    # four-entry sample — a mutant whose misbehaviour appears only on a LONGER
+    # (or exactly-two-entry) list is outside the bound, as is one keyed only on
+    # digits or extension case (see #4528).
     from tools.ci_selection import carve_out_files, fast_pool
-    probe_extra = ["bench/probe_zed.py", "zzz/probe_plain.py",
-                   "bench/probe_aaa.py", "yyy/probe_tail.py"]
+    probe_extra = ["bench/Probe_zed.py", "bench/Probe_aaa.py",
+                   "zzz/probe_plain.py", "yyy/probe_tail.py"]
     probe_names = tuple(f.replace(".py", "") for f in probe_extra)
     assert not (set(probe_extra) & classified), (
         f"probe names would collide with a classified file: {set(probe_extra) & classified}"
