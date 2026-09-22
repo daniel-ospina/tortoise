@@ -90,6 +90,13 @@ _IDENT = re.compile(r"[A-Za-z_$][\w$]*")
 _AUTH_DEF = re.compile(r"(?:async\s+)?function\s+authAction\s*\(")
 _ON_REQUEST = re.compile(r"export\s+(?:const|function|async\s+function)\s+(onRequest\w*)")
 _SOURCE_SUFFIXES = (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx")
+# Keywords after which a `/` MUST open a regex literal rather than divide (#4446 review).
+_REGEX_PRECEDING_KEYWORDS = frozenset(
+    {
+        "await", "case", "delete", "do", "else", "in", "instanceof", "new", "of",
+        "return", "throw", "typeof", "void", "yield",
+    }
+)
 
 # The method a call asks for when the call site does not name one, and what the reader
 # returns when a `method:` KEY is present whose value it cannot read (#4446 review). An
@@ -108,14 +115,14 @@ UNREADABLE_METHOD = "?"
 #   Declared rather than chased — a fourth seam is what the dropped guard kept adding, one
 #   review cycle at a time.
 UNVERIFIABLE_SITES = {
-    ("api", "path"),
-    ("authAction", "path"),
-    ("fetch", "path"),
-    ("api", "url"),
+    ("api", "path"): 1,
+    ("authAction", "path"): 1,
+    ("fetch", "path"): 1,
+    ("api", "url"): 1,
     # `fetch(`${API_BASE}${path}`)` — the `api()` wrapper's own body, forwarding the value
-    # it was called with. A template whose path is built ENTIRELY from its own parameter
-    # has no literal path to check; the call sites that supply it are checked.
-    ("fetch", "forwarded path"),
+    # it was called with. A template whose path is built entirely from a single parameter has
+    # no literal path to check; the call sites that supply it are checked.
+    ("fetch", "forwarded path"): 1,
 }
 
 # Every site whose trailing hole had to be read elastically (the hole is a query string,
@@ -125,6 +132,7 @@ UNVERIFIABLE_SITES = {
 # site is added, so the new one reds the shape test.
 TRAILING_HOLE_SITES = {
     ("api", "/v1/backups", "GET"): 1,
+    ("api", "/v1/graphs", "PATCH"): 1,
     ("api", "/v1/index/docs", "POST"): 1,
     ("api", "/v1/index/github/re-poll", "POST"): 1,
     ("api", "/v1/onboarding/github/connect", "POST"): 1,
@@ -133,10 +141,14 @@ TRAILING_HOLE_SITES = {
     ("api", "/v1/onboarding/state", "GET"): 1,
     ("api", "/v1/onboarding/state", "PATCH"): 6,
     ("api", "/v1/onboarding/state/checkpoint", "POST"): 1,
-    ("api", "/v1/sessions", "GET"): 1,
+    ("api", "/v1/sessions", "DELETE"): 1,
+    ("api", "/v1/sessions", "GET"): 2,
     ("api", "/v1/team", "GET"): 2,
+    ("api", "/v1/team/keys", "DELETE"): 2,
     ("api", "/v1/team/keys", "GET"): 2,
+    ("api", "/v1/team/keys", "PATCH"): 2,
     ("api", "/v1/team/keys", "POST"): 2,
+    ("fetch", "/v1/graphs", "DELETE"): 1,
     ("fetch", "/v1/graphs/trash", "GET"): 1,
     ("fetch", "/v1/graphs/trash", "POST"): 1,
 }
@@ -212,12 +224,24 @@ def _skip_braces(text: str, i: int) -> int:
 
 def _regex_starts(text: str, i: int) -> bool:
     """Whether the `/` at `i` opens a regex literal rather than a division: true when the
-    last significant character cannot end an expression. Skipping regexes matters here —
-    a pattern containing a quote (`/_/g`) would otherwise open a phantom string that
-    swallows real call sites, and a silent coverage loss is worse than a false red."""
+    last significant character cannot end an expression, or when the preceding word is a
+    keyword that must be followed by one (`return /'/`, `typeof /x/`). Skipping regexes
+    matters here — a pattern containing a quote would otherwise open a phantom string that
+    swallows real call sites, and a silent coverage loss is worse than a false red. The
+    keyword arm was added after a review found `return /'/` still swallowed the next call
+    (#4446 review cycle 2).
+    """
     j = i - 1
     while j >= 0 and text[j] in " \t\n":
         j -= 1
+    # A BACKWARD scan, not `re.search(..., text[: j + 1])`: slicing the file at every `/`
+    # copies up to the whole source per call, which took this suite from seconds to minutes
+    # (#4446 review cycle 2 fix, caught by the suite's own runtime).
+    k = j
+    while k >= 0 and (text[k].isalnum() or text[k] in "_$"):
+        k -= 1
+    if text[k + 1 : j + 1] in _REGEX_PRECEDING_KEYWORDS:
+        return True
     return j < 0 or text[j] in "(,=:[!&|?{};+*%~^<>"
 
 
@@ -276,6 +300,23 @@ def _skip_ws(text: str, i: int) -> int:
     return i
 
 
+def _next_token(text: str, i: int) -> int:
+    """The next index that is neither whitespace nor a comment — so a trailing comment after
+    a literal (`api('/v1/backups' /* why */)`) is not mistaken for a concatenation (#4446
+    review cycle 2)."""
+    while True:
+        i = _skip_ws(text, i)
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            i = len(text) if j < 0 else j
+            continue
+        if text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            i = len(text) if j < 0 else j + 2
+            continue
+        return i
+
+
 def _first_argument(text: str, i: int) -> tuple[str, list[str], list[str], int]:
     """(kind, segments, holes, end) for the first argument at `i`.
 
@@ -291,7 +332,7 @@ def _first_argument(text: str, i: int) -> tuple[str, list[str], list[str], int]:
     if text[i] in "'\"":
         end = _skip_quoted(text, i)
         literal = text[i + 1 : end - 1]
-        after = _skip_ws(text, end)
+        after = _next_token(text, end)
         if after < len(text) and text[after] not in ",)":
             # The value continues past this literal, so the requested path is NOT the path
             # read here: `api('/v1/team' + '/bogus')` must not certify `/v1/team`.
@@ -317,6 +358,12 @@ def _first_argument(text: str, i: int) -> tuple[str, list[str], list[str], int]:
             buf.append(text[j])
             j += 1
         parts.append("".join(buf))
+        # The TEMPLATE spelling of a built path is a concatenation too: `api(`/v1/x/${a}` + y)`
+        # was certified as `/v1/x/{}` while the browser requests more than that (#4446 review
+        # cycle 2 — the string branch was the only one that checked).
+        after = _next_token(text, end)
+        if after < len(text) and text[after] not in ",)":
+            return ("concat", [HOLE.join(parts)], [], after)
         return ("template", parts, holes, end)
     m = _IDENT.match(text, i)
     # The END of the argument, not its start: `_http_method` reads the `opts` object that
@@ -337,8 +384,13 @@ def _http_method(text: str, i: int) -> str:
     if i >= len(text) or text[i] != ",":
         return "GET"
     i = _skip_ws(text, i + 1)
-    if i >= len(text) or text[i] != "{":
+    if i >= len(text):
         return "GET"
+    if text[i] != "{":
+        # The opts are not an object literal (a variable, a spread, a call), so the verb is
+        # unknown: `api('/v1/backups', o)` where `o = {method: 'DELETE'}` would be checked as
+        # GET. Fail closed rather than assume (#4446 review cycle 2).
+        return UNREADABLE_METHOD
     m = _METHOD.search(text, i, _skip_braces(text, i))
     if m:
         return m.group(1).strip("'\"` ").upper()
@@ -437,12 +489,19 @@ def _client_sources() -> list[Path]:
 
 
 def _is_forwarding(call: _Call) -> bool:
-    """Whether this call's path is built ENTIRELY from its own parameter — the wrappers'
-    bodies (`fetch(`${API_BASE}${path}`)`, `fetch(path, …)`). There is no literal path to
-    check; the value arrives from the call sites, which ARE checked, and
-    `_unverifiable_sites` pins them so a new one is visible."""
+    """Whether this call's path is built entirely from a SINGLE parameter — the wrappers'
+    bodies (`fetch(`${API_BASE}${path}`)`). There is no literal path to check; the value
+    arrives from the call sites, which ARE checked.
+
+    The test is EXACT (`['']`: one hole, no literal text at all). A looser "nothing but
+    slashes" rule swallowed `fetch(`${API_BASE}/${x}`)`, a real request with no function
+    behind it, and the pin then absorbed it as a known site (#4446 review cycle 2).
+    """
     parts = call.segments[1:] if call.name == "fetch" else call.segments
-    return call.kind == "template" and not "".join(parts).strip("/")
+    # EVERY part empty = the path is nothing but holes (`${API_BASE}${path}`), which is the
+    # one forwarding spelling. One literal character anywhere (including a `/`) makes it a
+    # real path that must resolve.
+    return call.kind == "template" and bool(parts) and all(p == "" for p in parts)
 
 
 def _client_calls() -> list[_Call]:
@@ -660,7 +719,7 @@ def test_every_hole_bearing_v1_path_matches_a_route_shape() -> None:
     declared ambiguity). Literal segments must still line up with a real template, so a
     typo after a hole is not absorbed."""
     table = _api_routes()
-    failures, elastic = [], {}
+    failures, ambiguous = [], {}
     for call in _client_calls():
         if "{}" not in _addressed(call) or not _proxied(call):
             continue
@@ -668,20 +727,24 @@ def test_every_hole_bearing_v1_path_matches_a_route_shape() -> None:
             failures.append(f"{_addressed(call)} — the method could not be read ({call})")
             continue
         variants = _upstream_candidates(_addressed(call))
+        if len(variants) > 1:
+            # AMBIGUOUS is a property of the CALL SITE (a trailing hole with no separator),
+            # not of the route table: deriving it from which reading happened to match made a
+            # server-only route addition red this file (#4446 review cycle 2).
+            key = (call.name, variants[1].split("{")[0].rstrip("/"), call.method)
+            ambiguous[key] = ambiguous.get(key, 0) + 1
         hit = next((v for v in variants if _matches_route(v, {call.method}, table)), None)
         if hit is None:
             failures.append(f"{call.method} {_addressed(call)} — {call}")
-        elif hit != variants[0]:
-            key = (call.name, variants[1].split("{")[0].rstrip("/"), call.method)
-            elastic[key] = elastic.get(key, 0) + 1
     assert not failures, "hole-bearing client paths with no matching route shape:\n  " + "\n  ".join(
         failures
     )
     # COUNTED, not merely present: the previous `set <= declared` absorbed a brand-new
     # broken call site that reused a declared path (#4446 review).
-    assert elastic == TRAILING_HOLE_SITES, (
-        "the sites needing the elastic (query) reading of a trailing hole changed:\n"
-        f"  now:      {sorted(elastic.items())}\n"
+    assert ambiguous == TRAILING_HOLE_SITES, (
+        "the call sites with an ambiguous trailing hole (a hole that a query string and a "
+        "segment can both explain) changed:\n"
+        f"  now:      {sorted(ambiguous.items())}\n"
         f"  declared: {sorted(TRAILING_HOLE_SITES.items())}"
     )
 
@@ -721,7 +784,15 @@ def test_the_unverifiable_call_sites_are_the_declared_ones() -> None:
     (extend the seam, or check it in a browser lane), which is the behaviour the dropped
     guard's cycles kept discovering after the fact."""
     found = _unverifiable_sites()
-    assert found <= UNVERIFIABLE_SITES, (
-        f"new call sites whose path cannot be read statically: {sorted(found - UNVERIFIABLE_SITES)} "
-        "— declare them here with the reason, or check them in a browser lane (#4446)"
+    # COUNTED, not merely present: a set declaration absorbs every new site that matches a
+    # declared key, which is the same presence-vs-count failure this file removed from the
+    # trailing-hole pin (#4446 review cycle 2).
+    because: dict[tuple[str, str], int] = {}
+    for key in found:
+        because[key] = because.get(key, 0) + 1
+    assert because == UNVERIFIABLE_SITES, (
+        f"call sites whose path cannot be read statically changed:\n"
+        f"  now:      {sorted(because.items())}\n"
+        f"  declared: {sorted(UNVERIFIABLE_SITES.items())}\n"
+        "— declare them with the reason, or check them in a browser lane (#4446)"
     )
