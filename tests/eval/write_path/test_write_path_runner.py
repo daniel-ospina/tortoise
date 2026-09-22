@@ -636,7 +636,11 @@ def test_run_carries_operator_edge_audit_dimension(tmp_path, monkeypatch):
         op for ops in owned_by.values() for op in ops
         if op.get("expected_kind") == "SUPERSEDE"
     ]
-    assert len(supersedes) >= 1
+    # Lower-bounded by the corpus's OWN declared SUPERSEDE floor, never a magic
+    # `1` — a second encoding of ``MIN_PLANTED_OPERATOR_KINDS["SUPERSEDE"]``
+    # would keep accepting a corpus that violates the declared floor.
+    assert len(supersedes) >= \
+        generate_corpus.MIN_PLANTED_OPERATOR_KINDS["SUPERSEDE"]
     # Scope the TARGET assertion to the CROSS-SESSION SUPERSEDE. A second
     # planted SUPERSEDE is a legitimate measurement-power extension (see
     # ``MIN_PLANTED_OPERATOR_KINDS``), and one whose ``to`` is its own session
@@ -661,8 +665,14 @@ def test_run_carries_operator_edge_audit_dimension(tmp_path, monkeypatch):
         session_order[op["to_session"]] < session_order[op["from_session"]]
         for op in cross_session_supersedes
     ), cross_session_supersedes
-    assert any(op.get("expected_kind") == "SUPERSEDE"
-               for op in owned_by.get("wp07_bluepeak_followup", []))
+    # The cross-session SUPERSEDE's detail needs no owner-name pin here, and must
+    # not get one: ``runner.run_benchmark`` buckets each detail by its OWN
+    # ``owner_session``, so a bucket assertion would be a TAUTOLOGY (a
+    # cannot-fail guard, the #4261/#4222 family) rather than a check, while a
+    # session-name pin would redden for no regression the moment a cross-session
+    # SUPERSEDE is planted in another session. The exactly-once sum above already
+    # proves this edge — like every other planted edge — landed in exactly one
+    # bucket; its capture-order precondition is asserted just above.
     # The receipt must CARRY the audit block (it is the publish artifact).
     # ``build_receipt`` REBUILDS an explicit projection rather than copying the
     # report's block, so this equality is a real cross-object check — a
