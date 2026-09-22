@@ -1,5 +1,14 @@
 """#2422 — terminal claims must not vote in EP (P6.3 ghost-must-not-vote).
 
+#2490 — terminal posterior freeze → vacuity decay: a terminalized claim's
+posterior pins at its pre-terminal value unless the terminalizing WRITER
+decays it. This file also pins that every terminalizing write (retract /
+supersede / invalidate / assess_source / capture-lane retraction / rebuild
+folds) decays the claim to vacuity (confidence 0.5, posterior (1,1)), that
+the vacuous read is stable across dreams, and that every contested reader
+(annotate_ep_batch, GraphRanker/StateRanker/GapsRanker, get_contested_claims,
+_review_prune, why, analyze) excludes terminal claims.
+
 Eval-spec P6.3: a retracted / invalidated / superseded claim's ghost must not
 change any live posterior — re-running EP after terminalization must equal the
 graph where the claim was never connected. Root cause fixed here:
@@ -398,4 +407,429 @@ def test_assess_source_superseded_assessment_no_strand(sdk, tmp_path):
     ).result_set
     assert int(claim_dirty[0][0]) == 1, (
         "the superseded assessment's operator neighbor must be dirty for recompute"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #2490 — terminal posterior vacuity decay (decay at EVERY terminalizing
+# write + rebuild fold; every contested reader excludes terminals)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@pytest.fixture()
+def sup_2490(tmp_path):
+    """(db, events, sdk) with the JSONL journal wired (rebuild replay)."""
+    import os
+    db = os.path.join(str(tmp_path), "p2490.db")
+    events = tmp_path / "events"
+    events.mkdir()
+    sdk = TortoiseSDK(db, event_log_path=str(events / "events.jsonl"))
+    yield db, events, sdk
+    sdk.close()
+
+
+def _rebuild_2490(sdk, events_dir) -> None:
+    sdk._get_proj().rebuild_all(str(events_dir))
+
+
+def ep_store(sdk: TortoiseSDK, pid: str) -> dict:
+    """Stored (not coalesced) EP/lifecycle columns of a Point."""
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.confidence, n.posterior_alpha, "
+        "       n.posterior_beta, n.ep_alpha, n.ep_beta, n.status, n.outdated",
+        params={"id": pid},
+    ).result_set
+    if not rows:
+        raise AssertionError(f"no point {pid}")
+    r = rows[0]
+    return {"confidence": r[0], "posterior_alpha": r[1], "posterior_beta": r[2],
+            "ep_alpha": r[3], "ep_beta": r[4], "status": r[5],
+            "outdated": bool(r[6])}
+
+
+def plant_highvar_terminal(sdk: TortoiseSDK, pid: str) -> None:
+    """Force the STORED posterior of a claim to a near-balanced Beta(2,2)
+    (variance 0.05 > CONTESTED_VARIANCE_THRESHOLD 0.04) BEFORE terminalizing.
+    Discriminator for the reader-gate tests: pre-fix un-gated readers rank
+    this terminal CONTESTED by stored variance alone — the exclusion assertion
+    fails on old code even when decay+gate are both removed."""
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) "
+        "SET n.confidence = 0.5, n.posterior_alpha = 2.0, "
+        "    n.posterior_beta = 2.0",
+        params={"id": pid})
+
+
+def build_measured(sdk: TortoiseSDK) -> dict[str, str]:
+    """Single measured claim A (baseline 10,1) wired to a neutral claim B via
+    an IMPL operator — A gets a real EP posterior flush (~0.909 mean)."""
+    a = sdk.create_point("statement", "measured source claim", status="live")["id"]
+    b = sdk.create_point("statement", "neutral follow-on claim", status="live")["id"]
+    sdk.set_point_baseline(a, 10.0, 1.0)
+    sdk.set_point_baseline(b, 1.0, 1.0)
+    op = sdk.create_operator("IMPL", a, [b])["id"]
+    run_ep(sdk, [op])
+    return {"a": a, "b": b, "op": op}
+
+
+def assert_vacuous(sdk: TortoiseSDK, pid: str, terminal_status: str,
+                   outdated: bool) -> None:
+    """#2490 core read: a terminalized claim reads confidence 0.5 + posterior
+    (1,1) — the vacuous Beta(1,1) — with ep_alpha/ep_beta prior history kept."""
+    st = ep_store(sdk, pid)
+    if terminal_status:
+        assert st["status"] == terminal_status, st
+    assert st["outdated"] is outdated, st
+    assert st["posterior_alpha"] == 1.0 and st["posterior_beta"] == 1.0, st
+    assert st["confidence"] == 0.5, st
+    assert posterior_mean(sdk, pid) == pytest.approx(0.5), st
+    # Prior history is retained — the SOLE recovery vector (#2490).
+    assert st["ep_alpha"] == 10.0 and st["ep_beta"] == 1.0, st
+
+
+def test_retract_decays_terminal_posterior(sdk):
+    """retract_point decays the claim atomically with the status write and the
+    vacuous read is stable across a subsequent EP run (the terminal claim can
+    never re-enter EP to repin a posterior)."""
+    ids = build_measured(sdk)
+    a = ids["a"]
+    assert posterior_mean(sdk, a) > 0.6, "A must be measured pre-retraction"
+    sdk.retract_point(a)
+    assert_vacuous(sdk, a, terminal_status="retracted", outdated=False)
+    # Post-dream stability: another EP run (terminal excluded as a factor)
+    # must leave the decayed read untouched.
+    run_ep(sdk, [ids["op"]])
+    assert_vacuous(sdk, a, terminal_status="retracted", outdated=False)
+
+
+def test_supersede_decays_terminal_posterior(sdk):
+    """supersede_point decays the superseded old claim (status + outdated)."""
+    ids = build_measured(sdk)
+    a = ids["a"]
+    assert posterior_mean(sdk, a) > 0.6
+    succ = sdk.create_point("statement", "successor claim", status="live")["id"]
+    sdk.supersede_point(a, succ)
+    assert_vacuous(sdk, a, terminal_status="superseded", outdated=True)
+    run_ep(sdk, [ids["op"]])
+    assert_vacuous(sdk, a, terminal_status="superseded", outdated=True)
+
+
+def test_invalidate_decays_terminal_posterior(sdk):
+    """invalidate_point writes the legacy outdated=true FLAG without touching
+    status — the decay must ride that flag write (flag-only terminal class)."""
+    ids = build_measured(sdk)
+    a = ids["a"]
+    assert posterior_mean(sdk, a) > 0.6
+    succ = sdk.create_point("statement", "correcting claim", status="live")["id"]
+    sdk.invalidate_point(a, succ)
+    assert_vacuous(sdk, a, terminal_status="live", outdated=True)
+    run_ep(sdk, [ids["op"]])
+    assert_vacuous(sdk, a, terminal_status="live", outdated=True)
+
+
+def test_assess_source_decays_superseded_assessment(sdk):
+    """assess_source flags older same-(url, assessor) assessments outdated —
+    the flagged assessment decays atomically (alias p)."""
+    url = "https://example.com/src-2490-decay"
+    first = sdk.assess_source(url, "agent-a", 0.9, "first assessment")
+    old_id = first["assessment_point_id"]
+    claim = sdk.create_point("statement", "assessed claim", status="live")["id"]
+    op = sdk.create_operator("IMPL", old_id, [claim])["id"]
+    sdk.set_point_baseline(old_id, 10.0, 1.0)
+    run_ep(sdk, [op])
+    assert posterior_mean(sdk, old_id) > 0.6, "assessment must be measured"
+    # Second assessment from the same assessor supersedes (flags) the first.
+    sdk.assess_source(url, "agent-a", 0.1, "revised assessment")
+    assert_vacuous(sdk, old_id, terminal_status=None, outdated=True)
+    run_ep(sdk, [op])
+    assert_vacuous(sdk, old_id, terminal_status=None, outdated=True)
+
+
+def test_capture_lane_retraction_decays(sdk, tmp_path):
+    """Capture-lane (EventAPI re-ingest) retraction: the projection fold
+    (_retract) is the replay surface — a PointRetracted emitted into the
+    projection must decay the tombstoned claim."""
+    import os
+
+    from tortoise.api import EventAPI
+    from tortoise.log import EventLog
+
+    ids = build_measured(sdk)
+    a = ids["a"]
+    assert posterior_mean(sdk, a) > 0.6
+    log = EventLog(os.path.join(str(tmp_path), "cap_events.jsonl"))
+    api = EventAPI(log, initiated_by="extractor", agent_id="test",
+                   projection=sdk._get_proj())
+    api.retract_point(a, corrects=None)
+    assert_vacuous(sdk, a, terminal_status="retracted", outdated=False)
+
+
+def test_superseded_rebuild_decay_parity(sup_2490):
+    """A superseded-then-rebuilt claim reads 0.5 (fold decay), NOT the
+    ep_alpha-coalesced 0.909 (10,1) a journal replay would otherwise
+    resurrect — the PointSuperseded fold decays the re-stamped node."""
+    _, events, sdk = sup_2490
+    a = sdk.create_point(
+        "statement", "measured old A", status="live",
+        ep_alpha=10.0, ep_beta=1.0, baseline_set=True)["id"]
+    succ = sdk.create_point("statement", "successor A'", status="live")["id"]
+    sdk.supersede_point(a, succ)
+    pre = ep_store(sdk, a)
+    assert pre["posterior_alpha"] == 1.0 and pre["confidence"] == 0.5
+    _rebuild_2490(sdk, events)
+    post = ep_store(sdk, a)
+    # Rebuild replay must reproduce the live decayed read via the fold decay:
+    # the PointSuperseded fold writes posterior (1,1) + confidence 0.5 onto
+    # the re-stamped node (a NO-fold rebuild leaves posterior/confidence
+    # NULL — EP columns are not projection-managed props — so a decayed
+    # terminal would otherwise read back as unmeasured neutral, or as the
+    # coalesced ep_alpha prior on graphs that journal it).
+    assert post["posterior_alpha"] == 1.0 and post["posterior_beta"] == 1.0, post
+    assert post["confidence"] == 0.5, post
+    assert post["status"] == "superseded" and post["outdated"] is True, post
+    assert posterior_mean(sdk, a) == pytest.approx(0.5), post
+
+
+def test_retracted_rebuild_decay_parity(sup_2490):
+    """retract → rebuild → 0.5: the PointRetracted fold decay ships in the
+    rebuild replay (retract fold-decay must not go untested)."""
+    _, events, sdk = sup_2490
+    a = sdk.create_point(
+        "statement", "measured retract A", status="live",
+        ep_alpha=10.0, ep_beta=1.0, baseline_set=True)["id"]
+    sdk.retract_point(a)
+    pre = ep_store(sdk, a)
+    assert pre["posterior_alpha"] == 1.0 and pre["confidence"] == 0.5
+    _rebuild_2490(sdk, events)
+    post = ep_store(sdk, a)
+    assert post["posterior_alpha"] == 1.0 and post["posterior_beta"] == 1.0, post
+    assert post["confidence"] == 0.5, post
+    assert post["status"] == "retracted", post
+    assert posterior_mean(sdk, a) == pytest.approx(0.5), post
+
+
+# ── Reader assertions: no contested computation lists a terminal claim ─────
+
+def _terminal_chain(sdk: TortoiseSDK) -> dict[str, str]:
+    """Measured A terminalized via supersede + a LIVE measured claim X (both
+    ~0.909 measured) for include/exclude contrast on the same graph."""
+    ids = build_measured(sdk)  # A strong → supersede below
+    succ = sdk.create_point("statement", "successor claim", status="live")["id"]
+    sdk.supersede_point(ids["a"], succ)
+    x = sdk.create_point("statement", "live measured contrast", status="live")["id"]
+    sdk.set_point_baseline(x, 10.0, 1.0)
+    opx = sdk.create_operator("IMPL", x, [ids["b"]])["id"]
+    run_ep(sdk, [ids["op"], opx])
+    ids.update({"succ": succ, "x": x, "opx": opx})
+    return ids
+
+
+def test_annotate_ep_batch_gates_terminal(sdk):
+    """annotate_ep_batch: a terminal (superseded + decayed) measured claim
+    reads has_ep=False + contested=False + confidence_mean 0.5; the LIVE
+    measured claim keeps has_ep=True."""
+    from tortoise.search_engine import annotate_ep_batch
+    ids = _terminal_chain(sdk)
+    ann = annotate_ep_batch(sdk._get_proj().g, [ids["a"], ids["x"]])
+    ta, xa = ann[ids["a"]], ann[ids["x"]]
+    assert ta.has_ep is False and ta.contested is False, ta
+    assert ta.confidence_mean == 0.5, ta
+    assert xa.has_ep is True and xa.contested is False, xa
+    assert xa.confidence_mean == pytest.approx(0.909, abs=0.01), xa
+
+
+def test_rankers_gate_terminal(sdk):
+    """GraphRanker/StateRanker/GapsRanker signal fetchers: a terminal claim
+    is never contested and never has_ep; its live twin stays measured."""
+    from tortoise.ranking import GapsRanker, GraphRanker, StateRanker
+    ids = _terminal_chain(sdk)
+    proj = sdk._get_proj()
+    gs = GraphRanker(projection=proj)._fetch_point_signals([ids["a"], ids["x"]])
+    assert gs[ids["a"]]["contested"] is False, gs
+    assert gs[ids["x"]]["contested"] is False, gs
+    assert gs[ids["x"]]["confidence"] > 0.5, gs
+    ss = StateRanker(projection=proj)._fetch_point_signals([ids["a"], ids["x"]])
+    assert ss[ids["a"]]["has_ep"] is False and ss[ids["a"]]["contested"] is False, ss
+    assert ss[ids["x"]]["has_ep"] is True, ss
+    gaps = GapsRanker(projection=proj)._fetch_confidence_signals([ids["a"], ids["x"]])
+    assert gaps[ids["a"]]["has_ep"] is False and gaps[ids["a"]]["contested"] is False, gaps
+    assert gaps[ids["x"]]["has_ep"] is True, gaps
+
+
+def test_get_contested_claims_excludes_terminal_keeps_live_unmeasured(sdk):
+    """get_contested_claims excludes terminal claims (decayed (1,1) variance
+    must not list) but KEEPS the unmeasured LIVE claim — Beta(1,1) fallback
+    variance 1/12 > 0.04 lists it (test_agent_ops_supersede:169 pin
+    semantics — NO has_ep gate here). Discriminating: the terminal carries a
+    pre-terminalization stored Beta(2,2) (variance 0.05 > 0.04) — un-gated
+    old code ranks it contested by stored variance."""
+    ids = build_measured(sdk)
+    succ = sdk.create_point("statement", "successor claim", status="live")["id"]
+    plant_highvar_terminal(sdk, ids["a"])
+    sdk.supersede_point(ids["a"], succ)
+    unmeasured = sdk.create_point("statement", "live unmeasured claim",
+                                  status="live")["id"]
+    ep = sdk._get_ep()
+    by_id = {c["id"]: c for c in ep.get_contested_claims()}
+    assert ids["a"] not in by_id, "superseded+decayed claim must not list"
+    # The live unmeasured claim (no persisted α/β → coalesced (1,1)) MUST
+    # list — an unmeasured LIVE claim is not excluded by the terminal
+    # predicate and there is deliberately NO has_ep gate (:169 pin).
+    assert unmeasured in by_id, by_id
+    assert by_id[unmeasured]["variance"] > 0.04
+
+
+def test_review_prune_variance_scan_excludes_terminal(sdk):
+    """_review_prune's contested variance scan: a terminal (retracted +
+    decayed) measured claim is flagged STALE (status) — never CONTESTED.
+    The terminal carries a pre-terminalization stored Beta(2,2) — old
+    un-gated code flags it contested by stored variance."""
+    ids = build_measured(sdk)
+    plant_highvar_terminal(sdk, ids["a"])
+    sdk.retract_point(ids["a"])
+    out = sdk.review_connections(mode="prune", scope=None, prune_limit=50)
+    pruned = out["prune"]
+    stale = [e for e in pruned if e["issue"] == "stale"]
+    contested = [e for e in pruned if e["issue"] == "contested"]
+    stale_endpoints = {e["detail"].get("stale_endpoint") for e in stale}
+    assert ids["a"] in stale_endpoints, stale
+    for e in contested:
+        assert e["detail"].get("contested_endpoint") != ids["a"], contested
+
+
+def test_review_prune_nand_challenged_excludes_flag_outdated(sdk):
+    """_review_prune's NAND-challenged (contested) leg: a LEGACY-INVALIDATED
+    claim (status stays 'live' + outdated=true — the flag class #2490
+    decays) with an incoming NAND operator edge must be flagged STALE —
+    never CONTESTED.  Pre-fix the status-only gate admitted it (status
+    'live') and the terminal read contested AND stale — the carve rested on
+    the false premise that status='live' implies live.  The LIVE counter
+    claim (outdated null) stays legitimately contested."""
+    x = sdk.create_point("statement", "X challenged claim", status="live")["id"]
+    y = sdk.create_point("statement", "Y live counter claim", status="live")["id"]
+    sdk.create_operator("NAND", x, [y])
+    # Legacy invalidate: flag-only terminalization (status untouched).
+    corr = sdk.create_point("statement", "X corrected replacement",
+                            status="live")["id"]
+    sdk.invalidate_point(x, corr)
+    out = sdk.review_connections(mode="prune", scope=None, prune_limit=50)
+    pruned = out["prune"]
+    stale = [e for e in pruned if e["issue"] == "stale"]
+    contested = [e for e in pruned if e["issue"] == "contested"]
+    stale_endpoints = {e["detail"].get("stale_endpoint") for e in stale}
+    assert x in stale_endpoints, stale
+    contested_endpoints = {
+        e["detail"].get("contested_endpoint") for e in contested
+    }
+    assert x not in contested_endpoints, contested
+    # The live counter claim is still challenged (its own NAND) — contested.
+    assert y in contested_endpoints, contested
+
+
+def test_why_direct_read_terminal_not_contested(sdk):
+    """why() direct id-lookup of a superseded claim (the supersession block
+    must serve terminal ids): the ep sub-block reads has_ep=False +
+    contested=False (projection-side override — NOT a WHERE drop)."""
+    from tortoise.why import assemble_why_blocks
+    ids = _terminal_chain(sdk)
+    blocks = assemble_why_blocks(sdk._get_proj(), [ids["a"], ids["x"]])
+    ep_a = blocks[ids["a"]]["ep"]
+    assert ep_a["has_ep"] is False and ep_a["contested"] is False, ep_a
+    assert ep_a["confidence_mean"] == 0.5, ep_a
+    ep_x = blocks[ids["x"]]["ep"]
+    assert ep_x["has_ep"] is True and ep_x["confidence_mean"] > 0.5, ep_x
+    # Supersession context is still served for the terminal id.
+    assert blocks[ids["a"]]["supersession"].get("status") == "superseded"
+
+
+def test_analyze_most_uncertain_and_trends_exclude_terminal(sdk):
+    """analyze most_uncertain/trends ORDER BY variance DESC must not list a
+    decayed terminal (variance 1/12 > 0.04 would top the ranking)."""
+    from tortoise.analyze import analyze
+    phrase = "how the strategy over time?"  # exact entity classify() extracts
+    a = sdk.create_point("statement", phrase + " measured claim TERM-A",
+                         status="live")["id"]
+    x = sdk.create_point("statement", phrase + " measured claim LIVE-X",
+                         status="live")["id"]
+    b = sdk.create_point("statement", "neutral follower", status="live")["id"]
+    sdk.set_point_baseline(a, 10.0, 1.0)
+    sdk.set_point_baseline(x, 10.0, 1.0)
+    sdk.set_point_baseline(b, 1.0, 1.0)
+    op_a = sdk.create_operator("IMPL", a, [b])["id"]
+    op_x = sdk.create_operator("IMPL", x, [b])["id"]
+    run_ep(sdk, [op_a, op_x])
+    sdk.retract_point(a)
+    proj = sdk._get_proj()
+
+    res = analyze("what are we most uncertain about?", proj)
+    assert res["pattern"] == "most_uncertain", res["pattern"]
+    raw_ids = {r[0] for r in res["raw"]}
+    assert a not in raw_ids, f"decayed terminal listed as most uncertain: {res['raw']}"
+    assert x in raw_ids, f"live measured claim missing from most uncertain: {res['raw']}"
+
+    res2 = analyze("how has the strategy changed over time?", proj)
+    assert res2["pattern"] == "trends", res2["pattern"]
+    raw2 = {r[0] for r in res2["raw"]}
+    assert a not in raw2, f"decayed terminal listed in trends: {res2['raw']}"
+    assert x in raw2, f"live measured claim missing from trends: {res2['raw']}"
+
+
+def test_w4_boost_never_fires_on_terminal(sdk, monkeypatch):
+    """W4-b relevance-gated contested boost: a terminal claim is gated to
+    contested=False upstream, so the boost resolver never sees it and
+    w4_contested_boost never fires — even under the W4 flag + a query."""
+    from tortoise.ranking import StateRanker
+    ids = build_measured(sdk)
+    plant_highvar_terminal(sdk, ids["a"])
+    sdk.retract_point(ids["a"])
+    monkeypatch.setenv("TORTOISE_W4_ENRICHMENT", "1")
+    ranker = StateRanker(projection=sdk._get_proj())
+    results = [{"id": ids["a"], "entity_type": "point",
+                "confidence": 0.5, "similarity": 0.8}]
+    ranked = ranker.rerank(results, entity_type="point",
+                           query="measured source claim")
+    rr = ranked[0]["recall_ranking"]
+    assert rr["contested"] is False, rr
+    assert "w4_contested_boost" not in rr, rr
+def test_outdated_prop_rejected_on_all_write_surfaces(sdk, tmp_path):
+    """#2491: the outdated flag is server-managed (lifecycle-only). Accepting
+    it via props silently flag-flips a live claim to EP-dead with no journal
+    event and no invalidate_factor_messages drop — the #2422 ghost resurfaces
+    (the degenerate factor never re-runs to zero the stale sibling seed).
+
+    Guard lives in _sanitize_props (covers update_point, create_point, the
+    dedup-forward path, AND _update_entity's label-loop, which all sanitize)
+    plus the MCP _SERVER_MANAGED_PROPS boundary.
+    """
+    a = sdk.create_point("statement", "live claim")["id"]
+
+    # update_point: reject + pre-write (flag unset, status unchanged)
+    with pytest.raises(ValueError, match="outdated"):
+        sdk.update_point(a, props={"outdated": True})
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.outdated, n.status",
+        params={"id": a},
+    ).result_set
+    assert rows[0][0] is None, "flag must be unset (guard pre-write)"
+    assert rows[0][1] in ("live", "draft"), "status must be unchanged"
+
+    # create_point: reject on the new-node path
+    with pytest.raises(ValueError, match="outdated"):
+        sdk.create_point("statement", "another", props={"outdated": True})
+
+    # _update_entity surface (routes through _sanitize_props label-loop)
+    with pytest.raises(ValueError, match="outdated"):
+        sdk.update_entity(a, outdated=True)
+
+    # MCP boundary parity: server-managed list rejects with ERR_INVALID shape
+    from tortoise import mcp_server
+
+    msg = mcp_server._reject_server_managed_props({"outdated": True, "note": "x"})
+    assert msg is not None and "outdated" in msg
+
+    # Guard fired pre-write: the flag never reached the graph on ANY surface
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.outdated = true RETURN count(n)",
+    ).result_set
+    assert int(rows[0][0]) == 0, (
+        "rejected outdated prop must never reach the graph (guard pre-write)"
     )

@@ -38,6 +38,16 @@ class Memory:
     #: (honest no-op) non-members — never a silent misroute (plan Task-3
     #: "item.target if present must be a closed-set member").
     target_id: str | None = None
+    #: Optional author-stated SOURCE STRENGTH for a filed evidence point
+    #: (ladder: gold/high/medium/low/unverified, T0-T4 or numeric — validated
+    #: by the SDK). When the executor/agent knows the counter-source is
+    #: strong it states it here; the arm maps it onto the created evidence.
+    #: Absent (None) => the arm applies the SDK's documented decide default
+    #: (medium, Beta(3,1)) — an agent-filed contradiction is NEVER weaker
+    #: than the standard rung by omission (#2284 exposure finding: the
+    #: draft-first path previously lost the default and behaved as
+    #: unverified, ~3x weaker than intended).
+    credibility: str | None = None
 
 
 @dataclass(frozen=True)

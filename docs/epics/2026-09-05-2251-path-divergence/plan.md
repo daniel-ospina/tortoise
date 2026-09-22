@@ -60,7 +60,7 @@ no-anchor contract). Verified: `_make_sdk` URI branch (174-176) is
 construction-args byte-identical to today's bare constructions, so URI mode is
 preserved; the `"registry"` anchor key is shared with `_registry_anchor()`
 writers so reads and writes view the same anchored server; routing site 2
-through `_make_sdk` preserves pin-4 (never constructs the `team_{tid}`
+through `_make_sdk` preserves pin-4 (never constructs the `org_{tid}`
 projection — `list_graphs()` is the probe) and fixes a latent exception-path
 SDK leak (`sdk.close()` at 13837 is skipped when `list_graphs()` raises).
 
@@ -125,13 +125,13 @@ SDK leak (`sdk.close()` at 13837 is skipped when `list_graphs()` raises).
      construction-args byte-identical to today (no anchor, no keepalive, no
      `_get_registry()` → cannot recreate the deleted `registry_control_plane`
      in Supabase mode; `list_graphs()` is server-wide and never mints a
-     `team_{tid}` graph — pin-4 preserved).
+     `org_{tid}` graph — pin-4 preserved).
    - Rewrite the #2179 comment block (:13822-13834) → #2251 resolution note;
      fix the stale "WITHOUT constructing the projection" docstring (the body
      does construct the *registry* projection; what it must never construct is
-     the `team_{tid}` projection).
+     the `org_{tid}` projection).
    - Remove the dead local `from tortoise.sdk import TortoiseSDK` (:13826).
-   - Reword the stale falsy-team_id guard comment (:333-334) whose rationale
+   - Reword the stale falsy-org_id guard comment (:333-334) whose rationale
      ("namespace=None would sweep the default/shared graph") changes post-fix
      (falsy id now fails the namespace charset regex at construction instead;
      the filter itself stays — it is still correct).
@@ -250,7 +250,7 @@ close+clear `_FALLBACK_KEEPALIVE` in a `finally` (fixture hygiene).
    resolution order, `_graph_has_team_namespace` `except → True` fail-open,
    and the #1997 accept-and-drop gate all stay — only the probed DB is
    corrected. `_ACCEPT_AND_DROP` unchanged.
-4. No read-path writes to the `team_{tid}` graph (pin-4): `list_graphs()` is
+4. No read-path writes to the `org_{tid}` graph (pin-4): `list_graphs()` is
    the probe; the seam's eager anchor connect touches only the writers' registry
    main graph (a graph that already exists post-provision). (The onboarding
    FLOW-leg re-enable in embedded-default deployments IS an intended

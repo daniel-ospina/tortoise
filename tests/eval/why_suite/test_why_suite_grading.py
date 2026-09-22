@@ -177,6 +177,102 @@ def test_clean_wrong_supports_pointer_fails_navigation():
     assert row["nav_errors"][0]["expected_target"] == "pt_support_a"
 
 
+# ── Resolved-presentation arm (issue #2490) ────────────────────────────────
+
+
+def _superseded_expected(**over) -> dict:
+    """Gold expectations for a RESOLVED (superseded) claim: conflict
+    surfacing not expected, support NOT graded (its belief is not measured —
+    has_ep=false via the terminal gate), the resolved arm graded instead."""
+    exp = {
+        "expected_conflict": False,
+        "expected_resolved": True,
+        "clean": False,
+        "family": "superseded",
+        "expected_targets": [
+            {"kind": "nand", "target_id": "pt_counter"},
+            {"kind": "superseded", "target_id": "pt_successor"},
+        ],
+        "expected_tradeoff": False,
+        "expected_support": False,
+        "favored_option_id": None,
+    }
+    exp.update(over)
+    return exp
+
+
+def _superseded_block(**over) -> dict:
+    """The #2490 why-block of a superseded predecessor: supersession view
+    served (status superseded), conflict STRUCTURE present for navigation,
+    but the ep block reads NOT contested (resolved, not a live dispute)."""
+    block = {
+        "point_id": "superseded-topic",
+        "ep": {"confidence_mean": 0.5, "variance": 0.083, "contested": False, "has_ep": False},
+        "supersession": {
+            "status": "superseded",
+            "superseded_by": {"point_id": "pt_successor"},
+            "supersedes": [],
+            "successor_label": "successor claim",
+        },
+        "conflicts": {"contested": False, "nands": [COUNTER]},
+        "dig_deeper": [
+            {"label": "read the counterargument (NAND)", "kind": "nand", "target": "pt_counter"},
+            {"label": "see the successor", "kind": "superseded", "target": "pt_successor"},
+        ],
+    }
+    block.update(over)
+    return block
+
+
+def test_superseded_resolved_block_grades_resolved_ok():
+    row = grading.grade_point(_superseded_block(), _superseded_expected())
+    assert row["expected_resolved"] is True
+    assert row["resolved_ok"] is True
+    # The resolved claim's belief is NOT measured — support is not graded.
+    assert row["support_sufficient"] is None
+    # Conflict surfacing not expected (resolved) — but structure nav still
+    # graded: the nand counter + successor pointers must resolve.
+    assert row["conflict_surfaced"] is None
+    assert row["nav_correct"] == 2 and row["nav_total"] == 2
+
+
+def test_superseded_block_reads_contested_fails_resolved_arm():
+    # The anti-ghost: if the ep block reads CONTESTED (the pre-#2490 ghost),
+    # the resolved arm must fail — never a live open dispute.
+    block = _superseded_block(
+        ep={"confidence_mean": 0.9, "variance": 0.083, "contested": True, "has_ep": True}
+    )
+    row = grading.grade_point(block, _superseded_expected())
+    assert row["resolved_ok"] is False
+
+
+def test_superseded_block_conflicts_contested_fails_resolved_arm():
+    block = _superseded_block(conflicts={"contested": True, "nands": [COUNTER]})
+    row = grading.grade_point(block, _superseded_expected())
+    assert row["resolved_ok"] is False
+
+
+def test_superseded_block_missing_supersession_fails_closed():
+    # Fail-closed: no supersession view = NOT presented as resolved.
+    block = _superseded_block(supersession=None)
+    row = grading.grade_point(block, _superseded_expected())
+    assert row["resolved_ok"] is False
+
+
+def test_superseded_block_wrong_status_fails_resolved_arm():
+    block = _superseded_block(supersession=dict(_superseded_block()["supersession"], status="live"))
+    row = grading.grade_point(block, _superseded_expected())
+    assert row["resolved_ok"] is False
+
+
+def test_live_row_never_grades_resolved_arm():
+    # A live/clean claim carries no resolved expectation — resolved_ok None.
+    row = grading.grade_point(_conflicted_block(), _expected())
+    assert row["expected_resolved"] is False
+    assert row["resolved_ok"] is None
+    assert row["support_sufficient"] is True  # support still graded live
+
+
 # ── Dig-deeper navigation (Q2) ─────────────────────────────────────────────
 
 

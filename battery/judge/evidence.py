@@ -16,7 +16,8 @@ Legs over the evidence bundle (declarative anchored-yes/no protocol):
   configs (BATTERY_JUDGE_MODEL + BATTERY_JUDGE_MODEL_2, both temp 0) —
   a single model at temp 0 yields kappa==1.0 by construction and never
   counts as reliability, so the real path FAILS CLOSED when the second
-  config is absent;
+  config is absent — or when both configs resolve to the SAME model id
+  (#2601, an identical temp-0 pair is the same kappa==1.0 lie);
 - per-item IRT infit [0.7, 1.3] over anchored item renders;
 - gold-anchor agreement >= 0.8 (the block's >= 1 expected-'no' render with
   no-share > 20% catches a degenerate all-yes judge);
@@ -54,10 +55,18 @@ class _SpendMeter:
     reserve_usd: float | None = None
     total_usd: float = 0.0
     calls: int = 0
+    #: #2906 — how the priced calls got their cost (review #2915 P2: the judge
+    #: spend figure was the one persisted number with no provenance label).
+    provider_calls: int = 0
+    estimated_calls: int = 0
 
     def record(self, call: JudgeCall) -> None:
         self.total_usd += float(call.cost_usd or 0.0)
         self.calls += 1
+        if getattr(call, "cost_basis", "estimated") == "provider_reported":
+            self.provider_calls += 1
+        else:
+            self.estimated_calls += 1
         if self.reserve_usd is not None and self.total_usd > self.reserve_usd:
             raise ConfigError(
                 f"judge-leg reserve exceeded: ${self.total_usd:.4f} spent > "
@@ -117,8 +126,10 @@ def run_evidence_validation(*, config_dir: str | Path, rubric_id: str,
 
     Real path (judge_a/judge_b None): builds Judge A from
     BATTERY_JUDGE_MODEL and Judge B from BATTERY_JUDGE_MODEL_2 (absent
-    second config => ConfigError — fail-closed against a degenerate
-    single-model kappa==1.0). Hermetic tests inject mock judges.
+    second config, or one resolving to the SAME model id as the first,
+    => ConfigError — fail-closed against a degenerate single-model
+    kappa==1.0, which an identical temp-0 judge pair reproduces exactly).
+    Hermetic tests inject mock judges.
     """
     bundle = _load_bundle(evidence)
     renders = [str(r.get("render", "")) for r in
@@ -146,6 +157,10 @@ def run_evidence_validation(*, config_dir: str | Path, rubric_id: str,
         raise ConfigError(f"rubric {rubric_id!r} has no items")
 
     meter = _SpendMeter(reserve_usd=reserve_usd)
+    # Real path: both judges env-built from the two configs (never
+    # injected hermetic mocks) — only that pair carries the two-config
+    # distinctness contract the inter-judge leg asserts.
+    env_pair = judge_a is None and judge_b is None and not force_mock
     if judge_a is None:
         if force_mock:
             judge_a = JudgeClient(force_mock=True)
@@ -156,6 +171,25 @@ def run_evidence_validation(*, config_dir: str | Path, rubric_id: str,
             judge_b = JudgeClient(force_mock=True)
         else:
             judge_b = _real_client("BATTERY_JUDGE_MODEL_2")
+    # #2601 distinctness guard: a second config that RESOLVES to the same
+    # model as the first is degenerate — two identical temp-0 judges emit
+    # byte-identical verdicts, so AC1/kappa == 1.0 by construction and the
+    # leg "passes" without ever measuring inter-judge reliability. Compare
+    # resolved model ids whitespace-stripped + case-insensitively (the
+    # same physical model under two slug spellings is equally degenerate;
+    # no string compare can catch a slug alias, but this closes the
+    # exact/format-level duplicate). Hermetic injected mocks are exempt —
+    # they may legitimately share a class, and the injected pair never is
+    # the env-built two-model claim this leg makes.
+    if env_pair and judge_a.model_id.strip().lower() == (
+            judge_b.model_id.strip().lower()):
+        raise ConfigError(
+            f"real validation refuses to start: BATTERY_JUDGE_MODEL and "
+            f"BATTERY_JUDGE_MODEL_2 both resolve to "
+            f"{judge_a.model_id.strip()!r} — two identical temp-0 judges "
+            f"yield AC1/kappa == 1.0 by construction and never measure "
+            f"inter-judge reliability; set BATTERY_JUDGE_MODEL_2 to a "
+            f"DISTINCT model")
     a = _MeteredClient(judge_a, meter)
     b = _MeteredClient(judge_b, meter)
 
@@ -224,4 +258,11 @@ def run_evidence_validation(*, config_dir: str | Path, rubric_id: str,
 
 
 def meter_report(meter: _SpendMeter) -> dict:
-    return {"judge_calls": meter.calls, "judge_spend_usd": meter.total_usd}
+    return {"judge_calls": meter.calls, "judge_spend_usd": meter.total_usd,
+            # Never asserts provenance with nothing behind it: a run that
+            # priced no calls reads "estimated", matching the recorder and
+            # probe manifest rules.
+            "cost_basis": (
+                "estimated" if not (meter.provider_calls or meter.estimated_calls)
+                else "provider_reported" if not meter.estimated_calls
+                else "mixed" if meter.provider_calls else "estimated")}

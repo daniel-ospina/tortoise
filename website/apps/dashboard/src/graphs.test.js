@@ -4,13 +4,17 @@ import assert from 'node:assert/strict'
 import {
   GRAPH_KEY_SCOPES,
   canManageGraphKeys,
+  deleteTypedMatches,
   graphCanDelete,
+  graphKeyPanelEmptyLine,
+  graphKeysSuppressed,
   graphMintBody,
   graphsMeter,
   isDefaultGraph,
   sortedGraphRows,
   sortedTrashRows,
   tierCreateLocked,
+  TRASH_GRACE_DAYS,
   trashDaysLeft,
   trashEraseLabel,
 } from './graphs.js'
@@ -50,6 +54,20 @@ test('tierCreateLocked: free/anon locked; solo/pro/team/unknown open', () => {
   assert.equal(tierCreateLocked(null), false)
 })
 
+test('graphKeysSuppressed: default rows suppress the Keys cell (its count is 0 in both lanes; keys live on the API Keys tab)', () => {
+  // The server reports key_count 0 for default-kind rows in BOTH lanes and
+  // the UI must never render a bound-default artifact (e.g. the registry
+  // capstone "1") on a row it cannot act on — suppress the whole cell.
+  assert.equal(graphKeysSuppressed(DEFAULT), true)
+  assert.equal(graphKeysSuppressed({ ...DEFAULT, key_count: 1 }), true) // capstone bound-default "1" still suppressed
+  assert.equal(graphKeysSuppressed(CUSTOM('a')), false)
+  assert.equal(graphKeysSuppressed({ ...CUSTOM('a'), key_count: 3 }), false)
+  assert.equal(graphKeysSuppressed(null), true)
+  assert.equal(graphKeysSuppressed(undefined), true)
+  assert.equal(graphKeysSuppressed({ kind: 'default' }), true)
+  assert.equal(graphKeysSuppressed({ kind: 'custom' }), false)
+})
+
 test('canManageGraphKeys: custom graphs only (default keys live on API Keys)', () => {
   assert.equal(canManageGraphKeys(DEFAULT), false)
   assert.equal(canManageGraphKeys(CUSTOM('a')), true)
@@ -82,6 +100,19 @@ test('sortedGraphRows: empty + null-safe', () => {
   assert.deepEqual(sortedGraphRows(undefined), [])
 })
 
+test('graphKeyPanelEmptyLine: #2307 owner/admin keeps mint CTA; member gets who-can-create', () => {
+  // Owner/admin panel renders the mint form next to the empty line — the
+  // actionable "mint one above" copy stays truthful for them.
+  assert.equal(
+    graphKeyPanelEmptyLine(true),
+    'No keys for this graph yet — mint one above (shown once).')
+  assert.equal(
+    graphKeyPanelEmptyLine(false),
+    'No keys for this graph yet — only owners and admins can create keys.')
+  // The member branch must never point at the owner-only mint control.
+  assert.ok(!graphKeyPanelEmptyLine(false).includes('mint'))
+})
+
 test('graphMintBody: graph-bound data-plane scopes', () => {
   const b = graphMintBody('g-a', 'my key')
   assert.deepEqual(b, { graph_id: 'g-a', scopes: ['graphs:read', 'graphs:write'], name: 'my key' })
@@ -108,13 +139,13 @@ const TOMB = (id, deletedAt) => ({ graph_id: id, name: id, kind: 'custom', delet
 
 test('trashDaysLeft: counts whole days from deleted_at to now', () => {
   const now = new Date(T0).toISOString()
-  // Deleted exactly 4 days ago → 3 days left of the 7-day window.
+  // Deleted exactly 4 days ago → the rest of the window.
   const old = new Date(T0 - 4 * 86400000).toISOString()
-  assert.equal(trashDaysLeft(old, now), 3)
-  // Deleted just now → 7 days left.
-  assert.equal(trashDaysLeft(now, now), 7)
-  // Deleted 7+ days ago → 0 (past window; purge clears on cadence).
-  const aged = new Date(T0 - 8 * 86400000).toISOString()
+  assert.equal(trashDaysLeft(old, now), TRASH_GRACE_DAYS - 4)
+  // Deleted just now → the full window.
+  assert.equal(trashDaysLeft(now, now), TRASH_GRACE_DAYS)
+  // Deleted past the window → 0 (past window; purge clears on cadence).
+  const aged = new Date(T0 - (TRASH_GRACE_DAYS + 1) * 86400000).toISOString()
   assert.equal(trashDaysLeft(aged, now), 0)
 })
 
@@ -148,4 +179,19 @@ test('sortedTrashRows: empty + null-safe', () => {
   assert.deepEqual(sortedTrashRows([]), [])
   assert.deepEqual(sortedTrashRows(null), [])
   assert.deepEqual(sortedTrashRows(undefined), [])
+})
+
+// ── #2701 delete-modal type-to-confirm gate ──────────────────────────────
+test('deleteTypedMatches: only the literal word "delete" passes', () => {
+  assert.equal(deleteTypedMatches('delete'), true)
+  assert.equal(deleteTypedMatches(' delete '), true)   // trim tolerated
+  assert.equal(deleteTypedMatches('DELETE'), true)     // case-insensitive
+  assert.equal(deleteTypedMatches('Delete'), true)
+  assert.equal(deleteTypedMatches('delet'), false)
+  assert.equal(deleteTypedMatches('deletee'), false)
+  assert.equal(deleteTypedMatches('delete now'), false) // no extra words
+  assert.equal(deleteTypedMatches(''), false)
+  assert.equal(deleteTypedMatches(null), false)
+  assert.equal(deleteTypedMatches(' x delete'), false)  // prefix fails
+  assert.equal(deleteTypedMatches('delete x'), false)   // suffix fails
 })

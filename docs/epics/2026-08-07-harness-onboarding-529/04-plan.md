@@ -100,7 +100,7 @@ class OnboardingStatePatchRequest(BaseModel):  # tortoise/hosted_api.py
     section: str | None = None   # "config"|"prompt"|"both" — analytics only, NOT persisted
 ```
 
-Behavior contract: handler pops `harness`/`section` before `_update_onboarding_state` (same pattern as `email`); if `harness ∈ {claude,codex,cursor,pi}` and `section ∈ {config,prompt,both}` (subset-of-#235-enum validated; `both` accepted for a future copy-both action per #235's schema), emit `_track_analytics_event(team_id, "artifact_copied", {"harness":…, "section":…})`; invalid values → no event, no error. Analytics props already allowed (`_ALLOWED_ANALYTICS_PROPS` contains both). Integrity constraints: enum check server-side; state keys unchanged (`_ALLOWED_STATE_KEYS` untouched).
+Behavior contract: handler pops `harness`/`section` before `_update_onboarding_state` (same pattern as `email`); if `harness ∈ {claude,codex,cursor,pi}` and `section ∈ {config,prompt,both}` (subset-of-#235-enum validated; `both` accepted for a future copy-both action per #235's schema), emit `_track_analytics_event(org_id, "artifact_copied", {"harness":…, "section":…})`; invalid values → no event, no error. Analytics props already allowed (`_ALLOWED_ANALYTICS_PROPS` contains both). Integrity constraints: enum check server-side; state keys unchanged (`_ALLOWED_STATE_KEYS` untouched).
 
 **Enum↔slug mapping (coherence fix):** analytics/beacon harness ENUM values are `{claude, codex, cursor, pi}` (short form, #235 schema); variant ARTIFACT slugs are `{claude-code, codex, cursor, pi}` (file names). welcome.html owns the single explicit mapping `claude → claude-code` (identity for the other three) when building the Block B fetch URL; T3 asserts the mapping's presence.
 

@@ -907,6 +907,348 @@ class TestS3:
         types = {t for _, t in sdk.calls}
         assert "object" in types and "event" in types
 
+    def test_turn_echo_is_never_an_s3_prior(self, monkeypatch):
+        """#2552: a capture's own turn echoes are transcript, not memory.
+
+        On a fresh capture the session's turn Points (``{sid}_t{i}``) are the
+        only content in the graph, so S3 used to return them as the
+        link-before-create prior set: the extracted claim NOOP-folded onto its
+        own transcript echo and never became a memory Point."""
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+
+        class MockSDK:
+            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                if entity_type != "point":
+                    return []
+                return [
+                    {"id": "s1_t3", "content": "[user] the lease makes that "
+                     "impossible no matter how we roll out",
+                     "point_kind": "event"},
+                    {"id": "s1_t4", "content": "[assistant] then we re-plan",
+                     "point_kind": "event"},
+                    # a role OUTSIDE the prefix allowlist — the production turn
+                    # marker still identifies it as an echo
+                    {"id": "s1_t5", "content": "[developer] custom role turn",
+                     "point_kind": "event"},
+                    # a caller-minted Point in the session's turn namespace, but
+                    # NOT a turn — must survive the prior set
+                    {"id": "s1_t9", "content": "the lease forbids it",
+                     "point_kind": "statement"},
+                    {"id": "pt_real", "content": "a real claim",
+                     "point_kind": "statement"},
+                ]
+
+        res = v2.search_graph(MockSDK(), S2_FIXTURE, "STORY", session_id="s1")
+        assert [p["id"] for p in res["points"]] == ["s1_t9", "pt_real"]
+
+    def test_turn_echo_filter_is_anchored_not_shape_based(self):
+        """The id leg is exactly ``^{session_id}_t\\d+$``, never a shape guess.
+
+        ``create_point`` accepts explicit caller ids and ``retrieval.py``
+        records the D3 decision that "the shape of an id is not evidence that a
+        capture happened", so an unanchored ``_t\\d+$`` would silently drop a
+        real, caller-minted memory Point from every prior set."""
+        # this capture's own echoes
+        assert v2._is_turn_echo_id("s1", "s1_t0")
+        assert v2._is_turn_echo_id("wp06_quarry_rollout",
+                                   "wp06_quarry_rollout_t8")
+        # another session's turn is not ours to drop
+        assert not v2._is_turn_echo_id("s1", "s2_t8")
+        # a session id that PREFIXES another's must not over-match
+        assert not v2._is_turn_echo_id("s1", "s10_t3")
+        # caller-minted ids that merely LOOK like the shape — the class
+        # tests/test_d3_session_identity.py documents as reachable
+        assert not v2._is_turn_echo_id("s1", "acme_t5")
+        assert not v2._is_turn_echo_id("s1", "note_t12")
+        assert not v2._is_turn_echo_id("s1", "pt_foo_t3")
+        # exactly ``\d`` — NOT ``str.isdigit()``, which also accepts category-No
+        # numerics (superscript 2, circled 1) for which ``\d`` is False
+        assert not v2._is_turn_echo_id("s1", "s1_t\u00b2")
+        assert not v2._is_turn_echo_id("s1", "s1_t\u2460")
+        assert not v2._is_turn_echo_id("s1", "s1_t")        # no digits
+        assert not v2._is_turn_echo_id("s1", "s1_t3\n")    # no trailing NL
+        # content-addressed memory ids
+        assert not v2._is_turn_echo_id(
+            "s1",
+            "pt_e3f831d86cf073e2af58d9b542c5ca7be19ec7c114d307f675fce08b1672a8")
+        # regex metacharacters in the session id are escaped, not interpreted
+        assert v2._is_turn_echo_id("s.1", "s.1_t2")
+        assert not v2._is_turn_echo_id("s.1", "sx1_t2")
+        # no session named -> never drop (an unanchored match would be a guess)
+        assert not v2._is_turn_echo_id(None, "s1_t8")
+        assert not v2._is_turn_echo_id("", "s1_t8")
+        assert not v2._is_turn_echo_id("s1", None)
+
+    def test_turn_echo_filter_requires_a_turn_marker(self):
+        """Both legs must hold: a caller-minted Point carrying the session's
+        turn-namespace id but no turn marker is NOT a turn echo."""
+        assert v2._is_turn_echo_row("s1", {"id": "s1_t3",
+                                           "content": "[user] hello there"})
+        # the production turn marker — covers a role outside the allowlist
+        assert v2._is_turn_echo_row(
+            "s1", {"id": "s1_t5", "content": "[developer] custom role",
+                   "point_kind": "event"})
+        # same id, claim content and kind -> preserved
+        assert not v2._is_turn_echo_row(
+            "s1", {"id": "s1_t3", "content": "the lease forbids it",
+                   "point_kind": "statement"})
+        # transcript content but another session's id -> preserved
+        assert not v2._is_turn_echo_row(
+            "s1", {"id": "s2_t3", "content": "[user] hello"})
+        assert not v2._is_turn_echo_row(
+            None, {"id": "s1_t3", "content": "[user] hello"})
+
+    def test_turn_echo_content_pattern_matches_retrieval(self):
+        """The content leg IS ``retrieval._ROLE_PREFIX_RE`` — pinned
+        STRUCTURALLY (pattern + flags), so a role added to the production
+        pattern cannot leave this mirror stale."""
+        from tortoise.retrieval import _ROLE_PREFIX_RE
+        assert v2._TURN_ECHO_CONTENT_RE.pattern == _ROLE_PREFIX_RE.pattern
+        assert v2._TURN_ECHO_CONTENT_RE.flags == _ROLE_PREFIX_RE.flags
+
+    def test_turn_echo_id_agrees_with_the_graded_layer_pattern(self):
+        """The id leg is the graded layer's ``_turn_id_pattern`` identity on every
+        id WITHOUT a trailing newline — and deliberately STRICTER on the one that
+        has one (``fullmatch`` is ``\\A…\\Z``; the runner's ``.match`` + ``$``
+        accepts a single trailing newline). Both sides of that divergence are
+        asserted so the difference is pinned and visible rather than latent."""
+        from tests.eval.write_path.runner import _turn_id_pattern
+        pat = _turn_id_pattern("s1")
+        for pid in ("s1_t0", "s1_t12", "s2_t1", "s10_t1", "s1_t", "s1_tx",
+                    "pt_ab_t3", "acme_t5"):
+            assert v2._is_turn_echo_id("s1", pid) == bool(pat.match(pid)), pid
+        # the deliberate divergence: the runner's ``$`` accepts a trailing
+        # newline, this predicate does not (stricter = a missed drop, never
+        # memory loss)
+        assert bool(pat.match("s1_t3\n")) is True
+        assert v2._is_turn_echo_id("s1", "s1_t3\n") is False
+
+    def test_turn_echo_filter_is_point_only(self, monkeypatch):
+        """An echo-shaped id on the event/entity legs is untouched — the drop
+        is confined to ``entity_type == "point"``."""
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+
+        class MockSDK:
+            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                if entity_type == "point":
+                    return [{"id": "pt_real", "content": "a real claim",
+                             "point_kind": "statement"}]
+                if entity_type == "event":
+                    return [{"id": "s1_t3", "content": "[user] owner paused",
+                             "point_kind": "core:decision"}]
+                if entity_type in ("object", "subject"):
+                    # echo-shaped id AND transcript content — still preserved on
+                    # the entity leg, which carries no such drop
+                    return [{"id": "s1_t4", "content": "[user] a named entity",
+                             "point_kind": "core:plan"}]
+                return []
+
+        res = v2.search_graph(MockSDK(), S2_FIXTURE, "The story. First para.",
+                              session_id="s1")
+        assert [e["id"] for e in res["events"]] == ["s1_t3"]
+        assert [e["id"] for e in res["entities"]] == ["s1_t4"]
+        assert [p["id"] for p in res["points"]] == ["pt_real"]
+
+    def test_turn_echo_drop_refills_the_prior_window(self, monkeypatch):
+        """The drop runs AFTER the SDK's own ``[:limit]`` truncation (#898's
+        filter-before-truncation contract, applied here by hand), so the point
+        leg over-fetches and refills. The mock HONOURS ``limit`` exactly as
+        ``tortoise_fts_query`` does, so the behavioural assertion can only pass
+        if the refill is real."""
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+
+        class MockSDK:
+            def __init__(self):
+                self.asked = []
+
+            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                self.asked.append((entity_type, limit))
+                if entity_type != "point":
+                    return []
+                rows = ([{"id": f"s1_t{i}", "content": f"[user] turn {i}",
+                          "point_kind": "event"} for i in range(5)]
+                        + [{"id": "pt_real", "content": "a real claim",
+                            "point_kind": "statement"}])
+                return rows[:limit]  # the real callee truncates to `limit`
+
+        sdk = MockSDK()
+        res = v2.search_graph(sdk, S2_FIXTURE, "STORY", session_id="s1")
+        assert [p["id"] for p in res["points"]] == ["pt_real"]
+        # the point leg asked for exactly `limit + _PRIOR_OVERFETCH`; every other
+        # leg kept the exact window it always had
+        assert sdk.asked, "no queries ran"
+        assert {win for t, win in sdk.asked if t == "point"} == \
+            {3 + v2._PRIOR_OVERFETCH}, sdk.asked
+        assert {win for t, win in sdk.asked if t != "point"} == {3}, sdk.asked
+
+    def test_turn_echo_drop_refills_a_single_slot(self, monkeypatch):
+        """``limit=1`` — the minimal refill: one echo dropped, the real prior
+        still returned."""
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+
+        class MockSDK:
+            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                if entity_type != "point":
+                    return []
+                rows = [{"id": "s1_t0", "content": "[user] hi",
+                         "point_kind": "event"},
+                        {"id": "pt_real", "content": "a real claim",
+                         "point_kind": "statement"}]
+                return rows[:limit]
+
+        res = v2.search_graph(MockSDK(), S2_FIXTURE, "STORY", limit=1,
+                              session_id="s1")
+        assert [p["id"] for p in res["points"]] == ["pt_real"]
+
+    def test_turn_echo_window_bound_is_documented(self, monkeypatch):
+        """The refill pool is FINITE, its SIZE is pinned, and BOTH sides of its
+        boundary are asserted — not implied.
+
+        A capture can hold ``MAX_SESSION_TURNS`` (500) turns; when more echoes
+        than the window outrank a real prior, the prior is still starved. The
+        durable fix is a pre-truncation exclusion in the retrieval layer
+        (#4509); until then the pool is a deliberate constant, so growth is a
+        conscious change and its declared bound stays true."""
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+        # the pool size IS part of the documented contract — pinned, so a silent
+        # growth cannot turn the declared bound into a lie
+        assert v2._PRIOR_OVERFETCH == 12
+
+        def _prior_survives(echoes):
+            class MockSDK:
+                def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                    if entity_type != "point":
+                        return []
+                    rows = ([{"id": f"s1_t{i}", "content": f"[user] turn {i}",
+                              "point_kind": "event"} for i in range(echoes)]
+                            + [{"id": "pt_real", "content": "a real claim",
+                                "point_kind": "statement"}])
+                    return rows[:limit]
+            return bool(v2.search_graph(MockSDK(), S2_FIXTURE, "STORY",
+                                        session_id="s1")["points"])
+
+        # one echo short of the window -> the refill still surfaces the prior
+        assert _prior_survives(3 + v2._PRIOR_OVERFETCH - 1)
+        # AT the window bound the prior is starved — the documented limitation
+        assert not _prior_survives(3 + v2._PRIOR_OVERFETCH)
+
+    def test_turn_echo_drop_never_exceeds_the_limit(self, monkeypatch):
+        """The refill re-truncates: the prior set is never wider than ``limit``,
+        even though the point leg fetched ``limit + _PRIOR_OVERFETCH`` rows."""
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+
+        class MockSDK:
+            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                if entity_type != "point":
+                    return []
+                rows = [{"id": f"pt_{i}", "content": f"claim {i}",
+                         "point_kind": "statement"} for i in range(8)]
+                return rows[:limit]  # the real callee truncates to the request
+
+        res = v2.search_graph(MockSDK(), S2_FIXTURE, "STORY", session_id="s1")
+        assert len(res["points"]) == 3
+
+    def test_over_fetch_is_clamped_to_the_sdk_limit_bound(self, monkeypatch):
+        """The over-fetch must not push the callee past its documented bound,
+        the mirror constant must match the callee's REAL bound, and an
+        out-of-range ``limit`` must still reach the callee (which raises) rather
+        than being silently capped."""
+        import inspect
+
+        from tortoise.sdk import TortoiseSDK
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+        # drift guard: the bound is a hardcoded literal in the callee — pin the
+        # mirror against THAT source, not against itself
+        src = inspect.getsource(TortoiseSDK.tortoise_fts_query)
+        assert f"limit > {v2._FTS_LIMIT_MAX}" in src, (
+            f"_FTS_LIMIT_MAX={v2._FTS_LIMIT_MAX} does not match the callee's "
+            "documented bound — the clamp would let the over-fetch raise")
+
+        class MockSDK:
+            def __init__(self):
+                self.asked = []
+
+            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                self.asked.append((entity_type, limit))
+                return []
+
+        sdk = MockSDK()
+        v2._fts_rows(sdk, "point", "q", limit=v2._FTS_LIMIT_MAX - 1,
+                     session_id="s1")
+        assert sdk.asked == [("point", v2._FTS_LIMIT_MAX)], sdk.asked
+
+        sdk2 = MockSDK()
+        v2._fts_rows(sdk2, "point", "q", limit=v2._FTS_LIMIT_MAX + 1,
+                     session_id="s1")
+        assert sdk2.asked == [("point", v2._FTS_LIMIT_MAX + 1)], sdk2.asked
+
+    def test_over_fetch_only_when_a_session_can_be_filtered(self):
+        """No session -> nothing to drop -> no wider window (no wasted work)."""
+        class MockSDK:
+            def __init__(self):
+                self.asked = []
+
+            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                self.asked.append((entity_type, limit))
+                return []
+
+        sdk = MockSDK()
+        v2._fts_rows(sdk, "point", "q", limit=3)  # no session_id
+        v2._fts_rows(sdk, "point", "q", limit=3, session_id="s1")
+        assert sdk.asked == [("point", 3),
+                             ("point", 3 + v2._PRIOR_OVERFETCH)], sdk.asked
+
+    def test_extract_session_forwards_the_session_id_to_the_prior_search(
+            self, monkeypatch):
+        """The filter is inert unless ``extract_session_v2`` hands its session
+        id to ``search_graph`` — the wiring that activates #2552's fix. Pinned
+        because dropping that kwarg re-introduces the bug with the suite green."""
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+        seen = {}
+
+        class _ReachedS3(Exception):
+            pass
+
+        def _fake_search_graph(sdk, embed_list, story, **kw):
+            seen.update(kw)
+            raise _ReachedS3()
+
+        monkeypatch.setattr(v2, "search_graph", _fake_search_graph)
+        conv = [{"role": "user", "content": "we should ship the cache"},
+                {"role": "assistant", "content": "agreed"}]
+        with pytest.raises(_ReachedS3):
+            v2.extract_session_v2(MockModel([]), conv, session_id="sess-42")
+        assert seen.get("session_id") == "sess-42"
+
+    def test_capture_extraction_anchor_is_the_turn_id_session(self, monkeypatch):
+        """The session id the EXTRACTOR is handed is the same one the capture
+        minted the turn ids from (``f"{session_id}_t{i}"``) — the identity the
+        S3 filter anchors on. Pinned at the sdk seam, because the tests above can
+        only see the id the extractor is given, not where it came from: rewriting
+        ``sdk._extract_session_v2``'s forward to ``session_id=None`` leaves them
+        all green while the filter becomes a no-op on the real capture path."""
+        import tortoise.extractor_v2 as ev2
+        monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+        seen = {}
+
+        class _ReachedExtractor(Exception):
+            pass
+
+        def _recorder(model, conversation, **kw):
+            seen.update(kw)
+            raise _ReachedExtractor()
+
+        monkeypatch.setattr(ev2, "extract_session_v2", _recorder)
+        from tortoise.sdk import TortoiseSDK
+        sdk = object.__new__(TortoiseSDK)  # the request path needs no graph
+        with pytest.raises(_ReachedExtractor):
+            sdk._extract_session_v2([{"role": "user", "content": "hi"}],
+                                    "sess-7", "2026-01-01T00:00:00Z")
+        # the extraction anchor and the turn-id prefix are ONE identity
+        assert seen.get("session_id") == "sess-7"
+        assert v2._is_turn_echo_id(seen["session_id"],
+                                   f"{seen['session_id']}_t0")
+
     def test_degrades_on_backend_error(self, monkeypatch):
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
 
@@ -4629,3 +4971,285 @@ class TestKindClassifierAdjudication2134:
         with open(kc.__file__) as _f:
             src = _f.read()
         assert "escalate=False" in src
+
+
+# ── #2552 layer-2 operator-emission semantics (remaining fix waves) ───────
+
+
+class TestOperatorSemantics2552:
+    """Hermetic emission-semantics pins for the #2552 remaining waves — the
+    #2514 operator corpus measured 0/4 edge_correct (diagnosis in PR #2556):
+    op_02 NEGATE src/dst inverted, op_03 MITIGATES emission gap (risk point
+    fused into the action, no mitigation structure), op_04 SUPERSEDE partial
+    (no point-level decision-reversal → CORRECTS path), plus the grader leg
+    (paraphrase band — graded in test_write_path_grading.py). Prompt-render
+    pins assert the emission CONTRACT reaches both mapping stages; the
+    execute_embed pins assert the deterministic folds. No API — hermetic."""
+
+    # ── prompt/output-contract pins ──────────────────────────────────────
+
+    def test_s2s4_prompts_carry_nand_direction_rule(self):
+        """op_02: both mapping stages instruct the NAND direction — src =
+        the ATTACKING counter-claim (the newer claim), dst = the claim under
+        attack (NAND points AT what it refutes, #909 new-claim-attacks-
+        existing). The inverted emission measured on the corpus (older
+        hypothesis listed as the attacker) must not survive an informed
+        mapper."""
+        for prompt in (v2.render_s2_prompt(), v2.render_s4_prompt("S", {}, {}),
+                       v2.render_s2_prompt(core_only=True),
+                       v2.render_s4_prompt("S", {}, {}, core_only=True)):
+            assert "new-claim-attacks-existing" in prompt
+            assert "NAND points AT what it refutes" in prompt
+            assert "ATTACKING counter-claim" in prompt
+        # the S2 semantic core (verbose) carries its own direction bullet
+        assert "NAND DIRECTION (#909" in v2.S2_TMPL
+
+    def test_s2s4_prompts_carry_risk_and_mitigation_structure(self):
+        """op_03: a risk/concern claim is its OWN durable point (never fused
+        into the action that closes it) and a mitigation is a graded
+        dampener ON AN OPERATOR edge (src = action content, target_edge =
+        the dampened edge, strength 0.10-0.50, w*(1-strength) never a
+        refutation) — the shared rule block reaches both mapping stages."""
+        for prompt in (v2.render_s2_prompt(), v2.render_s4_prompt("S", {}, {}),
+                       v2.render_s2_prompt(core_only=True),
+                       v2.render_s4_prompt("S", {}, {}, core_only=True)):
+            assert "RISK/RELEVANCE CLAIMS ARE DURABLE POINTS" in prompt
+            assert "MITIGATES = graded relevance dampener ON AN OPERATOR edge" in prompt
+            assert "w_eff = w * (1 - strength)" in prompt
+
+    def test_s4_prompt_carries_decision_reversal_rule_and_contract_key(self):
+        """op_04: the S4 rules carry the DECISION/CLAIM REVERSAL recipe
+        (point supersedes only against an EARLIER-session claim surfaced by
+        search; in-session reversals are state/validity semantics) and the
+        OUTPUT_CONTRACT's points fragment advertises the ``supersedes`` key
+        (id|content|null) so both mapping stages can emit it."""
+        assert "DECISION/CLAIM REVERSAL" in v2.S4_TMPL
+        assert '"supersedes": "existing-id|content|null"' in v2.OUTPUT_CONTRACT
+        for prompt in (v2.render_s2_prompt(), v2.render_s4_prompt("S", {}, {})):
+            assert "existing-id|content|null" in prompt
+
+    def test_anti_routine_gate_carves_out_risk_claims(self):
+        """op_03 guard: #2542 clause discipline stays inviolate — the risk/
+        relevance carve-out is ADDITIVE (never suppresses a durable claim),
+        and the operator rule block explicitly exempts risk claims from the
+        ANTI-ROUTINE NOOP gate."""
+        assert "NOT a routine aside under the ANTI-ROUTINE gate" in v2.OPERATOR_SEMANTICS_RULE
+        # carve-out is a carve-out: nothing in the NOOP gate text regresses
+        # the durable-substance strip guarantee (#2542)
+        assert "NEVER strip" in v2.ANTI_ROUTINE_EXCLUSION
+        assert "When in doubt" in v2.ANTI_ROUTINE_EXCLUSION
+
+    # ── deterministic folds ─────────────────────────────────────────────
+
+    NAND_EDUS = [  # noqa: RUF012
+        {"index": 0, "role": "user",
+         "text": "the flip must have raced the lease renewal when the region cut over"},
+        {"index": 1, "role": "user",
+         "text": "the flag did not cause the duplicates, it had been stable for two hours"},
+    ]
+    NAND_HYP = ("the flip must have raced the lease renewal when the "
+                "region cut over")
+    NAND_COUNTER = ("the flag did not cause the duplicates, it had been "
+                    "stable for two hours")
+
+    def _nand_embed(self, src: str, dst: str) -> dict:
+        pts = [
+            {"content": self.NAND_HYP, "pointKind": "statement",
+             "quote": self.NAND_HYP},
+            {"content": self.NAND_COUNTER, "pointKind": "statement",
+             "quote": self.NAND_COUNTER},
+        ]
+        return {"entities": [], "events": [], "points": pts,
+                "operators": [{"src": src, "dst": dst, "op_type": "NAND"}]}
+
+    def _nand_ids(self, result) -> dict:
+        return {p["content"]: p["id"] for p in result["payload"]["points"]}
+
+    def test_nand_inverted_emission_is_canonicalized_newer_src(self):
+        """op_02: a NAND whose src is the OLDER claim (asserted at an earlier
+        turn than dst) contradicts the #909 extraction default — execute_embed
+        swaps it so the newer counter-claim is src, with a counted warning.
+        The corpus gold geometry: the t11 counter-claim must src the t5
+        hypothesis it refutes."""
+        embed = self._nand_embed(self.NAND_HYP, self.NAND_COUNTER)  # inverted
+        r = v2.execute_embed(embed, {}, session_id="s1", edus=self.NAND_EDUS)
+        ids = self._nand_ids(r)
+        op = r["payload"]["operators"][0]
+        assert op["op_type"] == "NAND"
+        assert op["src"] == ids[self.NAND_COUNTER], "newer counter-claim must be src"
+        assert op["dst"] == ids[self.NAND_HYP]
+        assert op["direction"] == "unidirectional"
+        assert any("NAND direction canonicalized" in w for w in r["warnings"])
+
+    def test_nand_correct_direction_never_swapped(self):
+        """op_02 control: an already-correct emission (newer counter-claim
+        first) is left untouched — no warning, no swap."""
+        embed = self._nand_embed(self.NAND_COUNTER, self.NAND_HYP)
+        r = v2.execute_embed(embed, {}, session_id="s1", edus=self.NAND_EDUS)
+        ids = self._nand_ids(r)
+        op = r["payload"]["operators"][0]
+        assert op["src"] == ids[self.NAND_COUNTER]
+        assert op["dst"] == ids[self.NAND_HYP]
+        assert not any("canonicalized" in w for w in r["warnings"])
+
+    def test_nand_no_turn_ids_never_swapped(self):
+        """op_02 never-guess: without resolved source turns (no edus — e.g.
+        an endpoint is an existing-graph/event node or an unquoted point)
+        the fold keeps the model's order; the prompt rule is the lever."""
+        embed = self._nand_embed(self.NAND_HYP, self.NAND_COUNTER)
+        r = v2.execute_embed(embed, {}, session_id="s1")  # no edus
+        ids = self._nand_ids(r)
+        op = r["payload"]["operators"][0]
+        assert op["src"] == ids[self.NAND_HYP] and op["dst"] == ids[self.NAND_COUNTER]
+        assert not any("canonicalized" in w for w in r["warnings"])
+
+    def test_risk_point_minted_and_mitigates_folds_on_target_edge(self):
+        """op_03: the recipe folds end-to-end — the risk claim stays its OWN
+        payload point (never absorbed by the action point), and a MITIGATES
+        with src = the action point content + a target_edge present in the
+        SAME payload emits a payload operator with the resolved point ids,
+        the intact IMPL target, and the graded strength."""
+        obs = "the region clock drifted eleven seconds"
+        risk = "clock skew between regions can make lease expiry unsafe"
+        action = ("the skew-tolerant grace period is in place so a lagging "
+                  "region's renewal cannot clobber a live lease")
+        embed = {
+            "entities": [], "events": [],
+            "points": [
+                {"content": obs, "pointKind": "statement"},
+                {"content": risk, "pointKind": "statement"},
+                {"content": action, "pointKind": "statement"},
+            ],
+            "operators": [
+                {"src": obs, "dst": risk, "op_type": "IMPL"},
+                {"src": action, "dst": risk, "op_type": "MITIGATES",
+                 "target_edge": {"src": obs, "dst": risk, "op_type": "IMPL"},
+                 "strength": 0.3},
+            ],
+        }
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        contents = {p["content"] for p in r["payload"]["points"]}
+        assert risk in contents and action in contents and obs in contents
+        ids = {p["content"]: p["id"] for p in r["payload"]["points"]}
+        types = [o["op_type"] for o in r["payload"]["operators"]]
+        assert types == ["IMPL", "MITIGATES"]
+        mit = r["payload"]["operators"][1]
+        assert mit["src"] == ids[action] and mit["dst"] == ids[risk]
+        assert mit["target"] == {"src": ids[obs], "dst": ids[risk],
+                                 "op_type": "IMPL"}
+        assert mit["strength"] == 0.3
+        assert not any("MITIGATES target edge not emitted" in w for w in r["warnings"])
+
+    def test_mitigates_without_target_edge_drops_loudly_not_fabricated(self):
+        """op_03 honesty: a MITIGATES whose target edge was not emitted is
+        dropped with a warning (the write path has nothing to dampen) —
+        the deterministic fold never fabricates a target operator."""
+        risk = "clock skew between regions can make lease expiry unsafe"
+        action = ("the skew-tolerant grace period is in place so a lagging "
+                  "region's renewal cannot clobber a live lease")
+        obs = "the region clock drifted eleven seconds"
+        embed = {
+            "entities": [], "events": [],
+            "points": [
+                {"content": risk, "pointKind": "statement"},
+                {"content": action, "pointKind": "statement"},
+            ],
+            "operators": [
+                {"src": action, "dst": risk, "op_type": "MITIGATES",
+                 "target_edge": {"src": obs, "dst": risk, "op_type": "IMPL"},
+                 "strength": 0.3},
+            ],
+        }
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        assert r["payload"]["operators"] == []
+        assert any("MITIGATES target edge not emitted" in w for w in r["warnings"])
+
+    def test_decision_reversal_point_supersedes_folds_corrects_record(self):
+        """op_04: the direct decision-reversal path — a NEW point whose
+        ``supersedes`` names an EARLIER-session decision (surfaced by the S3
+        search, cross-session by construction) folds a point-level pt_
+        supersession record that the write path applies as a CORRECTS
+        supersession (sdk.supersede). This is the channel the corpus's
+        cross-session SUPERSEDE (wp07 → wp06) needs — previously only the
+        content-revision UPDATE fold formed pt_ records."""
+        old_content = ("ship the lease fix all-at-once behind a single "
+                       "global kill flag")
+        search = {"entities": [], "events": [],
+                  "points": [{"id": "pt_d1", "content": old_content,
+                              "kind": "statement"}]}
+        embed = {
+            "entities": [], "events": [],
+            "points": [
+                {"content": "roll out per-service flags instead of one "
+                            "global kill flag",
+                 "pointKind": "statement",
+                 "supersedes": old_content},
+            ],
+            "operators": [],
+        }
+        r = v2.execute_embed(embed, search, session_id="s1")
+        new_pid = r["payload"]["points"][0]["id"]
+        assert new_pid.startswith("pt_")
+        record = next((s for s in r["supersessions"]
+                       if s["superseded"] == "pt_d1"), None)
+        assert record is not None, r["supersessions"]
+        assert record["supersedes_by"] == new_pid
+        assert "reversal" in record["evidence"]
+        # rides the payload's canonical supersessions channel (commit id)
+        assert any(s == record for s in r["payload"]["supersessions"])
+
+    def test_decision_reversal_unresolved_or_ambiguous_never_guesses(self):
+        """op_04 never-guess: a ``supersedes`` ref that matches no S3 prior
+        (or matches >1) is skipped with a warning — no fabricated record."""
+        old_content = ("ship the lease fix all-at-once behind a single "
+                       "global kill flag")
+        search = {"entities": [], "events": [],
+                  "points": [{"id": "pt_d1", "content": old_content,
+                              "kind": "statement"}]}
+        embed = {
+            "entities": [], "events": [],
+            "points": [
+                {"content": "roll out per-service flags instead of one "
+                            "global kill flag",
+                 "pointKind": "statement",
+                 "supersedes": "some decision that never existed"},
+            ],
+            "operators": [],
+        }
+        r = v2.execute_embed(embed, search, session_id="s1")
+        new_pid = r["payload"]["points"][0]["id"]
+        assert not any(s["supersedes_by"] == new_pid for s in r["supersessions"])
+        assert any("matches no S3 prior" in w for w in r["warnings"])
+        # ambiguous (two priors, same content) → skipped (never guess)
+        search2 = {"entities": [], "events": [],
+                   "points": [{"id": "pt_a", "content": old_content,
+                               "kind": "statement"},
+                              {"id": "pt_b", "content": old_content,
+                               "kind": "statement"}]}
+        embed["points"][0]["supersedes"] = old_content
+        r2 = v2.execute_embed(embed, search2, session_id="s1")
+        assert not any(s["supersedes_by"] == new_pid
+                       for s in r2["supersessions"])
+        assert any("ambiguous" in w for w in r2["warnings"])
+
+    def test_point_supersede_self_ref_skipped(self):
+        """op_04 self guard: a ref resolving to the point ITSELF (same id)
+        is skipped with a warning — a self-CORRECTS would poison the graph."""
+        content = "roll out per-service flags instead of one global kill flag"
+        # identical content in the search ⇒ the candidate is NOOP-folded and
+        # never emitted; the self-guard fires when the resolved prior id ==
+        # the emitted point id (defensive — content-addressing makes the
+        # honest path a NOOP first)
+        from tortoise.extractor_v2 import _content_id
+        pid = _content_id("pt", content)
+        search = {"entities": [], "events": [],
+                  "points": [{"id": pid, "content": content,
+                              "kind": "statement"}]}
+        embed = {"entities": [], "events": [],
+                 "points": [{"content": content, "pointKind": "statement",
+                             "supersedes": content}],
+                 "operators": []}
+        r = v2.execute_embed(embed, search, session_id="s1")
+        # NOOP fold — no payload point, no record, no CORRECTS
+        assert r["payload"]["points"] == []
+        assert all(s["superseded"] != s["supersedes_by"] for s in r["supersessions"])

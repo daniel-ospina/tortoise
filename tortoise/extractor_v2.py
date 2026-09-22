@@ -66,6 +66,8 @@ import warnings
 import weakref
 from typing import Any
 
+from .env_truthy import is_truthy  # #4097: the declared truthy contract
+
 # ── The v2 master list (design doc §3) ─────────────────────────────────────
 
 SUBJECTS = {
@@ -240,13 +242,56 @@ VALUE_FIDELITY_RULE = (
 )
 
 
+# #2552 (layer-2 operator-emission semantics — the remaining waves after the
+# #2556 persistence fix, measured 0/4 on the #2514 operator corpus): the
+# operator-structure rule block. Rendered into BOTH mapping stages (S2/S4)
+# from the SAME {anti_routine} slot as its siblings. The product semantics
+# are DECIDED (scoping findings F1/F2 — do not revisit): a mitigation
+# attacks the OPERATOR (the connection) as a graded dampener
+# (w_eff = w * (1 - strength)), never a refutation; a same-session decision
+# reversal is state/validity semantics; a CROSS-SESSION point correction is
+# a CORRECTS supersession — point-level "supersedes" refs resolve against
+# the S3 search results, so they are cross-session by construction.
+OPERATOR_SEMANTICS_RULE = (
+    "OPERATOR STRUCTURE (direction, relevance, supersede — #2552):\n"
+    "- NAND IS DIRECTED (extraction default #909 — new-claim-attacks-existing):\n"
+    "  src = the ATTACKING counter-claim, dst = the claim under attack. When a\n"
+    "  LATER claim contradicts an EARLIER one, the newer counter-claim is src\n"
+    "  and the older claim is dst — NAND points AT what it refutes. An explicit\n"
+    "  negation in a later turn ('the flag did not cause the duplicates') marks\n"
+    "  THAT later claim as the attacker. Never put the claim under attack first.\n"
+    "- RISK/RELEVANCE CLAIMS ARE DURABLE POINTS: a risk or concern claim\n"
+    "  ('clock skew between regions can make lease expiry unsafe') is its OWN\n"
+    "  point — never fuse it into the point/event for the action that later\n"
+    "  closes it. A risk claim changes future decisions (it motivates a\n"
+    "  mitigation), so it is NOT a routine aside under the ANTI-ROUTINE gate.\n"
+    "- MITIGATES = graded relevance dampener ON AN OPERATOR edge (F1): when a\n"
+    "  shipped action or measure closes or reduces a risk, emit the action as\n"
+    "  its OWN point and emit MITIGATES with src = the action point's exact\n"
+    "  content, dst = the risk point's exact content, target_edge = the\n"
+    "  operator edge whose relevance the action dampens, strength 0.10-0.50\n"
+    "  (w_eff = w * (1 - strength) — a graded dampener, NEVER a refutation.\n"
+    "  A direct point-to-point refutation is NAND territory (a separate\n"
+    "  operator), not a stronger MITIGATES).\n"
+    "- POINT-LEVEL SUPERSEDE (cross-session reversal — F2): when a new point\n"
+    "  REPLACES a claim or decision from an EARLIER session, set its\n"
+    "  \"supersedes\" to the existing point's id or EXACT content copied from\n"
+    "  the graph search results — the write path folds a point-level CORRECTS\n"
+    "  supersession (the old point is marked outdated). Same-session\n"
+    "  reversals are state/validity semantics — never a point supersede.\n"
+    "  Never invent an id or content: resolve against the search results only."
+)
+
+
 def _s2s4_rules() -> str:
     """The shared rule block inserted at the {anti_routine} slot of the S2
     and S4 mapping prompts: the anti-routine NOOP gate (#2424) paired with
-    the value-fidelity rule (#2453). One source, both stages. The #2424
-    residual clause-level strip (routine asides embedded in durable prose)
-    lives inside ANTI_ROUTINE_EXCLUSION, so it reaches both stages too."""
-    return ANTI_ROUTINE_EXCLUSION + "\n\n" + VALUE_FIDELITY_RULE
+    the value-fidelity rule (#2453) and the operator-structure rule (#2552).
+    One source, all stages — S2 and S4 map with the SAME operator semantics
+    (the #2424 residual clause-level strip and the operator rules live in
+    the shared blocks, so every mapping stage carries them)."""
+    return (ANTI_ROUTINE_EXCLUSION + "\n\n" + VALUE_FIDELITY_RULE
+            + "\n\n" + OPERATOR_SEMANTICS_RULE)
 
 
 CORE_OBJECT_KEYS = (
@@ -314,7 +359,7 @@ def build_master_list(sdk=None) -> dict:
     tenant's namespaces — so tenant A's pack kinds reach A's extraction
     prompts and write gates while tenant B's never do. The tenant identity
     is the SDK's resolved graph (pass the tenant-scoped SDK,
-    ``_make_sdk(namespace=team_id)`` — no separate identity argument to
+    ``_make_sdk(namespace=org_id)`` — no separate identity argument to
     mismatch). The tenant path NEVER reads or writes the process-global
     ``_MASTER_LIST_CACHE`` (#1154: a tenant-scoped compile must not poison
     the shared memo); the #1350 perf guard rides the tenant-view memo (per
@@ -463,10 +508,8 @@ def _classify_later_enabled() -> bool:
     reflects that run; only the additive ``classify_later`` result key is
     an empty block when the flag is off — see ``extract_session_v2``).
     Value matching is case-insensitive (True/TRUE/ON/yes all enable —
-    review FIX B)."""
-    import os
-    return os.environ.get("TORTOISE_CLASSIFY_LATER", "").strip().lower() in (
-        "1", "true", "yes", "on")
+    review FIX B) and goes through the declared truthy contract (#4097)."""
+    return is_truthy(os.environ.get("TORTOISE_CLASSIFY_LATER"))
 
 
 def _default_kind_classifier(model):
@@ -623,7 +666,7 @@ def _render_chains(master: dict) -> str:
 
 S1_TMPL = """You are the STORY SUMMARIZER for the company/product epistemic memory.
 Read the whole conversation. Produce a NARRATIVE that captures what CHANGED
-about the world we operate in — the state of the product, the team, the
+about the world we operate in — the state of the product, the org, the
 domain — and WHY it changed, at the level of durable meaning, not mechanics.
 
 Use the MEMORY GRANULARITY definitions below as the rule for what to keep
@@ -641,7 +684,7 @@ durable belief, or a reason — or is it how the work was done this hour?"
    or mitigate the relevance (MITIGATES) between points and objects.
 EVENTS (secondary): only as context for why state changed.
 OPERATIONAL KNOWLEDGE (tertiary but DURABLE — do not drop it): cause-effect
-lessons about how the environment behaves and how the team works, when they
+lessons about how the environment behaves and how the org works, when they
 would change future behavior: tool/process behaviors ("the bash tool kills
 child processes when it returns", "setsid does not exist on macOS",
 "pytest-timeout is not installed"), workflow rules ("issues without fractal
@@ -967,6 +1010,7 @@ OUTPUT_CONTRACT = """{
               "tier": "A|B",            # Tier-A state-value marker (E2); omit = Tier-B
               "quote": str|null,          # verbatim source text, <=200 chars (E3)
               "search_keys": [str, ...],  # 2-4 aliases + verbatim value tokens (E3)
+              "supersedes": "existing-id|content|null",  # replaces a prior-session point found in search (CORRECTS fold; omit = none)
               "source_turn_id": int|null}],  # {index}: turn in the SOURCE TRANSCRIPT (E3)
   "operators": [
     {"src": str, "dst": str, "op_type": "IMPL|NAND"},
@@ -1016,6 +1060,13 @@ MASTER LIST
 
 CONDENSED SEMANTIC CORE (from the how-to-use-tortoise skill)
 - Edge types: IMPL = supports/implies; NAND = contradicts.
+- NAND DIRECTION (#909 extraction default — new-claim-attacks-existing):
+  NAND is a DIRECTED attack — src = the ATTACKING counter-claim, dst = the
+  claim under attack. When a LATER claim contradicts an EARLIER one, the
+  newer counter-claim is src and the older claim is dst (NAND points AT
+  what it refutes; the execution fold canonicalizes this order). An
+  explicit negation in a later turn ("the flag did not cause it") marks
+  that later claim as the attacker — never put the attacked claim first.
 - TRUTH vs WEIGHT — two different tools for two different problems:
   * A claim that is FACTUALLY WRONG → NAND the Point directly (truth attack).
     Truth lives on the POINT.
@@ -1714,16 +1765,127 @@ def _derive_queries(embed_list: dict, story: str) -> dict:
     return queries
 
 
-def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3) -> list[dict]:
-    rows = sdk.tortoise_fts_query(query, entity_type=entity_type, limit=limit)
+# #2552: a capture's OWN turn echoes are TRANSCRIPT, not memory.
+# capture_session writes the turn Points (deterministic ids ``{session_id}_t{i}``,
+# ``is_episodic=true``, content ``[role] <text>`` via ``sdk._capture_turn_texts``)
+# BEFORE extraction runs, so on a fresh capture they are the ONLY content in the
+# graph — S3 returned them as the link-before-create prior set, the freshly
+# extracted claim NOOP-folded onto its own transcript echo
+# (``classify_consolidation``), never became a memory Point, and every operator
+# referencing it resolved (via ``execute_embed``'s ``point_ids``) to a turn id —
+# an endpoint invisible to the memory layer, so the planted-operator audit graded
+# it from_content_missing / to_content_missing / edge_missing. S3 must never
+# dedup the extraction against the transcript it is extracting.
+#
+# The row test is the extractor's OWN predicate (not a copy of the graded
+# layer's): an id ANCHORED on the capture's ``session_id``
+# (``\A{session_id}_t\d+\Z`` — the same identity ``runner._turn_id_pattern``
+# builds, applied more strictly: ``fullmatch`` rejects the trailing newline that
+# its ``.match`` + ``$`` would accept) AND a turn marker on the row (the
+# production ``pointKind == "event"``, or the ``[role] …`` content leg
+# ``retrieval._is_turn_point`` uses). The graded layer's two legs are
+# independently sufficient (a union); here the id is deliberately conjoined with
+# a marker (an intersection), because ``create_point`` accepts explicit caller
+# ids, ``retrieval.py`` records the D3 decision that the ``{session_id}_t{i}``
+# prefix "is unverifiable — ANY caller id ending in ``_t<digits>`` would be read
+# as a session … the shape of an id is not evidence that a capture happened",
+# and a caller-minted Point whose id merely collides with the session's turn
+# namespace (the class ``tests/test_d3_session_identity.py`` documents as
+# reachable) must survive the prior set. With no session id the filter is a
+# NO-OP: keeping an echo is a missed dedup, dropping a real prior is memory loss.
+#
+# Scope and its bound — two things this does NOT do, both tracked in #4509:
+#   * other ingest lanes' transcript rows with different id shapes (the longmem
+#     lane's ``lme:{qid}:s{si}:t{ti}`` episodic points) do not match; and
+#   * ``tortoise_fts_query`` truncates to ``limit`` internally — i.e. BEFORE this
+#     drop runs — so asking for exactly ``limit`` lets the echoes consume every
+#     slot and hide a real prior ranked below them (the "filtering after the
+#     limit cut silently shrinks the result" defect epic #898 fixed for
+#     ``exclude_status``). The point leg over-fetches ``_PRIOR_OVERFETCH`` and
+#     refills to ``limit``, absorbing up to that many echoes; a session whose
+#     echoes exceed the pool (a capture can hold ``MAX_SESSION_TURNS`` = 500) can
+#     still starve a prior. The durable fix is a pre-truncation exclusion in the
+#     retrieval layer (#4509) — this bound is deliberately local and pinned by a
+#     test rather than pretended away.
+_PRIOR_OVERFETCH = 12
+
+#: Mirror of ``tortoise.retrieval._ROLE_PREFIX_RE`` (keep-in-sync — that is the
+#: production "is this a transcript turn" content leg). Pinned structurally by
+#: ``tests/test_extractor_v2.py::test_turn_echo_content_pattern_matches_retrieval``.
+_TURN_ECHO_CONTENT_RE = re.compile(
+    r"^\[(user|assistant|system|tool|unknown)\]\s*", re.IGNORECASE)
+
+#: ``tortoise_fts_query``'s documented ``limit`` bound (tortoise/sdk.py). The
+#: point leg's over-fetch must not push the call past it — ``limit=9990`` would
+#: otherwise ask for 10002 and raise ``ValueError``.
+_FTS_LIMIT_MAX = 10000
+
+
+def _is_turn_echo_id(session_id, point_id) -> bool:
+    r"""True for one of ``session_id``'s own turn echoes (``{session_id}_t{i}``).
+
+    The anchored ID leg only — pair it with :func:`_is_turn_echo_row`. The match
+    is ``\A{session_id}_t\d+\Z`` (``re.fullmatch``) — NOT a shape test, and NOT
+    ``str.isdigit``: ``isdigit()`` also accepts category-No numerics such as
+    ``²``, and ``fullmatch`` is deliberately stricter than the graded layer's
+    ``_turn_id_pattern`` + ``.match`` (whose ``$`` accepts one trailing
+    newline). Stricter can only MISS a drop, never lose a real prior. False
+    whenever the session id is unknown, so a caller that cannot name its session
+    never drops a row."""
+    if not session_id or not point_id:
+        return False
+    return bool(re.fullmatch(
+        rf"{re.escape(str(session_id))}_t\d+", str(point_id)))
+
+
+def _is_turn_echo_row(session_id, row: dict) -> bool:
+    """This session's turn ID **and** a turn marker on the row.
+
+    The id is the reliable turn/claim discriminator (``runner._turn_id_pattern``'s
+    identity). The marker is EITHER the production turn kind
+    (``pointKind == "event"`` — what ``capture_session`` stamps on every turn
+    Point, ``tortoise/sdk.py``) OR the ``[role] …`` transcript prefix
+    (``retrieval._is_turn_point``'s content leg). The kind leg is what keeps a
+    capture whose role is not in the prefix allowlist from silently retaining
+    its own echoes: ``_normalize_turn_role`` passes ANY role string through, so
+    a ``[developer] …`` / ``[human] …`` turn matches no alternation.
+
+    Requiring a marker at all is what keeps a caller-minted Point — whose id
+    merely sits in the session's turn namespace, the class
+    ``tests/test_d3_session_identity.py`` documents as reachable — in the
+    prior set."""
+    if not _is_turn_echo_id(session_id, row.get("id")):
+        return False
+    if row.get("point_kind") == "event":
+        return True
+    content = row.get("content")
+    return bool(_TURN_ECHO_CONTENT_RE.match(str(content or "").strip()))
+
+
+def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3, *,
+              session_id: str | None = None) -> list[dict]:
+    # Only the point leg over-fetches, and only when there is a session to filter
+    # by and a `limit` in the callee's valid range; every other call keeps the
+    # exact ``limit`` window it always had (so an out-of-range `limit` still
+    # raises from the callee, on every leg, as before). The over-fetch is clamped
+    # to the callee's documented bound so it cannot itself raise.
+    fetch = (min(limit + _PRIOR_OVERFETCH, _FTS_LIMIT_MAX)
+             if (entity_type == "point" and session_id
+                 and 0 < limit <= _FTS_LIMIT_MAX) else limit)
+    rows = sdk.tortoise_fts_query(query, entity_type=entity_type, limit=fetch)
     out = []
     for r in rows or []:
         if entity_type in ("object", "subject"):
             out.append({"id": r.get("id", ""), "name": r.get("content", ""),
                         "kind": r.get("kind", "")})
+        elif entity_type == "point" and _is_turn_echo_row(session_id, r):
+            # #2552: this capture's transcript echo — never a memory prior.
+            continue
         else:
             out.append({"id": r.get("id", ""), "content": r.get("content", ""),
                         "kind": r.get("kind", "")})
+        if limit > 0 and len(out) >= limit:
+            break
     return out
 
 
@@ -1769,7 +1931,8 @@ def _enrich_point_priors(sdk, points: list[dict]) -> None:
 
 
 def search_graph(sdk, embed_list: dict, story: str, *,
-                 max_queries: int = 15, limit: int = 3) -> dict:
+                 max_queries: int = 15, limit: int = 3,
+                 session_id: str | None = None) -> dict:
     """S3: search the REAL graph for existing entities/points/events.
 
     - Resolves the active backend from the environment (design doc §3 owner
@@ -1778,6 +1941,11 @@ def search_graph(sdk, embed_list: dict, story: str, *,
       topic, events by entity (tortoise_fts_query, batch).
     - Graceful degradation: unreachable graph (connection error/timeout)
       returns partial results + ``degraded`` — the pipeline proceeds.
+
+    ``session_id`` is the capture being extracted: it is the anchor that lets
+    the point leg drop the capture's OWN turn echoes from the prior set
+    (#2552 — see ``_is_turn_echo_id``). Callers that cannot name their session
+    pass nothing and get the unfiltered priors.
 
     Returns:
         {"mode": str, "degraded": bool, "reason": str|None,
@@ -1811,7 +1979,8 @@ def search_graph(sdk, embed_list: dict, story: str, *,
                     break
                 q_run += 1
                 try:
-                    for row in _fts_rows(sdk, entity_type, q, limit=limit):
+                    for row in _fts_rows(sdk, entity_type, q, limit=limit,
+                                         session_id=session_id):
                         rid = row.get("id")
                         if not rid or rid in results[bucket[entity_type]]:
                             continue
@@ -1879,7 +2048,7 @@ You have: (a) the compiled story of the conversation, (b) the S2 embed list,
 any key entities, events, or points that AFFECT THE WORLD MODEL — durable
 objects/subjects, decisions/occurrences, claims whose support/attack
 structure matters, AND durable operational/process lessons (cause-effect
-knowledge about how the environment behaves or how the team works — e.g.
+knowledge about how the environment behaves or how the org works — e.g.
 "backgrounded processes die when the tool returns", "create_point defaults to
 draft mode")? Add them. Do NOT pad with process chatter (the value filter
 applies — same STRICT EXCLUSION as S2: strip the mechanics tokens, keep the
@@ -1917,6 +2086,15 @@ Rules:
   ("the old strategy") resolves to the existing item. Emit ONE statement
   point capturing the replacement wired to BOTH entities (about_entities =
   [new, superseded]).
+- DECISION/CLAIM REVERSAL — POINT-LEVEL SUPERSEDE (cross-session only,
+  #2552): when this conversation OVERTURNS a decision or claim made in an
+  EARLIER session and the search results contain that existing point, emit
+  the new decision as its own point AND set its "supersedes" to the
+  existing point's id or EXACT content — the write path folds a point-level
+  CORRECTS supersession (the old point is marked outdated). Never point
+  "supersedes" at an in-session claim (same-session reversals are
+  state/validity semantics, not CORRECTS) and never invent an id or
+  content — copy from the search results only.
 - DECISION EVENTS only when a real decision exists — never fabricate one for
   a supersession or completion.
 - A point that already exists in the graph (same content) → lifecycle
@@ -1947,10 +2125,14 @@ Rules:
   or event emitted in THIS output (copy verbatim, no paraphrasing). If an
   endpoint has no point yet, CREATE the point first. NEVER use an entity name
   as an operator endpoint — entities wire via about_entities.
-- MITIGATES: relevance attack on the OPERATOR edge, strength 0.10-0.50.
-  NAND: truth attack on a FACTUALLY WRONG point. Golden rule: relevance lives
-  on the OPERATOR, truth lives on the POINT. Never NAND an option/criterion
-  for being a bad fit.
+- MITIGATES: relevance attack on the OPERATOR edge, strength 0.10-0.50 —
+  src = the action point's exact content, target_edge = the edge whose
+  relevance the action dampens (a risk claim the action closes stays its
+  OWN point, never fused into the action). NAND: truth attack on a
+  FACTUALLY WRONG point — src = the attacking counter-claim (the NEWER
+  claim), dst = the claim under attack (NAND points AT what it refutes).
+  Golden rule: relevance lives on the OPERATOR, truth lives on the POINT.
+  Never NAND an option/criterion for being a bad fit.
 - RETRACTIONS (E7): when the conversation explicitly WITHDRAWS a previously-
   stated fact ("forget my gym schedule", "scratch that", "that is no longer
   true"), add {"content": "<the exact prior claim>"} or {"id": "<existing-id>"}
@@ -2551,7 +2733,7 @@ def _resolution_prompt(existing: list[dict], new_names: list[str]) -> str:
 
 
 def resolve_entities(entity_refs: list[dict], search: dict,
-                     model=None) -> dict:
+                     model=None, stats: dict | None = None) -> dict:
     """D3: two-phase entity resolution — returns
     {"map": {name: {"id", "name"}}, "records": [{"name", "resolves_to",
     "mode"}], "warnings": [...]}.
@@ -2594,7 +2776,7 @@ def resolve_entities(entity_refs: list[dict], search: dict,
             prompt = _resolution_prompt(
                 existing, [u["name"] for u in unmatched])
             resp = _complete(model, _RESOLUTION_SYSTEM, prompt,
-                             max_tokens=500)
+                             max_tokens=500, stats=stats)
             parsed = _parse_json(resp)
             unmatched_names = {u["name"] for u in unmatched}
             for item in (parsed.get("resolutions") or []):
@@ -3220,6 +3402,43 @@ def _resolve_retraction(ref: dict, search: dict,
     return None
 
 
+def _resolve_point_supersede(ref: str, search: dict,
+                             *, warnings: list[str]) -> dict | None:
+    """Resolve a point-level ``supersedes`` ref (a point REPLACES a claim/
+    decision from an EARLIER session) to the S3 prior POINT using the
+    never-guess discipline (mirror of ``_resolve_retraction``): by id
+    (unique), else by normalized-content equality — the S4 render copies
+    search-result content verbatim, so exact equality is the honest match
+    (a paraphrase ref does not resolve: the caller warns + fails open).
+    0 or >1 matches → None (the caller warns; never guesses). S3 only
+    returns live priors (terminal excluded at the search layer, #1391), so
+    a resolved target is live by construction. Resolution against the S3
+    search — which ran BEFORE this capture's writes — makes the point
+    supersede CROSS-SESSION by construction (the #2552 F2 decision:
+    same-session reversals are state/validity semantics, never a CORRECTS
+    record)."""
+    ref = (ref or "").strip()
+    if not ref or ref in ("null", "None"):
+        return None
+    points = [p for p in (search or {}).get("points", []) or []
+              if isinstance(p, dict) and p.get("id")]
+    for p in points:
+        if str(p.get("id")) == ref:
+            return p
+    norm = _norm(ref)
+    matches = [p for p in points
+               if _norm(str(p.get("content") or "")) == norm]
+    if not matches:
+        warnings.append(f"point supersedes={ref[:60]!r} matches no S3 prior "
+                        "— skipped (fail-open)")
+        return None
+    if len(matches) > 1:
+        warnings.append(f"point supersedes={ref[:60]!r} is ambiguous "
+                        f"({len(matches)} priors) — skipped (never guess)")
+        return None
+    return matches[0]
+
+
 def _supersession_records(entity_refs: list[dict], search: dict,
                           *, warnings: list | None = None) -> list[dict]:
     """Shared supersession-record builder — the ONE resolution discipline for
@@ -3460,6 +3679,28 @@ def _object_kind_forms(master: dict) -> set[str]:
     return forms | _PACK_OBJECT_FORMS
 
 
+def _canonicalize_nand_direction(src: str, dst: str, turns: dict) -> \
+        tuple[str, str] | None:
+    """#2552 (op_02, measured inversion on the #2514 corpus): NAND-direction
+    canonicalization — the extraction default (#909) is new-claim-attacks-
+    existing, so the ATTACKER (src) must be the LATER-asserted endpoint.
+    When BOTH endpoints are fresh session points carrying known source turns
+    and src is the EARLIER one, the model inverted the direction — swap
+    src/dst so the newer counter-claim is src (the corpus gold geometry:
+    the t11 counter-claim 'the flag did not cause it' must src the t5
+    hypothesis it refutes). Never guess: either endpoint without a known
+    turn (an existing-graph/event endpoint, an unquoted point) or a tie
+    (same turn) → None (keep the model's order; the prompt rule is the
+    primary lever there). Returns (src, dst) canonicalized or None."""
+    s_t = turns.get(src)
+    d_t = turns.get(dst)
+    if s_t is None or d_t is None:
+        return None
+    if not (type(s_t) is int and type(d_t) is int) or s_t >= d_t:
+        return None
+    return (dst, src)
+
+
 def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                   story_arc: str = "", summary: str = "",
                   extractor_version: str = "value@0.5.0+v2",
@@ -3663,6 +3904,13 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     point_ids: dict[str, str] = {}   # norm content → point id
     tier_a_points = 0                # E2 (#1534): Tier-A state-value count
     noops: list[dict] = []           # E7 (D4): folded duplicates — result-level
+    # #2552 (op_04, F2): point-level supersede refs collected from the
+    # embed points (a NEW point whose ``supersedes`` names an EARLIER-session
+    # claim surfaced by the S3 search) — resolved after the loop against the
+    # search index (cross-session by construction) into pt_ supersession
+    # records, deduped against the UPDATE-fold records below.
+    point_supersede_refs: list[dict] = []
+    pt_record_pairs: set[tuple[str, str]] = set()
     for p in embed_list.get("points", []) or []:
         if not isinstance(p, dict):
             warnings.append(f"non-dict point entry {p!r} skipped")
@@ -3742,6 +3990,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             # sites). Self-supersede guard — never fires for revises (new
             # content ⇒ new content-addressed id), kept for discipline.
             if existing_id and existing_id != pid:
+                pt_record_pairs.add((existing_id, pid))
                 supersessions.append({
                     "superseded": existing_id, "supersedes_by": pid,
                     "evidence": "fact-value contradiction (later session "
@@ -3751,6 +4000,15 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             link_before_create.append({
                 "searched_for": f"point '{content[:60]}'", "found": False,
                 "note": "no match — created"})
+        # #2552 (op_04): collect an explicit point-level ``supersedes`` ref
+        # (the DECISION-REVERSAL channel — a NEW decision/claim replaces a
+        # prior-session one). Resolution runs after the loop against the S3
+        # search, so only points actually emitted here (NEW or REVISES —
+        # NOOPs continued above) can carry a record; a self-referential or
+        # unemitted ref never reaches the record builder.
+        supersede_ref = str(p.get("supersedes") or "").strip()
+        if supersede_ref and supersede_ref not in ("null", "None"):
+            point_supersede_refs.append({"point_id": pid, "ref": supersede_ref})
         point_ids[n] = pid
         turn_idx = _resolve_source_turn(p, edus, warnings=warnings)
         pt_entry = {
@@ -3782,6 +4040,45 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if when_valid:
             pt_entry["when"] = when_valid
         payload_points.append(pt_entry)
+
+    # #2552 (op_04): resolve the collected point-level supersede refs against
+    # the S3 search (never-guess: id or exact-content match; 0/>1 → warn +
+    # skip) and append pt_ supersession records — the deterministic
+    # DECISION-REVERSAL → CORRECTS channel. The search index holds only
+    # points that existed BEFORE this capture, so a resolved target is an
+    # EARLIER-session claim by construction (same-session reversals are
+    # state/validity semantics, never a CORRECTS record — F2). Deduped
+    # against the UPDATE-fold records above.
+    for sr in point_supersede_refs:
+        pid = sr["point_id"]
+        ref = sr["ref"]
+        prior = _resolve_point_supersede(ref, search, warnings=warnings)
+        if prior is None:
+            continue
+        old_id = str(prior.get("id") or "").strip()
+        if not old_id or old_id == pid:
+            warnings.append(f"point supersedes={ref[:60]!r} is the point "
+                            "itself — skipped (never guess)")
+            continue
+        if (old_id, pid) in pt_record_pairs:
+            continue
+        pt_record_pairs.add((old_id, pid))
+        supersessions.append({
+            "superseded": old_id, "supersedes_by": pid,
+            "evidence": "point-level supersede ref (claim/decision "
+                        "reversal; cross-session correction)"})
+        link_before_create.append({
+            "searched_for": f"point '{str(prior.get('content') or '')[:60]}'",
+            "found": True,
+            "note": f"superseded by new point {pid} — CORRECTS fold"})
+
+    # source-turn map over the emitted payload points — the NAND-direction
+    # canonicalizer's input (#2552 op_02: newer counter-claim must be src).
+    turn_by_point: dict[str, int] = {}
+    for _pt in payload_points:
+        t = _pt.get("source_turn_id")
+        if type(t) is int:
+            turn_by_point[_pt["id"]] = t
 
     # ── operators (dependency order 4) — TWO-PASS ─────────────────────────
     # Pass 1 emits IMPL/NAND and collects the emitted edges; pass 2 processes
@@ -3815,6 +4112,19 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                             f"emitted point/event ({o.get('src')!r} → {o.get('dst')!r})")
             continue
         if op_type in ("IMPL", "NAND"):
+            if op_type == "NAND":
+                # #2552 (op_02): canonicalize the NAND direction so the
+                # newer counter-claim is src (new-claim-attacks-existing,
+                # #909) — an inverted emission (older claim listed first)
+                # is swapped with a counted warning, never silent.
+                canon = _canonicalize_nand_direction(src, dst, turn_by_point)
+                if canon is not None:
+                    warnings.append(
+                        f"NAND direction canonicalized (#909 — new-claim-"
+                        f"attacks-existing): src was asserted before dst; "
+                        f"swapped so the newer counter-claim is src "
+                        f"({src[:60]!r} ↔ {dst[:60]!r})")
+                    src, dst = canon
             payload_operators.append({
                 "src": src, "dst": dst, "op_type": op_type,
                 "direction": "unidirectional"})
@@ -3883,6 +4193,13 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
 
     # ── payload assembly (mirrors _summary_to_payload / _stream_to_payload) ─
     from datetime import datetime, timezone
+
+    from tortoise.file_indexer import derive_source_content_hash
+    # #4005: the session Source's integrity anchor is the RAW conversation
+    # hash (a hash is not the raw — W-7 stays intact), NOT a hash of the
+    # identity url. The hosted commit path stores it verbatim.
+    raw_content_hash = derive_source_content_hash(
+        _edus_to_text(edus) if edus else "")
     payload = {
         "schema_version": "1", "session_id": session_id,
         "client_commit_id": "",
@@ -3891,7 +4208,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                       "calibration_version": "v2"},
         "summary": (summary or "")[:2000],
         "story_arc": (story_arc or "")[:4000],
-        "provenance_refs": [{"path": "session.md", "spans": []}],
+        "provenance_refs": [{"path": "session.md", "spans": [],
+                             "contentHash": raw_content_hash}],
         "sources": [],
         "entities": payload_entities, "points": payload_points,
         "events": payload_events, "operators": payload_operators,
@@ -4199,7 +4517,12 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # #1746 (D1/D7): the recovery counters roll per-stage (the ladder's
     # sanitize/repair events — never error strings, never census entries).
     llm_stats: dict = {"calls": 0, "retries": 0, "truncated": 0,
-                      "deadline_aborts": 0}  # #1787 P2-L: deadline-kill counter
+                      "deadline_aborts": 0,  # #1787 P2-L: deadline-kill
+                      # #3359: the cost driver (calibration data only)
+                      "prompt_tokens": 0, "completion_tokens": 0,
+                      "cost_usd": 0.0, "calls_without_cost": 0,
+                      "calls_without_usage": 0,
+                      "by_stage": {}}
     recovery_stats: dict[str, int] = {}
     error_census: dict[str, int] = {}
     # #1695 Task 5: the classify-later choke point — the env toggle read
@@ -4254,7 +4577,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             failed_chunks += 1
             errors.append(f"S1 chunk failed: {type(e).__name__}: {e}")
             _bump_census(error_census, e)
-        _rollup_llm(llm_stats, stage_stats)
+        _rollup_llm(llm_stats, stage_stats, "s1")
         _rollup_recovery(recovery_stats, stage_stats)
     if failed_chunks:
         errors.append(f"{failed_chunks}/{len(chunks)} S1 chunks failed")
@@ -4284,7 +4607,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             errors.append("S2 output partial — truncated tail dropped "
                           "(embed list incomplete)")
             _bump_census_class(error_census, "partial_parse")
-        _rollup_llm(llm_stats, stage_stats)
+        _rollup_llm(llm_stats, stage_stats, "s2")
         _rollup_recovery(recovery_stats, stage_stats)
 
     # ── classify(S2) (#1695 Task 5): the first classify pass — the pack-
@@ -4309,13 +4632,13 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 # must see the flag-on arm's batched adjudication cost.
                 usage = out["stats"].get("llm")
                 if usage:
-                    _rollup_llm(llm_stats, usage)
+                    _rollup_llm(llm_stats, usage, "classify")
         except Exception as e:  # never block capture (P1)
             errors.append(f"classify(S2) failed: {type(e).__name__}: {e}")
             _bump_census_class(error_census, "classify_error")
 
     # ── S3: search the graph (real backend, graceful degradation) ──────────
-    search = search_graph(sdk, embed_list, story)
+    search = search_graph(sdk, embed_list, story, session_id=session_id)
 
     # ── S4: review gaps → complete embed list (E4: merges-not-replaces) ───
     complete_list: dict = embed_list
@@ -4357,7 +4680,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             errors.append("S4 output partial — truncated tail dropped "
                           "(embed list incomplete)")
             _bump_census_class(error_census, "partial_parse")
-        _rollup_llm(llm_stats, stage_stats)
+        _rollup_llm(llm_stats, stage_stats, "s4")
         _rollup_recovery(recovery_stats, stage_stats)
 
     # ── classify-later post-merge pass (#1695 Task 5): E4 + kind-preservation
@@ -4389,7 +4712,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 # roll the adjudication tail spend (same as the S2 pass).
                 usage = out["stats"].get("llm")
                 if usage:
-                    _rollup_llm(llm_stats, usage)
+                    _rollup_llm(llm_stats, usage, "classify")
             slot_rekeys = _rekey_slots(complete_list)
         except Exception as e:  # never block capture (P1)
             errors.append(f"classify(union) failed: {type(e).__name__}: {e}")
@@ -4403,6 +4726,13 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # (nothing to resolve against). Never blocks capture (P1).
     resolution_records: list[dict] = []
     resolution_warnings: list[str] = []
+    # #3359: the D3 entity-resolution LLM fallback makes a REAL provider
+    # call. Without a stats dict it contributed nothing to the session cost
+    # roll-up — silently understating spend for every session that hit it.
+    # A dedicated per-stage accumulator fixes that, and the roll-up runs
+    # after the try/except so a resolution failure still reports the spend
+    # it already made.
+    resolution_stats: dict = {}
     if search and not search.get("degraded") and (search.get("entities") or []):
         ent_refs = [{"name": str(e.get("name", "")).strip(),
                      "kind": str(e.get("kind", "")).strip()}
@@ -4410,7 +4740,8 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                     if isinstance(e, dict) and e.get("name")]
         if ent_refs:
             try:
-                res = resolve_entities(ent_refs, search, model=model)
+                res = resolve_entities(ent_refs, search, model=model,
+                                       stats=resolution_stats)
                 if res.get("map"):
                     complete_list = _apply_entity_resolution(
                         complete_list, res["map"])
@@ -4429,6 +4760,12 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 # D1 (#1746): deterministic class for the previously-
                 # uncensused resolution failure path.
                 _bump_census_class(error_census, "entity_resolution_failed")
+    # #3359: roll the D3 resolution stage's cost driver into the session
+    # roll-up — outside the try/except so the spend already made is reported
+    # even when the resolution itself failed. A resolve_entities call that
+    # never reached the LLM leaves ``resolution_stats`` empty, so this is a
+    # no-op for the deterministic (phase-1-only) path.
+    _rollup_llm(llm_stats, resolution_stats, "resolve")
 
     # ── chain enforcement (#1695 Task 1): DETERMINISTIC rewire between the
     # resolution pass and S5 — the prompts' advisory "TRY TO REPAIR" becomes
@@ -4829,16 +5166,165 @@ def _bump_classify_census(error_census: dict[str, int], stats: dict) -> None:
             error_census[cls] = error_census.get(cls, 0) + n
 
 
-def _rollup_llm(llm_stats: dict, stage_stats: dict) -> None:
+def _empty_cost_bucket() -> dict:
+    """#3359: one ``(stage, provider, model)`` cost-envelope bucket — the
+    shape ``tools/longmem_eval/usage.py`` emits and
+    ``costing.price_usage_envelope`` consumes, so a stored ``capture_cost``
+    row is repricable at report time from the versioned pricing map.
+
+    ``usage_present`` ANDs conservatively (the #2185 contract): a lane with
+    ANY usage-less call is never silently priced.
+    """
+    return {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+            "cost_usd": 0.0, "calls_without_cost": 0,
+            "calls_without_usage": 0, "usage_present": True}
+
+
+def _merge_cost_bucket(tgt: dict, src: dict) -> None:
+    """Merge one cost-envelope bucket into another of the same shape."""
+    tgt["calls"] += int(src.get("calls", 0) or 0)
+    tgt["prompt_tokens"] += int(src.get("prompt_tokens", 0) or 0)
+    tgt["completion_tokens"] += int(src.get("completion_tokens", 0) or 0)
+    tgt["cost_usd"] = round(
+        tgt["cost_usd"] + float(src.get("cost_usd", 0.0) or 0.0), 6)
+    tgt["calls_without_cost"] += int(src.get("calls_without_cost", 0) or 0)
+    tgt["calls_without_usage"] += int(src.get("calls_without_usage", 0) or 0)
+    tgt["usage_present"] = bool(
+        tgt["usage_present"] and src.get("usage_present", True))
+
+
+def _merge_cost_accumulator(tgt_stats: dict, src_stats: dict) -> None:
+    """Merge one stage's cost accumulator (``stats["cost"]``) into another.
+
+    The kind_classifier rolls per-batch accumulators into one adjudication
+    accumulator with the same shape ``_rollup_llm`` consumes — one concept,
+    one merge path.
+    """
+    src = (src_stats or {}).get("cost") or {}
+    if not src:
+        return
+    acc = tgt_stats.setdefault("cost", {})
+    acc["calls"] = int(acc.get("calls", 0)) + int(src.get("calls", 0) or 0)
+    acc["prompt_tokens"] = (
+        int(acc.get("prompt_tokens", 0))
+        + int(src.get("prompt_tokens", 0) or 0))
+    acc["completion_tokens"] = (
+        int(acc.get("completion_tokens", 0))
+        + int(src.get("completion_tokens", 0) or 0))
+    acc["cost_usd"] = round(
+        float(acc.get("cost_usd", 0.0))
+        + float(src.get("cost_usd", 0.0) or 0.0), 6)
+    acc["calls_without_cost"] = (
+        int(acc.get("calls_without_cost", 0))
+        + int(src.get("calls_without_cost", 0) or 0))
+    acc["calls_without_usage"] = (
+        int(acc.get("calls_without_usage", 0))
+        + int(src.get("calls_without_usage", 0) or 0))
+    for provider, models in (src.get("by_route") or {}).items():
+        for model, bucket in (models or {}).items():
+            _merge_cost_bucket(
+                acc.setdefault("by_route", {}).setdefault(provider, {})
+                .setdefault(model, _empty_cost_bucket()), bucket)
+
+
+def _accumulate_call_cost(stats: dict, *, prompt_tokens, completion_tokens,
+                          cost_usd, provider, model) -> None:
+    """#3359: accumulate ONE successful provider call into ``stats["cost"]``.
+
+    Called from ``_complete``'s success path — the single point where the
+    per-call token counts (return tuple) meet the provider-reported charge
+    captured in-thread by ``_call_once``. Accumulation, not overwrite, is
+    required: a stage may make SEVERAL calls (the S1/S2/S4 one-shot
+    escalation and the #1746 parse-retry both re-enter ``_complete``), and a
+    per-call snapshot would measure only the LAST one — dropping the base
+    call's spend from exactly the long sessions the p95 read is about.
+
+    ``calls_without_cost`` discloses calls the provider served without a
+    charge (the deepseek-direct lane today); ``calls_without_usage``
+    discloses calls with no usage block at all. Neither is ever silently
+    priced at $0.
+    """
+    acc = stats.setdefault("cost", {})
+    ptoks = int(prompt_tokens or 0)
+    ctoks = int(completion_tokens or 0)
+    acc["calls"] = int(acc.get("calls", 0)) + 1
+    acc["prompt_tokens"] = int(acc.get("prompt_tokens", 0)) + ptoks
+    acc["completion_tokens"] = int(acc.get("completion_tokens", 0)) + ctoks
+    if cost_usd is None:
+        acc["calls_without_cost"] = int(acc.get("calls_without_cost", 0)) + 1
+    else:
+        acc["cost_usd"] = round(
+            float(acc.get("cost_usd", 0.0)) + float(cost_usd), 6)
+    has_usage = bool(ptoks or ctoks or cost_usd is not None)
+    lane = (acc.setdefault("by_route", {}).setdefault(provider or "unknown", {})
+            .setdefault(model or "unknown", _empty_cost_bucket()))
+    lane["calls"] += 1
+    lane["prompt_tokens"] += ptoks
+    lane["completion_tokens"] += ctoks
+    if cost_usd is None:
+        lane["calls_without_cost"] += 1
+    else:
+        lane["cost_usd"] = round(lane["cost_usd"] + float(cost_usd), 6)
+    if not has_usage:
+        acc["calls_without_usage"] = (
+            int(acc.get("calls_without_usage", 0)) + 1)
+        lane["calls_without_usage"] += 1
+    lane["usage_present"] = bool(lane["usage_present"] and has_usage)
+
+
+def _rollup_llm(llm_stats: dict, stage_stats: dict,
+                stage: str = "unattributed") -> None:
     """Roll one stage's per-call stats into the per-session LLM roll-up
     (D3: stats['llm'] = calls / retries / truncated across S1/S2/S4; #1787
     Task 5 Step 0 P2-L: ``deadline_aborts`` — deadline-killed generations
     are billed but never counted by any token accumulator, so the harness
-    bounds the loss via this counter)."""
+    bounds the loss via this counter).
+
+    #3359: also rolls the COST DRIVER — prompt/completion tokens, the
+    provider's own reported charge, and the ``calls_without_cost`` /
+    ``calls_without_usage`` disclosure counters — from the stage's cost
+    accumulator (``stage_stats["cost"]``, written per successful call by
+    ``_accumulate_call_cost``). Both counters roll to the session level here
+    so a provider that reported no charge, or a call that carried no usage
+    block at all, is disclosed on the emitted row instead of surviving only
+    inside ``by_stage``. Each call keeps the ``(provider, model)``
+    route that served it, so a mid-stage failover is never misattributed to
+    the configured primary. The ``by_stage`` buckets use the
+    pricing-envelope shape (``tools/longmem_eval/usage.py`` /
+    ``costing.price_usage_envelope``) so the row is repricable at report
+    time. ``stage`` defaults for the pre-existing 2-arg callers.
+    """
     llm_stats["calls"] += stage_stats.get("attempts", 0)
     llm_stats["retries"] += stage_stats.get("retries", 0)
     llm_stats["truncated"] += int(bool(stage_stats.get("truncated")))
     llm_stats["deadline_aborts"] += stage_stats.get("deadline_aborts", 0)
+
+    cost = stage_stats.get("cost") or {}
+    llm_stats["prompt_tokens"] = (
+        llm_stats.get("prompt_tokens", 0)
+        + int(cost.get("prompt_tokens", 0) or 0))
+    llm_stats["completion_tokens"] = (
+        llm_stats.get("completion_tokens", 0)
+        + int(cost.get("completion_tokens", 0) or 0))
+    llm_stats["cost_usd"] = round(
+        llm_stats.get("cost_usd", 0.0)
+        + float(cost.get("cost_usd", 0.0) or 0.0), 6)
+    llm_stats["calls_without_cost"] = (
+        llm_stats.get("calls_without_cost", 0)
+        + int(cost.get("calls_without_cost", 0) or 0))
+    # #3359: a call that returned NO usage block at all (no tokens, no
+    # charge) is a different disclosure from one that returned tokens but no
+    # charge — roll it too, so the emitted row can say so at session level.
+    llm_stats["calls_without_usage"] = (
+        llm_stats.get("calls_without_usage", 0)
+        + int(cost.get("calls_without_usage", 0) or 0))
+
+    by_stage = llm_stats.setdefault("by_stage", {})
+    for provider, models in (cost.get("by_route") or {}).items():
+        for model, bucket in (models or {}).items():
+            _merge_cost_bucket(
+                by_stage.setdefault(stage, {}).setdefault(provider, {})
+                .setdefault(model, _empty_cost_bucket()), bucket)
 
 
 def _rollup_recovery(recovery_stats: dict, stage_stats: dict) -> None:
@@ -4852,14 +5338,27 @@ def _rollup_recovery(recovery_stats: dict, stage_stats: dict) -> None:
 def _call_once(model, system: str, user: str, *, deadline_s: int,
                max_tokens: int | None,
                stats: dict | None
-               ) -> tuple[str | None, object | None, int, int]:
+               ) -> tuple[str | None, object | None, int, int,
+                          float | None, str | None, str | None]:
     """One wall-clock-bounded completion attempt (M3 D1: each retry attempt
     gets its OWN deadline — a wedged call cannot stay wedged across retries).
 
-    Returns ``(resp, finish_reason, prompt_tokens, completion_tokens)`` — the
-    finish reason AND per-call token counts captured in the calling thread
+    Returns ``(resp, finish_reason, prompt_tokens, completion_tokens,
+    cost_usd, provider, model)`` — the finish reason AND per-call token
+    counts captured in the calling thread
     right after ``complete()`` returns (F4 #1780; token capture #2134
     Task 0 — never read the shared adapter attrs from the caller thread).
+
+    #3359: the same in-thread capture also snapshots the provider's OWN
+    reported charge (``last_cost_usd`` — ``None`` when the route reports
+    none) and the SERVING route (``last_route``/``route``/``provider``,
+    never the configured primary — a mid-call failover must not be
+    misattributed) plus the wire model id, and returns all three in the
+    RETURN TUPLE. They are deliberately NOT written into ``stats``: that
+    dict is shared with the lock-guarded ``deadline_aborts`` counter
+    precisely because it may be shared across worker threads, so a
+    publish-then-pop hand-off there would be a non-atomic
+    read-modify-write. Only the joined success path reaches the return.
 
     The model call runs in a thread; exceptions are captured and RE-RAISED
     after join (Python threads do not propagate exceptions to the joiner —
@@ -4897,6 +5396,23 @@ def _call_once(model, system: str, user: str, *, deadline_s: int,
             getattr(model, "last_prompt_tokens", None) or 0)
         box["completion_tokens"] = int(
             getattr(model, "last_completion_tokens", None) or 0)
+        # #3359: the provider's own charge + the route that served it,
+        # captured in the SAME thread as the call (same cross-thread-race
+        # reason as the tokens above; ``is None`` — 0.0 is authoritative).
+        _cost = getattr(model, "last_cost_usd", None)
+        box["cost_usd"] = (None if _cost is None else float(_cost))
+        # The SERVING route, never the configured primary: a RoutingModel
+        # keeps ``provider`` = the configured primary and flips
+        # ``last_route``/``route`` on failover, so reading ``provider``
+        # would attribute the fallback's charge to the primary's rate
+        # (and misprice it at report time). ``last_route`` (always the last
+        # served) → ``route`` (RotatingModel's active lane) → ``provider``
+        # (a plain adapter).
+        box["cost_provider"] = (getattr(model, "last_route", None)
+                                or getattr(model, "route", None)
+                                or getattr(model, "provider", None))
+        box["cost_model"] = (getattr(model, "model", None)
+                             or getattr(model, "id", None))
 
     def _run():
         try:
@@ -4963,8 +5479,19 @@ def _call_once(model, system: str, user: str, *, deadline_s: int,
 
     if "exc" in box:
         raise box["exc"]
+    # #3359: the cost driver travels back in the RETURN TUPLE, not via a
+    # mutation of the caller's ``stats`` dict. That dict is shared with the
+    # deadline-abort counter (which is lock-guarded precisely because it MAY
+    # be shared), so publishing here and popping in ``_complete`` would be a
+    # non-atomic read-modify-write — under a shared dict one call could pop
+    # another call's charge and attribute it to its own tokens/route. The
+    # tuple has no such window. Only the joined success path reaches here
+    # (the deadline-abort path raised above), so an abandoned thread never
+    # writes into a stats dict that was already rolled up.
     return (box.get("resp"), box.get("finish_reason"),
-            box.get("prompt_tokens", 0), box.get("completion_tokens", 0))
+            box.get("prompt_tokens", 0), box.get("completion_tokens", 0),
+            box.get("cost_usd"), box.get("cost_provider"),
+            box.get("cost_model"))
 
 
 def _scaled_deadline(base: int, max_tokens: int | None) -> int:
@@ -5004,7 +5531,10 @@ def _complete(model, system: str, user: str, *, deadline_s: int | None = None,
     explicit ``deadline_s`` always wins, never ``max()``-ed). ``stats``
     (optional) records attempts / retries / truncated / last_class per call
     for the per-session LLM roll-up (D3), plus ``deadline_aborts`` (#1787
-    P2-L) on a deadline kill.
+    P2-L) on a deadline kill, and accumulates the #3359 cost driver —
+    tokens, the provider's own reported charge, and the serving route — into
+    ``stats["cost"]`` (one entry per SUCCESSFUL call, so the escalation /
+    parse-retry calls are summed, never overwritten).
 
     ``retries``/``backoff_*`` default to None → the module constants
     (``_COMPLETE_RETRIES`` / ``_BACKOFF_BASE_S`` / ``_BACKOFF_CAP_S``) are
@@ -5026,7 +5556,8 @@ def _complete(model, system: str, user: str, *, deadline_s: int | None = None,
     for attempt in range(1, retries + 2):
         try:
             (resp, finish_reason,
-             prompt_tokens, completion_tokens) = _call_once(
+             prompt_tokens, completion_tokens,
+             call_cost_usd, call_provider, call_model) = _call_once(
                  model, system, user, deadline_s=deadline_s,
                  max_tokens=max_tokens, stats=stats)
             truncated = finish_reason == "length"
@@ -5036,19 +5567,35 @@ def _complete(model, system: str, user: str, *, deadline_s: int | None = None,
                              finish_reason=finish_reason,
                              prompt_tokens=prompt_tokens,
                              completion_tokens=completion_tokens)
+                # #3359: accumulate THIS call's cost driver into the stage
+                # accumulator. The token fields above stay per-call
+                # (``run_s1`` / ``_complete_parsed`` read them as a
+                # snapshot); the accumulator is what the session roll-up
+                # sums, so a re-entrant call (escalation / parse retry) adds
+                # to the base call's spend instead of overwriting it. The
+                # values come from ``_call_once``'s own return tuple — this
+                # call's capture, never another thread's.
+                _accumulate_call_cost(
+                    stats, prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    cost_usd=call_cost_usd,
+                    provider=call_provider,
+                    model=call_model)
                 # #2134 Task 0 (P1-22): the truncation-token read surface —
                 # a length-truncated call's emitted tokens are the lower
                 # bound on the true list size (the model filled its budget
                 # then was cut). Accumulate into recovery-carried keys so the
                 # per-call values roll for free through _rollup_recovery ->
                 # ingest_v2 -> run.py outcome recovery (the per-stage
-                # stats["prompt_tokens"]/["completion_tokens"] are transient;
-                # _rollup_llm copies only attempts/retries/truncated/
-                # deadline_aborts). The seam-less COMBINED keys count every
+                # stats["prompt_tokens"]/["completion_tokens"] are the LAST
+                # call's snapshot; _rollup_llm sums the #3359 cost
+                # accumulator above, which keeps every call's tokens). The seam-less COMBINED keys count every
                 # truncating call across the extractor seams (S1 chunks, S2,
                 # S4 — the kind_classifier adjudication seam does NOT reach
                 # this surface: its finally forwards only
-                # attempts/retries/truncated/deadline_aborts, and escalation
+                # attempts/retries/truncated/deadline_aborts plus the #3359
+                # cost accumulator (via _merge_cost_accumulator), and never
+                # recovery.*, and escalation
                 # is scoped out there via escalate=False, so its 1500-cap
                 # truncations are counted in llm.truncated only). The
                 # per-seam keys are accumulated at the

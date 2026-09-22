@@ -342,6 +342,10 @@ def _classify_points(
             # Gate on has_ep: uncalibrated points (no persisted ep_alpha/ep_beta)
             # fall back to Beta(1,1) → variance 0.0833, which would falsely
             # classify every NAND-connected pair as disputed.
+            # #2490: terminal peers are also has_ep=False (annotate_ep_batch
+            # gates them — their decayed (1,1) posterior is column-
+            # indistinguishable from measured (1,1)), so a terminal side can
+            # never drag a live peer into a disputed pair either.
             if not ep_a.has_ep or not ep_b.has_ep:
                 continue
 

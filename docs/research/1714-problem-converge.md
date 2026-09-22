@@ -39,7 +39,7 @@ Tortoise's onboarding memory-capture promise sits on an ingestion baseline that 
 
 1. **Unkeyed duplication** — `sdk.py:1539` `dedup = props.pop("dedup", False)` (default False → ULID + unconditional CREATE); `github_indexer.py:115-118` never passes `dedup`. Docstring "Idempotent: SDK create_point dedups by content hash" is FALSE. Test masks it (`tests/test_github_indexer.py:38-52` FakeSDK with its own URL-set).
 2. **Removed legacy kind** — `ONTOLOGY.md §5 (v3.8)`: extraction point kind = `statement` ONLY; `observation` removed. Indexer writes `observation`.
-3. **Quota asymmetry** — `/v1/index/github` → `_run_indexing` → `index_issues`: zero `count_team_usage` calls (ungated); `/v1/sessions` 402-gates (hosted_api.py:4029-4038). Auto-index can exhaust points → sessions die.
+3. **Quota asymmetry** — `/v1/index/github` → `_run_indexing` → `index_issues`: zero `count_org_usage` calls (ungated); `/v1/sessions` 402-gates (hosted_api.py:4029-4038). Auto-index can exhaust points → sessions die.
 4. **Flag-only session promise** — `set_session_recording` (hosted_api.py:7700) writes state only; #235 plan Step 3b capture contract never implemented.
 5. **Orphaned ontology-correct path** — `tortoise/connectors/github.py` already emits Object (pm:issue) + Event (`eventKind: github.issue.<state>`) + Sources + aboutSubject edges via `_upsert_event`/sourceObjectId (`projection/entities.py`), with `start_webhook`; reachable only via `pipeline_cli.py`.
 

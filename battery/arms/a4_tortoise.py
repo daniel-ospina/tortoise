@@ -40,6 +40,14 @@ from battery.runner.setup import scenario_namespace
 #: with a stamped starting belief — the product's own write surface).
 _EVIDENCE_KIND = "evidence"
 _CLAIM_MEMORY_KIND = "claim"
+#: Author-stated credibility fallback for filed evidence (#2284 exposure
+#: finding): the SDK applies the documented decide default (medium,
+#: Beta(3,1)) ONLY when status is NOT explicitly passed — the arm stages
+#: evidence as draft (draft-first, #2291), so it must state the default
+#: ITSELF or every agent-filed contradiction silently behaves as
+#: unverified (~3x weaker: measured -0.07 vs -0.21 on the target). Single
+#: source: tortoise.sdk.DECIDE_DEFAULT_CREDIBILITY.
+_DEFAULT_EVIDENCE_CREDIBILITY = "medium"
 #: Per-episode Challenge/Deepen cycle cap (#2291 I-3 / Task 4 ep_outcome):
 #: cap-hit ⇒ non_converged/undec, never forced CONVERGED.
 DECIDE_CYCLES_CAP = 8
@@ -51,6 +59,11 @@ DECIDE_CYCLES_CAP = 8
 _WRITE_KINDS = frozenset({"evidence", "nand", "imply", "support", "statement"})
 #: seed-manifest marker content prefix — never surfaced as a memory.
 _SEED_MANIFEST_PREFIX = "battery:seed_manifest:"
+#: #2985/#3005 P1 — the dense retrieval leg the real-mode refusal REQUIRES.
+#: ``recall_state`` → ``tortoise_fts_query`` is hybrid RRF over FTS + vector
+#: (+ structural); a read that never submitted ``vector`` measured a
+#: keyword-only surface, not the product's retrieval.
+_GATED_LEG = "vector"
 
 
 def _is_seed_manifest(content: str) -> bool:
@@ -64,11 +77,42 @@ class A4TortoiseArm:
     model_id = "fixed"
     temperature = 0.0
 
+    #: #2985 — this arm READS through the product's HYBRID retrieval
+    #: (``recall_state`` → ``tortoise_fts_query``, FTS+vector+structural RRF).
+    #: The real runner preflights the embedder BEFORE setup/ingest for arms
+    #: carrying this flag, so a degraded environment fails closed instead of
+    #: publishing an FTS-only number under the a4 label. The explicit
+    #: ``embeddings`` extra is what makes the vector leg runnable; a plain
+    #: ``uv sync`` yields a KEYWORD-ONLY product (#2985).
+    requires_hybrid_retrieval = True
+
     def __init__(self, db_path: str | None = None, **config):
         self._db_path = db_path or os.environ.get("TORTOISE_DB_PATH") or ""
         self._sdk_by_id: dict[str, object] = {}
         self.decide_cycles = 0
         self._active_scenario: str | None = None
+        #: #2985 — the retrieval legs this arm actually OBSERVED across its
+        #: reads (union, from the product's per-call ``leg_trace``) and the
+        #: observed degraded flag. Recorded in summary.json so a persisted a4
+        #: number carries the retrieval conditions that produced it. Named
+        #: ``observed_*`` to stay distinct from the parity lane's
+        #: ``retrieval_legs()`` capability-PROBE method (#3005).
+        self.observed_retrieval_legs: list[str] = []
+        self.observed_retrieval_degraded = False
+        #: #3005 P1 — the machine-readable result of the last observed-leg
+        #: gate evaluation (``None`` until the gate is enforced), so a
+        #: refused read carries WHAT was wrong, not just that it refused.
+        self.observed_retrieval_gate: dict | None = None
+        #: #3005 P1 — the real-mode requirement. ``False`` by default so
+        #: hermetic/equivalence tests may drive the arm in a degraded
+        #: environment; the REAL runner sets it True before setup, at which
+        #: point a read whose VECTOR leg never ran is refused (an FTS-only
+        #: number must never wear the a4 label). The flag — not the
+        #: embedder's mere absence — is what makes the refusal real-mode
+        #: specific: a successful `EmbeddingModel.get()` followed by a
+        #: query-time `encode_failed` / `breaker_open` is exactly the hole
+        #: this closes.
+        self.require_observed_hybrid = False
         #: per-scenario memo of filed records this setup (true-no-op keys:
         #: evidence = (op_kind, target, content); mitigate = content).
         self._filed_content: dict[str, set[str]] = {}
@@ -142,31 +186,39 @@ class A4TortoiseArm:
         draft/terminal filtering per product semantics. The probe query is
         the episode's own user message when present, else the scenario's
         primary planted claim (the everyday "what do I know about X" read).
-        Memory.confidence = the claim's EP posterior mean (row.ep.
-        confidence_mean) — never None on the real path (uncalibrated rows
-        fall back to the product's documented neutral 0.5). Operator ids
-        surfaced by the state read's nands/arguments attachments are
-        emitted as operator-kind Memories (content = the attached edge
-        label when given, else "") so the WRITE closed set can carry
-        operators for #901 mitigate routing. Raises ArmUnavailable on
-        failure (never partial memories). The per-episode decide counter
-        resets when the episode MOVES to a different scenario (episodes are
-        per-scenario sequential — a late scenario must not inherit an early
-        one's cycle count toward the cap).
+
+        EPISODE BOUNDARY (Task 10 streams): each retrieve() starts a NEW
+        episode, so the per-episode decide counter resets here — with
+        stream sessions the scenario stays the same across N sessions but
+        the DECIDE_CYCLES_CAP budget belongs to ONE episode (= one session:
+        retrieve -> decide writes -> terminal). Without the reset, session-1
+        writes would silently cap every later session (record -> None,
+        no surfacing event) while each session is billed as measured.
+
+        Memory.confidence is the claim's EP posterior mean — never None on
+        the real path (uncalibrated rows fall back to neutral 0.5);
+        operator ids from the state read's nands/arguments attachments are
+        emitted as operator-kind Memories so the WRITE closed set can carry
+        operators for #901 mitigate routing.
+
+        Raises ArmUnavailable on failure (never partial memories).
+
+        #3005 P1: when the real runner set ``require_observed_hybrid``, a
+        read whose VECTOR leg never RAN (query-time ``encode_failed`` /
+        ``breaker_open``, or a trace with no vector entry at all) is refused
+        — the availability preflight passes in exactly those cases, so the
+        observed leg trace is the only proof the hybrid surface was measured.
         """
-        # Episode boundary: reset decide_cycles when the scenario changes.
-        sid = context.scenario.id
-        if self._active_scenario is not None and self._active_scenario != sid:
-            self.decide_cycles = 0
-        self._active_scenario = sid
+        self.decide_cycles = 0
         sdk = self._sdk(context.scenario)
+        trace: list[dict] = []
         try:
             query = (context.user_message or "").strip()
             if not query:
                 probe = _scenario_probe_query(context.scenario)
                 query = probe or ""
             results = sdk.recall_state(
-                query=query or None, kind=None, limit=20)
+                query=query or None, kind=None, limit=20, leg_trace=trace)
             out: list[Memory] = []
             seen_op_ids: set[str] = set()
             for row in results or []:
@@ -203,9 +255,85 @@ class A4TortoiseArm:
                         out.append(Memory(
                             id=str(oid), content="", confidence=None,
                             kind="operator"))
-            return out
+        except ArmUnavailable:
+            raise
         except Exception as e:  # noqa: BLE001, RUF100
             raise ArmUnavailable(f"a4 graph read: {e}") from e
+        finally:
+            # #2985: record the legs the trace observed even on a failed read
+            # (a partial trace still says which leg was attempted) — the same
+            # interpreter the parity lane uses, so the two record identically.
+            # Runs BEFORE the real-mode refusal below (the fold is what makes
+            # the refusal decidable) and before an exception propagates.
+            self._record_retrieval_trace(trace)
+        self._refuse_unobserved_hybrid(trace)
+        return out
+
+    def _record_retrieval_trace(self, trace: list[dict]) -> None:
+        """Fold one read's observed leg trace into the run-level record.
+
+        Union of leg names (a leg that ran in ANY read ran in the arm) and
+        OR of the per-leg ``degraded`` flag — via the shared interpreter of
+        the product's trace shape (``retrieval_preflight.merge_leg_trace``),
+        so the a4 arm and the parity lane record identically.
+        """
+        from battery.runner.retrieval_preflight import merge_leg_trace
+        if merge_leg_trace(self.observed_retrieval_legs, trace):
+            self.observed_retrieval_degraded = True
+
+    def _observed_legs_gate(self, trace: list[dict]) -> dict:
+        """Machine-readable observed-leg gate for ONE read's trace.
+
+        Mirrors ``parity.mabench_tortoise.retrieval_capability_gate`` (the
+        same shape/verdict) so the two lanes refuse on the same condition:
+        the VECTOR leg is satisfied only when a vector entry reports
+        ``ran`` — a present-but-not-submitted entry (``encode_failed`` /
+        ``breaker_open`` / ``no_embedder``) or a missing entry both fail.
+        """
+        entries = [e for e in (trace or []) if isinstance(e, dict)]
+        vector = [e for e in entries if e.get("leg") == _GATED_LEG]
+        ran = any(bool(e.get("ran")) for e in vector)
+        reason = next((str(e.get("reason")) for e in vector
+                       if e.get("reason")), None) or "vector_leg_absent"
+        return {
+            "gated": True,
+            "vector_leg": ran,
+            "legs_seen": sorted({str(e.get("leg")) for e in entries
+                                 if e.get("leg")}),
+            "reason": reason,
+            "leg_trace": entries,
+        }
+
+    def _refuse_unobserved_hybrid(self, trace: list[dict]) -> None:
+        """Refuse a read that did not submit the VECTOR leg (real mode only).
+
+        The availability preflight (``require_hybrid_retrieval``) catches a
+        missing embedder BEFORE setup, but it cannot see a query-time leg
+        failure (``encode_failed`` / ``breaker_open``). When the real runner
+        set ``require_observed_hybrid``, the observed trace is the proof of
+        the surface; without the vector leg the read measured keyword-only
+        retrieval and the arm refuses rather than let an FTS-only number be
+        published under the a4 label. Hermetic/equivalence lanes never set
+        the flag, so the arm stays usable without the ``embeddings`` extra.
+        """
+        if not self.require_observed_hybrid:
+            return
+        gate = self._observed_legs_gate(trace)
+        self.observed_retrieval_gate = gate
+        if gate["vector_leg"]:
+            return
+        # A refusal IS a degraded observation — stamp it so the run record
+        # fails closed even when the trace carried no ``degraded`` flag.
+        self.observed_retrieval_degraded = True
+        raise ArmUnavailable(
+            f"a4 retrieval capability gate FAILED — the {_GATED_LEG} leg did "
+            f"not run (reason={gate['reason']!r}, "
+            f"legs_seen={gate['legs_seen']!r}). An FTS-only read is a "
+            f"degraded, keyword-only retrieval surface — NOT the product's "
+            f"hybrid retrieval — and must not produce an a4 number (#2985). "
+            f"Install the embeddings extra (`uv sync --extra embeddings "
+            f"--extra parity`) and re-run; the arm refuses rather than "
+            f"record a keyword-only number.")
 
     # ── ep_outcome terminal table (#2291 I-4) ───────────────────────────
     def ep_terminal_outcome(self, scenario: Scenario, *,
@@ -280,8 +408,17 @@ class A4TortoiseArm:
         }
 
     # ── record ──────────────────────────────────────────────────────────
-    def record(self, context: AgentContext, item: Memory) -> None:
+    def record(self, context: AgentContext, item: Memory) -> str | None:
         """Write through the product verb surface (#901 routing).
+
+        Returns the PRODUCT write reference when a write succeeded (the
+        operator edge id for nand/imply writes — the Amend-1 event_ref a
+        tool_event emission carries); None on any honest no-op (cap-hit,
+        empty/claim-less closed set, unknown verb, identical re-file,
+        unresolved target). The executor emits a ``contradiction_surfaced``
+        tool_event ONLY when a real ref came back — emission-loss-proof:
+        absence of the tool_event provably means the conflict was not
+        filed, never a lost emission (#2284 Task 9).
 
         #2291 Task 3 semantics:
         - Targets come ONLY from the retrieved closed set
@@ -314,28 +451,28 @@ class A4TortoiseArm:
           (never swallow + fabricate from an uncalibrated store).
         """
         if self._db_path is None:
-            return
+            return None
         sdk = self._sdk(context.scenario)
         sid = context.scenario.id
         filed = self._filed_content.setdefault(sid, set())
         try:
             if self.decide_cycles >= DECIDE_CYCLES_CAP:
-                return  # cap-hit: honest no-op (never forced CONVERGED)
+                return None  # cap-hit: honest no-op (never forced CONVERGED)
             closed = [m for m in (context.prior_memories or ())
                       if m.id and not _is_seed_manifest(m.content)]
             if item.kind == "mitigate":
                 ops = [m for m in closed if m.kind == "operator"]
                 if not ops:
-                    return  # unresolved operator target ⇒ honest no-op
+                    return None  # unresolved operator target ⇒ honest no-op
                 if item.target_id is not None:
                     op_ids = {o.id for o in ops}
                     if item.target_id not in op_ids:
-                        return  # target not a closed-set operator ⇒ refuse
+                        return None  # target not a closed-set operator ⇒ refuse
                     mit_key = f"mitigate::{item.target_id}::{item.content}"
                 else:
                     mit_key = f"mitigate::{item.content}"
                 if mit_key in filed:
-                    return  # identical re-mitigation: TRUE no-op
+                    return None  # identical re-mitigation: TRUE no-op
                 c = item.confidence
                 if isinstance(c, float) and math.isfinite(c):
                     # clamp raw numeric confidence into [0.10, 0.50]
@@ -345,24 +482,27 @@ class A4TortoiseArm:
                     strength = 0.3  # decide-tooling default, in-range
                 op_target = (item.target_id if item.target_id is not None
                              else ops[0].id)
-                sdk.mitigate_operator(
+                mit = sdk.mitigate_operator(
                     op_target, reason=item.content or "", strength=strength)
                 filed.add(mit_key)
                 self.decide_cycles += 1
-                return
+                if isinstance(mit, dict) and isinstance(mit.get("id"), str) \
+                        and mit["id"]:
+                    return mit["id"]  # real product ref (review #2629 P2)
+                return str(mit)  # fallback ref: the mitigation point
             claims = [m for m in closed if m.kind == _CLAIM_MEMORY_KIND]
             if not claims:
-                return  # empty/claim-less closed set ⇒ zero writes (no-op)
+                return None  # empty/claim-less closed set ⇒ zero writes (no-op)
             if item.kind not in _WRITE_KINDS:
                 # Unknown/not-yet-routed verb (supersede, …): HONEST NO-OP.
                 # Never a silent IMPL misroute that flips a replacement into
                 # agreement with the superseded claim. Task-9's executor
                 # routes supersede at its own layer via the product verb.
-                return
+                return None
             if item.target_id is not None:
                 claim_ids = {c.id for c in claims}
                 if item.target_id not in claim_ids:
-                    return  # target not a closed-set claim ⇒ refuse
+                    return None  # target not a closed-set claim ⇒ refuse
                 target = item.target_id
             else:
                 target = claims[0].id
@@ -372,9 +512,11 @@ class A4TortoiseArm:
             op_kind = "nand" if item.kind == "nand" else "imply"
             dedup_key = f"{op_kind}::{target}::{item.content}"
             if dedup_key in filed:
-                return  # identical re-file this setup: TRUE no-op
+                return None  # identical re-file this setup: TRUE no-op
             created = sdk.create_point(kind=_EVIDENCE_KIND, content=item.content,
                                        dedup=True, status="draft",
+                                       credibility=item.credibility
+                                       or _DEFAULT_EVIDENCE_CREDIBILITY,
                                        source_harness="battery",
                                        source_session=sid)
             ev_id = created.get("id") if isinstance(created, dict) else None
@@ -382,16 +524,21 @@ class A4TortoiseArm:
                 raise ArmUnavailable("a4 create_point returned no id")
             try:
                 if item.kind == "nand":
-                    sdk.create_operator(
+                    op = sdk.create_operator(
                         "NAND", ev_id, [target], direction="unidirectional")
                 else:
-                    sdk.create_operator("IMPL", ev_id, [target])
+                    op = sdk.create_operator("IMPL", ev_id, [target])
             except Exception as e:  # noqa: BLE001, RUF100
                 # Evidence stays DRAFT (promote_source fires only on operator
                 # success) ⇒ inert residue, never a live orphan.
                 raise ArmUnavailable(f"a4 operator write failed: {e}") from e
             filed.add(dedup_key)
             self.decide_cycles += 1  # one cycle per NEW record
+            if isinstance(op, dict):
+                op_id = op.get("id")
+                if isinstance(op_id, str) and op_id:
+                    return op_id
+            return str(ev_id)  # fallback ref: the evidence point the edge promoted
         except ArmUnavailable:
             raise
         except Exception as e:  # noqa: BLE001, RUF100

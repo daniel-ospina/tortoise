@@ -36,24 +36,26 @@ def client(tmp_path, monkeypatch):
     from tortoise.hosted_api import _make_sdk
     sdk = _make_sdk(namespace="registry")
     try:
-        team = sdk.team_create("e2e-team")
+        team = sdk.org_create("e2e-team")
     except Exception:
         # Already exists — look it up
         rows = sdk._get_registry().query(
             "MATCH (t:Team {name: $name}) RETURN t.id",
             params={"name": "e2e-team"}).result_set
         team = {"id": rows[0][0]}
-    real_team_id = team["id"]
-    from tortoise.hosted_api import get_current_team
-    app.dependency_overrides[get_current_team] = lambda: {
-        "team_id": real_team_id, "tier": "free", "key_id": "k1",
+    real_org_id = team["id"]
+    from tortoise.hosted_api import get_current_org
+    app.dependency_overrides[get_current_org] = lambda: {
+        "org_id": real_org_id, "tier": "free", "key_id": "k1",
         # C5 #2114: C2 owner class (deleg-NULL + scopes [] → legacy full
         # access) — the E2E journey uses the register-minted tt_ key.
         "legacy_full_access": True, "max_users": 1, "max_graphs": 1,
         "max_teams": 1,
         # #1922: /v1/demo is quota-gated — the auth override must carry the
-        # fail-closed max_points cap or the seed path 500s.
+        # fail-closed max_points cap or the seed path 500s. #4010: the same
+        # contract covers max_sessions (unlimited → explicit None).
         "max_points": 10000,
+        "max_sessions": None,
     }
     with TestClient(app) as tc:
         yield tc
@@ -70,7 +72,7 @@ class TestOnboardingJourney:
         assert r.status_code == 200
         body = r.json()
         assert "api_key" in body and body["api_key"].startswith("tt_")
-        assert "team_id" in body
+        assert "org_id" in body
 
     def test_e2e_register_idempotent(self, client):
         """Registering twice returns already_registered (409) without re-key."""
@@ -141,9 +143,14 @@ class TestOnboardingJourney:
         assert r.status_code == 200
         assert r.json()["connected"] is False
 
-    def test_e2e_github_connect_returns_auth_url(self, client):
+    def test_e2e_github_connect_returns_auth_url(self, client, monkeypatch):
         """E2E-3: GitHub connect returns an authorize URL (mock client id)."""
-        os.environ["GITHUB_CLIENT_ID"] = "e2e-client"
+        # #4152: monkeypatch, not os.environ — a RAW assignment here LEAKED
+        # GITHUB_CLIENT_ID=e2e-client into the rest of the pytest process, so
+        # tests/test_github_connect.py::test_connect_returns_auth_url (which
+        # only setdefaults the var at import) asserted against e2e-client and
+        # failed whenever this file ran first on the same xdist worker.
+        monkeypatch.setenv("GITHUB_CLIENT_ID", "e2e-client")
         r = client.post("/v1/onboarding/github/connect", json={"org": "acme"})
         assert r.status_code == 200
         assert "github.com/login/oauth/authorize" in r.json()["auth_url"]
@@ -165,12 +172,12 @@ class TestReAskStateKeyCompat:
         rows = sdk._get_registry().query(
             "MATCH (t:Team {name: $name}) RETURN t.id",
             params={"name": "e2e-team"}).result_set
-        team_id = rows[0][0]
+        org_id = rows[0][0]
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.onboarding_state = $st",
-            params={"id": team_id, "st": "{}"},
+            params={"id": org_id, "st": "{}"},
         )
-        _update_onboarding_state(team_id, **extra)
+        _update_onboarding_state(org_id, **extra)
 
     def test_reask_keys_roundtrip(self, client):
         """The backward-compat keys persist through the allowlisted state

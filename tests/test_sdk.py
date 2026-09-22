@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import sys
 import tempfile
 
@@ -29,6 +30,7 @@ def sdk():
     sdk = TortoiseSDK(db_path)
     yield sdk
     sdk.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 def _make_point(sdk: TortoiseSDK, **kw):
@@ -469,15 +471,19 @@ class TestInvalidateSupersede:
         assert len(corrected) == 1, "CORRECTS edge duplicated on re-supersede"
 
     def test_invalidate_idempotent_corrects_edge(self, sdk):
-        # #330: re-invalidating the same pair must not duplicate CORRECTS, and
-        # the second call re-asserts (both points still exist -> True) without
-        # creating extra edges.
+        # #330: re-invalidating the same pair must not duplicate CORRECTS.
+        # #2498: the repeat is now an ILLEGAL transition — the shared lifecycle
+        # guard treats the `outdated=true` flag invalidate just wrote as
+        # terminal, so the second call raises instead of re-asserting. The old
+        # #330 re-assert moved `expiredAt` forward and MERGEd one CORRECTS edge
+        # per distinct corrector onto a node every read surface already
+        # excludes. The first call's CORRECTS edge stays unique.
         old = _make_point(sdk, content="old")
         new = _make_point(sdk, content="new")
         r1 = sdk.invalidate_point(old["id"], new["id"])
         assert r1["invalidated"] is True
-        r2 = sdk.invalidate_point(old["id"], new["id"])
-        assert r2["invalidated"] is True  # present endpoints -> re-assert
+        with pytest.raises(ValueError, match="already terminal"):
+            sdk.invalidate_point(old["id"], new["id"])
         corrected = sdk.traverse(new["id"], "CORRECTS", direction="outgoing")
         assert len(corrected) == 1, "CORRECTS edge duplicated on re-invalidate"
 
@@ -1253,3 +1259,47 @@ def test_promotion_survives_rebuild(sdk, tmp_path):
         assert rows and rows[0][0] == "live", (
             f"rebuild must preserve promotion for {pid}, got {rows}"
         )
+
+
+def test_event_retention_interval_rejects_nonpositive_in_sdk(monkeypatch):
+    """Round-4 review P2 (PRE-EXISTING): ``TORTOISE_EVENT_RETENTION_INTERVAL``
+    was parsed with a bare ``int()``, so ``0``/``-1`` made the gate
+    ``now - _EVENT_PURGE_LAST < interval`` always false — a purge DELETE on
+    every ``events_poll``. The validated interval must keep the gate closed.
+
+    #3416: ``time.monotonic()`` is seconds since BOOT, so it is a few hundred
+    on a CI runner booted minutes ago and millions on a long-lived dev box.
+    The old setup seeded the gate with a bare ``0.0`` and leaned on uptime
+    exceeding the interval for that to look like "the past" — it passed on dev
+    boxes and failed on every fresh runner. Simulate a freshly-booted host and
+    seed the gate monotonic-relative (never an absolute literal) so this is
+    deterministic on any host."""
+    import time
+
+    import tortoise.event_store as es
+    from tortoise import monitoring
+
+    uptime = 300.0  # a runner booted 5 minutes ago
+    monkeypatch.setattr(time, "monotonic", lambda: uptime)
+
+    purges: list[str] = []
+    monkeypatch.setattr(es, "purge_expired",
+                        lambda *a, **k: purges.append("expired"))
+    monkeypatch.setattr(es, "purge_overflow",
+                        lambda *a, **k: purges.append("overflow"))
+    monkeypatch.setenv("TORTOISE_EVENT_RETENTION_INTERVAL", "0")
+    interval = monitoring.event_retention_interval()
+    assert interval > 0, "a non-positive interval must fall back to a positive one"
+    # "Last purge" one full real interval + 1s in the past → the gate is open
+    # no matter what the host uptime is. monkeypatch restores the previous
+    # class value afterwards, so this process-level gate does not leak into
+    # neighbouring tests.
+    monkeypatch.setattr(TortoiseSDK, "_EVENT_PURGE_LAST", uptime - interval - 1.0)
+    # ``_maybe_purge_events`` reads only module-level state + the (patched)
+    # purge fns here, so a placeholder receiver/projection is sufficient.
+    TortoiseSDK._maybe_purge_events(object(), None)
+    first = len(purges)
+    assert first > 0, "the first gated purge did not run"
+    TortoiseSDK._maybe_purge_events(object(), None)
+    assert len(purges) == first, (
+        "interval=0 made the purge gate always false — a DELETE on every poll")

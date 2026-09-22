@@ -6,7 +6,7 @@ FakeControlPlane (zero network), with a registry SPY asserting the FalkorDB
 registry is never touched:
 
 - writers: POST /v1/team/keys, GET/DELETE /v1/team/keys/{id}, POST
-  /v1/agent/signup, POST /v1/register, POST /v1/teams, members DELETE/PATCH,
+  /v1/agent/signup, POST /v1/register, POST /v1/organizations, members DELETE/PATCH,
   POST /v1/internal/reconcile, POST /v1/onboarding/team, /internal/provision
   (disabled), create_graph/_graph_create + graph_list (env-gated in sdk.py).
 - readers: member listing, graph_list, quota counts (api_keys/users/graphs).
@@ -32,7 +32,7 @@ os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 os.environ.setdefault("FASTAPI_INTERNAL_KEY", "test-internal-shared-secret-xyz")
 
 from tortoise.auth import lookup_hash  # noqa: I001
-from tortoise.hosted_api import app, get_current_team, get_current_user
+from tortoise.hosted_api import app, get_current_org, get_current_user
 
 from tests._http_fixtures import patched_tortoise_sdk
 from tests.fake_control_plane import ErrorControlPlane, FakeControlPlane
@@ -42,7 +42,7 @@ from datetime import UTC
 _INTERNAL_HEADERS = {"Authorization": "Bearer test-internal-shared-secret-xyz"}
 
 TEST_TEAM = {
-    "team_id": "team-free-001",
+    "org_id": "team-free-001",
     "key_id": "key-001",
     "tier": "free",
     # C1/C2 tenancy fields (tt_ legacy-key resolution dict — deleg NULL,
@@ -56,7 +56,7 @@ TEST_TEAM = {
     "max_graphs": 1,
     "max_points": 10000,
     "max_api_keys": 2,
-    "max_sessions": 1000,
+    "max_sessions": None,
 }
 
 
@@ -105,8 +105,8 @@ def spy(monkeypatch):
 def fake() -> FakeControlPlane:
     return FakeControlPlane({
         "api_keys": [],
-        "team_memberships": [],
-        "teams": [dict(FREE_TEAM)],
+        "org_memberships": [],
+        "organizations": [dict(FREE_TEAM)],
         "invitations": [],
     })
 
@@ -137,9 +137,9 @@ def client(monkeypatch, supabase_env, spy):
 
 @pytest.fixture
 def team_client(client):
-    """Client with get_current_team overridden (authenticated team dict)."""
+    """Client with get_current_org overridden (authenticated team dict)."""
     tc, fake, spy = client
-    app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
+    app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
     return tc, fake, spy
 
 
@@ -154,7 +154,7 @@ def user_client(client):
 
 def _owner_membership(**overrides) -> dict:
     row = {
-        "id": "mem-1", "user_id": _USER1, "team_id": "team-free-001",
+        "id": "mem-1", "user_id": _USER1, "org_id": "team-free-001",
         "role": "owner", "status": "active", "identity": None,
     }
     row.update(overrides)
@@ -180,7 +180,7 @@ class TestCreateApiKey:
         rows = fake.tables["api_keys"]
         assert len(rows) == 1
         assert rows[0]["id"] == body["id"]
-        assert rows[0]["team_id"] == TEST_TEAM["team_id"]
+        assert rows[0]["org_id"] == TEST_TEAM["org_id"]
         assert rows[0]["lookup_hash"] == lookup_hash(key)
         assert rows[0]["key_prefix"] == key[:10]
         assert rows[0]["created_via"] == "provisioned"
@@ -217,7 +217,7 @@ class TestCreateApiKey:
         import tortoise.supabase_control as sc
         monkeypatch.setattr(sc, "get_control_plane", lambda: ErrorControlPlane())
         tc, _, _ = client
-        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
         r = tc.post("/v1/team/keys")
         assert r.status_code == 500
 
@@ -328,6 +328,62 @@ class TestCreateApiKeyExpiry2426:
         assert r.status_code == 200, r.text
 
 
+class TestRevokedKeysDoNotConsumeCap2481:
+    """#2481 (SUPABASE lane) — revoked api_keys rows are audit tombstones,
+    never max_api_keys budget consumers. Every cap seam counts via
+    quota._count_resource with `revoked_at is null` (+ expiry exclusion) —
+    revoked rows never count. PIN: revoke-then-mint succeeds at cap and a
+    pre-existing revoked-tombstone stack alone can never 402/409 a mint;
+    only a true ACTIVE overage still 402s/409s (active-key semantics
+    unchanged — the fake control plane's api_keys table is the SOR)."""
+
+    def test_revoke_then_mint_succeeds_at_cap(self, team_client):
+        """Team at max (2 active rows) revokes one key → the revoked row
+        must not hold the slot; a replacement mint immediately succeeds."""
+        tc, fake, _ = team_client
+        a = tc.post("/v1/team/keys")
+        b = tc.post("/v1/team/keys")
+        assert a.status_code == 200 and b.status_code == 200
+        # control: at the cap with 2 ACTIVE rows → 402
+        assert tc.post("/v1/team/keys").status_code == 402
+        # revoke one row → its tombstone must NOT consume the cap slot
+        r = tc.delete(f"/v1/team/keys/{a.json()['id']}")
+        assert r.status_code == 200 and r.json()["revoked"] is True
+        m = tc.post("/v1/team/keys", json={"name": "replacement"})
+        assert m.status_code == 200, m.text
+        rows = fake.tables["api_keys"]
+        assert len([x for x in rows if x["revoked_at"] is None]) == 2
+        assert len([x for x in rows if x["revoked_at"] is not None]) == 1
+
+    def test_preseeded_revoked_tombstones_never_402_or_409(self, team_client):
+        """A stack of pre-existing revoked tombstones alone (5 rows, zero
+        active) can never 402/409 a mint — the gates only fire when ACTIVE
+        rows reach the cap."""
+        tc, fake, _ = team_client
+        for i in range(5):
+            fake.seed("api_keys", [_key_row(
+                id=f"tomb-{i}", created_via="provisioned",
+                revoked_at="2026-08-01T00:00:00Z")])
+        # two mints land (active 0 → 2); the third 402s ONLY on 2 ACTIVE
+        assert tc.post("/v1/team/keys").status_code == 200
+        assert tc.post("/v1/team/keys").status_code == 200
+        assert tc.post("/v1/team/keys").status_code == 402
+        # scoped mint reads the SAME count → 409 only on the ACTIVE overage
+        assert tc.post("/v1/team/keys",
+                       json={"scopes": ["graphs:read"]}).status_code == 409
+        # revoke one active → both surfaces free up (tombstones still there)
+        active = [x for x in fake.tables["api_keys"] if x["revoked_at"] is None]
+        assert len(active) == 2
+        r = tc.delete(f"/v1/team/keys/{active[0]['id']}")
+        assert r.status_code == 200, r.text
+        # scoped-mint 409 surface frees first (tombstones still present)
+        s = tc.post("/v1/team/keys", json={"scopes": ["graphs:read"]})
+        assert s.status_code == 200, s.text
+        # then the legacy-mint 402 surface
+        assert tc.delete(f"/v1/team/keys/{s.json()['id']}").status_code == 200
+        assert tc.post("/v1/team/keys").status_code == 200
+
+
 # ── GET /v1/team/keys (list_api_keys) ───────────────────────────────────────
 
 class TestListApiKeys:
@@ -385,7 +441,7 @@ class TestRevokeApiKey:
 
     def test_other_team_key_403(self, team_client):
         tc, fake, _ = team_client
-        fake.seed("api_keys", [_key_row(id="other-key", team_id="team-other")])
+        fake.seed("api_keys", [_key_row(id="other-key", org_id="team-other")])
         r = tc.delete("/v1/team/keys/other-key")
         assert r.status_code == 403
 
@@ -407,7 +463,7 @@ class TestAgentSignup:
         r = tc.post("/v1/agent/signup", json={})
         assert r.status_code == 200, r.text
         body = r.json()
-        key, team_id, identity = body["key"], body["team_id"], body["identity"]
+        key, org_id, identity = body["key"], body["org_id"], body["identity"]
         assert identity.startswith("anon-")
 
         # exactly one provision RPC call, identity path, wrapper fn
@@ -419,8 +475,8 @@ class TestAgentSignup:
         # key_prefix = api_key[:10] — registry-path parity (review P2,
         # PR #874)
         assert p["p_key_prefix"] == key[:10]
-        assert p["p_team_id"] == team_id
-        assert p["p_graph_name"] == f"team_{team_id}"
+        assert p["p_org_id"] == org_id
+        assert p["p_graph_name"] == f"org_{org_id}"
         assert p["p_lookup_hash"] == lookup_hash(key)
         assert p["p_key_hash"]  # salted PBKDF2 continuity hash
         assert p["p_tier"] == "free"
@@ -431,26 +487,26 @@ class TestAgentSignup:
         assert p["p_signup_token_hash"] == lookup_hash(tok)
 
         # rows landed (fake simulates the RPC)
-        assert any(t["id"] == team_id for t in fake.tables["teams"])
-        mem = [m for m in fake.tables["team_memberships"]
-               if m["team_id"] == team_id]
+        assert any(t["id"] == org_id for t in fake.tables["organizations"])
+        mem = [m for m in fake.tables["org_memberships"]
+               if m["org_id"] == org_id]
         assert len(mem) == 1
         assert mem[0]["user_id"] is None
         assert mem[0]["identity"] == identity
         assert mem[0]["role"] == "owner" and mem[0]["status"] == "active"
-        keys = [k for k in fake.tables["api_keys"] if k["team_id"] == team_id]
+        keys = [k for k in fake.tables["api_keys"] if k["org_id"] == org_id]
         assert len(keys) == 1
         assert keys[0]["lookup_hash"] == lookup_hash(key)
         # #1709: the token row landed (hash-only; bound to the team)
         token_rows = [t for t in fake.tables.get("agent_signup_tokens", [])
-                      if t["team_id"] == team_id]
+                      if t["org_id"] == org_id]
         assert len(token_rows) == 1
         assert token_rows[0]["token_hash"] == lookup_hash(tok)
 
         # minted key authenticates (api_keys.lookup_hash path)
         r2 = tc.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
         assert r2.status_code == 200, r2.text
-        assert r2.json()["team_id"] == team_id
+        assert r2.json()["org_id"] == org_id
 
     def test_never_touches_registry(self, client, spy):
         tc, _, _ = client
@@ -505,7 +561,7 @@ class TestRegister:
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["api_key"].startswith("tt_")
-        assert body["team_id"] and body["graph_name"] == f"team_{body['team_id']}"
+        assert body["org_id"] and body["graph_name"] == f"org_{body['org_id']}"
 
         fn, p = fake.rpc_calls[0]
         assert fn == "provision_team"
@@ -513,8 +569,8 @@ class TestRegister:
         assert p["p_identity"].startswith("reg-")  # deterministic per-email
         assert p["p_email"] == "founder@example.com"
         assert p["p_lookup_hash"] == lookup_hash(body["api_key"])
-        team = next(t for t in fake.tables["teams"]
-                    if t["id"] == body["team_id"])
+        team = next(t for t in fake.tables["organizations"]
+                    if t["id"] == body["org_id"])
         assert team["email"] == "founder@example.com"
 
         # minted key authenticates
@@ -523,7 +579,7 @@ class TestRegister:
 
     def test_duplicate_email_409(self, client):
         tc, fake, _ = client
-        fake.seed("teams", [{"id": "t-dup", "name": "dup",
+        fake.seed("organizations", [{"id": "t-dup", "name": "dup",
                              "email": "dup@example.com"}])
         r = tc.post("/v1/register", json={
             "email": "dup@example.com", "password": "hunter2secret"})
@@ -546,47 +602,47 @@ class TestRegister:
         assert r.status_code == 500
 
 
-# ── POST /v1/teams (create_team — user path via provision_team RPC) ────────
+# ── POST /v1/organizations (create_team — user path via provision_team RPC) ────────
 
 class TestCreateTeam:
     def test_create_team_user_path(self, user_client):
         tc, fake, _ = user_client
-        r = tc.post("/v1/teams", json={"name": "acme"})
+        r = tc.post("/v1/organizations", json={"name": "acme"})
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["name"] == "acme"
         assert body["tier"] == "free"
-        assert body["graph_name"] == f"team_{body['team_id']}"  # #1903: stored name == data-plane namespace
+        assert body["graph_name"] == f"org_{body['org_id']}"  # #1903: stored name == data-plane namespace
 
         fn, p = fake.rpc_calls[0]
         assert fn == "provision_team"
-        assert p["p_graph_name"] == f"team_{body['team_id']}"
+        assert p["p_graph_name"] == f"org_{body['org_id']}"
         # persisted teams.graph_name pinned (the round-trip consumers read it)
-        assert next(t for t in fake.tables["teams"]
-                    if t["id"] == body["team_id"])["graph_name"] == \
-            f"team_{body['team_id']}"
+        assert next(t for t in fake.tables["organizations"]
+                    if t["id"] == body["org_id"])["graph_name"] == \
+            f"org_{body['org_id']}"
         assert p["p_user_id"] == _USER1
         assert p["p_identity"] is None
-        assert p["p_team_id"] == body["team_id"]
-        assert p["p_team_name"] == "acme"
+        assert p["p_org_id"] == body["org_id"]
+        assert p["p_org_name"] == "acme"
         # owner membership landed for the JWT user
-        mem = [m for m in fake.tables["team_memberships"]
-               if m["user_id"] == _USER1 and m["team_id"] == body["team_id"]]
+        mem = [m for m in fake.tables["org_memberships"]
+               if m["user_id"] == _USER1 and m["org_id"] == body["org_id"]]
         assert len(mem) == 1 and mem[0]["role"] == "owner"
 
     def test_create_team_keyless_no_api_keys_row(self, user_client):
-        """#1921: POST /v1/teams provisions KEYLESS — no tt_ mint, no
+        """#1921: POST /v1/organizations provisions KEYLESS — no tt_ mint, no
         api_keys row. The old per-call mint persisted only the hash and
         never returned the plaintext — a dead key permanently counted
         against max_api_keys (2 free teams exhausted the cap with zero
         usable keys). Mirror of create_onboarding_team's #1716 keyless
         provision: all-NULL key params → teams + membership, NO key row."""
         tc, fake, _ = user_client
-        r = tc.post("/v1/teams", json={"name": "keyless"})
+        r = tc.post("/v1/organizations", json={"name": "keyless"})
         assert r.status_code == 200, r.text
         body = r.json()
         assert "key" not in body  # the response never carries a key
-        tid = body["team_id"]
+        tid = body["org_id"]
         fn, p = fake.rpc_calls[0]
         assert fn == "provision_team"
         # all-or-none key guard (migration 20260825214233): all-NULL =
@@ -595,13 +651,13 @@ class TestCreateTeam:
         assert p["p_key_hash"] is None
         assert p["p_lookup_hash"] is None
         assert p["p_key_prefix"] is None
-        rows = [k for k in fake.tables["api_keys"] if k["team_id"] == tid]
+        rows = [k for k in fake.tables["api_keys"] if k["org_id"] == tid]
         assert rows == [], "create_team must not mint a dead api_keys row"
 
     def test_duplicate_name_409(self, user_client):
         tc, fake, _ = user_client
-        fake.seed("teams", [{"id": "t-acme", "name": "acme"}])
-        r = tc.post("/v1/teams", json={"name": "acme"})
+        fake.seed("organizations", [{"id": "t-acme", "name": "acme"}])
+        r = tc.post("/v1/organizations", json={"name": "acme"})
         assert r.status_code == 409
 
     def test_duplicate_name_race_maps_rpc_409(self, user_client):
@@ -630,7 +686,7 @@ class TestCreateTeam:
         old = sc.get_control_plane
         sc.get_control_plane = lambda: _UniqueViolation(fake)
         try:
-            r = tc.post("/v1/teams", json={"name": "acme"})
+            r = tc.post("/v1/organizations", json={"name": "acme"})
         finally:
             sc.get_control_plane = old
         assert r.status_code == 409, r.text
@@ -644,49 +700,49 @@ class TestCreateTeam:
         tc, fake, _ = user_client
         since = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()  # noqa: UP017
         # 3 MEMBER rows (invite accepts) — must NOT trigger the owner limit
-        fake.seed("team_memberships", [
+        fake.seed("org_memberships", [
             {"id": f"mem-inv-{i}", "user_id": _USER1,
-             "team_id": f"team-inv-{i}", "role": "member",
+             "org_id": f"team-inv-{i}", "role": "member",
              "status": "active", "created_at": since}
             for i in range(3)
         ])
-        r = tc.post("/v1/teams", json={"name": "mine"})
+        r = tc.post("/v1/organizations", json={"name": "mine"})
         assert r.status_code == 200, r.text
 
     def test_rate_limit_3_per_hour(self, user_client):
         tc, fake, _ = user_client
         from datetime import datetime, timedelta, timezone
         since = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()  # noqa: UP017
-        fake.seed("team_memberships", [
-            _owner_membership(id=f"m{i}", team_id=f"team-{i}",
+        fake.seed("org_memberships", [
+            _owner_membership(id=f"m{i}", org_id=f"team-{i}",
                               created_at=since)
             for i in range(3)
         ])
-        r = tc.post("/v1/teams", json={"name": "fourth"})
+        r = tc.post("/v1/organizations", json={"name": "fourth"})
         assert r.status_code == 429
 
     def test_rate_limit_ignores_old_rows(self, user_client):
         from datetime import datetime, timedelta, timezone
         tc, fake, _ = user_client
         old = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()  # noqa: UP017
-        fake.seed("team_memberships", [
-            _owner_membership(id="m-old", team_id="team-old", created_at=old),
+        fake.seed("org_memberships", [
+            _owner_membership(id="m-old", org_id="team-old", created_at=old),
         ])
-        r = tc.post("/v1/teams", json={"name": "fresh"})
+        r = tc.post("/v1/organizations", json={"name": "fresh"})
         assert r.status_code == 200, r.text
 
     def test_never_touches_registry(self, user_client, spy):
         tc, _, _ = user_client
-        r = tc.post("/v1/teams", json={"name": "acme"})
+        r = tc.post("/v1/organizations", json={"name": "acme"})
         assert r.status_code == 200, r.text
         spy.assert_clean()
 
     def test_backup_round_trip_dashboard_created_team(self, user_client, monkeypatch):
         """#1903 backup surface: a dashboard-created team's backup resolves
-        teams.graph_name (= team_{team_id} post-fix) and dumps the REAL data
+        teams.graph_name (= org_{org_id} post-fix) and dumps the REAL data
         graph (manifest node_count + restore round-trip capture the seeded
         point). Mirrors the pro_backup_client setup (:1006-1031) — POST
-        /backups is key-auth (get_current_team) and the tier gate reads the
+        /backups is key-auth (get_current_org) and the tier gate reads the
         dependency dict."""
         import base64 as _b64  # noqa: I001
         import tortoise.hosted_api as ha_mod
@@ -700,23 +756,23 @@ class TestCreateTeam:
         store = MemoryStorage()  # SHARED — _backup_storage is called per request
         monkeypatch.setattr(ha_mod, "_backup_storage", lambda: store)
         monkeypatch.setattr(
-            _pricing, "daily_backups_enabled", lambda tier: tier == "pro"
+            _pricing, "hourly_backups_enabled", lambda tier: tier == "pro"
         )
-        r = tc.post("/v1/teams", json={"name": "acme"})
+        r = tc.post("/v1/organizations", json={"name": "acme"})
         assert r.status_code == 200, r.text
-        team_id = r.json()["team_id"]
-        assert r.json()["graph_name"] == f"team_{team_id}"
-        # get_current_team_session honors the get_current_team override
+        org_id = r.json()["org_id"]
+        assert r.json()["graph_name"] == f"org_{org_id}"
+        # get_current_org_session honors the get_current_org override
         # (hosted_api.py:1540-1548), so one override covers create + restore.
-        app.dependency_overrides[get_current_team] = lambda: dict(
-            TEST_TEAM, team_id=team_id, tier="pro", backup_enabled=True)
+        app.dependency_overrides[get_current_org] = lambda: dict(
+            TEST_TEAM, org_id=org_id, tier="pro", backup_enabled=True)
         # seed the real data graph: bind the raw handle to the EXPLICIT
-        # team_{team_id} graph (the same graph the backup dump reads via
+        # org_{org_id} graph (the same graph the backup dump reads via
         # from_uri) so the seed target is explicit and lane-independent —
         # mirrors test_restore_binds_live_graph_to_teams_graph_name.
-        sdk = ha_mod._make_sdk(namespace=team_id)
+        sdk = ha_mod._make_sdk(namespace=org_id)
         try:
-            sdk._get_proj().db.select_graph(f"team_{team_id}").query(
+            sdk._get_proj().db.select_graph(f"org_{org_id}").query(
                 "CREATE (p:Point {id:'seed-1', content:'real decision'})"
             )
         finally:
@@ -724,7 +780,7 @@ class TestCreateTeam:
         r = tc.post("/backups")
         assert r.status_code == 201, r.text
         manifest = r.json()
-        assert manifest["graph_name"] == f"team_{team_id}"  # stored name wins
+        assert manifest["graph_name"] == f"org_{org_id}"  # stored name wins
         # dump captured non-skip nodes (the provision RPC may co-mint
         # starter PackInstall nodes, so assert >=1, not an exact total)
         assert manifest["node_count"] >= 1, \
@@ -737,16 +793,16 @@ class TestCreateTeam:
         assert r2.json()["restored"]["nodes"] >= 1, \
             f"restore empty: {r2.json()}"
         # specific-content proof: the seeded point survived the round-trip
-        probe = ha_mod._make_sdk(namespace=team_id)
+        probe = ha_mod._make_sdk(namespace=org_id)
         try:
             rows = probe._get_proj().db.select_graph(
-                f"team_{team_id}").query(
+                f"org_{org_id}").query(
                     "MATCH (p:Point {id:'seed-1'}) RETURN count(p)").result_set
             # swap proof: the dump excludes TeamMeta (_EXPORT_SKIP_LABELS), so
             # a post-restore TeamMeta would mean the live graph was never
             # replaced by the restore.
             metas = probe._get_proj().db.select_graph(
-                f"team_{team_id}").query(
+                f"org_{org_id}").query(
                     "MATCH (t:TeamMeta) RETURN count(t)").result_set
         finally:
             probe.close()
@@ -757,23 +813,23 @@ class TestCreateTeam:
 # ── Members surface: list / remove / role change ───────────────────────────
 
 class TestMembers:
-    def _seed_team(self, fake, team_id="team-free-001"):
-        fake.seed("team_memberships", [
-            _owner_membership(team_id=team_id),
-            {"id": "mem-2", "user_id": _USER2, "team_id": team_id,
+    def _seed_team(self, fake, org_id="team-free-001"):
+        fake.seed("org_memberships", [
+            _owner_membership(org_id=org_id),
+            {"id": "mem-2", "user_id": _USER2, "org_id": org_id,
              "role": "member", "status": "active", "identity": None},
-            {"id": "mem-3", "user_id": None, "team_id": team_id,
+            {"id": "mem-3", "user_id": None, "org_id": org_id,
              "role": "member", "status": "active", "identity": "anon-abc123"},
         ])
 
     def test_list_members_active_and_invited(self, user_client):
         tc, fake, _ = user_client
         self._seed_team(fake)
-        fake.seed("team_memberships", [
-            {"id": "mem-4", "user_id": _USER4, "team_id": "team-free-001",
+        fake.seed("org_memberships", [
+            {"id": "mem-4", "user_id": _USER4, "org_id": "team-free-001",
              "role": "member", "status": "removed", "identity": None},
         ])
-        r = tc.get("/v1/teams/team-free-001/members")
+        r = tc.get("/v1/organizations/team-free-001/members")
         assert r.status_code == 200, r.text
         rows = r.json()
         assert len(rows) == 3  # removed excluded
@@ -786,10 +842,10 @@ class TestMembers:
     def test_remove_member(self, user_client):
         tc, fake, _ = user_client
         self._seed_team(fake)
-        r = tc.delete(f"/v1/teams/team-free-001/members/{_USER2}")
+        r = tc.delete(f"/v1/organizations/team-free-001/members/{_USER2}")
         assert r.status_code == 200, r.text
         assert r.json() == {"status": "removed"}
-        mem = next(m for m in fake.tables["team_memberships"]
+        mem = next(m for m in fake.tables["org_memberships"]
                    if m["id"] == "mem-2")
         assert mem["status"] == "removed"
 
@@ -797,48 +853,48 @@ class TestMembers:
         """Identity rows are removable via their surfaced user_id."""
         tc, fake, _ = user_client
         self._seed_team(fake)
-        r = tc.delete("/v1/teams/team-free-001/members/anon-abc123")
+        r = tc.delete("/v1/organizations/team-free-001/members/anon-abc123")
         assert r.status_code == 200, r.text
-        mem = next(m for m in fake.tables["team_memberships"]
+        mem = next(m for m in fake.tables["org_memberships"]
                    if m["id"] == "mem-3")
         assert mem["status"] == "removed"
 
     def test_remove_owner_409(self, user_client):
         tc, fake, _ = user_client
         self._seed_team(fake)
-        r = tc.delete(f"/v1/teams/team-free-001/members/{_USER1}")
+        r = tc.delete(f"/v1/organizations/team-free-001/members/{_USER1}")
         assert r.status_code == 409
 
     def test_remove_unknown_404(self, user_client):
         tc, fake, _ = user_client
         self._seed_team(fake)
-        r = tc.delete("/v1/teams/team-free-001/members/ghost")
+        r = tc.delete("/v1/organizations/team-free-001/members/ghost")
         assert r.status_code == 404
 
     def test_change_role(self, user_client):
         tc, fake, _ = user_client
         self._seed_team(fake)
-        r = tc.patch(f"/v1/teams/team-free-001/members/{_USER2}",
+        r = tc.patch(f"/v1/organizations/team-free-001/members/{_USER2}",
                      json={"role": "admin"})
         assert r.status_code == 200, r.text
         assert r.json() == {"user_id": _USER2, "role": "admin"}
-        mem = next(m for m in fake.tables["team_memberships"]
+        mem = next(m for m in fake.tables["org_memberships"]
                    if m["id"] == "mem-2")
         assert mem["role"] == "admin"
 
     def test_change_owner_role_409(self, user_client):
         tc, fake, _ = user_client
         self._seed_team(fake)
-        r = tc.patch(f"/v1/teams/team-free-001/members/{_USER1}",
+        r = tc.patch(f"/v1/organizations/team-free-001/members/{_USER1}",
                      json={"role": "member"})
         assert r.status_code == 409
 
     def test_never_touches_registry(self, user_client, spy):
         tc, fake, _ = user_client
         self._seed_team(fake)
-        assert tc.get("/v1/teams/team-free-001/members").status_code == 200
-        assert tc.delete(f"/v1/teams/team-free-001/members/{_USER2}").status_code == 200
-        assert tc.patch(f"/v1/teams/team-free-001/members/{_USER2}",
+        assert tc.get("/v1/organizations/team-free-001/members").status_code == 200
+        assert tc.delete(f"/v1/organizations/team-free-001/members/{_USER2}").status_code == 200
+        assert tc.patch(f"/v1/organizations/team-free-001/members/{_USER2}",
                         json={"role": "member"}).status_code == 200
         spy.assert_clean()
 
@@ -892,7 +948,7 @@ class TestGraphSurface:
     def _seed_default_graph(self, fake):
         """Real teams rows always carry graph_name (provision_team requires
         it) — the shared FREE_TEAM fixture predates the column."""
-        fake.tables["teams"][0]["graph_name"] = "team_team-free-001"
+        fake.tables["organizations"][0]["graph_name"] = "team_team-free-001"
 
     def test_create_graph_writes_row_supabase_mode(self, user_client):
         """C2: the session alias writes the graphs row via the seam in
@@ -900,22 +956,22 @@ class TestGraphSurface:
         table is the SOR). Uses a PRO team (free 402s per E2E-3)."""
         tc, fake, _ = user_client
         self._seed_default_graph(fake)
-        fake.tables["teams"][0]["tier"] = "pro"
-        fake.tables["teams"][0]["max_graphs"] = None
-        fake.seed("team_memberships", [_owner_membership()])
+        fake.tables["organizations"][0]["tier"] = "pro"
+        fake.tables["organizations"][0]["max_graphs"] = None
+        fake.seed("org_memberships", [_owner_membership()])
         r = tc.post("/v1/graphs", json={
-            "team_id": "team-free-001", "name": "research"})
+            "org_id": "team-free-001", "name": "research"})
         assert r.status_code == 201, r.text
         body = r.json()
         # The nested 201 envelope (additive for the dashboard caller)
         assert body["graph"]["kind"] == "custom"
-        assert body["graph"]["namespace"].startswith("team_team-free-001_g_")
+        assert body["graph"]["namespace"].startswith("org_team-free-001_g_")
         assert body["graph"]["id"].startswith("g_")
         assert body["key_plaintext"].startswith("tk_")
         assert body["revealed_once"] is True
         # The row landed in Supabase (the seam write)
         rows = fake.query("graphs", select=["id", "name", "status"],
-                          filters=[("team_id", "eq", "team-free-001")])
+                          filters=[("org_id", "eq", "team-free-001")])
         assert len(rows) == 1 and rows[0]["name"] == "research"
         # The minted key records WHO minted — the session user UUID
         # (#1511 attribution parity with create_api_key; not "api").
@@ -923,7 +979,7 @@ class TestGraphSurface:
                            select=["created_by", "created_by_key_id",
                                    "delegation_depth", "graph_id",
                                    "scopes"],
-                           filters=[("team_id", "eq", "team-free-001")])
+                           filters=[("org_id", "eq", "team-free-001")])
         assert len(krows) == 1
         assert krows[0]["created_by"] == _USER1
         assert krows[0]["created_by_key_id"] is None  # session mint
@@ -936,37 +992,64 @@ class TestGraphSurface:
         CTA, NOT a silent no-op 200 (the pre-C2 behavior)."""
         tc, fake, _ = user_client
         self._seed_default_graph(fake)
-        fake.seed("team_memberships", [_owner_membership()])
+        fake.seed("org_memberships", [_owner_membership()])
         r = tc.post("/v1/graphs", json={
-            "team_id": "team-free-001", "name": "research"})
+            "org_id": "team-free-001", "name": "research"})
         assert r.status_code == 402, r.text
         assert "Upgrade" in r.json()["detail"]
 
     def test_list_graphs_derives_default_and_key_count(self, user_client):
-        """E7/C2: list derives the default graph from teams.graph_name;
+        """E7/C2: list derives the default graph from organizations.graph_name;
         rows carry status + key_count; point_count dropped."""
         tc, fake, _ = user_client
         self._seed_default_graph(fake)
-        fake.seed("team_memberships", [_owner_membership()])
-        r = tc.get("/v1/graphs?team_id=team-free-001")
+        fake.seed("org_memberships", [_owner_membership()])
+        r = tc.get("/v1/graphs?org_id=team-free-001")
         assert r.status_code == 200, r.text
         graphs = r.json()
         assert graphs == [{"graph_id": "default", "name": "default",
                            "kind": "default", "status": "active",
                            "recording": None,  # C6 #2115 read-back
                            "key_count": 0}]
+        # #2306 (supabase lane pin of the lane-consistency fix): the default
+        # row's key_count stays 0 even with keys present — the team-wide rows
+        # (graph_id NULL, the keys that resolve to the default graph) are
+        # managed on the API-Keys tab and never counted on a graph row, while
+        # an active custom-bound key counts on ITS OWN row (revoked excluded).
+        fake.seed("api_keys", [
+            {"id": "tw-a", "org_id": "team-free-001", "lookup_hash": "h1",
+             "graph_id": None, "revoked_at": None},
+            {"id": "gb-a", "org_id": "team-free-001", "lookup_hash": "h2",
+             "graph_id": "g_custom000001", "revoked_at": None},
+            {"id": "gb-r", "org_id": "team-free-001", "lookup_hash": "h3",
+             "graph_id": "g_custom000001",
+             "revoked_at": "2026-09-01T00:00:00Z"},
+        ])
+        fake.seed("graphs", [{
+            "id": "g_custom000001", "org_id": "team-free-001",
+            "name": "research", "kind": "custom",
+            "namespace": "team_team-free-001_g_g_custom000001",
+            "status": "active", "created_at": "2026-09-01T00:00:00Z",
+        }])
+        r = tc.get("/v1/graphs?org_id=team-free-001")
+        rows = r.json()
+        assert len(rows) == 2
+        default_row = next(x for x in rows if x["kind"] == "default")
+        assert default_row["key_count"] == 0  # team-wide keys never counted
+        custom_row = next(x for x in rows if x["kind"] == "custom")
+        assert custom_row["key_count"] == 1  # active bound keys only
 
     def test_list_my_teams_uses_derived_graphs(self, user_client):
         """E6: team switcher — graph_count/default_graph_id come from the
         derived default graph, not registry Graph nodes."""
         tc, fake, _ = user_client
         self._seed_default_graph(fake)
-        fake.seed("team_memberships", [_owner_membership()])
-        r = tc.get("/v1/teams")
+        fake.seed("org_memberships", [_owner_membership()])
+        r = tc.get("/v1/organizations")
         assert r.status_code == 200, r.text
         rows = r.json()
         assert len(rows) == 1
-        assert rows[0]["team_id"] == "team-free-001"
+        assert rows[0]["org_id"] == "team-free-001"
         assert rows[0]["graph_count"] == 1
         assert rows[0]["default_graph_id"] == "default"
 
@@ -976,16 +1059,16 @@ class TestGraphSurface:
         default → count 0 (the count comes from Supabase, never registry)."""
         tc, fake, _ = user_client
         self._seed_default_graph(fake)
-        fake.tables["teams"][0]["tier"] = "solo"
-        fake.tables["teams"][0]["max_graphs"] = 2
-        fake.seed("team_memberships", [_owner_membership()])
+        fake.tables["organizations"][0]["tier"] = "solo"
+        fake.tables["organizations"][0]["max_graphs"] = 2
+        fake.seed("org_memberships", [_owner_membership()])
         # 1st custom: 2 of 2 reached → 201
         r1 = tc.post("/v1/graphs", json={
-            "team_id": "team-free-001", "name": "g1"})
+            "org_id": "team-free-001", "name": "g1"})
         assert r1.status_code == 201, r1.text
         # 2nd custom: at cap → 409 + X-Graph-Quota (not 402 — quota ≠ tier)
         r2 = tc.post("/v1/graphs", json={
-            "team_id": "team-free-001", "name": "g2"})
+            "org_id": "team-free-001", "name": "g2"})
         assert r2.status_code == 409, r2.text
         assert r2.headers.get("X-Graph-Quota") == "2/2"
 
@@ -994,14 +1077,14 @@ class TestGraphSurface:
         (fake control plane), never the registry graph."""
         tc, fake, _ = user_client
         self._seed_default_graph(fake)
-        fake.tables["teams"][0]["tier"] = "pro"
-        fake.tables["teams"][0]["max_graphs"] = None
-        fake.seed("team_memberships", [_owner_membership()])
+        fake.tables["organizations"][0]["tier"] = "pro"
+        fake.tables["organizations"][0]["max_graphs"] = None
+        fake.seed("org_memberships", [_owner_membership()])
         assert tc.post("/v1/graphs", json={
-            "team_id": "team-free-001",
+            "org_id": "team-free-001",
             "name": "research"}).status_code == 201
-        assert tc.get("/v1/graphs?team_id=team-free-001").status_code == 200
-        assert tc.get("/v1/teams").status_code == 200
+        assert tc.get("/v1/graphs?org_id=team-free-001").status_code == 200
+        assert tc.get("/v1/organizations").status_code == 200
         spy.assert_clean()
 
 
@@ -1011,7 +1094,7 @@ class TestInternalProvisionDisabled:
     def test_disabled_in_supabase_mode(self, client):
         tc, _, _ = client
         r = tc.post("/internal/provision", headers=_INTERNAL_HEADERS, json={
-            "team_id": "team-x", "team_name": "X",
+            "org_id": "team-x", "org_name": "X",
             "api_key_hash": "h", "created_by": "u"})
         assert r.status_code == 503
         assert "provision_team" in r.json()["detail"]
@@ -1019,7 +1102,7 @@ class TestInternalProvisionDisabled:
     def test_never_touches_registry(self, client, spy):
         tc, _, _ = client
         tc.post("/internal/provision", headers=_INTERNAL_HEADERS, json={
-            "team_id": "team-x", "team_name": "X",
+            "org_id": "team-x", "org_name": "X",
             "api_key_hash": "h", "created_by": "u"})
         spy.assert_clean()
 
@@ -1029,27 +1112,27 @@ class TestInternalProvisionDisabled:
 class TestOnboardingTeam:
     def test_subteam_provisions_via_rpc(self, team_client):
         tc, fake, _ = team_client
-        # #1748: seed the session-user context (get_current_team_session
+        # #1748: seed the session-user context (get_current_org_session
         # carries session_user_id for JWT auth; tests override the dep).
-        app.dependency_overrides[get_current_team] = lambda: dict(
+        app.dependency_overrides[get_current_org] = lambda: dict(
             TEST_TEAM, session_user_id="user-1")
         r = tc.post("/v1/onboarding/team", json={"name": "subteam"})
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["graph_name"] == f"team_{body['team_id']}"  # #1903: stored name == data-plane namespace
+        assert body["graph_name"] == f"org_{body['org_id']}"  # #1903: stored name == data-plane namespace
         assert "key" not in body  # #1716: the response never carries a key
         fn, p = fake.rpc_calls[0]
         assert fn == "provision_team"
-        assert p["p_graph_name"] == f"team_{body['team_id']}"
+        assert p["p_graph_name"] == f"org_{body['org_id']}"
         # persisted teams.graph_name pinned (the round-trip consumers read it)
-        assert next(t for t in fake.tables["teams"]
-                    if t["id"] == body["team_id"])["graph_name"] == \
-            f"team_{body['team_id']}"
+        assert next(t for t in fake.tables["organizations"]
+                    if t["id"] == body["org_id"])["graph_name"] == \
+            f"org_{body['org_id']}"
         # #1748: USER path — the session user is the owner member (no
         # throwaway anon-{uuid} identity).
         assert p["p_user_id"] == "user-1"
         assert p["p_identity"] is None
-        assert p["p_team_id"] == body["team_id"]
+        assert p["p_org_id"] == body["org_id"]
         # #1716: keyless provisioning — all-NULL key params → NO api_keys row
         # attributable to the sub-team (the old per-call tt_ mint was an
         # unrecoverable dead credential: plaintext never returned, hash-only
@@ -1059,33 +1142,33 @@ class TestOnboardingTeam:
         assert p["p_lookup_hash"] is None
         assert p["p_key_prefix"] is None
         keys = [k for k in fake.tables["api_keys"]
-                if k["team_id"] == body["team_id"]]
+                if k["org_id"] == body["org_id"]]
         assert keys == []
         # the session user is a REAL owner member (role owner, status active,
         # user_id set, identity NULL) — the RPC's membership upsert, NOT a
         # hand-inserted row.
-        mem = [m for m in fake.tables["team_memberships"]
-               if m["team_id"] == body["team_id"]]
+        mem = [m for m in fake.tables["org_memberships"]
+               if m["org_id"] == body["org_id"]]
         assert len(mem) == 1
         assert mem[0]["user_id"] == "user-1"
         assert mem[0].get("identity") is None
         assert mem[0]["role"] == "owner"
         assert mem[0]["status"] == "active"
         # onboarding state write went to the seam too (teams row)
-        state = next(t for t in fake.tables["teams"]
-                     if t["id"] == TEST_TEAM["team_id"])["onboarding_state"]
-        assert state["team_created"] is True
+        state = next(t for t in fake.tables["organizations"]
+                     if t["id"] == TEST_TEAM["org_id"])["onboarding_state"]
+        assert state["org_created"] is True
 
     def test_subteam_requires_session_user(self, team_client):
         """#1748: no session user on the team context (session_user_id or
         key created_by) → 403 — never a throwaway-identity orphan team."""
         tc, fake, _ = team_client
-        app.dependency_overrides[get_current_team] = lambda: dict(
+        app.dependency_overrides[get_current_org] = lambda: dict(
             TEST_TEAM, session_user_id=None)
         r = tc.post("/v1/onboarding/team", json={"name": "orphan"})
         assert r.status_code == 403, r.text
         assert fake.rpc_calls == []  # no provision attempted
-        assert all(t["id"] != "orphan" for t in fake.tables["teams"])
+        assert all(t["id"] != "orphan" for t in fake.tables["organizations"])
 
     def test_key_auth_owner_from_key_creator(self, client):
         """#1748 key-auth branch: a real Bearer tt_ key (no session JWT —
@@ -1125,29 +1208,29 @@ class TestOnboardingTeam:
         resolves on REST. The sub-team is listable and deletable by its
         owner — the full #1716 escape hatch, now actually reachable."""
         tc, fake, _ = team_client
-        app.dependency_overrides[get_current_team] = lambda: dict(
+        app.dependency_overrides[get_current_org] = lambda: dict(
             TEST_TEAM, session_user_id=_USER1)
         app.dependency_overrides[get_current_user] = lambda: {
             "user_id": _USER1, "email": "user-1@example.com"}
         r = tc.post("/v1/onboarding/team", json={"name": "subteam"})
         assert r.status_code == 200, r.text
-        sub_team_id = r.json()["team_id"]
+        sub_org_id = r.json()["org_id"]
         assert [k for k in fake.tables["api_keys"]
-                if k["team_id"] == sub_team_id] == []
+                if k["org_id"] == sub_org_id] == []
         # REAL membership grant from provisioning — no hand-inserted row:
         # the fake's provision_team emulation wrote it via p_user_id.
-        assert any(m["team_id"] == sub_team_id
+        assert any(m["org_id"] == sub_org_id
                    and m["user_id"] == _USER1
                    and m["role"] == "owner"
                    and m["status"] == "active"
-                   for m in fake.tables["team_memberships"])
+                   for m in fake.tables["org_memberships"])
         # session-key mint resolves the owner membership → 200
         r2 = tc.post("/v1/session/key", json={"purpose": "recovery"})
         assert r2.status_code == 200, r2.text
         key = r2.json()["key"]
         assert key.startswith("tt_")
         rows = [k for k in fake.tables["api_keys"]
-                if k["team_id"] == sub_team_id]
+                if k["org_id"] == sub_org_id]
         assert len(rows) == 1
         assert rows[0]["lookup_hash"] == lookup_hash(key)
         assert rows[0]["created_via"] == "recovery"
@@ -1155,15 +1238,15 @@ class TestOnboardingTeam:
         app.dependency_overrides.clear()
         r3 = tc.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
         assert r3.status_code == 200, r3.text
-        assert r3.json()["team_id"] == sub_team_id
-        # the sub-team is LISTABLE by the owner (GET /v1/teams)
+        assert r3.json()["org_id"] == sub_org_id
+        # the sub-team is LISTABLE by the owner (GET /v1/organizations)
         app.dependency_overrides[get_current_user] = lambda: {
             "user_id": _USER1, "email": "user-1@example.com"}
-        r4 = tc.get("/v1/teams")
+        r4 = tc.get("/v1/organizations")
         assert r4.status_code == 200, r4.text
-        assert any(t["team_id"] == sub_team_id for t in r4.json())
-        # and DELETABLE by the owner (DELETE /v1/teams/{id})
-        r5 = tc.delete(f"/v1/teams/{sub_team_id}")
+        assert any(t["org_id"] == sub_org_id for t in r4.json())
+        # and DELETABLE by the owner (DELETE /v1/organizations/{id})
+        r5 = tc.delete(f"/v1/organizations/{sub_org_id}")
         assert r5.status_code in (200, 202), r5.text
         # the key is revoked by the delete cascade → auth fails closed
         app.dependency_overrides.clear()
@@ -1174,7 +1257,7 @@ class TestOnboardingTeam:
         tc, _, _ = team_client
         # #1748: the onboarding sub-team is provisioned on the USER path —
         # seed the session-user context so the write takes the RPC path.
-        app.dependency_overrides[get_current_team] = lambda: dict(
+        app.dependency_overrides[get_current_org] = lambda: dict(
             TEST_TEAM, session_user_id="user-1")
         r = tc.post("/v1/onboarding/team", json={"name": "subteam"})
         assert r.status_code == 200, r.text
@@ -1193,11 +1276,11 @@ _INVENTORY_ENDPOINTS = [
     ("post", "/v1/register",
      {"email": "sweep@example.com", "password": "hunter2secret"},
      None, "register writer"),
-    ("post", "/v1/teams", {"name": "sweep-team"}, None, "create_team writer"),
-    ("get", "/v1/teams/team-free-001/members", None, None, "member listing"),
+    ("post", "/v1/organizations", {"name": "sweep-team"}, None, "create_team writer"),
+    ("get", "/v1/organizations/team-free-001/members", None, None, "member listing"),
     ("post", "/v1/internal/reconcile", None, _INTERNAL_HEADERS, "reconcile"),
     ("post", "/v1/onboarding/team", {"name": "sweep-sub"}, None, "onboarding"),
-    ("get", "/v1/graphs?team_id=team-free-001", None, None, "graph_list"),
+    ("get", "/v1/graphs?org_id=team-free-001", None, None, "graph_list"),
 ]
 
 
@@ -1217,11 +1300,11 @@ class TestZeroRegistryInventory:
         # #1748: seed the session user on the team context (onboarding
         # sub-team provisioning takes the USER path → the sweep exercises
         # the real RPC write, not a 403 short-circuit).
-        app.dependency_overrides[get_current_team] = lambda: dict(
+        app.dependency_overrides[get_current_org] = lambda: dict(
             TEST_TEAM, session_user_id=_USER1)
-        fake.seed("team_memberships", [
+        fake.seed("org_memberships", [
             _owner_membership(),
-            {"id": "mem-2", "user_id": _USER2, "team_id": "team-free-001",
+            {"id": "mem-2", "user_id": _USER2, "org_id": "team-free-001",
              "role": "member", "status": "active", "identity": None},
         ])
         kwargs = {}
@@ -1240,17 +1323,17 @@ class TestZeroRegistryInventory:
 
 class TestBackupEndpointsSupabaseGraphName:
     """#924: the on-demand backup endpoints resolve the graph name from the
-    control plane via the SAME seam as the sweep (backup_sweep.team_graph_name)
+    control plane via the SAME seam as the sweep (backup_sweep.org_graph_name)
     — Supabase mode reads teams.graph_name (SDK team creation names graphs
-    team_{name}, NOT team_{id}; #768), registry mode is team_{id}. The old
-    team_{id} hardcode targeted a nonexistent graph for SDK-created teams
+    org_{name}, NOT org_{id}; #768), registry mode is org_{id}. The old
+    org_{id} hardcode targeted a nonexistent graph for SDK-created teams
     (P0-guard trip on the sweep, cross-graph rejection on restore).
     """
 
     @pytest.fixture
     def pro_backup_client(self, client, monkeypatch):
         """Supabase-mode client, Pro tier, in-memory backup storage, and a
-        teams row whose graph_name differs from the team_{id} convention."""
+        teams row whose graph_name differs from the org_{id} convention."""
         import base64 as _b64  # noqa: I001
         import tortoise.hosted_api as ha_mod
         from tortoise import pricing as _pricing
@@ -1262,30 +1345,30 @@ class TestBackupEndpointsSupabaseGraphName:
         )
         store = MemoryStorage()  # SHARED — _backup_storage is called per request
         monkeypatch.setattr(ha_mod, "_backup_storage", lambda: store)
-        # Backups gate: pro passes (pricing.json still marks daily_backups
+        # Backups gate: pro passes (pricing.json still marks hourly_backups
         # "planned", so the allowlist is patched like test_hosted_api does).
         monkeypatch.setattr(
-            _pricing, "daily_backups_enabled", lambda tier: tier == "pro"
+            _pricing, "hourly_backups_enabled", lambda tier: tier == "pro"
         )
         # SDK-created team: the graph is named per teams.graph_name — NOT
-        # team_{id} (#768). team_myapp != team_team-pro-924, so a team_{id}
+        # org_{id} (#768). team_myapp != team_team-pro-924, so a org_{id}
         # hardcode is provably wrong here.
-        fake.seed("teams", [{
+        fake.seed("organizations", [{
             "id": "team-pro-924", "name": "myapp",
             "graph_name": "team_myapp", "tier": "pro", "backup_enabled": True,
         }])
-        app.dependency_overrides[get_current_team] = lambda: dict(
-            TEST_TEAM, team_id="team-pro-924", tier="pro")
+        app.dependency_overrides[get_current_org] = lambda: dict(
+            TEST_TEAM, org_id="team-pro-924", tier="pro")
         yield tc, fake, store
         app.dependency_overrides.clear()
 
     def test_backup_create_uses_teams_graph_name(self, pro_backup_client):
-        """POST /backups names the archive per teams.graph_name, not team_{id}."""
+        """POST /backups names the archive per teams.graph_name, not org_{id}."""
         tc, fake, _ = pro_backup_client  # noqa: RUF059
         r = tc.post("/backups")
         assert r.status_code == 201, r.text
         manifest = r.json()
-        assert manifest["team_id"] == "team-pro-924"
+        assert manifest["org_id"] == "team-pro-924"
         # The teams row wins: team_myapp, never team_team-pro-924.
         assert manifest["graph_name"] == "team_myapp"
         assert manifest["backup_id"].startswith("team-pro-924/")
@@ -1293,7 +1376,7 @@ class TestBackupEndpointsSupabaseGraphName:
     def test_backup_restore_uses_teams_graph_name(self, pro_backup_client):
         """Round trip: the restore resolves the SAME teams.graph_name, so the
         backup it just created passes the cross-graph isolation check (the
-        old team_{id} hardcode rejected it with a 400 cross-graph error)."""
+        old org_{id} hardcode rejected it with a 400 cross-graph error)."""
         tc, fake, _ = pro_backup_client  # noqa: RUF059
         r = tc.post("/backups")
         assert r.status_code == 201, r.text
@@ -1306,18 +1389,18 @@ class TestBackupEndpointsSupabaseGraphName:
         assert r.json()["restored"] == {"nodes": 0, "edges": 0}
 
     def test_restore_binds_live_graph_to_teams_graph_name(self, pro_backup_client):
-        """The restore's live-graph bound is teams.graph_name, not team_{id}:
+        """The restore's live-graph bound is teams.graph_name, not org_{id}:
         the on-demand backup dumps the REAL team_myapp graph (node_count > 0)
         and a restore round-trips against it (200, node restored). With the
-        old team_{id} hardcode the backup dumped the phantom team_{id} graph
-        (always empty) — a real graph named team_{name} would never be
+        old org_{id} hardcode the backup dumped the phantom org_{id} graph
+        (always empty) — a real graph named org_{name} would never be
         backed up, exactly the #924 data-loss hazard (review P1 #935: the
         fix binds the dump to the resolved graph, so the data IS captured)."""
         import tortoise.hosted_api as ha_mod
 
         tc, fake, _ = pro_backup_client  # noqa: RUF059
         # Seed the REAL (SDK-created) live graph — named team_myapp per
-        # teams.graph_name, NOT team_{id} (#768).
+        # teams.graph_name, NOT org_{id} (#768).
         sdk = ha_mod._make_sdk(namespace=f"test_writer_team_pro_924_{os.urandom(4).hex()}")
         try:
             live = sdk._get_proj().db.select_graph("team_myapp")
@@ -1328,18 +1411,18 @@ class TestBackupEndpointsSupabaseGraphName:
             sdk.close()
         # The backup dumps the RESOLVED graph (teams.graph_name), so the
         # seeded node IS captured (review P1 #935: the old dump came from the
-        # SDK-namespace phantom team_{id} graph and was always empty).
+        # SDK-namespace phantom org_{id} graph and was always empty).
         r = tc.post("/backups")
         assert r.status_code == 201, r.text
         manifest = r.json()
         assert manifest["graph_name"] == "team_myapp"
         assert manifest["node_count"] == 1, (
             "backup must dump the resolved teams.graph_name graph, not the "
-            "phantom team_{id} SDK namespace"
+            "phantom org_{id} SDK namespace"
         )
         backup_key = f"backups/{manifest['backup_id']}/dump.enc"
         # Restore binds the live graph = team_myapp → the non-empty backup
-        # round-trips (200, 1 node restored) — with the old phantom-team_{id}
+        # round-trips (200, 1 node restored) — with the old phantom-org_{id}
         # hardcode the backup was empty and the restore "succeeded" on
         # nothing, silently losing the real graph.
         r = tc.post(
@@ -1362,11 +1445,11 @@ class TestBackupEndpointsSupabaseGraphName:
             pass
 
     def test_backup_create_fail_closed_when_team_vanished(self, pro_backup_client):
-        """A team missing from teams (or without graph_name) 503s — never a
+        """A team missing from organizations (or without graph_name) 503s — never a
         backup of a guessed/wrong graph."""
         tc, fake, _ = pro_backup_client  # noqa: RUF059
-        app.dependency_overrides[get_current_team] = lambda: dict(
-            TEST_TEAM, team_id="team-ghost", tier="pro")
+        app.dependency_overrides[get_current_org] = lambda: dict(
+            TEST_TEAM, org_id="team-ghost", tier="pro")
         try:
             r = tc.post("/backups")
             assert r.status_code == 503, r.text
@@ -1375,7 +1458,7 @@ class TestBackupEndpointsSupabaseGraphName:
             app.dependency_overrides.clear()
 
 
-# #1719 (codebase-review P1-1): JWT subjects + team_memberships.user_id are
+# #1719 (codebase-review P1-1): JWT subjects + org_memberships.user_id are
 # real UUIDs in prod (uuid column) — non-UUID literals would 22P02. Identity
 # anchors (anon-*) stay non-UUID to exercise the identity path.
 _USER1 = "9f2c1a40-0000-4a00-8000-000000000001"

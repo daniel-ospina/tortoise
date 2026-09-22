@@ -28,7 +28,7 @@ URI support: docker://, redis://, rediss:// (FalkorDB Cloud) via
 FalkorProjection.from_uri().
 
 Multi-tenant: --all-tenants queries the registry graph for team IDs and
-iterates team_{team_id} graphs. Per-tenant backfill, one team at a time.
+iterates org_{org_id} graphs. Per-tenant backfill, one team at a time.
 
 Usage:
     python3 graph-scripts/backfill_embeddings.py [--dry-run] [--graph GRAPH]
@@ -467,9 +467,9 @@ def main(argv: list[str] | None = None) -> int:
             if not team_rows:
                 print("  No teams found in registry")
             for row in team_rows:
-                team_id = row[0]
-                graph_name = f"team_{team_id}"
-                print(f"\nTeam: {team_id} → {graph_name}")
+                org_id = row[0]
+                graph_name = f"org_{org_id}"
+                print(f"\nTeam: {org_id} → {graph_name}")
                 total, purged = _dry_run(db, graph_name, labels,
                                          force=args.force_re_embed)
                 grand_total += total
@@ -515,9 +515,9 @@ def main(argv: list[str] | None = None) -> int:
             if not team_rows:
                 print("  No teams found in registry")
             for row in team_rows:
-                team_id = row[0]
-                graph_name = f"team_{team_id}"
-                print(f"\n── Team: {team_id} → {graph_name} ──")
+                org_id = row[0]
+                graph_name = f"org_{org_id}"
+                print(f"\n── Team: {org_id} → {graph_name} ──")
                 _merge_stats(
                     stats,
                     _force_reembed_graph(db, graph_name, labels,
@@ -548,9 +548,9 @@ def main(argv: list[str] | None = None) -> int:
         if not team_rows:
             print("  No teams found in registry")
         for row in team_rows:
-            team_id = row[0]
-            graph_name = f"team_{team_id}"
-            print(f"\n── Team: {team_id} → {graph_name} ──")
+            org_id = row[0]
+            graph_name = f"org_{org_id}"
+            print(f"\n── Team: {org_id} → {graph_name} ──")
             s = _backfill_graph(db, graph_name, labels,
                                 args.limit, args.batch_size)
             grand_scanned += s["scanned"]

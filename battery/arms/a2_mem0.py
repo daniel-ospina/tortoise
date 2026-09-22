@@ -4,6 +4,13 @@ Mock contract (no MEM0_API_KEY): the 4-layer Mem0MockStore (conversation/
 session/user/organizational). Real mode (MEM0_API_KEY set): thin HTTP seam
 — the adapter still routes through the same retrieve/record contract and
 raises ArmUnavailable on API failure (never partial memories).
+
+#2633 real-mode limitation (the differential verdict must know): a2 real
+runs exercise a READ-ONLY live store — setup seeds ONLY in mock mode, and
+record() is a best-effort no-op in real mode (the write path is a Task-9
+seam TODO). The real-run pre-flight asserts ``required_env_keys`` before
+any episode so a real request without MEM0_API_KEY never silently runs
+real-model spend against the seeded in-process mock store.
 """
 from __future__ import annotations  # noqa: I001
 
@@ -19,11 +26,22 @@ from battery.config.corpus import Scenario
 
 
 class A2Mem0Arm:
-    """Mem0-class memory arm. arm_id=a2, adapter=battery.arms.a2_mem0."""
+    """Mem0-class memory arm. arm_id=a2, adapter=battery.arms.a2_mem0.
+
+    Required env keys: ``MEM0_API_KEY`` (real mode). Without it the arm
+    serves the seeded in-process mock store — the real-run gate (run.py)
+    refuses a2 under executor=real when the key is absent.
+    """
 
     arm_id = "a2"
     model_id = "fixed"
     temperature = 0.0
+    #: Real-run credential surface (#2633): the env key whose absence makes
+    #: ``_real_mode()`` False — a real request without it would silently
+    #: exercise the in-process MOCK store under run_mode=real. Declared on
+    #: the ADAPTER (the surface owner), read by the runner pre-flight
+    #: (battery/runner/run.py); never hardcoded there or in arms.yaml.
+    required_env_keys: tuple[str, ...] = ("MEM0_API_KEY",)
 
     def __init__(self, api_key: str | None = None, layer: str = "user",
                  **config):

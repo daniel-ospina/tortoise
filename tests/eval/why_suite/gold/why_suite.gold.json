@@ -15,6 +15,7 @@
             "target_role": "counter"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },
@@ -35,6 +36,7 @@
             "target_role": "counter"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },
@@ -55,6 +57,7 @@
             "target_role": "counter"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },
@@ -75,6 +78,7 @@
             "target_role": "counter"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },
@@ -95,6 +99,7 @@
             "target_role": "counter"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },
@@ -115,6 +120,7 @@
             "target_role": "counter"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },
@@ -135,6 +141,7 @@
             "target_role": "counter"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },
@@ -155,6 +162,7 @@
             "target_role": "counter"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },
@@ -175,6 +183,7 @@
             "target_role": "counter"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },
@@ -195,6 +204,7 @@
             "target_role": "counter"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },
@@ -219,6 +229,7 @@
             "target_role": "option_a"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": true
       },
@@ -243,6 +254,7 @@
             "target_role": "option_a"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": true
       },
@@ -267,6 +279,7 @@
             "target_role": "option_a"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": true
       },
@@ -291,6 +304,7 @@
             "target_role": "option_a"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": true
       },
@@ -315,6 +329,7 @@
             "target_role": "option_a"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": true
       },
@@ -324,7 +339,7 @@
     {
       "clean": false,
       "expected": {
-        "conflict_surfacing": true,
+        "conflict_surfacing": false,
         "dig_deeper_targets": [
           {
             "kind": "supports",
@@ -339,7 +354,8 @@
             "target_role": "successor"
           }
         ],
-        "support_chain_sufficient": true,
+        "resolved": true,
+        "support_chain_sufficient": false,
         "tradeoff_sufficient": false
       },
       "family": "superseded",
@@ -348,7 +364,7 @@
     {
       "clean": false,
       "expected": {
-        "conflict_surfacing": true,
+        "conflict_surfacing": false,
         "dig_deeper_targets": [
           {
             "kind": "supports",
@@ -363,7 +379,8 @@
             "target_role": "successor"
           }
         ],
-        "support_chain_sufficient": true,
+        "resolved": true,
+        "support_chain_sufficient": false,
         "tradeoff_sufficient": false
       },
       "family": "superseded",
@@ -372,7 +389,7 @@
     {
       "clean": false,
       "expected": {
-        "conflict_surfacing": true,
+        "conflict_surfacing": false,
         "dig_deeper_targets": [
           {
             "kind": "supports",
@@ -387,7 +404,8 @@
             "target_role": "successor"
           }
         ],
-        "support_chain_sufficient": true,
+        "resolved": true,
+        "support_chain_sufficient": false,
         "tradeoff_sufficient": false
       },
       "family": "superseded",
@@ -396,7 +414,7 @@
     {
       "clean": false,
       "expected": {
-        "conflict_surfacing": true,
+        "conflict_surfacing": false,
         "dig_deeper_targets": [
           {
             "kind": "supports",
@@ -411,7 +429,8 @@
             "target_role": "successor"
           }
         ],
-        "support_chain_sufficient": true,
+        "resolved": true,
+        "support_chain_sufficient": false,
         "tradeoff_sufficient": false
       },
       "family": "superseded",
@@ -420,7 +439,7 @@
     {
       "clean": false,
       "expected": {
-        "conflict_surfacing": true,
+        "conflict_surfacing": false,
         "dig_deeper_targets": [
           {
             "kind": "supports",
@@ -435,7 +454,8 @@
             "target_role": "successor"
           }
         ],
-        "support_chain_sufficient": true,
+        "resolved": true,
+        "support_chain_sufficient": false,
         "tradeoff_sufficient": false
       },
       "family": "superseded",
@@ -455,6 +475,7 @@
             "target_role": "counter"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },
@@ -475,6 +496,7 @@
             "target_role": "counter"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },
@@ -495,6 +517,7 @@
             "target_role": "counter"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },
@@ -515,6 +538,7 @@
             "target_role": "counter"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },
@@ -535,6 +559,7 @@
             "target_role": "counter"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },
@@ -555,6 +580,7 @@
             "target_role": "counter"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },
@@ -575,6 +601,7 @@
             "target_role": "counter"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },
@@ -595,6 +622,7 @@
             "target_role": "counter"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },
@@ -615,6 +643,7 @@
             "target_role": "counter"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },
@@ -635,6 +664,7 @@
             "target_role": "counter"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },
@@ -651,6 +681,7 @@
             "target_role": "support_a"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },
@@ -667,6 +698,7 @@
             "target_role": "support_a"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },
@@ -683,6 +715,7 @@
             "target_role": "support_a"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },
@@ -699,6 +732,7 @@
             "target_role": "support_a"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },
@@ -715,6 +749,7 @@
             "target_role": "support_a"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },
@@ -731,6 +766,7 @@
             "target_role": "support_a"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },
@@ -747,6 +783,7 @@
             "target_role": "support_a"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },
@@ -763,6 +800,7 @@
             "target_role": "support_a"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },
@@ -779,6 +817,7 @@
             "target_role": "support_a"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },
@@ -795,6 +834,7 @@
             "target_role": "support_a"
           }
         ],
+        "resolved": false,
         "support_chain_sufficient": true,
         "tradeoff_sufficient": false
       },

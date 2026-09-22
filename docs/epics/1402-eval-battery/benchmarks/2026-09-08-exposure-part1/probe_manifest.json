@@ -1,0 +1,38 @@
+{
+  "scenarios": [
+    "d-001",
+    "ct-001",
+    "cal-001",
+    "ret-001"
+  ],
+  "arms": [
+    "a0",
+    "a4"
+  ],
+  "seed": 7,
+  "model": {
+    "model_id": "deepseek/deepseek-v4-flash",
+    "provider": "openrouter",
+    "temperature": 0.0
+  },
+  "spend": {
+    "sub_cap_usd": 3.0
+  },
+  "usage": {
+    "deliberation": {
+      "prompt_tokens": 5541,
+      "completion_tokens": 25029,
+      "calls": 32
+    },
+    "envelope": {
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "calls": 0
+    },
+    "judge": {
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "calls": 0
+    }
+  }
+}

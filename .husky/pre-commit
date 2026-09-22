@@ -53,6 +53,21 @@ if git diff --cached --name-only | grep -qE '^tests/.*\.py$'; then
   fi
 fi
 
+# AGENTS.md materialization gate (#600): stage-guard BEFORE spawning the
+# checker — one cheap git call on commits that don't touch AGENTS.md; the
+# full check runs only when AGENTS.md is staged. Resolve checker via
+# scripts/ symlink OR $AGENT_INFRA_PATH (repos whose real scripts/ dir
+# lacks it, e.g. swarm).
+if git diff --cached --name-only -- AGENTS.md 2>/dev/null | grep -q .; then
+  CHECKER="scripts/check-agents-materialized.sh"
+  if [ ! -f "$CHECKER" ] && [ -n "${AGENT_INFRA_PATH:-}" ] && [ -f "$AGENT_INFRA_PATH/scripts/check-agents-materialized.sh" ]; then
+    CHECKER="$AGENT_INFRA_PATH/scripts/check-agents-materialized.sh"
+  fi
+  if [ -f "$CHECKER" ]; then
+    bash "$CHECKER" || exit 1
+  fi
+fi
+
 # Only run lint-staged if this is a Node.js project (has package.json)
 if [ -f package.json ] && command -v npx >/dev/null 2>&1; then
   npx lint-staged
