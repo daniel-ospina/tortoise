@@ -123,7 +123,11 @@ function escapeHtml(value: string): string {
  * sibling auth routes) so no new asset pipeline is introduced and the page
  * cannot be stale relative to the handler.
  */
-function recoveryInterstitial(email: string | null, pendingId: string): Response {
+// Exported for the regression guard (#3525): `src/securityHeaders.test.js` calls
+// this and asserts the REAL response carries `no-store`, the flow cookie, and a
+// nonce that the inline `<script>`/`<style>` actually match — a source-level
+// regex on this file would also pass on a commented-out header.
+export function recoveryInterstitial(email: string | null, pendingId: string): Response {
   const shown = email ? escapeHtml(email) : "your account";
   // #3525: this is the one self-rendered HTML page in the dashboard AND the one
   // with no inline event handlers, so it can be nonce-gated — the treatment the
