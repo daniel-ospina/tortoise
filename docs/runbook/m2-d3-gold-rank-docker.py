@@ -5,20 +5,29 @@ The committed diagnostic is embedded-only (it builds TortoiseSDK on a
 tempfile redislite path). Under fleet load the embedded lane is the known
 blocker, so this driver monkeypatches ONLY the store the diagnostic opens:
 TortoiseSDK is redirected at the docker FalkorDB (TORTOISE_ASK_SHAPE_DB_URI's
-substrate), one unique scratch graph per measure() call.
+substrate), one run-unique scratch graph per measure() call.
 
 It changes NOTHING about the measurement: same fixture, same five questions,
 same CUT=40, same LIMIT=120/LEG_DEPTH=120, same dense/backlog arms, and it
 reuses the diagnostic's own measure() verbatim.
+
+Usage: m2-d3-gold-rank-docker.py <out.json>
+
+The repo root is derived from this file's location (docs/runbook/x.py -> repo
+root), so the diagnostic and the `tortoise` package are imported from the
+worktree/branch this file lives in — NOT from a hardcoded checkout. Scratch
+graphs are dropped in a best-effort cleanup.
 """
 from __future__ import annotations
 
+import contextlib
 import importlib.util
-import itertools
 import os
 import sys
+import uuid
+from pathlib import Path
 
-REPO = "/Users/danielospina/Documents/GitHub/tortoise"
+REPO = str(Path(__file__).resolve().parents[2])
 sys.path.insert(0, REPO)
 
 spec = importlib.util.spec_from_file_location(
@@ -29,24 +38,63 @@ spec.loader.exec_module(w7a)
 import tortoise.sdk as sdk_mod  # noqa: E402
 
 _real = sdk_mod.TortoiseSDK
-_seq = itertools.count()
+# A run-unique token, not the PID: a recycled PID would otherwise reconnect to
+# an already-populated scratch graph and seed into stale state.
+_run_id = uuid.uuid4().hex[:8]
 _created: list[str] = []
 
 
 def docker_sdk(_path):
-    n = next(_seq)
-    name = f"w7a_rank_{os.getpid()}_{n}"
+    name = f"w7a_rank_{_run_id}_{len(_created)}"
     _created.append(name)
     os.environ["TORTOISE_DB_URI"] = (
         f"docker://:falkordb@localhost:6379/{name}")
     return _real(None)
 
 
+def _write_graph_list(out_path: str) -> None:
+    """Record the scratch graph names beside the receipt (best-effort)."""
+    path = os.path.join(os.path.dirname(os.path.abspath(out_path)),
+                        "w7a_graphs.txt")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write("\n".join(_created))
+    except OSError as e:  # never mask the measurement's exit status
+        print(f"w7a-driver: could not write {path}: {e}", file=sys.stderr)
+
+
+def _drop_graphs() -> None:
+    """Best-effort GRAPH.DELETE of every scratch graph this run created."""
+    if not _created:
+        return
+    try:
+        sdk = _real(None)
+    except Exception as e:  # cleanup never masks the measurement's rc
+        print(f"w7a-driver: graph cleanup skipped: {e}", file=sys.stderr)
+        return
+    try:
+        db = sdk._get_proj().db
+        for name in _created:
+            with contextlib.suppress(Exception):  # absent graph is success
+                db.select_graph(name).delete()
+    except Exception as e:
+        print(f"w7a-driver: graph cleanup incomplete: {e}", file=sys.stderr)
+    finally:
+        sdk.close()
+
+
 w7a.TortoiseSDK = docker_sdk
 
+out_path = sys.argv[1] if len(sys.argv) > 1 else ""
+rc = 1
 try:
     rc = w7a.main()
 finally:
-    with open("/tmp/askshape-m2/w7a_graphs.txt", "w") as f:
-        f.write("\n".join(_created))
+    if out_path:
+        _write_graph_list(out_path)
+    try:
+        _drop_graphs()
+    except Exception as e:
+        print(f"w7a-driver: cleanup error: {e}", file=sys.stderr)
 sys.exit(rc)
