@@ -423,15 +423,20 @@ class TestCursorHarnessRegistration:
         with pytest.raises(ValidationError):
             SessionRequest(conversation=_CONV, harness="cursor-typo")
 
-    def test_receipt_key_round_trips_get_and_patch(
+    def test_receipt_key_is_registered_but_server_owned_on_patch(
             self, api_client, session_user, monkeypatch):  # noqa: F811
-        """Behaviour behind the three registration surfaces, executed rather
-        than scanned.
+        """Behaviour behind the registration surfaces, executed rather than
+        scanned — under the #3681 server-owned rule.
 
         * ``_ONBOARDING_DEFAULT_STATE`` — a FRESH org's GET already carries
-          the key (unset), because the read merges defaults;
+          the receipt key (unset), because the read merges defaults;
         * ``OnboardingStatePatchRequest`` + ``_ALLOWED_STATE_KEYS`` — a PATCH
-          of the key round-trips to the persisted state and back out;
+          of a NON-server-owned registered key still round-trips to the
+          persisted state and back out (the surface stays open for FLOW keys);
+        * **#3681** — the receipt key itself is SERVER-OWNED evidence: a PATCH
+          of it is REFUSED (403 ``server_owned_key``) and persists nothing, so
+          a client can no longer fabricate the receipt ``captureStatus.js``
+          reads to pick the capture sentence's present tense;
         * negative control — an UNREGISTERED spelling is silently dropped.
           Without it the positive assertion could pass vacuously on a filter
           that admits everything.
@@ -447,14 +452,25 @@ class TestCursorHarnessRegistration:
         assert RECEIPT_KEY in fresh, fresh
         assert fresh[RECEIPT_KEY] is None, fresh
 
+        # A registered FLOW key (not server-owned evidence) still round-trips.
+        r = tc.patch("/v1/onboarding/state", json={"prompt_pasted": True},
+                     headers=auth)
+        assert r.status_code == 200, r.text
+        assert r.json()["onboarding"]["prompt_pasted"] is True, r.text
+        r = tc.get("/v1/onboarding/state", headers=auth)
+        assert r.json()["onboarding"]["prompt_pasted"] is True
+
+        # The receipt itself is SERVER-OWNED (#3681): refused, nothing
+        # persisted — no client-fabricated present-tense capture claim.
         stamp = "2026-01-01T00:00:00+00:00"  # server-time in prod; any str here
         r = tc.patch("/v1/onboarding/state", json={RECEIPT_KEY: stamp},
                      headers=auth)
-        assert r.status_code == 200, r.text
-        assert r.json()["onboarding"][RECEIPT_KEY] == stamp, r.text
-
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"] == {
+            "message": "server_owned_key", "keys": [RECEIPT_KEY]}, r.text
         r = tc.get("/v1/onboarding/state", headers=auth)
-        assert r.json()["onboarding"][RECEIPT_KEY] == stamp
+        assert r.json()["onboarding"][RECEIPT_KEY] is None, \
+            "a client-fabricated capture receipt was persisted"
 
         typo = RECEIPT_KEY[:-1] + "x"
         r = tc.patch("/v1/onboarding/state", json={typo: stamp}, headers=auth)

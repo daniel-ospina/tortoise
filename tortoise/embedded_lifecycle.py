@@ -68,15 +68,21 @@ from __future__ import annotations  # noqa: I001
 import math
 import os
 import contextlib
+import fcntl
 
 import shutil
 import signal
 import socket
+import stat
 import sys
 import tempfile
 import time
 
-from tortoise.embedded_reaper import OWNERS_DIRNAME, _is_ephemeral_dir
+from tortoise.embedded_reaper import (
+    OWNERS_DIRNAME,
+    OWNER_LOCK_NAME,
+    _is_ephemeral_dir,
+)
 from tortoise.env_truthy import is_truthy  # #4097: the declared truthy contract
 
 # ── #4214: the exit seam must not stat the temp root once per client ───────
@@ -1221,6 +1227,106 @@ def owner_record_dir(socket_file: str) -> str:
 #: record is only dropped when the last of them closes).
 _owner_refcounts: dict[str, int] = {}
 
+#: #4577: per-process fd holding the SHARED ``flock`` on each socket's owner
+#: dir ``.lock``, keyed by the same abspath key as `_owner_refcounts`. The fd
+#: is kept OPEN for the process lifetime and closed only when the refcount
+#: reaches 0, so the kernel holds the lock exactly as long as this process is
+#: a live owner. Kept in lockstep with `_owner_refcounts` so no fd leaks
+#: (every key is popped and closed on the last `forget_owner`; the at-fork
+#: hook re-acquires fresh descriptors, see `_adopt_owner_records_after_fork`).
+_owner_lock_fds: dict[str, int] = {}
+
+
+def _acquire_owner_lock(socket_file: str) -> int | None:
+    """Take and HOLD a shared ``flock`` on the owner dir's ``.lock`` (#4577).
+
+    The reaper's liveness question ("does this server still have a live
+    owner?") becomes a KERNEL FACT when it is answered by a held lock: the
+    kernel releases the lock when the last fd referring to the open file
+    description is closed, i.e. when this process dies. That is strictly
+    stronger than the pid+start inference (#3599 / #1642 FIX 5), which needs
+    a ``ps`` read and still has a recycled-pid / unreadable-start failure
+    class (an inference can be wrong; a held lock cannot).
+
+    ``O_NOFOLLOW`` so a symlink planted at ``.lock`` in a shared tempdir is
+    never followed (#4098 discipline): the open fails with ELOOP and this
+    process simply carries no lock, which the reader treats as "unknown" and
+    falls back to the records. Never raises — a lock we cannot take is a
+    missing optimisation, never a construction failure.
+
+    Returns the held fd (the caller keeps it open for the process lifetime)
+    or None when no lock could be taken.
+    """
+    path = os.path.join(owner_record_dir(socket_file), OWNER_LOCK_NAME)
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        return None
+    try:
+        # #4577 review, #4098 discipline: reject a planted NON-REGULAR file.
+        # On Linux `flock` on a FIFO SUCCEEDS, so without this the writer
+        # would "hold" a lock the reader must then refuse to open (which,
+        # unguarded, blocks forever). No lock -> the records stay the
+        # fallback signal.
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            return None
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        return None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH)
+    except OSError:
+        # A lock we cannot take is "no lock"; close the fd rather than leak
+        # it — the record files remain the fallback liveness signal.
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        return None
+    return fd
+
+
+def _release_owner_lock(key: str) -> None:
+    """Drop this process's shared ``flock`` for ``key`` (last owner only).
+
+    Closing the fd is what releases the lock (the kernel drops it with the
+    open file description); the explicit ``LOCK_UN`` just makes the release
+    immediate and self-documenting. Never raises.
+
+    Then reclaim the ``.lock`` file so the owner dir can be removed when this
+    process was the LAST owner on the host — otherwise every close would
+    strand a ``.lock``-only ``.tortoise-owners`` dir (the temp-dir leak class
+    #3599 exists to fight). The reclaim is gated on an EXCLUSIVE
+    non-blocking lock taken AFTER our own release: a competing live owner's
+    shared lock makes the attempt fail, and the file is then left in place
+    for it. (Unlinking would be safe even then — a live owner always has a
+    record file, which is the fallback signal — but keeping the stronger
+    signal whenever any other owner exists is strictly better.)
+    """
+    fd = _owner_lock_fds.pop(key, None)
+    if fd is None:
+        return
+    with contextlib.suppress(OSError):
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    with contextlib.suppress(OSError):
+        os.close(fd)
+    path = os.path.join(owner_record_dir(key), OWNER_LOCK_NAME)
+    try:
+        probe = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+    except OSError:
+        return  # already gone / unreadable — nothing to reclaim
+    try:
+        try:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return  # another live owner still holds it -> leave the file
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(probe)
+
 #: Cache of THIS process's start time, keyed by pid (#4487).
 #: `record_owner` runs on EVERY construction now, and `_process_start_time`
 #: shells out to `ps` — a fork+exec per client, which on a loaded runner is
@@ -1273,9 +1379,27 @@ def _adopt_owner_records_after_fork() -> None:
     _own_start_cache.clear()
     inherited = list(_owner_refcounts)
     _owner_refcounts.clear()
-    for sock in inherited:
+    # #4577: the child inherits the parent's lock fds, which refer to the
+    # SAME open file descriptions. Those must not stay in the child's map:
+    # `flock(LOCK_UN)` on a duplicate releases the lock for the PARENT too
+    # (a lock belongs to the open file description, not the fd), so a child
+    # `forget_owner` could unlock a still-live parent's server — the exact
+    # #1557 fail-open this lock exists to prevent. Re-acquire a fresh
+    # description for every inherited socket FIRST (a second SHARED lock is
+    # compatible, so it succeeds while the inherited one is still held),
+    # then close the inherited fds — which never leaves a free-lock window
+    # for a concurrent reaper.
+    inherited_locks = dict(_owner_lock_fds)
+    _owner_lock_fds.clear()
+    # Re-acquire for the union: a held fd whose refcount entry was somehow
+    # missing must still get a fresh descriptor, or the child would drop a
+    # lock it inherited without replacing it.
+    for sock in dict.fromkeys([*inherited, *inherited_locks]):
         with contextlib.suppress(Exception):
             record_owner(sock)
+    for fd in inherited_locks.values():
+        with contextlib.suppress(OSError):
+            os.close(fd)
 
 
 if hasattr(os, "register_at_fork"):  # POSIX; absent on Windows
@@ -1347,6 +1471,14 @@ def record_owner(socket_file: str | None) -> bool:
     except OSError:
         return False
     _owner_refcounts[key] = _owner_refcounts.get(key, 0) + 1
+    # #4577: hold the shared liveness lock alongside the record file. The
+    # `key not in` guard keeps the fd map consistent with the refcount map —
+    # re-acquiring when a descriptor is already held would overwrite (and
+    # leak) it. A None fd is "no lock": the records stay the fallback.
+    if key not in _owner_lock_fds:
+        fd = _acquire_owner_lock(socket_file)
+        if fd is not None:
+            _owner_lock_fds[key] = fd
     return True
 
 
@@ -1367,6 +1499,12 @@ def forget_owner(socket_file: str | None) -> bool:
         _owner_refcounts[key] = held - 1
         return False  # another client in this process still owns it
     _owner_refcounts.pop(key, None)
+    # #4577: the LAST client in this process drops this process's shared
+    # lock — the kernel-visible signal that this owner is gone. Released
+    # here (after the count, before the record unlink) so the migration of
+    # the two signals always overlaps; either order is safe because a free
+    # lock only ever falls back to the records.
+    _release_owner_lock(key)
     d = owner_record_dir(socket_file)
     try:
         names = os.listdir(d)
