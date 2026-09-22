@@ -99,7 +99,12 @@ SESSION_ID="$(printf '%s\n' "$META" | sed -n '2p')"
 TMP="$(mktemp -t tortoise_session_end.XXXXXX)"
 trap 'rm -f "$TMP"' EXIT
 python3 - "$TRANSCRIPT_PATH" "$TMP" << 'PYEOF'
-import json, sys
+import sys
+# CWE-427: `python3 -` sets sys.path[0] = '' (the cwd), so a planted ./json.py
+# in the session workspace would execute here at every SessionEnd. `sys` is a
+# builtin and cannot be shadowed, so it is safe to import before the drop.
+sys.path[:] = [p for p in sys.path if p not in ("", ".")]
+import json
 src, dst = sys.argv[1], sys.argv[2]
 out = []
 try:
@@ -228,14 +233,16 @@ else
   # resolution silently fell back to the default corpus and ignored a
   # configured TORTOISE_SESSION_CORPUS — the corpus-dir divergence class
   # the plan condemns, review-gate P1).
-  SWEEP_CORPUS="$(python3 -c "
+  SWEEP_CORPUS="$(python3 -c '
 import sys
-# CWE-427: the corpus resolver imports `tortoise` by NAME, so the cwd must be
-# off sys.path first — a planted ./tortoise/ in the session workspace would
-# otherwise be imported and executed here.
+# CWE-427: the corpus resolver imports tortoise by NAME, so the cwd must be off
+# sys.path first - a planted ./tortoise/ in the session workspace would
+# otherwise be imported and executed here. NOTE: this heredoc-style source is
+# SINGLE-quoted on purpose: inside a double-quoted shell string the quotes in
+# ("", ".") close the string and the source is mangled into a SyntaxError.
 sys.path[:] = [p for p in sys.path if p not in ("", ".")]
 from tortoise.session_indexer import session_corpus_dir
-print(session_corpus_dir())" 2>/dev/null || true)"
+print(session_corpus_dir())' 2>/dev/null || true)"
   [ -z "$SWEEP_CORPUS" ] && SWEEP_CORPUS="$HOME/.tortoise/docs/conversations"
   # CHILD_STDERR debug-redirect is OPT-IN: only when the operator set it
   # (never force-write a file at every session close)

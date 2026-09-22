@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -847,3 +848,71 @@ def test_breadcrumb_dir_agrees_with_verify_for_a_trailing_slash(
         f"{sorted(str(p) for p in tmp_path.rglob('*.json'))}")
     body = json.loads(looked_for.read_text(encoding="utf-8"))
     assert body["kind"] == "install-inert", body
+
+
+_HOOK_SCRIPTS = sorted(
+    list((REPO_ROOT / "tortoise" / "claude-hooks").glob("*.sh"))
+    + list((REPO_ROOT / "tortoise" / "codex-hooks").glob("*.sh"))
+    + list((REPO_ROOT / "tortoise" / "cursor-hooks").glob("*.sh")))
+
+
+def _hook_id(p: Path) -> str:
+    """Unique per file: three hooks are all named ``session-end.sh``."""
+    return f"{p.parent.name}/{p.name}"
+
+
+def _double_quoted_python_regions(text: str) -> list[str]:
+    """The body of every ``-c "…"`` in ``text`` (a DOUBLE-quoted shell string,
+    where the shell would substitute before Python ever sees it)."""
+    return [m.group(1) for m in
+            re.finditer(r'-c\s+"\n(.*?)\n"', text, re.S)]
+
+
+@pytest.mark.parametrize("hook", _HOOK_SCRIPTS, ids=_hook_id)
+def test_double_quoted_python_blocks_are_shell_safe(hook):
+    """A ``-c "…"`` block embeds Python inside a DOUBLE-quoted shell string, so
+    the shell processes it first. Two things then silently MANGE the Python,
+    and neither is visible to ``bash -n``:
+
+    * a ``"`` anywhere in the source **closes the shell string** — so
+      ``p not in ("", ".")`` reaches the interpreter as ``p not in (, .)``, a
+      ``SyntaxError``;
+    * a backtick in a *comment* is **command-substituted**, so the shell runs
+      that text and splices its output into the source.
+
+    Both were introduced while fixing #4314 and both were silent. The first
+    made ``SWEEP_CORPUS`` always empty, so a configured
+    ``TORTOISE_SESSION_CORPUS`` was ignored and the sweep fell back to the
+    default corpus — the exact divergence the block above it documents. The
+    second ran three bogus commands on every prompt.
+
+    Mutation: add a ``"`` or a backtick to any ``-c "`` block in these hooks
+    and this REDs with the offending file."""
+    text = hook.read_text(encoding="utf-8")
+    for i, region in enumerate(_double_quoted_python_regions(text)):
+        assert '"' not in region, (
+            f"{hook.name}: a double quote in -c \" block #{i} closes the shell "
+            f"string and mangles the Python — use a single-quoted block, or a "
+            f"quote-free expression. Region:\n{region}")
+        assert "`" not in region, (
+            f"{hook.name}: a backtick in -c \" block #{i} is command-"
+            f"substituted by the shell and its output spliced into the Python. "
+            f"Region:\n{region}")
+        # The region as it appears in the file is NOT what the interpreter
+        # receives, so compile it the way Python will see it (the shell consumes
+        # the delimiting quotes; ``-c`` strips nothing else once they are gone).
+        compile(region, f"{hook.name}#{i}", "exec")
+
+
+def test_the_double_quoted_block_extractor_is_not_vacuous():
+    """The per-hook guard above asserts nothing if the extractor matches no
+    block, so pin that it actually finds the hooks' embedded Python. A stale
+    regex would silently retire the guard."""
+    total = sum(len(_double_quoted_python_regions(
+        h.read_text(encoding="utf-8"))) for h in _HOOK_SCRIPTS)
+    assert total >= 2, (
+        f"the -c \" extractor found only {total} block(s) across the shipped "
+        f"hooks — it has gone stale and the shell-safety guard is vacuous. "
+        f"(Only ``volunteer-turn.sh`` currently uses a double-quoted block; "
+        f"the rest are single-quoted or heredocs, so this floor is small on "
+        f"purpose and still catches a regex that stopped matching.)")

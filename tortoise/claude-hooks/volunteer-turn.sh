@@ -203,6 +203,15 @@ case "$HARNESS" in
     # Claude-hooks-shaped: hookSpecificOutput.additionalContext (Codex
     # UserPromptSubmit and Devin hooks.v1 use the identical contract).
     "$PY3" -c "
+import sys
+# CWE-427: -c puts the cwd at sys.path[0], so a planted ./json.py or ./os.py
+# in the session workspace would execute on every prompt. This source is a
+# DOUBLE-quoted shell string, so two rules apply: the predicate must avoid
+# quotes (p and p != '.' is p not in ('', '.')), and the comments must contain
+# NO backticks, which the shell would command-substitute and splice into this
+# source. Neither rule is theoretical: an earlier revision of this comment ran
+# three bogus commands here on every prompt.
+sys.path[:] = [p for p in sys.path if p and p != '.']
 import json, os
 print(json.dumps({'hookSpecificOutput': {
     'hookEventName': 'UserPromptSubmit',
@@ -212,6 +221,10 @@ print(json.dumps({'hookSpecificOutput': {
   cline)
     # Cline UserPromptSubmit → contextModification.context.
     "$PY3" -c "
+import sys
+# CWE-427: same double-quoted source and same quote-free predicate as the
+# claude|codex|devin arm above - and likewise NO backticks in this comment.
+sys.path[:] = [p for p in sys.path if p and p != '.']
 import json, os
 print(json.dumps({'contextModification': {
     'context': os.environ.get('TORTOISE_VOLUNTEER_BLOCK', '')}}))
