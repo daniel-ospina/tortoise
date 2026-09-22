@@ -1616,10 +1616,10 @@ durations:
   test_capture_loop_responsiveness.py: 7.7
   # #2988/#3243: 30 cases — structural AST pins plus behavioural tests that park
   # real daemon-pool workers on threading.Event gates and drive a reachable
-  # cold-start through the real probe. Measured ~15.4s in the embedded lane
-  # (30 passed, TORTOISE_TEST_CARVE_OUT=1); re-measure from the first post-merge
-  # junit artifact rather than trusting it.
-  test_selfhost_health_probe_executor.py: 15.4
+  # cold-start through the real probe. Measured ~28.1s in the embedded lane
+  # (30 passed, TORTOISE_TEST_CARVE_OUT=1, 2026-09-22); re-measure from the
+  # first post-merge junit artifact rather than trusting it.
+  test_selfhost_health_probe_executor.py: 28.1
   test_writer_inventory.py: 7.3
   test_decide.py: 7.2
   test_onboarding_endpoints.py: 7.2

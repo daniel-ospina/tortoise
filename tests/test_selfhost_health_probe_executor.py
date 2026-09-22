@@ -512,15 +512,17 @@ def test_liveness_coordinator_window_covers_its_cycle():
     """A result older than ``stale_after`` is discarded, so the freshness
     window must cover the worst-case refresh cycle (``max(interval,
     probe_bound)``) or a REACHABLE graph reads degraded between refreshes —
-    the #3243 lie in steady state. The bound is the dominating term (the
-    interval is capped at half the platform window), so pin the window against
-    it."""
+    the #3243 lie in steady state. Pin the window against BOTH terms of that
+    cycle, resolved for real (a window pinned only against the probe bound is
+    true by construction, since the bound is what the window is taken from)."""
+    import tortoise.monitoring as mon
     from tortoise import selfhost as sh
 
-    assert sh._HEALTH_PROBE._stale_after >= sh._HEALTH_PROBE._timeout, (
-        f"staleness window {sh._HEALTH_PROBE._stale_after}s is below the probe "
-        f"bound {sh._HEALTH_PROBE._timeout}s — a slow-but-valid probe would be "
-        "discarded as stale (#3243)"
+    worst_cycle = max(mon.health_probe_interval(), sh._HEALTH_PROBE._timeout)
+    assert sh._HEALTH_PROBE._stale_after >= worst_cycle, (
+        f"staleness window {sh._HEALTH_PROBE._stale_after}s is below the "
+        f"worst-case refresh cycle {worst_cycle}s — a slow-but-valid probe "
+        "would be discarded as stale (#3243)"
     )
 
 

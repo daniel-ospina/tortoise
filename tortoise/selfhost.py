@@ -192,9 +192,11 @@ def _submit_probe(pool, fn):
 # the residual it closes.
 #
 # Why the read stays HONEST without a per-request probe (#1384): HealthProbe
-# serves the last completed verdict while it is younger than
-# ``PROBE_STALE_AFTER`` (30 s) and reports it stale — hence degraded — after
-# that. A stopped FalkorDB (NXDOMAIN/#1381) fails the probe at connect time, so
+# serves the last completed verdict while it is younger than the coordinator's
+# staleness window and reports it stale — hence degraded — after that. That
+# window is ``PROBE_STALE_AFTER`` (30 s) by default and is widened by
+# ``_liveness_probe_stale_after`` to follow a raised cold-start allowance, so
+# the window is never SMALLER than the platform default. A stopped FalkorDB (NXDOMAIN/#1381) fails the probe at connect time, so
 # the next refresh records ok=false within one period; a wedged probe cannot pin
 # an "ok" report past the staleness window. What changed is WHERE the wait
 # lives (the refresher, not the check), not whether a dead DB is reported.
@@ -552,13 +554,16 @@ async def health():
     status to "degraded" with db.ok=false instead of killing the process or
     500ing — visible immediately, no graph-touching request needed (#1381).
 
-    #2988: this handler performs NO I/O and takes NO thread hand-off. It reads
-    ONE in-memory value from ``_HEALTH_PROBE.snapshot()`` — the same
-    single-flight coordinator the hosted /health uses — and returns. Nothing on
-    the request path submits work to the loop's DEFAULT ThreadPoolExecutor (or
-    to any pool), so a saturated executor, a black-holed DB, or a cold-starting
-    large graph cannot delay this response by a microsecond. Freshness comes
-    from the background ``_health_probe_loop`` refresher.
+    #2988: this handler performs NO I/O, submits nothing to any pool, and never
+    waits on a worker. It reads ONE in-memory value from
+    ``_HEALTH_PROBE.snapshot()`` — the same single-flight coordinator the hosted
+    /health uses — and returns. Nothing on the request path submits work to the
+    loop's DEFAULT ThreadPoolExecutor (or to any pool), so a saturated executor,
+    a black-holed DB, or a cold-starting large graph cannot delay this response
+    by a microsecond. (``snapshot()`` may start the ONE bounded single-flight
+    probe daemon thread — its self-heal path, non-blocking and gated on the
+    refresh budget — but it never waits on that thread.) Freshness comes from
+    the background ``_health_probe_loop`` refresher.
 
     #3243: that decoupling is what lets the REFRESHER, which is off the request
     path, pass the projection cold-start allowance (``_probe_db``), so a
