@@ -714,7 +714,7 @@ above must not be read as assuming either outcome:
   `grace_period` is the configured `"180s"` — generous headroom the TCP check
   does not need. The listener exists within seconds of start (the ~85 s
   torch/model load does not gate a connect), and the ~2 min FalkorDB DNS tail
-  (#1381) is surfaced by the deploy workflow's DB health gate, not by this check.
+  (#1381) is surfaced by the deploy workflow's DB health verification, not by this check.
 - **If the clamp exists**: the effective grace period is **60 s**, still far
   longer than the seconds it takes the listener to bind, so the clamp is no
   longer a cold-start hazard for the TCP check. The historical worry — that a
@@ -780,7 +780,7 @@ Machines API / Uptime Kuma / the existing Telegram alerting used by the backup
 sweep) that fires when the public endpoint fails for >2 consecutive probes.
 
 The deploy workflow only probes at deploy time (`.github/workflows/deploy-hosted.yml`
-"Post-deploy DB health gate"), so during #2850 nothing alerted for ~35 min while
+"Post-deploy DB health verification"), so during #2850 nothing alerted for ~35 min while
 the machine was locally healthy and serving. `fly checks list` and the presence
 of `[PR01] no known healthy instances` in the proxy logs are the two signals
 that would have caught it immediately.
