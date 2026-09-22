@@ -152,16 +152,24 @@ class TestCheckpointStepRequiresAgentCredential:
 
     def test_session_jwt_may_still_write_the_dashboard_catalog_step(
             self, monkeypatch):
-        """``catalog-presented`` is the ONE dashboard-owned step (W1/W8): the
-        browser rendered the catalog, no agent can observe that, the B3
-        tripwire (#3428/#2937) pins the dashboard's checkpoint body to exactly
-        it, and ``_GATE_BUILD`` requires it.
+        """``catalog-presented`` is exempt from the agent gate for ONE reason,
+        and it is a LEGACY one: the production deploy is frozen at
+        ``558c022c6`` (pre-#3913, held by #4471), and that deployed bundle
+        still POSTs ``{"step": "catalog-presented"}`` with a session
+        credential — so gating the step now would 403 the live dashboard.
+
+        It is NOT a live dashboard surface: since #3913 (owner ruling
+        2026-09-20) no dashboard path writes it (the B3 tripwire from #3704
+        asserts exactly ONE checkpoint call site, the fork write, and no
+        module serializes this step), and ``_GATE_BUILD`` no longer requires
+        it. The exemption MUST be removed — emptying the allowlist — once the
+        deploy carrying #3913 reaches production.
 
         RED mutation: gate ``body.step is not None`` (drop the
         ``_DASHBOARD_WRITABLE_STEPS`` exemption) → this session write returns
         403 and the step setter is never called → both assertions fail; the
-        build-fork completion path becomes unreachable, re-creating #3670.
-        GREEN: the dashboard's own step stays session-writable."""
+        frozen live dashboard would 403 while the deploy freeze holds.
+        GREEN: the frozen bundle's step stays session-writable."""
         r, steps = self._post_step(
             monkeypatch, _SESSION, step="catalog-presented")
         assert r.status_code == 200, r.text
@@ -202,6 +210,8 @@ class TestPatchRefusesFabricatedReceipt:
     receipt → both assertions fail.
     GREEN: an operational key (the legitimate form) still writes."""
 
+    @pytest.mark.parametrize("credential", [_AGENT, _SESSION],
+                             ids=["agent", "session"])
     @pytest.mark.parametrize(
         ("field", "state_key"),
         [
@@ -217,14 +227,18 @@ class TestPatchRefusesFabricatedReceipt:
         ],
     )
     def test_server_owned_capture_keys_are_refused(
-            self, monkeypatch, field, state_key):
+            self, monkeypatch, credential, field, state_key):
+        """Ownership is lane-INDEPENDENT: both an agent key and a session JWT
+        are refused (a session caller must not fabricate a receipt either —
+        the session lane's own capture writes the BARE receipt, never a
+        per-harness one). Parametrized over both lanes (#3671 review)."""
         seen: list[dict] = []
         monkeypatch.setattr(
             ha, "_update_onboarding_state",
             lambda oid, **kw: (seen.append(kw), {})[1])
         monkeypatch.setattr(ha, "_get_onboarding_projection", lambda oid: {})
         monkeypatch.setattr(ha, "_org_email", lambda oid: None)
-        _set_dependency(_AGENT)
+        _set_dependency(credential)
         try:
             with TestClient(app) as tc:
                 r = tc.patch(_resolved_path("patch_onboarding_state"),
@@ -305,8 +319,13 @@ class TestCaptureReceiptHarnessIsServerResolved:
             app.dependency_overrides[get_current_org] = (
                 lambda: dict(holder["org"]))
             monkeypatch.setattr(ha, "_update_onboarding_state", _spy)
-            with TestClient(app) as tc:
-                yield tc, holder, seen
+            try:
+                with TestClient(app) as tc:
+                    yield tc, holder, seen
+            finally:
+                # never leak the auth override into the next test (the
+                # ordering-flake source the helpers above also close)
+                app.dependency_overrides.clear()
 
     def _capture(self, tc, *, session_id, harness):
         return tc.post(_resolved_path("capture_session"),
@@ -329,8 +348,11 @@ class TestCaptureReceiptHarnessIsServerResolved:
         r2 = self._capture(tc, session_id="S1", harness="cursor")
         assert r2.status_code == 200, r2.text
 
+        # the pin cannot go vacuous: the forged replay DID write a second
+        # receipt (so the key assertions below are exercised on both).
         receipts = self._receipt_keys(seen)
-        assert receipts, "no receipt was written at all"
+        assert len(receipts) == 2, (
+            f"the forged replay wrote no second receipt: {receipts}")
         assert all(
             k == "session_capture_receipt_claude" for r in receipts for k in r
         ), f"a forged body.harness reached the receipt key: {receipts}"
@@ -339,6 +361,16 @@ class TestCaptureReceiptHarnessIsServerResolved:
             "session_capture_receipt_claude"]}
         assert isinstance(receipts[0]["session_capture_receipt_claude"], str)
         assert receipts[0]["session_capture_receipt_claude"]
+        # …and the Session node ITSELF still carries the original harness. The
+        # relabel under test is the Session MERGE (`s.harness=$harness`), so
+        # read it back directly: mutating only that line to the client value
+        # keeps the receipt assertions green, and this is what REDs.
+        stored = ha._make_sdk(
+            namespace=_CAPTURE_TEAM["org_id"])._get_proj().g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.harness AS harness",
+            params={"sid": "S1"}).result_set
+        assert stored and stored[0][0] == "claude", (
+            f"the forged replay relabeled the Session's stored harness: {stored}")
 
     def test_fresh_agent_capture_names_its_own_harness(self, env):
         """The legitimate form: a FRESH session's agent credential declares its
@@ -445,8 +477,12 @@ async def test_stored_session_harness_owns_and_closes_its_data_sdk(
         {"org_id": "o"}, "S-bound") == "claude"
     assert seen == [("claude", "S-bound")]
     assert closed == [True], "the SDK handle was not closed (connection leak)"
-    # no session id → no lookup, no SDK opened
+    # no session id → no lookup, no SDK opened, no query run
+    closed_before, seen_before = list(closed), list(seen)
     assert await ha._stored_session_harness({"org_id": "o"}, None) is None
+    assert closed == closed_before, (
+        "the no-session-id case opened (and closed) an SDK")
+    assert seen == seen_before, "the no-session-id case ran a query"
 
 
 # ═══════════════════════════════════════════════════════════════════

@@ -655,10 +655,13 @@ _STATE_KEY_TABLE: dict[str, tuple[str, object]] = {
 
 
 def test_state_keys_registered_parametrized(client):
-    """Task 11 (cycle-3 P1-2 fix, self-verifying): every capture-surface key
-    round-trips through BOTH live default-state dicts, the allowlist, and the
-    PATCH model — a key added to the table without registering it anywhere
-    fails here (the allowlist filter would silently drop it in production)."""
+    """Task 11 (cycle-3 P1-2 fix, self-verifying): every capture-surface key is
+    REGISTERED — present in BOTH live default-state dicts, the allowlist, and
+    the PATCH model — so a key added to the table without registering it
+    anywhere fails here (the allowlist filter would otherwise silently drop it
+    in production). The OPERATIONAL keys then round-trip through PATCH + GET;
+    the server-owned capture/install evidence keys are REFUSED there (403, no
+    write) instead — see ``_CAPTURE_SERVER_OWNED_KEYS`` and the branch below."""
     from tortoise.hosted_api import (
         _ALLOWED_STATE_KEYS,
         _CAPTURE_SERVER_OWNED_KEYS,

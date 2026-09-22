@@ -8386,13 +8386,15 @@ async def capture_session(body: SessionRequest, request: Request, org: dict = De
     """Capture an agent session and extract turns as episodic Points.
 
     #1927: the session_recording OPT-OUT check is FIRST in the gate stack (before
-    the quota 402) so disabled orgs do no quota work at all; any
-    non-2xx failure records ``session_capture_last_error_{harness}`` (the
-    dashboard failure sub-line reads this, NOT client state) — except the #3060
-    capacity 429 and the #3129 in-flight 409, which are server conditions — and
-    2xx records
-    ``session_capture_receipt_{harness}`` (bare ``session_capture_receipt``
-    for legacy no-harness hooks).
+    the quota 402) so disabled orgs do no quota work at all. The bookkeeping
+    keys are per LANE (#3681): an AGENT credential's non-2xx records
+    ``session_capture_last_error_{observed_harness}`` (the dashboard failure
+    sub-line reads this, NOT client state) and its 2xx records
+    ``session_capture_receipt_{observed_harness}`` — except the #3060
+    capacity 429 and the #3129 in-flight 409, which are server conditions. A
+    session-JWT (dashboard/browser) caller observes no harness: it records NO
+    per-harness last-error, and only the BARE ``session_capture_receipt`` —
+    the same bare member legacy no-harness hooks write.
     """
     _require_scope(org, "graphs:write", "capture_session")
     try:
@@ -8817,9 +8819,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # capture's OWN writes: no Session MERGE, no turn Points, no
         # ``capture_ok``, no receipt, and the transcript stays on the user's
         # machine, retryable verbatim. (The 402 itself still records the
-        # per-harness ``session_capture_last_error_*`` key in the wrapper, the
-        # same as every other refusal, and files an incident — neither is
-        # capture data.) Refusing anywhere later would leave ``capture_ok``
+        # per-harness ``session_capture_last_error_*`` key in the wrapper for an
+        # AGENT credential, the same as every other refusal — a session-JWT
+        # caller records no per-harness key (see ``_observed_capture_harness``)
+        # — and files an incident; neither is capture data.) Refusing anywhere
+        # later would leave ``capture_ok``
         # NULL and turn the next same-``session_id`` POST into a silent
         # zero-extract replay (the hazard ``_reserve_capture_slot`` documents).
         #
@@ -19161,8 +19165,8 @@ def _maybe_file_harness_connected(org_id: str) -> None:
     the client into the server), and a graph-bound key writing org-DEFAULT
     graph state would be a cross-graph write (C5 #2114). Step write is
     FWW/keyed-MERGE (replay is a no-op). Fail-open: a graph/state hiccup must
-    never fail the agent's committed write (the MCP auto-complete precedent
-    #2985)."""
+    never fail the agent's committed write — the precedent is
+    ``mcp_server._maybe_onboarding_auto_complete``'s fail-open ``except``."""
     try:
         if not _graph_available(org_id):
             return
@@ -19172,7 +19176,14 @@ def _maybe_file_harness_connected(org_id: str) -> None:
         # fresh SDK per call and leaks a connection otherwise (the same leak
         # the PATCH handler documents at #1997); this runs on the hot
         # point-write path, so it must not add a per-write leak.
-        _sdk = _make_sdk(namespace=org_id)
+        # Open the name the org-graph guard verified: `_make_sdk(namespace=)`
+        # re-derives `org_{org_id}`, so for a legacy `team_{org_id}` org it
+        # would MINT a different, absent graph and file the step where the
+        # projection never reads it (pin 4). None (probe failed / not listed)
+        # → the inline construction (fail-open), exactly as the PATCH handler
+        # does at #1997.
+        _sdk = (_open_org_graph_sdk(org_id)
+                or _make_sdk(namespace=org_id))
         try:
             _os.write_completed_step(
                 _sdk._get_proj(), org_id, "harness-connected",
@@ -19631,7 +19642,9 @@ class OnboardingStatePatchRequest(BaseModel):
 # capture sentence's TENSE, producing the present-tense claim with nothing
 # filed (the same false-claim class as #3671, one key further down). Derived
 # from the canonical harness value set so a new harness cannot silently
-# re-open the surface; the bare (harness-less) receipt is the legacy member.
+# re-open the surface; the bare (harness-less) receipt is the legacy
+# no-harness hooks' member AND the session-JWT (browser) lane's member — a
+# session capture proves a capture happened, not a harness.
 def _capture_server_owned_keys() -> set[str]:
     """The DERIVATION behind ``_CAPTURE_SERVER_OWNED_KEYS`` (#3681).
 
@@ -19863,9 +19876,22 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
 # #3671: the steps a SESSION JWT (dashboard/browser) may checkpoint. A NAMED
 # allowlist — not "everything except the server-observed set" — so a future
 # step added to _CHECKPOINT_STEPS defaults to agent-only (fail-closed).
-# ``catalog-presented`` is that one dashboard step: the B3 tripwire
-# (#3428/#2937) pins the browser's checkpoint body to exactly it, and
-# ``_GATE_BUILD`` needs it for the build fork to complete.
+#
+# ``catalog-presented`` is the ONE member, and it is NOT a live dashboard
+# surface. Since #3913 (owner ruling 2026-09-20) no dashboard path writes this
+# step: the B3 tripwire (#3704, which closed #3428/#2937) asserts exactly ONE
+# checkpoint call site across src/ — the fork write — and #3913 removed the
+# dashboard's catalog writer, so the tripwire also asserts no module
+# serializes ``catalog-presented``. Nor does completing the build fork require
+# the step: ``_GATE_BUILD`` (tortoise/onboarding/state.py) has been
+# {harness-connected, first-points-filed} since #3913. The member exists ONLY
+# because the production deploy is frozen at ``558c022c6`` (pre-#3913, held by
+# #4471): that bundle still POSTs ``{"step": "catalog-presented"}`` with a
+# session credential, so removing the exemption now would 403 the live
+# dashboard. It MUST be removed — emptying this allowlist, which is the
+# fail-closed default a future step inherits — once the deploy carrying #3913
+# reaches production (#3704 is the pre-#3913 writer removal; the live front
+# door is the frozen bundle, not a dashboard path).
 _DASHBOARD_WRITABLE_STEPS: frozenset[str] = frozenset({
     "catalog-presented",
 })
@@ -19909,9 +19935,10 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
       (replay → noop), unknown step → 422.
       #3671: the server-observed steps (all but ``catalog-presented``)
       require an AGENT credential — a session-JWT step write is refused 403
-      ``agent_credential_required``. ``catalog-presented`` stays
-      session-writable: the dashboard is its only honest observer. The
-      non-step FLOW ops below keep the dual-auth lane.
+      ``agent_credential_required``. ``catalog-presented`` is exempt ONLY
+      because the deployed bundle is frozen pre-#3913 (see
+      ``_DASHBOARD_WRITABLE_STEPS``); the non-step FLOW ops below keep the
+      dual-auth lane.
     - fork/compact → set-once (first write wins; same-value replay 200;
       changed → 409).
     - fork_unsure_at (true) → #2407 "not sure yet — decide later": records
@@ -19960,15 +19987,20 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
     # AGENT credential (tt_/tk_ key, MCP/OAuth) may write them; a session
     # write is REFUSED loudly (403) rather than silently accepted.
     #
-    # ``catalog-presented`` is deliberately NOT in that set: it is the ONE
-    # step the DASHBOARD owns (W1/W8 — the browser rendered the catalog; no
-    # agent can observe that), the B3 tripwire (#3428/#2937) pins the
-    # browser's checkpoint body to exactly this step, and _GATE_BUILD
-    # requires it — gating it would make the build-fork completion path
-    # unreachable, i.e. re-create the #3670 defect this PR exists to close.
-    # Non-step FLOW ops (fork/compact/member_progress/fork_unsure_at) keep
-    # their existing lanes — the dashboard legitimately records the human's
-    # fork answer.
+    # ``catalog-presented`` is deliberately exempt from that gate, and the
+    # exemption is NOT a live surface: since #3913 (owner ruling 2026-09-20)
+    # no dashboard path writes it — the B3 tripwire (#3704, closing
+    # #3428/#2937) asserts exactly ONE checkpoint call site, the fork write,
+    # and #3913 removed the dashboard's catalog writer so the tripwire also
+    # asserts no module serializes this step — and ``_GATE_BUILD`` no longer
+    # contains it. The member exists ONLY because the deployed bundle is
+    # frozen at ``558c022c6`` (pre-#3913; deploy held by #4471) and that
+    # bundle still POSTs ``{"step": "catalog-presented"}`` with a session
+    # credential, so gating it now would 403 the live dashboard. This
+    # allowlist MUST be emptied (the fail-closed default) once the deploy
+    # carrying #3913 reaches production. Non-step FLOW ops
+    # (fork/compact/member_progress/fork_unsure_at) keep their existing lanes
+    # — the dashboard legitimately records the human's fork answer.
     if (body.step is not None
             and body.step not in _DASHBOARD_WRITABLE_STEPS
             and not _credential_is_agent(org)):
