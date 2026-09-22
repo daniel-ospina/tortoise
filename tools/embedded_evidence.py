@@ -1266,13 +1266,83 @@ def _written_location(out: Path) -> Path:
     tree — and then the tool's own record is dirt it did not exclude. Resolve the
     PARENT physically and keep the final component lexical.
 
-    The parent is resolved with `realpath` (not `abspath`) so both sides of the
-    containment comparison sit on the same basis: a `--ref` measured root comes
-    from `tempfile.mkdtemp()` and is `/var/…` while macOS's `Path.cwd()` is
+    The parent is resolved with `realpath` — never `abspath`. `abspath` collapses
+    `..` LEXICALLY, before any symlink is resolved, so it predicts a destination the
+    kernel does not use: with `lnk -> <tree>/docs`, `abspath("…/lnk/../x.json")`
+    reads "outside" while `os.replace` follows `lnk` and THEN applies `..`, landing
+    the record at `<tree>/x.json` (#4203, reproduced). `realpath` resolves `..`
+    AFTER the symlink, exactly as the kernel does. It also puts both sides of the
+    containment comparison on one basis: a `--ref` measured root comes from
+    `tempfile.mkdtemp()` and is `/var/…` while macOS's `Path.cwd()` is
     `/private/var/…` — the same directory spelled two ways.
+
+    This is still a PREDICTION, so it is no longer the only thing standing between
+    the tool and its own dirt — `_verify_record_landed_outside` observes where the
+    file actually landed after the write and is the fail-closed backstop.
     """
-    abs_out = os.path.abspath(os.fspath(out))
-    return Path(os.path.realpath(os.path.dirname(abs_out)), os.path.basename(abs_out))
+    raw = os.fspath(out)
+    return Path(os.path.realpath(os.path.dirname(raw)), os.path.basename(raw))
+
+
+def _same_dir(a: Path, b: Path) -> bool:
+    """Do `a` and `b` name the same directory? Asked of the KERNEL, by inode.
+
+    `os.path.samefile` is the only comparison insensitive to BOTH case (a
+    case-variant of a root component passed a string-containment test on a
+    case-insensitive FS — #4203) and any lexical divergence `realpath` left behind.
+    A path that does not exist raises `OSError`; "cannot stat" is not "inside".
+    """
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def _inside_tree(candidate: Path, root: Path) -> bool:
+    """Is `candidate` inside `root`? Answered by identity, never by string.
+
+    `candidate` may not exist yet (the record destination usually does not), so
+    walk its ancestors and ask whether any of them IS `root` — `Path.is_relative_to`
+    and `root in candidate.parents` are string tests and were the half that let a
+    case-variant root through.
+    """
+    node = candidate
+    while True:
+        if _same_dir(node, root):
+            return True
+        parent = node.parent
+        if parent == node:
+            return False
+        node = parent
+
+
+def _verify_record_landed_outside(out: Path, *measured_roots: Path) -> None:
+    """Observe where the record ACTUALLY landed; delete it and refuse if in-tree.
+
+    The pre-write refusal is a PREDICTION, and five prior cycles were defeated by
+    predicting a path the kernel then resolved differently (five exclusions, then
+    `abspath`'s lexical `..`). This is the fail-closed half that makes the class
+    terminate: after `os.replace` the file EXISTS, so `realpath(out)` follows the
+    final component too and reports the physical file the kernel created. If that
+    is inside any tree the pin measures, the record is deleted and the invocation is
+    a usage error — the prediction no longer has to be right in any future spelling,
+    because the fact is checked.
+    """
+    landed = Path(os.path.realpath(os.fspath(out)))
+    for root in measured_roots:
+        root_real = Path(os.path.realpath(os.fspath(root)))
+        if _inside_tree(landed, root_real):
+            try:
+                os.unlink(out)
+            except OSError:
+                pass
+            raise UsageError(
+                f"--record-out {out} was written inside the measured tree ({root}) "
+                "and has been deleted. The tool's own record must not be part of "
+                "the dirt it is measuring. Write the record outside the measured "
+                f"tree (the default is {_default_record_out()}) and copy or upload "
+                "it afterwards."
+            )
 
 
 def _refuse_in_tree_record_out(out: Path, *measured_roots: Path) -> None:
@@ -1293,7 +1363,7 @@ def _refuse_in_tree_record_out(out: Path, *measured_roots: Path) -> None:
     location = _written_location(out)
     for root in measured_roots:
         root_real = Path(os.path.realpath(os.fspath(root)))
-        if location == root_real or root_real in location.parents:
+        if _inside_tree(location, root_real):
             raise UsageError(
                 f"--record-out {out} is inside the measured tree ({root}). The "
                 "tool's own record would then be part of the dirt it is "
@@ -1685,7 +1755,18 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     out = args.record_out or _default_record_out()
-    _write_record(rec, out)
+    try:
+        _write_record(rec, out)
+        # #4203: the pre-write refusal PREDICTS the destination; this OBSERVES it.
+        # A record that slipped past the prediction is deleted and refused here, so
+        # no future spelling of the path can leave the tool's own record as dirt in
+        # a tree it is measuring.
+        _verify_record_landed_outside(
+            out, REPO_ROOT, Path(rec["pin"]["measured_root"]),
+        )
+    except UsageError as exc:
+        print(f"usage error: {exc}", file=sys.stderr)
+        return 2
     print(json.dumps({
         "record": str(out),
         "status": rec["verdict"]["status"],
