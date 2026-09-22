@@ -124,6 +124,7 @@ retired ON `main` and this column is what a caller experiences now. The map is r
 
 The registry states what retiring a name DOES — quoted verbatim and in full:
 
+> ── Retired names (#3883 / #3863) ─────────────────────────────────────────
 > A name in this mapping is RETIRED: it is not in TOOL_REGISTRY, so it is not
 > registered as an MCP tool and never appears in `tools/list`. It is NOT gone —
 > `_RetiredToolTransform` in mcp_server.py resolves it on `get_tool` and serves

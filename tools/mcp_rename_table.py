@@ -43,12 +43,17 @@ WHAT THIS ARTIFACT ADDS OVER 0.1 (#4282)
      cannot describe a plan that landed differently. A name whose 0.1 destination
      differs from the destination of its redirect is a **FINDING**, reported and
      never quietly reconciled.
-  3. A **maximality guard** over the registry prose this artifact quotes. A claim
-     nothing quotes is a claim nothing can check, and a quote cut off mid-clause
-     drops exactly the clause that can contradict the row it backs — `quote in
-     text` cannot see it, because a truncated prefix is still a substring. The
-     rule shape (`_maximal`) is `tools/sdk_rename_table.py`'s and
-     `tools/bridge_table.py`'s, deliberately not a third rule.
+  3. **Derived-region citations.** The registry prose this artifact quotes is not
+     typed: each citation NAMES a region of a source file (the maximal
+     blank-line-bounded comment paragraph containing an anchor line) and the
+     generator EXTRACTS that region verbatim. A claim nothing quotes is a claim
+     nothing can check, and a hand-typed quote can be cut on either edge — `quote
+     in text` cannot see it, because a truncated prefix is still a substring.
+     Deriving the region removes the failure mode instead of detecting it: a
+     truncation is impossible by construction, and an anchor that does not match
+     exactly one source line FAILS the build. `_maximal` is retained only as a
+     cheap second tripwire, and it requires BOTH edges to be region boundaries.
+     The rule is stated here, inline, as its own definition.
 """
 from __future__ import annotations
 
@@ -119,110 +124,160 @@ NO_REPLACEMENT = "**no replacement**"
 _TARGET_RE = re.compile(r"(tortoise_[a-z0-9_]+)")
 
 # ─────────────────────────────────────────────────────────────────────
-# THE CITATIONS. The `Retirement` prose asserts what the registry DOES with a
-# retired name, and the direction of the `get` retirement is an owner decision
-# recorded in the registry's own comment. Both are claims ABOUT the registry, and
-# a claim that is not quoted is a claim nothing can check. Each is quoted
-# VERBATIM from the registry's comment prose and MAXIMALLY: a read that stops
-# mid-clause drops exactly the clause that can contradict the row it backs, and
-# `quote in text` cannot see it, because a truncated prefix is still a substring.
+# THE CITATIONS — DERIVED REGIONS, never hand-typed quotes.
+#
+# A citation NAMES a region of a source file and the generator EXTRACTS it whole.
+# The region is the maximal blank-line-bounded comment paragraph containing the
+# anchor line, so BOTH edges are boundaries the source itself provides and a
+# truncation is impossible by construction. The anchor is a SELECTOR, not
+# evidence: it must match exactly one source line (or the build refuses), and the
+# rendered quote is read out of the source, never re-typed.
 # ─────────────────────────────────────────────────────────────────────
-REGISTRY_SRC = ROOT / "tortoise" / "tool_registry.py"
 
-# key -> (source document, the quote). The quotes are TYPED evidence — the whole
-# point is that a change in the source is detectable, so they are not derived from
-# the thing they quote.
-CITES: dict[str, tuple[str, str]] = {
+# key -> (source document, the anchor line that names the region). The anchor is a
+# selector, not evidence: it either matches exactly one source line or the build
+# fails, and the rendered quote is the extracted paragraph, never the anchor.
+REGIONS: dict[str, tuple[str, str]] = {
     "retired_behaviour": (
         "tortoise/tool_registry.py",
-        "A name in this mapping is RETIRED: it is not in TOOL_REGISTRY, so it is not\n"
-        "registered as an MCP tool and never appears in `tools/list`. It is NOT gone —\n"
-        "`_RetiredToolTransform` in mcp_server.py resolves it on `get_tool` and serves\n"
-        "a shim that answers exactly as the live tool did AND warns the caller, naming\n"
-        "the replacement. That is the #3836 (b) decision: a retired name keeps working\n"
-        "and tells us who still calls it.",
+        "A name in this mapping is RETIRED: it is not in TOOL_REGISTRY, so it is not",
     ),
     "owner_decision": (
         "tortoise/tool_registry.py",
-        "⚠ This direction is an OWNER DECISION, not an implementation preference:\n"
-        "`docs/product/canonical-mcp-tools.md` (approved, approval_pr 4120) rules\n"
-        "that `tortoise_get_entity` must NOT be retired and that the map must\n"
-        "retire `tortoise_get` in its place. Retiring the pair the other way sends\n"
-        "every caller of `get_entity` to a name that is itself retired — a churn\n"
-        "loop — which is why the pointers below name `tortoise_get_entity`.",
+        "⚠ This direction is an OWNER DECISION, not an implementation preference:",
     ),
 }
 
-# A quote that stops mid-clause is exactly what this rule rejects. Boundaries: a
-# cell/row boundary (`|`), a line end, or the document end.
-#
-# A SENTENCE end is deliberately NOT a boundary. `… \u2192 `manage_source_trust`.` ends
-# at a full stop while the NEXT sentence ("…; reads via `list_sources`") continues the
-# claim — a sentence boundary is exactly where the contradictory clause begins, so it
-# cannot be a safe stopping point. This is the tightened form of
-# `tools/sdk_rename_table.py::_maximal`, and the same rule shape the task specifies
-# (cell/row boundary, line end, document end — no sentence end).
+# A region boundary is a BLANK LINE or the document's own edge. A SENTENCE end is
+# deliberately NOT a boundary: the next sentence is exactly where a contradictory
+# clause begins. A LEFT line boundary is not enough either — dropping a region's
+# first line leaves the quote starting at a line boundary, which is the
+# head-truncation the derived-region design exists to make impossible; `_maximal`
+# is the second tripwire for exactly that, and it demands BOTH edges.
 _COMMENT_LINE = re.compile(r"^\s*#\s?(.*)$")
 
 
-def _maximal(quote: str, text: str) -> bool:
-    """Is `quote` a maximal region of `text` — not a right-truncation of one?
+def _comment_text(path: Path) -> str:
+    """`path`'s comment prose with the `#` markers stripped, as one text.
 
-    True only when the match ends at a table-cell/row boundary (`|`), a line end, or
-    the end of the document. A quote that stops anywhere else — including at a
-    sentence end, where the next sentence can contradict it — is rejected.
-    """
-    idx = text.find(quote)
-    if idx < 0:
-        return True  # absent text is CITATION DRIFT, reported by its own check
-    after = text[idx + len(quote):]
-    return after == "" or after.startswith("\n") or quote.endswith("|")
-
-
-def _registry_comment_text() -> str:
-    """The registry's comment prose with the `#` markers stripped, as one text.
-
-    The citations quote the registry's OWN comments, so the text they are checked
+    The citations quote the source's OWN comments, so the text they are checked
     against has to be the comment content — against the raw file a quote of a
     comment never matches and the guard would be vacuous. Non-comment lines become
     empty lines, so a contiguous comment region stays contiguous.
     """
     out: list[str] = []
-    for line in REGISTRY_SRC.read_text(encoding="utf-8").splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         m = _COMMENT_LINE.match(line)
         out.append(m.group(1) if m else "")
     return "\n".join(out)
 
 
+class _RegionError(Exception):
+    """An anchor that does not name exactly one region — a defect in the EVIDENCE."""
+
+
+def _region(doc: str, anchor: str) -> str:
+    """The maximal blank-line-bounded comment paragraph containing `anchor`.
+
+    The region is READ OUT OF THE SOURCE, never typed, so neither edge can be a
+    truncation: both are the blank separators the source itself provides.
+    """
+    path = ROOT / doc
+    if not path.is_file():
+        raise _RegionError(f"source document does not exist: {doc}")
+    lines = _comment_text(path).split("\n")
+    hits = [i for i, line in enumerate(lines) if line == anchor]
+    if not hits:
+        raise _RegionError(f"anchor line is not in {doc}: {anchor!r}")
+    if len(hits) > 1:
+        raise _RegionError(
+            f"anchor line matches {len(hits)} lines of {doc} — it must name exactly "
+            f"one region: {anchor!r}"
+        )
+    i = hits[0]
+    start = i
+    while start > 0 and lines[start - 1] != "":
+        start -= 1
+    end = i
+    while end + 1 < len(lines) and lines[end + 1] != "":
+        end += 1
+    return "\n".join(lines[start:end + 1])
+
+
+def _at_paragraph_start(text: str, start: int) -> bool:
+    """Is `start` the first character of a blank-line-bounded region?"""
+    if start == 0:
+        return True
+    if text[start - 1] != "\n":
+        return False
+    prev_start = text.rfind("\n", 0, start - 1) + 1
+    return text[prev_start:start - 1].strip() == ""
+
+
+def _at_paragraph_end(text: str, end: int) -> bool:
+    """Is `end` the exclusive end of a blank-line-bounded region?"""
+    if end >= len(text):
+        return True
+    if text[end] != "\n":
+        return False
+    next_end = text.find("\n", end + 1)
+    if next_end == -1:
+        next_end = len(text)
+    return text[end + 1:next_end].strip() == ""
+
+
+def _maximal(quote: str, text: str) -> bool:
+    """Is `quote` a maximal region of `text` — truncated on NEITHER edge?
+
+    The SECOND tripwire over the derived region: a derivation bug that returned a
+    sub-paragraph, or a future edit that re-introduced a typed quote, must fail
+    here. Both edges are required; a left line boundary alone is NOT a region
+    boundary (dropping a paragraph's first line leaves exactly that).
+    """
+    idx = text.find(quote)
+    if idx < 0:
+        return True  # absent text is reported as CITATION SOURCE ERROR by `_region`
+    return _at_paragraph_start(text, idx) and _at_paragraph_end(text, idx + len(quote))
+
+
 def _citation_errors() -> list[str]:
-    """Fail the build on a DRIFTED or TRUNCATED citation — never on a disagreement.
+    """Fail the build on a region that will not resolve or comes out truncated.
 
     A disagreement between the map and the registry is a FINDING to report. A
-    citation that is missing or truncated is a defect in the EVIDENCE itself, and
-    evidence that can be edited to agree with the row is worse than no evidence.
+    citation whose source file is missing, whose anchor does not name exactly one
+    region, or that does not come out as a maximal paragraph is a defect in the
+    EVIDENCE itself, and evidence that can be edited to agree with the row is
+    worse than no evidence.
     """
-    text = _registry_comment_text()
     errs: list[str] = []
     # Non-vacuity: a guard that resolves nothing cannot fail, and would read green.
-    if not CITES:
+    if not REGIONS:
         errs.append("NO citation is declared — the citation guard is UNARMED")
-    for key, (doc, quote) in sorted(CITES.items()):
+    for key, (doc, anchor) in sorted(REGIONS.items()):
+        try:
+            quote = _region(doc, anchor)
+        except _RegionError as e:
+            errs.append(f"CITATION SOURCE ERROR: {key}: {e}")
+            continue
         if not quote.strip():
             errs.append(
-                f"EMPTY CITATION: {key} carries no quote — an empty string is a "
+                f"EMPTY CITATION: {key} resolves to nothing — an empty string is a "
                 "substring of every document, so the guard passes while the claim "
                 "is backed by nothing"
             )
-        elif quote not in text:
-            errs.append(f"CITATION DRIFT: {key} quotes {doc} but that text is gone")
-        elif not _maximal(quote, text):
-            after = text[text.find(quote) + len(quote):][:60]
+            continue
+        text = _comment_text(ROOT / doc)
+        if not _maximal(quote, text):
+            idx = text.find(quote)
+            before = text[:idx][-60:]
+            after = text[idx + len(quote):][:60]
             errs.append(
-                f"TRUNCATED CITATION: {key}'s quote stops mid-clause — the registry "
-                f"continues {after!r}, which can contradict the row this quote backs. "
-                "A quote must end at a cell/row boundary (`|`), a line end, or the "
-                "document end — a sentence end is NOT enough, because the next "
-                "sentence is where a contradiction begins."
+                f"TRUNCATED CITATION: {key}'s region is not a maximal paragraph of "
+                f"{doc} — it continues {after!r}, preceded by {before!r}. A region "
+                "must be extracted whole: a truncation on either edge drops the "
+                "clause that can contradict the row it backs, and a sentence end is "
+                "NOT a boundary because the next sentence is where a contradiction "
+                "begins."
             )
     return errs
 
@@ -359,8 +414,8 @@ def _rendezvous_hint(rows: list[dict]) -> str | None:
 
 
 def _quote_lines(key: str) -> list[str]:
-    """Render a citation as blockquote lines, verbatim."""
-    return [f"> {line}" for line in CITES[key][1].splitlines()]
+    """Render a derived citation as blockquote lines, verbatim."""
+    return [f"> {line}" for line in _region(*REGIONS[key]).splitlines()]
 
 
 def render(rows: list[dict]) -> str:

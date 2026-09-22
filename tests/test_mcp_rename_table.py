@@ -80,10 +80,29 @@ DISAGREEMENTS_LITERAL: set[str] = set()
 # second typed copy cannot drift with the suite green.
 PR_NUMBER_LITERAL = 4031
 PR_MERGE_SHA_LITERAL = "e3bb78a14"
+# `e3bb78a14` is committed at 2026-09-21 12:06:35 -0500. Pinned as a LITERAL
+# because nothing used to read the rendered date: it could be typed as any value
+# and the suite stayed green (independent review, P2-1).
+PR_MERGED_DATE_LITERAL = "2026-09-21"
 
-# The last line of each citation the generator declares is the clause a
-# right-truncation drops. Pinned as LITERALS: a tail-drop lands on a line boundary,
-# which `_maximal` accepts by design, so only an explicit tail pin can see it.
+# The region each citation NAMES — a (source document, anchor line) pair, pinned
+# as LITERALS. The generator derives the rendered quote from these, so a mutation
+# of either moves the document away from what `_derived_paragraph` finds here and
+# reds `test_rendered_citations_are_the_full_derived_region`.
+REGION_LITERAL: dict[str, tuple[str, str]] = {
+    "retired_behaviour": (
+        "tortoise/tool_registry.py",
+        "A name in this mapping is RETIRED: it is not in TOOL_REGISTRY, so it is not",
+    ),
+    "owner_decision": (
+        "tortoise/tool_registry.py",
+        "⚠ This direction is an OWNER DECISION, not an implementation preference:",
+    ),
+}
+
+# The last line of each derived region is the clause a tail-truncation drops.
+# Pinned as LITERALS: a tail-drop lands on a line boundary, which the old
+# right-edge-only rule accepted, so only an explicit tail pin can see it.
 CITATION_TAIL_LITERAL: dict[str, str] = {
     "retired_behaviour": "and tells us who still calls it.",
     "owner_decision":
@@ -444,10 +463,12 @@ def test_b1_states_plainly_that_there_are_no_disagreements() -> None:
 def test_provenance_states_the_merge_and_that_the_column_is_live() -> None:
     """The document must state #4031 MERGED, and that the column is present behaviour.
 
-    The PR number and SHA are pinned as LITERALS here, and the generator renders
-    them from ONE source, so a second typed copy cannot drift with the suite
-    green. The dead branch ref must be gone: the map is read live, not pinned to
-    a branch that no longer exists.
+    The PR number, SHA and merge date are pinned as LITERALS here, and the
+    generator renders them from ONE source, so a second typed copy cannot drift
+    with the suite green. EVERY rendered mention is pinned: `re.search` saw only
+    the first `PR #NNNN`, so a hand-typed second `#40310` (in the Part B heading,
+    say) passed. The dead branch ref must be gone: the map is read live, not
+    pinned to a branch that no longer exists.
     """
     doc = _doc()
     # The provenance paragraph, derived from the generator's single source.
@@ -455,13 +476,25 @@ def test_provenance_states_the_merge_and_that_the_column_is_live() -> None:
         f"the document does not state that PR #{PR_NUMBER_LITERAL} MERGED as "
         f"`{PR_MERGE_SHA_LITERAL}` — the paragraph's provenance is not the merged PR"
     )
-    # EXACT, not substring: `PR #4031` must not be a prefix of another number.
-    m = re.search(r"PR #(\d+) MERGED", doc)
-    assert m, "the document no longer records the merge as `PR #NNNN MERGED`"
-    assert int(m.group(1)) == PR_NUMBER_LITERAL, (
-        f"the merge paragraph names PR #{m.group(1)}, expected #{PR_NUMBER_LITERAL}"
+    # EXACT, not substring: EVERY rendered PR mention must be the one number. A
+    # second hand-typed copy is a claim that can drift.
+    mentions = re.findall(r"PR #(\d+)", doc)
+    assert mentions, "the document no longer records any `PR #NNNN`"
+    assert set(mentions) == {str(PR_NUMBER_LITERAL)}, (
+        f"the document names PRs {sorted(set(mentions))!r}; every one of its "
+        f"{len(mentions)} mentions must be #{PR_NUMBER_LITERAL}"
     )
-    assert "`e3bb78a14`" in doc, "the merge SHA is not rendered as one exact token"
+    # Every backticked short-SHA token must be the one merge SHA.
+    shas = re.findall(r"`([0-9a-f]{7,40})`", doc)
+    assert set(shas) == {PR_MERGE_SHA_LITERAL}, (
+        f"the document renders SHAs {sorted(set(shas))!r}; every one must be "
+        f"`{PR_MERGE_SHA_LITERAL}`"
+    )
+    # The merge DATE is rendered from one source and pinned here: nothing used to
+    # read it, so it could be typed as any value with the suite green (P2-1).
+    assert f"({PR_MERGED_DATE_LITERAL})" in doc, (
+        f"the merge paragraph does not render the date ({PR_MERGED_DATE_LITERAL})"
+    )
     # The column is PRESENT behaviour, not a forecast.
     assert "today's behaviour, not a forecast" in doc, (
         "the document no longer says the `Retirement` column is today's behaviour"
@@ -484,90 +517,162 @@ def test_provenance_states_the_merge_and_that_the_column_is_live() -> None:
         assert cmd in doc, f"the Reproduce block no longer contains: {cmd!r}"
 
 
-# ── The citation guard: a quote must be verbatim AND maximal ─────────────────
+# ── The citation guard: a region is DERIVED, not typed ──────────────────────
 
-def test_maximal_rejects_a_mid_clause_truncation() -> None:
-    """`_maximal` is the rule shape `sdk_rename_table`/`bridge_table` use, pinned."""
-    sys.path.insert(0, str(ROOT))
-    import tools.mcp_rename_table as mrt
+def _comment_lines_of(path: Path) -> list[str]:
+    """`path`'s comment content per line, non-comment lines blanked.
 
-    text = "alpha beta gamma. delta epsilon\nzeta | tail\n"
-    assert mrt._maximal("alpha beta gamma. delta epsilon", text) is True  # line end
-    assert mrt._maximal("zeta |", text) is True  # cell/row boundary
-    assert mrt._maximal("alpha beta", text) is False, (
-        "a mid-clause truncation was accepted — the clause that can contradict the "
-        "row is exactly what a truncation drops"
-    )
-    # A sentence end is NOT a boundary: the NEXT sentence is where a contradiction
-    # begins, which is exactly the defect this rule exists to catch (the sibling
-    # `sdk_rename_table` tightened `_maximal` to reject it for that reason). The
-    # sentence here ends MID-LINE, which is the shape a truncation actually takes.
-    assert mrt._maximal("alpha beta gamma.", text) is False, (
-        "a sentence-end truncation was accepted — the contradictory clause is the "
-        "next sentence"
-    )
-    assert mrt._maximal("absent text", text) is True, (
-        "absent text must pass here: CITATION DRIFT is reported by its own check"
-    )
+    The test's OWN extractor, independent of `tools/mcp_rename_table.py`.
+    """
+    out: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"^\s*#\s?(.*)$", line)
+        out.append(m.group(1) if m else "")
+    return out
 
 
-def test_committed_citations_are_verbatim_and_maximal() -> None:
-    """Every citation the generator declares is present in full in the registry."""
-    sys.path.insert(0, str(ROOT))
-    import tools.mcp_rename_table as mrt
+def _derived_paragraph(doc: str, anchor: str) -> str:
+    """Independently derive the blank-line-bounded paragraph containing `anchor`.
 
-    assert mrt.CITES, "the generator declares no citation — the guard is unarmed"
-    assert mrt._citation_errors() == [], (
-        "a committed citation has drifted from the registry or been truncated"
-    )
+    The expected citation region is computed from the SOURCE (with the pinned
+    anchor), never read back from the generator under test.
+    """
+    lines = _comment_lines_of(ROOT / doc)
+    hits = [i for i, line in enumerate(lines) if line == anchor]
+    assert len(hits) == 1, f"anchor {anchor!r} matched {len(hits)} lines of {doc}"
+    i = hits[0]
+    start = i
+    while start > 0 and lines[start - 1] != "":
+        start -= 1
+    end = i
+    while end + 1 < len(lines) and lines[end + 1] != "":
+        end += 1
+    return "\n".join(lines[start:end + 1])
 
 
-def test_declared_citations_reach_their_final_clause_in_the_document() -> None:
-    """Each citation's LAST clause is rendered, so a right-truncation reds.
+def test_maximal_rejects_a_truncation_on_either_edge() -> None:
+    """`_maximal` (the secondary tripwire) demands BOTH edges be region boundaries.
 
-    The expected set and tails are LITERALS: a truncation that lands on a line
-    boundary is accepted by `_maximal` (a line end is a region boundary), so an
-    assertion that read the tail from the generator would move with the mutation
-    and see nothing.
+    The rule is stated inline here in the generator as its own definition, so
+    this test pins that definition rather than a cited prior art.
     """
     sys.path.insert(0, str(ROOT))
     import tools.mcp_rename_table as mrt
 
-    assert set(mrt.CITES) == set(CITATION_TAIL_LITERAL), (
+    text = "alpha beta gamma.\ndelta epsilon\n\nzeta | tail\n\nomega\n"
+    assert mrt._maximal("alpha beta gamma.\ndelta epsilon", text) is True
+    assert mrt._maximal("omega", text) is True  # bounded by the document edge
+    # HEAD truncation: the paragraph's first line dropped. The quote still starts
+    # at a LINE boundary — which a left-edge-only check would accept.
+    assert mrt._maximal("delta epsilon", text) is False, (
+        "a head truncation was accepted — dropping the first line leaves a line "
+        "boundary on the left, and the dropped line carries the claim"
+    )
+    # TAIL truncation: stops mid-paragraph, on a line boundary.
+    assert mrt._maximal("alpha beta gamma.", text) is False, (
+        "a tail truncation was accepted — the next line continues the claim"
+    )
+    # A sentence end is not a boundary either: the rest of the line continues the
+    # claim, and the next sentence is where a contradiction can begin.
+    assert mrt._maximal("one. two", "one. two\n\nthree\n") is True
+    assert mrt._maximal("one.", "one. two\n\nthree\n") is False, (
+        "a sentence end mid-line was accepted — the rest of the line continues the claim"
+    )
+    assert mrt._maximal("absent text", text) is True, (
+        "absent text must pass here: a missing anchor is reported by its own check"
+    )
+
+
+def test_committed_citations_resolve_and_are_maximal() -> None:
+    """Every declared region resolves, exactly once, to a maximal paragraph."""
+    sys.path.insert(0, str(ROOT))
+    import tools.mcp_rename_table as mrt
+
+    assert mrt.REGIONS, "the generator declares no citation — the guard is unarmed"
+    assert mrt._citation_errors() == [], (
+        "a committed citation failed to resolve or came out truncated"
+    )
+
+
+def test_rendered_citations_are_the_full_derived_region() -> None:
+    """The document renders EVERY line of each independently derived region.
+
+    The expected region is computed by this file's OWN extractor from the source
+    and the pinned anchors — never read back from the generator. A region cut on
+    EITHER edge (the P1-1 head-truncation) is a mismatch. This is the assertion
+    the review's P1-1 mutation reds.
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.mcp_rename_table as mrt
+
+    assert mrt.REGIONS == REGION_LITERAL, (
+        "the declared regions changed:\n"
+        f"  declared: {sorted(mrt.REGIONS.items())}\n"
+        f"  pinned:   {sorted(REGION_LITERAL.items())}"
+    )
+    doc = _doc()
+    for key, (src, anchor) in REGION_LITERAL.items():
+        assert (ROOT / src).is_file(), f"{key} names a source that does not exist: {src}"
+        region = _derived_paragraph(src, anchor)
+        rendered = "\n".join(f"> {line}" for line in region.splitlines())
+        assert rendered in doc, (
+            f"{key}'s derived region is not rendered in full — the document is "
+            f"truncated or the region moved:\n{rendered}"
+        )
+        # The anchor line is the FIRST clause of the claim; a head-truncation
+        # drops exactly it while leaving a valid-looking blockquote.
+        assert f"> {anchor}" in doc, f"{key}'s anchor line is not rendered in the document"
+
+
+def test_declared_citations_reach_their_final_clause_in_the_document() -> None:
+    """Each region's LAST clause is rendered, so a tail-truncation reds.
+
+    A truncation that lands on a line boundary is what the old right-edge-only
+    rule accepted, so an assertion that read the tail from the generator would
+    move with the mutation and see nothing. The tails are LITERALS.
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.mcp_rename_table as mrt
+
+    assert set(mrt.REGIONS) == set(CITATION_TAIL_LITERAL), (
         "the declared citation set changed:\n"
-        f"  declared: {sorted(mrt.CITES)}\n"
+        f"  declared: {sorted(mrt.REGIONS)}\n"
         f"  pinned:   {sorted(CITATION_TAIL_LITERAL)}"
     )
     doc = _doc()
     for key, tail in CITATION_TAIL_LITERAL.items():
-        assert mrt.CITES[key][1].endswith(tail), (
-            f"{key}'s declared quote no longer reaches its final clause {tail!r}"
+        assert mrt._region(*mrt.REGIONS[key]).endswith(tail), (
+            f"{key}'s derived region no longer reaches its final clause {tail!r}"
         )
         assert f"> {tail}" in doc, (
-            f"{key}'s final clause is not rendered in the document — a right-truncation "
+            f"{key}'s final clause is not rendered in the document — a truncation "
             "drops exactly this clause"
         )
 
 
-def test_build_fails_on_a_truncated_citation(monkeypatch, capsys) -> None:
-    """A citation cut mid-clause must FAIL the build, not render as evidence."""
+def test_build_fails_on_a_truncated_region(monkeypatch, capsys) -> None:
+    """A region that comes out cut on EITHER edge must FAIL the build.
+
+    A derived region cannot be truncated by construction, so the mutation here is
+    a derivation BUG — exactly the tripwire's job: `_region` is replaced with one
+    that drops a whole line, head and tail in turn.
+    """
     sys.path.insert(0, str(ROOT))
     import tools.mcp_rename_table as mrt
 
-    doc, quote = mrt.CITES["retired_behaviour"]
-    # Stop on the fourth line, mid-clause: the registry continues
-    # " AND warns the caller, naming the replacement." on the same line.
-    truncated = "\n".join([*quote.splitlines()[:3],
-                            "a shim that answers exactly as the live tool did"])
-    assert truncated in mrt._registry_comment_text(), (
-        "the truncation used by this test is not a real substring — it would red for "
-        "DRIFT, not for TRUNCATION"
-    )
-    monkeypatch.setitem(mrt.CITES, "retired_behaviour", (doc, truncated))
-    errs = mrt._citation_errors()
-    assert any("TRUNCATED CITATION" in e for e in errs), (
-        f"a mid-clause truncation was accepted by the guard: {errs!r}"
-    )
+    real = mrt._region
+    for label, cut in (
+        ("head", lambda q: q.splitlines()[1:]),
+        ("tail", lambda q: q.splitlines()[:-1]),
+    ):
+        monkeypatch.setattr(
+            mrt, "_region",
+            lambda doc, anchor, _cut=cut: "\n".join(_cut(real(doc, anchor))),
+        )
+        errs = mrt._citation_errors()
+        assert any("TRUNCATED CITATION" in e for e in errs), (
+            f"a {label} truncation was accepted by the guard: {errs!r}"
+        )
     # The guard must be WIRED INTO the build, not merely available: `_validate`
     # has to surface it, or the CI form exits 0 with the defect.
     assert any(
@@ -576,25 +681,45 @@ def test_build_fails_on_a_truncated_citation(monkeypatch, capsys) -> None:
     monkeypatch.setattr(sys, "argv", ["mcp_rename_table.py", "--check"])
     rc = mrt.main()
     err = capsys.readouterr().err
-    assert rc == 1, "the generator exited 0 with a truncated citation"
+    assert rc == 1, "the generator exited 0 with a truncated region"
     assert "TRUNCATED CITATION" in err, (
-        "the build failed, but not for the truncated citation — the check is not wired "
+        "the build failed, but not for the truncated region — the check is not wired "
         f"into `_validate` (stderr was {err!r})"
     )
 
 
-def test_build_fails_on_a_drifted_citation(monkeypatch) -> None:
-    """A citation whose source text is gone must FAIL the build as DRIFT."""
+def test_build_fails_when_the_declared_source_does_not_resolve(monkeypatch) -> None:
+    """The source half of a region is LOAD-BEARING, not decorative.
+
+    It used to appear only in a drift message, so changing it to any path —
+    including one that does not exist — left the suite green (P2-5). It is now the
+    file the region is EXTRACTED from, so a missing source, a vanished anchor, and
+    an ambiguous anchor all fail the build.
+    """
     sys.path.insert(0, str(ROOT))
     import tools.mcp_rename_table as mrt
 
+    anchor = REGION_LITERAL["owner_decision"][1]
     monkeypatch.setitem(
-        mrt.CITES, "owner_decision",
-        ("tortoise/tool_registry.py", "a sentence the registry does not contain"),
+        mrt.REGIONS, "owner_decision", ("tortoise/does_not_exist.py", anchor)
     )
     errs = mrt._citation_errors()
-    assert any("CITATION DRIFT" in e for e in errs), (
-        f"a citation absent from the registry was accepted: {errs!r}"
+    assert any("CITATION SOURCE ERROR" in e and "does_not_exist" in e for e in errs), (
+        f"a region in a nonexistent source was accepted: {errs!r}"
+    )
+    # A source that EXISTS but does not contain the anchor is also a fail.
+    monkeypatch.setitem(
+        mrt.REGIONS, "owner_decision", ("tortoise/sdk.py", "a line sdk.py does not contain")
+    )
+    errs = mrt._citation_errors()
+    assert any("CITATION SOURCE ERROR" in e and "sdk.py" in e for e in errs), (
+        f"an anchor absent from the declared source was accepted: {errs!r}"
+    )
+    # An anchor that matches more than one line must not silently pick one.
+    monkeypatch.setitem(mrt.REGIONS, "owner_decision", ("tortoise/tool_registry.py", ""))
+    errs = mrt._citation_errors()
+    assert any("CITATION SOURCE ERROR" in e and "exactly" in e for e in errs), (
+        f"an ambiguous anchor was accepted: {errs!r}"
     )
 
 
@@ -727,6 +852,166 @@ def test_redirect_target_extracts_the_tool_name() -> None:
             f"_redirect_target({expr!r}) returned {mrt._redirect_target(expr)!r}, "
             f"expected {want!r}"
         )
+
+
+# ── Every rendered count and provenance claim has an independent oracle ──────
+
+
+def test_second_warning_shim_count_is_the_map_size() -> None:
+    """The `... so the N `warning shim` names are` figure is recomputed, not free.
+
+    One `warning shim` occurrence was guarded; the retirement paragraph's second
+    occurrence was not, so it could be typed as any number with the suite green
+    (P2-2).
+    """
+    m = re.search(r"so the (\d+) `warning shim` names are", _doc())
+    assert m, (
+        "the retirement paragraph's `... so the N `warning shim` names are` clause "
+        "is missing"
+    )
+    assert int(m.group(1)) == len(RETIRED_LITERAL), (
+        f"the retirement paragraph says {m.group(1)} names retire with a warning shim; "
+        f"the registry map has {len(RETIRED_LITERAL)}"
+    )
+
+
+def test_b1_names_count_is_the_map_size() -> None:
+    """B1's own `... for all N names` figure is recomputed, not free (P2-3)."""
+    b1 = _doc().split("### B1")[1].split("## Reproduce")[0]
+    m = re.search(r"agree on the target for all (\d+) names\.", b1)
+    assert m, "B1's `... for all N names` clause is missing or changed shape"
+    assert int(m.group(1)) == len(RETIRED_LITERAL), (
+        f"B1 says the redirect agrees for all {m.group(1)} names; the map has "
+        f"{len(RETIRED_LITERAL)}"
+    )
+
+
+def test_index_row_summary_matches_the_agreement() -> None:
+    """`docs/00_index.md` restates the agreement as a count — it must be true.
+
+    A caller reads the index row INSTEAD of the artifact, so a stale
+    `(N of N agree, M findings)` there is a false summary (P2-4). The expected
+    values come from the pinned literals, not from the row.
+    """
+    index = (ROOT / "docs" / "00_index.md").read_text(encoding="utf-8")
+    rows = [ln for ln in index.splitlines() if "docs/product/mcp-rename-table.md" in ln]
+    assert len(rows) == 1, "docs/00_index.md must carry exactly one MCP rename-table row"
+    m = re.search(r"\((\d+) of (\d+) agree, (\d+) findings\)", rows[0])
+    assert m, "the index row no longer states `(N of N agree, M findings)`"
+    agree, total, findings = (int(g) for g in m.groups())
+    assert (agree, total) == (len(RETIRED_LITERAL), len(RETIRED_LITERAL)), (
+        f"the index row says {agree} of {total} agree; the map has {len(RETIRED_LITERAL)}"
+    )
+    assert findings == len(DISAGREEMENTS_LITERAL), (
+        f"the index row says {findings} findings; the pinned set has "
+        f"{len(DISAGREEMENTS_LITERAL)}"
+    )
+
+
+def test_generator_names_only_existing_source_paths() -> None:
+    """Every source path the generator's prose names must resolve on this branch.
+
+    The rule's provenance used to cite `tools/sdk_rename_table.py::_maximal` —
+    a file that is neither on this branch nor on `main` — and
+    `tools/bridge_table.py`, which carries no `_maximal` (P2-6). A provenance
+    claim a reader of this branch cannot resolve is the defect class this
+    artifact exists to remove.
+    """
+    src = GENERATOR.read_text(encoding="utf-8")
+    named = set(re.findall(r"(?:tools|tortoise)/[a-z0-9_/]+\.py", src))
+    assert named, "the generator names no source path — did its prose change shape?"
+    missing = sorted(p for p in named if not (ROOT / p).is_file())
+    assert not missing, (
+        f"the generator cites source paths that do not exist on this branch: {missing}"
+    )
+    assert "sdk_rename_table" not in src, (
+        "the generator cites `tools/sdk_rename_table.py` as its rule's prior art, but "
+        "that file is not on this branch or on `main`"
+    )
+    assert "bridge_table.py`'s `_maximal`" not in src, (
+        "the generator cites `tools/bridge_table.py`'s `_maximal`, but that module "
+        "carries no `_maximal`"
+    )
+
+
+def test_docs_only_edit_of_the_generated_doc_is_unguarded_by_ci() -> None:
+    """The ci-surfaces note must not overstate a guard that does not exist.
+
+    A docs-only edit of the GENERATED document selects NO surface (#4454), so
+    this test file does not run — and no workflow runs the generator's `--check`
+    standalone. The `core` note once claimed the guard was "the `api` arm plus
+    the `--check` drift form"; both halves are false for a docs-only change
+    (P2-7). This pins the real selection behaviour and forbids the claim.
+    """
+    sys.path.insert(0, str(ROOT))
+    from tools.ci_selection import load_manifest, select
+
+    sel = select(["docs/product/mcp-rename-table.md"], "pull_request", load_manifest())
+    assert sel["surfaces"] == [], (
+        f"a docs-only edit now selects {sel['surfaces']!r} — the ci-surfaces note "
+        "may need updating"
+    )
+    assert "test_mcp_rename_table.py" not in sel["test_files"], (
+        "the docs-only selection now runs this file — the note can be corrected upward"
+    )
+
+    workflows = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
+    assert workflows, "no workflows found — the standalone `--check` claim cannot be checked"
+    runners = [w.name for w in workflows if "mcp_rename_table.py --check" in w.read_text()]
+    assert not runners, f"a workflow now runs the standalone check: {runners}"
+
+    note = (ROOT / "config" / "ci-surfaces.yml").read_text(encoding="utf-8")
+    m = re.search(r"((?:^  #.*\n)+)  - test_mcp_rename_table\.py", note, re.M)
+    assert m, "the `core` note above test_mcp_rename_table.py is missing"
+    # Strip the comment markers and collapse whitespace FIRST: a re-worded but
+    # equivalent false claim must not slip through by being wrapped differently.
+    flat = re.sub(
+        r"\s+", " ",
+        " ".join(re.sub(r"^\s*#\s?", "", ln) for ln in m.group(1).splitlines()),
+    )
+    assert "#4454" in flat, "the `core` note no longer carries the #4454 docs-only-gap qualifier"
+    assert "selects no surface" in flat, (
+        "the `core` note no longer states that a docs-only change selects no surface"
+    )
+    assert "the `api` arm plus the `--check` drift form" not in flat, (
+        "the `core` note again claims the `--check` drift form guards a docs-only "
+        "change — no workflow runs it standalone"
+    )
+
+
+def test_duration_weight_matches_the_sibling_generator_suite() -> None:
+    """The durations weight is a defensible estimate, not a stale reading.
+
+    `test_bridge_table.py` and this suite pay the same shared-conftest + generator
+    import cost, so their weights must agree. The comment that shipped claimed
+    "254s wall"; measured here, this file runs 7.1-11.6 s in-suite (10.3-15.7 s
+    wall incl. interpreter start) across 8 runs on 2026-09-21 at load average
+    34-38 (P2-8). The superseded reading must not be restated as fact.
+    """
+    import yaml
+
+    manifest = yaml.safe_load((ROOT / "config" / "ci-surfaces.yml").read_text())
+    durations = manifest.get("durations") or {}
+    assert "test_mcp_rename_table.py" in durations, "the durations entry is missing"
+    assert durations["test_mcp_rename_table.py"] == durations["test_bridge_table.py"], (
+        "the two generator suites pay the same import cost, so their weights must "
+        f"agree: {durations['test_mcp_rename_table.py']} vs "
+        f"{durations['test_bridge_table.py']}"
+    )
+    m = re.search(
+        r"((?:^  #.*\n)+)  test_mcp_rename_table\.py:",
+        (ROOT / "config" / "ci-surfaces.yml").read_text(encoding="utf-8"),
+        re.M,
+    )
+    assert m, "the durations comment above the entry is missing"
+    comment = m.group(1)
+    assert "load" in comment, (
+        "the durations comment must state the condition the measurement was taken "
+        "under — a bare wall number is not reproducible"
+    )
+    assert "254" not in comment, (
+        "the superseded `254s` reading is restated; it measures ~10s on this box"
+    )
 
 
 # ── Drift gate ───────────────────────────────────────────────────────────────
