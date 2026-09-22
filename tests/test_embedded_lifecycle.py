@@ -1088,9 +1088,17 @@ def test_selfhost_daemon_sigterm_closes_embedded_server(tmp_path):
 # ── #3599: per-server owner records (the reaper's orphan discriminator) ───
 
 def _owner_entries(socket_file: str):
+    """Owner-RECORD filenames for the server (control dotfiles excluded).
+
+    #4577: the owner dir also holds a `.lock` control file while an owner is
+    live; these assertions are about the record files, so hidden entries are
+    filtered exactly as `_owner_records` filters them.
+    """
     from tortoise.embedded_lifecycle import owner_record_dir
     d = owner_record_dir(socket_file)
-    return sorted(os.listdir(d)) if os.path.isdir(d) else None
+    if not os.path.isdir(d):
+        return None
+    return sorted(n for n in os.listdir(d) if not n.startswith("."))
 
 
 def test_owner_socket_of_resolves_the_inner_client():
@@ -1486,6 +1494,96 @@ def test_fork_hook_drops_the_inherited_start_cache():
         assert 99999999 not in _own_start_cache
     finally:
         _own_start_cache.clear()
+
+
+# ── #4577: the shared owner liveness flock (writer side) ────────────────
+
+def test_record_owner_holds_and_releases_the_shared_lock(tmp_path):
+    """#4577: `record_owner` holds a SHARED flock on
+    `.tortoise-owners/.lock` for the process's lifetime (the reaper's
+    `_owner_lock_held` reads it as a live owner); the lock survives until the
+    LAST client on the socket forgets, and its fd is closed then (no leak).
+
+    Mutation: delete the `_acquire_owner_lock` call from `record_owner`; the
+    first `is True` assertion fails. Make `_release_owner_lock` return without
+    closing the fd and the post-release `os.fstat(fd)` check fails."""
+    from tortoise.embedded_lifecycle import (
+        _owner_lock_fds,
+        _owner_refcounts,
+        forget_owner,
+        record_owner,
+    )
+    from tortoise.embedded_reaper import _owner_lock_held
+
+    sock = str(tmp_path / "sock" / "redis.socket")
+    key = os.path.abspath(sock)
+    try:
+        assert record_owner(sock) is True
+        assert _owner_refcounts[key] == 1, "one client, one claim"
+        assert _owner_lock_held(sock) is True, (
+            "record_owner must hold the shared liveness lock")
+        fd = _owner_lock_fds[key]
+        # Idempotent per (process, socket): the second claim reuses the SAME
+        # descriptor — a new one would leak the first and could be unlocked
+        # independently.
+        assert record_owner(sock) is False
+        assert _owner_refcounts[key] == 2
+        assert _owner_lock_fds[key] == fd, "no second fd for the same socket"
+        # First forget keeps the lock: another client still owns the server.
+        assert forget_owner(sock) is False
+        assert _owner_lock_held(sock) is True, (
+            "the lock must survive the first (non-last) forget")
+        # Last forget drops it and closes the fd.
+        assert forget_owner(sock) is True
+        assert _owner_lock_held(sock) in (None, False), (
+            "the last forget must release the lock (the .lock file is "
+            "reclaimed, so the probe reads False or UNKNOWN — never True)")
+        assert key not in _owner_lock_fds, "the fd map must not leak"
+        with pytest.raises(OSError):
+            os.fstat(fd)  # closed descriptor -> EBADF
+    finally:
+        _owner_refcounts.pop(key, None)
+        _fd = _owner_lock_fds.pop(key, None)
+        if _fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(_fd)
+
+
+def test_record_owner_never_follows_a_symlinked_lock(tmp_path):
+    """#4577 / #4098: `record_owner` opens `.lock` with `O_NOFOLLOW`, so a
+    symlink planted at `.lock` is never followed — the process takes no lock
+    rather than locking an attacker-chosen file. The owner record is still
+    written, so the fallback liveness signal survives.
+
+    Mutation: drop `O_NOFOLLOW` from `_acquire_owner_lock`; the symlink is
+    followed, `_owner_lock_fds` gains an fd, and the `key not in` assertion
+    fails (the process would believe it owned a lock on the target)."""
+    from tortoise.embedded_lifecycle import (
+        _owner_lock_fds,
+        forget_owner,
+        record_owner,
+    )
+    from tortoise.embedded_reaper import _owner_lock_held
+
+    sock = str(tmp_path / "sock" / "redis.socket")
+    owners = Path(sock).parent / ".tortoise-owners"
+    owners.mkdir(parents=True)
+    target = tmp_path / "victim.lock"
+    target.write_text("")
+    (owners / ".lock").symlink_to(target)
+    key = os.path.abspath(sock)
+    try:
+        record_owner(sock)  # must not raise and must not follow the link
+        assert key not in _owner_lock_fds, (
+            "a symlinked .lock must never be followed into a held lock")
+        assert _owner_lock_held(sock) is None, (
+            "the symlinked lock reads UNKNOWN -> the records are the "
+            "fallback")
+        assert _owner_entries(sock), (
+            "the owner record itself must still be written")
+    finally:
+        forget_owner(sock)
+        _owner_lock_fds.pop(key, None)
 
 
 def test_shared_server_keeps_co_tenant_owner_record(tmp_path):

@@ -3363,9 +3363,14 @@ class TortoiseSDK:
     ) -> dict:
         """Capture an agent session into the graph (#312 delta 4, #822).
 
-        Mirrors the hosted POST /v1/sessions logic minus quota/auth:
-        turns become episodic Points keyed {session_id}_t{i} (deterministic +
-        idempotent), the M2 LLM extractor (epic #909) turns the conversation
+        Mirrors the hosted POST /v1/sessions logic minus quota/auth. The
+        hosted lane resolves the capture harness from the server's own record
+        (#3681's ``_observed_capture_harness``); this SDK path stores the
+        caller-supplied ``harness`` (selfhost/embedded has no server
+        credential lane to resolve it from). See the note at the
+        ``if harness:`` clause below. Turns become episodic Points keyed
+        {session_id}_t{i} (deterministic + idempotent), the M2 LLM extractor
+        (epic #909) turns the conversation
         into epistemic Points (+ IMPL/NAND operators — provenance-grounded,
         extracted via the EventAPI projection), plus a :Session node and an
         ontology-compliant :Event {eventKind:'sessionCaptured'} whose
@@ -3487,6 +3492,11 @@ class TortoiseSDK:
         # #1727 Slice 2 (Task 11): harness is set set-only-when-present (None
         # NEVER erases a stored value) — the conditional clause keeps the
         # query valid in both embedded and Docker lanes (no unused binding).
+        # NOT hosted parity (#3681): the hosted lane resolves the harness from
+        # the server's own record (``_observed_capture_harness``) so a re-POST
+        # of an existing session_id cannot RELABEL it; this SDK path still
+        # writes the caller-supplied value (selfhost/embedded has no server
+        # credential lane). Do not read the clause below as a parity pin.
         # Review PR #1827 (parity with hosted_api.py): created_at uses
         # coalesce so an idempotent re-POST preserves the ORIGINAL capture
         # time.
