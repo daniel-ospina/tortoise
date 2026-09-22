@@ -24,7 +24,14 @@ suites in this directory)::
     ALLOW_PROD=1 .venv/bin/python tests/e2e/audit_prod_csp.py
     ALLOW_PROD=1 .venv/bin/python tests/e2e/audit_prod_csp.py https://app.premiselabs.co/
 
-Exits 0 when no surface reported a CSP violation, 1 otherwise.
+Exits 0 when no surface reported a CSP violation, 1 otherwise. Non-CSP console/
+page errors and failed requests are printed separately (they never count toward
+the violation total) so a completeness claim about "no OTHER failed request" is
+readable off the output instead of asserted from a blind instrument.
+
+NOTE: `/admin` (the `ADMIN_CSP` surface) requires an authenticated session, so it
+is not in the default URL set; it is covered statically by the `securityHeaders`
+guard, which pins its policy.
 """
 
 from __future__ import annotations
@@ -38,6 +45,9 @@ DEFAULT_URLS = [
     "https://premiselabs.co/",
     "https://premiselabs.co/docs/",
     "https://tortoise.premiselabs.co/",
+    # A Function-rendered HTML surface (`blog/[[path]].ts` → `_lib.ts`), where
+    # `_headers` does NOT apply and the policy is the marketing `RELAXED_CSP`.
+    "https://tortoise.premiselabs.co/blog",
     "https://app.premiselabs.co/",
     "https://app.premiselabs.co/signup",
     "https://app.premiselabs.co/auth",
@@ -49,6 +59,17 @@ def _violations(console: list[str], failed: list[str]) -> list[str]:
     """CSP refusals, from either the console or a failed request."""
     hits = [m for m in console if "Content Security Policy" in m or "Refused to" in m]
     return hits + [f"{f} (request failed)" for f in failed if "csp" in f.lower()]
+
+
+def _other_errors(console: list[str], failed: list[str]) -> list[str]:
+    """Non-CSP console/page errors and failed requests.
+
+    Kept OUT of `_violations`: a network blip or an unrelated app error must not
+    read as a CSP violation, and a completeness claim ("the beacon was the only
+    failure") is only checkable if this class is visible rather than discarded.
+    """
+    csp = set(_violations(console, failed))
+    return [m for m in console if m not in csp] + [f for f in failed if "csp" not in f.lower()]
 
 
 def main(argv: list[str]) -> int:
@@ -71,8 +92,7 @@ def main(argv: list[str]) -> int:
             page.on("pageerror", lambda e, c=console: c.append(f"[pageerror] {e}"))
             page.on("requestfailed", lambda r, f=failed: f.append(f"{r.url} :: {r.failure}"))
             try:
-                resp = page.goto(url, wait_until="domcontentloaded", timeout=45_000)
-                blocked = _violations(console, failed)
+                resp = page.goto(url, wait_until="load", timeout=45_000)
                 if resp is not None:
                     csp = resp.headers.get("content-security-policy") or ""
                     # `connect-src 'self'` with no third-party host is the strict
@@ -82,14 +102,25 @@ def main(argv: list[str]) -> int:
                     )
                 else:
                     kind = "?"
+                # Read AFTER the settle, not before. The beacon sends its RUM
+                # payload on `load`/`visibilitychange` via `navigator.sendBeacon`,
+                # so a `connect-src` refusal arrives after `domcontentloaded` — a
+                # read taken before the wait silently drops exactly the
+                # `connect-src` class this script exists to detect, and prints OK.
                 page.wait_for_timeout(3_500)
+                blocked = _violations(console, failed)
+                others = _other_errors(console, failed)
             except Exception as exc:
                 blocked = [f"[goto-failed] {exc}"]
+                others = []
                 kind = "?"
             status = "OK" if not blocked else f"{len(blocked)} BLOCKED"
             print(f"{status:>10}  {kind:<8} {url}")
             for b in blocked:
                 print(f"            - {b[:220]}")
+            # Printed separately, never merged into the verdict.
+            for o in others:
+                print(f"            (non-CSP error) {o[:200]}")
             dirty += 1 if blocked else 0
             ctx.close()
         browser.close()

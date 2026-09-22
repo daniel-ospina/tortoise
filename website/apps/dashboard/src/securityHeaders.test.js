@@ -115,6 +115,26 @@ const HTML_SITES = [
   ['website/functions/blog/_lib.ts', 1],
 ]
 
+/**
+ * The policy constant each HTML-producing site is entitled to stamp.
+ *
+ * The COUNT above proves the stamps are live; this proves they are the RIGHT
+ * one. A count alone accepts `ADMIN_CSP` swapped for `RELAXED_CSP` in
+ * `admin/[[path]].ts`, which would move the admin console from `script-src 'self'`
+ * to `'unsafe-inline'` plus the broad origin set with every test green.
+ *
+ * `strictCspWithNonce` is a call, not a constant — the same value `isCspValue`
+ * already accepts for this site's stamp.
+ */
+const HTML_SITE_POLICY = {
+  'website/apps/dashboard/functions/auth/index.ts': 'RELAXED_CSP',
+  'website/apps/dashboard/functions/welcome.ts': 'RELAXED_CSP',
+  'website/apps/dashboard/functions/auth/confirm.ts': 'strictCspWithNonce',
+  'website/apps/dashboard/functions/admin/[[path]].ts': 'ADMIN_CSP',
+  'website/functions/_middleware.ts': 'RELAXED_CSP',
+  'website/functions/blog/_lib.ts': 'RELAXED_CSP',
+}
+
 /** The four request paths that must serve the SPA document under `STRICT_CSP`. */
 const STRICT_PATHS = ['/', '/team', '/team/', '/index.html']
 
@@ -325,6 +345,34 @@ function stampCount(relPath) {
     }
   })
   return count
+}
+
+/**
+ * The CSP constant/call names stamped in a file, in source order. `stampCount`
+ * proves the stamps are live; this proves WHICH policy they name (see
+ * `HTML_SITE_POLICY`). Same AST shapes as `stampCount`, so the two cannot
+ * disagree about what a stamp is.
+ */
+function stampConstants(relPath) {
+  const ast = parseSource(readFileSync(join(repoRoot, relPath), 'utf8'), relPath)
+  const names = []
+  const record = (node) => {
+    if (!isCspValue(node)) return
+    names.push(node.type === 'CallExpression' ? node.callee.name : node.name)
+  }
+  visitNodes(ast.program, (node) => {
+    if (node.type === 'ObjectProperty' && nameOf(node.key) === 'Content-Security-Policy') {
+      record(node.value)
+      return
+    }
+    if (node.type === 'CallExpression' && node.callee?.type === 'MemberExpression') {
+      const method = nameOf(node.callee.property)
+      if (method === 'set' || method === 'append') {
+        if (nameOf(node.arguments?.[0]) === 'Content-Security-Policy') record(node.arguments?.[1])
+      }
+    }
+  })
+  return names
 }
 
 /**
@@ -753,6 +801,29 @@ test('_headers values are byte-identical to the stamped constants', () => {
       `${path} must carry STRICT_CSP`,
     )
   }
+
+  // The per-path checks above visit the blocks the guard KNOWS about. The set of
+  // blocks that actually carry (or detach) a policy must EQUAL that set: a new
+  // block — a new path, or a wildcard like `/*.html` — with its own policy would
+  // otherwise ship unvisited, and if it omits the beacon it re-blocks the edge
+  // tag with every test green. A block that detaches the inherited policy without
+  // re-adding one ships that surface with NO policy at all, which is worse.
+  const policyBlocks = (headers) =>
+    Object.entries(headers)
+      .filter(([, b]) => b.headers['content-security-policy'] || b.detached.has('content-security-policy'))
+      .map(([path]) => path)
+      .sort()
+  assert.deepEqual(
+    policyBlocks(parseHeaders('website/_headers')),
+    ['/*'],
+    'website/_headers carries (or detaches) a CSP on an unaudited block',
+  )
+  assert.deepEqual(
+    policyBlocks(appHeaders),
+    ['/*', ...STRICT_PATHS].sort(),
+    'dashboard _headers carries (or detaches) a CSP on a block that is not in the ' +
+      'audited set — add it to STRICT_PATHS with its pinned constant, or remove it',
+  )
 })
 
 // ── 4b. every policy admits the PLATFORM-INJECTED beacon ──────────────────
@@ -854,16 +925,17 @@ test('every policy allows the platform-injected Cloudflare beacon', () => {
           `host-source in script-src, so ${SCRIPT_ORIGIN} would NOT load the tag`,
       )
     }
-    // `script-src-elem`/`script-src-attr`, when present, override `script-src` for
-    // <script src> / inline handlers. Naming the origin only in script-src would
-    // then be inert.
-    for (const override of ['script-src-elem', 'script-src-attr']) {
-      if (byDirective.has(override)) {
-        wrong.push(
-          `${name}: ${override} overrides script-src for the elements that matter — ` +
-            `this test cannot prove the tag loads; remove it or model it here`,
-        )
-      }
+    // `script-src-elem`, when present, overrides `script-src` for `<script src>`
+    // elements — the injected tag is one, so naming the origin only in
+    // `script-src` would be inert. `script-src-attr` governs inline event
+    // handlers and `javascript:` URLs ONLY: it cannot affect a `<script src>`
+    // element, so its presence is not a beacon risk and must NOT redden this test
+    // (adding it is a legitimate hardening of the `'unsafe-inline'` policies).
+    if (byDirective.has('script-src-elem')) {
+      wrong.push(
+        `${name}: script-src-elem overrides script-src for <script src> — ` +
+          `this test cannot prove the tag loads; remove it or model it here`,
+      )
     }
   }
   assert.deepEqual(
@@ -887,6 +959,27 @@ test('every HTML-producing Function stamps the CSP on each HTML-producing path',
     wrong,
     [],
     'an HTML-producing path lost its Content-Security-Policy stamp (a stamp must be an object property or a headers.set/append argument — a header name built as an expression is not counted)',
+  )
+})
+
+test('each HTML-producing site stamps the policy constant its surface is entitled to', () => {
+  assert.deepEqual(
+    Object.keys(HTML_SITE_POLICY).sort(),
+    HTML_SITES.map(([rel]) => rel).sort(),
+    'HTML_SITE_POLICY must cover exactly the HTML-producing sites listed in HTML_SITES',
+  )
+  const wrong = []
+  for (const [rel, expected] of Object.entries(HTML_SITE_POLICY)) {
+    const found = new Set(stampConstants(rel))
+    if (found.size !== 1 || !found.has(expected)) {
+      wrong.push(`${rel}: expected ${expected}, found ${[...found].join(', ') || '(none)'}`)
+    }
+  }
+  assert.deepEqual(
+    wrong,
+    [],
+    'an HTML site stamps a policy other than the one its surface requires — a ' +
+      'lower-tier policy (e.g. RELAXED_CSP for the ADMIN_CSP console) silently weakens it',
   )
 })
 
