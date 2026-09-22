@@ -8,8 +8,10 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import signal
 import sys
 import tempfile
+import time
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -76,6 +78,15 @@ def _embedded_daemon_alive(db_path: str) -> bool:
     live pid IS the leak; a vanished pidfile is itself proof the daemon
     exited (Redis removes its own pidfile on graceful shutdown), so its
     absence must not read as failure.
+
+    Fail-CLOSED, because this is an assertion oracle: a registry or pidfile
+    that cannot be read is "undetermined", and undetermined must read as
+    alive so the pin reds loudly. Returning False there would let a live leak
+    pass the assertion silently — the one direction an oracle may not fail.
+    Likewise a non-positive pid: ``os.kill(0, 0)`` probes the caller's own
+    process GROUP and ``os.kill(-1, 0)`` broadcasts, so a corrupt pid of
+    ``0``/``-1`` would otherwise report a healthy daemon (the same guard
+    `embedded_reaper._owner_records` carries, for the same reason).
     """
     import json
 
@@ -86,18 +97,71 @@ def _embedded_daemon_alive(db_path: str) -> bool:
         with open(settings) as fh:
             reg = json.load(fh)
         pidfile = reg.get("pidfile")
-        if not pidfile or not os.path.exists(pidfile):
-            return False
+    except Exception:
+        return True  # unreadable registry — undetermined, fail closed
+    if not pidfile or not os.path.exists(pidfile):
+        return False  # Redis unlinks its pidfile on graceful shutdown
+    try:
         with open(pidfile) as fh:
             pid = int(fh.read().strip())
     except Exception:
-        return False
+        return True  # torn/unparseable pidfile — undetermined, fail closed
+    if pid <= 0:
+        return True  # 0/-1 would probe our own process group
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True  # exists, other uid — fail closed
+    return True
+
+
+def _leaked_daemon_pid(db_path: str) -> int | None:
+    """The positive pid in the daemon's own pidfile, or None.
+
+    Reclaim-only: the "is it alive" decision belongs to
+    `_embedded_daemon_alive`, which must stay fail-CLOSED. Here an unreadable
+    record only means "cannot reclaim" (None), never "not a leak".
+    """
+    import json
+
+    try:
+        with open(db_path + ".settings") as fh:
+            pidfile = json.load(fh).get("pidfile")
+        if not pidfile:
+            return None
+        with open(pidfile) as fh:
+            pid = int(fh.read().strip())
+    except Exception:
+        return None
+    return pid if pid > 0 else None
+
+
+def _reclaim_leaked_daemon(db_path: str) -> bool:
+    """Terminate a leaked daemon if one is live; return whether one was found.
+
+    Used as the SUBJECT of the pin's assertion (`assert not
+    _reclaim_leaked_daemon(db_path)`), so the cleanup runs before the assert
+    can fire. That ordering is load-bearing rather than tidy: on the reverted
+    build the shared-release branch reclaims nothing, so a red pin would
+    otherwise bequeath the very orphan it reports — one per retry, on a leg
+    whose leak threshold is 0 (#4496 review, P2).
+    """
+    if not _embedded_daemon_alive(db_path):
+        return False
+    pid = _leaked_daemon_pid(db_path)
+    if pid is not None:
+        for attempt in range(30):  # SIGTERM first, then SIGKILL
+            try:
+                os.kill(pid, signal.SIGTERM if attempt == 0 else signal.SIGKILL)
+            except OSError:
+                break
+            time.sleep(0.2)
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
     return True
 
 
@@ -454,40 +518,15 @@ class TestCliOnboardDbTarget:
             # still holds the store, so this reds the mutation deterministically.
             assert os.path.exists(db_path), "init did not save the embedded db"
 
-            # NEGATIVE: no LIVE daemon survives the call. redislite's
-            # `<db>.settings` registry is removed only by the client that
-            # STARTED the daemon, so registry-absence is order-dependent (an
-            # attaching client shuts the daemon down but leaves the registry
-            # behind). Pin the DAEMON instead: if the registry survives, a
-            # READABLE pid that is still alive is the leak. A missing pidfile is
-            # itself proof the daemon exited — Redis removes its own pidfile on
-            # graceful shutdown — so absence of a pid must not be read as
-            # failure.
-            settings = db_path + ".settings"
-            if os.path.exists(settings):
-                import json as _json
-                from pathlib import Path as _Path
-                pid = None
-                try:
-                    reg = _json.loads(_Path(settings).read_text())
-                    pidfile = reg.get("pidfile")
-                    if pidfile and os.path.exists(pidfile):
-                        pid = int(_Path(pidfile).read_text().strip())
-                except Exception:
-                    pid = None
-                if pid is not None:
-                    alive = True
-                    try:
-                        os.kill(pid, 0)
-                    except ProcessLookupError:
-                        alive = False
-                    except PermissionError:
-                        alive = True
-                    assert not alive, (
-                        f"init leaked its embedded redis-server (pid {pid}, "
-                        "#4579): once the co-tenant release withdraws the owner "
-                        "record it becomes an uninstrumented, dir-present orphan "
-                        "the #3767 reaper refuses to fast-kill")
+            # NEGATIVE: no LIVE daemon survives the call (see
+            # `_embedded_daemon_alive` for why the DAEMON, not the registry,
+            # is the subject). `_reclaim_leaked_daemon` is the assertion's
+            # subject so that a red pin cleans up after itself.
+            assert not _reclaim_leaked_daemon(db_path), (
+                f"init leaked its embedded redis-server ({db_path}, #4579): "
+                "once the co-tenant release withdraws the owner record it "
+                "becomes an uninstrumented, dir-present orphan the #3767 "
+                "reaper refuses to fast-kill")
         finally:
             if _gc_was_enabled:
                 gc.enable()
@@ -558,7 +597,7 @@ class TestCliOnboardDbTarget:
             if gc_was_enabled:
                 gc.enable()
 
-        assert not _embedded_daemon_alive(db_path), (
+        assert not _reclaim_leaked_daemon(db_path), (
             "init leaked its embedded redis-server under a mocked "
             "subprocess.run (#4496): the reaper's ps probe raised, "
             "cotenant_holds_server read that as a co-tenant, and the last "
@@ -610,30 +649,9 @@ class TestCliOnboardDbTarget:
             # The probe was released on the error return: no LIVE daemon may
             # survive it. Same order-independent daemon pin as the success-path
             # test above (a vanished pidfile is proof the daemon exited).
-            settings = db_path + ".settings"
-            if os.path.exists(settings):
-                import json as _json
-                from pathlib import Path as _Path
-                pid = None
-                try:
-                    reg = _json.loads(_Path(settings).read_text())
-                    pidfile = reg.get("pidfile")
-                    if pidfile and os.path.exists(pidfile):
-                        pid = int(_Path(pidfile).read_text().strip())
-                except Exception:
-                    pid = None
-                if pid is not None:
-                    alive = True
-                    try:
-                        os.kill(pid, 0)
-                    except ProcessLookupError:
-                        alive = False
-                    except PermissionError:
-                        alive = True
-                    assert not alive, (
-                        f"init leaked its embedded redis-server (pid {pid})"
-                        " on an error return that followed the probe bind "
-                        "(#4579)")
+            assert not _reclaim_leaked_daemon(db_path), (
+                f"init leaked its embedded redis-server ({db_path})"
+                " on an error return that followed the probe bind (#4579)")
         finally:
             if _gc_was_enabled:
                 gc.enable()

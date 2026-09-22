@@ -869,16 +869,13 @@ def _is_detached(pid: int) -> bool:
     Fail-closed: any uncertainty (ps timeout/error, pid vanished, unparseable
     ppid) returns False so the server is protected, never risked.
     """
-    import subprocess as _sp
     cached = _PROC_INFO_CACHE.get(pid)
     if cached is not None and cached.get("ppid") is not None:
         return cached["ppid"] in (0, 1)
-    try:
-        r = _sp.run(["ps", "-o", "ppid=", "-p", str(pid)],
-                    capture_output=True, text=True, timeout=5)
-    except (_sp.TimeoutExpired, OSError):
+    raw = _run_text(["ps", "-o", "ppid=", "-p", str(pid)], timeout=5)
+    if raw is None:
         return False
-    raw = r.stdout.strip()
+    raw = raw.strip()
     if not raw:
         return False  # pid vanished mid-check -> reap() skips dead pids anyway
     try:

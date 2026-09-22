@@ -164,14 +164,19 @@ def test_probless_ps_stdout_is_undeterminable_not_raising(monkeypatch, tmp_path)
         assert R._owner_records(sp) == (1, 1)
 
 
-def test_uptime_and_cmdline_also_tolerate_a_mock(monkeypatch):
-    """The same guard covers the sibling `ps` readers.
+def test_uptime_and_cmdline_also_tolerate_a_mock(monkeypatch, tmp_path):
+    """The same guard covers the sibling `ps`/`lsof`/`pgrep` readers.
 
-    `_process_start_time` was the one on the close path, but `_uptime_seconds`
-    and `_cmdline` parse the identical captured stdout and are reached from
-    `discover()`/`_classify()`. One unguarded reader is enough to turn a
-    mocked subprocess into a raise, so all of them are pinned here rather
-    than only the one that happened to leak first.
+    `_process_start_time` was the one on the close path, but the module has
+    nine captured-stdout readers and only ONE of them (`_process_start_time`,
+    via `_parse_lstart`'s `re.match`) actually raises on a MagicMock — the
+    others fail *silently and in the wrong direction*, which is worse:
+    `_parse_etime(MagicMock())` returns `0.0` ("infinitely old, safe to
+    reap"), `_cmdline` returns the mock itself, `_parse_client_list` returns
+    `[]` ("zero clients" — the verdict that licences a kill), and
+    `"p<pid>" in MagicMock()` is `False`. Each is pinned here to its
+    "undeterminable" value, so a future revert of any single site reds
+    instead of quietly inverting a fail-closed probe.
     """
     from unittest import mock
 
@@ -180,6 +185,16 @@ def test_uptime_and_cmdline_also_tolerate_a_mock(monkeypatch):
         fake.return_value.returncode = 0
         assert R._uptime_seconds(os.getpid()) is None
         assert R._cmdline(os.getpid()) == ""
+        assert R._process_has_socket(os.getpid(), "/tmp/nope.sock") is False
+        assert R._is_detached(os.getpid()) is False  # fail-closed, not True
+        assert R._derive_real_pid_macos("/tmp/nope.sock") is None
+        assert R._pgrep_redis_servers() == []
+        assert R._batch_process_info([os.getpid()]) == {}
+        # `returncode == 0` is redis-cli's own success word, so a non-text
+        # stdout must not be parsed as "zero clients" — None is the
+        # caller-safe "client state unknown".
+        assert R._client_list(str(tmp_path / "nope.sock")) is None
+        assert R._active_client_count(str(tmp_path / "nope.sock")) is None
 
 
 # ── NEGATIVE CONTROL — an unowned dir is NOT ours ────────────────────────────
