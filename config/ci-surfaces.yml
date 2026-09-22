@@ -175,6 +175,11 @@ surfaces:
   - test_export_cli.py
   - test_export_pack_config.py
   - test_failure_contract.py
+  # #3039: percent-decoding of URI userinfo — api-surface consumers
+  # (tortoise/acl_graph_users.py::_admin_client, tortoise/__main__.py doctor
+  # probe) feed the same rule in tortoise/config.py; registered here so an
+  # acl/__main__-only change runs the pinned tests.
+  - test_from_uri_userinfo.py
   - test_fake_control_plane.py
   - test_free_team_entitlement.py   # main-side drift unblock (#1929): committed on main (entitlement gate work) but never added to selection — the --integrity gate fails every PR without it
   - test_one_free_org_entitlement.py  # main-side drift unblock (#2789/#2822): one-free-org entitlement test merged on main but never added to selection — the --integrity gate fails every PR without it
@@ -362,6 +367,10 @@ surfaces:
   - test_capture_spool.py
   battery:
   - test_battery_arms.py
+  # (removed a duplicate test_battery_derive_truth_leg.py entry here on the
+  # #3039 merge: the branch registered it as a main-side drift unblock before
+  # main did; main now carries the canonical battery entry below
+  # (#3100/#3221), and keeping both is the #2913 invisible-duplicate class.)
   - test_battery_judge.py
   - test_battery_parity.py
   - test_battery_recall_wiring.py  # #3327 matched-recall pre-pass wiring (hermetic)
@@ -740,6 +749,10 @@ surfaces:
   # durations map) — an unmeasured entry would also drop fast-pool coverage
   # below the 90% floor (#4259 review).
   - test_fly_secret_drift.py
+  # #3039: percent-decoding of URI userinfo (the single shared rule in
+  # tortoise/config.py, which is a core-surface path) — registered here so a
+  # config.py-only change still runs the guard.
+  - test_from_uri_userinfo.py
   - test_frontmatter_validator.py
   - test_gate_b_tooling.py
   - test_graph_diagnostics.py
@@ -1486,6 +1499,14 @@ durations:
   # it stays in the derived fast halves.
   test_dump_edge_asymmetry_3895.py: 90.0
   test_divergence_conformance.py: 57.8
+  # #3039: new file. No CI junit measurement exists yet, so the value below is
+  # a LOCAL measurement (54 tests, 55.6s docker-lane). Entry — rather than the
+  # flat 2.0s default — is required because leaving it out drops durations
+  # coverage from 90.02% (541/601) on main to 89.87% (541/602), one file below
+  # the 90% floor exactly as #4348 (--register cannot emit a `durations` row)
+  # describes; and a 27x under-weight would skew the LPT pack for a ~55s file.
+  # Refresh from the first post-merge junit artifact.
+  test_from_uri_userinfo.py: 55.6
   test_export_cli.py: 53.7
   test_github_indexer.py: 51.5
   test_doctor.py: 44.8
