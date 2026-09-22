@@ -3505,10 +3505,25 @@ class FalkorProjection(
         # graph WAS configured (a v1 sidecar is written whenever the old build
         # captured any graph-only entry — #Batch, :Session, graph-only Points),
         # so it reports STATE UNKNOWN. T1 below is the proof case.
+        #
+        # The gate keys on the RESCUE FILE's version ONLY — deliberately NOT on
+        # `not config_snapshot`. A pre-preservation wipe can be followed by the
+        # self-heal this issue names (`ensure_tenant_packs` repopulating starter
+        # `:PackInstall` rows before the retry), and then the fresh capture is
+        # NON-empty while the real custom configuration the old build destroyed
+        # is still unknown. Gating on emptiness would report that as a clean
+        # `N of N restored` with no marker — a false "restored" for an unknown
+        # state, which is the fail-open this state exists to prevent. A false
+        # "unknown" is safe and operator-clearable; a false "restored" is not.
         leftover_version = (leftover or {}).get("version")
-        if (leftover is not None and not config_snapshot
+        config_unknown_staged: dict | None = None
+        if (leftover is not None
                 and (not isinstance(leftover_version, int)
-                     or leftover_version < 2)):
+                     or leftover_version < 2)
+                and not any(
+                    isinstance(e, dict) and e.get("label") == "Meta"
+                    and (e.get("props") or {}).get("key") == _CONFIG_RESET_KEY
+                    for e in config_snapshot)):
             # Assign into `merged` AND the local: the pre-wipe PAYLOAD is
             # derived from `merged`, while the restore leg reads the local. A
             # local-only rebind would leave `payload["config_snapshot"] == []`,
@@ -3518,11 +3533,13 @@ class FalkorProjection(
             # restored and a state-UNKNOWN graph would report `config_reset
             # = False`, i.e. "never configured". That is precisely the window
             # the sidecar exists for.
-            merged["config_snapshot"] = [{
+            config_unknown_staged = {
                 "label": "Meta",
                 "props": _config_reset_props(
                     None, "legacy_sidecar_no_config_record"),
-            }]
+            }
+            merged["config_snapshot"] = [*config_snapshot,
+                                        config_unknown_staged]
             config_snapshot = merged["config_snapshot"]
             logger.error(
                 "rebuild: the leftover pre-wipe snapshot at %s predates config "
@@ -4711,7 +4728,6 @@ class FalkorProjection(
         # failure is counted and surfaced once, and the post-restore check below
         # turns the resulting gap into the marker.
         config_restore_failures = 0
-        restored_config: set[tuple] = set()
         # Populate the label→spec map before either the restore or the T1 check
         # reads it. The capture path fills it as a side effect, but the T2 path
         # stages a marker entry WITHOUT a capture, and an empty map would make
@@ -4744,7 +4760,11 @@ class FalkorProjection(
                     spec.label, identity_prop, identity, type(e).__name__, e,
                 )
                 continue
-            restored_config.add((spec.label, identity))
+            # (No `restored_config` bookkeeping: "the write did not raise" is
+            # not the same claim as "the identity is present", and T1 below
+            # verifies against the GRAPH. Tracking both would leave a second,
+            # weaker source of truth that a future change could mistake for
+            # load-bearing.)
         if config_restore_failures:
             logger.error(
                 "rebuild: %d config restore(s) FAILED — the pre-wipe "
@@ -5203,6 +5223,12 @@ class FalkorProjection(
             _config_key(entry) for entry in config_snapshot
             if isinstance(entry, dict)
             and entry.get("label") in _CONFIG_CLASS_BY_LABEL
+            # The marker T2 STAGED is a statement about unprovability, not
+            # captured configuration: counting it would report `N+1 of N+1`
+            # for a graph whose real config is unknown. It is still part of the
+            # section (so it is persisted and restored) — it just must not
+            # inflate the counts the operator reads.
+            and entry is not config_unknown_staged
         }
         config_verified = True
         config_missing: set = set()
@@ -5243,6 +5269,7 @@ class FalkorProjection(
                     "restore from the still-pending sidecar (#2814)",
                     type(e).__name__, e,
                 )
+        config_reset_read_failed = False
         try:
             config_reset_marker = read_config_reset(self.g)
         except Exception as e:
@@ -5251,6 +5278,11 @@ class FalkorProjection(
                 type(e).__name__, e,
             )
             config_reset_marker = None
+            # Fail-SAFE, not fail-open: `None` must not mean both "never set"
+            # and "could not be read". Reporting `config_reset: false` on an
+            # unreadable marker would tell the operator the config is fine on
+            # the one path that cannot check.
+            config_reset_read_failed = True
         if snapshot_pending:
             _clear_prewipe_snapshot(snapshot_path)
         node_count = self.g.query(
@@ -5272,7 +5304,8 @@ class FalkorProjection(
                 "config_expected": len(config_expected_set),
                 "config_restored": len(config_expected_set - config_missing)
                 if config_verified else 0,
-                "config_reset": config_reset_marker is not None}
+                "config_reset": (config_reset_marker is not None
+                                 or config_reset_read_failed)}
 
     def query(self, cypher: str, **params):
         # P0 guard (#99): refuse bulk graph-wipe on non-test graphs.

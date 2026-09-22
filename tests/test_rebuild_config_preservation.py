@@ -1154,3 +1154,63 @@ def test_config_registry_doc_consistency():
         assert f":{label}" in audit, f"audit query omits :{label}"
     for key in doc_meta_keys:
         assert key in audit, f"audit query omits Meta key {key}"
+
+
+def test_v1_leftover_with_self_healed_config_still_reports_unknown(graph):
+    """A pre-preservation rescue file makes the state UNKNOWN even when the LIVE
+    graph already carries config.
+
+    The self-heal this issue names (`ensure_tenant_packs`) repopulates starter
+    `:PackInstall` rows between the old build's wipe and the retry, so gating
+    the state-unknown marker on "the fresh capture is empty" would report a
+    clean `N of N restored` with NO marker while the real custom configuration
+    the old build destroyed stays unknown — a false "restored" for an unknown
+    state. The marker must not inflate the counts either.
+    """
+    from tortoise.projection import read_config_reset
+
+    events, sdk = graph
+    _write_journal(events, [])
+    _plant(Path(_sidecar_path(events)), _sidecar_payload(
+        version=1, batch_snapshot=[{"id": "b-legacy"}]))
+    _write_install(sdk, "dev", version="0.3.0", status="active",
+                   source="starter")
+
+    result = sdk._get_proj().rebuild_all(str(events))
+
+    marker = read_config_reset(_g(sdk))
+    assert marker is not None, (
+        "a v1 rescue file means the state is unknown; the presence of a live "
+        "starter row must not turn that into a reported clean restore")
+    assert marker["reason"] == "legacy_sidecar_no_config_record"
+    assert result["config_reset"] is True
+    # The live row survives, and the staged marker is NOT counted as captured
+    # configuration (it asserts unprovability, it is not config).
+    assert _read_install(sdk, "dev")["source"] == "starter"
+    assert result["config_expected"] == 1
+    assert result["config_restored"] == 1
+
+
+def test_unreadable_marker_is_not_reported_as_absent(graph, monkeypatch):
+    """A marker READ failure must not read as `config_reset: False`.
+
+    `None` from the read currently means both "never set" and "could not be
+    read"; the return field and the CLI warning are built from it, so an
+    unreadable marker would tell the operator the configuration is fine on the
+    one path that cannot check.
+    """
+    from tortoise import projection as pr
+
+    events, sdk = graph
+    _write_journal(events, [])
+    _write_install(sdk, "unreadable", version="1.0.0")
+
+    def _boom(_g):
+        raise RuntimeError("injected marker read failure")
+
+    monkeypatch.setattr(pr, "read_config_reset", _boom)
+    result = sdk._get_proj().rebuild_all(str(events))
+
+    assert result["config_reset"] is True, (
+        "an unreadable marker must fail SAFE (report the incident), never "
+        "report `config_reset: False`")
