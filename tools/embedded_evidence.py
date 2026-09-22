@@ -1282,9 +1282,11 @@ def _sweep_record_residue(*measured_roots: Path) -> list[Path]:
     to eliminate. `_write_record` now creates the temp in the destination's
     physical parent and unlinks it on failure, so this is the BACKSTOP for residue
     that cleanup could not remove (its `os.unlink` failed, or an earlier invocation
-    crashed). The sweep is non-recursive and name-prefixed (`mkstemp`'s `.rec-`),
-    which is where the lexical collapse placed the temp; it never touches anything
-    else the tree contains.
+    crashed). Every directory a temp can be created in is swept: the measured roots
+    themselves (a lexical collapse such as `tree/lnk/..` places the temp in the tree
+    ROOT) and the destination's physical parent (where the temp goes when `out`
+    resolves to a nested directory). The sweep is non-recursive and name-prefixed
+    (`mkstemp`'s `.rec-`), so it never touches anything else the tree contains.
     """
     removed: list[Path] = []
     for root in measured_roots:
@@ -1835,7 +1837,14 @@ def main(argv: list[str] | None = None) -> int:
         # do, and any `.rec-*` temp left inside a measured tree must be swept: the
         # temp holds a complete record, and leaving it would make the tool's own
         # bytes part of the dirt the pin measures.
-        swept = _sweep_record_residue(*measured_roots)
+        swept = _sweep_record_residue(
+            *measured_roots,
+            # The physical parent the temp is created in, so a temp that resolved
+            # to a NESTED in-tree directory (a symlink swapped after the pre-write
+            # refusal) is swept too — the measured roots alone only reach the
+            # top-level collapse.
+            Path(os.path.realpath(os.path.dirname(os.fspath(out)))),
+        )
         detail = (
             f"removed {len(swept)} temp file(s) from the measured tree"
             if swept else "no temp residue was found in the measured tree"

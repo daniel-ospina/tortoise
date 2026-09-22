@@ -1472,6 +1472,51 @@ def test_the_sweep_removes_rec_residue_an_earlier_write_left_behind(
     assert "could not write the record" in err, f"not the write refusal: {err!r}"
 
 
+def test_the_sweep_covers_the_destinations_physical_parent(tmp_path, monkeypatch, capsys):
+    """The sweep must also reach a NESTED in-tree parent, not only the tree root.
+
+    A symlink swapped for a real directory after the pre-write refusal can resolve
+    the destination INTO the tree, so the temp is created in a nested directory
+    rather than the tree root. `_write_record`'s own unlink covers that, but when
+    THAT fails the sweep is the backstop — and a sweep of the measured roots alone
+    would only see the top level. The destination's physical parent is therefore
+    swept too; without it this test's residue survives.
+    """
+    tree = tmp_path / "tree"
+    nested = tree / "sub"
+    nested.mkdir(parents=True)
+    residue = nested / ".rec-planted456.tmp"
+    fake_repo = tmp_path / "fake-repo"
+    fake_repo.mkdir()
+    monkeypatch.setattr(ee, "REPO_ROOT", fake_repo)
+    monkeypatch.setattr(ee, "_build_record", lambda args: {
+        "pin": {"measured_root": str(tree)},
+        "red": {"cause": None},
+        "load": {"red_band": None},
+        "verdict": {"status": "ALL-GREEN", "closes_issue": False, "violations": []},
+        "exit_code": 3,
+    })
+
+    def _plant_then_fail(rec, out):
+        residue.write_text("{}\n")
+        raise OSError(21, "Is a directory")
+
+    monkeypatch.setattr(ee, "_write_record", _plant_then_fail)
+
+    rc = ee.main([
+        "run", "--selection", "family", "--n", "2",
+        "--record-out", str(nested / "rec.json"),
+    ])
+    err = capsys.readouterr().err
+
+    assert rc == 2
+    assert not residue.exists(), (
+        "the sweep must reach the destination's physical parent, not only the "
+        "measured roots"
+    )
+    assert "removed 1 temp file(s)" in err, f"the sweep must report what it removed: {err!r}"
+
+
 def test_an_out_of_tree_record_is_written_and_the_run_succeeds(tmp_path, monkeypatch, capsys):
     """The ordinary path is unaffected: an out-of-tree record is written, exit is the record's.
 
