@@ -516,8 +516,13 @@ def test_liveness_coordinator_window_follows_a_raised_allowance(monkeypatch):
     frozen at the 30 s platform default discards the verdict of a REACHABLE
     cold start once ``TORTOISE_PROBE_SETUP_TIMEOUT`` pushes ``probe_duration``
     past 30 s — the #3243 false degrade, in steady state. Raise the allowance
-    (the resolver reads it at CALL time) and pin that the window moved with it:
-    a window taken from a fixed bound, or frozen at import time, fails here.
+    (the resolver reads it at CALL time) and pin that the window moved with it.
+
+    This pins the RESOLVER. That the coordinator is BUILT from it is pinned
+    structurally by
+    ``test_liveness_coordinator_is_built_from_the_dynamic_window_and_bound``
+    — the two are a pair, because a fixed ``stale_after=`` at the construction
+    site leaves this test green while re-opening #3243.
     """
     import tortoise.monitoring as mon
     from tortoise import selfhost as sh
@@ -537,6 +542,39 @@ def test_liveness_coordinator_window_follows_a_raised_allowance(monkeypatch):
         f"the window {raised}s no longer covers the coordinator's own bound "
         f"{sh._liveness_probe_hard_timeout()}s at that allowance (#3243)"
     )
+
+
+def test_liveness_coordinator_is_built_from_the_dynamic_window_and_bound():
+    """The resolvers' return values are not the contract — the COORDINATOR
+    must be built from them.
+
+    ``stale_after=_liveness_probe_stale_after()`` is what makes the freshness
+    window follow a raised cold-start allowance; a literal (or any fixed bound)
+    at the construction site re-opens the #3243 steady-state degrade while the
+    resolver test above stays green. The bound is pinned in the same call for
+    the same reason (``_liveness_probe_hard_timeout`` is what
+    ``_liveness_probe_stale_after`` is taken from, so a frozen bound would
+    silently freeze the window too).
+    """
+    call = _module_assign("_HEALTH_PROBE").value
+    assert isinstance(call, ast.Call), (
+        f"_HEALTH_PROBE is not a plain HealthProbe(...) call — the pins cannot "
+        f"read it: {ast.dump(call)[:120]}"
+    )
+    assert getattr(call.func, "id", None) == "HealthProbe", (
+        f"_HEALTH_PROBE is not a HealthProbe(...) call: "
+        f"{ast.dump(call.func)[:80]}"
+    )
+    kwargs = {kw.arg: kw.value for kw in call.keywords}
+    for kwarg, resolver in (("stale_after", "_liveness_probe_stale_after"),
+                            ("timeout", "_liveness_probe_hard_timeout")):
+        value = kwargs.get(kwarg)
+        assert (isinstance(value, ast.Call)
+                and getattr(value.func, "id", None) == resolver), (
+            f"HealthProbe({kwarg}=...) is not {resolver}() — a fixed bound "
+            "there re-opens the #3243 steady-state degrade while the resolver "
+            "test stays green"
+        )
 
 
 def test_health_probe_loop_does_not_compound_the_interval():
