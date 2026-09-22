@@ -24826,7 +24826,11 @@ async def backups_rebaseline(request: Request, body: dict):
     graph_id = body.get("graph_id", "default")
     if not org_id:
         raise HTTPException(status_code=400, detail="org_id required")
-    from tortoise.hosted_backup import _validate_graph_id, _validate_org_id
+    from tortoise.hosted_backup import (
+        _validate_graph_id,
+        _validate_org_id,
+        count_data_nodes,
+    )
     try:
         # #2377 (defense in depth): org_id/graph_id flow into R2 state keys
         # (_graph_state_key + the legacy org-file write below) — apply the
@@ -24860,8 +24864,13 @@ async def backups_rebaseline(request: Request, body: dict):
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=f"Re-baseline failed: {e}")  # noqa: B904
     try:
-        g = db.select_graph(row["graph_name"])
-        count = int(g.query("MATCH (n) RETURN count(n)").result_set[0][0])
+        # #4233: count the SAME node set every other DR surface counts —
+        # dump_graph's (the sweep manifest, the empty-backup guard, drill
+        # verification). A raw `MATCH (n)` included the projection's internal
+        # `Meta {key:'point_fts_v2'}` marker once a projection had been opened
+        # on the org graph, so a 3-point graph re-baselined to 4 and flaked the
+        # required check on unrelated PRs.
+        count = count_data_nodes(db, row["graph_name"])
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"graph unavailable: {e}")  # noqa: B904
     state = {
@@ -25017,11 +25026,15 @@ def _drill_execute(
         pass
     within_rto = duration_s <= _DRILL_RTO_S
     # #3845: surface a wedge distinctly — "fork slot wedged" must never be
-    # readable as a plain "copy failed". Absent on the clean path, so a healthy
-    # drill record is unchanged.
+    # readable as a plain "copy failed". #4233: surface a copy (either the
+    # pre-restore safety copy or the swap) that outlived the restore's read
+    # bound the same way, so an RTO breach caused by it is attributable from
+    # the PERSISTED record/incident, not only the immediate response. Both
+    # absent on the clean path, so a healthy drill record is unchanged.
     detail = {k: v for k, v in (
         ("restored", result.get("restored")),
         ("fork_slot", result.get("fork_slot")),
+        ("copy_read_bound_overrun", result.get("copy_read_bound_overrun")),
     ) if v is not None}
     record = _drill_record(
         run=run, status="ok" if within_rto else "rto_breach",
@@ -25184,6 +25197,11 @@ async def backups_drill_scheduled(request: Request):
                     "rto_s": result.get("rto_s"),
                     "org_id": (result.get("record") or {}).get("org_id"),
                     "backup_key": (result.get("record") or {}).get("backup_key"),
+                    # #4233: if either GRAPH.COPY (pre-restore safety copy or
+                    # swap) outlived the restore's read bound, name it — that
+                    # is the attributable cause.
+                    "copy_read_bound_overrun": result.get(
+                        "copy_read_bound_overrun"),
                 },
             )
         except Exception:

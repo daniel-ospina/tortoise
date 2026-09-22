@@ -183,7 +183,7 @@ ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
         # #2823 Supabase-lane sweep seed — the DATA plane stays FalkorDB in
         # both lanes; the endpoint resolves graph_name from organizations.graph_name
         'f"org_{tid}"': "endpoint-constrained",  # Supabase-lane sweep seed write
-        '"org_team_x"': "read-only",                  # post-drill count assert
+        '"org_team_x"': "endpoint-constrained",  # post-drill count assert + #4233 marker write (drill/backup resolve org_{id})
         # #2313 custom-graph drill seeds (per-graph sweep/restore E2E); the
         # server-lane _clean_team_graphs fixture drops team_* graphs per test
         '"team_team_x_g_c1"': "endpoint-constrained",  # custom drill seed write
@@ -201,6 +201,13 @@ ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
         '"org_swap_target"': "test-constructed",   # live target + read-back
         '"org_bound_source"': "test-constructed",  # seeded source (ordinary-bound guard)
         '"org_bound_target"': "test-constructed",  # live target (ordinary-bound guard)
+        # #4233 outcome-settle guards — same direct-helper shape as the #3813
+        # block above: a raw source and a raw destination whose names are
+        # handed straight to `_restore_into_temp_verify_swap` /
+        # `_graph_copy_with_restore_bound` / `_restore_copy_settled` and read
+        # back. Test-constructed, not production-shape.
+        '"org_settle_source"': "test-constructed",  # seeded source
+        '"org_settle_target"': "test-constructed",  # destination + read-back
     },
     "test_eval_ingest_cache.py": {
         'f"org_{namespace}"': "endpoint-constrained",  # #2626 regression — own-graph cleanup delete (namespace=icache-<tag>-<uuid>, docker lane)
