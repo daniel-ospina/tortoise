@@ -114,6 +114,74 @@ def _no_path_registry_missing_data_dir(d: Path, gone: Path) -> None:
         f"dbfilename 'redis.db'\ndir '{gone}'\npidfile '{d}/redis.pid'\n")
 
 
+# ── #4496: the probes must not raise when `subprocess.run` is mocked ─────────
+
+def test_probless_ps_stdout_is_undeterminable_not_raising(monkeypatch, tmp_path):
+    """#4496: a non-text `ps` stdout reads as "undeterminable", never raises.
+
+    Every probe in `embedded_reaper` is documented fail-CLOSED — `None` (or
+    an empty result) means "cannot tell" — yet each parses captured
+    `ps`/`lsof`/`pgrep` stdout with `.strip()` / `.splitlines()` /
+    `re.match`. Dozens of tests fake git detection with
+    `mock.patch("subprocess.run")`, whose `stdout` is a MagicMock; the read
+    then raised `TypeError` out of a helper whose contract is "or None".
+
+    That was a LEAK, not a crash. The exception propagated through
+    `_owner_records` into `cotenant_holds_server`, whose deliberate
+    fail-closed `except Exception: return True` then reported a PHANTOM
+    co-tenant — so the LAST of two clients on one embedded daemon declined
+    the shutdown and the daemon survived uninstrumented with its directory
+    present. That is exactly the
+    `candidate / path_based=False / unattributed=True / dir_missing=False`
+    survivor `test-slow (b)` reports (threshold 0) and #3767 deliberately
+    refuses to fast-kill.
+
+    `_owner_records` must also stay total: it is the discriminator the whole
+    ownership claim reads, and a raise there is what flipped the close.
+    """
+    from unittest import mock
+
+    d = tmp_path / "mock-ps"
+    owners = d / R.OWNERS_DIRNAME
+    owners.mkdir(parents=True)
+    # start=1 is a REAL float, which is what makes `_owner_records` consult
+    # `ps` at all (an 'unknown' stamp short-circuits to the pid-liveness
+    # arm and never reaches the parser — hence the ordering-dependent leak).
+    (owners / f"{os.getpid()}-1").write_text("")
+    sp = str(d / R.SOCKET_MARKER)
+
+    # Force the single-`ps` fallback: the per-sweep cache would otherwise
+    # answer for our own pid. (`delitem`, not an empty record — the cache is
+    # fully populated by `_batch_process_info`, so a partial entry is not a
+    # shape the probes promise to read.)
+    monkeypatch.delitem(R._PROC_INFO_CACHE, os.getpid(), raising=False)
+
+    with mock.patch("subprocess.run") as fake:
+        fake.return_value.returncode = 0  # a fake git probe that "succeeds"
+        assert R._process_start_time(os.getpid()) is None
+        # The owner is still OURS and alive — the undeterminable start must
+        # not be read as "no live owner" (that would licence a kill).
+        assert R._owner_records(sp) == (1, 1)
+
+
+def test_uptime_and_cmdline_also_tolerate_a_mock(monkeypatch):
+    """The same guard covers the sibling `ps` readers.
+
+    `_process_start_time` was the one on the close path, but `_uptime_seconds`
+    and `_cmdline` parse the identical captured stdout and are reached from
+    `discover()`/`_classify()`. One unguarded reader is enough to turn a
+    mocked subprocess into a raise, so all of them are pinned here rather
+    than only the one that happened to leak first.
+    """
+    from unittest import mock
+
+    monkeypatch.delitem(R._PROC_INFO_CACHE, os.getpid(), raising=False)
+    with mock.patch("subprocess.run") as fake:
+        fake.return_value.returncode = 0
+        assert R._uptime_seconds(os.getpid()) is None
+        assert R._cmdline(os.getpid()) == ""
+
+
 # ── NEGATIVE CONTROL — an unowned dir is NOT ours ────────────────────────────
 
 def test_registryless_unowned_dir_is_not_a_candidate():

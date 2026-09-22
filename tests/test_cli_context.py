@@ -66,6 +66,41 @@ def _delenv_falkordb(monkeypatch):
         monkeypatch.delenv(k, raising=False)
 
 
+def _embedded_daemon_alive(db_path: str) -> bool:
+    """True while a LIVE redis-server still serves the embedded store.
+
+    Pins the DAEMON, not the registry: redislite's ``<db>.settings`` registry
+    is removed only by the client that STARTED the daemon, so registry-
+    absence is order-dependent (an attaching client shuts the daemon down but
+    leaves the registry behind). A surviving registry whose pidfile names a
+    live pid IS the leak; a vanished pidfile is itself proof the daemon
+    exited (Redis removes its own pidfile on graceful shutdown), so its
+    absence must not read as failure.
+    """
+    import json
+
+    settings = db_path + ".settings"
+    if not os.path.exists(settings):
+        return False
+    try:
+        with open(settings) as fh:
+            reg = json.load(fh)
+        pidfile = reg.get("pidfile")
+        if not pidfile or not os.path.exists(pidfile):
+            return False
+        with open(pidfile) as fh:
+            pid = int(fh.read().strip())
+    except Exception:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, other uid — fail closed
+    return True
+
+
 class TestCliContext:
     def test_empty_graph_prints_empty_notice(self, db_env, capsys):
         """Empty graph → digest says memory is empty, exits 0."""
@@ -456,6 +491,79 @@ class TestCliOnboardDbTarget:
         finally:
             if _gc_was_enabled:
                 gc.enable()
+
+    def test_init_daemon_is_closed_when_subprocess_run_is_mocked(
+            self, monkeypatch, tmp_path):
+        """#4496: an embedded init inside a mocked `subprocess.run` still closes.
+
+        Dozens of tests fake git detection with `mock.patch("subprocess.run")`
+        — this file alone does it in ten places — and `_cmd_init`'s close asks
+        the reaper whether a co-tenant still holds the daemon. That probe reads
+        `ps`; under the mock its stdout is a MagicMock, and the unguarded parse
+        raised `TypeError` out of `_process_start_time`, a helper whose
+        contract is "epoch seconds, or None when undeterminable". The raise
+        propagated through `_owner_records` into `cotenant_holds_server`,
+        whose deliberate fail-closed `except Exception: return True` then
+        reported a PHANTOM co-tenant: the last of init's two clients took the
+        shared branch (pool disconnect only, no shutdown) and the daemon
+        survived UNINSTRUMENTED with its data dir present — the exact
+        `candidate / path_based=False / unattributed=True / dir_missing=False`
+        shape `test-slow (b)` reports at threshold 0, and the class #3767
+        deliberately refuses to fast-kill.
+
+        The leak is ORDER-DEPENDENT, which is why the LEG was the
+        reproduction and a single file was not: `record_owner` resolves our
+        own pid's start time at most ONCE per process (`_own_start_cache`),
+        so only a re-run with that cache already warm stamps a REAL start —
+        and only a real stamp makes `_owner_records` consult `ps` at close
+        time. An "unknown" stamp short-circuits to the pid-liveness arm and
+        never reaches the parser. Warm the cache explicitly so the pin does
+        not depend on which tests ran first.
+
+        `subprocess.run` stays mocked across the whole call, because the close
+        runs inside `_cmd_init` — before the caller's `with` block exits. That
+        is the real sequence the leg exercises.
+        """
+        import gc
+        import time
+
+        from tortoise import __main__ as m
+        from tortoise import embedded_lifecycle as el
+        from tortoise import embedded_reaper as R
+
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        _delenv_falkordb(monkeypatch)
+        db_path = str(tmp_path / "init-under-mock.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        # The full-run condition: a prior test already resolved our start.
+        monkeypatch.setitem(el._own_start_cache, os.getpid(), time.time())
+        # …and the per-sweep ps cache must not answer for our pid either, or
+        # `_process_start_time` would return the cached float and never parse.
+        monkeypatch.delitem(R._PROC_INFO_CACHE, os.getpid(), raising=False)
+
+        # Same GC-independence as the sibling pin: the wrappers are cyclic, so
+        # a collection landing in this window could SAVE-close the daemon and
+        # let an unfixed build pass. The explicit close must be the only seam.
+        gc_was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            with mock.patch("subprocess.run") as fake_run:
+                fake_run.return_value.returncode = 1  # not a git repo
+                rc = m._cmd_init(mock.Mock(
+                    path=None, cmd="init", yes=True, api_key=None,
+                    no_index=True))
+            assert rc == 0
+        finally:
+            if gc_was_enabled:
+                gc.enable()
+
+        assert not _embedded_daemon_alive(db_path), (
+            "init leaked its embedded redis-server under a mocked "
+            "subprocess.run (#4496): the reaper's ps probe raised, "
+            "cotenant_holds_server read that as a co-tenant, and the last "
+            "client declined the shutdown — leaving an uninstrumented, "
+            "dir-present orphan the #3767 reaper refuses to fast-kill")
 
     @pytest.mark.parametrize("exc", [ImportError, RuntimeError])
     def test_init_releases_the_probe_when_a_later_step_raises(
