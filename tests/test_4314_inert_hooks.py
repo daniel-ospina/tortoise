@@ -801,3 +801,49 @@ def test_no_interpreter_breadcrumb_is_written_without_python3(tmp_path):
     body = _breadcrumb(home, "codex")
     assert body["kind"] == "install-inert", body
     assert "no python3 interpreter" in body["detail"], body
+
+
+@pytest.mark.parametrize("suffix", ["", "/", "///"])
+def test_breadcrumb_dir_agrees_with_verify_for_a_trailing_slash(
+        tmp_path, suffix):
+    """The hook writes the install-inert breadcrumb with SHELL string surgery
+    (``${receipt_dir%/*}``) while ``session verify`` reads it with pathlib's
+    ``.parent``. Those two disagree on a TRAILING SLASH — ``Path('…/r/').parent``
+    is ``…``, but ``${'…/r/'%/*}`` is ``…/r`` — so an inert install whose
+    ``TORTOISE_IMPORT_RECEIPT_DIR`` ends in ``/`` writes a breadcrumb verify
+    never looks at and reads **PROVEN**. That is the exact false-PROVEN this
+    seam exists to remove (#4314), so the two derivations are pinned EQUAL here
+    rather than merely both-existing.
+
+    Mutation: drop the trailing-slash normalization from the hook's
+    ``_record_breadcrumb`` — the shell writes ``…/receipts/capture-errors/``
+    while ``_local_capture_error_file`` resolves ``…/capture-errors/``, and
+    this REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    hooks = home / ".claude" / "hooks"
+    hooks.mkdir(parents=True)
+    hook = hooks / "session-end.sh"
+    shutil.copy(CLAUDE_HOOK, hook)
+    hook.chmod(0o755)
+
+    receipt_dir = str(tmp_path / "receipts") + suffix
+    transcript = _write_claude_transcript(tmp_path / "transcript.jsonl")
+    proc = _run_claude_hook(hook, home, transcript=transcript,
+                            path=f"{tmp_path / 'bin'}:/usr/bin:/bin",
+                            extra_env={"TORTOISE_IMPORT_RECEIPT_DIR":
+                                       receipt_dir})
+    assert proc.returncode == 0, proc.stderr
+
+    # What `session verify` will actually look for, under the hook's env.
+    from tortoise import session_verify
+    looked_for = session_verify._local_capture_error_file(
+        "claude", {"HOME": str(home),
+                   "TORTOISE_IMPORT_RECEIPT_DIR": receipt_dir})
+    assert _wait_for(lambda: looked_for.is_file()), (
+        f"the hook's breadcrumb is invisible to verify for "
+        f"TORTOISE_IMPORT_RECEIPT_DIR={receipt_dir!r}: verify reads "
+        f"{looked_for} but the hook wrote "
+        f"{sorted(str(p) for p in tmp_path.rglob('*.json'))}")
+    body = json.loads(looked_for.read_text(encoding="utf-8"))
+    assert body["kind"] == "install-inert", body

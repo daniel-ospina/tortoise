@@ -85,6 +85,15 @@ _record_breadcrumb() {
   local harness="$1" detail="$2"
   local receipt_dir crumb_dir stamp
   receipt_dir="${TORTOISE_IMPORT_RECEIPT_DIR:-${HOME:-/nonexistent}/.tortoise/import-receipts}"
+  # Normalize to pathlib's `.parent` semantics (#4373 review). Python's
+  # `Path(x).parent` DROPS trailing slashes before taking the parent; `${x%/*}`
+  # does not — so `…/import-receipts/` made the shell write
+  # `…/import-receipts/capture-errors/` while `session verify` read
+  # `…/capture-errors/`, leaving the breadcrumb invisible and an INERT install
+  # reading PROVEN. That is the exact false-PROVEN this seam exists to remove.
+  while [ "${receipt_dir%/}" != "$receipt_dir" ] && [ "$receipt_dir" != "/" ]; do
+    receipt_dir="${receipt_dir%/}"
+  done
   case "$receipt_dir" in
     */*) crumb_dir="${receipt_dir%/*}/capture-errors" ;;
     *) crumb_dir="capture-errors" ;;
@@ -123,7 +132,13 @@ if [ "${1:-}" = "--worker" ]; then
   [ -n "$PAYLOAD" ] && [ -f "$PAYLOAD" ] || exit 0
 
   META="$(python3 -c '
-import json, sys
+import sys
+# CWE-427: drop the process cwd before importing `json` — `python -c` puts cwd
+# at sys.path[0], so a planted ./json.py in the session workspace would execute
+# at every SessionEnd. `sys` is builtin and cannot be shadowed.
+sys.path[:] = [p for p in sys.path if p not in ("", ".")]
+import json
+
 try:
     d = json.load(sys.stdin)
 except Exception:
@@ -149,6 +164,10 @@ print(root0)
     STORE_TRANSCRIPT_PATH="$(TORTOISE_CURSOR_SID="$SESSION_ID" \
       TORTOISE_CURSOR_PROJECT="${CURSOR_PROJECT_DIR:-$WORKSPACE_ROOT}" \
       python3 -c '
+import sys
+# CWE-427: drop the process cwd before importing the stdlib — see the META
+# parser above; a planted ./glob.py or ./re.py would execute here too.
+sys.path[:] = [p for p in sys.path if p not in ("", ".")]
 import glob, os, re, urllib.parse
 sid = os.environ.get("TORTOISE_CURSOR_SID") or ""
 cwd = os.environ.get("TORTOISE_CURSOR_PROJECT") or ""

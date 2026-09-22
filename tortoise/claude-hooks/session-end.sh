@@ -51,6 +51,15 @@ _record_breadcrumb() {
   local harness="$1" detail="$2"
   local receipt_dir crumb_dir stamp
   receipt_dir="${TORTOISE_IMPORT_RECEIPT_DIR:-${HOME:-/nonexistent}/.tortoise/import-receipts}"
+  # Normalize to pathlib's `.parent` semantics (#4373 review). Python's
+  # `Path(x).parent` DROPS trailing slashes before taking the parent; `${x%/*}`
+  # does not — so `…/import-receipts/` made the shell write
+  # `…/import-receipts/capture-errors/` while `session verify` read
+  # `…/capture-errors/`, leaving the breadcrumb invisible and an INERT install
+  # reading PROVEN. That is the exact false-PROVEN this seam exists to remove.
+  while [ "${receipt_dir%/}" != "$receipt_dir" ] && [ "$receipt_dir" != "/" ]; do
+    receipt_dir="${receipt_dir%/}"
+  done
   case "$receipt_dir" in
     */*) crumb_dir="${receipt_dir%/*}/capture-errors" ;;
     *) crumb_dir="capture-errors" ;;
@@ -67,7 +76,13 @@ _record_breadcrumb() {
 # #1727 (Task 14, T1-P11): the REAL session_id is forwarded as the capture
 # idempotency key (re-POSTs of the same session_id converge to one Session);
 # harness='claude' is passed for per-harness receipts.
-META="$(python3 -c 'import json,sys
+META="$(python3 -c 'import sys
+# CWE-427: drop the process cwd from sys.path BEFORE importing anything
+# non-builtin. ``python -c`` puts cwd at sys.path[0], so a planted ./json.py
+# in the session workspace would otherwise execute at every SessionEnd. `sys`
+# is a builtin module and cannot be shadowed, so importing it first is safe.
+sys.path[:] = [p for p in sys.path if p not in ("", ".")]
+import json
 try:
     d = json.load(sys.stdin)
     print(d.get("transcript_path") or "")
@@ -214,6 +229,11 @@ else
   # configured TORTOISE_SESSION_CORPUS — the corpus-dir divergence class
   # the plan condemns, review-gate P1).
   SWEEP_CORPUS="$(python3 -c "
+import sys
+# CWE-427: the corpus resolver imports `tortoise` by NAME, so the cwd must be
+# off sys.path first — a planted ./tortoise/ in the session workspace would
+# otherwise be imported and executed here.
+sys.path[:] = [p for p in sys.path if p not in ("", ".")]
 from tortoise.session_indexer import session_corpus_dir
 print(session_corpus_dir())" 2>/dev/null || true)"
   [ -z "$SWEEP_CORPUS" ] && SWEEP_CORPUS="$HOME/.tortoise/docs/conversations"

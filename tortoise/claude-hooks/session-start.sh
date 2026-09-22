@@ -41,6 +41,15 @@ _record_breadcrumb() {
   local harness="$1" detail="$2"
   local receipt_dir crumb_dir stamp
   receipt_dir="${TORTOISE_IMPORT_RECEIPT_DIR:-${HOME:-/nonexistent}/.tortoise/import-receipts}"
+  # Normalize to pathlib's `.parent` semantics (#4373 review). Python's
+  # `Path(x).parent` DROPS trailing slashes before taking the parent; `${x%/*}`
+  # does not — so `…/import-receipts/` made the shell write
+  # `…/import-receipts/capture-errors/` while `session verify` read
+  # `…/capture-errors/`, leaving the breadcrumb invisible and an INERT install
+  # reading PROVEN. That is the exact false-PROVEN this seam exists to remove.
+  while [ "${receipt_dir%/}" != "$receipt_dir" ] && [ "$receipt_dir" != "/" ]; do
+    receipt_dir="${receipt_dir%/}"
+  done
   case "$receipt_dir" in
     */*) crumb_dir="${receipt_dir%/*}/capture-errors" ;;
     *) crumb_dir="capture-errors" ;;
