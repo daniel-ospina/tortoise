@@ -36,11 +36,24 @@ surfaces:
   # the same reason: the file it guards is tortoise/hosted_api.py, which
   # selects the `api` surface.
   - test_graph_write_loop_responsiveness.py
+  # #3718 (read half): the REST graph-READ handlers must not run synchronous
+  # FalkorDB I/O on the event loop. Same dual registration as the three guards
+  # above and for the same reason: the file it guards is tortoise/hosted_api.py,
+  # which selects the `api` surface — a PR that re-inlined a read in that file
+  # alone would otherwise never run this guard.
+  - test_read_routes_loop_responsiveness.py
   # #3498: the control-plane auth/session HTTP must not run on the event loop.
   # Same dual registration as the three loop-responsiveness guards above, for
   # the same reason: the file it guards is tortoise/hosted_api.py (and
   # tortoise/monitoring.py), which selects the `api` surface.
   - test_control_plane_offload_3498.py
+  # #4015: the analytics emit's off-loop + fail-soft contract (the Stripe
+  # webhook's failure path included). Same dual registration as the loop-
+  # responsiveness guards above: the file it guards is tortoise/hosted_api.py
+  # (which selects `api`), and the `core` half is load-bearing for the seams it
+  # monkeypatches — tortoise/monitoring.py (the offload pool), plus the
+  # billing/notify paths the Stripe tests drive — which fall through to `core`.
+  - test_analytics_offloop_4015.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_metering_period_window.py
   - test_metering_window_admission.py  # #3981: the six swallow sites report the dropped increment (caller-level; the coverage is the proof)
@@ -457,6 +470,7 @@ surfaces:
   - test_backup_watcher_health.py
   - test_graph_write_loop_responsiveness.py  # #3718: REST graph-write off-loop (dual: api)
   - test_control_plane_offload_3498.py  # #3498: control-plane auth/session off-loop (dual: api)
+  - test_analytics_offloop_4015.py  # #4015: analytics emit off-loop + Stripe fail-soft (dual: api)
   - test_build_window_transcript.py
   - test_canary_classify.py
   - test_canonical.py
@@ -469,6 +483,7 @@ surfaces:
   # REPLACES the `core` fallback: a core-only entry would never run this guard
   # on a hosted_api.py-only (api) or onboarding/state.py-only change.
   - test_onboarding_telemetry_w11.py
+  - test_read_routes_loop_responsiveness.py  # #3718: REST graph-read off-loop (dual: api)
   # #4194: captured turn Points must carry the embedding the dense leg
   # searches. Registered here because this file pins the unpatterned engine
   # module `tortoise/search_engine.py` (run_vector_query /
@@ -1385,6 +1400,15 @@ durations:
   # machine (see #3653/#3685 for the embedded-redislite flake that inflates the
   # tail). A loose middle; re-measure rather than trusting it.
   test_graph_write_loop_responsiveness.py: 30.0
+  # #3718 (read half): 13 cases (9 parametrized read endpoints + the
+  # /v1/points freeze case + 3 AST-inventory cases); 10 of them block a graph
+  # call for ~2s while a 20ms ticker and a concurrent /health probe run, so it
+  # is dominated by wall-clock stalls, like its write-half sibling above.
+  # FIRST ESTIMATE (same class as the sibling, which measured 25-84s on this
+  # host); re-measure from the first post-merge junit artifact rather than
+  # trusting it (see #3653/#3685 for the embedded-redislite flake that inflates
+  # the tail).
+  test_read_routes_loop_responsiveness.py: 30.0
   test_cli_serve.py: 28.1
   test_redirect_seam.py: 27.3
   eval/retrieval/test_gate_1349.py: 26.0
@@ -1502,6 +1526,10 @@ durations:
   test_transport_wait_bound.py: 2.0
   test_collision_preflight.py: 3.0
   test_control_plane_offload_3498.py: 2.7  # #3498: control-plane offload seam
+  # #4015: new file in this pool with no CI junit measurement yet — entered at
+  # the flat 2.0s default under the #3400/#4221 policy above (no DB, no network:
+  # the emit's HTTP client is stubbed and the webhook's seams are monkeypatched).
+  test_analytics_offloop_4015.py: 2.0
   test_free_team_entitlement.py: 3.0
   test_integration_search.py: 3.0
   test_kind_classifier.py: 3.0
@@ -1561,7 +1589,7 @@ durations:
   test_attribution_actor.py: 1.6
   test_battery_cli.py: 1.5
   test_bridge_mcp.py: 1.5
-  test_bridge_table.py: 240.0  # 9 tests, each paying the ~16s generator/tortoise.sdk import; measured 34s-537s wall depending on box load
+  test_bridge_table.py: 240.0  # 18 tests; the generator/tortoise.sdk import dominates (paid by the in-process import and the two subprocess --check tests). Re-measured locally 25-30s; CI-observed range 34s-537s depending on box load, so the #3400 reserve is retained deliberately (#4282).
   test_connector_sources.py: 1.5
   test_e2e9_point_in_time.py: 1.5
   test_file_human_approval.py: 1.5

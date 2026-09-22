@@ -1607,6 +1607,47 @@ _SCORECARD_EXECUTOR = ThreadPoolExecutor(
     thread_name_prefix="activation-scorecard")
 
 
+async def _run_with_close(executor: ThreadPoolExecutor, fn, sdk, /, *args, **kwargs):
+    """Run one blocking graph call on a DEDICATED executor; the item owns ``sdk.close()``.
+
+    #3718 (code review): the call AND ``sdk.close()`` are ONE worker hand-off.
+    Letting the coroutine's ``finally`` close instead runs the close on the
+    LOOP while the worker is still inside the call whenever the request is
+    cancelled — cancelling the await stops the AWAITABLE, not the thread
+    (CPython #87185, quoted at length in this file's #2988 timeout note: the
+    worker "is never cancelled and continues running forever despite the
+    timeout error") — and the SDK owns the projection/connection that call is
+    reading.
+
+    The close therefore travels WITH THE WORK ITEM rather than with the
+    future: the submitted closure closes ``sdk`` in its own ``finally``, so
+    whoever ends up running the call closes the SDK exactly once — on the
+    worker thread, so a cancellation can no longer tear the SDK down mid-call,
+    and no caller can forget it (``TortoiseSDK.close()`` is idempotent —
+    ``_t_closed``).
+
+    Not the ``add_done_callback`` shape: ``ThreadPoolExecutor.submit`` puts the
+    work item on the queue BEFORE ``_adjust_thread_count()`` can raise "can't
+    start new thread", so a submit ``RuntimeError`` does NOT prove the call
+    never ran. Attaching the close to the ITEM makes the submit outcome
+    irrelevant, and — as ``_run_dream_on_pool`` records in full below (#3773
+    round 3) — there is deliberately NO loop-side close on a submit failure:
+    closing a caller-supplied SDK there could tear it down under a call an
+    existing worker had already picked up (the CPython #87185 class this design
+    removes). A pre-enqueue failure instead strands the caller's SDK to GC —
+    bounded and transient, and the same lifecycle the sibling write handlers'
+    SDKs already have (they never close explicitly).
+    """
+    def _call_and_close():
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            sdk.close()
+
+    cfut = _submit_off_loop(executor, _call_and_close)
+    return await asyncio.wrap_future(cfut)
+
+
 async def _run_dream_on_pool(fn, sdk_factory, /, *args, **kwargs):
     """Run one long dream pass on the dream pool; the WORK ITEM owns the close.
 
@@ -4365,6 +4406,16 @@ async def get_current_org_gated(request: Request) -> dict:
 # _require_owner_admin_if_session helper reads it once).
 _SESSION_USER_ID_KEY = "session_user_id"
 
+# #4504: the VERIFIED session email rides the same JWT branch, under its own
+# named key, so surfaces that need the signed-in human's contact identity
+# (billing checkout) can read it without a second token decode. It is sourced
+# ONLY from ``get_current_user`` (the signature-verified Supabase JWT's
+# ``email`` claim, shape-checked in session_auth.verify_session_jwt) — NEVER
+# from a request body/header/query value a caller could forge. Key-auth org
+# dicts carry none; dependency-override dicts are returned UNCHANGED (a test
+# seam may inject one) — exactly like session_user_id.
+_SESSION_USER_EMAIL_KEY = "session_user_email"
+
 
 async def get_current_org_session(request: Request, gate_key_login: bool = True) -> dict:
     """Management-endpoint dependency: accept a session JWT (verified
@@ -4427,6 +4478,14 @@ async def get_current_org_session(request: Request, gate_key_login: bool = True)
     # their org dicts carry no session_user_id (create_api_key falls back
     # to "api").
     org[_SESSION_USER_ID_KEY] = user["user_id"]
+    # #4504: attach the VERIFIED session email (the signed JWT's ``email``
+    # claim, already shape-checked string|None by verify_session_jwt). This is
+    # the signed-in human's own identity — not a client-supplied value — and
+    # is the fallback the billing email chain reads before its 400. Absent /
+    # blank (e.g. a phone-only identity) → key omitted, chain falls through.
+    _session_email = user.get("email")
+    if isinstance(_session_email, str) and _session_email.strip():
+        org[_SESSION_USER_EMAIL_KEY] = _session_email.strip()
     # #2380 (Task 4): explicit auth_lane marker — documentation-in-code for
     # the session-vs-key distinction the #2297/#2380 role gates predicate
     # on. THE GATE PREDICATE STAYS ON session_user_id PRESENCE, NOT this
@@ -5841,7 +5900,6 @@ async def list_points(
             raise HTTPException(status_code=400, detail=f"kind must be one of {sorted(allowed)}")
     _require_scope(org, "graphs:read", "list_points")
     sdk = _data_sdk(org)
-    proj = sdk._get_proj()
     conditions = ["n.is_operator = false"]
     # #432 Task 2: retracted points (status='retracted') are EXCLUDED from the
     # default listing surface — tombstone contract: retrievable by id via
@@ -5865,7 +5923,14 @@ async def list_points(
         + " AND ".join(conditions)
         + " RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit"
     )
-    rows = proj.g.query(query, params=params).result_set
+    # #3718 residual 2: the projection is SYNCHRONOUS FalkorDB (a blocking
+    # socket client) — `_get_proj()` opens/attaches it and `g.query` is the
+    # round trip — so BOTH ride one worker hand-off. Nothing between the two
+    # touches thread-unsafe state, and the query string/params were already
+    # built on the loop. Same `asyncio.to_thread` pattern the write handlers
+    # and /v1/search use.
+    rows = await asyncio.to_thread(
+        lambda: sdk._get_proj().g.query(query, params=params).result_set)
     results = []
     for r in rows:
         d = r[0]
@@ -5880,13 +5945,14 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
     """Get a single Point by ID."""
     _require_scope(org, "graphs:read", "get_point")
     sdk = _data_sdk(org)
-    proj = sdk._get_proj()
-    rows = proj.g.query(
-        "MATCH (p:Point {id: $id}) "
-        "WHERE p.status IS NULL OR p.status <> 'retracted' "
-        "RETURN properties(p)",
-        params={"id": point_id},
-    ).result_set
+    # #3718 residual 2: sync FalkorDB read off the loop (see list_points).
+    rows = await asyncio.to_thread(
+        lambda: sdk._get_proj().g.query(
+            "MATCH (p:Point {id: $id}) "
+            "WHERE p.status IS NULL OR p.status <> 'retracted' "
+            "RETURN properties(p)",
+            params={"id": point_id},
+        ).result_set)
     if not rows:
         raise HTTPException(status_code=404, detail="Point not found")
     props = dict(rows[0][0])
@@ -6017,10 +6083,17 @@ async def dream_health(
     region_attempts (C5) and warm-start savings (C4)."""
     _require_scope(org, "graphs:read", "dream_health")
     sdk = _data_sdk(org)
-    try:
-        return sdk.dream_health_check()
-    finally:
-        sdk.close()
+    # #3718 residual 2 (code review): `dream_health_check` first runs
+    # `_hydrate_dirty_roots()` — an UNBOUNDED all-`Point` `ep_dirty` scan with
+    # no index — so it is the "long/stallable" class the module's #3060
+    # criterion keeps OFF the shared default executor (the same scan, reached
+    # through `sdk.dream`, already runs on `_DREAM_EXECUTOR`). It therefore
+    # runs on that pool via `_run_with_close`, which also makes the close travel
+    # with the work item: with a plain `asyncio.to_thread(...)` + a loop-side
+    # `finally: sdk.close()`, cancelling the request would close the projection
+    # on the LOOP while the worker was still inside the scan (CPython #87185 —
+    # the same race `_run_dream_on_pool` was built to remove).
+    return await _run_with_close(_DREAM_EXECUTOR, sdk.dream_health_check, sdk)
 
 
 @app.get("/v1/search")
@@ -6125,10 +6198,12 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
     point_count = 0
     graph_ready = True
     try:
-        point_count = sdk._get_proj().g.query(
-            "MATCH (n:Point) WHERE NOT n.id IN $demo_ids RETURN count(n)",
-            params={"demo_ids": list(_DEMO_POINT_IDS)},
-        ).result_set[0][0]
+        # #3718 residual 2: sync FalkorDB read off the loop (see list_points).
+        point_count = await asyncio.to_thread(
+            lambda: sdk._get_proj().g.query(
+                "MATCH (n:Point) WHERE NOT n.id IN $demo_ids RETURN count(n)",
+                params={"demo_ids": list(_DEMO_POINT_IDS)},
+            ).result_set[0][0])
     except Exception:
         import logging
         logging.getLogger("tortoise.api").warning(
@@ -8238,25 +8313,30 @@ async def list_api_keys(graph_id: str | None = None,
     sdk = _make_sdk(namespace="registry")
     try:
         if graph_id is not None:
-            keys = sdk._get_registry().query(
-                "MATCH (k:APIKey {org_id: $tid, graph_id: $gid}) "
-                "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, "
-                "k.revoked_at, k.name, k.created_via, k.expires_at, "
-                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id, "
-                "k.created_by "
-                "ORDER BY k.created_at DESC",
-                params={"tid": org["org_id"], "gid": graph_id},
-            )
+            # #3718 residual 2: `_get_registry()` attaches the SYNC FalkorDB
+            # client (`_get_proj`) and `.query` is a blocking round trip — both
+            # ride one worker hand-off.
+            keys = await asyncio.to_thread(
+                lambda: sdk._get_registry().query(
+                    "MATCH (k:APIKey {org_id: $tid, graph_id: $gid}) "
+                    "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, "
+                    "k.revoked_at, k.name, k.created_via, k.expires_at, "
+                    "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id, "
+                    "k.created_by "
+                    "ORDER BY k.created_at DESC",
+                    params={"tid": org["org_id"], "gid": graph_id},
+                ))
         else:
-            keys = sdk._get_registry().query(
-                "MATCH (k:APIKey {org_id: $tid}) "
-                "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, k.revoked_at, "
-                "k.name, k.created_via, k.expires_at, "
-                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id, "
-                "k.created_by "
-                "ORDER BY k.created_at DESC",
-                params={"tid": org["org_id"]},
-            )
+            keys = await asyncio.to_thread(
+                lambda: sdk._get_registry().query(
+                    "MATCH (k:APIKey {org_id: $tid}) "
+                    "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, k.revoked_at, "
+                    "k.name, k.created_via, k.expires_at, "
+                    "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id, "
+                    "k.created_by "
+                    "ORDER BY k.created_at DESC",
+                    params={"tid": org["org_id"]},
+                ))
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("list_api_keys failed")
@@ -11199,9 +11279,12 @@ async def list_sessions(request: Request, org: dict = Depends(get_current_org_se
             "s.machine_id, s.model "
             "ORDER BY s.created_at DESC LIMIT 50"
         )
-        rows = sdk._get_proj().g.query(
-            query, params={"uid": actor_filter} if actor_filter else None
-        ).result_set
+        # #3718 residual 2: sync FalkorDB read off the loop (see list_points).
+        rows = await asyncio.to_thread(
+            lambda: sdk._get_proj().g.query(
+                query,
+                params={"uid": actor_filter} if actor_filter else None,
+            ).result_set)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").warning(
@@ -11291,7 +11374,10 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     _require_scope(org, "graphs:read", "get_session_detail")
     sdk = _data_sdk(org)
     try:
-        proj = sdk._get_proj()
+        # #3718 residual 2: `_get_proj()` opens/attaches the SYNC FalkorDB
+        # client — off-load the attach as well as the reads below, so the
+        # first (connect) request is not the one that blocks the loop.
+        proj = await asyncio.to_thread(sdk._get_proj)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").warning(
@@ -11302,12 +11388,13 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     # Session node — #2600: actor_user_id/harness APPENDED at the END so
     # the existing sess[0..2] (id/created_at/turns) mapping is unchanged.
     # #2599: machine_id and model appended after harness — sess[4]/sess[5].
-    sess_rows = proj.g.query(
-        "MATCH (s:Session {id:$sid}) RETURN s.id, s.created_at, "
-        "s.turn_count, s.actor_user_id, s.harness, "
-        "s.machine_id, s.model",
-        params={"sid": session_id},
-    ).result_set
+    sess_rows = await asyncio.to_thread(
+        lambda: proj.g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.id, s.created_at, "
+            "s.turn_count, s.actor_user_id, s.harness, "
+            "s.machine_id, s.model",
+            params={"sid": session_id},
+        ).result_set)
     if not sess_rows:
         raise HTTPException(status_code=404, detail="Session not found")
     sess = sess_rows[0]
@@ -11326,20 +11413,22 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     # pointKind is NULL for M2 conversation extraction — so the legacy
     # decision/statement filter would report 0; count every non-turn Point
     # wired to the session instead).
-    ext_rows = proj.g.query(
-        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
-        "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "
-        "RETURN count(p)",
-        params={"sid": session_id},
-    ).result_set
+    ext_rows = await asyncio.to_thread(
+        lambda: proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+            "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "
+            "RETURN count(p)",
+            params={"sid": session_id},
+        ).result_set)
     extracted_count = ext_rows[0][0] if ext_rows else 0
 
     # Turn points (events) — ordered by turn index embedded in the id
-    turn_rows = proj.g.query(
-        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
-        "RETURN t.id, t.content, t.createdAt ORDER BY t.id",
-        params={"sid": session_id},
-    ).result_set
+    turn_rows = await asyncio.to_thread(
+        lambda: proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
+            "RETURN t.id, t.content, t.createdAt ORDER BY t.id",
+            params={"sid": session_id},
+        ).result_set)
     turns = []
     for tr in turn_rows:
         tid = tr[0]
@@ -11358,13 +11447,14 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
 
     # Extracted points (#822: same non-turn filter as the count — M2 LLM
     # Points are untyped, reported as "statement" like the capture response).
-    ext_points_rows = proj.g.query(
-        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
-        "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "
-        "RETURN p.id, p.content, p.pointKind, p.createdAt "
-        "ORDER BY p.createdAt",
-        params={"sid": session_id},
-    ).result_set
+    ext_points_rows = await asyncio.to_thread(
+        lambda: proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+            "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "
+            "RETURN p.id, p.content, p.pointKind, p.createdAt "
+            "ORDER BY p.createdAt",
+            params={"sid": session_id},
+        ).result_set)
     extracted = []
     for er in ext_points_rows:
         extracted.append({
@@ -11381,11 +11471,12 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     # capture that never materialized the Source reports `source: null`,
     # never a fabricated stub.
     source = None
-    source_rows = proj.g.query(
-        "MATCH (src:Source {url:$url}) "
-        "RETURN src.url, src.sourceKind, src.eventId",
-        params={"url": f"session:{session_id}"},
-    ).result_set
+    source_rows = await asyncio.to_thread(
+        lambda: proj.g.query(
+            "MATCH (src:Source {url:$url}) "
+            "RETURN src.url, src.sourceKind, src.eventId",
+            params={"url": f"session:{session_id}"},
+        ).result_set)
     if source_rows:
         source = {
             "url": source_rows[0][0],
@@ -15219,17 +15310,18 @@ async def list_pending_invites_for_me(user: dict = Depends(get_current_user)):  
         return {"invites": pending_invitations_for_email(
             get_control_plane(), email)}
     sdk = _make_sdk(namespace="registry")
-    reg = sdk._get_registry()
     from datetime import datetime as _dt
     now = _dt.now(UTC).isoformat()
-    rows = reg.query(
-        "MATCH (i:Invitation {email:$email}) "
-        "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status = 'pending') "
-        "AND (i.expires_at IS NULL OR i.expires_at > $now) "
-        "MATCH (t:Team {id:i.org_id}) "
-        "RETURN i.id, i.org_id, t.name, i.role, i.inviter_email, i.expires_at",
-        params={"email": email, "now": now},
-    ).result_set
+    # #3718 residual 2: sync FalkorDB (registry graph) read off the loop.
+    rows = await asyncio.to_thread(
+        lambda: sdk._get_registry().query(
+            "MATCH (i:Invitation {email:$email}) "
+            "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status = 'pending') "
+            "AND (i.expires_at IS NULL OR i.expires_at > $now) "
+            "MATCH (t:Team {id:i.org_id}) "
+            "RETURN i.id, i.org_id, t.name, i.role, i.inviter_email, i.expires_at",
+            params={"email": email, "now": now},
+        ).result_set)
     return {"invites": [{
         "invitation_id": r[0], "org_id": r[1],
         "org_name": r[2] or r[1], "role": r[3],
@@ -15504,11 +15596,13 @@ async def list_members(org_id: str, user: dict = Depends(get_current_user)):  # 
         except Exception:
             raise HTTPException(status_code=500, detail="Internal server error")  # noqa: B904
     sdk = _make_sdk(namespace="registry")
-    rows = sdk._get_registry().query(
-        "MATCH (m:Membership {org_id:$tid}) WHERE m.status = 'active' OR m.status = 'invited' "
-        "RETURN m.user_id, m.role, m.status, m.invited_email",
-        params={"tid": org_id},
-    ).result_set
+    # #3718 residual 2: sync FalkorDB (registry graph) read off the loop.
+    rows = await asyncio.to_thread(
+        lambda: sdk._get_registry().query(
+            "MATCH (m:Membership {org_id:$tid}) WHERE m.status = 'active' OR m.status = 'invited' "
+            "RETURN m.user_id, m.role, m.status, m.invited_email",
+            params={"tid": org_id},
+        ).result_set)
     return [{"user_id": r[0], "role": r[1], "status": r[2],
              "email": r[3] or ""} for r in rows]
 
@@ -20111,13 +20205,12 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     harness = updates.pop("harness", None)
     section = updates.pop("section", None)
     if harness in _HARNESS_ANALYTICS_VALUES and section in _SECTION_ANALYTICS_VALUES:
-        # #3498: the analytics write builds a fresh httpx.Client per event —
-        # a blocking PostgREST call; off the loop.
-        await _cp_offload(
-            lambda: _track_analytics_event(
-                org["org_id"], "artifact_copied",
-                {"harness": harness, "section": section}),
-            op="analytics_event", best_effort=True)
+        # #3498/#4015: the analytics write builds a fresh httpx.Client per
+        # event — a blocking PostgREST call; off the loop via the shared entry
+        # point.
+        await _emit_analytics_off_loop(
+            org["org_id"], "artifact_copied",
+            {"harness": harness, "section": section})
     elif harness is not None or section is not None:
         # #3821: an enum-invalid beacon used to produce NO event and NO
         # observer — indistinguishable from a beacon that never fired. The
@@ -20137,7 +20230,11 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     # presence cannot be confirmed, and dropping would lose the client's
     # intent against the legacy fallback path.
     if (_ACCEPT_AND_DROP and "onboarding_complete" in updates
-            and _graph_has_org_namespace(org["org_id"])):
+            # #3718 residual 2 (review): `_graph_has_org_namespace` reads the
+            # server-wide graph list through the registry projection — sync
+            # FalkorDB I/O on this hot PATCH path, so off-load it too.
+            and await asyncio.to_thread(
+                _graph_has_org_namespace, org["org_id"])):
         try:
             # review (#1997): the SDK is explicitly closed (the projection
             # handle leaks a connection per PATCH otherwise — the writers'
@@ -20149,11 +20246,22 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
             # unchanged. Closed in the finally below either way.
             _node_sdk = (_open_org_graph_sdk(org["org_id"])
                          or _make_sdk(namespace=org["org_id"]))
-            try:
-                _node = _os.read_onboarding_node(
-                    _node_sdk._get_proj(), org["org_id"])
-            finally:
-                _node_sdk.close()
+            # The WORKER owns the close: it runs in the worker's own
+            # ``finally``, so the SDK is closed exactly once there whether the
+            # read succeeds, raises, or the request is cancelled (the worker
+            # keeps running — CPython #87185). A loop-side ``finally: close()``
+            # after the await would instead tear the projection down under a
+            # worker still inside the read on cancellation, and gating that
+            # close on a completion flag would leak the connection on the
+            # cancel path (both regression shapes caught in #3718 review).
+            def _read_node():
+                try:
+                    return _os.read_onboarding_node(
+                        _node_sdk._get_proj(), org["org_id"])
+                finally:
+                    _node_sdk.close()
+
+            _node = await asyncio.to_thread(_read_node)
         except Exception:
             _node = None
         if _node is not None:
@@ -21559,6 +21667,17 @@ def _track_analytics_event(org_id: str, event_name: str,
         delivered = False
         try:
             import httpx
+            # #4015: the client is built PER EVENT, deliberately. For the
+            # funnel sites it goes through ``_emit_analytics_off_loop`` → the
+            # telemetry pool, so a fresh TCP+TLS handshake costs a telemetry
+            # WORKER SLOT, never an event-loop stall — it is not the defect this
+            # issue names. (The capture-cost lane reaches this helper on the
+            # loop's shared default executor instead; either way, off-loop.)
+            # Reusing a pooled client is a throughput optimisation for those
+            # pools and needs its own measurement plus a lifecycle it does not
+            # have today (lazy construction gated on ``configured``, because
+            # this sink must keep serving a HALF-CONFIGURED env and degrade to
+            # the JSONL — the #3677/#3820 contract); tracked as #4462.
             with httpx.Client(timeout=_ANALYTICS_POST_TIMEOUT_S) as client:
                 resp = client.post(
                     f"{url}/rest/v1/analytics_events",
@@ -22179,6 +22298,61 @@ def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
     }
 
 
+async def _emit_analytics_off_loop(org_id: str, event_name: str,
+                                   properties: dict | None = None) -> None:
+    """#4015: the shared off-loop entry point for a hosted funnel-event emit.
+
+    It is the one entry point for the sites that #4352 routed through
+    ``_cp_offload``; the capture-cost lane (``_emit_capture_ledger``) keeps its
+    own ``asyncio.to_thread`` path — still off-loop, but on the loop's SHARED
+    default executor, which the abuse hooks and the selfhost readiness probe
+    also use, so it is not isolated the way this pool is — and ``mcp_server``
+    its own retained emitter. Moving the capture lane onto this pool is #4468.
+
+    ``_track_analytics_event`` is a synchronous ``httpx.Client`` POST and
+    ``hosted_api`` runs a SINGLE uvicorn worker, so calling it inline from an
+    ``async def`` handler stalls EVERY concurrent request for the duration of a
+    Supabase round-trip (the #2988 / #3498 class). This routes it through the
+    #3498 offload seam (``run_control_plane_call``, via ``_cp_offload``) on the
+    dedicated ``telemetry`` pool: the auth-critical ``auth`` pool can never be
+    parked by an analytics burst, and the event loop is never occupied.
+
+    ``best_effort=True`` bounds FAILURE, not LATENCY — this emit is AWAITED,
+    so a saturated telemetry pool can add up to the seam's
+    ``CONTROL_PLANE_OFFLOAD_TIMEOUT_S`` (10 s) to ONE request before it returns
+    (the bound is per call; a request that emits at several sites pays it per
+    site). The emit is not fire-and-forget because the #3821 strict-mode
+    escape below must be able to propagate, and a detached dispatch cannot
+    carry it. The wait bound swallows an OFFLOAD failure — a missed bound or a
+    saturated telemetry backlog — because telemetry must never gate the request
+    path with an ERROR.
+
+    The bound is deliberately BELOW the wrapped call's own worst case, which
+    inverts the seam's usual "outer bound above inner bound" rule and is an
+    accepted exception here: ``_ANALYTICS_POST_TIMEOUT_S`` is an httpx
+    PER-PHASE timeout, so one POST can hold its worker for ~3x that. A
+    `wait_for` expiry abandons the await, never the daemon thread (CPython
+    #87185), so under sustained slow emits a worker keeps running for the
+    remainder while the caller has already moved on. The trade is explicit:
+    bounding the WORKER instead would make a slow-but-healthy telemetry sink
+    gate a user request for longer than the seam's own budget allows.
+
+    The ONE exception that still escapes is the #3821 strict-mode
+    ``UnregisteredTelemetryKey``: that guard exists precisely so a misregistered
+    prop cannot be silently swallowed, and the onboarding wrapper
+    (``_track_onboarding_event``) depends on the escape.
+
+    A caller whose failure path is UNRECOVERABLE guards the call itself: the
+    Stripe webhook fires the billing notification FIRST and wraps this emit,
+    because a raise there would land in its ``except Exception`` → a 500 AFTER
+    the event was claimed, and the retry sees ``is_first=False`` — see
+    ``webhooks_stripe``.
+    """
+    await _cp_offload(
+        lambda: _track_analytics_event(org_id, event_name, properties),
+        op="analytics_event", best_effort=True)
+
+
 async def _track_onboarding_event(org: dict, event_name: str, **props) -> None:
     """Convenience: track with the current org, swallowing errors.
 
@@ -22188,16 +22362,14 @@ async def _track_onboarding_event(org: dict, event_name: str, **props) -> None:
     Everything else is still swallowed (analytics must never break the
     onboarding flow).
 
-    #3498: async because the write it wraps is a blocking PostgREST call —
-    ``_track_analytics_event`` builds a fresh ``httpx.Client(timeout=5)`` per
+    #3498/#4015: async because the write it wraps is a blocking PostgREST call
+    — ``_track_analytics_event`` builds a fresh ``httpx.Client(timeout=5)`` per
     event, which used to run ON the event loop from every async caller. The
-    strict-mode ``UnregisteredTelemetryKey`` still escapes (it is raised in the
-    worker thread and re-raised through ``await``)."""
+    emit goes through the shared off-loop entry point; the strict-mode
+    ``UnregisteredTelemetryKey`` still escapes (it is raised in the worker
+    thread and re-raised through ``await``)."""
     try:
-        await _cp_offload(
-            lambda: _track_analytics_event(
-                org["org_id"], event_name, props or None),
-            op="analytics_event", best_effort=True)
+        await _emit_analytics_off_loop(org["org_id"], event_name, props or None)
     except UnregisteredTelemetryKey:
         raise
     except Exception:
@@ -22407,11 +22579,9 @@ async def github_callback(code: str | None = None, state: str | None = None,
     welcome_url = f"{email_link_base()}/welcome.html"
 
     if error:
-        await _cp_offload(
-            lambda: _track_analytics_event(
-                "", "onboarding_error",
-                {"step": "github_connect", "error_type": "oauth_denied"}),
-            op="analytics_event", best_effort=True)
+        await _emit_analytics_off_loop(
+            "", "onboarding_error",
+            {"step": "github_connect", "error_type": "oauth_denied"})
         return RedirectResponse(f"{welcome_url}?github=denied", status_code=302)
 
     # Validate state — 404 on missing/invalid (don't leak existence)
@@ -22486,11 +22656,9 @@ async def github_callback(code: str | None = None, state: str | None = None,
         import asyncio as _asyncio
         _asyncio.get_event_loop().create_task(
             _run_indexing(job_id, org_id, org, None))
-    await _cp_offload(
-        lambda: _track_analytics_event(
-            org_id, "question_answered",
-            {"question_id": "github_connect", "answer": "yes"}),
-        op="analytics_event", best_effort=True)
+    await _emit_analytics_off_loop(
+        org_id, "question_answered",
+        {"question_id": "github_connect", "answer": "yes"})
     return RedirectResponse(f"{welcome_url}?github=connected", status_code=302)
 
 
@@ -24835,7 +25003,11 @@ async def backups_rebaseline(request: Request, body: dict):
     graph_id = body.get("graph_id", "default")
     if not org_id:
         raise HTTPException(status_code=400, detail="org_id required")
-    from tortoise.hosted_backup import _validate_graph_id, _validate_org_id
+    from tortoise.hosted_backup import (
+        _validate_graph_id,
+        _validate_org_id,
+        count_data_nodes,
+    )
     try:
         # #2377 (defense in depth): org_id/graph_id flow into R2 state keys
         # (_graph_state_key + the legacy org-file write below) — apply the
@@ -24869,8 +25041,13 @@ async def backups_rebaseline(request: Request, body: dict):
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=f"Re-baseline failed: {e}")  # noqa: B904
     try:
-        g = db.select_graph(row["graph_name"])
-        count = int(g.query("MATCH (n) RETURN count(n)").result_set[0][0])
+        # #4233: count the SAME node set every other DR surface counts —
+        # dump_graph's (the sweep manifest, the empty-backup guard, drill
+        # verification). A raw `MATCH (n)` included the projection's internal
+        # `Meta {key:'point_fts_v2'}` marker once a projection had been opened
+        # on the org graph, so a 3-point graph re-baselined to 4 and flaked the
+        # required check on unrelated PRs.
+        count = count_data_nodes(db, row["graph_name"])
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"graph unavailable: {e}")  # noqa: B904
     state = {
@@ -25026,11 +25203,15 @@ def _drill_execute(
         pass
     within_rto = duration_s <= _DRILL_RTO_S
     # #3845: surface a wedge distinctly — "fork slot wedged" must never be
-    # readable as a plain "copy failed". Absent on the clean path, so a healthy
-    # drill record is unchanged.
+    # readable as a plain "copy failed". #4233: surface a copy (either the
+    # pre-restore safety copy or the swap) that outlived the restore's read
+    # bound the same way, so an RTO breach caused by it is attributable from
+    # the PERSISTED record/incident, not only the immediate response. Both
+    # absent on the clean path, so a healthy drill record is unchanged.
     detail = {k: v for k, v in (
         ("restored", result.get("restored")),
         ("fork_slot", result.get("fork_slot")),
+        ("copy_read_bound_overrun", result.get("copy_read_bound_overrun")),
     ) if v is not None}
     record = _drill_record(
         run=run, status="ok" if within_rto else "rto_breach",
@@ -25193,6 +25374,11 @@ async def backups_drill_scheduled(request: Request):
                     "rto_s": result.get("rto_s"),
                     "org_id": (result.get("record") or {}).get("org_id"),
                     "backup_key": (result.get("record") or {}).get("backup_key"),
+                    # #4233: if either GRAPH.COPY (pre-restore safety copy or
+                    # swap) outlived the restore's read bound, name it — that
+                    # is the attributable cause.
+                    "copy_read_bound_overrun": result.get(
+                        "copy_read_bound_overrun"),
                 },
             )
         except Exception:
@@ -25251,6 +25437,30 @@ def _billing_error_to_http(exc: Exception) -> HTTPException:
     return HTTPException(status_code=502, detail=str(exc))
 
 
+def _billing_email_like(value: object) -> bool:
+    """True when *value* is usable as a billing/customer email.
+
+    #4504 review: ``APIKey.created_by`` is a CREATOR ID, not always an email —
+    the same codebase writes a Supabase user UUID (``_mint_key``:
+    ``session_user_id or "api"``), the literal ``"api"``, and (for
+    /v1/register) an email address. Handing a UUID/``"api"`` to Stripe as the
+    customer email either 502s or binds a garbage address, and — with the
+    session fallback placed last — it shadowed that fallback for a genuinely
+    entitled session user. The gate requires a real address shape — a single
+    ``@``, a non-empty local part and domain, and no interior whitespace;
+    surrounding whitespace is trimmed, so a caller that returns a passing
+    value must return its ``.strip()``. UUIDs and ``"api"`` fail the gate and
+    fall through.
+    """
+    if not isinstance(value, str):
+        return False
+    v = value.strip()
+    if not v or v.count("@") != 1 or any(c.isspace() for c in v):
+        return False
+    local, _, domain = v.partition("@")
+    return bool(local) and bool(domain)
+
+
 def _billing_customer_email(sdk, org: dict) -> str:
     """Resolve the billing email via the fallback chain (review fix 1):
 
@@ -25258,8 +25468,19 @@ def _billing_customer_email(sdk, org: dict) -> str:
     2. ``APIKey.created_by`` — provision-path orgs (created via
        /internal/provision) have no ``Org.email``; the Edge Function stored
        the creator on the APIKey node instead. Prefer the key used for THIS
-       request, fall back to any org key.
-    3. 400 last resort — clear message, no crash.
+       request, fall back to any org key. Both links are shape-gated
+       (``_billing_email_like``) because ``created_by`` may be a user UUID or
+       ``"api"`` rather than an address (#4504 review) — a non-email creator
+       id must fall through, not be posted to Stripe as the customer email.
+    3. The VERIFIED session user's email (#4504) — OAuth/session users whose
+       org carries no ``Team.email`` and whose keys carry no usable
+       ``created_by`` (a dashboard/provisioned org) were refused a checkout
+       they are entitled to. ``org[_SESSION_USER_EMAIL_KEY]`` is attached
+       ONLY on the JWT branch of ``get_current_org_session``, from the
+       signature-verified Supabase JWT's ``email`` claim — never a
+       client-supplied body/header. Last in the chain: the existing
+       resolutions keep precedence.
+    4. 400 last resort — clear message, no crash.
     """
     org_id = org["org_id"]
     row = sdk._get_registry().query(
@@ -25272,14 +25493,20 @@ def _billing_customer_email(sdk, org: dict) -> str:
         row = sdk._get_registry().query(
             "MATCH (k:APIKey {id:$id}) RETURN k.created_by", params={"id": key_id}
         ).result_set
-        if row and row[0][0]:
-            return row[0][0]
+        if row and _billing_email_like(row[0][0]):
+            return row[0][0].strip()
     row = sdk._get_registry().query(
         "MATCH (k:APIKey {org_id:$tid}) RETURN k.created_by LIMIT 1",
         params={"tid": org_id},
     ).result_set
-    if row and row[0][0]:
-        return row[0][0]
+    if row and _billing_email_like(row[0][0]):
+        return row[0][0].strip()
+    # #4504: verified session email — before the 400, after the existing
+    # resolutions (precedence unchanged). Reached whenever no earlier link
+    # produced an address — including a non-email ``created_by``.
+    session_email = org.get(_SESSION_USER_EMAIL_KEY)
+    if isinstance(session_email, str) and session_email.strip():
+        return session_email.strip()
     raise HTTPException(
         status_code=400,
         detail="No customer email for this team — register with an email or "
@@ -25293,9 +25520,11 @@ def _billing_checkout_sync(org: dict, price_id: str) -> dict:
 
     Order matters (scoping P1-2, review fix 1): resolve/validate price →
     stored-mirror guard → resolve email → create-or-reuse Stripe customer →
-    SYNC-PERSIST ``stripe_customer_id`` + ``customer_email`` on the Org node
-    → stale-mirror race guard (list_subscriptions) → create Checkout session.
-    A missed first webhook event leaves a reconcilable mirror (Task 8).
+    SYNC-PERSIST ``stripe_customer_id`` on the Org node (plus ``customer_email``
+    on first bind, or as a backfill when the stored one is empty — a reused
+    customer keeps its stored email, see below) → stale-mirror race guard
+    (list_subscriptions) → create Checkout session. A missed first webhook
+    event leaves a reconcilable mirror (Task 8).
     """
     from tortoise.billing import StripeClient
     org_id = org["org_id"]
@@ -25303,11 +25532,13 @@ def _billing_checkout_sync(org: dict, price_id: str) -> dict:
 
     # Layer 1 guard: stored mirror already active → reject before any Stripe call.
     row = sdk._get_registry().query(
-        "MATCH (t:Team {id:$id}) RETURN t.subscription_status, t.stripe_customer_id",
+        "MATCH (t:Team {id:$id}) "
+        "RETURN t.subscription_status, t.stripe_customer_id, t.customer_email",
         params={"id": org_id},
     ).result_set
     status = row[0][0] if row else None
     stored_customer_id = row[0][1] if row else None
+    stored_customer_email = row[0][2] if row else None
     if status in _BILLING_ACTIVE_STATUSES:
         raise HTTPException(status_code=409, detail="team already has an active subscription")
 
@@ -25321,11 +25552,23 @@ def _billing_checkout_sync(org: dict, price_id: str) -> dict:
     except Exception as e:
         raise _billing_error_to_http(e) from e
 
-    # Sync-persist the customer binding BEFORE the session (survives a missed first event).
-    sdk._get_registry().query(
-        "MATCH (t:Team {id:$id}) SET t.stripe_customer_id=$cid, t.customer_email=$email",
-        params={"id": org_id, "cid": customer_id, "email": email},
-    )
+    # Sync-persist the customer binding BEFORE the session (survives a missed
+    # first event). When the customer is REUSED, keep an already-stored
+    # ``customer_email``: it belongs to that Stripe customer, while the
+    # resolved email may now come from a different member's session (#4504) —
+    # rewriting it would make the mirror disagree with the address invoices go
+    # to. Backfill only when the stored value is empty (the checkout webhook
+    # persisted the binding without a customer_email).
+    if stored_customer_id and stored_customer_email:
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.stripe_customer_id=$cid",
+            params={"id": org_id, "cid": customer_id},
+        )
+    else:
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.stripe_customer_id=$cid, t.customer_email=$email",
+            params={"id": org_id, "cid": customer_id, "email": email},
+        )
 
     # Layer 2 guard: stale-mirror race — Stripe is the authority for money.
     try:
@@ -26047,11 +26290,22 @@ async def webhooks_stripe(request: Request):
             org_tier,
             webhook_event_marker,
         )
+        # #4015: the tier is a READ, so it is taken BEFORE the claim in both
+        # branches. The claim is what makes every ``is_first``-gated side
+        # effect fire AT MOST ONCE — a retry after a claim sees
+        # ``is_first=False`` forever — so an abort between the claim and the
+        # notification (a tier-read failure included) drops the notification
+        # PERMANENTLY. Read first: a failure leaves the event unclaimed and
+        # Stripe's retry reprocesses it.
         if is_supabase_enabled():
             cp = get_control_plane()
-            is_first = webhook_event_marker(cp, event_id, etype)
             tier = org_tier(cp, org_id)
+            is_first = webhook_event_marker(cp, event_id, etype)
         else:
+            tier_rows = sdk._get_registry().query(
+                "MATCH (t:Team {id:$id}) RETURN t.tier", params={"id": org_id}
+            ).result_set
+            tier = tier_rows[0][0] if tier_rows else None
             seen_rows = sdk._get_registry().query(
                 "MATCH (w:WebhookEvent {event_id:$id}) RETURN w.first_seen",
                 params={"id": event_id},
@@ -26062,25 +26316,41 @@ async def webhooks_stripe(request: Request):
                     "CREATE (w:WebhookEvent {event_id:$id, first_seen:$now, type:$type})",
                     params={"id": event_id, "now": _now_iso(), "type": etype},
                 )
-            tier_rows = sdk._get_registry().query(
-                "MATCH (t:Team {id:$id}) RETURN t.tier", params={"id": org_id}
-            ).result_set
-            tier = tier_rows[0][0] if tier_rows else None
         if is_first and notify_kind:
-            # Audit + analytics + notifications — first processing only.
-            await _async_audit(
-                request, org_id, notify_kind,
-                resource_type="team", resource_id=org_id,
-            )
-            await _cp_offload(
-                lambda: _track_analytics_event(org_id, notify_kind, {
-                    "plan": tier, "tier": tier, "status": etype,
-                }),
-                op="analytics_event", best_effort=True)
+            # #4015: the billing NOTIFICATION is the first side effect after
+            # the claim, because it is the unrecoverable one: once claimed, a
+            # re-delivery can never re-fire it, and everything downstream of
+            # this line is best-effort. ``notify_billing_event`` is documented
+            # never-raise (tortoise/notify.py), so it cannot abort itself; the
+            # audit and telemetry legs — either of which could otherwise 500
+            # the webhook AND strand the notification — follow it. (#4352 had
+            # already moved the analytics POST behind ``_cp_offload``; what
+            # this change adds here is the notify-first order and the guards.)
             notify_billing_event(
                 notify_kind, {"org_id": org_id, "tier": tier},
                 {"subscription_status": etype},
             )
+            try:
+                await _async_audit(
+                    request, org_id, notify_kind,
+                    resource_type="team", resource_id=org_id,
+                )
+            except Exception as exc:  # noqa: BLE001, RUF100 — never 500 a webhook
+                _logger.warning("webhook: audit failed (non-fatal): %s",
+                                _safe_log(exc))
+            # The emit's own FAIL-SOFT guard, on top of the offload's
+            # best-effort contract: ``_emit_analytics_off_loop`` still
+            # re-raises the #3821 strict-mode registration guard (dev/CI only)
+            # because the onboarding lane relies on that escape, and a raise
+            # here would 500 a delivery whose notification is already spent.
+            try:
+                await _emit_analytics_off_loop(org_id, notify_kind, {
+                    "plan": tier, "tier": tier, "status": etype,
+                })
+            except Exception as exc:  # noqa: BLE001, RUF100 — never 500 a webhook
+                _logger.warning(
+                    "webhook: analytics emit failed (non-fatal): %s",
+                    _safe_log(exc))
         return JSONResponse(status_code=200, content={"detail": "processed"})
     except Exception as e:
         _logger.error("webhook: processing failed (%s)", _safe_log(e))
