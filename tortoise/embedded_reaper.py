@@ -426,22 +426,29 @@ def _has_ownership_claim(dbdir_real: str,
     `_owner_lock_held()` is deliberately NOT consulted here. The two
     mechanisms answer different questions — #4577 asks "is an owner ALIVE?"
     (a kernel fact), #3767 asks "is this dir OURS to reap?" (attribution) —
-    and a held lock is a liveness proof, not an admission claim:
+    and a held lock is a liveness proof, not an admission claim. Two reasons,
+    the first decisive:
 
-      * `record_owner` writes the record file BEFORE it takes the lock, and
-        `forget_owner` releases the lock BEFORE it unlinks the record, so the
-        lock's held-interval is strictly INSIDE the record file's lifetime: a
-        held lock implies a present record, and "held lock, no record" is a
-        state tortoise's own writer never produces. An arm admitting it would
-        admit precisely the state we cannot create ourselves — the most
-        suspicious one, not the most trustworthy (a same-uid foreign app that
-        plants `.tortoise-owners/.lock` and flocks it could satisfy it).
       * Admission is PERMISSIVE in effect (it makes a dir a KILL candidate),
         and a dir admitted on the lock arm would be unconditionally vetoed by
         `reap()`'s ``_owner_lock_held(...) is True`` check — a held lock is
         exactly what makes `reap()` skip. The arm could therefore never
         produce a kill; it would only widen #3767's gate for zero reaping
-        gain, against requirement #4546 that the gate stay narrow.
+        gain, against the #4546 requirement that the gate stay narrow.
+      * It would also add no reachability the record arm lacks. The writer's
+        ordering (`record_owner` writes the record BEFORE taking the lock,
+        `forget_owner` releases the lock BEFORE unlinking the record) puts
+        the lock's held-interval inside the record's lifetime — but PER SOCKET
+        DIRECTORY, not absolutely: the stamp is ``<pid>-<start>`` with no
+        socket identity, so one process owning TWO sockets in ONE directory
+        shares a single record file and the first `forget_owner` unlinks it
+        while the second socket's shared flock is still held. That reachable
+        "held lock, no recognisable record" state is refused HERE (fail
+        CLOSED — the dir stays `protected`, never a kill candidate), which
+        loses nothing: a live lock holder must never be killed anyway. It is
+        also the state a lock arm would gratuitously admit, and a same-uid
+        foreign app that plants `.tortoise-owners/.lock` and flocks it could
+        satisfy such an arm too.
 
     So the lock is authorised where it belongs — at DESTRUCTION, not at
     admission — and `_owner_record_dir_present` stays consistent with it by
@@ -1638,9 +1645,12 @@ def _classify_dir(dbdir: str, socket_path: str,
         "path_based": _is_path_based(registry, dbdir_real, tmpdir_real),
         # #3767: no tortoise-written owner instrument => the server is
         # UNATTRIBUTABLE. reap() requires the #1557/#1642 FIX 3
-        # orphan-confirmation window for it in every mode, exactly as for a
-        # path-based server: redislite's registry is written by redislite,
-        # not tortoise, so it does not establish ownership.
+        # orphan-confirmation window for it: redislite's registry is written
+        # by redislite, not tortoise, so it does not establish ownership.
+        # #4546 SCOPE: in a FULL sweep reap() exempts a `dir_missing` record
+        # from this arm (its registry data dir is already gone, so no on-disk
+        # user data remains); the `path_based` arm carries no such exemption,
+        # and under `--only-safe` the earlier live-pid gate skips first.
         #
         # RESIDUAL (#3767 review P2, accepted): this covers the DOMINANT route
         # the issue names — a foreign no-path server with an INTACT registry —
@@ -1847,6 +1857,17 @@ def _cooldown_check(registry: dict | None,
             pid = None
     if pid is not None and not _pid_effectively_alive(pid):
         return "stale_socket"
+    # DELIBERATE (pre-existing, not a #4496 regression): an UNMEASURABLE
+    # uptime (`None` — a `ps` timeout/OSError, or a non-text stdout read as
+    # undeterminable) is NOT treated as protected. The boot cooldown is a
+    # CLOCK guard against reaping a server that is still starting, not a
+    # safety gate: the safety gates are `reap()`'s live-pid / orphan-
+    # confirmation / 0-client / owner-record / held-flock checks, which all
+    # run regardless of classification. Treating a failed probe as protected
+    # would make the whole reaper inert whenever `ps` is slow or absent —
+    # the #3599 failure class — and `_run_text` turning a bad stdout into
+    # `None` widened only WHICH inputs reach this path, not its semantics
+    # (a real `ps` timeout already produced `None` here).
     uptime = _uptime_seconds(pid) if pid else 0.0
     min_uptime = _parse_min_uptime()
     if uptime is not None and uptime < min_uptime:
@@ -3106,7 +3127,10 @@ def _owner_record_dir_present(socket_dir: str) -> bool:
     things: the registry-less ownership claim (`_has_ownership_claim`), and
     the record's `unattributed` flag — a server with no tortoise instrument
     cannot be attributed to us, so `reap()` requires the #1557/#1642 FIX 3
-    orphan-confirmation window for it in EVERY mode.
+    orphan-confirmation window for it in EVERY mode, EXCEPT a `dir_missing`
+    record in a FULL sweep (#4546: its registry data dir is already gone, so
+    no on-disk user data remains; the `path_based` arm has no such exemption,
+    and under `--only-safe` the earlier live-pid gate still skips first).
 
     Deliberately NOT `_owner_records`, whose per-record liveness resolution
     shells out to `ps`; the orphan VERDICT still comes from `_owner_records`
@@ -3115,7 +3139,11 @@ def _owner_record_dir_present(socket_dir: str) -> bool:
     Recognition matches `_owner_records`: a dotted name is ignored and an
     unparsable/non-positive pid prefix is a foreign file. An empty dir reads
     False, mirroring `_owner_records`' "total == 0 is no evidence at all"
-    fail-closed rule. Fail closed on OSError.
+    fail-closed rule. Fail closed on OSError. (The dotted-name skip is
+    intent-documenting, NOT load-bearing: no dotted name can pass the
+    positive-pid parse anyway, since `int(".lock".partition("-")[0])` raises
+    ValueError. It is stated here so the rule reads the same as
+    `_owner_records`'.)
 
     RESIDUAL (#3767 review P2, accepted + documented): a tortoise server
     whose owner closed GRACEFULLY while the daemon survived loses its

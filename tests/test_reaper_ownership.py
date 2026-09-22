@@ -178,10 +178,17 @@ def test_uptime_and_cmdline_also_tolerate_a_mock(monkeypatch, tmp_path):
       i.e. the strongest orphan signal, from an unreadable `ps`;
     * `_client_list`/`_active_client_count` -> `_parse_client_list(MagicMock())`
       is `[]`, the "zero clients" verdict that licences a kill;
-    * `_uptime_seconds` -> `_parse_etime(MagicMock())` is `0.0`, which is the
-      *youngest* possible uptime — a wrong value, but it lands on the SAFE
-      side of `_cooldown_check`'s `uptime < min_uptime` comparison, so it is
-      pinned as an inversion-adjacent case rather than a fail-open one.
+    * `_uptime_seconds` -> `_parse_etime(MagicMock())` is `0.0`, the
+      *youngest* possible uptime — a wrong value that lands on the SAFE side
+      of `_cooldown_check`'s `uptime < min_uptime`. The guard now yields
+      `None`, which `_cooldown_check` reads as "not protected by the boot
+      cooldown" (the permissive side) — DELIBERATE and pre-existing, not a
+      fail-open introduced here: a real `ps` timeout/OSError already produced
+      `None` on this path before the guard, and treating a failed probe as
+      protected would make the reaper inert whenever `ps` is slow or absent
+      (#3599). The safety gates are `reap()`'s owner-record / held-flock /
+      orphan-confirmation checks, not this classification — see
+      `_cooldown_check`'s comment.
 
     Deliberately NOT asserted: `_process_has_socket`, `_derive_real_pid_macos`,
     `_pgrep_redis_servers` and `_batch_process_info`. A MagicMock happens to
@@ -530,21 +537,24 @@ def test_owner_lock_file_alone_is_not_an_ownership_claim(tmp_path):
     `OWNER_LOCK_NAME` (main `845f47f53`, #4577) lives inside
     `OWNERS_DIRNAME`, so the flock change dropped a new file into the very
     directory #3767's claim reads. If the claim counted it, the lock would
-    SILENTLY widen the admission gate: a `.lock`-only `.tortoise-owners` dir
-    is a state tortoise's own writer never produces (`record_owner` writes the
-    record BEFORE the lock; `forget_owner` releases the lock BEFORE unlinking
-    the record), so admitting it would admit the fabricated-only case.
+    SILENTLY widen the admission gate — a lock arm would admit a dir whose
+    only tortoise marker is a `.lock` a same-uid foreign app can plant and
+    flock itself.
 
     It need not be an admission claim: main's `reap()` already vetoes
     `_owner_lock_held(...) is True` at DESTRUCTION, which is where a liveness
-    fact belongs. This test pins the separation in both halves:
-      * `_owner_record_dir_present` ignores dotted names, so a
-        `.tortoise-owners` dir holding only `.lock` carries NO claim; and
-      * `_has_ownership_claim` therefore REFUSES the dir.
+    fact belongs (a dir admitted on a lock arm would be skipped by that very
+    check, so the arm could never produce a kill). This test pins the
+    separation: a `.tortoise-owners` dir holding only `.lock` carries NO
+    claim and `_has_ownership_claim` REFUSES it.
 
     RED if the lock arm is added to the claim (e.g. `if _owner_lock_held(...)
-    is True: return None`) or if the dotted-name skip in
-    `_owner_record_dir_present` is dropped.
+    is True: return None`) — that is the mutation this pins.
+    NOT pinned here: the dotted-name skip in `_owner_record_dir_present`. A
+    dotted name could never pass the positive-pid parse anyway
+    (`int(".lock".partition("-")[0])` raises ValueError), so the skip is
+    intent-documenting rather than load-bearing, and no test can
+    mutation-verify it.
     """
     import fcntl
 
