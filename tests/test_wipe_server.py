@@ -877,15 +877,71 @@ def test_sweep_preserves_non_owned_graphs(monkeypatch, tmp_path):
     assert "tortoise" not in db.detached and "x" not in db.detached
 
 
+def test_sweep_preserved_warning_reports_journal_kept(
+        monkeypatch, tmp_path, caplog):
+    """#7795 review P2-1: the PRESERVED warning is the operator's ONLY record
+    of a non-owned name, and it must not claim the journal was consumed when
+    an OWNED drop failure KEPT it — that sends the operator away from the
+    file that still holds the drop-set bookkeeping. Mixed case: one
+    non-owned name (preserved) + one owned name whose drop raises."""
+    import logging
+
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    journal = tmp_path / "session.graphs.jsonl"
+    journal.write_text("test_ws_bad\ntortoise\n")
+    db = _FakeDb(fail_delete={"test_ws_bad"})
+    with caplog.at_level(logging.WARNING):
+        res = _sweep_drop(_FakeProj(db), str(journal), drop=True)
+    assert res["preserved"] == ["tortoise"]
+    assert res["failed"] == ["test_ws_bad"]
+    assert res["journal_removed"] is False
+    assert journal.exists(), "an owned drop failure KEEPS the journal"
+    warned = [r.getMessage() for r in caplog.records
+              if "PRESERVED" in r.getMessage()]
+    assert warned, "a preserved name must be surfaced to the operator"
+    assert "KEPT" in warned[0], \
+        f"the KEPT branch must be stated, not the consumed branch: {warned[0]!r}"
+    assert "retrying cannot reclaim them" not in warned[0], \
+        "false in the mixed case — the journal was kept"
+
+
+def test_sweep_preserved_warning_reports_journal_consumed(
+        monkeypatch, tmp_path, caplog):
+    """#7795 review P2-1 (clean branch): with no owned drop failure the
+    journal IS removed and the names become unreclaimable, so the warning
+    must say so — the counterpart pin to the mixed case above."""
+    import logging
+
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    journal = tmp_path / "session.graphs.jsonl"
+    journal.write_text("tortoise\n")
+    db = _FakeDb()
+    with caplog.at_level(logging.WARNING):
+        res = _sweep_drop(_FakeProj(db), str(journal), drop=True)
+    assert res["preserved"] == ["tortoise"]
+    assert res["failed"] == []
+    assert res["journal_removed"] is True
+    assert not journal.exists()
+    warned = [r.getMessage() for r in caplog.records
+              if "PRESERVED" in r.getMessage()]
+    assert warned, "a preserved name must be surfaced to the operator"
+    assert "retrying cannot reclaim them" in warned[0]
+    assert "KEPT" not in warned[0], \
+        "the journal WAS removed — the message must not say it was kept"
+
+
 def test_sweep_owns_org_namespace_by_name(monkeypatch, tmp_path):
     """#7795 review P1: ``org_`` — the CURRENT product-namespace spelling
     (#3543 tenancy rename) — must be in the sweep's owned set BY THAT NAME,
     and a journaled ``org_*`` graph must be DROPPED, not preserved.
 
     The journal IS the ownership record for a product-side mint
-    (``_journal_append_product`` at the hosted ``org_create`` sites,
-    tortoise/hosted_api.py:97,2328,6167,6258,11684), so a journaled
-    ``org_*`` graph is demonstrably ours. The earlier pins exercised
+    (``_journal_append_product`` at the hosted ``org_create`` sites:
+    ``hosted_api.provision_tenant``, ``hosted_api.register_user`` (both the
+    Supabase and registry lanes), and
+    ``hosted_api._eager_provision_org_graph``), so a journaled
+    ``org_*`` graph is demonstrably ours — each of those sites journals only
+    a graph the call itself minted. The earlier pins exercised
     ``team_`` only — the PRE-rename spelling — which is exactly why the
     missing ``org_`` slipped through: an ``org_`` name took the
     ``preserved`` branch while the empty ``failed`` list still removed the
