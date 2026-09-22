@@ -95,9 +95,10 @@ def test_unsupported_filter_op_raises_on_patch_and_delete() -> None:
     behaviour production does not have — the same "CI green while prod
     differs" class this file exists to lock down.
 
-    REDs on: reverting ``_matches`` to the if-chain with no final op check, or
-    removing the DELETE branch's ``_validate_filter_ops`` (the two DELETEs added
-    for #2642 re-review P2 then return ``[]`` instead of raising).
+    The PATCH and DELETE branches pre-validate the whole filter list before
+    evaluating it, so the cases below rest on ``_validate_filter_ops`` and not
+    on ``_matches``' own final op check; removing either call makes the
+    corresponding case return ``[]`` instead of raising.
     GREEN legitimate form: an op every branch covers (``eq``)."""
     f = FakeControlPlane(tables={"org_memberships": [
         {"org_id": "t1", "user_id": "00000000-0000-0000-0000-000000000001",
