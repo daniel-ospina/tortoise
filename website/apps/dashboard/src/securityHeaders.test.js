@@ -256,9 +256,9 @@ const PINNED_POLICIES = {
 }
 
 /**
- * Everything wrong with one policy VALUE, as a list. Shared by §4b (all five
- * declared policies) and §3 (the SERVED interstitial policy, nonce masked), so a
- * nonce-keyed branch cannot be checked by one and missed by the other.
+ * Everything wrong with one policy VALUE, as a list. Used by §4b, which scans
+ * all five declared policies; §3 checks the SERVED interstitial against the pin
+ * (the same value, whole-string, which is strictly stronger).
  */
 function policyProblems(name, value) {
   const wrong = []
@@ -440,8 +440,9 @@ function functionNodes(ast) {
  * two shapes that actually stamp a header — an object property
  * `"Content-Security-Policy": <const>`, and a `headers.set/append("Content-Security-Policy", <const>)`
  * call — cannot be inflated by any string, template or regex, because text is
- * not a property or an argument. A header name BUILT as an expression is not
- * counted (fail-closed, and it names the file).
+ * not a property or an argument. A header name BUILT as an expression (a variable,
+ * a concat, a computed key) counts as an UNATTRIBUTABLE stamp — fail-closed, and
+ * the surplus above the expected count names the file.
  */
 function stampCount(relPath) {
   const ast = parseSource(readFileSync(join(repoRoot, relPath), 'utf8'), relPath)
@@ -857,15 +858,15 @@ function nonLiteralContentTypes(relPath) {
   const src = commentStripped(relPath)
   const out = []
   const re =
-    /(?:\.(?:set|append)\(\s*["'`]Content-Type["'`]\s*,\s*|["'`]Content-Type["'`]\s*:\s*)([^,}\n]+)/gi
+    /(?:\.(?:set|append)\(\s*["'`]Content-Type["'`]\s*,\s*|["'`]Content-Type["'`]\s*:\s*)([^,})\n]+)/gi
   let match
   while ((match = re.exec(src))) {
     const value = match[1].trim()
-    // A backtick value WITHOUT an interpolation is a literal; one with `${` is a
-    // runtime value the text scan cannot read. Treating every backtick as a
-    // literal let `` `text/${x}` `` (split so no `html` run appears) pass as a
-    // literal AND escape the `html` mention scan.
-    const literal = /^["']/.test(value) || (value.startsWith('`') && !value.includes('${'))
+    // The WHOLE value must be ONE quoted string. Testing only its first character
+    // accepted a concatenation that STARTS with a quote — `"text/" + "ht" + "ml"`
+    // — which then also evaded the `html` mention scan. A backtick value WITH an
+    // interpolation is a runtime value too.
+    const literal = /^(?:"[^"]*"|'[^']*')$/.test(value) || (value.startsWith('`') && !value.includes('${'))
     if (!literal) out.push(value.slice(0, 60))
   }
   return out
