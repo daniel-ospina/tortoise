@@ -1368,8 +1368,9 @@ async def _lifespan(app):
                             org_id, exc)
                         return None
 
+                from tortoise.alert_store import WRITER_WATCHER
                 watcher = BackupWatcher(
-                    _backup_storage(), _alert_store_from(cfg),
+                    _backup_storage(), _alert_store_from(cfg, writer=WRITER_WATCHER),
                     org_provider=_sweep_orgs,
                     eligible_provider=_eligible_orgs if cfg.org_sweep_enabled else None,
                     graph_provider=_graph_provider,
@@ -4417,6 +4418,101 @@ _SESSION_USER_ID_KEY = "session_user_id"
 _SESSION_USER_EMAIL_KEY = "session_user_email"
 
 
+def _credential_is_agent(org: dict) -> bool:
+    """True iff the caller authenticated with an AGENT credential.
+
+    Agent = a ``tt_``/``tk_`` API key or an MCP/OAuth (``oat_``) token — a
+    machine credential the user's agent runs with. NOT a human session JWT
+    (the dashboard / a browser).
+
+    The lane discriminator is ``session_user_id`` presence — the established
+    #2297/#2380 predicate (attached ONLY on the JWT branch of
+    get_current_org_session; key/OAuth org dicts never carry it, and the
+    dependency-override seam supplies it only when it emulates a session
+    face). ``auth_lane == 'session'`` is the explicit marker; the
+    session_user_id presence stays the predicate of record so the override
+    seam keeps gating identically.
+
+    Why it matters (#3670/#3671): "your agent connected" is literally true
+    only when an agent credential made the call. The dashboard is a browser
+    — it observes no agent — so a state write from that lane is an assertion,
+    never an observation."""
+    return not (org.get(_SESSION_USER_ID_KEY)
+                or org.get("auth_lane") == "session")
+
+
+def _observed_capture_harness(org: dict, claimed: str | None,
+                              stored: str | None = None) -> str | None:
+    """The harness the SERVER may name in capture bookkeeping (receipt key /
+    last-error key / the Session's own ``harness`` property).
+
+    - A session-JWT caller (dashboard / browser) observes no harness — the
+      per-harness claim is refused and the bare ``session_capture_receipt``
+      (server-observed: a capture happened, harness unproven) is used.
+    - An agent credential: the server's OWN stored Session harness wins over
+      a later claim (``stored or claimed``) — first-writer-wins, so a re-POST
+      of an existing session_id can never RELABEL the harness and light
+      another harness's receipt. Only a FRESH session falls back to the
+      caller's claim, which for an agent credential is the agent's own
+      declaration (the agent is present — the connection is observed).
+
+    ``body.harness`` is therefore never authoritative on its own: it can only
+    ever introduce a harness on a session the server has not yet stamped."""
+    if not _credential_is_agent(org):
+        return None
+    return stored or claimed
+
+
+async def _stored_session_harness(org: dict,
+                                  session_id: str | None) -> str | None:
+    """The SERVER's recorded harness for an existing session, or None (#3681).
+
+    The capture ERROR paths live in ``capture_session`` — outside
+    ``_capture_session_impl``, where the stored harness is read — so without
+    this lookup they would resolve the harness from ``body.harness`` (a
+    client assertion) and could plant a caller-named
+    ``session_capture_last_error_{claim}`` key, re-opening the very relabel /
+    receipt forgery #3681 closes (review P2). Fail-open: a lookup failure
+    returns None, which restores the fresh-session rule (the claim only ever
+    introduces a harness the server has not stamped).
+
+    GRAPH-BOUND (review P1): the read resolves through ``_data_sdk`` — the
+    SAME tenancy resolver the capture writes the Session with — so a
+    graph-bound key's Session is read from its OWN graph (C5 #2114).
+    ``_org_proj`` reads the org-DEFAULT graph, which a bound key's Session is
+    never written to: the lookup would miss, ``_observed_capture_harness``
+    would fall back to the caller's ``body.harness``, and the error path would
+    plant a claim-named ``session_capture_last_error_{claim}`` — re-opening
+    the relabel hole, and writing org-DEFAULT state from a graph-bound key.
+
+    #3718: sync FalkorDB I/O must stay OFF the event loop. ``_data_sdk``'s
+    ownership pre-check and the query both run in a worker thread (this helper
+    is awaited from the async ``capture_session`` error paths; the auto-file
+    precedent ``_maybe_file_harness_connected`` shows the shape)."""
+    if not session_id:
+        return None
+    try:
+        return await asyncio.to_thread(
+            _read_stored_session_harness, org, session_id)
+    except Exception:
+        return None
+
+
+def _read_stored_session_harness(org: dict, session_id: str) -> str | None:
+    """The sync body of ``_stored_session_harness`` (runs off-loop).
+
+    Owns and closes its SDK handle — ``_org_proj`` opened a fresh SDK per
+    call and leaked the connection (review P2)."""
+    sdk = _data_sdk(org)
+    try:
+        rows = sdk._get_proj().g.query(
+            "OPTIONAL MATCH (s:Session {id:$sid}) RETURN s.harness AS harness",
+            params={"sid": session_id}).result_set
+        return rows[0][0] if rows else None
+    finally:
+        sdk.close()
+
+
 async def get_current_org_session(request: Request, gate_key_login: bool = True) -> dict:
     """Management-endpoint dependency: accept a session JWT (verified
     identity) OR an API key. Key-auth goes through get_current_org + the
@@ -5837,6 +5933,23 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
     )
     # Metering (#681): best-effort write-op count for overage billing.
     _record_write_op(org)
+    # #3670: an AGENT-credentialed graph write is a server-observed agent
+    # connection — file the onboarding completion signal so a REST-first /
+    # build-fork org (whose only in-flow write is this REST route) reaches
+    # the connected screen. A session-JWT (dashboard/browser) write must NOT
+    # file it: it observes no agent, and filing generically would re-create
+    # the false claim lane B3 deleted. Fail-open (never fails the write).
+    # C5 #2114: the auto-file writes ORG-LEVEL onboarding state on the org's
+    # DEFAULT graph, so a GRAPH-BOUND key must not trigger it — every sibling
+    # org-level surface rejects that key class via
+    # `_reject_graph_bound_org_surface` (the checkpoint route included). It is
+    # also OFF-LOADED: this handler is `async` and
+    # `_maybe_file_harness_connected` runs sync FalkorDB I/O — calling it
+    # inline would re-open the #3718 "no sync I/O on the loop" invariant the
+    # `asyncio.to_thread` write above exists to hold.
+    if _credential_is_agent(org) and not org.get("graph_id"):
+        await asyncio.to_thread(
+            _maybe_file_harness_connected, org["org_id"])
     # #308 (R1, delta 8): one Point created → one point_create event.
     await _abuse_record_points(request, org, 1)
 
@@ -7702,16 +7815,21 @@ def _mint_key(org_id: str, *, graph_id: str | None = None,
     # #2481 (audit pin): this is the PRIMARY mint gate for every standalone
     # mint surface (POST /v1/team/keys legacy/scoped/child mints and the
     # per-graph create_org_graph mint). It counts via quota._count_resource
-    # — the ONE predicate that already excludes revoked rows
-    # (revoked_at IS NULL) and expired rows (#2426), so revoked tombstones
-    # never consume the max_api_keys budget. The session-key mint/rotate
+    # — the ONE predicate that excludes revoked rows
+    # (revoked_at IS NULL), expired rows (#2426) and bootstrap session rows
+    # (#4140/R13: `created_via IS NULL OR <> 'bootstrap'`, NULL-tolerant so
+    # a legacy durable row still counts), so revoked tombstones and 24h
+    # session credentials never consume the max_api_keys budget. The
+    # session-key mint/rotate
     # lanes (session_key / _session_key_supabase) and the signup-token
     # recovery lanes carry their own predicates with the SAME
     # revoked_at IS NULL + non-bootstrap exclusions. #2426 note: the
     # recovery lanes' EXPIRY exclusion diverges (the Supabase
     # recover_team_key RPC still counts expired-but-unrevoked rows while
     # its registry twin excludes them) — recorded as out of scope for
-    # #2481 (revoked-only); recovery never 402s, so no user wedge.
+    # #2481 (revoked-only) and tracked in #4550 (the RPC's over-cap branch
+    # can revoke a LIVE key as collateral for expired rows that no longer
+    # occupy a slot); the RPC never 402s.
     from tortoise.quota import _count_resource
     from tortoise.supabase_control import (
         get_control_plane,
@@ -8917,13 +9035,15 @@ async def capture_session(body: SessionRequest, request: Request, org: dict = De
     """Capture an agent session and extract turns as episodic Points.
 
     #1927: the session_recording OPT-OUT check is FIRST in the gate stack (before
-    the quota 402) so disabled orgs do no quota work at all; any
-    non-2xx failure records ``session_capture_last_error_{harness}`` (the
-    dashboard failure sub-line reads this, NOT client state) — except the #3060
-    capacity 429 and the #3129 in-flight 409, which are server conditions — and
-    2xx records
-    ``session_capture_receipt_{harness}`` (bare ``session_capture_receipt``
-    for legacy no-harness hooks).
+    the quota 402) so disabled orgs do no quota work at all. The bookkeeping
+    keys are per LANE (#3681): an AGENT credential's 2xx records
+    ``session_capture_receipt_{observed_harness}``, and its non-2xx records
+    ``session_capture_last_error_{observed_harness}`` (the dashboard failure
+    sub-line reads this, NOT client state) — except the #3060 capacity 429 and
+    the #3129 in-flight 409, which are server conditions. A session-JWT
+    (dashboard/browser) caller observes no harness: it records NO per-harness
+    last-error, and only the BARE ``session_capture_receipt`` — the same bare
+    member legacy no-harness hooks write.
     """
     _require_scope(org, "graphs:write", "capture_session")
     try:
@@ -8971,7 +9091,12 @@ async def capture_session(body: SessionRequest, request: Request, org: dict = De
                 and e.detail != _CAPTURE_SESSION_IN_FLIGHT_DETAIL):
             try:
                 _record_capture_last_error(
-                    org["org_id"], body.harness, e.detail)
+                    org["org_id"],
+                    _observed_capture_harness(
+                        org, body.harness,
+                        await _stored_session_harness(
+                            org, body.session_id)),
+                    e.detail)
             except Exception:
                 logging.getLogger("tortoise.api").exception(
                     "capture last-error state write failed (non-fatal)")
@@ -8984,7 +9109,10 @@ async def capture_session(body: SessionRequest, request: Request, org: dict = De
             "session capture failed (unexpected error)")
         try:
             _record_capture_last_error(
-                org["org_id"], body.harness,
+                org["org_id"],
+                _observed_capture_harness(
+                    org, body.harness,
+                    await _stored_session_harness(org, body.session_id)),
                 "internal capture error — see server logs")
         except Exception:
             logging.getLogger("tortoise.api").exception(
@@ -9234,10 +9362,18 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     session_row = proj.g.query(
         "OPTIONAL MATCH (s:Session {id:$sid}) "
         "RETURN count(s) AS n, s.capture_ok AS ok, "
-        "s.capture_extractor AS extractor",
+        "s.capture_extractor AS extractor, s.harness AS harness",
         params={"sid": session_id},
     ).result_set[0]
     session_existed = bool(session_row[0])
+    # #3681 (server-stamped harness): the capture's harness is resolved from
+    # the SERVER's own record — a session-JWT caller never names one (bare
+    # receipt), and an agent credential can never RELABEL an already-captured
+    # session (the stored harness wins; first-writer-wins). ``body.harness``
+    # only ever introduces a harness on a session the server has not stamped.
+    stored_harness = session_row[3]
+    capture_harness = _observed_capture_harness(org, body.harness,
+                                                stored_harness)
     # #2335 WI-2b (TRUE retry): capture_ok records whether the LAST attempt
     # SUCCEEDED. Replay (no-op) fires only when the prior capture SUCCEEDED
     # (capture_ok True). A prior FAILED capture (capture_ok False) is
@@ -9332,9 +9468,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # capture's OWN writes: no Session MERGE, no turn Points, no
         # ``capture_ok``, no receipt, and the transcript stays on the user's
         # machine, retryable verbatim. (The 402 itself still records the
-        # per-harness ``session_capture_last_error_*`` key in the wrapper, the
-        # same as every other refusal, and files an incident — neither is
-        # capture data.) Refusing anywhere later would leave ``capture_ok``
+        # per-harness ``session_capture_last_error_*`` key in the wrapper for an
+        # AGENT credential, the same as every other refusal — a session-JWT
+        # caller records no per-harness key (see ``_observed_capture_harness``)
+        # — and files an incident; neither is capture data.) Refusing anywhere
+        # later would leave ``capture_ok``
         # NULL and turn the next same-``session_id`` POST into a silent
         # zero-extract replay (the hazard ``_reserve_capture_slot`` documents).
         #
@@ -9400,9 +9538,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                    "s.turn_count=$tc", "s.is_episodic=true"]
     _merge_params = {"sid": session_id, "now": now,
                      "tc": len(body.conversation)}
-    if body.harness:
+    if capture_harness:
         _merge_sets.append("s.harness=$harness")
-        _merge_params["harness"] = body.harness
+        _merge_params["harness"] = capture_harness
     # #2600: actor stamp — set only when a server-resolved human is present
     # (org dict carries it on REST; the MCP capture tool threads the
     # middleware ContextVar into its hand-built dict at mcp_server.py).
@@ -9776,7 +9914,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 # carry a provenance field, so None normalizes to "unknown"
                 # (the Session-merge conditional can't apply: the stamp is
                 # one shared SET for all points).
-                source_harness = body.harness or "unknown"
+                source_harness = capture_harness or "unknown"
                 # W5 Phase D (#2104): the stamp gates over the MINTED ids —
                 # a dedup-folded entry (content_hash_hit/rephrase_linked)
                 # resolved to an existing node whose provenance belongs to
@@ -10084,13 +10222,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 params={"sid": session_id, "url": f"session:{session_id}"},
             )
 
-    receipt_key = _capture_receipt_key(body.harness)
+    receipt_key = _capture_receipt_key(capture_harness)
     if _session_alive():
         try:
             _update_onboarding_state(org["org_id"], **{
                 receipt_key: now,
             })
-            _record_capture_last_error(org["org_id"], body.harness, None)
+            _record_capture_last_error(org["org_id"], capture_harness, None)
         except Exception:
             import logging
             logging.getLogger("tortoise.api").exception(
@@ -10110,7 +10248,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 # reconcile self-heals).
                 try:
                     bucket_empty = _session_count_by_harness(
-                        proj, body.harness) == 0
+                        proj, capture_harness) == 0
                 except Exception:
                     bucket_empty = False
                 if bucket_empty:
@@ -10141,7 +10279,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         extraction_warnings.append(
             "session deleted during capture — capture receipt not recorded")
         _sweep_orphaned_writes()
-        _record_capture_last_error(org["org_id"], body.harness, None)
+        _record_capture_last_error(org["org_id"], capture_harness, None)
 
     # #2002 (W6): FIRST-CAPTURE trigger (epic §2 WF-5, §4 DM-1, §8 timing pin)
     # — at the user's FIRST capture the capture-disclosed NODE CHECKPOINT is
@@ -10431,7 +10569,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             "capture_observation emit failed (non-fatal)")
     return build_write_verb(
         source_session=session_id,
-        source_harness=body.harness or "unknown",
+        source_harness=capture_harness or "unknown",
         ingested_at=now,
         status=verb_status,
         error=None,
@@ -14252,9 +14390,8 @@ async def invite_info(token: str):
     if not token:
         raise HTTPException(status_code=422, detail="token required")
 
-    def _registry_invite():
+    def _registry_invite(sdk):
         from tortoise.auth import verify_api_key as _verify
-        sdk = _make_sdk(namespace="registry")
         reg = sdk._get_registry()
         rows = reg.query(
             "MATCH (i:Invitation) WHERE i.accepted_at IS NULL "
@@ -14267,47 +14404,69 @@ async def invite_info(token: str):
                         "inviter_email": ie, "expires_at": exp}
         return None
 
-    def _org_name(org_id: str) -> str | None:
-        from tortoise.supabase_control import (
-            get_control_plane,
-            is_supabase_enabled,
-            org_by_id,
-        )
-        if is_supabase_enabled():
-            t = org_by_id(get_control_plane(), org_id)
-            return (t or {}).get("name")
-        sdk = _make_sdk(namespace="registry")
-        reg = sdk._get_registry()
-        rows = reg.query(
-            "MATCH (t:Team {id:$id}) RETURN properties(t)",
-            params={"id": org_id},
-        ).result_set
-        return rows[0][0].get("name") if rows else None
-
     try:
         from tortoise.supabase_control import (
             get_control_plane,
             invitation_info_by_token,
             is_supabase_enabled,
+            org_by_id,
         )
-        inv = (invitation_info_by_token(get_control_plane(), token)
-               if is_supabase_enabled() else _registry_invite())
+        if is_supabase_enabled():
+            # #3718/#3498: BOTH control-plane reads are blocking PostgREST
+            # calls, submitted as ONE offload unit. That keeps the route's
+            # offload-failure exposure independent of whether the token
+            # matched — a matched token must not be the only case that can
+            # observe a saturated pool, since ``_cp_offload`` is fail-closed
+            # 503 and the 404 copy below is deliberately oracle-free — and it
+            # is one worker hop instead of two. The expiry gate lives inside
+            # the unit so an expired token never reaches the org read.
+            def _hosted_invite():
+                cp = get_control_plane()
+                found = invitation_info_by_token(cp, token)
+                if not found:
+                    return None
+                exp = found.get("expires_at")
+                if exp and exp < datetime.now(UTC).isoformat():
+                    return None
+                name = (org_by_id(cp, found["org_id"]) or {}).get("name")
+                return (found, name) if name else None
+
+            result = await _cp_offload(_hosted_invite, op="invite_info")
+        else:
+            # #3718: the registry scan is sync FalkorDB I/O
+            # (``_get_registry().query``), so it runs off the loop. The SDK
+            # attach is built on the loop and the closure is handed over as a
+            # callable REFERENCE — the read-half house style (``list_members``
+            # / ``list_pending_invites_for_me``). A nested def counts as
+            # on-loop only when it is INVOKED on the loop, which is what keeps
+            # the AST guard in `tests/test_read_routes_loop_responsiveness.py`
+            # satisfied here (re-inlining the call re-reports this handler).
+            _reg_sdk = _make_sdk(namespace="registry")
+            inv = await asyncio.to_thread(_registry_invite, _reg_sdk)
+            result = None
+            if inv:
+                _exp = inv.get("expires_at")
+                if not (_exp and _exp < datetime.now(UTC).isoformat()):
+                    # #3718: the org-name read is sync FalkorDB I/O too — off
+                    # the loop, the same reference style as the invite scan.
+                    _org_sdk = _make_sdk(namespace="registry")
+                    _rows = await asyncio.to_thread(
+                        lambda: _org_sdk._get_registry().query(
+                            "MATCH (t:Team {id:$id}) RETURN properties(t)",
+                            params={"id": inv["org_id"]},
+                        ).result_set)
+                    _name = _rows[0][0].get("name") if _rows else None
+                    if _name:
+                        result = (inv, _name)
     except HTTPException:
         raise
     except Exception:
         raise HTTPException(status_code=500,  # noqa: B904
                             detail="Invites unavailable (control plane error)")
 
-    if not inv:
+    if not result:
         raise HTTPException(status_code=404, detail="Invite not found or expired")
-
-    exp = inv.get("expires_at")
-    if exp and exp < datetime.now(UTC).isoformat():
-        raise HTTPException(status_code=404, detail="Invite not found or expired")
-
-    org_name = _org_name(inv["org_id"])
-    if not org_name:
-        raise HTTPException(status_code=404, detail="Invite not found or expired")
+    inv, org_name = result
 
     return {
         "org_name": org_name,
@@ -18732,7 +18891,11 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
 
     A session-authenticated user with NO valid key can mint a tt_ key here —
     no pre-existing key required. Two purposes (plan §6.2 E1):
-    - bootstrap: 24h ephemeral, cap-EXEMPT (R13), 3-active backstop (dashboard auth)
+    - bootstrap: 24h ephemeral, cap-EXEMPT (R13) — and now genuinely so:
+      the shared ``quota._count_resource("api_keys")`` count that gates the
+      standalone mint excludes ``created_via='bootstrap'`` in BOTH lanes
+      (#4140), so a bootstrap mint no longer consumes a ``max_api_keys``
+      slot on POST /v1/team/keys; 3-active backstop (dashboard auth)
     - recovery: persistent (no expiry), revocable, counts against max_api_keys;
       at cap, auto-revokes the oldest other key, then a session credential —
       a LEGACY org-scoped unowned key (created_by IS NULL — frees a real
@@ -19673,6 +19836,75 @@ def _maybe_apply_completion(org_id: str) -> bool:
         return False
 
 
+def _maybe_file_harness_connected(org_id: str) -> None:
+    """#3670: file ``harness-connected`` off a server-observed AGENT write.
+
+    The completion signal was MCP-tool-only (``mcp_server
+    ._maybe_onboarding_auto_complete``), so a REST-first / build-fork org —
+    whose only in-flow write is the wizard's ``POST /v1/points`` curl — could
+    never reach the connected screen (#3670). An AGENT-credentialed graph
+    write IS the observation the step claims: the agent's own credential was
+    used, so "your agent connected" is literally true.
+
+    Callers MUST gate on ``_credential_is_agent`` AND on the key NOT being
+    graph-bound — a session-JWT (dashboard/browser) write observes no agent
+    and must never file this (the #3670 design constraint: filing generically
+    would re-create the exact false claim lane B3 deleted, merely moved from
+    the client into the server), and a graph-bound key writing org-DEFAULT
+    graph state would be a cross-graph write (C5 #2114). Step write is
+    FWW/keyed-MERGE (replay is a no-op). Fail-open: a graph/state hiccup must
+    never fail the agent's committed write — the precedent is
+    ``mcp_server._maybe_onboarding_auto_complete``'s fail-open ``except``."""
+    try:
+        legacy_mirror = bool(
+            _get_onboarding_state(org_id).get("onboarding_complete"))
+        # review P2: own the SDK handle and close it. `_org_proj` opens a
+        # fresh SDK per call and leaks a connection otherwise (the same leak
+        # the PATCH handler documents at #1997); this runs on the hot
+        # point-write path, so it must not add a per-write leak.
+        #
+        # Open the LISTED org-graph name (the same selection
+        # `_get_onboarding_projection` reads through) and SKIP on None. This
+        # STEP WRITE must never MINT a graph name that was never observed: do
+        # NOT pre-check existence with `_graph_available` — that helper builds
+        # `_make_sdk(namespace=org_id)._get_proj()`, whose constructor runs
+        # `_ensure_indexes()` (CREATE INDEX) and so MATERIALIZES the very
+        # `org_{org_id}` this write must not create; the subsequent
+        # `_open_org_graph_sdk` then re-probes the listing it just polluted
+        # and files the step into the graph its own guard minted.
+        # `_open_org_graph_sdk` selects from `_registry_existing_graphs`,
+        # which reads `list_graphs()` off the registry projection; it can
+        # therefore materialize only the REGISTRY graph, never an org graph.
+        # None means NEITHER name is listed, or the registry probe failed.
+        # Skip, loudly — the caller's point write is never touched by this
+        # function.
+        #
+        # Scope of the no-mint claim: it covers THIS step write's own graph
+        # selection, which never constructs an org namespace. It does NOT
+        # cover the completion gate below — `_maybe_apply_completion` opens
+        # the org DEFAULT projection via `_org_proj(org_id)` (canonical
+        # `org_{org_id}`), whose constructor materializes that name by design.
+        # That is the pre-existing #3670 legacy-name gap, a separate
+        # behaviour, not a step-write mint, and out of scope here.
+        _sdk = _open_org_graph_sdk(org_id)
+        if _sdk is None:
+            _logger.warning(
+                "onboarding auto-file (harness-connected) skipped: no listed "
+                "org graph to write (org=%s, step not filed)", org_id)
+            return
+        try:
+            _os.write_completed_step(
+                _sdk._get_proj(), org_id, "harness-connected",
+                status_from_mirror=legacy_mirror)
+        finally:
+            _sdk.close()
+        _maybe_apply_completion(org_id)
+    except Exception:
+        _logger.exception(
+            "onboarding auto-file (harness-connected) failed (non-fatal, "
+            "org=%s)", org_id)
+
+
 # ── #2006 (W11): onboarding funnel telemetry ──────────────────────────
 # The emission gate is the COMPLETED_STEP edge's NEW CREATION — the
 # ``created`` flag ``onboarding.state.write_completed_step`` already returns
@@ -19906,9 +20138,14 @@ def _open_org_graph_sdk(org_id: str) -> TortoiseSDK | None:
     keepalive key and every downstream `sdk._namespace` consumer stay
     byte-identical to before this helper existed.
 
-    None means "not listed" — it does NOT mean the probe failed. Callers keep
-    their `_make_sdk(namespace=org_id)` fallback for the fail-open case
-    (graph-up-unknown), exactly as the inline construction did.
+    None means "not listed" OR "the registry probe failed" —
+    ``_registry_existing_graphs`` returns None on a probe failure, and
+    ``if not listed`` treats that the same as an empty listing, so the two
+    are NOT distinguishable here without a second probe. READ callers keep
+    their `_make_sdk(namespace=org_id)` fallback (the read must proceed and
+    raise → 'unavailable'); a WRITE caller must instead SKIP, because minting
+    a name the probe never observed is exactly the pin-4 violation this
+    helper exists to prevent.
     """
     listed = _registry_existing_graphs()
     if not listed:
@@ -20110,11 +20347,46 @@ class OnboardingStatePatchRequest(BaseModel):
 
 # #2001 (W5): PATCH-surface ownership table — which FLOW keys are rejected
 # where (per-step write-surface ownership, scope pin 7/8).
+#
+# #3681: the capture-surface evidence keys are SERVER-OWNED. A receipt
+# (``session_capture_receipt[_harness]``), a per-harness last-error, and an
+# install probe are all observations the server stamps — a client PATCH could
+# otherwise fabricate the receipt ``captureStatus.js`` reads to decide the
+# capture sentence's TENSE, producing the present-tense claim with nothing
+# filed (the same false-claim class as #3671, one key further down). Derived
+# from the canonical harness value set so a new harness cannot silently
+# re-open the surface; the bare (harness-less) receipt is the legacy
+# no-harness hooks' member AND the session-JWT (browser) lane's member — a
+# session capture proves a capture happened, not a harness.
+def _capture_server_owned_keys() -> set[str]:
+    """The DERIVATION behind ``_CAPTURE_SERVER_OWNED_KEYS`` (#3681).
+
+    Kept CALLABLE (not inlined into the constant) so the registration-table
+    derivation is testable: a test that merely compares two filters of the
+    SAME frozen table cannot distinguish derivation from coincidence — a
+    hand-listed pair would satisfy it. Re-running this over an EXTENDED
+    registration table proves a newly registered harness becomes
+    server-owned (``tests/test_onboarding_truth_surface.py``).
+
+    The install probes are DERIVED from the registration table
+    (``_ALLOWED_STATE_KEYS`` ← ``_ONBOARDING_DEFAULT_STATE``), so a harness
+    that registers an ``install_probe_{h}`` key is server-owned the moment it
+    is registered — a literal pair would silently re-open a client-writable
+    evidence key for the next harness (review P2)."""
+    return {
+        "session_capture_receipt",
+        *{f"session_capture_receipt_{h}" for h in _SESSION_HARNESS_VALUES},
+        *{f"session_capture_last_error_{h}" for h in _SESSION_HARNESS_VALUES},
+        *{k for k in _ALLOWED_STATE_KEYS if k.startswith("install_probe_")},
+    }
+
+
+_CAPTURE_SERVER_OWNED_KEYS = _capture_server_owned_keys()
 _PATCH_SERVER_OWNED_KEYS = {
     "fork", "compact", "status", "version",
     "completed_steps", "member_progress", "last_decide_attempt",
     "fork_unsure_at",
-}
+} | _CAPTURE_SERVER_OWNED_KEYS
 _PATCH_REJECTED_STEP_FIELDS = {
     "harness_connected", "first_points_filed", "decide_completed",
     "capture_disclosed", "org_named",
@@ -20327,6 +20599,17 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
 # Per-step write-surface ownership (scope pin 8): the PATCH surface accepts
 # operational keys + catalog-presented (no dashboard path has sent the latter
 # since #3913); agents checkpoint everything else.
+#
+# #3671: the steps a SESSION JWT (dashboard/browser) may checkpoint. A NAMED
+# allowlist — not "everything except the server-observed set" — so a future
+# step added to _CHECKPOINT_STEPS defaults to agent-only (fail-closed).
+#
+# It is EMPTY: no dashboard path has sent a STEP since the #3913 owner ruling
+# (2026-09-20), and every ``step`` write now requires an agent credential —
+# the fail-closed default this surface exists to establish. The mechanism
+# stays (a future exemption, if one is ever decided, is declared HERE and
+# nowhere else; the predicate below reads the allowlist, never the reverse).
+_DASHBOARD_WRITABLE_STEPS: frozenset[str] = frozenset()
 _CHECKPOINT_STEPS: frozenset[str] = frozenset({
     "harness-connected",      # W2: harness connected
     "first-points-filed",     # W3: org-anchor Subject filed (seed)
@@ -20365,6 +20648,11 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
     - step ∈ {harness-connected, first-points-filed, decide-completed,
       capture-disclosed, catalog-presented} — keyed-MERGE, first-write-wins
       (replay → noop), unknown step → 422.
+      #3671: EVERY step write requires an AGENT credential — a session-JWT
+      step write is refused 403 ``agent_credential_required`` (no dashboard
+      path has sent a step since the #3913 owner ruling; see
+      ``_DASHBOARD_WRITABLE_STEPS``); the non-step FLOW ops below keep the
+      dual-auth lane.
     - fork/compact → set-once (first write wins; same-value replay 200;
       changed → 409).
     - fork_unsure_at (true) → #2407 "not sure yet — decide later": records
@@ -20405,6 +20693,25 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
         raise HTTPException(
             status_code=403,
             detail={"message": "server_owned_key", "keys": ["status"]})
+    # #3671 (assertion ≠ observation): a SERVER-OBSERVED step is a fact only
+    # the server can witness (an agent connected / filed / decided / was
+    # disclosed). A session JWT is the dashboard/browser lane — it observes
+    # no agent, so asserting one of those from it is exactly the false claim
+    # lane B3 deleted, merely moved from the client into the server. Only an
+    # AGENT credential (tt_/tk_ key, MCP/OAuth) may write them; a session
+    # write is REFUSED loudly (403) rather than silently accepted.
+    #
+    # ``_DASHBOARD_WRITABLE_STEPS`` is empty, so the gate covers EVERY step —
+    # ``catalog-presented`` included. Non-step FLOW ops
+    # (fork/compact/member_progress/fork_unsure_at) keep their existing lanes
+    # — the dashboard legitimately records the human's fork answer.
+    if (body.step is not None
+            and body.step not in _DASHBOARD_WRITABLE_STEPS
+            and not _credential_is_agent(org)):
+        raise HTTPException(
+            status_code=403,
+            detail={"message": "agent_credential_required",
+                    "step": body.step})
     if not _graph_available(org_id):
         raise HTTPException(status_code=503,
                             detail="Onboarding graph unavailable — retry later")
@@ -24477,10 +24784,19 @@ def _backup_config_safe() -> BackupConfig | None:  # noqa: F821
     return cfg if cfg.enabled else None
 
 
-def _alert_store_from(cfg) -> AlertStore:  # noqa: F821
+def _alert_store_from(cfg, writer: str | None = None) -> AlertStore:  # noqa: F821
+    """Build the store. `writer` is the identity its resolves act as.
+
+    Defaults to the app (this factory is the app's), so the declared owner in
+    KIND_OWNERS actually declares itself — otherwise the authority check is
+    short-circuited for the whole app path and the map is inert. The watcher
+    passes WRITER_WATCHER explicitly at its construction site.
+    """
     from tortoise import github_issue as gi
-    from tortoise.alert_store import AlertStore
+    from tortoise.alert_store import WRITER_APP, AlertStore
     from tortoise.telegram_push import send_message
+
+    writer = WRITER_APP if writer is None else writer
 
     storage = _backup_storage()
 
@@ -24500,9 +24816,13 @@ def _alert_store_from(cfg) -> AlertStore:  # noqa: F821
     def push_telegram(text: str) -> None:
         send_message(cfg.telegram_bot_token, cfg.telegram_chat_id, text)
 
+    def issue_open(number: int) -> bool:
+        return gi.issue_is_open_checked(cfg.gh_repo, cfg.github_issues_pat, number)
+
     return AlertStore(
         storage, file_issue=file_issue, close_issue=close_issue,
         search_open=search_open, push_telegram=push_telegram,
+        issue_open=issue_open, default_writer=writer,
         repo=cfg.gh_repo, assignee=cfg.alert_assignee,
     )
 

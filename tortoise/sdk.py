@@ -3375,9 +3375,14 @@ class TortoiseSDK:
     ) -> dict:
         """Capture an agent session into the graph (#312 delta 4, #822).
 
-        Mirrors the hosted POST /v1/sessions logic minus quota/auth:
-        turns become episodic Points keyed {session_id}_t{i} (deterministic +
-        idempotent), the M2 LLM extractor (epic #909) turns the conversation
+        Mirrors the hosted POST /v1/sessions logic minus quota/auth. The
+        hosted lane resolves the capture harness from the server's own record
+        (#3681's ``_observed_capture_harness``); this SDK path stores the
+        caller-supplied ``harness`` (selfhost/embedded has no server
+        credential lane to resolve it from). See the note at the
+        ``if harness:`` clause below. Turns become episodic Points keyed
+        {session_id}_t{i} (deterministic + idempotent), the M2 LLM extractor
+        (epic #909) turns the conversation
         into epistemic Points (+ IMPL/NAND operators — provenance-grounded,
         extracted via the EventAPI projection), plus a :Session node and an
         ontology-compliant :Event {eventKind:'sessionCaptured'} whose
@@ -3499,6 +3504,11 @@ class TortoiseSDK:
         # #1727 Slice 2 (Task 11): harness is set set-only-when-present (None
         # NEVER erases a stored value) — the conditional clause keeps the
         # query valid in both embedded and Docker lanes (no unused binding).
+        # NOT hosted parity (#3681): the hosted lane resolves the harness from
+        # the server's own record (``_observed_capture_harness``) so a re-POST
+        # of an existing session_id cannot RELABEL it; this SDK path still
+        # writes the caller-supplied value (selfhost/embedded has no server
+        # credential lane). Do not read the clause below as a parity pin.
         # Review PR #1827 (parity with hosted_api.py): created_at uses
         # coalesce so an idempotent re-POST preserves the ORIGINAL capture
         # time.
@@ -7910,9 +7920,31 @@ class TortoiseSDK:
         hash present. A hash-less point arises from a partial ``create_point``
         write (a crash between the node CREATE and the props SET) or a graph
         written before #2795 D2 — NOT from a rebuild: #2795 D2 recomputes the
-        hash on replay, so a rebuilt graph keeps its hashes. Order pin: hash
-        query first, fallback only on the miss — the hash-present path is
-        unchanged."""
+        hash on replay, so a rebuilt graph keeps its hashes.
+
+        The fallback is gated on the WRITER's own hash-first condition (see
+        the query below): it runs only when the UNFILTERED
+        ``content_hash + kind`` lookup is EMPTY, because that is the only
+        state in which ``create_point`` / ``_find_point_by_content`` ever
+        reach their A10 fallback — a hash-present sibling is what the writer
+        resolves to, so a hash-less sibling must not be consulted. Running it
+        on the terminal-filtered miss alone would falsely reject a bundle
+        whose ref the writer dedups onto a LIVE hash-present sibling. When
+        several hash-LESS duplicates share the content+kind the write path's
+        own pick among them is unspecified (its A10 fallback carries no
+        ORDER BY), so the guard is deliberately conservative and rejects if
+        ANY candidate is terminal — over-rejecting an ambiguous duplicate pair
+        is the safe direction.
+
+        Residual gap (pre-existing, tracked in #3142): the terminal filter is
+        ``status IN $terminal AND coalesce(outdated,false) = false``, so a
+        point superseded through ``supersede_point`` (which stamps BOTH
+        ``status='superseded'`` and ``outdated=true``) is not matched — the
+        guard never fired for canonically-superseded points even with the
+        hash present, and Phase-2 ``_check_endpoint_race`` is what catches
+        them. Aligning the filter with that check (``status IN $terminal OR
+        outdated = true``) is follow-up #3142, deliberately out of this
+        fix's scope."""
         proj = self._get_proj()
         terminal = sorted(self._INGEST_TERMINAL_STATUSES)
         base_clauses, base_params = self._dedup_match_clauses(point_kind=kind)
@@ -7926,23 +7958,39 @@ class TortoiseSDK:
                     "terminal": terminal},
         ).result_set
         if not rows:
-            # #2971 A10 CONTENT+KIND FALLBACK SCAN: a partial create_point
-            # write (crash between the node CREATE and the props SET) or a
-            # graph written before #2795 D2 leaves the terminal point
-            # hash-less — without this scan the cycle-17/18 guard cannot see
-            # it. (#2795 D2 now recomputes the hash on replay, so a rebuild no
-            # longer produces this state.)
-            fallback_clauses, fallback_params = self._dedup_match_clauses(
-                point_kind=kind,
-                extra_clauses=("n.content_hash IS NULL",
-                               "n.content = $content"))
-            fallback_clauses = [*fallback_clauses, *status_clauses]
-            rows = proj.g.query(
-                "MATCH (n:Point) WHERE "
-                f"{' AND '.join(fallback_clauses)} RETURN n.id LIMIT 1",
-                params={**fallback_params, "content": content,
-                        "terminal": terminal},
+            # #2971 A10 CONTENT+KIND FALLBACK SCAN, gated on the WRITER's own
+            # hash-first ordering: `create_point` / `_find_point_by_content`
+            # reach their A10 fallback ONLY when the UNFILTERED
+            # content_hash+kind lookup finds NOTHING — a hash-present sibling
+            # (live or terminal) means the writer resolves there and never
+            # consults a hash-less point. Running this fallback on the
+            # terminal-filtered miss alone would falsely reject a bundle whose
+            # edge legally lands on a LIVE hash-present duplicate (review of
+            # #2971 caught it). `any_hash` mirrors the writer's hash query
+            # exactly: the same shared clauses, no status scoping.
+            any_hash = proj.g.query(
+                "MATCH (n:Point {content_hash:$ch}) WHERE "
+                f"{' AND '.join(base_clauses)} RETURN n.id LIMIT 1",
+                params={**base_params, "ch": _content_hash(content)},
             ).result_set
+            if not any_hash:
+                # A partial create_point write (crash between the node CREATE
+                # and the props SET) or a graph written before #2795 D2
+                # leaves the terminal point hash-less — without this scan the
+                # cycle-17/18 guard cannot see it. (#2795 D2 now recomputes
+                # the hash on replay, so a rebuild no longer produces this
+                # state.)
+                fallback_clauses, fallback_params = self._dedup_match_clauses(
+                    point_kind=kind,
+                    extra_clauses=("n.content_hash IS NULL",
+                                   "n.content = $content"))
+                fallback_clauses = [*fallback_clauses, *status_clauses]
+                rows = proj.g.query(
+                    "MATCH (n:Point) WHERE "
+                    f"{' AND '.join(fallback_clauses)} RETURN n.id LIMIT 1",
+                    params={**fallback_params, "content": content,
+                            "terminal": terminal},
+                ).result_set
         return rows[0][0] if rows else None
 
     def _check_endpoints(self, bundle: dict, violations: list[dict]) -> None:

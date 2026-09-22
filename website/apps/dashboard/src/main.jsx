@@ -22,6 +22,11 @@ import { overviewConnection, overviewDigest, overviewNextAction } from './overvi
 // can RENDER the live action (react-dom/server) and execute the handler
 // instead of grepping source text.
 import { OverviewEmptyActions, resolveSectionHash, focusDeepLinkTarget } from './overviewEmptyAction.js'
+// #3729: the member empty-state key note — the key requirement stated as
+// CONDITIONAL plus the chooser-reachable key-less route, extracted as a
+// createElement component so the suite RENDERS it (react-dom/server) instead
+// of grepping the two inline strings (onboardingEmptyStateKeyNote.test.js).
+import { MemberEmptyStateKeyNote } from './onboardingEmptyStateKeyNote.js'
 // #1997 (W1): the 4 human onboarding steps — pure structure + copy + fork
 // options + org-name validation, node --test unit-tested (wizardFlow.test.js).
 import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError, durableKeyName, wizardStageLabel } from './wizardFlow.js'
@@ -6632,6 +6637,9 @@ function claimIntentInFlight() {
   // When it shows, the legacy empty-state cards hide.
   const showReentryCard = !welcomeMode && !onboardingComplete &&
     team && (team.point_count ?? 0) === 0 && !wizardDone
+  // The build-fork re-entry lead-in is used by BOTH re-entry arms (existing-key
+  // and no-key) — one literal, so they cannot drift.
+  const REENTRY_BUILD_LEAD_IN = 'Your Organization is live — finish the setup below. '
   // #1831 P2-1 / #2246: the wizard's setup commands embed the user's key —
   // never emit `Bearer ` with an empty key; fall back to a create-a-key
   // message instead (see the wizard step-0 render below).
@@ -8609,10 +8617,14 @@ function claimIntentInFlight() {
               {snippetKey || connectGate.mode === 'existing'
                 ? (isOwnerAdmin
                     ? "Your Organization's API key is live — finish the setup below to connect your agent (the setup step shows a fresh key, or you can use an existing one)."
-                    : "You're in — finish the setup below to connect your agent (paste the key an owner or admin shared with you).")
+                    : <>{isBuildFork
+                        ? REENTRY_BUILD_LEAD_IN
+                        : "You're in — finish the setup below to connect your agent. "}<MemberEmptyStateKeyNote variant="reentry" buildFork={isBuildFork} /></>)
                 : (isOwnerAdmin
                     ? "Your Organization is live — finish the setup below to connect your agent. No API key yet? One is created on the connect step when you get there."
-                    : "Your Organization is live — finish the setup below to connect your agent. You'll need an API key: ask an owner or admin to share one, then paste it on the connect step.")}
+                    : <>{isBuildFork
+                        ? REENTRY_BUILD_LEAD_IN
+                        : 'Your Organization is live — finish the setup below to connect your agent. '}<MemberEmptyStateKeyNote variant="reentry" buildFork={isBuildFork} /></>)}
             </p>
             <div className="empty-actions">
               <button className="btn-primary" onClick={() => { setWizardPaused(false); onboardingRefreshedAtDoneRef.current = false; setWizardStep(0); setWelcomeMode(true) }}>
@@ -8668,7 +8680,9 @@ function claimIntentInFlight() {
                   ? (connectGate.mode === 'existing'
                       ? "Your Organization's API keys are live — connect your agent below (the setup step can mint up to your plan's key limit, or use an existing one)."
                       : 'Your Organization is live — connect your agent below (its key is created on the connect step, or in the API Keys tab).')
-                  : "Your Organization is live — connect your agent below. You'll need an API key to paste: ask an owner or admin to share one."}
+                  : <>{isBuildFork
+                      ? 'Your Organization is live. '
+                      : 'Your Organization is live — connect your agent below. '}<MemberEmptyStateKeyNote variant="graph-missing" buildFork={isBuildFork} /></>}
               </p>
             )}
             <div className="empty-actions">
@@ -8826,12 +8840,24 @@ function claimIntentInFlight() {
                     {team.dashboard_key_login !== false && <span style={{ color: 'var(--accent,#06b6d4)' }}>(recommended: disable)</span>}
                     {team.dashboard_key_login === false && <span style={{ color: 'var(--green,#4ade80)' }}>disabled ✓</span>}
                   </h4>
-                  <p>
-                    We recommend disabling your API key as a dashboard sign-in
-                    method. The key stays valid for graph operations — managing
-                    keys, restoring backups, and billing will require your
-                    GitHub/Google sign-in instead.
-                  </p>
+                  {/* #3136: the recommendation is ADVISORY — it renders
+                      only while the setting is ON (the agent-signup cohort
+                      that still signs in with a key). The OFF state renders
+                      the consequence line instead, never a stale nag. */}
+                  {team.dashboard_key_login !== false && (
+                    <p>
+                      We recommend disabling your API key as a dashboard sign-in
+                      method. The key stays valid for graph operations — managing
+                      keys, restoring backups, and billing will require your
+                      GitHub/Google sign-in instead.
+                    </p>
+                  )}
+                  {team.dashboard_key_login === false && (
+                    <p>
+                      Your API key can no longer sign in to this dashboard. It
+                      still works for graph operations (SDK, CLI, MCP).
+                    </p>
+                  )}
                   {toggleError && <p className="error" role="alert">{toggleError}</p>}
                 </div>
               </div>
