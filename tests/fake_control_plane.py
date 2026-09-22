@@ -846,6 +846,14 @@ class FakeControlPlane:
             return [row]
         if method == "DELETE":
             # PostgREST row-delete semantics (used by the #302 purge).
+            #
+            # Validate every filter op BEFORE the scan: _matches only reaches
+            # its unsupported-op guard while it still has a row to test, so an
+            # EMPTY table, or an earlier filter that fails first, would skip it
+            # — an op the fake cannot model must raise for DELETE too (#2642
+            # re-review P2). Scoped to THIS branch on purpose: POST never reads
+            # ``filters`` (see _validate_filter_ops).
+            _validate_filter_ops(filters)
             self.tables[table] = [
                 r for r in self.tables.get(table, []) if not _matches(r, filters or [])
             ]
@@ -917,13 +925,20 @@ _SUPPORTED_FILTER_OPS = frozenset({"eq", "neq", "is", "gt", "gte", "lt", "lte"})
 def _validate_filter_ops(filters: list[tuple[str, str, object]] | None) -> None:
     """Raise ValueError for a filter op the fake does not implement.
 
+    The fake's unsupported-op guard covers every method that APPLIES filters —
+    GET (in its own inline loop below), PATCH and DELETE (via this function) —
+    regardless of body, row count, or whether an earlier filter short-circuits
+    the scan.
+
+    POST is deliberately excluded: it does not read ``filters`` (it inserts the
+    body), so validating a POST filter list would newly reject a query whose
+    filters the fake — like the real client — never applies.
+
     ``_matches`` raises the same error, but only while scanning rows and only
-    for the filters it actually reaches — so a bodyless PATCH (which scans no
-    rows), or an empty table, or a filter list where an earlier predicate
-    short-circuits, would skip the guard. The guard must hold UNIVERSALLY: an
-    op the fake cannot model must raise regardless of body or row count, or a
-    test can pass against a query production would answer differently
-    (#3665 / #2642 re-review P2).
+    for the filters it actually reaches, so a bodyless PATCH (which scans no
+    rows), an empty table, or a filter list whose earlier predicate fails first
+    would otherwise skip it — and a test could then pass against a query
+    production would answer differently (#3665 / #2642 re-review P2).
     """
     for _col, op, _value in filters or []:
         if op not in _SUPPORTED_FILTER_OPS:
@@ -954,7 +969,10 @@ def _matches(row: dict, filters: list[tuple[str, str, object]]) -> bool:
             # match on the remaining filters — i.e. the fake mutates MORE rows
             # than the real client would, and a test can pass against
             # behaviour production does not have. The GET path above already
-            # raises for an unsupported op; this mirrors it.
+            # raises for an unsupported op; this mirrors it. PATCH and DELETE
+            # additionally pre-validate via ``_validate_filter_ops`` (so the
+            # guard holds even when there is no row to scan) — this raise is
+            # their row-scan backstop, not their only line of defence.
             raise ValueError(f"unsupported filter op {op!r}")
     return True
 
