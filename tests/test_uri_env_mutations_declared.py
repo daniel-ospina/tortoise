@@ -107,6 +107,7 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_battery_lane_matrix.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # hermetic env-strip test (fixture-param monkeypatch — auto-undo)
     "test_body_cap_sweep.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # #2032: embedded lane via delenv (the test_billing pattern — registry-lane determinism for register/agent mints)
     "test_bridge_mcp.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],
+    "test_selfhost_health_probe_executor.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],  # #3331: the probe-lane behavioural tests force the EMBEDDED lane (setenv "" IS the point — the selfhost health handlers are driven without a live server; the fixture-param monkeypatch auto-restores, no lane leak)
     "test_chain_enforcer.py": [r'monkeypatch\.delenv\("TORTOISE_DB_URI"'],
     "test_github_index_lifecycle.py": [r'monkeypatch\.delenv\("TORTOISE_DB_URI"',
                                         r'monkeypatch\.setenv\("TORTOISE_DB_URI",\s*"docker:'],
@@ -167,6 +168,11 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # expansion pattern; the monkeypatch.setenv is auto-restored).
     "test_coverage_loop.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    # C4 #2517: docker-lane source-session re-injection tests — module-level
+    # live probe (set + restore) + per-test fresh-graph fixture (the
+    # test_coverage_loop pattern; the monkeypatch.setenv auto-restores).
+    "test_session_reinjection.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
+                                     r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     "test_ep_directional.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     "test_event_provenance.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
@@ -181,6 +187,10 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # ── DELIBERATE_URI: fixtures/tests that force the docker lane directly ──
     "test_consolidation_4way.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     "test_doctor.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    # #3039: the ACL admin-client decode pin forces a docker:// URI so
+    # `_admin_client` takes the redis path; redis.Redis is stubbed, never
+    # connects. The setenv IS the test input (deliberate docker lane).
+    "test_from_uri_userinfo.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     "test_namespace_uri_mode.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                      r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
                                      r'monkeypatch\.setenv\(\s*$'],
