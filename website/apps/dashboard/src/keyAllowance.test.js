@@ -123,7 +123,8 @@ test('#2699: the numbered create notice offers the achievable remedy, never rege
   // The enforced number the user needs stays stated.
   assert.match(up, /limit of 2 API keys/, up)
   // The remedy that works AT the cap: revoke frees a slot
-  // (quota._count_resource('api_keys') counts only non-revoked, non-expired rows).
+  // (quota._count_resource('api_keys') counts only non-revoked, non-expired,
+  // non-bootstrap rows — #4140).
   assert.match(up, /Revoke an existing key to free a slot/, up)
   // The dead end is gone — the RED direction (fails against the pre-#2699 string).
   assert.doesNotMatch(up, /regenerate/i, up)
@@ -205,7 +206,7 @@ test('#3874: the pre-cap allowance equals the at-cap refusal for the same org', 
 
 // ── 6. Usage mirrors the mint gate's predicate ───────────────────────────
 
-test('#3874: used-slot count mirrors quota._count_resource (non-revoked, non-expired)', () => {
+test('#3874: used-slot count mirrors quota._count_resource (non-revoked, non-expired, non-bootstrap)', () => {
   const now = Date.parse('2026-09-18T00:00:00Z')
   const iso = (ms) => new Date(now + ms).toISOString()
   const rows = [
@@ -214,11 +215,67 @@ test('#3874: used-slot count mirrors quota._count_resource (non-revoked, non-exp
     { id: 'future', expires_at: iso(86400000) },           // counts
     { id: 'expired', expires_at: iso(-86400000) },         // excluded (#2426)
     { id: 'revoked', revoked_at: iso(-1000) },             // excluded (#2481)
-    { id: 'bootstrap-live', created_via: 'bootstrap' },    // counts (gate predicate)
+    { id: 'bootstrap-live', created_via: 'bootstrap' },    // excluded (#4140/R13)
   ]
-  assert.equal(usedKeySlots(rows, now), 4)
+  assert.equal(usedKeySlots(rows, now), 3)
   const a = keyAllowance({ max_api_keys: 6 }, rows, now)
-  assert.deepEqual(a, { limit: 6, used: 4, remaining: 2, exhausted: false })
+  assert.deepEqual(a, { limit: 6, used: 3, remaining: 3, exhausted: false })
+})
+
+// ── 6b. #4140: bootstrap session credentials are cap-EXEMPT ───────────────
+// The R13 rule: `max_api_keys` counts the keys a user can manage. A 24h
+// bootstrap session credential is cap-EXEMPT in the server count
+// (quota._count_resource, BOTH lanes), so the display must exclude it too or
+// the pre-cap line and the #4353 at-cap notices over-state usage against a
+// gate that would allow the mint.
+
+test('#4140: a live, expiring, or unparseable bootstrap row never holds a slot', () => {
+  const now = Date.parse('2026-09-18T00:00:00Z')
+  const rows = [
+    { id: 'boot-live', created_via: 'bootstrap' },
+    { id: 'boot-future', created_via: 'bootstrap', expires_at: new Date(now + 86400000).toISOString() },
+    { id: 'boot-past', created_via: 'bootstrap', expires_at: new Date(now - 86400000).toISOString() },
+    // The order-of-checks case: bootstrap is excluded regardless of a junk
+    // expiry, so the conservative "unparseable ⇒ counts" rule must not win.
+    { id: 'boot-junk', created_via: 'bootstrap', expires_at: 'not-a-date' },
+    { id: 'durable', created_via: 'provisioned' },
+  ]
+  assert.equal(usedKeySlots(rows, now), 1, 'only the durable row holds a slot')
+  assert.deepEqual(keyAllowance({ max_api_keys: 2 }, rows, now),
+    { limit: 2, used: 1, remaining: 1, exhausted: false })
+})
+
+test('#4140: a NULL/legacy created_via is durable and still holds a slot (fail-closed)', () => {
+  // The over-exemption direction the cap must never take: a legacy row with
+  // no created_via is NOT a bootstrap session credential.
+  const now = Date.parse('2026-09-18T00:00:00Z')
+  const rows = [
+    { id: 'legacy' },                                   // NULL created_via → counts
+    { id: 'legacy-empty', created_via: '' },            // not the literal → counts
+    { id: 'boot', created_via: 'bootstrap' },           // exempt
+  ]
+  assert.equal(usedKeySlots(rows, now), 2)
+})
+
+test('#4140: revoked_at parity — any non-null value is revoked (server IS NULL)', () => {
+  // The mirror must match the server's `revoked_at IS NULL`, not JS truthiness:
+  // an anomalous '' or 0 is a non-null revoked_at the gate already excludes.
+  const now = Date.parse('2026-09-18T00:00:00Z')
+  assert.equal(usedKeySlots(
+    [{ id: 'empty', revoked_at: '' }, { id: 'zero', revoked_at: 0 }], now), 0)
+  assert.equal(usedKeySlots([{ id: 'live', revoked_at: null }], now), 1)
+})
+
+test('#4140: the allowance arithmetic matches the server gate at the boundary', () => {
+  // With max = N, N-1 counted rows allow a mint; N counted rows exhaust. The
+  // same fixture arithmetic the Python count tests pin (golden agreement).
+  const now = Date.parse('2026-09-18T00:00:00Z')
+  const boot = { id: 'boot', created_via: 'bootstrap' }
+  const durable = (id) => ({ id, created_via: 'provisioned' })
+  const before = keyAllowance({ max_api_keys: 2 }, [boot, durable('d1')], now)
+  assert.deepEqual(before, { limit: 2, used: 1, remaining: 1, exhausted: false })
+  const at = keyAllowance({ max_api_keys: 2 }, [boot, durable('d1'), durable('d2')], now)
+  assert.deepEqual(at, { limit: 2, used: 2, remaining: 0, exhausted: true })
 })
 
 test('#3874: an over-cap legacy org clamps remaining at zero (never negative)', () => {
