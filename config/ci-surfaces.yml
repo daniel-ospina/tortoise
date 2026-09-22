@@ -399,6 +399,7 @@ surfaces:
   - test_capture_cost_measurement.py
   - test_capture_entity_attachment_3664.py
   - test_ci_expected_manifests.py
+  - test_ci_guard_invocation.py
   - test_client_cli_probe.py
   # #3677: dual-registered with `api` for the same reason as test_boot_regressions.py
   # above. `api` is the arm that actually fires on a tortoise/hosted_api.py-only change;
@@ -1712,6 +1713,18 @@ durations:
   # measurement of the current file, and its direction is not asserted either
   # way. Refresh from the first post-merge main run that includes it.
   test_ci_expected_manifests.py: 0.157
+  # #4494: first cut, and the REASONING is the provenance because this file has
+  # never run in CI. The closest analogue is the entry above: a subprocess-driven
+  # file whose CI wall time was 0.157s (1 `_run_guard` definition + 2 call sites).
+  # This file has 6 test functions and records 8 interpreter invocations in a
+  # fresh run, so 0.4 is that measurement scaled by work done. Local call times
+  # (3.5-6.7s at host load 15-197) are NOT used: they measure this box, not a
+  # runner. Refresh from the first post-merge main run that includes it (#3400).
+  # The entry also matters for COVERAGE HEADROOM, not just balance: registering a
+  # file without one took the fast pool from 0.9022 (583 files, 57 unmeasured) to
+  # 0.9007 (584, 58) against the 0.90 floor, leaving 0.4 files of margin; with
+  # this entry it is 0.9024 (1.4 files). See #4348 for the `--register` gap.
+  test_ci_guard_invocation.py: 0.4
   bench/test_bench_core.py: 0.1
   eval/harness/test_harness_corpus.py: 0.1
   eval/write_path/test_write_path_grading.py: 0.1
