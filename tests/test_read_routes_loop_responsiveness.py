@@ -434,6 +434,12 @@ _OFFLOAD_BOUNDARY_CALLEES = frozenset({
 #: and the ``_graph_has_org_namespace`` probe handed to ``to_thread`` by
 #: reference — but its later onboarding WRITES still run through sync helpers
 #: the scan cannot see; those are part of the residual, not covered by this set.
+#: ⚠️ The same caveat is why ``_run_indexing`` is NOT here: it genuinely
+#: off-loads three calls, but its dominant graph work (``indexer.index_repo``'s
+#: projection walk) is one level down in another module's method and the two
+#: ``_update_onboarding_state`` writes are sync helpers — neither is a seam the
+#: scan sees, so membership here was a VACUOUS pass (round-4 review). It is
+#: declared in ``_KNOWN_INLINE_HELPER_RESIDUAL`` under #4709 instead.
 _OFFLOADED_ASYNC_BODIES = frozenset({
     "list_points", "get_point", "org_info", "list_sessions",
     "get_session_detail", "dream_health",
@@ -453,7 +459,7 @@ _OFFLOADED_ASYNC_BODIES = frozenset({
     # whose check-then-act had to stay atomic — is a single hand-off too.
     # Behavioural coverage for the lane lives in
     # ``tests/test_dataplane_lane_loop_responsiveness.py``.
-    "_lifespan", "_run_indexing", "public_demo",
+    "_lifespan", "public_demo",
     "commit_session", "delete_session",
     "backups_create", "backups_restore", "backups_sweep",
     "backups_purge", "backups_rebaseline", "backups_drill",
@@ -475,9 +481,19 @@ _KNOWN_INLINE_ROUTE_RESIDUAL = frozenset({
 #: Non-route async bodies with inline sync FalkorDB I/O — the per-request auth
 #: dependency `get_current_org` (6 sites, the single highest-traffic one), the
 #: membership/owner gates, the capture path (`_capture_session_impl`) and the
-#: registry/backup helpers. (The lifecycle helpers `_lifespan`/`_run_indexing`
-#: were the other two members until #3718 residual 3 off-loaded them.) Same
-#: declared residual; same burn-down. Scanned rather than ignored because a
+#: registry/backup helpers. `_lifespan` was a member until #3718 residual 3
+#: off-loaded its `_control_plane_source` resolve.
+#:
+#: `_run_indexing` is here (not in `_OFFLOADED_ASYNC_BODIES`) because its
+#: dominant graph work is helper-mediated and therefore INVISIBLE to the scan:
+#: `indexer.index_repo` (a method in another module — its own `_get_proj()`
+#: attach + a synchronous per-item projection loop) and two
+#: `_update_onboarding_state` writes. Round-4 review found the name was a
+#: vacuous off-load declaration; it is tracked under #4709. The three calls it
+#: DOES off-load (`_make_sdk`, `backfill_legacy_closed`,
+#: `_relink_sessions_after_index`) remain on a worker.
+#:
+#: Same declared residual; same burn-down. Scanned rather than ignored because a
 #: dependency body is still ON the loop.
 _KNOWN_INLINE_HELPER_RESIDUAL = frozenset({
     "get_current_org", "_capture_session_impl", "_user_memberships",
@@ -487,6 +503,7 @@ _KNOWN_INLINE_HELPER_RESIDUAL = frozenset({
     "_rollback_restore_name_race", "_trash_name_conflict",
     "_require_owner_admin", "_require_owner", "_registry_mismatch_accept_v2",
     "_registry_accept_by_id", "_quarantine_import",
+    "_run_indexing",
 })
 
 

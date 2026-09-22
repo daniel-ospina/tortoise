@@ -11142,19 +11142,21 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     #
     # ⚠️ ONE HAND-OFF IS NOT MUTUAL EXCLUSION (the same lesson `public_demo`
     # carries): `asyncio.to_thread` submits to the loop's SHARED pool, so two
-    # concurrent POSTs with the SAME `client_commit_id` run this closure in two
-    # threads. The pre-#3718 inline sequence was accidentally atomic — the
-    # single-threaded loop serialized the record read against the write phase.
+    # concurrent POSTs run this closure in two threads. The pre-#3718 inline
+    # sequence was accidentally atomic — the single-threaded loop serialized
+    # the record read against the write phase.
     # The hand-off removes that accident, so the check-then-act takes an
-    # explicit per-`(org, client_commit_id)` lock (`_commit_serialization`,
-    # the `_org_restore_lock` pattern). Round-3 review reproduced the double
-    # apply with a two-party barrier: without the lock BOTH requests enter the
-    # write phase, both return `duplicate:false`, and the Session counters are
-    # written twice (`commit_count +1` twice, `value_nodes_created +$created`
-    # twice) while `_record_write_op` bills 2 write-ops for one payload. The
-    # lock is WHY the loser observes a `fully_written` record at [2] instead of
-    # a `partial` one mid-write.
-    def _commit_sync() -> dict:
+    # explicit per-GRAPH lock (`_acquire_commit_lock` / `_release_commit_lock`,
+    # owned by the WORKER thread so a cancelled caller cannot release it while
+    # the write is still running). Round-3 review reproduced the double apply
+    # with a two-party barrier: without the lock BOTH requests enter the write
+    # phase, both return `duplicate:false`, and the Session counters are written
+    # twice (`commit_count +1` twice, `value_nodes_created +$created` twice)
+    # while `_record_write_op` bills 2 write-ops for one payload. The lock is
+    # WHY the loser observes a `fully_written` record at [2] instead of a
+    # `partial` one mid-write. Round-4 review widened the key and moved the
+    # acquisition here and corrected the commentary above (see `_COMMIT_LOCKS`).
+    def _commit_region() -> dict:
         proj = sdk._get_proj()
         store = CommitRecordStore(sdk)
 
@@ -11176,8 +11178,9 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         # duplicate (if fully_written) or completes the remainder (held|partial).
         # The MERGE only makes the WRITE atomic — it does not make the loser
         # WAIT, and a `partial` record (the winner is mid-write) plans as
-        # `duplicate=False`, so the region needs the `_commit_serialization`
-        # lock held around it (#3718 round-3 review).
+        # `duplicate=False`, so the region needs the per-graph commit lock
+        # held around it (`_acquire_commit_lock`; #3718 round-3 review,
+        # round-4 widened key).
         rec, created = store.acquire(
             payload.client_commit_id, session_id=payload.session_id,
             status="partial", write_ops_billed=0)
@@ -11268,8 +11271,26 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
             warn=plan.budget.warn,
             warnings=warnings,
         )
-    async with _commit_serialization(org["org_id"], payload.client_commit_id):
-        return await asyncio.to_thread(_commit_sync)
+
+    def _commit_sync() -> dict:
+        # The lock is taken HERE, on the worker thread, and held across the
+        # whole read → plan → write → stamp region. Two things this ordering
+        # buys that a loop-side `async with` around the hand-off could not:
+        # (1) the second commit's `_load_commit_graph_state` runs only after
+        # the first finished writing, so its plan cannot be billed against a
+        # pre-write snapshot; (2) `asyncio.to_thread` work is not cancellable,
+        # so a cancelled caller cannot release the lock while this thread is
+        # still writing (see `_COMMIT_LOCKS`).
+        key, lock = _acquire_commit_lock(org["org_id"])
+        try:
+            with lock:
+                return _commit_region()
+        finally:
+            _release_commit_lock(key)
+
+    # One worker hand-off of the whole synchronous region (see the note above).
+    # The lock lives inside `_commit_sync`, not around this await.
+    return await asyncio.to_thread(_commit_sync)
 
 
 @app.get("/v1/sessions")
@@ -23238,6 +23259,15 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
     function ALSO aborts when it no longer owns the job entry (TTL-evicted
     / replaced by a newer run) — a stale run must never keep writing
     status or resurrect a live walk.
+
+    ⚠️ #3718 residual (#4709): this body off-loads `_make_sdk`,
+    `backfill_legacy_closed` and `_relink_sessions_after_index`, but its
+    DOMINANT graph work is still ON the loop — `indexer.index_repo`'s
+    projection walk (a `_get_proj()` attach + a synchronous per-item
+    `proj.apply`/`proj.g.query` loop inside another module) and the two
+    `_update_onboarding_state` writes below. Both are helper-mediated, so the
+    AST guard cannot see them; this body is therefore declared in
+    `_KNOWN_INLINE_HELPER_RESIDUAL`, not `_OFFLOADED_ASYNC_BODIES`.
     """
     from tortoise.indexer.github_indexer import GitHubFetchError, GitHubIndexer
     # P2: generation/owner token stamped at mint. A TTL-evicted entry
@@ -23313,6 +23343,8 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
                 _logger.warning(
                     "legacy -closed backfill failed (team=%s): %s", org_id, e)
             else:
+                # #4709: sync onboarding write still ON the loop (declared
+                # residual — see the `_run_indexing` docstring).
                 _update_onboarding_state(
                     org_id, github_legacy_backfill_done=True)
 
@@ -23414,6 +23446,7 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
             # repo processed, mirroring github_indexed's resumable-cursor
             # behavior).
             updates["github_indexed_at"] = datetime.now(UTC).isoformat()
+        # #4709: sync onboarding write still ON the loop (declared residual).
         _update_onboarding_state(org_id, **updates)
         # Evict after an hour (T1-P14: eviction-expired polls render
         # honestly).
@@ -24214,7 +24247,12 @@ async def backups_list(org: dict = Depends(get_current_org_session_ungated)):  #
                     # #2823: one shared dialect-aware seam — never a hand-rolled
                     # `is_supabase_enabled()` branch (that per-caller drift is
                     # what left the sweep enumerating the empty registry).
-                    cp = _control_plane_source()
+                    # #3718: `_control_plane_source` is SYNC and its registry
+                    # lane eagerly attaches (`_make_sdk` + `_get_proj()`, plus a
+                    # possible PROBE_RETRY_DELAY sleep) — the same call the
+                    # sibling backup handlers already ride a worker for, so it
+                    # must not resolve on the loop here either.
+                    cp = await asyncio.to_thread(_control_plane_source)
                 except Exception as e:
                     _logger.warning("backups list cp unavailable: %s", e)
                     cp = None
@@ -24326,25 +24364,46 @@ async def _demo_seed_lock(org_id: str) -> asyncio.Lock:
         return _DEMO_SEED_LOCKS.setdefault(org_id, asyncio.Lock())
 
 
-#: Per-(org, client_commit_id) mutual exclusion for `commit_session`'s
-#: check-then-act (#3718 round-3 review, reproduced with a two-party barrier:
-#: `max concurrent write-phase entries=2`, `write_ops=2`, `nodes_written=4`
-#: for ONE logical payload).
+#: Per-GRAPH mutual exclusion for `commit_session`'s check-then-act (#3718
+#: round-3 review, reproduced with a two-party barrier: `max concurrent
+#: write-phase entries=2`, `write_ops=2`, `nodes_written=4` for ONE logical
+#: payload).
 #:
-#: WHY THIS KEY, not per-org. The invariant is per LOGICAL PAYLOAD — the
-#: `:CommitRecord` MERGE only dedupes the same `client_commit_id`. Keying by
-#: org would also serialize *distinct* commits, which do not conflict (their
-#: `coalesce(x, 0) + $n` Session-counter SETs are single atomic Cypher
-#: statements, so two different cids both land), and commits are the hot write
-#: path — an org-wide lock would turn a tenant's commit parallelism into a
-#: queue for no correctness gain. Different orgs never contend either, so a
-#: guessed cid cannot be used to block another tenant.
+#: WHY PER-GRAPH, not per-`(org, client_commit_id)`. Round 3 keyed by the
+#: logical payload on the argument that distinct commits do not conflict —
+#: their `coalesce(x, 0) + $n` Session-counter SETs are single atomic Cypher
+#: statements. That is correct about the ARITHMETIC and wrong about the READ:
+#: the lock must also cover the read-then-plan step, and
+#: `_load_commit_graph_state` reads GLOBAL graph state — the Session counters
+#: AND the content-addressed `Point` set, every `:Object` and every operator.
+#: Two concurrent commits on ONE session with DIFFERENT cids therefore both
+#: plan against a pre-write snapshot: both bill `net_new=1` for the same point
+#: and both apply `SET s.value_nodes_created = coalesce(…,0) + 1` (and
+#: `draft_count`), and `value_nodes_created` is the budget numerator, so the
+#: >25 held / >50 402 ceiling can be tripped early. The same global read makes
+#: cross-SESSION commits that share an entity/point conflict too, which is why
+#: the key is the GRAPH and not the session. Different orgs are different
+#: graph namespaces and never contend, so a guessed cid cannot block another
+#: tenant. Per-graph serialization is the part of the pre-#3718 single
+#: no-`await` sequence on the loop that actually mattered (a single loop
+#: serialized everything; the graph is the real conflict domain).
 #:
-#: WHY REFCOUNTED. A plain `_COMMIT_LOCKS[(org, cid)] = Lock()` grows without
-#: bound (one entry per logical commit, forever). The entry is dropped when its
-#: last holder releases; the increment and the drop both run under the guard,
-#: so a caller that arrives during teardown either extends the live lock or
-#: mints a fresh one — never observes a half-removed entry.
+#: WHY REFCOUNTED. A plain `_COMMIT_LOCKS[org] = Lock()` grows without bound
+#: as orgs are seen. The entry is dropped when its last holder releases; the
+#: increment and the drop both run under the guard, so a caller that arrives
+#: during teardown either extends the live lock or mints a fresh one — never
+#: observes a half-removed entry.
+#:
+#: WHY A `threading.Lock`, ACQUIRED INSIDE THE WORKER. `asyncio.to_thread`
+#: work is NOT cancellable: when `WaitBoundMiddleware` cancels the caller on a
+#: disconnect, the `CancelledError` lands at the `await`, and an `async with`
+#: around it would RELEASE the lock while the abandoned thread is still
+#: writing — a same-cid retry then re-enters concurrently, the exact
+#: double-apply the lock exists to prevent. A `threading.Lock` acquired and
+#: released INSIDE `_commit_sync` has the WORKER's lifetime: the `with` block
+#: exits only when the thread finishes, cancellation or not. It never blocks
+#: the event loop (the wait is on the worker thread, not the loop) — the same
+#: `_dream_lock` / `_org_mint_lock` precedent in this module.
 #:
 #: WHY A LOCK AT ALL (and not the loser re-reading the record). The loser's
 #: correctness depends on the WINNER HAVING FINISHED: after `acquire` returns
@@ -24354,40 +24413,36 @@ async def _demo_seed_lock(org_id: str) -> asyncio.Lock:
 #: holds if the loser WAITS. Returning `duplicate:true` on sight of `partial`
 #: would be worse: it tells the client "already committed" before the data is
 #: written, so a winner that then fails would be a silent data loss.
-_COMMIT_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
-_COMMIT_LOCKS_GUARD = asyncio.Lock()
-_COMMIT_LOCK_REFS: dict[tuple[str, str], int] = {}
+_COMMIT_LOCKS: dict[str, threading.Lock] = {}
+_COMMIT_LOCKS_GUARD = threading.Lock()
+_COMMIT_LOCK_REFS: dict[str, int] = {}
 
 
-@asynccontextmanager
-async def _commit_serialization(org_id: str, client_commit_id: str):
-    """Serialize `commit_session`'s record-read → write-phase → record-stamp
-    region for one `(org, client_commit_id)`.
+def _acquire_commit_lock(org_id: str) -> tuple[str, threading.Lock]:
+    """Refcount-acquire the graph's commit lock — WORKER-thread side.
 
-    Needed BECAUSE the region is off-loaded: `asyncio.to_thread` runs it on a
-    thread from the loop's shared pool, so two concurrent POSTs with the same
-    `client_commit_id` (the expected shape when the WaitBoundMiddleware refuses
-    a >10 s commit and the client retries — a real commit measures ~32 s in the
-    embedded lane) execute the closure in parallel. Pre-#3718 the single
-    no-`await` sequence on the loop serialized them for free.
+    Called from inside `_commit_sync`, never from the loop: acquiring the
+    `threading.Lock` on the loop would block the loop, and owning the lock
+    from the worker is the whole reason its lifetime survives the request
+    task's cancellation. The map guard is held only for the lookup/increment.
     """
-    key = (org_id, client_commit_id)
-    async with _COMMIT_LOCKS_GUARD:
-        lock = _COMMIT_LOCKS.get(key)
+    with _COMMIT_LOCKS_GUARD:
+        lock = _COMMIT_LOCKS.get(org_id)
         if lock is None:
-            lock = _COMMIT_LOCKS[key] = asyncio.Lock()
-        _COMMIT_LOCK_REFS[key] = _COMMIT_LOCK_REFS.get(key, 0) + 1
-    try:
-        async with lock:
-            yield
-    finally:
-        async with _COMMIT_LOCKS_GUARD:
-            remaining = _COMMIT_LOCK_REFS.get(key, 1) - 1
-            if remaining <= 0:
-                _COMMIT_LOCKS.pop(key, None)
-                _COMMIT_LOCK_REFS.pop(key, None)
-            else:
-                _COMMIT_LOCK_REFS[key] = remaining
+            lock = _COMMIT_LOCKS[org_id] = threading.Lock()
+        _COMMIT_LOCK_REFS[org_id] = _COMMIT_LOCK_REFS.get(org_id, 0) + 1
+    return org_id, lock
+
+
+def _release_commit_lock(key: str) -> None:
+    """Drop the reference taken by `_acquire_commit_lock` (worker side)."""
+    with _COMMIT_LOCKS_GUARD:
+        remaining = _COMMIT_LOCK_REFS.get(key, 1) - 1
+        if remaining <= 0:
+            _COMMIT_LOCKS.pop(key, None)
+            _COMMIT_LOCK_REFS.pop(key, None)
+        else:
+            _COMMIT_LOCK_REFS[key] = remaining
 
 
 @app.post("/backups", status_code=201)

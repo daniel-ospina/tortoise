@@ -9,16 +9,19 @@ single event loop — and with it every concurrent request, for every tenant.
 Three earlier PRs off-loaded the REST surfaces (#3772 writes, #4455 reads,
 #4578 invite-info; #3773 the ``_data_sdk`` construction). What remained is the
 DATA-plane seam outside those bodies: the session lane (``commit_session``,
-``delete_session``), the demo seed, the DR/backup lane (7 handlers) and the two
-lifecycle/background sites (``_lifespan`` boot drill-GC, ``_run_indexing``
-backfill). ``tests/test_read_routes_loop_responsiveness.py`` now declares those
-12 bodies in ``_OFFLOADED_ASYNC_BODIES`` — that file owns the AST inventory and
-fails if any of them goes back inline.
+``delete_session``), the demo seed, the DR/backup lane (7 handlers) and the
+``_lifespan`` boot drill-GC site. ``tests/test_read_routes_loop_responsiveness.py``
+declares those 11 bodies in ``_OFFLOADED_ASYNC_BODIES`` — that file owns the AST
+inventory and fails if any of them goes back inline. (``_run_indexing`` was a
+12th member until round-4 review found its declaration VACUOUS: its dominant
+graph work is ``indexer.index_repo``'s projection walk, one level down in
+another module, plus two sync-helper ``_update_onboarding_state`` writes neither
+scan can see. It is now a declared residual under #4709.)
 
 This file adds the BEHAVIOURAL half, in the same style as that file: the
 seam's OWN view of the loop (``asyncio.get_running_loop()`` succeeds only on
 the loop thread — a worker thread has no running loop), which is a mechanism
-assertion rather than a source grep. The AST pin covers all 12 bodies; the
+assertion rather than a source grep. The AST pin covers all 11 bodies; the
 probe below covers one representative per lane, because that is what can be
 driven without a full backup/R2/drill fixture — and two cases cover the calls
 NO guard can see (see the next paragraph).
@@ -84,6 +87,7 @@ Re-run before treating such a failure as a regression.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import threading
 import time
 
@@ -562,8 +566,8 @@ def test_concurrent_commit_same_payload_applies_once(client, monkeypatch):
     This is the round-3 review's reproduction as a permanent test, in the
     ``public_demo`` serialization test's shape: a two-party
     ``threading.Barrier`` (not a sleep) counts MAX CONCURRENT write-phase
-    entries, so it reddens only if the per-``(org, client_commit_id)`` lock is
-    gone — not merely because the pool is busy. The REAL write phase is
+    entries, so it reddens only if the per-graph lock is gone — not merely
+    because the pool is busy. The REAL write phase is
     replaced by the barrier stand-in (a real commit measures ~32 s in this
     embedded lane, past the harness's 10 s transport wait bound), so this
     asserts the SERIALIZATION; the off-load itself is pinned by the AST
@@ -577,10 +581,9 @@ def test_concurrent_commit_same_payload_applies_once(client, monkeypatch):
     from tortoise.hosted_api import app
 
     _arm_dependencies(monkeypatch)
-    # Fresh lock maps: an ``asyncio.Lock`` binds to the loop that first contends
-    # for it, and this test drives its own loop (the entry's refcount is dropped
-    # at release, but a lock left behind by an earlier loop would still be
-    # reused by this one).
+    # Fresh lock maps: the lock is a ``threading.Lock`` now (worker-owned), but
+    # a fresh map still isolates this test from any earlier one, and a lock left
+    # behind by an earlier test would otherwise be reused here.
     monkeypatch.setattr(ha_mod, "_COMMIT_LOCKS", {})
     monkeypatch.setattr(ha_mod, "_COMMIT_LOCK_REFS", {})
 
@@ -637,8 +640,127 @@ def test_concurrent_commit_same_payload_applies_once(client, monkeypatch):
     assert state["max"] == 1, (
         f"two concurrent commits with the SAME client_commit_id both ran the "
         f"write phase (max concurrent entries={state['max']}) — the "
-        f"per-(org, client_commit_id) lock is gone, so the Session counters and "
+        f"per-graph lock is gone, so the Session counters and "
         f"the write-op meter are applied twice for one logical payload (#3718)")
+
+
+def test_concurrent_commit_same_session_different_cids_serialize(
+        client, monkeypatch, force_sparse_tfidf):
+    """#3718 round 4: the lock must serialize the READ-then-plan step, not only
+    the identical-cid replay.
+
+    Round 3 keyed the lock by ``(org, client_commit_id)``, arguing distinct
+    commits do not conflict. That is true of the Session-counter ARITHMETIC
+    (``coalesce(x, 0) + $n`` is one atomic Cypher statement) but false of the
+    READ that precedes it: ``_load_commit_graph_state`` reads GLOBAL graph state
+    (the content-addressed ``Point`` set, every ``:Object``, every operator)
+    PLUS the Session counters, all BEFORE any write. Two concurrent commits on
+    ONE session with DIFFERENT cids therefore both plan against a pre-write
+    snapshot: both bill the same point/entity as net-new and both apply
+    ``value_nodes_created + net_new``, and that counter is the budget numerator
+    (>25 held / >50 402 can trip early).
+
+    Two payloads share the session and the point/entity content and differ only
+    in ``summary``, so ``compute_client_commit_id`` mints two DISTINCT cids. A
+    two-party barrier at the write phase (with the REAL write phase behind it;
+    embeddings stubbed so this stays inside the harness's 10 s transport bound)
+    makes the race deterministic:
+
+    * GREEN (per-graph lock): only the first commit reaches the write phase. Its
+      barrier times out (the second cannot arrive while it holds the lock), its
+      real writes land, then the second reads the written state → ``net_new=0``.
+      ``value_nodes_created`` is 2 (1 point + 1 entity, counted ONCE) and
+      ``nodes_written`` is 2.
+    * RED (the round-3 per-``(org, cid)`` key): both reach the barrier together,
+      both read pre-write state → both ``net_new=2`` → ``value_nodes_created``
+      is 4 and ``nodes_written`` is 4.
+
+    Mutation proof (round 4): with the key reverted to ``(org, cid)`` this
+    fails on ``value_nodes_created == 4`` (and ``max == 2``); with the
+    per-graph key it is ``2`` / ``1``.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tests.test_commit_endpoint import _finalize, _raw_payload
+    from tortoise.hosted_api import app
+
+    _arm_dependencies(monkeypatch)
+    monkeypatch.setattr(ha_mod, "_COMMIT_LOCKS", {})
+    monkeypatch.setattr(ha_mod, "_COMMIT_LOCK_REFS", {})
+
+    session_id = "dataplane-loop-3718-commit-diffcid"
+    body_a = _finalize(_raw_payload(1, session_id=session_id, summary="alpha"))
+    body_b = _finalize(_raw_payload(1, session_id=session_id, summary="beta"))
+    assert body_a["client_commit_id"] != body_b["client_commit_id"], (
+        "the two payloads must be distinct logical commits (different cids) — "
+        "otherwise this re-runs the same-cid case and proves nothing")
+    # Overlapping content: the SAME content-addressed point id (and entity) in
+    # both payloads is what the global read dedupes when the reads serialize.
+    assert body_a["points"][0]["id"] == body_b["points"][0]["id"]
+
+    real_writes = ha_mod._execute_commit_writes
+    gate = threading.Lock()
+    state = {"concurrent": 0, "max": 0}
+    entered = threading.Barrier(2, timeout=2)
+
+    def _barrier_then_real_writes(sdk, payload, plan):
+        with gate:
+            state["concurrent"] += 1
+            state["max"] = max(state["max"], state["concurrent"])
+        try:
+            entered.wait()
+        except threading.BrokenBarrierError:
+            pass
+        finally:
+            with gate:
+                state["concurrent"] -= 1
+        return real_writes(sdk, payload, plan)
+
+    monkeypatch.setattr(ha_mod, "_execute_commit_writes",
+                        _barrier_then_real_writes)
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            return await asyncio.gather(
+                ac.request("POST", "/v1/sessions/commit", json=body_a),
+                ac.request("POST", "/v1/sessions/commit", json=body_b))
+
+    responses = asyncio.run(_run())
+
+    statuses = [r.status_code for r in responses]
+    assert statuses == [200, 200], (
+        f"both distinct commits must land; got {statuses} "
+        f"({[r.text[:160] for r in responses]})")
+    assert state["max"] >= 1, "neither commit reached the write phase"
+
+    proj = ha_mod._make_sdk(namespace=TEST_ORG_ID)._get_proj()
+    rows = proj.g.query(
+        "MATCH (s:Session {id:$sid}) "
+        "RETURN coalesce(s.value_nodes_created, 0)",
+        params={"sid": session_id}).result_set
+    created = int(rows[0][0]) if rows else 0
+
+    reg = ha_mod._make_sdk(namespace="registry")._get_registry()
+    mrows = reg.query(
+        "MATCH (m:MeteringRecord {org_id:$tid}) "
+        "RETURN m.write_ops, m.nodes_written",
+        params={"tid": TEST_ORG_ID}).result_set
+
+    # The CONSEQUENCE first, so a mutation run names the double-apply itself.
+    assert created == 2, (
+        f"the Session's value_nodes_created is {created}, expected 2 "
+        f"(1 point + 1 entity counted ONCE). A higher value means both "
+        f"concurrent commits planned net-new against a pre-write snapshot — "
+        f"the read-then-plan step is not serialized (#3718 round 4; max "
+        f"concurrent write-phase entries={state['max']})")
+    assert mrows and mrows[0][1] == 2, (
+        f"metering row is {mrows!r}, expected write_ops=2 (two distinct "
+        f"commits) and nodes_written=2 (net-new counted ONCE) (#3718)")
+    assert state["max"] == 1, (
+        f"two concurrent commits on one session with different cids both ran "
+        f"the write phase (max concurrent entries={state['max']}) — the lock "
+        f"key is the logical payload, not the graph (#3718 round 4)")
 
 
 def test_lifespan_resolves_the_control_plane_off_loop(monkeypatch):
@@ -802,3 +924,161 @@ def test_backups_rebaseline_counts_on_a_worker(client, monkeypatch):
         "off-loaded (#3718)")
     assert response.status_code == 200, response.text[:200]
     assert response.json().get("status") == "rebaselined", response.text[:200]
+
+
+def test_backups_list_resolves_control_plane_on_a_worker(client, monkeypatch):
+    """#3718 round 4: ``backups_list``'s control-plane fallback must run off-loop.
+
+    ``_control_plane_source`` is SYNC and, in registry mode, constructs the
+    registry SDK and attaches EAGERLY (``_make_sdk`` + ``_get_proj()``, plus a
+    possible ``PROBE_RETRY_DELAY`` sleep) — the same helper this PR already
+    off-loaded in ``_lifespan`` and the other backup handlers. ``backups_list``
+    resolves it inline under a ``try/except``, invisible to BOTH guards (the
+    scan walks async bodies; the call sits in a sync helper one level down).
+    The legacy-flat reverse lookup is the only branch that reaches it, so the
+    storage/list legs are stubbed to land there.
+
+    Stubbed, and only stubbed: the backup listing, the legacy-flat index read
+    and the override resolution (all external storage / control-plane legs).
+    The resolve under test is the real ``_control_plane_source`` call site.
+    """
+    import tortoise.backup_sweep as backup_sweep
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app
+
+    _arm_dependencies(monkeypatch)
+    state: dict = {}
+
+    def _probe():
+        try:
+            asyncio.get_running_loop()
+            state["on_loop"] = True
+        except RuntimeError:
+            state["on_loop"] = False
+        state["calls"] = state.get("calls", 0) + 1
+        return object()  # a non-None control-plane stand-in
+
+    monkeypatch.setattr(ha_mod, "_control_plane_source", _probe)
+    monkeypatch.setattr(ha_mod, "_backup_storage", lambda: object())
+    # A 2-segment backup_id with no graph_id is a legacy FLAT manifest — the
+    # shape that takes the pre-first-sweep CP reverse-lookup fallback.
+    monkeypatch.setattr(
+        ha_mod, "list_backups",
+        lambda storage, org_id: [{"backup_id": "org/legacy-flat",
+                                  "graph_id": None,
+                                  "created_at": "2026-01-01T00:00:00Z",
+                                  "size": 0, "node_count": 0}])
+    monkeypatch.setattr(backup_sweep, "read_legacy_flat_index",
+                        lambda storage, org_id: {})
+    monkeypatch.setattr(ha_mod, "_legacy_graph_overrides",
+                        lambda cp, org_id, listed: {})
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            return await ac.get("/v1/backups")
+
+    response = asyncio.run(_run())
+
+    assert state.get("calls") == 1, (
+        "the list never reached its control-plane fallback, so this run proves "
+        f"nothing ({response.status_code}: {response.text[:200]})")
+    assert state.get("on_loop") is False, (
+        "backups_list resolved the control plane ON the event loop — in "
+        "registry mode that is a blocking SDK construct + eager attach "
+        "(#3718 round 4)")
+    assert response.status_code == 200, response.text[:200]
+
+
+def test_cancelled_commit_holds_the_lock_until_the_worker_finishes(
+        client, monkeypatch):
+    """#3718 round 4: a cancelled caller must NOT release the commit lock while
+    the abandoned worker thread is still writing.
+
+    ``asyncio.to_thread`` work is not cancellable. When ``WaitBoundMiddleware``
+    takes the caller-cancellation arm it does ``task.cancel()``, so the
+    ``CancelledError`` lands at the handler's ``await``. An ``asyncio`` lock
+    held via ``async with`` around that await is RELEASED by the cancellation
+    while the thread keeps writing — a same-cid retry then mints/acquires the
+    lock and re-enters concurrently, which is the double-apply the lock exists
+    to prevent. The lock is therefore a ``threading.Lock`` acquired INSIDE
+    ``_commit_sync`` (the worker), so only the worker's own ``with`` exit can
+    release it.
+
+    This drives that path for real: the write phase is gated (a ``threading``
+    event), the request task is cancelled while the worker sits in it, and a
+    same-cid retry must then be BLOCKED (``max concurrent write-phase
+    entries`` stays 1). With a loop-side ``async with`` lock the retry enters
+    the gate too (entries=2), and the retry returns a fresh (non-duplicate)
+    write instead of replaying the winner's record.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tests.test_commit_endpoint import _finalize, _raw_payload
+    from tortoise.hosted_api import app
+
+    _arm_dependencies(monkeypatch)
+    monkeypatch.setattr(ha_mod, "_COMMIT_LOCKS", {})
+    monkeypatch.setattr(ha_mod, "_COMMIT_LOCK_REFS", {})
+
+    entered = threading.Event()
+    release = threading.Event()
+    gate = threading.Lock()
+    state = {"concurrent": 0, "max": 0, "second_entered": None,
+             "writes": 0}
+    stalled = threading.Event()
+
+    def _gated_writes(sdk, payload, plan):
+        with gate:
+            state["concurrent"] += 1
+            state["max"] = max(state["max"], state["concurrent"])
+            state["writes"] += 1
+        entered.set()
+        stalled.set()
+        release.wait(timeout=15)
+        with gate:
+            state["concurrent"] -= 1
+
+    monkeypatch.setattr(ha_mod, "_execute_commit_writes", _gated_writes)
+    body = _finalize(_raw_payload(1, session_id="dataplane-3718-cancel-lock"))
+
+    async def _drive():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            first = asyncio.create_task(
+                ac.request("POST", "/v1/sessions/commit", json=body))
+            for _ in range(1000):
+                if stalled.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            assert stalled.is_set(), (
+                "the first commit never reached its gated write phase, so this "
+                "run proves nothing")
+            first.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await first
+            # The worker thread is STILL inside the gate. A same-cid retry must
+            # block on the worker-owned lock, not enter the write phase.
+            second = asyncio.create_task(
+                ac.request("POST", "/v1/sessions/commit", json=body))
+            await asyncio.sleep(0.75)
+            state["second_entered"] = state["concurrent"]
+            release.set()
+            return await second
+
+    response = asyncio.run(_drive())
+
+    assert state["second_entered"] == 1, (
+        "a same-cid retry entered the write phase while the cancelled "
+        "request's worker thread was still inside it (concurrent write-phase "
+        f"entries={state['second_entered']}) — the lock was released at "
+        f"cancellation instead of following the worker (#3718 round 4)")
+    assert state["max"] == 1, (
+        f"max concurrent write-phase entries={state['max']} — the abandoned "
+        f"worker and the retry overlapped (#3718 round 4)")
+    assert state["writes"] == 1, (
+        f"the write phase ran {state['writes']} times for one client_commit_id "
+        f"— the retry re-ran it instead of replaying the winner (#3718)")
+    assert response.status_code == 200, response.text[:200]
+    assert response.json().get("duplicate") is True, response.text[:200]
