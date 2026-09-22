@@ -28,7 +28,10 @@
 #   (i) verdict=clean-micro is accepted on both acceptance paths
 #   (j) marker selection: a wrong-diff or bad-signature candidate never masks
 #       a following good one
-#   (k) evidence is bound to this PR and this repo (other PR / other repo)
+#   (k) evidence is bound to this PR and this repo (other PR / other repo),
+#       including a diff-bearing marker replayed from another PR with an
+#       IDENTICAL diff= (the diff-match arm matches on the hash alone, so the
+#       PR anchor is the only thing preventing the replay)
 #   (l) a whitespace-padded GATE_SECRET is normalised
 #   plus the static invariants: the required job must never gain
 #   `if:`/`needs:`/`continue-on-error:` (any indentation or quoting), the
@@ -241,6 +244,15 @@ if grep -qF -- "--jq .body" "$T/gh.log"; then
 else
     bad "(a) gate never requested the PR body (stub log: $(cat "$T/gh.log"))"
 fi
+# Both the diff fetch and the body fetch must be scoped to THIS repo and THIS
+# PR. If either ever drifts to a different PR, the diff-match arm would
+# validate a marker against another PR's diff — the whole binding is void. The
+# stub serves whatever it is given, so only the CALL SHAPE can catch this.
+if [ "$(grep -cF -- "repos/${REPO_NAME}/pulls/${PR_NUMBER}" "$T/gh.log")" -ge 2 ]; then
+    ok "(a) both gh calls target repos/${REPO_NAME}/pulls/${PR_NUMBER}"
+else
+    bad "(a) a gh call is not scoped to repos/${REPO_NAME}/pulls/${PR_NUMBER} (stub log: $(cat "$T/gh.log"))"
+fi
 assert_not_contains "(a) no unrecognised gh invocation" "unrecognised invocation"
 
 echo "── (b) sha AND diff= both mismatch → fail ─────────────────────"
@@ -389,6 +401,16 @@ printf '%s sig=%s\n' "$other_repo_m" "$(sign "$other_repo_m")" > "$T/body-k2"
 STUB_DIFF_FILE="$DIFF_FILE" run_gate "$T/body-k2"
 assert_rc 1 "(k2) a marker recorded for another repo is rejected"
 assert_contains "(k2) names the recorded repo" "was found for other-org/other-repo"
+# k3: PR-anchoring of the diff-match arm. A validly-signed marker for ANOTHER PR
+#     whose signed diff= EQUALS this PR's live diff must not be replayable here.
+#     The diff-match arm matches on the hash alone, so without the
+#     `reviews/<PR_NUMBER>.json` anchor an identical diff on an unrelated PR
+#     (e.g. a reverted/cherry-picked change) would cross-satisfy this one.
+other_pr_diff_m="review recorded: reviews/9999.json verdict=clean @ ${STALE} diff=${DH} (${REPO_NAME})"
+printf '%s sig=%s\n' "$other_pr_diff_m" "$(sign "$other_pr_diff_m")" > "$T/body-k3"
+STUB_DIFF_FILE="$DIFF_FILE" run_gate "$T/body-k3"
+assert_rc 1 "(k3) a diff-bearing marker recorded for another PR is rejected"
+assert_contains "(k3) reports no evidence for this PR" "No AI review evidence found in PR #${PR_NUMBER}"
 
 echo "── (l) a whitespace-padded GATE_SECRET is normalised ─────────"
 # The deployed key file is 64 hex chars PLUS a trailing newline; the gate
