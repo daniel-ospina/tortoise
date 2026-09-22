@@ -1578,6 +1578,22 @@ class TestFakeControlPlane:
         assert cp.query("t", filters=[("a", "eq", 1)], select=["a"]) == [
             {"a": 1}, {"a": 1}]
 
+    def test_neq_excludes_null_like_sql(self):
+        """#4140: PostgREST `neq`/`<>` has SQL three-valued semantics — a
+        NULL column is NOT `<> value` (it is NULL → excluded). The Pythonic
+        `r.get(col) != value` would KEEP the NULL row, which is how a
+        `created_via=neq.bootstrap` filter could silently over-exempt a
+        legacy NULL durable key. Pinned directly so a revert of the
+        NULL-excluding semantics reddens here."""
+        cp = FakeControlPlane({"t": [
+            {"a": 1, "b": None}, {"a": 2, "b": "x"},
+        ]})
+        # b == NULL never matches `b <> 'x'` (SQL: NULL <> 'x' is NULL)
+        assert cp.query("t", filters=[("b", "neq", "x")]) == []
+        assert cp.query("t", filters=[("a", "neq", 1)]) == [{"a": 2, "b": "x"}]
+        # ...and `col <> NULL` matches NOTHING (SQL: every comparison is NULL)
+        assert cp.query("t", filters=[("b", "neq", None)]) == []
+
     def test_gt_lt_filters_null_excluding(self):
         """#765 dialect: gt/lt mirror SQL NULL semantics — a NULL column
         never matches an ordered comparison."""

@@ -7814,16 +7814,21 @@ def _mint_key(org_id: str, *, graph_id: str | None = None,
     # #2481 (audit pin): this is the PRIMARY mint gate for every standalone
     # mint surface (POST /v1/team/keys legacy/scoped/child mints and the
     # per-graph create_org_graph mint). It counts via quota._count_resource
-    # — the ONE predicate that already excludes revoked rows
-    # (revoked_at IS NULL) and expired rows (#2426), so revoked tombstones
-    # never consume the max_api_keys budget. The session-key mint/rotate
+    # — the ONE predicate that excludes revoked rows
+    # (revoked_at IS NULL), expired rows (#2426) and bootstrap session rows
+    # (#4140/R13: `created_via IS NULL OR <> 'bootstrap'`, NULL-tolerant so
+    # a legacy durable row still counts), so revoked tombstones and 24h
+    # session credentials never consume the max_api_keys budget. The
+    # session-key mint/rotate
     # lanes (session_key / _session_key_supabase) and the signup-token
     # recovery lanes carry their own predicates with the SAME
     # revoked_at IS NULL + non-bootstrap exclusions. #2426 note: the
     # recovery lanes' EXPIRY exclusion diverges (the Supabase
     # recover_team_key RPC still counts expired-but-unrevoked rows while
     # its registry twin excludes them) — recorded as out of scope for
-    # #2481 (revoked-only); recovery never 402s, so no user wedge.
+    # #2481 (revoked-only) and tracked in #4550 (the RPC's over-cap branch
+    # can revoke a LIVE key as collateral for expired rows that no longer
+    # occupy a slot); the RPC never 402s.
     from tortoise.quota import _count_resource
     from tortoise.supabase_control import (
         get_control_plane,
@@ -18864,7 +18869,11 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
 
     A session-authenticated user with NO valid key can mint a tt_ key here —
     no pre-existing key required. Two purposes (plan §6.2 E1):
-    - bootstrap: 24h ephemeral, cap-EXEMPT (R13), 3-active backstop (dashboard auth)
+    - bootstrap: 24h ephemeral, cap-EXEMPT (R13) — and now genuinely so:
+      the shared ``quota._count_resource("api_keys")`` count that gates the
+      standalone mint excludes ``created_via='bootstrap'`` in BOTH lanes
+      (#4140), so a bootstrap mint no longer consumes a ``max_api_keys``
+      slot on POST /v1/team/keys; 3-active backstop (dashboard auth)
     - recovery: persistent (no expiry), revocable, counts against max_api_keys;
       at cap, auto-revokes the oldest other key, then a session credential —
       a LEGACY org-scoped unowned key (created_by IS NULL — frees a real

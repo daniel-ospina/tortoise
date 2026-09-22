@@ -2,6 +2,7 @@ version: 1
 surfaces:
   api:
   - test_1162_add_operator_local_svbp.py
+  - test_3926_error_prop_guard.py  # #3926: the MCP error-prop success-path guard; same `api` surface as test_bridge_mcp.py / test_mcp_server_auth_modes.py (tortoise/mcp_server.py is a SHARED_MODULE — full matrix)
   - test_abuse.py
   - test_abuse_integration.py
   - test_acl_graph_users.py   # C4 #2113: per-graph FalkorDB ACL layer (docker-lane; skipif no URI)
@@ -118,6 +119,12 @@ surfaces:
   # `docs/product/sdk-rename-table.md`, and `tools/` + `docs/` are non-python
   # prefixes, so a generator-only edit would otherwise select no surface.
   - test_sdk_rename_table.py
+  # #4282 Phase 0.4 + 1.1: the declared `TortoiseSDK` public surface. Registered here AND
+  # under `core`, for the same reason as test_bridge_table.py above: it guards
+  # `tools/sdk_surface.py` and the GENERATED `config/sdk-surface.json` +
+  # `docs/product/sdk-surface-declaration.md`, and `tools/` + `docs/` are non-python
+  # prefixes, so a generator-only edit would otherwise select NO surface.
+  - test_sdk_surface.py
   - test_cimd_ssrf.py  # #2847: CIMD SSRF control set (URL/host validation, DNS-rebinding pin, redirects, caps, cache, rate limit)
   - test_claim_endpoints.py
   - test_user_identity_authority.py
@@ -454,6 +461,15 @@ surfaces:
   # document is therefore UNGUARDED BY DESIGN (#4454); the drift gate exists only
   # for the generator path.
   - test_sdk_rename_table.py
+  # #4282 Phase 0.4 + 1.1: dual-registered with `api` for the same reason — `api` is keyed on
+  # SOURCE PATTERNS, and the files this guard protects are not api-owned: `tools/sdk_surface.py`
+  # plus the GENERATED `config/sdk-surface.json` and
+  # `docs/product/sdk-surface-declaration.md`. Editing those selected NO surface, so the drift
+  # gate never ran on precisely the PRs that can break it. `core` is the docs/default surface.
+  # NOTE: a docs-only change is in NON_PYTHON_PREFIXES, so editing the GENERATED declaration
+  # doc alone still selects NO surface and is UNGUARDED BY DESIGN (#4454), exactly as the
+  # sibling bridge-table registration documents for its own generated document.
+  - test_sdk_surface.py
   - test_capture_cost_measurement.py
   - test_capture_entity_attachment_3664.py
   - test_ci_expected_manifests.py
@@ -1644,6 +1660,7 @@ durations:
   # the first CI junit run that includes it.
   test_mcp_rename_table.py: 240.0
   test_sdk_rename_table.py: 60.0  # 49 tests; one subprocess `--check` (fresh ~16s tortoise.sdk import) + 48 in-process; measured 46s-553s wall depending on box load
+  test_sdk_surface.py: 120.0  # 19 tests, ~10 of which pay the ~16s tortoise.sdk import in a subprocess; measured 88s-105s wall depending on box load
   test_connector_sources.py: 1.5
   test_e2e9_point_in_time.py: 1.5
   test_file_human_approval.py: 1.5
@@ -1828,6 +1845,10 @@ durations:
   longmem_eval/test_context_assembly_arms.py: 0.1
   longmem_eval/test_gold_evidence_claims.py: 0.1
   mini_beir/test_mini_beir.py: 0.1
+  # #3926/#4173: measured 0.114s — run 35444881400 (head d96b92d20),
+  # `pytest-log-test-a` junit.xml, `time` summed over the file's 3 `testcase`
+  # elements (its shard); 0.1 is that sum at this map's one-decimal convention.
+  test_3926_error_prop_guard.py: 0.1
   test_abuse.py: 0.1
   test_aggregative_intent.py: 0.1
   test_api.py: 0.1
