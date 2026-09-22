@@ -1185,7 +1185,7 @@ class TestOnboardingToolGating:
             "a failed offload must not be cached as False"
         )
 
-    def test_gate_offload_uses_the_request_bound_not_the_lane_bound(self):
+    def test_gate_offload_uses_the_request_bound_not_the_lane_bound(self, monkeypatch):
         """#2924: the gate buys a SHORT bound, not the graph lane's cold-start one.
 
         ``_graph_offload``'s default bound is ``probe_setup_timeout()`` + a
@@ -1197,6 +1197,14 @@ class TestOnboardingToolGating:
         """
         import tortoise.hosted_api as ha
         from tortoise import monitoring
+
+        # The bound must be resolved at CALL time. Patch it to a value that is
+        # distinguishable from its default: an import-time capture would report
+        # the default, so asserting the default cannot tell the two apart —
+        # which is how the round-2 import-time defect survived this test.
+        SENTINEL_BOUND = 3.75
+        monkeypatch.setattr(monitoring, "CONTROL_PLANE_OFFLOAD_TIMEOUT_S", SENTINEL_BOUND)
+        assert monitoring.graph_offload_timeout_s() > SENTINEL_BOUND
 
         seen = {}
 
@@ -1214,7 +1222,9 @@ class TestOnboardingToolGating:
 
         assert result == {"onboarding_complete": True}
         assert seen["op"] == "onboarding_projection"
-        assert seen["timeout"] == monitoring.CONTROL_PLANE_OFFLOAD_TIMEOUT_S
+        assert seen["timeout"] == SENTINEL_BOUND, (
+            "the gate did not resolve CONTROL_PLANE_OFFLOAD_TIMEOUT_S at call time"
+        )
         assert seen["timeout"] < monitoring.graph_offload_timeout_s(), (
             "the gate fell back to the graph lane's cold-projection bound"
         )
