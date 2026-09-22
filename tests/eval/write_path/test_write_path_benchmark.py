@@ -45,7 +45,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
-from tests.eval.write_path import corpus, runner, schema  # noqa: E402
+from tests.eval.write_path import corpus, generate_corpus, runner, schema  # noqa: E402
 from tests.eval.write_path.judge import JUDGE_PIN_MECHANICAL  # noqa: E402
 
 # Module wall-clock cap.  #2514 extended the corpus from 5 to 7 sessions
@@ -143,11 +143,17 @@ def test_bpre_lane_full_corpus_replay_emits_and_grades(sdk_factory):
     assert report["metrics"]["salient_unit_survival_macro"] <= 1.0
     assert report["metrics"]["provenance_accuracy"] == 1.0
     # #2514 operator-edge audit: the echo lane structurally writes no operator
-    # edges — the planted 4 are graded 0 edge_correct (audit dimension on the
-    # completed run; the operator bar is a product-lane bar, see scoping note).
-    assert report["operator_audit"]["planted"] == 4
-    assert report["operator_audit"]["edge_correct"] == 0
-    assert 1 <= report["operator_audit"]["content_ok"] <= 4
+    # edges — the planted edges are graded by the cue-word relation stage, so
+    # only a few match (the audit dimension on the completed run; the operator
+    # bar is a product-lane bar, see scoping note). The denominator is pinned
+    # to the corpus floor, never a literal — #2552 grew it 4 -> 15 and a
+    # hardcoded 4 here is the exact denominator bug this lane's sibling fixed.
+    assert report["operator_audit"]["planted"] == \
+        generate_corpus.MIN_PLANTED_OPERATOR_EDGES
+    assert report["operator_audit"]["edge_correct"] < \
+        report["operator_audit"]["planted"]
+    assert 1 <= report["operator_audit"]["content_ok"] <= \
+        report["operator_audit"]["planted"]
     # Every session contributed a graded gold + memory points + control 1.0.
     seen_sessions = {r["session_id"] for r in report["session_results"]}
     assert seen_sessions == set(corpus.session_ids())
@@ -161,7 +167,8 @@ def test_bpre_lane_full_corpus_replay_emits_and_grades(sdk_factory):
     assert runner.validate_receipt(receipt) == []
     assert receipt["judge_pin"] == JUDGE_PIN_MECHANICAL
     assert receipt["corpus_hash"] == corpus.compute_fixtures_hash()
-    assert receipt["operator_audit"]["planted"] == 4
+    assert receipt["operator_audit"]["planted"] == \
+        report["operator_audit"]["planted"]
 
 
 def test_bpre_lane_determinism_and_provenance_regression_fails(sdk_factory, tmp_path):

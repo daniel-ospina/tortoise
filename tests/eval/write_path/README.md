@@ -189,8 +189,10 @@ IMPL/NAND/MITIGATES nodes touching the session's memory points;
 mitigation Points on operators).  Kind → graph-form mapping + the ontology
 findings live in the scoping note.  The audit is NOT a `METRIC_VALUES` member
 (no baseline re-bless of the metric vocabulary): the m2 echo lane has no
-relation extraction, so its 0/N is structural, and the operator bar is a
-product-lane (llm) bar — same posture split as the standing leakage bar.
+relation extraction — its cue-word heuristic matches only a few planted edges
+(the measured corpus reads 2/15 `edge_correct`) — so its number is structural,
+and the operator bar is a product-lane (llm) bar — same posture split as the
+standing leakage bar.
 
 ### ⛔ Three lanes, three different questions (#2552)
 

@@ -18,7 +18,7 @@ import shutil
 
 import pytest
 
-from tests.eval.write_path import corpus, runner, schema
+from tests.eval.write_path import corpus, generate_corpus, runner, schema
 from tests.eval.write_path.judge import JUDGE_PIN_MECHANICAL
 
 
@@ -578,9 +578,9 @@ def test_run_carries_operator_edge_audit_dimension(tmp_path, monkeypatch):
     the RIGHT operator edge between the anchored claims. On the deterministic
     m2 echo lane the operator EDGES do not match the planted semantics (the
     M2 MockModel relation stage is a cue-word heuristic, not the product
-    extractor) — 0/N edges, endpoint-anchor pairs partly content-present —
-    recorded as an additive audit dimension + note + receipt field, never a
-    gated metric.
+    extractor) — only a few edges match, endpoint-anchor pairs largely
+    content-present — recorded as an additive audit dimension + note +
+    receipt field, never a gated metric.
 
     #2552 (layer-2 WIRE): the m2 lane DOES commit operators; the structural
     fix makes them retrievable — every committed operator node carries the
@@ -599,7 +599,7 @@ def test_run_carries_operator_edge_audit_dimension(tmp_path, monkeypatch):
     assert report["run_status"] == "completed", report.get("log")
     audit = report["operator_audit"]
     assert audit is not None
-    assert audit["planted"] == 15  # #2552: 15 edges, all seven sessions
+    assert audit["planted"] == generate_corpus.MIN_PLANTED_OPERATOR_EDGES
     assert audit["edge_correct"] < audit["planted"]  # m2 cue-word relations
     assert 1 <= audit["content_ok"] <= audit["planted"]
     # #2552: the committed operator topology entered the retrievable layer.

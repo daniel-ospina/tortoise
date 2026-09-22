@@ -3730,7 +3730,9 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
       - no minted kinds: unknown kinds repair to the family fallback with a
         warning (core:other / core:occurrence / statement).
       - Layer-1 integrity: operators whose src/dst/target reference no emitted
-        point/event are DROPPED with a warning (mirrors _stream_to_payload);
+        point/event are DROPPED with a warning. NOTE the v1 seam
+        (``_stream_to_payload``) drops that same class and does NOT mint, so
+        this clause is no longer a mirror of it — see the #2552 note below.
         MITIGATES strengths clamp to [0.10, 0.50] with a warning.
         ⚠️ #2552 MINT-BEFORE-WIRE: before that check runs, an operator endpoint
         that names no emitted point/event is materialized as a statement Point
@@ -4143,7 +4145,11 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # ENTITY is NOT minted (the prompt forbids entity endpoints — the operator
     # drops instead of a claim Point being fabricated from a participant
     # name), and any minted endpoint no surviving operator references is
-    # pruned before payload assembly.
+    # pruned before payload assembly. Because of that prune,
+    # ``stats["operator_endpoints_minted"]`` is read from ``minted_endpoints``
+    # AFTER the prune and therefore counts minted-and-RETAINED endpoints, not
+    # every mint performed — a run can emit two "endpoint minted" warnings and
+    # still report ``operator_endpoints_minted == 0``.
     minted_endpoints: list[str] = []
 
     def _mint_endpoint(ref: str, where: str) -> str:
@@ -4157,9 +4163,13 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             # The hard rule is explicit — "NEVER use an entity name as an
             # operator endpoint — entities are wired through
             # about_entities". Minting one would fabricate a degenerate claim
-            # Point out of a participant name, so the ref is NOT minted and
-            # the operator drops below with its ordinary "did not resolve"
-            # warning (the pre-#2552 behaviour, which is correct HERE).
+            # Point out of a participant name, so the ref is NOT minted. What
+            # then happens depends on the call site: a src/dst endpoint drops
+            # in the operator pass with its ordinary "did not resolve"
+            # warning, while a MITIGATES ``target_edge`` endpoint drops in pass
+            # 2 with "MITIGATES target edge not emitted" (that operator's own
+            # src/dst still resolve). Either way it is the pre-#2552
+            # behaviour, which is correct HERE.
             warnings.append(
                 f"operator endpoint NOT minted (#2552 mint-before-wire): "
                 f"{where} named the emitted ENTITY {content[:60]!r} — the "
