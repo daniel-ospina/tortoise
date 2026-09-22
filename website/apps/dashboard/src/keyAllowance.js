@@ -20,20 +20,30 @@
 // The number of key rows that OCCUPY a slot on the mint gate's predicate.
 //
 // Mirrors tortoise.quota._count_resource('api_keys') — the ONE count shared
-// by every max_api_keys mint gate (the standalone POST /v1/team/keys mint
+// by the standalone max_api_keys mint gates (the POST /v1/team/keys mint
 // this dashboard's create/rotate flow calls, plus the per-graph mint and the
-// REST/MCP limit checks): a row counts when it is NOT revoked AND NOT
-// expired. A revoked row is an audit tombstone; an expired row can never
-// authenticate (#2426), so counting either would hold a slot for a dead
-// credential and wedge the org at its cap.
+// REST limit checks): a row counts when it is NOT revoked, NOT expired
+// (#2426), and NOT a bootstrap session credential (#4140/R13 — bootstrap
+// keys are cap-EXEMPT in the server count, so the display must not count
+// them either). A revoked row is an audit tombstone; an expired row can
+// never authenticate (#2426); a 24h bootstrap session credential is never a
+// manageable product key. Counting any of them would hold a slot for a
+// credential the user cannot manage and desync the display from the gate.
 //
-// `rows` is the RAW GET /v1/team/keys payload, NOT the table's managedKeys
-// filter: the server gate counts every live row (bootstrap session
-// credentials included), so the display counts the same set and the
-// "N of M used" it shows agrees with what the next create will do.
+// `rows` is the RAW GET /v1/team/keys payload (bootstrap rows included — the
+// server still lists them), and `created_via` rides that payload in both
+// lanes, so the display filters bootstrap exactly as the gate does.
 export function usedKeySlots(rows, now = Date.now()) {
   return (rows || []).filter((k) => {
-    if (!k || k.revoked_at) return false
+    // Server parity: the count treats a row as revoked when `revoked_at IS
+    // NULL` is false — i.e. ANY non-null value (an anomalous '' or 0
+    // included). A bare falsy check would count '' as live and over-state
+    // usage against a gate that has already freed the slot.
+    if (!k || k.revoked_at != null) return false
+    // #4140 (R13): checked BEFORE expiry — the server excludes bootstrap
+    // regardless of expiry, so a bootstrap row with an absent or unparseable
+    // expires_at must still be excluded (#4140 adversarial T6).
+    if (k.created_via === 'bootstrap') return false
     if (!k.expires_at) return true
     const t = Date.parse(k.expires_at)
     // An unparseable expiry is treated as NOT expired (conservative: it

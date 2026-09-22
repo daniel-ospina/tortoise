@@ -1682,8 +1682,11 @@ def test_run_protocol_step5_gate_string_pins_criterion():
     from tools.longmem_eval.run import _build_parser as runner_parser
 
     def _runner_argv(cmd):
-        # drop the [sys.executable, "-m", "tools.longmem_eval.run"] head.
-        return cmd[3:]
+        # drop the [sys.executable, "-B", "-m", "tools.longmem_eval.run"] head
+        # by MEANING, not by index: the byte-code-free `-B` (#3712) sits
+        # between the interpreter and `-m`, so a fixed `cmd[3:]` would leave
+        # the module name in the runner's argv.
+        return cmd[cmd.index("tools.longmem_eval.run") + 1:]
 
     rp = runner_parser()
     overridden = build_command(STEPS_BY_NUMBER[5],

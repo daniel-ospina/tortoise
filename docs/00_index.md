@@ -21,6 +21,8 @@ aboutObjects: tortoise
 | **Vision — the MCP and SDK surface** — the target surface, the implementation plan from it, which artifact governs which, and the lanes blocked on this (#1521). `graph_set_recording` was settled by owner ruling on 2026-09-21 (kept — the MCP target is **26**), but **four placement items in the owner-approved `canonical-mcp-tools.md` remain owner-open** and are listed in the vision doc's cross-artifact tensions section | `docs/product/vision-mcp-sdk-surface.md` |
 | **Bridge table (Phase 0.1 of #4282)** — every current tool and its single destination, the merged-target discriminator map, and the target methods with no SDK method behind them. **GENERATED** by `tools/bridge_table.py`; never edit by hand | `docs/product/bridge-table.md` |
 | **MCP rename table (Phase 0.3 of #4282)** — the caller's migration row for every served MCP tool: the name to call **today** (the registry's live `RETIRED_USE_INSTEAD`, or an explicit `no replacement`), the **target-surface** destination, and whether the old name retires with a warning shim or is simply absent — plus the name-by-name agreement check against #4031 (16 of 16 agree, 0 findings). **GENERATED** by `tools/mcp_rename_table.py`; never edit by hand | `docs/product/mcp-rename-table.md` |
+| **SDK rename table (Phase 0.3b of #4282)** — every public `TortoiseSDK` method and what replaces it (a target method, `unchanged`, or `discarded` with the doc's rationale and quote), the unbacked rows, the cross-doc tensions, and the doc→code name mismatches. **GENERATED** by `tools/sdk_rename_table.py`; never edit by hand | `docs/product/sdk-rename-table.md` |
+| **Declared SDK public surface (Phase 0.4 + 1.1 of #4282)** — the authoritative `TortoiseSDK` public method set, derived from the AST (not an `__all__`: the methods are class members), reconciled in both directions against runtime reflection and the approved baseline, and the procedure for adding a method. **GENERATED** by `tools/sdk_surface.py`; the machine-readable form is `config/sdk-surface.json` | `docs/product/sdk-surface-declaration.md` |
 | Ask pre-ship gate runbook + #2069 routing/cost record (#1987/#2069) | `docs/runbook/1987-ask-abstention-check.md` |
 | **Blog E2E residue cleanup runbook** — remove the `meta-contract-*` / `lifecycle-e2e-*` rows the pre-#4220 deploy E2E deposited in prod; guards, dry-run, verification | `docs/runbook/4220-blog-e2e-residue-cleanup.md` |
 | **Ship-test instrument** — the per-deploy clean-browser onboarding walk (signup → wizard → connected only when the server observed it) + the observation artifact (#3806) | `docs/runbook/3806-ship-test-instrument.md` |
@@ -47,6 +49,7 @@ aboutObjects: tortoise
 | Agent-harness landscape — volunteering-memory end-state distribution targets (epic #2080) | `docs/research/2026-09-01-gbrain-learnings/platform-landscape.md` |
 | Embedder selection decision record (ADR-009, #1349) | `docs/adr/ADR-009-embedder-selection.md` |
 | Auth planes — sessions vs machine credentials (ADR-010, #2246) | `docs/adr/ADR-010-auth-planes-session-agent-key.md` |
+| Resolution authority for DR alerts is evidence-gated (ADR-011, #2844/#3127) | `docs/adr/ADR-011-resolution-authority-for-dr-alerts.md` |
 | OAuth 2.1 for remote MCP — discovery, PKCE flow, DCR capacity policy + trusted-CIDR exemption (#524/#2866) | `docs/oauth-mcp.md` |
 | #2246 dashboard session-only scope + verified plan (ADR-010) | `docs/scoping/2026-09-04-2246-dashboard-session-only.md` |
 | #2514 planted-operator (layer-2) corpus + grading scoping | `docs/scoping/2026-09-07-2514-operator-corpus.md` |
@@ -75,5 +78,6 @@ aboutObjects: tortoise
 | #2600 Attribution Phase 1 scoping — resolver human actor; sessions + write-events stamped (epic #2554 v1 gate) | `docs/scoping-2600-attribution-phase1.md` |
 | #2789 one free organization per person — scoping (double diamond, Design 2 = webhook-provisioned org) | `docs/scoping/2026-09-10-2789-one-free-org.md` |
 | #2789 one free organization per person — implementation plan | `docs/plans/2026-09-10-2789-one-free-org.md` |
+| #3525 CSP for the app origin + `no-store` regression guard — scope + plan, with the `Set-Cookie`-stripping / `_headers`-bypass `### Integration Docs` record | `docs/plans/2026-09-22-3525-csp-no-store.md` |
 | Retention and deletion — the one promise (canonical) | `docs/retention-and-deletion.md` |
 | Durability posture — the one authority: mechanism, loss window, and the strongest verification actually performed, per deployment (canonical, #2881) | `docs/durability-posture.md` |
