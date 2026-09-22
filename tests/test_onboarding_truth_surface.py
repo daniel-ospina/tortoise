@@ -590,6 +590,32 @@ def _stub_create_point_path(monkeypatch, *, opener=None, listed=None):
     return steps, opens, written
 
 
+def _our_opens(opens, org_id: str = "org-truth") -> list:
+    """The recorded org-tenant opens that belong to THIS test's org.
+
+    Both stubbing helpers record every org-tenant ``_make_sdk`` call, and CI
+    runs the retention sweep LIVE (``TORTOISE_TEST_SWEEP_TEAM_STRAYS=1``,
+    #1886), so background tasks — including leftovers from sibling tests in
+    the same shard — open unrelated graphs (``_make_sdk(graph_name=<graph
+    id>)``) while a test is running. Measured: CI ``test (b)`` failed
+    ``assert opens == [(None, "team_org-truth"), ("org-truth", None)]`` with
+    four stray ``(None, '<graph id>')`` entries appended, while the same file
+    passed at the same head in a shard where the sweep had nothing to touch.
+    An unscoped equality on ``opens`` is therefore order- and
+    environment-dependent — a flake, not a property.
+
+    Scoping to the test's own org keeps every RED mutation detectable: each
+    one (the restored ``_graph_available`` pre-check, a bare
+    ``_make_sdk(namespace=org_id)`` opener) mints or opens a name carrying
+    THIS ``org_id``, so it still lands in the filtered list. ``opens`` entries
+    are ``(namespace, graph_name)`` from ``_stub_mintable_org_graph`` and
+    ``("namespace"|"graph_name", value)`` from ``_stub_create_point_path``;
+    the filter reads only the value positions, so it is correct for both.
+    """
+    return [o for o in opens
+            if org_id in (o[0] or "") or org_id in (o[1] or "")]
+
+
 def _stub_mintable_org_graph(monkeypatch, *, listed=()):
     """Route-path stubs for the point write that model graph MATERIALIZATION
     faithfully, so the auto-file's real opener selection is OBSERVABLE.
@@ -739,7 +765,7 @@ class TestAgentRestWriteFilesHarnessConnected:
         r, steps, opens, _written = self._post_point(monkeypatch, _AGENT)
         assert r.status_code == 200, r.text
         assert steps == ["harness-connected"]
-        assert opens == []  # never `_make_sdk` — no unobserved graph minted
+        assert _our_opens(opens) == []  # never `_make_sdk` — no unobserved graph minted
 
     def test_session_credentialed_rest_write_files_nothing(self, monkeypatch):
         """The dashboard's own first-party write must NOT manufacture a
@@ -781,7 +807,7 @@ class TestAgentRestWriteFilesHarnessConnected:
         assert r.json()["id"] == "p-truth"   # the point write succeeded
         assert steps == []
         assert written == []
-        assert opens == []
+        assert _our_opens(opens) == []
         assert "org_org-truth" not in state, state
         assert set(state) == before, (before, state)
 
@@ -811,7 +837,9 @@ class TestAgentRestWriteFilesHarnessConnected:
         assert r.status_code == 200, r.text
         # the REAL opener selected the LISTED legacy name first; the REAL
         # completion gate then opened the org DEFAULT projection.
-        assert opens == [(None, "team_org-truth"), ("org-truth", None)], opens
+        # Scoped to this org's opens — background sweep traffic otherwise
+        # appends unrelated graph opens (see `_our_opens`).
+        assert _our_opens(opens) == [(None, "team_org-truth"), ("org-truth", None)], opens
         assert steps == ["harness-connected"]
         # (a) the step landed in the legacy graph — and nowhere else
         assert written == [("team_org-truth", "harness-connected")], written
@@ -880,8 +908,9 @@ class TestHarnessConnectedOpenerSelection:
             monkeypatch, listed=listed)
         r = _post_point_request(_AGENT)
         assert r.status_code == 200, r.text
-        # the REAL opener selected exactly the listed name
-        assert opens == [expected], (
+        # the REAL opener selected exactly the listed name (this org's opens
+        # only — see `_our_opens`)
+        assert _our_opens(opens) == [expected], (
             f"opener selection for listed={listed}: {opens}")
         # …and the step was written through THAT handle's projection
         assert written == [(expected, "harness-connected")], written
