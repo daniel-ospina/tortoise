@@ -862,6 +862,19 @@ jobs:
     # of pytest time vs ~38m serial — main-push wall-clock drops to
     # ~max(leg) ≈ 23-24m incl. setup (~40-50% cut). Separate runners = zero
     # hermeticity risk (slow files share no state across processes).
+    #
+    # #4712 re-measured the same split from run 35735193291's junit artifacts
+    # (2026-09-22): leg a = 252.9s (4.2m), leg b = 87.3s (1.5m) — the halves had
+    # drifted far from the 2026-08-19 balance, and leg a's weight is one file
+    # (test_hosted_api.py, 114.6s). #4711 then moves the repo's heaviest file
+    # here: eval/retrieval/test_integration.py (855.2s declared) is placed on
+    # the LIGHTER leg b, so the new split is a ≈ 252.9s / b ≈ 942.5s. That is
+    # deliberately NOT a further rebalance: the new file exceeds half the slow
+    # pool's total weight, so no 2-way split can bring the legs within the
+    # 1.25x ratio — the minimum achievable max-leg is the file itself on its own
+    # leg (855.2s), and b is within 87s of that. Both legs stay far under the
+    # 75m pytest watchdog / 90m job cap. Rebalancing the remainder is filed as a
+    # follow-up rather than folded in here.
     # Each leg keeps the 75m watchdog + 5-min heartbeat + guaranteed-summary
     # tail (#798/#964); the drift-guard step pins the union of both legs to
     # config/ci-surfaces.yml `slow_files:` MINUS the epic #1647 carve-out
@@ -885,7 +898,7 @@ jobs:
               test_projection test_sdk_group3 test_source_inheritance_own
           - half: b
             files: >-
-              test_backfill_sources test_cli_context
+              eval/retrieval/test_integration test_backfill_sources test_cli_context
               test_enumeration_surfaces test_event_provenance
               test_graphcopy_boolean_index_3154
               test_index_directory test_ingest test_ingest_validation

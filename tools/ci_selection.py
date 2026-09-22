@@ -1317,7 +1317,12 @@ def _durations_map(manifest: dict) -> dict:
 
 
 def duration_issues(manifest: dict) -> list[str]:
-    """#1473: every durations key must be classified and non-slow."""
+    """#1473/#4712: every durations key must be a CLASSIFIED test file.
+
+    #4712 widened this from "classified and non-slow": the slow/carve lanes now
+    carry their measured cost too (see the loop below for the rationale).
+    Values must additionally be numeric and finite.
+    """
     issues = []
     # #3407 review cycle 4 (pre-existing): this site and `--split` below used
     # `.get("durations", {})`, which returns a present-but-NULL `durations:` key
@@ -1333,14 +1338,30 @@ def duration_issues(manifest: dict) -> list[str]:
     if raw is not None and not isinstance(raw, dict):
         return [f"durations is not a mapping: {type(raw).__name__}"]
     durations = _durations_map(manifest)
-    slow = set(manifest.get("slow_files", []))
     classified = set()
     for s, files in manifest["surfaces"].items():  # noqa: B007
         classified.update(files)
     classified.update(manifest.get("tier1", []))
     for name in durations:
-        if name in slow:
-            issues.append(f"durations key {name} is a slow file (must be fast-gate)")
+        # #4712: the map used to be fast-gate-ONLY — a `slow_files` key was
+        # rejected outright ("must be fast-gate", #1473) because the original
+        # consumer was the fast pool's LPT pack. The two lanes that exist
+        # BECAUSE they are expensive therefore carried no cost data at all,
+        # which is how the repo's heaviest file (eval/retrieval/
+        # test_integration.py — 855.2s declared, 1297.9s measured) sat unnoticed
+        # inside the FAST lane (#4711). #4712 supersedes that restriction: the
+        # map is now the suite's per-file cost table and slow/carve keys are
+        # admitted.
+        #
+        # OVERRIDES: #1473's "a durations key must not be a slow file" — the
+        # lanes whose whole reason for existing is cost now carry their
+        # measured cost, so their regression is visible.
+        #
+        # This is a WIDENING of what may appear, never a relaxation of the
+        # checks: every key must still be a CLASSIFIED test file, and every
+        # value numeric and finite (below). No consumer changes shape —
+        # `split_fast_gate` and `duration_coverage_issues` both iterate the fast
+        # pool explicitly, so a lane key can never be packed into a fast half.
         if name not in classified:
             issues.append(f"durations key {name} is not classified in the manifest")
         # P2 (#3407 review): validate the VALUE, not just the key. Both guards

@@ -1322,6 +1322,11 @@ tier1:
 - test_weights.py
 - test_writer_inventory.py
 slow_files:
+# #4711: the single most expensive file in the repo (declared 855.2s; measured
+# 1297.9s in the fast half of run 35735193291 — 47% of that half's pytest time)
+# was classified as an ordinary file and ran in the FAST lane. Nested path, so it
+# sorts before the flat test_*.py names.
+- eval/retrieval/test_integration.py
 - test_about_edges.py
 - test_backfill_sources.py
 - test_billing.py
@@ -2129,3 +2134,65 @@ durations:
   test_session_reinjection.py: 0.0        # true CI junit sum 2.864 (20 tests)
   test_session_reinjection_rules.py: 0.0  # true CI junit sum 0.802 (38 tests)
   test_backups_v1_alias.py: 0.01
+# #4711/#4712: the two lanes that exist BECAUSE they are expensive carried no
+# weights at all (0/33 slow_files and 3/30 carve_out before this block), so
+# none of the consumers above could see the files most likely to dominate a
+# run. Measured from the junit.xml artifacts of main run 35735193291
+# (head 26207c42) — the newest green push at the time of writing. Each value
+# is the sum of that file's testcase `time` attributes (so per-test teardown
+# is included); keys are `tests/`-relative, matching the map above.
+# `slow_files` runs in the 2-leg test-slow job, `carve_out` in the single
+# URI-unset test-carve-out job (#1647). NOT hand-timed: see #4712.
+  bench/test_smoke_embedded.py: 30.7
+  test_about_edges.py: 8.3
+  test_backfill_sources.py: 1.0
+  test_billing.py: 15.6
+  test_cli_context.py: 9.3
+  test_config.py: 4.1
+  test_control_plane.py: 5.1
+  test_cross_tenant_read_isolation.py: 2.6
+  test_dream.py: 3.5
+  test_embedded_concurrency.py: 125.6
+  test_embedded_durability_claim.py: 0.5
+  test_embedded_lifecycle.py: 87.7
+  test_enumeration_surfaces.py: 1.2
+  test_ep_sources.py: 5.3
+  test_eval_extraction_health.py: 0.1
+  test_eval_ingest_retry.py: 16.1
+  test_eval_resume_retry_failed.py: 4.2
+  test_event_provenance.py: 2.3
+  test_flip_gate.py: 6.7
+  test_fork_safety_3845.py: 6.1
+  test_fork_slot_wedge_3845.py: 2.1
+  test_graph_integrity_gate.py: 9.2
+  test_graphcopy_boolean_index_3154.py: 0.6
+  test_guard.py: 30.4
+  test_hard_reject.py: 0.7
+  test_hosted_api.py: 114.6
+  test_hosted_backup.py: 14.4
+  test_index_cli.py: 29.2
+  test_index_directory.py: 8.4
+  test_indexes.py: 0.9
+  test_ingest.py: 1.2
+  test_ingest_bundle.py: 8.7
+  test_ingest_mode.py: 4.4
+  test_ingest_validation.py: 1.4
+  test_longmem_runner.py: 173.3
+  test_mcp_http.py: 16.5
+  test_mcp_route_challenge.py: 0.8
+  test_migrate_db.py: 34.1
+  test_pack_shipping_wheel.py: 33.7
+  test_per_session_census.py: 2.0
+  test_pre_migration_safety.py: 2.3
+  test_precision_leak_4028.py: 3.1
+  test_projection.py: 8.9
+  test_projection_embedded_socket_timeout.py: 1.9
+  test_projection_lifecycle.py: 8.9
+  test_reaper.py: 195.9
+  test_reaper_orphan.py: 0.1
+  test_redis_guard.py: 0.5
+  test_resume_gate_parity.py: 0.1
+  test_sdk.py: 7.9
+  test_sdk_group3.py: 2.7
+  test_search_engine_gaps.py: 3.0
+  test_source_inheritance_own.py: 45.7
