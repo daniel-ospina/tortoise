@@ -269,10 +269,13 @@ def test_deterministic_planted_operator_lane_grades_at_least_three(
     # The cross-session SUPERSEDE is the audit leg #2552 also repairs (the
     # session-scoped edge query could not see a CORRECTS whose target lives
     # in the earlier session). Located by its PROPERTY (kind + endpoints in
-    # different sessions), never by the generated op id: ids come from
-    # ``sorted(ops, key=(relation_turn, id))``, so inserting an operator with
-    # an earlier relation_turn renames ``..._op_04`` and would redden this lane
-    # for no regression — the same hardcoded-corpus-shape defect class.
+    # different sessions), never by its audit key: that key is the id STRING the
+    # corpus spec hand-declares (``op_id = f"{prefix}_{op['id']}"`` in
+    # ``generate_corpus._build_planted_operators`` — the ``relation_turn`` sort
+    # there fixes list ORDER only, it does not derive ids). Pinning it therefore
+    # couples this lane to a spec-authoring literal, and renaming or renumbering
+    # the spec's op ids reddens the lane for no regression. The property is what
+    # the engine must satisfy, so assert on that instead.
     cross_session_supersedes = [
         d for d in audit["results"].values()
         if d.get("expected_kind") == "SUPERSEDE"

@@ -648,8 +648,19 @@ def test_run_carries_operator_edge_audit_dimension(tmp_path, monkeypatch):
         if op.get("from_session") != op.get("to_session")
     ]
     assert cross_session_supersedes, supersedes
-    assert all(op.get("to_session") == "wp06_quarry_rollout"
-               for op in cross_session_supersedes)
+    # …and assert the PROPERTY that makes a cross-session CORRECTS possible at
+    # all: the superseded claim must already be in the graph, so the TARGET's
+    # session is captured BEFORE the owning one. Never pin the target to a
+    # session NAME — a second genuine cross-session SUPERSEDE (wp03 -> wp01,
+    # say) is a legitimate extension and a name pin would redden this lane for
+    # no regression; the ordering property holds for every such edge.
+    session_order = {
+        r["session_id"]: i for i, r in enumerate(report["session_results"])
+    }
+    assert all(
+        session_order[op["to_session"]] < session_order[op["from_session"]]
+        for op in cross_session_supersedes
+    ), cross_session_supersedes
     assert any(op.get("expected_kind") == "SUPERSEDE"
                for op in owned_by.get("wp07_bluepeak_followup", []))
     # The receipt must CARRY the audit block (it is the publish artifact).

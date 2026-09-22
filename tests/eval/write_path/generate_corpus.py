@@ -175,9 +175,10 @@ REQUIRED_OPERATOR_KINDS = set(MIN_PLANTED_OPERATOR_KINDS)
 # to it at import makes a vocabulary change fail loudly here instead of in a
 # distant test (code-review finding). Scope of the link: the floor map and the
 # schema ONLY. The GRADER dispatches on the same kind names through its own
-# literals (``grading.operator_edge_detail``) and is deliberately untouched by
-# this PR — the grader is out of #2552's scope — so it is filed as a
-# follow-up rather than silently claimed as covered.
+# literals (``grading.operator_edge_detail``); it is unchanged by THIS PR
+# (``grading.py`` is absent from the diff) and its silent `edge_missing`
+# fall-through for an unrecognised kind is a pre-existing fail-open, filed as
+# #4671 rather than claimed as covered here.
 if set(MIN_PLANTED_OPERATOR_KINDS) != set(schema.PLANTED_OPERATOR_KIND_VALUES):
     raise AssertionError(
         "MIN_PLANTED_OPERATOR_KINDS and schema.PLANTED_OPERATOR_KIND_VALUES "
