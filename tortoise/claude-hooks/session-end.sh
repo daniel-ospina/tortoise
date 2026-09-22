@@ -167,7 +167,12 @@ if [ "$CONVERT_RC" -eq 2 ]; then
   # Record the loss in the SAME ledger `tortoise session capture` writes to
   # (schema mirrors capture_spool.record_discard). Best-effort: still exit 0.
   python3 - "$SESSION_ID" "$TRANSCRIPT_PATH" << 'PYEOF' 2>/dev/null || true
-import datetime, json, os, sys
+import sys
+# CWE-427: `python3 -` sets sys.path[0] = '' (the cwd), so a planted ./json.py
+# in the session workspace would execute here — on every SessionEnd. `sys` is a
+# builtin and cannot be shadowed, so it is safe to import before the drop.
+sys.path[:] = [p for p in sys.path if p not in ("", ".")]
+import datetime, json, os
 sid, path = sys.argv[1], sys.argv[2]
 root = os.environ.get("TORTOISE_CAPTURE_SPOOL_DIR") or os.path.join(
     os.path.expanduser("~"), ".tortoise", "capture-spool")

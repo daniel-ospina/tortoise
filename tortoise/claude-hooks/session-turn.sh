@@ -38,7 +38,12 @@ set -euo pipefail
 
 # Claude Code passes hook metadata as JSON on stdin:
 # {"session_id": "...", "transcript_path": "...", "cwd": "..."}
-META="$(python3 -c 'import json,sys
+META="$(python3 -c 'import sys
+# CWE-427: `python3 -c` puts the process cwd at sys.path[0], so a planted
+# ./json.py in the session workspace would execute here — on EVERY prompt.
+# `sys` is a builtin and cannot be shadowed, so importing it first is safe.
+sys.path[:] = [p for p in sys.path if p not in ("", ".")]
+import json
 try:
     d = json.load(sys.stdin)
     print(d.get("transcript_path") or "")
