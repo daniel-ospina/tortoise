@@ -45,12 +45,14 @@ from tools.longmem_eval.stall_guard import (  # noqa: E402, RUF100
     resolve_stall_timeout_s,
 )
 from tortoise.projection import (  # noqa: E402, RUF100
+    _DB_TIMEOUT_MAX_S,
     _DEFAULT_SOCKET_CONNECT_TIMEOUT,
     _DEFAULT_SOCKET_TIMEOUT,
     _SOCKET_CONNECT_TIMEOUT_ENV,
     _SOCKET_TIMEOUT_ENV,
     FalkorProjection,
     _resolve_socket_timeout,
+    _socket_timeouts,
 )
 from tortoise.retry import retryable_transient  # noqa: E402, RUF100
 
@@ -394,6 +396,74 @@ def test_run_main_scopes_the_eval_socket_timeouts(monkeypatch):
     assert os.environ.get(ENV_SOCKET_TIMEOUT) == "42"
 
 
+def _client_read_timeout_via_projection() -> float:
+    """The READ bound the real host branch passes to ``FalkorDB`` (mocked).
+
+    Ground truth the banner and the precedence tests must match — computed by
+    EXECUTING the production wiring, never by re-reading a fallback expression
+    (that would make the comparison tautological).
+    """
+    from unittest import mock
+
+    fake = mock.MagicMock()
+    fake.return_value.select_graph.return_value = mock.MagicMock()
+    with mock.patch("falkordb.FalkorDB", fake):
+        proj = FalkorProjection.__new__(FalkorProjection)
+        FalkorProjection.__init__(proj, host="example.invalid", port=6379,
+                                  graph_name="t_resolved_read_bound",
+                                  skip_health_check=True)
+    return fake.call_args.kwargs["socket_timeout"]
+
+
+def test_graph_read_timeout_precedence_per_lane_var_beats_product_knob(
+        monkeypatch):
+    """P2-1: pin the ACTUAL precedence the host branch implements.
+
+    ``_resolve_socket_timeout(TORTOISE_DB_SOCKET_TIMEOUT,
+    _socket_timeouts()[1])``: the per-lane var WINS when set, and the #2850
+    product knob (``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S``) is consulted ONLY
+    when it is unset. The comment above the wiring used to read as if both
+    knobs were equally honored ("product supplies the default, eval overrides"),
+    which is true for a bare SDK construction but NOT for the ``--db`` eval
+    lane: ``run_main`` UNCONDITIONALLY presets the per-lane var there, so the
+    product knob is never read. Both halves are pinned here:
+
+    * RED (wrong precedence): hard-code the banner/projection fallback to
+      ``DEFAULT_EVAL_SOCKET_TIMEOUT_S`` → the first assertion reads 120s, not
+      30s.
+    * RED (the clamp trap): clamp the per-lane var to ``_DB_TIMEOUT_MAX_S``
+      (60s) "for symmetry" → the final assertion reads 60s, not 120s — which
+      would silently cut off the eval's long MERGE writes and defeat #2969.
+    """
+    monkeypatch.delenv(ENV_SOCKET_TIMEOUT, raising=False)
+    monkeypatch.setenv("TORTOISE_FALKORDB_SOCKET_TIMEOUT_S", "30")
+    # Product knob is the FALLBACK while the per-lane var is unset …
+    assert _socket_timeouts()[1] == 30.0
+    assert _client_read_timeout_via_projection() == 30.0
+    # … and the per-lane var WINS the moment it is set.
+    monkeypatch.setenv(ENV_SOCKET_TIMEOUT, "45")
+    assert _client_read_timeout_via_projection() == 45.0
+
+    # The `--db` lane: ``run_main`` presets the per-lane var to the eval
+    # default (120s) when the operator left it unset, so the product knob (30s)
+    # is DEAD there — the behaviour the reworded comment must describe.
+    monkeypatch.delenv(ENV_SOCKET_TIMEOUT, raising=False)
+    seen: dict[str, object] = {}
+
+    def _fake_run_main(_parser, _args, db_uri):
+        seen["preset"] = os.environ.get(ENV_SOCKET_TIMEOUT)
+        seen["client"] = _client_read_timeout_via_projection()
+        return {}
+
+    monkeypatch.setattr(runner, "_run_main", _fake_run_main)
+    runner.run_main(["--db", "docker://:falkordb@localhost:6380/lme"])
+    assert float(seen["preset"]) == DEFAULT_EVAL_SOCKET_TIMEOUT_S == 120.0
+    assert seen["client"] == 120.0
+    # 120s is deliberate and NOT clamped by the product ceiling (60s) —
+    # clamping it would defeat #2969 and is a reopen, not a fix.
+    assert seen["client"] > _DB_TIMEOUT_MAX_S
+
+
 def test_resolve_stall_budget_is_not_fingerprint_member():
     """The new knob is resilience config, not a measurement axis — the
     checkpoint fingerprint shape must not change (a stale-fingerprint
@@ -410,14 +480,41 @@ def test_resolve_stall_budget_is_not_fingerprint_member():
 def test_ingest_bound_banner_is_well_formed(monkeypatch):
     """The #2969 run diagnostic must render cleanly in all four states
     (a mangled line is worse than no line — a verifier caught a stray unit
-    suffix here)."""
+    suffix here) AND report the bound the graph client will ACTUALLY use.
+
+    P2-2: the banner's fallback used to be ``DEFAULT_EVAL_SOCKET_TIMEOUT_S``
+    (120s) while the client falls back to the #2850 product value
+    (``_socket_timeouts()[1]``, default 10s), so the two disagreed on any path
+    that reaches the banner WITHOUT ``run_main``'s env preset (a direct
+    ``_run_main`` call — the path this test drives). The rendered value is
+    cross-checked against a real (mock-backed) projection, so a private banner
+    fallback cannot come back unnoticed.
+    """
     monkeypatch.delenv(ENV_SOCKET_TIMEOUT, raising=False)
+    monkeypatch.delenv("TORTOISE_FALKORDB_SOCKET_TIMEOUT_S", raising=False)
+    # Both sides unset → the client falls back to the product default (10s),
+    # and the banner must print THAT. The old code printed the eval default
+    # (120s) here — the exact disagreement P2-2 reports.
+    assert _DEFAULT_SOCKET_TIMEOUT == 10.0
+    assert _client_read_timeout_via_projection() == _DEFAULT_SOCKET_TIMEOUT
     line = runner._ingest_bound_banner(900.0, db_uri="docker://h:6379/g")
     assert line == (
         "[longmem_eval] ingest stall budget: 900s "
-        f"({ENV_STALL_TIMEOUT}); graph socket read timeout: 120s "
+        f"({ENV_STALL_TIMEOUT}); graph socket read timeout: 10s "
         f"({ENV_SOCKET_TIMEOUT})")
+
+    # DISCRIMINATION: the fallback tracks the product KNOB, not a private eval
+    # constant. With the product knob at 30s the banner must say 30s; a
+    # re-introduced hard-coded eval default would say 120s.
+    monkeypatch.setenv("TORTOISE_FALKORDB_SOCKET_TIMEOUT_S", "30")
+    assert _client_read_timeout_via_projection() == 30.0
+    assert "read timeout: 30s " in runner._ingest_bound_banner(
+        900.0, db_uri="docker://h:6379/g")
+    assert "read timeout: 120s " not in runner._ingest_bound_banner(
+        900.0, db_uri="docker://h:6379/g")
+
     monkeypatch.setenv(ENV_SOCKET_TIMEOUT, "45")
+    assert _client_read_timeout_via_projection() == 45.0
     assert "read timeout: 45s " in runner._ingest_bound_banner(
         900.0, db_uri="docker://h:6379/g")
     monkeypatch.setenv(ENV_SOCKET_TIMEOUT, "none")

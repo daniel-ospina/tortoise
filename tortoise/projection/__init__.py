@@ -2154,12 +2154,22 @@ class FalkorProjection(
             # Docker FalkorDB
             from falkordb import FalkorDB  # ponytail: lazy import, only needed for Docker mode
             # Resolved at CONNECTION time so an env knob covers every
-            # construction site (SDK sessions, ingest, hosted). Both knob
-            # families are honored: #2850's product-wide `_socket_timeouts()`
-            # (TORTOISE_FALKORDB_CONNECT_TIMEOUT_S / _SOCKET_TIMEOUT_S) supplies
-            # the default, and #2969's eval-lane TORTOISE_DB_SOCKET_CONNECT_TIMEOUT
-            # / TORTOISE_DB_SOCKET_TIMEOUT (fail-loud, explicit none/off/0
-            # opt-out) overrides it.
+            # construction site (SDK sessions, ingest, hosted). ACTUAL
+            # precedence: #2969's per-lane TORTOISE_DB_SOCKET_CONNECT_TIMEOUT /
+            # TORTOISE_DB_SOCKET_TIMEOUT (fail-loud, explicit none/off/0
+            # opt-out) WINS whenever it is set; #2850's product-wide
+            # `_socket_timeouts()` (TORTOISE_FALKORDB_CONNECT_TIMEOUT_S /
+            # _SOCKET_TIMEOUT_S) only supplies the DEFAULT, read when the
+            # per-lane var is unset. So the product knob is live for a bare
+            # SDK / hosted construction, but DEAD on the `--db` eval lane:
+            # `tools/longmem_eval/run.py::run_main` UNCONDITIONALLY presets the
+            # per-lane var to `DEFAULT_EVAL_SOCKET_TIMEOUT_S` (120s) when the
+            # operator has not set it, so the per-lane var is always set
+            # there. That 120s is deliberate (#2969: the eval's
+            # multi-hundred-KB MERGE writes must not be cut off) and is NOT
+            # clamped by `_DB_TIMEOUT_MAX_S` — the per-lane parser has no
+            # ceiling. Only an explicit none/off/0 restores #2850's unbounded
+            # mode.
             connect_to, read_to = _socket_timeouts()
             self.db = FalkorDB(host=host, port=port, username=username, password=password,
                                socket_connect_timeout=_resolve_socket_timeout(

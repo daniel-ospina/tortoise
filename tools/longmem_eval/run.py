@@ -63,8 +63,9 @@ from tortoise.model_adapters import (
 )
 
 # #2969: the PRODUCT parser owns the socket-timeout vocabulary — the eval
-# reuses it so the run diagnostic reports the exact effective bound.
-from tortoise.projection import _resolve_socket_timeout
+# reuses it (and its product-knob fallback) so the run diagnostic reports the
+# exact effective bound the graph client will be built with.
+from tortoise.projection import _resolve_socket_timeout, _socket_timeouts
 
 # #2578 (Task 1): the product-verbatim abstained-phrases classifier — the
 # measurement gate's raw reader_refusal marker uses EXACTLY the vocabulary
@@ -615,23 +616,40 @@ def _finalize_embedder_preflight(status: dict, *, mock: bool) -> dict:
     raise SystemExit(1)
 
 
+def _resolved_graph_read_timeout() -> float | None:
+    """The graph-client READ bound the eval lane will ACTUALLY use (#2969).
+
+    Mirrors ``tortoise/projection``'s host branch EXACTLY:
+    ``_resolve_socket_timeout(TORTOISE_DB_SOCKET_TIMEOUT,
+    _socket_timeouts()[1])`` — the per-lane var wins when set, and the #2850
+    product knob (``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S``) supplies the
+    fallback. P2-2: the banner must not carry its own fallback (it used to use
+    the eval default, 120s, while the client fell back to the product value,
+    10s — and the two disagreed on any path that reaches the banner WITHOUT
+    ``run_main``'s env preset). Both the banner and the run-start validation
+    go through THIS function, so the reported bound and the client's cannot
+    drift apart.
+    """
+    return _resolve_socket_timeout(ENV_SOCKET_TIMEOUT, _socket_timeouts()[1])
+
+
 def _ingest_bound_banner(stall_timeout_s: float, *,
                          db_uri: str | None) -> str:
     """#2969 diagnostic: the effective ingest bounds for THIS run.
 
     A stalled run is silent by nature; this line makes the socket bound and
     the no-progress budget visible in the run log so "stalled" is
-    distinguishable from "slow" without stack sampling. The read bound is
-    resolved through the PRODUCT parser (``_resolve_socket_timeout``) so the
-    reported value is exactly what the graph client will use; the embedded
-    lane has no graph socket, so it reports n/a rather than a fiction.
+    distinguishable from "slow" without stack sampling. The read bound comes
+    from :func:`_resolved_graph_read_timeout` — the SAME resolution the graph
+    client uses — so the reported value is exactly the client's, including the
+    product-knob fallback; the embedded lane has no graph socket, so it
+    reports n/a rather than a fiction.
     """
     stall_txt = (f"{stall_timeout_s:g}s" if stall_timeout_s else "disabled")
     if db_uri is None:
         read_txt = "n/a (embedded lane)"
     else:
-        read_val = _resolve_socket_timeout(ENV_SOCKET_TIMEOUT,
-                                           DEFAULT_EVAL_SOCKET_TIMEOUT_S)
+        read_val = _resolved_graph_read_timeout()
         read_txt = (f"{read_val:g}s" if read_val
                     else "UNBOUNDED (explicit opt-out)")
     return (f"[longmem_eval] ingest stall budget: {stall_txt} "
@@ -6239,8 +6257,7 @@ def _run_main(parser: argparse.ArgumentParser, args,
     # vocabulary has one home) — a typo fails at RUN START, not mid-question.
     try:
         ingest_stall_timeout_s = resolve_stall_timeout_s()
-        _resolve_socket_timeout(ENV_SOCKET_TIMEOUT,
-                                DEFAULT_EVAL_SOCKET_TIMEOUT_S)
+        _resolved_graph_read_timeout()
     except ValueError as _e:
         raise SystemExit(str(_e)) from None
     print(_ingest_bound_banner(ingest_stall_timeout_s, db_uri=db_uri),
