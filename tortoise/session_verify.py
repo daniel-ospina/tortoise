@@ -55,9 +55,14 @@ honour, and there is deliberately no per-harness detach table to drift.
 HONEST DISCLOSURE.  A harness whose seam cannot be fired headlessly is NOT
 faked.  Cursor's ``sessionEnd`` fires only from a local desktop-editor session
 (its cloud agents have no editor-lifetime boundary), and Pi's seam is a
-TypeScript extension the Pi process loads in-process — neither can be fired by
-this command, so their links report ``UNVERIFIABLE-IN-CI`` with the reason.  A
-link is only ever ``PROVEN`` when the path actually ran.
+TypeScript extension the Pi process loads in-process — neither is a command
+this verifier can execute and present as "the harness fired it", so their
+links report ``UNVERIFIABLE-IN-CI``.  That ruling is about the INSTALL leg, not
+the seam's testability: Pi's handler logic — including the installed artifact
+— is exercised headlessly by ``tortoise/pi-hooks/tortoise-capture.test.ts``
+(run by ``tests/test_pi_capture_hooks.py``); the residual (a real ``pi``
+process loading the installed extension against the live API) is manual-only.
+A link is only ever ``PROVEN`` when the path actually ran.
 """
 from __future__ import annotations
 
@@ -126,6 +131,13 @@ EXIT_UNVERIFIABLE = 2
 #: editor-lifetime session boundary), and Pi's seam is a TypeScript extension
 #: loaded in-process by Pi — neither is a script this command may execute and
 #: present as "the harness fired it".
+#:
+#: The ruling is about THIS COMMAND's inability to execute the harness's
+#: registration — it is not a claim that the seam is untestable.  Pi's handler
+#: logic is exercised headlessly by its own suite
+#: (``tortoise/pi-hooks/tortoise-capture.test.ts``, run by
+#: ``tests/test_pi_capture_hooks.py``), which also loads and fires the
+#: INSTALLED artifact; see ``UNVERIFIABLE_REASON['pi']``.
 HEADLESS_FIRABLE: dict[str, bool] = {
     "claude": True,
     "codex": True,
@@ -135,6 +147,13 @@ HEADLESS_FIRABLE: dict[str, bool] = {
 
 #: Why a non-firable harness's links are UNVERIFIABLE.  Named per harness so
 #: the report says exactly what is missing, never a generic shrug.
+#:
+#: Pi's entry is deliberately SCOPED ("not firable by this command") and
+#: PLAIN TEXT (it is printed verbatim into a report line).  The over-broad
+#: absolutes this replaced — "cannot be executed headlessly", "no headless
+#: trigger" — were false: the seam's handlers are fired headlessly by its own
+#: suite, and `pi -p` is non-interactive.  A test pins the absence of those
+#: phrases (`tests/test_session_verify.py::test_pi_is_honestly_unverifiable`).
 UNVERIFIABLE_REASON: dict[str, str] = {
     "cursor": (
         "Cursor's sessionEnd hook is IDE-only — it fires from a local "
@@ -142,8 +161,14 @@ UNVERIFIABLE_REASON: dict[str, str] = {
         "machine."),
     "pi": (
         "Pi's capture seam is a TypeScript extension loaded in-process by Pi "
-        "(~/.pi/agent/extensions/tortoise-capture.ts); it is not a script and "
-        "cannot be executed headlessly."),
+        "(~/.pi/agent/extensions/tortoise-capture.ts), not a command this "
+        "verifier can execute; the install leg is therefore not firable by "
+        "this command. The seam's handler logic is exercised hermetically by "
+        "tortoise/pi-hooks/tortoise-capture.test.ts (run by "
+        "tests/test_pi_capture_hooks.py), and the installed artifact is "
+        "loaded and fired by that file's node probe (into a temp HOME); the "
+        "residual — a real pi process loading the installed extension "
+        "against the live API — is manual-only."),
 }
 
 #: The capture EVENT each harness registers (the SessionStart seam is Claude's

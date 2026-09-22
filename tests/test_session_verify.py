@@ -995,14 +995,29 @@ def test_cursor_is_honestly_unverifiable(hosted, setup):
 
 
 def test_pi_is_honestly_unverifiable(hosted, setup):
-    """Pi's seam is an in-process TypeScript extension — not script-firable.
-    Installed is UNVERIFIABLE (present, not fired), never a fabricated pass."""
+    """Pi's seam is an in-process TypeScript extension — not a command this
+    verifier can execute.  Installed is UNVERIFIABLE (present, not fired),
+    never a fabricated pass.  The reason must name the suite that DOES exercise
+    it and the manual-only residual, and must never restate the over-broad
+    absolute (the seam's handlers ARE fired headlessly by its own suite, and
+    `pi -p` is non-interactive)."""
     home, _bindir, _fake = setup
     root = _install(home, "pi")
     report = _verify(hosted, home, "pi", root)
     assert report["exit_code"] == EXIT_UNVERIFIABLE
     assert report["links"]["installed"]["status"] == "UNVERIFIABLE-IN-CI"
-    assert "extension" in report["links"]["installed"]["detail"]
+    detail = report["links"]["installed"]["detail"]
+    assert "extension" in detail
+    assert "tortoise-capture.test.ts" in detail
+    assert "tests/test_pi_capture_hooks.py" in detail
+    assert "installed" in detail
+    assert "manual-only" in detail
+    assert "not firable by this command" in detail
+    # The over-broad absolutes must never return: the seam IS fired headlessly
+    # by its own suite (source + installed artifact).
+    assert "cannot be executed headlessly" not in detail
+    assert "cannot be fired headlessly" not in detail
+    assert "no headless trigger" not in detail
 
 
 # ── hermeticity: root resolution is home-scoped, env only where one exists ──

@@ -7,12 +7,18 @@ it IS the opt-in — the #3575 trap was a capture extension that defaulted off),
 and it talks to both hosted capture endpoints.
 
 The behavioral assertions run the extension's own `node --test` suite when the
-local Node supports native TypeScript type stripping (Node >= 22.6); the
-source-level assertions always run, so the surface stays pinned even where
-Node is older or absent.
+local Node supports TypeScript type stripping; the flag is passed explicitly so
+that Node 22.6–22.17 (where stripping is opt-in) work too. The source-level
+assertions always run, so the surface stays pinned even where Node is older or
+absent.
+
+The installed-artifact tests at the bottom load and fire the file
+``capture_install`` actually writes, so the seam is verified at its INSTALL
+location, not only in the source tree.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -22,10 +28,17 @@ from pathlib import Path
 
 import pytest
 
+from tortoise.capture_install import install_capture
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOKS = REPO_ROOT / "tortoise" / "pi-hooks"
 EXTENSION = HOOKS / "tortoise-capture.ts"
 EXTENSION_TEST = HOOKS / "tortoise-capture.test.ts"
+
+#: Node strips TypeScript types only WITH this flag on 22.6–22.17; it is a
+#: no-op (accepted) on >= 22.18, where stripping is the default. Passing it
+#: explicitly keeps the `_node_supports_ts` (>= 22.6) guard true.
+NODE_TS_FLAG = "--experimental-strip-types"
 
 
 def _src() -> str:
@@ -152,7 +165,7 @@ def test_extension_behavioral_suite():
         pytest.skip("node < 22.6 cannot strip TypeScript types — source pins still ran")
     with tempfile.TemporaryDirectory() as fake_home:
         proc = subprocess.run(
-            [node, "--test", str(EXTENSION_TEST)],
+            [node, NODE_TS_FLAG, "--test", str(EXTENSION_TEST)],
             capture_output=True,
             text=True,
             cwd=str(REPO_ROOT),
@@ -160,3 +173,137 @@ def test_extension_behavioral_suite():
             env=_scrubbed_env(fake_home),
         )
     assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+
+
+# ── the INSTALLED artifact ("#4620 outcome (1) at installed fidelity") ──
+#
+# Everything above exercises the seam at its SOURCE path
+# (`tortoise/pi-hooks/tortoise-capture.ts`). The probe below imports the file
+# `capture_install` actually writes, from a bare temp HOME with NO sibling
+# files — proving the artifact is self-contained and firable where it is
+# installed. It is not a second copy of the 51-test suite: the marginal claim
+# is module resolution from the install location (see the anti-vacuity test).
+
+_PROBE_SOURCE = r'''
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.env.PROBE_SEAM).href);
+const handlers = {};
+const pi = { on(e, f) { handlers[e] = f; } };
+const calls = [];
+const fetchImpl = async (url, init) => {
+  calls.push({ url, body: JSON.parse(String(init?.body ?? "{}")) });
+  return { ok: true, status: 200, json: async () => ({}) };
+};
+mod.default(pi, {
+  fetchImpl,
+  env: { TORTOISE_API_KEY: "tt_test", TORTOISE_API_URL: "https://h" },
+  configPath: "/nonexistent/tortoise-config.json",
+  spoolDir: process.env.PROBE_SPOOL,
+});
+const ctx = {
+  sessionManager: {
+    getEntries: () => [
+      { type: "message", message: { role: "user", content: [{ type: "text", text: "installed seam probe" }] } },
+      { type: "message", message: { role: "assistant", content: [{ type: "text", text: "receipt" }] } },
+    ],
+    getSessionId: () => "sess-installed-1",
+    getSessionFile: () => "/tmp/sessions/2026-01-01_abc.jsonl",
+  },
+  model: { provider: "deepseek", id: "deepseek-v4-flash" },
+};
+await handlers.session_shutdown({ reason: "quit" }, ctx);
+await new Promise((r) => setImmediate(r));
+console.log("PROBE_JSON:" + JSON.stringify({ handlers: Object.keys(handlers), calls }));
+'''
+
+
+def _require_node() -> str:
+    """The `node` binary, or a skip — mirrors `test_extension_behavioral_suite`."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available — the source pins above still ran")
+    if not _node_supports_ts(node):
+        pytest.skip("node < 22.6 cannot strip TypeScript types — source pins still ran")
+    return node
+
+
+def _run_installed_probe(tmp_home: Path, installed: Path, node: str):
+    """Install the probe beside the installed seam and run it, hermetically.
+
+    `_scrubbed_env` strips the capture credential but NOT
+    `TORTOISE_CAPTURE_SPOOL_DIR`, so `PROBE_SPOOL` is passed explicitly —
+    otherwise a real spool could be written.
+    """
+    probe = tmp_home / "probe.mjs"
+    probe.write_text(_PROBE_SOURCE, encoding="utf-8")
+    return subprocess.run(
+        [node, NODE_TS_FLAG, "probe.mjs"],
+        capture_output=True,
+        text=True,
+        cwd=str(tmp_home),
+        timeout=120,
+        env={
+            **_scrubbed_env(str(tmp_home)),
+            "PROBE_SEAM": str(installed),
+            "PROBE_SPOOL": str(tmp_home / "spool"),
+        },
+    )
+
+
+def test_installed_seam_loads_and_fires():
+    """#4620 outcome (1): load and fire the artifact AS INSTALLED, assert the
+    capture receipt.
+
+    The source-located suite above proves the seam's LOGIC; this proves the
+    file `install_capture` writes is self-contained at its install location —
+    it registers both handlers and POSTs harness=pi with the session's turns.
+    """
+    node = _require_node()
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_home = Path(tmp)
+        install_capture("pi", home=tmp_home)
+        installed = tmp_home / ".pi" / "agent" / "extensions" / "tortoise-capture.ts"
+        assert installed.is_file(), f"installer wrote no seam at {installed}"
+        proc = _run_installed_probe(tmp_home, installed, node)
+        assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+        m = re.search(r"^PROBE_JSON:(.*)$", proc.stdout, re.M)
+        assert m, f"no PROBE_JSON line — stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+        payload = json.loads(m.group(1))
+        assert {"session_start", "session_shutdown"} <= set(payload["handlers"]), payload["handlers"]
+        calls = payload["calls"]
+        assert len(calls) == 1, calls
+        assert re.search(r"/v1/sessions$", calls[0]["url"]), calls[0]["url"]
+        body = calls[0]["body"]
+        assert body["harness"] == "pi"
+        assert body["session_id"] == "sess-installed-1"
+        assert body["conversation"] == [
+            {"role": "user", "content": "installed seam probe"},
+            {"role": "assistant", "content": "receipt"},
+        ]
+
+
+def test_installed_seam_probe_fails_when_the_artifact_is_not_self_contained():
+    """Anti-vacuity for `test_installed_seam_loads_and_fires`.
+
+    Mutation: append a relative runtime import to the INSTALLED seam, with no
+    sibling file beside it. The source-located suite still passes (a sibling
+    would resolve); the installed single-file probe must FAIL with
+    ERR_MODULE_NOT_FOUND — proving the check exercises the install location,
+    not the source tree. Without this, a probe that silently imported the
+    source (or that swallowed a load error) would pass vacuously.
+    """
+    node = _require_node()
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_home = Path(tmp)
+        install_capture("pi", home=tmp_home)
+        installed = tmp_home / ".pi" / "agent" / "extensions" / "tortoise-capture.ts"
+        installed.write_text(
+            installed.read_text(encoding="utf-8")
+            + '\nimport { __x } from "./helper.ts";\n',
+            encoding="utf-8",
+        )
+        proc = _run_installed_probe(tmp_home, installed, node)
+        combined = proc.stdout + proc.stderr
+        assert proc.returncode != 0, combined
+        assert "ERR_MODULE_NOT_FOUND" in combined, combined
+        assert "helper.ts" in combined, combined

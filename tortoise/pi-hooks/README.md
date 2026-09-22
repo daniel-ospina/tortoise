@@ -10,7 +10,7 @@ scripts.
 | File | Role |
 |---|---|
 | `tortoise-capture.ts` | the extension — install-probe on `session_start`, session filing on `session_shutdown` |
-| `tortoise-capture.test.ts` | behavioral tests (`node --test tortoise/pi-hooks/tortoise-capture.test.ts`) |
+| `tortoise-capture.test.ts` | behavioral tests (`node --experimental-strip-types --test tortoise/pi-hooks/tortoise-capture.test.ts`) |
 
 ## Install (done by the product, not by hand)
 
@@ -62,6 +62,59 @@ hardening (treat the server's `409 already in flight` as a benign "another
 producer has this session_id" rather than `was NOT filed`, and/or a
 server-side producer/idempotency key) belongs to that issue, **not** to this
 install guard.
+
+## Verification — what is executable, what is manual-only
+
+### Executably verified (hermetic, runs in CI)
+
+| Check | What it proves |
+|---|---|
+| `node --experimental-strip-types --test tortoise/pi-hooks/tortoise-capture.test.ts` | 51 hermetic tests: `extractTurns`, truncation, payload, credential precedence, the spool, and the real `session_start` / `session_shutdown` handlers fired against a mock `pi` with an injected `fetch` (no network, no LLM) |
+| `tests/test_pi_capture_hooks.py` | the source pins **plus the installed artifact**: it installs the seam into a temp `HOME` and loads/fires the file `capture_install` writes, asserting the capture receipt. A sibling anti-vacuity test proves that check would fail on a non-self-contained install |
+
+`tests/test_pi_capture_hooks.py` is registered under `core` (and `onboarding`); a change under
+`tortoise/pi-hooks/` selects `core` via the `tortoise/` fallback, so the guard runs on the PR that
+edits the seam.
+
+### Manual-only
+
+**That a real `pi` process loads the installed extension and calls `turn_end` / `session_shutdown`
+against the live API.** This needs a live harness and an LLM call, so it is not CI-able.
+
+Procedure — run at release/installation time by a maintainer with a live `pi` install and a capture
+credential (at 2026-09-22, the **B1 lane**, which owns objective 1's exit evidence:
+`~/.pi/agent/state/lane-reports/B1-LIVE-FOUR-HARNESS-2026-09-22.md`):
+
+1. Ensure `TORTOISE_API_KEY` is set and the organization's Agent-sessions toggle is **on** (otherwise
+   the server refuses the capture with a 409 and no receipt prints).
+2. Run a non-dogfood session with only this seam loaded:
+   ```bash
+   pi --no-extensions -e ~/.pi/agent/extensions/tortoise-capture.ts -p "<trivial prompt>"
+   ```
+   `--no-extensions` disables discovery **and** settings-registered extensions, so the probe is
+   single-producer even on a host carrying the legacy `tortoise-capture/` (`#3713`).
+3. **Pass condition = `retrievable` — read the specific captured content back.** A row in
+   `GET /v1/sessions` alone proves only `captured` (the write landed), never `retrievable`; read the
+   session back by id (`GET /v1/sessions/{id}` — turns + extracted points) or via
+   `/v1/context?query=…`. The `[tortoise-capture] captured session(s) → <apiUrl> (filed N≥1)` line is
+   supporting evidence (a 2xx is implied, not printed).
+4. **A read-back 504 is `UNMEASURABLE` — never PASS, never FAIL** (the read path is query-dependent,
+   `#4661`). **No receipt line while the session IS present in `GET /v1/sessions` is the `#4675`
+   post-commit-504 false negative, not a seam failure** — never score it FAIL; attempt the content
+   read-back, else `UNMEASURABLE`.
+
+### Blockers on a live verdict
+
+- **`#4661`** — the read path 504s; a read-back is UNMEASURABLE.
+- **`#4675`** — a post-commit 504 is indistinguishable from a pre-commit one, so the client records
+  no receipt for a session that DID land (the client's terminality rule).
+- **`#3713`** — launch-blocking for the claim *"Pi capture works"* (recorded decision
+  2026-09-22T17:20Z), **not** for a clean-machine install; its sequencing blocker `#3971` has merged
+  (`73acefddf`).
+
+Until `#4661` and `#4675` are resolved the live leg can yield **no verdict**, so objective 1's
+done-state must not read as verified. Automating the probe into `session verify` is **`#4710`**; the
+version-contract route to stale-install detection is **`#4680`**.
 
 ## Configuration
 

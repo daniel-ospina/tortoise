@@ -42,6 +42,11 @@ aboutObjects: tortoise-memory-capture, tortoise-onboarding
 | `AGENT_ONBOARDING.md` Q3 | prompt e2e/manual | false-promise phrasing | drafted copy; grep clean; parity table |
 | Claude Code hooks + Pi extension | ops/e2e | exit-0 violation, receipt missing | hook smoke; Pi 2xx leg observed |
 
+> **#4620 (2026-09-22):** the Pi leg is executably verified for the seam's logic **and** the
+> installed artifact (`tortoise/pi-hooks/tortoise-capture.test.ts`, `tests/test_pi_capture_hooks.py`);
+> the real-`pi` leg is manual-only — procedure + actor in `tortoise/pi-hooks/README.md`. See the
+> amendment at the bottom.
+
 ### Journey Test Map
 
 ### Journey: First-timer opts into memory capture
@@ -314,6 +319,10 @@ aboutObjects: tortoise-memory-capture, tortoise-onboarding
 2. **T2 (Task 15)** lands inside Slice 2 after T1+T3 (per user staging).
 3. **Cursor spike + Claude-Web filing-path spike** are research tasks inside their slices; verdicts recorded; web row disabled-with-reason until a server-visible signal is confirmed (Task 13 spike verdict) — never hidden.
 4. **Pi hosted-2xx leg** is an ops checklist item (live key + `tortoise-config.json`), not a CI pytest.
+   > **#4620 (2026-09-22):** the seam's logic and the installed artifact ARE CI-verified; what remains
+   > manual-only is a real `pi` process loading the installed extension — procedure + actor in
+   > `tortoise/pi-hooks/README.md`. Pass condition is `retrievable`; a read-back 504 is UNMEASURABLE
+   > (`#4661`/`#4675`). See the amendment at the bottom.
 5. Every commit through **commit-workflow** (pre-flight, PR, code-review gate).
 
 ## Runtime Prerequisites
@@ -418,3 +427,33 @@ Docker FalkorDB test lane · `GITHUB_CLIENT_ID/SECRET` + token `repo` scope · `
 
 <!-- plan-review: cycles=5, status=clean, version=2.3.0 (cycles 3-5 folded into task bodies; cycles 1-2 have incorporation sections) -->
 <!-- final-verification: clean (2 P2s resolved post-gate) -->
+
+## #4620 amendment (2026-09-22) — the Pi seam's verification status, stated
+
+*Appended by `#4620`; the reviewed text above is unchanged (see the two pointers at the
+Integration-Surface row `Claude Code hooks + Pi extension` and sequencing item 4).*
+
+Objective 1's Pi leg has two halves with different verification statuses:
+
+- **Executably verified (hermetic, CI).** The seam's handler logic — `extractTurns`, truncation,
+  payload, credential precedence, the durable spool, and the real `session_start` / `session_shutdown`
+  handlers fired against a mock `pi` with an injected `fetch` — is covered by
+  `tortoise/pi-hooks/tortoise-capture.test.ts` (51 tests), and the artifact **as installed** is loaded
+  and fired by `tests/test_pi_capture_hooks.py` (CI-selected for a `tortoise/pi-hooks/` change). The
+  claim that "nothing loads the extension's seam in a test" is false.
+- **Manual-only.** That a real `pi` process loads the installed extension and calls
+  `turn_end` / `session_shutdown` against the live API. Procedure —
+  `pi --no-extensions -e ~/.pi/agent/extensions/tortoise-capture.ts -p "<trivial prompt>"` on a
+  non-dogfood install, run by a maintainer with a live `pi` install and a capture credential (at
+  2026-09-22 the B1 lane, objective-1's exit-evidence owner) — is in `tortoise/pi-hooks/README.md`
+  § Verification. **Pass condition = `retrievable`** — read the specific captured content back
+  (`GET /v1/sessions/{id}` turns + points, or `/v1/context?query=…`); a row in `GET /v1/sessions`
+  alone is **not** sufficient. A read-back 504 is **UNMEASURABLE**, and a missing receipt for a
+  session that IS present is the `#4675` false negative — never FAIL.
+
+**Blockers on a live verdict:** `#4661` (read path 504s), `#4675` (post-commit-504 false negative),
+and `#3713` (launch-blocking for the claim *"Pi capture works"* — recorded decision 2026-09-22T17:20Z
+— **not** for a clean-machine install; its sequencing blocker `#3971` has merged as `73acefddf`).
+Until `#4661` / `#4675` are resolved the live leg yields **no verdict**, so this objective must not be
+read as verified for Pi. Automating the probe is `#4710`; a version-contract stale-install detector is
+`#4680`.
