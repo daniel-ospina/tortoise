@@ -559,13 +559,23 @@ class TestHealthEndpoints:
         import tortoise.hosted_api as ha_mod
         import tortoise.monitoring as monitoring
 
-        # (a) registered, and OUTERMOST. Starlette's add_middleware INSERTS at
+        # (a) registered, and second-outermost: WaitBoundMiddleware (#3834) is
+        # registered last and so wraps it. Starlette's add_middleware INSERTS at
         # index 0, so the LAST-registered middleware is first in the list.
         classes = [m.cls for m in ha_mod.app.user_middleware]
         assert ha_mod.InFlightMiddleware in classes, (
             "InFlightMiddleware is not installed — the idle gate always reads 0")
-        assert classes[0] is ha_mod.InFlightMiddleware, (
-            f"the gauge must wrap everything (registered last): {classes!r}")
+        # #3834: WaitBoundMiddleware is now registered LAST (outermost), so the
+        # gauge sits immediately inside it. That order is REQUIRED, not
+        # incidental: the bound ABANDONS (never cancels) a breached handler, and
+        # the gauge must keep counting that handler until it genuinely finishes.
+        # Reversing the two would release the gauge at the 10 s refusal while the
+        # abandoned work still runs — the exact #2850 mis-read. The gauge still
+        # wraps every handler and every short-circuiting middleware.
+        assert classes[0] is ha_mod.WaitBoundMiddleware, (
+            f"the wait bound must be outermost (registered last): {classes!r}")
+        assert classes[1] is ha_mod.InFlightMiddleware, (
+            f"the gauge must wrap every handler (registered second-outermost): {classes!r}")
 
         # (b) a REAL request through the module-level app: the gauge is >= 1
         # WHILE the handler runs, and released afterwards. ``/health`` is read
@@ -1749,12 +1759,16 @@ class TestRevokedKeysDoNotConsumeCap2481:
     """#2481 (REGISTRY lane) — revoked keys are audit tombstones, never
     max_api_keys budget consumers. The reported bug: after revoking a key
     a team could not mint a replacement while only revoked tombstones
-    remained. Audit result: every cap seam counts via quota._count_resource
-    with the predicate `revoked_at IS NULL AND (expires_at IS NULL OR > now)`
-    — revoked rows never count. These tests PIN that: revoke-then-mint
-    succeeds at cap, a pre-existing tombstone stack alone can never 402
-    (legacy mint) or 409 (scoped mint), and only a true ACTIVE overage
-    still 402s/409s (active-key semantics unchanged)."""
+    remained. Audit result: the standalone mint gates all count via
+    quota._count_resource with the predicate `revoked_at IS NULL AND
+    (expires_at IS NULL OR > now) AND (created_via IS NULL OR <>
+    'bootstrap')` (#2426 expiry; #4140/R13 bootstrap) — revoked rows never
+    count. (The recovery-mint lanes carry their OWN predicates with the
+    same exclusions; #4140's rule is one LOGICAL predicate, not one literal
+    string.) These tests PIN that: revoke-then-mint succeeds at cap, a
+    pre-existing tombstone stack alone can never 402 (legacy mint) or 409
+    (scoped mint), and only a true ACTIVE overage still 402s/409s
+    (active-key semantics unchanged)."""
 
     def test_revoke_then_mint_succeeds_at_cap(self, client):
         """Team at max (2 active) revokes one key → the revoked row must
@@ -1800,6 +1814,93 @@ class TestRevokedKeysDoNotConsumeCap2481:
         assert client.delete(
             f"/v1/team/keys/{s.json()['id']}").status_code == 200
         assert client.post("/v1/team/keys").status_code == 200
+
+
+class TestBootstrapKeysCapExempt4140:
+    """#4140 / R13 (REGISTRY lane) — bootstrap (24h session) keys are
+    cap-EXEMPT: they never consume a ``max_api_keys`` slot on the standalone
+    mint gate, while every DURABLE credential (provisioned / recovery / NULL
+    legacy created_via) still does. The bug: ``quota._count_resource
+    ("api_keys")`` counted bootstrap nodes, so a free org (allowance 2) with
+    one session key could mint only one durable key before 402.
+
+    The exemption is NULL-TOLERANT — a legacy node with no ``created_via``
+    is DURABLE and must count (the over-exemption direction this predicate
+    must fail closed on)."""
+
+    @staticmethod
+    def _seed(kid, *, created_via="provisioned", expires_at=None,
+              revoked_at=None):
+        from datetime import UTC, datetime
+
+        import tortoise.hosted_api as ha_mod
+        ha_mod._make_sdk(namespace="registry")._get_registry().query(
+            "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:'h', "
+            "key_prefix:$kp, created_by:$cb, created_at:$now, "
+            "created_via:$cv, expires_at:$ea, revoked_at:$ra})",
+            params={"id": kid, "tid": TEST_ORG_ID, "kp": f"tt{kid[:8]}",
+                    "cb": _U1, "now": datetime.now(UTC).isoformat(),
+                    "cv": created_via, "ea": expires_at, "ra": revoked_at},
+        )
+
+    def test_count_excludes_live_bootstrap(self, client):
+        from datetime import UTC, datetime, timedelta
+
+        from tortoise.quota import _count_resource
+        future = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
+        self._seed("b1", created_via="bootstrap", expires_at=future)
+        self._seed("b2", created_via="bootstrap", expires_at=future)
+        self._seed("d1", created_via="provisioned")
+        assert _count_resource(TEST_ORG_ID, "api_keys") == 1
+
+    def test_count_includes_every_durable_class(self, client):
+        from datetime import UTC, datetime, timedelta
+
+        from tortoise.quota import _count_resource
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        self._seed("p", created_via="provisioned")
+        self._seed("r", created_via="recovery")
+        self._seed("n", created_via=None)          # legacy NULL → durable
+        self._seed("other", created_via="agent_signup")
+        # near-miss literals are NOT the exact exemption
+        self._seed("cap", created_via="Bootstrap")
+        self._seed("sp", created_via="bootstrap ")
+        self._seed("boot", created_via="bootstrap", expires_at=future)
+        assert _count_resource(TEST_ORG_ID, "api_keys") == 6
+
+    def test_count_excludes_expired_and_revoked_durable(self, client):
+        from datetime import UTC, datetime, timedelta
+
+        from tortoise.quota import _count_resource
+        past = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+        self._seed("expired", created_via="provisioned", expires_at=past)
+        self._seed("revoked", created_via="provisioned", revoked_at=past)
+        self._seed("live", created_via="provisioned")
+        assert _count_resource(TEST_ORG_ID, "api_keys") == 1
+
+    def test_standalone_mint_gate_ignores_bootstrap_and_blocks_at_cap(
+            self, client):
+        """Boundary: with free max_api_keys=2, two live bootstrap nodes
+        occupy NO slot (both durable mints land); the third durable mint
+        402s (legacy mint)."""
+        from datetime import UTC, datetime, timedelta
+        future = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
+        self._seed("b1", created_via="bootstrap", expires_at=future)
+        self._seed("b2", created_via="bootstrap", expires_at=future)
+        assert client.post("/v1/team/keys", json={"name": "d1"}).status_code == 200
+        assert client.post("/v1/team/keys", json={"name": "d2"}).status_code == 200
+        assert client.post("/v1/team/keys", json={"name": "d3"}).status_code == 402
+        # the scoped-mint 409 gate reads the SAME count → same boundary
+        assert client.post(
+            "/v1/team/keys", json={"scopes": ["graphs:read"]}).status_code == 409
+
+    def test_null_legacy_durable_still_consumes_a_slot(self, client):
+        """Over-exemption guard: a node with NULL created_via is DURABLE —
+        two of them fill the free cap and the next mint 402s. This is the
+        direction the predicate must fail closed on."""
+        self._seed("n1", created_via=None)
+        self._seed("n2", created_via=None)
+        assert client.post("/v1/team/keys").status_code == 402
 
 
 class TestKeyAllowance3874:

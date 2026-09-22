@@ -37,6 +37,32 @@ from tools.longmem_eval.run import (  # noqa: E402, RUF100
     run_main,
 )
 
+#: C4 (#2517): the ONE vocabulary of ``match_source`` legs the eval lane
+#: asserts against. The authoritative closed set is
+#: ``tortoise.search_engine.SearchResult.match_source``'s ``Literal``;
+#: ``test_match_source_legs_match_the_literal`` fails closed on drift, so
+#: this tuple can never silently fall one leg behind ("session" is the C4
+#: source-session re-injection leg).
+_MATCH_SOURCE_LEGS = ("fts", "vector", "structural", "rrf", "tfidf",
+                      "session")
+
+
+def test_match_source_legs_match_the_literal():
+    """The reader vocabulary and the engine's ``Literal`` are ONE set.
+
+    ``get_type_hints`` (not ``field.type``): ``search_engine.py`` has
+    ``from __future__ import annotations``, so the dataclass field's
+    ``.type`` is the *string* "Literal[...]" and ``get_args()`` on it
+    returns ``()`` — a permanently-red assertion.
+    """
+    from typing import get_args, get_type_hints
+
+    from tortoise.search_engine import SearchResult
+
+    literal_legs = get_args(
+        get_type_hints(SearchResult)["match_source"])
+    assert set(_MATCH_SOURCE_LEGS) == set(literal_legs)
+
 MINI = Path(__file__).parent / "fixtures" / "longmemeval_mini.json"
 
 
@@ -310,8 +336,7 @@ def test_retrieve_rerank_orders_and_caps(tmp_path, monkeypatch):
         cap = Counter(h["session_id"] for h in ret["hits"] if h["session_id"])
         assert max(cap.values(), default=0) <= 2   # E2E-10 cap
         for h in ret["hits"]:
-            assert h["match_source"] in (
-                "fts", "vector", "structural", "rrf", "tfidf")
+            assert h["match_source"] in _MATCH_SOURCE_LEGS
         # recall-retention guard: evidence must SURVIVE the rerank
         # (precision stage != recall stage — the reranker must not drop the
         # answer)
@@ -566,7 +591,7 @@ def test_retrieve_rerank_leg_mix_partition(tmp_path, monkeypatch):
         # provenance legs are untouched (rerank is additive, never a rewrite)
         for leg in lm:
             if leg != "rerank":
-                assert leg in ("fts", "vector", "structural", "rrf", "tfidf")
+                assert leg in _MATCH_SOURCE_LEGS
         # off-path: no bucket + identical leg-mix
         assert "rerank" not in base["match_source_counts"]
         assert base["match_source_counts"] == \

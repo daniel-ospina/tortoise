@@ -81,19 +81,33 @@ def rerank_enabled(flag: bool | None = None) -> bool:
     return is_truthy(os.environ.get(ASK_RERANK_ENV))
 
 
-def _env_int(name: str, default: int) -> int:
-    """Ask-lane env int with clamp: garbage or out-of-range (< 1) values fall
-    back to the default — never a crash."""
-    raw = os.environ.get(name)
-    if raw is None or not raw.strip():
+def _clamp_int(raw: str | int | None, default: int) -> int:
+    """Ask-lane int clamp — the ONE implementation shared by the env read
+    (``_env_int``) and any caller holding an explicit value that must resolve
+    IDENTICALLY to it (#2513): garbage, non-integer, blank or out-of-range
+    (< 1) values fall back to the default — never a crash. Accepting an
+    already-parsed int (as well as the env's str) is what lets the run path
+    clamp an explicit knob through the same function instead of re-deriving
+    the rule."""
+    if raw is None:
+        return default
+    text = str(raw).strip()
+    if not text:
         return default
     try:
-        value = int(raw.strip())
+        value = int(text)
     except ValueError:
         return default
     if value < 1:
         return default
     return value
+
+
+def _env_int(name: str, default: int) -> int:
+    """Ask-lane env int with clamp: garbage or out-of-range (< 1) values fall
+    back to the default — never a crash. Thin wrapper over ``_clamp_int`` so
+    the env path and an explicit-value caller can never diverge."""
+    return _clamp_int(os.environ.get(name), default)
 
 
 def _env_float(name: str, default: float) -> float:
