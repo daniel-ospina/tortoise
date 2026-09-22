@@ -72,3 +72,40 @@ Remove a code from `[tool.ruff.lint] ignore` / `[tool.mypy] disable_error_code`,
 surfaced violations, re-measure, and update this table. Suggested order: start with the
 mechanical ruff fixes (`--fix` handles I001/F401/F841/E401/UP017...), then the mypy
 low-count codes (`override`, `func-returns-value`, `call-overload`, `list-item`).
+
+## #1685 (2026-08-25): baseline refresh + pin — root cause corrected
+
+The issue's premise ("0.16.4 behavior change") is **wrong** — verified: both
+ruff 0.16.3 and 0.16.4 report byte-identical violation locations (473 total).
+The real root cause is **the baseline never held**:
+
+- At merge #1504 the ruff baseline was **369 violations** (not 0): `hosted_api.py`
+  and ~20 other files were never covered (37 `# noqa` at the merge).
+- The CI lint gate had been **narrowed to the syntax class** (E9/F63/F7,
+  ci.yml:416) — the red passed silently.
+- **+104 violations drifted** over the next 319 commits (no gate enforced new
+  code against the full rule surface).
+
+**Refresh (2026-08-25, ruff 0.16.4):**
+- 473 violations → **230 safe-fixed** by `ruff check . --fix` (UP017/UP037/
+  F401/I001/...; `--fix` mode's own count reports 248 lines changed because
+  UP037 annotation-unquoting is only diagnosed when fixing)
+- **242 `# noqa` directives** added by `--add-noqa` (B904/SIM105/B008/F821/
+  E402 plus F841/RUF059/SIM103/F811 leftovers — not auto-fixable)
+- Result: `ruff check .` == 0 errors; re-running `--add-noqa` adds 0 (idempotent)
+
+**Pin (durability):**
+- ci.yml `lint-command`: `pip install ruff==0.16.4 && ruff check .` — the
+  explicit-version install overrides the agent-infra job's unpinned
+  `pip install ruff`
+- dev group + uv.lock: `ruff==0.16.4` — local `uv run ruff` aligns with CI
+
+**Deliberately skipped (documented, Task 6):** the `# noqa: redis-guard` marker
+in graph-scripts/add_convergence_evidence.py:113 collides with ruff's noqa
+parser (a warning only under `--add-noqa`; plain `ruff check .` is clean).
+Rewording would break the required redis-guard check (`tools/redis-guard.py:87`
+naive substring grep, test-enforced). Left untouched.
+
+**Follow-up:** `typecheck-command` (mypy, agent-infra python-ci.yml:71
+unpinned) has the same drift mode — out of scope here (cross-repo input
+`ruff-version`/`mypy-version` would be the durable fix).

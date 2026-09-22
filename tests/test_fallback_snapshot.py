@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile  # noqa: F401
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -143,9 +144,9 @@ def test_fallback_snapshot_supersede_decoration(sdk):
     machinery the full path uses) so [SUPERSEDED BY] renders in embedded
     mode. A superseded hit (include_terminal=True) carries status + the
     superseding claim; undecorated hits stay byte-identical."""
-    a = sdk.create_point("statement", "espresso preferred in the morning",
+    a = sdk.create_point("statement", "espresso preferred in the morning",  # noqa: F841
                          id="ku_old", status="live")
-    b = sdk.create_point("statement", "drip coffee preferred now",
+    b = sdk.create_point("statement", "drip coffee preferred now",  # noqa: F841
                          id="ku_new", status="live")
     sdk.supersede_point("ku_old", "ku_new")
 
@@ -232,11 +233,16 @@ def test_fallback_snapshot_invalidated_on_delete(sdk):
 
 def test_fallback_snapshot_lazy_ttl_fires(monkeypatch):
     """TTL fires at read time (not a background timer) → rebuild, logged."""
+    monkeypatch.setattr(fs, "SNAPSHOT_TTL_SECONDS", 1.0)
+    # ``built_at`` must be seeded TTL-RELATIVE, not as an absolute literal:
+    # ``time.monotonic()`` is seconds since BOOT, so a bare ``0.0`` only reads
+    # as expired while host uptime exceeds the TTL — the same uptime coupling
+    # as #3416 (harmless at a 1s TTL, but the same latent defect).
     fs._store.put(("g", "n"), {
-        "built_at": 0.0, "dirty": False, "points": [],
+        "built_at": time.monotonic() - fs.SNAPSHOT_TTL_SECONDS - 1.0,
+        "dirty": False, "points": [],
         "vectorizer": None, "doc_vecs": None, "model_id": None,
     })
-    monkeypatch.setattr(fs, "SNAPSHOT_TTL_SECONDS", 1.0)
     got = fs._store.get(("g", "n"))
     assert got is None, "stale snapshot must be dropped at read"
 

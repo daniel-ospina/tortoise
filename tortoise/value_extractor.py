@@ -17,16 +17,35 @@ from pathlib import Path
 
 # ── The value brief: compiled vocab + semantics (the #954 contract) ─────────
 
-def compile_value_brief(packs_dir: Path | str | None = None) -> dict:
+def compile_value_brief(packs_dir: Path | str | None = None,
+                        tenant_manifests: dict[str, str] | None = None) -> dict:
     """The closed vocabulary + kind semantics from the installed packs.
-    The same source the prompts and the enforcer validate against."""
+    The same source the prompts and the enforcer validate against.
+
+    ``tenant_manifests`` (#2031 — hosted per-tenant custom packs) is an
+    ADDITIVE overlay: ``{namespace: full manifest yaml}`` compiled through
+    the SAME loop as the filesystem catalog (the epic #1891 plan §4
+    mandate: the tenant-view compile reuses this function — no parallel
+    compile path). ``None`` → the default (shared-catalog-only) path,
+    byte-identical to before. The overlay contributes the tenant manifest's
+    kindDefs (with nearMisses, same extraction discipline), its
+    memory_granularity, and declared-but-kindDefs-less object/document/
+    event kinds (empty semantics — the parity surface for the default
+    path's FIX M declared-kind acceptance, which is served by the
+    process-global ``_PACK_*_FORMS`` sets that tenant packs never reach)."""
     from tortoise.pack_registry import PackRegistry  # noqa: I001
+    from tortoise.pack_registry import default_packs_dir
     import yaml
-    packs_dir = Path(packs_dir) if packs_dir else \
-        Path(__file__).resolve().parent.parent / "packs"
+    packs_dir = Path(packs_dir) if packs_dir else default_packs_dir()
     reg = PackRegistry(packs_dir)
     reg.load_all()
     ns_files = {}
+    # NOTE: glob order intentionally NOT sorted — the flag-off S2 prompt and
+    # verbose master render must stay byte-identical to main on the same
+    # platform, and the pack-manifest glob order (readdir-dependent) is the
+    # pre-existing behavior. Deterministic order is guaranteed only
+    # downstream: KindIndex.build sorts the kind names, render_s2_prompt
+    # sorts the pack-namespace set.
     for mf in packs_dir.glob("*/manifest.yaml"):
         d = yaml.safe_load(mf.read_text()) or {}
         if d.get("namespace"):
@@ -41,8 +60,9 @@ def compile_value_brief(packs_dir: Path | str | None = None) -> dict:
                 "nearMisses": spec.get("nearMisses", []),
             }
     # T12 (#1272): the core objectKind set is aligned to ONTOLOGY §5 Object
-    # Kind Vocabulary (16 kinds incl. the commitment-state family) — the
-    # prior brief (concept/standard/document/tool/workflow/WorkItem/other)
+    # Kind Vocabulary (17 kinds — Problem added by the #2238 problem-family
+    # salvage landing, 2026-09-05) — the prior brief
+    # (concept/standard/document/tool/workflow/WorkItem/other)
     # missed project/tag/user/skill/agent/agreement + strategy/plan/goal/
     # target and added concept (not in §5). `concept` is mapped to core:other.
     granularity = {}
@@ -52,9 +72,59 @@ def compile_value_brief(packs_dir: Path | str | None = None) -> dict:
         if g:
             granularity[ns] = g
 
+    # #2031: per-tenant custom packs (hosted) — the SAME compile loop over
+    # the tenant's :PackManifest YAMLs (graph-native, not filesystem).
+    # Reserved-namespace validation (pack_manifest_store.validate_manifest)
+    # rejects starter + ``core`` + ``memory_granularity`` namespaces, so
+    # overlay keys can never shadow the shared catalog or the brief's
+    # reserved ``memory_granularity`` key.
+    if tenant_manifests:
+        _DECLARED_KIND_ATTRS = ("objectKinds", "documentKinds", "eventKinds")
+        for ns, manifest_yaml in tenant_manifests.items():
+            # #2031 review: per-namespace isolation — one malformed/legacy
+            # node (hand-inserted, backfilled, corrupt) must degrade only its
+            # own namespace, never the whole tenant's vocabulary compile
+            # (mirrors the missing-yaml skip in _get_tenant_manifest_yamls).
+            try:
+                raw = yaml.safe_load(manifest_yaml) or {}
+                if not isinstance(raw, dict):
+                    continue
+                onto = raw.get("ontology") or {}
+                if not isinstance(onto, dict):
+                    continue
+                kd = onto.get("kindDefs") or {}
+                if not isinstance(kd, dict):
+                    kd = {}
+                declared: set[str] = set()
+                for attr in _DECLARED_KIND_ATTRS:
+                    for k in (onto.get(attr) or []):
+                        if isinstance(k, str):
+                            declared.add(k)
+                for k, spec in kd.items():
+                    spec = spec if isinstance(spec, dict) else {}
+                    kinds[f"{ns}:{k}"] = {
+                        "description": spec.get("description", ""),
+                        "nearMisses": spec.get("nearMisses", []),
+                    }
+                    declared.discard(k)
+                # Declared-but-kindDefs-less kinds (the #1935 fixture shape:
+                # objectKinds: [contract] with no kindDef) — empty semantics so
+                # they ride the master's pack_kinds and the write gates accept
+                # them (FIX M parity; _PACK_*_FORMS only serve the shared
+                # catalog, never tenant packs).
+                for k in sorted(declared):
+                    kinds.setdefault(f"{ns}:{k}", {"description": "", "nearMisses": []})
+                g = onto.get("memory_granularity")
+                if g:
+                    granularity[ns] = g
+            except Exception:  # noqa: BLE001, RUF100 — never let one node
+                continue  # take down the whole tenant's vocabulary
+
     core = {
         "core:Project": "A project",
         "core:WorkItem": "A unit of work",
+        "core:Problem": "A deviation between actual and desired state — "
+                        "problem-family parent (2026-08-31)",
         "core:document": "A document artifact",
         "core:tag": "A tag",
         "core:user": "A user",
@@ -70,10 +140,159 @@ def compile_value_brief(packs_dir: Path | str | None = None) -> dict:
         "core:goal": "A goal state (commitment-state family)",
         "core:target": "A target state (commitment-state family)",
     }
-    return {**core, **kinds, "memory_granularity": granularity}
+    # The core vocabulary is merged FIRST and kinds keys that would collide
+    # with it are filtered out, so canonical core kinds can never be shadowed
+    # by a kind key (a legacy/bypass :PackManifest node with namespace `core`
+    # would otherwise override them — the write gate rejects that namespace,
+    # this is defense-in-depth). This also preserves the pre-#2031 brief key
+    # ORDER (core kinds first — the default path's brief is byte-identical,
+    # key order included).
+    return {**core, **{k: v for k, v in kinds.items() if k not in core},
+            "memory_granularity": granularity}
+
+
+def compile_kind_index_spec(packs_dir: Path | str | None = None) -> dict:
+    """The FULL kind-classification candidate set (issue #1695, Task 3):
+    ``{kind: {"text", "section", "description", "synonyms", "examples",
+    "nearMisses"}}`` for every classifiable kind — core §5 objects, the
+    subject kinds, the point kind, the event kinds, and the pack kindDefs
+    WITH their full key set (description/synonyms/examples/nearMisses).
+
+    Unlike ``compile_value_brief`` (which drops synonyms/examples — only
+    description + nearMisses ride through), this accessor reads
+    ``PackManifest.kind_defs`` in full so the kind INDEX can embed a
+    re-weighted classification surface (the D0-2 probe refinement path:
+    description + synonyms + examples — the plan's mandated re-weight
+    before the build commits). The ``text`` field is the surface the index
+    embeds; the metadata fields feed the classifier's nearMiss rerank and
+    the eval's confusability analysis.
+
+    Candidate/write-gate alignment (review cycle 3): pack pointKinds are
+    NOT classifiable (point classification is trivial — "statement" only),
+    so point-only kinds are excluded from the spec and the "points"
+    section holds ONLY "statement"; and declared-but-kindDefs-less pack
+    kinds (eventKinds/objectKinds/documentKinds without a kindDef — e.g.
+    ALL 8 pm eventKinds, dev:apiSpec, marketing:keyword) get synthesized
+    name-only entries so the classifier can assign them and nearMisses refs
+    to them resolve.
+
+    Lazy imports keep the module importable without the pack machinery
+    (``extractor_v2`` imports this module's ``compile_value_brief``).
+
+    Memoized per RESOLVED ``packs_dir`` (the key is the resolved path, so a
+    custom-dir call never poisons the default-dir memo and vice versa —
+    cycle-3 P2 unkeyed memo)."""
+    import copy
+
+    from tortoise.pack_registry import default_packs_dir
+    global _KIND_SPEC_CACHE
+    packs_dir = (Path(packs_dir) if packs_dir else default_packs_dir()).resolve()
+    cached = _KIND_SPEC_CACHE.get(str(packs_dir))
+    if cached is not None:
+        # deep copy — callers must never mutate the shared cache (the
+        # build/load paths treat the spec as read-only).
+        return copy.deepcopy(cached)
+    from tortoise.extractor_v2 import CORE_OBJECT_KEYS, EVENTS, POINTS, SUBJECTS
+
+    def _surface(kind: str, desc: str, syns: list, exs: list) -> str:
+        parts = [f"{kind}: {desc}"] if desc else [kind]
+        if syns:
+            parts.append("synonyms: " + ", ".join(str(s) for s in syns))
+        if exs:
+            parts.append("examples: " + ", ".join(str(e) for e in exs))
+        return " | ".join(parts)
+
+    brief = compile_value_brief(packs_dir)
+    spec: dict[str, dict] = {}
+    for k in CORE_OBJECT_KEYS:
+        desc = str(brief.get(k, "") or "")
+        spec[k] = {"text": _surface(k, desc, [], []), "section": "objects",
+                   "description": desc, "synonyms": [], "examples": [],
+                   "nearMisses": []}
+    for k, desc in SUBJECTS.items():
+        spec[k] = {"text": _surface(k, str(desc), [], []), "section": "subjects",
+                   "description": str(desc), "synonyms": [], "examples": [],
+                   "nearMisses": []}
+    for k, desc in POINTS.items():
+        spec[k] = {"text": _surface(k, str(desc), [], []), "section": "points",
+                   "description": str(desc), "synonyms": [], "examples": [],
+                   "nearMisses": []}
+    for k, desc in EVENTS.items():
+        spec[k] = {"text": _surface(k, str(desc), [], []), "section": "events",
+                   "description": str(desc), "synonyms": [], "examples": [],
+                   "nearMisses": []}
+    # packs: the kindDefs FULL key set (compile_value_brief drops
+    # synonyms/examples — read the manifests directly); the section is
+    # derived from the pack's kind declarations (eventKinds → events,
+    # documentKinds/objectKinds → objects) so Task 4's per-type candidate
+    # restriction is correct. Pack pointKinds are NOT classifiable — the
+    # design doc locks point classification to "statement" (FIX A: the
+    # index's "points" section must contain ONLY "statement"), so point-
+    # only kinds are SKIPPED from the spec entirely.
+    from tortoise.pack_registry import PackRegistry
+    reg = PackRegistry(packs_dir)
+    reg.load_all()
+    for ns, pack in reg.packs.items():
+        # Section mapping for DECLARED kinds: eventKinds → events,
+        # object/documentKinds → objects (setdefault so a kind declared in
+        # BOTH keeps the first non-point section; pointKinds are excluded
+        # per FIX A — a point+document kind like marketing:contentBrief
+        # lands in objects via its document declaration).
+        declared: dict[str, str] = {}
+        for k in (pack.event_kinds or []):
+            declared.setdefault(k, "events")
+        for k in (pack.object_kinds or []) + (pack.document_kinds or []):
+            declared.setdefault(k, "objects")
+        for kind, kd in (pack.kind_defs or {}).items():
+            k = f"{ns}:{kind}"
+            # FIX A: a point-only kind (declared in pointKinds, no object/
+            # document/event declaration) is never classifiable — skip it.
+            if kind in (pack.point_kinds or []) and kind not in declared:
+                continue
+            desc = str(kd.get("description", brief.get(k, "")) or "")
+            syns = [str(s) for s in (kd.get("synonyms") or [])]
+            exs = [str(e) for e in (kd.get("examples") or [])]
+            nms = [str(n) for n in (kd.get("nearMisses") or [])]
+            spec[k] = {"text": _surface(k, desc, syns, exs),
+                       "section": declared.get(kind, "objects"),
+                       "description": desc,
+                       "synonyms": syns, "examples": exs,
+                       "nearMisses": nms}
+        # FIX L: declared-but-kindDefs-less pack kinds (dev:apiSpec,
+        # marketing:keyword, pm:milestone, ALL 8 pm eventKinds, ...) are
+        # never in the index → the classifier can't assign them and
+        # nearMisses refs to them resolve to ∅. Synthesize name-only spec
+        # entries (section derived from the declaration; pointKinds already
+        # excluded above per FIX A). An existing kindDefs entry is never
+        # clobbered.
+        for kind, section in declared.items():
+            k = f"{ns}:{kind}"
+            if k in spec:
+                continue  # a kindDefs entry already rode through
+            spec[k] = {"text": k, "section": section,
+                       "description": "", "synonyms": [], "examples": [],
+                       "nearMisses": []}
+    _KIND_SPEC_CACHE[str(packs_dir)] = spec
+    return copy.deepcopy(spec)
 
 
 _VOCAB_CACHE: dict | None = None
+
+
+#: Load-once memo for the kind-index spec, keyed by the RESOLVED packs dir
+#: (packs are static per process per dir — per-session classifier
+#: construction must not re-read + YAML-parse every pack manifest; the key
+#: keeps a custom-dir call from poisoning the default-dir memo and vice
+#: versa — cycle-3 P2 unkeyed memo). Mirrors ``_MASTER_LIST_CACHE`` /
+#: ``_VOCAB_CACHE``.
+_KIND_SPEC_CACHE: dict[str, dict] = {}
+
+
+def _clear_kind_spec_cache() -> None:
+    """Test hook — clear ALL memoized kind-index specs (cross-test
+    isolation; the per-session re-parse is exactly what the memo avoids)."""
+    global _KIND_SPEC_CACHE
+    _KIND_SPEC_CACHE = {}
 
 
 def _object_kind_vocab() -> set[str]:

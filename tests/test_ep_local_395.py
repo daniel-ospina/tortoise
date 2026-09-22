@@ -613,8 +613,12 @@ def test_ac3_last_affected_no_stale_writeback():
 
 
 def test_ac3_writeback_set_equals_run_set():
-    """AC3 — the write-back set == the run set: n.confidence is stamped for
-    exactly ep._last_affected (no second BFS with a divergent depth)."""
+    """AC3 — the write-back set == the run set: n.confidence is written for
+    exactly ep._last_affected (no second BFS with a divergent depth).
+
+    #1915: updatedAt is no longer the write-back discriminator — the read
+    path never stamps it (see test_compute_confidence_read_never_stamps_
+    updated_at); confidence is the write-back field."""
     with _fresh_sdk() as sdk:
         a = _make_claim(sdk, "w1")
         b = _make_claim(sdk, "w2")
@@ -629,12 +633,62 @@ def test_ac3_writeback_set_equals_run_set():
             sdk._get_ep()._last_affected
         stamped = {
             r[0] for r in sdk._get_proj().g.query(
-                "MATCH (n:Point) WHERE n.updatedAt IS NOT NULL RETURN n.id"
+                "MATCH (n:Point) WHERE n.confidence IS NOT NULL RETURN n.id"
             ).result_set
         }
         assert stamped == sdk._get_ep()._last_affected, (
-            "write-back set must equal the run set (updatedAt stamped exactly "
-            "on the run's affected claims)")
+            "write-back set must equal the run set (confidence written "
+            "exactly on the run's affected claims)")
+
+
+def test_compute_confidence_read_never_stamps_updated_at():
+    """#1915 — compute_confidence (a READ) never moves the freshness signal:
+    the confidence write-back drops the updatedAt stamp. Every affected
+    claim's updatedAt is byte-unchanged by the read (0 read-induced churn on
+    ORDER BY updatedAt surfaces) while n.confidence still lands on exactly
+    the run set."""
+    with _fresh_sdk() as sdk:
+        a = _make_claim(sdk, "f1")
+        b = _make_claim(sdk, "f2")
+        c = _make_claim(sdk, "f3")
+        sdk.set_point_baseline(a["id"], 1, 1)
+        sdk.set_point_baseline(b["id"], 1, 1)
+        sdk.set_point_baseline(c["id"], 1, 1)
+        sdk.create_operator("IMPL", a["id"], [b["id"]])
+        sdk.create_operator("IMPL", b["id"], [c["id"]])
+        proj = sdk._get_proj()
+
+        def _updated_at(pid: str):
+            rows = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.updatedAt",
+                params={"id": pid},
+            ).result_set
+            return rows[0][0] if rows else None
+
+        run_set = {a["id"], b["id"], c["id"]}
+        before = {pid: _updated_at(pid) for pid in run_set}
+        assert all(v is not None for v in before.values()), (
+            "claims carry their creation updatedAt stamp")
+
+        result = sdk.compute_confidence(anchors=[a["id"]], max_hops=1)
+        assert result["converged"] is True
+        assert set(result["confidences"]) == sdk._get_ep()._last_affected
+
+        # Freshness: the read changed NO updatedAt anywhere in the closure.
+        for pid in run_set:
+            assert _updated_at(pid) == before[pid], (
+                f"compute_confidence stamped updatedAt on {pid} "
+                f"({before[pid]} -> {_updated_at(pid)}) — a READ must not "
+                f"move the freshness signal (#1915)")
+        # Write-back intact: confidence persisted exactly on the run set.
+        written = {
+            r[0] for r in proj.g.query(
+                "MATCH (n:Point) WHERE n.confidence IS NOT NULL RETURN n.id"
+            ).result_set
+        }
+        assert written == sdk._get_ep()._last_affected, (
+            "write-back set must equal the run set (confidence, not "
+            "updatedAt, is the write-back discriminator)")
 
 
 # ── AC5: interactive latency ─────────────────────────────────────────────

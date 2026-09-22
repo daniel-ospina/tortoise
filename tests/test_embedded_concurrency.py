@@ -888,3 +888,51 @@ def test_restore_removes_stale_aof(monkeypatch):
     finally:
         proj_mod.remove_stale_aof = real_remove
         shutil.rmtree(bdir, ignore_errors=True)
+
+
+def test_markerless_sweep_reaps_sigkilled_suite_orphan(monkeypatch, tmp_path):
+    """#2052: the suite-INDEPENDENT sweep (launchd/cron `--only-safe`, NO live
+    suite markers) must reap a SIGKILLed suite's orphaned server — the
+    2026-08-30 case (101 PPID-1 redis-servers under a worktree venv, ~1.5 GB,
+    no embedded run for 2h after the kill).
+
+    Two sweeps, matching the scheduled cadence: sweep 1 records the
+    zero-client observation; sweep 2 confirms it (injected 0-minute
+    confirmation window + empty active-suites dir → suites_active False).
+    The kill-9 parent is `_spawn_orphan_pid` (parent dies without close()).
+    """
+    import tortoise.embedded_reaper as reaper_mod
+    from tortoise.embedded_reaper import _run_sweep
+
+    # Markerless: the active-suites dir does not exist (no suite running).
+    monkeypatch.setattr(reaper_mod, "ACTIVE_SUITES_DIR",
+                        str(tmp_path / "no-active-suites"))
+    # Confirmation state isolated from the real ~/.tortoise + window injected.
+    monkeypatch.setattr(reaper_mod, "ZERO_CLIENT_STATE_PATH",
+                        str(tmp_path / "reaper-zero-client.json"))
+    monkeypatch.setattr(reaper_mod, "ZERO_CLIENT_CONFIRM_MINUTES", 0.0)
+    monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
+    assert not os.path.exists(str(tmp_path / "no-active-suites"))
+
+    own_pid, sock = _spawn_orphan_pid(_make_flat_tmpdir())
+    assert _pid_alive(own_pid), "spawned orphan not alive (spawn failure)"
+    time.sleep(1)
+
+    # Sweep 1 (only-safe, markerless, via _run_sweep — the scheduled-sweep
+    # entry, which runs _mark_orphan_confirmation): records the zero-client
+    # observation — must NOT kill yet (confirmation needs a second sweep).
+    first = _run_sweep(dry_run=False, batch_size=200, only_safe=True, jobs=8,
+                       sigterm_timeout=3.0)
+    assert all(a["pid"] != own_pid for a in first), \
+        "markerless sweep 1 must not kill before confirmation"
+    assert _pid_alive(own_pid), "orphan alive after sweep 1 (record-only)"
+
+    # Sweep 2: confirmation window elapsed (injected 0) + no live markers →
+    # the dead-parent orphan is reaped. Covers ALL redislite bin paths
+    # (pgrep -f "redislite/bin/redis-server" — worktree venvs included, I2).
+    second = _run_sweep(dry_run=False, batch_size=200, only_safe=True, jobs=8,
+                        sigterm_timeout=3.0)
+    assert any(a["pid"] == own_pid for a in second), \
+        f"markerless sweep did not reap the sigkilled-suite orphan {own_pid}"
+    _wait_server_exit(own_pid, max_wait_s=15)
+    assert not os.path.exists(sock), "zombie socket remains after markerless sweep"

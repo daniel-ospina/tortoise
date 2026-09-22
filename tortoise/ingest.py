@@ -13,6 +13,12 @@ ollama tags). Providers:
     mock:NAME       → offline MockModel                 (for testing the wiring)
 
 Idempotent: re-running the same file at the same extractor version is a no-op.
+
+Builder capability catalog note (#2004 W8 / epic #1976 DM-5): this module is
+referenced in the builder capability catalog (onboarding) — catalog module
+'Document indexer' (corpus ingestion) — tortoise/tool_registry.py
+CAPABILITY_CATALOG. If you add or rename an extractor/indexer, update the
+catalog reference.
 """
 from __future__ import annotations  # noqa: I001
 
@@ -80,7 +86,33 @@ def _infer_format(filepath: Path) -> str:
 
 # ── #133 upgrade helpers ────────────────────────────────────────────
 
-def _run_ep_propagation(proj, *, label: str = "EP"):
+def _belief_emitter(api):
+    """#2884 FIX-5: a ``TortoiseEP`` emitter that journals belief write-backs.
+
+    ``_run_ep_propagation`` builds a bare ``TortoiseEP`` with NO emitter, so
+    every posterior/confidence it wrote was durable only until the next JSONL
+    wipe+rebuild — the exact silent-loss class #2884 fixes, on the
+    ingest-propagation path. This CLI builds a raw ``FalkorProjection`` (no SDK
+    handle), but it holds the SAME ``EventAPI``/``EventLog`` the SDK emitter
+    writes and ``rebuild_all`` replays. #2884 A6: the record is appended
+    through ``EventAPI.emit_belief`` — the ONE ingest envelope (``_emit``),
+    already guarded so a log-write failure cannot crash the CLI after the
+    graph write committed. An earlier revision hand-built a THIRD envelope
+    here; routing through the api removes that second implementation of the
+    record shape.
+    """
+    if api is None:
+        return None
+
+    def emit(type_: str, **payload) -> None:
+        if type_ != "ConfidenceChanged":
+            return  # this seam journals belief write-backs ONLY
+        api.emit_belief(type_, **payload)
+
+    return emit
+
+
+def _run_ep_propagation(proj, api=None, *, label: str = "EP"):
     """#133: Run EP confidence propagation after ingest/upgrade.
 
     Lazy (on-demand) — called only after an upgrade/ingest, not on every
@@ -125,7 +157,8 @@ def _run_ep_propagation(proj, *, label: str = "EP"):
             print(f"  {label}: skipped — no stored confidence on any claim "
                   f"(graph uncalibrated); set credibility / baselines first")
             return
-        ep = proj.get_ep() if hasattr(proj, 'get_ep') else TortoiseEP(proj)
+        ep = (proj.get_ep() if hasattr(proj, 'get_ep')
+              else TortoiseEP(proj, emit=_belief_emitter(api)))
         n_iter, converged = ep.run(op_ids, max_hops=3, evidence=evidence)
         suffix = (f" ({uncalibrated} uncalibrated claims excluded)"
                   if uncalibrated else "")
@@ -236,7 +269,7 @@ def _do_upgrade(transcript, text, source_id, proj, api, args):
     print(f"  doc_status: {current_status} → extracted")
 
     # 5. Lazy EP re-propagation on affected subgraph (#133 Task 3)
-    _run_ep_propagation(proj)
+    _run_ep_propagation(proj, api)
 
 
 def _resolve_ingest_base() -> str | None:
@@ -385,7 +418,7 @@ def _do_upgrade_all(proj, api, args):
     # Lazy EP re-propagation ONCE after all upgrades (#133 Task 3 — review P2:
     # N× full-graph EP is wasteful; one run after the loop is equivalent).
     if upgraded:
-        _run_ep_propagation(proj)
+        _run_ep_propagation(proj, api)
 
     print(f"upgrade-all complete: {upgraded} upgraded, {skipped} skipped")
 
@@ -576,7 +609,7 @@ def main(argv=None):
                 # (replaces BFS propagate_shock — bidirectional, quadrature-based).
                 # #1157: shared helper — priors from stored confidence only;
                 # refuses (loud flag) when the graph has none.
-                _run_ep_propagation(proj, label="EP")
+                _run_ep_propagation(proj, api, label="EP")
 
                 # S7: Semantic extraction (Subjects + Objects + aboutEntities)
                 if args.semantic_extract and is_doc:

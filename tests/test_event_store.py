@@ -1,13 +1,13 @@
 """Task 3 tests — durable SDK event emission to :GraphEvent nodes.
 
-Uses the shared sdk_factory fixture (tests/conftest.py, Task 1). No team_id
+Uses the shared sdk_factory fixture (tests/conftest.py, Task 1). No org_id
 property anywhere — the graph namespace IS the team partition (plan-review P2).
 """
 import json
 
 
 def _events(proj):
-    # plan-review P2: no team_id property — the graph namespace IS the partition
+    # plan-review P2: no org_id property — the graph namespace IS the partition
     rows = proj.g.query(
         "MATCH (e:GraphEvent) RETURN properties(e) ORDER BY e.seq").result_set
     return [r[0] for r in rows]
@@ -82,11 +82,18 @@ def test_all_mutations_emit(sdk_factory, tmp_path):
     old = sdk.create_point("statement", "old")
     new = sdk.create_point("statement", "new")
     sdk.supersede_point(old["id"], new["id"])
+    # #2488/#2498: the invalidate emitter needs its OWN pair now — a repeat
+    # invalidate on the superseded `old` is rejected by the shared lifecycle
+    # guard (outdated=true is itself terminal).
+    inv_old = sdk.create_point("statement", "inv-old")
+    inv_new = sdk.create_point("statement", "inv-new")
+    sdk.invalidate_point(inv_old["id"], inv_new["id"])
     sdk.annotate_operator(op["id"], 0.5, 0.5, 0.5, 0.5)
     types = [e["type"] for e in _events(sdk._get_proj())]
-    assert types.count("PointAdded") == 4  # src, tgt, old, new
+    assert types.count("PointAdded") == 6  # src, tgt, old, new, inv-old, inv-new
     assert "OperatorAdded" in types and "PointRetracted" in types
     assert "PointSuperseded" in types and "OperatorAnnotated" in types
+    assert "PointInvalidated" in types  # #2488: invalidate_point emits
 
 
 def test_content_edit_emits_nothing(sdk_factory, tmp_path):

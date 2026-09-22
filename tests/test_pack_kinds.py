@@ -111,7 +111,9 @@ def v3_registry():
     _write_pack(d, "product-strategy", V3_PS)
     registry = PackRegistry(d)
     registry.load_all()
-    return registry
+    yield registry
+    # #4096: reclaim this fixture's temp pack tree on teardown.
+    shutil.rmtree(d, ignore_errors=True)
 
 
 @pytest.fixture
@@ -152,7 +154,9 @@ def registry():
             yaml.dump(data, f)
     registry = PackRegistry(d)
     registry.load_all()
-    return registry
+    yield registry
+    # #4096: reclaim this fixture's temp pack tree on teardown.
+    shutil.rmtree(d, ignore_errors=True)
 
 
 class TestPackLoading:
@@ -872,7 +876,7 @@ class TestV3BackwardCompatibility:
         """§6.2a regression: the CURRENT registry packs (v2) load unchanged."""
         registry = PackRegistry(REPO_PACKS_DIR)
         loaded = registry.load_all()
-        assert loaded == 4  # dev, marketing, product-strategy, project-management
+        assert loaded == 5  # dev, marketing, product-strategy, project-management, agent-ops (#1933)
         assert not registry.errors, f"v2 packs must load clean: {registry.errors}"
 
 

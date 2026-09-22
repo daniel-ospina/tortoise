@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import sys
 import tempfile
 
@@ -29,6 +30,7 @@ def sdk():
     sdk = TortoiseSDK(db_path)
     yield sdk
     sdk.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 def _make_point(sdk: TortoiseSDK, **kw):
@@ -86,6 +88,42 @@ class TestUpdatePoint:
         p = _make_point(sdk, content="before")
         sdk.update_point(p["id"], content="after")
         assert sdk.get_point(p["id"])["content"] == "after"
+
+    def test_update_content_recomputes_content_hash(self, sdk):
+        """#1904: update_point(content=...) recomputes content_hash in the
+        same round trip. All dedup surfaces match on the stored hash, so a
+        stale hash after a content edit silently breaks dedup — the edited
+        point's re-insert must dedup to the SAME point (exactly once)."""
+        import hashlib
+        p = sdk.create_point("statement", "X")
+        sdk.update_point(p["id"], content="Y")
+        after = sdk.get_point(p["id"])
+        assert after["content_hash"] == hashlib.sha256(b"Y").hexdigest()
+        again = sdk.create_or_update_point("statement", "Y")
+        assert again["id"] == p["id"]
+        g = sdk._get_proj().g
+        cnt = g.query(
+            "MATCH (n:Point {content_hash:$ch}) WHERE n.is_operator = false "
+            "RETURN count(n)",
+            params={"ch": hashlib.sha256(b"Y").hexdigest()},
+        ).result_set[0][0]
+        assert cnt == 1
+
+    def test_update_content_hash_not_in_event_record(self, tmp_path):
+        """#1904: content_hash is DERIVED from content — the PointRevised
+        record must not persist it (mirrors create_point's snapshot strip)."""
+        import json
+        sdk = TortoiseSDK(db_path=str(tmp_path / "t.db"),
+                          event_log_path=str(tmp_path / "events.jsonl"))
+        p = sdk.create_point("statement", "X")
+        sdk.update_point(p["id"], content="Y")
+        lines = (tmp_path / "events.jsonl").read_text().splitlines()
+        revised = [json.loads(l) for l in lines  # noqa: E741
+                   if json.loads(l).get("type") == "PointRevised"]
+        assert revised, "PointRevised event must be emitted"
+        assert "content_hash" not in revised[0]
+        assert revised[0]["new_content"] == "Y"
+        sdk.close()
 
 
 # ── delete_point ─────────────────────────────────────────────────────
@@ -243,6 +281,17 @@ class TestPaginatedQuery:
         ids2 = {r["id"] for r in page2["results"]}
         assert ids1.isdisjoint(ids2)
 
+    def test_invalid_pagination_params_rejected(self, sdk):
+        # #1914: limit=0 would make hasMore = skip + 0 < total always True
+        # on non-empty graphs (infinite pagination loop); negative skip/limit
+        # would pass raw into Cypher. Both must fail cleanly (ValueError →
+        # clean 400 at the API surface).
+        sdk.create_point("statement", "A")
+        for kwargs in ({"limit": 0}, {"limit": -5}, {"skip": -1},
+                       {"skip": -1, "limit": 0}):
+            with pytest.raises(ValueError, match="must be"):
+                sdk.paginated_query(kind="statement", **kwargs)
+
 
 # ── get_point ────────────────────────────────────────────────────────
 
@@ -320,13 +369,20 @@ class TestGetChainStatus:
     def test_expected_keys(self, sdk):
         status = sdk.summarize_structure()
         for key in ("gate0_jtbds", "gate1_use_cases", "gate2_user_journeys",
-                     "gate3_workflows", "gate4_requirements", "total"):
+                     "gate3_workflows", "gate4_requirements",
+                     "total", "operators", "gate_total"):
             assert key in status, f"missing key: {key}"
+            assert isinstance(status[key], int), f"{key} should be int"
 
-    def test_total_matches_sum(self, sdk):
+    def test_gate_total_matches_gate_sum(self, sdk):
+        """#2205 total-vs-gate semantics: gate_total is the gate-kind
+        subtotal (the pre-#2205 meaning of 'total'); total spans ALL kinds
+        and is >= the gate-only subtotal."""
         status = sdk.summarize_structure()
-        gate_sum = sum(v for k, v in status.items() if k != "total")
-        assert status["total"] == gate_sum
+        gate_keys = ("gate0_jtbds", "gate1_use_cases", "gate2_user_journeys",
+                     "gate3_workflows", "gate4_requirements")
+        assert status["gate_total"] == sum(status[k] for k in gate_keys)
+        assert status["total"] >= status["gate_total"]
 
 
 # ── file_jtbd ────────────────────────────────────────────────────────
@@ -415,15 +471,19 @@ class TestInvalidateSupersede:
         assert len(corrected) == 1, "CORRECTS edge duplicated on re-supersede"
 
     def test_invalidate_idempotent_corrects_edge(self, sdk):
-        # #330: re-invalidating the same pair must not duplicate CORRECTS, and
-        # the second call re-asserts (both points still exist -> True) without
-        # creating extra edges.
+        # #330: re-invalidating the same pair must not duplicate CORRECTS.
+        # #2498: the repeat is now an ILLEGAL transition — the shared lifecycle
+        # guard treats the `outdated=true` flag invalidate just wrote as
+        # terminal, so the second call raises instead of re-asserting. The old
+        # #330 re-assert moved `expiredAt` forward and MERGEd one CORRECTS edge
+        # per distinct corrector onto a node every read surface already
+        # excludes. The first call's CORRECTS edge stays unique.
         old = _make_point(sdk, content="old")
         new = _make_point(sdk, content="new")
         r1 = sdk.invalidate_point(old["id"], new["id"])
         assert r1["invalidated"] is True
-        r2 = sdk.invalidate_point(old["id"], new["id"])
-        assert r2["invalidated"] is True  # present endpoints -> re-assert
+        with pytest.raises(ValueError, match="already terminal"):
+            sdk.invalidate_point(old["id"], new["id"])
         corrected = sdk.traverse(new["id"], "CORRECTS", direction="outgoing")
         assert len(corrected) == 1, "CORRECTS edge duplicated on re-invalidate"
 
@@ -1132,6 +1192,47 @@ def test_r16_skips_unset_status_operator(sdk):
     sdk2.close()
 
 
+def test_update_content_replay_hash_parity(tmp_path):
+    """#1904 replay parity: the live graph's stored content_hash for an
+    edited point equals the hash the JSONL replay derives from the replayed
+    content (PointRevised.new_content). Before the fix the stored hash stayed
+    at sha256("X") while the replay content was "Y" — live graph and replay
+    diverged."""
+    import hashlib
+    import json
+
+    from tortoise.projection import fold  # replay single source of truth
+
+    event_log = tmp_path / "events.jsonl"
+    sdk = TortoiseSDK(db_path=str(tmp_path / "t.db"),
+                      event_log_path=str(event_log))
+    p = sdk.create_point("statement", "X")
+    sdk.update_point(p["id"], content="Y")
+    live_hash = sdk.get_point(p["id"])["content_hash"]
+    assert live_hash == hashlib.sha256(b"Y").hexdigest()
+
+    # fold() is the replay's single source of truth (projection module
+    # contract): the replayed content determines the derived hash.
+    events = [json.loads(l) for l in event_log.read_text().splitlines()]  # noqa: E741
+    replayed = fold(events)[p["id"]]
+    assert replayed["content"] == "Y"
+    assert live_hash == hashlib.sha256(
+        replayed["content"].encode()).hexdigest()
+
+    # wipe+rebuild_all: the edited content survives and the edited point is
+    # still exactly-once reachable via dedup (hash-less fallback scan).
+    rebuilt = sdk._get_proj().rebuild_all(str(tmp_path))
+    assert rebuilt["events"] > 0
+    row = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.content",
+        params={"id": p["id"]},
+    ).result_set[0]
+    assert row[0] == "Y"
+    again = sdk.create_or_update_point("statement", "Y")
+    assert again["id"] == p["id"]
+    sdk.close()
+
+
 def test_promotion_survives_rebuild(sdk, tmp_path):
     """Rebuild parity (#548, review #944): promoted Points and R16-promoted
     operators must still be live after wipe+rebuild_all from the JSONL log."""
@@ -1158,3 +1259,47 @@ def test_promotion_survives_rebuild(sdk, tmp_path):
         assert rows and rows[0][0] == "live", (
             f"rebuild must preserve promotion for {pid}, got {rows}"
         )
+
+
+def test_event_retention_interval_rejects_nonpositive_in_sdk(monkeypatch):
+    """Round-4 review P2 (PRE-EXISTING): ``TORTOISE_EVENT_RETENTION_INTERVAL``
+    was parsed with a bare ``int()``, so ``0``/``-1`` made the gate
+    ``now - _EVENT_PURGE_LAST < interval`` always false — a purge DELETE on
+    every ``events_poll``. The validated interval must keep the gate closed.
+
+    #3416: ``time.monotonic()`` is seconds since BOOT, so it is a few hundred
+    on a CI runner booted minutes ago and millions on a long-lived dev box.
+    The old setup seeded the gate with a bare ``0.0`` and leaned on uptime
+    exceeding the interval for that to look like "the past" — it passed on dev
+    boxes and failed on every fresh runner. Simulate a freshly-booted host and
+    seed the gate monotonic-relative (never an absolute literal) so this is
+    deterministic on any host."""
+    import time
+
+    import tortoise.event_store as es
+    from tortoise import monitoring
+
+    uptime = 300.0  # a runner booted 5 minutes ago
+    monkeypatch.setattr(time, "monotonic", lambda: uptime)
+
+    purges: list[str] = []
+    monkeypatch.setattr(es, "purge_expired",
+                        lambda *a, **k: purges.append("expired"))
+    monkeypatch.setattr(es, "purge_overflow",
+                        lambda *a, **k: purges.append("overflow"))
+    monkeypatch.setenv("TORTOISE_EVENT_RETENTION_INTERVAL", "0")
+    interval = monitoring.event_retention_interval()
+    assert interval > 0, "a non-positive interval must fall back to a positive one"
+    # "Last purge" one full real interval + 1s in the past → the gate is open
+    # no matter what the host uptime is. monkeypatch restores the previous
+    # class value afterwards, so this process-level gate does not leak into
+    # neighbouring tests.
+    monkeypatch.setattr(TortoiseSDK, "_EVENT_PURGE_LAST", uptime - interval - 1.0)
+    # ``_maybe_purge_events`` reads only module-level state + the (patched)
+    # purge fns here, so a placeholder receiver/projection is sufficient.
+    TortoiseSDK._maybe_purge_events(object(), None)
+    first = len(purges)
+    assert first > 0, "the first gated purge did not run"
+    TortoiseSDK._maybe_purge_events(object(), None)
+    assert len(purges) == first, (
+        "interval=0 made the purge gate always false — a DELETE on every poll")

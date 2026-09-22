@@ -638,11 +638,11 @@ class TestMCPRegistration:
 
 class TestReviewGateFixes:
     def test_explicit_baseline_never_clobbered_real_path(self):
-        """set_point_baseline(source='explicit') + strong source → untouched."""
+        """set_point_baseline(default set-by-author) + strong source → untouched."""
         with fresh_sdk() as sdk:
             url = "https://explicit2.example"
             p = sdk.create_point("statement", "explicit claim", extractedFrom=url)
-            sdk.set_point_baseline(p["id"], 2.0, 8.0, source="explicit")  # low prior, explicit
+            sdk.set_point_baseline(p["id"], 2.0, 8.0)  # low prior, author-set
             sdk._get_proj().g.query(
                 "MATCH (s:Source {url:$url}) SET s.credibilityTier = 'T0', s.ingestedAt = $ts",
                 params={"url": url, "ts": FRESH},
@@ -651,7 +651,7 @@ class TestReviewGateFixes:
             pt = sdk.get_point(p["id"])
             assert pt["ep_alpha"] == 2.0  # untouched despite strong T0 source
             assert pt["ep_beta"] == 8.0
-            assert pt["baseline_source"] == "explicit"
+            assert pt["baseline_source"] == "set-by-author"
 
     def test_multi_source_reliability_aggregation(self):
         """get_source_reliability on multi-source point asserts the aggregation formula."""

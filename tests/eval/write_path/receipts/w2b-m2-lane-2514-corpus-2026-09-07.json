@@ -1,0 +1,290 @@
+{
+  "receipt_version": 1,
+  "run_id": "w2b-21075f29fa94",
+  "date": "2026-09-07T20:30:15Z",
+  "run_status": "completed",
+  "verdict": "regression",
+  "failure_origin": "gate_regression",
+  "commit": "5b6e3855",
+  "corpus_hash": "sha256:d17a99af2828eab6d1084f9d5edf8534497465d56f910ef6d6dafbf68c87bec6",
+  "judge_pin": "w2-write-path-mechanical-v2",
+  "resolved_config": {
+    "lanes": [
+      "verbatim",
+      "facts",
+      "dream"
+    ],
+    "mode": "BPRE",
+    "harness": "all",
+    "seed": 42,
+    "extractor_posture": "m2"
+  },
+  "cost_usd": 0.0,
+  "metrics": {
+    "salient_unit_survival_macro": 1.0,
+    "salient_unit_survival_strict": 1.0,
+    "distractor_leakage_per_run": 15,
+    "sessions_emitting": 1.0,
+    "quote_fidelity": 1.0,
+    "provenance_accuracy": 1.0
+  },
+  "quote_spans_total": 0,
+  "justification": "m2 deterministic echo replay of the EXTENDED #2514 corpus (7 sessions / 90 units). macro 1.0 / strict 1.0 unchanged; leakage 11 -> 15 (2 added sessions x 2 distractors; structural on the echo lane). operator-edge audit 0/4 (structural \u2014 no relation extraction), content_ok 3/4. Corpus-blessed into baselines/m2.json (see its justification).",
+  "session_results": [
+    {
+      "session_id": "wp01_quarry_debug",
+      "emitted": true,
+      "macro": {
+        "survived": 16,
+        "total": 16
+      },
+      "strict": {
+        "survived": 16,
+        "total": 16
+      },
+      "leaked": [
+        "wp01_quarry_debug_d_01",
+        "wp01_quarry_debug_d_02",
+        "wp01_quarry_debug_d_03"
+      ],
+      "quotes": {
+        "grounded": 0,
+        "total": 0
+      },
+      "provenance": {
+        "provenanced": 61,
+        "total": 61
+      },
+      "memory_points": 61,
+      "operator_counts": {},
+      "planted_operators": [],
+      "failed_units": []
+    },
+    {
+      "session_id": "wp02_lumen_refactor",
+      "emitted": true,
+      "macro": {
+        "survived": 13,
+        "total": 13
+      },
+      "strict": {
+        "survived": 13,
+        "total": 13
+      },
+      "leaked": [
+        "wp02_lumen_refactor_d_01",
+        "wp02_lumen_refactor_d_02"
+      ],
+      "quotes": {
+        "grounded": 0,
+        "total": 0
+      },
+      "provenance": {
+        "provenanced": 52,
+        "total": 52
+      },
+      "memory_points": 52,
+      "operator_counts": {},
+      "planted_operators": [],
+      "failed_units": []
+    },
+    {
+      "session_id": "wp03_ember_design",
+      "emitted": true,
+      "macro": {
+        "survived": 15,
+        "total": 15
+      },
+      "strict": {
+        "survived": 15,
+        "total": 15
+      },
+      "leaked": [
+        "wp03_ember_design_d_01",
+        "wp03_ember_design_d_02"
+      ],
+      "quotes": {
+        "grounded": 0,
+        "total": 0
+      },
+      "provenance": {
+        "provenanced": 50,
+        "total": 50
+      },
+      "memory_points": 50,
+      "operator_counts": {},
+      "planted_operators": [],
+      "failed_units": []
+    },
+    {
+      "session_id": "wp04_aurora_perf",
+      "emitted": true,
+      "macro": {
+        "survived": 13,
+        "total": 13
+      },
+      "strict": {
+        "survived": 13,
+        "total": 13
+      },
+      "leaked": [
+        "wp04_aurora_perf_d_01",
+        "wp04_aurora_perf_d_02"
+      ],
+      "quotes": {
+        "grounded": 0,
+        "total": 0
+      },
+      "provenance": {
+        "provenanced": 44,
+        "total": 44
+      },
+      "memory_points": 44,
+      "operator_counts": {},
+      "planted_operators": [],
+      "failed_units": []
+    },
+    {
+      "session_id": "wp05_retro_writeup",
+      "emitted": true,
+      "macro": {
+        "survived": 15,
+        "total": 15
+      },
+      "strict": {
+        "survived": 15,
+        "total": 15
+      },
+      "leaked": [
+        "wp05_retro_writeup_d_01",
+        "wp05_retro_writeup_d_02"
+      ],
+      "quotes": {
+        "grounded": 0,
+        "total": 0
+      },
+      "provenance": {
+        "provenanced": 49,
+        "total": 49
+      },
+      "memory_points": 49,
+      "operator_counts": {},
+      "planted_operators": [],
+      "failed_units": []
+    },
+    {
+      "session_id": "wp06_quarry_rollout",
+      "emitted": true,
+      "macro": {
+        "survived": 9,
+        "total": 9
+      },
+      "strict": {
+        "survived": 9,
+        "total": 9
+      },
+      "leaked": [
+        "wp06_quarry_rollout_d_01",
+        "wp06_quarry_rollout_d_02"
+      ],
+      "quotes": {
+        "grounded": 0,
+        "total": 0
+      },
+      "provenance": {
+        "provenanced": 41,
+        "total": 41
+      },
+      "memory_points": 41,
+      "operator_counts": {},
+      "planted_operators": [
+        {
+          "id": "wp06_quarry_rollout_op_01",
+          "expected_kind": "SUPPORTS",
+          "verdict": "edge_missing",
+          "edge_correct": false,
+          "forms_found": null
+        }
+      ],
+      "failed_units": []
+    },
+    {
+      "session_id": "wp07_bluepeak_followup",
+      "emitted": true,
+      "macro": {
+        "survived": 9,
+        "total": 9
+      },
+      "strict": {
+        "survived": 9,
+        "total": 9
+      },
+      "leaked": [
+        "wp07_bluepeak_followup_d_01",
+        "wp07_bluepeak_followup_d_02"
+      ],
+      "quotes": {
+        "grounded": 0,
+        "total": 0
+      },
+      "provenance": {
+        "provenanced": 40,
+        "total": 40
+      },
+      "memory_points": 40,
+      "operator_counts": {},
+      "planted_operators": [
+        {
+          "id": "wp07_bluepeak_followup_op_02",
+          "expected_kind": "NEGATE",
+          "verdict": "edge_missing",
+          "edge_correct": false,
+          "forms_found": null
+        },
+        {
+          "id": "wp07_bluepeak_followup_op_03",
+          "expected_kind": "MITIGATES",
+          "verdict": "edge_missing",
+          "edge_correct": false,
+          "forms_found": null
+        },
+        {
+          "id": "wp07_bluepeak_followup_op_04",
+          "expected_kind": "SUPERSEDE",
+          "verdict": "to_content_missing",
+          "edge_correct": false,
+          "forms_found": null
+        }
+      ],
+      "failed_units": []
+    }
+  ],
+  "notes": [
+    "wp01_quarry_debug: capture ok=True extraction_mode=llm extracted=62",
+    "wp02_lumen_refactor: capture ok=True extraction_mode=llm extracted=52",
+    "wp03_ember_design: capture ok=True extraction_mode=llm extracted=52",
+    "wp04_aurora_perf: capture ok=True extraction_mode=llm extracted=46",
+    "wp05_retro_writeup: capture ok=True extraction_mode=llm extracted=49",
+    "wp06_quarry_rollout: capture ok=True extraction_mode=llm extracted=42",
+    "wp07_bluepeak_followup: capture ok=True extraction_mode=llm extracted=40",
+    "dream EP pass: total_affected=121 coverage=0.5353982300884956 converged_all=True",
+    "operator-edge audit (#2514): 0/4 planted operator edges graded edge_correct (audit dimension only \u2014 not yet a gated metric); the m2 echo lane has no relation extraction, so 0 is structural there, never a bar",
+    "quote_fidelity 1.0 is VACUOUS: the corpus gold contains no double-quoted spans (quote_spans_total=0) \u2014 this number is a floor, not a fidelity bar; it will not hold under a future corpus that quotes",
+    "cost not tracked: the extractor seam reported no llm_cost_usd in any session (mock/unknown adapter) \u2014 receipt cost_usd is 0.0 with this note, never a silently-fake measured figure"
+  ],
+  "log": [
+    "parser round-trip ok (codex, 26 turns)",
+    "parser round-trip ok (codex, 22 turns)",
+    "parser round-trip ok (pi, 24 turns)",
+    "parser round-trip ok (pi, 20 turns)",
+    "parser round-trip ok (claude-desktop, 23 turns)",
+    "parser round-trip ok (codex, 22 turns)",
+    "parser round-trip ok (codex, 22 turns)",
+    "metrics: {\"salient_unit_survival_macro\": 1.0, \"salient_unit_survival_strict\": 1.0, \"distractor_leakage_per_run\": 15, \"sessions_emitting\": 1.0, \"quote_fidelity\": 1.0, \"provenance_accuracy\": 1.0}"
+  ],
+  "operator_audit": {
+    "planted": 4,
+    "edge_correct": 0,
+    "content_ok": 3
+  }
+}

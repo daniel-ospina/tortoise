@@ -16,7 +16,7 @@ import os
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
 import tempfile  # noqa: F401
-import time  # noqa: F401
+import time
 
 import pytest
 
@@ -53,7 +53,7 @@ def seeded_registry_sdk(tmp_path):
     """
     db_path = str(tmp_path / "reg.db")
     sdk = TortoiseSDK(db_path=db_path, namespace="registry")
-    team = sdk.team_create("test-team")
+    team = sdk.org_create("test-team")
     key_info = sdk.apikey_create(team["id"], "test-fixture")
     return sdk, key_info["api_key"]  # (registry SDK, plaintext tt_ key)
 
@@ -115,24 +115,24 @@ class TestContextVarsAndSdk:
         # Isolate: no URI → embedded mode; reset module global for identity check
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         ma.sdk = None
-        token = ma._current_team_id.set(None)
+        token = ma._current_org_id.set(None)
         try:
-            assert ma._get_team_sdk() is ma._get_base_sdk()
+            assert ma._get_org_sdk() is ma._get_base_sdk()
         finally:
-            ma._current_team_id.reset(token)
+            ma._current_org_id.reset(token)
             ma.sdk = None
 
     def test_team_sdk_returns_team_scoped_when_set(self):
-        from tortoise.mcp_auth import _current_team_id, _get_team_sdk
-        token = _current_team_id.set("team-abc")
+        from tortoise.mcp_auth import _current_org_id, _get_org_sdk
+        token = _current_org_id.set("team-abc")
         try:
-            assert isinstance(_get_team_sdk(), TortoiseSDK)
+            assert isinstance(_get_org_sdk(), TortoiseSDK)
         finally:
-            _current_team_id.reset(token)
+            _current_org_id.reset(token)
 
     def test_http_allowed_populated_default_deny(self):
         from tortoise.mcp_auth import HTTP_ALLOWED
-        assert "tortoise_team_create" not in HTTP_ALLOWED
+        assert "tortoise_org_create" not in HTTP_ALLOWED
         assert "tortoise_backfill_v25" not in HTTP_ALLOWED
         assert "tortoise_ingest_corpus" not in HTTP_ALLOWED
         assert "tortoise_create_point" in HTTP_ALLOWED
@@ -159,6 +159,27 @@ class TestAuthPreLeak:
         body = _parse_sse_json(r)
         assert body is not None and "Bearer tt_" in body["error"]["message"]
 
+    def test_successful_auth_writes_last_used_at(self, mcp_client,
+                                                 seeded_registry_sdk):
+        """#1854 (review P2): a successful MCP resolution bumps the APIKey
+        node's last_used_at (best-effort #685 write-through) — a recovery
+        key used ONLY via MCP must not read as never-used to the NULL-first
+        recovery rotation (that would rotate a LIVE MCP credential).
+        Telemetry-write failures never gate auth (try/except swallow)."""
+        tc, _ = mcp_client
+        sdk, _ = seeded_registry_sdk
+        reg = sdk._get_registry()
+        rows = reg.query(
+            "MATCH (k:APIKey) RETURN k.last_used_at",
+        ).result_set
+        assert rows and rows[0][0] is None  # fresh key: never used
+        r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
+        assert r.status_code == 200, r.text
+        rows = reg.query(
+            "MATCH (k:APIKey) RETURN k.last_used_at",
+        ).result_set
+        assert rows and rows[0][0] is not None  # write-through bumped it
+
     def test_bearer_wrong_prefix_401(self, mcp_client):
         tc, _ = mcp_client
         tc.headers["Authorization"] = "Bearer not-tt-prefix"
@@ -174,15 +195,15 @@ class TestAuthPreLeak:
             def apikey_verify(self, token):
                 raise ConnectionError("Connection refused")
 
-        orig_init = ma.TeamResolutionMiddleware._get_registry_sdk
-        ma.TeamResolutionMiddleware._get_registry_sdk = lambda self: _DownSDK()
+        orig_init = ma.OrgResolutionMiddleware._get_registry_sdk
+        ma.OrgResolutionMiddleware._get_registry_sdk = lambda self: _DownSDK()
         try:
             r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
             assert r.status_code == 503
             body = _parse_sse_json(r)
             assert body is not None and "error" in body
         finally:
-            ma.TeamResolutionMiddleware._get_registry_sdk = orig_init
+            ma.OrgResolutionMiddleware._get_registry_sdk = orig_init
 
     def test_revoked_key_fails_after_cache_expiry(self, tmp_path):
         """Revoked key works ≤60s (cache hit), fails after cache expiry (fresh cache → 401)."""
@@ -191,7 +212,7 @@ class TestAuthPreLeak:
 
         db_path = str(tmp_path / "rev.db")
         reg_sdk = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = reg_sdk.team_create("rev-team")
+        team = reg_sdk.org_create("rev-team")
         key_info = reg_sdk.apikey_create(team["id"], "t")
         key = key_info["api_key"]
         headers = {"Authorization": f"Bearer {key}",
@@ -219,6 +240,366 @@ class TestAuthPreLeak:
             r = tc2.post("/mcp", headers=headers,
                          json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
             assert r.status_code == 401
+
+
+# ── #3144 / #3812: the auth-plane 503's Retry-After contract, EXECUTED ──────
+
+class TestAuthRetryAfterContract:
+    """#3144 / #3812 — the idle → first-request path, executed end to end.
+
+    #3144's reported symptom is the **MCP startup connect**: a client connects
+    eagerly at session start (Pi's ``mcp-client``: a 15s connect budget and NO
+    retry), a single ``503`` during org resolution is logged, and the whole
+    session runs with **zero** Tortoise tools. The app-side lever is therefore
+    the response CONTRACT on the auth-plane 503: a retryable failure a client
+    can act on, not a bodyless rejection it cannot distinguish from an outage.
+
+    #3812's acceptance is that the contract is asserted by EXECUTING the path:
+    a header assertion pinned to source text cannot fail and is not evidence.
+    These tests drive the real mounted MCP ASGI app through the real sequence
+    (warm resolution → idle past the 60s cache TTL → cold re-resolve → retry),
+    so removing the ``Retry-After`` header makes them red.
+    """
+
+    @pytest.fixture
+    def idle_mcp_client(self, tmp_path, monkeypatch):
+        """Mounted MCP app plus a handle on its OrgResolutionMiddleware.
+
+        The middleware instance owns the per-token 60s resolution cache, so
+        holding a reference to it is how the test reaches the
+        idle → first-request path deterministically (no real 60s sleep).
+        """
+        import tortoise.mcp_auth as ma
+        from tortoise.mcp_server import create_http_app
+
+        db_path = str(tmp_path / "retry.db")
+        reg_sdk = TortoiseSDK(db_path=db_path, namespace="registry")
+        team = reg_sdk.org_create("retry-team")
+        key = reg_sdk.apikey_create(team["id"], "retry")["api_key"]
+
+        made: list = []
+        orig_init = ma.OrgResolutionMiddleware.__init__
+
+        def _capture(self, *a, **kw):
+            orig_init(self, *a, **kw)
+            made.append(self)
+
+        monkeypatch.setattr(ma.OrgResolutionMiddleware, "__init__", _capture)
+        app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
+                              _registry_sdk=reg_sdk)
+        tc = _mounted_test_client(app)
+        tc.headers.update({
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        })
+        with tc:
+            yield tc, key, made, reg_sdk
+
+    @staticmethod
+    def _warm_and_age_idle_cache(idle_mcp_client):
+        """Warm the token→org cache, then age it past the 60s TTL.
+
+        Returns the live middleware, whose cache entry is now stale — the
+        state the process is in for the first request after an idle period,
+        which forces a fresh control-plane resolution: the cold path #3144
+        reports. (The middleware is instantiated lazily on the warm request,
+        as it is in production.)
+        """
+        tc, key, made, _reg_sdk = idle_mcp_client
+        # 1) A warm request resolves and caches the token → org mapping.
+        warm, _ = _mcp_post(tc, {"jsonrpc": "2.0", "method": "tools/list",
+                                 "id": 1})
+        assert warm.status_code == 200, warm.text
+        assert made, "OrgResolutionMiddleware was never instantiated"
+        middleware = made[0]
+        assert key in middleware._cache, "the warm request did not cache"
+        # 2) Idle: age the cached resolution past the middleware's 60s TTL.
+        ts, org, limits = middleware._cache[key]
+        middleware._cache[key] = (ts - 61.0, org, limits)
+        return middleware
+
+    @staticmethod
+    def _first_503_after_idle(tc, monkeypatch, rid: int, configured):
+        """Drive the idle→first-request path once; return ``(raw, seconds)``.
+
+        ``configured is None`` DELETES ``TORTOISE_MCP_AUTH_RETRY_AFTER`` —
+        the production default — so the unset path is proven on the WIRE and
+        not only against the resolver unit test. Without this a change that
+        emits the header only when the knob is explicitly set stays green
+        while the common deployment advertises no back-off at all (#3144).
+
+        Re-armed for each call: the failed resolution does NOT write the
+        cache, so the seeded stale entry is still stale and every request
+        here takes the cold re-resolve path.
+        """
+        import tortoise.mcp_auth as ma
+        if configured is None:
+            monkeypatch.delenv("TORTOISE_MCP_AUTH_RETRY_AFTER", raising=False)
+        else:
+            monkeypatch.setenv("TORTOISE_MCP_AUTH_RETRY_AFTER", configured)
+        resp, body = _mcp_post(
+            tc, {"jsonrpc": "2.0", "method": "tools/list", "id": rid})
+        assert resp.status_code == 503, resp.text
+        # A real HTTP response with a JSON-RPC body — the zero-byte shape
+        # in #3144's field report is proxy-generated, never app-side
+        # (#3709).
+        assert resp.content, "zero-byte 503 body"
+        assert body is not None and body["error"]["code"] == ma.ERR_REGISTRY, body
+        raw = resp.headers.get("Retry-After")
+        assert raw is not None, (
+            "the auth-plane 503 carries no Retry-After — an MCP client "
+            "has no instruction to back off and gives up on the startup "
+            "connect")
+        # int() raises on an HTTP-date or garbage → not parseable.
+        seconds = int(raw)
+        return raw, seconds
+
+    def test_idle_first_request_503_is_retryable_and_the_retry_resolves(
+            self, idle_mcp_client, monkeypatch):
+        tc, _key, _made, reg_sdk = idle_mcp_client
+        self._warm_and_age_idle_cache(idle_mcp_client)
+
+        # 3) The control plane / registry is cold or unreachable on the
+        #    re-resolve (twice: it recovers for the retry leg).
+        calls = {"n": 0}
+        real_verify = reg_sdk.apikey_verify
+
+        def _cold_then_healthy(token):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise ConnectionError("control plane cold / connection refused")
+            return real_verify(token)
+
+        monkeypatch.setattr(reg_sdk, "apikey_verify", _cold_then_healthy)
+
+        # 4) The contract: a parseable Retry-After in a sane range, pinned to
+        #    the CONFIGURED value. Removing the header makes this RED (#3812's
+        #    acceptance). The value is read back off the wire and slept below
+        #    — the test honours what the SERVER advertised, not a number it
+        #    chose itself. (The clamp itself is proven separately, on the
+        #    wire, in test_default_and_out_of_range_knobs_reach_the_wire.)
+        _, first = self._first_503_after_idle(tc, monkeypatch, 2, "3")
+        assert 1 <= first <= 3600, f"Retry-After out of sane range: {first}"
+        # PIN the advertised value. A range check alone would let a hardcoded
+        # in-range literal pass — and a value at the 3600s ceiling would hang
+        # the `time.sleep` below for an hour.
+        assert first == 3, (
+            f"the 503 advertised {first}s, not the configured "
+            "TORTOISE_MCP_AUTH_RETRY_AFTER=3 — the knob is not wired to the wire")
+        assert calls["n"] == 1, (
+            "the stale cache entry was served — this is not the idle path")
+
+        # A SECOND configured value: together with the first this pins the
+        # knob→wire wiring against ANY hardcoded literal (no single literal can
+        # satisfy both 3 and 2), which a one-value pin cannot.
+        _, advertised = self._first_503_after_idle(tc, monkeypatch, 3, "2")
+        assert advertised == 2, (
+            f"the 503 advertised {advertised}s, not the configured "
+            "TORTOISE_MCP_AUTH_RETRY_AFTER=2 — the value is not read at CALL time")
+        assert calls["n"] == 2, "the second request did not re-resolve"
+
+        # 5) The retry leg, after EXACTLY the advertised delay: the dependency
+        #    has recovered, and the request must RESOLVE — not be served a
+        #    mocked back-off acknowledgement, and not be answered from a
+        #    refreshed stale cache without re-consulting the dependency.
+        time.sleep(advertised)
+        retry, retry_body = _mcp_post(
+            tc, {"jsonrpc": "2.0", "method": "tools/list", "id": 4})
+        assert retry.status_code == 200, retry.text
+        assert retry_body is not None and "result" in retry_body, retry_body
+        assert retry_body["result"]["tools"], "tools/list resolved empty"
+        assert calls["n"] == 3, (
+            "the retry did not re-consult the recovered dependency — it was "
+            "served from cache, so this proves no resolution")
+
+    def test_default_and_out_of_range_knobs_reach_the_wire(
+            self, idle_mcp_client, monkeypatch):
+        """The UNSET default and the CLAMP must be proven ON THE WIRE.
+
+        Two regressions the configured-value test above cannot see:
+
+        * **unset** — the production default. If the header is emitted only
+          when the knob is explicitly set, the common deployment advertises
+          NO ``Retry-After``: exactly the defect #3144 removes.
+        * **out of range** — the resolver clamps, but nothing above ties the
+          value actually emitted to it. A raw ``os.environ.get(..., "5")``
+          keeps every configured-value assertion green while the server
+          advertises ``Retry-After: 0`` (a busy-retry hammer against a down
+          dependency) or an absurd ``99999``.
+
+        No sleep on the advertised delay here — this asserts the bytes the
+        server hands a client, it does not wait them out.
+        """
+        import tortoise.mcp_auth as ma
+
+        tc, _key, _made, reg_sdk = idle_mcp_client
+        self._warm_and_age_idle_cache(idle_mcp_client)
+
+        calls = {"n": 0}
+
+        def _always_cold(token):
+            calls["n"] += 1
+            raise ConnectionError("control plane cold / connection refused")
+
+        monkeypatch.setattr(reg_sdk, "apikey_verify", _always_cold)
+
+        # (a) UNSET → the production default, on the wire.
+        raw, seconds = self._first_503_after_idle(tc, monkeypatch, 2, None)
+        assert raw == "5", (
+            f"with TORTOISE_MCP_AUTH_RETRY_AFTER unset the 503 advertised "
+            f"{raw!r}, not the default 5 — the header is emitted only when the "
+            "knob is explicitly set, so a default deployment advertises no "
+            "back-off at all (#3144)")
+        assert seconds == 5
+
+        # (b) Below the floor: never advertise 0 (a busy-retry hammer).
+        raw, _ = self._first_503_after_idle(tc, monkeypatch, 3, "0")
+        assert raw == "1", (
+            f"TORTOISE_MCP_AUTH_RETRY_AFTER=0 reached the wire as {raw!r} — "
+            "the clamp is not applied to the value the server emits")
+        assert raw == str(ma._resolve_auth_retry_after_s()), (
+            "the emitted header is not the clamped resolver's output")
+
+        # (c) Above the ceiling: never advertise an absurd window.
+        raw, _ = self._first_503_after_idle(tc, monkeypatch, 4, "99999")
+        assert raw == "3600", (
+            f"TORTOISE_MCP_AUTH_RETRY_AFTER=99999 reached the wire as {raw!r} "
+            "— the clamp is not applied to the value the server emits")
+        assert raw == str(ma._resolve_auth_retry_after_s()), (
+            "the emitted header is not the clamped resolver's output")
+        assert calls["n"] == 3, "a request did not take the cold re-resolve path"
+
+    @pytest.mark.parametrize("raw,expected", [
+        (None, 5),        # unset → default
+        ("1", 1),        # floor is allowed (a 1s back-off is honest)
+        ("45", 45),
+        ("0", 1),         # never advertise 0 (a busy-retry hammer)
+        ("-9", 1),
+        ("99999", 3600),  # never advertise an absurd window
+        ("nonsense", 5),  # unparseable → default
+    ])
+    def test_auth_retry_after_resolver_clamps_to_a_sane_range(
+            self, monkeypatch, raw, expected):
+        import tortoise.mcp_auth as ma
+        if raw is None:
+            monkeypatch.delenv("TORTOISE_MCP_AUTH_RETRY_AFTER", raising=False)
+        else:
+            monkeypatch.setenv("TORTOISE_MCP_AUTH_RETRY_AFTER", raw)
+        assert ma._resolve_auth_retry_after_s() == expected
+
+
+# ── #2202: tortoise_health truth on the hosted surface ────────────────
+
+class TestTortoiseHealthTruth:
+    """#2202 — the hosted MCP tool tortoise_health must report the same truth
+    as the server /health: ok when the served graph is healthy, degraded only
+    on a real probe failure. Pre-#2202 the tool probed monitoring's
+    module-global SDK handle, which the HTTP hosted surface never registers —
+    every onboarding call reported degraded / no_sdk_registered while /health
+    (fresh SDK probe of the same DB) said ok. The tool must instead probe the
+    request-scoped TEAM SDK (the graph it actually serves) like every other
+    tool."""
+
+    @staticmethod
+    def _tool_result(body):
+        """Dict-shaped tool results come back inline or as content[].text JSON
+        depending on the FastMCP call path — handle both."""
+        result = body.get("result", {}) if body else {}
+        if isinstance(result, dict) and "content" in result:
+            # A RETIRED tool's result carries an extra trailing block with the #3883
+            # warning; it is not part of the payload and is skipped here.
+            text = "".join(c.get("text", "") for c in result["content"]
+                           if isinstance(c, dict)
+                           and not c.get("text", "").startswith("RETIRED TOOL"))
+            if text:
+                import json
+                try:
+                    return json.loads(text)
+                except ValueError:
+                    return {"text": text}
+        return result
+
+    def test_tortoise_health_ok_over_tenant_http(self, tmp_path, monkeypatch):
+        """A healthy team's tortoise_health reads ok — never the onboarding
+        no_sdk_registered lie. Pins its own embedded store (the shared default
+        ~/.tortoise store is a cross-suite singleton; per-test isolation keeps
+        this green on both lanes)."""
+        from tortoise.mcp_server import create_http_app
+
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        db = str(tmp_path / "health.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db)
+        reg = TortoiseSDK(db_path=db, namespace="registry")
+        team = reg.org_create("health-truth-team")
+        key = reg.apikey_create(team["id"], "h")["api_key"]
+
+        app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
+                              _registry_sdk=reg)
+        tc = _mounted_test_client(app)
+        tc.headers.update({
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        })
+        with tc:
+            r, body = _mcp_post(tc, {"jsonrpc": "2.0", "id": 1,
+                                     "method": "tools/call",
+                                     "params": {"name": "tortoise_health",
+                                                "arguments": {}}})
+            assert r.status_code == 200, r.text
+            result = self._tool_result(body)
+            assert result.get("status") == "ok", body
+            assert result.get("db", {}).get("ok") is True
+            assert result.get("falkordb") == "connected"
+            assert "no_sdk_registered" not in str(result)
+            assert isinstance(result.get("graph_size"), int)
+
+    def test_tortoise_health_probes_team_graph_not_registry(self, tmp_path,
+                                                             monkeypatch):
+        """The tool's db/graph_size come from the SERVED team graph — probing
+        the registry namespace would auto-create/report a different graph
+        (#669 discipline: health probes never open the registry namespace).
+        Seed one point as the team, then assert graph_size reflects it."""
+        from tortoise.mcp_server import create_http_app
+
+        # Deterministic embedded env (mirrors the quota fixtures): the team
+        # graph lives on this DB, so graph_size is asserted against the same
+        # store the request-scoped SDK serves.
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        db = str(tmp_path / "health.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db)
+        reg = TortoiseSDK(db_path=db, namespace="registry")
+        team = reg.org_create("health-truth-team")
+        reg.org_update(team["id"], max_points=1000)
+        key = reg.apikey_create(team["id"], "h")["api_key"]
+
+        app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
+                              _registry_sdk=reg)
+        tc = _mounted_test_client(app)
+        tc.headers.update({
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        })
+        with tc:
+            # Seed through the served surface (create_point resolves the same
+            # team SDK the health probe uses).
+            r, body = _mcp_post(tc, {"jsonrpc": "2.0", "id": 1,
+                                     "method": "tools/call",
+                                     "params": {"name": "tortoise_create_point",
+                                                "arguments": {"kind": "statement",
+                                                              "content": "health-truth seed"}}})
+            assert r.status_code == 200, r.text
+            assert "error" not in str(body), body
+            r, body = _mcp_post(tc, {"jsonrpc": "2.0", "id": 2,
+                                     "method": "tools/call",
+                                     "params": {"name": "tortoise_health",
+                                                "arguments": {}}})
+            assert r.status_code == 200, r.text
+            result = self._tool_result(body)
+            assert result.get("status") == "ok", body
+            assert result.get("graph_size") >= 1, body
 
 
 # ── GET /mcp metadata ───────────────────────────────────────────────────────
@@ -260,9 +641,9 @@ class TestTeamIsolation:
 
         db_path = str(tmp_path / "iso.db")
         sdk = TortoiseSDK(db_path=db_path, namespace="registry")
-        team_a = sdk.team_create("tenant-a")
+        team_a = sdk.org_create("tenant-a")
         ka = sdk.apikey_create(team_a["id"], "t")["api_key"]
-        team_b = sdk.team_create("tenant-b")
+        team_b = sdk.org_create("tenant-b")
         kb = sdk.apikey_create(team_b["id"], "t")["api_key"]
 
         app = create_http_app(allowed_origins=[], _registry_sdk=sdk)
@@ -302,7 +683,7 @@ class TestTeamIsolation:
 class TestComputeConfidenceHTTP:
     """AC7 — the no-arg HTTP disable-contract (#395 delta C).
 
-    The request-scoped SDK (mcp_auth.py _get_team_sdk) has empty in-memory
+    The request-scoped SDK (mcp_auth.py _get_org_sdk) has empty in-memory
     dirty state over HTTP, so the SDK no-arg path would silently return {}
     where today it runs whole-graph EP (the #7288 timeout surface). The
     transport-aware branch lives in the handler: no-arg over HTTP →
@@ -357,7 +738,7 @@ class TestComputeConfidenceHTTP:
             sdk = TortoiseSDK(os.path.join(
                 _tf.mkdtemp(prefix="tt_395_http_"), "http.db"))
             return sdk
-        monkeypatch.setattr(ms, "_get_team_sdk", _fresh_sdk)
+        monkeypatch.setattr(ms, "_get_org_sdk", _fresh_sdk)
         r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/call",
                                   "id": 1,
                                   "params": {"name": "tortoise_compute_confidence",
@@ -386,7 +767,7 @@ class TestComputeConfidenceHTTP:
             orig_cc = lambda *a, **k: seen.update(max_hops=k.get("max_hops")) or {}  # noqa: E731
             sdk.compute_confidence = orig_cc
             return sdk
-        monkeypatch.setattr(ms, "_get_team_sdk", _spy_sdk)
+        monkeypatch.setattr(ms, "_get_org_sdk", _spy_sdk)
         monkeypatch.setattr(ms, "_parse", lambda x: x)
         token = _transport_mode.set("http")
         try:
@@ -412,7 +793,7 @@ class TestRateLimit:
         # Fresh registry + app with rate limiting enabled
         db_path = str(tmp_path / "rl.db")
         reg_sdk = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = reg_sdk.team_create("rl-team")
+        team = reg_sdk.org_create("rl-team")
         key = reg_sdk.apikey_create(team["id"], "t")["api_key"]
         app = create_http_app(allowed_origins=[], _registry_sdk=reg_sdk)
         tc = _mounted_test_client(app)
@@ -436,14 +817,14 @@ class TestExcludedTools:
         r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
         assert r.status_code == 200
         names = [t["name"] for t in _parse_sse_json(r)["result"]["tools"]]
-        assert "tortoise_team_create" not in names
+        assert "tortoise_org_create" not in names
         assert "tortoise_backfill_v25" not in names
         assert "tortoise_ingest_corpus" not in names
 
     def test_excluded_call_errors(self, mcp_client):
         tc, _ = mcp_client
         r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/call", "id": 1,
-                                  "params": {"name": "tortoise_team_create",
+                                  "params": {"name": "tortoise_org_create",
                                              "arguments": {"name": "x"}}})
         assert r.status_code == 200  # JSON-RPC error inside result, not HTTP error
         body = _parse_sse_json(r)
@@ -456,7 +837,7 @@ class TestExcludedTools:
 # ── Epic #888: onboarding tool retirement ────────────────────────
 
 class TestOnboardingToolGating:
-    """Epic #888 no-regret item 2: the six tortoise_onboarding_* tools must
+    """Epic #888 no-regret item 2: the seven tortoise_onboarding_* tools must
     NOT appear in a team's tools/list once that team's onboarding is complete
     (onboarding_state.onboarding_complete). The onboarding flow itself is
     unchanged — only the steady-state listing hides them.
@@ -467,6 +848,7 @@ class TestOnboardingToolGating:
         "tortoise_onboarding_session_recording",
         "tortoise_onboarding_github_connect",
         "tortoise_onboarding_github_index", "tortoise_onboarding_github_status",
+        "tortoise_onboarding_seed",  # #1999 (W3)
     }
 
     @staticmethod
@@ -479,24 +861,60 @@ class TestOnboardingToolGating:
         assert r.status_code == 200, r.text
         return {t["name"] for t in _parse_sse_json(r)["result"]["tools"]}
 
-    def _build_client(self, tmp_path, monkeypatch, team_name):
+    def _build_client(self, tmp_path, monkeypatch, org_name):
         """Registry on TORTOISE_DB_PATH (so hosted_api onboarding-state reads
         hit the same graph the middleware authenticates against) + MCP app."""
         import os as _os  # noqa: F401, I001
         from tortoise.mcp_server import create_http_app
-        db_path = str(tmp_path / f"{team_name}.db")
+        db_path = str(tmp_path / f"{org_name}.db")
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         reg = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = reg.team_create(team_name)
+        team = reg.org_create(org_name)
         key = reg.apikey_create(team["id"], "t")["api_key"]
         app = create_http_app(allowed_origins=[], _registry_sdk=reg)
         return _mounted_test_client(app), key, team["id"]
 
+    def test_onboarding_seed_tool_files_two_subjects(self, tmp_path, monkeypatch):
+        """#1999 (W3): tortoise_onboarding_seed is listed + callable over the
+        MCP surface; explicit names file the two anchor Subjects (no
+        email on this team → the person name must be provided, never
+        invented)."""
+        from tortoise.mcp_server import create_http_app
+        db_path = str(tmp_path / "onb-seed.db")
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        reg = TortoiseSDK(db_path=db_path, namespace="registry")
+        team = reg.org_create("seedteam")
+        key = reg.apikey_create(team["id"], "t")["api_key"]
+        app = create_http_app(allowed_origins=[], _registry_sdk=reg)
+        tc = _mounted_test_client(app)
+        with tc:
+            names = self._list_names(tc, key)
+            assert "tortoise_onboarding_seed" in names
+            r = tc.post("/mcp", headers={
+                "Authorization": f"Bearer {key}",
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json",
+            }, json={"jsonrpc": "2.0", "method": "tools/call", "id": 2,
+                    "params": {"name": "tortoise_onboarding_seed",
+                                "arguments": {"org_name": "Seed Co",
+                                               "person_name": "Sam Seed"}}})
+            assert r.status_code == 200, r.text
+            body = _parse_sse_json(r)
+            text = body["result"]["content"][0]["text"]
+            import json as _json
+            payload = _json.loads(text)
+            assert payload["status"] == "seeded", payload
+            assert payload["org_subject"]["subjectKind"] == "organization"
+            assert payload["user_subject"]["subjectKind"] == "naturalPerson"
+            assert payload["member_of"]["edge"]["relation"] == "memberOf"
+            assert payload["member_of"]["created"] is True
+
     def test_onboarding_tools_hidden_after_completion(self, tmp_path, monkeypatch):
         from tortoise.hosted_api import _update_onboarding_state  # noqa: I001
         from tortoise import mcp_server
-        tc, key, team_id = self._build_client(tmp_path, monkeypatch, "onb-team")
+        tc, key, org_id = self._build_client(tmp_path, monkeypatch, "onb-team")
         with tc:
             # Onboarding incomplete → onboarding tools ARE listed
             names = self._list_names(tc, key)
@@ -505,7 +923,7 @@ class TestOnboardingToolGating:
                 f"{self.ONBOARDING_TOOLS - names}")
             # Complete onboarding through the canonical state writer, then
             # clear the 60s per-team gate cache so the next list re-reads.
-            _update_onboarding_state(team_id, onboarding_complete=True)
+            _update_onboarding_state(org_id, onboarding_complete=True)
             mcp_server._onboarding_state_cache.clear()
             # Onboarding complete → onboarding tools retired from the listing
             names2 = self._list_names(tc, key)
@@ -525,9 +943,9 @@ class TestOnboardingToolGating:
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         reg = TortoiseSDK(db_path=db_path, namespace="registry")
-        team_a = reg.team_create("team-a")
+        team_a = reg.org_create("team-a")
         key_a = reg.apikey_create(team_a["id"], "t")["api_key"]
-        team_b = reg.team_create("team-b")
+        team_b = reg.org_create("team-b")
         key_b = reg.apikey_create(team_b["id"], "t")["api_key"]
         app = create_http_app(allowed_origins=[], _registry_sdk=reg)
         tc = _mounted_test_client(app)
@@ -545,7 +963,7 @@ class TestOnboardingToolGating:
     def test_fail_open_when_onboarding_state_unreadable(self, tmp_path, monkeypatch):
         """A control-plane read failure must NOT hide onboarding tools — a
         transient outage must not strand a team mid-onboarding (fail-open)."""
-        def _boom(team_id):
+        def _boom(org_id):
             raise RuntimeError("control plane down")
         monkeypatch.setattr("tortoise.hosted_api._get_onboarding_state", _boom)
         from tortoise import mcp_server
@@ -563,18 +981,18 @@ class TestOnboardingToolGating:
         from tortoise import mcp_server  # noqa: I001
         from tortoise import mcp_auth
         calls = {"n": 0}
-        def _state(team_id):
+        def _state(org_id):
             calls["n"] += 1
             return {"onboarding_complete": True}
         monkeypatch.setattr("tortoise.hosted_api._get_onboarding_state", _state)
         mcp_server._onboarding_state_cache.clear()
-        tok = mcp_auth._current_team_id.set("cache-team")
+        tok = mcp_auth._current_org_id.set("cache-team")
         try:
-            assert mcp_server._team_onboarding_complete() is True
-            assert mcp_server._team_onboarding_complete() is True  # cached
+            assert mcp_server._org_onboarding_complete() is True
+            assert mcp_server._org_onboarding_complete() is True  # cached
             assert calls["n"] == 1, f"re-fetched within TTL: {calls['n']} reads"
         finally:
-            mcp_auth._current_team_id.reset(tok)
+            mcp_auth._current_org_id.reset(tok)
             mcp_server._onboarding_state_cache.clear()
 
     def test_gate_cache_ttl_expiry_refetches(self, monkeypatch):
@@ -583,19 +1001,19 @@ class TestOnboardingToolGating:
         from tortoise import mcp_server  # noqa: I001
         from tortoise import mcp_auth
         calls = {"n": 0}
-        def _state(team_id):
+        def _state(org_id):
             calls["n"] += 1
             return {"onboarding_complete": True}
         monkeypatch.setattr("tortoise.hosted_api._get_onboarding_state", _state)
         monkeypatch.setattr(mcp_server, "_ONBOARDING_STATE_TTL", 0.0)
         mcp_server._onboarding_state_cache.clear()
-        tok = mcp_auth._current_team_id.set("ttl-team")
+        tok = mcp_auth._current_org_id.set("ttl-team")
         try:
-            assert mcp_server._team_onboarding_complete() is True
-            assert mcp_server._team_onboarding_complete() is True
+            assert mcp_server._org_onboarding_complete() is True
+            assert mcp_server._org_onboarding_complete() is True
             assert calls["n"] == 2, f"TTL=0 must refetch: {calls['n']} reads"
         finally:
-            mcp_auth._current_team_id.reset(tok)
+            mcp_auth._current_org_id.reset(tok)
             mcp_server._onboarding_state_cache.clear()
 
     def test_gate_failed_read_not_cached(self, monkeypatch):
@@ -605,24 +1023,213 @@ class TestOnboardingToolGating:
         from tortoise import mcp_server  # noqa: I001
         from tortoise import mcp_auth
         calls = {"n": 0}
-        def _state(team_id):
+        def _state(org_id):
             calls["n"] += 1
             if calls["n"] == 1:
                 raise RuntimeError("transient")
             return {"onboarding_complete": False}
         monkeypatch.setattr("tortoise.hosted_api._get_onboarding_state", _state)
         mcp_server._onboarding_state_cache.clear()
-        tok = mcp_auth._current_team_id.set("retry-team")
+        tok = mcp_auth._current_org_id.set("retry-team")
         try:
-            assert mcp_server._team_onboarding_complete() is False  # fail-open
-            assert mcp_server._team_onboarding_complete() is False  # retried read
+            assert mcp_server._org_onboarding_complete() is False  # fail-open
+            assert mcp_server._org_onboarding_complete() is False  # retried read
             assert calls["n"] == 2, "failed read must not be cached"
             # and the successful False WAS cached now
-            assert mcp_server._team_onboarding_complete() is False
+            assert mcp_server._org_onboarding_complete() is False
             assert calls["n"] == 2, "successful read should now be cached"
         finally:
-            mcp_auth._current_team_id.reset(tok)
+            mcp_auth._current_org_id.reset(tok)
             mcp_server._onboarding_state_cache.clear()
+
+
+# ── #2300: graph-bound keys vs team-level onboarding/GitHub state ────────
+# Post-#2083 parity: a minted per-graph key (deleg=0, graphs:read/write)
+# must be DENIED team-level default-graph/control-plane state over MCP HTTP
+# — the REST twins reject graph-bound keys (C5 #2114 GRAPH_SCOPED_TEAM_
+# SURFACE). tortoise_onboarding_state (the MCP-vs-REST asymmetry found in
+# the post-ship review) + tortoise_onboarding_github_status (read) +
+# tortoise_onboarding_github_connect (OAuth initiation) — while team-wide /
+# legacy keys keep the flows unchanged.
+
+class TestGraphBoundKeyTeamSurfaceReject:
+    """#2300: MCP HTTP authz for the onboarding/GitHub team-surface tools.
+
+    Deleg=0 per-graph keys resolve graph scope on the registry lane
+    (sdk.apikey_verify graph_id/namespace — #2300 C5 registry-lane parity)
+    and hit the tool-body graph-bound rejects; team-wide (deleg NULL) and
+    legacy keys pass. The authz signal mirrors REST's GRAPH_SCOPED_TEAM_SURFACE
+    family: an AuthorizationError isError result whose text names the surface.
+    """
+
+    @staticmethod
+    def _mint_key(reg, tid, *, scopes, graph_id=None, deleg=None):
+        """Raw APIKey node — the hosted mint matrix's registry DB shape
+        (mirror of tests/test_tenancy_spine.py._mint_key)."""
+        import uuid as _uuid
+
+        from tortoise.auth import hash_api_key
+        token = "tk_" + _uuid.uuid4().hex
+        reg._get_registry().query(
+            "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, "
+            "key_prefix:$kp, created_by:'#2300', graph_id:$gid, "
+            "scopes:$scopes, delegation_depth:$dd})",
+            params={"id": f"k-{_uuid.uuid4().hex[:8]}", "tid": tid,
+                    "kh": hash_api_key(token), "kp": token[:10],
+                    "gid": graph_id, "scopes": scopes, "dd": deleg},
+        )
+        return token
+
+    def _env(self, tmp_path, monkeypatch, name):
+        """Registry on TORTOISE_DB_PATH + team + default graph + one custom
+        graph (the per-graph keys bind here) + mounted MCP app. Returns
+        (reg, org_id, graph_id, tc)."""
+        from tortoise.mcp_server import create_http_app
+        db_path = str(tmp_path / f"{name}.db")
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        reg = TortoiseSDK(db_path=db_path, namespace="registry")
+        team = reg.org_create(name)
+        reg._graph_create(team["id"], "default", kind="default")
+        g = reg._graph_create(team["id"], "bound-g", kind="custom")
+        app = create_http_app(allowed_origins=[], _registry_sdk=reg)
+        return reg, team["id"], g["graph_id"], _mounted_test_client(app)
+
+    @staticmethod
+    def _call(tc, token, tool, args=None):
+        """tools/call over MCP HTTP; returns (result_dict, text)."""
+        r = tc.post("/mcp", headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        }, json={"jsonrpc": "2.0", "method": "tools/call", "id": 1,
+                "params": {"name": tool, "arguments": args or {}}})
+        assert r.status_code == 200, r.text
+        body = _parse_sse_json(r)
+        result = body.get("result") or {}
+        text = "".join(c.get("text", "") for c in result.get("content", [])
+                        if isinstance(c, dict))
+        return result, text
+
+    def _assert_denied(self, tc, token, tool, surface, args=None):
+        result, text = self._call(tc, token, tool, args)
+        assert result.get("isError") is True, (
+            f"{tool} not denied for a graph-bound key: {text}")
+        assert f"Graph-scoped keys cannot access {surface}." in text, (
+            f"{tool} denial text: {text}")
+
+    def test_graph_bound_key_cannot_read_onboarding_state(self, tmp_path,
+                                                          monkeypatch):
+        """The true MCP-vs-REST asymmetry (#2300): tortoise_onboarding_state
+        reads the team DEFAULT-graph/control-plane projection — its REST twin
+        GET /v1/onboarding/state 403s graph-bound keys (C5), the MCP twin did
+        not. A deleg=0 graphs:read per-graph key must now be denied."""
+        _reg, tid, gid, tc = self._env(tmp_path, monkeypatch, "state-gb")
+        bound_ro = self._mint_key(_reg, tid, scopes=["graphs:read"],
+                                  graph_id=gid, deleg=0)
+        with tc:
+            self._assert_denied(tc, bound_ro, "tortoise_onboarding_state",
+                                "onboarding state")
+
+    def test_graph_bound_key_cannot_read_github_status(self, tmp_path,
+                                                       monkeypatch):
+        """#2300: tortoise_onboarding_github_status reads team GitHub
+        credential state — a deleg=0 graphs:read key must be denied (REST
+        twin now rejects too — #2300 closes the REST residual)."""
+        _reg, tid, gid, tc = self._env(tmp_path, monkeypatch, "gstatus-gb")
+        bound_ro = self._mint_key(_reg, tid, scopes=["graphs:read"],
+                                  graph_id=gid, deleg=0)
+        with tc:
+            self._assert_denied(tc, bound_ro,
+                                "tortoise_onboarding_github_status",
+                                "github status")
+
+    def test_graph_bound_write_key_cannot_initiate_github_connect(
+            self, tmp_path, monkeypatch):
+        """#2300: tortoise_onboarding_github_connect starts a TEAM-wide
+        OAuth — even a graphs:read+write per-graph key must be denied (the
+        write scope gate alone is not enough; the team-surface reject fires)."""
+        _reg, tid, gid, tc = self._env(tmp_path, monkeypatch, "gconn-gb")
+        bound_rw = self._mint_key(_reg, tid,
+                                  scopes=["graphs:read", "graphs:write"],
+                                  graph_id=gid, deleg=0)
+        with tc:
+            self._assert_denied(tc, bound_rw,
+                                "tortoise_onboarding_github_connect",
+                                "github connect")
+            # A graphs:read-ONLY bound key hits the dispatch write gate
+            # (write implies read) before the body reject — still an authz
+            # denial, same failure family.
+            bound_ro = self._mint_key(_reg, tid, scopes=["graphs:read"],
+                                      graph_id=gid, deleg=0)
+            result, text = self._call(tc, bound_ro,
+                                      "tortoise_onboarding_github_connect")
+            assert result.get("isError") is True, text
+            assert "graphs:write scope" in text, text
+
+    def test_team_wide_scoped_key_unchanged(self, tmp_path, monkeypatch):
+        """Positive control: a team-wide scoped key (deleg NULL, graphs:read)
+        still reads onboarding state + GitHub status over MCP HTTP — the
+        reject is narrow (graph-bound keys only)."""
+        _reg, tid, _gid, tc = self._env(tmp_path, monkeypatch, "state-wide")
+        wide = self._mint_key(_reg, tid, scopes=["graphs:read"])
+        with tc:
+            result, text = self._call(tc, wide, "tortoise_onboarding_state")
+            assert result.get("isError") is not True, text
+            assert "onboarding_complete" in text, text
+            result, text = self._call(tc, wide,
+                                      "tortoise_onboarding_github_status")
+            assert result.get("isError") is not True, text
+            assert "connected" in text, text
+
+    def test_legacy_key_unchanged(self, tmp_path, monkeypatch):
+        """Positive control: a legacy full-access key (deleg NULL, no
+        scopes) keeps the onboarding-state read."""
+        _reg, tid, _gid, tc = self._env(tmp_path, monkeypatch, "state-legacy")
+        legacy = _reg.apikey_create(tid, "#2300-legacy")["api_key"]
+        with tc:
+            result, text = self._call(tc, legacy, "tortoise_onboarding_state")
+            assert result.get("isError") is not True, text
+            assert "onboarding_complete" in text, text
+
+
+# ── #2210: advertised == served ─────────────────────────────────
+# First-run trial observation: the FastMCPAdapter logged "7 registry entries
+# have no handler — skipped" (the seven onboarding tools + tortoise_session_capture
+# were defined AFTER the mid-module register_all call) while the HTTP tool list
+# still advertised them. register_all now runs at module bottom, after every
+# tool def — every registry-advertised tool must be registered and servable.
+
+class TestAdvertisedToolsAllServed:
+    def test_registry_tools_all_registered(self):
+        """#2210: no registry entry is silently skipped at registration —
+        the module-bottom register_all resolves a handler for every registry
+        entry (its 'no handler — skipped' warning must never fire). Uses the
+        RAW provider listing (bypasses the HTTP _HTTPToolFilter transform,
+        which intentionally hides HTTP-excluded/curation-group-scoped tools)."""
+        import asyncio
+
+        from tortoise import mcp_server
+        from tortoise.tool_registry import TOOL_REGISTRY
+
+        raw = asyncio.run(mcp_server.mcp._list_tools())
+        registered = {t.name for t in raw}
+        unregistered = {e.name for e in TOOL_REGISTRY} - registered
+        assert not unregistered, (
+            f"registry entries never registered: {sorted(unregistered)}")
+
+    def test_session_capture_served_over_http(self, mcp_client):
+        """#2210 wire contract: tortoise_session_capture is registry-
+        advertised (HTTP_ALLOWED) — it must be REGISTERED and therefore
+        listed over the default HTTP surface (it was previously defined
+        after the mid-module register_all and never served at all: absent
+        from tools/list, 404-ish on call)."""
+        tc, _ = mcp_client
+        r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
+        assert r.status_code == 200, r.text
+        names = {t["name"] for t in _parse_sse_json(r)["result"]["tools"]}
+        assert "tortoise_session_capture" in names, (
+            "advertised tool missing from the HTTP listing")
 
 
 # ── Graph name injection ────────────────────────────────────────────────────
@@ -728,7 +1335,7 @@ class TestContextVarNoLeak:
         assert r.status_code == 401
         # After the request completes, ContextVar should be back to None
         # (fresh asyncio task per request — contextvars copy-on-write).
-        assert ma._current_team_id.get() is None
+        assert ma._current_org_id.get() is None
 
 
 class TestInputCaps:
@@ -753,7 +1360,7 @@ class TestQuotaEnforcement:
         monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "quota.db"))
         db = str(tmp_path / "quota.db")
         reg = TortoiseSDK(db_path=db, namespace="registry")
-        team = reg.team_create("quota-team")
+        team = reg.org_create("quota-team")
         key_info = reg.apikey_create(team["id"], "quota-fixture")
         yield reg, key_info["api_key"], team["id"], db
         reg.close()
@@ -773,8 +1380,8 @@ class TestQuotaEnforcement:
         with tc:
             yield tc, reg, key, tid
 
-    def _set_max_points(self, reg_sdk, team_id, value):
-        reg_sdk.team_update(team_id, max_points=value)
+    def _set_max_points(self, reg_sdk, org_id, value):
+        reg_sdk.org_update(org_id, max_points=value)
 
     def test_create_point_blocked_at_cap(self, quota_client):
         """A team at its points cap gets ERR_QUOTA on create_point (HTTP)."""
@@ -822,7 +1429,7 @@ class TestQuotaEnforcement:
     def test_cross_team_isolation(self, quota_client):
         """Team A at cap → blocked; team B below cap → succeeds (same DB)."""
         tc, reg_sdk, key, tid = quota_client  # noqa: RUF059
-        team_b = reg_sdk.team_create("quota-team-b")
+        team_b = reg_sdk.org_create("quota-team-b")
         key_b = reg_sdk.apikey_create(team_b["id"], "quota-fixture-b")["api_key"]
         self._set_max_points(reg_sdk, tid, 0)  # team A at cap
 
@@ -954,7 +1561,7 @@ class TestQuotaEnforcement:
             graphs = _j.loads(text)
         except Exception:
             graphs = []
-        assert all(g.startswith("team_") for g in graphs), f"foreign graphs leaked: {graphs}"
+        assert all(g.startswith("org_") for g in graphs), f"foreign graphs leaked: {graphs}"
         assert "registry" not in graphs
 
 
@@ -1024,7 +1631,7 @@ class TestIntrospectiveQuotaCompleteness:
         names = {t.get("name") for t in body.get("result", {}).get("tools", [])}
         for excluded in ("tortoise_ingest_corpus", "tortoise_index_sessions",
                          "tortoise_index_files", "tortoise_backfill_v25",
-                         "tortoise_team_create"):
+                         "tortoise_org_create"):
             assert excluded not in names, f"{excluded} must stay HTTP-excluded"
 
 
@@ -1064,15 +1671,16 @@ class TestSC5IndexFilesSurface:
             "index_files creates nodes AND edges — must be quota-gated")
 
     def test_legacy_tools_deprecation_markers(self):
-        """Both legacy tools carry the MCP tool-description DEPRECATED marker
-        naming the replacement (plan §6.3 — behavior unchanged, SC4)."""
-        from tortoise.tool_registry import TOOL_REGISTRY
-        by_name = {t.name: t for t in TOOL_REGISTRY}
+        """Both legacy tools are RETIRED (#3883): they keep the DEPRECATED
+        description naming the replacement, and stay http-excluded."""
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY
+        by_name = {t.name: t for t in RETIRED_TOOL_REGISTRY}
         for legacy in ("tortoise_index_sessions", "tortoise_ingest_corpus"):
             d = by_name[legacy].description
             assert d.startswith("DEPRECATED"), f"{legacy} missing DEPRECATED marker: {d}"
             assert "tortoise_index_files" in d, f"{legacy} marker must name the replacement"
             assert by_name[legacy].http_policy is False, f"{legacy} must stay http-excluded"
+            assert by_name[legacy].retired_use_instead == "tortoise_index_files(directory)"
 
     def test_index_files_absent_from_http_tools_list(self, mcp_client):
         """E2E-17(e) structural half: the filesystem-walk tool is not
@@ -1095,3 +1703,84 @@ class TestSC5IndexFilesSurface:
         text = "".join(c.get("text", "") for c in body.get("result", {}).get("content", []))
         assert "-32004" in text or "not available over HTTP" in text, \
             f"expected excluded error, got: {body}"
+
+
+# ── #2302: tortoise_graph_set_recording HTTP contract ───────────────────
+
+class TestGraphSetRecordingHTTP:
+    """#2302 — the per-graph recording override MCP surface is REGISTERED
+    (tools/list) and CALLABLE over the mounted tenant HTTP stack, with the
+    same semantics as PATCH /v1/graphs/{graph_id} (true/false/null override,
+    'default' graph resolution). The override write is control-plane state —
+    the registry Graph node prop — verified directly after the call."""
+
+    @staticmethod
+    def _unwrap(body: dict) -> dict:
+        result = body.get("result", {})
+        sc = result.get("structuredContent")
+        if sc is not None:
+            return sc
+        for item in result.get("content", []):
+            text = item.get("text")
+            if text:
+                import json as _json
+                try:
+                    return _json.loads(text)
+                except Exception:
+                    continue
+        return result
+
+    def test_registered_and_callable_set_clear_default_graph(self, tmp_path,
+                                                             monkeypatch):
+        from tortoise.mcp_server import create_http_app
+
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        db = str(tmp_path / "rec.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db)
+        reg = TortoiseSDK(db_path=db, namespace="registry")
+        team = reg.org_create("rec-http-team")
+        reg._graph_create(team["id"], "default", kind="default")
+        key = reg.apikey_create(team["id"], "r")["api_key"]
+
+        app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
+                              _registry_sdk=reg)
+        tc = _mounted_test_client(app)
+        tc.headers.update({
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        })
+        with tc:
+            # Advertised to agents (registered + HTTP_ALLOWED + sessions group).
+            r, body = _mcp_post(tc, {"jsonrpc": "2.0", "id": 1,
+                                     "method": "tools/list", "params": {}})
+            assert r.status_code == 200, r.text
+            names = {t.get("name")
+                     for t in body.get("result", {}).get("tools", [])}
+            assert "tortoise_graph_set_recording" in names, (
+                "the recording-on surface must be discoverable over HTTP")
+            # Set true on the DEFAULT graph (no graph_id = team-wide default).
+            r, body = _mcp_post(tc, {"jsonrpc": "2.0", "id": 2,
+                                     "method": "tools/call",
+                                     "params": {
+                                         "name": "tortoise_graph_set_recording",
+                                         "arguments": {"recording": True}}})
+            assert r.status_code == 200, r.text
+            result = self._unwrap(body)
+            assert result.get("graph_id") == "default", body
+            assert result.get("recording") is True, body
+            # Clear back to inherit (null) — node prop gone.
+            r, body = _mcp_post(tc, {"jsonrpc": "2.0", "id": 3,
+                                     "method": "tools/call",
+                                     "params": {
+                                         "name": "tortoise_graph_set_recording",
+                                         "arguments": {"recording": None}}})
+            assert r.status_code == 200, r.text
+            result = self._unwrap(body)
+            assert result.get("recording") is None, body
+            rows = reg._get_registry().query(
+                "MATCH (g:Graph {org_id:$tid, kind:'default'}) "
+                "RETURN g.recording",
+                params={"tid": team["id"]},
+            ).result_set
+            assert rows and rows[0][0] is None, rows

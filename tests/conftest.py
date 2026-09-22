@@ -7,11 +7,39 @@ directly (no user-facing tier path in v1). Used by E2E-1/3/4/5/10/11/12/13.
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 
 import pytest
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
+
+# RateLimitMiddleware (100 req/min per path+IP bucket) trips 429 in
+# full-suite runs (>100 points per shared IP bucket — the same documented
+# pattern as tests/test_hosted_api.py:22). Set BEFORE hosted_api imports so
+# the middleware is constructed disabled; per-endpoint limiter tests
+# (signup 2/24h, session 5/hr, recovery) delenv RATE_LIMIT_DISABLED — those
+# read env at CALL time and stay live.
+os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
+# #2850: the loop-stall watchdog exits the process (os._exit) when the event
+# loop stops ticking — that is the point in production, and catastrophic in a
+# test runner that DELIBERATELY stalls the loop (the /healthz staleness tests)
+# or that simply holds a GIL-heavy test for longer than the threshold. Tests
+# exercise the watchdog with an injected exit_fn; the real one stays disarmed
+# for the whole session.
+os.environ.setdefault("TORTOISE_LOOP_STALL_EXIT_S", "0")
+# #2850: the dedicated liveness listener defaults to the fixed 0.0.0.0:9090
+# deployment contract. An ephemeral port for the test session keeps parallel
+# test sessions on one host from fighting over it (and never exposes a
+# listener on a shared CI box); the 9090 contract is asserted directly.
+os.environ.setdefault("TORTOISE_HEALTHZ_PORT", "0")
+# #1686: TEST_MODE must be visible BEFORE tests._embedded imports tortoise.
+# projection (tests/_embedded.py:27 imports it) — the module-body
+# Thread.start stamp install is gated on TEST_MODE, and conftest's own
+# `from tests._embedded import shared_proj` (below) is what triggers that
+# import. (Call-time redirect checks are unaffected — only the module-body
+# install gate needs the env early.)
+os.environ.setdefault("TORTOISE_TEST_MODE", "1")
 
 # #1642 FIX 6: the session-end sweep loops discover->reap until the backlog
 # is cleared or this wall-clock budget is exhausted, at a raised batch size
@@ -31,10 +59,10 @@ os.environ.setdefault("TORTOISE_FAST_ATEXIT", "1")
 # tests/ is a namespace package (no __init__.py): resolve it via the repo
 # root so conftest loads under `uv run pytest tests/` too (python -m pytest
 # adds cwd, but uv run does not — CI uv-lock-check, issue #1012).
-import sys  # noqa: I001
-from pathlib import Path
+import sys  # noqa: E402, I001
+from pathlib import Path  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from tests._embedded import shared_proj  # noqa: F401, I001
+from tests._embedded import shared_proj  # noqa: E402, F401, I001
 
 # ── Epic #1647 (D-1=A): the test-session signal + redirect env ────────────
 # Exported at CONFTEST IMPORT so the PRODUCT-side redirect
@@ -45,9 +73,42 @@ from tests._embedded import shared_proj  # noqa: F401, I001
 # TORTOISE_TEST_SESSION is the session nonce folded into derived graph names.
 from tests._embedded import TEST_NO_REDIRECT_STEMS  # noqa: E402
 
-os.environ.setdefault("TORTOISE_TEST_MODE", "1")
+# (TORTOISE_TEST_MODE was already exported above — before the tests._embedded
+# import — so projection's module-body Thread.start stamp install sees it;
+# the call-time redirect checks read the env at construction regardless.)
 from tortoise import projection as _projection_mod  # noqa: E402
+
 _projection_mod._TEST_SESSION_ACTIVE = True
+# #1686: install the Thread.start test-stem stamp AFTER the session flag is
+# live (prod can never satisfy the flag, so even a leaked TEST_MODE=1 env
+# cannot patch stdlib — see install_thread_stamp's docstring).
+_projection_mod.install_thread_stamp()
+
+
+# ── Epic #1686: per-thread test-module attribution ────────────────────────
+# Record the RUNNING test module's stem on the current (main) thread so
+# worker threads spawned during the test (TestClient portals, background
+# threads) inherit it via projection's patched Thread.start — the
+# frame-keyed carve-out exemption cannot see worker-thread stacks.
+
+
+def pytest_runtest_setup(item):
+    """Record the running test module's stem on the current thread (#1686)."""
+    try:
+        stem = (item.module.__name__.rsplit(".", 1)[-1]
+                if item.module is not None else None)
+    except AttributeError:
+        stem = None
+    _projection_mod._record_current_test_stem(stem)
+
+
+def pytest_runtest_teardown(item, nextitem):
+    """Clear the main-thread stem at test end (#1686).
+
+    Only the MAIN thread's slot is cleared — child threads keep their
+    spawn-time inherited stems (bounded in practice: module-scoped portal
+    threads spawn within one module; documented in projection)."""
+    _projection_mod._record_current_test_stem(None)
 os.environ.setdefault("TORTOISE_TEST_NO_REDIRECT", ",".join(TEST_NO_REDIRECT_STEMS))
 
 # Cycle-5 P2-1 / cycle-6 P1-5: the session nonce is an OVERWRITE (never
@@ -82,17 +143,18 @@ if _is_db_uri_conftest(os.environ.get("TORTOISE_DB_URI")):
     import tests._embedded as _embedded_mod
     _embedded_mod._JOURNAL_FILE = _JOURNAL_PATH
 
-from tortoise.pricing import tier_limits  # noqa: E402  (late import: after TEST_MODE env wiring)
-from tortoise.sdk import TortoiseSDK  # noqa: E402
-
-
 # ── Epic #1647 Task 10 Step 1a (P4, plan-review P1-9): URI-required ───────
 # Default pytest requires TORTOISE_DB_URI; the carve-out is the sole embedded
 # surface. Declared FIRST among the session fixtures so the enforcement
 # fails the run before any hygiene/sweep machinery spins up. The named
 # helper lives in tests/_embedded.py (pinned by test_markers.py — the
 # tests.conftest import would re-execute conftest's top-level code).
-from tests._embedded import _assert_p4_uri_required  # noqa: E402
+from tests._embedded import (  # noqa: E402
+    _assert_p4_uri_required,
+    serialize_embedded_construction,
+)
+from tortoise.pricing import tier_limits  # noqa: E402  (late import: after TEST_MODE env wiring)
+from tortoise.sdk import TortoiseSDK  # noqa: E402
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -105,12 +167,87 @@ def _p4_uri_required():
     _assert_p4_uri_required()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _fresh_capture_spool():
+    """#3963: start every pytest SESSION with a fresh capture spool.
+
+    Under pytest, ``tortoise.capture_spool.spool_dir()`` redirects to
+    ``<tmp>/tortoise-capture-spool-tests/<sha256(test-id)>`` — keyed by test id
+    so a test AND any process it spawns share one spool (the fail-closed guard
+    that stops a test touching the developer's real captures). The key is
+    stable across RUNS, so a second run of the same test would inherit run 1's
+    `filed_key` and silently skip the capture — the suite would stop being
+    re-runnable. Wipe the tree once per session.
+    """
+    import shutil
+    from pathlib import Path
+
+    shutil.rmtree(Path(tempfile.gettempdir()) / "tortoise-capture-spool-tests",
+                  ignore_errors=True)
+    yield
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _serialize_embedded_construction():
+    """#3546: install ONE process-wide embedded construction lock, once.
+
+    The #3505 double-start race is a PROCESS-wide invariant (see
+    `tests/_embedded.EMBEDDED_CONSTRUCTION_LOCK` for the mechanism and its
+    scope), so it can never be closed by per-file lock objects: the two copies
+    #3511 installed each serialized only their own module, leaving every other
+    embedded fixture exposed. `tests/test_invites_http.py` was one — its
+    seeded Membership landed on the loser daemon, so the app's registry anchor
+    read an empty graph and POST /v1/invites 403'd
+    ("Requires owner or admin role in team") instead of reaching its 402/200
+    branch, reddening 20 of its tests.
+
+    Session-scoped and autouse so it is in place before the first test
+    constructs anything, and so it covers files that do not exist yet. Declared
+    immediately AFTER `_p4_uri_required` so that gate stays the first session
+    fixture to run (same-scope autouse fixtures are set up in declaration
+    order); this fixture never needs a URI itself.
+    """
+    mp = pytest.MonkeyPatch()
+    serialize_embedded_construction(mp)
+    yield
+    mp.undo()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _reclaim_session_tmpdirs():
+    """#4096: reclaim SESSION-scoped test temp trees at the very end of the run.
+
+    `tests/conftest.py:shared_embedded_db` and `tests/_embedded.py:shared_proj`
+    each `mkdtemp` one shared tree for the whole session and (before this) never
+    removed it. They cannot reclaim locally: their consumers never close their
+    servers, and the pass-2 sweeps in `_redislite_hygiene` / `_server_graph_hygiene`
+    read the socket/pid markers *inside* those trees — removing the tree in the
+    shared fixture's own teardown (which reverse setup order places BEFORE the
+    sweeps) would destroy that evidence and could orphan a live redislite server
+    (#4068/#1005).
+
+    `autouse`, and with no dependency on the shared fixtures, so it is set up
+    regardless of which tests request the shared trees; it reads the registry they
+    populate (`tests._embedded.SESSION_TMPDIRS`). The teardown-last edge is
+    **structural, not alphabetical**: `_redislite_hygiene` declares this fixture as
+    a dependency, so setup runs reclaim -> redislite -> server_graph and
+    reverse-order teardown runs server_graph -> redislite -> reclaim. (pytest orders
+    same-scope autouse fixtures by NAME, not declaration order — a rename would
+    silently invert a declaration-order assumption.)
+    """
+    yield
+    from tests import _embedded as _embedded_mod
+    _embedded_mod.drain_session_tmpdirs()
+
+
 @pytest.fixture
 def provision_test_user():
     created = []
+    tmpdirs = []
 
     def factory(tier: str = "free", demo_seed: bool = True):
         tmpdir = tempfile.mkdtemp()
+        tmpdirs.append(tmpdir)
         # Epic #1647 (plan-review P1-5): under a supported URI, sweep the
         # shared non-test "e2e-tests" namespace to a guard-passing per-test
         # test_e2e_<uuid> (the SDK maps it to test_e2e_<uuid>_tortoise,
@@ -122,10 +259,12 @@ def provision_test_user():
         if _is_db_uri(os.environ.get("TORTOISE_DB_URI")):
             _ns = f"test_e2e_{os.urandom(4).hex()}"
         sdk = TortoiseSDK(os.path.join(tmpdir, "e2e.db"), namespace=_ns)
-        team = sdk.team_create(f"e2e-{os.urandom(4).hex()}")
+        team = sdk.org_create(f"e2e-{os.urandom(4).hex()}")
         lim = tier_limits(tier)
         # #310 (review fix 16b): mirror production CREATE semantics — write
-        # max_points (= max_graph_nodes, GAP-B mapping) + max_sessions too.
+        # max_points (= max_graph_nodes, GAP-B mapping). #4010: max_sessions is
+        # written as NULL (unlimited) — it is never a cap, and a leftover
+        # number here would re-create exactly the trap the issue names.
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.tier=$tier, t.max_graphs=$mg, "
             "t.max_users=$mu, t.max_api_keys=$mk, t.max_points=$mp, "
@@ -133,7 +272,7 @@ def provision_test_user():
             params={"id": team["id"], "tier": tier,
                     "mg": lim["max_graphs_per_team"], "mu": lim["max_users_per_team"],
                     "mk": lim["max_api_keys"], "mp": lim["max_graph_nodes"],
-                    "ms": 1000, "ops": lim["included_write_ops_per_month"],
+                    "ms": None, "ops": lim["included_write_ops_per_month"],
                     "nodes": lim["max_graph_nodes"]},
         )
         if demo_seed:
@@ -144,8 +283,8 @@ def provision_test_user():
         user_id = f"user-{os.urandom(4).hex()}"
         sdk.membership_create(team["id"], user_id, "owner")
         created.append(sdk)
-        return {"sdk": sdk, "team_id": team["id"], "api_key": team["api_key"],
-                "graph_name": team["graph_name"], "team_name": team["name"],
+        return {"sdk": sdk, "org_id": team["id"], "api_key": team["api_key"],
+                "graph_name": team["graph_name"], "org_name": team["name"],
                 "user_id": user_id}
 
     yield factory
@@ -154,6 +293,10 @@ def provision_test_user():
             sdk.close()
         except Exception:
             pass
+    # #4096: close first (above), then reclaim — removing the tree under a live
+    # redislite server would orphan it.
+    for d in tmpdirs:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 @pytest.fixture
@@ -236,12 +379,17 @@ def shared_embedded_db():
     # embedded shared server, unchanged.
     """
     import tempfile as _tf
-    db_path = os.path.join(_tf.mkdtemp(prefix="tortoise_shared_embedded_"), "shared.db")
+
+    from tests._embedded import register_session_tmpdir
+
+    tmpdir = _tf.mkdtemp(prefix="tortoise_shared_embedded_")
+    register_session_tmpdir(tmpdir)
+    db_path = os.path.join(tmpdir, "shared.db")
     yield db_path
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _redislite_hygiene():
+def _redislite_hygiene(_reclaim_session_tmpdirs):
     """Bound redislite orphan accumulation (#1005) + index-pid files (#1231).
 
     Session start: register this suite in the active-suite registry and run
@@ -350,7 +498,15 @@ def _redislite_hygiene():
                             # many servers compounds past pytest-timeout under
                             # CI load (observed: TestMcpHandlers teardown
                             # timed out at 600s with the reaper in _kill).
-                            sigterm_timeout=3.0)
+                            sigterm_timeout=3.0,
+                            # deadline is now threaded INTO reap(): the
+                            # eager pre-probe cache is skipped and the record
+                            # loop aborts once the budget is spent — the
+                            # end-sweep can never run past pytest-timeout on
+                            # a large stale backlog (observed: >300s teardown
+                            # timeout redding the leg with the reaper in
+                            # _kill/probe).
+                            deadline=deadline)
                         total += len(acted)
                         if not acted or time.monotonic() >= deadline:
                             break
@@ -743,18 +899,40 @@ def _reset_ip_rate_limits():
     signup_buckets = getattr(ha_mod, "_SIGNUP_BUCKETS", None)
     if signup_buckets is not None:
         signup_buckets.clear()
+    # #1709: recovery limiter buckets (per-IP + per-token) are in-memory per
+    # process and share the module-scoped TestClient host — reset per test.
+    recover_buckets = getattr(ha_mod, "_RECOVER_BUCKETS", None)
+    if recover_buckets is not None:
+        recover_buckets.clear()
+    recover_token_buckets = getattr(ha_mod, "_RECOVER_TOKEN_BUCKETS", None)
+    if recover_token_buckets is not None:
+        recover_token_buckets.clear()
     try:
         from tortoise.abuse import SIGNUP_TRACKER
         SIGNUP_TRACKER.reset()
+    except (ImportError, AttributeError):
+        pass
+    try:
+        from tortoise.abuse import RECOVERY_TRACKER
+        RECOVERY_TRACKER.reset()
     except (ImportError, AttributeError):
         pass
     yield
     _register_buckets.clear()
     if signup_buckets is not None:
         signup_buckets.clear()
+    if recover_buckets is not None:
+        recover_buckets.clear()
+    if recover_token_buckets is not None:
+        recover_token_buckets.clear()
     try:
         from tortoise.abuse import SIGNUP_TRACKER
         SIGNUP_TRACKER.reset()
+    except (ImportError, AttributeError):
+        pass
+    try:
+        from tortoise.abuse import RECOVERY_TRACKER
+        RECOVERY_TRACKER.reset()
     except (ImportError, AttributeError):
         pass
 
@@ -775,3 +953,204 @@ def _embedded_only_skip_hook(request):
     Delegates to the named helper `_embedded_only_skip` (cycle-5 P2-12) so
     the marker-semantics test drives the exact hook."""
     _embedded_only_skip(request)
+
+
+# ── #1930: ambient TORTOISE_PACKS_DIR isolation ───────────────────────────
+# The pack-dir env leg (epic #1891 WF-2) makes the whole suite
+# ambient-env-sensitive: a developer/CI/operator machine that exports
+# TORTOISE_PACKS_DIR must never silently redirect pack resolution in ANY
+# test module. Cleared per test so caplog warn assertions are deterministic
+# regardless of ordering (the warn-once sentinel is module-level).
+@pytest.fixture(autouse=True)
+def _packs_env_isolation(monkeypatch):
+    """#1930: reset pack-resolution env + module state before each test.
+
+    TORTOISE_PACKS_DIR is deleted unless a test sets it explicitly
+    (monkeypatch restores after). domain_loader module state (_registry /
+    _env_fallback_key / _PACKS_DIR) and the warn-once sentinel are reset so
+    no test leaks pack-resolution state into the next.
+    """
+    monkeypatch.delenv("TORTOISE_PACKS_DIR", raising=False)
+    import tortoise.pack_registry as pack_registry
+    from tortoise import domain_loader
+    domain_loader._registry = None
+    domain_loader._env_fallback_key = None
+    domain_loader._PACKS_DIR = None
+    getattr(pack_registry, "_WARN_ONCE", set()).clear()
+    yield
+    domain_loader._registry = None
+    domain_loader._env_fallback_key = None
+    domain_loader._PACKS_DIR = None
+
+
+# ── #3818 (P1-2): ambient CODEX_HOME isolation ───────────────────────────
+# `capture_install.codex_home()` honors `$CODEX_HOME` for the whole tree, so a
+# developer/CI/operator machine that exports it would send every direct
+# `install_capture("codex", home=...)` — and every codex test in the suite —
+# into the REAL `~/.codex` (the probe run wrote hooks.json +
+# hooks/tortoise-session-end.sh there). Cleared per test so no codex test can
+# mutate the machine it runs on; the sentinel is what the guard test in
+# test_codex_capture_hook.py reads to prove the scrub ran.
+@pytest.fixture(autouse=True)
+def _codex_home_isolation(monkeypatch):
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setenv("TORTOISE_TEST_CODEX_HOME_SCRUBBED", "1")
+    yield
+
+
+# ── #3819 (P1-2): ambient CURSOR_HOME isolation ───────────────────────────
+# Cursor has NO config-dir env var (verified: `CURSOR_HOME` appears nowhere in
+# Cursor 3.20.21's bundle; it reads `~/.cursor/hooks.json`), so the resolver
+# never consults one.  The scrub is DEFENSE-IN-DEPTH: a future code path that
+# reintroduced an env-scoped Cursor root cannot silently redirect an install
+# away from the real `~/.cursor` during an unrelated test.  It is NOT itself
+# the guard — no test can observe a property the code does not consult.  The
+# guard that CAN go red is
+# `test_no_cursor_test_can_reach_the_real_cursor_store` in
+# test_cursor_capture_hook.py, which re-introduces an ambient `CURSOR_HOME`
+# (aimed at the live store) and asserts the resolved root is still under the
+# tmp tree.
+@pytest.fixture(autouse=True)
+def _cursor_home_isolation(monkeypatch):
+    monkeypatch.delenv("CURSOR_HOME", raising=False)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _disable_embedder_autowarmup(monkeypatch):
+    """#2952: keep the engine-init embedder warm-up out of the test suite.
+
+    ``TortoiseSDK._get_proj`` starts a daemon warm-up thread (best-effort,
+    #2952 (B)). Unstubbed tests would otherwise trigger a real HF model load
+    in the background, and a failed load would emit WARNING noise into
+    ``caplog`` assertions. Tests that exercise the warm-up call it directly
+    (with a stubbed ``EmbeddingModel.get``).
+    """
+    monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "0")
+    yield
+
+
+# ── #3820 (cycle-2 P1): the analytics-alert channel is OFF for every test ───
+# The write path now has a terminal outcome, and three of its four exits can
+# reach the alert leg (`dropped` at once, `fallback` once the streak crosses
+# `_ANALYTICS_FALLBACK_ALERT_AFTER`, and the resolve on a recovered write).
+# Unpatched, that leg builds the REAL `AlertStore` from whatever the process
+# env carries: on a machine holding production secrets (an ambient
+# `DR_ISSUES_PAT` + `R2_*`, or `SUPABASE_SERVICE_ROLE_KEY` with `SUPABASE_URL`
+# deleted — which the P1-2 arm classifies as `fallback`) a suite run PUTs to
+# prod R2, searches and can CREATE a real `[DR] ANALYTICS_SINK_DEGRADED` GitHub
+# issue, and pushes Telegram. The per-file guard this replaces covered only
+# `tests/test_analytics_write_path_resolution.py`; this one covers EVERY test.
+# `_ANALYTICS_DEGRADED_STREAK` / `_ANALYTICS_RESOLVE_PENDING` /
+# `_ANALYTICS_RESOLVE_NOT_BEFORE` are
+# process globals with no other reset, the outcome counter is a process-global
+# Prometheus `Counter`, and `_ANALYTICS_COUNTS` is the in-process dict the
+# incident detail reads — all are reset per test.
+#
+# The LOCAL JSONL SINK is the fifth write path and is isolated here too: with
+# `_ANALYTICS_FALLBACK_PATH` left as the module default (`None`) the writer
+# resolves `~/.tortoise/analytics_fallback.jsonl` — the REAL file, and on the
+# production box the DR runbook's recovery source (`docs/ops/registry-backup-dr.md`).
+# Only four test files ever set the path, so every other emit path appended
+# test-fixture ids to the real file. Redirecting it to `tmp_path` closes that
+# suite-wide.
+_REAL_ANALYTICS_ALERT_STORE = None
+# The production module-level ``_ANALYTICS_COUNTS`` object, captured before the
+# isolation replaces the attribute. The replacement is a fresh derivation each
+# test, which is right for isolation but HIDES whether the real dict is itself
+# derived — a test pinning that derivation must read this captured object.
+_REAL_ANALYTICS_COUNTS = None
+
+
+@pytest.fixture(autouse=True)
+def _analytics_alert_isolation(monkeypatch, tmp_path):
+    """Never let a test build a real analytics sink incident (#3820 P1).
+
+    Patches the documented indirection seam ``_analytics_alert_store`` to a
+    no-op and clears the episode latch, the degraded streak, the outcome
+    counter and the in-process outcome counts. The local JSONL sink is
+    redirected into the test's ``tmp_path`` as well, so no test can append to
+    the REAL ``~/.tortoise/analytics_fallback.jsonl``. Tests that mean to
+    exercise the store install their own fake via ``monkeypatch.setattr`` in
+    the test body (that runs later, so it wins); the few that pin the REAL
+    construction leg opt back in with the ``real_analytics_alert_store``
+    fixture.
+    """
+    global _REAL_ANALYTICS_ALERT_STORE, _REAL_ANALYTICS_COUNTS
+    import tortoise.hosted_api as ha
+    import tortoise.monitoring as mon
+
+    if _REAL_ANALYTICS_ALERT_STORE is None:
+        _REAL_ANALYTICS_ALERT_STORE = ha._analytics_alert_store
+    monkeypatch.setattr(ha, "_analytics_alert_store", lambda: None)
+    monkeypatch.setattr(ha, "_ANALYTICS_DEGRADED_STREAK", 0)
+    # `PENDING=True, NOT_BEFORE=None` is the process-start state: an incident
+    # may have been left open by a dead process, so the first delivered write
+    # probes (the CLEAN state omits the probe).
+    monkeypatch.setattr(ha, "_ANALYTICS_RESOLVE_PENDING", True)
+    monkeypatch.setattr(ha, "_ANALYTICS_RESOLVE_NOT_BEFORE", None)
+    # #3820 cycle-9 P2-2: the resolve's in-flight claim. A leaked ``True`` from
+    # one test would make every later test's resolve SKIP, so the suite-wide
+    # isolation resets it with the rest of the resolve state.
+    monkeypatch.setattr(ha, "_ANALYTICS_RESOLVE_INFLIGHT", False)
+    if _REAL_ANALYTICS_COUNTS is None:
+        _REAL_ANALYTICS_COUNTS = ha._ANALYTICS_COUNTS
+    monkeypatch.setattr(ha, "_ANALYTICS_COUNTS",
+                        {o: 0 for o in ha._ANALYTICS_OUTCOMES})
+    monkeypatch.setattr(ha, "_ANALYTICS_FALLBACK_PATH",
+                        str(tmp_path / "analytics_fallback.jsonl"))
+    mon.ANALYTICS_OUTCOME_COUNT.clear()
+
+
+@pytest.fixture
+def real_analytics_alert_store(monkeypatch, _analytics_alert_isolation):
+    """Opt out of ``_analytics_alert_isolation`` for the REAL store leg.
+
+    Only for tests that pin what the real builder does (T14/T15 in
+    ``tests/test_analytics_fallback_alert.py``). Those replace the object store
+    (``_backup_storage`` -> ``MemoryStorage``) and both egress endpoints, so
+    restoring the real builder cannot reach R2, GitHub or Telegram.
+
+    This fixture does NOT itself patch the object store or the egress
+    callables — a requester that restores the real builder without them can
+    reach real infrastructure. Every requester must install both (as T14 and
+    T15 do).
+    """
+    import tortoise.hosted_api as ha
+
+    real = _REAL_ANALYTICS_ALERT_STORE
+    assert real is not None, "real builder not captured — check fixture order"
+    monkeypatch.setattr(ha, "_analytics_alert_store", real)
+    return real
+
+
+@pytest.fixture
+def real_analytics_counts(_analytics_alert_isolation):
+    """The production module-level ``_ANALYTICS_COUNTS`` object.
+
+    ``_analytics_alert_isolation`` REPLACES the module attribute with a fresh
+    derivation each test. That is right for isolation, but it masks whether the
+    REAL module-level dict is itself derived: a test pinning the derivation
+    must read this captured object instead of the replacement.
+    """
+    assert _REAL_ANALYTICS_COUNTS is not None, (
+        "real counts not captured — check fixture order")
+    return _REAL_ANALYTICS_COUNTS
+
+
+@pytest.fixture
+def force_sparse_tfidf(monkeypatch):
+    """#2573/#2772: pin the sparse TF-IDF fallback (no embedder) for the test.
+
+    CI may run with the bge embedder cache present or absent (python-ci.yml
+    treats a failed HF download as a WARN and lets the suite run
+    TF-IDF-degraded), so any test pinning exact retrieval pool sizes must
+    pin the embedder state or it is environment-dependent. Request this
+    fixture in such a test; assertions are unchanged (this is the
+    ``tests/eval/retrieval/test_oracle.py`` ``_force_sparse_tfidf`` pattern
+    promoted to a shared named home — older inline copies predate it).
+    """
+    from tortoise.embeddings import EmbeddingModel
+    monkeypatch.setattr(EmbeddingModel, "get", classmethod(
+        lambda cls, load_timeout=None: None))
+    return None

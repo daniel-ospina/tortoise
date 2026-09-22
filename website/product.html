@@ -329,6 +329,7 @@
       <h1>Memory that makes your agents <span>smarter</span></h1>
       <p class="hero-sub">Tortoise is the memory and reasoning system that enables your agents to make complex decisions without losing track of the variables or being swayed by the last message. They don&rsquo;t just recall facts. They understand why decisions were made and reason with auditable world models.</p>
       <a href="/auth" class="cta-start hero-cta">Connect your agent →</a>
+      <p style="margin-top:1.25rem;font-size:0.85rem;"><a href="/docs" style="color:var(--accent);text-decoration:none;">Browse the docs →</a> · <a href="/faq" style="color:var(--accent);text-decoration:none;">Design FAQ →</a> · <a href="/blog" style="color:var(--accent);text-decoration:none;">Read the blog →</a></p>
     </section>
     <section id="beat-how" class="beat">
       <h2>A <span>computational</span> memory graph</h2>
@@ -365,6 +366,7 @@
       <div class="pricing-grid" id="pricing-grid" aria-live="polite"><!-- cards rendered by pricing.js --></div>
 
       <p class="pricing-usage" id="pricing-usage-line"></p>
+      <p style="font-size:0.75rem;color:var(--text-dim);margin-top:0.75rem;">Use of the service is subject to our <a href="/tos" style="color:var(--accent);text-decoration:none;">Terms of Service</a></p>
 
       <div class="selfhost" id="selfhost-section"></div>
   </section>
@@ -681,9 +683,12 @@
     function renderPricing() {
       const grid = document.getElementById('pricing-grid');
       const names = ['free', 'solo', 'pro', 'team'];
+      // #4336: display names — the tier KEY stays `pro` (mirror parity,
+      // Stripe ids, pricing.json); only the rendered name changes.
+      const labels = { free: 'Free', solo: 'Solo', pro: 'Builder', team: 'Team' };
       grid.innerHTML = names.map((name) => {
         const t = PRICING.tiers[name];
-        const label = name.charAt(0).toUpperCase() + name.slice(1);
+        const label = labels[name] || (name.charAt(0).toUpperCase() + name.slice(1));
         const popular = t.popular ? '<span class="popular-tag">Most popular</span>' : '';
         const features = t.features.map((f) => `<div class="feature">${checkSvg()} <span>${f}</span></div>`).join('');
         const excluded = t.excluded.map((f) => `<div class="feature"><span class="x">✕</span> <span class="muted">${f}</span></div>`).join('');
@@ -697,7 +702,7 @@
           <a href="/auth" class="btn${name === 'free' ? ' secondary' : ''}">${cta}</a>
         </div>`;
       }).join('');
-      document.getElementById('pricing-usage-line').textContent = `${PRICING.display.overage_line} — applies to Pro and Team`;
+      document.getElementById('pricing-usage-line').textContent = `${PRICING.display.overage_line} — applies to Builder and Team`;
     }
 
     function renderSelfHost() {
@@ -708,6 +713,7 @@
           <a href="/self-hosted">Self-hosted setup guide →</a>
           <a href="https://github.com/daniel-ospina/tortoise" target="_blank" rel="noopener">Self-host on GitHub →</a>
           <a href="/auth">Migrate to cloud anytime →</a>
+          <a href="/license">License →</a>
         </div>`;
     }
 
@@ -730,7 +736,9 @@
     <a href="https://premiselabs.co" class="footer-logo" aria-label="Premise Labs">
       <img src="/assets/premiselabs-logo.png" alt="Premise Labs" width="160" height="98" />
     </a>
-    <nav class="footer-links" aria-label="Legal">
+    <nav class="footer-links" aria-label="Footer">
+      <a href="/blog">Blog</a>
+      <a href="/faq">FAQ</a>
       <a href="/privacy">Privacy Policy</a>
       <a href="/tos">Terms of Service</a>
       <a href="/license">License</a>

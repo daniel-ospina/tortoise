@@ -57,41 +57,111 @@ the token regardless of which subdomain presented it.
 
 ## 2. What Tortoise has
 
+> **CURRENT ARCHITECTURE (#4054, 2026-09-18).** The client-side, JS-readable
+> parent-domain cookie described in the original 2026-08-19 note has been
+> REMOVED. The browser now holds only an HttpOnly `__Host-session` opaque handle
+> issued by a server-side BFF on the app origin; the access/refresh tokens live
+> in D1 (`SESSIONS`) and never reach the browser. §2.1–§2.3 and §5.5 below are
+> the current state; §2.4, §3, §4 and §5.1–§5.4 are the historical record of the
+> pre-BFF design and its fixes (each carries a superseded note).
+
 ### 2.1 The session
 
-- **Provider:** Supabase (GoTrue), JWT access + refresh tokens.
-- **Transport:** a custom storage adapter (`website/assets/supabase-session.js`)
-  persists the supabase-js session to a **parent-domain cookie**
-  (`sb-tortoise-auth-token` on `.premiselabs.co`) so `app.premiselabs.co`
-  (dashboard) and `tortoise.premiselabs.co` (auth pages, welcome) share one
-  session. Non-HttpOnly (JS reads it) — mitigated by textContent-only
-  rendering and server-side token validation.
-- **Legacy cohort:** pre-#1225 sessions still in origin-scoped localStorage
-  (`sb-ybetwichurajbfswfeqa-auth-token`) are migrated to the cookie on load
-  (supabase-session.js `migrateLegacySession`, runs on the tortoise origin).
-  The dashboard's head gate reads only the parent-domain cookie — a
-  legacy-cohort holder hitting the dashboard directly gets one bounce to
-  `/auth` (where migration runs and they're redirected back). Self-healing;
-  the cohort shrinks as legacy sessions are migrated/expired.
+- **Provider:** Supabase (GoTrue), JWT access + refresh tokens — held SERVER-side.
+- **Transport (current):** a server-side BFF on the app origin. The browser
+  receives only an opaque `__Host-session` (plus `__Host-authflow`) cookie:
+  `HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=…`, with **no `Domain`
+  attribute** — the `__Host-` prefix enforces host-only, so a cookie set on one
+  subdomain can never authenticate another. Issued and cleared by
+  `website/apps/dashboard/functions/_shared/auth/session.ts`
+  (`SESSION_COOKIE = "__Host-session"`, `buildCookie`).
+- **Session store:** the opaque handle keys a D1 row (`SESSIONS` binding) holding
+  `user_id`, the refresh token, the **session** expiry (`expires_at` — the session's own
+  TTL, not the refresh token's), and a cache of the access token (`access_token`,
+  `access_token_expires_at`) plus a refresh-cooldown stamp (`token_rejected_at`) — the
+  last three added by `_shared/auth/token.ts`, so a read path reuses the cached token
+  instead of calling GoTrue per request. The access token never leaves the server: it is
+  minted/refreshed in-process by the Function and is never sent to the browser; the cookie
+  is revocable immediately (the row is marked `revoked = 1`; nothing deletes it).
+- **OVERRIDES:** the standard cross-subdomain session — a `Domain=.premiselabs.co` cookie shared by
+  every subdomain (§1.3) — is **rejected**. It is JS-reachable from any subdomain and forfeits the
+  `__Host-` prefix. One session-bearing origin is worth the extra 301. The recorded ruling is the
+  auth-topology decision on **#3501 / #4054**; the full rationale lives in the private `premise-labs`
+  repo (`engineering/auth/SCOPE.md` §3, §4 W6, §13), which this repo's Functions also cite — named
+  here because it is outside this repository and cannot be opened from it.
+- **Legacy cohort:** the JS-readable parent-domain bridge
+  (`website/assets/supabase-session.js`, cookie `sb-tortoise-auth-token` on
+  `.premiselabs.co`) is RETAINED but no BFF page loads it — it survives as the
+  canonical adapter for `tortoise/oauth.py`'s consent-page port and the
+  dashboard's non-secret claim-marker helpers (see §5.5). Its legacy-key
+  migration (`migrateLegacyKeysToCookie`) is consequently inert on BFF pages.
 
-### 2.2 The auth surfaces (after the #1498 consolidation)
+### 2.2 The auth surfaces
 
-- **One auth page** at `tortoise.premiselabs.co/auth` (combined Log in /
-  Sign up card: GitHub/Google OAuth + API-key and email modals). `/signin*`
-  → 301; `/signup` is a legacy alias.
-- **Protected pages:** `/welcome` (post-auth provisioning) and the dashboard
-  (`app.premiselabs.co`).
+> **Functions root:** every `functions/…` path in this doc is relative to
+> `website/apps/dashboard/functions/` — the BFF moved with the session to the app project (#4054).
+> `website/functions/` (the marketing project) now holds only `_middleware.ts` and `blog/**`, so an
+> unqualified path read as "the marketing Functions" points at the wrong tree.
 
-### 2.3 The gates (after #1498/#1506)
+- **One auth page** at `app.premiselabs.co/auth` — `website/apps/dashboard/functions/auth/index.ts`
+  rewrites `/auth` to the `/signup` asset, preserving the query string (invite
+  tokens, `?error=`, `?next=`). The marketing origins converge on the app origin, and **which layer
+  does the 301 depends on the host** (`website/functions/_middleware.ts`, `website/_redirects`):
+  `/auth` 301s **unconditionally** in the middleware (so it covers `tortoise.*` and previews/dev),
+  while `/signup`, `/welcome` and `/invite-accept` are 301'd by the middleware's `APP_ONLY` branch
+  **only on the exact `premiselabs.co` host** and, on the tortoise host, by the static `_redirects`.
+  `/signin*` is a legacy alias with no route on the app origin — `_redirects` maps it to `/auth` **on
+  the tortoise host** (`tortoise.premiselabs.co/signin` → `/auth` → `app.premiselabs.co/auth`); on the
+  company host there is one extra hop first
+  (`premiselabs.co/signin` → `tortoise.premiselabs.co/signin`), and on the app origin it 404s. The
+  card offers GitHub/Google OAuth, API key and email/password.
+- **Protected pages:** `/welcome` (decided server-side) and the dashboard — both on
+  `app.premiselabs.co`. `/welcome` is **not** a provisioning page: it renders only the recovery
+  reset panel. Team + API-key provisioning is the dashboard's first-run onboarding.
+
+### 2.3 The gates (server-side, #4054)
 
 | Surface | Gate | Timing |
 |---|---|---|
-| `/auth` | synchronous head-gate cookie check → `location.replace` to welcome/dashboard for signed-in visitors | instant (before paint) |
-| `/welcome` | synchronous head-gate cookie check → `location.replace` to `/auth` when no session (callback hashes exempt) | instant (before paint) |
-| Dashboard | **NEW (#1506):** synchronous head-gate cookie check in `index.html` → `location.replace` to `/auth` when no session/key/claim | instant (before the app bundle renders) |
-| API | Bearer-token validation per request | authoritative |
+| `/auth` | `website/apps/dashboard/functions/auth/index.ts` serves the page; no client cookie check | server render |
+| `/welcome` | `website/apps/dashboard/functions/welcome.ts`, four session outcomes (below) | server, before the page is served |
+| Dashboard | `website/apps/dashboard/functions/api/session.ts` is the single source of session truth (200 `{user}` / 401 not-signed-in / 503 store-unreachable); the SPA asks it instead of reading a cookie | server round-trip |
+| API | Bearer-token validation per request (the BFF holds the token) | authoritative |
+
+`/welcome`'s four session outcomes — the first three answer without rendering a page; the fourth
+is the only case that renders one:
+
+The table is grouped by outcome, not by the order `welcome.ts` evaluates them in (`?reset` is
+tested at :74, before the signed-in redirect at :100).
+
+| Case | Response |
+|---|---|
+| signed in | 302 `APP_ORIGIN[/?claim=1]` |
+| no cookie / dead session | 302 `/auth?next=…&stale=1` |
+| store unreachable (`!env.SESSIONS`, or the D1 read fails) | 503, terminal — **never** a redirect |
+| **any `reset` parameter present** **and** signed in | serves the reset-panel asset — **the ONE rendered case** (503 `assets unavailable` instead, if `env.ASSETS` is unbound) |
+
+The reset condition is **presence, not value** — `welcome.ts` tests
+`url.searchParams.get("reset") !== null`, so a bare `?reset` renders the panel too.
+
+The last two rows are the ones that bite. Omitting the reset case makes `/welcome` look like a pure
+redirect — and that is how the panel's corruption stayed invisible: the Function serves the panel via
+`env.ASSETS.fetch`, which **re-enters the asset router**, where `_redirects` *does* apply (unlike
+inbound routing, which a Function intercepts first). Redirecting on a D1 blip is the other: it reports
+a database outage to the user as "you are signed out".
+
+> **Historical (#1498/#1506 era, REMOVED by #4054):** the gates below were
+> synchronous client-side head-gate cookie checks (`readValidSession()` +
+> `location.replace`) in each page's `<head>`, and the dashboard's `index.html`
+> carried the same check before the bundle rendered. Under the BFF there is no
+> JS-readable session, so those checks were removed — a synchronous client gate
+> cannot see an HttpOnly host-only cookie, and one that tries reproduces the
+> #3485 loop.
 
 ### 2.4 What was wrong (the user report)
+
+> ⚠️ **Historical (pre-BFF, superseded by #4054).** The report below describes the client-side
+> design that the BFF replaced; it is kept as the problem statement, not as current behaviour.
 
 1. **The dashboard checked the session asynchronously** via
    `supabaseClient.auth.getSession()` inside the React mount effect — which
@@ -107,6 +177,10 @@ the token regardless of which subdomain presented it.
 
 ## 3. The fixes
 
+> ⚠️ **Superseded by #4054.** The client-side head gates below were replaced by
+> the server-side BFF (§2). They are recorded for history; do not reintroduce a
+> client gate that reads a session cookie.
+
 1. **#1498 (merged):** one `/auth` page; `/welcome` + `/auth` head gates
    (synchronous cookie read, `location.replace` = Back-proof); the
    dashboard's embedded login/signup card removed.
@@ -118,6 +192,10 @@ the token regardless of which subdomain presented it.
    API-key paste, reachable only by key/claim holders).
 
 ## 4. Residual risks / recommendations
+
+> ⚠️ **Superseded by #4054** for items 1, 2 and 4: the cookie is no longer
+> JS-readable (§2.1), so the XSS-exfiltration and client `getSession()` refresh
+> risks below no longer apply. Item 3 (server-side authorization) still holds.
 
 1. **Non-HttpOnly session cookie** — the shared cookie must be JS-readable
    for supabase-js, so XSS in any subdomain can exfiltrate a session. The
@@ -138,10 +216,23 @@ the token regardless of which subdomain presented it.
 
 ## 5. #1511 — auth unification: one page, strict validity, key→session exchange
 
+> ⚠️ **Historical (§5.1–§5.4, pre-BFF, superseded by #4054).** These four sections record the
+> 2026-08-19 client-side unification — parent-domain cookie transport included. They describe the
+> design of their time; §5.5 is the one part still current (see this doc's §2 preamble).
+
 Issue #1511 (2026-08-19/20) closed the remaining gaps: the dashboard could
 strand users on a key-only card, `/auth` lacked "Last used" labels, browser
 API-key login was broken (a cross-origin localStorage write the dashboard
 couldn't read), and stale sessions leaked into `/welcome`. What changed:
+
+> ⚠️ **Mechanically superseded by #4054.** The flows below are described in
+> terms of the pre-BFF client-side cookie (the client storing the session into
+> `sb-tortoise-auth-token`, the head gate reading it). The BFF moved every one
+> of those steps server-side: the browser stores nothing (a `__Host-session`
+> handle only), the API-key exchange runs in `functions/auth/api-key.ts`, and
+> `/welcome` is decided by `functions/welcome.ts` (§2). The product INTENT below
+> (one login surface, strict validity, server-side exchange, welcome never
+> rendering unauthenticated) still holds; the mechanism is §2.1–§2.3.
 
 ### 5.1 The dashboard never shows auth UI
 
@@ -204,26 +295,88 @@ graph credential; it can't be written cross-origin — SOP). Instead:
   and redirects to `/auth`. Non-401 failures keep the retry-once +
   contact-support error state.
 
-### 5.5 Shared client helpers
+### 5.5 Shared client helpers (retained; the dashboard copy was removed by #4054)
 
-`website/assets/supabase-session.js` (copied to the dashboard's
-`public/assets/`) exposes one validity predicate + clear + last-used +
-bounce helpers — loop-safety by construction across all three pages:
-
-- `readValidSession()` — strict cookie→legacy read
-- `clearStoredSession()` — cookie + both legacy localStorage keys
-- `get/setLastAuthMethod()` — `tt_last_auth_method`
-- `bounceToAuth(search, hash)` — origin-aware absolute/relative target
-- `storeSession(session)` — direct parent-cookie write (the exchange path)
+The shared bridge `website/assets/supabase-session.js` exposed one validity
+predicate + clear + last-used + bounce helpers, and was copied into the
+dashboard's `public/assets/`. **#4054 removed that dashboard copy** — a BFF page
+must not ship a JS-readable session bridge. The shared file itself is retained
+(§2.1) and still declares `readValidSession()` / `clearStoredSession()` /
+`getLastAuthMethod()` / `setLastAuthMethod()` / `bounceToAuth()` /
+`storeSession()`, but NO BFF page loads it. The dashboard's auth state now comes
+from `functions/api/session.ts` and its bounce is a local same-origin
+`location.replace("/auth" + search + hash)` in `main.jsx`; the non-secret
+`tt_claim_pending` cookie is still written by `signup.html` and `main.jsx`.
 
 ### 5.6 Test coverage
 
-- `tests/test_session_login.py` (18) — exchange contract, evaluation order, error tree, rate limit, TOCTOU, expires_at injection, transport 502, session-identity backstop, session-attribution.
-- `tests/test_session_login_helpers.py` (6) — mint-target resolution.
+- `tests/test_session_login.py` (28) — exchange contract, evaluation order, error tree, rate limit, TOCTOU, expires_at injection, transport 502, session-identity backstop, session-attribution.
+- `tests/test_session_login_helpers.py` (7) — mint-target resolution.
 - `tests/e2e/test_session_login_flow.py` — two-origin loop regression
   (exchange → cookie → dashboard renders; no cookie → instant redirect;
   ANON → claim funnel) via prod-domain route interception.
 - `tests/e2e/test_dashboard_gate.py`, `test_welcome_page.py` (401 →
-  clear → `/auth`, no welcome↔/auth loop), `test_cross_subdomain_cookie_sync.py`
-  (helper presence + byte parity), `test_writer_inventory.py` /
-  `TestCreateApiKeySessionAttribution` (created_by = session UUID).
+  clear → `/auth`, no welcome↔/auth loop); `tests/test_cross_subdomain_cookie_sync.py`
+  (helper presence + cookie-contract parity — note it is NOT under `tests/e2e/`),
+  `test_writer_inventory.py` (`TestGraphSurface` — the session-mint `created_by` /
+  `created_by_key_id` assertions) and `tests/test_session_login.py::TestCreateApiKeySessionAttribution`
+  (created_by = session UUID).
+
+## 6. The machine-credential model: unified scoped keys (epic #2083)
+
+Epic #2083 (multi-graph tenancy, shipped 2026-09-04) replaced the implicit
+"one key = full team access" model with **one unified key table carrying a
+graph scope + a flat scope allowlist** — no new credential type, no key
+rotation, no forced migration (E2E-5).
+
+### 6.1 What an API key now IS
+
+| Column | Meaning |
+|---|---|
+| `graph_id` | NULL = **team-wide key** → resolves to the team's DEFAULT graph (the pre-epic behavior — legacy keys untouched); set = bound to ONE custom graph |
+| `scopes` | FLAT allowlist array from `{graphs:read, graphs:write}` — the escalation set (`graphs:create/delete`, `keys:manage`, `team:manage`) is owner-mint-only |
+| `delegation_depth` | NULL = owner-minted; 0 = minted by another key (can never hold escalation scopes — DB CHECK + resolution) |
+| `created_by_key_id` | mint lineage (a delegated key cannot mint) |
+
+**The owner/legacy class (D2):** `delegation_depth IS NULL AND scopes = []`
+⇒ `legacy_full_access = True` — a tt_ key minted before/in the legacy shape
+keeps byte-identical full-team behavior (all three resolution lanes — REST,
+MCP, apikey_verify — derive the same class). The C3-era scoped mint of a
+deleg-NULL key with scopes `[]` + a graph is the documented footgun: it
+would read as full access while echoing `scopes:[]` — the shrink branch 422s
+it (`Per-graph keys require at least one scope.`).
+
+### 6.2 Enforcement surfaces
+
+- **`_require_scope(scope)`** (REST) / the MCP equivalent: reads require
+  `graphs:read`, writes require `graphs:write`; `legacy_full_access` (and
+  key-less session faces) are exempt. Graph-bound keys can only touch their
+  own graph; team-level write surfaces (index/seed/pack/restore/backup)
+  reject graph-bound keys (`_reject_graph_bound_*`) because they act on the
+  DEFAULT graph.
+- **Delegation is one level:** a `deleg=0` child key is minted with
+  `graphs:read` by default; children can never hold `keys:manage`, so they
+  cannot mint further keys — the DB CHECK `chk_minted_key_no_escalation`
+  is the invariant.
+- **C5/C6 data-plane gates:** per-graph context/sessions/capture ride the
+  key's graph context (fail-closed 403 `GRAPH_NOT_FOUND` on vanished
+  graph-bound keys); the session_recording per-graph override (`PATCH
+  /v1/graphs/{id} {recording}`) never re-enables a team-opted-out recording.
+
+### 6.3 The #2082 boundary (deliberate)
+
+Key scopes are **capability gates in the control plane**: they decide which
+graph + which data-plane verbs a credential may use. They are NOT an agent
+policy system — what an agent does with its granted access (prompts,
+tool-selection policy, safety rails) lives in the agent layer, outside the
+key model. The epic kept that line: scope allowlisting stays flat and
+machine-readable; per-graph ACL *users* (C4) are defense-in-depth for graph
+mints, not a policy engine.
+
+### 6.4 Supabase storage parity
+
+The supabase `api_keys` table mirrors the registry shape exactly
+(`graph_id`, `scopes` jsonb FLAT, `delegation_depth`, `created_by_key_id`,
++ the `chk_minted_key_no_escalation` CHECK + `idx_api_keys_graph_id`).
+The C1 migration is pure-additive and drops cleanly (rollback drill in the
+C8 runbook — apply → rollback → re-apply passes in CI).

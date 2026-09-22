@@ -1,0 +1,14 @@
+{
+  "continuity": {
+    "reader_planted": [
+      "integrates with Kafka for the event feed"
+    ],
+    "reader_queries": [
+      "How does Orion consume events?"
+    ],
+    "writer_session": "iso_cw_b_writer_orion"
+  },
+  "schema_version": 1,
+  "session_id": "iso_cw_b_writer_orion",
+  "suite": "continuity"
+}

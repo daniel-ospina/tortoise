@@ -22,8 +22,13 @@ Routing env vars (documented here; ``.env.example`` entries deferred to P4):
     collapse. Process-local by design (per-worker); shared breakers are a
     follow-up if the collapse class recurs.
   - ``TORTOISE_EXTRACT_MODEL`` — canonical family-prefixed model id
-    (default ``deepseek/deepseek-v4-flash``); the direct route sends the bare
-    id on the wire, the openrouter route sends it unchanged (D6).
+    (default ``deepseek/deepseek-v4-flash``); the direct route sends the
+    flash family's documented id (``deepseek-v4-flash``) with thinking
+    explicitly disabled on the wire (pilot #1549 — ``deepseek-v4-flash``
+    reasons by default and collapses to empty output; the legacy
+    non-reasoning chat alias was retired upstream 2026-07-24 (still
+    served during transition), #1790); the
+    openrouter route sends the spec unchanged (D6).
 
 Taxonomy contract (M2/M3 import these — do not fork):
   ``LlmErrorClass``, ``FATAL_STATUS_CODES``, ``FATAL_CONFIG_STATUS_CODES``,
@@ -32,6 +37,7 @@ Taxonomy contract (M2/M3 import these — do not fork):
 """
 from __future__ import annotations
 
+import contextlib
 import enum
 import errno
 import os
@@ -41,6 +47,11 @@ import time
 from urllib import error as urllib_error
 
 import requests
+
+# #2185 seam: the canonical usage-sink fire helper (models.py is dependency-
+# free of model_adapters — this one-way import cannot cycle).
+from tortoise.env_truthy import is_truthy  # #4097: the declared truthy contract
+from tortoise.models import _emit_usage_sink
 
 
 class OpenRouterModel:
@@ -56,13 +67,23 @@ class OpenRouterModel:
 
     def __init__(self, model_id: str, max_tokens: int | None = None,
                  temperature: float = 0.0,
-                 thinking_budget: int = 0, disable_reasoning: bool = False):
+                 thinking_budget: int = 0, disable_reasoning: bool = False,
+                 json_mode: bool | None = None):
         self.id = model_id
         self.api_key = os.environ.get(self.key_env, "")
         self.max_tokens = max_tokens  # None = NO CAP (omit from request body)
         self.temperature = temperature
         self.thinking_budget = thinking_budget  # for reasoning models
         self.disable_reasoning = disable_reasoning  # send reasoning.effort=none
+        # json_mode (#1987 Task 3): per-instance structural pin for the JSON
+        # mode content-flip hazard (``_should_send_json_mode`` fires on the
+        # substring "json" in user-controlled retrieved context — the ask
+        # lane embeds retrieved memory, so a memory mentioning "json" would
+        # send response_format=json_object on a free-text answer and mangle
+        # it). None = unchanged behavior (the extraction lane); False = NEVER
+        # send response_format; True = always send when the prompt requests
+        # JSON.
+        self.json_mode = json_mode
         # Session per adapter so a deadline can interrupt a hung read
         # (pilot #1549: the DeepSeek/OpenRouter API stalls mid-chunked-response;
         # requests.post per-call leaks the socket — close() on deadline kills it).
@@ -70,13 +91,22 @@ class OpenRouterModel:
         # M3 (#1524, GATE-2): the per-call finish reason — "length" = the
         # generation hit the cap (truncation detected, not silently lost).
         self.last_finish_reason: str | None = None
+        # #2906: the provider's own charge for the LAST call (USD), from
+        # ``usage.cost``. None means the route did not report one — never
+        # 0.0, which would read as a genuinely free call. Consumers MUST
+        # test ``is None``, not truthiness, or a real 0.0 free call is
+        # re-priced from the (possibly wrong) token basis.
+        self.last_cost_usd: float | None = None
+        # #2185: additive usage-capture seam (no-op unless the harness sets
+        # it — the eval collector binds a sink at registration).
+        self.usage_sink = None
 
     def close(self) -> None:
         """Interrupt any in-flight request (pilot #1549: called by the
         extractor's deadline when a call exceeds its wall-clock bound — the
         hung socket read raises and the daemon thread dies instead of
         leaking + billing forever)."""
-        try:
+        try:  # noqa: SIM105
             self._session.close()
         except Exception:
             pass
@@ -106,7 +136,15 @@ class OpenRouterModel:
         # parse-error census class at zero prompt cost. DeepSeek requires the
         # prompt to contain "json" + an example (both present); OpenRouter
         # passes response_format through. Toggle: TORTOISE_JSON_MODE=0 disables.
-        if os.environ.get("TORTOISE_JSON_MODE", "1") == "1":
+        #
+        # #1782: json_object mode is ONLY sent when the prompt actually
+        # requests JSON — DeepSeek returns HTTP 400 if the mode is set but the
+        # prompt doesn't contain the text "json" (case-insensitive substring).
+        # Non-JSON calls (the preflight billing probe, ping, reader/judge
+        # prompts) must NOT carry the mode. #1987 Task 3: the per-instance
+        # ``json_mode=False`` pin (the ask lane) NEVER sends it — the
+        # structural override beats the content heuristic.
+        if self.json_mode is not False and _should_send_json_mode(system, user):
             body["response_format"] = {"type": "json_object"}
         # Enable thinking for reasoning models
         if self.thinking_budget > 0:
@@ -125,6 +163,15 @@ class OpenRouterModel:
         self.last_prompt_tokens = usage.get('prompt_tokens', 0)
         self.last_completion_tokens = usage.get('completion_tokens', 0)
         self.last_cost = data.get('usage', {}).get('total_tokens', 0)  # will be overridden
+        # #2906: surface the provider's own charge (OpenRouter returns it as
+        # ``usage.cost``, USD). Absent on routes that do not report one.
+        # ``is None`` — 0.0 is authoritative, not absent.
+        _provider_cost = usage.get('cost')
+        self.last_cost_usd = (None if _provider_cost is None
+                              else float(_provider_cost))
+        # #2185 seam: fire with the response-local usage (provider from the
+        # class attr; no-op when no sink is bound).
+        _emit_usage_sink(self, usage)
 
         content = data['choices'][0]['message']['content']
         self.last_finish_reason = data["choices"][0].get("finish_reason")
@@ -148,11 +195,18 @@ class VeniceModel(OpenRouterModel):
 
 
 class DeepSeekDirectModel(OpenRouterModel):
-    """Direct DeepSeek API adapter (api.deepseek.com) — same model ids as
-    OpenRouter (deepseek-v4-flash / v4-pro) but no OpenRouter hop. Used when
-    DEEPSEEK_API_KEY is set and TORTOISE_EXTRACTOR_PROVIDER != 'openrouter'
-    (#1350 — the extractor's LLM calls were hitting OpenRouter connection
-    errors under load; the direct API is the same model, different route)."""
+    """Direct DeepSeek API adapter (api.deepseek.com) — no OpenRouter hop.
+    The flash family runs NON-reasoning: ``deepseek-v4-flash`` with thinking
+    explicitly disabled (pilot #1549: api.deepseek.com's ``deepseek-v4-flash``
+    reasons by default — thinking defaults ON — and collapses to empty
+    output, 1500/1500 reasoning tokens, finish=length; the legacy
+    alias that used to provide non-reasoning chat was retired upstream
+    2026-07-24 (still served during transition), #1790);
+    ``deepseek-v4-pro`` stays as-is (no
+    collapse evidence — pending verification). Used when DEEPSEEK_API_KEY is
+    set and TORTOISE_EXTRACTOR_PROVIDER != 'openrouter' (#1350 — the
+    extractor's LLM calls were hitting OpenRouter connection errors under
+    load; the direct API is the same model, different route)."""
     provider = "deepseek-direct"
     base_url = "https://api.deepseek.com/v1/chat/completions"
     key_env = "DEEPSEEK_API_KEY"
@@ -176,6 +230,36 @@ class DeepSeekDirectModel(OpenRouterModel):
         cap = self.max_tokens if max_tokens is None else max_tokens
         if cap is not None:
             body["max_tokens"] = cap
+        # #1746 (D6): JSON-mode parity on the DIRECT path — mirrors
+        # OpenRouterModel (the pilot's direct route ran WITHOUT it — H1, the
+        # untested lever). Toggle: TORTOISE_JSON_MODE=0 disables. DeepSeek's
+        # "json"+example requirement is already satisfied by the S2/S4
+        # prompts ("JSON object" + OUTPUT_CONTRACT example). NOTE: JSON mode
+        # does NOT fix truncation (breaks at max_tokens) — the parse ladder
+        # is the truncation pairing; no cap raise in #1746.
+        #
+        # #1782: gate on the prompt actually requesting JSON — DeepSeek 400s
+        # when json_object mode is set without the text "json" in the prompt
+        # (the preflight probe / ping prompts lack it). #1987 Task 3: the
+        # per-instance ``json_mode=False`` pin (the ask lane) structurally
+        # overrides the content heuristic.
+        if self.json_mode is not False and _should_send_json_mode(system, user):
+            body["response_format"] = {"type": "json_object"}
+        # #1790: the flash family runs NON-reasoning. The legacy
+        # alias (routed to v4-flash non-thinking) was retired upstream
+        # 2026-07-24 (still served during transition); ``deepseek-v4-flash``
+        # reasons by
+        # DEFAULT (thinking: high) and collapses non-trivial prompts into
+        # hidden reasoning tokens (pilot #1549: 1500/1500 reasoning tokens,
+        # zero content). Disable thinking explicitly — the documented
+        # OpenAI-format toggle (api-docs.deepseek.com/guides/thinking_mode;
+        # live-verified 2026-08-28: zero reasoning_content, finish=stop,
+        # byte-identical usage to the retired alias). ``deepseek-v4-pro``
+        # keeps its default (no collapse evidence — pending verification).
+        # prefix-agnostic: a provider-prefixed id (e.g. "deepseek/deepseek-v4-flash")
+        # must not bypass the gate (gate ↔ MODELS drift would re-open #1549).
+        if self.id.rsplit("/", 1)[-1] == "deepseek-v4-flash":
+            body["thinking"] = {"type": "disabled"}
         r = self._session.post(
             self.base_url,
             headers={"Authorization": f"Bearer {self.api_key}",
@@ -187,7 +271,15 @@ class DeepSeekDirectModel(OpenRouterModel):
         usage = data.get("usage", {})
         self.last_prompt_tokens = usage.get("prompt_tokens", 0)
         self.last_completion_tokens = usage.get("completion_tokens", 0)
+        # #2906: the direct route does not publish ``usage.cost`` — surface
+        # it if it ever does, else None (never a stale prior figure).
+        _provider_cost = usage.get("cost")
+        self.last_cost_usd = (None if _provider_cost is None
+                              else float(_provider_cost))
         self.last_finish_reason = data["choices"][0].get("finish_reason")
+        # #2185 seam (DeepSeekDirectModel has its OWN complete body — the fire
+        # must live here too, not just on the OpenRouterModel path).
+        _emit_usage_sink(self, usage)
         return data["choices"][0]["message"]["content"]
 
 
@@ -195,6 +287,19 @@ class DeepSeekDirectModel(OpenRouterModel):
 # re-exports this; the eval harness and tools reference the names).
 MODELS = {
     'deepseek-flash': lambda: OpenRouterModel('deepseek/deepseek-v4-flash', max_tokens=None, temperature=0.0),
+    # Pilot #1549 (50-Q run, 2026-08-25) + #1790: the direct API id is the
+    # NON-reasoning flash variant. api.deepseek.com's ``deepseek-v4-flash``
+    # reasons by DEFAULT (thinking: high) and burns the whole max_tokens
+    # budget on hidden reasoning tokens for non-trivial prompts (observed:
+    # 1500/1500 reasoning tokens, finish_reason=length, ZERO output content)
+    # — S1 then returns an empty story, S2/S4 never run, and extraction
+    # silently produces no points. The legacy alias (routed to
+    # v4-flash non-thinking) was retired upstream 2026-07-24
+    # (still served during transition, #1790); the
+    # replacement is the documented id ``deepseek-v4-flash``
+    # WITH thinking explicitly disabled in ``DeepSeekDirectModel.complete``
+    # (live-verified 2026-08-28: full story output, finish_reason=stop,
+    # zero reasoning_content — byte-identical usage to the retired alias).
     'deepseek-flash-direct': lambda: DeepSeekDirectModel('deepseek-v4-flash', max_tokens=None, temperature=0.0),
     'deepseek-v4-pro-direct': lambda: DeepSeekDirectModel('deepseek-v4-pro', max_tokens=None, temperature=0.0),
     'deepseek-v4-pro': lambda: OpenRouterModel('deepseek/deepseek-v4-pro', max_tokens=500),
@@ -299,6 +404,21 @@ def is_fatal(exc: BaseException) -> bool:
     return classify_llm_error(exc) in (LlmErrorClass.FATAL, LlmErrorClass.FATAL_CONFIG)
 
 
+def is_billing_exhausted(exc: BaseException) -> bool:
+    """True → HTTP 402 (Payment Required) — the provider's credits ran out.
+
+    The one 'fatal' class that is PROVIDER-specific (a balance emptied
+    mid-run), not config-inherent: auth (401/403) means the credential is
+    wrong everywhere, config 4xx means the request shape is wrong everywhere
+    — rotation would just retry the same bug. A 402 is a runtime condition
+    of THAT provider; ``RotatingModel`` cooldowns it and rotates to an
+    alternative so the run continues (#1951). Deliberately NOT part of the
+    M2/M3 taxonomy export contract — ``is_fatal``/``classify_llm_error``
+    semantics are unchanged for the retry/abort consumers (run.py M3,
+    extractor_v2); only the rotation pool consults this hook."""
+    return _http_status(exc) == 402
+
+
 # ── Provider routing (D2) ──────────────────────────────────────────────────
 
 _PROVIDER_NAMES = ("deepseek-direct", "openrouter")
@@ -359,6 +479,169 @@ def resolve_extractor_provider() -> tuple[str, str | None]:
     return (None, None)
 
 
+# ── Ask-lane provider-capability routing (#2069) ───────────────────────────
+# The ask lane's reader routing is provider-capability-aware (spec declares
+# the family): a spec valid only on OpenRouter (``qwen/qwen3.8-max``) must
+# NEVER be posted to the deepseek-direct primary (HTTP 400 → correctly
+# FATAL_CONFIG → 502 — the #2069 defect). The family prefix decides the
+# servable set; ``resolve_reader_provider`` intersects it with the
+# env/keys-resolved order and honors ``TORTOISE_ASK_PROVIDER``.
+
+#: Family prefix → providers that can serve the family. OpenRouter-only
+#: families (qwen/, upstage/, anthropic/, … — the MODELS registry's
+#: judge/reader-only families); ``deepseek`` (prefixed or bare) keeps the
+#: deepseek-direct/openrouter/venice pool. An UNKNOWN family must fail loud
+#: — never "→ all" (a typo'd/future family must not fall through to
+#: deepseek-direct and re-introduce the 400-on-foreign-spec defect).
+_SPEC_FAMILY_PROVIDERS = {
+    "qwen": {"openrouter"},
+    "upstage": {"openrouter"},
+    "anthropic": {"openrouter"},
+    "deepseek": {"deepseek-direct", "openrouter", "venice"},
+}
+
+#: Ask-lane provider enum (``TORTOISE_ASK_PROVIDER`` valid values).
+_ASK_PROVIDERS = ("deepseek-direct", "openrouter", "venice")
+
+#: Provider → key env var (the empty-intersection guard names these).
+_PROVIDER_KEY_ENV = {
+    "deepseek-direct": "DEEPSEEK_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "venice": "VENICE_API_KEY",
+}
+
+#: Ordered provider chain per explicit primary (mirrors
+#: ``resolve_extractor_provider``'s ``_chain`` ordering).
+_ASK_PROVIDER_CHAIN = {
+    "deepseek-direct": ("deepseek-direct", "openrouter", "venice"),
+    "openrouter": ("openrouter", "deepseek-direct", "venice"),
+    "venice": ("venice", "openrouter", "deepseek-direct"),
+}
+
+
+def _providers_can_serve(model_id: str) -> set[str]:
+    """Provider-capability map (#2069): which providers can serve a spec.
+
+    Family = the spec's prefix (``qwen/``, ``upstage/``, ``anthropic/`` →
+    OpenRouter-only; ``deepseek/`` + bare deepseek ids → the
+    deepseek-direct/openrouter/venice pool). An UNKNOWN family prefix fails
+    LOUD with ``ValueError`` naming the family (never "→ all") — an
+    unrecognized family must never fall through to deepseek-direct and
+    re-introduce the defect (deepseek 400 on a foreign spec). The ask lane
+    normalizes MODELS keys (``_ASK_MODELS_KEY_SPECS``) and rejects the
+    eval's colon-form BEFORE this runs, so a bare ``qwen3.8-max`` or
+    ``openrouter:qwen/qwen3.8-max`` never reaches the unknown-family branch.
+    """
+    family, sep, _rest = model_id.partition("/")
+    if not sep:
+        # bare id — deepseek back-compat; a bare non-deepseek id (post
+        # ``_ASK_MODELS_KEY_SPECS`` normalization) fails loud.
+        if not family.startswith("deepseek"):
+            raise ValueError(
+                f"unknown model family for bare {model_id!r} — bare "
+                f"non-deepseek ids must use the family-prefixed form "
+                f"(e.g. 'qwen/qwen3.8-max', 'upstage/solar-pro4', "
+                f"'anthropic/claude-opus-5')")
+        family = "deepseek"
+    servable = _SPEC_FAMILY_PROVIDERS.get(family)
+    if servable is None:
+        raise ValueError(
+            f"unknown model family {family!r} in {model_id!r} — no provider "
+            f"can serve it; recognized families: "
+            f"{', '.join(sorted(_SPEC_FAMILY_PROVIDERS))}")
+    return servable
+
+
+def resolve_reader_provider(model_id: str) -> tuple[str | None, list[str]]:
+    """Resolve (primary, ordered pool) for the ASK lane (#2069).
+
+    The servable set comes from ``_providers_can_serve(model_id)`` (the
+    family capability map); the env/keys-resolved order is INTERSECTED with
+    it. ``TORTOISE_ASK_PROVIDER`` (default ``auto``) selects the primary;
+    an explicit value without its key fails closed with ``ValueError``
+    (mirror ``resolve_extractor_provider``). With all three provider keys
+    set, the shared builder returns the pilot #1549 ``RotatingModel`` whose
+    deterministic reorder picks the primary — the explicit provider still
+    gates the SERVABLE set (fail-closed when unkeyed) but the rotation
+    order wins the primary slot (pre-existing extraction-lane semantics,
+    byte-identical). An EMPTY intersection raises a
+    build-time ``ValueError`` naming the missing key — fail-fast, NEVER a
+    silent misbuild that 401s at call time. The deepseek family preserves
+    the extraction lane's lenient no-key default (a single OpenRouter
+    adapter) so no-key ask behavior is unchanged.
+    """
+    explicit = (os.environ.get("TORTOISE_ASK_PROVIDER", "").strip().lower()
+                or "auto")
+    ds_key = bool(os.environ.get("DEEPSEEK_API_KEY"))
+    or_key = bool(os.environ.get("OPENROUTER_API_KEY"))
+    vz_key = bool(os.environ.get("VENICE_API_KEY"))
+    keyed = {"deepseek-direct": ds_key, "openrouter": or_key,
+             "venice": vz_key}
+    servable = _providers_can_serve(model_id)
+
+    if explicit != "auto":
+        if explicit not in _ASK_PROVIDERS:
+            raise ValueError(
+                f"TORTOISE_ASK_PROVIDER={explicit!r} invalid — valid values: "
+                f"auto | {' | '.join(_ASK_PROVIDERS)}")
+        if explicit not in servable:
+            raise ValueError(
+                f"TORTOISE_ASK_PROVIDER={explicit} cannot serve {model_id!r} "
+                f"— the {model_id.split('/', 1)[0]} family is served only by "
+                f"{', '.join(sorted(servable))}")
+        if not keyed[explicit]:
+            raise ValueError(
+                f"TORTOISE_ASK_PROVIDER={explicit} but "
+                f"{_PROVIDER_KEY_ENV[explicit]} is not set — an explicit "
+                f"provider names a key that isn't configured; never "
+                f"silently routing elsewhere (#1530 fail-closed)")
+        chain = _ASK_PROVIDER_CHAIN[explicit]
+        pool = [p for p in chain if p in servable and keyed[p]]
+        return (explicit, pool)
+
+    # auto mode: ordered servable providers that have keys configured.
+    pool = [p for p in _ASK_PROVIDER_CHAIN["deepseek-direct"]
+            if p in servable and keyed[p]]
+    if pool:
+        return (pool[0], pool)
+    # Empty intersection. The deepseek family keeps the lenient no-key
+    # default (a single OpenRouter adapter — no-key ask behavior unchanged);
+    # every other family fails LOUD at build time naming the key it needs.
+    if "deepseek-direct" in servable and not any(keyed.values()):
+        return (None, ["openrouter"])
+    missing = sorted({_PROVIDER_KEY_ENV[p] for p in servable
+                      if not keyed[p]})
+    raise ValueError(
+        f"no configured provider can serve {model_id!r}: the "
+        f"{', '.join(sorted(servable))} lane(s) need "
+        f"{' or '.join(missing)} in the environment")
+
+
+def _build_routing_model(model_id: str, pool_names: list[str], *,
+                         max_tokens, temperature, json_mode):
+    """Shared private pool-builder (#2069) — both lanes' RoutingModel /
+    RotatingModel construction (extraction behavior byte-identical)."""
+    providers = [_build_single(p, model_id, max_tokens=max_tokens,
+                               temperature=temperature, json_mode=json_mode)
+                 for p in pool_names]
+    # Pilot #1549: 3+ configured providers → the rotating pool (spread the
+    # sustained load + redundancy); 1-2 → the existing RoutingModel semantics.
+    if len(providers) >= 3:
+        # Scale-optimized weights (pilot #1549 research): order the pool
+        # Venice-first (1000 RPM backbone), OpenRouter (cheapest lane), then
+        # DeepSeek direct as the small spare (expensive + starves under load).
+        by_name = {p.provider: p for p in providers}
+        ordered = [by_name.get(name) for name in
+                   ("venice", "openrouter", "deepseek-direct")]
+        ordered = [p for p in ordered if p is not None]
+        weights = {"venice": 0.50, "openrouter": 0.35, "deepseek-direct": 0.15}
+        w = [weights.get(p.provider, 0.33) for p in ordered]
+        return RotatingModel(ordered, cooldown_s=_failover_cooldown_seconds(),
+                             weights=w, model=model_id)
+    return RoutingModel(providers[0], providers[1] if len(providers) > 1 else None,
+                        cooldown_s=_failover_cooldown_seconds())
+
+
 # ── In-process failover cooldown (D5 flap guard) ───────────────────────────
 
 _FAILOVER_COOLDOWN: dict[str, float] = {}  # provider -> last transient failure ts
@@ -406,11 +689,17 @@ class RoutingModel:
     ``complete()`` tries the primary; the exception class decides (D4):
     FATAL (401/402/403) and FATAL_CONFIG (400/404/unknown 4xx) re-raise
     immediately — no retry, NO failover; TRANSIENT/UNKNOWN fails over to the
-    fallback when configured. Stickiness (D5): once a call fails over,
-    ``last_route``/``route`` flip to the fallback and STAY there for the rest
-    of this extraction (forward-only, never back mid-extraction). A primary
-    in the process-local cooldown window is skipped outright (fallback used
-    directly) — the #1350 flap protection.
+    fallback when configured. Stickiness (D5): once an in-complete call
+    fails over, ``last_route``/``route`` flip to the fallback and STAY there
+    for the rest of this extraction (forward-only, never back
+    mid-extraction). The DEADLINE-abort path (``note_stall``) is separate:
+    circuit-breaker semantics (#2384 option A) — a first deadline abort only
+    cools the provider, a SECOND consecutive stall trips the sticky
+    ``_failed_over``, and a half-open probe (fallback itself cooled + the
+    primary's cooldown lapsed) may return the session to the primary
+    (clearing the sticky on success). A primary in the process-local
+    cooldown window is skipped outright (fallback used directly) — the
+    #1350 flap protection.
 
     Exposes the capture meta contract (D8): ``provider`` (the configured
     primary), ``route``/``last_route`` (the active / most-recent route),
@@ -425,14 +714,52 @@ class RoutingModel:
         self.failover_used = False
         self.errors: list[str] = []
         self._failed_over = False
+        # #2384 option A: per-provider CONSECUTIVE deadline-abort strikes.
+        # Only the PRIMARY's count is consumed (the trip below) — a
+        # fallback-served stall must never flip (that would lock the session
+        # onto the wedged fallback forward-only). A primary success between
+        # stalls resets its count in ``_call``, so two stalls only trip when
+        # no primary success intervened (circuit breaker: never trip on one).
+        self._stall_strikes: dict[str, int] = {}
         # M3 (#1524, GATE-2): surfaced from the inner adapter after each call.
         self.last_finish_reason: str | None = None
+        # #1987 Task 3: the RESOLVED SPEC (the wire id the serving adapter
+        # carries — ``_direct_wire_id`` strips the family prefix on the direct
+        # lane; the full spec on the OpenRouter lane) + per-call usage
+        # forwards, mirrored from the serving adapter after each call (same
+        # pattern as ``last_finish_reason``). The ask response's ``model``
+        # field and per-call token capture read these.
+        self.model: str = getattr(primary, "id", "")
+        self.last_prompt_tokens: int = 0
+        self.last_completion_tokens: int = 0
+        # #2906: provider-reported charge for the last call — forwarded from
+        # the serving adapter (None when it did not report one).
+        self.last_cost_usd: float | None = None
+        # #2339: the adapter CURRENTLY being called (set in _call before
+        # adapter.complete, cleared on success). An external deadline abort
+        # kills the worker thread while this is set — note_stall() reads it
+        # to attribute the stall to the WEDGED adapter, never to the last
+        # successful one (stale ``route``).
+        self._in_flight = None
 
     def complete(self, *, system: str, user: str,
                  max_tokens: int | None = None) -> str:
         if self.fallback is not None and (
                 self._failed_over
                 or _primary_in_cooldown(self.primary.provider, self.cooldown_s)):
+            # R2 + half-open (#2384): a sticky _failed_over must not strand
+            # the session on a FALLBACK that note_stall itself cooled (its
+            # own deadline abort) — with the primary healthy again, a single
+            # probe may return the session to it (option A: ``_call`` clears
+            # the sticky on a probe success). Both-cooled stays on the
+            # fallback (no healthy option exists).
+            if (self._failed_over
+                    and not _primary_in_cooldown(self.primary.provider,
+                                                 self.cooldown_s)
+                    and _primary_in_cooldown(self.fallback.provider,
+                                             self.cooldown_s)):
+                return self._call(self.primary, system, user, failover=False,
+                                  max_tokens=max_tokens)
             return self._call(self.fallback, system, user, failover=True,
                               max_tokens=max_tokens)
         try:
@@ -449,32 +776,161 @@ class RoutingModel:
 
     def _call(self, adapter, system: str, user: str, *, failover: bool,
               max_tokens: int | None = None) -> str:
-        out = adapter.complete(system=system, user=user,
-                               max_tokens=max_tokens)
+        self._in_flight = adapter  # #2339: who is serving right now
+        try:
+            out = adapter.complete(system=system, user=user,
+                                   max_tokens=max_tokens)
+        finally:
+            self._in_flight = None
+        if adapter is self.primary:
+            # #2384 option A: a successful primary call proves the lane
+            # healthy — reset its consecutive-stall count (a success between
+            # stalls is never a trip) and, on a half-open probe success,
+            # clear the sticky _failed_over so the session returns to the
+            # primary.
+            self._stall_strikes[self.primary.provider] = 0
+            self._failed_over = False
         self.last_route = adapter.provider
         self.last_finish_reason = getattr(adapter, "last_finish_reason", None)
+        # #1987 Task 3: per-call usage + resolved-spec forwards.
+        self.last_prompt_tokens = getattr(adapter, "last_prompt_tokens", 0)
+        self.last_completion_tokens = getattr(adapter, "last_completion_tokens", 0)
+        self.last_cost_usd = getattr(adapter, "last_cost_usd", None)
+        self.model = getattr(adapter, "id", self.model)
         if failover:
             self.route = adapter.provider
             self.failover_used = True
         return out
 
+    def close(self) -> None:
+        """Close the inner adapters (deadline interrupt — mirrors
+        RotatingModel.close; RoutingModel was missed by the #1655 fix)."""
+        for adapter in (self.primary, self.fallback):
+            if adapter is None:
+                continue
+            close = getattr(adapter, "close", None)
+            if close is not None:
+                with contextlib.suppress(Exception):
+                    close()
+
+    def note_stall(self, provider: str | None = None) -> None:
+        """Provider-level stall signal from an EXTERNAL deadline abort.
+
+        The extractor's per-call deadline kills a hung read in a worker
+        thread and raises TimeoutError OUTSIDE ``complete()`` — so the
+        normal in-complete failover path (and its cooldown) never fires and
+        every retry would re-hit the stalled provider. ``note_stall``
+        records the failure for the WEDGED adapter (the one ``_in_flight``
+        when the worker was killed — never the stale ``route`` from the
+        last success) and interrupts only that adapter's session. The next
+        ``complete()`` then routes to the healthy alternative. Two-strike
+        trip (#2384 option A): the FIRST stall only cools the provider (a
+        scaled-deadline straggler is NOT evidence of provider distress) —
+        only a SECOND consecutive stall of the primary flips the sticky
+        ``_failed_over``; a primary success in between resets the count.
+        Best-effort: never raises (the deadline path calls it
+        fire-and-forget).
+        """
+        target = None
+        if provider is not None:
+            for adapter in (self.primary, self.fallback):
+                if adapter is not None and adapter.provider == provider:
+                    target = adapter
+                    break
+        else:
+            target = self._in_flight or self.primary
+        if target is None:
+            return
+        _note_failure(target.provider, self.cooldown_s)
+        self.errors.append(f"{target.provider}: stalled (deadline abort)")
+        # Two-strike trip (#2384 option A): count the stall per provider; the
+        # SECOND consecutive stall of the PRIMARY trips the sticky
+        # _failed_over. A fallback-served stall still must NOT flip (that
+        # would lock the session onto the wedged fallback forward-only).
+        self._stall_strikes[target.provider] = (
+            self._stall_strikes.get(target.provider, 0) + 1)
+        if (self.fallback is not None and target is self.primary
+                and self._stall_strikes[target.provider] >= 2):
+            self._failed_over = True
+        close = getattr(target, "close", None)
+        if close is not None:
+            with contextlib.suppress(Exception):
+                close()
+
+
+def _prompt_requests_json(system: str | None, user: str | None) -> bool:
+    """True when a prompt asks for JSON output (the S2/S4 extractor prompts
+    say "JSON object" + the OUTPUT_CONTRACT example).
+
+    A bare substring match — "json" appearing anywhere in the combined
+    system+user text, case-insensitive (matches "JSON", "non-json",
+    "JSONL", "jsonify", ...). #1782: DeepSeek returns HTTP 400 when
+    "response_format": {"type": "json_object"} is sent but the prompt
+    lacks the text "json". Non-JSON calls — the preflight billing probe,
+    ping, reader/judge prompts — must NOT carry the mode. This is the
+    documented DeepSeek contract, not a heuristic: json_object mode requires
+    the model to see "json" in the prompt to know the expected output
+    shape.
+    """
+    hay = f"{system or ''} {user or ''}".lower()
+    return "json" in hay
+
+
+def _should_send_json_mode(system: str | None, user: str | None) -> bool:
+    """Single-source gate for ``response_format: {"type": "json_object"}``
+    (#1782) — shared by OpenRouterModel.complete and
+    DeepSeekDirectModel.complete so the two bodies can never drift.
+
+    True only when TORTOISE_JSON_MODE is enabled (default "1", read per
+    call — the toggle can flip mid-run) AND the prompt requests JSON
+    (delegated to ``_prompt_requests_json``).
+
+    #4097: the env read goes through the declared truthy contract, so
+    ``TORTOISE_JSON_MODE=true``/``yes``/``on`` now enables it — previously the
+    exact ``== "1"`` match made those spellings silently DISABLE a default-ON
+    mode."""
+    return (is_truthy(os.environ.get("TORTOISE_JSON_MODE", "1"))
+            and _prompt_requests_json(system, user))
+
 
 def _strip_family_prefix(model_id: str) -> str:
     """Direct-route wire normalization (D6): ``deepseek/deepseek-v4-flash`` →
-    ``deepseek-v4-flash`` (matches the eval's DeepSeekDirectModel ids)."""
+    ``deepseek-v4-flash``. Intermediate step feeding ``_direct_wire_id`` (the
+    direct lane's bare-id normalization)."""
     return model_id.rsplit("/", 1)[-1] if "/" in model_id else model_id
 
 
-def _build_single(provider: str, model_id: str, *, max_tokens, temperature):
+def _direct_wire_id(model_id: str) -> str:
+    """Direct-API wire id (D6 + #1790): the direct lane sends BARE ids —
+    ``deepseek/deepseek-v4-flash`` → ``deepseek-v4-flash`` (the OpenRouter
+    lane keeps the family prefix). The flash family keeps its current
+    documented id ``deepseek-v4-flash``; non-reasoning behavior is achieved
+    by explicitly disabling thinking in ``DeepSeekDirectModel.complete``
+    (the legacy alias — routing to v4-flash non-thinking — was
+    retired upstream 2026-07-24 (still served during transition),
+    #1790). ``deepseek-v4-pro`` is
+    unchanged (no collapse evidence — out of scope pending verification)."""
+    return _strip_family_prefix(model_id)
+
+
+def _build_single(provider: str, model_id: str, *, max_tokens, temperature,
+                 json_mode: bool | None = None):
     if provider == "deepseek-direct":
         return DeepSeekDirectModel(
-            _strip_family_prefix(model_id),
-            max_tokens=max_tokens, temperature=temperature)
+            _direct_wire_id(model_id),
+            max_tokens=max_tokens, temperature=temperature,
+            json_mode=json_mode)
     if provider == "venice":
+        # Venice's catalog serves the documented flash id (docstring). A
+        # wrong id fails LOUD via preflight (config-4xx → fatal gate), never
+        # silently; verify the venice catalog before enabling the pool
+        # (#1549).
         return VeniceModel(
             _strip_family_prefix(model_id),
-            max_tokens=max_tokens, temperature=temperature)
-    return OpenRouterModel(model_id, max_tokens=max_tokens, temperature=temperature)
+            max_tokens=max_tokens, temperature=temperature,
+            json_mode=json_mode)
+    return OpenRouterModel(model_id, max_tokens=max_tokens,
+                           temperature=temperature, json_mode=json_mode)
 
 
 class RotatingModel:
@@ -485,14 +941,28 @@ class RotatingModel:
 
     ``complete()`` routes each call to the next healthy provider in the
     rotation; a transient failure puts that provider in cooldown (skipped
-    for ``cooldown_s``) and the next provider is tried; fatal errors
-    (401/402/403 + config 4xx, P2 taxonomy) re-raise immediately — no
-    rotation on auth/billing failures. Exposes the capture-meta contract:
+    for ``cooldown_s``) and the next provider is tried. Auth (401/403) and
+    config 4xx (P2 taxonomy) re-raise immediately — no rotation on
+    credential/request-shape bugs. HTTP 402 (billing exhausted) is
+    rotation-eligible (#1951): cooldown THAT provider and continue on an
+    alternative — the run proceeds slower, not dead — raising only when
+    there is no alternative provider (fail loud, no infinite loop). Exposes
+    the capture-meta contract:
     ``provider``/``route`` (active provider), ``errors``, ``last_finish_reason``
     (the truncation signal — read from the serving adapter), ``close()``
-    (interrupt a hung read — the #1655 fix, applied to the active adapter)."""
+    (interrupt a hung read — the #1655 fix, applied to the active adapter).
+
+    Deadline-abort stalls (#2384 option A): ``note_stall`` cools the wedged
+    lane on the FIRST abort (a straggler is not distress evidence); a SECOND
+    CONSECUTIVE stall of the SAME lane (per-provider count, reset by a
+    success on that lane) takes the lane out of rotation for the session
+    (``_downed``) — the pool stops burning deadline probes against a
+    twice-stalled lane. A downed lane returns only via the half-open probe
+    in ``complete`` (when no healthy lane remains and its cooldown lapsed)
+    — a probe success restores it. Different lanes never compound: each
+    lane's count is its own."""
     def __init__(self, providers: list, *, cooldown_s: float = 300.0,
-                 weights: list[float] | None = None):
+                 weights: list[float] | None = None, model: str | None = None):
         self.providers = providers
         self.cooldown_s = cooldown_s
         # Pilot #1549 (scale research): weighted rotation — each provider's
@@ -506,6 +976,31 @@ class RotatingModel:
         self.errors: list[str] = []
         self.last_finish_reason: str | None = None
         self.route = providers[0].provider if providers else None
+        # #1987 Task 3: the resolved-spec + per-call usage forwards (mirrored
+        # from the serving adapter; ``model`` is the serving lane's wire id —
+        # NOT the raw model_id spec, so RoutingModel and RotatingModel report
+        # the SAME format).
+        self.model: str = (getattr(providers[0], "id", "")
+                           if providers else (model or ""))
+        self.last_prompt_tokens: int = 0
+        self.last_completion_tokens: int = 0
+        # #2906: provider-reported charge for the last call — forwarded from
+        # the serving adapter (None when it did not report one).
+        self.last_cost_usd: float | None = None
+        # #2339: the adapter currently being called (set before p.complete in
+        # the rotation loop, cleared on success). A deadline abort kills the
+        # worker mid-call with this set — note_stall() cools THIS adapter,
+        # never the stale ``route`` (last success).
+        self._in_flight = None
+        # #2384 option A: per-provider CONSECUTIVE deadline-abort strikes +
+        # the session-downed set they trip (the rotation analog of
+        # RoutingModel's two-strike _failed_over). One stall only cools;
+        # strikes[provider] >= 2 downs the lane for the session; a success on
+        # the lane (in complete) resets its count and restores it. _cooldowns
+        # stays per-wrapper (pre-existing); _downed lanes are excluded even
+        # after their cooldown lapses unless the half-open probe fires.
+        self._stall_strikes: dict[str, int] = {}
+        self._downed: set[str] = set()
 
     @property
     def provider(self) -> str:
@@ -524,15 +1019,42 @@ class RotatingModel:
             p = self.providers[idx]
             if self._cooldowns.get(p.provider, 0.0) > now:
                 continue
+            if p.provider in self._downed:
+                # #2384 option A half-open probe: a twice-stalled lane is out
+                # of rotation for the session UNLESS no healthy lane remains
+                # (its own cooldown lapsed) — then a single probe re-admits it
+                # and a probe success (below) restores it. Never burn probes
+                # against a downed lane while a healthy one is usable.
+                if any(q.provider not in self._downed
+                       and self._cooldowns.get(q.provider, 0.0) <= now
+                       for q in self.providers):
+                    continue
+                self._downed.discard(p.provider)
             try:
+                self._in_flight = p
                 out = p.complete(system=system, user=user, max_tokens=max_tokens)
+                self._in_flight = None
                 self.route = p.provider
+                # #2384 option A: a success on the lane resets its
+                # consecutive-stall count and (if it was a half-open probe)
+                # restores it to the pool.
+                self._stall_strikes[p.provider] = 0
+                self._downed.discard(p.provider)
                 self.last_finish_reason = getattr(p, "last_finish_reason", None)
+                # #1987 Task 3: per-call usage + resolved-spec forwards.
+                self.last_prompt_tokens = getattr(p, "last_prompt_tokens", 0)
+                self.last_completion_tokens = getattr(p, "last_completion_tokens", 0)
+                self.last_cost_usd = getattr(p, "last_cost_usd", None)
+                self.model = getattr(p, "id", self.model)
                 return out
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 last_err = e
-                if is_fatal(e):
-                    raise  # never rotate on auth/billing/config failures
+                self._in_flight = None  # no longer mid-call on this adapter
+                billing = is_billing_exhausted(e)
+                if is_fatal(e) and not billing:
+                    raise  # auth (401/403) + config 4xx — never rotate (#1951)
+                if billing and n == 1:
+                    raise  # no alternative provider — fail loud, no infinite loop
                 self._cooldowns[p.provider] = now + self.cooldown_s
                 self.errors.append(f"{p.provider}: {type(e).__name__}: {e}")
         raise last_err if last_err is not None else RuntimeError(
@@ -556,10 +1078,59 @@ class RotatingModel:
         for p in self.providers:
             close = getattr(p, "close", None)
             if close is not None:
-                try:
+                try:  # noqa: SIM105
                     close()
                 except Exception:
                     pass
+
+    def note_stall(self, provider: str | None = None) -> None:
+        """Cooldown the WEDGED provider after an external deadline abort
+        (mirrors RoutingModel.note_stall) + interrupt only its session.
+        Attribution uses the caller's snapshot when given (the extractor
+        samples the in-flight adapter BEFORE close() unblocks the worker —
+        #2384), else the in-flight adapter, else the stale ``route`` — so a
+        persistent wedge cools the right farm and the next ``complete()``
+        rotates onto the healthy ones. A single stalled GPU farm no longer
+        sinks a whole session. Two-strike trip (#2384 option A): a SECOND
+        CONSECUTIVE stall of the SAME lane (counted per provider; a success
+        on that lane in between resets its count in ``complete``) takes the
+        lane out of rotation for the session (``_downed``) — one stall only
+        cools. A downed lane is re-admitted only by the half-open probe
+        (``complete`` when no healthy lane remains)."""
+        target = None
+        if provider is not None:
+            for p in self.providers:
+                if p.provider == provider:
+                    target = p
+                    break
+        if target is None:
+            target = self._in_flight
+        if target is None:
+            for p in self.providers:
+                if p.provider == self.route:
+                    target = p
+                    break
+        if target is None:
+            return
+        self._cooldowns[target.provider] = time.time() + self.cooldown_s
+        # #2384 option A: count the stall per provider; the SECOND consecutive
+        # stall of the SAME lane downs it for the session (excluded from
+        # rotation until the half-open probe re-admits it). One stall only
+        # cools — a scaled-deadline straggler is not distress evidence. A
+        # success on the lane (in complete) resets its count.
+        self._stall_strikes[target.provider] = (
+            self._stall_strikes.get(target.provider, 0) + 1)
+        if self._stall_strikes[target.provider] >= 2:
+            self._downed.add(target.provider)
+            self.errors.append(
+                f"{target.provider}: downed (2 consecutive deadline aborts)")
+        self.errors.append(f"{target.provider}: stalled (deadline abort)")
+        close = getattr(target, "close", None)
+        if close is not None:
+            try:  # noqa: SIM105
+                close()
+            except Exception:
+                pass
 
 
 # Eval CLI extractor-registry keys (MODELS) → the real DeepSeek/OpenRouter
@@ -573,53 +1144,141 @@ class RotatingModel:
 # pass through — they are not valid extractor specs on either provider.
 _REGISTRY_KEY_TO_ID = {
     "deepseek-flash": "deepseek/deepseek-v4-flash",
-    "deepseek-flash-direct": "deepseek-v4-flash",
-    "deepseek-v4-pro-direct": "deepseek-v4-pro",
+    # Pilot #1549 (2026-08-25) + #1790: the DIRECT-API flash wire id is the
+    # current documented id ``deepseek-v4-flash``; non-reasoning behavior is
+    # achieved by disabling thinking explicitly in ``DeepSeekDirectModel.complete``
+    # (the legacy alias was retired upstream 2026-07-24 (still served
+    # during transition), #1790 — v4-flash reasons by default and burns
+    # the max_tokens budget on
+    # hidden reasoning for non-trivial prompts: 1500/1500 reasoning tokens
+    # observed, finish_reason=length, ZERO content — S1 collapses to an empty
+    # story and extraction silently produces no points). The key maps to the
+    # FAMILY-PREFIXED id so every route gets a valid wire id: the direct lane
+    # strips to the bare flash id (``_direct_wire_id``), the OpenRouter lane
+    # keeps the valid prefixed id, and the venice lane serves its documented
+    # catalog id. ``deepseek-v4-pro-direct`` is unchanged (no collapse
+    # evidence for v4-pro — pending verification). The v4-pro keys are ALSO
+    # family-prefixed so the OpenRouter pool lane gets a valid id (bare ids
+    # 404 there → fatal → pool-kill, #1549 class).
+    "deepseek-flash-direct": "deepseek/deepseek-v4-flash",
+    "deepseek-v4-pro-direct": "deepseek/deepseek-v4-pro",
     "deepseek-v4-pro": "deepseek/deepseek-v4-pro",
-    "deepseek-v4-pro-noreason": "deepseek-v4-pro",
+    "deepseek-v4-pro-noreason": "deepseek/deepseek-v4-pro",
     "deepseek-r1-xhigh": "deepseek/deepseek-r1-0528",
     "deepseek-v4-pro-xhigh": "deepseek/deepseek-v4-pro",
 }
 
 
+# Public alias — the eval harness (tools/longmem_eval/run.py) imports the
+# registry-key remap as a stable contract; keep this name public.
+REGISTRY_KEY_TO_ID = _REGISTRY_KEY_TO_ID
+
+
+# #2069: ASK-lane MODELS-key normalization — bare non-deepseek MODELS
+# registry keys (qwen3.8-max, solar-pro4, claude-opus-5 — passed through
+# unmapped by ``_REGISTRY_KEY_TO_ID`` above, which maps deepseek-* keys
+# only) are NOT deepseek-family and must never route to deepseek-direct.
+# Resolve BEFORE the family parse: the bare key → its family-prefixed
+# spec (derived from the MODELS registry's target slugs — verified:
+# qwen3.8-max → qwen/qwen3.8-max, solar-pro4 → upstage/solar-pro4,
+# claude-opus-5 → anthropic/claude-opus-5). A bare key absent from this
+# map with a non-deepseek name fails loud in ``_providers_can_serve``.
+_ASK_MODELS_KEY_SPECS = {
+    "qwen3.8-max": "qwen/qwen3.8-max",
+    "solar-pro4": "upstage/solar-pro4",
+    "claude-opus-5": "anthropic/claude-opus-5",
+}
+
+
+def _normalize_ask_model_spec(model_id: str) -> str:
+    """Ask-lane spec normalization (#2069) — runs BEFORE the family parse:
+    (1) the eval registry-key remap (``_REGISTRY_KEY_TO_ID``, deepseek keys
+    only — back-compat); (2) colon-form REJECTION — the eval lane's
+    ``provider:model`` format (the documented ``TORTOISE_LME_READER_MODEL``
+    value) is NOT the product format, and ``openrouter:qwen/qwen3.8-max``
+    must not fall into unknown-prefix handling (it would 400 on
+    deepseek-direct → 502); the ask lane accepts ``family/model`` ONLY and
+    raises pointing at the family-prefixed form; (3) bare MODELS keys via
+    ``_ASK_MODELS_KEY_SPECS`` so a bare non-deepseek registry key never
+    routes to deepseek-direct."""
+    model_id = _REGISTRY_KEY_TO_ID.get(model_id, model_id)
+    if ":" in model_id:
+        raise ValueError(
+            f"ask-lane model spec {model_id!r} uses the eval's colon-form "
+            f"('provider:model') — the ask lane accepts the family-prefixed "
+            f"product form only (e.g. 'qwen/qwen3.8-max'); drop the provider "
+            f"prefix")
+    if "/" not in model_id:
+        model_id = _ASK_MODELS_KEY_SPECS.get(model_id, model_id)
+    return model_id
+
+
 def build_extractor_model(model_id: str | None = None, *,
                           max_tokens: int | None = 4000,
-                          temperature: float = 0.0) -> RoutingModel:
+                          temperature: float = 0.0,
+                          json_mode: bool | None = None) -> RoutingModel:
     """Production entry — build the routing extractor model (D7).
 
     Resolves (primary, fallback) via ``resolve_extractor_provider()`` and
     wraps them in a ``RoutingModel``. ``model_id`` defaults to
-    ``TORTOISE_EXTRACT_MODEL`` (or ``deepseek/deepseek-v4-flash``). Builds
+    ``TORTOISE_EXTRACT_MODEL`` (or ``deepseek/deepseek-v4-flash``; the
+    default's direct route sends ``deepseek-v4-flash`` with thinking
+    disabled on the wire — pilot #1549/#1790). Builds
     leniently — with NO keys at all it degrades to a single OpenRouter
     adapter (back-compat for direct callers / ``TestModelAdapterBounds``);
     fail-closed is enforced at the pipeline gates, not here. An explicit
     ``TORTOISE_EXTRACTOR_PROVIDER`` whose key is absent raises ValueError
-    (config error, everywhere)."""
+    (config error, everywhere).
+
+    ``json_mode`` (#1987 Task 3): threaded to every built adapter — None
+    keeps the extraction lane's content-heuristic behavior unchanged;
+    False structurally disables ``response_format`` on the ask lane;
+    True always sends it when the prompt requests JSON.
+    """
     if model_id is None:
         model_id = (os.environ.get("TORTOISE_EXTRACT_MODEL", "").strip()
                     or "deepseek/deepseek-v4-flash")
     # Registry-key normalization (pilot #1549 fix) — unknown strings pass
     # through untouched (raw specs stay valid).
     model_id = _REGISTRY_KEY_TO_ID.get(model_id, model_id)
-    primary_name, pool_names = resolve_extractor_provider()
+    primary_name, pool_names = resolve_extractor_provider()  # noqa: RUF059
     if not pool_names:
         pool_names = ["openrouter"]  # lenient no-key default (D3)
-    providers = [_build_single(p, model_id, max_tokens=max_tokens,
-                               temperature=temperature)
-                 for p in pool_names]
-    # Pilot #1549: 3+ configured providers → the rotating pool (spread the
-    # sustained load + redundancy); 1-2 → the existing RoutingModel semantics.
-    if len(providers) >= 3:
-        # Scale-optimized weights (pilot #1549 research): order the pool
-        # Venice-first (1000 RPM backbone), OpenRouter (cheapest lane), then
-        # DeepSeek direct as the small spare (expensive + starves under load).
-        by_name = {p.provider: p for p in providers}
-        ordered = [by_name.get(name) for name in
-                   ("venice", "openrouter", "deepseek-direct")]
-        ordered = [p for p in ordered if p is not None]
-        weights = {"venice": 0.50, "openrouter": 0.35, "deepseek-direct": 0.15}
-        w = [weights.get(p.provider, 0.33) for p in ordered]
-        return RotatingModel(ordered, cooldown_s=_failover_cooldown_seconds(),
-                             weights=w)
-    return RoutingModel(providers[0], providers[1] if len(providers) > 1 else None,
-                        cooldown_s=_failover_cooldown_seconds())
+    return _build_routing_model(model_id, pool_names, max_tokens=max_tokens,
+                                temperature=temperature, json_mode=json_mode)
+
+
+def build_reader_model(model_id: str | None = None, *,
+                       max_tokens: int = 500,
+                       temperature: float = 0.0) -> RoutingModel:
+    """Build the ask-lane reader model (#1987 Task 3, #2069).
+
+    ``model_id=None`` resolves ``TORTOISE_ASK_MODEL`` (mirroring
+    ``build_extractor_model``'s ``TORTOISE_EXTRACT_MODEL`` fallback),
+    hardcoded ``deepseek/deepseek-v4-flash`` as the final fallback.
+    The ask lane pins ``json_mode=False`` structurally — retrieved memory
+    can mention "json" and ``_should_send_json_mode`` must never fire
+    ``response_format`` on a free-text answer (the eval lane was immune via
+    ``response_format=None``).
+
+    #2069 provider-capability routing: the pool is built ONLY from
+    providers that can serve the spec's family (``resolve_reader_provider``
+    — ``qwen/qwen3.8-max`` → OpenRouter-only; the deepseek-direct primary
+    is structurally ABSENT from non-deepseek pools, so a deepseek-direct
+    "400 on a foreign spec" is impossible). ``TORTOISE_ASK_PROVIDER``
+    (default ``auto``) selects the primary; an empty intersection (e.g. a
+    qwen spec with no ``OPENROUTER_API_KEY``) raises a build-time
+    ``ValueError`` naming the missing key. Official reader call shape:
+    temperature 0, bounded ``max_tokens`` (default 500).
+    """
+    if model_id is None:
+        model_id = (os.environ.get("TORTOISE_ASK_MODEL", "").strip()
+                    or "deepseek/deepseek-v4-flash")
+    # #2069: registry-key remap + MODELS-key normalization + colon-form
+    # rejection BEFORE the family parse (a bare non-deepseek MODELS key or
+    # the eval's ``provider:model`` colon-form must never reach
+    # ``_providers_can_serve``'s unknown-family branch).
+    model_id = _normalize_ask_model_spec(model_id)
+    _primary_name, pool_names = resolve_reader_provider(model_id)
+    return _build_routing_model(model_id, pool_names, max_tokens=max_tokens,
+                                temperature=temperature, json_mode=False)

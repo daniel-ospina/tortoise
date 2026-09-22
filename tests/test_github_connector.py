@@ -139,6 +139,25 @@ def test_webhook_issue_closed():
     })
     assert ev["eventKind"] == "github.issue.closed"
     assert ev["endedAt"] == "2026-07-19T02:00:00Z"
+    # P2-7 (#1725): webhook TRANSITIONS mint transition ids — a webhook
+    # close is a `-closed` event, never a duplicate `-created`.
+    assert ev["eventId"] == "github-issue-org/r-5-closed"
+
+
+def test_webhook_issue_reopened():
+    gh = GitHubConnector(config={"repo": "org/r"})
+    ev = gh._webhook_to_event("issues", {
+        "action": "reopened",
+        "issue": {
+            "number": 5,
+            "title": "Back",
+            "created_at": "2026-07-18T00:00:00Z",
+            "closed_at": None,
+            "html_url": "...",
+        },
+    })
+    assert ev["eventKind"] == "github.issue.reopened"
+    assert ev["eventId"] == "github-issue-org/r-5-reopened"
 
 
 def test_webhook_pr_merged():
@@ -359,8 +378,16 @@ def test_producers_share_event_id():
     poll_ev = gh._issue_to_event(issue)
     entities = gh._issue_to_entities(issue)
     assert poll_ev is not None and entities is not None
+    # #1725 extended: FULL eventId + eventKind + subject equality — the
+    # entity path and poll path share the ONE github_map vocabulary (the
+    # #1155 normalization; the old pm:card*/github-user:{author} divergence
+    # is gone).
     assert poll_ev["eventId"] == entities["event"]["eventId"]
     assert poll_ev["eventId"] == "github-issue-test/repo-42-created"
+    assert poll_ev["eventKind"] == entities["event"]["eventKind"] \
+        == "github.issue.open"
+    assert poll_ev["subject"] == entities["event"]["subject"] \
+        == "issue:test/repo#42"
     # both producers point the produces edge at the SAME Object name — the
     # pm:issue Object ({repo}#{number}) — never a stub.
     assert poll_ev["object"] == entities["event"]["object"] == "test/repo#42"
@@ -415,8 +442,9 @@ def test_ingest_one_event_per_issue(shared_proj, monkeypatch):
         "MATCH (e:Event) WHERE e.eventId STARTS WITH 'github-issue-test/repo-42' "
         "RETURN e.eventId, e.eventKind"
     ).result_set
+    # #1725: the deliberate #1155 eventKind re-pin (pm:card* → github.issue.*)
     assert sorted(tuple(r) for r in rows) == [
-        ("github-issue-test/repo-42-created", "pm:cardCreated"),
+        ("github-issue-test/repo-42-created", "github.issue.open"),
     ]
 
     # No Event carries the legacy poll-path id (which collided with the

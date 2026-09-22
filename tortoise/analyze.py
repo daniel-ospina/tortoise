@@ -9,7 +9,7 @@ from __future__ import annotations  # noqa: I001
 import json, os, re  # noqa: E401
 from typing import Any
 
-from .live import _live_only
+from .live import _live_only, _terminal_excluded
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -80,9 +80,14 @@ TEMPLATES: dict[str, dict] = {
         "triggers": ["uncertain", "weakest", "least sure", "unknown", "unsure", "low confidence"],
         "description": "Find claims with lowest EP confidence or highest variance",
         "subgraph_vars": ["c"],
-        "cypher": """
+        # #2490: decayed terminals carry var 1/12 > the 0.04 contested bar and
+        # would dominate "most uncertain" on include-terminal surfaces — the
+        # shared live.py terminal predicate excludes them ("uncertain" is for
+        # LIVE claims).
+        "cypher": f"""
             MATCH (c:Point)
             WHERE c.is_operator = false
+              AND {_terminal_excluded('c.status')}
               AND (c.posterior_alpha IS NOT NULL OR c.ep_alpha IS NOT NULL)
             WITH c, coalesce(c.posterior_alpha, c.ep_alpha, 1.0) AS a,
                  coalesce(c.posterior_beta, c.ep_beta, 1.0) AS b
@@ -111,9 +116,12 @@ TEMPLATES: dict[str, dict] = {
         "triggers": ["changed", "trend", "evolved", "over time", "history", "how has"],
         "description": "Show confidence changes by comparing node properties over time",
         "subgraph_vars": ["c"],
-        "cypher": """
+        # #2490: exclude decayed terminals from the confidence timeline (see
+        # most_uncertain — the shared live.py terminal predicate).
+        "cypher": f"""
             MATCH (c:Point)
             WHERE c.content CONTAINS $entity
+              AND {_terminal_excluded('c.status')}
               AND (c.posterior_alpha IS NOT NULL OR c.ep_alpha IS NOT NULL)
             RETURN c.id, c.content, coalesce(c.confidence,0.5) as conf,
                    coalesce(c.posterior_alpha, c.ep_alpha, 1.0) as a,
@@ -245,7 +253,7 @@ def _extract_entity(question: str, trigger: str) -> str:
 # issued it. (The old code used `OPENAI_API_KEY or DEEPSEEK_API_KEY` and always
 # POSTed to api.deepseek.com — the OpenAI key was exfiltrated to DeepSeek.)
 _LLM_PROVIDERS: dict[str, tuple[str, str]] = {
-    "DEEPSEEK_API_KEY": ("https://api.deepseek.com/v1/chat/completions", "deepseek-chat"),
+    "DEEPSEEK_API_KEY": ("https://api.deepseek.com/v1/chat/completions", "deepseek-v4-flash"),
     "OPENAI_API_KEY": ("https://api.openai.com/v1/chat/completions", "gpt-4o-mini"),
 }
 # Priority order when multiple keys are set (deepseek first — historical default).
@@ -274,13 +282,22 @@ def llm_classify(question: str) -> tuple[str, dict] | None:
         return None  # fall back to keyword only
 
     try:
-        body = json.dumps({
+        body = {
             "model": provider_model,
             "temperature": 0,
             "response_format": {"type": "json_object"},
             "messages": [{"role": "system", "content": LLM_PROMPT},
                          {"role": "user", "content": question}],
-        }).encode()
+        }
+        # #1790: deepseek-v4-flash reasons by DEFAULT (thinking: high) and
+        # collapses into hidden reasoning tokens — disable thinking for the
+        # flash family ONLY (OpenAI would 400 on the unknown param). The
+        # gate is model-id based, mirroring the adapter's flash-family scope
+        # guard: a future pro entry in _LLM_PROVIDERS must NOT silently
+        # disable thinking.
+        if provider_model.rsplit("/", 1)[-1] == "deepseek-v4-flash":
+            body["thinking"] = {"type": "disabled"}
+        body = json.dumps(body).encode()
         req = urllib.request.Request(
             provider_url,
             data=body,
@@ -394,11 +411,11 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
     visited: set[str] = set(anchors)
     rel_types = set(rel_filter.split("|"))
 
-    live_op = f"AND {_live_only('op.status', include_draft)}" if not include_draft else ""
-    live_t = f"AND {_live_only('target.status', include_draft)}" if not include_draft else ""
-    live_p = f"AND {_live_only('p.status', include_draft)}" if not include_draft else ""
-    live_b = f"AND {_live_only('b.status', include_draft)}" if not include_draft else ""
-    live_a = f"AND {_live_only('a.status', include_draft)}" if not include_draft else ""
+    live_op = f"AND {_live_only('op.status', include_draft)}"
+    live_t = f"AND {_live_only('target.status', include_draft)}"
+    live_p = f"AND {_live_only('p.status', include_draft)}"
+    live_b = f"AND {_live_only('b.status', include_draft)}"
+    live_a = f"AND {_live_only('a.status', include_draft)}"
 
     # derived-liveness (GATE-2 Q3): operator participates IFF >=2 of its
     # connected points (IMPL|NAND neighbors, both directions) are live.
@@ -411,21 +428,29 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
 
         GATE-2 Q3 derived-liveness: an operator participates in EP iff >=2 of
         its connected points (IMPL|NAND neighbors, both directions) are live.
-        "Live" matches the shared #780 ``_live_only`` semantics (live.py):
-        ``status IS NULL OR status <> 'draft'`` — legacy pre-#780 nodes
-        without a stored status are LIVE (the entity write path defaults
+        "Live" matches the shared #780/#2422 ``_live_only`` semantics
+        (live.py): ``status IS NULL OR status <> 'draft'`` AND NOT terminal
+        (retracted/superseded/outdated/archived status or the
+        ``outdated=true`` flag) — legacy pre-#780 nodes without a stored
+        status are LIVE (the entity write path defaults
         ``coalesce($st, n.status, 'live')``). The predicate is UNCONDITIONAL
-        (draft endpoints never count toward the >=2, even under the
-        include_draft escape hatch — the E2E-13.1 1-live/1-draft boundary
-        pins the operator INERT).
+        (draft AND terminal endpoints never count toward the >=2, even under
+        the include_draft escape hatch — the E2E-13.1 1-live/1-draft
+        boundary pins the operator INERT; #2422 extends the same exclusion
+        to terminal endpoints).
         """
         if not ids:
             return set()
         rows = proj.g.query(
             "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]-(t:Point) "
             "WHERE op.id IN $ids "
-            "AND (t.is_operator = false AND t.op_type IS NULL) "
-            "AND (t.status IS NULL OR t.status <> 'draft') "
+            # #3139/#3154: index-independent form — a bare `= false` is
+            # emptied by a GRAPH.COPY'd boolean index, making every operator
+            # look inert (zero live connections) and silently starving the
+            # dream selector of factors.
+            "AND (t.is_operator IS NULL OR t.is_operator = false) "
+            "AND t.op_type IS NULL "
+            f"AND {_live_only('t.status')} "
             "WITH op, count(DISTINCT t) AS live_conn "
             "WHERE live_conn >= 2 "
             "RETURN op.id",
@@ -504,8 +529,11 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
                 rows = proj.g.query(
                     f"MATCH (a:Point)-[r:{rel}]->(b:Point) "
                     f"WHERE a.id IN $frontier {live_a} {live_b} "
-                    "AND a.is_operator = false AND a.op_type IS NULL "
-                    "AND b.is_operator = false AND b.op_type IS NULL "
+                    # #3139/#3154: index-independent non-operator predicate.
+                    "AND (a.is_operator IS NULL OR a.is_operator = false) "
+                    "AND a.op_type IS NULL "
+                    "AND (b.is_operator IS NULL OR b.is_operator = false) "
+                    "AND b.op_type IS NULL "
                     "RETURN DISTINCT b.id, a.id, type(r)",
                     params={"frontier": frontier_list},
                 ).result_set
@@ -520,8 +548,11 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
                 rows = proj.g.query(
                     f"MATCH (a:Point)-[r:{rel}]->(b:Point) "
                     f"WHERE b.id IN $frontier {live_a} {live_b} "
-                    "AND a.is_operator = false AND a.op_type IS NULL "
-                    "AND b.is_operator = false AND b.op_type IS NULL "
+                    # #3139/#3154: index-independent non-operator predicate.
+                    "AND (a.is_operator IS NULL OR a.is_operator = false) "
+                    "AND a.op_type IS NULL "
+                    "AND (b.is_operator IS NULL OR b.is_operator = false) "
+                    "AND b.op_type IS NULL "
                     "AND (type(r) = 'NAND' "
                     "     OR coalesce(r.direction, 'bidirectional') <> 'unidirectional') "
                     "RETURN DISTINCT a.id, b.id, type(r)",
@@ -596,15 +627,15 @@ def _stale_first_claims(proj, limit: int | None = None) -> list[str]:
     n.lastDreamedAt`` would rank never-dreamed claims FRESHEST, the
     opposite of the contract). This is the plan's explicit-null-scan-union
     alternative: one deterministic query instead of a union scan, at the
-    cost of not sorting on the raw indexed property (the :Point(
-    lastDreamedAt) / :Point(is_operator, lastDreamedAt) indexes still
-    accelerate the property access and the is_operator filter on
-    docker/server).
+    cost of not sorting on the raw indexed property (the plain :Point(
+    lastDreamedAt) index still accelerates the property access; #3154
+    retired the :Point(is_operator, lastDreamedAt) composite — no engine
+    indexes the boolean property).
     """
     base = (
         "MATCH (n:Point) "
         "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
-        "AND (n.status IS NULL OR n.status <> 'draft') "
+        f"AND {_live_only('n.status')} "
         "WITH n, coalesce(n.lastDreamedAt, '') AS _freshness "
         "ORDER BY _freshness ASC, n.id ASC "
         "RETURN n.id"
@@ -626,7 +657,7 @@ def _stale_first_count_stamped(proj) -> int:
     rows = proj.g.query(
         "MATCH (n:Point) "
         "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
-        "AND (n.status IS NULL OR n.status <> 'draft') "
+        f"AND {_live_only('n.status')} "
         "AND n.lastDreamedAt IS NOT NULL "
         "RETURN count(n)"
     ).result_set

@@ -71,6 +71,28 @@ class TestHealth:
             assert body["db"]["ok"] is True
             assert isinstance(body["db"]["latency_ms"], (int, float))
 
+    def test_health_liveness_passes_no_setup_allowance(self, monkeypatch, tmp_path):
+        """#3143 review: the platform liveness gate must keep the tight shared
+        budget. A refactor that threaded the MCP tool's cold-start allowance
+        into ``/health`` (selfhost/hosted call ``probe_db`` directly, not via
+        ``metrics()``) would silently destroy the #1384 fast-degrade contract —
+        a dead DB would take up to the allowance to flip degraded."""
+        tc = _client_for_env(monkeypatch, tmp_path, TORTOISE_API_KEY="k")
+        import tortoise.monitoring as mon
+
+        seen = {}
+        real_probe_db = mon.probe_db
+
+        def _spy_probe_db(sdk, setup_timeout=None):
+            seen["setup_timeout"] = setup_timeout
+            return real_probe_db(sdk, setup_timeout=setup_timeout)
+
+        monkeypatch.setattr(mon, "probe_db", _spy_probe_db)
+        with tc:
+            r = tc.get("/health")
+            assert r.status_code == 200
+        assert seen["setup_timeout"] is None, seen
+
     def test_health_degraded_when_db_down(self, monkeypatch, tmp_path):
         """#1384: a stopped FalkorDB flips /health to degraded — 200, never
         500 or a crashed handler."""
@@ -180,6 +202,180 @@ class TestToolsList:
             )
             assert r.status_code in (200, 202)
             assert "result" in r.text or "tools" in r.text
+
+
+def _parse_sse_json(r):
+    """Parse an MCP response body that may be SSE-framed."""
+    text = r.text
+    if text.startswith("event:") or "\ndata: " in text:
+        for line in text.splitlines():
+            if line.startswith("data: "):
+                import json
+                return json.loads(line[len("data: "):])
+        return None
+    return r.json()
+
+
+def _tool_result(body):
+    """Extract a tool-call result dict from a JSON-RPC body — FastMCP returns
+    dict-shaped results inline OR wrapped in content[].text JSON depending on
+    the call path; both are handled here."""
+    result = body.get("result", {}) if body else {}
+    if isinstance(result, dict) and "content" in result:
+        # Skip the trailing #3883 retirement warning block (it is not payload).
+        text = "".join(c.get("text", "") for c in result["content"]
+                       if isinstance(c, dict)
+                       and not c.get("text", "").startswith("RETIRED TOOL"))
+        if text:
+            import json
+            try:
+                return json.loads(text)
+            except ValueError:
+                return {"text": text}
+    return result
+
+
+def _mcp_post(tc, payload):
+    headers = {"Accept": "application/json, text/event-stream",
+               "Content-Type": "application/json"}
+    r = tc.post("/mcp", json=payload, headers=headers)
+    return r, _parse_sse_json(r)
+
+
+def _mcp_post_auth(tc, key, payload):
+    """_mcp_post with a static-mode Bearer key (auth_mode="static")."""
+    headers = {"Accept": "application/json, text/event-stream",
+               "Content-Type": "application/json",
+               "Authorization": f"Bearer {key}"}
+    r = tc.post("/mcp", json=payload, headers=headers)
+    return r, _parse_sse_json(r)
+
+
+class TestHealthTruthMCP:
+    """#2202 — tortoise_health reports the same truth as the daemon's /health.
+
+    The onboarding lie: the MCP tool used to probe monitoring's module-global
+    SDK handle, which the HTTP daemon never registers (only the stdio
+    entrypoint does) — so tortoise_health reported degraded /
+    no_sdk_registered / graph_size 0 while GET /health (fresh SDK probe of the
+    SAME graph) returned ok. These tests run the REAL selfhost daemon surface
+    (auth_mode=static): /health and the MCP tortoise_health tool must agree,
+    and mere tool listing must not drag hosted machinery in.
+    """
+
+    def test_tortoise_health_ok_matches_http_health(self, monkeypatch, tmp_path):
+        """Healthy daemon: tools/call tortoise_health == ok, exactly like
+        GET /health — no no_sdk_registered, graph probed."""
+        tc = _client_for_env(monkeypatch, tmp_path, TORTOISE_API_KEY="k")
+        with tc:
+            health = tc.get("/health")
+            assert health.status_code == 200
+            assert health.json()["status"] == "ok"
+
+            r, body = _mcp_post_auth(tc, "k", {
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "tortoise_health", "arguments": {}},
+            })
+            assert r.status_code == 200, r.text
+            result = _tool_result(body)
+            assert result.get("status") == "ok", body
+            assert result.get("db", {}).get("ok") is True
+            assert result.get("falkordb") == "connected"
+            assert "no_sdk_registered" not in str(result)
+            assert isinstance(result.get("graph_size"), int)
+
+    def test_tortoise_health_degraded_matches_http_health(self, monkeypatch,
+                                                          tmp_path):
+        """#2202 pin: degraded is reserved for a REAL probe failure — a dead
+        DB flips BOTH /health and the MCP tool to degraded together (same
+        probe)."""
+        tc = _client_for_env(monkeypatch, tmp_path, TORTOISE_API_KEY="k")
+        import tortoise.monitoring as mon
+
+        def _boom_probe(sdk, *args, **kwargs):
+            # probe_db's contract is never-raise: a dead DB is a FAILED probe
+            # result, not an exception. Return the degraded shape both /health
+            # and metrics() turn into status="degraded". (#3143 widened the
+            # signature with optional budget args — the stub accepts them.)
+            return {"ok": False, "latency_ms": 0.0, "error": "NXDOMAIN"}
+
+        # probe_db is imported lazily from tortoise.monitoring inside both
+        # /health (selfhost.py) and metrics() (the MCP tool) — patch it there.
+        monkeypatch.setattr(mon, "probe_db", _boom_probe)
+        with tc:
+            r = tc.get("/health")
+            assert r.status_code == 200
+            assert r.json()["status"] == "degraded"
+
+            r, body = _mcp_post_auth(tc, "k", {
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "tortoise_health", "arguments": {}},
+            })
+            assert r.status_code == 200, r.text
+            result = _tool_result(body)
+            assert result.get("status") == "degraded", body
+            assert result.get("db", {}).get("ok") is False
+
+    def test_tools_list_creates_no_stray_tmp_db(self, monkeypatch, tmp_path):
+        """#2202 indicator 2: tools/list on the daemon must not open a stray
+        embedded DB in $TMPDIR (the 21KB tortoise.db side effect observed
+        during mere tool listing). The daemon's own graph lives at
+        TORTOISE_DB_PATH (tmp_path here) — nothing may mint a second store in
+        the system tempdir. (The hosted_api no-import guarantee is pinned
+        unit-level in test_onboarding_gate_short_circuits_on_selfhost — a
+        sys.modules diff here would be vacuous once an earlier file in the
+        same pytest process imported hosted_api.)"""
+        import tempfile
+
+        tmp = tempfile.gettempdir()
+        stray_before = {f for f in os.listdir(tmp) if f.startswith("tortoise.db")}
+
+        tc = _client_for_env(monkeypatch, tmp_path, TORTOISE_API_KEY="k")
+        with tc:
+            r, body = _mcp_post_auth(tc, "k", {
+                "jsonrpc": "2.0", "id": 1, "method": "tools/list",
+                "params": {},
+            })
+            assert r.status_code == 200, r.text
+            names = [t["name"] for t in body["result"]["tools"]]
+            assert "tortoise_overview" in names
+            # #3883: tortoise_health is RETIRED — callable and warned, never listed.
+            assert "tortoise_health" not in names
+
+        stray_after = {f for f in os.listdir(tmp) if f.startswith("tortoise.db")}
+        assert stray_after == stray_before, (
+            f"tools/list opened a stray embedded DB in $TMPDIR: "
+            f"{stray_after - stray_before}")
+
+    def test_onboarding_gate_short_circuits_on_selfhost_before_hosted_api(
+            self, monkeypatch):
+        """#2202 indicator 2: the tools/list onboarding-completion gate
+        (_team_onboarding_complete) must short-circuit on the SELFHOST team
+        id BEFORE importing tortoise.hosted_api — the control-plane read that
+        dragged hosted machinery / an embedded registry DB into a mere tool
+        listing. Pin the guard ORDER: hosted_api imports are BLOCKED here, and
+        the gate still returns False (fail-open: onboarding tools stay
+        listed)."""
+        import builtins
+
+        from tortoise import mcp_server as _ms
+        from tortoise.mcp_auth import SELFHOST_ORG_ID, _current_org_id
+
+        real_import = builtins.__import__
+
+        def _blocked_import(name, *args, **kwargs):
+            if name == "tortoise.hosted_api":
+                raise AssertionError(
+                    "tools/list gate must not import hosted_api on the "
+                    "selfhost daemon")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _blocked_import)
+        token = _current_org_id.set(SELFHOST_ORG_ID)
+        try:
+            assert _ms._org_onboarding_complete() is False
+        finally:
+            _current_org_id.reset(token)
 
 
 class TestOriginProtection:
@@ -323,3 +519,175 @@ class TestSubprocessSmoke:
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proc.kill()
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# #2179 — selfhost_api._sdk() keepalive check-then-create race
+# ─────────────────────────────────────────────────────────────────────────
+# The #1475 per-path keepalive anchor (mirror of hosted_api._FALLBACK_
+# KEEPALIVE) had the SAME unlocked check-then-create shape hosted_api did
+# before #2172: two threads calling _sdk() concurrently on a cold path both
+# see an empty dict, both open the same embedded db_path, and the
+# setdefault loser is dropped UNCLOSED (daemon socket unlinked mid-request →
+# ConnectionError / silent empty-graph reads). All-async today, but
+# TestClient/portal threads and any to_thread pool make it a REAL thread
+# race exactly as the hosted lane became. _SELFHOST_LOCK serializes the
+# miss/stale path (re-check + evict + create + insert) so exactly ONE
+# anchor per path is created. Mirrors test_hosted_api.py's #2172 probe
+# (keep in sync): a counting __init__ parks ~300ms to widen the pre-fix
+# window, then asserts 1 anchor + N fresh SDKs, no closed-aware orphan,
+# and a sentinel written via the anchor reads back through every returned
+# SDK (decoupled-server guard). The third iteration (round 2, 0-based)
+# pre-seeds a PATH-DRIFTED anchor (bound to seed.db, stored under the
+# round key) so the in-lock stale evict + recreate branch is exercised
+# under contention too.
+def test_sdk_concurrent_first_calls_single_anchor(monkeypatch):
+    import threading
+    import time
+    import uuid
+
+    import tortoise.selfhost_api as sha
+    from tortoise.sdk import TortoiseSDK
+
+    monkeypatch.setenv("TORTOISE_DB_URI", "")  # force embedded mode
+    ns = f"selfhost-race-{uuid.uuid4().hex}"
+    _orig_init = TortoiseSDK.__init__
+
+    def _make_counter(target_db: str):
+        made: list = []
+
+        def _counting_init(self, db_path=None, *, namespace=None, **kwargs):
+            if db_path == target_db:
+                made.append(self)
+                time.sleep(0.3)  # widen the pre-fix race window (docstring)
+            _orig_init(self, db_path, namespace=namespace, **kwargs)
+
+        return made, _counting_init
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            for _round in range(3):
+                if _round == 2:
+                    # Seed an anchor bound to a DIFFERENT path and pre-store
+                    # it under this round's key — the path-drift stale case
+                    # (_anchor_usable compares the anchor's INTERNAL path to
+                    # the requested db_path, independent of the dict key).
+                    seed_db = os.path.join(td, "seed.db")
+                    monkeypatch.setenv("TORTOISE_DB_PATH", seed_db)
+                    sha._sdk()  # creates + stores a connected seed anchor
+                    stale = sha._SELFHOST_KEEPALIVE.pop(seed_db, None)
+                    assert stale is not None, "seed anchor not stored"
+                    db = os.path.join(td, f"round-{_round}.db")
+                    monkeypatch.setenv("TORTOISE_DB_PATH", db)
+                    sha._SELFHOST_KEEPALIVE[db] = stale  # pre-store: both threads see it
+                else:
+                    db = os.path.join(td, f"round-{_round}.db")
+                    monkeypatch.setenv("TORTOISE_DB_PATH", db)
+                    stale = None
+                constructed, counting_init = _make_counter(db)
+                monkeypatch.setattr(TortoiseSDK, "__init__", counting_init)
+                results: list = []
+                errors: list = []
+                barrier = threading.Barrier(2)
+
+                def _go(_barrier=barrier, _results=results, _errors=errors):
+                    try:
+                        _barrier.wait(timeout=10)
+                        _results.append(sha._sdk())
+                    except Exception as e:
+                        _errors.append(e)
+
+                threads = [threading.Thread(target=_go, daemon=True)
+                           for _ in range(2)]
+                for t in threads:
+                    t.start()
+                try:
+                    for t in threads:
+                        t.join(timeout=60)
+                    for t in threads:
+                        assert not t.is_alive(), (
+                            f"round {_round}: thread hung — the #2179 "
+                            f"regression would deadlock here")
+                    assert not errors, f"round {_round}: thread raised: {errors!r}"
+                    anchors = [v for k, v in sha._SELFHOST_KEEPALIVE.items()
+                               if k == db]
+                    assert anchors, (
+                        f"round {_round}: no anchor stored for {db!r}")
+                    anchor = anchors[0]
+                    assert anchor._proj is not None, "anchor not connected"
+                    assert sha._anchor_usable(anchor, db) is True
+                    # Lower bound (not equality): a legitimate env-fault
+                    # recovery (the lock winner's eager connect fails, the
+                    # loser's in-lock re-check evicts it and recreates) adds
+                    # a second, CLOSED anchor construction on correct code.
+                    assert len(constructed) >= 1 + len(results), (
+                        f"round {_round}: expected >= 1 anchor + 1 per "
+                        f"returned fresh SDK = {1 + len(results)} "
+                        f"constructions, got {len(constructed)} — an anchor "
+                        f"or fresh SDK was never built")
+                    # Fresh-per-request contract: returned SDKs are NOT the
+                    # shared anchor (a regression returning it would share
+                    # mutable session state across requests — the #493 class).
+                    assert all(s is not anchor for s in results), (
+                        f"round {_round}: a returned SDK IS the shared anchor")
+                    assert len({id(s) for s in results}) == 2, (
+                        f"round {_round}: returned SDKs are not distinct")
+                    returned = {id(s) for s in results}
+                    # Closed-aware orphan check: every construction must be
+                    # the stored anchor, a returned SDK, or a CLOSED evicted
+                    # candidate (the env-fault recovery path closes what it
+                    # evicts). Pre-fix the loser was dropped OPEN — unclosed
+                    # and unaccounted — which is exactly the leak.
+                    unclosed_orphans = [
+                        inst for inst in constructed
+                        if not getattr(inst, "_t_closed", False)
+                        and inst is not anchor
+                        and id(inst) not in returned]
+                    assert not unclosed_orphans, (
+                        f"round {_round}: {len(unclosed_orphans)} UNCLOSED "
+                        f"construction(s) neither stored nor returned — a "
+                        f"dropped-unclosed SDK (the #2179 race) leaks here")
+                    # Data-plane probe: a node written through the anchor's
+                    # graph must be readable via every returned SDK — proves
+                    # they attach to the anchor's data-bearing daemon.
+                    sentinel = f"race-{ns}-{_round}"
+                    anchor._get_proj().g.query(
+                        "CREATE (n:RaceSentinel {rk: $rk})", {"rk": sentinel})
+                    for sdk in results:
+                        seen = sdk._get_proj().g.query(
+                            "MATCH (n:RaceSentinel {rk: $rk}) RETURN count(n)",
+                            {"rk": sentinel}).result_set[0][0]
+                        assert seen == 1, (
+                            f"round {_round}: returned SDK missed the "
+                            f"anchor's write — decoupled server")
+                    if _round == 2:
+                        assert anchor is not stale, "stale anchor re-served"
+                        assert stale is not None and stale._t_closed is True, (
+                            "stale anchor evicted but never closed — the "
+                            "dropped-unclosed daemon leak #2179 prevents")
+                        assert stale._proj is None
+                finally:
+                    # Deterministic round teardown (close-then-pop, #1950):
+                    # shut every daemon we started. Under FIXED code nothing
+                    # was dropped (the orphans assert proved it).
+                    for sdk in results:
+                        try:  # noqa: SIM105
+                            sdk.close()
+                        except Exception:
+                            pass
+                    leftover = sha._SELFHOST_KEEPALIVE.pop(db, None)
+                    if leftover is not None:
+                        try:  # noqa: SIM105
+                            leftover.close()
+                        except Exception:
+                            pass
+        finally:
+            for k in list(sha._SELFHOST_KEEPALIVE):
+                leftover = sha._SELFHOST_KEEPALIVE.pop(k, None)
+                if leftover is not None:
+                    try:  # noqa: SIM105
+                        leftover.close()
+                    except Exception:
+                        pass

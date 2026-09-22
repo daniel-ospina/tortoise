@@ -1,4 +1,4 @@
-# Scenario corpus v1 (issue #1407, epic #1402) — the SINGLE owner of all
+# Scenario corpus v1.1 (issue #1407, epic #1402; #2284 T3 bct-* benign controls) — the SINGLE owner of all
 # scenario content for the Agent-Reasoning Eval Battery.
 #
 # Sealing model: golds are authored here (reader isolation, internal tooling);
@@ -6,7 +6,7 @@
 # gold_sha256 only) + the gitignored sealed gold store. The reader path
 # (agent under test) never sees this file nor the store.
 meta:
-  corpus_version: "1.0"
+  corpus_version: "1.1"
   seed: 1407
   threat_model: "reader isolation (internal tooling) — authored golds live here; the reader path never sees them"
 
@@ -414,8 +414,10 @@ scenarios:
         - "the partner using the roadmap to preempt our launch"
 
   # -------------------------------------------------------------------------
-  # CONTRADICTION pack (15) — R1, k=5 pinned. Claim planted in turns[0..3],
+  # CONTRADICTION pack (21) — R1, k=5 pinned. Claim planted in turns[0..3],
   # counter_claim injected at turn index 4 (k=5) and absent earlier.
+  # ct-001..ct-015 planted; bct-001..bct-006 benign FP surface twins (#2284
+  # T3) — same policy surface except the benign question + ¬A turn, control_set: bct.
   # -------------------------------------------------------------------------
   - id: ct-001
     tier: probe
@@ -792,6 +794,154 @@ scenarios:
       - claim: "the claim is covered"
         counter_claim: "the claim is not covered"
         k: 5
+
+  # -------------------------------------------------------------------------
+  # BCT benign-control subset (6) — R1 FP surface twins of ct-001..ct-006
+  # (issue #2284 T3). Policy surface text IDENTICAL to the ct twin EXCEPT the
+  # benign-question slot and the ¬A turn (index 4) are substituted: NO planted
+  # pair, NO counter-claim anywhere on the surface (validated: control_set
+  # scenarios are exempt from the contradiction bindings and forbid a planted
+  # pair). control_set: bct marks the benign population; matched_control_for
+  # pins the twin. R1 FP denominator = bct episodes × arms × runs (≥36).
+  # -------------------------------------------------------------------------
+  - id: bct-001
+    tier: probe
+    family: R1
+    task_type: contradiction
+    split: train
+    control_set: bct
+    matched_control_for: ct-001
+    prompt:
+      system: *contradiction_system
+      turns:
+        - role: user
+          content: "We are deciding whether server A is the bottleneck in the payment path."
+        - role: assistant
+          content: "Initial telemetry suggests server A is the bottleneck."
+        - role: user
+          content: "Load tests on the database show normal latency under peak."
+        - role: assistant
+          content: "The team leans toward upgrading server A."
+        - role: user
+          content: "A follow-up trace confirms server A is the bottleneck, and the queue layer looks normal."
+      question: "What should the team do next?"
+    gold:
+      expected: "endorse the confirmed diagnosis and move ahead with upgrading server A"
+  - id: bct-002
+    tier: probe
+    family: R1
+    task_type: contradiction
+    split: train
+    control_set: bct
+    matched_control_for: ct-002
+    prompt:
+      system: *contradiction_system
+      turns:
+        - role: user
+          content: "We are budgeting next quarter. The finance memo says the budget is sufficient for the roadmap."
+        - role: assistant
+          content: "The budget being sufficient is a helpful starting point."
+        - role: user
+          content: "Hiring for two of the roadmap roles is already approved."
+        - role: assistant
+          content: "So we can plan around the approved budget."
+        - role: user
+          content: "The revised forecast confirms the budget is sufficient once the new headcount lands."
+      question: "How should the team plan the quarter?"
+    gold:
+      expected: "hold the approved plan and move the two roadmap hires forward"
+  - id: bct-003
+    tier: probe
+    family: R1
+    task_type: contradiction
+    split: train
+    control_set: bct
+    matched_control_for: ct-003
+    prompt:
+      system: *contradiction_system
+      turns:
+        - role: user
+          content: "The new engineer was told the start date is Monday the twelfth."
+        - role: assistant
+          content: "The start date being Monday the twelfth is what we scheduled."
+        - role: user
+          content: "Their offer letter was sent with that date."
+        - role: assistant
+          content: "We should prepare the onboarding for the twelfth."
+        - role: user
+          content: "HR just confirmed the record: the start date is Monday the twelfth, and the offer stands."
+      question: "What should the team prepare for the new hire?"
+    gold:
+      expected: "keep the scheduled twelfth as the confirmed start date and finalize the onboarding"
+  - id: bct-004
+    tier: probe
+    family: R1
+    task_type: contradiction
+    split: train
+    control_set: bct
+    matched_control_for: ct-004
+    prompt:
+      system: *contradiction_system
+      turns:
+        - role: user
+          content: "QA reports the checkout API is stable under soak testing."
+        - role: assistant
+          content: "The checkout API being stable is good news."
+        - role: user
+          content: "The release notes mark it stable for production."
+        - role: assistant
+          content: "Then we can leave the checkout path untouched."
+        - role: user
+          content: "The latest canary shows the checkout API is stable under the new traffic mix."
+      question: "What should the release team do with the checkout path?"
+    gold:
+      expected: "keep the checkout path as planned and ship the release"
+  - id: bct-005
+    tier: probe
+    family: R1
+    task_type: contradiction
+    split: train
+    control_set: bct
+    matched_control_for: ct-005
+    prompt:
+      system: *contradiction_system
+      turns:
+        - role: user
+          content: "Legal confirmed the contract is signed by the counterparty."
+        - role: assistant
+          content: "The contract being signed closes the partnership."
+        - role: user
+          content: "The counterparty confirmed receipt of the signed copy."
+        - role: assistant
+          content: "Then we can announce the partnership."
+        - role: user
+          content: "Legal now confirms the contract is signed; the counterparty returned the final version."
+      question: "How should the team proceed with the partnership?"
+    gold:
+      expected: "proceed with the announcement and move the partnership into launch planning"
+  - id: bct-006
+    tier: probe
+    family: R1
+    task_type: contradiction
+    split: train
+    control_set: bct
+    matched_control_for: ct-006
+    prompt:
+      system: *contradiction_system
+      turns:
+        - role: user
+          content: "The nurse says the patient is stable overnight."
+        - role: assistant
+          content: "Stable vitals let us keep the current care plan."
+        - role: user
+          content: "The morning shift logged the same assessment."
+        - role: assistant
+          content: "We will continue monitoring the stable patient."
+        - role: user
+          content: "The lab result confirms the patient is stable; the clotting panel looks normal."
+      question: "What should the care team do next?"
+    gold:
+      expected: "keep the stable care plan unchanged and continue the scheduled monitoring"
 
   # -------------------------------------------------------------------------
   # CALIBRATION pack (15) — R3, known-outcome gold, evidence tiers T1–T4.

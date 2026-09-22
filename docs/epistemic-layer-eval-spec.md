@@ -113,11 +113,12 @@ Each test: setup (nodes/edges/baselines) → action → exact assertion. Deltas 
 - **Status:** REPHRASE is not implemented; this test defines its contract. The log-cap math to reuse is `aggregate_prior` (§1 anti-Sybil row).
 
 ### P6 — Invalidation + supersession composition (bi-temporal)
-- **Setup:** E(T0) `IMPL→` A; A `IMPL→` B. Action: `supersede_point(A, A')` (edge transfer per ONTOLOGY §3.1).
+- **Setup:** E(T0) `IMPL→` A; A `IMPL→` B. Action: `supersede_point(A, A')`. **Scoped per #2421:** belief-preservation (assertions 1–2) is asserted for **Case 1 — restatement** only (the successor restates A — same claim, better source/wording — so every connection still applies and edges transfer). Case 2 — substantive correction (the successor exists *because* a refutation landed) is **out of scope for assertions 1–2** (they explicitly do NOT hold) and is asserted by the **P6.3 ghost gate** (which holds for both cases) plus a **dedicated Case-2 assertion TODO below** — the P6 fixture contains no NAND, so non-re-attachment of a motivating refutation is NOT exercised here; it needs its own fixture (E `NAND→` A; correct A→A'; assert the NAND does not appear incident to A' and mean(A') reflects the structural recompute).
 - **Assertions (structure, extending `test_supersede_edges.py`):**
-  1. `mean(A') ≈ mean(A)` before supersession ± 0.02 **[cal]** (A' inherits A's belief: transferred edges + same evidence).
-  2. After supersession, `mean(B)` changes by < 0.02 (the conclusion is preserved through replacement). **[cal]**
-  3. A is `outdated:true` and its outgoing operator messages are zeroed: re-running EP with A in the graph produces `|Δ mean(B)| < 0.005` versus a graph where A was deleted (invalidation over deletion: A's ghost must not vote).
+  1. *(restatement only)* `mean(A') ≈ mean(A)` before supersession ± 0.02 **[cal]** (A' inherits A's belief: transferred edges + same evidence). For a substantive correction this assertion does NOT hold — the successor's belief is the structural recomputation with the motivating refutation gone.
+  2. *(restatement only)* After supersession, `mean(B)` changes by < 0.02 (the conclusion is preserved through replacement). **[cal]**
+  3. A is `outdated:true` and its outgoing operator messages are zeroed: re-running EP with A in the graph produces `|Δ mean(B)| < 0.005` versus a graph where A was deleted (invalidation over deletion: A's ghost must not vote — the **P6.3 ghost gate, holds for BOTH cases**).
+- **Case-2 TODO (#2421):** dedicated fixture — E(T0) `NAND→` A (the refutation that motivates the correction), A `IMPL→` B; `supersede_point(A, A')` with a substantive-correction disposition. Assert: the motivating NAND does NOT re-attach to A' (its edge count on the successor is 0), a still-applicable refutation IS kept, and `mean(A')` = structural recompute (not ≈ mean(A)).
 - **Bi-temporal assertion:** the graph must answer "was A believed at t1?" from history — either a timestamped belief snapshot or a replayed event log — and `belief(A, t1) − belief(A, now)` must be consistent with the invalidation event. If the layer ships no history, this test is **explicitly deferred** and R4 is marked not-shippable; do not fake it with current-state reads.
 
 ### P7 — Anti-Sybil tier dominance

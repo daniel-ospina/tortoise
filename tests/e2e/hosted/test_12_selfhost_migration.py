@@ -182,11 +182,11 @@ def _provision_owner_tenant(api, user_id: str) -> dict:
     """Team + APIKey + owner Membership via /internal/provision (the E2E-6-D
     pattern): register-created teams have no Membership node, but the import
     endpoint is owner-scoped session auth — the parity journey needs a real
-    owner tenant to POST /v1/teams/{team_id}/import and read the export."""
-    team_id = f"e2e12p-{uuid.uuid4().hex[:10]}"
+    owner tenant to POST /v1/organizations/{org_id}/import and read the export."""
+    org_id = f"e2e12p-{uuid.uuid4().hex[:10]}"
     r = api.post("/internal/provision",
                  headers={"Authorization": f"Bearer {INTERNAL_KEY}"},
-                 data={"team_id": team_id, "team_name": f"E2E12P {team_id[-6:]}",
+                 data={"org_id": org_id, "org_name": f"E2E12P {org_id[-6:]}",
                        "api_key_hash": "e2e:unused-placeholder-hash",
                        "created_by": user_id})
     assert r.status == 200, f"internal provision: {r.status} {r.text()}"
@@ -240,7 +240,7 @@ def _seed_parity_source_graph(db_path: str) -> dict:
         nodes = sum(
             1 for row in _rows
             if not _is_export_skip_node(
-                [str(l) for l in (row[0] or [])], dict(row[1] or {})))
+                [str(l) for l in (row[0] or [])], dict(row[1] or {})))  # noqa: E741
         edges = int(g.query("MATCH ()-[r]->() RETURN count(r)").result_set[0][0])
         ids = sorted(str(r[0]) for r in g.query(
             "MATCH (n:Point) RETURN coalesce(n.id, '')").result_set)
@@ -261,7 +261,7 @@ def test_parity_export_import(api, session_jwt, tmp_path):
     Beats the E2E-12-D baseline (test_migration_journey_selfhost_to_hosted
     asserts content-presence only): selfhost graph (points + operator + edges)
     → `tortoise export` subprocess (real CLI, encrypt-by-default) → fresh
-    hosted team → POST /v1/teams/{team_id}/import → structure counts, Point
+    hosted team → POST /v1/organizations/{org_id}/import → structure counts, Point
     IDs, and edge topology all match the source.
 
     Pinned name — referenced by the `-k parity` CI selector.
@@ -295,11 +295,11 @@ def test_parity_export_import(api, session_jwt, tmp_path):
     #    session auth, mirroring the E2E-6-D export surface).
     user_id, tok = session_jwt()
     h = {"Authorization": f"Bearer {tok}"}
-    team_id = _provision_owner_tenant(api, user_id)["team_id"]
+    org_id = _provision_owner_tenant(api, user_id)["org_id"]
 
     # 3. Import the artifact into the fresh team graph.
     r = api.post(
-        f"/v1/teams/{team_id}/import",
+        f"/v1/organizations/{org_id}/import",
         data=Path(out).read_bytes(),
         headers={**h,
                  "Content-Type": "application/vnd.tortoise.export.v1",
@@ -314,7 +314,7 @@ def test_parity_export_import(api, session_jwt, tmp_path):
     #    the E2E-12-D baseline). The owner export snapshot surfaces the same
     #    `MATCH (n) RETURN count(n)` / `MATCH ()-[r]->() RETURN count(r)`
     #    counts that back `tortoise_check_structure`.
-    snapshot = api.get(f"/v1/teams/{team_id}/export", headers=h)
+    snapshot = api.get(f"/v1/organizations/{org_id}/export", headers=h)
     assert snapshot.status == 200, snapshot.text()
     exp = snapshot.json()
     assert exp["summary"]["nodes"] == ref["nodes"]

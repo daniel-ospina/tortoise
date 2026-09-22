@@ -6,16 +6,24 @@ Harness (pinned in the #1511 plan Task 5):
 - Serve the dashboard dist with `wrangler@4 pages dev dist --port 8790`
   from website/apps/dashboard/.
 - `__AUTH_BASE_URL = 'https://tortoise.premiselabs.co'` via addInitScript so
-  the dashboard gate emits the ABSOLUTE target; intercepted
-  `https://tortoise.premiselabs.co/auth` requests are re-fetched from the
-  :8788 server (route handler proxies via page.request).
+  the dashboard gate emits the ABSOLUTE target for the tests that ASSERT a
+  prod-origin /auth landing; intercepted `https://tortoise.premiselabs.co/auth`
+  requests are re-fetched from the :8788 server (route handler proxies via
+  page.request).
+- #2744: dashboard DOCUMENTS load from the LOCAL preview (:8790); the
+  ASSERTED /auth landings keep their prod-origin URL, but their content is
+  served from :8788 by the route handler (`_wire_*` proxies via
+  page.request). The prod hosts stay intercepted for those asserted targets
+  and for app-emitted prod-origin redirects (the AUTH_HOST rewrite is
+  load-bearing; APP_HOST is a defensive fallback — no migrated spec
+  originates a prod-app-origin request).
 - Opt-in: RUN_DASHBOARD_E2E=1 (mirrors RUN_LEGAL_E2E).
 
 Flows:
 1. No session/claim → instant redirect to /auth (the gate emits the absolute
    target; the intercepted request is served the auth page).
 2. Claim in flight (tt_claim_pending cookie only; ?claim=1 only; tt_claim_key
-   only) → the claim-paste screen ("Claim your team") shows.
+   only) → the claim-paste screen ("Claim your organization") shows.
 3. Stored key alone (tortoise_api_key, no claim markers) → redirect to /auth
    (the storedKey exemption is gone).
 """
@@ -33,6 +41,10 @@ from playwright.sync_api import Page, expect
 from tests.e2e.test_session_login_flow import (
     APP_HOST,
     AUTH_HOST,
+    _goto_local_dashboard,
+    _preflight_local_servers,
+    _proxy_body,
+    _seed_local_session_cookie,
     _session_json,
     _wire_prod_domains,
 )
@@ -50,6 +62,57 @@ AUTH_TARGET = "https://tortoise.premiselabs.co/auth"
 AUTH_LOCAL = AUTH_ORIGIN + "/auth"
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _local_preview_servers() -> None:
+    """#2744: fail fast (one clear error) when :8788/:8790 are not serving."""
+    _preflight_local_servers()
+
+
+def _seed_gate_session(page: Page, sess: dict, parent_domain: bool = True) -> None:
+    """#2744: seed a gate test's session for the LOCAL preview — the loopback
+    cookie the :8790 mount gate reads, plus (unless ``parent_domain=False``)
+    the prod parent-domain cookie so intercepted prod-origin redirects/
+    subresources stay session-coherent. Pass ``parent_domain=False`` for the
+    /auth-bounce specs (401-clear, logout): a surviving ``.premiselabs.co``
+    session would make the intercepted ``/auth`` page's valid-session gate
+    bounce straight back to the dashboard, so the landing assertion would only
+    pass transiently and never prove the session/cookie was cleared. The spec
+    suites used to seed ONLY the ``.premiselabs.co`` cookie and then navigate
+    ``APP_HOST + "/"`` (a prod-origin DOCUMENT); both change here."""
+    _seed_local_session_cookie(page, sess["user"]["id"], sess, parent_domain=parent_domain)
+
+
+def _mock_bootstrap_200(route, url: str, json_mod, team: dict | None = None) -> bool:
+    """#1885: mock the post-mint dashboard bootstrap reads with 200s so the
+    shell loads instead of 401-ing into the generic error card. Returns True
+    if the request was handled. ``json_mod`` is the caller's json module
+    (each handle imports its own); ``team`` overrides the /v1/team payload.
+    #1828: the shell pins ?org_id= on these reads — match query-tolerant."""
+    path = url.split("?", 1)[0]
+    if path.endswith("/v1/team/keys"):
+        route.fulfill(status=200, content_type="application/json", body="[]")
+        return True
+    if path.endswith("/v1/sessions"):
+        route.fulfill(status=200, content_type="application/json", body="[]")
+        return True
+    if path.endswith("/backups"):
+        route.fulfill(status=200, content_type="application/json",
+                      body=json_mod.dumps({"backups": []}))
+        return True
+    if path.endswith("/v1/team"):
+        t = team or {"org_id": "team_m429", "name": "M429", "tier": "free", "anon": False}
+        route.fulfill(status=200, content_type="application/json",
+                      body=json_mod.dumps(t))
+        return True
+    if "/members" in path:
+        route.fulfill(status=200, content_type="application/json", body="[]")
+        return True
+    if path.endswith("/v1/graphs") or path.endswith("/v1/team/alerts"):
+        route.fulfill(status=200, content_type="application/json", body="[]")
+        return True
+    return False
+
+
 def _wire_auth_intercept(page: Page) -> None:
     """Intercept the absolute /auth target and serve the local auth page."""
 
@@ -58,9 +121,10 @@ def _wire_auth_intercept(page: Page) -> None:
         if url.startswith((AUTH_TARGET, "https://tortoise.premiselabs.co/")):
             local = AUTH_LOCAL + url[len(AUTH_TARGET):]
             try:
-                resp = page.request.get(local)
-                route.fulfill(status=resp.status, content_type="text/html",
-                              body=resp.text())
+                # #1941: content-type-aware fulfillment — resp.text() decodes
+                # as UTF-8 and throws UnicodeDecodeError on binary assets
+                # (PNG favicon/og:image).
+                _proxy_body(route, local, page)
             except Exception:
                 route.fulfill(status=200, content_type="text/html",
                               body="<html><body>auth</body></html>")
@@ -112,7 +176,7 @@ def test_claim_intent_shows_claim_paste(page: Page, claim_seed: str) -> None:
     _wire_auth_intercept(page)
     page.add_init_script("window.__AUTH_BASE_URL = 'https://tortoise.premiselabs.co';")
     page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-    expect(page.locator("body")).to_contain_text("Claim your team", timeout=20_000)
+    expect(page.locator("body")).to_contain_text("Claim your organization", timeout=20_000)
 
 
 @pytest.mark.parametrize("stale_seed", [
@@ -145,40 +209,53 @@ def test_claim_paste_has_back_to_signin_escape(page: Page) -> None:
     _wire_auth_intercept(page)
     page.add_init_script("window.__AUTH_BASE_URL = 'https://tortoise.premiselabs.co';")
     page.goto(DASHBOARD_URL, wait_until="domcontentloaded", timeout=30_000)
-    expect(page.locator("body")).to_contain_text("Claim your team", timeout=20_000)
+    expect(page.locator("body")).to_contain_text("Claim your organization", timeout=20_000)
     expect(page.locator("a[href='https://tortoise.premiselabs.co/auth']")).to_be_visible()
 
 
-def test_mint_429_shows_error_card_not_stuck_shell(page: Page) -> None:
-    """#1559: a session-key mint 429 (the live global-IP-bucket bug) must
-    render an actionable error card with a retry — never the silent
-    'Redirecting to the sign-in page…' shell (which does NOT navigate and
-    stranded every new user after OAuth)."""
+def test_fresh_session_login_renders_session_only_with_zero_mint(page: Page) -> None:
+    """#2167 (F1/F6 home — inverts the #1830/#1559 mint-429 test): a fresh
+    session login (RETURNING user, team exists, NO stored key) issues ZERO
+    POST /v1/session/key — the mount never mints a bootstrap key. The
+    dashboard renders session-only on the JWT (Team/Keys/Sessions/Backups
+    all 200 via the shell mocks) with NO agent-key banner (the old
+    'Couldn't create an agent key' recoverable-mint leg is gone with the
+    mint machinery). A regression mint fails loudly (loud-500 tripwire)."""
     import json as _json
     import time as _time
-    import urllib.parse as _up
+    mint_calls: list = []
     sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
             "refresh_token": "rt", "expires_in": 3600,
             "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
             "user": {"id": "u-mint429", "email": "mint429@premise-labs.dev"}}
-    page.context.add_cookies([{"name": "sb-tortoise-auth-token",
-                               "value": _up.quote(_json.dumps(sess)),
-                               "domain": ".premiselabs.co", "path": "/"}])
-    from tests.e2e.test_session_login_flow import AUTH_ORIGIN, DASHBOARD_URL, _proxy_body  # noqa: F401
-
+    _seed_gate_session(page, sess)
     def handle(route):
         url = route.request.url
         if "api.premiselabs.co" in url:
             if url.endswith("/v1/session/key"):
-                route.fulfill(status=429, content_type="application/json",
-                              headers={"Retry-After": "60"},
-                              body=_json.dumps({"detail": "Rate limit exceeded."}))
+                # loud 500 + counter — the journey must never reach it
+                mint_calls.append(url)
+                route.fulfill(status=500, content_type="application/json",
+                              body=_json.dumps({"detail": "#2167 zero-mint tripwire"}))
                 return
-            if url.endswith("/v1/teams"):
-                # A RETURNING user (team exists) hits the mint path; a
-                # first-timer would go through the #1566 in-app provisioning.
+            if url.endswith("/v1/organizations"):
                 route.fulfill(status=200, content_type="application/json",
-                              body=_json.dumps([{"team_id": "team_m429", "name": "M429"}]))
+                              body=_json.dumps([{"org_id": "team_m429", "name": "M429"}]))
+                return
+            if url.endswith("/v1/onboarding/state") and route.request.method == "GET":
+                route.fulfill(status=200, content_type="application/json",
+                              body=_json.dumps({"onboarding": {"onboarding_complete": True}}))
+                return
+            if url.endswith("/v1/user/identity") and route.request.method == "GET":
+                route.fulfill(status=200, content_type="application/json",
+                              body=_json.dumps({"methods": [], "login_methods": 0,
+                                                "keys_tier": 0, "banner": {"show": False}}))
+                return
+            # session-only render mocks (query-tolerant, #1828)
+            if _mock_bootstrap_200(route, url, _json,
+                                   team={"org_id": "team_m429", "org_name": "M429",
+                                         "tier": "free", "anon": False, "graph_ready": True,
+                                         "point_count": 0}):
                 return
             route.fulfill(status=401, content_type="application/json", body="{}")
             return
@@ -193,17 +270,26 @@ def test_mint_429_shows_error_card_not_stuck_shell(page: Page) -> None:
         route.continue_()
 
     page.route("**/*", handle)
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
-    expect(page.locator("body")).to_contain_text("Too many requests from this network", timeout=20_000)
+    _goto_local_dashboard(page)
+    # The dashboard renders session-only (chrome up, no mint banner, never
+    # the silent redirect shell).
+    expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
+    assert mint_calls == [], f"zero-mint: POST /v1/session/key fired: {mint_calls}"
+    expect(page.locator("body")).not_to_contain_text("Couldn't create an agent key")
     expect(page.locator("body")).not_to_contain_text("Redirecting to the sign-in page")
+    expect(page.locator("body")).not_to_contain_text("HTTP 401")
 
 
 def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
-    """#1566: a first-timer (valid session, NO teams) landing on the app is
-    provisioned IN-APP — tenant-provision → membership poll → reveal — and
-    the key is shown in the welcome card exactly once (A13). A returning
-    visit (key consumed) shows the ready card without re-revealing."""
-    import urllib.parse as _up
+    """#1566/#2323: a first-timer (valid session, NO teams) lands on the
+    welcome card + W1 orientation removed — org-create is now step 0.
+    mount-time provisioning was removed by #2323 Option B). The org-create
+    step submit provisions in-app (tenant-provision → 201; the canonical
+    delivery is the post-write membership poll → reveal_api_key RPC, atomic
+    reveal+null A13 — the 201-body plaintext is only the 3-poll fallback).
+    The key is shown exactly once, at the CONNECT step (ADR-010: in-memory
+    only). A returning visit (onboarding complete) lands on the dashboard's
+    first-run card with NO key (#1885)."""
     import time as _time
     user_id = "u-welcome1566"
     sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
@@ -211,28 +297,60 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
             "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
             "user": {"id": user_id, "email": "welcome1566@premise-labs.dev",
                      "user_metadata": {"display_name": "Welcome Test"}}}
-    page.context.add_cookies([{"name": "sb-tortoise-auth-token",
-                               "value": _up.quote(json.dumps(sess)),
-                               "domain": ".premiselabs.co", "path": "/"}])
+    _seed_gate_session(page, sess)
     reveal_calls = {"n": 0}
+    fork_payloads: list = []
 
     def handle(route):
         url = route.request.url
         if "api.premiselabs.co" in url:
-            if url.endswith("/v1/teams"):
+            if url.endswith("/v1/organizations"):
                 # First-timer: no teams → the app provisions.
                 route.fulfill(status=200, content_type="application/json", body="[]")
+                return
+            if url.split("?", 1)[0].endswith("/v1/onboarding/state") and route.request.method == "GET":
+                # #1885: the shell calls this FIRST (re-fired per #1847) — a
+                # 401 catch-all shows the generic error card before the flow.
+                # #2356 (review): query-strip — the post-provision re-fire
+                # pins ?org_id= once a team exists (#1828), mirroring the
+                # returning-visit branch below.
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"onboarding": {}}))
+                return
+            if url.split("?", 1)[0].endswith("/v1/onboarding/state/checkpoint") and route.request.method == "POST":
+                # #2356: the fork pick persists the set-once fork via this
+                # checkpoint write BEFORE the wizard advances (handleWizardFork
+                # — #1997 W1: self picks advance only after the 2xx; the api
+                # catch-all 401 below used to abort the advance and strand the
+                # page on the fork step). 200 no-op is the keyed-MERGE replay
+                # shape (handleWizardFork never reads the body); the payload
+                # is captured below so the set-once fork write is pinned.
+                # Query-strip (the shell pins ?org_id= once a team exists —
+                # #1828) like the onboarding-state branches.
+                fork_payloads.append(json.loads(route.request.post_data or "{}"))
+                route.fulfill(status=200, content_type="application/json",
+                              body="{}")
+                return
+            if url.endswith("/v1/user/identity") and route.request.method == "GET":
+                # #1885: post-#1765 bootstrap also reads the identity inventory.
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"methods": [], "login_methods": 0,
+                                               "keys_tier": 0, "banner": {"show": False}}))
+                return
+            if _mock_bootstrap_200(route, url, json,
+                                   team={"org_id": "team_w", "org_name": "Welcome Team",
+                                         "tier": "free", "anon": False}):
                 return
             route.fulfill(status=401, content_type="application/json", body="{}")
             return
         if "functions/v1/tenant-provision" in url and route.request.method == "POST":
             route.fulfill(status=201, content_type="application/json",
-                          body=json.dumps({"team_id": "team_w", "team_name": "Welcome Team",
+                          body=json.dumps({"org_id": "team_w", "org_name": "Welcome Team",
                                            "api_key": "tt_welcome_key_1234567890abcdef"}))
             return
-        if "team_memberships" in url and route.request.method == "GET":
+        if "org_memberships" in url and route.request.method == "GET":
             route.fulfill(status=200, content_type="application/json",
-                          body=json.dumps({"team_id": "team_w", "team_name": "Welcome Team",
+                          body=json.dumps({"org_id": "team_w", "org_name": "Welcome Team",
                                            "graph_name": "team_w", "status": "active"}))
             return
         if "rpc/reveal_api_key" in url and route.request.method == "POST":
@@ -241,61 +359,215 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
                           body=json.dumps("tt_welcome_key_1234567890abcdef"))
             return
         if url.startswith(AUTH_HOST):
-            from tests.e2e.test_session_login_flow import AUTH_ORIGIN
             local = AUTH_ORIGIN + url[len(AUTH_HOST):]
-            resp = page.request.get(local)
-            route.fulfill(status=resp.status, content_type="text/html", body=resp.text())
+            _proxy_body(route, local, page)
             return
         if url.startswith(APP_HOST):
-            from tests.e2e.test_session_login_flow import DASHBOARD_URL
             local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
-            ctype = "application/javascript" if local.endswith(".js") else ("text/css" if local.endswith(".css") else "text/html")
-            resp = page.request.get(local)
-            route.fulfill(status=resp.status, content_type=ctype, body=resp.body())
+            _proxy_body(route, local, page)
             return
         route.continue_()
 
     page.route("**/*", handle)
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
-    expect(page.locator("body")).to_contain_text("tt_welcome_key_1234567890abcdef", timeout=20_000)
-    assert reveal_calls["n"] == 1, f"reveal must fire exactly once, got {reveal_calls['n']}"
-    # The raw key must be displayed (a revealed-once key is never shown again).
-    expect(page.locator("body")).to_contain_text("copy it now", timeout=10_000)
+    _goto_local_dashboard(page)
+    # #2323 (Option B): teamless first-timer → welcome card (orientation
+    # removed per epic #2534), no key anywhere yet.
+    expect(page.locator("body")).to_contain_text("Create your Organization", timeout=20_000)
+    expect(page.locator("body")).not_to_contain_text("tt_welcome_key_1234567890abcdef")
+    # Orientation removed — directly on org-create step (was Step 1).
+    expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
+    page.get_by_label("Organization name").fill("acme")
+    expect(page.locator("body")).not_to_contain_text("tt_welcome_key_1234567890abcdef")
+    # Provision fires on the SUBMIT (the typed name is the provisioning
+    # door). The key is NOT shown on the org-create step.
+    page.get_by_role("button", name="Create Organization").click()
+    expect(page.locator("body")).to_contain_text("Choose how you'll use Tortoise", timeout=20_000)
+    expect(page.locator("body")).not_to_contain_text("tt_welcome_key_1234567890abcdef")
+    # Fork card → connect step: the in-memory provisioned plaintext is
+    # displayed EXACTLY ONCE here. The reveal_api_key RPC fired exactly ONCE
+    # at the org-create SUBMIT — provisionInApp's canonical post-write
+    # membership poll → atomic reveal+null (A13, #1566); the 201-body
+    # plaintext is only the 3-poll fallback. The membership-poll mock above
+    # (in handle()) returns an active row on EVERY attempt, so the poll
+    # succeeds on attempt 1 — the canonical channel is the one exercised:
+    # exactly one reveal, and the connect step renders welcomeKey with no
+    # further reveal (ADR-010 single-consumption). If a future delivery
+    # change makes the 201 body primary, this pin fails loudly.
+    # #3218: the self-fork option is first-person now ('For my internal setup').
+    page.get_by_role("button", name="For my internal setup").click()
+    expect(page.locator("body")).to_contain_text("Connect your agent", timeout=15_000)
+    expect(page.locator("body")).to_contain_text("tt_welcome_key_1234567890abcdef", timeout=15_000)
+    assert reveal_calls["n"] == 1, \
+        f"first-run plaintext rides the canonical provision reveal (exactly once), got {reveal_calls['n']}"
+    # The fork advance rides the set-once checkpoint write — pin that the app
+    # actually sent fork=self before the connect step rendered (W1 contract;
+    # the #2323-era drift survived because nothing pinned the write).
+    # Verified single-fire: the fork buttons disable while busy and the build/
+    # harness-connected checkpoint writes are gated off this self path.
+    assert fork_payloads == [{"fork": "self"}], \
+        f"the fork pick checkpoints fork=self exactly once (W1 set-once write), got {fork_payloads}"
     # Returning visit: the key is consumed (reveal returns 'pending') → the
     # ready card, no re-reveal.
     reveal_calls["n"] = 0
+    mint_calls: list = []
     def handle_returning(route):
         url = route.request.url
         if "rpc/reveal_api_key" in url and route.request.method == "POST":
             reveal_calls["n"] += 1
             route.fulfill(status=200, content_type="application/json", body=json.dumps("pending"))
             return
+        if url.endswith("/v1/session/key") and route.request.method == "POST":
+            # #2167/#2246: the returning visit NEVER mints and holds no key —
+            # the mount is session-only (the stored-key probe is deleted).
+            # Loud 500 + counter so a regression mint fails the journey.
+            mint_calls.append(url)
+            route.fulfill(status=500, content_type="application/json",
+                          body=json.dumps({"detail": "#2167 zero-mint tripwire"}))
+            return
+        if url.endswith("/v1/organizations"):
+            # #1885: returning visit — the team EXISTS now; the shared handle
+            # mocks teams→[] (first-timer), which would re-trigger provisioning.
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps([{"org_id": "team_w", "org_name": "Welcome Team",
+                                            "tier": "free"}]))
+            return
+        _path_ret = url.split("?", 1)[0]
+        if _path_ret.endswith("/v1/onboarding/state") and route.request.method == "GET":
+            # #1885: returning visit — onboarding is COMPLETE (the shared handle
+            # returns an empty onboarding dict → the setup wizard re-appears).
+            # Query-strip: the post-#1828 shell pins ?org_id= on this read.
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"onboarding": {"onboarding_complete": True}}))
+            return
         handle(route)
     page.route("**/*", handle_returning)
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
-    expect(page.locator("body")).to_contain_text("Welcome back", timeout=20_000)
-    assert reveal_calls["n"] == 1, "returning visit reveals once (pending), no re-reveal"
+    _goto_local_dashboard(page)
+    # #1885: a returning user (onboarding complete) lands on the dashboard's
+    # first-run card — the key is NEVER re-revealed (reveal_calls stays 0;
+    # the welcome-card reveal only fires on the provisioning path).
+    expect(page.locator("body")).to_contain_text("No memories yet", timeout=20_000)
+    assert reveal_calls["n"] == 0, f"no re-reveal on the returning dashboard path, got {reveal_calls['n']}"
+    assert mint_calls == [], f"zero-mint: POST /v1/session/key on the returning visit: {mint_calls}"
+    # #2356 (test-review): pin the KEYLESS outcome concretely — the welcome
+    # key plaintext must be ABSENT from the returning DOM (any source: card,
+    # snippet, curl sample) and the empty-state card copy must render. The
+    # old "copy it now"/"Couldn't create an agent key" negations were
+    # vacuous — those strings exist nowhere in the app sources.
+    expect(page.locator("body")).not_to_contain_text("tt_welcome_key_1234567890abcdef")
+    expect(page.locator("body")).to_contain_text("Your memory is connected")
+
+
+def test_welcome_mode_fork_503_stays_and_recovers(page: Page) -> None:
+    """#1566/#2323/#2356: a 503 from the fork checkpoint POST (the graph is
+    temporarily unavailable) leaves the wizard ON the fork step with the
+    inline error + the fork buttons recovered — never a strand. The #2356
+    root cause was exactly a non-2xx checkpoint response aborting the fork →
+    connect advance, so the failure lane is pinned: the same click retried
+    against a 2xx advances to the connect step."""
+    import time as _time
+    user_id = "u-wf503"
+    sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
+            "refresh_token": "rt", "expires_in": 3600,
+            "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
+            "user": {"id": user_id, "email": "wf503@premise-labs.dev"}}
+    _seed_gate_session(page, sess)
+    checkpoint_calls = {"n": 0}
+
+    def handle(route):
+        url = route.request.url
+        if "api.premiselabs.co" in url:
+            if url.split("?", 1)[0].endswith("/v1/onboarding/state") and route.request.method == "GET":
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"onboarding": {}}))
+                return
+            if url.split("?", 1)[0].endswith("/v1/onboarding/state/checkpoint") and route.request.method == "POST":
+                # First fork pick: 503 (graph unavailable) — the app must stay
+                # on the fork step with the error + recovered buttons. The
+                # retried pick gets the 2xx and advances.
+                checkpoint_calls["n"] += 1
+                if checkpoint_calls["n"] == 1:
+                    route.fulfill(status=503, content_type="application/json",
+                                  body=json.dumps({"detail": "graph unavailable"}))
+                else:
+                    route.fulfill(status=200, content_type="application/json", body="{}")
+                return
+            if url.endswith("/v1/organizations"):
+                route.fulfill(status=200, content_type="application/json", body="[]")
+                return
+            if url.endswith("/v1/user/identity") and route.request.method == "GET":
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"methods": [], "login_methods": 0,
+                                               "keys_tier": 0, "banner": {"show": False}}))
+                return
+            if _mock_bootstrap_200(route, url, json,
+                                   team={"org_id": "team_w", "org_name": "Welcome Team",
+                                         "tier": "free", "anon": False}):
+                return
+            route.fulfill(status=401, content_type="application/json", body="{}")
+            return
+        if "functions/v1/tenant-provision" in url and route.request.method == "POST":
+            route.fulfill(status=201, content_type="application/json",
+                          body=json.dumps({"org_id": "team_w", "org_name": "Welcome Team",
+                                           "api_key": "tt_welcome_key_1234567890abcdef"}))
+            return
+        if "org_memberships" in url and route.request.method == "GET":
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"org_id": "team_w", "org_name": "Welcome Team",
+                                           "graph_name": "team_w", "status": "active"}))
+            return
+        if "rpc/reveal_api_key" in url and route.request.method == "POST":
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps("tt_welcome_key_1234567890abcdef"))
+            return
+        if url.startswith(AUTH_HOST):
+            local = AUTH_ORIGIN + url[len(AUTH_HOST):]
+            _proxy_body(route, local, page)
+            return
+        if url.startswith(APP_HOST):
+            local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
+            _proxy_body(route, local, page)
+            return
+        route.continue_()
+
+    page.route("**/*", handle)
+    _goto_local_dashboard(page)
+    expect(page.locator("body")).to_contain_text("Create your Organization", timeout=20_000)
+    # #2744/#2534: the orientation step was removed — the first-timer welcome
+    # card renders the org-create form DIRECTLY (no `Continue →`; the stale
+    # click timed out and stranded these specs).
+    expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
+    page.get_by_label("Organization name").fill("acme")
+    page.get_by_role("button", name="Create Organization").click()
+    expect(page.locator("body")).to_contain_text("Choose how you'll use Tortoise", timeout=20_000)
+    # 503 on the fork checkpoint: STAY on the fork step, surface the inline
+    # error, recover the buttons — no advance, no strand.
+    page.get_by_role("button", name="For my internal setup").click()
+    expect(page.locator("body")).to_contain_text("The graph is temporarily unavailable — try again in a moment.", timeout=10_000)
+    expect(page.locator("body")).not_to_contain_text("Connect your agent")
+    expect(page.get_by_role("button", name="For my internal setup")).to_be_enabled(timeout=5_000)
+    # Retry against the 2xx: the fork persists and the wizard advances.
+    page.get_by_role("button", name="For my internal setup").click()
+    expect(page.locator("body")).to_contain_text("Connect your agent", timeout=15_000)
+    assert checkpoint_calls["n"] == 2, f"exactly one 503 + one 2xx checkpoint write, got {checkpoint_calls['n']}"
 
 
 def test_welcome_mode_provision_failure_shows_error_card(page: Page) -> None:
-    """#1566: an edge-function provisioning failure shows the actionable
-    error card with a retry — never the silent stuck shell (the #1559
-    pattern applied to the welcome mode)."""
-    import urllib.parse as _up
+    """#1566/#2323: a tenant-provision failure on the org-create SUBMIT
+    shows the inline step-1 error with the submit button recovered (busy
+    flags reset in `finally`) — never a silent stuck shell or a wedged
+    spinner (the #1559 pattern applied to the name-first flow)."""
     import time as _time
     user_id = "u-wfail"
     sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
             "refresh_token": "rt", "expires_in": 3600,
             "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
             "user": {"id": user_id, "email": "wfail@premise-labs.dev"}}
-    page.context.add_cookies([{"name": "sb-tortoise-auth-token",
-                               "value": _up.quote(json.dumps(sess)),
-                               "domain": ".premiselabs.co", "path": "/"}])
+    _seed_gate_session(page, sess)
 
     def handle(route):
         url = route.request.url
         if "api.premiselabs.co" in url:
-            if url.endswith("/v1/teams"):
+            if url.endswith("/v1/organizations"):
                 route.fulfill(status=200, content_type="application/json", body="[]")
                 return
             route.fulfill(status=401, content_type="application/json", body="{}")
@@ -305,45 +577,55 @@ def test_welcome_mode_provision_failure_shows_error_card(page: Page) -> None:
                           body=json.dumps({"error": "boom"}))
             return
         if url.startswith(AUTH_HOST):
-            from tests.e2e.test_session_login_flow import AUTH_ORIGIN
-            resp = page.request.get(AUTH_ORIGIN + url[len(AUTH_HOST):])
-            route.fulfill(status=resp.status, content_type="text/html", body=resp.text())
+            local = AUTH_ORIGIN + url[len(AUTH_HOST):]
+            _proxy_body(route, local, page)
             return
         if url.startswith(APP_HOST):
-            from tests.e2e.test_session_login_flow import DASHBOARD_URL
             local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
-            ctype = "application/javascript" if local.endswith(".js") else ("text/css" if local.endswith(".css") else "text/html")
-            resp = page.request.get(local)
-            route.fulfill(status=resp.status, content_type=ctype, body=resp.body())
+            _proxy_body(route, local, page)
             return
         route.continue_()
 
     page.route("**/*", handle)
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
-    expect(page.locator("body")).to_contain_text("Could not create your team — try again.", timeout=20_000)
-    expect(page.locator("body")).to_contain_text("Try again", timeout=10_000)
+    _goto_local_dashboard(page)
+    # #2323: provisioning fires on the org-create SUBMIT (mount no longer
+    # provisions) — the 500 surfaces the inline step-1 error; the busy flags
+    # reset so the submit button recovers and a retry is possible.
+    expect(page.locator("body")).to_contain_text("Create your Organization", timeout=20_000)
+    # #2744/#2534: no orientation step — org-create renders directly.
+    expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
+    page.get_by_label("Organization name").fill("acme")
+    page.get_by_role("button", name="Create Organization").click()
+    expect(page.locator("body")).to_contain_text("Could not create your organization — try again.", timeout=20_000)
+    # Recovered: the submit button is enabled again (not a full-card wedge).
+    expect(page.get_by_role("button", name="Create Organization")).to_be_enabled(timeout=5_000)
 
 
 def test_welcome_mode_provision_401_clears_session_and_redirects(page: Page) -> None:
-    """#1566/#1511 semantic: a 401 from tenant-provision means the session is
-    stale — the app clears it and goes to /auth (never an error card or a
-    stuck state)."""
-    import urllib.parse as _up
+    """#1566/#1511/#2323: a 401 from tenant-provision on the org-create
+    SUBMIT means the session is stale — the app clears it and goes to /auth
+    (never an error card or a stuck state)."""
     import time as _time
     user_id = "u-w401"
     sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
             "refresh_token": "rt", "expires_in": 3600,
             "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
             "user": {"id": user_id, "email": "w401@premise-labs.dev"}}
-    page.context.add_cookies([{"name": "sb-tortoise-auth-token",
-                               "value": _up.quote(json.dumps(sess)),
-                               "domain": ".premiselabs.co", "path": "/"}])
+    # #2744: parent_domain=False — the 401 clears the session; a seeded
+    # .premiselabs.co cookie would survive the loopback clear and bounce the
+    # intercepted /auth page straight back to the dashboard.
+    _seed_gate_session(page, sess, parent_domain=False)
 
     def handle(route):
         url = route.request.url
         if "api.premiselabs.co" in url:
-            if url.endswith("/v1/teams"):
+            if url.endswith("/v1/organizations"):
                 route.fulfill(status=200, content_type="application/json", body="[]")
+                return
+            if url.endswith("/v1/onboarding/state") and route.request.method == "GET":
+                # #1885: the shell calls this FIRST (re-fired per #1847).
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"onboarding": {}}))
                 return
             route.fulfill(status=401, content_type="application/json", body="{}")
             return
@@ -352,22 +634,32 @@ def test_welcome_mode_provision_401_clears_session_and_redirects(page: Page) -> 
                           body=json.dumps({"error": "Unauthorized"}))
             return
         if url.startswith(AUTH_HOST):
-            from tests.e2e.test_session_login_flow import AUTH_ORIGIN
-            resp = page.request.get(AUTH_ORIGIN + url[len(AUTH_HOST):])
-            route.fulfill(status=resp.status, content_type="text/html", body=resp.text())
+            local = AUTH_ORIGIN + url[len(AUTH_HOST):]
+            _proxy_body(route, local, page)
             return
         if url.startswith(APP_HOST):
-            from tests.e2e.test_session_login_flow import DASHBOARD_URL
             local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
-            ctype = "application/javascript" if local.endswith(".js") else ("text/css" if local.endswith(".css") else "text/html")
-            resp = page.request.get(local)
-            route.fulfill(status=resp.status, content_type=ctype, body=resp.body())
+            _proxy_body(route, local, page)
             return
         route.continue_()
 
     page.route("**/*", handle)
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    _goto_local_dashboard(page)
+    # #2323: the stale-session 401 now surfaces on the org-create SUBMIT
+    # (mount no longer provisions). Drive to it, then expect the /auth bounce.
+    expect(page.locator("body")).to_contain_text("Create your Organization", timeout=20_000)
+    # #2744/#2534: no orientation step — org-create renders directly.
+    expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
+    page.get_by_label("Organization name").fill("acme")
+    page.get_by_role("button", name="Create Organization").click()
     expect(page).to_have_url(re.compile(rf"^{re.escape(AUTH_HOST)}/auth"), timeout=20_000)
+    # #2744: the /auth landing alone no longer proves the stale session was
+    # cleared — the seeded credential is host-only loopback, invisible to the
+    # intercepted prod-origin /auth document. Pin the clear directly
+    # (context.cookies() reads every origin).
+    assert not [c for c in page.context.cookies()
+                if c["name"] == "sb-tortoise-auth-token"], (
+        "401 must clear the session cookie before the /auth bounce")
 
 
 def test_oauth_callback_fragment_lands_in_dashboard(page: Page) -> None:
@@ -375,8 +667,6 @@ def test_oauth_callback_fragment_lands_in_dashboard(page: Page) -> None:
     the session in the FRAGMENT (#access_token=…) and NO cookie yet — the
     synchronous head gate must NOT bounce (that would drop the fragment and
     loop back to /auth); supabase-js ingests it and the dashboard mounts."""
-    import urllib.parse as _up
-    import time as _time
     user_id = "u-frag"
     # NO session cookie — the fragment carries the tokens (supabase-js
     # ingests them; the mocked /auth/v1/user returns the identity). All
@@ -396,46 +686,47 @@ def test_oauth_callback_fragment_lands_in_dashboard(page: Page) -> None:
             route.fulfill(status=401, content_type="application/json", body="{}")
             return
         if "api.premiselabs.co" in url:
-            if url.endswith("/v1/teams"):
+            # #1828: loadAll pins ?org_id= on overview reads — match on the
+            # query-stripped path so /v1/team/keys?org_id=… still resolves.
+            path = urllib.parse.urlsplit(url).path
+            if path.endswith("/v1/organizations"):
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps([{"team_id": "team_frag", "name": "Frag Team"}]))
+                              body=json.dumps([{"org_id": "team_frag", "name": "Frag Team"}]))
                 return
-            if url.endswith("/v1/session/key"):
+            if path.endswith("/v1/session/key"):
+                # #2167: a fragment-auth first landing never mints (no stored
+                # key → the mount is session-only) — loud 500 tripwire.
+                route.fulfill(status=500, content_type="application/json",
+                              body=json.dumps({"detail": "#2167 zero-mint tripwire"}))
+                return
+            if path.endswith("/v1/team") or path.endswith("/v1/team/"):
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps({"key": "tt_frag_key_1234567890abcdef", "team_id": "team_frag"}))
+                              body=json.dumps({"org_id": "team_frag", "name": "Frag Team", "tier": "free"}))
                 return
-            if url.endswith("/v1/team") or url.endswith("/v1/team/"):
-                route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps({"team_id": "team_frag", "name": "Frag Team", "tier": "free"}))
-                return
-            if url.endswith("/v1/team/keys"):
+            if path.endswith("/v1/team/keys"):
                 route.fulfill(status=200, content_type="application/json", body=json.dumps({"keys": []}))
                 return
-            if url.endswith("/v1/sessions"):
+            if path.endswith("/v1/sessions"):
                 route.fulfill(status=200, content_type="application/json", body=json.dumps({"sessions": []}))
                 return
-            if url.endswith("/backups"):
+            if path.endswith("/backups"):
                 route.fulfill(status=200, content_type="application/json", body=json.dumps({"backups": []}))
                 return
             route.fulfill(status=401, content_type="application/json", body="{}")
             return
         if url.startswith(AUTH_HOST):
-            from tests.e2e.test_session_login_flow import AUTH_ORIGIN
-            resp = page.request.get(AUTH_ORIGIN + url[len(AUTH_HOST):])
-            route.fulfill(status=resp.status, content_type="text/html", body=resp.text())
+            local = AUTH_ORIGIN + url[len(AUTH_HOST):]
+            _proxy_body(route, local, page)
             return
         if url.startswith(APP_HOST):
-            from tests.e2e.test_session_login_flow import DASHBOARD_URL
             local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
-            ctype = "application/javascript" if local.endswith(".js") else ("text/css" if local.endswith(".css") else "text/html")
-            resp = page.request.get(local)
-            route.fulfill(status=resp.status, content_type=ctype, body=resp.body())
+            _proxy_body(route, local, page)
             return
         route.continue_()
     page.route("**/*", handle)
     # Implicit-flow fragment return (the signup.html OAuth target).
     _FRAG_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiAidS1mcmFnIiwgImF1ZCI6ICJhdXRoZW50aWNhdGVkIiwgInJvbGUiOiAiYXV0aGVudGljYXRlZCIsICJleHAiOiA0MTAyNDQ0ODAwLCAiZW1haWwiOiAiZnJhZ0BwcmVtaXNlLWxhYnMuZGV2In0.sig"
-    page.goto(APP_HOST + "/#access_token=" + _FRAG_TOKEN + "&refresh_token=fake-rt&expires_in=3600&token_type=bearer",
+    page.goto(DASHBOARD_URL + "#access_token=" + _FRAG_TOKEN + "&refresh_token=fake-rt&expires_in=3600&token_type=bearer",
               wait_until="domcontentloaded", timeout=30_000)
     # The gate must NOT bounce to /auth; the session ingests and the app
     # chrome (with a team) renders.
@@ -443,98 +734,420 @@ def test_oauth_callback_fragment_lands_in_dashboard(page: Page) -> None:
     expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
 
 
-def test_bootstrap_cap_falls_back_to_recovery_mint(page: Page) -> None:
-    """#1566-fix: the bootstrap session-key mint has a 3-active cap (24h keys)
-    — a user who accumulated keys across incognito windows is dead-ended with
-    'Too many active session keys — wait for expiry' until expiry. The mount
-    must fall back to the RECOVERY mint (persistent, auto-revokes at cap) so
-    the dashboard still renders."""
-    import urllib.parse as _up
+def _mock_session_shell(route, url: str, json_mod, mint_calls: list | None = None) -> bool:
+    """#2167: the session-only dashboard shell reads — onboarding state,
+    identity inventory, keys/sessions/backups (query-tolerant #1828) — 200
+    empty so the chrome renders on the session JWT alone. POST /v1/session/key
+    is a loud-500 + counter zero-mint tripwire. Returns True if handled (the
+    caller's /v1/organizations + /v1/team branches run first)."""
+    path = url.split("?", 1)[0]
+    if path.endswith("/v1/session/key"):
+        if mint_calls is not None:
+            mint_calls.append(url)
+        route.fulfill(status=500, content_type="application/json",
+                      body=json_mod.dumps({"detail": "#2167 zero-mint tripwire"}))
+        return True
+    if path.endswith("/v1/onboarding/state") and not url.rstrip("/").endswith("PATCH"):
+        route.fulfill(status=200, content_type="application/json",
+                      body=json_mod.dumps({"onboarding": {"onboarding_complete": True}}))
+        return True
+    if path.endswith("/v1/user/identity"):
+        route.fulfill(status=200, content_type="application/json",
+                      body=json_mod.dumps({"methods": [], "login_methods": 0,
+                                            "keys_tier": 0, "banner": {"show": False}}))
+        return True
+    if path.endswith("/v1/team/keys") or path.endswith("/v1/sessions") or path.endswith("/backups"):
+        route.fulfill(status=200, content_type="application/json", body=json_mod.dumps({"keys": [], "sessions": [], "backups": []}))
+        return True
+    if "/members" in path or path.endswith("/v1/graphs") or path.endswith("/v1/team/alerts"):
+        route.fulfill(status=200, content_type="application/json", body="[]")
+        return True
+    return False
+
+
+def test_stored_key_residue_is_purged_on_session_mount(page: Page) -> None:
+    """#2246 (ADR-010) — replaces the #2167 probe-401 test: the mount
+    stored-key probe is DELETED, so a seeded REVOKED/EXPIRED/disabled
+    residue is never probed or classified — the session mount purges the
+    KEY_STORAGE slot once ("inert residue that gets cleaned") and renders
+    session-only on the JWT. Zero key-authed requests fire anywhere (the
+    old test's key-lane probe 401 is gone; every Authorization header on
+    API reads is the session JWT)."""
     import time as _time
-    user_id = "u-cap"
+    user_id = "u-drop401"
+    dead_key = "tt_dead_abcdef0123456789"
+    mint_calls: list = []
+    key_authed: list = []
     sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
             "refresh_token": "rt", "expires_in": 3600,
             "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
-            "user": {"id": user_id, "email": "cap@premise-labs.dev"}}
-    page.context.add_cookies([{"name": "sb-tortoise-auth-token",
-                               "value": _up.quote(json.dumps(sess)),
-                               "domain": ".premiselabs.co", "path": "/"}])
-    # The bootstrap mint 429s (cap) — the fallback must retry as recovery.
+            "user": {"id": user_id, "email": "drop401@premise-labs.dev"}}
+    _seed_gate_session(page, sess)
+    page.add_init_script(f"localStorage.setItem('tortoise_api_key', '{dead_key}');")
+
     def handle(route):
         url = route.request.url
         if "api.premiselabs.co" in url:
-            if url.endswith("/v1/session/key"):
-                body = json.loads(route.request.post_data or "{}")
-                if body.get("purpose") == "bootstrap":
-                    route.fulfill(status=429, content_type="application/json",
-                                  body=json.dumps({"detail": "Too many active session keys — wait for expiry"}))
-                    return
-                if body.get("purpose") != "recovery":
-                    # Mirror the server's 422 for unknown purposes — the
-                    # fallback MUST retry as recovery, not anything else.
-                    route.fulfill(status=422, content_type="application/json",
-                                  body=json.dumps({"detail": "purpose must be 'bootstrap' or 'recovery'"}))
-                    return
+            path = url.split("?", 1)[0]
+            if path.endswith("/v1/organizations"):
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps({"key": "tt_recovery_key_1234567890abcdef", "team_id": "team_cap"}))
+                              body=json.dumps([{"org_id": "team_ok", "name": "OK", "tier": "free"}]))
                 return
-            if url.endswith("/v1/teams"):
+            if path.endswith("/v1/team") or path.endswith("/v1/team/"):
+                # #2246: NO key-lane probe exists — every /v1/team read is
+                # session-authed. A Bearer tt_ header would be a regression.
+                auth = (route.request.headers.get("authorization") or "")
+                if auth.startswith("Bearer tt_"):
+                    key_authed.append(url)
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps([{"team_id": "team_cap", "name": "Cap"}]))
+                              body=json.dumps({"org_id": "team_ok", "org_name": "OK",
+                                               "tier": "free", "anon": False, "graph_ready": True,
+                                               "point_count": 1}))
                 return
-            if url.endswith("/v1/team") or url.endswith("/v1/team/"):
-                route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps({"team_id": "team_cap", "name": "Cap", "tier": "free"}))
-                return
-            if url.endswith("/v1/team/keys"):
-                route.fulfill(status=200, content_type="application/json", body=json.dumps({"keys": []}))
-                return
-            if url.endswith("/v1/sessions"):
-                route.fulfill(status=200, content_type="application/json", body=json.dumps({"sessions": []}))
-                return
-            if url.endswith("/backups"):
-                route.fulfill(status=200, content_type="application/json", body=json.dumps({"backups": []}))
+            if _mock_session_shell(route, url, json, mint_calls):
                 return
             route.fulfill(status=401, content_type="application/json", body="{}")
             return
         if url.startswith(AUTH_HOST):
-            from tests.e2e.test_session_login_flow import AUTH_ORIGIN
-            resp = page.request.get(AUTH_ORIGIN + url[len(AUTH_HOST):])
-            route.fulfill(status=resp.status, content_type="text/html", body=resp.text())
+            local = AUTH_ORIGIN + url[len(AUTH_HOST):]
+            _proxy_body(route, local, page)
             return
         if url.startswith(APP_HOST):
-            from tests.e2e.test_session_login_flow import DASHBOARD_URL
             local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
-            ctype = "application/javascript" if local.endswith(".js") else ("text/css" if local.endswith(".css") else "text/html")
-            resp = page.request.get(local)
-            route.fulfill(status=resp.status, content_type=ctype, body=resp.body())
+            _proxy_body(route, local, page)
             return
         route.continue_()
 
     page.route("**/*", handle)
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
-    # The dashboard renders (bootstrap 429 → recovery fallback) — the cap
-    # error card must NOT show (with the old code the 429 surfaced the
-    # 'Too many active session keys' error card), and the app chrome is up.
+    _goto_local_dashboard(page)
     expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
-    expect(page.locator("body")).not_to_contain_text("Too many active session keys", timeout=10_000)
+    assert mint_calls == [], f"zero-mint: POST /v1/session/key fired: {mint_calls}"
+    assert key_authed == [], f"#2246: key-authed requests must not fire: {key_authed}"
+    # the session mount purged the residue once (never probed/adopted)
+    slot = page.evaluate("localStorage.getItem('tortoise_api_key')")
+    assert slot is None, f"#2246: the session mount must purge the slot, got {slot!r}"
+    # session-only render — never an error card / 'Invalid API key' banner
+    expect(page.locator("body")).not_to_contain_text("Invalid API key")
+    expect(page.locator("body")).not_to_contain_text("Redirecting to the sign-in page")
+
+
+def test_all_suspended_session_purges_residue_and_renders_appeal(page: Page) -> None:
+    """#2167 rule 9 + F8 (the ACTUAL fresh-login suspension mechanism): an
+    ALL-suspended membership set makes the server 403 the /v1/organizations LIST
+    with the _suspended_detail() dict (list_my_teams — hosted_api.py).
+    #2246: the mount NEVER probes stored keys — the session-mount residue
+    purge runs at session resolution (before the teams fetch), so even a
+    seeded durable is purged once and the appeal path renders from the
+    403-teams catch. Never a mint, never a probe, never a drop-vs-keep
+    classification."""
+    import time as _time
+    user_id = "u-susp"
+    held_key = "tt_susp_abcdef0123456789"
+    mint_calls: list = []
+    key_authed: list = []
+    sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
+            "refresh_token": "rt", "expires_in": 3600,
+            "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
+            "user": {"id": user_id, "email": "susp@premise-labs.dev"}}
+    _seed_gate_session(page, sess)
+    page.add_init_script(f"localStorage.setItem('tortoise_api_key', '{held_key}');")
+
+    def handle(route):
+        url = route.request.url
+        if "api.premiselabs.co" in url:
+            path = url.split("?", 1)[0]
+            if (route.request.headers.get("authorization") or "").startswith("Bearer tt_"):
+                key_authed.append(url)
+            if path.endswith("/v1/organizations"):
+                # the REAL contract: every membership suspended → 403 dict
+                route.fulfill(status=403, content_type="application/json",
+                              body=json.dumps({"detail": {"code": "SUSPENDED",
+                                                            "message": "Suspended for review",
+                                                            "appeal_url": "https://premise-labs.dev/appeal"}}))
+                return
+            if _mock_session_shell(route, url, json, mint_calls):
+                return
+            route.fulfill(status=401, content_type="application/json", body="{}")
+            return
+        if url.startswith(AUTH_HOST):
+            local = AUTH_ORIGIN + url[len(AUTH_HOST):]
+            _proxy_body(route, local, page)
+            return
+        if url.startswith(APP_HOST):
+            local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
+            _proxy_body(route, local, page)
+            return
+        route.continue_()
+
+    page.route("**/*", handle)
+    _goto_local_dashboard(page)
+    # the appeal path renders (blocking error card + CTA)
+    expect(page.locator("body")).to_contain_text("Suspended for review", timeout=25_000)
+    expect(page.locator("body")).to_contain_text("Appeal the suspension", timeout=10_000)
+    assert mint_calls == [], f"zero-mint: POST /v1/session/key fired: {mint_calls}"
+    assert key_authed == [], f"#2246: key-authed requests must not fire: {key_authed}"
+    # #2246: the session mount purged the seeded residue (never probed)
+    slot = page.evaluate("localStorage.getItem('tortoise_api_key')")
+    assert slot is None, f"#2246: the session mount must purge the slot, got {slot!r}"
+
+
+def test_fresh_login_suspended_team_shows_appeal_banner(page: Page) -> None:
+    """#2167 rule 9 + F8 (fresh login, NO stored key): an ALL-suspended
+    membership set 403s the /v1/organizations LIST with the _suspended_detail() dict
+    (list_my_teams) — the session-authed teams fetch IS the fresh-login
+    suspension vector post-mint-removal. The catch parses the dict → the
+    appeal banner renders. (Distinct from the stored-durable test above.)"""
+    import time as _time
+    user_id = "u-susp2"
+    mint_calls: list = []
+    sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
+            "refresh_token": "rt", "expires_in": 3600,
+            "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
+            "user": {"id": user_id, "email": "susp2@premise-labs.dev"}}
+    _seed_gate_session(page, sess)
+
+    def handle(route):
+        url = route.request.url
+        if "api.premiselabs.co" in url:
+            path = url.split("?", 1)[0]
+            if path.endswith("/v1/organizations"):
+                # the REAL contract: every membership suspended → 403 dict
+                route.fulfill(status=403, content_type="application/json",
+                              body=json.dumps({"detail": {"code": "SUSPENDED",
+                                                            "message": "Suspended for review",
+                                                            "appeal_url": "https://premise-labs.dev/appeal"}}))
+                return
+            if _mock_session_shell(route, url, json, mint_calls):
+                return
+            route.fulfill(status=401, content_type="application/json", body="{}")
+            return
+        if url.startswith(AUTH_HOST):
+            local = AUTH_ORIGIN + url[len(AUTH_HOST):]
+            _proxy_body(route, local, page)
+            return
+        if url.startswith(APP_HOST):
+            local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
+            _proxy_body(route, local, page)
+            return
+        route.continue_()
+
+    page.route("**/*", handle)
+    _goto_local_dashboard(page)
+    expect(page.locator("body")).to_contain_text("Suspended for review", timeout=25_000)
+    expect(page.locator("body")).to_contain_text("Appeal the suspension", timeout=10_000)
+    assert mint_calls == [], f"zero-mint: POST /v1/session/key fired: {mint_calls}"
+
+
+def test_multi_membership_suspended_first_healthy_second_renders(page: Page) -> None:
+    """#2167 #1912 P1 pin: a multi-membership user whose FIRST membership is
+    suspended but who holds a healthy SECOND team lands on the healthy team —
+    never the suspension error card (the mount pins the first healthy team
+    BEFORE completeLogin on every session-only landing; the old unpinned
+    reads resolved memberships[0] → 403 → error card on every reload)."""
+    import time as _time
+    user_id = "u-1912"
+    mint_calls: list = []
+    sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
+            "refresh_token": "rt", "expires_in": 3600,
+            "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
+            "user": {"id": user_id, "email": "u1912@premise-labs.dev"}}
+    _seed_gate_session(page, sess)
+
+    def handle(route):
+        url = route.request.url
+        if "api.premiselabs.co" in url:
+            path = url.split("?", 1)[0]
+            if path.endswith("/v1/organizations"):
+                # suspended FIRST membership + healthy second (#1912)
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps([
+                                  {"org_id": "team_sus", "name": "Suspended Co",
+                                   "tier": "free", "suspended_at": "2026-09-01T00:00:00Z"},
+                                  {"org_id": "team_ok", "name": "Healthy Co", "tier": "free"},
+                              ]))
+                return
+            if path.endswith("/v1/team") or path.endswith("/v1/team/"):
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+                tid = (qs.get("org_id") or [""] )[0]
+                if tid == "team_sus":
+                    route.fulfill(status=403, content_type="application/json",
+                                  body=json.dumps({"detail": {"code": "SUSPENDED",
+                                                                "message": "Suspended for review",
+                                                                "appeal_url": "https://premise-labs.dev/appeal"}}))
+                    return
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"org_id": tid or "team_ok", "org_name": "Healthy Co",
+                                               "tier": "free", "anon": False, "graph_ready": True,
+                                               "point_count": 1}))
+                return
+            if _mock_session_shell(route, url, json, mint_calls):
+                return
+            route.fulfill(status=401, content_type="application/json", body="{}")
+            return
+        if url.startswith(AUTH_HOST):
+            local = AUTH_ORIGIN + url[len(AUTH_HOST):]
+            _proxy_body(route, local, page)
+            return
+        if url.startswith(APP_HOST):
+            local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
+            _proxy_body(route, local, page)
+            return
+        route.continue_()
+
+    page.route("**/*", handle)
+    _goto_local_dashboard(page)
+    # the healthy second team renders — chrome up, NO suspension card
+    expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
+    expect(page.locator("body")).not_to_contain_text("Suspended for review")
+    expect(page.locator("body")).not_to_contain_text("Appeal the suspension")
+    assert mint_calls == [], f"zero-mint: POST /v1/session/key fired: {mint_calls}"
+    # the healthy team is selected (the account blob names it)
+    expect(page.get_by_role("button", name=re.compile(r"Account menu"))).to_contain_text("Healthy Co", timeout=10_000)
+
+
+def test_stored_residue_on_suspended_team_lands_healthy_alternate(page: Page) -> None:
+    """#2167 #1912 + #2246: a stored DURABLE residue (never probed) whose
+    own team is SUSPENDED — a multi-membership user with a HEALTHY alternate
+    team lands on the healthy team via the mount's first-healthy pin (#1912),
+    never the blocking suspension card. The residue is purged once at session
+    resolution (never classified keep/drop — the probe machinery is gone)."""
+    import time as _time
+    user_id = "u-5d-alt"
+    held_key = "tt_susal_abcdef0123456789"
+    mint_calls: list = []
+    key_authed: list = []
+    sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
+            "refresh_token": "rt", "expires_in": 3600,
+            "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
+            "user": {"id": user_id, "email": "susalt@premise-labs.dev"}}
+    _seed_gate_session(page, sess)
+    page.add_init_script(f"localStorage.setItem('tortoise_api_key', '{held_key}');")
+
+    def handle(route):
+        url = route.request.url
+        if "api.premiselabs.co" in url:
+            path = url.split("?", 1)[0]
+            if (route.request.headers.get("authorization") or "").startswith("Bearer tt_"):
+                key_authed.append(url)
+            if path.endswith("/v1/organizations"):
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps([
+                                  {"org_id": "team_sus", "name": "Suspended Co",
+                                   "suspended_at": "2026-09-01T00:00:00Z"},
+                                  {"org_id": "team_ok", "name": "Healthy Co", "tier": "free"},
+                              ]))
+                return
+            if path.endswith("/v1/team") or path.endswith("/v1/team/"):
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+                tid = (qs.get("org_id") or ["team_ok"])[0]
+                if tid == "team_sus":
+                    route.fulfill(status=403, content_type="application/json",
+                                  body=json.dumps({"detail": {"code": "SUSPENDED",
+                                                                "message": "Suspended for review",
+                                                                "appeal_url": "https://premise-labs.dev/appeal"}}))
+                    return
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"org_id": tid or "team_ok", "org_name": "Healthy Co",
+                                               "tier": "free", "anon": False, "graph_ready": True,
+                                               "point_count": 1}))
+                return
+            if _mock_session_shell(route, url, json, mint_calls):
+                return
+            route.fulfill(status=401, content_type="application/json", body="{}")
+            return
+        if url.startswith(AUTH_HOST):
+            local = AUTH_ORIGIN + url[len(AUTH_HOST):]
+            _proxy_body(route, local, page)
+            return
+        if url.startswith(APP_HOST):
+            local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
+            _proxy_body(route, local, page)
+            return
+        route.continue_()
+
+    page.route("**/*", handle)
+    _goto_local_dashboard(page)
+    # the HEALTHY alternate renders — chrome up, no suspension card
+    expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
+    expect(page.locator("body")).not_to_contain_text("Suspended for review")
+    expect(page.locator("body")).not_to_contain_text("Appeal the suspension")
+    expect(page.get_by_role("button", name=re.compile(r"Account menu"))).to_contain_text("Healthy Co", timeout=10_000)
+    assert mint_calls == [], f"zero-mint: POST /v1/session/key fired: {mint_calls}"
+    assert key_authed == [], f"#2246: key-authed requests must not fire: {key_authed}"
+    # #2246: the residue was purged once at session resolution
+    slot = page.evaluate("localStorage.getItem('tortoise_api_key')")
+    assert slot is None, f"#2246: the session mount must purge the slot, got {slot!r}"
 
 
 def test_logout_redirects_to_auth(page: Page) -> None:
     """#1511 (VGATE P1): a signed-in user clicking Log out is redirected to
     /auth — the key-only card is gone, so sign-out must land on the login
-    page, never the dead redirect shell. Requires the loop harness: a valid
+    page, never the dead redirect shell. #2246 rule-8 hygiene RETAINED: the
+    logout wipe still fires on the app origin (the KEY_STORAGE slot is
+    already purged by the session mount, but logout's removeItem is the
+    belt — the slot never survives a sign-out). #2246 review round-1: the
+    residue is RE-SEEDED after the mount purge so the logout click is the
+    ONLY remaining wipe — otherwise the final residue assert would pass
+    vacuously if logout's own wipe regressed (the mount purge already removed
+    it). #2744: the residue is read from the loopback origin's localStorage in
+    the context storage state (a .premiselabs.co evidence cookie cannot be
+    written from a loopback document). Requires the loop harness: a valid
     session cookie → dashboard renders → Log out → /auth."""
+    durable = "tt_loop_durable_abcdef0123456789"
     _wire_prod_domains(page)
-    page.context.add_cookies([{
-        "name": "sb-tortoise-auth-token",
-        "value": urllib.parse.quote(json.dumps(_session_json())),
-        "domain": ".premiselabs.co", "path": "/",
-    }])
+    _seed_local_session_cookie(page, "u-loop", _session_json("u-loop"), parent_domain=False)
     page.add_init_script(f"window.__AUTH_BASE_URL = '{AUTH_HOST}';")
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    # #2246: legacy residue seeded — the session mount purges it once
+    # (never probed/adopted; the mount probe is deleted).
+    page.add_init_script(f"localStorage.setItem('tortoise_api_key', '{durable}');")
+    # #2744: the app origin is now the LOOPBACK preview, so a
+    # .premiselabs.co evidence cookie cannot be written from it (domain
+    # mismatch) — the pre-migration cross-origin cookie bridge is unusable.
+    # The wipe is asserted below from the context's per-origin storage state
+    # instead (Playwright retains each origin's localStorage across the
+    # bounce).
+    _goto_local_dashboard(page)
     expect(page.locator("body")).to_contain_text("Graphs", timeout=20_000)
+    # the session mount purged the residue (no held key in state)
+    assert page.evaluate("localStorage.getItem('tortoise_api_key')") is None
+    # #2246 review round-1: the mount purge ALREADY removed the residue.
+    # Re-seed it NOW so the logout click below is the ONLY remaining wipe —
+    # the final assert then pins logout's own removeItem, not the mount purge.
+    page.evaluate(f"localStorage.setItem('tortoise_api_key', '{durable}')")
+
+    def _loopback_key_residue() -> list:
+        """#2744: the loopback origin's ``tortoise_api_key`` values from the
+        context storage state (per-origin, so it survives the /auth bounce).
+        ``DASHBOARD_URL`` is a loopback URL with no path, so the prefix match
+        is exact; an env override carrying a path would match nothing, hence
+        the positive-control assert below."""
+        prefix = DASHBOARD_URL.rstrip("/")
+        return [
+            item["value"]
+            for origin in page.context.storage_state().get("origins", [])
+            if origin.get("origin", "").startswith(prefix)
+            for item in origin.get("localStorage", [])
+            if item.get("name") == "tortoise_api_key"
+        ]
+
+    # Positive control: the re-seeded residue MUST be observable, or the
+    # post-logout absence assert would pass vacuously (the #2246 round-2
+    # class the rewrite was meant to preserve).
+    assert _loopback_key_residue() == [durable], (
+        "pre-logout residue read is not positive — cannot assert the wipe")
     page.locator(".account-blob-btn").click()
     expect(page.locator(".account-menu-logout")).to_be_visible()
     page.locator(".account-menu-logout").click()
     expect(page).to_have_url(re.compile(rf"^{re.escape(AUTH_HOST)}/auth"), timeout=20_000)
+    # rule 8 (session clear): context.cookies() reads every origin, so a
+    # surviving loopback credential fails here (the pre-migration transitive
+    # check via the .premiselabs.co cookie is not expressible on the loopback
+    # harness — the loopback clear can be pinned directly).
+    assert not [c for c in page.context.cookies()
+                if c["name"] == "sb-tortoise-auth-token"], (
+        "logout must clear the session cookie")
+    # rule 8 (KEY_STORAGE wipe): the re-seeded residue is gone — a survivor
+    # means logout's own removeItem did not fire.
+    assert not _loopback_key_residue(), (
+        f"logout must wipe KEY_STORAGE on the app origin "
+        f"(residue: {_loopback_key_residue()})")

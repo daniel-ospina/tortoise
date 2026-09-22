@@ -80,10 +80,26 @@ When a claim faces challenge, you have two tools. They address different things:
 |---|------|-------------|
 | **What it says** | "This claim is FALSE" | "This claim is TRUE but matters LESS than it seems" |
 | **Dimension** | Correctness | Relevance |
-| **Effect on EP** | Contradiction propagates through graph | Confidence reduction on the edge |
+| **Effect on EP** | Contradiction propagates through graph | Dampens the operator's weight: `w_eff = w × (1 − strength)` (#2315) |
 | **Applies to** | The argument Point directly | The operator (IMPL connection) between argument and what it supports |
 
 **The golden rule:** Relevance lives on the OPERATOR, truth lives on the POINT.
+
+> **Mitigation semantics (single source: `tortoise/weights.py` module
+> docstring, #2315):** `strength` is the graded DAMPENER of the operator's
+> effective EP weight — sanctioned band 0.10–0.50, formula
+> `w_eff = w × (1 − strength)`: a 0.30 mitigation keeps 70% of the operator's
+> weight; 0.50 keeps 50% — dampened, never refuted (a mitigated NAND stays a
+> contradiction, only weaker). EP reads `mitigation_strength` via
+> `compute_operator_weight` — it is NOT advisory metadata. It is NOT a
+> statement of how true the reason is, and it is NOT fused into the
+> mitigation point's belief (that would invert the meaning).
+> Decision parts filed through the decide tooling are born LIVE with an
+> explicit starting belief (#2199): omit `credibility=` for the system
+> starting belief medium = Beta(3,1) (provenance `system-default`), or pass
+> `credibility="high|medium|low"` (ladder gold/high/medium/low/unverified)
+> for a `set-by-author` belief. The documented decide flow ranks on the first
+> attempt — no promote/calibrate chores, no CalibrationError.
 
 - An option IS an option (it's true that it's a candidate); a criterion IS a criterion — **never NAND an option or criterion for being a bad fit.** A bad fit is a relevance problem, not a truth problem.
 - If a FINDING is factually untrue → NAND the finding Point directly (truth attack).
@@ -474,7 +490,7 @@ sdk.taxonomy()  # or tortoise_status() — returns point counts, pointKinds, gra
 
 Or via MCP:
 ```
-tortoise_summarize_structure  # returns {gateN_*, total}; zero total on an empty/wrong graph
+tortoise_summarize_structure  # returns {total, operators, gateN_*, gate_total}; zero total on an empty/wrong graph
 ```
 
 ## Common Failure Mode

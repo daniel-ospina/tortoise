@@ -1,0 +1,16 @@
+{
+  "holdout": true,
+  "seed": 9,
+  "suite": "continuity",
+  "turns": [
+    {
+      "content": "Decision: the Ember onboarding ships as a three-step flow with an explicit consent step. Approved by Ana.",
+      "role": "user"
+    },
+    {
+      "content": "Recorded.",
+      "role": "assistant"
+    }
+  ],
+  "writer": true
+}

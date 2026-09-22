@@ -1,0 +1,172 @@
+// keyExpiryTripwire.test.js — #2426 configurable API-key expiration static
+// tripwires (CI-run via dashboard-js-tests, node --test zero-dep convention).
+// The #2426 UX surface lives in main.jsx (component-scope helpers + JSX) and
+// sessionKey.js (pure predicates, unit-tested in sessionKey.test.js) — the
+// greps below make the FEATURE'S LOAD-BEARING SHAPES hard regressions:
+//   1. the create form's expiry presets (30d DEFAULT / Custom / Never),
+//      minted as expires_in days ONLY (never the expires_at body param);
+//   2. the keys-table columns (Name | Prefix | Created | Last used | Expires |
+//      Status) fed by the fmtExpiry derivation (Never / amber in-N-days /
+//      terminal expired) + the #2476 Last-used cell (relative-time label,
+//      plain-text Never);
+//   3. rotate re-applying the old row's lifetime span + confirm copy stating
+//      the replacement expiry; the show-once card echoing the mint expiry;
+//   4. isManagedKey staying bootstrap-exclusion-only (an expiring durable
+//      row must NEVER vanish from the table — the #2426 critical fix);
+//   5. the wizard's expiring-paste rejection — an expiring key is classified
+//      'expiring' (never embedded) and refused with a truthful reason.
+// A future edit that drops any of these regresses #2426 the same way the
+// pre-fix dashboard hid every expiring key.
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
+
+const here = dirname(fileURLToPath(import.meta.url))
+const mainJsx = readFileSync(join(here, 'main.jsx'), 'utf8')
+const sessionKeyJs = readFileSync(join(here, 'sessionKey.js'), 'utf8')
+const indexCss = readFileSync(join(here, 'index.css'), 'utf8')
+
+// 1. Create-form expiry presets — 30d is the DEFAULT (market decision), the
+// select exposes Custom + Never, and the mint payload is days-only.
+test('#2426: create form defaults to the 30d preset with Custom + Never options', () => {
+  assert.match(mainJsx, /newKeyExpiryPreset,\s*setNewKeyExpiryPreset\]\s*=\s*React\.useState\('30'\)/,
+    'the expiry preset state must DEFAULT to 30d (market default — never None)')
+  assert.match(mainJsx, /\{ id: 'custom', label: 'Custom date…' \}/, 'Custom preset option')
+  assert.match(mainJsx, /\{ id: 'never', label: 'No expiration' \}/, 'Never preset option')
+  assert.match(mainJsx, /newKeyExpiryPreset === 'custom' && \(/, 'Custom reveals the date input')
+  assert.match(mainJsx, /type="date"/, 'Custom date input renders')
+})
+
+test('#2426: mintKey sends expires_in DAYS only — never the expires_at body param', () => {
+  assert.match(mainJsx, /if \(expiresInDays != null && !Number\.isNaN\(expiresInDays\)\) payload\.expires_in = expiresInDays/,
+    'mintKey must translate the preset to expires_in days')
+  // The days-only path is deliberate (avoids the server's mutually-exclusive
+  // dual-param validation entirely) — the create/rotate callers compute days.
+  assert.match(mainJsx, /const days = newKeyExpiryPreset === 'never' \? null/, 'Never → no param')
+  assert.match(mainJsx, /expiryDaysFromDate\(newKeyExpiryDate\)/, 'Custom → computed days')
+  // No expiry-param mint body: every mintKey POST body is the payload object.
+  assert.match(mainJsx, /body: JSON\.stringify\(payload\),/, 'mintKey body is the shared payload')
+  // Never mints must keep the legacy byte-identical shape — never a body that
+  // the server would read as an expiry request.
+  const mintKeySlice = mainJsx.slice(mainJsx.indexOf('async function mintKey'))
+  assert.ok(!/JSON\.stringify\(\{\s*(name\??[^}]*expires_at|expires_at)/.test(mintKeySlice),
+    'mintKey must never JSON-stringify an expires_at body key')
+})
+
+test('#2426: Custom dates are clamped to the 1-366-day window (server 422 parity)', () => {
+  assert.match(mainJsx, /KEY_MAX_EXPIRY_DAYS = 366/, '366-day ceiling constant')
+  assert.match(mainJsx, /Math\.ceil\(\(t - Date\.now\(\)\) \/ _MS_PER_DAY\)/, 'date → whole-days conversion')
+  assert.match(mainJsx, /return \(days >= 1 && days <= KEY_MAX_EXPIRY_DAYS\) \? days : null/, '1-366 clamp')
+})
+
+// 2. Keys-table columns (Name | Prefix | Created | Last used | Expires |
+// Status) + fmtExpiry states.
+test('#2476/#2426: the keys table is Name | Prefix | Created | Last used | Expires | Status', () => {
+  const header = mainJsx.match(/<th scope="col">Name<\/th>.*<\/thead>/s)
+  assert.ok(header, 'keys-table thead found')
+  const cols = header[0].match(/<th scope="col">([^<]*)<\/th>/g) || []
+  const names = cols.map((c) => c.replace(/<[^>]+>/g, ''))
+  assert.ok(names.indexOf('Created') !== -1 && names.indexOf('Last used') !== -1
+    && names.indexOf('Expires') !== -1 && names.indexOf('Status') !== -1,
+    `Expected Created | Last used | Expires | Status columns, got: ${names}`)
+  assert.ok(names.indexOf('Created') < names.indexOf('Last used'), 'Last used after Created')
+  assert.ok(names.indexOf('Last used') < names.indexOf('Expires'), 'Expires after Last used')
+  assert.ok(names.indexOf('Expires') < names.indexOf('Status'), 'Expires before Status')
+  assert.match(mainJsx, /colSpan="7"/, 'empty-state colSpan widened for the 7th column')
+})
+
+test('#2476: the Last-used cell renders formatRelativeTime output and a plain-text Never', () => {
+  // The cell must feed formatRelativeTime (memory-sources util parity) and
+  // fall back to PLAIN 'Never' (no span.dim — #2426: the status cell's dim
+  // identifies 'disabled'; a Never-in-dim cell double-matched e2e strict
+  // mode). Clock: Date.now() per render (the App-level `now` only ticks on
+  // the Overview skeleton and would freeze on the keys tab).
+  assert.match(mainJsx, /const rel = formatRelativeTime\(lu, Date\.now\(\)\)/, 'cell uses formatRelativeTime')
+  assert.match(mainJsx, /if \(!rel\) return 'Never'/, "never-used rows render plain 'Never'")
+  assert.match(mainJsx, /title=\{`Last used \$\{fmtTime\(lu\)\}`\}/, 'used rows carry the absolute-date title tooltip')
+  // Structural dim-exclusion guard (#2426): the whole Last-used cell body
+  // (from the lu binding to the closing td) must never wrap the Never fallback
+  // (or the label) in a span.dim. Slice-based so the guard cannot rot into a
+  // vacuous never-matching regex.
+  const cellStart = mainJsx.indexOf('const lu = k.last_used_at')
+  assert.ok(cellStart !== -1, 'Last-used cell lu binding found')
+  const cellBody = mainJsx.slice(cellStart, mainJsx.indexOf('})()}</td>', cellStart))
+  assert.ok(cellBody.includes("return 'Never'"), 'plain-text Never branch inside the cell')
+  assert.ok(!cellBody.includes('className="dim"'),
+    'the Last-used Never must never sit in a span.dim cell (#2426)')
+})
+
+test('#2426: fmtExpiry renders Never / amber in-N-days / terminal expired', () => {
+  assert.match(mainJsx, /function fmtExpiry\(iso, now = Date\.now\(\)\)/, 'fmtExpiry helper exists')
+  assert.match(mainJsx, /if \(!iso\) return \{ text: 'Never', cls: '' \}/, 'Never when null')
+  assert.match(mainJsx, /text: 'expired', cls: 'expired'/, 'terminal expired state')
+  assert.match(mainJsx, /days <= KEY_SOON_DAYS/, 'expiring-soon threshold')
+  assert.match(mainJsx, /\$\{dateText\} · in \$\{days\} day/, 'amber in-N-days label')
+  // Tombstone: an expired row is still RENDERED (no filter hides it).
+  assert.match(mainJsx, /const ex = fmtExpiry\(k\.expires_at\)/, 'Expires cell renders from the row')
+})
+
+test('#2426: CSS states for expiring (amber) and expired (terminal red) exist', () => {
+  assert.match(indexCss, /\.expiring \{ color: #fbbf24; \}/, 'amber .expiring rule')
+  assert.match(indexCss, /\.expired \{ color: var\(--red\); \}/, 'terminal .expired rule')
+})
+
+// 3. Show-once card + rotate carry-over.
+test('#2426: the show-once key card states the expiry (server echo / never)', () => {
+  assert.match(mainJsx, /setNewKeyExpiresAt\(\(mk && mk\.expires_at\) \|\| null\)/,
+    'create captures the server expiry echo into the modal card')
+  // #2735: rotate's reveal moved to its OWN `rotatedKey` state (so the create
+  // modal's dismiss cannot destroy an unread replacement) — the expiry echo
+  // must ride it, or a rotated key silently reads 'never expires'.
+  // #4342: the plaintext is derived ONCE and a plaintext-less mint is REFUSED
+  // before the latch (the pre-fix `|| ''` expression latched an empty reveal).
+  // Scoped to regenerateKey's body — createKey derives the same local name.
+  // Both pins are kept so neither the refusal NOR the expiry echo can be
+  // dropped silently.
+  const rotStart = mainJsx.indexOf('async function regenerateKey(')
+  assert.notEqual(rotStart, -1, 'regenerateKey must exist')
+  const rotBody = mainJsx.slice(rotStart, mainJsx.indexOf('\n  async function ', rotStart + 1))
+  assert.match(rotBody, /const plaintext = revealableMintPlaintext\(mk\)/,
+    'rotate derives the replacement plaintext through the shareable non-blank-string predicate')
+  assert.match(rotBody, /if \(!plaintext\) \{/, 'rotate must refuse a plaintext-less mint')
+  assert.ok(rotBody.indexOf('if (!plaintext) {') < rotBody.indexOf('setRotatedKey({ plaintext: plaintext'),
+    'the refusal must come BEFORE the reveal latch — no empty reveal can be set (#4342)')
+  assert.match(rotBody, /has already been revoked/, 'the refusal must state the OLD key is already revoked')
+  assert.match(rotBody, /setRotatedKey\(\{ plaintext: plaintext, expiresAt: \(mk && mk\.expires_at\) \|\| null \}\)/,
+    'rotate captures the server expiry echo into rotatedKey')
+  assert.match(mainJsx, /expires \{fmtExpiryDate\(newKeyExpiresAt\)\}/, 'modal card shows the create expiry date')
+  assert.match(mainJsx, /expires \{fmtExpiryDate\(rotatedKey\.expiresAt\)\}/, 'rotate reveal shows the replacement expiry date')
+  assert.match(mainJsx, /never expires/, 'card states Never explicitly')
+})
+
+test('#2426: rotate re-applies the old row lifetime span + confirm states replacement expiry', () => {
+  assert.match(mainJsx, /function lifetimeDaysFromRow\(row\)/, 'lifetime-span helper exists')
+  assert.match(mainJsx, /lifetimeDaysFromRow\(oldRow\)/, 'rotate mint passes the span as expires_in')
+  assert.match(mainJsx, /The replacement never expires \(same as this key\)\./, 'Never stays Never in the confirm')
+  assert.match(mainJsx, /The replacement expires \$/, 'confirm names the replacement expiry date')
+})
+
+// 4. isManagedKey — the CRITICAL pre-existing-bug fix: bootstrap-exclusion
+// ONLY (any expiring durable must stay a table row).
+test('#2426: isManagedKey excludes bootstrap only — no expires_at exclusion may return', () => {
+  const start = sessionKeyJs.indexOf('export function isManagedKey')
+  const body = sessionKeyJs.slice(start, sessionKeyJs.indexOf('export function', start + 10))
+  assert.ok(!body.includes('expires_at'),
+    `isManagedKey must be bootstrap-exclusion only (an expires_at check would hide every expiring key): ${body}`)
+  assert.match(body, /created_via === 'bootstrap'/, 'bootstrap rows stay excluded')
+  assert.match(body, /return !\(k\.created_via === 'bootstrap'\)/, 'bootstrap-only predicate')
+  // The embed-safe derivations (usableDurableRows / durableConnectKey) keep
+  // their own no-expiry filters — the embed surface stays Never-keys-only.
+  const usable = sessionKeyJs.slice(sessionKeyJs.indexOf('export function usableDurableRows'))
+  assert.match(usable, /!k\.expires_at/, 'usableDurableRows excludes expiring rows explicitly')
+  assert.match(sessionKeyJs, /if \(row\.expires_at\) return \{ key: '', durable: false, source: 'expiring' \}/,
+    'paste classifier reports source expiring (distinct from bootstrap)')
+})
+
+// 5. Wizard embed surface — Never-keys-only policy.
+test('#2426/#2827: the connect wizard never embeds an expiring key', () => {
+  assert.match(mainJsx, /check\.source === 'expiring'/, 'paste validation rejects expiring rows')
+  assert.match(mainJsx, /It expires, and a key embedded in an agent must never expire/, 'truthful expiring reason')
+})

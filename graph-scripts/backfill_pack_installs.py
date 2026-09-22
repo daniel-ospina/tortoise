@@ -6,12 +6,12 @@ tenants have no pack install-state). Safe to re-run: ``ensure_tenant_packs``
 is an additive MERGE per namespace — never duplicates, never uninstalls.
 
 D5 (plan docs/plans/2026-08-15-318-pack-isolation-plan.md): handles the
-legacy ``team_{name}`` vs ``team_{id}`` graph naming. Install records ALWAYS
-land in the introspection READ TARGET (``team_{team_id}`` — the graph GET
-/v1/packs + packs_list read via ``namespace=team_id``). The RECORDED
+legacy ``org_{name}`` vs ``org_{id}`` graph naming. Install records ALWAYS
+land in the introspection READ TARGET (``org_{org_id}`` — the graph GET
+/v1/packs + packs_list read via ``namespace=org_id``). The RECORDED
 graph_name (``teams.graph_name`` in Supabase control-plane mode, the Team
 node's ``graph_name`` property in registry mode) is read only to DETECT and
-report legacy ``team_{name}`` tenants — writing into a legacy graph would
+report legacy ``org_{name}`` tenants — writing into a legacy graph would
 leave backfilled records invisible to the read surface (code-review conf 70,
 PR #1261) and the self-heal would mint a duplicate set.
 
@@ -40,21 +40,21 @@ from tortoise.pack_state import (  # noqa: E402, I001
 
 
 def _iter_teams() -> list[dict]:
-    """Every existing (non-deleted) team as {team_id, graph_name}.
+    """Every existing (non-deleted) team as {org_id, graph_name}.
 
     Supabase control-plane mode: ``teams`` table rows (graph_name recorded
     via the provision_team RPC's p_graph_name). Registry mode: ``Team``
-    nodes (graph_name property when present — legacy /v1/teams + onboarding
-    recorded team_{name}; hosted provisioning has none → team_{id} derivation).
+    nodes (graph_name property when present — legacy /v1/organizations + onboarding
+    recorded org_{name}; hosted provisioning has none → org_{id} derivation).
     """
     try:
         from tortoise.supabase_control import get_control_plane, is_supabase_enabled
         if is_supabase_enabled():
             rows = get_control_plane().query(
-                "teams", select=["id", "graph_name"],
+                "organizations", select=["id", "graph_name"],
                 filters=[("deleted_at", "is", None)],
             )
-            return [{"team_id": r["id"], "graph_name": r.get("graph_name")}
+            return [{"org_id": r["id"], "graph_name": r.get("graph_name")}
                     for r in rows if r.get("id")]
     except Exception as e:  # noqa: BLE001, RUF100
         print(f"⚠️  Supabase team enumeration failed ({e}) — trying registry mode")
@@ -63,7 +63,7 @@ def _iter_teams() -> list[dict]:
     rows = sdk._get_registry().query(
         "MATCH (t:Team) WHERE t.deleted_at IS NULL RETURN t.id, t.graph_name"
     ).result_set
-    return [{"team_id": r[0], "graph_name": r[1] if len(r) > 1 else None}
+    return [{"org_id": r[0], "graph_name": r[1] if len(r) > 1 else None}
             for r in rows if r and r[0]]
 
 
@@ -93,29 +93,29 @@ def main() -> int:
 
     n_activated = 0
     for t in teams:
-        team_id, recorded = t["team_id"], t["graph_name"]
+        org_id, recorded = t["org_id"], t["graph_name"]
         # D5 (code-review conf 70, PR #1261): ALWAYS target the introspection
-        # read surface — team_{team_id}. GET /v1/packs and MCP packs_list read
-        # the SDK-derived team_{team_id} graph (namespace=team_id), never the
-        # legacy team_{name} graph recorded by sdk.team_create; landing
+        # read surface — org_{org_id}. GET /v1/packs and MCP packs_list read
+        # the SDK-derived org_{org_id} graph (namespace=org_id), never the
+        # legacy org_{name} graph recorded by sdk.team_create; landing
         # installs there would make backfilled records invisible and the read
         # surface's self-heal would mint a second set.
-        graph_name = f"team_{team_id}"
+        graph_name = f"org_{org_id}"
         if recorded and recorded != graph_name:
-            print(f"· team {team_id}: recorded graph {recorded!r} is legacy "
-                  f"team_{{name}} — landing installs in read target {graph_name}")
+            print(f"· team {org_id}: recorded graph {recorded!r} is legacy "
+                  f"org_{{name}} — landing installs in read target {graph_name}")
         if args.apply:
             from tortoise.sdk import TortoiseSDK
-            sdk = TortoiseSDK(namespace=team_id)
+            sdk = TortoiseSDK(namespace=org_id)
             try:
                 activated = ensure_tenant_packs(sdk, graph_name=graph_name)
-                print(f"✔ team {team_id} -> graph {graph_name}: "
+                print(f"✔ team {org_id} -> graph {graph_name}: "
                       f"{len(activated)} pack(s) active")
                 n_activated += len(activated)
             except Exception as e:  # noqa: BLE001, RUF100
-                print(f"✖ team {team_id} -> graph {graph_name}: FAILED ({e})")
+                print(f"✖ team {org_id} -> graph {graph_name}: FAILED ({e})")
         else:
-            print(f"· team {team_id} -> graph {graph_name}: "
+            print(f"· team {org_id} -> graph {graph_name}: "
                   f"would activate {', '.join(starter)} (dry-run)")
             n_activated += len(starter)
 

@@ -1,2 +1,9 @@
+# Pre-existing: Fly config + local venv must never enter the build context.
 fly.toml
 .venv
+# #1929: local build artifacts must not enter the Docker build context
+# (they don't exist in CI — fresh checkout — but a local `docker build`
+# would otherwise ship stale wheels/eggs into the image).
+dist/
+build/
+*.egg-info/

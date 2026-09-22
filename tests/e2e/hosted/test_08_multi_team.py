@@ -22,24 +22,28 @@ skip_unless_hosted_e2e()
 
 def _create_team(api, jwt_headers, name_suffix):
     name = f"e2e8d-{name_suffix}-{uuid.uuid4().hex[:6]}"
-    r = api.post("/v1/teams", headers=jwt_headers, data={"name": name})
+    r = api.post("/v1/organizations", headers=jwt_headers, data={"name": name})
     assert r.status == 200, f"team create: {r.status} {r.text()}"
     return r.json()
 
 
 def test_multi_team_ownership_and_listing(api, session_jwt):
-    """One session user creates two teams; GET /v1/teams lists both."""
+    """One session user creates two teams; GET /v1/organizations lists both.
+
+    The #1877 free-team entitlement gate (402) only applies to FREE plans —
+    bump the first team to tier=team so the second create passes."""
     user_id, tok = session_jwt()  # noqa: RUF059
     h = {"Authorization": f"Bearer {tok}"}
     t1 = _create_team(api, h, "alpha")
+    bump_team_tier(api, t1.get("id") or t1.get("org_id"), "team")
     t2 = _create_team(api, h, "beta")
 
-    r = api.get("/v1/teams", headers=h)
+    r = api.get("/v1/organizations", headers=h)
     assert r.status == 200, r.text()
-    ids = {t.get("id") or t.get("team_id") for t in r.json()}
+    ids = {t.get("id") or t.get("org_id") for t in r.json()}
     for created in (t1, t2):
-        cid = created.get("id") or created.get("team_id")
-        assert cid in ids, f"created team {cid} missing from /v1/teams: {ids}"
+        cid = created.get("id") or created.get("org_id")
+        assert cid in ids, f"created team {cid} missing from /v1/organizations: {ids}"
 
 
 def test_invite_accept_flow_with_rbac(api, session_jwt):
@@ -48,13 +52,13 @@ def test_invite_accept_flow_with_rbac(api, session_jwt):
     owner_id, owner_tok = session_jwt()
     ho = {"Authorization": f"Bearer {owner_tok}"}
     team = _create_team(api, ho, "invitable")
-    team_id = team.get("id") or team.get("team_id")
+    org_id = team.get("id") or team.get("org_id")
 
-    bump_team_tier(api, team_id, "team")
+    bump_team_tier(api, org_id, "team")
 
     invitee_email = f"e2e-invitee-{uuid.uuid4().hex[:8]}@e2e.premise-labs.dev"
     r = api.post("/v1/invites", headers=ho,
-                 data={"team_id": team_id, "email": invitee_email, "role": "member"})
+                 data={"org_id": org_id, "email": invitee_email, "role": "member"})
     assert r.status == 200, f"invite mint: {r.status} {r.text()}"
     token = r.json()["token"]
 
@@ -64,13 +68,13 @@ def test_invite_accept_flow_with_rbac(api, session_jwt):
     r = api.post("/v1/invites/accept", headers=hm, data={"token": token})
     assert r.status == 200, f"invite accept: {r.status} {r.text()}"
 
-    r = api.get(f"/v1/teams/{team_id}/members", headers=ho)
+    r = api.get(f"/v1/organizations/{org_id}/members", headers=ho)
     assert r.status == 200, r.text()
     member_ids = {m.get("user_id") for m in r.json()}
     assert member_id in member_ids, f"accepted member missing: {member_ids}"
 
     # RBAC: a plain member cannot remove members (owner/admin only)
-    r = api.delete(f"/v1/teams/{team_id}/members/{owner_id}", headers=hm)
+    r = api.delete(f"/v1/organizations/{org_id}/members/{owner_id}", headers=hm)
     assert r.status == 403, f"member removing owner must 403, got {r.status}"
 
 
@@ -78,15 +82,15 @@ def test_duplicate_invite_409_and_bad_token_400(api, session_jwt):
     owner_id, owner_tok = session_jwt()  # noqa: RUF059
     ho = {"Authorization": f"Bearer {owner_tok}"}
     team = _create_team(api, ho, "dupinvite")
-    team_id = team.get("id") or team.get("team_id")
-    bump_team_tier(api, team_id, "team")
+    org_id = team.get("id") or team.get("org_id")
+    bump_team_tier(api, org_id, "team")
 
     email = f"e2e-dup-{uuid.uuid4().hex[:8]}@e2e.premise-labs.dev"
     r1 = api.post("/v1/invites", headers=ho,
-                  data={"team_id": team_id, "email": email, "role": "member"})
+                  data={"org_id": org_id, "email": email, "role": "member"})
     assert r1.status == 200, r1.text()
     r2 = api.post("/v1/invites", headers=ho,
-                  data={"team_id": team_id, "email": email, "role": "member"})
+                  data={"org_id": org_id, "email": email, "role": "member"})
     assert r2.status == 409, f"duplicate invite must 409, got {r2.status}: {r2.text()}"
 
     _, member_tok = session_jwt()

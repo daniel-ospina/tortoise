@@ -1,0 +1,24 @@
+{
+  "holdout": false,
+  "seed": 12,
+  "suite": "isolation",
+  "team": "team_b",
+  "turns": [
+    {
+      "content": "For Team B: the 'Mercury' incident postmortem is scheduled Friday. The Mercury on-call rotation is fixed.",
+      "role": "user"
+    },
+    {
+      "content": "Recorded under Team B.",
+      "role": "assistant"
+    },
+    {
+      "content": "Priority: ship the Mercury retry fix before the postmortem.",
+      "role": "user"
+    },
+    {
+      "content": "Recorded.",
+      "role": "assistant"
+    }
+  ]
+}

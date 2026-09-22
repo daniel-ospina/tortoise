@@ -56,28 +56,29 @@ def client():
         yield c
 
 
-def _seed_team(fake, *, team_id="t1", created_by=_OWNER,
+def _seed_team(fake, *, org_id="t1", created_by=_OWNER,
                user_ids=None, status="active", email="owner@example.com",
                team_extra=None):
     """Seed a claimed team + an api_keys row created by `created_by`."""
-    team_row = {"id": team_id, "name": "Team", "tier": "free",
+    org_row = {"id": org_id, "name": "Team", "tier": "free",
                 "max_users": 5, "max_graphs": 5, "graph_size_cap": 10000,
-                "ops_allowance": 1000, "email": email}
+                "ops_allowance": 1000, "email": email,
+                "dashboard_key_login": True}
     if team_extra:
-        team_row.update(team_extra)
-    fake.seed("teams", [team_row])
-    mems = [{"team_id": team_id, "user_id": uid, "role": "owner" if uid == _OWNER else "member",
+        org_row.update(team_extra)
+    fake.seed("organizations", [org_row])
+    mems = [{"org_id": org_id, "user_id": uid, "role": "owner" if uid == _OWNER else "member",
              "status": status}
             for uid in (user_ids or [_OWNER, _MEMBER])]
-    fake.seed("team_memberships", mems)
-    return team_id
+    fake.seed("org_memberships", mems)
+    return org_id
 
 
-def _mint_key(fake, team_id="t1", created_by=_OWNER):
+def _mint_key(fake, org_id="t1", created_by=_OWNER):
     plain = f"tt_{uuid.uuid4().hex}"
     fake.seed("api_keys", [{
         "id": f"k-{uuid.uuid4().hex[:8]}",
-        "team_id": team_id,
+        "org_id": org_id,
         "lookup_hash": lookup_hash(plain),
         "key_prefix": plain[:10],
         "created_via": "provisioned",
@@ -192,12 +193,12 @@ class TestSessionLogin:
         # Force the flag off on the resolved team (resolve_api_key reads
         # dashboard_key_login from the teams row — seed it off).
         monkeypatch.setattr(sc, "get_control_plane", lambda: FakeControlPlane(
-            tables={"teams": [{"id": "t1", "name": "T", "tier": "free", "max_users": 5,
+            tables={"organizations": [{"id": "t1", "name": "T", "tier": "free", "max_users": 5,
                                "max_graphs": 5, "graph_size_cap": 10000, "ops_allowance": 1000,
                                "email": "x@y.com", "dashboard_key_login": False}],
-                    "team_memberships": [{"team_id": "t1", "user_id": _OWNER,
+                    "org_memberships": [{"org_id": "t1", "user_id": _OWNER,
                                           "role": "owner", "status": "active"}],
-                    "api_keys": [{"id": "k1", "team_id": "t1", "lookup_hash": lookup_hash(key),
+                    "api_keys": [{"id": "k1", "org_id": "t1", "lookup_hash": lookup_hash(key),
                                   "created_by": _OWNER, "enabled": True,
                                   "revoked_at": None, "expires_at": None}]}))
         r = _exchange(client, key)
@@ -219,12 +220,12 @@ class TestSessionLogin:
         assert r.json()["detail"]["error_code"] == "KEY_NOT_USER_MINTED"
 
     def test_identity_key_on_anon_team_403_anon_team_no_owner(self, client, fake):
-        fake.seed("teams", [{"id": "t-anon", "name": "T", "tier": "free",
+        fake.seed("organizations", [{"id": "t-anon", "name": "T", "tier": "free",
                              "max_users": 5, "max_graphs": 5, "graph_size_cap": 10000,
                              "ops_allowance": 1000, "email": None}])
-        fake.seed("team_memberships", [{"team_id": "t-anon", "identity": "anon-abc",
+        fake.seed("org_memberships", [{"org_id": "t-anon", "identity": "anon-abc",
                                         "role": "owner", "status": "active"}])
-        key = _mint_key(fake, team_id="t-anon", created_by="anon-abc")
+        key = _mint_key(fake, org_id="t-anon", created_by="anon-abc")
         r = _exchange(client, key)
         assert r.status_code == 403
         assert r.json()["detail"]["error_code"] == "ANON_TEAM_NO_OWNER"
@@ -242,12 +243,12 @@ class TestSessionLogin:
         creators ONLY — a UUID creator who is no longer an active member (a
         team that lost its claimed owner) is KEY_NOT_USER_MINTED, never
         ANON_TEAM_NO_OWNER."""
-        fake.seed("teams", [{"id": "t-anon2", "name": "T", "tier": "free",
+        fake.seed("organizations", [{"id": "t-anon2", "name": "T", "tier": "free",
                              "max_users": 5, "max_graphs": 5, "graph_size_cap": 10000,
                              "ops_allowance": 1000, "email": None}])
-        fake.seed("team_memberships", [{"team_id": "t-anon2", "identity": "anon-xyz",
+        fake.seed("org_memberships", [{"org_id": "t-anon2", "identity": "anon-xyz",
                                         "role": "owner", "status": "active"}])
-        key = _mint_key(fake, team_id="t-anon2", created_by=_MEMBER)  # UUID, not a member
+        key = _mint_key(fake, org_id="t-anon2", created_by=_MEMBER)  # UUID, not a member
         r = _exchange(client, key)
         assert r.status_code == 403
         assert r.json()["detail"]["error_code"] == "KEY_NOT_USER_MINTED"
@@ -346,18 +347,18 @@ class TestSessionLogin:
         key = _mint_key(fake, created_by=_OWNER)
         _patch_gotrue(monkeypatch)
         # Post-verify backstop: remove the membership from the fake so the
-        # sanity check fails. Simulated by patching membership_for_user_team
+        # sanity check fails. Simulated by patching membership_for_user_org
         # to return None for the mint-target after the mint.
-        real = sc.membership_for_user_team
+        real = sc.membership_for_user_org
         calls = {"n": 0}
 
-        def _flaky(cp, user_id, team_id):
+        def _flaky(cp, user_id, org_id):
             calls["n"] += 1
             if calls["n"] > 1:  # pre-mint check passes; post-verify check fails
                 return None
-            return real(cp, user_id, team_id)
+            return real(cp, user_id, org_id)
 
-        monkeypatch.setattr(sc, "membership_for_user_team", _flaky)
+        monkeypatch.setattr(sc, "membership_for_user_org", _flaky)
         r = _exchange(client, key)
         assert r.status_code == 403
 
@@ -383,3 +384,204 @@ class TestCreateApiKeySessionAttribution:
         assert rows, "no api_keys row written"
         assert rows[0]["created_by"] == _OWNER, \
             f"session mint must record the user UUID, got {rows[0]['created_by']!r}"
+
+
+class TestMintPathOutage503:
+    """#1719 Task 4: a control-plane failure on the mint-path reads must
+    degrade to 503 control_plane_unavailable — never the global-handler 500
+    body the client rendered as 'Invalid API key.'."""
+
+    def test_mint_path_membership_outage_503(self, client, fake, monkeypatch):
+        """membership_for_user_org raises (outage/schema-cache) on the
+        mint path → 503 with the error_code, not a raw 500."""
+        _seed_team(fake, created_by=_OWNER)
+        key = _mint_key(fake, created_by=_OWNER)
+
+        def _boom(cp, user_id, org_id):
+            raise RuntimeError("Supabase control-plane query failed "
+                               "(org_memberships): HTTP 400")
+
+        monkeypatch.setattr(sc, "membership_for_user_org", _boom)
+        r = _exchange(client, key)
+        assert r.status_code == 503, r.text
+        body = r.json()
+        assert body.get("detail", {}).get("error_code") == "control_plane_unavailable"
+        assert "temporarily unavailable" in body["detail"]["message"].lower()
+
+    def test_mint_path_is_anon_team_outage_503(self, client, fake, monkeypatch):
+        """is_anon_org raises on the anon branch → 503, never a 500."""
+        _seed_team(fake, created_by="anon-abc-identity")  # identity creator
+        key = _mint_key(fake, created_by="anon-abc-identity")
+
+        def _boom(cp, org_id):
+            raise RuntimeError("Supabase control-plane query failed "
+                               "(org_memberships): HTTP 500")
+
+        monkeypatch.setattr(sc, "is_anon_org", _boom)
+        r = _exchange(client, key)
+        assert r.status_code == 503, r.text
+        assert r.json().get("detail", {}).get("error_code") == "control_plane_unavailable"
+
+
+class TestResolveLegOutage503:
+    """#1737: the resolve-leg (api_keys read) shares the control-plane
+    outage class — a RuntimeError escaping the resolve must degrade to 503
+    control_plane_unavailable, never the raw 500 "Auth error" (the mint-path
+    map landed in #1719; this closes the resolve-leg gap on the SAME
+    endpoint, which previously 500'd depending on which query failed first).
+    """
+
+    def test_resolve_leg_outage_503(self, client, fake, monkeypatch):
+        """The REAL failure class: resolve_api_key (inside the shared
+        _get_current_team_supabase) raises RuntimeError on a control-plane
+        outage; the function converts it to HTTPException(500, 'Auth error')
+        internally, and the call-site map must turn that into 503
+        control_plane_unavailable — not the raw 500 'Auth error'."""
+        _seed_team(fake, created_by=_OWNER)
+        key = _mint_key(fake, created_by=_OWNER)
+
+        # Patch the inner resolve seam (what _get_current_team_supabase
+        # calls) so the REAL conversion path (RuntimeError → 500
+        # "Auth error") is exercised, then the call-site 500→503 map fires.
+        def _boom_resolve(cp, token):
+            raise RuntimeError("Supabase control-plane query failed "
+                               "(api_keys): HTTP 400")
+
+        monkeypatch.setattr(sc, "resolve_api_key", _boom_resolve)
+        r = _exchange(client, key)
+        assert r.status_code == 503, r.text
+        body = r.json()
+        assert body.get("detail", {}).get("error_code") == "control_plane_unavailable"
+        body = r.json()
+        assert body.get("detail", {}).get("error_code") == "control_plane_unavailable"
+        assert "temporarily unavailable" in body["detail"]["message"].lower()
+
+
+class TestRateLimitChargePoints:
+    """#1719 Task 5: server faults must not consume the 5/hr login bucket —
+    charge only on terminal 200/401/403 (server decisions), never on 5xx."""
+
+    def _limiter_on(self, monkeypatch):
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+
+    def test_503_does_not_consume_bucket(self, client, fake, monkeypatch):
+        """A mint-path 503 must NOT burn a bucket slot — a valid login
+        still succeeds after it."""
+        self._limiter_on(monkeypatch)
+        _seed_team(fake, created_by=_OWNER)
+        key = _mint_key(fake, created_by=_OWNER)
+        orig = sc.membership_for_user_org
+
+        def _boom(cp, user_id, org_id):
+            raise RuntimeError("Supabase control-plane query failed "
+                               "(org_memberships): HTTP 400")
+
+        monkeypatch.setattr(sc, "membership_for_user_org", _boom)
+        r = _exchange(client, key)
+        assert r.status_code == 503, r.text  # bucket NOT charged
+
+        # Narrow undo: restore ONLY the _boom patch (not the _env fixture's
+        # control-plane/GoTrue patches).
+        monkeypatch.setattr(sc, "membership_for_user_org", orig)
+        _patch_gotrue(monkeypatch)
+        r = _exchange(client, key)
+        assert r.status_code == 200, r.text
+
+    def test_invalid_key_401_consumes_bucket(self, client, fake, monkeypatch):
+        """Junk-key 401s charge — brute-force protection preserved:
+        5× 401 → 6th attempt (even valid) 429."""
+        self._limiter_on(monkeypatch)
+        _seed_team(fake, created_by=_OWNER)
+        key = _mint_key(fake, created_by=_OWNER)
+        for _ in range(5):
+            r = _exchange(client, "tt_does-not-exist")
+            assert r.status_code == 401, r.text
+        r = _exchange(client, key)
+        assert r.status_code == 429
+
+    def test_legacy_key_403_does_not_bypass_bucket(self, client, fake, monkeypatch):
+        """403s (server decisions — ANON_TEAM_NO_OWNER / KEY_NOT_USER_MINTED)
+        charge: 5× 403 → 6th attempt 429. A leaked legacy key can't be
+        enumerated beyond 5/hr."""
+        self._limiter_on(monkeypatch)
+        _seed_team(fake, created_by="anon-abc-identity")
+        key = _mint_key(fake, created_by="anon-abc-identity")
+        for _ in range(5):
+            r = _exchange(client, key)
+            assert r.status_code == 403, r.text  # claim funnel, no 500
+        r = _exchange(client, key)
+        assert r.status_code == 429
+
+    def test_concurrent_charges_cannot_exceed_burst_bound(self, client, fake, monkeypatch):
+        """#1738: the deferred check and the terminal charge are SEPARATE
+        lock acquisitions — N concurrent 401s can each pass the check, then
+        all charge, bursting the bucket to limit+concurrency. _charge_ip_bucket
+        re-checks len(bucket) >= limit under the lock and DROPS over-limit
+        charges, preserving the 5/hr boundary."""
+        self._limiter_on(monkeypatch)
+        from tortoise import hosted_api as ha
+        ip = "203.0.113.9"
+        # Seed the window AT the limit — as if 5 earlier 401s had charged.
+        ha._SESSION_BUCKETS[ip] = [time.time()] * ha._SESSION_LOGIN_LIMIT
+        # A burst of concurrent terminal-outcome charges must not inflate
+        # the bucket past the limit (each sees the full window under the lock).
+        import asyncio
+        async def _burst():
+            await asyncio.gather(*[
+                ha._charge_ip_bucket(
+                    ha._SESSION_BUCKETS, ha._SESSION_LOGIN_LOCK, ip,
+                    limit=ha._SESSION_LOGIN_LIMIT,
+                    window_s=ha._SESSION_LOGIN_WINDOW_S)
+                for _ in range(8)
+            ])
+        loop = asyncio.get_event_loop_policy().new_event_loop()
+        try:
+            loop.run_until_complete(_burst())
+        finally:
+            loop.close()
+        assert len(ha._SESSION_BUCKETS[ip]) == ha._SESSION_LOGIN_LIMIT
+
+    def test_charge_below_limit_still_appends(self, client, fake, monkeypatch):
+        """#1738: the burst bound only drops OVER-limit charges — a charge
+        into a window with room still appends (the deferred-charge contract)."""
+        self._limiter_on(monkeypatch)
+        from tortoise import hosted_api as ha
+        ip = "203.0.113.10"
+        ha._SESSION_BUCKETS[ip] = []
+        import asyncio
+        loop = asyncio.get_event_loop_policy().new_event_loop()
+        try:
+            loop.run_until_complete(
+                ha._charge_ip_bucket(
+                    ha._SESSION_BUCKETS, ha._SESSION_LOGIN_LOCK, ip,
+                    limit=ha._SESSION_LOGIN_LIMIT,
+                    window_s=ha._SESSION_LOGIN_WINDOW_S))
+        finally:
+            loop.close()
+        assert len(ha._SESSION_BUCKETS[ip]) == 1
+
+
+class TestChargeBucketResilience:
+    """#1719 code-review P2: _charge_ip_bucket must never raise — a charge
+    is telemetry, and a KeyError on a pruned bucket would replace a
+    terminal 401/403/200 with a 500."""
+
+    def test_charge_after_prune_does_not_raise(self, client, fake, monkeypatch):
+        self._limiter_on(monkeypatch)
+        from tortoise import hosted_api as ha
+        # Simulate the deferred-check-then-charge race: the bucket existed at
+        # check time (pruned to empty), then a concurrent max_entries sweep
+        # deleted it before the charge. setdefault must recreate it, not KeyError.
+        ip = "203.0.113.7"
+        ha._SESSION_BUCKETS[ip] = []  # created by the deferred check
+        del ha._SESSION_BUCKETS[ip]   # concurrent prune removed it
+        # The charge must not raise (it recreates the bucket).
+        import asyncio
+        asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
+            ha._charge_ip_bucket(ha._SESSION_BUCKETS, ha._SESSION_LOGIN_LOCK,
+                                 ip, limit=ha._SESSION_LOGIN_LIMIT,
+                                 window_s=ha._SESSION_LOGIN_WINDOW_S))
+        assert ha._SESSION_BUCKETS[ip], "bucket must be recreated and charged"
+
+    def _limiter_on(self, monkeypatch):
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)

@@ -1,0 +1,47 @@
+# Baseline allowlist for the test-lint tripwire (issue #2143, wave 3 of
+# #2127) — a DATA file, deliberately NOT conftest-inline.
+#
+# Why config/: a change under config/ selects the CORE surface, tier-2,
+# `full=false` (tools/ci_selection.py — config/* falls through to core).
+# A conftest-inline allowlist would flip every wave PR to the full docker
+# matrix via SHARED_MODULES ("tests/conftest.py") — the #2090 scoping
+# decision (docs/scoping/2026-09-01-2090-test-b-lane-scoping.md, "Lint
+# tripwire ... MOVED to follow-up 1 wave 3").
+#
+# What this file does: tests/test_lint_tripwire.py (registered in
+# config/ci-surfaces.yml `tier1`) fails loud at pytest COLLECTION on any
+# tests/ module that monkeypatches `TortoiseSDK.__init__` WITHOUT a
+# `TORTOISE_DB_PATH` pin (the #2090 keepalive-churn shape) and is NOT
+# listed here. Modules listed here are the PRE-EXISTING baseline →
+# warn-only (non-blocking) via the pytest warnings summary.
+#
+# Removing an entry (after migrating the module onto
+# tests/_http_fixtures.patched_tortoise_sdk) FLIPS that file to fail-loud —
+# this is how the baseline empties over time. At wave-3 ship time the
+# re-grep (patch `TortoiseSDK.__init__` ∧ ¬TORTOISE_DB_PATH-pin in scope)
+# matched exactly the 4 modules below: the audited DELIBERATE leftovers
+# that waves 1/1b/2 (#2137/#2153/#2154) did not migrate. All other
+# pre-existing patchers (tests/test_hosted_api.py canonical, tests/
+# test_free_team_entitlement.py, tests/test_cli_context.py, the shared
+# helper itself) carry a pin and never match.
+version: 1
+allowlist:
+  # Wave-2 audit named blocks (#2127, docs/scoping/2026-09-02-2127-b-waves-
+  # scoping.md): the q3/wizard DELIBERATE db_path PASS-THROUGH patches
+  # (test_q3_and_wizard_write_same_keys et al.) must bind the SAME registry
+  # DB the Q3 tool block used — the force-db_path shared helper cannot
+  # express that. Restore closes every keepalive anchor deterministically.
+  - tests/test_onboarding_endpoints.py
+  # Wave-1b patch-only file (#2127): the tenant-isolation `_route_patch`
+  # maps namespace → per-tenant temp DB (one module-global patch; the
+  # force-one-path helper cannot express per-tenant routing). No
+  # _FALLBACK_KEEPALIVE involvement.
+  - tests/test_pack_manifest_store.py
+  # Wave-1b patch-only file (#2127): same `_route_patch` namespace-routing
+  # shape as test_pack_manifest_store.py. No _FALLBACK_KEEPALIVE involvement.
+  - tests/test_pack_manifest_store_extraction.py
+  # Wave-1b patch-only file (#2127): the #451 real-init SPY
+  # (test_import_does_not_construct_tortoisesdk) asserts mcp_server import
+  # never constructs TortoiseSDK — a pass-through spy that records calls;
+  # it cannot create keepalive anchors (asserts zero constructions).
+  - tests/test_sdk_props_coercion.py

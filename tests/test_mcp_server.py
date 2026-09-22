@@ -12,15 +12,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # import cycle can never be masked).
 import tortoise.mcp_server as mcp_mod
 
-# Check if FalkorDB is available for integration tests
-try:
-    from tortoise.sdk import TortoiseSDK
-    sdk = TortoiseSDK()
-    sdk.status()
-    FALKORDB_AVAILABLE = True
-except Exception:
-    FALKORDB_AVAILABLE = False
-
 
 @pytest.fixture(autouse=True)
 def _transport_context():
@@ -31,15 +22,15 @@ def _transport_context():
     context (quota skipped). Restore after each test.
     """
     from tortoise.mcp_auth import (  # noqa: I001
-        _current_team_id, _current_team_limits, _transport_mode,
+        _current_org_id, _current_org_limits, _transport_mode,
     )
     _transport_mode.set("stdio")
-    _current_team_id.set(None)
-    _current_team_limits.set(None)
+    _current_org_id.set(None)
+    _current_org_limits.set(None)
     yield
     _transport_mode.set(None)
-    _current_team_id.set(None)
-    _current_team_limits.set(None)
+    _current_org_id.set(None)
+    _current_org_limits.set(None)
 
 
 def test_stdio_embedded_banner(monkeypatch, capsys, tmp_path):
@@ -152,10 +143,10 @@ class _StubQuerySDK:
 
 @pytest.fixture
 def query_sdk(monkeypatch):
-    """Swap _get_team_sdk for a stub; return the stub to assert on calls."""
+    """Swap _get_org_sdk for a stub; return the stub to assert on calls."""
     from tortoise import mcp_server
     stub = _StubQuerySDK()
-    monkeypatch.setattr(mcp_server, "_get_team_sdk", lambda: stub)
+    monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: stub)
     return stub
 
 
@@ -403,20 +394,128 @@ class TestToolFunctions:
         """#1009: GITHUB_CLIENT_ID unset (self-host HTTP — OAuth is hosted-mode
         only) → the prompt-canonical text, not the misleading
         'GitHub OAuth not configured' (AGENT_ONBOARDING.md lines 51/209)."""
-        from tortoise.mcp_auth import _current_team_id
+        from tortoise.mcp_auth import _current_org_id
         from tortoise.mcp_server import tortoise_onboarding_github_connect
         monkeypatch.delenv("GITHUB_CLIENT_ID", raising=False)
-        token = _current_team_id.set("team-github-oauth")
+        token = _current_org_id.set("team-github-oauth")
         try:
             result = tortoise_onboarding_github_connect("acme")
         finally:
-            _current_team_id.reset(token)
+            _current_org_id.reset(token)
         assert result == {"error": "No team context (HTTP mode required)"}
 
+    def test_github_index_wraps_repo_into_list(self, monkeypatch):
+        """#1845 review (deep bug scan): _run_indexing now takes a repo LIST.
+        The MCP caller wraps its single optional repo into a one-item list
+        through the same allowlist validator as the REST re-poll — a bare
+        str would be iterated character-by-character by the new contract
+        (repo='repo1' → walks org/r, org/e, ...)."""
+        import tortoise.hosted_api as ha
+        import tortoise.mcp_server as ms
+        from tortoise.mcp_auth import _current_org_id
+        from tortoise.mcp_server import tortoise_onboarding_github_index
 
-@pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="FalkorDB not available")
+        calls: list = []
+        token = _current_org_id.set("team-github-index")
+        import asyncio as _asyncio
+        # Hermetic (CI workers may have no current event loop — the tool's
+        # get_event_loop().create_task raises RuntimeError there): create an
+        # explicit loop so the scheduled task actually runs.
+        loop = _asyncio.new_event_loop()
+        _asyncio.set_event_loop(loop)
+        try:
+            monkeypatch.setattr(ha, "_github_token_enc", lambda tid: "enc")
+            monkeypatch.setattr(ha, "_start_index_job",
+                                lambda tid, kind="github": ("job1", True))
+
+            async def _capture(job_id, org_id, org, repos):
+                calls.append((org, repos))
+
+            monkeypatch.setattr(ha, "_run_indexing", _capture)
+            # the tool imports names into its module namespace at call time
+            monkeypatch.setattr(ms, "_github_token_enc",
+                                lambda tid: "enc", raising=False)
+            monkeypatch.setattr(ms, "_start_index_job",
+                                lambda tid, kind="github": ("job1", True),
+                                raising=False)
+            monkeypatch.setattr(ms, "_run_indexing", _capture, raising=False)
+            monkeypatch.setattr(ms, "_validate_repo_scope",
+                                ha._validate_repo_scope, raising=False)
+            result = tortoise_onboarding_github_index("acme", "repo1")
+            assert result == {"job_id": "job1", "status": "started"}
+            # the tool schedules _run_indexing via create_task on the loop
+            # we set — pump it so the capture runs
+            loop.run_until_complete(_asyncio.sleep(0.05))
+            assert calls == [("acme", ["repo1"])], \
+                "the repo must be wrapped into a one-item list, not a bare str"
+        finally:
+            _current_org_id.reset(token)
+            loop.close()
+            _asyncio.set_event_loop(None)
+
+
+class TestGraphBoundTeamSurfaceReject:
+    """#2300 completeness sweep: EVERY MCP tool that touches team-level
+    state (the seven onboarding tools + pack install) must reject a
+    graph-bound resolution outright — no tool left asymmetric vs the REST
+    team-surface reject set (C5 #2114). Direct function-body probe with the
+    resolution ContextVars set (the same context the HTTP middleware
+    attaches to a deleg=0 per-graph key after #2300's registry-lane fix).
+    """
+
+    # tool name → call kwargs the function body needs BEFORE its reject
+    # fires (required params only — the reject is the first gate in every
+    # body; only demo_create checks org_id first, so the probe sets it).
+    TOOL_ARGS = {  # noqa: RUF012
+        "tortoise_onboarding_demo_create": {},
+        "tortoise_onboarding_state": {},
+        "tortoise_onboarding_seed": {},
+        "tortoise_onboarding_session_recording": {"enabled": True},
+        "tortoise_onboarding_github_connect": {},
+        "tortoise_onboarding_github_index": {"org": "acme"},
+        "tortoise_onboarding_github_status": {},
+        "tortoise_pack_install": {"manifest_yaml": "x: 1"},
+    }
+
+    def test_every_team_surface_tool_rejects_graph_bound(self):
+        from fastmcp.exceptions import AuthorizationError  # noqa: I001
+        from tortoise.mcp_auth import (
+            _current_graph_id, _current_graph_namespace,
+            _current_legacy_full_access, _current_scopes, _current_org_id,
+        )
+        toks = [
+            _current_org_id.set("gb-team"),
+            _current_graph_id.set("g_gb"),
+            _current_graph_namespace.set("team_gb_g_gb"),
+            _current_scopes.set(["graphs:read", "graphs:write"]),
+            _current_legacy_full_access.set(False),
+        ]
+        try:
+            for tool, args in sorted(self.TOOL_ARGS.items()):
+                fn = getattr(mcp_mod, tool, None)
+                assert fn is not None, f"{tool} has no module-level handler"
+                with pytest.raises(AuthorizationError) as exc:
+                    fn(**args)
+                assert "Graph-scoped keys cannot access" in str(
+                    exc.value), f"{tool}: {exc.value}"
+        finally:
+            for tok in reversed(toks):
+                tok.var.reset(tok)
+
+
 class TestToolIntegration:
     """Integration tests that require FalkorDB."""
+
+    @pytest.fixture(autouse=True)
+    def _require_live_uri(self):
+        """TestToolIntegration needs a REAL FalkorDB server (its tools construct
+        bare SDKs against the URI) — skip visibly on URI-less lanes via the
+        _live_utils gate, whose reason family is exempt from the #1436
+        skip-guard ("requires TORTOISE_DB_URI"). A probe-based skipif (bare
+        TortoiseSDK against the default embedded store) instead flips by LPT
+        order and reds the guard on tier-2 PR legs."""
+        from tests._live_utils import _skip_unless_live_uri
+        _skip_unless_live_uri()
     def test_status_returns_dict(self):
         from tortoise.mcp_server import tortoise_status
         result = tortoise_status()
@@ -651,7 +750,7 @@ class TestAnalyzeLlmBudget:
         """Beyond the per-minute budget, tortoise_analyze skips llm_classify
         (no outbound call) and degrades to keyword-only."""
         import tortoise.mcp_server as ms
-        from tortoise.mcp_auth import _current_team_id
+        from tortoise.mcp_auth import _current_org_id
         from tortoise.quota import MAX_ANALYZE_LLM_PER_MIN
 
         # embedded env (no Docker) so the team SDK resolves
@@ -661,7 +760,7 @@ class TestAnalyzeLlmBudget:
         monkeypatch.setenv("TORTOISE_DB_PATH", _os.path.join(_tf.mkdtemp(), "budget.db"))
 
         # Team context (HTTP) → budget accounting
-        token = _current_team_id.set("team-budget")
+        token = _current_org_id.set("team-budget")
         try:
             # Exercise the ACCUMULATION path: MAX calls allowed, next rejected
             ms._ANALYZE_LLM_BUDGET.pop("team-budget", None)
@@ -681,7 +780,7 @@ class TestAnalyzeLlmBudget:
             # Keyword path still answers
             assert result.get("pattern") is not None or "disagreement" in str(result.get("answer", ""))
         finally:
-            _current_team_id.reset(token)
+            _current_org_id.reset(token)
             ms._ANALYZE_LLM_BUDGET.pop("team-budget", None)
 
 
@@ -709,14 +808,13 @@ class TestEventsTools:
         assert rt.annotations.destructiveHint is True
 
     def test_events_poll_returns_same_shape_as_sdk(self, monkeypatch, tmp_path):
-        import os  # noqa: I001
-        from tortoise.mcp_server import tortoise_events_poll, _transport_mode
+        from tortoise.mcp_server import _transport_mode, tortoise_events_poll
         from tortoise.sdk import TortoiseSDK
 
         db = os.path.join(str(tmp_path), "evt.db")
         sdk = TortoiseSDK(db)
         sdk.create_point("statement", "hello from mcp")
-        monkeypatch.setattr("tortoise.mcp_server._get_team_sdk", lambda: sdk)
+        monkeypatch.setattr("tortoise.mcp_server._get_org_sdk", lambda: sdk)
         token = _transport_mode.set("stdio")
         try:
             result = tortoise_events_poll()
@@ -726,12 +824,11 @@ class TestEventsTools:
         assert result["next_cursor"]
 
     def test_events_poll_unknown_type_error(self, monkeypatch, tmp_path):
-        import os  # noqa: I001
-        from tortoise.mcp_server import tortoise_events_poll, _transport_mode
+        from tortoise.mcp_server import _transport_mode, tortoise_events_poll
         from tortoise.sdk import TortoiseSDK
 
         sdk = TortoiseSDK(os.path.join(str(tmp_path), "evt2.db"))
-        monkeypatch.setattr("tortoise.mcp_server._get_team_sdk", lambda: sdk)
+        monkeypatch.setattr("tortoise.mcp_server._get_org_sdk", lambda: sdk)
         token = _transport_mode.set("stdio")
         try:
             result = tortoise_events_poll(types=["Nope"])
@@ -740,13 +837,12 @@ class TestEventsTools:
         assert result.get("error")  # _safe structured error, not a crash
 
     def test_retract_point_returns_sdk_result(self, monkeypatch, tmp_path):
-        import os  # noqa: I001
-        from tortoise.mcp_server import tortoise_retract_point, _transport_mode
+        from tortoise.mcp_server import _transport_mode, tortoise_retract_point
         from tortoise.sdk import TortoiseSDK
 
         sdk = TortoiseSDK(os.path.join(str(tmp_path), "evt3.db"))
         p = sdk.create_point("statement", "retract me")
-        monkeypatch.setattr("tortoise.mcp_server._get_team_sdk", lambda: sdk)
+        monkeypatch.setattr("tortoise.mcp_server._get_org_sdk", lambda: sdk)
         token = _transport_mode.set("stdio")
         try:
             result = tortoise_retract_point(p["id"])
@@ -832,11 +928,10 @@ class TestIngestPromotionPolicy:
             assert "not allowed under promotion_policy 'gated'" in res["error"]
 
     def _sdk_backed_ingest(self, request, monkeypatch, tmp_path, *, reify=False, **kw):
-        import os  # noqa: I001
         from tortoise.sdk import TortoiseSDK
         sdk = TortoiseSDK(os.path.join(str(tmp_path), "ing.db"))
         request.addfinalizer(sdk.close)  # match repo teardown convention
-        monkeypatch.setattr("tortoise.mcp_server._get_team_sdk", lambda: sdk)
+        monkeypatch.setattr("tortoise.mcp_server._get_org_sdk", lambda: sdk)
         conn = {"from": "pA", "to": "pB", "operator": "IMPL"}
         if reify:
             # §8 (INGEST_CONTRACT): reify:true anchors a REAL operator node
@@ -937,7 +1032,6 @@ class TestStdioEntrypointToolRegistration:
 
     def test_stdio_entrypoint_serves_full_registry(self, tmp_path):
         import json
-        import os
         import select
         import subprocess
         import sys
@@ -996,7 +1090,10 @@ class TestStdioEntrypointToolRegistration:
             # Issue #993 target (1): tools/list >= 70 on this entrypoint.
             assert len(names) >= 70, f"expected >=70 tools, got {len(names)}"
             # Onboarding-critical tools must be present (Step 0 + the set).
-            assert "tortoise_health" in names
+            # #3883: tortoise_health is RETIRED — the consolidator is advertised
+            # and the retired name still answers, with a warning, off the list.
+            assert "tortoise_overview" in names
+            assert "tortoise_health" not in names
             onboarding = {
                 "tortoise_onboarding_demo_create",
                 "tortoise_onboarding_state",
@@ -1004,6 +1101,7 @@ class TestStdioEntrypointToolRegistration:
                 "tortoise_onboarding_github_connect",
                 "tortoise_onboarding_github_index",
                 "tortoise_onboarding_github_status",
+                "tortoise_onboarding_seed",  # #1999 (W3)
             }
             missing = onboarding - set(names)
             assert not missing, f"missing onboarding tools: {sorted(missing)}"

@@ -59,7 +59,7 @@ def main() -> int:
     ap.add_argument("--base", default="origin/main",
                     help="base ref to compare against (default: origin/main)")
     ap.add_argument("--max-behind", type=int, default=None,
-                    help="fail when behind by more than N commits "
+                    help="fail when behind by more than N commits "  # noqa: UP031
                          "(default: %d)" % DEFAULT_MAX_BEHIND)
     ap.add_argument("--json", action="store_true",
                     help="machine-readable output")

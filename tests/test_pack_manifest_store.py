@@ -1,0 +1,669 @@
+"""Hosted per-tenant custom packs (#1935, epic #1891 slice 4; test-design
+#1898 surfaces 5/7/8).
+
+Covers:
+- validate_manifest: valid / malformed / missing-namespace / reserved /
+  ontology-only (connector+tool entrypoints) / oversized
+- POST /v1/packs/manifests: 201 / 422 / 413 / 401
+- Storage + activation: :PackManifest node + PackInstall source='custom'
+- GET /v1/packs: tenant packs listed; cross-tenant isolation (A's pack
+  never visible to B — structural graph-namespace isolation)
+- Concurrent double-upload → exactly one activation (idempotent MERGE +
+  per-(graph,namespace) lock #1307)
+- Deployment gate: tortoise_pack_install is an actionable stub when the
+  serving app is not hosted_api (self-host)
+- tenant_view memoization: cached per (tenant, pack_config_version),
+  invalidated on :PackManifest write (#1154/#1350)
+
+Docker lane (default): TORTOISE_DB_URI must be set (epic #1647 P4).
+"""
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+import threading
+import uuid
+
+os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
+os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
+os.environ.setdefault("FASTAPI_INTERNAL_KEY", "test-internal-shared-secret-xyz")
+
+import pytest
+from fastapi.testclient import TestClient
+
+import tortoise.hosted_api as ha_mod
+from tests._http_fixtures import patched_tortoise_sdk
+from tortoise.hosted_api import app, get_current_org, get_current_user
+
+TEST_ORG_ID = f"team-{uuid.uuid4().hex[:8]}"
+TEST_TEAM = {
+    "org_id": TEST_ORG_ID,
+    "key_id": "test-key-001",
+    # C5 #2114 (#2260): legacy tt_ class — scope-less key_id dicts 403 the
+    # data-plane gates otherwise (mirrors the #2241 migration pattern).
+    "legacy_full_access": True,
+    "tier": "free",
+    "max_users": 1, "max_graphs": 1, "max_points": 10000,
+    "max_api_keys": 2, "max_sessions": None,
+}
+TEST_TEAM_B = {"org_id": f"team-{uuid.uuid4().hex[:8]}", "key_id": "test-key-002",
+               # C5 #2114 (#2260): legacy tt_ class (see TEST_TEAM note).
+               "legacy_full_access": True,
+               "tier": "free", "max_users": 1, "max_graphs": 1,
+               "max_points": 10000, "max_api_keys": 2, "max_sessions": None}
+
+VALID_MANIFEST = """namespace: tenant-ops
+name: Tenant Operations
+version: 0.1.0
+tier: free
+ontology:
+  extends: core
+  objectKinds:
+  - contract
+"""
+
+RESERVED_MANIFEST = VALID_MANIFEST.replace("tenant-ops", "dev")
+CONNECTOR_MANIFEST = VALID_MANIFEST + """
+connectors:
+- source: github
+  sourceKind: github_issue
+  entrypoint: connector.py::GitHubConnector
+"""
+
+
+@pytest.fixture
+def client():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "test.db")
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
+        # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk).
+        # Patching tortoise.sdk.TortoiseSDK == hosted_api.TortoiseSDK (same
+        # class object) — the helper's hosted_api patch applies identically;
+        # it adds the #1950 TORTOISE_DB_PATH pin + deterministic close of
+        # _make_sdk anchors at exit (this file's local helper cleared neither).
+        with patched_tortoise_sdk(db_path):
+            yield TestClient(app)
+
+
+@pytest.fixture
+def client_b():
+    """Second tenant (isolation probe)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "test_b.db")
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM_B)
+        # #2127: shared helper (see client).
+        with patched_tortoise_sdk(db_path):
+            yield TestClient(app)
+
+
+def _team_sdk(org_id: str = TEST_ORG_ID):
+    return ha_mod._make_sdk(namespace=org_id)
+
+
+# ── validate_manifest (unit) ────────────────────────────────────────────────
+
+class TestValidateManifest:
+    def test_valid(self):
+        from tortoise.pack_manifest_store import validate_manifest
+        r = validate_manifest(VALID_MANIFEST)
+        assert r.ok and r.namespace == "tenant-ops", r.errors
+
+    def test_malformed_yaml(self):
+        from tortoise.pack_manifest_store import validate_manifest
+        r = validate_manifest("namespace: [unclosed")
+        assert not r.ok
+
+    def test_missing_namespace(self):
+        from tortoise.pack_manifest_store import validate_manifest
+        r = validate_manifest("name: No Namespace\ntier: free\n")
+        assert not r.ok
+        assert "namespace" in r.errors[0]
+
+    def test_reserved_namespace_rejected(self):
+        from tortoise.pack_manifest_store import validate_manifest
+        r = validate_manifest(RESERVED_MANIFEST)
+        assert not r.ok
+        assert "reserved starter pack" in r.errors[0]
+
+    def test_connector_entrypoint_rejected_ontology_only(self):
+        from tortoise.pack_manifest_store import validate_manifest
+        r = validate_manifest(CONNECTOR_MANIFEST)
+        assert not r.ok
+        assert "ontology-only" in r.errors[0]
+
+    def test_oversized(self):
+        from tortoise.pack_manifest_store import validate_manifest
+        r = validate_manifest("namespace: big\nname: X\n# " + "x" * (70 * 1024))
+        assert not r.ok
+        assert "64KB" in r.errors[0]
+
+    def test_traversal_namespace_rejected(self, tmp_path, monkeypatch):
+        """#2029 review gate (security P1): a traversal namespace must never
+        escape the temp registry dir — no mkdir/write outside it. The
+        charset guard rejects most vectors; the resolve-containment check
+        backstops it (defense in depth against a charset regression)."""
+        import tempfile as _tempfile
+        from pathlib import Path as _Path
+
+        from tortoise.pack_manifest_store import validate_manifest
+
+        class _FixedTempDir:
+            def __init__(self, root: _Path):
+                self._root = root
+
+            def __enter__(self):
+                self._root.mkdir(parents=True, exist_ok=True)
+                return str(self._root)
+
+            def __exit__(self, *exc):
+                return False
+        monkeypatch.setattr(_tempfile, "TemporaryDirectory",
+                            lambda prefix="": _FixedTempDir(tmp_path / "td"))
+        for bad in ("../escape", "a/b", "a\\b", "..", "-", "x:y"):
+            r = validate_manifest(f"namespace: {bad}\nname: X\ntier: free\n")
+            assert not r.ok, bad
+            assert "namespace" in r.errors[0], (bad, r.errors)
+        # Defense in depth: nothing escaped the registry dir.
+        assert not (tmp_path / "escape").exists()
+        assert not (tmp_path / "td" / ".." / "escape").resolve().exists()
+
+    def test_deeply_nested_yaml_recursion_error_is_validation_failure(self):
+        """#2040 Task 4: a deeply-nested payload-controlled yaml raises
+        ``RecursionError`` (NOT a YAMLError subclass) through
+        ``yaml.safe_load`` — it must be caught as a clean validation failure
+        (422-class), never escape as a 500 post-swap. The genuinely-nested
+        flow mapping ("{" * 1500 + "}" * 1500) is the form that empirically
+        raises RecursionError — the "a:" * 1000 form raises ScannerError (a
+        YAMLError subclass the existing handler already catches, so it would
+        pass vacuously)."""
+        from tortoise.pack_manifest_store import validate_manifest
+        r = validate_manifest("{" * 1500 + "}" * 1500)
+        assert not r.ok
+        assert "nesting too deep" in r.errors[0]
+
+
+# ── API surface ─────────────────────────────────────────────────────────────
+
+class TestUploadEndpoint:
+    def test_upload_201_and_activation(self, client):
+        r = client.post("/v1/packs/manifests",
+                        json={"manifest_yaml": VALID_MANIFEST})
+        assert r.status_code == 201, r.text
+        body = r.json()
+        assert body["activated"] is True and body["namespace"] == "tenant-ops"
+        # Storage + activation records present.
+        sdk = _team_sdk()
+        from tortoise.pack_manifest_store import get_tenant_manifests
+        ms = get_tenant_manifests(sdk)
+        assert any(m["namespace"] == "tenant-ops" for m in ms)
+        from tortoise.pack_state import get_tenant_packs
+        packs = get_tenant_packs(sdk)
+        assert any(p["namespace"] == "tenant-ops" and p["source"] == "custom"
+                   for p in packs)
+
+    def test_upload_422_invalid(self, client):
+        r = client.post("/v1/packs/manifests",
+                        json={"manifest_yaml": "namespace: [broken"})
+        assert r.status_code == 422
+        assert "errors" in r.json()["detail"]
+
+    def test_upload_422_reserved(self, client):
+        r = client.post("/v1/packs/manifests",
+                        json={"manifest_yaml": RESERVED_MANIFEST})
+        assert r.status_code == 422
+        assert "reserved" in str(r.json()["detail"])
+
+    def test_upload_413_oversized(self, client):
+        big = "namespace: big\nname: X\n# " + "x" * (70 * 1024)
+        r = client.post("/v1/packs/manifests", json={"manifest_yaml": big})
+        assert r.status_code == 413
+        # Wire size ~70KB < ~397KB wire cap → this must be the YAML gate,
+        # not the wire layers (pins the ordering of the two 413 paths).
+        assert r.json()["detail"] == "manifest exceeds 64KB"
+
+    def test_upload_401_unauthenticated(self):
+        from tortoise.hosted_api import get_current_org as _gt
+        app.dependency_overrides.pop(_gt, None)
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patched_tortoise_sdk(os.path.join(tmpdir, "t.db")):
+            # #2127: shared helper — the caller path arg is deliberately
+            # dropped by the helper (documented); immaterial here (the 401
+            # fires before any SDK construction).
+            c = TestClient(app)
+            r = c.post("/v1/packs/manifests",
+                       json={"manifest_yaml": VALID_MANIFEST})
+            assert r.status_code == 401
+
+    def test_list_includes_tenant_pack(self, client):
+        client.post("/v1/packs/manifests",
+                    json={"manifest_yaml": VALID_MANIFEST})
+        r = client.get("/v1/packs")
+        assert r.status_code == 200
+        ns = [p["namespace"] for p in r.json()["packs"]]
+        assert "tenant-ops" in ns
+
+
+class TestUploadRateLimit:
+    """#2038: per-IP hourly budget for manifest uploads (pack_manifest).
+
+    Mirrors the import path's sensitive-op doctrine (#1389/#1230) — see
+    test_import_endpoint.py::test_import_rate_limited_429 and
+    test_import_rate_limit_independent_of_export.
+    """
+
+    def test_upload_rate_limited_429(self, client, monkeypatch):
+        """Per-IP hourly budget for pack_manifest (2): exhausted → 429.
+
+        Pins the cheapest-rejection ordering (docstring: "checked BEFORE
+        the body is read"): with the budget exhausted, a would-be-500
+        malformed body still gets 429 — the check fires before the body
+        is parsed (test_upload_malformed_json_500 pins the would-be 500).
+        """
+        # production wiring: the default entry must exist — _check_sensitive
+        # _op_rate_limit .get() would otherwise no-op and silently disable
+        # the limiter in prod while injected-limit tests stay green.
+        assert ha_mod._SENSITIVE_OP_LIMITS.get("pack_manifest", 0) > 0
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        monkeypatch.setitem(ha_mod._SENSITIVE_OP_LIMITS, "pack_manifest", 2)
+        ha_mod._SENSITIVE_BUCKETS.clear()
+        try:
+            # valid uploads consume the budget; a third within the hour → 429
+            for _ in range(2):
+                r = client.post("/v1/packs/manifests",
+                                json={"manifest_yaml": VALID_MANIFEST})
+                assert r.status_code == 201, r.text
+            r = client.post("/v1/packs/manifests",
+                            json={"manifest_yaml": VALID_MANIFEST})
+            assert r.status_code == 429
+            assert r.json()["detail"] == (
+                "Rate limit exceeded for pack_manifest. Please try again later.")
+            assert r.headers["Retry-After"] == "3600"
+            # ordering pin: budget exhausted → malformed body gets 429, not
+            # 500 (HTTPException is handled; a JSONDecodeError would be
+            # re-raised by the client fixture). Proves the check precedes
+            # the body read/parse, not just the validation stage.
+            r = client.post("/v1/packs/manifests", content=b"{not json")
+            assert r.status_code == 429
+            # before-READ precedence: exhausted budget → oversized chunked
+            # stream gets 429, not the would-be 413 wire cap
+            # (test_upload_413_chunked_streaming_cap pins the would-be 413).
+            def _oversized():
+                for _ in range(12):
+                    yield b"not-json-" * 8192
+            r = client.post("/v1/packs/manifests", content=_oversized())
+            assert r.status_code == 429
+        finally:
+            ha_mod._SENSITIVE_BUCKETS.clear()
+
+    def test_upload_rate_limit_independent_of_export(self, client, monkeypatch):
+        """pack_manifest has its own budget — export calls don't consume it."""
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        monkeypatch.setitem(ha_mod._SENSITIVE_OP_LIMITS, "pack_manifest", 1)
+        monkeypatch.setitem(ha_mod._SENSITIVE_OP_LIMITS, "export", 1)
+        ha_mod._SENSITIVE_BUCKETS.clear()
+        # export's dependency is get_current_user — override it so the
+        # endpoint body runs (unknown team → 403 authz-first, budget
+        # consumed either way; mirrors test_import_endpoint.py).
+        app.dependency_overrides[get_current_user] = lambda: {"user_id": "u-2038"}
+        try:
+            tc = client
+            # export consumes its OWN budget on the authz-first 403 path —
+            # the second call's 429 proves the first one charged the export
+            # bucket (unknown team → 403, budget consumed either way;
+            # mirrors test_import_endpoint.py). Coupling note: this 403→429
+            # progression assumes export charges on the 403 (check-time
+            # charging); under the #1719 deferred-terminal doctrine the 403
+            # is still a terminal outcome, so the progression holds there
+            # too — only moving export's check AFTER authz breaks it (a
+            # real doctrine regression worth catching).
+            assert tc.get("/v1/organizations/nope/export").status_code == 403
+            assert tc.get("/v1/organizations/nope/export").status_code == 429
+            # export didn't consume the pack bucket → budget still left
+            r = tc.post("/v1/packs/manifests",
+                        json={"manifest_yaml": VALID_MANIFEST})
+            assert r.status_code == 201, r.text
+            r = tc.post("/v1/packs/manifests",
+                        json={"manifest_yaml": VALID_MANIFEST})
+            assert r.status_code == 429
+        finally:
+            app.dependency_overrides.pop(get_current_user, None)
+            ha_mod._SENSITIVE_BUCKETS.clear()
+
+    def test_upload_401_does_not_consume_budget(self, client, monkeypatch):
+        """Unauthenticated POSTs (dependency 401, before the body) must not
+        burn the per-IP budget — a shared-IP spammer can't lock out the
+        tenant (the limiter lives in the endpoint body, after the
+        get_current_org dependency)."""
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        monkeypatch.setitem(ha_mod._SENSITIVE_OP_LIMITS, "pack_manifest", 1)
+        ha_mod._SENSITIVE_BUCKETS.clear()
+        app.dependency_overrides.pop(get_current_org, None)
+        try:
+            for _ in range(3):
+                r = client.post("/v1/packs/manifests",
+                                json={"manifest_yaml": VALID_MANIFEST})
+                assert r.status_code == 401
+            # bucket untouched → a legitimate upload still succeeds
+            app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
+            r = client.post("/v1/packs/manifests",
+                            json={"manifest_yaml": VALID_MANIFEST})
+            assert r.status_code == 201, r.text
+        finally:
+            ha_mod._SENSITIVE_BUCKETS.clear()
+
+
+# ── Body-size cap before parse (#2029) ────────────────────────────────────
+
+class TestUploadBodyCap:
+    """#2029: oversized request bodies are rejected BEFORE buffering/parsing.
+
+    The pre-fix endpoint buffered the whole body via request.json() before
+    the 64KB manifest cap applied — a memory-DoS on a tenant-authenticated
+    surface. The wire layers (Content-Length early-exit + unconditional
+    streaming cap mirroring _read_import_body) reject bodies over the wire
+    cap (~397KB) without ever buffering them.
+    """
+
+    @staticmethod
+    def _wire_cap() -> int:
+        """The production wire cap — imported, never re-derived: a formula
+        copy here would silently unpin the boundary if the cap changed."""
+        from tortoise.pack_manifest_store import MANIFEST_WIRE_CAP_BYTES
+        return MANIFEST_WIRE_CAP_BYTES
+
+    def test_upload_413_spoofed_content_length_not_read(self, client):
+        """Content-Length over the wire cap → 413 with the body UNREAD.
+        The payload is a VALID JSON envelope — a read+parse would 201, so
+        413 uniquely proves the header pre-check fired before the body was
+        ever touched. CL is comfortably oversized (1GiB) to pin the contract
+        (oversized CL → 413 wire detail), not the cap formula."""
+        r = client.post(
+            "/v1/packs/manifests",
+            content=json.dumps({"manifest_yaml": VALID_MANIFEST}).encode(),
+            headers={"content-length": str(1 << 30)},
+        )
+        assert r.status_code == 413
+        assert r.json()["detail"] == "manifest request body exceeds the size cap"
+
+    def test_upload_413_chunked_streaming_cap(self, client):
+        """Unknown-length (chunked) oversized body → 413 via the streaming
+        cap BEFORE parse — the chunks are invalid JSON, so a parse attempt
+        would raise JSONDecodeError (→ 500), not 413."""
+        def _stream():
+            for _ in range(12):
+                yield b"not-json-" * 8192  # 9-byte prefix × 8192, no CL
+        r = client.post("/v1/packs/manifests", content=_stream())
+        assert r.status_code == 413
+        assert r.json()["detail"] == "manifest request body exceeds the size cap"
+
+    def test_upload_201_chunked_valid(self, client):
+        """A valid manifest streamed WITHOUT Content-Length still parses and
+        activates — the streaming path is not just a cap."""
+        def _stream():
+            payload = json.dumps({"manifest_yaml": VALID_MANIFEST}).encode()
+            for i in range(0, len(payload), 97):
+                yield payload[i:i + 97]
+        r = client.post("/v1/packs/manifests", content=_stream())
+        assert r.status_code == 201, r.text
+        body = r.json()
+        assert body["activated"] is True and body["namespace"] == "tenant-ops"
+
+    def test_upload_201_exact_64kb_yaml_boundary(self, client):
+        """A manifest of EXACTLY 64KB yaml bytes clears the wire layers and
+        the authoritative yaml gate (strict `>` → 65536 is not > 65536) →
+        201. Guards against the cap shifting from yaml bytes to wire bytes."""
+        pad = 65536 - len(VALID_MANIFEST.encode()) - 2
+        manifest = VALID_MANIFEST + "# " + "x" * pad
+        assert len(manifest.encode()) == 65536
+        r = client.post("/v1/packs/manifests", json={"manifest_yaml": manifest})
+        assert r.status_code == 201, r.text
+
+    def test_upload_201_escaped_wire_inflation_within_cap(self, client):
+        """#2029: a <=64KB manifest with EVERY char \\uXXXX-escaped (~6x wire
+        inflation — the worst legal JSON escaping) must still clear the wire
+        cap → 201. Pins the 6x MANIFEST_WIRE_CAP_BYTES bound independently
+        of the constant's arithmetic: a future 6x→3x "optimization" would
+        fail this test."""
+        from tortoise.pack_manifest_store import MANIFEST_WIRE_CAP_BYTES
+        yaml_body = ("namespace: esc6x\nname: X\nversion: 0.1.0\ntier: free\n"
+                     + "# " + "x" * (64 * 1024))
+        yaml_body = yaml_body[:64 * 1024]  # exactly 64KB yaml bytes
+        assert len(yaml_body.encode()) == 65536
+        escaped = "".join(f"\\u{ord(c):04x}" for c in yaml_body)
+        payload = ('{"manifest_yaml": "' + escaped + '"}').encode()
+        assert len(payload) < MANIFEST_WIRE_CAP_BYTES
+        r = client.post("/v1/packs/manifests", content=payload)
+        assert r.status_code == 201, r.text
+        assert r.json()["namespace"] == "esc6x"
+
+    def test_upload_wire_cap_boundary(self, client):
+        """Strict `>` at the wire cap: exactly body_cap bytes passes both
+        cap checks (→ parse → 201); body_cap+1 → 413. Pins the off-by-one
+        semantics of the CL pre-check and the streaming cap."""
+        envelope = json.dumps({"manifest_yaml": VALID_MANIFEST}).encode()
+        body_cap = self._wire_cap()
+        assert len(envelope) < body_cap
+        exact = envelope + b" " * (body_cap - len(envelope))  # JSON: trailing ws ok
+        r = client.post("/v1/packs/manifests", content=exact)
+        assert r.status_code == 201, r.text
+        r = client.post("/v1/packs/manifests", content=exact + b" ")
+        assert r.status_code == 413
+        assert r.json()["detail"] == "manifest request body exceeds the size cap"
+
+    def test_upload_201_malformed_content_length_falls_back(self, client):
+        """Malformed Content-Length is ignored (the header is never a trust
+        boundary) → the streaming path reads and parses the valid manifest."""
+        r = client.post(
+            "/v1/packs/manifests",
+            content=json.dumps({"manifest_yaml": VALID_MANIFEST}).encode(),
+            headers={"content-length": "abc"},
+        )
+        assert r.status_code == 201, r.text
+
+    def test_upload_413_malformed_content_length_still_capped(self, client):
+        """With a malformed Content-Length, the unconditional streaming cap
+        still rejects an oversized chunked body → 413."""
+        def _stream():
+            for _ in range(12):
+                yield b"not-json-" * 8192
+        r = client.post(
+            "/v1/packs/manifests",
+            content=_stream(),
+            headers={"content-length": "abc"},
+        )
+        assert r.status_code == 413
+        assert r.json()["detail"] == "manifest request body exceeds the size cap"
+
+    def test_upload_201_transfer_encoding_overrides_content_length(self, client):
+        """RFC 7230 §3.3.3: when Transfer-Encoding is present it overrides
+        Content-Length — the CL early-exit must NOT fire on a bogus large CL;
+        the small body streams through the cap and parses → 201."""
+        r = client.post(
+            "/v1/packs/manifests",
+            content=json.dumps({"manifest_yaml": VALID_MANIFEST}).encode(),
+            headers={"content-length": str(1 << 30),
+                     "transfer-encoding": "chunked"},
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["activated"] is True
+
+    def test_upload_422_traversal_namespace(self, client):
+        """A traversal namespace → 422 from validate_manifest on the
+        endpoint surface (review-gate security P1) — no escape write."""
+        r = client.post("/v1/packs/manifests", json={
+            "manifest_yaml": "namespace: ../escape\nname: X\ntier: free\n"})
+        assert r.status_code == 422
+        assert "namespace" in str(r.json()["detail"])
+
+    def test_upload_malformed_json_500(self, client):
+        """Malformed JSON → 500 (JSONDecodeError → generic exception
+        handler, detail "Internal server error") — byte-parity with the
+        pre-fix request.json() path. raise_server_exceptions=False so the
+        500 is returned, not re-raised (precedent: tests/test_hosted_api.py)."""
+        with TestClient(app, raise_server_exceptions=False) as tc:
+            r = tc.post("/v1/packs/manifests", content=b"{not json")
+        assert r.status_code == 500
+        assert r.json()["detail"] == "Internal server error"
+
+    def test_upload_empty_body_500(self, client):
+        """Empty body → 500 (json.loads(b"") raises JSONDecodeError), same
+        as request.json() on the pre-fix path."""
+        with TestClient(app, raise_server_exceptions=False) as tc:
+            r = tc.post("/v1/packs/manifests", content=b"")
+        assert r.status_code == 500
+        assert r.json()["detail"] == "Internal server error"
+
+    def test_upload_413_spoofed_small_content_length_still_capped(self, client):
+        """A SMALL Content-Length with an oversized actual stream must still
+        hit the streaming cap — the CL check is an optimization, never a
+        trust boundary (RFC 7230 §3.3.3: Transfer-Encoding beats CL). Pins
+        the under-claim direction of the threat model: a future "optimization"
+        that skips the streaming read when CL is small would silently
+        reintroduce the memory-DoS while every other test still passes."""
+        def _stream():
+            for _ in range(12):
+                yield b"not-json-" * 8192
+        r = client.post(
+            "/v1/packs/manifests",
+            content=_stream(),
+            headers={"content-length": "100"},
+        )
+        assert r.status_code == 413
+        assert r.json()["detail"] == "manifest request body exceeds the size cap"
+
+    def test_upload_422_missing_or_invalid_manifest_yaml(self, client):
+        """Missing-field guard sub-branches: empty dict, dict without
+        manifest_yaml, empty string, non-string value, non-dict JSON — all
+        422. A refactor dropping the isinstance(manifest_yaml, str) guard
+        would route {"manifest_yaml": 123} to .encode() → AttributeError
+        → 500."""
+        payloads = [
+            b"null",
+            b"{}",
+            b'{"foo": 1}',
+            b'{"manifest_yaml": ""}',
+            b'{"manifest_yaml": 123}',
+            b"[1, 2, 3]",
+        ]
+        for payload in payloads:
+            r = client.post("/v1/packs/manifests", content=payload)
+            assert r.status_code == 422, (payload, r.text)
+            assert "manifest_yaml" in r.json()["detail"]
+
+
+# ── Cross-tenant isolation (structural — graph namespace) ──────────────────
+
+class TestIsolation:
+    def test_tenant_a_pack_invisible_to_tenant_b(self):
+        """Structural isolation via graph namespace: tenant A's pack is never
+        visible to tenant B (both share one process but separate graphs).
+        Uses a namespace-routing SDK patch so each team resolves its OWN temp
+        DB (a single module-global patch — two sequential patches would let
+        the second override the first)."""
+        with tempfile.TemporaryDirectory() as tmp_a, tempfile.TemporaryDirectory() as tmp_b:
+            db_a = os.path.join(tmp_a, "a.db")
+            db_b = os.path.join(tmp_b, "b.db")
+
+            def _route_patch(self, db_path_arg=None, *, namespace=None, **kwargs):
+                target = db_b if namespace == TEST_TEAM_B["org_id"] else db_a
+                _orig(self, target, namespace=namespace)
+
+            import tortoise.sdk as sdk_mod
+            _orig = sdk_mod.TortoiseSDK.__init__
+            sdk_mod.TortoiseSDK.__init__ = _route_patch
+            app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
+            try:
+                c_a = TestClient(app)
+                r = c_a.post("/v1/packs/manifests",
+                             json={"manifest_yaml": VALID_MANIFEST})
+                assert r.status_code == 201, r.text
+                app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM_B)
+                c_b = TestClient(app)
+                r_b = c_b.get("/v1/packs")
+                ns = [p["namespace"] for p in r_b.json()["packs"]]
+                assert "tenant-ops" not in ns, \
+                    "tenant B must not see tenant A's pack"
+            finally:
+                app.dependency_overrides.clear()
+                sdk_mod.TortoiseSDK.__init__ = _orig
+
+
+# ── Concurrency (idempotent activation) ────────────────────────────────────
+
+class TestConcurrency:
+    def test_double_upload_single_activation(self, client):
+        """Concurrent double-upload of the same manifest converges to exactly
+        one activation (idempotent MERGE + per-(graph, namespace) lock
+        #1307). Deterministic synchronization (#2065): the barrier forces
+        the two uploads to overlap, the 201 responses are the persistence
+        barrier (upsert's MERGE completes server-side before the response is
+        sent), and a failed upload fails THIS test with its actual cause
+        instead of a misleading "expected exactly one PackManifest, got 0"
+        (the #2065 CI flake showed 0 total manifests — both writes had
+        failed, not a dedup violation).
+        """
+        from tortoise.pack_manifest_store import get_tenant_manifests
+        results: list[int] = []
+        errors: list[BaseException] = []
+        # Both uploads must be in flight simultaneously — without the
+        # barrier the threads could (rarely) serialize and never exercise
+        # the concurrent-write path at all.
+        barrier = threading.Barrier(2)
+
+        def _post():
+            try:
+                barrier.wait(timeout=10)
+                r = client.post("/v1/packs/manifests",
+                                json={"manifest_yaml": VALID_MANIFEST})
+            except BaseException as e:  # thread exceptions must surface in the main thread
+                errors.append(e)
+                return
+            results.append(r.status_code)
+
+        threads = [threading.Thread(target=_post) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # The 201 responses ARE the synchronization barrier: once both
+        # uploads return, their writes are durable and visible. A failed
+        # upload would make the invariant check below vacuous — fail here
+        # with the actual cause instead.
+        assert not errors, f"upload thread raised: {errors!r}"
+        assert set(results) == {201}, \
+            f"both uploads must succeed — got statuses {results}"
+
+        sdk = _team_sdk()
+        ms = get_tenant_manifests(sdk)
+        tenant = [m for m in ms if m["namespace"] == "tenant-ops"]
+        assert len(tenant) == 1, \
+            f"expected exactly one PackManifest, got {len(tenant)} (total {len(ms)})"
+
+
+# ── Deployment gate + tenant view ──────────────────────────────────────────
+
+class TestDeploymentGateAndView:
+    def test_mcp_install_stub_on_selfhost(self, monkeypatch):
+        """The MCP tool is an actionable stub when the serving app is not
+        hosted_api (self-host) — deployment-gated (#1935 R10)."""
+        import sys as _sys
+
+        import tortoise.mcp_server as mcp_mod
+        monkeypatch.setitem(_sys.modules, "tortoise.hosted_api", None)
+        out = mcp_mod.tortoise_pack_install(VALID_MANIFEST)
+        assert out["installed"] is False
+        assert "HOSTED-only" in out["error"]
+
+    def test_tenant_view_memoized_and_invalidated(self, client):
+        from tortoise.pack_manifest_store import tenant_view
+        sdk = _team_sdk()
+        v1 = tenant_view(sdk)
+        v2 = tenant_view(sdk)
+        assert v1 is v2, "memoized view must be cached"
+        client.post("/v1/packs/manifests",
+                    json={"manifest_yaml": VALID_MANIFEST})
+        v3 = tenant_view(sdk)
+        assert any(m["namespace"] == "tenant-ops" for m in v3["tenant"]), \
+            "view must refresh after a :PackManifest write"

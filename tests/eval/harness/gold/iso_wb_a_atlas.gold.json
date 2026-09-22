@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "session_id": "iso_wb_a_atlas",
+  "suite": "write_back",
+  "write_back": {
+    "planted_points": [
+      "migration is green in staging"
+    ],
+    "provenance_required": true
+  }
+}

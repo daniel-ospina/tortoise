@@ -1,0 +1,25 @@
+{
+  "protocol": "1509-run-protocol",
+  "evidence_scope": "gates 1-4 (corpus seal / answer-key manifest / dataset audit / judge pin) \u2014 committed for J7 auditability; steps 5+ pending execution",
+  "created_at_utc": "2026-09-04T16:11:43.629282+00:00",
+  "steps": {
+    "1": {
+      "status": "passed",
+      "passed_at_utc": "2026-09-04T16:11:51.997081+00:00"
+    },
+    "2": {
+      "status": "passed",
+      "passed_at_utc": "2026-09-04T16:11:52.023818+00:00"
+    },
+    "3": {
+      "status": "passed",
+      "passed_at_utc": "2026-09-04T16:11:52.051960+00:00"
+    },
+    "4": {
+      "status": "passed",
+      "passed_at_utc": "2026-09-04T16:11:52.079629+00:00"
+    }
+  },
+  "corpus_hash": "sha256:d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
+  "judge_pin": "longmemeval-official-anscheck-gpt4o-2024-08-06-v1"
+}

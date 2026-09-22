@@ -1,0 +1,534 @@
+"""#1853 — suspended-team lockdown parity on the session-auth surface.
+
+Bug-hunt 2026-08-28 (P2): the key-auth path and the session team-resolution
+path (_session_user_org) both 403 SUSPENDED, but every endpoint gated by
+_membership_team / _require_owner / _require_owner_admin resolved the team
+row without checking `suspended_at` — a suspended team could create graphs,
+list graph names, export the full artifact, import a full-graph overwrite,
+manage members, and mint/revoke invites via session-JWT auth.
+
+The fix wires `_ensure_not_suspended(team_row)` into the enforcement seams:
+- _require_owner (export / import / delete) and _require_owner_admin
+  (invites, members, key toggle, dashboard-login) — checked AFTER role
+  authz (no existence-oracle change), so every owner/admin endpoint
+  inherits parity
+- create_graph / list_graphs (on the team node they already
+  fetch — _membership_team itself stays pure)
+- list_my_teams: #1912 replaced the whole-list suspension 403 with a
+  per-row suspended_at field — healthy teams stay listable, and the 403
+  survives only when EVERY membership is suspended (nothing healthy to
+  switch to)
+- rescind_invite's Supabase branch (delegates RBAC to invitation_rescind,
+  which has no suspension check)
+
+Deliberately open while suspended: GET /v1/team/alerts (appeal flow,
+scoping delta 12) — asserted below.
+
+Supabase mode via FakeControlPlane (mirrors test_export_delete / test_auth_
+flip); session user via the get_current_user dependency override.
+"""
+
+from __future__ import annotations
+
+import os
+import tempfile
+
+os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
+# Sensitive-op limiter (export/import) opt out in tests (mirrors
+# test_export_delete).
+os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
+
+import pytest  # noqa: I001
+from fastapi.testclient import TestClient
+
+from tortoise.hosted_api import app, get_current_user
+from tortoise.sdk import TortoiseSDK
+
+from tests._http_fixtures import patched_tortoise_sdk
+from tests.fake_control_plane import FakeControlPlane
+from tests.test_supabase_control import (
+    FREE_TEAM,
+    _membership_row,
+)
+
+ORG_ID = "team-free-001"
+_TEAM2 = "team-free-002"
+
+# #1719: org_memberships.user_id is a uuid column — real JWT subjects are
+# UUIDs; non-UUID literals 22P02 under FakeControlPlane's fidelity check.
+_U1 = "9f2c1a40-0000-4a00-8000-000000000001"
+_U2 = "9f2c1a40-0000-4a00-8000-000000000002"
+OWNER = _U1
+
+
+def _enable_supabase(monkeypatch, cp) -> FakeControlPlane:
+    """Turn Supabase mode on and inject the fake control plane."""
+    import tortoise.supabase_control as sc
+
+    monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc_role_key_test")
+    monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+    monkeypatch.setattr(sc, "get_control_plane", lambda: cp)
+    return cp
+
+
+# #2127: local _patch_tortoise_sdk_init/_restore_sdk_init copies
+# superseded by the shared tests._http_fixtures.patched_tortoise_sdk helper
+# (patch → temp DB, #1950 pin, close-then-clear at enter; pop-env → restore
+# → deterministic close → clear overrides at exit). The old restore cleared
+# WITHOUT closing anchors — the #1950 leak the helper fixes.
+
+@pytest.fixture
+def sb_client(monkeypatch):
+    """Supabase-mode TestClient with a fake control plane + temp DB."""
+    fake = FakeControlPlane(
+        {"organizations": [], "api_keys": [], "org_memberships": [], "invitations": []}
+    )
+    _enable_supabase(monkeypatch, fake)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "susp.db")
+        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+            yield tc, fake, db_path
+
+
+@pytest.fixture
+def as_user():
+    """Override get_current_user per test (JWT session user)."""
+
+    def _set(user_id: str = OWNER):
+        app.dependency_overrides[get_current_user] = lambda: {"user_id": user_id}
+
+    yield _set
+    app.dependency_overrides.pop(get_current_user, None)
+
+
+def _seed_team(fake, *, suspended: bool = False, role: str = "owner", org_id: str = ORG_ID):
+    """Seed the team (+owner membership). suspended → suspended_at stamp."""
+    team = dict(FREE_TEAM)
+    team["id"] = org_id
+    if suspended:
+        team["suspended_at"] = "2026-08-01T00:00:00Z"
+    fake.seed("organizations", [team])
+    fake.seed("org_memberships", [_membership_row(role=role, org_id=org_id)])
+
+
+def _seed_pending_invite(fake, token: str = "tok-1"):
+    """Seed a pending invitation (lookup_hash = token hash) for ORG_ID."""
+    from tortoise.auth import lookup_hash as _lh
+
+    fake.seed(
+        "invitations",
+        [
+            {
+                "id": "inv-1",
+                "org_id": ORG_ID,
+                "email": "bob@example.com",
+                "role": "member",
+                "status": "pending",
+                "expires_at": None,
+                "lookup_hash": _lh(token),
+            }
+        ],
+    )
+
+
+# Keep seeded registry SDKs alive for the module lifetime: a TortoiseSDK
+# destructor SHUTDOWN NOSAVEs the process-shared embedded server when it
+# is the last reference — letting the _seed_registry local be GC'd mid-
+# suite can lose the just-seeded Team/Membership (flaky registry-mode
+# 403s). Anchoring the seed SDKs removes the race deterministically.
+_SEED_SDKS: list[TortoiseSDK] = []
+
+
+def _seed_registry(db_path: str, *, suspended: bool = False, org_id: str = "reg-team-1",
+                   m_id: str = "m-1"):
+    """Seed a registry Team + owner Membership (+ optional suspended_at)."""
+    sdk = TortoiseSDK(db_path, namespace="registry")
+    _SEED_SDKS.append(sdk)
+    reg = sdk._get_registry()
+    props = {"id": org_id, "name": org_id, "tier": "free"}
+    if suspended:
+        props["suspended_at"] = "2026-08-01T00:00:00Z"
+    reg.query(
+        "CREATE (t:Team {id:$id, name:$name, tier:$tier"
+        + (", suspended_at:$suspended_at" if suspended else "")
+        + "})",
+        params=props,
+    )
+    reg.query(
+        "CREATE (m:Membership {id:$id, user_id:$uid, org_id:$tid, "
+        "role:'owner', status:'active', joined_at:'2026-08-01T00:00:00Z'})",
+        params={"id": m_id, "uid": OWNER, "tid": org_id},
+    )
+
+
+@pytest.fixture
+def reg_client(monkeypatch):
+    """Registry-mode TestClient (TORTOISE_CONTROL_PLANE=registry) + temp DB."""
+    monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "susp-reg.db")
+        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+            yield tc, db_path
+
+
+def _assert_suspended(r):
+    """The key-path 403 shape: code SUSPENDED + appeal_url."""
+    assert r.status_code == 403, r.text
+    body = r.json()
+    assert body["detail"]["code"] == "SUSPENDED"
+    assert body["detail"]["appeal_url"]
+
+
+class TestSuspendedTeamLockdown:
+    """Every membership/owner endpoint 403s SUSPENDED on a suspended team."""
+
+    def test_create_graph_403(self, sb_client, as_user):
+        tc, fake, _ = sb_client
+        _seed_team(fake, suspended=True)
+        as_user()
+        r = tc.post("/v1/graphs", json={"org_id": ORG_ID, "name": "g1"})
+        _assert_suspended(r)
+
+    def test_list_graphs_403(self, sb_client, as_user):
+        tc, fake, _ = sb_client
+        _seed_team(fake, suspended=True)
+        as_user()
+        r = tc.get(f"/v1/graphs?org_id={ORG_ID}")
+        _assert_suspended(r)
+
+    def test_delete_graph_403_suspended(self, sb_client, as_user):
+        """C2 delete lifecycle: a suspended team 403s on DELETE before any
+        graph resolution (authz-first — the team check precedes the kind
+        lookup, so even an unknown gid on a suspended team is SUSPENDED,
+        never 404: no existence oracle)."""
+        tc, fake, _ = sb_client
+        _seed_team(fake, suspended=True)
+        as_user()
+        import tortoise.hosted_api as ha_mod
+        org_dict = {"org_id": ORG_ID, "tier": "free", "key_id": None,
+                     "session_user_id": OWNER}
+        app.dependency_overrides[ha_mod.get_current_org_session] = \
+            lambda: dict(org_dict)
+        try:
+            r = tc.delete(f"/v1/graphs/g_doesnotexist?org_id={ORG_ID}")
+            _assert_suspended(r)
+        finally:
+            app.dependency_overrides.pop(ha_mod.get_current_org_session,
+                                         None)
+
+    def test_list_my_teams_403(self, sb_client, as_user):
+        """#1912 regression: EVERY membership suspended → nothing healthy to
+        list — still 403 SUSPENDED with the appeal detail."""
+        tc, fake, _ = sb_client
+        _seed_team(fake, suspended=True)
+        as_user()
+        r = tc.get("/v1/organizations")
+        _assert_suspended(r)
+
+    def test_list_my_teams_all_suspended_403(self, sb_client, as_user):
+        """#1912: multiple suspended memberships (no healthy team) still 403
+        as a whole — the per-row suspended_at only unblocks MIXED lists."""
+        tc, fake, _ = sb_client
+        _seed_team(fake, suspended=True)
+        _seed_team(fake, suspended=True, org_id=_TEAM2)
+        as_user()
+        r = tc.get("/v1/organizations")
+        _assert_suspended(r)
+
+    def test_export_403(self, sb_client, as_user):
+        tc, fake, _ = sb_client
+        _seed_team(fake, suspended=True)
+        as_user()
+        r = tc.get(f"/v1/organizations/{ORG_ID}/export")
+        _assert_suspended(r)
+
+    def test_import_403(self, sb_client, as_user):
+        """Full-graph overwrite surface — the suspension check fires in
+        _require_owner before the artifact body is even read."""
+        tc, fake, _ = sb_client
+        _seed_team(fake, suspended=True)
+        as_user()
+        r = tc.post(f"/v1/organizations/{ORG_ID}/import", json={})
+        _assert_suspended(r)
+
+    def test_list_members_403(self, sb_client, as_user):
+        tc, fake, _ = sb_client
+        _seed_team(fake, suspended=True)
+        as_user()
+        r = tc.get(f"/v1/organizations/{ORG_ID}/members")
+        _assert_suspended(r)
+
+    def test_remove_member_403(self, sb_client, as_user):
+        tc, fake, _ = sb_client
+        _seed_team(fake, suspended=True)
+        as_user()
+        r = tc.delete(f"/v1/organizations/{ORG_ID}/members/some-user")
+        _assert_suspended(r)
+
+    def test_change_member_role_403(self, sb_client, as_user):
+        tc, fake, _ = sb_client
+        _seed_team(fake, suspended=True)
+        as_user()
+        r = tc.patch(f"/v1/organizations/{ORG_ID}/members/some-user", json={"role": "member"})
+        _assert_suspended(r)
+
+    def test_list_invites_403(self, sb_client, as_user):
+        tc, fake, _ = sb_client
+        _seed_team(fake, suspended=True)
+        as_user()
+        r = tc.get(f"/v1/invites?org_id={ORG_ID}")
+        _assert_suspended(r)
+
+    def test_delete_team_403(self, sb_client, as_user):
+        """Suspended team cannot even schedule deletion (a destructive
+        write) — the allow_removed gate only skips the check for the
+        idempotent replay of an ALREADY delete-pending team."""
+        tc, fake, _ = sb_client
+        _seed_team(fake, suspended=True)
+        as_user()
+        r = tc.delete(f"/v1/organizations/{ORG_ID}")
+        _assert_suspended(r)
+
+    def test_accept_invite_403(self, sb_client, as_user):
+        """A pre-suspension pending invite must not mint a membership on a
+        suspended team (invitation_accept checks suspended_at next to the
+        deleted_at kill-switch)."""
+        tc, fake, _ = sb_client
+        _seed_team(fake, suspended=True)
+        _seed_pending_invite(fake)
+        # invitee = a NON-member (the owner is already a member → 409 path)
+        as_user(_U2)
+        r = tc.post("/v1/invites/accept", json={"token": "tok-1"})
+        assert r.status_code == 403, r.text
+        assert "suspended" in r.json()["detail"]
+
+    def test_invite_403(self, sb_client, as_user):
+        tc, fake, _ = sb_client
+        _seed_team(fake, suspended=True)
+        as_user()
+        r = tc.post(
+            "/v1/invites", json={"org_id": ORG_ID, "email": "bob@example.com", "role": "member"}
+        )
+        _assert_suspended(r)
+
+    def test_rescind_invite_403(self, sb_client, as_user):
+        """Supabase branch delegates RBAC to invitation_rescind — the
+        explicit seam check must fire before the rescind write."""
+        tc, fake, _ = sb_client
+        _seed_team(fake, suspended=True)
+        as_user()
+        r = tc.delete(f"/v1/invites/inv-1?org_id={ORG_ID}")
+        _assert_suspended(r)
+
+    def test_alerts_still_open(self, sb_client, as_user):
+        """The appeal flow must stay reachable while suspended (scoping
+        delta 12): /v1/team/alerts uses _membership_team directly."""
+        tc, fake, _ = sb_client
+        _seed_team(fake, suspended=True)
+        as_user()
+        r = tc.get(f"/v1/team/alerts?org_id={ORG_ID}")
+        assert r.status_code == 200, r.text
+        assert r.json()["org_id"] == ORG_ID
+
+    def test_list_my_teams_mixed_healthy_listable(self, sb_client, as_user):
+        """#1912: a suspended membership must not 403 the whole switcher.
+        Mixed healthy/suspended memberships list BOTH rows — the suspended
+        one carries suspended_at (auto-selection skips it; manual selection
+        403s with the appeal detail) and the healthy team stays listable.
+        The suspended row also skips graph resolution: it has a default
+        graph on the teams row, yet graph_count stays 0."""
+        tc, fake, _ = sb_client
+        _seed_team(fake, suspended=True)
+        _seed_team(fake, suspended=False, org_id=_TEAM2)
+        # a graph_name would make graph_list return 1 graph — the skip must
+        # still yield graph_count 0 / default_graph_id None for the row.
+        fake.tables["organizations"][0]["graph_name"] = "default"
+        # mirror: the HEALTHY row in the same mixed response must still
+        # resolve its default graph.
+        fake.tables["organizations"][1]["graph_name"] = "default"
+        as_user()
+        r = tc.get("/v1/organizations")
+        assert r.status_code == 200, r.text
+        by_id = {t["org_id"]: t for t in r.json()}
+        assert set(by_id) == {ORG_ID, _TEAM2}
+        assert by_id[ORG_ID]["suspended_at"] == "2026-08-01T00:00:00Z"
+        assert by_id[ORG_ID]["graph_count"] == 0  # resolution skipped
+        assert by_id[ORG_ID]["default_graph_id"] is None
+        assert by_id[_TEAM2]["suspended_at"] is None
+        assert by_id[_TEAM2]["graph_count"] == 1
+        assert by_id[_TEAM2]["default_graph_id"] == "default"
+
+    def test_list_my_teams_healthy_only_200(self, sb_client, as_user):
+        """Control: no suspended memberships → switcher unaffected (per-row
+        suspended_at is None)."""
+        tc, fake, _ = sb_client
+        _seed_team(fake, suspended=False)
+        as_user()
+        r = tc.get("/v1/organizations")
+        assert r.status_code == 200, r.text
+        assert len(r.json()) == 1
+        assert r.json()[0]["suspended_at"] is None
+
+
+class TestSuspendedTeamLockdownRegistry:
+    """Registry-mode branches of the seams (selfhost): _team_node reads the
+    Team node, which carries suspended_at as a property."""
+
+    def test_create_graph_403(self, reg_client, as_user):
+        tc, db_path = reg_client
+        _seed_registry(db_path, suspended=True)
+        as_user()
+        r = tc.post("/v1/graphs", json={"org_id": "reg-team-1", "name": "g1"})
+        _assert_suspended(r)
+
+    def test_export_403(self, reg_client, as_user):
+        tc, db_path = reg_client
+        _seed_registry(db_path, suspended=True)
+        as_user()
+        r = tc.get("/v1/organizations/reg-team-1/export")
+        _assert_suspended(r)
+
+    def test_list_my_teams_mixed_healthy_listable(self, reg_client, as_user):
+        """#1912 registry branch: per-row suspended_at via properties(t) —
+        mixed memberships list both rows, suspended carries the stamp."""
+        tc, db_path = reg_client
+        _seed_registry(db_path, suspended=True, org_id="reg-team-1")
+        _seed_registry(db_path, suspended=False, org_id="reg-team-2", m_id="m-2")
+        as_user()
+        r = tc.get("/v1/organizations")
+        assert r.status_code == 200, r.text
+        by_id = {t["org_id"]: t for t in r.json()}
+        assert set(by_id) == {"reg-team-1", "reg-team-2"}
+        assert by_id["reg-team-1"]["suspended_at"] == "2026-08-01T00:00:00Z"
+        assert by_id["reg-team-2"]["suspended_at"] is None
+
+    def test_export_healthy_control(self, reg_client, as_user):
+        tc, db_path = reg_client
+        _seed_registry(db_path, suspended=False)
+        # seed a graph node so the export has data (empty namespace → 500)
+        sdk = TortoiseSDK(db_path, namespace="reg-team-1")
+        sdk._get_proj().g.query(
+            "CREATE (p:Point {id:'pt-0', content:'c', pointKind:'claim', confidence:0.8})"
+        )
+        as_user()
+        r = tc.get("/v1/organizations/reg-team-1/export")
+        assert r.status_code == 200, r.text
+        assert r.json()["summary"]["points"] == 1
+
+
+class TestHealthyTeamControl:
+    """Control: the same seams must NOT block healthy teams (regression)."""
+
+    def test_create_graph_still_works(self, sb_client, as_user):
+        """#1853: a healthy team can still create graphs. Suspension is
+        checked FIRST (before the tier gate — load-bearing: a suspended
+        FREE team must 403 SUSPENDED, not 402, per TestSuspendedTeamLockdown);
+        a healthy PRO team is used here so the free tier's 402 gate is not
+        in play and the success path is what's asserted."""
+        tc, fake, _ = sb_client
+        _seed_team(fake, suspended=False)
+        fake.tables["organizations"][0]["tier"] = "pro"
+        fake.tables["organizations"][0]["max_graphs"] = None
+        as_user()
+        r = tc.post("/v1/graphs", json={"org_id": ORG_ID, "name": "g1"})
+        assert r.status_code == 201, r.text
+        assert r.json()["graph"]["id"]
+
+    def test_delete_graph_session_owner_204(self, sb_client, as_user):
+        """C2 session face (E2E-8): an OWNER session user can delete a
+        custom graph. The delete endpoint resolves the session via
+        get_current_org_session (the key-only dependency would 401 an eyJ
+        token at the format gate) — the session team dict carries
+        session_user_id, which the endpoint reads for the role check."""
+        tc, fake, _ = sb_client
+        _seed_team(fake, suspended=False)
+        fake.tables["organizations"][0]["tier"] = "pro"
+        fake.tables["organizations"][0]["max_graphs"] = None
+        as_user()
+        r = tc.post("/v1/graphs", json={"org_id": ORG_ID, "name": "g1"})
+        assert r.status_code == 201, r.text
+        gid = r.json()["graph"]["id"]
+        # Session-authed delete: override get_current_org_session (the
+        # established dual-auth session pattern — the dep dict carries
+        # session_user_id, set by the real dependency's JWT lane).
+        import tortoise.hosted_api as ha_mod
+        org_dict = {"org_id": ORG_ID, "tier": "pro", "key_id": None,
+                     "session_user_id": OWNER}
+        app.dependency_overrides[ha_mod.get_current_org_session] = \
+            lambda: dict(org_dict)
+        try:
+            r = tc.delete(f"/v1/graphs/{gid}?org_id={ORG_ID}")
+            assert r.status_code == 204, r.text
+            rows = fake.query("graphs", select=["status"],
+                              filters=[("id", "eq", gid)])
+            assert rows[0]["status"] == "deleted"
+        finally:
+            app.dependency_overrides.pop(ha_mod.get_current_org_session,
+                                         None)
+
+    def test_delete_graph_session_member_403(self, sb_client, as_user):
+        """C2 session face: a MEMBER session user 403s on delete (owner/
+        admin only — parity with the key face's graphs:delete requirement)."""
+        tc, fake, _ = sb_client
+        _seed_team(fake, suspended=False, role="member")
+        fake.tables["organizations"][0]["tier"] = "pro"
+        fake.tables["organizations"][0]["max_graphs"] = None
+        as_user()
+        r = tc.post("/v1/graphs", json={"org_id": ORG_ID, "name": "g1"})
+        # A member CAN create (pre-existing E5 gates on membership only,
+        # D12) — but cannot delete.
+        assert r.status_code == 201, r.text
+        gid = r.json()["graph"]["id"]
+        import tortoise.hosted_api as ha_mod
+        org_dict = {"org_id": ORG_ID, "tier": "pro", "key_id": None,
+                     "session_user_id": OWNER}
+        app.dependency_overrides[ha_mod.get_current_org_session] = \
+            lambda: dict(org_dict)
+        try:
+            r = tc.delete(f"/v1/graphs/{gid}?org_id={ORG_ID}")
+            assert r.status_code == 403, r.text
+        finally:
+            app.dependency_overrides.pop(ha_mod.get_current_org_session,
+                                         None)
+
+    def test_list_my_teams_still_works(self, sb_client, as_user):
+        tc, fake, _ = sb_client
+        _seed_team(fake, suspended=False)
+        as_user()
+        r = tc.get("/v1/organizations")
+        assert r.status_code == 200, r.text
+        assert r.json()[0]["org_id"] == ORG_ID
+
+    def test_list_my_teams_no_memberships_200(self, sb_client, as_user):
+        """#1912 guard edge: zero memberships → 200 [] (the all-suspended
+        403 must not fire on an empty list — all() of [] is True)."""
+        tc, _, _ = sb_client
+        as_user()
+        r = tc.get("/v1/organizations")
+        assert r.status_code == 200, r.text
+        assert r.json() == []
+
+    def test_invite_admin_still_works_but_member_403(self, sb_client, as_user):
+        """Role authz unchanged on healthy teams: owner passes (Team tier
+        check 402s first — assert the seam itself passed by the 402 tier
+        response, not a 403)."""
+        tc, fake, _ = sb_client
+        _seed_team(fake, suspended=False)
+        as_user()
+        r = tc.post(
+            "/v1/invites", json={"org_id": ORG_ID, "email": "bob@example.com", "role": "member"}
+        )
+        # FREE tier → 402 (invites require Team tier); NOT a 403 — the
+        # owner/admin seam (and its new suspension check) passed.
+        assert r.status_code == 402, r.text
+
+    def test_suspended_non_owner_still_role_403_not_suspension(self, sb_client, as_user):
+        """AuthZ-first: a non-owner probing a suspended team gets the role
+        403, not the SUSPENDED detail (no existence-oracle change)."""
+        tc, fake, _ = sb_client
+        _seed_team(fake, suspended=True, role="member")
+        as_user()
+        r = tc.get(f"/v1/organizations/{ORG_ID}/export")
+        assert r.status_code == 403
+        assert "owner" in r.json()["detail"]

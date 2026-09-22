@@ -1,0 +1,98 @@
+{
+  "composition": {
+    "clean": 10,
+    "conflicted": 30,
+    "decision": 5,
+    "p9": 10,
+    "plain": 10,
+    "superseded": 5,
+    "total": 40
+  },
+  "corpus": "why_suite",
+  "plant_roles": {
+    "clean": {
+      "claim": "{topic} clean belief statement",
+      "support_a": "{topic} clean record one",
+      "support_b": "{topic} clean record two"
+    },
+    "decision": {
+      "counter": "{topic} decision counterargument",
+      "decision": "{topic} decision point",
+      "option_a": "{topic} alternative one",
+      "option_b": "{topic} alternative two",
+      "support": "{topic} decision support record"
+    },
+    "p9": {
+      "claim": "{topic} belief statement",
+      "counter": "{topic} counterargument gamma",
+      "support": "{topic} supporting record alpha"
+    },
+    "plain": {
+      "claim": "{topic} belief statement",
+      "counter": "{topic} counterargument gamma",
+      "support": "{topic} supporting record alpha"
+    },
+    "superseded": {
+      "counter": "{topic} counterargument gamma",
+      "old": "{topic} belief statement",
+      "successor": "{topic} successor belief",
+      "support": "{topic} supporting record alpha"
+    }
+  },
+  "protocol": "why_suite_corpus_v1",
+  "schema_version": 1,
+  "seed": 42,
+  "source": "tests/test_w4_why_enrichment.py::_seed_e2e1_corpus (W4-a, issue #2101) \u2014 the shared epic E2E-1/E2E-7 planted-conflict corpus",
+  "topics": {
+    "clean": [
+      "clean-topic-0",
+      "clean-topic-1",
+      "clean-topic-2",
+      "clean-topic-3",
+      "clean-topic-4",
+      "clean-topic-5",
+      "clean-topic-6",
+      "clean-topic-7",
+      "clean-topic-8",
+      "clean-topic-9"
+    ],
+    "decision": [
+      "decision-topic-0",
+      "decision-topic-1",
+      "decision-topic-2",
+      "decision-topic-3",
+      "decision-topic-4"
+    ],
+    "p9": [
+      "p9-topic-0",
+      "p9-topic-1",
+      "p9-topic-2",
+      "p9-topic-3",
+      "p9-topic-4",
+      "p9-topic-5",
+      "p9-topic-6",
+      "p9-topic-7",
+      "p9-topic-8",
+      "p9-topic-9"
+    ],
+    "plain": [
+      "plain-topic-0",
+      "plain-topic-1",
+      "plain-topic-2",
+      "plain-topic-3",
+      "plain-topic-4",
+      "plain-topic-5",
+      "plain-topic-6",
+      "plain-topic-7",
+      "plain-topic-8",
+      "plain-topic-9"
+    ],
+    "superseded": [
+      "superseded-topic-0",
+      "superseded-topic-1",
+      "superseded-topic-2",
+      "superseded-topic-3",
+      "superseded-topic-4"
+    ]
+  }
+}

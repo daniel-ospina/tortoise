@@ -123,7 +123,9 @@ def test_load_probe_thresholds_cal_table():
     cfg = load_thresholds(
         Path(__file__).resolve().parent.parent / "battery" / "config"
         / "thresholds.yaml")
-    assert load_probe_thresholds(cfg, "surfaced-rate", "a4", 0.5) == 0.90
+    # post-I-1 seed-mode measured basis (#2292 Task 7 re-lock: 04-plan
+    # fixture matrix A4 0.92 — never the verbatim 90% AC nominal).
+    assert load_probe_thresholds(cfg, "surfaced-rate", "a4", 0.5) == 0.92
     assert load_probe_thresholds(cfg, "brier", "a4", 0.5) == 0.25
     import pytest as _p
     with _p.raises(KeyError):

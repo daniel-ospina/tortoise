@@ -32,6 +32,22 @@ class Memory:
     confidence: float | None = None
     source: str = ""
     kind: str = "statement"
+    #: Optional WRITE target (a closed-set member id). When an executor
+    #: knows WHICH claim/operator a record is aimed at it sets this; the
+    #: arm validates membership in the retrieved closed set and refuses
+    #: (honest no-op) non-members — never a silent misroute (plan Task-3
+    #: "item.target if present must be a closed-set member").
+    target_id: str | None = None
+    #: Optional author-stated SOURCE STRENGTH for a filed evidence point
+    #: (ladder: gold/high/medium/low/unverified, T0-T4 or numeric — validated
+    #: by the SDK). When the executor/agent knows the counter-source is
+    #: strong it states it here; the arm maps it onto the created evidence.
+    #: Absent (None) => the arm applies the SDK's documented decide default
+    #: (medium, Beta(3,1)) — an agent-filed contradiction is NEVER weaker
+    #: than the standard rung by omission (#2284 exposure finding: the
+    #: draft-first path previously lost the default and behaved as
+    #: unverified, ~3x weaker than intended).
+    credibility: str | None = None
 
 
 @dataclass(frozen=True)
@@ -62,6 +78,11 @@ class ArmAdapter(Protocol):
       - record(context, item) — persist one memory item.
       - isolation_namespace() -> str — the arm's per-arm namespace; distinct
         from the harness's per-scenario setup namespace.
+
+    Seed contract (#2284 I-1): contradiction scenarios seed in seed_mode by
+    default — claim_a + evidence ONLY, never claim_b/k/NAND (¬A arrives
+    in-context at turn k at run time). The verb channel itself (sdk.ingest)
+    is sibling A's (#2291) — applied over the same seed_mode contract.
     """
 
     arm_id: str

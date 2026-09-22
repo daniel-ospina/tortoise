@@ -1,0 +1,14 @@
+{
+  "continuity": {
+    "reader_planted": [
+      "ingest retry to exponential backoff with a 5x cap"
+    ],
+    "reader_queries": [
+      "What did we decide about ingest retries?"
+    ],
+    "writer_session": "cw01_writer_ingest"
+  },
+  "schema_version": 1,
+  "session_id": "cw01_reader_ingest",
+  "suite": "continuity"
+}

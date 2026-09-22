@@ -2,11 +2,12 @@
 #
 # Multi-host sitemap submission (Google "cross-submission" pattern):
 # each sitemap file contains ONLY URLs for its own host; this robots.txt is
-# served identically on both hosts (shared Pages project) and lists all three
-# sitemap locations so every host discovers the correct one.
+# served identically on both hosts (shared Pages project) and lists every
+# sitemap location so every host discovers the correct one.
 #
 #   premiselabs.co          → company page       (sitemap-company.xml)
-#   tortoise.premiselabs.co → product + docs + legal + auth (sitemap-product.xml)
+#   tortoise.premiselabs.co → product + docs + faq + legal + auth (sitemap-product.xml)
+#   tortoise.premiselabs.co → blog               (/blog/sitemap.xml — dynamic, published only)
 #   app.premiselabs.co      → dashboard          (separate tortoise-dashboard project)
 #
 # Auth-gated pages (welcome, invite-accept) are excluded from sitemaps and
@@ -14,7 +15,9 @@
 
 User-agent: *
 Allow: /
+Disallow: /admin
 
 Sitemap: https://premiselabs.co/sitemap-company.xml
 Sitemap: https://tortoise.premiselabs.co/sitemap-product.xml
 Sitemap: https://app.premiselabs.co/sitemap.xml
+Sitemap: https://tortoise.premiselabs.co/blog/sitemap.xml

@@ -1,0 +1,876 @@
+"""#2116 (C7) dashboard Graphs-tab management e2e (RUN_DASHBOARD_E2E opt-in).
+
+The Graphs tab's render + management behavior (meter, per-graph key panel,
+one-time reveal, delete lifecycle, tier gate) is render/event logic in
+main.jsx that no unit test can reach (main.jsx has no component harness;
+graphs.js holds the pure derivations and IS node --test covered). This
+suite drives the real built dashboard (`npm run build` first — dist/ is a
+build artifact since #3775; same two-server harness as
+test_keys_table_mixed.py):
+
+  `wrangler@4 pages dev . --port 8788` from website/ (auth) +
+  `wrangler@4 pages dev dist --port 8790` from website/apps/dashboard/.
+
+  #2731: the app DOCUMENT is loaded from the LOCAL preview (DASHBOARD_URL,
+  :8790) — never the prod origin; the route handler is no longer load-bearing
+  for the document. API_HOST is intercepted and AUTH_HOST is rewritten to
+  :8788; the APP_HOST -> :8790 rewrite stays as a defensive fallback (no
+  request in this module originates from the prod app origin).
+
+Covered contracts (issue indicators 1-6):
+  1. Meter line — "N graphs · ∞ cap" (pro/team, max_graphs null) vs
+     "N/M graphs used" (solo). Free/anon hide the meter: the 🔒 lock line
+     states the 1-graph cap once (#2308).
+  2. Create flow → one-time reveal modal: the C2 nested envelope's
+     key_plaintext renders once with Copy; NO route re-shows it; dismissing
+     clears state (re-opening the tab shows no key anywhere).
+  3. Per-graph key panel — list (graph_id-filtered rows), mint (POST body
+     carries {graph_id, scopes: graphs:read+write}), revoke (owner/admin).
+  4. Delete action on custom rows only; the default graph row has no Delete.
+  5. Free/anon tier → create locked with 🔒 + upgrade CTA (no create form;
+     solo keeps its create form — pricing.json max_graphs=2, 409 quota gate).
+  6. Inline error surfacing: 409 (cap) on create → the error banner text.
+
+Harness posture (mirrors #2246 ADR-010 session-only):
+- Cookie-seeded session; ZERO key-authed requests (Bearer tt_ header sniff).
+- Every dashboard request rides the session JWT.
+- GET /v1/team/keys without graph_id returns the API-Keys tab's rows (the
+  mount loadAll read); with graph_id returns the per-graph panel rows.
+- POST /v1/team/keys + POST /v1/graphs bodies are captured for assertion.
+- The default graph row (kind 'default') NEVER offers the per-graph [Keys]
+  panel or [Delete]: its keys are the team-wide rows managed on the API
+  Keys tab — the server has no per-graph key surface for the default graph
+  (_ensure_graph_exists 404s default-kind nodes). Per-graph keys/panels
+  apply to custom rows only. #2306: the default row's Keys cell is
+  SUPPRESSED (its key_count is 0 in both lanes — the fixture below carries
+  the registry capstone's bound-default "1" on purpose, and the UI must not
+  render any number on a row it cannot act on) and replaced with an
+  "API Keys tab" affordance that opens the API-Keys tab.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import urllib.parse
+
+import pytest
+from playwright.sync_api import Page, expect
+
+from tests.e2e.test_session_login_flow import (
+    APP_HOST,
+    AUTH_HOST,
+    DASHBOARD_URL,
+    _bff_path,
+    _goto_local_dashboard,
+    _is_bff_api,
+    _preflight_local_servers,
+    _proxy_body,
+    _seed_local_session_cookie,
+)
+
+if not os.environ.get("RUN_DASHBOARD_E2E"):
+    pytest.skip("dashboard e2e: opt-in via RUN_DASHBOARD_E2E=1", allow_module_level=True)
+
+AUTH_ORIGIN = os.environ.get("DASHBOARD_AUTH_BASE", "http://127.0.0.1:8788")
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _local_preview_servers() -> None:
+    """#2731: fail fast (one clear error) when :8788/:8790 are not serving."""
+    _preflight_local_servers()
+
+
+ORG_ID = "team_graphs2116"
+# #2306: key_count 1 deliberately — the registry-lane capstone artifact
+# (a legacy bound-default APIKey node counted against the default node's
+# real gid). The chosen shape suppresses the default row's Keys cell
+# regardless of the payload, so this fixture also proves the UI never
+# renders a bound-default count it cannot act on.
+DEFAULT_ROW = {
+    "graph_id": "default", "name": "default", "kind": "default",
+    "status": "active", "key_count": 1, "recording": None,
+}
+CUSTOM_A = {
+    "graph_id": "g_prod", "name": "prod", "kind": "custom",
+    "status": "active", "key_count": 0, "recording": None,
+}
+CUSTOM_B = {
+    "graph_id": "g_dev", "name": "dev", "kind": "custom",
+    "status": "active", "key_count": 0, "recording": None,
+}
+
+_GRAPH_KEY = {
+    "id": "gk_panel_01", "key_prefix": "tk_panel1", "name": "ci",
+    "created_at": "2026-09-01T00:00:00.000Z", "revoked_at": None,
+    "graph_id": "g_prod", "scopes": ["graphs:read", "graphs:write"],
+    "delegation_depth": None,
+}
+_REVOKED_KEY = {
+    "id": "gk_panel_02", "key_prefix": "tk_panel2", "name": "old ci",
+    "created_at": "2026-08-01T00:00:00.000Z", "revoked_at": "2026-08-02T00:00:00.000Z",
+    "graph_id": "g_prod", "scopes": ["graphs:read", "graphs:write"],
+    "delegation_depth": None,
+}
+
+
+def _team_row(tier: str, max_graphs: int | None) -> dict:
+    return {
+        "org_id": ORG_ID,
+        "name": "Graphs Fixture",
+        "tier": tier,
+        "max_graphs": max_graphs,
+        "role": "owner",  # isOwnerAdmin gate — action assertions non-vacuous
+    }
+
+
+def _wire_graphs_harness(page: Page, org_row: dict,
+                         graphs: list[dict],
+                         graph_keys: dict[str, list[dict]],
+                         mint_bodies: list | None = None,
+                         graph_mint_bodies: list | None = None,
+                         key_authed: list | None = None,
+                         rename_bodies: list | None = None,
+                         create_status: int = 201,
+                         create_body: dict | None = None) -> None:
+    """Layered API mock (keys-table style). team_row carries tier/max_graphs
+    so one harness renders free (locked create) and pro/team (unlocked +
+    ∞ meter) shapes. mint_bodies collects POST /v1/team/keys bodies;
+    graph_mint_bodies collects POST /v1/graphs bodies.
+
+    The fixture lists are MUTABLE state: DELETE /v1/graphs/{gid} drops the
+    row, DELETE /v1/team/keys/{id} stamps revoked_at, and a per-graph mint
+    appends a row — so the panel re-renders REAL post-mutation state (the
+    assertions are not vacuous re-renders of a static fixture)."""
+    mint_bodies = mint_bodies if mint_bodies is not None else []
+    graph_mint_bodies = graph_mint_bodies if graph_mint_bodies is not None else []
+    key_authed = key_authed if key_authed is not None else []
+    rename_bodies = rename_bodies if rename_bodies is not None else []
+    user_id = "u-graphs2116"
+    create_body = create_body if create_body is not None else {
+        "graph": {**CUSTOM_B, "created_at": "2026-09-04T00:00:00.000Z"},
+        "key": {"id": "gk_new_01", "graph_id": "g_dev",
+                "scopes": ["graphs:read", "graphs:write"],
+                "created_at": "2026-09-04T00:00:00.000Z"},
+        "key_plaintext": "tk_live_newgraph1234567890abcdef",
+        "revealed_once": True,
+    }
+    # Deep-copy: PATCH/DELETE mutate these dicts in place; a shallow
+    # `list(graphs)` would write the rename/delete back into the module-level
+    # fixtures (DEFAULT_ROW/CUSTOM_A/…) and leak across tests in the process.
+    current_graphs = [dict(g) for g in graphs]
+    # Deep-copy the per-graph key fixtures so mutations never leak across
+    # tests in the same process (the harness list is per-page anyway).
+    current_keys: dict[str, list[dict]] = {
+        gid: [dict(r) for r in rows] for gid, rows in graph_keys.items()
+    }
+
+    def handle(route):
+        url = route.request.url
+        if _is_bff_api(url):
+            path = _bff_path(url)
+            query = urllib.parse.urlsplit(url).query
+            auth = (route.request.headers.get("authorization") or "")
+            if auth.startswith("Bearer tt_"):
+                key_authed.append(url)  # #2246: must stay empty (session only)
+            if path.endswith("/v1/session/key") and route.request.method == "POST":
+                route.fulfill(status=500, content_type="application/json",
+                              body=json.dumps({"detail": "zero-mint tripwire"}))
+                return
+            if path.endswith("/v1/organizations") and route.request.method == "GET":
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps([org_row]))
+                return
+            if path.endswith("/v1/team/keys") and route.request.method == "GET":
+                # The API-Keys tab's mount read (no graph_id) returns the
+                # team rows; the per-graph panel pins ?graph_id=.
+                gid = urllib.parse.parse_qs(query).get("graph_id", [None])[0]
+                rows = current_keys.get(gid, []) if gid else _team_key_rows(current_keys)
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"keys": rows}))
+                return
+            if path.endswith("/v1/team/keys") and route.request.method == "POST":
+                mint_bodies.append(route.request.post_data or "")
+                body = json.loads(route.request.post_data or "{}")
+                gid = body.get("graph_id")
+                row = {
+                    "id": f"gk_mint_{len(mint_bodies)}",
+                    "key_prefix": f"tk_mint{len(mint_bodies)}",
+                    "name": body.get("name"),
+                    "created_at": "2026-09-04T00:00:00.000Z",
+                    "revoked_at": None,
+                    "graph_id": gid,
+                    "scopes": body.get("scopes"),
+                    "delegation_depth": None,
+                }
+                if gid:
+                    current_keys.setdefault(gid, []).append(row)
+                else:
+                    current_keys.setdefault("team", []).append(row)
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({
+                                  "id": row["id"],
+                                  "key": f"tk_live_mint{len(mint_bodies)}abcdef0123456789",
+                                  "key_prefix": row["key_prefix"],
+                                  "created_at": row["created_at"],
+                                  "name": row["name"],
+                                  "graph_id": gid,
+                                  "scopes": body.get("scopes"),
+                                  "delegation_depth": None,
+                              }))
+                return
+            m = re.match(r"^/v1/team/keys/([^/]+)$", path)
+            if m and route.request.method == "DELETE":
+                kid = m.group(1)
+                for rows in current_keys.values():
+                    for r in rows:
+                        if r["id"] == kid:
+                            r["revoked_at"] = "2026-09-04T00:00:00.000Z"
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"revoked": True, "key_id": kid,
+                                               "revoked_at": "2026-09-04T00:00:00.000Z"}))
+                return
+            if path.endswith("/v1/graphs") and route.request.method == "GET":
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps(current_graphs))
+                return
+            if path.endswith("/v1/graphs") and route.request.method == "POST":
+                graph_mint_bodies.append(route.request.post_data or "")
+                route.fulfill(status=create_status, content_type="application/json",
+                              body=json.dumps(create_body))
+                return
+            m = re.match(r"^/v1/graphs/([^/]+)$", path)
+            if m and route.request.method == "DELETE":
+                gid = urllib.parse.unquote(m.group(1))
+                current_graphs[:] = [g for g in current_graphs
+                                     if g["graph_id"] != gid]
+                route.fulfill(status=204)
+                return
+            if m and route.request.method == "PATCH":
+                # #2701 rename: body is ONLY {name}; capture it and echo the
+                # updated row so the inline edit's optimistic state reconciles.
+                gid = urllib.parse.unquote(m.group(1))
+                rename_bodies.append(route.request.post_data or "")
+                body = json.loads(route.request.post_data or "{}")
+                for g in current_graphs:
+                    if g["graph_id"] == gid:
+                        g["name"] = body.get("name", g["name"])
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"graph_id": gid,
+                                               "name": body.get("name")}))
+                return
+            if path.endswith("/v1/sessions"):
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"sessions": []}))
+                return
+            if path.endswith("/backups"):
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"backups": []}))
+                return
+            if path.endswith("/v1/team") or path.endswith("/v1/team/"):
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps(org_row))
+                return
+            route.fulfill(status=401, content_type="application/json",
+                          body=json.dumps({"detail": "unauthorized"}))
+            return
+        if url.startswith(AUTH_HOST):
+            local = AUTH_ORIGIN + url[len(AUTH_HOST):]
+            _proxy_body(route, local, page)
+            return
+        if url.startswith(APP_HOST):
+            local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
+            _proxy_body(route, local, page)
+            return
+        route.continue_()
+
+    page.route("**/*", handle)
+    _seed_local_session_cookie(page, user_id)
+
+
+def _team_key_rows(graph_keys: dict[str, list[dict]]) -> list[dict]:
+    """The API-Keys tab's rows: the union of every bucket the caller
+    seeded (per-graph + any 'team' legacy graph_id-NULL rows)."""
+    out: list[dict] = []
+    for rows in graph_keys.values():
+        out.extend(rows)
+    return out
+
+
+def _open_graphs_tab(page: Page, org_row: dict,
+                     graphs: list[dict] | None = None,
+                     graph_keys: dict[str, list[dict]] | None = None,
+                     **kw) -> None:
+    _wire_graphs_harness(
+        page, org_row,
+        graphs if graphs is not None else [DEFAULT_ROW, CUSTOM_A],
+        graph_keys if graph_keys is not None else {"g_prod": [_GRAPH_KEY]},
+        **kw,
+    )
+    _goto_local_dashboard(page)
+    expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
+    page.locator('[data-tab="graphs"]').click()
+    # The graphs table is the active tab's <table> — one row per fixture row.
+    expected_rows = len(graphs) if graphs is not None else 2
+    expect(page.locator("table tbody tr")).to_have_count(expected_rows, timeout=15_000)
+
+
+def test_graphs_table_rows_default_first_with_actions(page: Page) -> None:
+    """Indicator 1 + the row model: default row first (its trash is
+    DISABLED — #2701), custom rows carry rename + Keys + Delete; status/
+    key-count columns render; the meter shows the ∞ label for a pro/team
+    tier (max_graphs null)."""
+    key_authed: list = []
+    _open_graphs_tab(page, _team_row("team", None),
+                     key_authed=key_authed)
+    assert key_authed == [], f"no key-authed requests in session mode: {key_authed}"
+    # Meter: '2 graphs · ∞ cap' (default + custom rows, max_graphs null).
+    expect(page.locator('[aria-label="Graph usage meter"]')).to_contain_text("2 graphs · ∞ cap")
+    rows = page.locator("table tbody tr")
+    expect(rows.first).to_contain_text("default")  # name + badge
+    # The default row: NO working Delete, NO per-graph [Keys] panel button
+    # (its keys are the team-wide rows on the API Keys tab — P1-1 review
+    # fix), and NO raw key_count — #2306 suppresses the Keys cell (fixture
+    # payload key_count 1 = the registry bound-default capstone artifact
+    # that must never render) and offers the API-Keys-tab affordance.
+    #
+    # #2701: the default row's 🗑 still RENDERS but is DISABLED (the lock
+    # reason rides the aria-label). `exact=True` is load-bearing — Playwright
+    # role-name matching is a case-insensitive SUBSTRING, so the stale
+    # `name="Delete"` locator wrongly selected the disabled trash because
+    # "…can't be deleted" contains "deleted". The lock is the app's design
+    # (never clickable), not evidence of a missing action.
+    expect(rows.first.get_by_role("button", name="Delete", exact=True)).to_have_count(0)
+    dflt_trash = rows.first.locator("button.graph-trash")
+    expect(dflt_trash).to_have_count(1)
+    expect(dflt_trash).to_be_disabled()
+    expect(dflt_trash).to_have_attribute(
+        "aria-label", "The default graph can't be deleted")
+    expect(rows.first.get_by_role("button", name="Manage keys for graph default")).to_have_count(0)
+    dflt_keys_cell = rows.first.locator("td").nth(3)
+    expect(dflt_keys_cell).to_contain_text("API Keys tab")
+    expect(dflt_keys_cell).not_to_contain_text("1")  # suppressed, not the payload count
+    custom_row = rows.filter(has_text="prod")
+    expect(custom_row.get_by_role("button", name="Delete graph prod")).to_be_visible()
+    expect(custom_row.get_by_role("button", name="Keys")).to_be_visible()
+    # #2701: the rename pencil is an owner/admin row action on EVERY row
+    # (rename is not delete-gated — the default graph is renameable).
+    expect(custom_row.get_by_role("button", name="Rename graph prod")).to_be_visible()
+    expect(rows.first.get_by_role("button", name="Rename graph default")).to_be_visible()
+    expect(custom_row).to_contain_text("custom")
+    expect(custom_row).to_contain_text("0")  # key_count column
+
+
+def test_free_tier_meter_hidden_lock_line_states_cap_once(page: Page) -> None:
+    """#2308: free tier states the 1-graph cap ONCE — the 🔒 lock line
+    ("Your plan includes 1 graph" + upgrade CTA) is the canonical statement;
+    the meter ("1/1 graphs used") is hidden so it can't restate the cap in
+    the same screenful. Solo/pro keep the meter (they have no lock line)."""
+    _open_graphs_tab(page, _team_row("free", 1),
+                     graphs=[DEFAULT_ROW])
+    # Only the default row renders.
+    expect(page.locator("table tbody tr")).to_have_count(1)
+    # The meter is hidden under the lock line — cap stated once + one CTA.
+    expect(page.locator('[aria-label="Graph usage meter"]')).to_have_count(0)
+    expect(page.locator("section")).to_contain_text("🔒")
+    expect(page.locator("section")).to_contain_text("Upgrade to add more")
+
+
+def test_free_tier_create_locked_with_upgrade_cta(page: Page) -> None:
+    """Indicator 5: free/solo see the 🔒 locked create + upgrade CTA — no
+    create form, no new-graph input anywhere on the tab."""
+    _open_graphs_tab(page, _team_row("free", 1),
+                     graphs=[DEFAULT_ROW])
+    expect(page.get_by_label("New graph name")).to_have_count(0)
+    expect(page.locator("section")).to_contain_text("🔒")
+    expect(page.locator("section")).to_contain_text("Upgrade to add more")
+
+
+def test_create_graph_reveals_key_once_then_clears(page: Page) -> None:
+    """Indicator 2 + surface 4: creating a graph returns the C2 nested
+    envelope and the modal shows key_plaintext ONCE with the shown-once
+    copy; dismissing clears state — no route re-shows the key (the envelope
+    is never re-fetched; the modal text is gone from the DOM)."""
+    key_authed: list = []
+    _open_graphs_tab(page, _team_row("team", None),
+                     key_authed=key_authed)
+    page.get_by_label("New graph name").fill("dev")
+    page.get_by_role("button", name="+ Create").click()
+    modal = page.locator('[role="dialog"][aria-label="New key — shown once"]')
+    expect(modal).to_be_visible(timeout=15_000)
+    expect(modal).to_contain_text("shown once")
+    expect(modal).to_contain_text("tk_live_newgraph1234567890abcdef")
+    # Copy & done dismisses (clipboard may be blocked in CI — the button
+    # still clears on success; assert the modal goes away either way via
+    # the fallback "I saved it" path in a second pass).
+    page.get_by_role("button", name="I saved it").click()
+    expect(modal).to_have_count(0)
+    # No show-key route/remnant: re-opening the tab renders no plaintext.
+    expect(page.locator("body")).not_to_contain_text("tk_live_newgraph1234567890abcdef")
+
+
+def test_per_graph_key_panel_lists_mints_and_revokes(page: Page) -> None:
+    """Indicator 3: the [Keys] panel lists the graph's keys (graph_id
+    filter), mint POSTs {graph_id, scopes: graphs:read+write} and reveals
+    the returned plaintext once; revoke confirms + DELETEs. Owner/admin
+    gating is exercised via role:'owner' rows."""
+    mint_bodies: list = []
+    graph_keys = {
+        "g_prod": [_GRAPH_KEY, _REVOKED_KEY],
+        "team": [_GRAPH_KEY],
+    }
+    _open_graphs_tab(page, _team_row("team", None),
+                     graph_keys=graph_keys,
+                     mint_bodies=mint_bodies)
+    custom_row = page.locator("table tbody tr").filter(has_text="prod")
+    custom_row.get_by_role("button", name="Keys").click()
+    panel = page.locator(".graph-key-panel")
+    expect(panel).to_contain_text("Keys for prod", timeout=15_000)
+    # Panel rows: active + revoked (revoked dimmed/terminal, no Revoke).
+    panel_rows = panel.locator("tbody tr")
+    expect(panel_rows).to_have_count(2)
+    revoked_row = panel_rows.filter(has_text="old ci")
+    expect(revoked_row).to_contain_text("revoked")
+    expect(revoked_row.get_by_role("button", name="Revoke")).to_have_count(0)
+    # Mint a new key for the graph.
+    panel.get_by_label("New graph key label").fill("deploy")
+    panel.get_by_role("button", name="+ Mint key").click()
+    expect(page.locator('[role="dialog"]')).to_contain_text("shown once", timeout=15_000)
+    assert mint_bodies, "panel mint body captured"
+    mint_body = json.loads(mint_bodies[-1])
+    assert mint_body["graph_id"] == "g_prod"
+    assert sorted(mint_body["scopes"]) == ["graphs:read", "graphs:write"]
+    page.get_by_role("button", name="I saved it").click()
+    # Revoke the active ci row — confirm dialog accepts; the mutation
+    # stamps revoked_at so the refreshed panel renders it revoked/terminal.
+    ci_row = panel_rows.filter(has_text="ci").first
+    expect(ci_row.get_by_role("button", name="Revoke")).to_be_visible()
+    page.once("dialog", lambda d: d.accept())
+    ci_row.get_by_role("button", name="Revoke").click()
+    expect(ci_row).to_contain_text("revoked", timeout=15_000)
+    expect(ci_row.get_by_role("button", name="Revoke")).to_have_count(0)
+
+
+def test_default_graph_has_no_actions_and_custom_delete_armed(page: Page) -> None:
+    """Indicator 4 + #2701: the default graph row never offers the per-graph
+    Keys panel or a WORKING delete (its 🗑 is rendered disabled with the
+    reason); its Keys cell is #2306-suppressed (API-Keys-tab affordance
+    instead of a count). A custom row's 🗑 opens the TYPE-TO-CONFIRM modal:
+    cancel keeps the row, typing the literal word + confirming fires DELETE
+    /v1/graphs/{gid}?org_id=…. The inline rename pencil commits a PATCH
+    {name} and the row re-renders with the new name."""
+    rename_bodies: list = []
+    # A second custom row so the rename round-trip cannot disturb the
+    # delete target (each action keeps its own row).
+    _open_graphs_tab(page, _team_row("team", None),
+                     graphs=[DEFAULT_ROW, CUSTOM_A, CUSTOM_B],
+                     rename_bodies=rename_bodies)
+    rows = page.locator("table tbody tr")
+    dflt = rows.filter(has_text="default").first
+    # #2701: disabled trash (exact=True — the reason substring contains
+    # "deleted", see the sibling test) + the lock reason on the aria-label.
+    expect(dflt.get_by_role("button", name="Delete", exact=True)).to_have_count(0)
+    dflt_trash = dflt.locator("button.graph-trash")
+    expect(dflt_trash).to_have_count(1)
+    expect(dflt_trash).to_be_disabled()
+    expect(dflt_trash).to_have_attribute(
+        "aria-label", "The default graph can't be deleted")
+    expect(dflt.get_by_role("button", name="Manage keys for graph default")).to_have_count(0)
+    # #2306 chosen shape: the suppressed cell points at the API Keys tab.
+    expect(dflt.locator("td").nth(3)).to_contain_text("API Keys tab")
+
+    # ── #2701 rename pencil: inline edit commits PATCH /v1/graphs/{id} {name} ──
+    dev_row = rows.filter(has_text="dev")
+    # PATCH interception is async — arm the response waiter BEFORE the commit
+    # so a slow route handler cannot land after press() returns (the row name
+    # updates optimistically, so only the captured body proves the network leg).
+    with page.expect_response(lambda r: r.request.method == "PATCH"
+                              and "/v1/graphs/" in r.url, timeout=15_000):
+        dev_row.get_by_role("button", name="Rename graph dev").click()
+        # Page-scoped: clicking the pencil REPLACES the row's name cell with the
+        # input, so the `has_text="dev"` row filter can no longer resolve — the
+        # input's aria-label is the stable handle while the edit is armed.
+        rename_input = page.get_by_label("Rename graph dev")
+        expect(rename_input).to_be_visible()
+        rename_input.fill("dev-renamed")
+        rename_input.press("Enter")  # Enter routes to blur → renameGraph
+    assert rename_bodies, "the rename pencil must PATCH the graph"
+    assert json.loads(rename_bodies[-1]) == {"name": "dev-renamed"}, rename_bodies
+    expect(rows.filter(has_text="dev-renamed")).to_be_visible(timeout=15_000)
+
+    # ── #2701 delete 🗑 → type-to-confirm modal on a custom row ──
+    custom_row = rows.filter(has_text="prod")
+    custom_row.get_by_role("button", name="Delete graph prod").click()
+    modal = page.locator('[role="dialog"][aria-label="Delete graph"]')
+    expect(modal).to_be_visible()
+    expect(modal).to_contain_text("Delete prod?")
+    # The destructive Confirm is gated on the typed literal word.
+    confirm_btn = modal.get_by_role("button", name="Delete graph", exact=True)
+    expect(confirm_btn).to_be_disabled()
+    modal.get_by_role("button", name="Cancel").click()
+    expect(modal).to_have_count(0)
+    expect(custom_row).to_be_visible()  # cancel keeps the row
+    # Re-arm, type the word, confirm → DELETE drops the row from the refetch.
+    custom_row.get_by_role("button", name="Delete graph prod").click()
+    expect(modal).to_be_visible()
+    modal.get_by_label("Type delete to confirm").fill("delete")
+    expect(confirm_btn).to_be_enabled()
+    confirm_btn.click()
+    expect(custom_row).not_to_be_visible(timeout=15_000)  # list re-fetch drops it
+
+
+def test_default_row_keys_cell_suppressed_with_api_keys_affordance(page: Page) -> None:
+    """#2306 chosen shape: the default row's Keys cell never shows a raw
+    count (the fixture's DEFAULT_ROW.key_count 1 = the registry capstone's
+    bound-default artifact — the supabase lane was a structural always-0;
+    both communicated nothing actionable). The cell renders the suppressed
+    dash + an "API Keys tab" affordance (its keys are the team-wide rows
+    managed there), and clicking it lands on the API-Keys tab."""
+    _open_graphs_tab(page, _team_row("team", None),
+                     graphs=[DEFAULT_ROW, CUSTOM_A])
+    rows = page.locator("table tbody tr")
+    dflt = rows.first
+    keys_cell = dflt.locator("td").nth(3)
+    # Suppressed: no numeric count (payload key_count 1 must not render),
+    # the affordance is the cell's actionable content.
+    expect(keys_cell).not_to_contain_text("1")
+    affordance = dflt.get_by_role("button", name="API Keys tab")
+    expect(affordance).to_be_visible()
+    expect(dflt.get_by_role("button", name="Manage keys for graph default")).to_have_count(0)
+    # Custom rows are untouched: numeric meter + [Keys] panel button.
+    custom_row = rows.filter(has_text="prod")
+    expect(custom_row).to_contain_text("0")
+    expect(custom_row.get_by_role("button", name="Manage keys for graph prod")).to_be_visible()
+    # The affordance navigates to the API Keys tab (where the default
+    # graph's team-wide keys live).
+    affordance.click()
+    expect(page.locator("h2")).to_contain_text("API Keys", timeout=15_000)
+
+
+def test_create_409_cap_error_surfaces_inline(page: Page) -> None:
+    """Indicator 6: a 409 cap on create surfaces the authoritative detail
+    (C2 provisioning service 409 = graph quota OR API-key cap) inline."""
+    _open_graphs_tab(
+        page, _team_row("team", None), create_status=409,
+        create_body={"detail": "Graph quota reached — delete a graph or upgrade."},
+    )
+    page.get_by_label("New graph name").fill("overflow")
+    page.get_by_role("button", name="+ Create").click()
+    expect(page.locator(".error.banner")).to_contain_text(
+        "Graph quota reached — delete a graph or upgrade.", timeout=15_000)
+
+
+def test_member_role_sees_no_manage_actions(page: Page) -> None:
+    """P2-3 review fix: the [Delete] (and the panel [Keys] manage affordance
+    for members — the panel renders read-only) are owner/admin-gated. A
+    member sees the list but no destructive/manage buttons on custom rows."""
+    member = _team_row("team", None)
+    member["role"] = "member"
+    _open_graphs_tab(page, member)
+    custom_row = page.locator("table tbody tr").filter(has_text="prod")
+    expect(custom_row.get_by_role("button", name="Delete")).to_have_count(0)
+    # The key panel opens read-only: mint/revoke absent, list visible.
+    custom_row.get_by_role("button", name="Keys").click()
+    panel = page.locator(".graph-key-panel")
+    expect(panel).to_contain_text("Only owners and admins can manage graph keys.",
+                                  timeout=15_000)
+    expect(panel.get_by_role("button", name="+ Mint key")).to_have_count(0)
+    expect(panel.get_by_role("button", name="Revoke")).to_have_count(0)
+    expect(panel).to_contain_text("ci")  # the list still renders
+
+
+def test_solo_tier_create_stays_open_with_used_total_meter(page: Page) -> None:
+    """P1-2 review fix: solo is NOT tier-blocked (pricing.json max_graphs=2;
+    the server 402-gate is free/anon only) — the create form stays and the
+    meter reads used/total until the 409 quota gate fires."""
+    _open_graphs_tab(page, _team_row("solo", 2),
+                     graphs=[DEFAULT_ROW, CUSTOM_A])
+    expect(page.get_by_label("New graph name")).to_be_visible()
+    expect(page.locator('[aria-label="Graph usage meter"]')).to_contain_text("2/2 graphs used")
+    expect(page.locator("section")).not_to_contain_text("🔒")
+
+
+# ── #2298 (the #2248 sync-review gap): two-team panel-revoke pin ────────────
+# The per-graph [Keys] panel revoke (revokePanelKey) pins ?org_id= on its
+# DELETE only since #2230; the pin is guarded by the STATIC
+# keyTeamPinsTripwire unit (presence of the pin string) — no behavioral
+# multi-team e2e proves the revoke TARGETS the SELECTED team. This leg is the
+# F10 two-team twin of the API-Keys-tab writes leg
+# (test_keys_table_mixed.py::test_two_team_key_writes_pin_selected_team):
+# a multi-membership session user on a NON-first membership team (Bravo)
+# revoking from the per-graph panel must have the DELETE carry
+# org_id=team_b (200), a dropped pin must 403 (server memberships[0]
+# resolution = Alpha → "Not your API key"), and a wrong-team pin must 403
+# too. Revoke is a SOFT revoke (stamp revoked_at; list reads re-render the
+# row revoked/terminal — the module's per-graph revoke contract). Mirrors
+# the real server fail-closed detail.
+
+_TWO_TEAM_KEYS_GRAPH_ALPHA = {
+    "id": "gk_alpha_01", "key_prefix": "tt_alpha01", "name": "alpha-ci",
+    "created_at": "2026-09-05T00:00:00.000Z", "revoked_at": None,
+    "graph_id": "g_alpha", "scopes": ["graphs:read", "graphs:write"],
+    "delegation_depth": None,
+}
+_TWO_TEAM_KEYS_GRAPH_BETA = {
+    "id": "gk_beta_01", "key_prefix": "tt_beta01", "name": "beta-ci",
+    "created_at": "2026-09-05T00:00:00.000Z", "revoked_at": None,
+    "graph_id": "g_beta", "scopes": ["graphs:read", "graphs:write"],
+    "delegation_depth": None,
+}
+
+
+def _two_team_graph_row(graph_id: str, name: str) -> dict:
+    return {
+        "graph_id": graph_id, "name": name, "kind": "custom",
+        "status": "active", "key_count": 1, "recording": None,
+    }
+
+
+def test_two_team_graphs_panel_revoke_pins_selected_team(page: Page) -> None:
+    """#2298: the graphs [Keys] panel revoke on a non-first membership team.
+    Session user in TWO teams (Alpha = memberships[0], Bravo = selected via
+    the account menu). Bravo's beta custom graph has one per-graph key
+    (gk_beta_01) and Alpha's alpha graph one (gk_alpha_01). Harness resolves
+    every DELETE /v1/team/keys/{id} under the PINNED team (org_id param;
+    absent → team_a, the server's memberships[0] session resolution):
+    - dropped pin (Bravo's key, no org_id)  → 403 "Not your API key"
+    - wrong pin (Alpha's key, org_id=team_b) → 403 "Not your API key"
+    - panel revoke of Bravo's key (org_id=team_b) → 200; soft revoke (the
+      real server stamps revoked_at and re-lists — rows never vanish), so the
+      refreshed panel re-renders the row revoked/terminal, not empty.
+    Assertions: the one 200 delete URL pins team_b; Bravo's key stamped
+    revoked_at (Alpha's untouched, still active); zero POST /v1/session/key;
+    zero key-authed."""
+    import re as _re
+    team_a = {"org_id": "team_a", "org_name": "Alpha", "tier": "team",
+              "max_graphs": None, "role": "owner", "anon": False}
+    team_b = {"org_id": "team_b", "org_name": "Bravo", "tier": "team",
+              "max_graphs": None, "role": "owner", "anon": False}
+    # Per-team per-graph key buckets (F10 shape) — writes resolve ONLY under
+    # the owning team's bucket; a wrong/dropped pin cannot accidentally hit.
+    # Deep-copy the fixtures so a revoke stamping revoked_at below never
+    # mutates the module constants across tests in the same process.
+    keys_by_team: dict = {
+        "team_a": {"g_alpha": [dict(_TWO_TEAM_KEYS_GRAPH_ALPHA)]},
+        "team_b": {"g_beta": [dict(_TWO_TEAM_KEYS_GRAPH_BETA)]},
+    }
+    graphs_by_team: dict = {
+        "team_a": [dict(DEFAULT_ROW), _two_team_graph_row("g_alpha", "alpha")],
+        "team_b": [dict(DEFAULT_ROW), _two_team_graph_row("g_beta", "beta")],
+    }
+    delete_log: list = []
+    mint_calls: list = []
+    key_authed: list = []
+
+    def handle(route):
+        url = route.request.url
+        if _is_bff_api(url):
+            path = _bff_path(url)
+            method = route.request.method
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+            tid = (qs.get("org_id") or ["team_a"])[0]  # server memberships[0]
+            auth = (route.request.headers.get("authorization") or "")
+            if auth.startswith("Bearer tt_"):
+                key_authed.append(url)
+            if path.endswith("/v1/session/key") and method == "POST":
+                mint_calls.append(route.request.post_data or "")
+                route.fulfill(status=500, content_type="application/json",
+                              body=json.dumps({"detail": "loud 500 — zero-mint tripwire"}))
+                return
+            if path.endswith("/v1/organizations") and method == "GET":
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps([team_a, team_b]))
+                return
+            if path.endswith("/v1/onboarding/state") and method == "GET":
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"onboarding": {"onboarding_complete": True}}))
+                return
+            if path.endswith("/v1/user/identity") and method == "GET":
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"methods": [], "login_methods": 0,
+                                                "banner": {"show": False}}))
+                return
+            if path.endswith("/v1/team/keys") and method == "GET":
+                gid = qs.get("graph_id", [None])[0]
+                if gid:
+                    rows = keys_by_team.get(tid, {}).get(gid, [])
+                else:
+                    # API-Keys-tab union read (mount loadAll) — not opened in
+                    # this leg, but must 200 so the shell boots clean.
+                    rows = [r for b in keys_by_team.get(tid, {}).values() for r in b]
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"keys": rows}))
+                return
+            m = _re.match(r"^/v1/team/keys/([^/]+)$", path)
+            if m and method == "DELETE":
+                kid = m.group(1)
+                # Resolve under the PINNED team only — absent pin mirrors the
+                # server's memberships[0] resolution (team_a). The key lives
+                # in exactly one team's buckets; wrong/dropped pin → 403
+                # (server fail-closed "Not your API key"), no mutation.
+                bucket = keys_by_team.get(tid, {})
+                found = next((r for rows in bucket.values() for r in rows
+                              if r["id"] == kid), None)
+                if found is None:
+                    delete_log.append({"url": url, "status": 403})
+                    route.fulfill(status=403, content_type="application/json",
+                                  body=json.dumps({"detail": "Not your API key"}))
+                    return
+                # Soft revoke (real-server contract, hosted_api.py): stamp
+                # revoked_at, keep the row — list reads return ALL rows incl.
+                # revoked, so the panel refresh re-renders it revoked/terminal
+                # (same model as _wire_graphs_harness' DELETE above).
+                found["revoked_at"] = "2026-09-05T00:00:00.000Z"
+                delete_log.append({"url": url, "status": 200})
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"revoked": True, "key_id": kid,
+                                               "revoked_at": found["revoked_at"]}))
+                return
+            if path.endswith("/v1/graphs") and method == "GET":
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps(graphs_by_team.get(tid, [])))
+                return
+            if path.endswith("/v1/sessions"):
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"sessions": []}))
+                return
+            if path.endswith("/backups"):
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"backups": []}))
+                return
+            if path.endswith("/v1/team") or path.endswith("/v1/team/"):
+                t = team_b if tid == "team_b" else team_a
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps(t))
+                return
+            if path.endswith("/v1/team/alerts"):
+                route.fulfill(status=200, content_type="application/json", body="[]")
+                return
+            route.fulfill(status=401, content_type="application/json", body="{}")
+            return
+        if url.startswith(AUTH_HOST):
+            local = AUTH_ORIGIN + url[len(AUTH_HOST):]
+            _proxy_body(route, local, page)
+            return
+        if url.startswith(APP_HOST):
+            local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
+            _proxy_body(route, local, page)
+            return
+        route.continue_()
+
+    page.route("**/*", handle)
+    _seed_local_session_cookie(page, "u-two-team-panel")
+    _goto_local_dashboard(page)
+    expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
+    # Select Bravo (≠ first membership Alpha) via the account menu — the
+    # switch's loadAll must pin ?org_id=team_b (a dropped pin cannot
+    # false-pass: expect_response only fires on the pinned read).
+    page.get_by_role("button", name=_re.compile(r"Account menu")).click()
+    with page.expect_response(lambda r: "/v1/team/keys" in r.url
+                              and "org_id=team_b" in r.url,
+                              timeout=15000):
+        page.locator(".account-menu").get_by_role("button", name="Bravo").click()
+    expect(page.locator("body")).to_contain_text("Bravo", timeout=15_000)
+
+    # ── Graphs tab: Bravo's rows ONLY (per-team truth) ──
+    page.locator('[data-tab="graphs"]').click()
+    rows = page.locator("table tbody tr")
+    expect(rows).to_have_count(2, timeout=15_000)  # default + beta
+    expect(rows.filter(has_text="beta")).to_be_visible()
+    # Alpha's "alpha" graph row NEVER renders on the selected team's tab.
+    expect(rows.filter(has_text="alpha")).to_have_count(0)
+
+    # ── Wrong-pin negatives (session-shaped probes, BEFORE the UI delete) ──
+    # The probes replay revokePanelKey's exact request: session JWT Bearer
+    # (read from the sb-tortoise-auth-token cookie, as the app does) with
+    # ONLY the org_id pin diverging. The harness resolves the team from the
+    # pin; absent pin = server memberships[0] resolution = Alpha.
+    _probe_js = """async (spec) => {
+      const raw = document.cookie.split(';').find(c => c.trim().startsWith('sb-tortoise-auth-token='))
+      let token = ''
+      if (raw) { try { token = JSON.parse(decodeURIComponent(raw.split('=').slice(1).join('='))).access_token || '' } catch (e) {} }
+      const res = await fetch(spec.url, {
+        method: 'DELETE',
+        credentials: 'include',
+        headers: token ? { Authorization: 'Bearer ' + token } : {},
+      })
+      let detail = null
+      try { detail = (await res.json()).detail } catch (e) {}
+      return {status: res.status, detail}
+    }"""
+    # The probes must address the APP'S OWN API namespace. `API_BASE` in
+    # main.jsx is `/api` — #4054 removed the client-side supabase client, so the
+    # browser holds only the opaque HttpOnly `__Host-session` handle and every
+    # call is same-origin — and the app origin serves `STRICT_CSP` with
+    # `connect-src 'self'`. A cross-origin fetch to `API_HOST` is therefore
+    # refused by the browser BEFORE the request is dispatched:
+    #
+    #   Connecting to 'https://api.premiselabs.co/v1/team/keys/…' violates the
+    #   following Content Security Policy directive: "connect-src 'self'".
+    #   The action has been blocked.  → TypeError: Failed to fetch
+    #
+    # The route handler never sees it (and an unhandled request would reach the
+    # real network). `_bff_path` strips the `/api` prefix, so these hit the SAME
+    # mock branches; the pin behaviour under test is unchanged.
+    _api = DASHBOARD_URL.rstrip("/") + "/api"
+    # 1) Bravo's key with NO pin → server resolves memberships[0] = Alpha →
+    #    the key is not Alpha's → 403 "Not your API key", nothing mutated.
+    probe1 = page.evaluate(_probe_js, {"url": f"{_api}/v1/team/keys/gk_beta_01"})
+    assert probe1["status"] == 403 and probe1["detail"] == "Not your API key", probe1
+    # 2) Alpha's key pinned to the WRONG team (team_b) → 403, nothing mutated.
+    probe2 = page.evaluate(_probe_js,
+                           {"url": f"{_api}/v1/team/keys/gk_alpha_01?org_id=team_b"})
+    assert probe2["status"] == 403 and probe2["detail"] == "Not your API key", probe2
+    # Both probes must have mutated nothing — the keys stay ACTIVE in their
+    # own buckets (probe 403s never stamp revoked_at).
+    assert [r["id"] for r in keys_by_team["team_b"]["g_beta"]] == ["gk_beta_01"]
+    assert keys_by_team["team_b"]["g_beta"][0]["revoked_at"] is None
+    assert [r["id"] for r in keys_by_team["team_a"]["g_alpha"]] == ["gk_alpha_01"]
+    assert keys_by_team["team_a"]["g_alpha"][0]["revoked_at"] is None
+
+    # ── The REAL panel revoke on Bravo (owner) ──
+    beta_row = rows.filter(has_text="beta")
+    beta_row.get_by_role("button", name="Keys").click()
+    panel = page.locator(".graph-key-panel")
+    expect(panel).to_contain_text("Keys for beta", timeout=15_000)
+    # Panel lists Bravo's per-graph key — never Alpha's.
+    panel_rows = panel.locator("tbody tr")
+    expect(panel_rows).to_have_count(1)
+    expect(panel).to_contain_text("tt_beta01")
+    expect(panel).not_to_contain_text("tt_alpha01")
+    # Revoke with the confirm dialog naming the row; the DELETE must carry
+    # ?org_id=team_b (the SELECTED team) and return 200.
+    confirm_msgs: list = []
+    page.once("dialog", lambda d: (confirm_msgs.append(d.message), d.accept()))
+    with page.expect_response(lambda r: r.request.method == "DELETE"
+                              and "/v1/team/keys/" in r.url
+                              and "org_id=team_b" in r.url,
+                              timeout=15000):
+        panel_rows.get_by_role("button", name="Revoke key tt_beta01").click()
+    assert confirm_msgs and "Revoke beta-ci" in confirm_msgs[0], confirm_msgs
+    assert "tt_beta01" in confirm_msgs[0], confirm_msgs
+    # Soft-revoke refresh: graphKeysFor re-lists g_beta — the row STAYS,
+    # stamped revoked_at, and re-renders revoked/terminal (dim row, no Revoke
+    # button — the module's per-graph revoke contract). The never-minted
+    # empty state does NOT appear (the graph had a key; it was revoked).
+    expect(panel_rows).to_have_count(1, timeout=15_000)
+    revoked_row = panel_rows.filter(has_text="beta-ci")
+    expect(revoked_row).to_contain_text("revoked")
+    expect(revoked_row.get_by_role("button", name=_re.compile(r"Revoke"))).to_have_count(0)
+    expect(panel).not_to_contain_text("No keys for this graph yet")
+
+    # ── Terminal: exactly one 200 delete, pinned team_b; buckets + tripwires ──
+    ok = [d for d in delete_log if d["status"] == 200]
+    forbidden = [d for d in delete_log if d["status"] == 403]
+    assert len(ok) == 1, f"exactly one successful panel revoke: {delete_log}"
+    assert "org_id=team_b" in ok[0]["url"], f"panel revoke must pin team_b: {ok[0]}"
+    assert len(forbidden) == 2, f"the two wrong-pin probes must 403: {delete_log}"
+    # Bravo's key soft-revoked (row retained + stamped); Alpha's untouched.
+    assert [r["id"] for r in keys_by_team["team_b"]["g_beta"]] == ["gk_beta_01"], \
+        "Bravo's key row is retained under soft revoke"
+    assert keys_by_team["team_b"]["g_beta"][0]["revoked_at"] is not None, \
+        "Bravo's pinned revoke must stamp revoked_at"
+    assert keys_by_team["team_a"]["g_alpha"][0]["revoked_at"] is None, \
+        "Alpha's key must be untouched by Bravo-pinned writes"
+    assert mint_calls == [], f"zero-mint tripwire: POST /v1/session/key fired: {mint_calls}"
+    assert key_authed == [], f"no key-authed requests in session mode: {key_authed}"

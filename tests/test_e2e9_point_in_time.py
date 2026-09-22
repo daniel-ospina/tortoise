@@ -29,7 +29,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tortoise.ids import content_hash  # noqa: E402
+from tortoise.ids import content_hash
 
 
 def _pid(content: str) -> str:
@@ -126,8 +126,8 @@ def _question() -> dict:
 @pytest.fixture
 def graph(tmp_path, monkeypatch):
     """V2 pipeline graph: two-session gym fixture ingested end-to-end."""
-    from tortoise.sdk import TortoiseSDK
     from tools.longmem_eval.ingest_v2 import ingest_haystack_v2
+    from tortoise.sdk import TortoiseSDK
 
     monkeypatch.setattr("tortoise.extractor_v2.search_graph", _fake_search)
     sdk = TortoiseSDK(str(tmp_path / "e2e9.db"))

@@ -2,9 +2,14 @@
 
 Zero Python deps. Uses `gh` CLI for polling + stdlib http.server for webhook.
 Maps issues/PRs → 4-entity chain per ONTOLOGY_v2.5 §1.1:
-  Source (github_issue) → Object (pm:issue) → Event (pm:cardCreated)
+  Source (github_issue) → Object (pm:issue) → Event (github.issue.*)
   + Subject (naturalPerson for author/assignees)
-PM domain extension kinds: pm:issue, pm:card, pm:cardCreated, pm:cardCompleted.
+
+#1725 (Slice 0): all ontology mapping is DELEGATED to the shared stateless
+`tortoise/github_map.py` — the SINGLE eventId/eventKind vocabulary (the
+#1155 normalization; pm:cardCreated/pm:cardCompleted are retired in favor of
+github.issue.open/github.issue.closed). These mappers are THIN WRAPPERS that
+only adapt gh-CLI field naming (already handled by github_map's normalizer).
 """
 from __future__ import annotations  # noqa: I001
 
@@ -19,6 +24,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Any, Callable  # noqa: UP035
 
 logger = logging.getLogger(__name__)
+
+from tortoise import github_map  # noqa: E402 — the shared #1725 mapper
 
 
 def _now_iso() -> str:
@@ -183,99 +190,37 @@ class GitHubConnector:
     # ── Entity extraction (ONTOLOGY_v2.5 §1.1, PM domain extension) ────
 
     def _issue_to_entities(self, issue: dict) -> dict | None:
-        """Map GitHub issue → entity chain.
+        """Map GitHub issue → entity chain (thin wrapper over github_map).
 
         Returns dict with: object (ObjectRegistered), event (EventRecorded),
-        subjects (SubjectAdded list), about_edges.
+        subjects (SubjectAdded list), about_subjects.
         Per ONTOLOGY_v2.5 §1.1: Object (pm:issue), Subject (naturalPerson).
-        PM domain extension: packs/project-management/manifest.yaml.
+
+        #1725: ALL mapping is delegated to `github_map` (the #1155 single
+        vocabulary — eventKind github.issue.{state}, subject
+        issue:{repo}#{n}); this method adds the connector's routing props
+        (label-derived team/role/complexity) and the aboutSubject wiring.
         """
         number = issue.get("number")
         title = issue.get("title", "")
         if not title or not number:
             return None
 
-        state = issue.get("state", "")
-        created_at = issue.get("createdAt", "")
-        closed_at = issue.get("closedAt", "")
-        url = issue.get("url", "")
         labels = [l.get("name", "") for l in (issue.get("labels") or [])]  # noqa: E741
         complexity = _extract_label_prefix(labels, "complexity:") or "standard"
         ux_rating = _extract_label_prefix(labels, "ux:") or ""
-        assignees = [a.get("login", "") for a in (issue.get("assignees") or [])]
-        author = (issue.get("author") or {}).get("login", "")  # P0: handle null author
-        milestone = (issue.get("milestone") or {}).get("title", "")  # noqa: F841
-
-        entity_id = f"github-issue-{self.repo}-{number}"
-
-        # Route to team + role based on labels + repo config
         route = self._route_issue(labels)
 
-        # Object — persisted entity (PM domain extension, ONTOLOGY_v2.5 §1.1)
-        obj = {
-            "type": "ObjectRegistered",
-            "id": entity_id,
-            "name": f"{self.repo}#{number}",
-            "object_kind": "pm:issue",
-            "title": title,
-            "url": url,
-            "createdAt": created_at,
-            "routed_team": route["team"],
-            "routed_role": route["role"],
-            "routed_product": route["product"],
-            "complexity": complexity,
-            "ux_rating": ux_rating,
-        }
-
-        # Event — temporal occurrence (PM domain extension)
-        event_kind = "pm:cardCompleted" if state == "closed" else "pm:cardCreated"
-        # #1155-P2: eventKind/subject intentionally DIVERGE from the poll-path
-        # producer (`_issue_to_event`: github.issue.{state} / subject
-        # issue:{repo}#{n}). Both producers write the SAME Event node (MERGE
-        # on the shared eventId); the projection's plain merge is
-        # LAST-WRITER-WINS (`e += $props` on MATCH) — whichever producer
-        # applies last defines the node's eventKind/subject. ingest()
-        # converges on THIS producer (covered poll events are deduped), but a
-        # standalone poll()/webhook apply AFTER the entity path flips the
-        # Event back to github.issue.* / issue:{repo}#{n}. Accepted risk —
-        # consumers rely on each producer's vocabulary; the divergence is
-        # pinned in test_producers_share_event_id so a future normalization
-        # is deliberate.
-        event = {
-            "type": "EventRecorded",
-            # #1155: canonical issue-Event id — shared with the poll/webhook
-            # producer (`_issue_to_event`). Both producers converge on ONE
-            # Event node per issue (MERGE dedup on eventId).
-            "eventId": f"{entity_id}-created",
-            "eventKind": event_kind,
-            "subject": f"github-user:{author}" if author else f"repo:{self.repo}",
-            # #1155: `object` references the pm:issue Object by NAME
-            # ({repo}#{number}) — the projection's produces-edge wiring
-            # matches Object.name, so the produces edge lands on the REAL
-            # Object (previously: a stub Object named after entity_id).
-            "object": f"{self.repo}#{number}",
-            "startedAt": created_at,
-            "endedAt": closed_at if state == "closed" else None,
-            # provenance parity with the poll-path producer (#1155)
-            "source": f"github:{self.repo}",
-            "sourceKind": "github_issue",
-        }
-
-        # Subjects — people involved (ONTOLOGY_v2.5 §1.1 subjectKind)
-        subjects = []
-        seen = set()
-        for login in [author] + assignees:  # noqa: RUF005
-            if login and login not in seen:
-                seen.add(login)
-                subjects.append({
-                    "type": "SubjectAdded",
-                    "id": f"github-user:{login}",
-                    "name": login,
-                    "subject_kind": "naturalPerson",
-                })
-
-        # aboutSubject edges — Object → Subject (ONTOLOGY_v2.5 §2.2)
-        about_subjects = [s["id"] for s in subjects]
+        obj = github_map.issue_to_object(
+            issue, self.repo, routed_team=route["team"],
+            routed_role=route["role"], routed_product=route["product"],
+            complexity=complexity, ux_rating=ux_rating)
+        if obj is None:
+            return None
+        event = github_map.issue_to_event(issue, self.repo, previous_state=None)
+        if event is None:
+            return None
+        subjects, about_subjects = github_map.issue_to_subjects(issue)
 
         return {
             "object": obj,
@@ -467,95 +412,52 @@ class GitHubConnector:
     # ── Event mapping ──────────────────────────────────────────────
 
     def _issue_to_event(self, issue: dict) -> dict | None:
-        number = issue.get("number")
-        title = issue.get("title", "")
-        if not title or not number:
-            return None
+        """Poll-path issue event — thin wrapper over github_map.
 
-        state = issue.get("state", "")
-        created_at = issue.get("createdAt", "")
-        closed_at = issue.get("closedAt", "")
-        url = issue.get("url", "")  # noqa: F841
-
-        return {
-            "type": "EventRecorded",
-            # #1155: canonical issue-Event id — MUST match the entity-path
-            # producer (`_issue_to_entities`, eventId f"{entity_id}-created")
-            # so both producers converge on ONE Event node per issue (MERGE
-            # dedup). The `-created` suffix keeps Event ids out of the Object
-            # id space (the pm:issue Object id is `entity_id`) — previously
-            # the poll-path eventId collided with the Object id string.
-            # #1155-P2: eventKind/subject diverge from the entity path by
-            # design (github.issue.* / issue:{repo}#{n} here vs pm:card* /
-            # github-user:{author}) — the shared Event node is last-writer-wins
-            # (see _issue_to_entities for the risk note).
-            "eventId": f"github-issue-{self.repo}-{number}-created",
-            "eventKind": f"github.issue.{state}",
-            "subject": f"issue:{self.repo}#{number}",
-            # #1155: `object` references the pm:issue Object by NAME
-            # ({repo}#{number}) — the projection's produces-edge wiring
-            # matches Object.name, so the produces edge lands on the REAL
-            # Object, identical to the entity-path producer (previously: a
-            # stub Object named after the issue title).
-            "object": f"{self.repo}#{number}",
-            "startedAt": created_at,
-            "endedAt": closed_at if state == "closed" else None,
-            "source": f"github:{self.repo}",
-            "sourceKind": "github_issue",
-            "participants": [],
-        }
+        #1725: byte-identical to the shared vocabulary (previous_state=None
+        ⇒ the `-created` event, kind github.issue.{state})."""
+        return github_map.issue_to_event(issue, self.repo, previous_state=None)
 
     def _pr_to_event(self, pr: dict) -> dict | None:
-        number = pr.get("number")
-        title = pr.get("title", "")
-        if not title or not number:
-            return None
-
-        state = pr.get("state", "")
-        merged_at = pr.get("mergedAt")
-        created_at = pr.get("createdAt", "")
-        closed_at = pr.get("closedAt", "")
-
-        kind = "github.pr.merged" if merged_at else f"github.pr.{state}"
-        url = pr.get("url", "")  # noqa: F841
-
-        return {
-            "type": "EventRecorded",
-            "eventId": f"github-pr-{self.repo}-{number}",
-            "eventKind": kind,
-            "subject": f"pr:{self.repo}#{number}",
-            "object": title,
-            "startedAt": created_at,
-            "endedAt": merged_at or (closed_at if state == "closed" else None),
-            "source": f"github:{self.repo}",
-            "sourceKind": "github_issue",
-            "participants": [],
-        }
+        """PR event — thin wrapper over github_map (#1725)."""
+        return github_map.pr_to_event(pr, self.repo)
 
     def _webhook_to_event(self, event_type: str, payload: dict) -> dict | None:
-        """Map GitHub webhook event → EventRecorded."""
+        """Map GitHub webhook event → EventRecorded (thin wrapper over
+        github_map). Transitions mint transition ids (P2-7): action
+        ``closed`` ⇒ ``-closed``, ``reopened`` ⇒ ``-reopened``; opening (no
+        previous state) ⇒ ``-created``."""
         if event_type == "issues":
             issue = payload.get("issue", {})
             action = payload.get("action", "")
+            if action in ("closed", "reopened"):
+                return github_map.issue_to_event({
+                    "number": issue.get("number"),
+                    "title": issue.get("title", ""),
+                    "state": "closed" if action == "closed" else "open",
+                    "createdAt": issue.get("created_at", ""),
+                    "closedAt": issue.get("closed_at"),
+                    "html_url": issue.get("html_url", ""),
+                }, self.repo,
+                    previous_state="open" if action == "closed" else "closed")
             return self._issue_to_event({
                 "number": issue.get("number"),
                 "title": issue.get("title", ""),
                 "state": "closed" if action == "closed" else "open",
                 "createdAt": issue.get("created_at", ""),
                 "closedAt": issue.get("closed_at"),
-                "url": issue.get("html_url", ""),
+                "html_url": issue.get("html_url", ""),
             })
         if event_type == "pull_request":
             pr = payload.get("pull_request", {})
-            action = payload.get("action", "")
             return self._pr_to_event({
                 "number": pr.get("number"),
                 "title": pr.get("title", ""),
-                "state": "closed" if action == "closed" else "open",
+                "state": "closed" if payload.get("action") == "closed" else "open",
                 "createdAt": pr.get("created_at", ""),
                 "closedAt": pr.get("closed_at"),
                 "mergedAt": pr.get("merged_at"),
-                "url": pr.get("html_url", ""),
+                "html_url": pr.get("html_url", ""),
             })
         return None
 

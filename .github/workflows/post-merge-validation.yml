@@ -138,7 +138,7 @@ jobs:
                   workflow_id: 'python-ci.yml',
                   event: 'push',           // filters out pull_request + schedule runs
                   head_sha: sha,
-                  per_page: 100,  # #1474 review P3: a SHA with >10 reruns must still see the newest run
+                  per_page: 100,  // #1474 review P3: a SHA with >10 reruns must still see the newest run
                 });
                 const candidates = (runs.data && runs.data.workflow_runs) || [];
                 if (candidates.length === 0) {
@@ -164,6 +164,52 @@ jobs:
             }
             for (const [k, v] of Object.entries(out)) core.setOutput(k, v);
 
+  lint:
+    # #2174: ruff gate on main pushes. CI lint (agent-infra-ci / lint in
+    # ci.yml) runs ONLY on pull_request events — lint-red code merged
+    # silently 3× in one session (#2130 sdk.py E702, #2138 dead-ARG001-noqa
+    # RUF100, #2155 w2a E702+I001), red'ing every subsequent PR's merge-ref
+    # until an out-of-band fix PR landed. This job runs ruff on EVERY push
+    # to main and FAILS loudly on the merge commit. NEVER deduped: python-ci
+    # push runs do not run ruff, so dedup-check must not skip this job (it
+    # has no `skip != 'true'` guards — the whole point is it always runs).
+    needs: dedup-check   # only for best-effort PR attribution on failure
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}  # deterministic — mid-run main advance must not move the tree
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'  # pyproject requires-python >= 3.12
+      - name: Install ruff (CI-pinned ==0.16.4)
+        run: pip install ruff==0.16.4
+      - name: Ruff check . (repo config — E/F/B/UP/I/SIM/RUF, #1503 baseline)
+        id: ruff
+        run: ruff check .
+      - name: Comment on the merged PR (best-effort attribution)
+        # Only on an actual ruff finding — an earlier infra flake (checkout /
+        # pip network) would leave this step skipped, not commented.
+        if: steps.ruff.outcome == 'failure'
+        env:
+          PR_NUMBER: ${{ needs.dedup-check.outputs.pr_number }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = process.env.PR_NUMBER;
+            if (!pr) {
+              core.warning('post-merge lint failed but no PR attribution — see the merge commit check');
+              return;
+            }
+            await github.rest.issues.createComment({
+              issue_number: parseInt(pr, 10),
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `⚠️ This PR **failed post-merge ruff lint** (run ${context.runId}). CI lint only runs on PR events, so every subsequent PR's merge-ref lint is red until this is fixed. Reproduce locally with \`pip install ruff==0.16.4 && ruff check .\` and open a fix PR.`,
+            });
+
   validate:
     # #1474: this job is the check branch protection tracks. `if: always()` +
     # `needs: dedup-check`: if dedup-check itself fails, the suite still runs
@@ -175,11 +221,15 @@ jobs:
     # Epic #1647 Task 10 Step 1a (P4): the pmv validate job is now a docker
     # lane (same URI mechanics as the fast matrix — job-level URI + the
     # EXPECT_URI tripwire signal). The carve-out exemption is the conftest
-    # TORTOISE_TEST_NO_REDIRECT list (17 stems) — no CARVE_OUT needed (URI
+    # TORTOISE_TEST_NO_REDIRECT stem list — no CARVE_OUT needed (URI
     # is set), and the carve-out files stay embedded by exemption.
     env:
       TORTOISE_DB_URI: "docker://:falkordb@localhost:6379/tortoise_test_matrix"
       TORTOISE_TEST_EXPECT_URI: "1"
+      # #1886: dedicated fresh-per-job docker container — journal-blind
+      # team_* stray pass stays live in CI (opt-in only; the shared dev
+      # container never sets it — issue #1884).
+      TORTOISE_TEST_SWEEP_TEAM_STRAYS: "1"
     # Mirror the fast matrix's two falkordb services: the passworded 6379
     # (the job URI + probe family) and the legacy passwordless 16379 (the
     # raw-client probes in test_search_engine et al.).
@@ -187,7 +237,20 @@ jobs:
       falkordb:
         image: falkordb/falkordb-server:latest
         env:
-          REDIS_ARGS: "--requirepass falkordb"
+          # #2216: no periodic RDB snapshot in this lane. Redis refuses a second
+          # fork while any child is active ("Can't fork for module: File exists"
+          # - errno EEXIST, Redis' single-fork-slot rule), and FalkorDB's
+          # GRAPH.COPY forks via RedisModule_Fork with 10 x 5ms retries - a
+          # shorter window than a BGSAVE, so a restore/drill test landing inside
+          # one fails with "GRAPH.COPY failed, could not fork" (main run
+          # 34527934725, test (a): the only failure of 4905). Reproduced locally
+          # 3/3 with the default config and 0/3 with this flag. Automatic
+          # snapshots are worthless in a throwaway test container, and explicit
+          # BGSAVE still works, so the RDB/snapshot tests are unaffected.
+          # (docker-compose.yml spells the same flag --save \"\" for its
+          # persistent dev container; both spellings are verified equivalent
+          # under run.sh's unquoted ${REDIS_ARGS} expansion.)
+          REDIS_ARGS: "--requirepass falkordb --save ''"
         ports:
           - 6379:6379
         options: >-
@@ -197,6 +260,13 @@ jobs:
           --health-retries 10
       falkordb-legacy:
         image: falkordb/falkordb-server:latest
+        env:
+          # #2216: same no-periodic-snapshot rule as the passworded falkordb
+          # service above (see there for the mechanism + the reproduced
+          # evidence). Deliberately NO --requirepass: this is the passwordless
+          # probe lane (tests use docker://:@localhost:16379/) and its
+          # health-cmd is plain `redis-cli ping`.
+          REDIS_ARGS: "--save ''"
         ports:
           - 16379:6379
         options: >-
@@ -252,7 +322,23 @@ jobs:
           set -o pipefail  # don't let `tail` mask a pip failure
           # pytest-asyncio: tests/test_github_indexer.py uses @pytest.mark.asyncio
           # (mirrors the python-ci.yml '.[test,embeddings]' surface, #493).
-          pip install -e '.[embeddings]' falkordblite pytest pytest-timeout pytest-asyncio 2>&1 | tail -2
+          pip install -e '.[embeddings]' falkordblite pytest pytest-timeout pytest-asyncio uv 2>&1 | tail -2
+          # uv (#2216): test_battery_corpus.py::test_builder_determinism_cross_process
+          # and tests/eval/retrieval/test_gate_1349.py::test_cli_python_dash_m_entrypoint
+          # shell out to bare `uv run` (default groups = dev included) — the runner
+          # has no uv by default, so both died with FileNotFoundError: 'uv' on every
+          # main merge. Pre-warm the FULL uv project env (uv sync --frozen, dev
+          # group included) so the subprocess `uv run` is a genuine no-op instead of
+          # a cold 1-3 min sync inside the subprocess timeout. Mirrors the
+          # python-ci.yml test job pre-warm verbatim (#2216). (--no-dev here would
+          # mismatch the bare `uv run` consumer and force a dev-group re-sync in
+          # the subprocess.)
+          # #1917 (CI unblock): some ubuntu-latest runner images ship a stale
+          # workspace .venv that uv refuses to touch (uv #13986 / #9423 —
+          # "failed to create directory .venv: File exists"). Remove it so uv sync
+          # recreates the pre-warmed env (same result, tolerant of the stale dir).
+          rm -rf .venv
+          uv sync --frozen
       - name: Clean stale redislite orphans (issue #1005 tempdir pollution)
         if: needs.dedup-check.outputs.skip != 'true'
         # Leaky shared runners accumulate redislite tempdirs from every
@@ -277,49 +363,24 @@ jobs:
           key: hf-embedding-cache-v2-${{ runner.os }}
           restore-keys: |
             hf-embedding-cache-v2-${{ runner.os }}-
-      - name: Pre-cache embedding model (BAAI/bge-small-en-v1.5)
+      - name: Embedding model REQUIRED (BAAI/bge-small-en-v1.5) — dense retrieval leg
         if: needs.dedup-check.outputs.skip != 'true'
-        # Best-effort: when the model is already cached (actions/cache
-        # restore) this is a no-op. When the download succeeds, the suite
-        # exercises the real embedding path. When it fails (HF unreachable
-        # from runner — observed: "couldn't connect to huggingface.co"),
-        # the runtime already degrades gracefully to TF-IDF fallback
-        # (embeddings.py catches load failure), so a failed download is a
-        # WARNING, never a job failure.
-        # #964: a hung HF download (stalled TCP, no error raised) would
-        # otherwise stall the step for the full job cap with no output —
-        # step-level timeout bounds it; continue-on-error turns the timeout
-        # into a warning, not a failure. #1211-class: on HF-unreachable
-        # runners, tight retries (3 × 5s backoff) fail fast so the suite
-        # falls back to TF-IDF instead of burning the watchdog budget.
-        # (#1439 parity port from python-ci's test job.)
-        continue-on-error: true
+        # #2573: this step OWNS "the embedder is required" — same contract as
+        # python-ci's three jobs (the heredoc here was the fourth copy of the
+        # block). It fails BY NAME with a ::warning::/::error:: annotation when
+        # the pinned model cannot be obtained, instead of silently running the
+        # keyword-only TF-IDF fallback and reporting a green post-merge pass.
+        # continue-on-error was deliberately REMOVED (it was `true`) — and the
+        # replaced heredoc's `del os.environ["HF_HUB_OFFLINE"]` never actually
+        # re-enabled the network (huggingface_hub latches that var at import),
+        # so its download fallback could never run. See
+        # tools/embedder_provision.py for the full account.
+        #
+        # #964: the step-level timeout still bounds a hung download (stalled TCP,
+        # no error raised) that would otherwise stall the step for the job cap.
         timeout-minutes: 6
         run: |
-          python - <<'EOF'
-          import os, time
-          # #1349 T10: pinned revision (VULN-001) — matches python-ci.
-          MODEL = "BAAI/bge-small-en-v1.5"
-          REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
-          os.environ["HF_HUB_OFFLINE"] = "1"
-          from sentence_transformers import SentenceTransformer
-          try:
-              SentenceTransformer(MODEL, revision=REVISION)
-              print("embedding model: cached, no download needed")
-          except Exception:
-              print("embedding model: not cached — downloading (with retries)")
-              del os.environ["HF_HUB_OFFLINE"]
-              for attempt in range(1, 4):
-                  try:
-                      SentenceTransformer(MODEL, revision=REVISION)
-                      print("embedding model: downloaded")
-                      break
-                  except Exception as e:
-                      print(f"download attempt {attempt}/3 failed: {e}")
-                      if attempt == 3:
-                          raise
-                      time.sleep(5 * attempt)
-          EOF
+          python3 tools/embedder_provision.py --attempts 3 --backoff 5
       - name: Generate coverage manifest (expected nodeids, epic #1647 Task 10 Step 1a)
         # The pmv run's collect-only expected set, generated in its OWN step
         # (off the pytest step's 50m watchdog). Task 10 Step 1a (cycle-2
@@ -335,6 +396,19 @@ jobs:
           # so the run step cannot drift (single source of truth).
           echo "$SLOW_IGNORES" > /tmp/pmv-slow-ignores
           python3 tools/skip-guard.py --emit-manifest "tests/" --marker "not track_b" --ignore tests/e2e $SLOW_IGNORES --output /tmp/pmv-expected-nodeids.txt
+      # #2216: GRAPH.COPY "could not fork" — NOT a code regression.
+      # The dr_endpoints / writer_inventory restore tests (TestDrDrill::*,
+      # TestCreateTeam::test_backup_round_trip_dashboard_created_team) can fail
+      # with "Restore swap failed ... GRAPH.COPY failed, could not fork".
+      # Cause (verified 2026-09-10, reproduced locally — this was previously
+      # recorded here as "OS fork/resource exhaustion", which is wrong): Redis
+      # refuses a second fork while a child is active ("Can't fork for module:
+      # File exists" — EEXIST, its single-fork-slot rule). FalkorDB's GRAPH.COPY
+      # retries 10x5ms, shorter than a BGSAVE, so a restore landing inside a
+      # periodic save window dies. The falkordb service containers now run
+      # --save '' (see the services: block above), which removes the periodic
+      # BGSAVE and with it this class. If a PMV red still shows ONLY this class,
+      # it is still not a regression — re-run.
       - name: Run tests (docker lane, per-test timeout)
         id: tests
         if: needs.dedup-check.outputs.skip != 'true'

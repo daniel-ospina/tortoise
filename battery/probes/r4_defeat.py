@@ -12,6 +12,13 @@ from typing import Any
 
 from battery.probes.base import ProbeResult
 
+#: Schema-v1.1 emitter-registry contract (issue #2284): the trace semantic
+#: keys this probe reads. Declarative only — behavior unchanged until the
+#: probe re-points reads onto the registry-emitted log (Task 9).
+CONSUMED_FIELDS: tuple[str, ...] = (
+    "stated_defeat_conditions", "real_defeat_conditions",
+)
+
 
 class R4DefeatProbe:
     #: Hyphenated cal-table metric key (thresholds.yaml).

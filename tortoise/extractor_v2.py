@@ -45,6 +45,12 @@ here as ``build_master_list()`` — an overlay over the v1
 v1 enforcer; adding non-kind sections to it would pollute
 ``value_extractor._object_kind_vocab``). The expansion is delivered by this
 module per design doc §3.
+
+Builder capability catalog note (#2004 W8 / epic #1976 DM-5): this module is
+referenced in the builder capability catalog (onboarding) — catalog module
+'Session extractor' (the 5-stage narrative-first session pipeline) —
+tortoise/tool_registry.py CAPABILITY_CATALOG. If you add or rename an
+extractor/indexer, update the catalog reference.
 """
 from __future__ import annotations
 
@@ -54,10 +60,13 @@ import json
 import os
 import random
 import re
+import threading
 import time
 import warnings
 import weakref
 from typing import Any
+
+from .env_truthy import is_truthy  # #4097: the declared truthy contract
 
 # ── The v2 master list (design doc §3) ─────────────────────────────────────
 
@@ -104,7 +113,7 @@ CHAINS = {
     },
 }
 
-PACK_NS = ("product-strategy:", "dev:", "marketing:", "pm:")
+PACK_NS = ("product-strategy:", "dev:", "marketing:", "pm:", "agent-ops:")
 
 # E2 (#1534): the USER-PERSONAL-STATE vocabulary — the operative criterion for
 # the Tier-A classification hint (personal bests, schedules, preferences). The
@@ -132,16 +141,174 @@ USER_PERSONAL_STATE = {
 # ids, hashes, counts as process metrics) from STATE VALUES (keep verbatim:
 # personal bests, schedules, preferences — the value IS the fact). Shared by
 # S1 (_granularity_text), S2 and S4 (via _render_master).
+#
+# #2453 (compounds with #2424 — one PR): EXTENDED to OPERATIONAL/decision
+# values. The mechanics-token exclusion ("counts/logistics are ephemeral")
+# is correct for PROCESS artifacts but starves engineering-decision memory:
+# on the number-dense write-path session wp04 (aurora_perf) retention was
+# 0/13 — every gold unit a concrete measurement/date/TTL/count the mapper
+# was told to treat as disposable. A concrete value that is the SUBJECT of a
+# decision, observation, or plan is durable state, not process — carried
+# verbatim (paired with ANTI_ROUTINE_EXCLUSION so value retention never
+# becomes routine-metric hoarding). Renders wherever the state clause
+# renders: S1 (_granularity_text), S2 and S4 (via _render_master).
 STATE_VALUE_CARVE_OUT = (
     "STATE-VALUE CARVE-OUT (applies to every domain above): user-personal-state "
     "VALUES — personal bests, schedules, preferences — are DURABLE even where "
     "counts/logistics are ephemeral. Carry the VALUE verbatim ('my personal "
     "best 5K time is 27:12', not 'the user has a fast 5K'). The value is the "
-    "fact; it is NOT a mechanics token."
+    "fact; it is NOT a mechanics token.\n"
+    "OPERATIONAL-VALUE CARVE-OUT (decisions, observations, plans — the same "
+    "rule, a different domain): a concrete value that is the SUBJECT of a "
+    "decision, observation, or plan is DURABLE too. Measurements, "
+    "deadlines/freezes, thresholds/TTLs, versions, and counts are carried "
+    "VERBATIM when they are the thing being fixed, the chosen target, or the "
+    "recorded measurement ('the p95 hit 4.2 seconds', 'the October 5 "
+    "release', 'back under 800 milliseconds', 'a ten minute TTL', 'forty "
+    "thousand requests per day') — never round, paraphrase, or label them. "
+    "Only INCIDENTAL process logistics remain droppable: ids, hashes, and "
+    "ephemeral counters not central to a decision."
 )
 
+
+# #2424 (compounds with #2453 — one PR): the ANTI-ROUTINE exclusion gate —
+# the mapper-level NOOP (Mem0 semantics: a per-candidate relevance decision,
+# "new + durable + non-trivial, else skip"). A true-but-routine claim ("the
+# on-call room has been quiet lately" — the wp03 distractor class, planted
+# inside a content-dense turn) is TRUE, so the pre-#2424 mapper mapped it as
+# a point; distractor leakage ran 1-4/run against a design tolerance of 1.
+# The rule renders into BOTH mapping stages from this single source
+# (render_s2_prompt / render_s4_prompt replace the {anti_routine} slot in
+# S2_TMPL / S4_TMPL). S1 (the story summarizer) deliberately does NOT get it
+# — S1 keeps the narrative register and a routine aside simply does not
+# change the story.
+#
+# #2424 RESIDUAL (clause-level): a sealed write-path run still leaked BOTH
+# wp03 distractors (d_01 + d_02) — the emission-level NOOP gates whole
+# candidates, so a routine aside that rides INSIDE the prose of an
+# otherwise-durable point slips through (a real point whose content also
+# carries "the on-call room has been quiet lately" as decoration). The
+# second paragraph below closes that hole at the same granularity the leak
+# takes: the CLAUSE, not the candidate.
+ANTI_ROUTINE_EXCLUSION = (
+    "ANTI-ROUTINE EXCLUSION (true-but-routine content is a NOOP): routine "
+    "operational asides, status-quo/banal remarks, filler, and small talk "
+    "must NOT be emitted as points, entities, or events. TRUE IS NOT ENOUGH: "
+    "a claim that is true but routine — no durable decision, state change, "
+    "or plan value ('the on-call room has been quiet lately') — is OMITTED. "
+    "Before emitting a candidate ask: does it change a future decision, "
+    "state, or belief? If only the moment is interesting it is a NOOP for "
+    "memory — emit nothing. Do NOT emit such content to hang an operator on "
+    "it (a routine aside gets no MITIGATES/NAND relevance attack — omit it "
+    "outright).\n"
+    "CLAUSE-LEVEL STRIP (an aside embedded in an otherwise-durable point's "
+    "prose is stripped — NEVER a whole point): the emission NOOP above "
+    "gates whole candidates; the strip below operates only on the PROSE of "
+    "a point you have already decided to emit. A durable candidate — a "
+    "decision, plan, goal, requirement, measurement, or entity-state change "
+    "— is ALWAYS emitted with its core, and NEVER skipped or emptied "
+    "because part of its context reads routine. Within an emitted point, "
+    "strip only genuine conversational decoration: status-quo/banal room "
+    "reports, small talk, non-load-bearing fillers ('we route alerts by "
+    "service ownership; the on-call room has been quiet lately' emits the "
+    "routing decision; the quiet-room clause is decoration, not content). "
+    "NEVER strip: the decision itself, its plan/scope, the entity or "
+    "subject it acts on, workload/roster state (someone pulling double "
+    "duty IS durable entity state), or concrete values — dates, deadlines, "
+    "targets, measurements stay EXACT under VALUE FIDELITY below (a "
+    "severity-preflight decision keeps its date; a migration plan keeps "
+    "'two sprints'). When in doubt, EMIT — the strip is for decoration "
+    "only, never for durable substance."
+)
+
+# #2453 companion (renders with ANTI_ROUTINE_EXCLUSION at the SAME
+# high-weight slot): the master-list carve-out alone was too weak for the
+# value-dense write-path session wp04 (0-2/13 across four runs) — the
+# point-writing guidance sits far from the master block, so the exact-value
+# rule must ALSO ride where the mapper writes content. Rendered by
+# _s2s4_rules() into the {anti_routine} slot of S2_TMPL / S4_TMPL.
+VALUE_FIDELITY_RULE = (
+    "VALUE FIDELITY (decision-relevant values are written EXACTLY): when a "
+    "point, entity, or event references a concrete value — a measurement, "
+    "date/freeze, threshold/TTL, version, or count that is the SUBJECT of a "
+    "decision, observation, or plan — WRITE THE EXACT VALUE INTO THE "
+    "CONTENT. Never paraphrase, round, generalize, or drop it: 'the p95 hit "
+    "4.2 seconds' stays '4.2 seconds' (not 'slow'), 'back under 800 "
+    "milliseconds' stays '800 milliseconds', 'the October 5 release' stays "
+    "'October 5'. The number is the memory; a vague restatement is a lost "
+    "fact. BOUNDARY: a routine readout that is not a thing being fixed or a "
+    "chosen target is still a NOOP under the ANTI-ROUTINE EXCLUSION above "
+    "— the number alone does not make an aside durable."
+)
+
+
+# #2552 (layer-2 operator-emission semantics): the operator-structure rule
+# block. Rendered into BOTH mapping stages (S2/S4) from the SAME
+# {anti_routine} slot as its siblings.
+#
+# What is DECIDED, and must not be re-litigated (these are the adopted
+# product semantics, recorded in ``docs/ONTOLOGY.md`` §3.9 / §3.1 and the
+# #2315 product decision of 2026-09-07): a mitigation attacks the OPERATOR
+# (the connection) as a graded dampener (w_eff = w * (1 - strength)), never a
+# refutation; a same-session decision reversal is state/validity semantics;
+# a CROSS-SESSION point correction is a CORRECTS supersession — point-level
+# "supersedes" refs resolve against the S3 search results, so they are
+# cross-session by construction.
+#
+# What is FLAGGED, and therefore NOT decided here (the corpus's own scoping
+# findings F1/F2, ``docs/scoping/2026-09-07-2514-operator-corpus.md``): the
+# core §3.1 Point→Point vocabulary registers IMPL / NAND / hasPart / CORRECTS
+# only — there is no first-class Point→Point "action reduces risk" operator
+# (F1), and §2's state-centric model does not clearly require a Point-level
+# CORRECTS for an in-SESSION reversal (F2).  The rule block below asserts the
+# write path's forms because they are the IMPLEMENTED ones; it is not an
+# ontology ruling.  An earlier version of this comment called the mapping
+# "F1/F2-validated", which read as a settlement of both.  The mapping is a
+# separate, out-of-scope question; do not treat this block as its answer.
+OPERATOR_SEMANTICS_RULE = (
+    "OPERATOR STRUCTURE (direction, relevance, supersede — #2552):\n"
+    "- NAND IS DIRECTED (extraction default #909 — new-claim-attacks-existing):\n"
+    "  src = the ATTACKING counter-claim, dst = the claim under attack. When a\n"
+    "  LATER claim contradicts an EARLIER one, the newer counter-claim is src\n"
+    "  and the older claim is dst — NAND points AT what it refutes. An explicit\n"
+    "  negation in a later turn ('the flag did not cause the duplicates') marks\n"
+    "  THAT later claim as the attacker. Never put the claim under attack first.\n"
+    "- RISK/RELEVANCE CLAIMS ARE DURABLE POINTS: a risk or concern claim\n"
+    "  ('clock skew between regions can make lease expiry unsafe') is its OWN\n"
+    "  point — never fuse it into the point/event for the action that later\n"
+    "  closes it. A risk claim changes future decisions (it motivates a\n"
+    "  mitigation), so it is NOT a routine aside under the ANTI-ROUTINE gate.\n"
+    "- MITIGATES = graded relevance dampener ON AN OPERATOR edge (F1): when a\n"
+    "  shipped action or measure closes or reduces a risk, emit the action as\n"
+    "  its OWN point and emit MITIGATES with src = the action point's exact\n"
+    "  content, dst = the risk point's exact content, target_edge = the\n"
+    "  operator edge whose relevance the action dampens, strength 0.10-0.50\n"
+    "  (w_eff = w * (1 - strength) — a graded dampener, NEVER a refutation.\n"
+    "  A direct point-to-point refutation is NAND territory (a separate\n"
+    "  operator), not a stronger MITIGATES).\n"
+    "- POINT-LEVEL SUPERSEDE (cross-session reversal — F2): when a new point\n"
+    "  REPLACES a claim or decision from an EARLIER session, set its\n"
+    "  \"supersedes\" to the existing point's id or EXACT content copied from\n"
+    "  the graph search results — the write path folds a point-level CORRECTS\n"
+    "  supersession (the old point is marked outdated). Same-session\n"
+    "  reversals are state/validity semantics — never a point supersede.\n"
+    "  Never invent an id or content: resolve against the search results only."
+)
+
+
+def _s2s4_rules() -> str:
+    """The shared rule block inserted at the {anti_routine} slot of the S2
+    and S4 mapping prompts: the anti-routine NOOP gate (#2424) paired with
+    the value-fidelity rule (#2453) and the operator-structure rule (#2552).
+    One source, all stages — S2 and S4 map with the SAME operator semantics
+    (the #2424 residual clause-level strip and the operator rules live in
+    the shared blocks, so every mapping stage carries them)."""
+    return (ANTI_ROUTINE_EXCLUSION + "\n\n" + VALUE_FIDELITY_RULE
+            + "\n\n" + OPERATOR_SEMANTICS_RULE)
+
+
 CORE_OBJECT_KEYS = (
-    "core:Project", "core:WorkItem", "core:document", "core:tag",
+    "core:Project", "core:WorkItem", "core:Problem", "core:document", "core:tag",
     "core:user", "core:skill", "core:tool", "core:agent",
     "core:workflow", "core:agreement", "core:standard", "core:other",
     "core:strategy", "core:plan", "core:goal", "core:target",
@@ -156,30 +323,25 @@ def _desc(brief: dict, key: str) -> str:
 _MASTER_LIST_CACHE: dict | None = None
 
 
-def build_master_list() -> dict:
-    """The v2 master list: compile_value_brief() kinds + the §3 additions
-    (subjects, points, events, chains, memory_granularity). Section values
-    are {kind: description} dicts — rendered as readable text in prompts.
-
-    Memoized (#1350 chunking finding): the packs are static per process —
-    re-reading + YAML-parsing every manifest per chunk cost 12.2s of a 14.3s
-    60-chunk run. Returns a deep copy so callers can't mutate the cache.
-    """
-    import copy
-    global _MASTER_LIST_CACHE
-    if _MASTER_LIST_CACHE is not None:
-        return copy.deepcopy(_MASTER_LIST_CACHE)
-    from tortoise.value_extractor import compile_value_brief
-    brief = compile_value_brief()
+def _build_master_from_brief(brief: dict,
+                             pack_prefixes: tuple[str, ...] = PACK_NS) -> dict:
+    """The master-list sections from a compiled value brief (#2031 refactor
+    of the build_master_list loop body — the section semantics are
+    byte-identical to pre-#2031). ``pack_prefixes`` is the namespace
+    allowlist for the pack_kinds section: the DEFAULT path passes the
+    starter set; the hosted tenant path passes starter + that tenant's
+    namespaces. Loop semantics preserved exactly: the memory_granularity
+    skip precedes the prefix check, and pack_kinds keeps the brief's
+    insertion order (prompt-visible)."""
     objects = {k: _desc(brief, k) for k in CORE_OBJECT_KEYS}
     pack_kinds = {}
     for k, v in brief.items():  # noqa: B007
         if k == "memory_granularity":
             continue
-        if not k.startswith(PACK_NS):
+        if not k.startswith(pack_prefixes):
             continue
         pack_kinds[k] = _desc(brief, k)
-    master = {
+    return {
         "objects": objects,
         "subjects": dict(SUBJECTS),
         "points": dict(POINTS),
@@ -193,8 +355,44 @@ def build_master_list() -> dict:
         # it); rendered into S2/S4 prompt context only.
         "user_personal_state": dict(USER_PERSONAL_STATE),
     }
-    _MASTER_LIST_CACHE = copy.deepcopy(master)
-    return master
+
+
+def build_master_list(sdk=None) -> dict:
+    """The v2 master list: compile_value_brief() kinds + the §3 additions
+    (subjects, points, events, chains, memory_granularity). Section values
+    are {kind: description} dicts — rendered as readable text in prompts.
+
+    Memoized (#1350 chunking finding): the packs are static per process —
+    re-reading + YAML-parsing every manifest per chunk cost 12.2s of a 14.3s
+    60-chunk run. Returns a deep copy so callers can't mutate the cache.
+
+    #2031 hosted tenant path (``sdk``): the master compiles from the
+    memoized tenant view's brief (shared catalog + THIS tenant's
+    :PackManifest manifests) with the pack_kinds allowlist extended to the
+    tenant's namespaces — so tenant A's pack kinds reach A's extraction
+    prompts and write gates while tenant B's never do. The tenant identity
+    is the SDK's resolved graph (pass the tenant-scoped SDK,
+    ``_make_sdk(namespace=org_id)`` — no separate identity argument to
+    mismatch). The tenant path NEVER reads or writes the process-global
+    ``_MASTER_LIST_CACHE`` (#1154: a tenant-scoped compile must not poison
+    the shared memo); the #1350 perf guard rides the tenant-view memo (per
+    (graph_identity, pack_config_version), invalidated on :PackManifest
+    write) instead.
+    """
+    if sdk is None:
+        import copy
+        global _MASTER_LIST_CACHE
+        if _MASTER_LIST_CACHE is not None:
+            return copy.deepcopy(_MASTER_LIST_CACHE)
+        from tortoise.value_extractor import compile_value_brief
+        brief = compile_value_brief()
+        master = _build_master_from_brief(brief, PACK_NS)
+        _MASTER_LIST_CACHE = copy.deepcopy(master)
+        return master
+    from tortoise.pack_manifest_store import tenant_view
+    view = tenant_view(sdk)
+    tenant_prefixes = tuple(f"{m['namespace']}:" for m in view["tenant"])
+    return _build_master_from_brief(view["brief"], PACK_NS + tenant_prefixes)
 
 
 def master_kind_forms(master: dict) -> set[str]:
@@ -233,8 +431,13 @@ _PACK_TRIGGERS = {
     "product-strategy:": ("product", "market", "competitor", "customer",
                           "roadmap", "feature", "use case", "strategy"),
     "pm:": ("project", "milestone", "pm:", "portfolio", "program"),
-    "epistemic-team:": ("epistemic", "weight", "confidence", "claim",
-                        "premise", "evidence"),
+    "agent-ops:": ("standard operating", "protocol", "token acknowledgement",
+                    "destructive action", "policy", "standing rule"),
+    # NOTE (#2031): the legacy "epistemic-team:" entry was removed — it
+    # referenced a pack that is not installed, so it could never fire on the
+    # default path; its presence would have trigger-gated a TENANT pack named
+    # `epistemic-team` (not a reserved namespace), silently stripping that
+    # tenant's own kinds from compact-mode prompts.
 }
 
 
@@ -246,53 +449,173 @@ def _needs_gloss(kind: str, desc: str) -> bool:
     low = d.lower()
     if any(m in low for m in ("not", "uncertain", "≡", "link:", "never", "only")):
         return True
-    if len(d.split()) > 6:  # longer descriptions carry real semantics
+    if len(d.split()) > 6:  # longer descriptions carry real semantics  # noqa: SIM103
         return True
     return False
 
 
 def _select_pack_kinds(story: str | None, pack_kinds: dict) -> dict:
     """Selective pack injection: only sections whose domain words appear in
-    the story (conservative — if nothing matches, return all so no needed
-    kind is ever dropped)."""
+    the story. Conservative fallback — if nothing matches, return all so no
+    needed kind is ever dropped (the flag-on path never calls this — the
+    pack vocabulary is owned by ``_render_master_core_only``)."""
     if not story:
         return dict(pack_kinds)
     low = story.lower()
     selected = {}
     for k, v in pack_kinds.items():
         ns = k.split(":")[0] + ":"
-        triggers = _PACK_TRIGGERS.get(ns, ())
-        if any(t in low for t in triggers):
+        triggers = _PACK_TRIGGERS.get(ns)
+        # #2031: a namespace with NO trigger entry cannot be story-selected —
+        # always include it (per-tenant custom packs; dropping them would
+        # silently strip the tenant's own kinds from their compact prompt).
+        # All five starter namespaces have trigger entries, so the DEFAULT
+        # path behavior is unchanged (byte-identical).
+        if triggers is None or any(t in low for t in triggers):
             selected[k] = v
     return selected or dict(pack_kinds)  # nothing matched → all (safe)
 
 
-def _render_master(master: dict, story: str | None = None) -> str:
+def _stable_hash(s: str) -> int:
+    """Deterministic 64-bit hash for the A′ label-order seed (Task 2,
+    #1695): same story → same seed → same shuffle order across paired
+    re-runs (the A′ diagnostic compares bit-level agreement)."""
+    import hashlib
+    return int(hashlib.sha256((s or "").encode("utf-8")).hexdigest()[:16], 16)
+
+
+def _label_order_rng(story: str | None = None):
+    """A′ (#1695 Task 2): the kind-list shuffle RNG — the label-order
+    randomization mitigation (Fantastically Ordered Prompts) and the A′
+    diagnostic hook. OFF by default (``TORTOISE_LABEL_ORDER`` unset →
+    None → byte-identical renders). ``TORTOISE_LABEL_ORDER=shuffle`` enables
+    a deterministic per-call seeded shuffle: the seed is the env override
+    ``TORTOISE_LABEL_ORDER_SEED`` (int) or a hash of the story (same story
+    → same order, so a paired fresh canonical re-run compares the SAME
+    sessions under a different order)."""
     import os
+    import random
+    if os.environ.get("TORTOISE_LABEL_ORDER", "").strip().lower() != "shuffle":
+        return None
+    seed_raw = os.environ.get("TORTOISE_LABEL_ORDER_SEED", "").strip()
+    if seed_raw:
+        try:
+            return random.Random(int(seed_raw))
+        except ValueError:
+            import warnings
+            warnings.warn(
+                f"invalid TORTOISE_LABEL_ORDER_SEED={seed_raw!r} — falling "
+                "back to the story-derived seed", stacklevel=2)
+    return random.Random(_stable_hash(story))
+
+
+def _classify_later_enabled() -> bool:
+    """#1695 Task 5: the call-time classify-later toggle — read at the
+    single choke point (extract_session_v2 + the render dispatchers) so ALL
+    callers (sdk, hosted_api, ingest_v2, run_v2_pipeline) inherit it without
+    threading a param. Unset/0 → the legacy pipeline: the classify-later
+    machinery is entirely off-path and the flag-off renders are
+    byte-identical to main — scoped to the DEFAULT (verbose) render (the
+    compact-mode S2 story-threading is pre-existing and identical to main;
+    the chain enforcer runs unconditionally on every arm and its result key
+    reflects that run; only the additive ``classify_later`` result key is
+    an empty block when the flag is off — see ``extract_session_v2``).
+    Value matching is case-insensitive (True/TRUE/ON/yes all enable —
+    review FIX B) and goes through the declared truthy contract (#4097)."""
+    return is_truthy(os.environ.get("TORTOISE_CLASSIFY_LATER"))
+
+
+def _default_kind_classifier(model):
+    """The default classify-later classifier (built lazily — index build is
+    the first-use cost; the EmbeddingModel singleton is shared, never
+    re-instantiated). The session's LLM adapter powers the adjudication
+    tail."""
+    from tortoise.kind_classifier import KindClassifier
+    return KindClassifier(model=model)
+
+
+def _render_master(master: dict, story: str | None = None, *,
+                   core_only: bool | None = None) -> str:
+    import os
+    if core_only is None:
+        core_only = _classify_later_enabled()
+    rng = _label_order_rng(story)
+    if core_only:
+        return _render_master_core_only(master, rng)
     if os.environ.get("TORTOISE_EXTRACTOR_PROMPT", "").strip() == "compact":
-        return _render_master_compact(master, story)
-    return _render_master_verbose(master)
+        return _render_master_compact(master, story, rng)
+    return _render_master_verbose(master, rng)
 
 
-def _render_master_compact(master: dict, story: str | None) -> str:
+def _render_master_core_only(master: dict, rng=None) -> str:
+    """#1695 Task 5: the flag-on S2/S4 master render — the verbose base
+    MINUS the PACK KINDS and CHAINS sections (the pack vocabulary and the
+    chain business logic leave the prompt; the kind classifier and the
+    chain enforcer own them post-extraction). The user-personal-state
+    vocabulary, memory-granularity, and the state-value carve-out are
+    RETAINED (the verbose base). Kind groups randomize under the A′ hook."""
+    lines = [
+        "MASTER LIST — the closed vocabulary (CORE ONLY). EVERY kind you "
+        "emit MUST come from this list (namespaced or bare form) or be "
+        "\"unclassified\" (pack-domain content is typed by a later stage). "
+        "Do NOT mint kinds: \"worktree\", \"test suite\", \"approach\" are "
+        "NOT kinds — re-map to the nearest listed kind or drop the item.",
+    ]
+
+    def _group(title: str, d: dict, shuffle: bool = False) -> str:
+        keys = list(d)
+        if shuffle and rng is not None:
+            rng.shuffle(keys)
+        out = [f"\n{title}"]
+        out += [f"- {k} — {d[k]}" for k in keys]
+        return "\n".join(out)
+
+    lines.append(_group("OBJECTS (core)", master["objects"], shuffle=True))
+    lines.append(_group("SUBJECTS (core)", master["subjects"], shuffle=True))
+    lines.append(_group("POINTS", master["points"], shuffle=True))
+    lines.append(_group("EVENTS", master["events"], shuffle=True))
+    # NO PACK KINDS and NO CHAINS — the classify-later/chain-enforcement
+    # layers own them (prompt shrinks ~2x; label-space research).
+    ups = master.get("user_personal_state") or {}
+    if ups:
+        lines.append("\nUSER-PERSONAL-STATE VOCABULARY (Tier-A classification "
+                     "hint — the VALUE is the fact, retain verbatim; these are "
+                     "NOT kinds: do NOT emit them as entity/event/point kinds)")
+        lines += [f"- {cat}: {desc}" for cat, desc in ups.items()]
+    g = master.get("memory_granularity") or {}
+    if g:
+        lines.append("\nMEMORY GRANULARITY (what to keep, what to strip)")
+        lines += [f"- {k}: {v}" for k, v in g.items()]
+    lines.append("\n" + STATE_VALUE_CARVE_OUT)
+    return "\n".join(lines)
+
+
+def _render_master_compact(master: dict, story: str | None,
+                           rng=None) -> str:
     lines = [
         "MASTER LIST — the closed vocabulary. EVERY kind you emit MUST come "
         "from this list. Do NOT mint kinds.",
     ]
 
-    def _group(title: str, d: dict) -> str:
+    def _group(title: str, d: dict, shuffle: bool = False) -> str:
+        keys = list(d)
+        if shuffle and rng is not None:
+            rng.shuffle(keys)
         out = [f"\n{title}"]
-        for k, v in d.items():
+        for k in keys:
+            v = d[k]
             out.append(f"- {k}" if not _needs_gloss(k, v) else f"- {k} — {v}")
         return "\n".join(out)
 
-    lines.append(_group("OBJECTS (core)", master["objects"]))
-    lines.append(_group("SUBJECTS (core)", master["subjects"]))
-    lines.append(_group("POINTS", master["points"]))
-    lines.append(_group("EVENTS", master["events"]))
+    lines.append(_group("OBJECTS (core)", master["objects"], shuffle=True))
+    lines.append(_group("SUBJECTS (core)", master["subjects"], shuffle=True))
+    lines.append(_group("POINTS", master["points"], shuffle=True))
+    lines.append(_group("EVENTS", master["events"], shuffle=True))
     selected = _select_pack_kinds(story, master["pack_kinds"])
-    lines.append(_group("PACK KINDS", selected))
-    # granularity: matched-domain subsections only (compact)
+    lines.append(_group("PACK KINDS", selected, shuffle=True))
+    # granularity: matched-domain subsections only (compact). Hint blocks
+    # (memory granularity, user-personal-state, carve-out) are EXCLUDED from
+    # the shuffle — only the kind vocabulary randomizes.
     g = master.get("memory_granularity") or {}
     if story:
         low = story.lower()
@@ -304,7 +627,7 @@ def _render_master_compact(master: dict, story: str | None) -> str:
     return "\n".join(lines)
 
 
-def _render_master_verbose(master: dict) -> str:
+def _render_master_verbose(master: dict, rng=None) -> str:
     lines = [
         "MASTER LIST — the closed vocabulary. EVERY kind you emit MUST come "
         "from this list (namespaced or bare form). Do NOT mint kinds: "
@@ -312,16 +635,20 @@ def _render_master_verbose(master: dict) -> str:
         "to the nearest listed kind or drop the item.",
     ]
 
-    def _group(title: str, d: dict) -> str:
+    def _group(title: str, d: dict, shuffle: bool = False) -> str:
+        keys = list(d)
+        if shuffle and rng is not None:
+            rng.shuffle(keys)
         out = [f"\n{title}"]
-        out += [f"- {k} — {v}" for k, v in d.items()]
+        out += [f"- {k} — {d[k]}" for k in keys]
         return "\n".join(out)
 
-    lines.append(_group("OBJECTS (core)", master["objects"]))
-    lines.append(_group("SUBJECTS (core)", master["subjects"]))
-    lines.append(_group("POINTS", master["points"]))
-    lines.append(_group("EVENTS", master["events"]))
-    lines.append(_group("PACK KINDS (from the installed packs)", master["pack_kinds"]))
+    lines.append(_group("OBJECTS (core)", master["objects"], shuffle=True))
+    lines.append(_group("SUBJECTS (core)", master["subjects"], shuffle=True))
+    lines.append(_group("POINTS", master["points"], shuffle=True))
+    lines.append(_group("EVENTS", master["events"], shuffle=True))
+    lines.append(_group("PACK KINDS (from the installed packs)",
+                        master["pack_kinds"], shuffle=True))
 
     lines.append("\nCHAINS (the business logic of mapping)")
     for name, c in master["chains"].items():
@@ -341,51 +668,6 @@ def _render_master_verbose(master: dict) -> str:
         lines += [f"- {k}: {v}" for k, v in g.items()]
     lines.append("\n" + STATE_VALUE_CARVE_OUT)
     return "\n".join(lines)
-    lines = [
-        "MASTER LIST — the closed vocabulary. EVERY kind you emit MUST come "
-        "from this list (namespaced or bare form). Do NOT mint kinds: "
-        "\"worktree\", \"test suite\", \"approach\" are NOT kinds — re-map "
-        "to the nearest listed kind or drop the item.",
-    ]
-
-    def _group(title: str, d: dict) -> str:
-        out = [f"\n{title}"]
-        out += [f"- {k} — {v}" for k, v in d.items()]
-        return "\n".join(out)
-
-    lines.append(_group("OBJECTS (core)", master["objects"]))
-    lines.append(_group("SUBJECTS (core)", master["subjects"]))
-    lines.append(_group("POINTS", master["points"]))
-    lines.append(_group("EVENTS", master["events"]))
-    lines.append(_group("PACK KINDS (from the installed packs)", master["pack_kinds"]))
-
-    lines.append("\nCHAINS (the business logic of mapping)")
-    for name, c in master["chains"].items():
-        lines.append(f"- {name}: {' → '.join(c['path'])}")
-        lines.append(f"    {c['note']}")
-
-    g = master["memory_granularity"]
-    if g:
-        lines.append("\nMEMORY GRANULARITY (what each domain considers DURABLE "
-                     "vs EPHEMERAL — the retention bar)")
-        lines += [f"- {ns}: {txt}" for ns, txt in g.items()]
-
-    # E2 (#1534): the user-personal-state vocabulary — the operative criterion
-    # for the Tier-A classification hint. Explicit hint-not-kind guard: the
-    # vocabulary is classification guidance, never entity/event/point kinds.
-    lines.append("\nUSER-PERSONAL-STATE VOCABULARY (Tier-A classification "
-                 "hint — these are NOT kinds: do NOT emit them as "
-                 "entity/event/point kinds. A fact matching one is Tier-A → a "
-                 "statement Point with tier:\"A\", the verbatim value in "
-                 "content, and the verbatim source in quote):")
-    lines += [f"- {cat} — {desc}"
-              for cat, desc in master["user_personal_state"].items()]
-    if g:
-        lines.append("")
-        lines.append(STATE_VALUE_CARVE_OUT)
-    return "\n".join(lines)
-
-
 def _render_chains(master: dict) -> str:
     return "\n".join(
         f"- {name}: {' → '.join(c['path'])} — {c['note']}"
@@ -397,7 +679,7 @@ def _render_chains(master: dict) -> str:
 
 S1_TMPL = """You are the STORY SUMMARIZER for the company/product epistemic memory.
 Read the whole conversation. Produce a NARRATIVE that captures what CHANGED
-about the world we operate in — the state of the product, the team, the
+about the world we operate in — the state of the product, the org, the
 domain — and WHY it changed, at the level of durable meaning, not mechanics.
 
 Use the MEMORY GRANULARITY definitions below as the rule for what to keep
@@ -415,7 +697,7 @@ durable belief, or a reason — or is it how the work was done this hour?"
    or mitigate the relevance (MITIGATES) between points and objects.
 EVENTS (secondary): only as context for why state changed.
 OPERATIONAL KNOWLEDGE (tertiary but DURABLE — do not drop it): cause-effect
-lessons about how the environment behaves and how the team works, when they
+lessons about how the environment behaves and how the org works, when they
 would change future behavior: tool/process behaviors ("the bash tool kills
 child processes when it returns", "setsid does not exist on macOS",
 "pytest-timeout is not installed"), workflow rules ("issues without fractal
@@ -447,12 +729,16 @@ tradeoffs and reasons behind) worth remembering in six months, per the
 memory-granularity rules above. If a detail won't matter then, drop it."""
 
 
-def _granularity_text() -> str:
+def _granularity_text(master: dict | None = None) -> str:
     """The S1 memory-granularity slot. E2 (D3): appends the STATE-VALUE
     CARVE-OUT so S1's granularity rules protect user-personal-state values
     from the mechanics-token filter — S1's "RESTATE, DON'T REINVENT" rule
-    then carries the value verbatim into the story."""
-    master = build_master_list()
+    then carries the value verbatim into the story.
+
+    #2031: ``master`` is the tenant-scoped master on the hosted path (so a
+    tenant pack's memory_granularity reaches the S1 prompt); None → the
+    default master (byte-identical)."""
+    master = master or build_master_list()
     g = master.get("memory_granularity", {})
     out = "\n".join(f"- {ns}: {txt}" for ns, txt in g.items())
     return f"{out}\n{STATE_VALUE_CARVE_OUT}" if out else STATE_VALUE_CARVE_OUT
@@ -510,16 +796,152 @@ def _valid_iso_date(v: str) -> bool:
 
 def run_s1(model, transcript: str, *,
            session_date: str | None = None,
-           stats: dict | None = None) -> str:
+           stats: dict | None = None,
+           master: dict | None = None) -> str:
     """S1: story summary for ONE segment. Returns the narrative text
     (the validated single-flash path). Generation is bounded at
     ``_S1_MAX_TOKENS`` (M3 #1524, D2 — capped output, truncation detected
-    via ``last_finish_reason == "length"``, never silently lost)."""
+    via ``last_finish_reason == "length"``, never silently lost).
+
+    #2031: ``master`` threads the tenant-scoped vocabulary to the S1
+    granularity slot on the hosted path (None → default master).
+
+    #2134 (Task 4): ONE-SHOT ESCALATION on a length-truncated S1 summary —
+    a 1500-cap cut silently drops the chunk-tail facts from the compiled
+    story (recorded in ``llm_truncated`` but never an error), the seam the
+    Task-1 measurement showed firing. The wrap mirrors the S2/S4 net with
+    three buckets (S1 has no parse ladder → no ``partial`` bucket):
+    ``escalated == recovered + residual + abort``. Escalation is narrative
+    (not list-bearing): a residual returns the ESCALATED response when one
+    exists (the longer emission — fewer facts dropped); an abort (the
+    escalated call itself raised) keeps attempt-1's retained truncated
+    summary. The chunk is never dropped — a raise would convert a benign
+    tail-drop into a chunk failure for zero gain (P2-14a/P1-21). An
+    un-escalatable truncation (esc <= base, P2-15) records the per-seam
+    truncation keys only — NO escalation episode (the S2/S4 seam's
+    ordering; ``escalated`` counts calls that actually fired)."""
     system = (S1_TMPL
-              .replace("{memory_granularity}", _granularity_text())
+              .replace("{memory_granularity}", _granularity_text(master))
               .replace("{date_anchor}", _date_anchor(session_date)))
-    return _complete(model, system, "CONVERSATION:\n" + transcript,
-                     max_tokens=_stage_cap(_S1_MAX_TOKENS), stats=stats)
+    user_msg = "CONVERSATION:\n" + transcript
+    base = _stage_cap(_S1_MAX_TOKENS)
+    response = _complete(model, system, user_msg,
+                         max_tokens=base, stats=stats)
+    finish = stats.get("finish_reason") if stats is not None else (
+        getattr(model, "last_finish_reason", None))
+    truncated = finish == "length"
+    if not truncated:
+        return response
+    _rec = stats.setdefault("recovery", {}) if stats is not None else None
+    # The base call WAS length-truncated — record the per-seam s1
+    # truncation-token keys (Task 0 R3-6: the S1 overage stays separable
+    # from S2/S4's 16K-capped values). This is truncation accounting and is
+    # independent of the escalation episode below (an un-escalatable
+    # truncation is still a truncation).
+    if _rec is not None:
+        _rec["truncation_prompt_tokens_s1"] = (
+            _rec.get("truncation_prompt_tokens_s1", 0)
+            + int(stats.get("prompt_tokens") or 0))
+        _rec["truncation_completion_tokens_s1"] = (
+            _rec.get("truncation_completion_tokens_s1", 0)
+            + int(stats.get("completion_tokens") or 0))
+    esc = _extractor_escalation_tokens(base)
+    if esc <= base:
+        # P2-15: no headroom → the truncated summary stands (S1 narrative is
+        # never a list-damage class; the truncation is already recorded).
+        # NO escalation episode is counted (matches _complete_parsed's
+        # esc<=base ordering: `escalated` counts calls that actually fired —
+        # the 3-bucket invariant stays literal under the no-headroom config).
+        return response
+    retained = response
+    if _rec is not None:
+        _rec["escalated"] = _rec.get("escalated", 0) + 1
+        # the truncating base call's wasted output (marginal-cost numerator,
+        # D6) — snapshotted after the guard, before the escalated call
+        # overwrites the in-stats token fields.
+        _rec["escalation_base_prompt_tokens"] = (
+            _rec.get("escalation_base_prompt_tokens", 0)
+            + int(stats.get("prompt_tokens") or 0))
+        _rec["escalation_base_output_tokens"] = (
+            _rec.get("escalation_base_output_tokens", 0)
+            + int(stats.get("completion_tokens") or 0))
+    base_attempts = stats.get("attempts") if stats is not None else 0
+    base_retries = stats.get("retries") if stats is not None else 0
+    try:
+        # D3b/P2-14b: retries=0 — S1 is per-chunk, so default retries would
+        # be catastrophic across N chunks (each chunk's escalated call is a
+        # fresh budget).
+        response = _complete(model, system, user_msg,
+                             max_tokens=esc, retries=0, stats=stats)
+    except BaseException as e:
+        if not isinstance(e, Exception):
+            raise
+        # P1-21 abort: keep attempt-1's retained truncated summary — the
+        # chunk is NOT dropped (a transient raise on the one-attempt
+        # escalated call must not be MORE fragile than the base call's
+        # _COMPLETE_RETRIES=2 budget).
+        if _rec is not None:
+            _rec["escalated_abort"] = _rec.get("escalated_abort", 0) + 1
+        # R3-3/P1-39: the escalated call's except-update wrote
+        # stats["attempts"] before raising — re-accumulate base + esc so the
+        # session `llm.calls` roll-up counts both calls on the abort arm too.
+        if stats is not None:
+            stats["attempts"] = int(base_attempts or 0) \
+                + int(stats.get("attempts") or 0)
+            stats["retries"] = int(base_retries or 0) \
+                + int(stats.get("retries") or 0)
+            stats["truncated"] = True
+        return retained
+    if stats is not None:
+        _rec = stats.setdefault("recovery", {})
+        # R3-3 mirror: running-total attempts/retries (the escalated call
+        # overwrote stats["attempts"] per call — re-accumulate base + esc so
+        # the session `llm.calls` roll-up counts BOTH calls).
+        stats["attempts"] = int(base_attempts or 0) \
+            + int(stats.get("attempts") or 0)
+        stats["retries"] = int(base_retries or 0) \
+            + int(stats.get("retries") or 0)
+        # OR the truncated flag across both calls (the escalated call's
+        # stats.update(truncated=False) must never erase the base flag —
+        # P1-2; the wrap owns the OR here). Criterion 3: a truncation that
+        # the escalation RECOVERED is still RECORDED (never valid=true with
+        # an unrecorded truncation).
+        stats["truncated"] = True
+        # D6 cost delta — the escalated call's post-return in-stats tokens
+        # (any finish: this is the spend numerator, not an overage read).
+        _rec["escalation_prompt_tokens"] = (
+            _rec.get("escalation_prompt_tokens", 0)
+            + int(stats.get("prompt_tokens") or 0))
+        _rec["escalation_output_tokens"] = (
+            _rec.get("escalation_output_tokens", 0)
+            + int(stats.get("completion_tokens") or 0))
+    finish = stats.get("finish_reason") if stats is not None else (
+        getattr(model, "last_finish_reason", None))
+    if finish == "length":
+        # P2-14a residual: keep the escalated (still-truncated) response —
+        # longer than attempt-1, fewer facts dropped. The per-seam s1 keys
+        # accumulate the ESCALATED call's overage ONLY here (a recovered
+        # escalated call was never length-truncated — R3-6 keys measure
+        # truncation, not spend; the spend already landed in the
+        # escalation_*_tokens delta above).
+        if _rec is not None:
+            _rec["escalated_residual"] = (
+                _rec.get("escalated_residual", 0) + 1)
+            # PER-LIST MAX, not `+=` (same semantics as the S2/S4 seam's
+            # post-escalation accumulation): base + escalated are the SAME
+            # summary emission — the R3-6 seam key is the per-list lower
+            # bound (the longest truncated emission), never a sum that
+            # exceeds the true summary size.
+            _rec["truncation_prompt_tokens_s1"] = max(
+                _rec.get("truncation_prompt_tokens_s1", 0),
+                int(stats.get("prompt_tokens") or 0))
+            _rec["truncation_completion_tokens_s1"] = max(
+                _rec.get("truncation_completion_tokens_s1", 0),
+                int(stats.get("completion_tokens") or 0))
+        return response
+    if _rec is not None:
+        _rec["escalated_recovered"] = _rec.get("escalated_recovered", 0) + 1
+    return response
 
 
 # ── The chunker + compiler (design doc §2) ─────────────────────────────────
@@ -601,6 +1023,7 @@ OUTPUT_CONTRACT = """{
               "tier": "A|B",            # Tier-A state-value marker (E2); omit = Tier-B
               "quote": str|null,          # verbatim source text, <=200 chars (E3)
               "search_keys": [str, ...],  # 2-4 aliases + verbatim value tokens (E3)
+              "supersedes": "existing-id|content|null",  # replaces a prior-session point found in search (CORRECTS fold; omit = none)
               "source_turn_id": int|null}],  # {index}: turn in the SOURCE TRANSCRIPT (E3)
   "operators": [
     {"src": str, "dst": str, "op_type": "IMPL|NAND"},
@@ -610,6 +1033,26 @@ OUTPUT_CONTRACT = """{
   "link_before_create": [{"searched_for": str, "found": bool, "note": str}],
   "retractions": [{"content": str}|"id": str]  # E7: explicit withdrawals — emit when the conversation RETRACTS a previously-stated fact (additive; omit when nothing is withdrawn)
 }"""
+
+
+# #1695 Task 5: the flag-on OUTPUT_CONTRACT — the base contract plus the
+# ``unclassified`` sentinel (pack-domain content is typed by the classify-
+# later stage). Kept as a SEPARATE constant so the flag-off contract stays
+# byte-identical (the sentinel is only legal when the pack vocabulary is
+# out of the prompt).
+OUTPUT_CONTRACT_CORE_ONLY = (
+    OUTPUT_CONTRACT
+    # The full entities anchor — the three PARTICIPANT-SLOT kind fields
+    # ("name": str, "kind": str, "confidence") share the bare
+    # '"kind": str,' fragment and must NOT advertise the sentinel (the
+    # write path would silently undo it). Only the top-level fields widen.
+    .replace('"name": str, "kind": str, "lifecycle"',
+             '"name": str, "kind": str|"unclassified", "lifecycle"')
+    .replace('"eventKind": str,', '"eventKind": str|"unclassified",')
+    .replace('"pointKind": "statement",',
+             '"pointKind": "statement"|"unclassified",')
+)
+
 
 
 # E3 (issue #1535): the SOURCE TRANSCRIPT block cap (chars) — protects the
@@ -630,6 +1073,13 @@ MASTER LIST
 
 CONDENSED SEMANTIC CORE (from the how-to-use-tortoise skill)
 - Edge types: IMPL = supports/implies; NAND = contradicts.
+- NAND DIRECTION (#909 extraction default — new-claim-attacks-existing):
+  NAND is a DIRECTED attack — src = the ATTACKING counter-claim, dst = the
+  claim under attack. When a LATER claim contradicts an EARLIER one, the
+  newer counter-claim is src and the older claim is dst (NAND points AT
+  what it refutes; the execution fold canonicalizes this order). An
+  explicit negation in a later turn ("the flag did not cause it") marks
+  that later claim as the attacker — never put the attacked claim first.
 - TRUTH vs WEIGHT — two different tools for two different problems:
   * A claim that is FACTUALLY WRONG → NAND the Point directly (truth attack).
     Truth lives on the POINT.
@@ -721,6 +1171,8 @@ But STRIP, DON'T DROP the durable claim they carry:
   "let me verify X").
 What survives is what changes the world model — including how we work.
 
+{anti_routine}
+
 CARVE-OUT — USER-PERSONAL-STATE VALUES ARE NOT MECHANICS TOKENS
 The exclusion list above targets PROCESS ARTIFACTS (issue ids, commit hashes,
 PR numbers, test counts as process metrics, file paths, commands, tool calls).
@@ -767,6 +1219,32 @@ Empty arrays are valid — extract-nothing is valid. Print ONLY the JSON object
 (no markdown fences, no commentary)."""
 
 
+# #1695 Task 5: the flag-on S2 template — the base template with the pack
+# vocabulary/chain-reasoning removed and the emit-untyped instruction added
+# (pack-domain content → "unclassified", typed by the classify-later stage).
+# Derived so the flag-off S2_TMPL stays byte-identical.
+S2_TMPL_CORE_ONLY = S2_TMPL.replace(
+    "- CHAINS — mapping must respect the chain positions (WARN, then TRY TO REPAIR):\n"
+    "{chains_text}\n"
+    "  If a mapping would connect across a chain in a way that violates it, WARN in\n"
+    "  chain_notes and TRY TO REPAIR by re-mapping toward the nearest valid chain\n"
+    "  position. NEVER invent entities to satisfy a chain.",
+    "CHAIN ENFORCEMENT IS DETERMINISTIC: pack-chain positions are enforced by a\n"
+    "post-extraction graph pass (the chain_notes field stays for your flags only).\n"
+    "Do NOT reason about chain paths here — emit the untyped items and the\n"
+    "enforcer rewires them. NEVER invent entities to satisfy a chain.",
+).replace(
+    "MASTER LIST\n{master_list}\n\nCONDENSED SEMANTIC CORE",
+    "MASTER LIST (CORE ONLY — the pack vocabulary is NOT here)\n{master_list}\n\n"
+    "PACK-DOMAIN CONTENT → UNCLASSIFIED: content whose kind would be a PACK kind\n"
+    "({pack_namespaces}) is NOT in the\n"
+    "vocabulary above. For such content emit kind/eventKind/pointKind: \"unclassified\"\n"
+    "— a later deterministic stage assigns the pack kind. Core kinds are in-context:\n"
+    "emit them directly. NEVER mint a pack kind name you cannot see in the list.\n\n"
+    "CONDENSED SEMANTIC CORE",
+)
+
+
 def _render_source_transcript(edus: list[dict] | None) -> str:
     """E3 (D3): turn-indexed SOURCE TRANSCRIPT block for S2/S4 — lets the
     model cite `source_turn_id` from the {index}: markers instead of
@@ -785,15 +1263,34 @@ def _render_source_transcript(edus: list[dict] | None) -> str:
 def render_s2_prompt(master: dict | None = None, *,
                      session_date: str | None = None,
                      edus: list[dict] | None = None,
-                     story: str | None = None) -> str:
+                     story: str | None = None,
+                     core_only: bool | None = None) -> str:
+    """The S2 prompt. ``core_only`` (None = env fallback) selects the
+    #1695 Task 5 core-only variant (pack vocabulary + chains out of the
+    prompt, the "unclassified" sentinel in the contract); the flag-off
+    default renders byte-identically to today."""
     master = master or build_master_list()
+    if core_only is None:
+        core_only = _classify_later_enabled()
     transcript = _render_source_transcript(edus)
-    return (S2_TMPL
-            .replace("{master_list}", _render_master(master, story))
-            .replace("{chains_text}", _render_chains(master))
+    tmpl = S2_TMPL_CORE_ONLY if core_only else S2_TMPL
+    contract = OUTPUT_CONTRACT_CORE_ONLY if core_only else OUTPUT_CONTRACT
+    chains = "" if core_only else _render_chains(master)
+    # The pack-namespace list is DYNAMIC — derived from the INSTALLED packs
+    # (master["pack_kinds"] keys), never hardcoded (epistemic-team is not
+    # installed; a future pack must route to unclassified too).
+    pack_ns = "/".join(sorted(
+        {k.rsplit(":", 1)[0] + ":" for k in (master.get("pack_kinds") or {})}
+    )) if core_only else ""
+    return (tmpl
+            .replace("{master_list}", _render_master(
+                master, story, core_only=core_only))
+            .replace("{pack_namespaces}", pack_ns)
+            .replace("{chains_text}", chains)
+            .replace("{anti_routine}", _s2s4_rules())
             .replace("{date_anchor}", _date_anchor(
                 session_date, include_emission_rules=True))
-            .replace("{output_contract}", OUTPUT_CONTRACT)
+            .replace("{output_contract}", contract)
             + (("\n\n" + transcript) if transcript else ""))
 
 
@@ -801,47 +1298,418 @@ _PARSE_RETRIES = 1  # re-prompt once on unparseable S2/S4 output (pilot #1549 fi
 # parse_error dominated the pilot census 18-31/qid — LLM sloppiness, self-corrects)
 
 
+def _error_excerpt(response: str, err: BaseException) -> str:
+    """Bounded error region for the error-informed re-prompt (D3, #1746):
+    the region around the JSONDecodeError position (±150 chars) when the
+    error exposes one, else the last 400 chars of the response; the excerpt
+    is bounded at 500 chars total. ``None`` responses are tolerated
+    (``_parse_json`` already treats them as empty)."""
+    resp = response or ""
+    pos = getattr(err, "pos", None)
+    if isinstance(pos, int) and 0 <= pos < len(resp):
+        excerpt = resp[max(0, pos - 150):pos + 150]
+    else:
+        excerpt = resp[-400:]
+    return excerpt[:500]
+
+
+def _accumulate_seam_out_tokens(stats: dict | None, seam: str | None) -> None:
+    """#2408 Task 0: healthy-path per-seam output-token accumulator.
+
+    Records ``stats["recovery"][f"{seam}_out_tokens"]`` = the FINAL
+    successful call's ``completion_tokens`` on the terminal success returns
+    of ``_complete_parsed``. Guard: ``not stats.get("partial")`` — the rung-4
+    partial-accept arms (escalated_partial via ``return parsed``; plain-path
+    rung-4 head via ``return _parse_json_robust``) both flow through the same
+    two returns with ``stats["partial"]=True`` and their whole-call tokens;
+    a partial list must never masquerade as a healthy total. Abort/residual
+    arms never reach the returns. ``seam=None`` (the kind_classifier
+    adjudication path) contributes nothing.
+    """
+    if stats is not None and seam and not stats.get("partial"):
+        _tokens = int(stats.get("completion_tokens") or 0)
+        if _tokens > 0:  # absent-when-no-data: a real success always reports
+            # tokens; a tokenless mock must not fabricate a 0 entry that
+            # creates a recovery dict where none existed (pre-existing pin:
+            # a clean rung-1 parse leaves stats["recovery"] empty).
+            _rec = stats.setdefault("recovery", {})
+            _rec[f"{seam}_out_tokens"] = (
+                _rec.get(f"{seam}_out_tokens", 0) + _tokens)
+
+
 def _complete_parsed(model, system: str, user: str, *,
-                     max_tokens: int | None, stats: dict | None) -> dict:
-    """``_complete`` + ``_parse_json`` with one re-prompt on parse failure.
+                     max_tokens: int | None, stats: dict | None,
+                     seam: str | None = None,
+                     escalate: bool = True) -> dict:
+    """``_complete`` + the parse-recovery ladder with one error-informed
+    re-prompt on parse failure (pilot #1549 + #1746 D3/D4).
 
     Transient/fatal classification lives in the ``_complete`` retry loop
     (M3); this layer adds the parse-retry the pilot census demanded: a
     parse_error is usually LLM sloppiness and the model self-corrects on
-    the same prompt. Retries are counted in ``stats["llm"]["retries"]``
-    (D3) and the census still records the final failure as ``parse_error``."""
+    an ERROR-INFORMED re-prompt. Retries are counted in
+    ``stats["llm"]["retries"]`` (D3) and the census records the final
+    failure as ``parse_error`` / ``truncated_parse_error`` (#1746 D2: the
+    FIRST parse-failing attempt's ``finish_reason`` decides the class —
+    ``length`` → the truncation hypothesis, else sloppiness/contamination).
+
+    Retry policy (#1746 D3): with ``escalate=True`` (the S2/S4 default,
+    #2134 Task 3), a ``finish_reason == "length"`` fires the ONE-SHOT
+    ESCALATION instead — one escalated ``_complete`` at
+    ``_extractor_escalation_tokens(max_tokens)`` (default 32000), whose
+    response is handled ONCE on a TERMINAL path (residual → fail-loud
+    ``_ParseError(truncated=True)``; clean → ``escalated_recovered``;
+    malformed-with-prefix → ``escalated_partial``; escalated-call raise →
+    ``escalated_abort`` + head-reparse of the retained truncating
+    response). The #1746 error-informed re-prompt is DISABLED
+    post-escalation (R3-1: it would re-call at the ORIGINAL base cap and
+    re-truncate). With ``escalate=False`` (the kind-classifier adjudication
+    seam), the pre-#2134 ladder is preserved verbatim: a first parse-
+    failing attempt with ``finish_reason == "length"`` SKIPS the retry
+    (same prompt + same cap is deterministic failure; rung-4
+    partial-accept ran in-process on attempt 1); a ``stop``/``None``
+    failure re-prompts with the bounded parse-error block
+    (``_error_informed_reprompt``).
+
+    #2134 Task 0 (R3-6): ``seam`` names the calling stage (run_s2 passes
+    ``"s2"``, run_s4 ``"s4"``; the kind_classifier adjudication path leaves
+    it ``None``) so a length-truncated call's tokens accumulate into
+    PER-SEAM recovery keys (``truncation_*_tokens_{seam}``) in addition to
+    the seam-less combined keys `_complete` already accumulates — keeping
+    the S2 (16K-capped) and S4 (16K-capped) truncation overage separable
+    for the Task-1 calibration read (a seam-less sum conflates S2+S4+S1 in
+    a multi-truncating session)."""
     attempts = 0
     last: Exception | None = None
+    first_truncated = False
+    # D7 (#1746): the stage-level truncated flag ORs over ALL calls of the
+    # stage (``_complete`` overwrites ``stats["truncated"]`` per attempt) —
+    # a truncated first attempt whose retry recovers must still record the
+    # truncation (criterion 3: no UNRECORDED truncation with valid=true).
+    stage_truncated = False
+    # #2134 (R3-3): running-total call accounting — every ``_complete``
+    # overwrites ``stats["attempts"]/["retries"]`` per call, so a single
+    # snapshot undercounts multi-call episodes; accumulate after EVERY
+    # invocation and write the running total back immediately (any caller
+    # read — success return, residual raise, roll-up — then sees the truth).
+    total_attempts = 0
+    total_retries = 0
+    escalated = False
+    user_msg = user
     while attempts <= _PARSE_RETRIES:
         attempts += 1
+        response = _complete(model, system, user_msg,
+                             max_tokens=max_tokens, stats=stats)
+        if stats is not None:
+            total_attempts += int(stats.get("attempts") or 0)
+            total_retries += int(stats.get("retries") or 0)
+            stats["attempts"] = total_attempts
+            stats["retries"] = total_retries
+        # D2 (#1746) + F4 (#1780): the finish reason is captured race-free
+        # in the calling thread by ``_complete`` and recorded into stats —
+        # reading the shared adapter attribute here would be a cross-thread
+        # race under ``--workers > 1`` (extract_session_v2 always passes
+        # stage_stats). The no-stats public-API path (run_s2/run_s4 default)
+        # falls back to the adapter attribute — preserving the pre-F4 D3
+        # retry-skip for truncated responses. Hold the FIRST parse-failing
+        # attempt's value — the class-decision signal for
+        # ``_ParseError.truncated``.
+        finish = stats.get("finish_reason") if stats is not None else (
+            getattr(model, "last_finish_reason", None))
+        stage_truncated = stage_truncated or finish == "length"
+        if stats is not None:
+            stats["truncated"] = stage_truncated
+            # #2134 Task 0 (R3-6): per-seam truncation-token accumulation —
+            # read the in-stats token fields `_complete` just wrote (same
+            # thread, post-return). Guarded on `seam` so the adjudication
+            # path (seam=None) contributes only the combined keys.
+            if finish == "length" and seam:
+                _rec = stats.setdefault("recovery", {})
+                _pk = f"truncation_prompt_tokens_{seam}"
+                _ck = f"truncation_completion_tokens_{seam}"
+                _rec[_pk] = (_rec.get(_pk, 0)
+                             + int(stats.get("prompt_tokens") or 0))
+                _rec[_ck] = (_rec.get(_ck, 0)
+                             + int(stats.get("completion_tokens") or 0))
+        # ── #2134 one-shot escalation (D1/D3/D3b; R2 + R3) ───────────
+        # Fires on the FIRST ``length`` at ANY pre-escalation attempt,
+        # BEFORE ``_parse_json_robust`` runs on the truncating response
+        # (P2-10b — no rung counters/partial from the truncating attempt
+        # need clearing). The escalated response is then handled ONCE on a
+        # TERMINAL path — the #1746 error-informed re-prompt is DISABLED
+        # post-escalation (R3-1: it would re-call ``_complete`` at the
+        # loop's ORIGINAL base ``max_tokens``, re-truncate a >16K list and
+        # rung-4 a truncation-attribute ``partial_parse`` — Task 6 leak).
+        if finish == "length" and escalate:
+            esc = _extractor_escalation_tokens(max_tokens)
+            if esc <= (max_tokens or 0):
+                # P2-15 (D2): no escalation headroom — the length-truncation
+                # is RESIDUAL fail-loud, NEVER rung-4 partial-accept of the
+                # truncating attempt. stats["partial"] is structurally False
+                # here (no parse has run); the defensive clear guards future
+                # reordering (R3-4).
+                if stats is not None:
+                    stats["partial"] = False
+                raise _ParseError(
+                    f"length-truncated with no escalation headroom "
+                    f"(esc {esc} <= base {max_tokens})",
+                    truncated=True, attempt=attempts,
+                    excerpt=_error_excerpt(response, None))
+            if not escalated:
+                escalated = True
+                _rec = (stats.setdefault("recovery", {})
+                        if stats is not None else None)
+                if _rec is not None:
+                    _rec["escalated"] = _rec.get("escalated", 0) + 1
+                    # the truncating base call's wasted output (the
+                    # marginal-cost numerator, D6) — snapshotted right after
+                    # the base call returned, before the escalated call
+                    # overwrites the in-stats token fields.
+                    _rec["escalation_base_prompt_tokens"] = (
+                        _rec.get("escalation_base_prompt_tokens", 0)
+                        + int(stats.get("prompt_tokens") or 0))
+                    _rec["escalation_base_output_tokens"] = (
+                        _rec.get("escalation_base_output_tokens", 0)
+                        + int(stats.get("completion_tokens") or 0))
+                retained_response = response
+                try:
+                    # D5: deadline auto-scales via _scaled_deadline(600, esc).
+                    # D3b: retries=1 (a single transient blip on a list that
+                    # fits the esc budget must not abort it); NO read-timeout
+                    # kwarg — model_adapters.py stays at its (10, 60) stall
+                    # bound (P1-6/P2-12b).
+                    response = _complete(model, system, user_msg,
+                                         max_tokens=esc, retries=1,
+                                         stats=stats)
+                except BaseException as e:
+                    if not isinstance(e, Exception):
+                        raise
+                    # D3b abort arm — the escalated call itself raised
+                    # (transient-after-retries / deadline kill / fatal 4xx /
+                    # adapter read-timeout). Fall back to a TRUNCATED-HEAD
+                    # parse of the truncating pre-escalation attempt's
+                    # retained response — canonical-then-rung-4 ONLY (rungs
+                    # 1-3 NEVER run on a known length-truncated input; a
+                    # section-boundary cut would clean-parse to a shorter
+                    # valid dict). Always classed partial_parse.
+                    if _rec is not None:
+                        _rec["escalated_abort"] = (
+                            _rec.get("escalated_abort", 0) + 1)
+                    # R3-3/P1-39 (code-review round): the escalated call's
+                    # except-branch stats.update(attempts=...) OVERWROTE the
+                    # running total with the escalated call's own per-call
+                    # count before raising — re-accumulate base + esc so the
+                    # session `llm.calls`/`llm_retries` roll-up counts BOTH
+                    # calls on the abort arm too (the run_s1 mirror; without
+                    # this, _rollup_llm undercounts by exactly the
+                    # pre-escalation attempts).
+                    if stats is not None:
+                        total_attempts += int(stats.get("attempts") or 0)
+                        total_retries += int(stats.get("retries") or 0)
+                        stats["attempts"] = total_attempts
+                        stats["retries"] = total_retries
+                    head = (_parse_canonical_strict(retained_response)
+                            or _longest_valid_prefix(retained_response))
+                    if head is None:
+                        raise _ParseError(
+                            str(e), truncated=True, attempt=attempts,
+                            excerpt=_error_excerpt(retained_response, None)
+                        ) from e
+                    if stats is not None:
+                        stats["partial"] = True
+                    return head
+                if stats is not None:
+                    total_attempts += int(stats.get("attempts") or 0)
+                    total_retries += int(stats.get("retries") or 0)
+                    stats["attempts"] = total_attempts
+                    stats["retries"] = total_retries
+                    # D6 cost delta — the escalated call's post-return
+                    # in-stats tokens (the call just returned, its own
+                    # values); the abort arm accumulated NONE above (a raise
+                    # never reaches a snapshot — P2-34).
+                    _rec = stats.setdefault("recovery", {})
+                    _rec["escalation_prompt_tokens"] = (
+                        _rec.get("escalation_prompt_tokens", 0)
+                        + int(stats.get("prompt_tokens") or 0))
+                    _rec["escalation_output_tokens"] = (
+                        _rec.get("escalation_output_tokens", 0)
+                        + int(stats.get("completion_tokens") or 0))
+                finish = (stats.get("finish_reason")
+                          if stats is not None
+                          else getattr(model, "last_finish_reason", None))
+                stage_truncated = stage_truncated or finish == "length"
+                if stats is not None:
+                    stats["truncated"] = stage_truncated
+                    if finish == "length" and seam:
+                        _rec = stats.setdefault("recovery", {})
+                        _pk = f"truncation_prompt_tokens_{seam}"
+                        _ck = f"truncation_completion_tokens_{seam}"
+                        # PER-LIST MAX, not `+=`: the base and the escalated
+                        # emissions are overlapping prefixes of the SAME
+                        # list — summing them (16K + 32K = 48K) would break
+                        # the R3-6/Task-1 "per-list lower bound" contract
+                        # #2335 sizes segments from (the correct lower bound
+                        # for a residual episode is the LONGEST truncated
+                        # emission, ~32K). The loop-top `+=` already holds
+                        # the base emission; the combined seam-less keys
+                        # (`_complete`'s) keep the total-spend SUM semantics.
+                        _rec[_pk] = max(_rec.get(_pk, 0),
+                                        int(stats.get("prompt_tokens") or 0))
+                        _rec[_ck] = max(_rec.get(_ck, 0),
+                                        int(stats.get("completion_tokens")
+                                            or 0))
+                if finish == "length":
+                    # D3 residual — still truncated after the ONE escalation:
+                    # fail-loud, NO parse-acceptance path (a balanced
+                    # complete-but-shorter section-boundary cut is STILL
+                    # truncated via finish). The residual raise carries NO
+                    # acceptance parse at all — only the `_error_excerpt`
+                    # string tail; `_parse_canonical_strict` is used solely
+                    # on the ABORT arm's head-reparse (P1-7).
+                    # WHY residual never accepts while the ABORT arm (above)
+                    # reparses the retained base-cap head: the escalated
+                    # response is the LONGEST emission this pipeline ever
+                    # held — accepting any shorter prefix of it as
+                    # "recovered" would silently drop the tail on exactly the
+                    # failure class #2134 exists to eliminate (the R2 fail-
+                    # loud tripwire; a double-residual on S2+S4 is the
+                    # #1987/#2335 mega-session signal and grades
+                    # empty_embed_list — hard — so the migration from the
+                    # #1746 recoverable-partial net to hard-fail pre-#2335 is
+                    # a conscious, reviewed decision, pinned by
+                    # test_over_32k_residual_census_killer_not_partial_parse).
+                    # The abort arm only reparses because the escalated call
+                    # was LOST (a raise) — otherwise ZERO data would embed;
+                    # a returned-truncated response keeps data loss VISIBLE.
+                    # (The P1-7 canonical parse note lives on the ABORT arm's
+                    # reparse — the residual raise carries no acceptance
+                    # parse at all, only the fail-loud excerpt.)
+                    if _rec is not None:
+                        _rec["escalated_residual"] = (
+                            _rec.get("escalated_residual", 0) + 1)
+                        stats["partial"] = False  # defensive (R3-4)
+                    raise _ParseError(
+                        f"escalated output still truncated at {esc} tokens",
+                        truncated=True, attempt=attempts,
+                        excerpt=_error_excerpt(response, None))
+                try:
+                    # R3 terminal parse — ONE pass over the escalated
+                    # response; a parse failure raises (no re-prompt).
+                    parsed = _parse_json_robust(response, stats=stats)
+                except ValueError as e2:
+                    # complete-but-garbage (finish != length): the escalated
+                    # response had no valid prefix → parse_error class
+                    # (truncated=False — the finish is stop/None, never a
+                    # truncation class on a stop response).
+                    if _rec is not None:
+                        _rec["escalated_partial"] = (
+                            _rec.get("escalated_partial", 0) + 1)
+                    raise _ParseError(
+                        str(e2), truncated=False, attempt=attempts,
+                        excerpt=getattr(e2, "excerpt", None)
+                        or _error_excerpt(response, e2)) from e2
+                # The terminal-parse CLASSIFIER arm: a stop-but-malformed
+                # escalated response whose rung-4 prefix was partial-accepted
+                # leaves stats["partial"] True from the in-call parse →
+                # escalated_partial; a clean terminal full parse → the
+                # recovered bucket. (The recovered-bucket predicate is
+                # `not stats["partial"]` — R3-5.)
+                if stats is not None and stats.get("partial"):
+                    if _rec is not None:
+                        _rec["escalated_partial"] = (
+                            _rec.get("escalated_partial", 0) + 1)
+                else:
+                    if _rec is not None:
+                        _rec["escalated_recovered"] = (
+                            _rec.get("escalated_recovered", 0) + 1)
+                # #2408 Task 0: terminal success — record the escalated
+                # call's output tokens (the full list that got embedded).
+                # parsed was already returned by _parse_json_robust above,
+                # so stats["partial"] reflects the rung-4 outcome.
+                _accumulate_seam_out_tokens(stats, seam)
+                return parsed
+        # #2408 Task 0: terminal success on the normal path — capture the
+        # parsed result FIRST so the helper sees stats["partial"] as set by
+        # _parse_json_robust's internal rung-4 accept (a partial head must
+        # never be recorded as a healthy total).
         try:
-            return _parse_json(_complete(model, system, user,
-                                         max_tokens=max_tokens, stats=stats))
+            _parsed = _parse_json_robust(response, stats=stats)
+            _accumulate_seam_out_tokens(stats, seam)
+            return _parsed
         except ValueError as e:
+            # _ParseError IS a ValueError subclass — the only exception the
+            # ladder raises; ``_complete`` sits OUTSIDE this try, so a raw
+            # adapter ValueError propagates to the stage except and is
+            # classed by ``_classify_error`` (no parse-retry).
             last = e
-            if stats is not None:
-                stats.setdefault("llm", {}).setdefault("retries", 0)
-                stats["llm"]["retries"] += 1
-    raise _ParseError(str(last)) from last
+            if attempts == 1:
+                # D2 (#1746): the FIRST parse-failing attempt's finish
+                # reason decides the class (a raw adapter ValueError has no
+                # truncated attr — getattr-safe for the final raise).
+                first_truncated = finish == "length"
+            if finish == "length":
+                # D3 (#1746): deterministic failure — same prompt + same cap
+                # re-fails identically; the ladder's partial-accept already
+                # recovered what it could in-process. (#2134: only reached
+                # with escalate=False — the kind_classifier adjudication
+                # seam, where today's behavior is preserved verbatim.)
+                break
+            if attempts <= _PARSE_RETRIES:
+                if stats is not None:
+                    stats.setdefault("llm", {}).setdefault("retries", 0)
+                    stats["llm"]["retries"] += 1
+                user_msg = _error_informed_reprompt(user, response, e)
+    raise _ParseError(str(last), truncated=first_truncated,
+                      attempt=attempts,
+                      excerpt=(getattr(last, "excerpt", None)
+                               or _error_excerpt(response, last))) from last
+
+
+def _error_informed_reprompt(user: str, response: str,
+                             err: _ParseError) -> str:
+    """D3 (#1746): the attempt-2 user message — the original prompt plus the
+    bounded parse-error block (message ≤ 300 chars + excerpt ≤ 500)."""
+    msg = str(err.args[0] if err.args else err)[:300]
+    excerpt = getattr(err, "excerpt", None) or _error_excerpt(response, err)
+    return (user + "\n\nYour previous response did not parse as the required "
+            "JSON.\nParse error: " + msg +
+            "\nOffending region: " + excerpt +
+            "\nRespond with ONLY the JSON object, no explanation.")
 
 
 def run_s2(model, story: str, master: dict | None = None, *,
            session_date: str | None = None,
            edus: list[dict] | None = None,
-           stats: dict | None = None) -> dict:
+           stats: dict | None = None,
+           core_only: bool | None = None) -> dict:
     """S2: story → embed list (draft prompt v1, owner-in-the-loop pending).
 
-    Output is bounded at ``_S2_S4_MAX_TOKENS`` (M3 #1524, D2); a truncated
-    or unparseable response raises ``_ParseError`` → census ``parse_error``
-    (the tail-cut tolerance of ``_parse_json`` still recovers truncated
-    JSON; the census records the truncation for the fix loop). S2 retries
-    once on parse failure (``_complete_parsed`` — pilot #1549 fix)."""
+    Output is bounded at ``_S2_S4_MAX_TOKENS`` (M3 #1524, D2). #2134
+    (Task 3): a length-truncated emit escalates ONCE to
+    ``_extractor_escalation_tokens`` (default 32000) and recovers the full
+    list (``escalated_recovered``) when it fits the knob; a response STILL
+    truncated after the one escalation (or an un-escalatable
+    ``esc <= base``) raises ``_ParseError(truncated=True)`` → census
+    ``truncated_parse_error`` (fail-loud residual — never a silent shorter
+    list). An unparseable (stop/None) response follows the #1746 ladder —
+    error-informed re-prompt once, then ``parse_error``.
+
+    ``story`` threads into the render (A′ #1695 Task 2): the label-order
+    shuffle seed derives from the story, so a paired canonical re-run under
+    a different order reproduces the SAME session. NOTE (flag-off
+    byte-identity scope): under ``TORTOISE_EXTRACTOR_PROMPT=compact`` the
+    story ALSO story-filters the pack-kind injection — aligning S2 with
+    S4's selection (origin ran S2 with story=None → full set). The DEFAULT
+    verbose path is unaffected (story only feeds the seed, which is a
+    no-op when the shuffle is unset), so the flag-off byte-identity claim
+    holds for the default render mode."""
     return _complete_parsed(model,
                             render_s2_prompt(master, session_date=session_date,
-                                             edus=edus),
+                                             edus=edus, story=story,
+                                             core_only=core_only),
                             "S1 STORY:\n" + story,
                             max_tokens=_stage_cap(_S2_S4_MAX_TOKENS),
-                            stats=stats)
+                            stats=stats, seam="s2")
 
 
 # ── S3: SEARCH THE GRAPH (real backend, graceful degradation) ─────────────
@@ -910,16 +1778,127 @@ def _derive_queries(embed_list: dict, story: str) -> dict:
     return queries
 
 
-def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3) -> list[dict]:
-    rows = sdk.tortoise_fts_query(query, entity_type=entity_type, limit=limit)
+# #2552: a capture's OWN turn echoes are TRANSCRIPT, not memory.
+# capture_session writes the turn Points (deterministic ids ``{session_id}_t{i}``,
+# ``is_episodic=true``, content ``[role] <text>`` via ``sdk._capture_turn_texts``)
+# BEFORE extraction runs, so on a fresh capture they are the ONLY content in the
+# graph — S3 returned them as the link-before-create prior set, the freshly
+# extracted claim NOOP-folded onto its own transcript echo
+# (``classify_consolidation``), never became a memory Point, and every operator
+# referencing it resolved (via ``execute_embed``'s ``point_ids``) to a turn id —
+# an endpoint invisible to the memory layer, so the planted-operator audit graded
+# it from_content_missing / to_content_missing / edge_missing. S3 must never
+# dedup the extraction against the transcript it is extracting.
+#
+# The row test is the extractor's OWN predicate (not a copy of the graded
+# layer's): an id ANCHORED on the capture's ``session_id``
+# (``\A{session_id}_t\d+\Z`` — the same identity ``runner._turn_id_pattern``
+# builds, applied more strictly: ``fullmatch`` rejects the trailing newline that
+# its ``.match`` + ``$`` would accept) AND a turn marker on the row (the
+# production ``pointKind == "event"``, or the ``[role] …`` content leg
+# ``retrieval._is_turn_point`` uses). The graded layer's two legs are
+# independently sufficient (a union); here the id is deliberately conjoined with
+# a marker (an intersection), because ``create_point`` accepts explicit caller
+# ids, ``retrieval.py`` records the D3 decision that the ``{session_id}_t{i}``
+# prefix "is unverifiable — ANY caller id ending in ``_t<digits>`` would be read
+# as a session … the shape of an id is not evidence that a capture happened",
+# and a caller-minted Point whose id merely collides with the session's turn
+# namespace (the class ``tests/test_d3_session_identity.py`` documents as
+# reachable) must survive the prior set. With no session id the filter is a
+# NO-OP: keeping an echo is a missed dedup, dropping a real prior is memory loss.
+#
+# Scope and its bound — two things this does NOT do, both tracked in #4509:
+#   * other ingest lanes' transcript rows with different id shapes (the longmem
+#     lane's ``lme:{qid}:s{si}:t{ti}`` episodic points) do not match; and
+#   * ``tortoise_fts_query`` truncates to ``limit`` internally — i.e. BEFORE this
+#     drop runs — so asking for exactly ``limit`` lets the echoes consume every
+#     slot and hide a real prior ranked below them (the "filtering after the
+#     limit cut silently shrinks the result" defect epic #898 fixed for
+#     ``exclude_status``). The point leg over-fetches ``_PRIOR_OVERFETCH`` and
+#     refills to ``limit``, absorbing up to that many echoes; a session whose
+#     echoes exceed the pool (a capture can hold ``MAX_SESSION_TURNS`` = 500) can
+#     still starve a prior. The durable fix is a pre-truncation exclusion in the
+#     retrieval layer (#4509) — this bound is deliberately local and pinned by a
+#     test rather than pretended away.
+_PRIOR_OVERFETCH = 12
+
+#: Mirror of ``tortoise.retrieval._ROLE_PREFIX_RE`` (keep-in-sync — that is the
+#: production "is this a transcript turn" content leg). Pinned structurally by
+#: ``tests/test_extractor_v2.py::test_turn_echo_content_pattern_matches_retrieval``.
+_TURN_ECHO_CONTENT_RE = re.compile(
+    r"^\[(user|assistant|system|tool|unknown)\]\s*", re.IGNORECASE)
+
+#: ``tortoise_fts_query``'s documented ``limit`` bound (tortoise/sdk.py). The
+#: point leg's over-fetch must not push the call past it — ``limit=9990`` would
+#: otherwise ask for 10002 and raise ``ValueError``.
+_FTS_LIMIT_MAX = 10000
+
+
+def _is_turn_echo_id(session_id, point_id) -> bool:
+    r"""True for one of ``session_id``'s own turn echoes (``{session_id}_t{i}``).
+
+    The anchored ID leg only — pair it with :func:`_is_turn_echo_row`. The match
+    is ``\A{session_id}_t\d+\Z`` (``re.fullmatch``) — NOT a shape test, and NOT
+    ``str.isdigit``: ``isdigit()`` also accepts category-No numerics such as
+    ``²``, and ``fullmatch`` is deliberately stricter than the graded layer's
+    ``_turn_id_pattern`` + ``.match`` (whose ``$`` accepts one trailing
+    newline). Stricter can only MISS a drop, never lose a real prior. False
+    whenever the session id is unknown, so a caller that cannot name its session
+    never drops a row."""
+    if not session_id or not point_id:
+        return False
+    return bool(re.fullmatch(
+        rf"{re.escape(str(session_id))}_t\d+", str(point_id)))
+
+
+def _is_turn_echo_row(session_id, row: dict) -> bool:
+    """This session's turn ID **and** a turn marker on the row.
+
+    The id is the reliable turn/claim discriminator (``runner._turn_id_pattern``'s
+    identity). The marker is EITHER the production turn kind
+    (``pointKind == "event"`` — what ``capture_session`` stamps on every turn
+    Point, ``tortoise/sdk.py``) OR the ``[role] …`` transcript prefix
+    (``retrieval._is_turn_point``'s content leg). The kind leg is what keeps a
+    capture whose role is not in the prefix allowlist from silently retaining
+    its own echoes: ``_normalize_turn_role`` passes ANY role string through, so
+    a ``[developer] …`` / ``[human] …`` turn matches no alternation.
+
+    Requiring a marker at all is what keeps a caller-minted Point — whose id
+    merely sits in the session's turn namespace, the class
+    ``tests/test_d3_session_identity.py`` documents as reachable — in the
+    prior set."""
+    if not _is_turn_echo_id(session_id, row.get("id")):
+        return False
+    if row.get("point_kind") == "event":
+        return True
+    content = row.get("content")
+    return bool(_TURN_ECHO_CONTENT_RE.match(str(content or "").strip()))
+
+
+def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3, *,
+              session_id: str | None = None) -> list[dict]:
+    # Only the point leg over-fetches, and only when there is a session to filter
+    # by and a `limit` in the callee's valid range; every other call keeps the
+    # exact ``limit`` window it always had (so an out-of-range `limit` still
+    # raises from the callee, on every leg, as before). The over-fetch is clamped
+    # to the callee's documented bound so it cannot itself raise.
+    fetch = (min(limit + _PRIOR_OVERFETCH, _FTS_LIMIT_MAX)
+             if (entity_type == "point" and session_id
+                 and 0 < limit <= _FTS_LIMIT_MAX) else limit)
+    rows = sdk.tortoise_fts_query(query, entity_type=entity_type, limit=fetch)
     out = []
     for r in rows or []:
         if entity_type in ("object", "subject"):
             out.append({"id": r.get("id", ""), "name": r.get("content", ""),
                         "kind": r.get("kind", "")})
+        elif entity_type == "point" and _is_turn_echo_row(session_id, r):
+            # #2552: this capture's transcript echo — never a memory prior.
+            continue
         else:
             out.append({"id": r.get("id", ""), "content": r.get("content", ""),
                         "kind": r.get("kind", "")})
+        if limit > 0 and len(out) >= limit:
+            break
     return out
 
 
@@ -965,7 +1944,8 @@ def _enrich_point_priors(sdk, points: list[dict]) -> None:
 
 
 def search_graph(sdk, embed_list: dict, story: str, *,
-                 max_queries: int = 15, limit: int = 3) -> dict:
+                 max_queries: int = 15, limit: int = 3,
+                 session_id: str | None = None) -> dict:
     """S3: search the REAL graph for existing entities/points/events.
 
     - Resolves the active backend from the environment (design doc §3 owner
@@ -974,6 +1954,11 @@ def search_graph(sdk, embed_list: dict, story: str, *,
       topic, events by entity (tortoise_fts_query, batch).
     - Graceful degradation: unreachable graph (connection error/timeout)
       returns partial results + ``degraded`` — the pipeline proceeds.
+
+    ``session_id`` is the capture being extracted: it is the anchor that lets
+    the point leg drop the capture's OWN turn echoes from the prior set
+    (#2552 — see ``_is_turn_echo_id``). Callers that cannot name their session
+    pass nothing and get the unfiltered priors.
 
     Returns:
         {"mode": str, "degraded": bool, "reason": str|None,
@@ -1007,7 +1992,8 @@ def search_graph(sdk, embed_list: dict, story: str, *,
                     break
                 q_run += 1
                 try:
-                    for row in _fts_rows(sdk, entity_type, q, limit=limit):
+                    for row in _fts_rows(sdk, entity_type, q, limit=limit,
+                                         session_id=session_id):
                         rid = row.get("id")
                         if not rid or rid in results[bucket[entity_type]]:
                             continue
@@ -1075,13 +2061,15 @@ You have: (a) the compiled story of the conversation, (b) the S2 embed list,
 any key entities, events, or points that AFFECT THE WORLD MODEL — durable
 objects/subjects, decisions/occurrences, claims whose support/attack
 structure matters, AND durable operational/process lessons (cause-effect
-knowledge about how the environment behaves or how the team works — e.g.
+knowledge about how the environment behaves or how the org works — e.g.
 "backgrounded processes die when the tool returns", "create_point defaults to
 draft mode")? Add them. Do NOT pad with process chatter (the value filter
 applies — same STRICT EXCLUSION as S2: strip the mechanics tokens, keep the
 durable claim — with the same CARVE-OUT: user-personal-state VALUES (personal
 bests, schedules, preferences) are facts, kept verbatim, never treated as
 mechanics tokens).
+
+{anti_routine}
 
 MASTER LIST (same closed vocabulary as S2 — no minted kinds)
 {master_list}
@@ -1111,6 +2099,15 @@ Rules:
   ("the old strategy") resolves to the existing item. Emit ONE statement
   point capturing the replacement wired to BOTH entities (about_entities =
   [new, superseded]).
+- DECISION/CLAIM REVERSAL — POINT-LEVEL SUPERSEDE (cross-session only,
+  #2552): when this conversation OVERTURNS a decision or claim made in an
+  EARLIER session and the search results contain that existing point, emit
+  the new decision as its own point AND set its "supersedes" to the
+  existing point's id or EXACT content — the write path folds a point-level
+  CORRECTS supersession (the old point is marked outdated). Never point
+  "supersedes" at an in-session claim (same-session reversals are
+  state/validity semantics, not CORRECTS) and never invent an id or
+  content — copy from the search results only.
 - DECISION EVENTS only when a real decision exists — never fabricate one for
   a supersession or completion.
 - A point that already exists in the graph (same content) → lifecycle
@@ -1141,10 +2138,14 @@ Rules:
   or event emitted in THIS output (copy verbatim, no paraphrasing). If an
   endpoint has no point yet, CREATE the point first. NEVER use an entity name
   as an operator endpoint — entities wire via about_entities.
-- MITIGATES: relevance attack on the OPERATOR edge, strength 0.10-0.50.
-  NAND: truth attack on a FACTUALLY WRONG point. Golden rule: relevance lives
-  on the OPERATOR, truth lives on the POINT. Never NAND an option/criterion
-  for being a bad fit.
+- MITIGATES: relevance attack on the OPERATOR edge, strength 0.10-0.50 —
+  src = the action point's exact content, target_edge = the edge whose
+  relevance the action dampens (a risk claim the action closes stays its
+  OWN point, never fused into the action). NAND: truth attack on a
+  FACTUALLY WRONG point — src = the attacking counter-claim (the NEWER
+  claim), dst = the claim under attack (NAND points AT what it refutes).
+  Golden rule: relevance lives on the OPERATOR, truth lives on the POINT.
+  Never NAND an option/criterion for being a bad fit.
 - RETRACTIONS (E7): when the conversation explicitly WITHDRAWS a previously-
   stated fact ("forget my gym schedule", "scratch that", "that is no longer
   true"), add {"content": "<the exact prior claim>"} or {"id": "<existing-id>"}
@@ -1164,21 +2165,67 @@ Rules:
 Empty arrays are valid. Print ONLY the JSON object."""
 
 
+# #1695 Task 5: the flag-on S4 template — the base template with the S4
+# re-emit clause (S2 items keep the classifier's kinds VERBATIM; the
+# MUST-come-from-list rule applies to NEW items only) and the chains block
+# replaced by the deterministic-enforcement note. Derived so the flag-off
+# S4_TMPL stays byte-identical.
+S4_TMPL_CORE_ONLY = S4_TMPL.replace(
+    "MASTER LIST (same closed vocabulary as S2 — no minted kinds)\n{master_list}\n\n"
+    "CHAINS\n{chains_text}\n\nS1 STORY",
+    "MASTER LIST (CORE ONLY — the pack vocabulary is NOT here)\n{master_list}\n\n"
+    "CHAIN ENFORCEMENT IS DETERMINISTIC (post-extraction graph pass).\n\n"
+    "S1 STORY",
+).replace(
+    "- Re-emit the S2 items you keep, corrected where the search results show they\n"
+    "  already exist (lifecycle changed/unchanged + supersedes = the existing id).",
+    "- Re-emit the S2 items you keep, corrected where the search results show they\n"
+    "  already exist (lifecycle changed/unchanged + supersedes = the existing id).\n"
+    "- S2 ITEMS ARE TYPED (#1695): the S2 items in the input carry kinds assigned\n"
+    "  by the classifier — including PACK kinds NOT in your MASTER LIST and the\n"
+    "  \"unclassified\" sentinel. Re-emit them VERBATIM with their kinds UNCHANGED:\n"
+    "  do NOT re-type an S2 item, do NOT replace a pack kind with a core kind, do\n"
+    "  NOT resolve an \"unclassified\" you cannot see in the list. The\n"
+    "  MUST-come-from-list rule applies to NEW items only.",
+).replace(
+    # FIX D (cycle 3): the base's advisory "TRY TO REPAIR" bullet contradicts
+    # the deterministic-enforcement contract — swap it in the core-only
+    # derivation (the base template stays byte-identical). The fragment is
+    # asserted to exist exactly once in S4_TMPL (anchor pin).
+    "- chain_notes: flag violations, TRY TO REPAIR toward the nearest valid chain\n"
+    "  position, never invent entities.",
+    "- chain_notes: flag violations for the deterministic post-extraction\n"
+    "  enforcer — do NOT attempt repairs yourself (the enforcer rewires\n"
+    "  deterministically). NEVER invent entities.",
+)
+
+
 def render_s4_prompt(story: str, search: dict, embed_list: dict,
                      master: dict | None = None, *,
                      session_date: str | None = None,
-                     edus: list[dict] | None = None) -> str:
+                     edus: list[dict] | None = None,
+                     core_only: bool | None = None) -> str:
+    """The S4 prompt. ``core_only`` (None = env fallback) selects the
+    #1695 Task 5 core-only variant (pack vocabulary + chains out, the S4
+    re-emit clause in); the flag-off default renders byte-identically."""
     master = master or build_master_list()
+    if core_only is None:
+        core_only = _classify_later_enabled()
     transcript = _render_source_transcript(edus)
-    return (S4_TMPL
-            .replace("{master_list}", _render_master(master, story))
-            .replace("{chains_text}", _render_chains(master))
+    tmpl = S4_TMPL_CORE_ONLY if core_only else S4_TMPL
+    contract = OUTPUT_CONTRACT_CORE_ONLY if core_only else OUTPUT_CONTRACT
+    chains = "" if core_only else _render_chains(master)
+    return (tmpl
+            .replace("{master_list}", _render_master(
+                master, story, core_only=core_only))
+            .replace("{chains_text}", chains)
+            .replace("{anti_routine}", _s2s4_rules())
             .replace("{story}", story)
             .replace("{search_results}", _render_search_results(search))
             .replace("{embed_list_json}", json.dumps(embed_list, indent=1))
             .replace("{date_anchor}", _date_anchor(
                 session_date, include_emission_rules=True))
-            .replace("{output_contract}", OUTPUT_CONTRACT)
+            .replace("{output_contract}", contract)
             + (("\n\n" + transcript) if transcript else ""))
 
 
@@ -1186,17 +2233,19 @@ def run_s4(model, story: str, search: dict, embed_list: dict,
            master: dict | None = None, *,
            session_date: str | None = None,
            edus: list[dict] | None = None,
-           stats: dict | None = None) -> dict:
+           stats: dict | None = None,
+           core_only: bool | None = None) -> dict:
     """S4: complete the embed list (S2 + gaps). Draft prompt v1.
 
     Output bounded at ``_S2_S4_MAX_TOKENS`` (M3 #1524, D2); unparseable
     output → ``_ParseError`` → census ``parse_error`` (see ``run_s2``)."""
     return _complete_parsed(model,
                             render_s4_prompt(story, search, embed_list, master,
-                                             session_date=session_date, edus=edus),
+                                             session_date=session_date, edus=edus,
+                                             core_only=core_only),
                             "Complete the embed list.",
                             max_tokens=_stage_cap(_S2_S4_MAX_TOKENS),
-                            stats=stats)
+                            stats=stats, seam="s4")
 
 
 # ── E4 (#1536): S4 merges-not-replaces — programmatic union (S2 ∪ S4) ──────
@@ -1262,8 +2311,101 @@ def merge_embed_lists(s2: dict, s4: dict) -> dict:
     return out
 
 
+# #2408 Task 1: optional noise fields a faithful re-emitter may
+# drop/abbreviate while the item is STILL a verbatim re-emission. NOTE: every
+# OTHER non-optional field is compared full-fold (the conservative basis —
+# see the BASIS NOTE in _verbatim_reemissions); the earlier correction-fields
+# pin (lifecycle/supersedes/slots/kind/eventKind) was deliberately NOT
+# implemented, so no separate correction-field set exists here.
+_VERBATIM_OPTIONAL_FIELDS = frozenset({
+    "source_ref", "confidence", "search_keys", "quote", "source_turn_id",
+})
+
+
+def _verbatim_norm_value(value):
+    """Normalize one item field for verbatim comparison. Strings fold through
+    ``_norm`` (whitespace/case — the SAME identity normalization the merge
+    key uses, so an S4 re-emission that dedupes against S2 under ``_merge_key``
+    also compares verbatim under the same lens); ``kind`` folds through
+    ``_norm_kind`` (``core:plan`` vs ``plan`` are the same entity); dict/list
+    values recurse; scalars pass through. A ``_verbatim_match`` between two
+    items that MERGE as one (same key) and carry the same content modulo this
+    normalization is a pure unchanged re-emission."""
+    if isinstance(value, dict):
+        return {k: _verbatim_norm_value(v) for k, v in value.items()
+                if k not in _VERBATIM_OPTIONAL_FIELDS}
+    if isinstance(value, list):
+        return [_verbatim_norm_value(v) for v in value]
+    if isinstance(value, str):
+        return _norm(value)
+    return value
+
+
+def _verbatim_match(section: str, s2_item: dict, s4_item: dict) -> bool:
+    """True when S4's collision copy of an S2 item is a PURE unchanged
+    re-emission: identical on the merge key AND on every non-optional field
+    (a change to lifecycle/supersedes/slots/kind/eventKind → correction, not
+    verbatim; a dropped/abbreviated optional field stays verbatim)."""
+    def _fold(item: dict) -> dict:
+        out = {}
+        for k, v in item.items():
+            if k in _VERBATIM_OPTIONAL_FIELDS:
+                continue
+            nv = _verbatim_norm_value(v)
+            # Entity kind folds through the key's OWN kind lens (_norm_kind):
+            # "core:plan" vs "plan" collide under _merge_key, so a re-emission
+            # that keeps the same bare kind is verbatim, not a correction.
+            if k == "kind" and section == "entities" and nv is not None:
+                nv = _norm_kind(nv)
+            out[k] = nv
+        return out
+    return _fold(s2_item) == _fold(s4_item)
+
+
+def _verbatim_reemissions(s2: dict, s4: dict) -> int:
+    """#2408 Task 1: count of S2 items S4 re-emitted UNCHANGED.
+
+    Scope: the 4 ``_EMBED_SECTIONS`` (entities/events/points/operators — the
+    same ``sections`` tuple ``_s4_merge_stats`` uses); chain_notes /
+    link_before_create / retractions are NOT re-emission surfaces. An S2 item
+    counts only when S4 emitted a colliding copy (``_merge_key``) that is a
+    verbatim match. Dict-only population (``isinstance(i, dict)``), matching
+    ``_s4_merge_stats``'s ``corrected_by_s4`` basis.
+
+    BASIS NOTE (code-review A/B, PR #2430): ``_verbatim_match`` compares EVERY
+    non-optional field (full-fold equality), which is STRICTER than the #1789
+    Task-1 Step-5 field pin (content fields + correction fields only). This is
+    deliberate and CONSERVATIVE: the delta contract's savings pool is items
+    that need NO emission at all — a drift on any non-optional field (note /
+    pointKind / startedAt / about_entities order) means the item WOULD be
+    re-emitted under the delta and is not pure savings. Counting it verbatim
+    would overstate the savings; excluding it undercounts verbatim and biases
+    unchanged_share LOW (conservative for a build decision). Documented on
+    #1789 so Task-6's s4_delta_reemit_suspect consumes the same basis.
+    """
+    sections = ("entities", "events", "points", "operators")
+    n = 0
+    for section in sections:
+        s4_by_key = {_merge_key(section, i): i
+                     for i in (s4.get(section) or []) if isinstance(i, dict)}
+        for item in (s2.get(section) or []):
+            if not isinstance(item, dict):
+                continue
+            k = _merge_key(section, item)
+            s4_item = s4_by_key.get(k)
+            if s4_item is not None and _verbatim_match(section, item, s4_item):
+                n += 1
+    return n
+
+
 def _s4_merge_stats(s2: dict, s4: dict, merged: dict) -> dict:
-    """E4 observability: prove 'no silent drops' in a live run (M7-adjacent)."""
+    """E4 observability: prove 'no silent drops' in a live run (M7-adjacent).
+
+    #2408 Task 1 (additive): ``verbatim_reemissions`` — of the items S4
+    collided with (``corrected_by_s4``), how many are PURE unchanged
+    re-emissions vs true corrections (``corrections = corrected_by_s4 -
+    verbatim_reemissions``). The census readout's unchanged-share numerator.
+    """
     sections = ("entities", "events", "points", "operators")
     s2_n = sum(len(s2.get(s) or []) for s in sections)
     s4_n = sum(len(s4.get(s) or []) for s in sections)
@@ -1278,6 +2420,7 @@ def _s4_merge_stats(s2: dict, s4: dict, merged: dict) -> dict:
         "s4_items": s4_n,
         "merged_items": merged_n,
         "corrected_by_s4": corrected,
+        "verbatim_reemissions": _verbatim_reemissions(s2, s4),
         "kept_from_s2": max(0, s2_n - corrected),   # no-silent-drop counter
         "added_by_s4": max(0, merged_n - s2_n),
     }
@@ -1286,7 +2429,12 @@ def _s4_merge_stats(s2: dict, s4: dict, merged: dict) -> dict:
 # ── S5: EMBED — deterministic execution → Layer-1 payload ──────────────────
 
 def _norm(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "").strip().lower())
+    """Normalize a classification key for identity comparisons. Defensive
+    str() coercion (review FIX C): LLM-emitted items may carry numeric/
+    non-str names/content — a raw .strip() would raise AttributeError on
+    them and abort the whole union-classify block.
+    """
+    return re.sub(r"\s+", " ", str(s or "").strip().lower())
 
 
 def _norm_kind(k: str) -> str:
@@ -1362,7 +2510,7 @@ def _fact_value_contradiction(content: str, about_entities: list[str] | None,
     old_when = str(existing.get("when") or existing.get("createdAt") or "").strip()
     if when and old_when:
         try:
-            if _valid_iso_date(when) and _valid_iso_date(old_when):
+            if _valid_iso_date(when) and _valid_iso_date(old_when):  # noqa: SIM102
                 if when[:10] < old_when[:10]:
                     return False
         except (TypeError, ValueError):
@@ -1419,8 +2567,10 @@ def _clean_slots(raw, warnings: list[str], ctx: str,
     kinds gate against the entity vocabulary, event kinds against the event
     vocabulary), confidence coerced to float and clamped to [0,1]
     (non-numeric → 0.0), unknown role keys and non-list role values dropped
-    with a warning. Returns None when no role survived (the payload entry
-    gets no slots).
+    with a warning. The classify-later ``unclassified`` sentinel is carried
+    WITHOUT the minted-kind repair warning (FIX G — it is a terminal, not a
+    minted kind; unresolved refs are dropped downstream). Returns None when
+    no role survived (the payload entry gets no slots).
     """
     if raw is None:
         return None
@@ -1428,7 +2578,12 @@ def _clean_slots(raw, warnings: list[str], ctx: str,
         warnings.append(f"{ctx}: slots must be an object — dropped")
         return None
     master = master or {}
-    entity_forms = master_kind_forms(master) if master else None
+    # FIX M slot-lane consistency: the subject/object lane gates against the
+    # SAME widened object vocabulary as execute_embed's entity gate
+    # (_object_kind_forms — master + pack object/document kinds) — a slot
+    # referencing an emitted pack-kind entity (e.g. dev:apiSpec) must keep
+    # its kind and resolve, not be repaired to core:other and dropped.
+    entity_forms = _object_kind_forms(master) if master else None
     event_forms = {k.lower() for k in master.get("events", {})}
     event_forms_bare = {k.lower().rsplit(":", 1)[-1]
                         for k in master.get("events", {})}
@@ -1449,13 +2604,28 @@ def _clean_slots(raw, warnings: list[str], ctx: str,
             kind = str(r.get("kind", "")).strip()
             if not name or not kind:
                 continue
+            # FIX G: the classify-later sentinel is a terminal, never a
+            # minted kind — skip the minted-kind branch explicitly (as
+            # _rekey_slots does) so it's carried without a spurious
+            # "minted slot kind" warning (resolved at write, like the
+            # entity/event sentinels).
+            sentinel = kind.lower() == UNCLASSIFIED
             if role == "event":
-                if kind.lower() not in event_forms and \
+                if sentinel:
+                    # FIX O: the sentinel is only advertised for top-level
+                    # fields — an EVENT-role slot passes through to the
+                    # payload untouched (_resolve_slot_refs drops only
+                    # subject/object strays, fail-closed), so carrying it
+                    # would write kind="unclassified" into a slot. Repair
+                    # to the event fallback SILENTLY (a terminal, not a
+                    # minted kind — FIX G's no-noise intent).
+                    kind = _EVENT_FALLBACK["kind"]
+                elif kind.lower() not in event_forms and \
                         kind.lower().rsplit(":", 1)[-1] not in event_forms_bare:
                     warnings.append(f"minted slot kind {kind!r} ('{name[:60]}'"
                                     f") → repaired to {_EVENT_FALLBACK['kind']}")
                     kind = _EVENT_FALLBACK["kind"]
-            elif entity_forms and \
+            elif entity_forms and not sentinel and \
                     kind.lower() not in entity_forms and \
                     kind.lower().rsplit(":", 1)[-1] not in {
                         f.lower().rsplit(":", 1)[-1] for f in entity_forms}:
@@ -1576,7 +2746,7 @@ def _resolution_prompt(existing: list[dict], new_names: list[str]) -> str:
 
 
 def resolve_entities(entity_refs: list[dict], search: dict,
-                     model=None) -> dict:
+                     model=None, stats: dict | None = None) -> dict:
     """D3: two-phase entity resolution — returns
     {"map": {name: {"id", "name"}}, "records": [{"name", "resolves_to",
     "mode"}], "warnings": [...]}.
@@ -1619,7 +2789,7 @@ def resolve_entities(entity_refs: list[dict], search: dict,
             prompt = _resolution_prompt(
                 existing, [u["name"] for u in unmatched])
             resp = _complete(model, _RESOLUTION_SYSTEM, prompt,
-                             max_tokens=500)
+                             max_tokens=500, stats=stats)
             parsed = _parse_json(resp)
             unmatched_names = {u["name"] for u in unmatched}
             for item in (parsed.get("resolutions") or []):
@@ -2053,31 +3223,135 @@ def validate_chains(embed_list: dict, master: dict | None = None) -> list[dict]:
     return notes
 
 
-def _minted_kind_report(embed_list: dict, master: dict | None = None) -> list[str]:
-    """Every kind used in entities/events/points that is NOT in the master
-    list (indicator: 0 minted kinds)."""
+def validate_chain_completeness(embed_list: dict,
+                                 master: dict | None = None) -> list[dict]:
+    """Rules-with-why chain completeness (issue #1933, E2E-4 negative a).
+
+    A pack chain whose FIRST emitted step is missing its NEXT step is an
+    INCOMPLETE chain: e.g. the agent-ops ``ruleLifecycle`` chain
+    [rule, rationale, ruleRevised] — a rule emitted WITHOUT its rationale
+    (the why) breaks the rules-with-why contract. Deterministic, no LLM:
+
+    1. Collect every emitted kind (entities/points/events, bare form) from
+       the embed list (PRE-repair — pack point kinds like
+       ``agent-ops:rationale`` are still visible here, unlike the commit
+       payload where FIX P repairs them to ``statement``).
+    2. For each PACK-DECLARED chain whose id is NOT in the canonical
+       hardcoded ``CHAINS`` dict (productDelivery/epicToCode/
+       campaignToChannel — their enforcement semantics are established via
+       the graph/payload validators and must not change), find the LOWEST
+       step index with an emitted item.
+    3. If the NEXT step (index+1) has NO emitted item → warn, naming the
+       missing step. A ruleRevised-only embed (highest step emitted, no
+       next step) never warns — a revision without its rule is outside this
+       chain's completeness contract.
+    4. Zero emitted items for ANY step → no note, no warning (unrelated
+       sessions never flood warnings).
+
+    Severity is the chain's manifest enforcement (warn — never blocks).
+    Returns notes mirroring ``validate_chains``' format.
+    """
     master = master or build_master_list()
-    forms = master_kind_forms(master)
-    full = {k.lower() for k in forms if ":" in k}
-    bare = {k.lower().rsplit(":", 1)[-1] for k in forms}
+    emitted: set[str] = set()
+    for e in (embed_list.get("entities") or []):
+        if isinstance(e, dict) and e.get("kind"):
+            emitted.add(str(e["kind"]).rsplit(":", 1)[-1].lower())
+    for p in (embed_list.get("points") or []):
+        if isinstance(p, dict) and p.get("pointKind"):
+            emitted.add(str(p["pointKind"]).rsplit(":", 1)[-1].lower())
+    for ev in (embed_list.get("events") or []):
+        if isinstance(ev, dict) and ev.get("eventKind"):
+            emitted.add(str(ev["eventKind"]).rsplit(":", 1)[-1].lower())
+    if not emitted:
+        return []
+    try:
+        from tortoise.pack_registry import PackRegistry, default_packs_dir
+        reg = PackRegistry(default_packs_dir())
+        reg.load_all()
+    except Exception:  # noqa: BLE001, RUF100 — never block capture
+        return []
+    notes: list[dict] = []
+    for pack in reg.packs.values():
+        for chain in getattr(pack, "chains", []) or []:
+            cid = chain.get("id")
+            steps = [str(s) for s in (chain.get("steps") or [])]
+            if not cid or len(steps) < 2 or cid in CHAINS:
+                continue  # canonical chains keep their established semantics
+            idx = {s.lower(): i for i, s in enumerate(steps)}
+            present = [i for s, i in idx.items() if s in emitted]
+            if not present:
+                continue  # chain not in play for this session
+            first = min(present)
+            nxt = first + 1
+            if nxt >= len(steps):
+                continue  # chain ends at its first emitted step — complete
+            missing = steps[nxt]
+            if idx.get(missing.lower()) is not None and \
+                    missing.lower() not in emitted:
+                notes.append({
+                    "chain": cid,
+                    "finding": (f"chain '{cid}' emitted '{steps[first]}' but "
+                                f"its next step '{missing}' is missing — the "
+                                f"chain is incomplete"),
+                    "action": "warned",
+                    "note": (f"'{missing}' is the next declared chain step "
+                             f"({ ' → '.join(steps) }); per chain enforcement "
+                             f"'{chain.get('enforcement', 'warn')}' this is a "
+                             "warning, never a block"),
+                })
+    return notes
+
+
+def _minted_kind_report(embed_list: dict, master: dict | None = None) -> list[str]:
+    """Every kind used in entities/events/points that is NOT writable by
+    the matching write gate (indicator: 0 minted kinds). Each lane uses the
+    SAME vocabulary as its execute_embed gate: entities → the EXTENDED
+    object vocabulary (master + pack object/document kinds — FIX M),
+    events → the EXTENDED event vocabulary (FIX A), points → the master's
+    "points" section ONLY (FIX P — pack point kinds are never writable)."""
+    master = master or build_master_list()
+    obj_forms = _object_kind_forms(master)
+    full = {k.lower() for k in obj_forms if ":" in k}
+    bare = {k.lower().rsplit(":", 1)[-1] for k in obj_forms}
+    point_full = {k.lower() for k in master["points"]}
+    point_bare = {k.lower().rsplit(":", 1)[-1] for k in master["points"]}
     minted: list[str] = []
     for e in embed_list.get("entities", []) or []:
         if not isinstance(e, dict):
             continue
         k = str(e.get("kind", ""))
-        if k and k.lower() not in full and k.lower() not in bare:
+        # The unclassified sentinel is a reserved terminal, not a minted
+        # kind — below-floor items on the flag-on path carry it through
+        # to the report and must NOT be flagged (the write path resolves
+        # it with its own census).
+        # entities: the EXTENDED object vocabulary (master + pack declared
+        # object/document kinds — FIX M: a classifier-assigned synthesized
+        # object kind is writable at execute_embed, so it is NOT minted;
+        # the report must agree with the write gate).
+        if k and k.lower() != UNCLASSIFIED and k.lower() not in full and k.lower() not in bare:
             minted.append(f"{k} (entity '{e.get('name', '')[:60]}')")
     for ev in embed_list.get("events", []) or []:
         if not isinstance(ev, dict):
             continue
         k = str(ev.get("eventKind", ""))
-        if k and k.lower() not in full and k.lower() not in bare:
+        # events: the EXTENDED event vocabulary (core + pack declared event
+        # kinds — FIX A: a classifier-assigned pack event kind is writable at
+        # execute_embed, so it is NOT minted; the report must agree with the
+        # write gate).
+        if k and k.lower() != UNCLASSIFIED and \
+                k.lower() not in _event_kind_forms(master):
             minted.append(f"{k} (event '{ev.get('content', '')[:60]}')")
     for p in embed_list.get("points", []) or []:
         if not isinstance(p, dict):
             continue
         k = str(p.get("pointKind", ""))
-        if k and k.lower() not in full and k.lower() not in bare:
+        # points: the master's "points" section ONLY (full + bare forms) —
+        # the point write gate repairs EVERYTHING else to statement, so the
+        # report must flag pack point kinds WITH kindDefs (dev:requirement,
+        # product-strategy:useCase/...) that master_kind_forms would
+        # otherwise accept (FIX P — the report agrees with the gate).
+        if k and k.lower() != UNCLASSIFIED and \
+                k.lower() not in point_full and k.lower() not in point_bare:
             minted.append(f"{k} (point '{p.get('content', '')[:60]}')")
     return minted
 
@@ -2141,6 +3415,43 @@ def _resolve_retraction(ref: dict, search: dict,
     return None
 
 
+def _resolve_point_supersede(ref: str, search: dict,
+                             *, warnings: list[str]) -> dict | None:
+    """Resolve a point-level ``supersedes`` ref (a point REPLACES a claim/
+    decision from an EARLIER session) to the S3 prior POINT using the
+    never-guess discipline (mirror of ``_resolve_retraction``): by id
+    (unique), else by normalized-content equality — the S4 render copies
+    search-result content verbatim, so exact equality is the honest match
+    (a paraphrase ref does not resolve: the caller warns + fails open).
+    0 or >1 matches → None (the caller warns; never guesses). S3 only
+    returns live priors (terminal excluded at the search layer, #1391), so
+    a resolved target is live by construction. Resolution against the S3
+    search — which ran BEFORE this capture's writes — makes the point
+    supersede CROSS-SESSION by construction (the #2552 F2 decision:
+    same-session reversals are state/validity semantics, never a CORRECTS
+    record)."""
+    ref = (ref or "").strip()
+    if not ref or ref in ("null", "None"):
+        return None
+    points = [p for p in (search or {}).get("points", []) or []
+              if isinstance(p, dict) and p.get("id")]
+    for p in points:
+        if str(p.get("id")) == ref:
+            return p
+    norm = _norm(ref)
+    matches = [p for p in points
+               if _norm(str(p.get("content") or "")) == norm]
+    if not matches:
+        warnings.append(f"point supersedes={ref[:60]!r} matches no S3 prior "
+                        "— skipped (fail-open)")
+        return None
+    if len(matches) > 1:
+        warnings.append(f"point supersedes={ref[:60]!r} is ambiguous "
+                        f"({len(matches)} priors) — skipped (never guess)")
+        return None
+    return matches[0]
+
+
 def _supersession_records(entity_refs: list[dict], search: dict,
                           *, warnings: list | None = None) -> list[dict]:
     """Shared supersession-record builder — the ONE resolution discipline for
@@ -2184,20 +3495,34 @@ def _supersession_records(entity_refs: list[dict], search: dict,
 
 
 def derive_supersessions(embed_list: dict, search: dict) -> list[dict]:
-    """The minimal status-derivation mapping (state-centric model): from the
-    embed list's entity lifecycle/supersedes + the S3 search results, derive
-    'entity A superseded by entity B' pairs. This is the read-side
-    projection's input — the event stream (session event + filed points) is
-    the truth; object status is derived, not stored. Shares the resolution
-    discipline with execute_embed's recording (same helper).
+    """The minimal supersession-derivation mapping (state-centric model): from
+    the embed list's entity lifecycle/supersedes + the S3 search results,
+    derive 'entity A superseded by entity B' pairs.
+
+    #2164: Object.status is a WRITE-THROUGH FOLD CACHE over the event stream
+    (§11) — supersession records feed the ObjectSuperseded event + fold, they
+    do not derive a read-side projection. Shares the resolution discipline
+    with execute_embed's recording (same helper), including the never-guess
+    guard: a 'superseded'-lifecycle entity carrying a supersedes ref (the OLD
+    side of a replacement) is skipped — the direction is ambiguous and the
+    record would invert.
 
     Returns [{"superseded": ..., "supersedes_by": ..., "evidence": ...}].
     """
-    refs = [{"name": str(e.get("name", "")).strip(),
-             "kind": str(e.get("kind", "")).strip(),
-             "supersedes": str(e.get("supersedes") or "").strip()}
-            for e in (embed_list.get("entities", []) or [])
-            if isinstance(e, dict)]
+    refs = []
+    for e in (embed_list.get("entities", []) or []):
+        if not isinstance(e, dict):
+            continue
+        lifecycle = str(e.get("lifecycle", "") or "").strip()
+        supersedes = str(e.get("supersedes") or "").strip()
+        if lifecycle == "superseded" and supersedes \
+                and supersedes not in ("null", "None"):
+            # never-guess parity with execute_embed's collection guard —
+            # skip the ref, never derive an inverted record.
+            continue
+        refs.append({"name": str(e.get("name", "")).strip(),
+                     "kind": str(e.get("kind", "")).strip(),
+                     "supersedes": supersedes})
     return _supersession_records(refs, search)
 
 
@@ -2286,6 +3611,108 @@ _ENTITY_FALLBACK = {"kind": "core:other"}
 _EVENT_FALLBACK = {"kind": "core:occurrence"}
 _POINT_FALLBACK = {"kind": "statement"}
 
+#: The pack-DECLARED event kinds (eventKinds) — including the kindDefs-less
+#: ones: the classifier can assign them via the kind index's "events"
+#: section (FIX L synthesis), so the write gate must accept them (FIX A
+#: candidate/write-gate alignment). Full + bare forms, case-folded.
+#: Derived once per process from the default packs (packs are static per
+#: process — mirrors the other vocab caches).
+_PACK_EVENT_FORMS: set[str] | None = None
+
+
+def _event_kind_forms(master: dict) -> set[str]:
+    """The writable event-kind vocabulary (FIX A candidate/write-gate
+    alignment): the master's event forms (core EVENTS + pack kindDefs —
+    the entity-gate mirror, ``master_kind_forms``) PLUS the namespaced
+    pack DECLARED event kinds (eventKinds — including kindDefs-less ones
+    the classifier can assign). Full + bare forms, case-folded. The gate
+    must never raise: a pack-registry failure degrades to the
+    master-forms-only set."""
+    global _PACK_EVENT_FORMS
+    forms = master_kind_forms(master)
+    if _PACK_EVENT_FORMS is None:
+        _PACK_EVENT_FORMS = set()
+        try:
+            from tortoise.pack_registry import (
+                PackRegistry,
+                default_packs_dir,
+            )
+            packs_dir = default_packs_dir()
+            reg = PackRegistry(packs_dir)
+            reg.load_all()
+            for ns, pack in reg.packs.items():
+                for k in (pack.event_kinds or []):
+                    _PACK_EVENT_FORMS.add(f"{ns}:{k}".lower())
+                    _PACK_EVENT_FORMS.add(k.lower())
+        except Exception:  # noqa: BLE001, RUF100 — never let the write
+            # gate raise (fail-open to the master-forms-only gate)
+            _PACK_EVENT_FORMS = set()
+    return forms | _PACK_EVENT_FORMS
+
+
+#: The pack-DECLARED object/document kinds (objectKinds + documentKinds) —
+#: including the kindDefs-less ones: the classifier can assign them via the
+#: kind index's "objects" section (FIX L synthesis), so the entity write
+#: gate must accept them (FIX M candidate/write-gate alignment — the events
+#: lane's FIX A mirror). Full + bare forms, case-folded. Derived once per
+#: process from the default packs (packs are static per process — mirrors
+#: _PACK_EVENT_FORMS).
+_PACK_OBJECT_FORMS: set[str] | None = None
+
+
+def _object_kind_forms(master: dict) -> set[str]:
+    """The writable entity-kind vocabulary (FIX M candidate/write-gate
+    alignment): the master's object/subject/point/event forms
+    (``master_kind_forms``) PLUS the namespaced pack DECLARED object and
+    document kinds (objectKinds + documentKinds — including kindDefs-less
+    ones the classifier can assign, e.g. dev:apiSpec, pm:milestone,
+    marketing:keyword). Full + bare forms, case-folded. The gate must never
+    raise: a pack-registry failure degrades to the master-forms-only set
+    (mirrors _event_kind_forms)."""
+    global _PACK_OBJECT_FORMS
+    forms = master_kind_forms(master)
+    if _PACK_OBJECT_FORMS is None:
+        _PACK_OBJECT_FORMS = set()
+        try:
+            from tortoise.pack_registry import (
+                PackRegistry,
+                default_packs_dir,
+            )
+            packs_dir = default_packs_dir()
+            reg = PackRegistry(packs_dir)
+            reg.load_all()
+            for ns, pack in reg.packs.items():
+                for k in (pack.object_kinds or []) + \
+                        (pack.document_kinds or []):
+                    _PACK_OBJECT_FORMS.add(f"{ns}:{k}".lower())
+                    _PACK_OBJECT_FORMS.add(k.lower())
+        except Exception:  # noqa: BLE001, RUF100 — never let the write
+            # gate raise (fail-open to the master-forms-only gate)
+            _PACK_OBJECT_FORMS = set()
+    return forms | _PACK_OBJECT_FORMS
+
+
+def _canonicalize_nand_direction(src: str, dst: str, turns: dict) -> \
+        tuple[str, str] | None:
+    """#2552 (op_02, measured inversion on the #2514 corpus): NAND-direction
+    canonicalization — the extraction default (#909) is new-claim-attacks-
+    existing, so the ATTACKER (src) must be the LATER-asserted endpoint.
+    When BOTH endpoints are fresh session points carrying known source turns
+    and src is the EARLIER one, the model inverted the direction — swap
+    src/dst so the newer counter-claim is src (the corpus gold geometry:
+    the t11 counter-claim 'the flag did not cause it' must src the t5
+    hypothesis it refutes). Never guess: either endpoint without a known
+    turn (an existing-graph/event endpoint, an unquoted point) or a tie
+    (same turn) → None (keep the model's order; the prompt rule is the
+    primary lever there). Returns (src, dst) canonicalized or None."""
+    s_t = turns.get(src)
+    d_t = turns.get(dst)
+    if s_t is None or d_t is None:
+        return None
+    if not (type(s_t) is int and type(d_t) is int) or s_t >= d_t:
+        return None
+    return (dst, src)
+
 
 def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                   story_arc: str = "", summary: str = "",
@@ -2303,8 +3730,20 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
       - no minted kinds: unknown kinds repair to the family fallback with a
         warning (core:other / core:occurrence / statement).
       - Layer-1 integrity: operators whose src/dst/target reference no emitted
-        point/event are DROPPED with a warning (mirrors _stream_to_payload);
+        point/event are DROPPED with a warning. NOTE the v1 seam
+        (``_stream_to_payload``) drops that same class and does NOT mint, so
+        this clause is no longer a mirror of it — see the #2552 note below.
         MITIGATES strengths clamp to [0.10, 0.50] with a warning.
+        ⚠️ #2552 MINT-BEFORE-WIRE: before that check runs, an operator endpoint
+        that names no emitted point/event is materialized as a statement Point
+        carrying the model's own reference text, and a MITIGATES's declared
+        ``target_edge`` IMPL is materialized when the model did not separately
+        emit it. So the drop now fires only on a genuinely unresolvable ref
+        (empty, a ref naming an emitted ENTITY — the prompt forbids entity
+        endpoints, so no claim Point is fabricated for one — or the
+        degenerate self-edge), not on the prompt's "CREATE the point first"
+        instruction being skipped by the model. A minted endpoint no
+        surviving operator references is pruned again.
 
     Returns {"payload", "chain_notes", "link_before_create", "warnings",
              "minted_kinds", "stats"}.
@@ -2327,8 +3766,20 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if not name:
             continue
         kind = str(e.get("kind", "")).strip() or "core:other"
-        forms = master_kind_forms(master)
-        if kind.lower() not in forms and \
+        # FIX M candidate/write-gate alignment: the entity gate uses the
+        # EXTENDED object vocabulary (master + pack object/document kinds —
+        # the classifier's synthesized object kinds, e.g. dev:apiSpec,
+        # pm:milestone, marketing:keyword, must survive un-repaired).
+        forms = _object_kind_forms(master)
+        if kind.lower() == UNCLASSIFIED:
+            # #1695 Task 5: the classify-later sentinel is NEVER written to
+            # the graph — best core kind + warning (the orchestrator's
+            # census already counted the terminal).
+            warnings.append(f"entity '{name[:60]}' kind 'unclassified' → "
+                            f"repaired to {_ENTITY_FALLBACK['kind']} "
+                            "(reserved sentinel)")
+            kind = _ENTITY_FALLBACK["kind"]
+        elif kind.lower() not in forms and \
                 kind.lower().rsplit(":", 1)[-1] not in {f.lower().rsplit(":", 1)[-1]
                                                         for f in forms}:
             warnings.append(f"minted entity kind {kind!r} ('{name[:60]}') "
@@ -2355,12 +3806,42 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 "note": "no match — created"})
         lifecycle = str(e.get("lifecycle", "") or "").strip()
         supersedes_ref = str(e.get("supersedes") or "").strip()
-        if lifecycle in ("changed", "superseded"):
-            warnings.append(f"entity '{name[:60]}' lifecycle={lifecycle} is not "
-                            "expressible in the Layer-1 payload — the server "
-                            "merges entities by (name, kind); the state change "
-                            "must ride on points/events instead")
-        if supersedes_ref and supersedes_ref not in ("null", "None", ""):
+        supersedes_collected = bool(supersedes_ref and supersedes_ref
+                                    not in ("null", "None", ""))
+        # #2164 (final-review P2): the warning must not lie. The Layer-1
+        # payload (entities merge by (name, kind) — there is no Object
+        # lifecycle state to write) cannot express 'changed'-ness, and a
+        # supersession is expressible ONLY from the NEW entity's side (its
+        # supersedes ref rides payload["supersessions"], the deterministic
+        # fold channel). A 'superseded' entity CARRYING a ref is the OLD side
+        # of a replacement — the ref points AT the live successor, the OPPOSITE
+        # of the record's fixed direction (ref target = the superseded side) —
+        # recording it would INVERT and capture would fold the live successor
+        # to superseded. Never guess: warn + skip the ref; only
+        # created/changed/unchanged collect (there 'supersedes' means 'this
+        # entity replaces X' — unambiguous).
+        if lifecycle == "changed":
+            # changed-ness is attribute/value state — it belongs on points
+            # (and events), not on an Object transition.
+            warnings.append(f"entity '{name[:60]}' lifecycle='changed' is not "
+                            "expressible in the Layer-1 payload — changed-ness "
+                            "is attribute/value state and must ride on "
+                            "points/events, not on an Object transition")
+        elif lifecycle == "superseded" and supersedes_collected:
+            warnings.append(
+                f"entity '{name[:60]}' lifecycle='superseded' with "
+                f"supersedes='{supersedes_ref[:60]}' is ambiguous (direction "
+                "unclear) — supersession record skipped (never-guess); emit "
+                "the NEW entity with lifecycle='created' + "
+                "supersedes='<old>' for the canonical shape")
+        elif lifecycle == "superseded":
+            # superseded with NO supersedes ref has nothing to express — the
+            # ref is the expressible channel (→ payload["supersessions"]).
+            warnings.append(f"entity '{name[:60]}' lifecycle=superseded with no "
+                            "supersedes ref is not expressible in the Layer-1 "
+                            "payload — set supersedes=<existing id/name> for "
+                            "the supersession to ride payload['supersessions']")
+        if supersedes_collected and lifecycle != "superseded":
             entity_supersede_refs.append({"name": name, "kind": kind,
                                           "supersedes": supersedes_ref})
         payload_entities.append({
@@ -2375,6 +3856,10 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # entities only)
     emitted_entity_keys = {(e["name"], _norm_kind(e["kind"]))
                            for e in payload_entities}
+    # #2552 mint-before-wire guard: an operator endpoint that names an
+    # EMITTED ENTITY is forbidden by the OPERATOR REFERENCING hard rule, so it
+    # must never be materialized as a claim Point (see `_mint_endpoint`).
+    emitted_entity_names = {_norm(name) for name, _ in emitted_entity_keys}
 
     # ── events (dependency order 2) ───────────────────────────────────────
     payload_events: list[dict] = []
@@ -2388,9 +3873,12 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if not content:
             continue
         ekind = str(ev.get("eventKind", "")).strip() or "core:occurrence"
-        if ekind.lower() not in {k.lower() for k in master["events"]} and \
-                ekind.lower().rsplit(":", 1)[-1] not in {k.lower().rsplit(":", 1)[-1]
-                                                         for k in master["events"]}:
+        if ekind.lower() == UNCLASSIFIED:
+            warnings.append(f"event '{content[:60]}' kind 'unclassified' → "
+                            f"repaired to {_EVENT_FALLBACK['kind']} "
+                            "(reserved sentinel)")
+            ekind = _EVENT_FALLBACK["kind"]
+        elif ekind.lower() not in _event_kind_forms(master):
             warnings.append(f"minted event kind {ekind!r} ('{content[:60]}') "
                             f"→ repaired to {_EVENT_FALLBACK['kind']}")
             ekind = _EVENT_FALLBACK["kind"]
@@ -2445,6 +3933,13 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     point_ids: dict[str, str] = {}   # norm content → point id
     tier_a_points = 0                # E2 (#1534): Tier-A state-value count
     noops: list[dict] = []           # E7 (D4): folded duplicates — result-level
+    # #2552 (op_04, F2): point-level supersede refs collected from the
+    # embed points (a NEW point whose ``supersedes`` names an EARLIER-session
+    # claim surfaced by the S3 search) — resolved after the loop against the
+    # search index (cross-session by construction) into pt_ supersession
+    # records, deduped against the UPDATE-fold records below.
+    point_supersede_refs: list[dict] = []
+    pt_record_pairs: set[tuple[str, str]] = set()
     for p in embed_list.get("points", []) or []:
         if not isinstance(p, dict):
             warnings.append(f"non-dict point entry {p!r} skipped")
@@ -2453,7 +3948,12 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if not content:
             continue
         pkind = str(p.get("pointKind", "")).strip() or "statement"
-        if pkind.lower() not in {k.lower() for k in master["points"]}:
+        if pkind.lower() == UNCLASSIFIED:
+            warnings.append(f"point '{content[:60]}' kind 'unclassified' → "
+                            f"repaired to {_POINT_FALLBACK['kind']} "
+                            "(reserved sentinel)")
+            pkind = _POINT_FALLBACK["kind"]
+        elif pkind.lower() not in {k.lower() for k in master["points"]}:
             warnings.append(f"minted point kind {pkind!r} ('{content[:60]}') "
                             f"→ repaired to {_POINT_FALLBACK['kind']}")
             pkind = _POINT_FALLBACK["kind"]
@@ -2519,6 +4019,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             # sites). Self-supersede guard — never fires for revises (new
             # content ⇒ new content-addressed id), kept for discipline.
             if existing_id and existing_id != pid:
+                pt_record_pairs.add((existing_id, pid))
                 supersessions.append({
                     "superseded": existing_id, "supersedes_by": pid,
                     "evidence": "fact-value contradiction (later session "
@@ -2528,6 +4029,15 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             link_before_create.append({
                 "searched_for": f"point '{content[:60]}'", "found": False,
                 "note": "no match — created"})
+        # #2552 (op_04): collect an explicit point-level ``supersedes`` ref
+        # (the DECISION-REVERSAL channel — a NEW decision/claim replaces a
+        # prior-session one). Resolution runs after the loop against the S3
+        # search, so only points actually emitted here (NEW or REVISES —
+        # NOOPs continued above) can carry a record; a self-referential or
+        # unemitted ref never reaches the record builder.
+        supersede_ref = str(p.get("supersedes") or "").strip()
+        if supersede_ref and supersede_ref not in ("null", "None"):
+            point_supersede_refs.append({"point_id": pid, "ref": supersede_ref})
         point_ids[n] = pid
         turn_idx = _resolve_source_turn(p, edus, warnings=warnings)
         pt_entry = {
@@ -2560,6 +4070,45 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             pt_entry["when"] = when_valid
         payload_points.append(pt_entry)
 
+    # #2552 (op_04): resolve the collected point-level supersede refs against
+    # the S3 search (never-guess: id or exact-content match; 0/>1 → warn +
+    # skip) and append pt_ supersession records — the deterministic
+    # DECISION-REVERSAL → CORRECTS channel. The search index holds only
+    # points that existed BEFORE this capture, so a resolved target is an
+    # EARLIER-session claim by construction (same-session reversals are
+    # state/validity semantics, never a CORRECTS record — F2). Deduped
+    # against the UPDATE-fold records above.
+    for sr in point_supersede_refs:
+        pid = sr["point_id"]
+        ref = sr["ref"]
+        prior = _resolve_point_supersede(ref, search, warnings=warnings)
+        if prior is None:
+            continue
+        old_id = str(prior.get("id") or "").strip()
+        if not old_id or old_id == pid:
+            warnings.append(f"point supersedes={ref[:60]!r} is the point "
+                            "itself — skipped (never guess)")
+            continue
+        if (old_id, pid) in pt_record_pairs:
+            continue
+        pt_record_pairs.add((old_id, pid))
+        supersessions.append({
+            "superseded": old_id, "supersedes_by": pid,
+            "evidence": "point-level supersede ref (claim/decision "
+                        "reversal; cross-session correction)"})
+        link_before_create.append({
+            "searched_for": f"point '{str(prior.get('content') or '')[:60]}'",
+            "found": True,
+            "note": f"superseded by new point {pid} — CORRECTS fold"})
+
+    # source-turn map over the emitted payload points — the NAND-direction
+    # canonicalizer's input (#2552 op_02: newer counter-claim must be src).
+    turn_by_point: dict[str, int] = {}
+    for _pt in payload_points:
+        t = _pt.get("source_turn_id")
+        if type(t) is int:
+            turn_by_point[_pt["id"]] = t
+
     # ── operators (dependency order 4) — TWO-PASS ─────────────────────────
     # Pass 1 emits IMPL/NAND and collects the emitted edges; pass 2 processes
     # MITIGATES against the COMPLETE edge set so order-independence holds
@@ -2572,6 +4121,100 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if r in event_ids:
             return event_ids[r]
         return ""
+
+    # ── MINT-BEFORE-WIRE (#2552, dependency order 3.5) ────────────────────
+    # The OPERATOR REFERENCING hard rule in the S2/S4 prompts instructs the
+    # model that "If an endpoint of an IMPL/NAND/MITIGATES relation has no
+    # point yet, CREATE the point first and reference it". Nothing in this
+    # seam enforced the second half: `_resolve` below is a strict consumer of
+    # the model's own `points` array, so an operator naming an endpoint the
+    # model did not also emit as a point/event was DROPPED — the edge was lost
+    # with a warning and the model's non-compliance became silent recall loss.
+    # Measured on the #2514 operator corpus (2026-09-16): 2 of 4 planted edges
+    # failed at the ENDPOINT stage (`from_content_missing` /
+    # `to_content_missing`) before any kind or direction question arose.
+    #
+    # This pre-pass materializes such an endpoint as a statement Point (the
+    # only extraction point kind — ONTOLOGY §2 state-centric model) whose
+    # content is the model's OWN reference text, verbatim: nothing is
+    # invented and no fuzzy binding is attempted — a ref that does not resolve
+    # under the existing normalized-equality rule is minted exactly as the
+    # model wrote it. It runs BEFORE the operator pass so the ordinary
+    # `_resolve` path then wires the operator unchanged. Two guards bound the
+    # pre-pass, both from the #2552 code review: a ref naming an emitted
+    # ENTITY is NOT minted (the prompt forbids entity endpoints — the operator
+    # drops instead of a claim Point being fabricated from a participant
+    # name), and any minted endpoint no surviving operator references is
+    # pruned before payload assembly. Because of that prune,
+    # ``stats["operator_endpoints_minted"]`` is read from ``minted_endpoints``
+    # AFTER the prune and therefore counts minted-and-RETAINED endpoints, not
+    # every mint performed — a run can emit two "endpoint minted" warnings and
+    # still report ``operator_endpoints_minted == 0``.
+    minted_endpoints: list[str] = []
+
+    def _mint_endpoint(ref: str, where: str) -> str:
+        content = str(ref or "").strip()[:1000]
+        if not content:
+            return ""
+        n = _norm(content)
+        if n in point_ids:
+            return point_ids[n]
+        if n in emitted_entity_names:
+            # The hard rule is explicit — "NEVER use an entity name as an
+            # operator endpoint — entities are wired through
+            # about_entities". Minting one would fabricate a degenerate claim
+            # Point out of a participant name, so the ref is NOT minted. What
+            # then happens depends on the call site: a src/dst endpoint drops
+            # in the operator pass with its ordinary "did not resolve"
+            # warning, while a MITIGATES ``target_edge`` endpoint drops in pass
+            # 2 with "MITIGATES target edge not emitted" (that operator's own
+            # src/dst still resolve). Either way it is the pre-#2552
+            # behaviour, which is correct HERE.
+            warnings.append(
+                f"operator endpoint NOT minted (#2552 mint-before-wire): "
+                f"{where} named the emitted ENTITY {content[:60]!r} — the "
+                "OPERATOR REFERENCING rule forbids entity endpoints, so no "
+                "claim Point is fabricated for it")
+            return ""
+        pid = _content_id("pt", content)
+        payload_points.append({
+            "id": pid, "content": content, "pointKind": "statement",
+            "reason": "NEW", "confidence": 0.5, "c_cal": 0.5,
+            "about_entities": [], "source_ref": "session.md", "quote": "",
+            "search_keys": [], "status": "draft",
+        })
+        point_ids[n] = pid
+        # `_resolve` probes the UNTRUNCATED ref, so register that key too when
+        # truncation changed it — otherwise a >1000-char ref mints a Point the
+        # operator pass cannot resolve: the edge still drops AND the Point is
+        # orphaned (code-review P2).
+        _full = _norm(ref)
+        if _full != n:
+            point_ids.setdefault(_full, pid)
+        minted_endpoints.append(pid)
+        warnings.append(
+            f"operator endpoint minted (#2552 mint-before-wire): {where} "
+            f"named {content[:60]!r} but no emitted point/event carried it — "
+            "materialized as a statement Point so the operator wires")
+        return pid
+
+    for _op in embed_list.get("operators", []) or []:
+        if not isinstance(_op, dict):
+            continue
+        _op_type = str(_op.get("op_type", "")).upper()
+        if _op_type not in ("IMPL", "NAND", "MITIGATES"):
+            continue
+        for _side in ("src", "dst"):
+            _ref = str(_op.get(_side, "") or "")
+            if _ref and not _resolve(_ref):
+                _mint_endpoint(_ref, f"{_op_type} {_side}")
+        if _op_type == "MITIGATES":
+            _target = _op.get("target") or _op.get("target_edge") or {}
+            if isinstance(_target, dict):
+                for _side in ("src", "dst"):
+                    _ref = str(_target.get(_side, "") or "")
+                    if _ref and not _resolve(_ref):
+                        _mint_endpoint(_ref, f"MITIGATES target_edge {_side}")
 
     payload_operators: list[dict] = []
     emitted_edges: set[tuple[str, str, str]] = set()
@@ -2592,6 +4235,19 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                             f"emitted point/event ({o.get('src')!r} → {o.get('dst')!r})")
             continue
         if op_type in ("IMPL", "NAND"):
+            if op_type == "NAND":
+                # #2552 (op_02): canonicalize the NAND direction so the
+                # newer counter-claim is src (new-claim-attacks-existing,
+                # #909) — an inverted emission (older claim listed first)
+                # is swapped with a counted warning, never silent.
+                canon = _canonicalize_nand_direction(src, dst, turn_by_point)
+                if canon is not None:
+                    warnings.append(
+                        f"NAND direction canonicalized (#909 — new-claim-"
+                        f"attacks-existing): src was asserted before dst; "
+                        f"swapped so the newer counter-claim is src "
+                        f"({src[:60]!r} ↔ {dst[:60]!r})")
+                    src, dst = canon
             payload_operators.append({
                 "src": src, "dst": dst, "op_type": op_type,
                 "direction": "unidirectional"})
@@ -2620,6 +4276,27 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                             f"('{o.get('src', '')[:40]}'→'{o.get('dst', '')[:40]}') "
                             "clamped")
             strength = min(0.50, max(0.10, strength))
+        declared_target_missing = (
+            bool(t_src and t_dst) and t_src != t_dst
+            and (t_src, t_dst, "IMPL") not in emitted_edges)
+        if declared_target_missing:
+            # #2552 mint-before-wire (the IMPL pair): the OUTPUT_CONTRACT
+            # declares a MITIGATES as ONE operator entry carrying its
+            # ``target_edge`` — it never asks the model to ALSO repeat that
+            # IMPL as its own operator entry, so a contract-compliant
+            # emission was dropped here unconditionally. The model asserted
+            # the edge by naming it in ``target_edge``: materialize it. Only
+            # the degenerate case (a missing endpoint, or a self-edge) still
+            # drops.
+            payload_operators.append({
+                "src": t_src, "dst": t_dst, "op_type": "IMPL",
+                "direction": "unidirectional"})
+            emitted_edges.add((t_src, t_dst, "IMPL"))
+            warnings.append(
+                "MITIGATES target edge materialized (#2552 mint-before-"
+                f"wire): the declared target IMPL ({t_src[:40]!r} → "
+                f"{t_dst[:40]!r}) was not emitted as its own operator "
+                "— added so the dampener has its target")
         if not (t_src and t_dst and (t_src, t_dst, "IMPL") in emitted_edges):
             warnings.append(f"MITIGATES target edge not emitted ({t_src!r}→{t_dst!r} "
                             "IMPL) — dropped")
@@ -2628,6 +4305,37 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             "src": src, "dst": dst, "op_type": "MITIGATES",
             "target": {"src": t_src, "dst": t_dst, "op_type": "IMPL"},
             "strength": round(strength, 2)})
+
+    # ── minted-endpoint prune (#2552 code-review P2) ──────────────────────
+    # A mint happens BEFORE the operator is known to survive, so an operator
+    # that still drops (a MITIGATES declaring no target edge, a src==dst
+    # self-edge) would otherwise commit a claim Point NOTHING references — an
+    # unsupported assertion in the memory layer, which is worse than the edge
+    # loss this pre-pass exists to fix. Prune every minted endpoint that no
+    # surviving payload operator references.
+    if minted_endpoints:
+        referenced: set[str] = set()
+        for _po in payload_operators:
+            referenced.add(str(_po.get("src") or ""))
+            referenced.add(str(_po.get("dst") or ""))
+            _tgt = _po.get("target")
+            if isinstance(_tgt, dict):
+                referenced.add(str(_tgt.get("src") or ""))
+                referenced.add(str(_tgt.get("dst") or ""))
+        orphans = [pid for pid in minted_endpoints if pid not in referenced]
+        if orphans:
+            orphan_set = set(orphans)
+            payload_points[:] = [p for p in payload_points
+                                 if p.get("id") not in orphan_set]
+            for _k in [k for k, v in point_ids.items() if v in orphan_set]:
+                del point_ids[_k]
+            minted_endpoints[:] = [p for p in minted_endpoints
+                                   if p not in orphan_set]
+            warnings.append(
+                f"minted operator endpoint(s) pruned (#2552 mint-before-wire): "
+                f"{len(orphans)} materialized endpoint(s) are referenced by no "
+                "surviving operator — dropped rather than committing an "
+                "unsupported claim Point")
 
     # ── retractions (D5): explicit withdrawals → DELETE-soft records ──────
     # Never from content alone: only the embed list's additive `retractions`
@@ -2660,6 +4368,13 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
 
     # ── payload assembly (mirrors _summary_to_payload / _stream_to_payload) ─
     from datetime import datetime, timezone
+
+    from tortoise.file_indexer import derive_source_content_hash
+    # #4005: the session Source's integrity anchor is the RAW conversation
+    # hash (a hash is not the raw — W-7 stays intact), NOT a hash of the
+    # identity url. The hosted commit path stores it verbatim.
+    raw_content_hash = derive_source_content_hash(
+        _edus_to_text(edus) if edus else "")
     payload = {
         "schema_version": "1", "session_id": session_id,
         "client_commit_id": "",
@@ -2668,7 +4383,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                       "calibration_version": "v2"},
         "summary": (summary or "")[:2000],
         "story_arc": (story_arc or "")[:4000],
-        "provenance_refs": [{"path": "session.md", "spans": []}],
+        "provenance_refs": [{"path": "session.md", "spans": [],
+                             "contentHash": raw_content_hash}],
         "sources": [],
         "entities": payload_entities, "points": payload_points,
         "events": payload_events, "operators": payload_operators,
@@ -2709,6 +4425,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         "stats": {
             "entities": len(payload_entities), "events": len(payload_events),
             "points": len(payload_points), "operators": len(payload_operators),
+            "operator_endpoints_minted": len(minted_endpoints),
             "tier_a_points": tier_a_points,
             "noops": len(noops),
             "deletions": len(deletions),
@@ -2718,6 +4435,198 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             "supersessions": len(supersessions),
         },
     }
+
+
+# ── #1695 Task 5: classify-later stage helpers ────────────────────────────
+# (pure embed-list transforms — no LLM here; the classifier owns the LLM)
+
+#: The unclassified sentinel — shared with tortoise.kind_classifier (kept
+#: local so extractor_v2 never imports the classifier at module level).
+UNCLASSIFIED = "unclassified"
+
+_CLASSIFY_SECTIONS = (
+    ("entities", "kind", "entity"),
+    ("events", "eventKind", "event"),
+    ("points", "pointKind", "point"),
+)
+
+
+def _classify_item_id(section: str, item: dict) -> str:
+    """Stable per-item key across classify passes: section + normalized
+    name/content (index-independent — the merged list reorders)."""
+    key = str(item.get("name") or item.get("content") or "")
+    return f"{section}:{_norm(key)}"
+
+def _collect_classify_items(embed_list: dict) -> list[dict]:
+    """Items needing classification: entities/events/points whose kind is
+    missing or the ``unclassified`` sentinel (core kinds assigned
+    in-context stay). The classification surface is the name (entities) or
+    content (events/points)."""
+    items: list[dict] = []
+    for section, kind_field, item_type in _CLASSIFY_SECTIONS:
+        for i, item in enumerate(embed_list.get(section) or []):
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get(kind_field) or "").strip()
+            if kind and kind.lower() != UNCLASSIFIED:
+                continue
+            text = str(item.get("name") or item.get("content") or "").strip()
+            if not text:
+                continue
+            items.append({"id": f"{_classify_item_id(section, item)}#{i}",
+                          "type": item_type,
+                          "text": text,
+                          "section": section,
+                          "kind": kind,
+                          "_idx": i})
+    return items
+
+
+def _apply_classify_kinds(embed_list: dict, assignments: dict) -> dict:
+    """Write the classifier assignments back into the embed list. The
+    ``unclassified`` sentinel stays (the write path resolves it); every
+    other assigned kind lands on the item's kind field."""
+    for section, kind_field, _item_type in _CLASSIFY_SECTIONS:
+        for i, item in enumerate(embed_list.get(section) or []):
+            if not isinstance(item, dict):
+                continue
+            a = assignments.get(f"{_classify_item_id(section, item)}#{i}")
+            if not a:
+                continue
+            kind = str(a.get("kind") or "")
+            if not kind or kind == UNCLASSIFIED:
+                continue
+            item[kind_field] = kind
+    return embed_list
+
+
+def _s2_kind_register(s2_list: dict, s2_assignments: dict) -> dict:
+    """{section-identity: classifier kind} for S2 items — the kind-
+    preservation register the post-merge re-stamp consults (entities keyed
+    by name, events/points by content — the section-aware freeze: freezing
+    ``objects:plan`` never freezes ``subjects:plan``)."""
+    register: dict[str, str] = {}
+    for section, _kind_field, _item_type in _CLASSIFY_SECTIONS:
+        for i, item in enumerate(s2_list.get(section) or []):
+            if not isinstance(item, dict):
+                continue
+            a = s2_assignments.get(f"{_classify_item_id(section, item)}#{i}")
+            if not a:
+                continue
+            kind = str(a.get("kind") or "")
+            if not kind or kind == UNCLASSIFIED:
+                continue
+            register[f"{section}:{_identity_key(section, item)}"] = kind
+    return register
+
+
+def _identity_key(section: str, item: dict) -> str:
+    """The section-aware kind-freeze identity (E4 merge-key semantics minus
+    the kind, so a re-typed S4 duplicate is caught). Coerces via str() —
+    a numeric/non-str name or content must not raise (review FIX C)."""
+    if section == "entities":
+        return _norm(str(item.get("name") or ""))
+    return _norm(str(item.get("content") or ""))
+
+
+def _restamp_s2_kinds(merged: dict, register: dict,
+                      warnings: list[str]) -> int:
+    """Kind preservation (post-E4): S2 classifier kinds survive S4
+    re-emission. Every merged item whose section-aware identity matches a
+    registered S2 item but whose kind was lost (missing/unclassified) is
+    re-stamped with the S2 kind. The fold removes ONLY sentinel/missing/
+    identical duplicates — a same-name member carrying a DIFFERENT
+    non-sentinel kind is preserved as a distinct (name, kind) :Object and
+    is NEVER folded or re-stamped (the S2 re-stamp fills LOST kinds only;
+    cycle-3 P2). Returns the override count (observable via census)."""
+    overrides = 0
+    for section, kind_field, _item_type in _CLASSIFY_SECTIONS:
+        items = merged.get(section) or []
+        # entity name-collision fold: same identity, conflicting kinds →
+        # keep the one carrying a registered S2 kind, drop the duplicates
+        if section == "entities":
+            by_name: dict[str, list[dict]] = {}
+            for it in items:
+                if isinstance(it, dict):
+                    by_name.setdefault(_norm(str(it.get("name") or "")), []).append(it)
+            for name, group in by_name.items():
+                if len(group) <= 1:
+                    continue
+                s2_reg = register.get(f"entities:{name}")
+                if s2_reg is None:
+                    continue
+                keeper = next(
+                    (it for it in group
+                     if str(it.get(kind_field) or "").strip() == s2_reg), group[0])
+                for it in list(group):
+                    if it is keeper:
+                        continue
+                    # Fold ONLY sentinel / missing / identical duplicates —
+                    # a same-name member carrying a DIFFERENT non-sentinel
+                    # kind is a distinct (name, kind) :Object (Layer-1)
+                    # that the fold must never delete (final-review P2).
+                    cur = str(it.get(kind_field) or "").strip()
+                    if not cur or cur.lower() == UNCLASSIFIED or cur == s2_reg:
+                        warnings.append(
+                            f"entity '{str(it.get('name'))[:60]}' re-typed by S4 "
+                            f"(kind {it.get(kind_field)!r}) — folded into the S2 "
+                            f"classifier kind {s2_reg!r} (no duplicate :Object)")
+                        items[:] = [x for x in items if x is not it]
+                        overrides += 1
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            s2k = register.get(f"{section}:{_identity_key(section, it)}")
+            if not s2k:
+                continue
+            cur = str(it.get(kind_field) or "").strip()
+            # Re-stamp ONLY LOST kinds (missing / the sentinel). A
+            # register-matched item carrying a DIFFERENT valid non-sentinel
+            # kind is a preserved distinct (name, kind) :Object — the S2
+            # re-stamp must never clobber it (cycle-3 P2: the fold above
+            # preserves it, so the re-stamp must too).
+            if not cur or cur.lower() == UNCLASSIFIED:
+                it[kind_field] = s2k
+                overrides += 1
+            elif cur.lower() != s2k.lower():
+                ident = str(it.get("name") if section == "entities"
+                            else it.get("content"))[:60]
+                warnings.append(
+                    f"entity '{ident}' re-typed by S4 (kind {cur!r}) — "
+                    f"preserved as distinct (name, kind) :Object")
+    return overrides
+
+
+def _rekey_slots(embed_list: dict) -> int:
+    """Slot re-key: participant slot kinds follow the classified entity
+    kinds (matched by name) — a slot's kind field must agree with its
+    entity's final kind. Returns the number of re-keyed slots."""
+    kind_by_name: dict[str, str] = {}
+    for e in embed_list.get("entities") or []:
+        if isinstance(e, dict) and e.get("name") and e.get("kind"):
+            k = str(e["kind"])
+            if k.lower() == UNCLASSIFIED:
+                # the sentinel is a terminal, never copied into a slot
+                # kind; slots must reference real kinds (the write path
+                # resolves the terminal on the top-level field itself)
+                continue
+            kind_by_name[_norm(str(e["name"]) or "")] = k
+    rekeyed = 0
+    for section in ("points", "events"):
+        for it in embed_list.get(section) or []:
+            if not isinstance(it, dict):
+                continue
+            slots = it.get("slots")
+            if not isinstance(slots, dict):
+                continue
+            for role in ("subject", "object"):
+                for s in slots.get(role) or []:
+                    if isinstance(s, dict) and s.get("name"):
+                        k = kind_by_name.get(_norm(str(s["name"]) or ""))
+                        if k and str(s.get("kind")) != k:
+                            s["kind"] = k
+                            rekeyed += 1
+    return rekeyed
 
 
 # ── The orchestrator ───────────────────────────────────────────────────────
@@ -2731,9 +4640,32 @@ def _edus_from_conversation(conversation: list[dict]) -> list[dict]:
 def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                        session_id: str | None = None, chunk_size: int = 50,
                        master: dict | None = None,
-                       session_date: str | None = None) -> dict:
+                       session_date: str | None = None,
+                       kind_classifier=None) -> dict:
     """The v2 production entry: conversation → S1 (chunked+compiled) → S2 →
     S3 (real-backend search) → S4 (gap review) → S5 (embed execution).
+
+    ``kind_classifier`` (#1695 Task 5) is the injected classify-later seam:
+    None + ``TORTOISE_CLASSIFY_LATER`` unset → the LEGACY pipeline — the
+    classify-later machinery (classifier passes, kind-preservation re-stamp,
+    slot re-key) is entirely off-path, and the flag-off renders are
+    byte-identical to main. Scope of that byte-identity guarantee: the
+    DEFAULT (verbose) render + the shared pipeline stages — NOT the whole
+    result dict. Documented non-regressions: (a) the chain enforcer (Task 1)
+    runs UNCONDITIONALLY on every arm (the A/B holds it constant) and may
+    deterministically rewire about_entities on the flag-off path — its
+    result key reflects that run (``items_checked`` >= 1 whenever
+    about_entities exist on any arm); (b) compact mode keeps its
+    pre-existing story-threaded pack selection (``_select_pack_kinds``,
+    identical in main) — the byte-identity guarantee is pinned to the
+    default verbose render; (c) two ADDITIVE result keys (``chain_enforcer``
+    / ``classify_later``) are always present — only ``classify_later`` is
+    an empty block when the flag is off.
+    When set (or the env toggle is on), the stage order becomes
+    S1 → S2 → classify(S2) → S3 → S4 → E4+re-stamp → classify(union,
+    kind-missing only) → slot re-key → resolve_entities → post-resolution
+    re-key → chain_enforcer → execute_embed, with core-only S2/S4 renders
+    (pack vocabulary + chains out of the prompt).
 
     ``session_date`` (E1, #1533) is the ISO date/datetime the conversation
     happened on: it anchors the S1/S2/S4 prompts (DATE ANCHOR block) and
@@ -2758,8 +4690,29 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # M3 (#1524, D3): per-session LLM roll-up + granular error census (class →
     # count across S1/S2/S4 failures). ``errors`` (strings) stays unchanged —
     # the additive keys feed the harness's per-question integrity (M4).
-    llm_stats: dict = {"calls": 0, "retries": 0, "truncated": 0}
+    # #1746 (D1/D7): the recovery counters roll per-stage (the ladder's
+    # sanitize/repair events — never error strings, never census entries).
+    llm_stats: dict = {"calls": 0, "retries": 0, "truncated": 0,
+                      "deadline_aborts": 0,  # #1787 P2-L: deadline-kill
+                      # #3359: the cost driver (calibration data only)
+                      "prompt_tokens": 0, "completion_tokens": 0,
+                      "cost_usd": 0.0, "calls_without_cost": 0,
+                      "calls_without_usage": 0,
+                      "by_stage": {}}
+    recovery_stats: dict[str, int] = {}
     error_census: dict[str, int] = {}
+    # #1695 Task 5: the classify-later choke point — the env toggle read
+    # HERE reaches every caller (sdk/hosted_api/ingest_v2/run_v2_pipeline all
+    # route through extract_session_v2); an injected classifier wins.
+    classify_later = kind_classifier is not None or _classify_later_enabled()
+    if classify_later and kind_classifier is None:
+        try:
+            kind_classifier = _default_kind_classifier(model)
+        except Exception as e:  # noqa: BLE001, RUF100 — never let the
+            # classifier construction block capture (fail-open: legacy path)
+            classify_later = False
+            errors.append(f"classify-later init failed: {type(e).__name__}: {e}")
+            _bump_census_class(error_census, "classify_later_init_failed")
     edus = _edus_from_conversation(conversation)
     if not edus:
         return {"session_id": session_id, "story_arc": "", "embed_list": {},
@@ -2768,8 +4721,18 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 "payload": None, "chain_notes": [], "link_before_create": [],
                 "supersessions": [],
                 "warnings": ["empty conversation — nothing extracted"],
-                "minted_kinds": [], "stats": {"llm": llm_stats},
-                "errors": errors, "error_census": error_census}
+                "minted_kinds": [], "stats": {"llm": llm_stats,
+                                                "recovery": recovery_stats},
+                "errors": errors, "error_census": error_census,
+                # #1695 Task 5: the evidence surfaces are always present
+                # (additive keys, empty when the flag is off)
+                "classify_later": {"enabled": classify_later,
+                                   "s2": {}, "union": {},
+                                   "restamp_overrides": 0,
+                                   "slot_rekeys": 0},
+                "chain_enforcer": {"notes": [], "stats": {
+                    "items_checked": 0, "violations": 0,
+                    "rewired": 0, "warned": 0}}}
 
     t0 = time.time()
     # ── S1: chunked story summary + compile ────────────────────────────────
@@ -2784,14 +4747,20 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
         try:
             chunk_stories.append(run_s1(model, _edus_to_text(chunk),
                                         session_date=session_date,
-                                        stats=stage_stats))
+                                        stats=stage_stats,
+                                        master=master))
         except Exception as e:  # per-chunk failure is non-fatal
             failed_chunks += 1
             errors.append(f"S1 chunk failed: {type(e).__name__}: {e}")
             _bump_census(error_census, e)
-        _rollup_llm(llm_stats, stage_stats)
+        _rollup_llm(llm_stats, stage_stats, "s1")
+        _rollup_recovery(recovery_stats, stage_stats)
     if failed_chunks:
         errors.append(f"{failed_chunks}/{len(chunks)} S1 chunks failed")
+        # D1 (#1746): deterministic class for the summary line — one bump per
+        # summary event, fired under the SAME condition as the append, so a
+        # clean run has no stray bump.
+        _bump_census_class(error_census, "s1_chunk_summary")
     story = compile_stories(chunk_stories)
     story_arc = story
 
@@ -2802,36 +4771,128 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
         try:
             embed_list = run_s2(model, story, master,
                                 session_date=session_date, edus=edus,
-                                stats=stage_stats)
+                                stats=stage_stats,
+                                core_only=classify_later)
         except Exception as e:
             errors.append(f"S2 failed: {type(e).__name__}: {e}")
             _bump_census(error_census, e)
-        _rollup_llm(llm_stats, stage_stats)
+        # D4 (#1746): a schema-validated PARTIAL accept (truncated tail
+        # dropped) is a recorded ERROR — the embed list is incomplete
+        # (valid=false), never a clean outcome. The partial list IS used.
+        if stage_stats.get("partial"):
+            errors.append("S2 output partial — truncated tail dropped "
+                          "(embed list incomplete)")
+            _bump_census_class(error_census, "partial_parse")
+        _rollup_llm(llm_stats, stage_stats, "s2")
+        _rollup_recovery(recovery_stats, stage_stats)
+
+    # ── classify(S2) (#1695 Task 5): the first classify pass — the pack-
+    # domain items the core-only S2 emitted as "unclassified" get their
+    # kinds BEFORE S3 so the graph search + S4 see final kinds (typed refs
+    # guaranteed pre-resolution). Fail-open: never blocks capture.
+    s2_classify_stats: dict = {}
+    s2_classify_warnings: list[str] = []
+    s2_assignments: dict = {}
+    if classify_later and embed_list:
+        try:
+            items = _collect_classify_items(embed_list)
+            if items:
+                out = kind_classifier.classify_items(items)
+                _apply_classify_kinds(embed_list, out["assignments"])
+                s2_classify_stats = out["stats"]
+                s2_classify_warnings = out["warnings"]
+                s2_assignments = out["assignments"]
+                _bump_classify_census(error_census, out["stats"])
+                # The adjudication tail's LLM spend (calls/retries/truncated)
+                # rolls into the per-session llm_stats — the A/B cost gate
+                # must see the flag-on arm's batched adjudication cost.
+                usage = out["stats"].get("llm")
+                if usage:
+                    _rollup_llm(llm_stats, usage, "classify")
+        except Exception as e:  # never block capture (P1)
+            errors.append(f"classify(S2) failed: {type(e).__name__}: {e}")
+            _bump_census_class(error_census, "classify_error")
 
     # ── S3: search the graph (real backend, graceful degradation) ──────────
-    search = search_graph(sdk, embed_list, story)
+    search = search_graph(sdk, embed_list, story, session_id=session_id)
 
     # ── S4: review gaps → complete embed list (E4: merges-not-replaces) ───
     complete_list: dict = embed_list
     s4_warnings: list[str] = []
     s4_merge_stats: dict = {}
+    # #2335 WI-1b: S4-full-rescue episode counter — S2 produced NOTHING (any
+    # cause) yet S4 re-emitted a full non-empty list (~2× cost band; today
+    # only llm.calls doubles). Distinct key so the 2× band is measurable
+    # separately from size-driven escalations. Incremented ONLY under the
+    # S2-empty guard (see below) — the S4 merge runs on EVERY non-empty S4.
+    s4_full_rescues = 0
     if story:
         stage_stats: dict = {}
         try:
             s4 = run_s4(model, story, search, embed_list, master,
                         session_date=session_date, edus=edus,
-                        stats=stage_stats)
+                        stats=stage_stats,
+                        core_only=classify_later)
             if s4 and (s4.get("entities") or s4.get("points") or
                        s4.get("events") or s4.get("operators")):
                 complete_list = merge_embed_lists(embed_list, s4)
                 s4_merge_stats = _s4_merge_stats(embed_list, s4, complete_list)
+                # #2335 WI-1b: a full-rescue episode is S4 rebuilding the
+                # session from an EMPTY S2 base (the merge is otherwise the
+                # normal E4 merges-not-replaces on every healthy capture —
+                # counting those would corrupt the measurement).
+                if not any((embed_list or {}).values()):
+                    s4_full_rescues += 1
             else:
                 # graceful degradation — S2 output stands; not an error
                 s4_warnings.append("S4 returned an empty list — kept S2 output")
         except Exception as e:
             errors.append(f"S4 failed: {type(e).__name__}: {e} — kept S2 output")
             _bump_census(error_census, e)
-        _rollup_llm(llm_stats, stage_stats)
+        # D4 (#1746): a schema-validated PARTIAL S4 accept is a recorded
+        # ERROR (same contract as the S2 partial above) — the partial IS
+        # merged over the S2 base (merge_embed_lists preserves S2 intact).
+        if stage_stats.get("partial"):
+            errors.append("S4 output partial — truncated tail dropped "
+                          "(embed list incomplete)")
+            _bump_census_class(error_census, "partial_parse")
+        _rollup_llm(llm_stats, stage_stats, "s4")
+        _rollup_recovery(recovery_stats, stage_stats)
+
+    # ── classify-later post-merge pass (#1695 Task 5): E4 + kind-preservation
+    # re-stamp → classify(union, kind-missing only) → slot re-key. The S2
+    # classifier kinds survive S4 re-emission (re-stamp + duplicate fold),
+    # the union's untyped gaps get kinds, and participant-slot kinds follow
+    # the final entity kinds (typed refs guaranteed pre-resolution).
+    s2_kind_register: dict = {}
+    union_classify_stats: dict = {}
+    union_classify_warnings: list[str] = []
+    restamp_overrides = 0
+    slot_rekeys = 0
+    if classify_later and complete_list:
+        s2_kind_register = _s2_kind_register(embed_list, s2_assignments)
+        try:
+            restamp_warnings: list[str] = []
+            restamp_overrides = _restamp_s2_kinds(complete_list,
+                                                  s2_kind_register,
+                                                  restamp_warnings)
+            if restamp_warnings:
+                s4_warnings.extend(restamp_warnings)
+            items = _collect_classify_items(complete_list)
+            if items:
+                out = kind_classifier.classify_items(items)
+                _apply_classify_kinds(complete_list, out["assignments"])
+                union_classify_stats = out["stats"]
+                union_classify_warnings = out["warnings"]
+                _bump_classify_census(error_census, out["stats"])
+                # roll the adjudication tail spend (same as the S2 pass).
+                usage = out["stats"].get("llm")
+                if usage:
+                    _rollup_llm(llm_stats, usage, "classify")
+            slot_rekeys = _rekey_slots(complete_list)
+        except Exception as e:  # never block capture (P1)
+            errors.append(f"classify(union) failed: {type(e).__name__}: {e}")
+            _bump_census_class(error_census, "classify_error")
 
     # ── entity resolution (D3): deterministic-first, bounded LLM fallback.
     # Runs BETWEEN S4 and S5; rewrites the embed list's entity names +
@@ -2841,6 +4902,13 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # (nothing to resolve against). Never blocks capture (P1).
     resolution_records: list[dict] = []
     resolution_warnings: list[str] = []
+    # #3359: the D3 entity-resolution LLM fallback makes a REAL provider
+    # call. Without a stats dict it contributed nothing to the session cost
+    # roll-up — silently understating spend for every session that hit it.
+    # A dedicated per-stage accumulator fixes that, and the roll-up runs
+    # after the try/except so a resolution failure still reports the spend
+    # it already made.
+    resolution_stats: dict = {}
     if search and not search.get("degraded") and (search.get("entities") or []):
         ent_refs = [{"name": str(e.get("name", "")).strip(),
                      "kind": str(e.get("kind", "")).strip()}
@@ -2848,30 +4916,133 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                     if isinstance(e, dict) and e.get("name")]
         if ent_refs:
             try:
-                res = resolve_entities(ent_refs, search, model=model)
+                res = resolve_entities(ent_refs, search, model=model,
+                                       stats=resolution_stats)
                 if res.get("map"):
                     complete_list = _apply_entity_resolution(
                         complete_list, res["map"])
                 resolution_records = res.get("records") or []
                 resolution_warnings = res.get("warnings") or []
+                # #1695 Task 5: post-resolution re-key — the resolution may
+                # rename entities; the participant-slot kinds are re-applied
+                # (idempotent — kinds don't change, names may) so the typed
+                # refs stay consistent with the canonical entities.
+                if classify_later:
+                    slot_rekeys += _rekey_slots(complete_list)
             except Exception as e:  # noqa: BLE001, RUF100 — resolve_entities is
                 # guarded internally, but the orchestrator never dies on
                 # resolution (P1: degrade to phase-1/ADD semantics)
                 errors.append(f"entity resolution failed: {type(e).__name__}: {e}")
+                # D1 (#1746): deterministic class for the previously-
+                # uncensused resolution failure path.
+                _bump_census_class(error_census, "entity_resolution_failed")
+    # #3359: roll the D3 resolution stage's cost driver into the session
+    # roll-up — outside the try/except so the spend already made is reported
+    # even when the resolution itself failed. A resolve_entities call that
+    # never reached the LLM leaves ``resolution_stats`` empty, so this is a
+    # no-op for the deterministic (phase-1-only) path.
+    _rollup_llm(llm_stats, resolution_stats, "resolve")
+
+    # ── chain enforcement (#1695 Task 1): DETERMINISTIC rewire between the
+    # resolution pass and S5 — the prompts' advisory "TRY TO REPAIR" becomes
+    # guaranteed. Never-invent / never-drop: reverse-chain about_entities
+    # pairs rewire through the nearest valid chain intermediate ONLY when
+    # unambiguous; else warn-and-keep. Runs on EVERY arm (independent of the
+    # classify-later flag — the A/B holds it constant). Never blocks capture.
+    chain_enforcer_notes: list[dict] = []
+    chain_enforcer_stats: dict = {}
+    try:
+        from tortoise.chain_enforcer import validate_and_rewire
+        complete_list, chain_enforcer_notes, chain_enforcer_stats = \
+            validate_and_rewire(complete_list, master)
+    except Exception as e:  # noqa: BLE001, RUF100 — never block capture (P1)
+        errors.append(f"chain enforcement failed: {type(e).__name__}: {e}")
+        # D1 (#1746): deterministic class for the previously-uncensused
+        # chain-enforcement failure path.
+        _bump_census_class(error_census, "chain_enforcement_failed")
+
+    # ── chain completeness (#1933, E2E-4 negative a): DETERMINISTIC check
+    # on the embed list (PRE-repair — pack point kinds like
+    # agent-ops:rationale are still visible here, unlike the commit payload
+    # where FIX P repairs them to statement). A pack chain whose first
+    # emitted step is missing its next step (ruleLifecycle: rule without
+    # rationale) is an incomplete chain — warn per the chain's manifest
+    # enforcement, never block. Notes are collected NOW and merged into
+    # ``result`` after it exists (the chain-enforcement block runs before
+    # ``result`` is created; the S5-failure branch carries them too).
+    chain_completeness_notes: list[dict] = []
+    try:
+        chain_completeness_notes = validate_chain_completeness(
+            complete_list, master)
+    except Exception as e:  # noqa: BLE001, RUF100 — never block capture (P1)
+        errors.append(f"chain completeness check failed: {type(e).__name__}: {e}")
+        _bump_census_class(error_census, "chain_completeness_failed")
 
     # ── S5: embed execution (deterministic) ────────────────────────────────
     if not complete_list:
         errors.append("no embed list produced (S2/S4 empty) — nothing to embed")
+        # D1 (#1746): deterministic class for the previously-uncensused
+        # empty-embed-list path.
+        _bump_census_class(error_census, "empty_embed_list")
     try:
         result = execute_embed(complete_list, search, session_id=session_id,
                                story_arc=story_arc, master=master,
                                session_date=session_date, edus=edus)
     except Exception as e:  # S5 must NEVER block the pipeline (design §7.4)
         errors.append(f"S5 failed: {type(e).__name__}: {e}")
+        # D1 (#1746): deterministic class for the previously-uncensused S5
+        # failure path.
+        _bump_census_class(error_census, "s5_failed")
         result = {"payload": None, "chain_notes": [], "link_before_create": [],
                   "supersessions": [], "noops": [], "deletions": [],
                   "warnings": [f"S5 embed execution failed: {e}"],
                   "minted_kinds": [], "stats": {}}
+    result["chain_enforcer"] = {      # #1695 Task 1 evidence surface
+        "notes": chain_enforcer_notes,
+        "stats": chain_enforcer_stats,
+    }
+    # #1933 (E2E-4 negative a): the chain-completeness evidence surface +
+    # human-readable warnings (additive keys — the S5-failure branch above
+    # carries the same merge).
+    result["chain_completeness"] = {"notes": chain_completeness_notes}
+    if chain_completeness_notes:
+        result.setdefault("warnings", []).extend(
+            f"{n['finding']}" for n in chain_completeness_notes)
+    # #1695 Task 5: the classify-later evidence surface (flag-off: the
+    # empty block — no telemetry growth, additive keys only).
+    result["classify_later"] = {
+        "enabled": classify_later,
+        "s2": s2_classify_stats,
+        "union": union_classify_stats,
+        "restamp_overrides": restamp_overrides,
+        "slot_rekeys": slot_rekeys,
+    }
+    if classify_later:
+        # the unclassified terminal is resolved at write (execute_embed's
+        # sentinel repair) — count it in the census. The UNION pass
+        # re-classifies the same below-floor S2 survivors (they are still
+        # kind-missing in the merged list), so its count is authoritative;
+        # fall back to the S2 count only when the union pass never ran.
+        # union_classify_stats is non-empty ONLY when the union pass ran
+        # (collected items) — gate the fallback on that, not on the count
+        union_u = union_classify_stats.get("unclassified") or 0
+        terminal = (union_u if union_classify_stats
+                    else (s2_classify_stats.get("unclassified") or 0))
+        if terminal:
+            error_census["unclassified_terminal"] = \
+                error_census.get("unclassified_terminal", 0) + terminal
+        for w in s2_classify_warnings + union_classify_warnings:
+            result.setdefault("warnings", []).append(w)
+    # The enforcer's notes are authoritative for every violation it examined
+    # (backstop note ⟹ enforcer note — both scan the same item/chain
+    # subsequences). When it ruled anything, its notes + the model's OWN
+    # chain_notes (from the embed list) replace the backstop's advisory
+    # notes, which would otherwise duplicate/contradict (a warned-and-kept
+    # pair gets re-flagged by validate_chains with its weaker recommendation).
+    if chain_enforcer_notes:
+        llm_chain_notes = [dict(c) for c in (complete_list.get("chain_notes") or [])
+                           if isinstance(c, dict)]
+        result["chain_notes"] = chain_enforcer_notes + llm_chain_notes
     result["session_id"] = session_id
     result["story_arc"] = story_arc
     result["embed_list"] = complete_list
@@ -2893,13 +5064,19 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     result["stats"]["elapsed_s"] = round(time.time() - t0, 1)
     result["stats"]["chunks"] = len(chunks)
     result["stats"]["failed_chunks"] = failed_chunks
+    result["stats"]["edus"] = len(edus)  # #2335 WI-1b: EDU(turn) count
     result["stats"]["s4_merge"] = s4_merge_stats  # E4 (#1536): no-silent-drop proof
+    if s4_full_rescues:
+        # #2335 WI-1b: absent-when-zero (a 0 write would fabricate a recovery
+        # shape on sessions that never hit the S2-empty/S4-full geometry).
+        result["stats"]["s4_full_rescues"] = s4_full_rescues
     # M3 (#1524, D3): additive integrity surface — the per-session census +
     # LLM roll-up feed the harness's per-question ``valid`` / ``error_classes``
     # (M4). The payload telemetry's hardcoded retry_count is wired to the
     # real value (previously always 0).
     result["error_census"] = error_census
     result["stats"]["llm"] = llm_stats
+    result["stats"]["recovery"] = recovery_stats  # #1746 (D7): ladder events
     if result.get("payload"):
         result["payload"]["telemetry"]["retry_count"] = llm_stats["retries"]
     return result
@@ -2917,13 +5094,25 @@ _COMPLETE_RETRIES = 2          # transient retries beyond the first (3 total)
 _BACKOFF_BASE_S = 2.0
 _BACKOFF_CAP_S = 30.0
 
+# #1787 Task 5 Step 0 (P2-L): lock-guarded deadline-abort counter — the
+# increment happens at the ``_call_once`` deadline-kill raise (the one seam
+# distinct from a network-transport TimeoutError); the guard makes the
+# counter safe even when a SHARED stats dict is written from multiple
+# worker threads (LOAD/INPLACE_ADD/STORE loses updates without it).
+_DEADLINE_ABORTS_LOCK = threading.Lock()
+
 # Bounded generations (D2): stage caps — S1 narrative is small (1500); the
-# S2/S4 embed JSON must clear the 4000-token truncation floor (8000). The
-# single env override TORTOISE_EXTRACTOR_MAX_TOKENS (int, read at call time)
-# raises BOTH stages without a code change — the retry-then-fix protocol's
-# mechanical lever (D6: ``transient_timeout`` spike → raise the cap).
+# S2/S4 embed JSON must clear the 4000-token truncation floor. #1787: the
+# 8000 default was set in M3 (#1524) against the V3-era 8K model ceiling;
+# deepseek-v4 models allow 384K max output, and 15/6720 reval calls hit
+# the old cap (silent tail-entity loss via partial-accept) — raise the
+# default to 16000 (still ≪ 384K ceiling; env override remains the
+# mechanical lever). The single env override TORTOISE_EXTRACTOR_MAX_TOKENS
+# (int, read at call time) raises BOTH stages without a code change — the
+# retry-then-fix protocol's mechanical lever (D6: ``transient_timeout``
+# spike → raise the cap).
 _S1_MAX_TOKENS = 1500
-_S2_S4_MAX_TOKENS = 8000
+_S2_S4_MAX_TOKENS = 16000
 
 
 def _stage_cap(default: int) -> int:
@@ -2940,6 +5129,45 @@ def _stage_cap(default: int) -> int:
                 f"invalid TORTOISE_EXTRACTOR_MAX_TOKENS={raw!r} — using "
                 f"stage default {default}", stacklevel=2)
     return default
+
+
+# #2134 (D2): the one-shot escalation budget — an ``ask_env_int``-shaped knob
+# (retrieval.py:147-160 semantics mirrored INLINE — no retrieval import, the
+# plan's cross-lane no-coupling rule): a valid [16000..64000] value is used
+# AS-IS; below/above/garbage falls back to the 32000 default (never
+# saturated to a bound, never a crash); warn when the resolved value is <=
+# the base cap (an un-escalatable truncation is RESIDUAL fail-loud — D2/P2-15).
+_ESCALATION_TOKENS_DEFAULT = 32000
+_ESCALATION_TOKENS_LO = 16000
+_ESCALATION_TOKENS_HI = 64000
+
+
+def _extractor_escalation_tokens(base: int | None) -> int:
+    """The escalation output budget for a ``length``-truncated call
+    (mirrors ``ask_env_int`` semantics exactly — never saturates)."""
+    raw = os.environ.get("TORTOISE_EXTRACTOR_ESCALATION_TOKENS", "").strip()
+    value = _ESCALATION_TOKENS_DEFAULT
+    if raw:
+        try:
+            parsed = int(raw)
+        except ValueError:
+            warnings.warn(
+                f"invalid TORTOISE_EXTRACTOR_ESCALATION_TOKENS={raw!r} — "
+                f"using {_ESCALATION_TOKENS_DEFAULT}", stacklevel=2)
+        else:
+            if (_ESCALATION_TOKENS_LO <= parsed <= _ESCALATION_TOKENS_HI):
+                value = parsed
+            else:
+                warnings.warn(
+                    f"TORTOISE_EXTRACTOR_ESCALATION_TOKENS={raw!r} out of "
+                    f"range [{_ESCALATION_TOKENS_LO}..{_ESCALATION_TOKENS_HI}]"
+                    f" — using {_ESCALATION_TOKENS_DEFAULT}", stacklevel=2)
+    if value <= (base or 0):
+        warnings.warn(
+            f"escalation budget {value} <= base cap {base or 0} — a "
+            f"length-truncation is now RESIDUAL (fail-loud), never a "
+            f"partial-accept (P2-15)", stacklevel=2)
+    return value
 
 
 _CAP_KIND_CACHE: weakref.WeakKeyDictionary[Any, str] = \
@@ -3050,42 +5278,321 @@ def _is_fatal_error(e: BaseException) -> bool:
 
 
 class _ParseError(ValueError):
-    """S2/S4 output that fails ``_parse_json`` — census class ``parse_error``
-    (a prompt/OUTPUT_CONTRACT regression, not a provider condition; the D6
-    triage treats a ``parse_error`` spike as a fix-the-prompt, not a
-    retry-harder)."""
+    """S2/S4 output that fails the parse-recovery ladder — census class
+    ``parse_error`` / ``truncated_parse_error`` (D2, #1746).
+
+    Carries the class-decision signal: ``truncated`` = the FIRST
+    parse-failing attempt's ``finish_reason`` was ``"length"`` (the
+    truncation hypothesis — H3) vs ``parse_error`` (contamination /
+    sloppiness — H2); ``attempt`` = which completion attempt failed;
+    ``excerpt`` = a bounded error region for the error-informed re-prompt
+    (D3)."""
+
+    def __init__(self, message: str, *, truncated: bool = False,
+                 attempt: int = 0, excerpt: str = ""):
+        super().__init__(message)
+        self.truncated = truncated
+        self.attempt = attempt
+        self.excerpt = excerpt
 
 
 def _bump_census(error_census: dict[str, int], e: BaseException) -> None:
-    """Record one stage-failure in the per-session census (D3)."""
-    cls = "parse_error" if isinstance(e, _ParseError) else _classify_error(e)
+    """Record one stage-failure in the per-session census (D3, #1746).
+
+    ``_ParseError`` is class-decided on its ``truncated`` flag (D2):
+    ``truncated_parse_error`` vs ``parse_error``; every other exception
+    keeps ``_classify_error`` (P2 delegation preserved)."""
+    if isinstance(e, _ParseError):
+        cls = "truncated_parse_error" if e.truncated else "parse_error"
+    else:
+        cls = _classify_error(e)
     error_census[cls] = error_census.get(cls, 0) + 1
 
 
-def _rollup_llm(llm_stats: dict, stage_stats: dict) -> None:
+def _bump_census_class(error_census: dict[str, int], cls: str) -> None:
+    """Class-explicit census bump (D1, #1746) — the deterministic-append
+    rule: every ``errors.append`` site in ``extract_session_v2`` pairs
+    exactly ONE census class, so ``len(errors) == sum(error_census)`` holds
+    structurally for the raise-paired classes (criterion 2; the pilot's
+    16-vs-14 drift is gone).
+
+    #1695 Task 5 — DUAL-provenance classes (documented, flag-only):
+    ``classify_error`` is BOTH raise-paired (the classify(S2)/classify(union)
+    exception handlers append an ``errors`` entry AND bump this class) AND
+    additively counted per-item by ``_bump_classify_census`` (the
+    classifier's fail-open per-item counters — rerank/adjudication/retrieval
+    failures never raise, so no ``errors`` entry pairs THOSE bumps).
+    ``embedding_error`` / ``unclassified_terminal`` are ADDITIVE ONLY (no
+    ``errors`` entry pairs them). The structural len-equality holds on the
+    raise-paired classes; the flag-only classes are governed by their own
+    A/B thresholds (parse-census equality computes on the class
+    INTERSECTION, per the plan)."""
+    error_census[cls] = error_census.get(cls, 0) + 1
+
+
+def _bump_classify_census(error_census: dict[str, int], stats: dict) -> None:
+    """#1695 Task 5: wire the classifier's fail-open counters into the
+    per-session error census (``classify_error`` / ``embedding_error`` — the
+    flag-only classes, additive observability per the documented exception
+    in ``_bump_census_class``; never paired with an ``errors`` entry)."""
+    for cls, key in (("classify_error", "classify_errors"),
+                     ("embedding_error", "embedding_errors")):
+        n = stats.get(key) or 0
+        if n:
+            error_census[cls] = error_census.get(cls, 0) + n
+
+
+def _empty_cost_bucket() -> dict:
+    """#3359: one ``(stage, provider, model)`` cost-envelope bucket — the
+    shape ``tools/longmem_eval/usage.py`` emits and
+    ``costing.price_usage_envelope`` consumes, so a stored ``capture_cost``
+    row is repricable at report time from the versioned pricing map.
+
+    ``usage_present`` ANDs conservatively (the #2185 contract): a lane with
+    ANY usage-less call is never silently priced.
+    """
+    return {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+            "cost_usd": 0.0, "calls_without_cost": 0,
+            "calls_without_usage": 0, "usage_present": True}
+
+
+def _merge_cost_bucket(tgt: dict, src: dict) -> None:
+    """Merge one cost-envelope bucket into another of the same shape."""
+    tgt["calls"] += int(src.get("calls", 0) or 0)
+    tgt["prompt_tokens"] += int(src.get("prompt_tokens", 0) or 0)
+    tgt["completion_tokens"] += int(src.get("completion_tokens", 0) or 0)
+    tgt["cost_usd"] = round(
+        tgt["cost_usd"] + float(src.get("cost_usd", 0.0) or 0.0), 6)
+    tgt["calls_without_cost"] += int(src.get("calls_without_cost", 0) or 0)
+    tgt["calls_without_usage"] += int(src.get("calls_without_usage", 0) or 0)
+    tgt["usage_present"] = bool(
+        tgt["usage_present"] and src.get("usage_present", True))
+
+
+def _merge_cost_accumulator(tgt_stats: dict, src_stats: dict) -> None:
+    """Merge one stage's cost accumulator (``stats["cost"]``) into another.
+
+    The kind_classifier rolls per-batch accumulators into one adjudication
+    accumulator with the same shape ``_rollup_llm`` consumes — one concept,
+    one merge path.
+    """
+    src = (src_stats or {}).get("cost") or {}
+    if not src:
+        return
+    acc = tgt_stats.setdefault("cost", {})
+    acc["calls"] = int(acc.get("calls", 0)) + int(src.get("calls", 0) or 0)
+    acc["prompt_tokens"] = (
+        int(acc.get("prompt_tokens", 0))
+        + int(src.get("prompt_tokens", 0) or 0))
+    acc["completion_tokens"] = (
+        int(acc.get("completion_tokens", 0))
+        + int(src.get("completion_tokens", 0) or 0))
+    acc["cost_usd"] = round(
+        float(acc.get("cost_usd", 0.0))
+        + float(src.get("cost_usd", 0.0) or 0.0), 6)
+    acc["calls_without_cost"] = (
+        int(acc.get("calls_without_cost", 0))
+        + int(src.get("calls_without_cost", 0) or 0))
+    acc["calls_without_usage"] = (
+        int(acc.get("calls_without_usage", 0))
+        + int(src.get("calls_without_usage", 0) or 0))
+    for provider, models in (src.get("by_route") or {}).items():
+        for model, bucket in (models or {}).items():
+            _merge_cost_bucket(
+                acc.setdefault("by_route", {}).setdefault(provider, {})
+                .setdefault(model, _empty_cost_bucket()), bucket)
+
+
+def _accumulate_call_cost(stats: dict, *, prompt_tokens, completion_tokens,
+                          cost_usd, provider, model) -> None:
+    """#3359: accumulate ONE successful provider call into ``stats["cost"]``.
+
+    Called from ``_complete``'s success path — the single point where the
+    per-call token counts (return tuple) meet the provider-reported charge
+    captured in-thread by ``_call_once``. Accumulation, not overwrite, is
+    required: a stage may make SEVERAL calls (the S1/S2/S4 one-shot
+    escalation and the #1746 parse-retry both re-enter ``_complete``), and a
+    per-call snapshot would measure only the LAST one — dropping the base
+    call's spend from exactly the long sessions the p95 read is about.
+
+    ``calls_without_cost`` discloses calls the provider served without a
+    charge (the deepseek-direct lane today); ``calls_without_usage``
+    discloses calls with no usage block at all. Neither is ever silently
+    priced at $0.
+    """
+    acc = stats.setdefault("cost", {})
+    ptoks = int(prompt_tokens or 0)
+    ctoks = int(completion_tokens or 0)
+    acc["calls"] = int(acc.get("calls", 0)) + 1
+    acc["prompt_tokens"] = int(acc.get("prompt_tokens", 0)) + ptoks
+    acc["completion_tokens"] = int(acc.get("completion_tokens", 0)) + ctoks
+    if cost_usd is None:
+        acc["calls_without_cost"] = int(acc.get("calls_without_cost", 0)) + 1
+    else:
+        acc["cost_usd"] = round(
+            float(acc.get("cost_usd", 0.0)) + float(cost_usd), 6)
+    has_usage = bool(ptoks or ctoks or cost_usd is not None)
+    lane = (acc.setdefault("by_route", {}).setdefault(provider or "unknown", {})
+            .setdefault(model or "unknown", _empty_cost_bucket()))
+    lane["calls"] += 1
+    lane["prompt_tokens"] += ptoks
+    lane["completion_tokens"] += ctoks
+    if cost_usd is None:
+        lane["calls_without_cost"] += 1
+    else:
+        lane["cost_usd"] = round(lane["cost_usd"] + float(cost_usd), 6)
+    if not has_usage:
+        acc["calls_without_usage"] = (
+            int(acc.get("calls_without_usage", 0)) + 1)
+        lane["calls_without_usage"] += 1
+    lane["usage_present"] = bool(lane["usage_present"] and has_usage)
+
+
+def _rollup_llm(llm_stats: dict, stage_stats: dict,
+                stage: str = "unattributed") -> None:
     """Roll one stage's per-call stats into the per-session LLM roll-up
-    (D3: stats['llm'] = calls / retries / truncated across S1/S2/S4)."""
+    (D3: stats['llm'] = calls / retries / truncated across S1/S2/S4; #1787
+    Task 5 Step 0 P2-L: ``deadline_aborts`` — deadline-killed generations
+    are billed but never counted by any token accumulator, so the harness
+    bounds the loss via this counter).
+
+    #3359: also rolls the COST DRIVER — prompt/completion tokens, the
+    provider's own reported charge, and the ``calls_without_cost`` /
+    ``calls_without_usage`` disclosure counters — from the stage's cost
+    accumulator (``stage_stats["cost"]``, written per successful call by
+    ``_accumulate_call_cost``). Both counters roll to the session level here
+    so a provider that reported no charge, or a call that carried no usage
+    block at all, is disclosed on the emitted row instead of surviving only
+    inside ``by_stage``. Each call keeps the ``(provider, model)``
+    route that served it, so a mid-stage failover is never misattributed to
+    the configured primary. The ``by_stage`` buckets use the
+    pricing-envelope shape (``tools/longmem_eval/usage.py`` /
+    ``costing.price_usage_envelope``) so the row is repricable at report
+    time. ``stage`` defaults for the pre-existing 2-arg callers.
+    """
     llm_stats["calls"] += stage_stats.get("attempts", 0)
     llm_stats["retries"] += stage_stats.get("retries", 0)
     llm_stats["truncated"] += int(bool(stage_stats.get("truncated")))
+    llm_stats["deadline_aborts"] += stage_stats.get("deadline_aborts", 0)
+
+    cost = stage_stats.get("cost") or {}
+    llm_stats["prompt_tokens"] = (
+        llm_stats.get("prompt_tokens", 0)
+        + int(cost.get("prompt_tokens", 0) or 0))
+    llm_stats["completion_tokens"] = (
+        llm_stats.get("completion_tokens", 0)
+        + int(cost.get("completion_tokens", 0) or 0))
+    llm_stats["cost_usd"] = round(
+        llm_stats.get("cost_usd", 0.0)
+        + float(cost.get("cost_usd", 0.0) or 0.0), 6)
+    llm_stats["calls_without_cost"] = (
+        llm_stats.get("calls_without_cost", 0)
+        + int(cost.get("calls_without_cost", 0) or 0))
+    # #3359: a call that returned NO usage block at all (no tokens, no
+    # charge) is a different disclosure from one that returned tokens but no
+    # charge — roll it too, so the emitted row can say so at session level.
+    llm_stats["calls_without_usage"] = (
+        llm_stats.get("calls_without_usage", 0)
+        + int(cost.get("calls_without_usage", 0) or 0))
+
+    by_stage = llm_stats.setdefault("by_stage", {})
+    for provider, models in (cost.get("by_route") or {}).items():
+        for model, bucket in (models or {}).items():
+            _merge_cost_bucket(
+                by_stage.setdefault(stage, {}).setdefault(provider, {})
+                .setdefault(model, _empty_cost_bucket()), bucket)
+
+
+def _rollup_recovery(recovery_stats: dict, stage_stats: dict) -> None:
+    """Roll one stage's recovery counters into the per-session recovery
+    roll-up (#1746, D4/D7: the ladder's sanitize / sanitize_insufficient /
+    repair events — warning-only, never error strings, never census)."""
+    for k, v in (stage_stats.get("recovery") or {}).items():
+        recovery_stats[k] = recovery_stats.get(k, 0) + v
 
 
 def _call_once(model, system: str, user: str, *, deadline_s: int,
-               max_tokens: int | None, stats: dict | None) -> str:
+               max_tokens: int | None,
+               stats: dict | None
+               ) -> tuple[str | None, object | None, int, int,
+                          float | None, str | None, str | None]:
     """One wall-clock-bounded completion attempt (M3 D1: each retry attempt
     gets its OWN deadline — a wedged call cannot stay wedged across retries).
+
+    Returns ``(resp, finish_reason, prompt_tokens, completion_tokens,
+    cost_usd, provider, model)`` — the finish reason AND per-call token
+    counts captured in the calling thread
+    right after ``complete()`` returns (F4 #1780; token capture #2134
+    Task 0 — never read the shared adapter attrs from the caller thread).
+
+    #3359: the same in-thread capture also snapshots the provider's OWN
+    reported charge (``last_cost_usd`` — ``None`` when the route reports
+    none) and the SERVING route (``last_route``/``route``/``provider``,
+    never the configured primary — a mid-call failover must not be
+    misattributed) plus the wire model id, and returns all three in the
+    RETURN TUPLE. They are deliberately NOT written into ``stats``: that
+    dict is shared with the lock-guarded ``deadline_aborts`` counter
+    precisely because it may be shared across worker threads, so a
+    publish-then-pop hand-off there would be a non-atomic
+    read-modify-write. Only the joined success path reaches the return.
 
     The model call runs in a thread; exceptions are captured and RE-RAISED
     after join (Python threads do not propagate exceptions to the joiner —
     without this, a rate-limit/5xx would silently return None and the caller
-    would record a phantom empty chunk)."""
+    would record a phantom empty chunk).
+
+    #2185: the body runs inside a ``contextvars.copy_context()`` snapshot —
+    contextvars do NOT propagate to new threads in CPython (repo precedent
+    quota.py:739), and the eval harness attributes usage rows by a
+    question-key ContextVar set in the caller thread. The snapshot is taken
+    in THIS thread before ``Thread.start()`` so ``model.complete()`` (and any
+    usage sink it fires) sees the caller's context.
+    """
+    import contextvars
     import threading
     box: dict = {}
+    _ctx = contextvars.copy_context()
+
+    def _body():
+        kwargs = _cap_kwargs(model, max_tokens, stats)
+        box["resp"] = model.complete(system=system, user=user, **kwargs)
+        # F4 (#1780): capture the finish reason in the SAME thread as
+        # the call (happens-before via the join below). Reading
+        # ``model.last_finish_reason`` later from the caller thread is a
+        # cross-thread race under ``--workers > 1``: another thread's
+        # complete() can overwrite the shared attribute between the
+        # return and the read. The SAME in-thread capture applies to the
+        # per-call token counts (#2134 Task 0 — the escalation cost delta
+        # (D6) and the truncation-token read surface (Task 1) must never
+        # read the shared adapter attrs post-hoc; the None-guarded
+        # normalization mirrors ``_billed()`` (sdk.py:216) so mocks
+        # without the token attrs contribute 0, never a TypeError).
+        box["finish_reason"] = getattr(model, "last_finish_reason", None)
+        box["prompt_tokens"] = int(
+            getattr(model, "last_prompt_tokens", None) or 0)
+        box["completion_tokens"] = int(
+            getattr(model, "last_completion_tokens", None) or 0)
+        # #3359: the provider's own charge + the route that served it,
+        # captured in the SAME thread as the call (same cross-thread-race
+        # reason as the tokens above; ``is None`` — 0.0 is authoritative).
+        _cost = getattr(model, "last_cost_usd", None)
+        box["cost_usd"] = (None if _cost is None else float(_cost))
+        # The SERVING route, never the configured primary: a RoutingModel
+        # keeps ``provider`` = the configured primary and flips
+        # ``last_route``/``route`` on failover, so reading ``provider``
+        # would attribute the fallback's charge to the primary's rate
+        # (and misprice it at report time). ``last_route`` (always the last
+        # served) → ``route`` (RotatingModel's active lane) → ``provider``
+        # (a plain adapter).
+        box["cost_provider"] = (getattr(model, "last_route", None)
+                                or getattr(model, "route", None)
+                                or getattr(model, "provider", None))
+        box["cost_model"] = (getattr(model, "model", None)
+                             or getattr(model, "id", None))
 
     def _run():
         try:
-            kwargs = _cap_kwargs(model, max_tokens, stats)
-            box["resp"] = model.complete(system=system, user=user, **kwargs)
+            _ctx.run(_body)
         except BaseException as e:  # noqa: BLE001, RUF100
             box["exc"] = e
 
@@ -3093,26 +5600,94 @@ def _call_once(model, system: str, user: str, *, deadline_s: int,
     t.start()
     t.join(timeout=deadline_s)
     if t.is_alive():
+        # #2384: sample the WEDGED adapter BEFORE any close() — close makes
+        # the worker unwind and clear _in_flight, so sampling after close
+        # misattributes the stall (a healthy provider gets cooled, the
+        # wedged one escapes and is re-hit every retry). The whole block is
+        # inside one swallow-guard (R2): a duck-typed adapter whose
+        # .provider is a raising property must never escape the deadline
+        # path — every failure here degrades to the bare close() below.
+        try:
+            wedged_provider = None
+            _inflight = getattr(model, "_in_flight", None)
+            if _inflight is not None:
+                _pv = getattr(_inflight, "provider", None)
+                if _pv is not None:
+                    wedged_provider = _pv
+            # #2339/#2384: a deadline abort fires OUTSIDE the wrapper's
+            # complete() (this thread kills the worker, so RoutingModel/
+            # RotatingModel never see an exception and never fail over) —
+            # every retry would re-hit the SAME stalled provider. Signal
+            # the stall (note_stall cools the wedged provider + interrupts
+            # its session) so the NEXT attempt routes to the healthy
+            # fallback and the session survives. Best-effort: a model
+            # without note_stall falls through to the bare close() below.
+            note_stall = getattr(model, "note_stall", None)
+            if note_stall is not None:
+                if wedged_provider is not None:
+                    note_stall(provider=wedged_provider)
+                else:
+                    note_stall()
+        except Exception:
+            pass
         # Pilot #1549: kill the hung request so the daemon thread's blocking
         # socket read raises and dies (was: abandoned thread leaked the
         # socket + kept billing; the API stalls mid-chunked-response and a
-        # trickle defeats the requests read timeout). close() is best-effort.
+        # trickle defeats the requests read timeout). close() is best-effort
+        # and idempotent (note_stall already closed the wedged adapter).
         close = getattr(model, "close", None)
         if close is not None:
-            try:
+            try:  # noqa: SIM105
                 close()
             except Exception:
                 pass
+        # #1787 Task 5 Step 0 (P2-L/P1-E): count the deadline kill — the
+        # abandoned daemon thread keeps running and the provider keeps
+        # billing, and the spend is invisible to any token accumulator. The
+        # counter lives on the per-call stats dict (rolled into the session
+        # llm roll-up by _rollup_llm) and is lock-guarded so even a SHARED
+        # stats dict across worker threads never loses an increment.
+        if stats is not None:
+            with _DEADLINE_ABORTS_LOCK:
+                stats["deadline_aborts"] = stats.get("deadline_aborts", 0) + 1
         raise TimeoutError(f"model call exceeded {deadline_s}s")
+
+
     if "exc" in box:
         raise box["exc"]
-    return box.get("resp")
+    # #3359: the cost driver travels back in the RETURN TUPLE, not via a
+    # mutation of the caller's ``stats`` dict. That dict is shared with the
+    # deadline-abort counter (which is lock-guarded precisely because it MAY
+    # be shared), so publishing here and popping in ``_complete`` would be a
+    # non-atomic read-modify-write — under a shared dict one call could pop
+    # another call's charge and attribute it to its own tokens/route. The
+    # tuple has no such window. Only the joined success path reaches here
+    # (the deadline-abort path raised above), so an abandoned thread never
+    # writes into a stats dict that was already rolled up.
+    return (box.get("resp"), box.get("finish_reason"),
+            box.get("prompt_tokens", 0), box.get("completion_tokens", 0),
+            box.get("cost_usd"), box.get("cost_provider"),
+            box.get("cost_model"))
 
 
-def _complete(model, system: str, user: str, *, deadline_s: int = 600,
-              max_tokens: int | None = None, retries: int = _COMPLETE_RETRIES,
-              backoff_base: float = _BACKOFF_BASE_S,
-              backoff_cap: float = _BACKOFF_CAP_S,
+def _scaled_deadline(base: int, max_tokens: int | None) -> int:
+    """Scale a base deadline with the generation budget (#1787 Task 2 Step 6).
+
+    A worst-case 16K emission at the conservative 20-25 tok/s floor needs
+    ~640-800s — beyond the historical 600s default (8K ≈ 320s cleared it).
+    The multiplier is **0.05 s/token** (cycle-4 P2-K decision: the old 0.04
+    multiplier put the scaled deadline EXACTLY at the 25 tok/s emission
+    point — zero margin, killing ~20-24 tok/s stragglers the old 8K/600s
+    would have completed; 0.05 → 800s at 16K restores a 25% margin at
+    25 tok/s and covers down to ~20 tok/s). The ``(max_tokens or 0)`` guard
+    is REQUIRED — callers pass ``max_tokens=None`` when no cap applies."""
+    return max(base, int(0.05 * (max_tokens or 0)))
+
+
+def _complete(model, system: str, user: str, *, deadline_s: int | None = None,
+              max_tokens: int | None = None, retries: int | None = None,
+              backoff_base: float | None = None,
+              backoff_cap: float | None = None,
               stats: dict | None = None) -> str:
     """Wall-clock-bounded completion with retry/backoff (M3 #1524, D1).
 
@@ -3125,21 +5700,90 @@ def _complete(model, system: str, user: str, *, deadline_s: int = 600,
     tightens the class, not the code).
 
     ``max_tokens`` bounds the generation (None = caller-applied stage cap;
-    0 = documented uncapped escape hatch). ``stats`` (optional) records
-    attempts / retries / truncated / last_class per call for the per-session
-    LLM roll-up (D3).
+    0 = documented uncapped escape hatch). ``deadline_s`` defaults to None →
+    the scaled default ``_scaled_deadline(600, max_tokens)`` (#1787 Task 2
+    Step 6: a worst-case 16K emission needs 800s, beyond the old fixed 600s;
+    the None sentinel keeps explicit-deadline callers unchanged — an
+    explicit ``deadline_s`` always wins, never ``max()``-ed). ``stats``
+    (optional) records attempts / retries / truncated / last_class per call
+    for the per-session LLM roll-up (D3), plus ``deadline_aborts`` (#1787
+    P2-L) on a deadline kill, and accumulates the #3359 cost driver —
+    tokens, the provider's own reported charge, and the serving route — into
+    ``stats["cost"]`` (one entry per SUCCESSFUL call, so the escalation /
+    parse-retry calls are summed, never overwritten).
+
+    ``retries``/``backoff_*`` default to None → the module constants
+    (``_COMPLETE_RETRIES`` / ``_BACKOFF_BASE_S`` / ``_BACKOFF_CAP_S``) are
+    read at CALL time (live constants — the test hook pins them to zero/small
+    values so the fail path never sleeps; cycle-3 P2 test hygiene).
 
     Total worst-case wall clock = attempts × deadline_s (documented — the
     abandoned daemon thread after a deadline keeps running and the provider
-    keeps billing; accepted, bounded per attempt)."""
+    keeps billing; accepted, bounded per attempt and counted via
+    ``deadline_aborts``)."""
+    if retries is None:
+        retries = _COMPLETE_RETRIES
+    if backoff_base is None:
+        backoff_base = _BACKOFF_BASE_S
+    if backoff_cap is None:
+        backoff_cap = _BACKOFF_CAP_S
+    if deadline_s is None:
+        deadline_s = _scaled_deadline(600, max_tokens)
     for attempt in range(1, retries + 2):
         try:
-            resp = _call_once(model, system, user, deadline_s=deadline_s,
-                              max_tokens=max_tokens, stats=stats)
-            truncated = getattr(model, "last_finish_reason", None) == "length"
+            (resp, finish_reason,
+             prompt_tokens, completion_tokens,
+             call_cost_usd, call_provider, call_model) = _call_once(
+                 model, system, user, deadline_s=deadline_s,
+                 max_tokens=max_tokens, stats=stats)
+            truncated = finish_reason == "length"
             if stats is not None:
                 stats.update(attempts=attempt, retries=attempt - 1,
-                             last_class=None, truncated=bool(truncated))
+                             last_class=None, truncated=bool(truncated),
+                             finish_reason=finish_reason,
+                             prompt_tokens=prompt_tokens,
+                             completion_tokens=completion_tokens)
+                # #3359: accumulate THIS call's cost driver into the stage
+                # accumulator. The token fields above stay per-call
+                # (``run_s1`` / ``_complete_parsed`` read them as a
+                # snapshot); the accumulator is what the session roll-up
+                # sums, so a re-entrant call (escalation / parse retry) adds
+                # to the base call's spend instead of overwriting it. The
+                # values come from ``_call_once``'s own return tuple — this
+                # call's capture, never another thread's.
+                _accumulate_call_cost(
+                    stats, prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    cost_usd=call_cost_usd,
+                    provider=call_provider,
+                    model=call_model)
+                # #2134 Task 0 (P1-22): the truncation-token read surface —
+                # a length-truncated call's emitted tokens are the lower
+                # bound on the true list size (the model filled its budget
+                # then was cut). Accumulate into recovery-carried keys so the
+                # per-call values roll for free through _rollup_recovery ->
+                # ingest_v2 -> run.py outcome recovery (the per-stage
+                # stats["prompt_tokens"]/["completion_tokens"] are the LAST
+                # call's snapshot; _rollup_llm sums the #3359 cost
+                # accumulator above, which keeps every call's tokens). The seam-less COMBINED keys count every
+                # truncating call across the extractor seams (S1 chunks, S2,
+                # S4 — the kind_classifier adjudication seam does NOT reach
+                # this surface: its finally forwards only
+                # attempts/retries/truncated/deadline_aborts plus the #3359
+                # cost accumulator (via _merge_cost_accumulator), and never
+                # recovery.*, and escalation
+                # is scoped out there via escalate=False, so its 1500-cap
+                # truncations are counted in llm.truncated only). The
+                # per-seam keys are accumulated at the
+                # _complete_parsed/run_s1 seams (R3-6).
+                if truncated:
+                    _rec = stats.setdefault("recovery", {})
+                    _rec["truncation_prompt_tokens"] = (
+                        _rec.get("truncation_prompt_tokens", 0)
+                        + prompt_tokens)
+                    _rec["truncation_completion_tokens"] = (
+                        _rec.get("truncation_completion_tokens", 0)
+                        + completion_tokens)
             return resp
         except BaseException as e:  # noqa: BLE001, RUF100
             if not isinstance(e, Exception):  # never retry SystemExit/KeyboardInterrupt
@@ -3207,6 +5851,385 @@ def _parse_json(response: str) -> dict:
     raise ValueError("unparseable JSON")
 
 
+def _parse_canonical_strict(response: str | None) -> dict | None:
+    """#2134 (D3/R2): CANONICAL-ONLY parse for the residual branch — returns
+    the dict for a fence-stripped, brace-balanced, complete JSON object and
+    ``None`` for ANY truncation/mid-cut/unbalanced/repair-required input.
+
+    The residual branch (a post-escalation ``finish == "length"``) must be
+    treated as truncated UNCONDITIONALLY, and rungs 1-3 of the recovery
+    ladder (``_parse_json``'s progressive tail-cut, ``_repair_candidates``,
+    ``_validate_output_shape``'s absent-section validity) can clean-parse a
+    section-boundary cut into a shorter valid dict — the silent tail-drop.
+    This helper therefore NEVER tail-cuts, NEVER sanitizes, NEVER repairs,
+    and applies NO shape gate: a balanced complete-but-shorter dict IS
+    returned (the CALLER classifies it truncated via ``finish``, never this
+    parser), an unterminated/truncated input returns ``None``.
+
+    ``allow_partial=False`` is explicitly NOT the residual mechanism — it
+    only gates rung-4 while rungs 1-3 still clean-parse (P2-9)."""
+    resp = (response or "").strip()
+    m = re.search(r"```(?:json)?\s*(.*?)```", resp, re.S)
+    if m:
+        resp = m.group(1).strip()
+    start = resp.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    end = -1
+    for i in range(start, len(resp)):
+        c = resp[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    if end < 0:
+        return None  # truncated — no balanced close
+    try:
+        return json.loads(resp[start:end])
+    except (ValueError, TypeError):
+        return None
+
+
+# ══ #1746 (D4/D5): the parse-boundary recovery ladder ════════════════════
+#
+# ``_parse_json_robust`` replaces the binary parse-or-fail at the S2/S4 seam:
+# rung 1 canonical → rung 2 sanitize (H2 control-char contamination) → rung 3
+# bounded repair → rung 4 schema-validated partial-accept (H3 truncation) →
+# rung 5 raise. Every recovery is a recorded event (``stats["recovery"]`` /
+# ``stats["partial"]``); failures keep their mechanism class via
+# ``_ParseError.truncated`` (D2).
+
+#: D5: the structural output-shape schema, hand-derived from OUTPUT_CONTRACT
+#: (kept adjacent — a contract edit → schema edit is a NEW coupling, tracked
+#: in the plan's Open questions). Each present section must be a LIST of
+#: dicts; each item must carry its required keys (primitive-typed); unknown
+#: keys and empty arrays ride through (valid).
+_OUTPUT_SCHEMA: dict[str, tuple[str, ...]] = {
+    "entities": ("name", "kind"),
+    "events": ("content", "eventKind"),
+    "points": ("content",),
+    "operators": ("src", "dst", "op_type"),
+    "chain_notes": ("chain", "finding", "action"),
+    "link_before_create": ("searched_for", "found"),
+    "retractions": ("content", "id"),  # content | id — either satisfies
+}
+
+#: D5: primitive types for the required keys (structural strictness only).
+_SCHEMA_PRIMITIVES: dict[str, tuple[type, ...]] = {
+    "name": (str,), "kind": (str,), "content": (str,),
+    "eventKind": (str,), "src": (str,), "dst": (str,),
+    "op_type": (str,), "chain": (str,), "finding": (str,),
+    "action": (str,), "searched_for": (str,), "found": (bool,),
+    "id": (str,),
+}
+
+
+def _is_primitive(v) -> bool:
+    return not isinstance(v, (dict, list, tuple)) and v is not None
+
+
+def _validate_output_shape(parsed) -> tuple[bool, list[str]]:
+    """D5 (#1746): structural-only output-shape validation — a schema gate
+    for the ladder's rungs 3-4 (a mis-tracked sanitize/repair scan can never
+    corrupt: junk output fails schema and falls through). Top-level must be
+    a dict; each PRESENT contract section must be a LIST of dicts; each item
+    must carry its required keys with primitive values; unknown keys and
+    empty arrays are VALID (fields ride through by reference — S5's
+    execution validation owns semantic repair). ``retractions`` items need
+    ``content`` OR ``id`` (the contract's ``content|id``)."""
+    issues: list[str] = []
+    if not isinstance(parsed, dict):
+        return False, [f"top-level output is {type(parsed).__name__}, not an object"]
+    for section, required in _OUTPUT_SCHEMA.items():
+        if section not in parsed:
+            continue
+        items = parsed[section]
+        if not isinstance(items, list):
+            issues.append(f"section {section!r} is {type(items).__name__}, not a list")
+            continue
+        for idx, item in enumerate(items):
+            if not isinstance(item, dict):
+                issues.append(f"{section}[{idx}] is {type(item).__name__}, not an object")
+                continue
+            if section == "retractions" and not (
+                    "content" in item or "id" in item):
+                issues.append(f"retractions[{idx}] needs content or id")
+            for key in required:
+                if key not in item:
+                    if section == "retractions":
+                        continue  # content | id — the disjunction is above
+                    issues.append(f"{section}[{idx}] missing required key {key!r}")
+                    continue
+                if not _is_primitive(item[key]):
+                    issues.append(
+                        f"{section}[{idx}].{key} is a non-primitive value")
+                    continue
+                expect = _SCHEMA_PRIMITIVES.get(key)
+                if expect and not isinstance(item[key], expect):
+                    issues.append(
+                        f"{section}[{idx}].{key} has the wrong type "
+                        f"(expected {expect[0].__name__})")
+    return (not issues), issues
+
+
+#: C0 control chars (0x00-0x1F) — escaped inside string literals by the
+#: sanitize rung (H2 output-side contamination, #1746 D4).
+_C0_CONTROL = frozenset(chr(c) for c in range(0x20))
+
+
+_SANITIZE_ESCAPES = {
+    "\n": "\\n", "\t": "\\t", "\r": "\\r",
+    "\b": "\\b", "\f": "\\f", "\"": "\\\"", "\\": "\\\\",
+}
+
+
+def _sanitize_control_chars(response: str) -> str:
+    """D4 rung 2 (#1746): string-aware scan — escape raw C0 control chars
+    (0x00-0x1F, incl. raw newlines/tabs) INSIDE string literals as their
+    JSON escapes; structural whitespace is untouched. Returns the original
+    string unchanged when nothing was altered (so callers can detect
+    whether the rung did work)."""
+    out: list[str] = []
+    in_str = False
+    esc = False
+    changed = False
+    for c in response:
+        if in_str:
+            if esc:
+                out.append(c)  # part of an escape sequence — leave as-is
+                esc = False
+                continue
+            if c == "\\":
+                out.append(c)
+                esc = True
+                continue
+            if c == '"':
+                in_str = False
+                out.append(c)
+                continue
+            if c in _C0_CONTROL:
+                out.append(_SANITIZE_ESCAPES.get(c, f"\\u{ord(c):04x}"))
+                changed = True
+                continue
+            out.append(c)
+            continue
+        if c == '"':
+            in_str = True
+        out.append(c)
+    return "".join(out) if changed else response
+
+
+#: D4 rung 3: bounded missing-comma repairs at boundary joins (first-valid-
+#: wins; the schema gate backstops a mis-targeted substitution).
+_REPAIR_RULES: tuple[tuple[str, str], ...] = (
+    ('}"{', '}", "{'),
+    (']"{"', ']", "{'),
+    ('}"[', '}", "['),
+    (']"["', ']", "['),
+    ('}{', '},{'),
+    ('][', '],['),
+    ('}"', '},"'),  # dict value object → next key (bounded, gated)
+)
+
+
+def _apply_repair_rule(working: str, find: str, repl: str) -> str | None:
+    """String-aware first-match application of one comma-insertion rule:
+    find the FIRST occurrence of ``find`` OUTSIDE any string literal
+    (in_str/esc tracker) and replace it; None when no outside-string
+    occurrence exists (a rule that only fires inside strings never
+    corrupts)."""
+    in_str = False
+    esc = False
+    n = len(find)
+    i = 0
+    while i <= len(working) - n:
+        c = working[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            i += 1
+            continue
+        if c == '"':
+            in_str = True
+            i += 1
+            continue
+        if working.startswith(find, i):
+            return working[:i] + repl + working[i + n:]
+        i += 1
+    return None
+
+
+def _repair_candidates(working: str) -> list[str]:
+    """D4 rung 3 (#1746): bounded CONTENT-PRESERVING repair candidates on
+    the working text — (a) unterminated object → append up to 8 closers;
+    (b) the bounded missing-comma rule list, applied string-aware
+    (``_apply_repair_rule``: a rule that only fires inside a string value
+    is never applied — no silent in-string corruption). NO data-dropping
+    tail-cuts here (a truncation cut at an item boundary is a recorded
+    ERROR via rung 4's partial-accept — ``stats["partial"]``, never a
+    warning-only "repair"). First-valid-wins + schema gate keep it safe;
+    no free-form repair library, no unbounded heuristics."""
+    candidates: list[str] = []
+    for k in range(1, 9):
+        candidates.append(working + "}" * k)
+    for find, repl in _REPAIR_RULES:
+        r = _apply_repair_rule(working, find, repl)
+        if r is not None:
+            candidates.append(r)
+    return candidates
+
+
+_EMBED_SECTIONS = ("entities", "points", "events", "operators")
+
+
+def _close_balanced(text: str) -> str | None:
+    """D4 rung 4 helper (#1746): append the minimal closing brackets that
+    make a JSON prefix balanced (the truncation cut lands mid-structure, so
+    a strict ``json.loads(prefix)`` can never be valid — the recovered
+    prefix is CLOSED before parsing). Returns None when the prefix cannot
+    be closed safely (an unterminated string/escape at the cut, or a
+    mismatched close — a mis-tracked cut must never corrupt)."""
+    stack: list[str] = []
+    in_str = False
+    esc = False
+    for c in text:
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c in "[{":
+            stack.append("]" if c == "[" else "}")
+        elif c in "]}":
+            if not stack:
+                return None
+            if stack[-1] != ("]" if c == "]" else "}"):
+                return None
+            stack.pop()
+    if in_str or esc:
+        return None
+    return text + "".join(reversed(stack))
+
+
+def _longest_valid_prefix(text: str) -> dict | None:
+    """D4 rung 4 (#1746): schema-validated partial-accept — progressive
+    prefix cuts at item boundaries (``}``/``]`` positions from the tail,
+    bounded ≤ 200 candidates), each closed to balance (``_close_balanced``)
+    and parsed; the LONGEST prefix that parses AND passes the schema gate
+    with ≥ 1 non-empty embed section (entities/points/events/operators —
+    mirroring the S4 caller's merge condition, so a partial the caller
+    would discard can never be falsely classed ``partial_parse``) is
+    accepted. A truncated-to-empty prefix never counts; a prefix with only
+    chain_notes/link_before_create/retractions non-empty falls through
+    (returns None → the caller raises)."""
+    positions = sorted((i for i, c in enumerate(text) if c in "}]"),
+                       reverse=True)
+    for i in positions[:200]:
+        closed = _close_balanced(text[:i + 1])
+        if closed is None:
+            continue
+        try:
+            parsed = json.loads(closed)
+        except json.JSONDecodeError:
+            continue
+        ok, _ = _validate_output_shape(parsed)
+        if not ok:
+            continue
+        if not any(parsed.get(s) for s in _EMBED_SECTIONS):
+            continue
+        return parsed
+    return None
+
+
+def _parse_json_robust(response: str, *, stats: dict | None = None) -> dict:
+    """D4 (#1746): the parse-boundary recovery ladder — raises
+    ``_ParseError`` on final failure.
+
+    Rungs per attempt: 1 canonical ``_parse_json``; 2 string-aware sanitize
+    (raw C0 control chars inside string literals → JSON escapes; success →
+    ``stats["recovery"]["sanitize"] += 1``; altered-but-unparseable → the
+    sanitized text becomes the ``working`` input for rungs 3-4 +
+    ``sanitize_insufficient += 1``); 3 bounded repair on ``working``
+    (schema-gated, first-valid-wins; success → ``recovery["repair"] += 1``);
+    4 schema-validated partial-accept on ``working`` (success →
+    ``stats["partial"] = True`` — the caller appends the ``partial_parse``
+    error class); 5 raise. The D5 schema gate backstops a mis-tracked scan
+    before any rung-3/4 output is accepted — worst case it fails schema and
+    falls through, never corrupting."""
+    response = response or ""  # a None adapter response (null provider
+    # content) must not crash rung 2's ``_sanitize_control_chars`` scan
+    # (the ``_error_excerpt`` docstring already claims None tolerance).
+    last_err: ValueError | None = None
+    # rung 1 — canonical (fences, brace-balance, tail-cuts)
+    try:
+        return _parse_json(response)
+    except ValueError as e:
+        last_err = e
+    recovery = (stats.setdefault("recovery", {})
+                if stats is not None else None)
+    # rung 2 — sanitize (H2 output-side contamination)
+    sanitized = _sanitize_control_chars(response)
+    altered = sanitized != response
+    if altered:
+        try:
+            parsed = _parse_json(sanitized)
+            if recovery is not None:
+                recovery["sanitize"] = recovery.get("sanitize", 0) + 1
+            return parsed
+        except ValueError as e:
+            last_err = e
+            if recovery is not None:
+                recovery["sanitize_insufficient"] = (
+                    recovery.get("sanitize_insufficient", 0) + 1)
+    working = sanitized if altered else response
+    # rung 3 — bounded repair (schema-gated, first-valid-wins)
+    for candidate in _repair_candidates(working):
+        try:
+            parsed = _parse_json(candidate)
+        except ValueError as e:
+            last_err = e
+            continue
+        ok, _ = _validate_output_shape(parsed)
+        if ok:
+            if recovery is not None:
+                recovery["repair"] = recovery.get("repair", 0) + 1
+            return parsed
+    # rung 4 — schema-validated partial-accept (H3 truncation)
+    prefix = _longest_valid_prefix(working)
+    if prefix is not None:
+        if stats is not None:
+            stats["partial"] = True
+        return prefix
+    # rung 5 — raise (the deepest failure's message + bounded excerpt)
+    raise _ParseError(str(last_err or ValueError("unparseable JSON")),
+                      excerpt=_error_excerpt(response, last_err))
+
+
 __all__ = [  # noqa: RUF022
     "build_master_list", "master_kind_forms",
     "run_s1", "chunk_transcript", "compile_stories",
@@ -3214,9 +6237,12 @@ __all__ = [  # noqa: RUF022
     "resolve_backend_mode", "search_graph",
     "run_s4", "render_s4_prompt",
     "merge_embed_lists", "_merge_key", "_s4_merge_stats",
-    "execute_embed", "validate_chains", "derive_supersessions",
+    "execute_embed", "validate_chains", "validate_chain_completeness",
+    "derive_supersessions",
     "classify_consolidation", "DecisionRecord", "resolve_entities",
     "extract_session_v2",
     "S1_TMPL", "S2_TMPL", "S4_TMPL", "OUTPUT_CONTRACT",
+    "S2_TMPL_CORE_ONLY", "S4_TMPL_CORE_ONLY", "OUTPUT_CONTRACT_CORE_ONLY",
     "SUBJECTS", "EVENTS", "CHAINS",
+    "UNCLASSIFIED",
 ]

@@ -66,8 +66,22 @@ Use the Tortoise MCP tools (no local FalkorDB needed for hosted tenants; self-ho
 1. **Create the nodes** — `tortoise_create_point` per point (dedup by
    content): options → `pointKind: option`, criteria → `criterion`,
    findings → `evidence`; keep ids stable (`opt:a`, `crit:1`, `finding:1`).
+   Decision parts are born LIVE with an explicit starting belief (#2199):
+   omit `credibility` for the system starting belief (medium = Beta(3,1),
+   provenance `system-default`, visible in `tortoise_calibrate_summary`), or
+   pass `credibility="high|medium|low"` (ladder gold/high/medium/low/
+   unverified) when you have a real belief — recorded `set-by-author`. There
+   is NO promote/calibrate step in this workflow: the documented flow ranks
+   on the first try.
 2. **Wire the edges** — `tortoise_create_operator` for each IMPL/NAND;
-   mitigation strength in `[0.10, 0.50]` for relevance edges.
+   mitigation strength in `[0.10, 0.50]` for relevance edges (0.50 = strongest
+   dampening — single source: `tortoise/weights.py` module docstring, #2315).
+   `strength` is the graded DAMPENER of the operator's effective EP weight:
+   `w_eff = w * (1 - strength)` — a 0.30 mitigation keeps 70% of the weight,
+   0.50 keeps 50%; dampened, never refuted. It is NOT how true the reason is
+   and is NOT fused into any prior (the mitigation POINT's own belief is
+   calibrated like any decision part). EP reads `mitigation_strength` via
+   `compute_operator_weight`.
 3. **Compute** — `tortoise_compute_confidence` (EP belief propagation on the
    decision subgraph) → the per-option confidence.
 4. **Sanity** — `tortoise_check_structure` before presenting (the graph must

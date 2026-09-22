@@ -4,6 +4,77 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Reaper pass-2 discovery is scoped and in-process (#4068)
+
+`discover()`'s stale-socket pass used to shell out to
+`find $TMPDIR -maxdepth 2 ( -name redis.socket -o -name redis.pid )` — on a
+churned dev-box tempdir that is ~230k stats and 10–25 s of metadata I/O per
+census, and it exceeded its own `SOCKET_WALK_TIMEOUT` and then returned `[]`
+with no completeness signal (it did log a warning, but a caller read the
+empty list as "nothing to clean"). It is now a depth-1 `os.scandir` scoped to
+the ephemeral namespace, with a monotonic deadline.
+
+- **Scoped, and lossless for actionable records.** For a depth-1 entry
+  `_is_ephemeral_dir(dir, tmpdir)` is exactly
+  `basename.startswith(EPHEMERAL_PREFIXES)` — the predicate every **removal**
+  path (kill-path cleanup, stale-dir Guard 1, quarantine) already requires —
+  so narrowing discovery loses no removable record. Kills are covered by the
+  pass-1 lemma (a live server is enumerated by pgrep/cmdline regardless of
+  its dir name). Measured 10.6 s → 0.44 s (~24×) on the reported box.
+- **No `find` subprocess; a partial scan is never silent.** `_iter_candidate_dirs`
+  tests `entry.name` before any stat, skips symlinked entries (parity with
+  `find` without `-L`), and on budget expiry/`OSError` logs a `WARNING` and
+  returns the PARTIAL set. The old code logged a warning too, but returned `[]`
+  with **no completeness signal**, so a caller read a timed-out walk as
+  "nothing to clean"; now `discover()`/`_run_sweep()` return a `_ScanAwareList`
+  (a `list` subclass) whose `.complete` flag — read fail-closed — prints as
+  `SCAN TRUNCATED` in the sweep summary.
+- **`--full-scan` is operator-only.** It restores the pre-#4068 **un-scoped**
+  enumeration (`TORTOISE_REAPER_FULL_SCAN` env; `[1,true,yes,on]`). It can reach
+  nothing an earlier release could not, and it cannot widen an `rmtree`
+  (containment is re-derived at every removal). Scoped discovery is lossless for
+  **removals** (every removal path requires `_is_ephemeral_dir`) and for
+  **kills** via the pass-1 lemma (a live server is enumerated by pgrep/cmdline
+  regardless of its dir name). The scheduled launchd/cron sweep stays scoped.
+  `tools/embedded_orphans.py --deep` requests the broad scan and reports
+  `census_truncated`.
+- **`_sweep_quarantine_dirs`** uses the same primitive (its removal path
+  stays ephemeral-scoped), removing the second `find` and its timeout.
+
+
+### Tenancy rename — the tenant is an organization, not a "team" (#3543)
+
+The tenant identifier is now `org` across the surfaces this slice owns. Renamed
+**in place; no data migration** — there are no customers before 2026-09-17.
+
+- **Vocabulary** (pinned across the sibling slices): `teams` → `organizations`,
+  `team_memberships` → `org_memberships`, `team_id` → `org_id`, `team_name` →
+  `org_name`; RPC parameters `p_team_id`/`p_team_name` → `p_org_id`/`p_org_name`;
+  the tenant GUC `app.current_team_id` → `app.current_org_id`; the graph
+  namespace `team_<id>` → `org_<id>`.
+- **`supabase/functions/tenant-provision/index.ts`**: calls `provision_team`
+  with `p_org_id`/`p_org_name` and a `org_<org_id>` graph name, and sends
+  `org_id`/`org_name` on its 201 body and on the `/internal/starter-seed` +
+  `/internal/onboarding-email` request bodies. RPC **function names are
+  unchanged** (`provision_team`, `provision_team_with_token`,
+  `recover_team_key`, `revoke_signup_token`) — that is the wire contract.
+- **`supabase/tests/**`**: every assertion suite now speaks the org vocabulary.
+- **`supabase/tests/pglite/validate.mjs`**: the migration list is now
+  **enumerated from `supabase/migrations/`** rather than hand-pinned. The pinned
+  array had drifted to 31 of the 38 migrations on disk, silently leaving
+  `20260817000001`, `20260829000001`, `20260830000001`, `20260907000001` and the
+  three `2026090900000*` migrations unapplied — and any migration added later
+  would have been uncovered again. Enumerating the directory makes full
+  coverage structural.
+- **`apps/graph-viz/server/main.py`**: the legacy `/api/provision` endpoint now
+  takes `org_name` and returns `org_id`/`org_name`, calling `sdk.org_create`.
+- **`entrypoint.sh`**: the GitHub-docs staging-path note uses `{org_id}`.
+- Deliberately unchanged: `api_keys.scopes` values (`team:manage`) and the
+  `chk_minted_key_no_escalation` CHECK (renaming those needs a row UPDATE — the
+  forbidden data migration); the website pricing tier **"Team"**
+  (`Free/Solo/Pro/Team`); and Linear/GitHub team references
+  (`config/connector_manifest.yaml` `linear.team_id` is a Linear team).
+
 ### Reaper discover/reap production semantics (#1383)
 
 The embedded reaper's discover/reap contract is now honest: every
@@ -119,7 +190,10 @@ run it, connect your tools over MCP.
 - **License**: Business Source License 1.1 — free self-hosted production use
   under $5M annual revenue; MPL 2.0 conversion after 4 years; hosted =
   commercial with free tier. See `docs/license-notes.md` (clause → precedent).
-- **`.mcp.json`**: tortoise entry points at the daemon (`http://localhost:8000/mcp`).
+- **`.mcp.json`**: tortoise entry points at the hosted endpoint
+  (`https://api.premiselabs.co/mcp/`) with an env-indirect
+  `Bearer ${TORTOISE_API_KEY}` (#3601); a self-hoster points the entry's `url`
+  at their own daemon (`http://localhost:8000/mcp`).
 
 ### Fixed — EP NAND under-propagation (#855)
 

@@ -1,0 +1,17 @@
+{
+  "holdout": false,
+  "seed": 15,
+  "suite": "continuity",
+  "team": "team_a",
+  "turns": [
+    {
+      "content": "Team A decision: 'Orion' uses the internal queue, not Kafka.",
+      "role": "user"
+    },
+    {
+      "content": "Recorded.",
+      "role": "assistant"
+    }
+  ],
+  "writer": true
+}

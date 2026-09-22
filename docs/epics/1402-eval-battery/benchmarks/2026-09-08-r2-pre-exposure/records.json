@@ -1,0 +1,27 @@
+{
+  "r2-coverage": {
+    "rubric_id": "r2-coverage",
+    "passed": true,
+    "abba_agreement": 1.0,
+    "abba_n": 8,
+    "kappa": 0.5364238410596024,
+    "irt_infit": {
+      "item-0": 2.0,
+      "item-1": 2.0,
+      "item-2": 1.1111111111111112,
+      "item-3": 3.777777777777778
+    },
+    "stress": {
+      "single_anchor": true,
+      "all_identical": true,
+      "contradictory_anchors": true,
+      "label_flip": true,
+      "verbosity_bias": true,
+      "stochastic_stability": true
+    },
+    "checksum": "4db869d2a557f268",
+    "blocked_reason": "",
+    "percent_agreement": 0.8857142857142857,
+    "ac1": 0.8486486486486486
+  }
+}

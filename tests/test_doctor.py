@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -45,6 +46,26 @@ def _run_doctor(argv: list[str]) -> int:
     """Invoke `tortoise doctor <argv>` (main returns int)."""
     from tortoise.__main__ import main
     return main(["doctor", *argv])
+
+
+def _seed_db(db_path: str, content: str, attempts: int = 3) -> None:
+    """Boot an embedded DB at db_path and write one point.
+
+    Bounded-retried (#720 review: redislite can transiently fail to start on
+    a crowded shared TMPDIR — unix-socket ENOENT); the seed forces the
+    projection up so the DB file exists before doctor probes it.
+    """
+    import time
+    for _i in range(attempts):
+        try:
+            sdk = TortoiseSDK(db_path=db_path)
+            sdk.create_point(kind="observation", content=content)
+            sdk.close()
+            return
+        except Exception:
+            if _i == attempts - 1:
+                raise
+            time.sleep(1)
 
 
 def _health_line(out: str) -> str:
@@ -80,12 +101,17 @@ class TestDoctorPath:
     def test_doctor_db_plain_path_uses_embedded(self, clear_db_env, tmp_path, capsys):
         """--db accepts plain file paths → embedded constructor (help match)."""
         db_path = os.path.join(str(tmp_path), "via_db_flag.db")
+        # Seed an initialized DB — doctor must not create one as a side effect
+        # of a diagnostic (#2204); the health row then proves --db resolved
+        # to THIS embedded graph, not a URI connection error.
+        _seed_db(db_path, "doctor --db flag seed")
         rc = _run_doctor(["--db", db_path])
         out = capsys.readouterr().out
 
         assert rc in (0, 1)
         line = _health_line(out)
-        assert "0 Points" in line  # fresh embedded DB — not a URI connection error
+        assert "Points" in line  # embedded DB reached via --db flag
+        assert "❌" not in line  # health at the seeded target must pass
 
     def test_doctor_bad_relative_path_clean_error(self, clear_db_env, capsys):
         """Relative --path → clean error, no traceback."""
@@ -218,8 +244,10 @@ class TestDoctorPath:
 
     def test_mask_uri_userinfo_all_schemes_and_delimiters(self):
         """#720 P2 conf 68: the mask applies to every scheme:// pattern
-        (docker/redis/rediss/bolt/etc) and never touches query/fragment
-        delimiters — an '@' in a query value must not swallow the host."""
+        (docker/redis/rediss/bolt/etc) and never touches a query/fragment
+        delimiter that genuinely starts one — an '@' in a query value does
+        not swallow the host UNLESS that would risk masking less (see
+        #2983 fail-closed cases below)."""
         from tortoise.__main__ import _mask_uri_userinfo
 
         assert _mask_uri_userinfo("bolt://user:sup3rsekrit@host:7687/g") == \
@@ -247,6 +275,105 @@ class TestDoctorPath:
         # urlsplit raises on unmatched '[' — the mask still hides the
         # credential instead of leaking it (and never raises in a handler)
         assert _mask_uri_userinfo("docker://user:pw@[abc") == "docker://:***@[abc"
+
+    def test_mask_uri_userinfo_delimiter_inside_password_fails_closed(self):
+        """#2983: a literal '?'/'#' inside a password (RFC-invalid — it
+        should be %3F/%23 — but copy-pasteable) must not truncate the
+        authority region before the '@' and re-emit the credential.
+        When an '@' follows the earliest '?'/'#', that delimiter is itself
+        inside the userinfo, so the mask consumes to the LAST '@' of the
+        full authority, mirroring entrypoint.sh::_redact_uri."""
+        from tortoise.__main__ import _mask_uri_userinfo
+
+        # Both repro shapes from the issue re-emitted the password verbatim.
+        assert _mask_uri_userinfo("rediss://user:S3n?tinel@host.cloud:1234") == \
+            "rediss://:***@host.cloud:1234"
+        assert _mask_uri_userinfo("rediss://user:S3n#tinel@host.cloud:1234") == \
+            "rediss://:***@host.cloud:1234"
+        # An '@' BEFORE the delimiter is password material too: the old code
+        # stopped at the '?' and leaked the '?word@host' tail.
+        assert _mask_uri_userinfo("rediss://user:p@ss?word@host:1234") == \
+            "rediss://:***@host:1234"
+        assert _mask_uri_userinfo("rediss://user:p#ss#word@host:1234") == \
+            "rediss://:***@host:1234"
+        # both delimiters, plus an extra '@' inside the credential
+        assert _mask_uri_userinfo("rediss://user:p?ss#w@rd@host:1234/g") == \
+            "rediss://:***@host:1234/g"
+        # trailing delimiter at the end of the password
+        assert _mask_uri_userinfo("rediss://user:S3n?@host:1234") == \
+            "rediss://:***@host:1234"
+        # '://' inside the password must not register as a second URI: the
+        # old next-scheme boundary truncated before the '@' and leaked the
+        # credential prefix (found by the #2983 verifier).
+        assert _mask_uri_userinfo("rediss://user:p://w@host:1234") == \
+            "rediss://:***@host:1234"
+        assert _mask_uri_userinfo("rediss://user:S3n://tinel@host.cloud:1234/db") == \
+            "rediss://:***@host.cloud:1234/db"
+        assert _mask_uri_userinfo("rediss://user:S3n?tinel://w@host.cloud:1234/db") == \
+            "rediss://:***@host.cloud:1234/db"
+        # '@' AND '://' inside the password together: the '@' must not make
+        # the inner '://' look like a second URI whose scheme is the leaked
+        # password tail.
+        assert _mask_uri_userinfo("rediss://user:S3n@tinel://w@host.cloud:1234/db") == \
+            "rediss://:***@host.cloud:1234/db"
+        assert _mask_uri_userinfo("rediss://user:S3n?x@tinel://@host.cloud:1234/db") == \
+            "rediss://:***@host.cloud:1234/db"
+        # embedded in prose — RELATIVE_PATH_ERROR carries the raw URI
+        prose = ("Relative DB path 'rediss://user:S3n?tinel@host:1234/g' "
+                 "rejected. Use (1) the canonical path")
+        assert _mask_uri_userinfo(prose) == \
+            ("Relative DB path 'rediss://:***@host:1234/g' rejected. "
+             "Use (1) the canonical path")
+        # A delimiter with NO '@' after it still starts a real
+        # query/fragment and stays byte-identical (well-formed path).
+        assert _mask_uri_userinfo("redis://:pw@db.example.com:6379/0?ssl=true") == \
+            "redis://:***@db.example.com:6379/0?ssl=true"
+        # Fail-closed over-reach, documented deliberately: an '@' in a
+        # GENUINE query is syntactically indistinguishable from a '?' in a
+        # password, so the mask consumes to the last '@' (masks more,
+        # never leaks; diagnosability loss only).
+        assert _mask_uri_userinfo("redis://:pw@host:6379/0?u=a@b") == \
+            "redis://:***@b"
+        # Same reason, a second URI whose predecessor has no userinfo is
+        # merged into one masked line rather than risking a split that
+        # leaves half a credential visible.
+        assert _mask_uri_userinfo(
+            "rediss://host1:1/db and rediss://u:p@host2:2/db") == \
+            "rediss://:***@host2:2/db"
+
+    def test_mask_uri_userinfo_fuzz_never_emits_password_material(self):
+        """#2983: exhaustive fuzz over passwords containing '?'/'#'/'@'/'/'.
+
+        The marker pair 'S3n'/'tinel' is asserted separately from the whole
+        password so the check stays honest for degenerate one-character
+        passwords (a lone '@' is unavoidably present as the mask separator).
+        """
+        from tortoise.__main__ import _mask_uri_userinfo
+
+        specials = ["?", "#", "@", "/", ":", "=", "&", "%40", "%3F", "%23",
+                    "://", "://w", "a://"]
+        passwords: list[str] = []
+        for a in specials:
+            passwords.append(f"S3n{a}tinel")
+            passwords.append(f"S3n{a}{a}tinel")
+            for b in specials:
+                passwords.append(f"S3n{a}tinel{b}")
+                passwords.append(f"S3n{a}{b}tinel")
+        passwords += [
+            "?S3ntinel", "#S3ntinel", "@S3ntinel", "/S3ntinel",
+            "S3ntinel?", "S3ntinel#", "S3ntinel@", "S3ntinel/",
+            "??S3n", "##S3n", "@@S3n", "//S3n", "S3n", "S3n?", "S3n#",
+        ]
+        for pw in passwords:
+            for uri in (
+                f"rediss://user:{pw}@host.cloud:1234/db",
+                f"docker://:{pw}@127.0.0.1:7687/tortoise",
+                f"bolt://user:{pw}@[::1]:7687/g",
+            ):
+                masked = _mask_uri_userinfo(uri)
+                assert "S3n" not in masked, f"marker leaked: {uri!r} -> {masked!r}"
+                assert "tinel" not in masked, f"marker leaked: {uri!r} -> {masked!r}"
+                assert pw not in masked, f"password leaked: {uri!r} -> {masked!r}"
 
     def test_doctor_db_uri_probe_uses_uri_graph_name(self, clear_db_env, monkeypatch, capsys):
         """#720 P2 conf 62: the Step 2 probe must select the graph from the
@@ -281,6 +408,44 @@ class TestDoctorPath:
         assert set(selected) == {"tenant-alpha"}
         assert "tortoise" not in selected
 
+    def test_doctor_db_uri_probe_uses_decoded_credentials(
+            self, clear_db_env, monkeypatch, capsys):
+        """#3039: the Step 2 probe must percent-DECODE URI userinfo — urlparse
+        does not, so a raw read forwards a literal %XX and the probe reports a
+        false auth failure. Pin the (username, password) it hands FalkorDB."""
+        import falkordb as _falkordb
+
+        calls: list[dict] = []
+
+        class _FakeGraph:
+            def query(self, q):
+                return None
+
+        class _FakeFalkorDB:
+            def __init__(self, *a, **k):
+                calls.append(
+                    {key: k.get(key) for key in ("username", "password")}
+                )
+
+            def select_graph(self, name):
+                return _FakeGraph()
+
+        monkeypatch.setattr(_falkordb, "FalkorDB", _FakeFalkorDB)
+        # ad%6Din -> admin ; p%40ss -> p@ss
+        rc = _run_doctor([
+            "--db", "docker://ad%6Din:p%40ss@127.0.0.1:59997/test_doctor_tenant"])
+        capsys.readouterr()
+
+        assert rc == 1  # dead port — both probe and Step 3 still construct
+        # Step 2 (the probe under test) is followed by Step 3's from_uri
+        # construction, so a single mutable dict would be overwritten by the
+        # later, already-decoded call. Assert on EVERY construction:
+        # reverting the probe to raw `parsed.username` must red this test.
+        assert calls, "doctor constructed no FalkorDB client"
+        assert all(
+            c == {"username": "admin", "password": "p@ss"} for c in calls
+        ), calls
+
     def test_doctor_embedded_target_skips_docker_probe(self, clear_db_env, tmp_path, capsys):
         """#720 conf 78: embedded target → probe reports embedded mode
         instead of attempting a fake localhost:16379 connection."""
@@ -295,15 +460,24 @@ class TestDoctorPath:
 
 
 class TestDoctorDefaultResolution:
-    def test_no_flags_defaults_to_embedded(self, clear_db_env, capsys):
+    def test_no_flags_defaults_to_embedded(self, monkeypatch, clear_db_env, tmp_path, capsys):
         """No flags, no env → shared default resolution (canonical embedded
         path), like init/index — NOT a local docker://localhost default
         (#720 conf 70). Graph health must report the embedded graph, never
-        a docker connection failure."""
+        a docker connection failure. Hermetic (#2204): the canonical default
+        (~/.tortoise/tortoise.db) is redirected to a seeded tmp DB — the
+        test must never depend on the runner's real ~/.tortoise existing."""
+        from tortoise import config as _config
+        canonical = os.path.join(str(tmp_path), ".tortoise", "tortoise.db")
+        monkeypatch.setattr(_config, "DEFAULT_DB_PATH", canonical)
+        # Seed an initialized embedded DB at the canonical default (fix A
+        # creates the data dir on open; the write forces the projection up).
+        _seed_db(canonical, "doctor no-flags seed")
+
         rc = _run_doctor([])
         out = capsys.readouterr().out
 
-        assert rc in (0, 1)  # docker probe may fail without a live FalkorDB
+        assert rc in (0, 1)  # docker section may warn without a live FalkorDB
         line = _health_line(out)
         assert "Points" in line
         assert "❌" not in line  # embedded resolution must not fail
@@ -332,22 +506,160 @@ class TestDoctorDefaultResolution:
     def test_no_flags_uses_tortoise_db_path(self, monkeypatch, clear_db_env, tmp_path, capsys):
         """TORTOISE_DB_PATH env → embedded at that path."""
         db_path = os.path.join(str(tmp_path), "env.db")
+        # Seed an initialized DB at the env target — doctor must not CREATE a
+        # DB as a side effect of a diagnostic (#2204); the health row then
+        # proves the env var won resolution by reporting THIS graph.
+        _seed_db(db_path, "doctor env-path seed")
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         rc = _run_doctor([])
         out = capsys.readouterr().out
 
         assert rc in (0, 1)
         line = _health_line(out)
-        assert "0 Points" in line
+        assert "Points" in line
+        assert "❌" not in line  # embedded health at the env target must pass
+        assert db_path in out  # the probe row names the resolved env target
+
+
+class TestDoctorPreInit:
+    """#2204: doctor on an UNINITIALIZED environment must print a clean,
+    readable first-run status instead of starting the embedded redis server,
+    which would emit a raw "*** FATAL CONFIG FILE ERROR" (redislite writes
+    `dir <missing-dir>` into its config) plus a redis-server subprocess
+    traceback. The probe is SKIPPED — doctor never creates state or spawns a
+    server on a machine the user has not set up.
+
+    Verdict split (review #2204): a missing DEFAULT target is the expected
+    fresh-machine first-run state → ⚠️ + rc 0 ("doctor passes pre-init"); a
+    missing EXPLICITLY CONFIGURED target (--db/--path/TORTOISE_DB_PATH
+    pointing somewhere else) keeps a loud ❌ + rc 1 naming the path — a
+    typo'd target must read as a config error, not as a healthy first run.
+    """
+
+    def test_embedded_path_missing_dir_reports_not_set_up(self, clear_db_env, tmp_path, capsys):
+        """--path into a NONEXISTENT directory tree → readable 'not set up
+        yet' line naming the configured target + rc 1 (config error), no
+        FATAL CONFIG noise, no traceback, and NO directory created (probe
+        skipped — doctor has no side effects)."""
+        db_path = os.path.join(str(tmp_path), "no-such-dir", "graph", "tortoise.db")
+
+        rc = _run_doctor(["--path", db_path])
+        out = capsys.readouterr().out
+
+        assert rc == 1
+        assert "FATAL CONFIG" not in out
+        assert "Traceback" not in out
+        assert "redis-server" not in out
+        line = _health_line(out)
+        assert "❌" in line  # configured-but-missing target is a config error
+        assert "not set up yet" in line
+        assert "tortoise init" in line
+        assert db_path in line  # names the misconfigured target
+        # probe skipped → the missing dir tree was NOT created
+        assert not os.path.exists(os.path.dirname(db_path))
+
+    def test_no_flags_fresh_machine_reports_not_set_up(self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """The canonical first-run scenario: no flags, no env, no ~/.tortoise
+        → doctor reports 'not set up yet — run tortoise init' (rc 0) instead
+        of the raw embedded-redis FATAL CONFIG error."""
+        from tortoise import config as _config
+        canonical = os.path.join(str(tmp_path), ".tortoise", "tortoise.db")
+        monkeypatch.setattr(_config, "DEFAULT_DB_PATH", canonical)
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert rc == 0
+        assert "FATAL CONFIG" not in out
+        assert "Traceback" not in out
+        line = _health_line(out)
+        assert "⚠️" in line
+        assert "not set up yet" in line
+        assert canonical in line  # names the missing default so the hint is actionable
+        assert "❌" not in line
+        assert not (tmp_path / ".tortoise").exists()  # no dir created by the probe
+
+
+class TestDoctorImportHygiene:
+    """#2204 O/I/T (3) regression: importing tortoise modules on a clean env
+    must NOT emit dev-mode pepper / API-key warnings or fastmcp "Component
+    already exists" / "no handler — skipped" noise. Runs in a SUBPROCESS
+    (fresh interpreter) so module caching from earlier tests cannot mask a
+    regression, with the pepper/key env scrubbed so the dev fallback path is
+    exercised.
+    """
+
+    _SCRUB_ENV = (
+        *_DB_ENV_VARS,
+        "TORTOISE_SECRET_PEPPER", "TORTOISE_API_KEY", "OPENROUTER_API_KEY",
+        "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",
+        "TORTOISE_TEST_MODE", "TORTOISE_FAST_ATEXIT", "RATE_LIMIT_DISABLED",
+        "TORTOISE_TEST_SESSION", "TORTOISE_SESSION_LLM_MOCK",
+    )
+
+    def _run_py(self, code: str) -> subprocess.CompletedProcess:
+        env = dict(os.environ)
+        for k in self._SCRUB_ENV:
+            env.pop(k, None)
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env["PYTHONPATH"] = root
+        return subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True, text=True, timeout=180, env=env, cwd=root,
+        )
+
+    def test_import_tortoise_auth_emits_no_warning(self):
+        """Importing tortoise.auth (pepper + key unset) is silent — the
+        dev-mode pepper warning moved from import time to first use."""
+        p = self._run_py("import tortoise.auth")
+        assert p.returncode == 0, p.stderr
+        assert p.stderr == "", p.stderr
+        assert "dev-mode pepper" not in p.stderr
+
+    def test_auth_dev_pepper_warns_once_at_first_use(self):
+        """The dev-pepper signal still fires — once per process, on first
+        hashing — never per call."""
+        p = self._run_py(
+            "import tortoise.auth as a; from tortoise.auth import hash_api_key; "
+            "hash_api_key('k1'); hash_api_key('k2'); hash_api_key('k3')"
+        )
+        assert p.returncode == 0, p.stderr
+        assert p.stderr.count("dev-mode pepper") == 1, p.stderr
+
+    def test_import_mcp_server_emits_no_fastmcp_noise(self):
+        """Importing tortoise.mcp_server emits no "Component already exists"
+        (duplicate registration) and no "registry entries have no handler"
+        lines — the pre-#2204 import noise."""
+        p = self._run_py("import tortoise.mcp_server")
+        assert p.returncode == 0, p.stderr
+        assert "Component already exists" not in p.stderr
+        assert "no handler" not in p.stderr
+
+    def test_session_capture_registered_on_mcp_instance(self):
+        """tortoise_session_capture — a registry tool whose handler existed
+        but was never registered while register_all ran mid-module — must now
+        actually reach the MCP server (#2204; the #993 entrypoint regression
+        only asserts >=70 tools + the onboarding set, so it would not catch a
+        silent absence)."""
+        p = self._run_py(
+            "import tortoise.mcp_server as m; "
+            "comps = m.mcp._local_provider._components; "
+            "names = [getattr(c, 'name', '') for c in comps.values()]; "
+            "assert 'tortoise_session_capture' in names, names; "
+            "print('OK')"
+        )
+        assert p.returncode == 0, p.stderr
+        assert "OK" in p.stdout
 
 
 class TestDoctorSessionExtraction:
-    """#1197: doctor surfaces the /v1/sessions LLM-provider gate (#822).
+    """#1197: doctor surfaces the /v1/sessions LLM-provider state (#822).
 
-    Capture fails closed (503) when no provider key is configured — the beta
-    testers' most-critical feature. Doctor must report the provider/model
-    when configured, and FAIL in hosted mode (FLY_APP_NAME) when the key is
-    missing or the test seam is left on, so ops catch it before testers do.
+    Captures are STORED but the LLM extraction is skipped when no provider key
+    is configured (#3892) — extraction is the beta testers' most-critical
+    feature. Doctor must report the provider/model when configured, and FAIL
+    in hosted mode (FLY_APP_NAME) when the key is missing or the test seam is
+    left on, so ops catch it before testers do.
     """
 
     _LLM_ENV = (
@@ -367,15 +679,16 @@ class TestDoctorSessionExtraction:
         return next(line for line in out.splitlines() if "Session extraction" in line)
 
     def test_no_provider_local_warns(self, clean_llm_env, capsys):
-        """No key + not hosted → ⚠️ warning (capture fails closed; rc not
-        driven by this check). Embedded DB so the only possible ❌ is mine."""
+        """No key + not hosted → ⚠️ warning (captures are stored, extraction
+        skipped; rc not driven by this check). Embedded DB so the only
+        possible ❌ is mine."""
         monkeypatch, db_path = clean_llm_env  # noqa: RUF059
         rc = _run_doctor(["--path", db_path])
         out = capsys.readouterr().out
 
         line = self._extraction_line(out)
         assert "⚠️" in line
-        assert "503" in line and "no LLM provider key" in line
+        assert "STORED" in line and "no LLM provider key" in line
         assert rc in (0, 1)
 
     def test_provider_key_reports_provider(self, clean_llm_env, capsys):
@@ -406,7 +719,8 @@ class TestDoctorSessionExtraction:
 
     def test_hosted_no_provider_fails(self, clean_llm_env, capsys):
         """Hosted mode (FLY_APP_NAME) + no provider key → ❌ + rc 1 — the
-        flagship beta feature cannot work; ops must not ship this."""
+        flagship extraction feature cannot work; ops must not ship this. The
+        copy is truthful: captures are STORED, extraction is skipped."""
         monkeypatch, db_path = clean_llm_env
         monkeypatch.setenv("FLY_APP_NAME", "tortoise-api")
         rc = _run_doctor(["--path", db_path])
@@ -414,7 +728,7 @@ class TestDoctorSessionExtraction:
 
         line = self._extraction_line(out)
         assert "❌" in line
-        assert "503" in line
+        assert "STORED" in line and "skipped" in line
         assert rc == 1
 
     def test_hosted_mock_seam_fails(self, clean_llm_env, capsys):
@@ -519,6 +833,9 @@ class TestOnboardDoctorCall:
         """#703 follow-up: _cmd_onboard calls _cmd_doctor(Namespace(cmd='doctor'))
         — both args.db AND args.path must be read via getattr."""
         monkeypatch.setenv("TORTOISE_DB_PATH", os.path.join(str(tmp_path), "onboard.db"))
+        # Seed an initialized DB (doctor must not create one as a side effect
+        # of a diagnostic — #2204); the health row must then report THIS graph.
+        _seed_db(os.path.join(str(tmp_path), "onboard.db"), "doctor onboard seed")
 
         from tortoise.__main__ import _cmd_doctor
         rc = _cmd_doctor(argparse.Namespace(cmd="doctor"))
@@ -527,7 +844,7 @@ class TestOnboardDoctorCall:
         assert rc in (0, 1)
         assert "'Namespace' object has no attribute" not in out
         line = _health_line(out)
-        assert "0 Points" in line  # embedded check actually ran (not a misleading ❌)
+        assert "Points" in line  # embedded check actually ran (not a misleading ❌)
 
     def test_full_onboard_reaches_doctor_without_crash(self, monkeypatch, clear_db_env, tmp_path, capsys):
         """End-to-end onboard → doctor Step 5 completes (init falls back to

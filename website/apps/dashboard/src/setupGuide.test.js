@@ -1,0 +1,221 @@
+// setupGuide.test.js — run with node --test (Node 20+, zero deps: the
+// derivation is pure, no jsdom/React needed) (#2001 W5).
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { SETUP_GUIDE_COUNTED, setupGuide } from './setupGuide.js'
+
+test('counted card steps are the fork-aware 3 (capture-disclosed never counted)', () => {
+  assert.deepEqual([...SETUP_GUIDE_COUNTED], [
+    'harness-connected',
+    'first-points-filed',
+    'decide-completed',
+  ])
+  assert.ok(!SETUP_GUIDE_COUNTED.includes('capture-disclosed'))
+  // #3913: catalog-presented is no longer a counted card step.
+  assert.ok(!SETUP_GUIDE_COUNTED.includes('catalog-presented'))
+})
+
+test('capture-disclosed before decide must NOT render 4 of 4 (self fork, all 4 rows done)', () => {
+  // harness + seed + decide + capture all done — the capture row must not
+  // inflate the count (total stays 3).
+  const g = setupGuide({
+    status: 'active', fork: 'self', compact: false,
+    completed_steps: ['team-named', 'harness-connected', 'first-points-filed',
+                      'decide-completed', 'capture-disclosed'],
+  })
+  assert.equal(g.total, 3)
+  assert.equal(g.done, 3)
+  assert.equal(g.percent, 100)
+})
+
+test('self fork shows connect/seed/decide/capture; decide missing → current step decide', () => {
+  const g = setupGuide({
+    status: 'active', fork: 'self', compact: false,
+    completed_steps: ['team-named', 'harness-connected', 'first-points-filed'],
+  })
+  assert.deepEqual(g.rows.map((r) => r.id), [
+    'harness-connected', 'first-points-filed', 'decide-completed', 'capture-disclosed',
+  ])
+  assert.equal(g.done, 2)
+  assert.equal(g.total, 3)
+  assert.equal(g.currentStep, 'decide-completed')
+})
+
+test('#3913: build fork renders NO extra row — the two observed acts only', () => {
+  const g = setupGuide({
+    status: 'active', fork: 'build', compact: false,
+    completed_steps: ['team-named', 'harness-connected', 'first-points-filed',
+                      'catalog-presented'],
+  })
+  assert.deepEqual(g.rows.map((r) => r.id), [
+    'harness-connected', 'first-points-filed', 'capture-disclosed',
+  ])
+  assert.equal(g.done, 2)
+  assert.equal(g.total, 2)
+  assert.equal(g.percent, 100)
+})
+
+test('build fork never counts decide', () => {
+  const g = setupGuide({
+    status: 'active', fork: 'build', compact: false,
+    completed_steps: ['team-named', 'harness-connected', 'decide-completed'],
+  })
+  assert.equal(g.done, 1)  // decide not in the build checklist
+  assert.equal(g.total, 2)
+})
+
+test('compact shows the reduced checklist (2 counted rows)', () => {
+  const g = setupGuide({
+    status: 'active', fork: 'self', compact: true,
+    completed_steps: ['team-named', 'harness-connected', 'first-points-filed'],
+  })
+  assert.deepEqual(g.rows.map((r) => r.id), [
+    'harness-connected', 'first-points-filed', 'capture-disclosed',
+  ])
+  assert.equal(g.done, 2)
+  assert.equal(g.total, 2)
+})
+
+test('complete status collapses the card (grandfathered + gate-complete)', () => {
+  const g = setupGuide({ status: 'complete', fork: 'self', compact: false })
+  assert.equal(g.collapsed, true)
+  assert.equal(g.status, 'complete')
+})
+
+test('wire-complete (node-absent grandfathered) also collapses the card', () => {
+  // jsonb onboarding_complete=true with status 'active' (no backfilled node)
+  // must never render a false active checklist — the COLLAPSE flag is what
+  // governs rendering; done/total still compute the underlying checklist.
+  const g = setupGuide({
+    status: 'active', fork: 'self', compact: false,
+    onboarding_complete: true,
+    completed_steps: [],
+  })
+  assert.equal(g.collapsed, true)
+  assert.equal(g.status, 'complete')
+})
+
+test('active + onboarding_complete false renders the checklist', () => {
+  const g = setupGuide({
+    status: 'active', fork: 'self', compact: false,
+    onboarding_complete: false,
+    completed_steps: ['harness-connected'],
+  })
+  assert.equal(g.collapsed, false)
+  assert.equal(g.status, 'active')
+  assert.equal(g.total, 3)
+})
+
+test('DEGRADED: graph-down FLOW markers → unavailable, never a false checklist', () => {
+  const g = setupGuide({
+    status: 'unavailable', fork: 'unavailable', version: 'unavailable',
+    compact: 'unavailable', completed_steps: 'unavailable',
+  })
+  assert.equal(g.degraded, true)
+  assert.equal(g.status, 'unavailable')
+  assert.equal(g.done, 0)
+  assert.equal(g.total, 0)
+})
+
+test('fork None defaults to self (read-time J6 default)', () => {
+  const g = setupGuide({
+    status: 'active', fork: null, compact: false,
+    completed_steps: ['harness-connected', 'first-points-filed'],
+  })
+  assert.deepEqual(g.rows.map((r) => r.id)[2], 'decide-completed')
+})
+
+test('#2407 unsure org (fork_unsure_at, fork still None) keeps the FORK QUESTION as the open counted row', () => {
+  const g = setupGuide({
+    status: 'active', fork: null, fork_unsure_at: '2026-01-01T00:00:00+00:00', compact: false,
+    completed_steps: ['team-named', 'harness-connected', 'first-points-filed'],
+  })
+  assert.deepEqual(g.rows.map((r) => r.id), [
+    'harness-connected', 'first-points-filed', 'fork', 'capture-disclosed',
+  ])
+  // NOT the self checklist: decide-completed must not render as the open row
+  assert.ok(!g.rows.some((r) => r.id === 'decide-completed'))
+  const forkRow = g.rows.find((r) => r.id === 'fork')
+  assert.equal(forkRow.counted, true)
+  assert.equal(forkRow.done, false)
+  assert.equal(forkRow.label, "Choose how you'll use Tortoise")
+  assert.equal(g.total, 3)  // harness + seed + fork (capture uncounted)
+  assert.equal(g.done, 2)
+  assert.equal(g.currentStep, 'fork')  // the deferral keeps the guide open
+  assert.equal(g.collapsed, false)
+})
+
+test('#2407 unsure org with zero progress shows the fork row as a counted row (never collapsed)', () => {
+  const g = setupGuide({
+    status: 'active', fork: null, fork_unsure_at: '2026-01-01T00:00:00+00:00', compact: false,
+    completed_steps: ['team-named'],
+  })
+  assert.deepEqual(g.rows.map((r) => r.id), [
+    'harness-connected', 'first-points-filed', 'fork', 'capture-disclosed',
+  ])
+  assert.equal(g.currentStep, 'harness-connected')
+  assert.equal(g.collapsed, false)
+})
+
+test('#2407 a persisted fork wins over a stale marker — fork set renders the normal fork-aware checklist', () => {
+  // invariant: fork_unsure_at is meaningful only while fork IS NULL (the
+  // checkpoint clears it on fork-set, but reads must never trust it)
+  const g = setupGuide({
+    status: 'active', fork: 'build', fork_unsure_at: '2026-01-01T00:00:00+00:00', compact: false,
+    completed_steps: ['team-named', 'harness-connected', 'first-points-filed'],
+  })
+  assert.deepEqual(g.rows.map((r) => r.id), [
+    'harness-connected', 'first-points-filed', 'capture-disclosed',
+  ])
+  assert.ok(!g.rows.some((r) => r.id === 'fork'))
+  assert.equal(g.total, 2)
+})
+
+test('#2407 complete-status unsure org stays collapsed (never re-renders an active fork row)', () => {
+  const g = setupGuide({
+    status: 'complete', fork: null, fork_unsure_at: '2026-01-01T00:00:00+00:00', compact: false,
+    completed_steps: [],
+  })
+  assert.equal(g.collapsed, true)
+  assert.equal(g.status, 'complete')
+})
+
+test('unknown fork falls back to the self checklist (mirrors Python gate)', () => {
+  const g = setupGuide({
+    status: 'active', fork: 'bogus', compact: false,
+    completed_steps: ['harness-connected', 'first-points-filed', 'decide-completed'],
+  })
+  assert.deepEqual(g.rows.map((r) => r.id), [
+    'harness-connected', 'first-points-filed', 'decide-completed', 'capture-disclosed',
+  ])
+  assert.equal(g.done, 3)
+  assert.equal(g.total, 3)
+  assert.equal(g.percent, 100)
+})
+
+test('unknown completed_steps ids are ignored (not counted, no crash)', () => {
+  const g = setupGuide({
+    status: 'active', fork: 'self', compact: false,
+    completed_steps: ['team-named', 'harness-connected', 'mystery-step',
+                      'first-points-filed', 'decide-completed'],
+  })
+  assert.equal(g.done, 3)  // mystery-step must not inflate the count
+  assert.equal(g.total, 3)
+})
+
+test('capture-disclosed on a BUILD fork does not inflate the total', () => {
+  const g = setupGuide({
+    status: 'active', fork: 'build', compact: false,
+    completed_steps: ['team-named', 'harness-connected', 'first-points-filed',
+                      'catalog-presented', 'capture-disclosed'],
+  })
+  assert.equal(g.done, 2)
+  assert.equal(g.total, 2)
+  assert.equal(g.percent, 100)
+})
+
+test('null state → loading (client fetch transient)', () => {
+  const g = setupGuide(null)
+  assert.equal(g.status, 'loading')
+  assert.equal(g.done, 0)
+})

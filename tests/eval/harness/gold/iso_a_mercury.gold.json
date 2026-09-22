@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "session_id": "iso_a_mercury",
+  "suite": "isolation",
+  "teams": {
+    "team_a": {
+      "anchors": [
+        "ships its alpha next Tuesday",
+        "budget is approved at $40k",
+        "owns the Mercury launch checklist"
+      ]
+    },
+    "team_b": {
+      "anchors": [
+        "incident postmortem is scheduled Friday"
+      ]
+    }
+  }
+}

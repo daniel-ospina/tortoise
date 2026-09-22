@@ -7,10 +7,10 @@ dashboard/Supabase account. Per-identity rate limit (3/hour).
 x-device-id are ignored (a client-chosen identity trivially bypasses the
 per-identity rate limit).
 #740: /internal/provision must write Membership with status:'active' so the
-E6 /v1/teams listing (active-membership query) includes the provisioned team.
+E6 /v1/organizations listing (active-membership query) includes the provisioned team.
 #770 (plan Task 2 — identity path): the server-side anon identity is the
 anchor for the Supabase control-plane row. When the agent writer flips to
-Supabase (plan Task 8/#765), provision_team stores it as team_memberships.identity
+Supabase (plan Task 8/#765), provision_team stores it as org_memberships.identity
 with user_id NULL (0009 chk_member_or_invite amendment + 0010 provision_team
 p_identity variant) — the endpoint itself still writes the registry until
 Task 8, and test_signup_identity_anchors_anon_membership locks the anchor
@@ -34,6 +34,12 @@ from tortoise.hosted_api import app
 from tortoise.session_auth import get_current_user
 
 _INTERNAL_KEY = "test-internal-shared-secret-xyz"
+
+# #1719 (Task 3): org_memberships.user_id is a uuid column — real JWT
+# subjects are UUIDs; non-UUID user_id literals are prod-impossible.
+# api_keys.created_by stays TEXT and remains non-UUID.
+_U740 = "9f2c1a40-0000-4a00-8000-000000000740"
+_U_CLAIM_A = "9f2c1a40-0000-4a00-8000-00000000000b"
 
 
 def _wait_for(predicate, timeout_s: float = 5.0):
@@ -65,14 +71,14 @@ class TestAgentSignup:
         key = r.json()["key"]
         r2 = client.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
         assert r2.status_code == 200, r2.text
-        assert r2.json()["team_id"]
+        assert r2.json()["org_id"]
 
     def test_signup_returns_key(self, client):
         r = client.post("/v1/agent/signup", json={"identity": f"anon-{uuid.uuid4().hex[:12]}"})
         assert r.status_code == 200, r.text
         data = r.json()
         assert data["key"].startswith("tt_")
-        assert data["team_id"]
+        assert data["org_id"]
         assert data["tier"] == "free"
 
     def test_client_identity_ignored(self, client):
@@ -96,11 +102,11 @@ class TestAgentSignup:
 
     def test_signup_identity_anchors_anon_membership(self, client):
         """#770 identity path: the server-side anon identity returned by signup
-        is the anchor for the Supabase team_memberships row (NULL user_id +
+        is the anchor for the Supabase org_memberships row (NULL user_id +
         identity — 0009 chk_member_or_invite amendment; provision_team's
         p_identity variant, 0010). The registry Membership node's user_id must
         equal the response identity — the SAME value provision_team stores in
-        team_memberships.identity when the agent writer flips to Supabase
+        org_memberships.identity when the agent writer flips to Supabase
         (plan Task 8/#765), so a later migration can reconcile rows 1:1."""
         r = client.post("/v1/agent/signup", json={})
         assert r.status_code == 200, r.text
@@ -108,10 +114,10 @@ class TestAgentSignup:
         assert data["identity"].startswith("anon-")
         sdk = ha_mod._make_sdk(namespace="registry")
         rows = sdk._get_registry().query(
-            "MATCH (m:Membership {team_id:$tid}) RETURN m.user_id",
-            params={"tid": data["team_id"]},
+            "MATCH (m:Membership {org_id:$tid}) RETURN m.user_id",
+            params={"tid": data["org_id"]},
         ).result_set
-        assert rows, f"no membership row for {data['team_id']}"
+        assert rows, f"no membership row for {data['org_id']}"
         assert rows[0][0] == data["identity"], (
             f"membership anchor {rows[0][0]!r} != signup identity {data['identity']!r}"
         )
@@ -128,7 +134,7 @@ class TestAgentSignup:
         row = sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) RETURN t.max_users, t.max_graphs, "
             "t.max_api_keys, t.ops_allowance, t.graph_size_cap",
-            params={"id": r.json()["team_id"]},
+            params={"id": r.json()["org_id"]},
         ).result_set[0]
         assert row[0] == lim["max_users_per_team"]
         assert row[1] == lim["max_graphs_per_team"]
@@ -185,13 +191,13 @@ class TestSignupIpRateLimit:
         """R8 success-path feed: a successful mint records the IP."""
         calls = []
         monkeypatch.setattr("tortoise.abuse.record_signup",
-                            lambda ip, team_id=None, now=None: calls.append((ip, team_id)))
+                            lambda ip, org_id=None, now=None: calls.append((ip, org_id)))
         r = client.post("/v1/agent/signup", json={})
         assert r.status_code == 200
         # the feed is fire-and-forget (to_thread) — poll briefly for the call
         _wait_for(lambda: len(calls) == 1)
         assert len(calls) == 1
-        assert calls[0][1] == r.json()["team_id"]
+        assert calls[0][1] == r.json()["org_id"]
 
     def test_signup_ip_limit_and_velocity_single_notify(self, client, monkeypatch):
         """P1-FIX-2 integration: 3rd signup 429 AND exactly ONE ops notify —
@@ -213,7 +219,7 @@ class TestSignupIpRateLimit:
 
 class TestProvisionMembershipStatus:
     """#740 — /internal/provision must write Membership status:'active' so
-    the E6 /v1/teams listing (which filters on status='active') shows it."""
+    the E6 /v1/organizations listing (which filters on status='active') shows it."""
 
     def test_provisioned_team_lists_in_teams_e6(self, client, monkeypatch):
         # #880: _check_internal reads FASTAPI_INTERNAL_KEY lazily (was a
@@ -226,29 +232,29 @@ class TestProvisionMembershipStatus:
                 "/internal/provision",
                 headers={"Authorization": f"Bearer {_INTERNAL_KEY}"},
                 json={
-                    "team_id": f"prov{os.urandom(3).hex()}",
-                    "team_name": "Provisioned Team",
+                    "org_id": f"prov{os.urandom(3).hex()}",
+                    "org_name": "Provisioned Team",
                     "api_key_hash": "ab" * 64,
-                    "created_by": "user-740-provision",
+                    "created_by": _U740,
                 },
             )
             assert r.status_code == 200, r.text
-            team_id = r.json()["team_id"]
+            org_id = r.json()["org_id"]
 
-            # E6 (GET /v1/teams) is session-JWT gated — override the FastAPI
+            # E6 (GET /v1/organizations) is session-JWT gated — override the FastAPI
             # dependency with the provisioned user (the established pattern in
             # test_hosted_api.py; not timing-sensitive like monkeypatching the
             # underlying verify_session_jwt, which flakes under load).
             app.dependency_overrides[get_current_user] = lambda: {
-                "user_id": "user-740-provision",
+                "user_id": _U740,
                 "email": "prov@test.dev",
             }
             try:
-                r2 = client.get("/v1/teams")
+                r2 = client.get("/v1/organizations")
                 assert r2.status_code == 200, r2.text
                 teams = r2.json()
-                assert any(t["team_id"] == team_id for t in teams), (
-                    f"provisioned team {team_id} missing from E6 listing: {teams}"
+                assert any(t["org_id"] == org_id for t in teams), (
+                    f"provisioned team {org_id} missing from E6 listing: {teams}"
                 )
             finally:
                 app.dependency_overrides.pop(get_current_user, None)
@@ -261,7 +267,7 @@ class TestAgentSignupClaim:
 
     Indicators 1 + 3: the SAME key authenticates pre/post claim and memories
     (data-plane graph) are intact — the claim touches only the control-plane
-    membership/email rows, never the team_id or the graph namespace.
+    membership/email rows, never the org_id or the graph namespace.
     """
 
     @pytest.fixture(autouse=True)
@@ -295,11 +301,11 @@ class TestAgentSignupClaim:
     def test_claim_same_key_authenticates_pre_post_and_memories_intact(
             self, client, monkeypatch):
         """Indicator 1 + 3: mint → point → claim → same key reads the SAME
-        graph (team_id unchanged) — memories preserved."""
+        graph (org_id unchanged) — memories preserved."""
         r = client.post("/v1/agent/signup", json={})
         assert r.status_code == 200, r.text
         key = r.json()["key"]
-        team_id = r.json()["team_id"]
+        org_id = r.json()["org_id"]
 
         # pre-claim: write a memory with the key
         r = client.post(
@@ -309,7 +315,7 @@ class TestAgentSignupClaim:
         )
         assert r.status_code == 200, r.text
 
-        self._patch_jwt(monkeypatch, "user-claim-a", "verified@example.com",
+        self._patch_jwt(monkeypatch, _U_CLAIM_A, "verified@example.com",
                         ["github"])
         r = client.post(
             "/v1/claim",
@@ -317,7 +323,7 @@ class TestAgentSignupClaim:
             json={"api_key": key},
         )
         assert r.status_code == 200, r.text
-        assert r.json()["team_id"] == team_id
+        assert r.json()["org_id"] == org_id
 
         # post-claim: the same key reads the SAME graph (memories intact)
         r = client.get(
@@ -329,9 +335,9 @@ class TestAgentSignupClaim:
         assert "pre-claim memory" in contents, (
             f"pre-claim memory lost after claim: {contents}")
 
-    def test_claim_email_overwrite_on_reg_team(self, client, monkeypatch):
-        """reg- identity teams (email set at mint) get the email overwritten
-        with the verified OAuth email on claim (P1-FIX-B, unconditional)."""
+    def test_claim_does_not_overwrite_reg_team_email(self, client, monkeypatch):
+        """#1765 demotion: claim never writes teams.email — the reg- mint
+        contact value (stale-reg@example.com) survives the claim."""
         r = client.post("/v1/agent/signup", json={})
         key = r.json()["key"]  # noqa: F841
         import tortoise.supabase_control as sc
@@ -339,19 +345,19 @@ class TestAgentSignupClaim:
         # simulate a reg- mint: provision a SECOND team with email set
         import uuid as _uuid  # noqa: I001
         from tortoise.auth import lookup_hash as _lh, hash_api_key as _hash
-        team_id = f"team-reg-{_uuid.uuid4().hex[:10]}"
+        org_id = f"team-reg-{_uuid.uuid4().hex[:10]}"
         api_key = f"tt_{_uuid.uuid4().hex}"
-        sc.provision_team(fake, **{
+        sc.provision_org(fake, **{
             "p_user_id": None, "p_identity": f"reg-{_uuid.uuid4().hex[:12]}",
-            "p_team_id": team_id, "p_team_name": f"Reg {team_id}",
+            "p_org_id": org_id, "p_org_name": f"Reg {org_id}",
             "p_api_key": api_key, "p_key_hash": _hash(api_key),
-            "p_lookup_hash": _lh(api_key), "p_graph_name": f"team_{team_id}",
+            "p_lookup_hash": _lh(api_key), "p_graph_name": f"org_{org_id}",
             "p_email": "stale-reg@example.com",
             "p_key_prefix": api_key[:10], "p_tier": "free",
             "p_max_users": 1, "p_max_graphs": 1, "p_ops_allowance": 10000,
             "p_graph_size_cap": 10000,
         })
-        self._patch_jwt(monkeypatch, "user-claim-a", "fresh-verified@example.com",
+        self._patch_jwt(monkeypatch, _U_CLAIM_A, "fresh-verified@example.com",
                         ["google"])
         r = client.post(
             "/v1/claim",
@@ -359,9 +365,10 @@ class TestAgentSignupClaim:
             json={"api_key": api_key},
         )
         assert r.status_code == 200, r.text
-        team_row = next(t for t in fake.tables["teams"] if t["id"] == team_id)
-        assert team_row["email"] == "fresh-verified@example.com", (
-            f"reg- email must be overwritten A→B, got {team_row['email']}")
+        org_row = next(t for t in fake.tables["organizations"] if t["id"] == org_id)
+        assert org_row.get("email") == "stale-reg@example.com", (
+            f"claim must NOT write teams.email — mint contact survives, "
+            f"got {org_row.get('email')}")
 class TestIpv6Normalization:
     """#1081 review P4: IPv4-mapped IPv6 must share ONE bucket with the
     dotted-quad form — a dual-stack client cannot double its 2/24h budget

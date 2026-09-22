@@ -1,0 +1,8 @@
+# #1929 (epic #1891 slice 1): the sdist must carry the tortoise.packs
+# discovery stub so a wheel rebuilt from the sdist (pip install <sdist>,
+# --no-binary :all: tooling) still ships the pack catalog. Without it, the
+# sdist ships only the loose packs/ source files and the rebuilt wheel has
+# ZERO tortoise/packs/ entries — the silent empty-registry defect (G1)
+# resurfacing on the sdist install path. Verified 2026-08-28 (plan-verify
+# gate): with this include, the sdist-rebuilt wheel ships all manifests.
+include tortoise/packs/__init__.py

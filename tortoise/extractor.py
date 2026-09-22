@@ -5,6 +5,11 @@ key: one utterance-level point each (Option A), plus asserted-only {NAND, IMPL}
 operators inferred from discourse connectives. The real LLM extractor (M2) will
 implement the same `Extractor` interface — segment in, events out — so nothing
 downstream changes when it's swapped in.
+
+Builder capability catalog note (#2004 W8 / epic #1976 DM-5): this module is
+referenced in the builder capability catalog (onboarding) — catalog module
+'Session extractor' — tortoise/tool_registry.py CAPABILITY_CATALOG. If you
+add or rename an extractor/indexer, update the catalog reference.
 """
 from __future__ import annotations
 
@@ -50,7 +55,13 @@ def _has_cue(text: str, single_re: re.Pattern, phrases: tuple[str, ...]) -> bool
     return bool(single_re.search(text)) or any(p in text for p in phrases)
 
 _SPEAKER = re.compile(r"^\s*([A-Z][\w .'-]{0,40}):\s*(.*)$")
-_SENT = re.compile(r"[^.?!]+[.?!]?")
+# #2207: a period INSIDE a version/identifier token (digit.digit — 'BSL 1.1',
+# 'v2.5.1', 'MPL-2.0') is NOT a sentence boundary. The content class admits
+# digit-flanked periods so '…BSL 1.1…' survives as ONE sentence; the optional
+# terminator refuses to end a sentence on a period followed by a digit (a
+# trailing '1.' inside '1.1' must stay inside the token). Real boundaries
+# after a decimal still split ('That costs 3.5. Next…' → two sentences).
+_SENT = re.compile(r"(?:[^.!?]|(?<=\d)\.(?=\d))+(?:[.!?](?!\d))?")
 
 
 class Extractor(Protocol):
@@ -343,10 +354,10 @@ class MockExtractor:
 _ISSUE_REF_RE = re.compile(r"([a-zA-Z0-9_-]+)#(\d+)")
 
 # objectKind vocab reuse (issue #782 complexity table + plan §4.1):
-# Project, WorkItem, document, tag, user, skill, tool, agent, workflow,
-# agreement, standard, other.
+# Project, WorkItem, Problem, document, tag, user, skill, tool, agent,
+# workflow, agreement, standard, other.
 _OBJECT_KIND_VOCAB = frozenset({
-    "project", "workitem", "document", "tag", "user", "skill", "tool",
+    "project", "workitem", "problem", "document", "tag", "user", "skill", "tool",
     "agent", "workflow", "agreement", "standard", "other",
 })
 
@@ -892,8 +903,9 @@ class EntityStage(_SemanticStage):
     def __init__(self, model, *, object_kinds: list[str] | None = None):
         super().__init__(model, object_kinds=_intersect_object_kinds(
             object_kinds or [
-                "project", "workitem", "document", "tag", "user", "skill",
-                "tool", "agent", "workflow", "agreement", "standard", "other",
+                "project", "workitem", "problem", "document", "tag", "user",
+                "skill", "tool", "agent", "workflow", "agreement",
+                "standard", "other",
             ],
         ))
         self._system = _ENTITY_CONV_SYS

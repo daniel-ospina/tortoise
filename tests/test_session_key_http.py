@@ -9,13 +9,13 @@ the audit:
 - 200 mint: bootstrap (24h expiry, cap-exempt, 3-active backstop) vs recovery
   (persistent, counts against max_api_keys)
 - 403 no-membership / no membership in team
-- 400 multi-team without team_id
+- 400 multi-team without org_id
 - 429 bootstrap backstop (3 active) — expired keys don't count (#742)
 - 402 recovery-at-cap with NO revocable other key
 - recovery-at-cap auto-revokes the OLDEST OTHER key (#750.10 — never the
   caller's own key)
 - 422 bad purpose
-- mint → Bearer round-trip through get_current_team (registry lookup path)
+- mint → Bearer round-trip through get_current_org (registry lookup path)
 
 Fixture mirrors tests/test_hosted_api.py (dependency override + temp
 FalkorDBLite DB via TortoiseSDK.__init__ patch).
@@ -29,41 +29,24 @@ from datetime import datetime, timedelta, timezone
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
-import pytest  # noqa: I001
+import pytest
 from fastapi.testclient import TestClient
 
+from tests._http_fixtures import patched_tortoise_sdk
 from tortoise.auth import hash_api_key, verify_api_key  # noqa: F401
 from tortoise.hosted_api import app, get_current_user
 from tortoise.sdk import TortoiseSDK
 
+# #1719 (Task 3): org_memberships.user_id is a uuid column — real JWT
+# subjects are UUIDs; non-UUID user_id literals are prod-impossible.
+# Session-key api_keys.created_by mirrors the minting user's UUID (the
+# cap/backstop logic compares it to the JWT subject); anon/reg identity
+# values would stay TEXT, but none appear here.
+_U1 = "9f2c1a40-0000-4a00-8000-000000000001"
+_U2 = "9f2c1a40-0000-4a00-8000-000000000002"
+
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
-
-
-def _patch_tortoise_sdk_init(db_path: str):
-    """Make TortoiseSDK use a temp db_path when constructed without one."""
-    import tortoise.hosted_api as ha_mod
-
-    _orig_init = ha_mod.TortoiseSDK.__init__
-
-    def _patched_init(self, db_path_arg=None, *, namespace=None, **kwargs):
-        _orig_init(self, db_path, namespace=namespace)
-
-    ha_mod.TortoiseSDK.__init__ = _patched_init
-    # Break the _make_sdk embedded fallback anchor (#1470): _FALLBACK_KEEPALIVE
-    # is module-level and survives test files, so an anchored SDK bound to a
-    # PREVIOUS test's temp DB leaks state into this test (the anchor's socket
-    # dies when that tempdir is removed → redis.socket ConnectionError, or the
-    # previous graph's rows appear in the "fresh" temp DB). Clear it so
-    # _make_sdk re-binds to THIS test's temp DB.
-    ha_mod._FALLBACK_KEEPALIVE.clear()
-    return _orig_init
-
-
-def _restore_tortoise_sdk_init(original_init):
-    import tortoise.hosted_api as ha_mod
-
-    ha_mod.TortoiseSDK.__init__ = original_init
 
 
 @pytest.fixture
@@ -77,21 +60,25 @@ def client():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
         app.dependency_overrides[get_current_user] = lambda: {
-            "user_id": "user-1",
+            "user_id": _U1,
             "email": "owner@example.com",
         }
-        _orig_init = _patch_tortoise_sdk_init(db_path)
-        try:
-            with TestClient(app) as tc:
-                yield tc
-        finally:
-            _restore_tortoise_sdk_init(_orig_init)
-            app.dependency_overrides.clear()
-            while _REG_SDKS:
-                try:
-                    _REG_SDKS.pop().close()
-                except Exception:
-                    pass
+        # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk) —
+        # patch __init__ → temp DB + #1950 TORTOISE_DB_PATH pin + close-then-
+        # clear at enter; pop-pin → restore __init__ → deterministic anchor
+        # close → clear overrides at exit (replaces the local
+        # _patch/_restore_tortoise_sdk_init copies). The _REG_SDKS hold +
+        # close stay here (direct SDK constructions, not keepalive anchors).
+        with patched_tortoise_sdk(db_path):
+            try:
+                with TestClient(app) as tc:
+                    yield tc
+            finally:
+                while _REG_SDKS:
+                    try:  # noqa: SIM105
+                        _REG_SDKS.pop().close()
+                    except Exception:
+                        pass
 
 
 # ── Registry seeding helpers ─────────────────────────────────────────────────
@@ -117,39 +104,53 @@ def reg():
 _REG_SDKS: list = []
 
 
-def _seed_team(reg, team_id: str, tier: str = "free"):
+def _seed_team(reg, org_id: str, tier: str = "free"):
     reg.query(
         "CREATE (t:Team {id:$id, name:$id, tier:$tier})",
-        params={"id": team_id, "tier": tier},
+        params={"id": org_id, "tier": tier},
     )
 
 
-def _seed_membership(reg, team_id: str, user_id: str, role: str,
+def _seed_membership(reg, org_id: str, user_id: str, role: str,
                      status: str = "active"):
     reg.query(
-        "CREATE (m:Membership {user_id:$uid, team_id:$tid, role:$role, "
+        "CREATE (m:Membership {user_id:$uid, org_id:$tid, role:$role, "
         "status:$status, created_at:'2026-08-01T00:00:00+00:00'})",
-        params={"uid": user_id, "tid": team_id, "role": role, "status": status},
+        params={"uid": user_id, "tid": org_id, "role": role, "status": status},
     )
 
 
-def _seed_api_key(reg, team_id: str, key_id: str, *, created_by: str,
+def _seed_api_key(reg, org_id: str, key_id: str, *, created_by: str,
                   created_via: str, created_at: str,
                   revoked_at: str | None = None,
-                  expires_at: str | None = None):
+                  expires_at: str | None = None,
+                  key_prefix: str = "tt_x",
+                  last_used_at: str | None = None):
     reg.query(
-        "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:'h', key_prefix:'tt_x', "
+        "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:'h', key_prefix:$kp, "
         "created_by:$cb, created_at:$ca, revoked_at:$ra, expires_at:$ea, "
-        "created_via:$cv})",
-        params={"id": key_id, "tid": team_id, "cb": created_by, "ca": created_at,
-                "ra": revoked_at, "ea": expires_at, "cv": created_via},
+        "created_via:$cv, last_used_at:$lua})",
+        params={"id": key_id, "tid": org_id, "cb": created_by, "ca": created_at,
+                "ra": revoked_at, "ea": expires_at, "cv": created_via,
+                "kp": key_prefix, "lua": last_used_at},
     )
 
 
-def _count_active_keys(reg, team_id: str) -> int:
+def _count_active_keys(reg, org_id: str) -> int:
     rows = reg.query(
-        "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL RETURN count(k)",
-        params={"tid": team_id},
+        "MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL RETURN count(k)",
+        params={"tid": org_id},
+    ).result_set
+    return int(rows[0][0])
+
+
+def _count_persistent_keys(reg, org_id: str) -> int:
+    """Non-revoked keys that COUNT against max_api_keys (bootstrap-excluded
+    — mirrors the mint's count predicate)."""
+    rows = reg.query(
+        "MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL "
+        "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') RETURN count(k)",
+        params={"tid": org_id},
     ).result_set
     return int(rows[0][0])
 
@@ -176,19 +177,19 @@ class TestBootstrapMint:
 
     def test_happy_path_returns_key_and_stores_hash(self, client, reg):
         _seed_team(reg, "team-a")
-        _seed_membership(reg, "team-a", "user-1", "owner")
+        _seed_membership(reg, "team-a", _U1, "owner")
         r = client.post("/v1/session/key", json={"purpose": "bootstrap"})
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["purpose"] == "bootstrap"
-        assert body["team_id"] == "team-a"
+        assert body["org_id"] == "team-a"
         assert body["expires_at"] is not None
         assert body["key"].startswith("tt_")
         assert body["key_prefix"] == body["key"][:10]
 
         # Registry stores hash only — never the plaintext key
         rows = reg.query(
-            "MATCH (k:APIKey {team_id:'team-a'}) RETURN k.key_hash, "
+            "MATCH (k:APIKey {org_id:'team-a'}) RETURN k.key_hash, "
             "k.key_prefix, k.created_via, k.created_by",
         ).result_set
         assert len(rows) == 1
@@ -196,11 +197,11 @@ class TestBootstrapMint:
         assert verify_api_key(body["key"], stored_hash)
         assert prefix == body["key"][:10]
         assert created_via == "bootstrap"
-        assert created_by == "user-1"
+        assert created_by == _U1
 
     def test_bootstrap_expiry_is_24h(self, client, reg):
         _seed_team(reg, "team-a")
-        _seed_membership(reg, "team-a", "user-1", "owner")
+        _seed_membership(reg, "team-a", _U1, "owner")
         r = client.post("/v1/session/key", json={"purpose": "bootstrap"})
         assert r.status_code == 200
         expires = datetime.fromisoformat(r.json()["expires_at"])
@@ -210,7 +211,7 @@ class TestBootstrapMint:
 
     def test_default_purpose_is_bootstrap(self, client, reg):
         _seed_team(reg, "team-a")
-        _seed_membership(reg, "team-a", "user-1", "owner")
+        _seed_membership(reg, "team-a", _U1, "owner")
         r = client.post("/v1/session/key", json={})
         assert r.status_code == 200, r.text
         assert r.json()["purpose"] == "bootstrap"
@@ -219,9 +220,9 @@ class TestBootstrapMint:
     def test_three_active_bootstrap_429(self, client, reg):
         """3-active backstop: the 4th bootstrap mint is rejected."""
         _seed_team(reg, "team-a")
-        _seed_membership(reg, "team-a", "user-1", "owner")
+        _seed_membership(reg, "team-a", _U1, "owner")
         for i in range(3):
-            _seed_api_key(reg, "team-a", f"boot-{i}", created_by="user-1",
+            _seed_api_key(reg, "team-a", f"boot-{i}", created_by=_U1,
                           created_via="bootstrap",
                           created_at=_hours_ago(1), expires_at=_hours_ahead(1))
         r = client.post("/v1/session/key", json={"purpose": "bootstrap"})
@@ -232,9 +233,9 @@ class TestBootstrapMint:
         """#742: expired bootstrap keys neither authenticate nor count
         against the 3-active backstop."""
         _seed_team(reg, "team-a")
-        _seed_membership(reg, "team-a", "user-1", "owner")
+        _seed_membership(reg, "team-a", _U1, "owner")
         for i in range(3):
-            _seed_api_key(reg, "team-a", f"boot-exp-{i}", created_by="user-1",
+            _seed_api_key(reg, "team-a", f"boot-exp-{i}", created_by=_U1,
                           created_via="bootstrap",
                           created_at=_hours_ago(48), expires_at=_hours_ago(1))
         r = client.post("/v1/session/key", json={"purpose": "bootstrap"})
@@ -244,9 +245,9 @@ class TestBootstrapMint:
         """R13: bootstrap keys do NOT count against max_api_keys — a recovery
         mint still succeeds with 2 active bootstrap keys on free tier."""
         _seed_team(reg, "team-a")
-        _seed_membership(reg, "team-a", "user-1", "owner")
+        _seed_membership(reg, "team-a", _U1, "owner")
         for i in range(2):  # free tier max_api_keys == 2
-            _seed_api_key(reg, "team-a", f"boot-{i}", created_by="user-1",
+            _seed_api_key(reg, "team-a", f"boot-{i}", created_by=_U1,
                           created_via="bootstrap",
                           created_at=_hours_ago(1), expires_at=_hours_ahead(1))
         r = client.post("/v1/session/key", json={"purpose": "recovery"})
@@ -259,12 +260,12 @@ class TestRecoveryMint:
 
     def test_recovery_key_is_persistent(self, client, reg):
         _seed_team(reg, "team-a")
-        _seed_membership(reg, "team-a", "user-1", "owner")
+        _seed_membership(reg, "team-a", _U1, "owner")
         r = client.post("/v1/session/key", json={"purpose": "recovery"})
         assert r.status_code == 200, r.text
         assert r.json()["expires_at"] is None
         rows = reg.query(
-            "MATCH (k:APIKey {team_id:'team-a'}) RETURN k.created_via",
+            "MATCH (k:APIKey {org_id:'team-a'}) RETURN k.created_via",
         ).result_set
         assert rows[0][0] == "recovery"
 
@@ -272,10 +273,10 @@ class TestRecoveryMint:
         """Free tier max_api_keys=2: minting a 3rd recovery key revokes the
         OLDEST OTHER user's key (#750.10 — never the caller's own)."""
         _seed_team(reg, "team-a")
-        _seed_membership(reg, "team-a", "user-1", "owner")
-        _seed_api_key(reg, "team-a", "other-old", created_by="user-2",
+        _seed_membership(reg, "team-a", _U1, "owner")
+        _seed_api_key(reg, "team-a", "other-old", created_by=_U2,
                       created_via="recovery", created_at=_hours_ago(10))
-        _seed_api_key(reg, "team-a", "other-new", created_by="user-2",
+        _seed_api_key(reg, "team-a", "other-new", created_by=_U2,
                       created_via="recovery", created_at=_hours_ago(1))
         assert _count_active_keys(reg, "team-a") == 2
         r = client.post("/v1/session/key", json={"purpose": "recovery"})
@@ -291,14 +292,18 @@ class TestRecoveryMint:
 
     def test_at_cap_keeps_own_keys_and_402s_when_nothing_else_to_revoke(
             self, client, reg):
-        """#750.10: recovery never dead-ends by killing the user's own key —
-        when ALL active keys are the caller's, the mint 402s."""
+        """#750.10 + #1828 fail-closed: recovery never dead-ends by killing
+        the user's own PERSISTENT key — when ALL active cap-counting keys are
+        the caller's own PROVISIONED keys (deliberate user-created keys via
+        create_api_key — #1830: NOT rotation candidates; own RECOVERY keys
+        ARE, since they are system-minted fallback credentials), the mint
+        402s."""
         _seed_team(reg, "team-a")
-        _seed_membership(reg, "team-a", "user-1", "owner")
-        _seed_api_key(reg, "team-a", "own-1", created_by="user-1",
-                      created_via="recovery", created_at=_hours_ago(10))
-        _seed_api_key(reg, "team-a", "own-2", created_by="user-1",
-                      created_via="recovery", created_at=_hours_ago(1))
+        _seed_membership(reg, "team-a", _U1, "owner")
+        _seed_api_key(reg, "team-a", "own-1", created_by=_U1,
+                      created_via="provisioned", created_at=_hours_ago(10))
+        _seed_api_key(reg, "team-a", "own-2", created_by=_U1,
+                      created_via="provisioned", created_at=_hours_ago(1))
         r = client.post("/v1/session/key", json={"purpose": "recovery"})
         assert r.status_code == 402
         assert "Key limit reached" in r.json()["detail"]
@@ -308,9 +313,261 @@ class TestRecoveryMint:
         ).result_set
         assert all(revoked is None for (revoked,) in rows)
 
+    def test_at_cap_rotates_own_oldest_bootstrap_key(self, client, reg):
+        """#1828 + review P2-1: at max_api_keys with only OWN keys and NO
+        own recovery key to rotate (#1830 makes recovery the tier-2
+        candidate — this test isolates the tier-3 bootstrap fallback by
+        seeding PROVISIONED fillers), the recovery fallback rotates the
+        user's own OLDEST bootstrap key (24h ephemeral — safe to rotate;
+        EXPIRED ones included, review P3) then RE-CHECKS the persistent
+        count — a rotated modern bootstrap was never in the count, so the
+        mint fails CLOSED (402) instead of minting cap+1 persistent keys
+        (the old overshoot grew persistent keys unboundedly per login).
+        Persistent user-minted keys stay untouched (#750.10); the rotated
+        ephemeral frees bootstrap headroom for the next login."""
+        _seed_team(reg, "team-a")
+        _seed_membership(reg, "team-a", _U1, "owner")
+        # 2 own PERSISTENT PROVISIONED keys (deliberate user keys — never
+        # rotation candidates, #750.10) fill the free-tier cap (2)...
+        _seed_api_key(reg, "team-a", "own-prov-1", created_by=_U1,
+                      created_via="provisioned", created_at=_hours_ago(10))
+        _seed_api_key(reg, "team-a", "own-prov-2", created_by=_U1,
+                      created_via="provisioned", created_at=_hours_ago(1))
+        # ...and 2 own 24h bootstrap keys are rotatable (oldest first; the
+        # OLDEST is already EXPIRED — P3: expiry is no longer a barrier).
+        _seed_api_key(reg, "team-a", "own-boot-1", created_by=_U1,
+                      created_via="bootstrap", created_at=_hours_ago(8),
+                      expires_at=_hours_ago(1))
+        _seed_api_key(reg, "team-a", "own-boot-2", created_by=_U1,
+                      created_via="bootstrap", created_at=_hours_ago(2),
+                      expires_at=_hours_ahead(1))
+        r = client.post("/v1/session/key", json={"purpose": "recovery"})
+        # P2-1: fail-closed — the rotation freed NO persistent slot (modern
+        # bootstraps never count), so the re-check 402s (no cap+1 overshoot).
+        assert r.status_code == 402, r.text
+        assert "Key limit reached" in r.json()["detail"]
+        rows = reg.query(
+            "MATCH (k:APIKey) WHERE k.id IN ['own-boot-1','own-boot-2'] "
+            "RETURN k.id, k.revoked_at",
+        ).result_set
+        by_id = {rid: revoked for rid, revoked in rows}
+        assert by_id["own-boot-1"] is not None  # oldest own bootstrap rotated
+        assert by_id["own-boot-2"] is None      # newest own bootstrap survives
+        # Persistent keys untouched (#750.10) + count never exceeds the cap
+        rows = reg.query(
+            "MATCH (k:APIKey) WHERE k.id IN ['own-prov-1','own-prov-2'] "
+            "RETURN k.revoked_at",
+        ).result_set
+        assert all(revoked is None for (revoked,) in rows)
+        assert _count_persistent_keys(reg, "team-a") <= 2
+
+    def test_at_cap_rotates_own_oldest_recovery_key(self, client, reg):
+        """#1830: at max_api_keys with only OWN persistent keys, the
+        recovery fallback now rotates the user's own OLDEST recovery key
+        (tier 2 — recovery keys are SYSTEM-MINTED fallback credentials, not
+        deliberate user-created keys (those are created_via='provisioned'),
+        so rotating one at cap is the escape-hatch semantics). A recovery key
+        COUNTS against max_api_keys, so the rotation frees a REAL slot: the
+        re-check passes and the mint lands at exactly the cap (never cap+1)
+        with rotated=True. Own PROVISIONED keys are never rotation
+        candidates (#750.10) and stay untouched."""
+        _seed_team(reg, "team-a")
+        _seed_membership(reg, "team-a", _U1, "owner")
+        # cap=2: two own RECOVERY keys fill the cap (the #1830 deadlock)…
+        _seed_api_key(reg, "team-a", "own-rec-1", created_by=_U1,
+                      created_via="recovery", created_at=_hours_ago(10))
+        _seed_api_key(reg, "team-a", "own-rec-2", created_by=_U1,
+                      created_via="recovery", created_at=_hours_ago(1))
+        # …plus an own PROVISIONED key (a deliberate user-created key the
+        # user already revoked) — it must stay untouched: provisioned keys
+        # are NOT rotation candidates, and the recovery rotation alone frees
+        # the needed slot.
+        _seed_api_key(reg, "team-a", "own-prov-1", created_by=_U1,
+                      created_via="provisioned", created_at=_hours_ago(5),
+                      revoked_at=_hours_ago(2))
+        assert _count_persistent_keys(reg, "team-a") == 2
+        r = client.post("/v1/session/key", json={"purpose": "recovery"})
+        assert r.status_code == 200, r.text
+        assert r.json()["expires_at"] is None  # recovery mint, not bootstrap
+        assert r.json()["rotated"] is True     # rotation signal → UI banner
+        rows = reg.query(
+            "MATCH (k:APIKey) WHERE k.id IN ['own-rec-1','own-rec-2','own-prov-1'] "
+            "RETURN k.id, k.revoked_at",
+        ).result_set
+        by_id = {rid: revoked for rid, revoked in rows}
+        assert by_id["own-rec-1"] is not None   # oldest own recovery rotated
+        assert by_id["own-rec-2"] is None       # newest own recovery survives
+        # provisioned key untouched — its original revoke timestamp stands
+        assert by_id["own-prov-1"] is not None
+        assert _count_persistent_keys(reg, "team-a") <= 2  # revoke+mint = cap
+        # #1854: the mint response names the rotated key for the UI banner
+        assert r.json()["rotated_key_prefix"] == "tt_x"
+
+    def test_at_cap_rotates_never_used_own_recovery_over_recently_used(
+            self, client, reg):
+        """#1854: own_recovery rotation is last_used_at-aware — a recovery
+        key that was NEVER used (last_used_at NULL) is rotated BEFORE a
+        recently-used one, even when the never-used key was created LATER.
+        Pre-#1854 the OLDEST-created key won on every mint — killing a live
+        persistent credential agents/other devices use. The mint response
+        also names the rotated key (rotated_key_prefix) so the dashboard
+        banner can point at it."""
+        _seed_team(reg, "team-a")
+        _seed_membership(reg, "team-a", _U1, "owner")
+        # cap=2: two own RECOVERY keys fill the cap. own-rec-old is the
+        # OLDEST-created but was USED 1h ago (a live credential);
+        # own-rec-new was created 1h ago but NEVER used (last_used_at NULL).
+        _seed_api_key(reg, "team-a", "own-rec-old", created_by=_U1,
+                      created_via="recovery", created_at=_hours_ago(10),
+                      key_prefix="tt_oldrec1", last_used_at=_hours_ago(1))
+        _seed_api_key(reg, "team-a", "own-rec-new", created_by=_U1,
+                      created_via="recovery", created_at=_hours_ago(1),
+                      key_prefix="tt_newrec1")
+        r = client.post("/v1/session/key", json={"purpose": "recovery"})
+        assert r.status_code == 200, r.text
+        assert r.json()["rotated"] is True
+        # the NEVER-USED key is rotated, not the oldest-created one
+        assert r.json()["rotated_key_prefix"] == "tt_newrec1"
+        rows = reg.query(
+            "MATCH (k:APIKey) WHERE k.id IN ['own-rec-old','own-rec-new'] "
+            "RETURN k.id, k.revoked_at",
+        ).result_set
+        by_id = {rid: revoked for rid, revoked in rows}
+        assert by_id["own-rec-old"] is None      # recently-used live credential survives
+        assert by_id["own-rec-new"] is not None  # never-used key rotated
+        assert _count_persistent_keys(reg, "team-a") <= 2  # revoke+mint = cap
+
+    def test_at_cap_rotates_least_recently_used_own_recovery(self, client, reg):
+        """#1854: among USED own recovery keys, the least-recently-used is
+        rotated (last_used_at ASC) — NOT the oldest-created. The LRU key
+        (used 10h ago) wins over the older-created key that was used 1h ago."""
+        _seed_team(reg, "team-a")
+        _seed_membership(reg, "team-a", _U1, "owner")
+        # cap=2: own-rec-older was created 10h ago but USED 1h ago (live);
+        # own-rec-lru was created 1h ago but last USED 10h ago (idle).
+        _seed_api_key(reg, "team-a", "own-rec-older", created_by=_U1,
+                      created_via="recovery", created_at=_hours_ago(10),
+                      key_prefix="tt_usedrec1", last_used_at=_hours_ago(1))
+        _seed_api_key(reg, "team-a", "own-rec-lru", created_by=_U1,
+                      created_via="recovery", created_at=_hours_ago(1),
+                      key_prefix="tt_lrurec1", last_used_at=_hours_ago(10))
+        r = client.post("/v1/session/key", json={"purpose": "recovery"})
+        assert r.status_code == 200, r.text
+        assert r.json()["rotated"] is True
+        assert r.json()["rotated_key_prefix"] == "tt_lrurec1"  # LRU rotated
+        rows = reg.query(
+            "MATCH (k:APIKey) WHERE k.id IN ['own-rec-older','own-rec-lru'] "
+            "RETURN k.id, k.revoked_at",
+        ).result_set
+        by_id = {rid: revoked for rid, revoked in rows}
+        assert by_id["own-rec-older"] is None      # recently-used survives
+        assert by_id["own-rec-lru"] is not None    # least-recently-used rotated
+        assert _count_persistent_keys(reg, "team-a") <= 2
+
+    def test_bootstrap_mint_reports_no_rotation(self, client, reg):
+        """#1854: rotated_key_prefix is None when no rotation happened — the
+        response field is always present, so clients can read it unguarded."""
+        _seed_team(reg, "team-a")
+        _seed_membership(reg, "team-a", _U1, "owner")
+        r = client.post("/v1/session/key", json={"purpose": "bootstrap"})
+        assert r.status_code == 200, r.text
+        assert r.json()["rotated"] is False
+        assert r.json()["rotated_key_prefix"] is None
+
+    def test_at_cap_recovery_rotation_prefers_own_recovery_over_bootstrap(
+            self, client, reg):
+        """#1830 core: the tier-2 own-RECOVERY candidate beats the tier-3
+        own-bootstrap — the exact deadlock scenario (own recovery keys + own
+        bootstraps coexist, no legacy, no other-user key). Rotating the
+        recovery key frees a REAL persistent slot so the re-check passes:
+        200, rotated=True, the OLDEST recovery key revoked, the bootstrap
+        survives. (A regression swapping tiers 2/3 would re-introduce the
+        402 deadlock — the rotated bootstrap would free no persistent slot.)"""
+        _seed_team(reg, "team-a")
+        _seed_membership(reg, "team-a", _U1, "owner")
+        # cap=2: two own RECOVERY keys fill the cap (the #1830 deadlock)...
+        _seed_api_key(reg, "team-a", "own-rec-1", created_by=_U1,
+                      created_via="recovery", created_at=_hours_ago(10))
+        _seed_api_key(reg, "team-a", "own-rec-2", created_by=_U1,
+                      created_via="recovery", created_at=_hours_ago(1))
+        # ...plus an own bootstrap (24h ephemeral — rotating it would NOT
+        # free a persistent slot; recovery must win the rotation order).
+        _seed_api_key(reg, "team-a", "own-boot-1", created_by=_U1,
+                      created_via="bootstrap", created_at=_hours_ago(5),
+                      expires_at=_hours_ahead(1))
+        r = client.post("/v1/session/key", json={"purpose": "recovery"})
+        assert r.status_code == 200, r.text
+        assert r.json()["rotated"] is True  # recovery rotation → UI banner
+        rows = reg.query(
+            "MATCH (k:APIKey) WHERE k.id IN ['own-rec-1','own-rec-2','own-boot-1'] "
+            "RETURN k.id, k.revoked_at",
+        ).result_set
+        by_id = {rid: revoked for rid, revoked in rows}
+        assert by_id["own-rec-1"] is not None  # oldest own recovery rotated
+        assert by_id["own-rec-2"] is None      # newest own recovery survives
+        assert by_id["own-boot-1"] is None     # own bootstrap survives (tier 3)
+        assert _count_persistent_keys(reg, "team-a") <= 2
+
+    def test_at_cap_rotates_legacy_unowned_key_when_it_frees_a_slot(
+            self, client, reg):
+        """#1828 review P3-4 + P2-1: a LEGACY team-scoped unowned key
+        (created_by IS NULL — a pre-created_by session credential by
+        construction) COUNTS against max_api_keys, so rotating it frees a
+        REAL slot: the re-check passes and the mint lands at exactly the cap
+        (never cap+1). Legacy is preferred over own modern bootstraps."""
+        _seed_team(reg, "team-a")
+        _seed_membership(reg, "team-a", _U1, "owner")
+        # cap=2: one own persistent key + one LEGACY unowned key (counted) —
+        # no OTHER-user key to auto-revoke (#750.10), so the fallback runs.
+        _seed_api_key(reg, "team-a", "own-rec-1", created_by=_U1,
+                      created_via="recovery", created_at=_hours_ago(10))
+        _seed_api_key(reg, "team-a", "legacy-1", created_by=None,
+                      created_via=None, created_at=_hours_ago(6))
+        # a newer own bootstrap exists — legacy must win (frees a slot)
+        _seed_api_key(reg, "team-a", "own-boot-1", created_by=_U1,
+                      created_via="bootstrap", created_at=_hours_ago(2),
+                      expires_at=_hours_ahead(1))
+        assert _count_persistent_keys(reg, "team-a") == 2
+        r = client.post("/v1/session/key", json={"purpose": "recovery"})
+        assert r.status_code == 200, r.text
+        assert r.json()["expires_at"] is None  # recovery mint, not bootstrap
+        assert r.json()["rotated"] is True     # rotation signal → UI banner
+        rows = reg.query(
+            "MATCH (k:APIKey) WHERE k.id IN ['legacy-1','own-boot-1','own-rec-1'] "
+            "RETURN k.id, k.revoked_at",
+        ).result_set
+        by_id = {rid: revoked for rid, revoked in rows}
+        assert by_id["legacy-1"] is not None   # legacy rotated (frees a slot)
+        assert by_id["own-boot-1"] is None     # own bootstrap survives
+        assert by_id["own-rec-1"] is None      # own persistent untouched
+        assert _count_persistent_keys(reg, "team-a") <= 2  # revoke+mint = cap
+
+    def test_revoked_tombstones_do_not_block_recovery_mint(self, client, reg):
+        """#2481 (session-key recovery lane, REGISTRY): revoked keys are
+        audit tombstones — they never count toward max_api_keys. A team
+        whose every prior durable key was revoked (active = 0) mints a
+        recovery key immediately (no rotation, no 402) even with a tall
+        tombstone stack; only a true ACTIVE overage can 402 (covered by the
+        own-provisioned-key test above)."""
+        _seed_team(reg, "team-a")
+        _seed_membership(reg, "team-a", _U1, "owner")
+        # a pile of revoked durables (recovery + provisioned tombstones) —
+        # none may consume the cap slot
+        for i in range(5):
+            _seed_api_key(reg, "team-a", f"tomb-{i}", created_by=_U1,
+                          created_via=("recovery" if i % 2 else "provisioned"),
+                          created_at=_hours_ago(20 + i),
+                          revoked_at=_hours_ago(2))
+        assert _count_persistent_keys(reg, "team-a") == 0
+        r = client.post("/v1/session/key", json={"purpose": "recovery"})
+        assert r.status_code == 200, r.text
+        assert r.json()["expires_at"] is None  # recovery mint, not bootstrap
+        assert r.json()["rotated"] is False    # slot was free — no rotation
+        assert _count_persistent_keys(reg, "team-a") == 1
+
 
 class TestMintGuards:
-    """Membership / team_id / purpose validation."""
+    """Membership / org_id / purpose validation."""
 
     def test_no_membership_403(self, client, reg):
         r = client.post("/v1/session/key", json={"purpose": "bootstrap"})
@@ -318,39 +575,39 @@ class TestMintGuards:
         assert "No team membership" in r.json()["detail"]
 
     def test_no_membership_in_requested_team_403(self, client, reg):
-        """Multi-membership + team_id pointing at a team the user is NOT in."""
+        """Multi-membership + org_id pointing at a team the user is NOT in."""
         _seed_team(reg, "team-a")
         _seed_team(reg, "team-b")
         _seed_team(reg, "team-x")
-        _seed_membership(reg, "team-a", "user-1", "owner")
-        _seed_membership(reg, "team-b", "user-1", "member")
+        _seed_membership(reg, "team-a", _U1, "owner")
+        _seed_membership(reg, "team-b", _U1, "member")
         r = client.post("/v1/session/key",
-                        json={"purpose": "bootstrap", "team_id": "team-x"})
+                        json={"purpose": "bootstrap", "org_id": "team-x"})
         assert r.status_code == 403
         assert "No membership in team" in r.json()["detail"]
 
-    def test_multi_team_requires_team_id_400(self, client, reg):
+    def test_multi_team_requires_org_id_400(self, client, reg):
         _seed_team(reg, "team-a")
         _seed_team(reg, "team-b")
-        _seed_membership(reg, "team-a", "user-1", "owner")
-        _seed_membership(reg, "team-b", "user-1", "member")
+        _seed_membership(reg, "team-a", _U1, "owner")
+        _seed_membership(reg, "team-b", _U1, "member")
         r = client.post("/v1/session/key", json={"purpose": "bootstrap"})
         assert r.status_code == 400
-        assert "team_id required" in r.json()["detail"]
+        assert "org_id required" in r.json()["detail"]
 
-    def test_multi_team_with_team_id_ok(self, client, reg):
+    def test_multi_team_with_org_id_ok(self, client, reg):
         _seed_team(reg, "team-a")
         _seed_team(reg, "team-b")
-        _seed_membership(reg, "team-a", "user-1", "owner")
-        _seed_membership(reg, "team-b", "user-1", "member")
+        _seed_membership(reg, "team-a", _U1, "owner")
+        _seed_membership(reg, "team-b", _U1, "member")
         r = client.post("/v1/session/key",
-                        json={"purpose": "bootstrap", "team_id": "team-b"})
+                        json={"purpose": "bootstrap", "org_id": "team-b"})
         assert r.status_code == 200, r.text
-        assert r.json()["team_id"] == "team-b"
+        assert r.json()["org_id"] == "team-b"
 
     def test_bad_purpose_422(self, client, reg):
         _seed_team(reg, "team-a")
-        _seed_membership(reg, "team-a", "user-1", "owner")
+        _seed_membership(reg, "team-a", _U1, "owner")
         r = client.post("/v1/session/key", json={"purpose": "enterprise"})
         assert r.status_code == 422
         assert "purpose" in r.json()["detail"]
@@ -361,11 +618,11 @@ class TestMintedKeyRoundTrip:
 
     def test_minted_bootstrap_key_authenticates_rest(self, client, reg):
         _seed_team(reg, "team-a")
-        _seed_membership(reg, "team-a", "user-1", "owner")
+        _seed_membership(reg, "team-a", _U1, "owner")
         r = client.post("/v1/session/key", json={"purpose": "bootstrap"})
         assert r.status_code == 200
         key = r.json()["key"]
-        # Same app, real get_current_team (NOT overridden): the minted key
+        # Same app, real get_current_org (NOT overridden): the minted key
         # resolves via key_prefix + verify_api_key against the registry.
         r2 = client.get("/v1/team/keys", headers={"Authorization": f"Bearer {key}"})
         assert r2.status_code == 200, r2.text
@@ -374,7 +631,7 @@ class TestMintedKeyRoundTrip:
 
     def test_minted_recovery_key_revoked_rejects(self, client, reg):
         _seed_team(reg, "team-a")
-        _seed_membership(reg, "team-a", "user-1", "owner")
+        _seed_membership(reg, "team-a", _U1, "owner")
         r = client.post("/v1/session/key", json={"purpose": "recovery"})
         assert r.status_code == 200
         key = r.json()["key"]
@@ -391,3 +648,92 @@ class TestMintedKeyRoundTrip:
         app.dependency_overrides.clear()
         r = client.post("/v1/session/key", json={"purpose": "bootstrap"})
         assert r.status_code == 401
+
+
+# ── #1855: per-team mint lock — registry lane ───────────────────────────────
+
+class TestSessionKeyMintConcurrency:
+    """#1855 — the REGISTRY (selfhost) mint holds the same per-team lock as
+    the Supabase lane (_org_mint_lock in hosted_api). The embedded store is
+    single-process (no multi-worker story), so the lock is belt-and-braces
+    that makes the serialization explicit. The load-bearing test is
+    test_registry_mint_blocks_while_team_lock_held (fails if the with-lock
+    wrapping is removed); the gather E2E is a regression guard for the cap
+    invariant."""
+
+    def test_registry_mint_blocks_while_team_lock_held(self, client, reg,
+                                                       monkeypatch):
+        """The REGISTRY mint wraps its critical section in the per-team lock:
+        a mint for a team whose lock is HELD by the test blocks until the
+        lock is released. Fails if the with-lock wrapping is ever removed."""
+        import asyncio
+        import threading
+
+        import tortoise.hosted_api as ha
+        from tortoise.hosted_api import _org_mint_lock
+
+        async def _noop(*_a, **_k):
+            return None
+
+        tid = "team-a"
+        _seed_team(reg, tid)
+        _seed_membership(reg, tid, _U1, "owner")
+        # post-insert side effects run OUTSIDE the lock and need a real
+        # request object — no-op them (we drive the mint directly).
+        monkeypatch.setattr(ha, "_async_audit", _noop)
+        monkeypatch.setattr(ha, "_abuse_evaluate_keys", _noop)
+
+        lock = _org_mint_lock(tid)
+        lock.acquire()
+        done = threading.Event()
+        outcome = {}
+
+        def _mint():
+            try:
+                asyncio.run(ha.session_key({"purpose": "recovery"}, None,
+                                           {"user_id": _U1}))
+                outcome["ok"] = True
+            except Exception as e:
+                outcome["err"] = repr(e)
+            done.set()
+
+        t = threading.Thread(target=_mint, daemon=True)
+        t.start()
+        assert not done.wait(timeout=0.75), \
+            f"registry mint proceeded while the team lock was held (wrapping missing?): {outcome}"
+        lock.release()
+        assert done.wait(timeout=10), "registry mint blocked forever after release"
+        assert outcome.get("ok") is True, f"registry mint failed: {outcome}"
+        assert _count_active_keys(reg, tid) == 1
+
+    def test_concurrent_recovery_mints_stay_at_cap(self, client, reg):
+        """#1855 verification checklist (registry lane): two CONCURRENT
+        recovery mints never overshoot max_api_keys (free = 2). Regression
+        guard — an all-sync section serializes on one event loop regardless
+        of the lock; this catches a future await entering the section."""
+        import asyncio
+
+        import httpx
+
+        from tortoise.hosted_api import app
+
+        tid = "team-a"
+        _seed_team(reg, tid)
+        _seed_membership(reg, tid, _U1, "owner")
+        _seed_api_key(reg, tid, "k-other", created_by=_U2,
+                      created_via="recovery", created_at=_hours_ago(48))
+
+        async def _run():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport,
+                                         base_url="http://test") as ac:
+                async def _mint(_i):
+                    return await ac.post("/v1/session/key",
+                                         json={"purpose": "recovery"})
+
+                return await asyncio.gather(*(_mint(i) for i in range(2)))
+
+        results = asyncio.run(_run())
+        assert all(r.status_code == 200 for r in results), \
+            [r.text for r in results]
+        assert _count_persistent_keys(reg, tid) <= 2

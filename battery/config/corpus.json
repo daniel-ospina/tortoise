@@ -1,7 +1,7 @@
 {
   "manifest": {
-    "content_sha256": "e7211442447fd40c4488e058c652ef9bc5fbfcffb4cba3aefa1a05bad6db1cc1",
-    "corpus_version": "1.0",
+    "content_sha256": "a5e803fd253963e695ef2c2a6f7b2eba05d9131bff3d41ecb2e12e3738f0b177",
+    "corpus_version": "1.1",
     "family_coverage": [
       "D3",
       "D4",
@@ -16,11 +16,11 @@
       "R4",
       "R5"
     ],
-    "golds_sha256": "d24a836e6990828dba39fb11ad3cb004a3a0f6782b38cbb49fd580806ff89834",
+    "golds_sha256": "2e12a2be4a3c692efd350e0f228240169d3bfeecd89b915ca9be3decee061920",
     "pack_counts": {
       "adversarial": 10,
       "calibration": 15,
-      "contradiction": 15,
+      "contradiction": 21,
       "cross_session_contradiction": 6,
       "decision": 20,
       "decision_drift": 6,
@@ -33,7 +33,7 @@
     },
     "split_counts": {
       "held_out": 13,
-      "train": 65,
+      "train": 71,
       "wave-1": 16,
       "wave-2": 23,
       "wave-3": 17
@@ -450,6 +450,222 @@
       "split": "held_out",
       "task_type": "adversarial",
       "tier": "differential"
+    },
+    {
+      "control_set": "bct",
+      "family": "R1",
+      "gold_sha256": "0732493f60f900d2939840cce49cf6feb13cddfd4ae53e99171d0ca0a8f1086f",
+      "id": "bct-001",
+      "matched_control_for": "ct-001",
+      "prompt": {
+        "question": "What should the team do next?",
+        "system": "You are advising a team on a technical question. Track the claims made in\nthe conversation, notice when a new claim conflicts with an earlier\nposition, and respond explicitly. Never silently drop an adopted position.\n",
+        "turns": [
+          {
+            "content": "We are deciding whether server A is the bottleneck in the payment path.",
+            "role": "user"
+          },
+          {
+            "content": "Initial telemetry suggests server A is the bottleneck.",
+            "role": "assistant"
+          },
+          {
+            "content": "Load tests on the database show normal latency under peak.",
+            "role": "user"
+          },
+          {
+            "content": "The team leans toward upgrading server A.",
+            "role": "assistant"
+          },
+          {
+            "content": "A follow-up trace confirms server A is the bottleneck, and the queue layer looks normal.",
+            "role": "user"
+          }
+        ]
+      },
+      "split": "train",
+      "task_type": "contradiction",
+      "tier": "probe"
+    },
+    {
+      "control_set": "bct",
+      "family": "R1",
+      "gold_sha256": "c7a1b87cb98da32b8dfcb5d4c5959f7b10b3d65f713f76187ac3df017cf1f707",
+      "id": "bct-002",
+      "matched_control_for": "ct-002",
+      "prompt": {
+        "question": "How should the team plan the quarter?",
+        "system": "You are advising a team on a technical question. Track the claims made in\nthe conversation, notice when a new claim conflicts with an earlier\nposition, and respond explicitly. Never silently drop an adopted position.\n",
+        "turns": [
+          {
+            "content": "We are budgeting next quarter. The finance memo says the budget is sufficient for the roadmap.",
+            "role": "user"
+          },
+          {
+            "content": "The budget being sufficient is a helpful starting point.",
+            "role": "assistant"
+          },
+          {
+            "content": "Hiring for two of the roadmap roles is already approved.",
+            "role": "user"
+          },
+          {
+            "content": "So we can plan around the approved budget.",
+            "role": "assistant"
+          },
+          {
+            "content": "The revised forecast confirms the budget is sufficient once the new headcount lands.",
+            "role": "user"
+          }
+        ]
+      },
+      "split": "train",
+      "task_type": "contradiction",
+      "tier": "probe"
+    },
+    {
+      "control_set": "bct",
+      "family": "R1",
+      "gold_sha256": "d4488f9efcf351535d0ddb7d45b382cf8ee8cb1d31856365d97bb1baaccf072d",
+      "id": "bct-003",
+      "matched_control_for": "ct-003",
+      "prompt": {
+        "question": "What should the team prepare for the new hire?",
+        "system": "You are advising a team on a technical question. Track the claims made in\nthe conversation, notice when a new claim conflicts with an earlier\nposition, and respond explicitly. Never silently drop an adopted position.\n",
+        "turns": [
+          {
+            "content": "The new engineer was told the start date is Monday the twelfth.",
+            "role": "user"
+          },
+          {
+            "content": "The start date being Monday the twelfth is what we scheduled.",
+            "role": "assistant"
+          },
+          {
+            "content": "Their offer letter was sent with that date.",
+            "role": "user"
+          },
+          {
+            "content": "We should prepare the onboarding for the twelfth.",
+            "role": "assistant"
+          },
+          {
+            "content": "HR just confirmed the record: the start date is Monday the twelfth, and the offer stands.",
+            "role": "user"
+          }
+        ]
+      },
+      "split": "train",
+      "task_type": "contradiction",
+      "tier": "probe"
+    },
+    {
+      "control_set": "bct",
+      "family": "R1",
+      "gold_sha256": "57f944390bdf660fbcb2449ee596910657346329280682f1ec2ff23baa92c04b",
+      "id": "bct-004",
+      "matched_control_for": "ct-004",
+      "prompt": {
+        "question": "What should the release team do with the checkout path?",
+        "system": "You are advising a team on a technical question. Track the claims made in\nthe conversation, notice when a new claim conflicts with an earlier\nposition, and respond explicitly. Never silently drop an adopted position.\n",
+        "turns": [
+          {
+            "content": "QA reports the checkout API is stable under soak testing.",
+            "role": "user"
+          },
+          {
+            "content": "The checkout API being stable is good news.",
+            "role": "assistant"
+          },
+          {
+            "content": "The release notes mark it stable for production.",
+            "role": "user"
+          },
+          {
+            "content": "Then we can leave the checkout path untouched.",
+            "role": "assistant"
+          },
+          {
+            "content": "The latest canary shows the checkout API is stable under the new traffic mix.",
+            "role": "user"
+          }
+        ]
+      },
+      "split": "train",
+      "task_type": "contradiction",
+      "tier": "probe"
+    },
+    {
+      "control_set": "bct",
+      "family": "R1",
+      "gold_sha256": "8557eb905f31156bbb8a389a4d0eacfc0156db9e46225e1088852a665efc77d3",
+      "id": "bct-005",
+      "matched_control_for": "ct-005",
+      "prompt": {
+        "question": "How should the team proceed with the partnership?",
+        "system": "You are advising a team on a technical question. Track the claims made in\nthe conversation, notice when a new claim conflicts with an earlier\nposition, and respond explicitly. Never silently drop an adopted position.\n",
+        "turns": [
+          {
+            "content": "Legal confirmed the contract is signed by the counterparty.",
+            "role": "user"
+          },
+          {
+            "content": "The contract being signed closes the partnership.",
+            "role": "assistant"
+          },
+          {
+            "content": "The counterparty confirmed receipt of the signed copy.",
+            "role": "user"
+          },
+          {
+            "content": "Then we can announce the partnership.",
+            "role": "assistant"
+          },
+          {
+            "content": "Legal now confirms the contract is signed; the counterparty returned the final version.",
+            "role": "user"
+          }
+        ]
+      },
+      "split": "train",
+      "task_type": "contradiction",
+      "tier": "probe"
+    },
+    {
+      "control_set": "bct",
+      "family": "R1",
+      "gold_sha256": "5dc43aa7bad91a0897822716f897de4dea67de28a31e5eaf211ad8c9299370ae",
+      "id": "bct-006",
+      "matched_control_for": "ct-006",
+      "prompt": {
+        "question": "What should the care team do next?",
+        "system": "You are advising a team on a technical question. Track the claims made in\nthe conversation, notice when a new claim conflicts with an earlier\nposition, and respond explicitly. Never silently drop an adopted position.\n",
+        "turns": [
+          {
+            "content": "The nurse says the patient is stable overnight.",
+            "role": "user"
+          },
+          {
+            "content": "Stable vitals let us keep the current care plan.",
+            "role": "assistant"
+          },
+          {
+            "content": "The morning shift logged the same assessment.",
+            "role": "user"
+          },
+          {
+            "content": "We will continue monitoring the stable patient.",
+            "role": "assistant"
+          },
+          {
+            "content": "The lab result confirms the patient is stable; the clotting panel looks normal.",
+            "role": "user"
+          }
+        ]
+      },
+      "split": "train",
+      "task_type": "contradiction",
+      "tier": "probe"
     },
     {
       "evidence_tiers": [

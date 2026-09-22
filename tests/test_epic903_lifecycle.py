@@ -41,8 +41,12 @@ class TestLifecycleAbsorption:
             new_id = f.claims["p2"]
             res = f.sdk.supersede_point(old_id, new_id)
             assert res["invalidated"] is True
-            # Both endpoints entered the dirty set (W1 lifecycle contract).
-            assert old_id in _dirty(f.sdk) and new_id in _dirty(f.sdk)
+            # #2422: the superseded old point is terminal for EP — a dirty
+            # flag would strand forever (never swept). The LIVE successor
+            # enters the dirty set (W1 lifecycle contract).
+            assert old_id not in _dirty(f.sdk), (
+                "terminal (superseded) point must not strand in dirty set (#2422)")
+            assert new_id in _dirty(f.sdk)
             # Transfer creates NEW edges without msg_* (verified: zero msg_*
             # refs in supersede_point) — the C9 invalidation drops the
             # SURVIVING node's own edges' seeds (its context changed under
@@ -79,7 +83,10 @@ class TestLifecycleAbsorption:
             assert _msg_edges(proj) > 0
             res = f.sdk.invalidate_point(f.claims["p1"], f.claims["p2"])
             assert res["invalidated"] is True
-            assert f.claims["p1"] in _dirty(f.sdk)
+            # #2422: p1 (flag-outdated, terminal for EP) must not strand in
+            # the dirty set; the live successor p2 enters it (W1 contract).
+            assert f.claims["p1"] not in _dirty(f.sdk), (
+                "terminal (invalidated) point must not strand in dirty set (#2422)")
             assert f.claims["p2"] in _dirty(f.sdk)
             # invalidate_point drops both endpoints' edges' seeds (C9 wiring).
             rows = proj.g.query(

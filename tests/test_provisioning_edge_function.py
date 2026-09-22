@@ -6,8 +6,9 @@ after signup) runs in the pre-deploy gate (plan Task 10). This test guards
 the same contract at the source level so a regression can never ship: the
 Edge Function must call provision_team (the atomic Supabase RPC), must NOT
 call /internal/provision (the old registry writer) or update_user_team (the
-old membership writer), must keep the data-plane demo seed, and must compute
-lookup_hash via the shared TS mirror (parity with tortoise/auth.py).
+old membership writer), must keep the data-plane REAL starter seed
+(#2360: /internal/starter-seed — never the demo sample auto-seed), and must
+compute lookup_hash via the shared TS mirror (parity with tortoise/auth.py).
 """
 from __future__ import annotations
 
@@ -58,11 +59,57 @@ def test_edge_function_writes_supabase_only():
     assert 'rpc("update_user_team"' not in src, (
         "Edge Function must not call the removed update_user_team RPC"
     )
-    # Data plane stays: the demo seed creates the team's knowledge-graph
+    # Data plane stays: the real starter seed creates the team's knowledge-graph
     # namespace (FalkorDB) — that is NOT a registry write.
-    assert "/internal/demo" in src, "Edge Function must keep the demo seed"
+    assert "/internal/starter-seed" in src, "Edge Function must keep the starter seed"
+    # #2360 re-spec: the fake demo auto-seed is GONE — a fresh org must never
+    # receive sample Points counted as its own data. The fetch URL is the
+    # contract (a stray call must never regress).
+    assert "`${fastApiUrl}/internal/demo`" not in src, (
+        "Edge Function must not call the demo sample auto-seed (#2360)"
+    )
     # lookup_hash must be computed via the shared TS mirror (P1-1 parity).
     assert "lookupHash" in src, "Edge Function must compute lookup_hash"
+
+
+def test_starter_seed_logs_non_ok_responses():
+    """#1860 (P3-1) carried to the #2360 starter seed: a non-2xx
+    /internal/starter-seed response must be LOGGED, not silently swallowed.
+    The old fire-and-forget `.catch()` covered only transport/abort errors —
+    an HTTP 500 body resolved 'successfully', so a failed seed left the
+    first-timer's graph silently missing starter data. The response must be
+    bound and checked with !ok (source contract)."""
+    src = EDGE_FN.read_text()
+    # the starter-seed fetch binds its response (not fire-and-forget)
+    assert "const starterRes = await fetch(`${fastApiUrl}/internal/starter-seed`" in src, (
+        "starter-seed fetch must bind its response (starterRes) so !ok is checkable"
+    )
+    # transport/abort failures still log
+    assert 'console.error("Starter seed failed:", e)' in src
+    # HTTP errors (4xx/5xx) log the status — never silently pass
+    assert "!starterRes.ok" in src, (
+        "starter-seed must check !starterRes.ok — a 500 body resolving 'successfully' "
+        "is the #1860 P3-1 bug"
+    )
+    assert "starterRes.status" in src, "non-ok starter-seed log must include the status"
+    # the provision RPC has already committed — the failure must NOT fail the
+    # whole provisioning (the user can still be onboarded)
+    assert "return json(response, 201" in src
+
+
+def test_starter_seed_carries_real_identity_data():
+    """#2360: the starter seed is REAL data — the edge fn must pass the
+    org name (user-confirmed), the person's own auth identity (user_id /
+    email), and the user's display name when present (never a silently
+    email-derived name, never a placeholder)."""
+    src = EDGE_FN.read_text()
+    # org_name = the wizard-typed org name (safeName) — real, confirmed
+    assert "org_name: safeName" in src, "starter seed must pass the org name"
+    # the person identity refs ride the VERIFIED caller (never client JSON)
+    assert "person_user_id: user_id" in src
+    assert "person_email: email" in src
+    # display name is passed only when the user actually has one
+    assert 'starterBody.person_name = display_name.trim()' in src
 
 
 def test_edge_function_uses_shared_lookup_mirror():
@@ -96,6 +143,74 @@ def test_shared_lookup_implements_plan_construction():
 # handled before the method gate, CORS headers on EVERY response path, and an
 # origin allowlist covering the welcome page's hosts (mirrors
 # waitlist-subscribe's proven pattern).
+
+# ── #2406: onboarding-call offer email (post-provision trigger) ────────────
+
+def test_edge_function_fires_onboarding_email_after_provision():
+    """The provisioning door must fire POST /internal/onboarding-email (the
+    #2406 one-time onboarding-call offer) for every NEW hosted signup."""
+    src = EDGE_FN.read_text()
+    assert "/internal/onboarding-email" in src, (
+        "Edge Function must fire the onboarding-email internal endpoint"
+    )
+    # Fires after the starter-seed block, still inside the handler (provision
+    # RPC already committed).
+    assert "await fireOnboardingEmail(orgId, display_name);" in src, (
+        "onboarding email must be fired after provisioning, passing the "
+        "PERSON display_name"
+    )
+    assert src.index("fireOnboardingEmail(orgId, display_name)") > src.index(
+        "Starter seed failed"), (
+        "onboarding email must fire after the starter seed (independent of it)"
+    )
+
+
+def test_edge_function_onboarding_email_passes_person_name_not_safe_name():
+    """The greeting must derive from the PERSON display name (caller/body) —
+    NEVER the org slug (safeName): the org name is wizard-typed and
+    whitespace-free; it is not a person's name (scope-doc §Personalization)."""
+    src = EDGE_FN.read_text()
+    # Scope the check to the onboarding POST body itself (safeName legitimately
+    # appears elsewhere — e.g. the provision_team RPC body p_org_name).
+    body_start = src.index("const body = JSON.stringify(")
+    body_chunk = src[body_start:body_start + 400]
+    assert "display_name: personDisplayName ?? undefined" in body_chunk, (
+        "onboarding body must carry the person display_name key"
+    )
+    assert "safeName" not in body_chunk, (
+        "the org slug must never be passed as the email greeting source"
+    )
+    assert "org_name" not in body_chunk, (
+        "the onboarding body must carry org_id + display_name only"
+    )
+    # The call site passes the PERSON display_name — not safeName.
+    assert "await fireOnboardingEmail(orgId, display_name);" in src
+    assert "fireOnboardingEmail(orgId, safeName)" not in src
+
+
+def test_edge_function_onboarding_email_retries_and_never_fails_provisioning():
+    """The #2406 email POST is 2 attempts (0s/+2s), bounded, logs every
+    non-definitive outcome, and NEVER throws — provisioning has already
+    committed, so a failed offer email must never fail the signup."""
+    src = EDGE_FN.read_text()
+    # two attempts with a +2s retry between them
+    assert "attempt < 2; attempt++" in src, (
+        "onboarding email must be attempted twice (0s/+2s)"
+    )
+    assert "setTimeout(r, 2_000)" in src, (
+        "the retry must wait +2s before the second attempt"
+    )
+    # bounded (never blow the hook deadline)
+    assert "AbortSignal.timeout(5_000)" in src, (
+        "onboarding email fetch must be time-bounded"
+    )
+    # independent error handling inside the helper — a failure never throws
+    # into the handler's outer catch (which would 500 a committed provision)
+    assert 'console.error("Onboarding email failed:", e)' in src
+    assert '"Onboarding email not sent: /internal/onboarding-email "' in src, (
+        "non-definitive statuses must be logged"
+    )
+
 
 def test_edge_function_answers_cors_preflight():
     """OPTIONS (preflight) must be answered 204 BEFORE the method gate, with

@@ -1,0 +1,98 @@
+{
+  "conversation": [
+    {
+      "content": "Let us draft the Bluepeak incident retro. The outage ran from 9:12am to 12:53pm on Monday, so about three hours and forty-one minutes of degraded search for their team.",
+      "role": "user"
+    },
+    {
+      "content": "Three hours forty-one minutes of degraded search. Let us capture the timeline first. What was the first signal the on-call saw?",
+      "role": "assistant"
+    },
+    {
+      "content": "The first signal was the error budget burn alert at 9:15am, three minutes after the deploy that introduced the bad configuration landed. The deploy went out at 9:12am.",
+      "role": "user"
+    },
+    {
+      "content": "Deploy at 9:12, burn alert at 9:15. What did the initial investigation blame before the actual root cause surfaced?",
+      "role": "assistant"
+    },
+    {
+      "content": "The initial investigation blamed the search index, which made us chase a reindex for the first forty minutes. Aisha kept pushing us to check the config diff instead, and that is where the real cause was.",
+      "role": "user"
+    },
+    {
+      "content": "So the config diff was the real cause. Can you state the root cause precisely for the retro?",
+      "role": "assistant"
+    },
+    {
+      "content": "The config partition was the root cause, the deploy shipped a config that split the query traffic unevenly across the search shards and one shard saturated.",
+      "role": "user"
+    },
+    {
+      "content": "Config partition confirmed. What was the mitigation that brought the system back?",
+      "role": "assistant"
+    },
+    {
+      "content": "We rolled the config back to the previous partition at 12:40pm and traffic normalized within thirteen minutes. Search was fully healthy again by 12:53pm.",
+      "role": "user"
+    },
+    {
+      "content": "Rollback at 12:40, healthy by 12:53. Now the follow-ups. What actions do we commit to so this class of incident does not repeat?",
+      "role": "assistant"
+    },
+    {
+      "content": "First, add a pre-deploy check that compares partition weights against the shard capacity model. Second, make the config diff visible in the deploy review. Nora suggested both and they are both good.",
+      "role": "user"
+    },
+    {
+      "content": "Pre-deploy partition check and visible config diff. Who owns each follow-up and by when?",
+      "role": "assistant"
+    },
+    {
+      "content": "Maya owns the pre-deploy check and it needs to land by November 2. Diego owns the config diff surfacing, due November 9.",
+      "role": "user"
+    },
+    {
+      "content": "Maya by November 2, Diego by November 9. Was the SLO breached, and do we owe the customer anything contractual?",
+      "role": "assistant"
+    },
+    {
+      "content": "The search SLO is 99.9 percent and we landed at 99.86 for the month, so yes we breached it. We already offered Bluepeak a service credit and their account team accepted. The account call ran smoothly, good Wi-Fi in the new meeting room.",
+      "role": "user"
+    },
+    {
+      "content": "SLO breach confirmed with a credit offered and accepted. Do you want the retro published to the whole company, or restricted to the engineering org?",
+      "role": "assistant"
+    },
+    {
+      "content": "Publish it company-wide. Incident writeups are opt-out by default now, that was the decision after the August incident, so the whole company sees the timeline and the follow-ups. I will book the retro room for Friday morning in case anyone wants to talk it through.",
+      "role": "user"
+    },
+    {
+      "content": "Company-wide publication with opt-out default. One more section retros often miss: what went well under pressure?",
+      "role": "assistant"
+    },
+    {
+      "content": "The rollback went smoothly because the deploy tooling kept the previous config one click away. And the on-call stayed calm, honestly that matters more than any tooling.",
+      "role": "user"
+    },
+    {
+      "content": "Rollback tooling and on-call calmness under pressure. Anything the timeline still misses before I assemble the writeup?",
+      "role": "assistant"
+    },
+    {
+      "content": "Add the comms timeline: we posted the first customer-facing status at 9:40am and the all-clear at 1:05pm. Sam from customer engineering wrote the status updates with Aisha.",
+      "role": "user"
+    },
+    {
+      "content": "Customer status at 9:40, all-clear at 1:05. That is a complete retro: timeline, root cause, mitigation, follow-ups with owners and dates, SLO breach with credit, company-wide publication.",
+      "role": "assistant"
+    },
+    {
+      "content": "Yes, and let us also record that the search team will run a shard capacity review before the end of the year, Priya volunteered to lead it.",
+      "role": "user"
+    }
+  ],
+  "harness": "claude-desktop",
+  "session_id": "wp05_retro_writeup"
+}

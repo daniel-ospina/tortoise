@@ -1,9 +1,12 @@
 -- ============================================================================
 -- SQL-level verification for migration 0010 (issue #770 — plan v2 Task 2)
--- Provisioning rewrite: atomic provision_team RPC (teams + team_memberships +
+-- Provisioning rewrite: atomic provision_team RPC (organizations + org_memberships +
 -- api_keys in ONE transaction), handle_new_user placeholder reconciliation,
 -- reveal_api_key lookup_hash retention, update_user_team removal, and the
--- agent-signup identity path (NULL user_id + identity).
+-- agent-signup identity path (NULL user_id + identity). Section 5b adds the
+-- #1716 keyless sections (all-NULL key params → NO api_keys row; partial key
+-- set rejected) — they run against the post-20260825214233 RPC (the harness
+-- applies every migration before the suites).
 --
 -- HOW TO RUN (no Docker — PGlite harness):
 --   npm --prefix supabase/tests/pglite run validate
@@ -27,9 +30,9 @@ GRANT USAGE ON SCHEMA tests TO anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION tests.assert(boolean, text) TO anon, authenticated, service_role;
 
 -- ── Cleanup any prior test rows (idempotent re-runs) ────────────────────────
-DELETE FROM public.api_keys WHERE team_id LIKE '%-770';
-DELETE FROM public.team_memberships WHERE team_id LIKE '%-770' OR identity LIKE '%770%';
-DELETE FROM public.teams WHERE id LIKE '%-770';
+DELETE FROM public.api_keys WHERE org_id LIKE '%-770';
+DELETE FROM public.org_memberships WHERE org_id LIKE '%-770' OR identity LIKE '%770%';
+DELETE FROM public.organizations WHERE id LIKE '%-770';
 DELETE FROM auth.users WHERE email LIKE '%770test%';
 
 -- Fixture users (each INSERT fires handle_new_user → placeholder row)
@@ -72,9 +75,9 @@ DO $$ BEGIN
     '0010: handle_new_user trigger fn must exist (rebuilt)');
   -- partial unique index for the identity path (idempotent anon re-provision)
   PERFORM tests.assert(
-    EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname='public' AND tablename='team_memberships'
-            AND indexname='uq_member_identity_team'),
-    '0010: partial unique (identity, team_id) WHERE user_id IS NULL');
+    EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname='public' AND tablename='org_memberships'
+            AND indexname='uq_member_identity_org'),
+    '0010: partial unique (identity, org_id) WHERE user_id IS NULL');
 END $$;
 
 -- ============================================================================
@@ -84,101 +87,101 @@ END $$;
 DO $$ BEGIN
   -- precondition: the trigger DID create exactly one placeholder
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.team_memberships
-      WHERE user_id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1'::uuid AND team_id='') = 1,
+    (SELECT count(*) FROM public.org_memberships
+      WHERE user_id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1'::uuid AND org_id='') = 1,
     'trigger: placeholder row must exist after auth.users INSERT');
 END $$;
 
 SELECT public.provision_team(
   p_user_id     => 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1'::uuid,
   p_identity    => NULL,
-  p_team_id     => 'team-a-770',
-  p_team_name   => 'Team A 770',
+  p_org_id     => 'org-a-770',
+  p_org_name   => 'Org A 770',
   p_api_key     => 'tt_plaintext_a_770',
   p_key_hash    => 'salt:hash-a-770',
   p_lookup_hash => 'lkp-a-770',
-  p_graph_name  => 'team_team-a-770',
+  p_graph_name  => 'org_org-a-770',
   p_email       => 'user-a-770test@example.com',
   p_key_prefix  => 'tt_plain'
 );
 
 DO $$ BEGIN
-  -- exactly one teams row
+  -- exactly one organizations row
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.teams WHERE id='team-a-770') = 1,
-    'provision_team: exactly one teams row');
+    (SELECT count(*) FROM public.organizations WHERE id='org-a-770') = 1,
+    'provision_team: exactly one organizations row');
   PERFORM tests.assert(
-    (SELECT name FROM public.teams WHERE id='team-a-770') = 'Team A 770',
-    'provision_team: team name written');
+    (SELECT name FROM public.organizations WHERE id='org-a-770') = 'Org A 770',
+    'provision_team: org name written');
   PERFORM tests.assert(
-    (SELECT graph_name FROM public.teams WHERE id='team-a-770') = 'team_team-a-770',
-    'provision_team: teams.graph_name = team_{team_id}');
+    (SELECT graph_name FROM public.organizations WHERE id='org-a-770') = 'org_org-a-770',
+    'provision_team: organizations.graph_name = org_{org_id}');
   PERFORM tests.assert(
-    (SELECT tier FROM public.teams WHERE id='team-a-770') = 'free',
+    (SELECT tier FROM public.organizations WHERE id='org-a-770') = 'free',
     'provision_team: tier free default');
   PERFORM tests.assert(
-    (SELECT max_users FROM public.teams WHERE id='team-a-770') = 1,
+    (SELECT max_users FROM public.organizations WHERE id='org-a-770') = 1,
     'provision_team: free-tier max_users');
   PERFORM tests.assert(
-    (SELECT max_graphs FROM public.teams WHERE id='team-a-770') = 1,
+    (SELECT max_graphs FROM public.organizations WHERE id='org-a-770') = 1,
     'provision_team: free-tier max_graphs');
   PERFORM tests.assert(
-    (SELECT ops_allowance FROM public.teams WHERE id='team-a-770') = 10000,
+    (SELECT ops_allowance FROM public.organizations WHERE id='org-a-770') = 10000,
     'provision_team: free-tier ops_allowance');
   PERFORM tests.assert(
-    (SELECT graph_size_cap FROM public.teams WHERE id='team-a-770') = 10000,
+    (SELECT graph_size_cap FROM public.organizations WHERE id='org-a-770') = 10000,
     'provision_team: free-tier graph_size_cap');
   PERFORM tests.assert(
-    (SELECT email FROM public.teams WHERE id='team-a-770') = 'user-a-770test@example.com',
-    'provision_team: team email written');
+    (SELECT email FROM public.organizations WHERE id='org-a-770') = 'user-a-770test@example.com',
+    'provision_team: org email written');
 
   -- exactly one membership row: the PLACEHOLDER was reconciled in place
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.team_memberships
+    (SELECT count(*) FROM public.org_memberships
       WHERE user_id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1'::uuid) = 1,
     'provision_team: exactly one membership row per user (no phantom)');
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.team_memberships
-      WHERE user_id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1'::uuid AND team_id='') = 0,
-    'provision_team: placeholder row reconciled (none left with team_id='''')');
+    (SELECT count(*) FROM public.org_memberships
+      WHERE user_id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1'::uuid AND org_id='') = 0,
+    'provision_team: placeholder row reconciled (none left with org_id='''')');
   PERFORM tests.assert(
-    (SELECT team_id FROM public.team_memberships
-      WHERE user_id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1'::uuid) = 'team-a-770',
-    'provision_team: placeholder flipped to real team_id');
+    (SELECT org_id FROM public.org_memberships
+      WHERE user_id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1'::uuid) = 'org-a-770',
+    'provision_team: placeholder flipped to real org_id');
   PERFORM tests.assert(
-    (SELECT api_key FROM public.team_memberships
+    (SELECT api_key FROM public.org_memberships
       WHERE user_id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1'::uuid) = 'tt_plaintext_a_770',
     'provision_team: plaintext api_key stored for one-time reveal');
   PERFORM tests.assert(
-    (SELECT key_hash FROM public.team_memberships
+    (SELECT key_hash FROM public.org_memberships
       WHERE user_id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1'::uuid) = 'salt:hash-a-770',
     'provision_team: salted key_hash stored (continuity)');
   PERFORM tests.assert(
-    (SELECT lookup_hash FROM public.team_memberships
+    (SELECT lookup_hash FROM public.org_memberships
       WHERE user_id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1'::uuid) = 'lkp-a-770',
     'provision_team: lookup_hash stored on membership');
   PERFORM tests.assert(
-    (SELECT status FROM public.team_memberships
+    (SELECT status FROM public.org_memberships
       WHERE user_id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1'::uuid) = 'active'
-    AND (SELECT role FROM public.team_memberships
+    AND (SELECT role FROM public.org_memberships
       WHERE user_id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1'::uuid) = 'owner',
     'provision_team: membership active + owner');
 
   -- exactly one api_keys row with the lookup_hash (E2E-1 contract)
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.api_keys WHERE team_id='team-a-770') = 1,
+    (SELECT count(*) FROM public.api_keys WHERE org_id='org-a-770') = 1,
     'provision_team: exactly one api_keys row');
   PERFORM tests.assert(
-    (SELECT lookup_hash FROM public.api_keys WHERE team_id='team-a-770') = 'lkp-a-770',
+    (SELECT lookup_hash FROM public.api_keys WHERE org_id='org-a-770') = 'lkp-a-770',
     'provision_team: api_keys.lookup_hash written');
   PERFORM tests.assert(
-    (SELECT created_via FROM public.api_keys WHERE team_id='team-a-770') = 'provisioned',
+    (SELECT created_via FROM public.api_keys WHERE org_id='org-a-770') = 'provisioned',
     'provision_team: api_keys.created_via = provisioned');
   PERFORM tests.assert(
-    (SELECT created_by FROM public.api_keys WHERE team_id='team-a-770') = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1',
+    (SELECT created_by FROM public.api_keys WHERE org_id='org-a-770') = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1',
     'provision_team: api_keys.created_by = user_id');
   PERFORM tests.assert(
-    (SELECT key_prefix FROM public.api_keys WHERE team_id='team-a-770') = 'tt_plain',
+    (SELECT key_prefix FROM public.api_keys WHERE org_id='org-a-770') = 'tt_plain',
     'provision_team: api_keys.key_prefix written');
 END $$;
 
@@ -188,41 +191,41 @@ END $$;
 SELECT public.provision_team(
   p_user_id     => 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1'::uuid,
   p_identity    => NULL,
-  p_team_id     => 'team-a-770',
-  p_team_name   => 'Team A 770',
+  p_org_id     => 'org-a-770',
+  p_org_name   => 'Org A 770',
   p_api_key     => 'tt_plaintext_a_770',
   p_key_hash    => 'salt:hash-a-770',
   p_lookup_hash => 'lkp-a-770',
-  p_graph_name  => 'team_team-a-770'
+  p_graph_name  => 'org_org-a-770'
 );
 
 -- Simulated race: a stale placeholder reappears AFTER provisioning (what the
 -- pre-0010 trigger could do if it fired after the RPC). provision_team must
 -- reconcile it again — still exactly one membership row.
-INSERT INTO public.team_memberships (user_id, team_id, team_name, key_hash, graph_name, role)
+INSERT INTO public.org_memberships (user_id, org_id, org_name, key_hash, graph_name, role)
 VALUES ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1'::uuid, '', 'provisioning...', 'pending', '', 'owner');
 
 SELECT public.provision_team(
   p_user_id     => 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1'::uuid,
   p_identity    => NULL,
-  p_team_id     => 'team-a-770',
-  p_team_name   => 'Team A 770',
+  p_org_id     => 'org-a-770',
+  p_org_name   => 'Org A 770',
   p_api_key     => 'tt_plaintext_a_770',
   p_key_hash    => 'salt:hash-a-770',
   p_lookup_hash => 'lkp-a-770',
-  p_graph_name  => 'team_team-a-770'
+  p_graph_name  => 'org_org-a-770'
 );
 
 DO $$ BEGIN
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.teams WHERE id='team-a-770') = 1,
-    'idempotent: exactly one teams row after re-invocation');
+    (SELECT count(*) FROM public.organizations WHERE id='org-a-770') = 1,
+    'idempotent: exactly one organizations row after re-invocation');
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.team_memberships
+    (SELECT count(*) FROM public.org_memberships
       WHERE user_id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1'::uuid) = 1,
     'idempotent: exactly one membership row (stale placeholder reconciled)');
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.api_keys WHERE team_id='team-a-770') = 1,
+    (SELECT count(*) FROM public.api_keys WHERE org_id='org-a-770') = 1,
     'idempotent: exactly one api_keys row after re-invocation');
 END $$;
 
@@ -230,31 +233,31 @@ END $$;
 -- SECTION 4 — no-placeholder path (RPC ran before the trigger could)
 -- user-b: delete the trigger placeholder, then provision → INSERT path
 -- ============================================================================
-DELETE FROM public.team_memberships
-WHERE user_id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa2'::uuid AND team_id='';
+DELETE FROM public.org_memberships
+WHERE user_id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa2'::uuid AND org_id='';
 
 SELECT public.provision_team(
   p_user_id     => 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa2'::uuid,
   p_identity    => NULL,
-  p_team_id     => 'team-b-770',
-  p_team_name   => 'Team B 770',
+  p_org_id     => 'org-b-770',
+  p_org_name   => 'Org B 770',
   p_api_key     => 'tt_plaintext_b_770',
   p_key_hash    => 'salt:hash-b-770',
   p_lookup_hash => 'lkp-b-770',
-  p_graph_name  => 'team_team-b-770'
+  p_graph_name  => 'org_org-b-770'
 );
 
 DO $$ BEGIN
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.team_memberships
+    (SELECT count(*) FROM public.org_memberships
       WHERE user_id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa2'::uuid) = 1,
     'no-placeholder path: exactly one membership row');
   PERFORM tests.assert(
-    (SELECT team_id FROM public.team_memberships
-      WHERE user_id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa2'::uuid) = 'team-b-770',
-    'no-placeholder path: real team_id row');
+    (SELECT org_id FROM public.org_memberships
+      WHERE user_id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa2'::uuid) = 'org-b-770',
+    'no-placeholder path: real org_id row');
   -- NOTE: the user-path race (RPC running BEFORE the trigger) is structurally
-  -- impossible — team_memberships.user_id FK → auth.users(id) means the
+  -- impossible — org_memberships.user_id FK → auth.users(id) means the
   -- auth.users INSERT (and its trigger) always precedes any membership write.
   -- The amended trigger's NOT EXISTS guard (0010) is belt-and-braces for that
   -- ordering; the stale-placeholder reconciliation is proven in SECTION 3.
@@ -266,30 +269,30 @@ END $$;
 SELECT public.provision_team(
   p_user_id     => NULL,
   p_identity    => 'agent:anon-770-1',
-  p_team_id     => 'team-c-770',
-  p_team_name   => 'Agent C 770',
+  p_org_id     => 'org-c-770',
+  p_org_name   => 'Agent C 770',
   p_api_key     => 'tt_plaintext_c_770',
   p_key_hash    => 'salt:hash-c-770',
   p_lookup_hash => 'lkp-c-770',
-  p_graph_name  => 'team_team-c-770'
+  p_graph_name  => 'org_org-c-770'
 );
 
 DO $$ BEGIN
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.team_memberships WHERE team_id='team-c-770' AND user_id IS NULL AND identity='agent:anon-770-1') = 1,
+    (SELECT count(*) FROM public.org_memberships WHERE org_id='org-c-770' AND user_id IS NULL AND identity='agent:anon-770-1') = 1,
     'identity path: membership row with NULL user_id + identity');
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.teams WHERE id='team-c-770') = 1,
-    'identity path: exactly one teams row');
+    (SELECT count(*) FROM public.organizations WHERE id='org-c-770') = 1,
+    'identity path: exactly one organizations row');
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.api_keys WHERE team_id='team-c-770') = 1,
+    (SELECT count(*) FROM public.api_keys WHERE org_id='org-c-770') = 1,
     'identity path: exactly one api_keys row');
   PERFORM tests.assert(
-    (SELECT created_by FROM public.api_keys WHERE team_id='team-c-770') = 'agent:anon-770-1',
+    (SELECT created_by FROM public.api_keys WHERE org_id='org-c-770') = 'agent:anon-770-1',
     'identity path: api_keys.created_by = identity');
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.team_memberships
-      WHERE team_id='team-c-770' AND user_id IS NULL AND identity='agent:anon-770-1') = 1,
+    (SELECT count(*) FROM public.org_memberships
+      WHERE org_id='org-c-770' AND user_id IS NULL AND identity='agent:anon-770-1') = 1,
     'identity path: chk_member_or_invite admits NULL user_id + identity');
 END $$;
 
@@ -297,23 +300,23 @@ END $$;
 SELECT public.provision_team(
   p_user_id     => NULL,
   p_identity    => 'agent:anon-770-1',
-  p_team_id     => 'team-c-770',
-  p_team_name   => 'Agent C 770',
+  p_org_id     => 'org-c-770',
+  p_org_name   => 'Agent C 770',
   p_api_key     => 'tt_plaintext_c_770',
   p_key_hash    => 'salt:hash-c-770',
   p_lookup_hash => 'lkp-c-770',
-  p_graph_name  => 'team_team-c-770'
+  p_graph_name  => 'org_org-c-770'
 );
 
 DO $$ BEGIN
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.team_memberships WHERE team_id='team-c-770') = 1,
+    (SELECT count(*) FROM public.org_memberships WHERE org_id='org-c-770') = 1,
     'identity path idempotent: exactly one membership row');
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.teams WHERE id='team-c-770') = 1,
-    'identity path idempotent: exactly one teams row');
+    (SELECT count(*) FROM public.organizations WHERE id='org-c-770') = 1,
+    'identity path idempotent: exactly one organizations row');
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.api_keys WHERE team_id='team-c-770') = 1,
+    (SELECT count(*) FROM public.api_keys WHERE org_id='org-c-770') = 1,
     'identity path idempotent: exactly one api_keys row');
 END $$;
 
@@ -325,58 +328,58 @@ END $$;
 SELECT public.provision_team(
   p_user_id     => NULL,
   p_identity    => 'agent:anon-770-1',
-  p_team_id     => 'team-c-770',
-  p_team_name   => 'Agent C 770',
+  p_org_id     => 'org-c-770',
+  p_org_name   => 'Agent C 770',
   p_api_key     => 'tt_plaintext_c_770_rotated',
   p_key_hash    => 'salt:hash-c-770-rotated',
   p_lookup_hash => 'lkp-c-770-rotated',
-  p_graph_name  => 'team_team-c-770'
+  p_graph_name  => 'org_org-c-770'
 );
 DO $$ BEGIN
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.team_memberships WHERE team_id='team-c-770') = 1,
+    (SELECT count(*) FROM public.org_memberships WHERE org_id='org-c-770') = 1,
     'identity rotation: still exactly one membership row');
   PERFORM tests.assert(
-    (SELECT lookup_hash FROM public.team_memberships
-      WHERE team_id='team-c-770' AND user_id IS NULL AND identity='agent:anon-770-1')
+    (SELECT lookup_hash FROM public.org_memberships
+      WHERE org_id='org-c-770' AND user_id IS NULL AND identity='agent:anon-770-1')
       = 'lkp-c-770-rotated',
     'identity rotation: membership lookup_hash follows the rotated key');
   PERFORM tests.assert(
-    (SELECT key_hash FROM public.team_memberships
-      WHERE team_id='team-c-770' AND user_id IS NULL AND identity='agent:anon-770-1')
+    (SELECT key_hash FROM public.org_memberships
+      WHERE org_id='org-c-770' AND user_id IS NULL AND identity='agent:anon-770-1')
       = 'salt:hash-c-770-rotated',
     'identity rotation: membership key_hash follows the rotated key');
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.api_keys WHERE team_id='team-c-770') = 2,
+    (SELECT count(*) FROM public.api_keys WHERE org_id='org-c-770') = 2,
     'identity rotation: api_keys accumulates the rotated key row');
 END $$;
 
 -- the owner ≤1 invariant (20260813000004 uq_member_owner — P3-FIX-P): a
--- SECOND identity attempting owner co-provision on an already-owned team is
--- REJECTED (anon teams are single-owner — the claim path needs exactly one
+-- SECOND identity attempting owner co-provision on an already-owned org is
+-- REJECTED (anon organizations are single-owner — the claim path needs exactly one
 -- NULL-user owner row to attach a verified identifier to). M:N membership
 -- for distinct identities remains valid via invitations/member role, but
 -- co-OWNERSHIP is now structurally impossible (the old "two identities may
--- co-provision one team" scenario predates the invariant and is invalid).
+-- co-provision one org" scenario predates the invariant and is invalid).
 DO $$ BEGIN
   BEGIN
     PERFORM public.provision_team(
       p_user_id     => NULL,
       p_identity    => 'agent:anon-770-2',
-      p_team_id     => 'team-c-770',
-      p_team_name   => 'Agent C 770',
+      p_org_id     => 'org-c-770',
+      p_org_name   => 'Agent C 770',
       p_api_key     => 'tt_plaintext_c2_770',
       p_key_hash    => 'salt:hash-c2-770',
       p_lookup_hash => 'lkp-c2-770',
-      p_graph_name  => 'team_team-c-770'
+      p_graph_name  => 'org_org-c-770'
     );
     RAISE EXCEPTION 'FAIL: second owner co-provision must be rejected (uq_member_owner)';
   EXCEPTION WHEN unique_violation THEN NULL; END;
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.team_memberships WHERE team_id='team-c-770') = 1,
+    (SELECT count(*) FROM public.org_memberships WHERE org_id='org-c-770') = 1,
     'owner≤1: second owner co-provision rejected — exactly one membership row');
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.api_keys WHERE team_id='team-c-770') = 2,
+    (SELECT count(*) FROM public.api_keys WHERE org_id='org-c-770') = 2,
     'owner≤1: rejected co-provision leaves the api_keys rows untouched');
 END $$;
 
@@ -385,10 +388,92 @@ DO $$ BEGIN
   BEGIN
     PERFORM public.provision_team(
       p_user_id => NULL, p_identity => NULL,
-      p_team_id => 'team-x-770', p_team_name => 'X', p_api_key => 'k',
+      p_org_id => 'org-x-770', p_org_name => 'X', p_api_key => 'k',
       p_key_hash => 'h', p_lookup_hash => 'l', p_graph_name => 'g');
     RAISE EXCEPTION 'FAIL: provision_team must reject all-NULL anchors';
   EXCEPTION WHEN others THEN NULL; END;
+END $$;
+
+-- ============================================================================
+-- SECTION 5b — keyless provisioning (#1716): all-NULL key params
+-- ============================================================================
+-- POST /v1/onboarding/org provisions a sub-org with NO api_keys row — the
+-- old per-call tt_ mint was an unrecoverable dead credential (plaintext never
+-- returned, hash-only at rest). Keyless = organizations + membership, zero api_keys;
+-- the org stays keyless until a session-key mint (POST /v1/session/key).
+SELECT public.provision_team(
+  p_user_id     => NULL,
+  p_identity    => 'agent:anon-1716-1',
+  p_org_id     => 'org-k-770',
+  p_org_name   => 'Org Keyless 770',
+  p_api_key     => NULL,
+  p_key_hash    => NULL,
+  p_lookup_hash => NULL,
+  p_graph_name  => 'org_org-k-770'
+);
+
+DO $$ BEGIN
+  PERFORM tests.assert(
+    (SELECT count(*) FROM public.organizations WHERE id='org-k-770') = 1,
+    'keyless: organizations row created');
+  PERFORM tests.assert(
+    (SELECT count(*) FROM public.org_memberships
+      WHERE org_id='org-k-770' AND user_id IS NULL
+        AND identity='agent:anon-1716-1') = 1,
+    'keyless: identity-path membership row created');
+  PERFORM tests.assert(
+    (SELECT count(*) FROM public.api_keys WHERE org_id='org-k-770') = 0,
+    'keyless: NO api_keys row attributable to the org (#1716)');
+END $$;
+
+-- keyless re-invocation stays idempotent and still writes no api_keys row
+SELECT public.provision_team(
+  p_user_id     => NULL,
+  p_identity    => 'agent:anon-1716-1',
+  p_org_id     => 'org-k-770',
+  p_org_name   => 'Org Keyless 770',
+  p_api_key     => NULL,
+  p_key_hash    => NULL,
+  p_lookup_hash => NULL,
+  p_graph_name  => 'org_org-k-770'
+);
+
+DO $$ BEGIN
+  PERFORM tests.assert(
+    (SELECT count(*) FROM public.org_memberships
+      WHERE org_id='org-k-770' AND user_id IS NULL
+        AND identity='agent:anon-1716-1') = 1,
+    'keyless re-invocation: exactly one membership row');
+  PERFORM tests.assert(
+    (SELECT count(*) FROM public.api_keys WHERE org_id='org-k-770') = 0,
+    'keyless re-invocation: still no api_keys row');
+END $$;
+
+-- PARTIAL key set → rejected (all-or-none guard, #1716). Flag pattern so the
+-- test actually fails if provision_team stops raising (the swallow-anything
+-- pattern above cannot detect that).
+DO $$ DECLARE
+  _raised boolean := false;
+BEGIN
+  BEGIN
+    PERFORM public.provision_team(
+      p_user_id     => NULL,
+      p_identity    => 'agent:anon-1716-2',
+      p_org_id     => 'org-p-770',
+      p_org_name   => 'Partial 770',
+      p_api_key     => 'tt_partial_770',
+      p_key_hash    => NULL,
+      p_lookup_hash => 'lkp-partial-770',
+      p_graph_name  => 'org_org-p-770'
+    );
+  EXCEPTION WHEN others THEN
+    _raised := true;
+  END;
+  PERFORM tests.assert(_raised,
+    'keyless: provision_team must reject a PARTIAL key set (all-or-none)');
+  PERFORM tests.assert(
+    NOT EXISTS (SELECT 1 FROM public.organizations WHERE id='org-p-770'),
+    'keyless: rejected partial provision persisted nothing (subtransaction rollback)');
 END $$;
 
 -- ============================================================================
@@ -398,21 +483,21 @@ SET request.jwt.claim.sub = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1';
 
 DO $$ BEGIN
   PERFORM tests.assert(
-    public.reveal_api_key('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1'::uuid, 'team-a-770') = 'tt_plaintext_a_770',
+    public.reveal_api_key('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1'::uuid, 'org-a-770') = 'tt_plaintext_a_770',
     'reveal: returns plaintext once to the row owner');
   PERFORM tests.assert(
-    public.reveal_api_key('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1'::uuid, 'team-a-770') IS NULL,
+    public.reveal_api_key('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1'::uuid, 'org-a-770') IS NULL,
     'reveal: second call returns NULL (key shown once)');
   PERFORM tests.assert(
-    (SELECT api_key FROM public.team_memberships
+    (SELECT api_key FROM public.org_memberships
       WHERE user_id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1'::uuid) IS NULL,
     'reveal: api_key nulled atomically');
   PERFORM tests.assert(
-    (SELECT lookup_hash FROM public.team_memberships
+    (SELECT lookup_hash FROM public.org_memberships
       WHERE user_id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1'::uuid) = 'lkp-a-770',
     'reveal: lookup_hash RETAINED on the nulled row (E2E-6 auth path)');
   PERFORM tests.assert(
-    (SELECT key_hash FROM public.team_memberships
+    (SELECT key_hash FROM public.org_memberships
       WHERE user_id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1'::uuid) = 'salt:hash-a-770',
     'reveal: key_hash retained');
 END $$;
@@ -421,10 +506,10 @@ END $$;
 SET request.jwt.claim.sub = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa2';
 DO $$ BEGIN
   PERFORM tests.assert(
-    public.reveal_api_key('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa2'::uuid, 'team-a-770') IS NULL,
-    'reveal: a user may not reveal another user''s team key (team mismatch)');
+    public.reveal_api_key('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa2'::uuid, 'org-a-770') IS NULL,
+    'reveal: a user may not reveal another user''s org key (org mismatch)');
   PERFORM tests.assert(
-    public.reveal_api_key('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1'::uuid, 'team-a-770') IS NULL,
+    public.reveal_api_key('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1'::uuid, 'org-a-770') IS NULL,
     'reveal: spoofing another user_id is denied (auth.uid() guard)');
 END $$;
 RESET request.jwt.claim.sub;
@@ -433,25 +518,25 @@ RESET request.jwt.claim.sub;
 -- prove an anon identity; agent keys are delivered once at mint time)
 DO $$ BEGIN
   PERFORM tests.assert(
-    public.reveal_api_key(NULL, 'team-c-770') IS NULL,
+    public.reveal_api_key(NULL, 'org-c-770') IS NULL,
     'reveal: identity-path row (NULL user_id) not revealable');
 END $$;
 
 -- fail-closed: a membership with NO lookup_hash must not be nulled
 -- (nulling the only credential without a lookup anchor = permanent lockout)
-INSERT INTO public.team_memberships (user_id, team_id, team_name, api_key, key_hash, graph_name, role, status, lookup_hash)
-VALUES ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa3'::uuid, 'team-d-770', 'Team D 770',
-        'tt_legacy_no_lkp_770', 'salt:hash-d-770', 'team_team-d-770', 'owner', 'active', NULL);
-INSERT INTO public.teams (id, name, graph_name) VALUES ('team-d-770', 'Team D 770', 'team_team-d-770');
+INSERT INTO public.org_memberships (user_id, org_id, org_name, api_key, key_hash, graph_name, role, status, lookup_hash)
+VALUES ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa3'::uuid, 'org-d-770', 'Org D 770',
+        'tt_legacy_no_lkp_770', 'salt:hash-d-770', 'org_org-d-770', 'owner', 'active', NULL);
+INSERT INTO public.organizations (id, name, graph_name) VALUES ('org-d-770', 'Org D 770', 'org_org-d-770');
 
 SET request.jwt.claim.sub = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa3';
 DO $$ BEGIN
   PERFORM tests.assert(
-    public.reveal_api_key('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa3'::uuid, 'team-d-770') IS NULL,
+    public.reveal_api_key('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa3'::uuid, 'org-d-770') IS NULL,
     'reveal fail-closed: missing lookup_hash → NULL');
   PERFORM tests.assert(
-    (SELECT api_key FROM public.team_memberships
-      WHERE user_id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa3'::uuid AND team_id='team-d-770') = 'tt_legacy_no_lkp_770',
+    (SELECT api_key FROM public.org_memberships
+      WHERE user_id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa3'::uuid AND org_id='org-d-770') = 'tt_legacy_no_lkp_770',
     'reveal fail-closed: api_key NOT nulled without a lookup anchor');
 END $$;
 RESET request.jwt.claim.sub;
@@ -459,31 +544,31 @@ RESET request.jwt.claim.sub;
 -- ============================================================================
 -- SECTION 7 — RLS + grants (defense in depth)
 -- ============================================================================
--- authenticated may NOT execute provision_team (mints teams/keys — the
+-- authenticated may NOT execute provision_team (mints organizations/keys — the
 -- Edge Function alone may, via service_role after #802 caller auth)
 SET ROLE authenticated;
 DO $$ BEGIN
   BEGIN
     PERFORM public.provision_team(
       p_user_id => 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa4'::uuid, p_identity => NULL,
-      p_team_id => 'team-e-770', p_team_name => 'E', p_api_key => 'k',
+      p_org_id => 'org-e-770', p_org_name => 'E', p_api_key => 'k',
       p_key_hash => 'h', p_lookup_hash => 'l', p_graph_name => 'g');
     RAISE EXCEPTION 'FAIL: authenticated must not execute provision_team';
   EXCEPTION WHEN insufficient_privilege THEN NULL; END;
 END $$;
 
--- GUC tenant scoping still denies cross-team reads (teams + api_keys)
-SET app.current_team_id = 'team-a-770';
+-- GUC tenant scoping still denies cross-org reads (organizations + api_keys)
+SET app.current_org_id = 'org-a-770';
 DO $$ BEGIN
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.teams WHERE id='team-a-770') = 1,
-    'RLS: authenticated (GUC=team-a) reads own team');
+    (SELECT count(*) FROM public.organizations WHERE id='org-a-770') = 1,
+    'RLS: authenticated (GUC=org-a) reads own org');
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.teams WHERE id='team-b-770') = 0,
-    'RLS: cross-team teams read denied');
+    (SELECT count(*) FROM public.organizations WHERE id='org-b-770') = 0,
+    'RLS: cross-org organizations read denied');
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.api_keys WHERE team_id='team-b-770') = 0,
-    'RLS: cross-team api_keys read denied');
+    (SELECT count(*) FROM public.api_keys WHERE org_id='org-b-770') = 0,
+    'RLS: cross-org api_keys read denied');
 END $$;
 
 -- membership rows: the 0003 auth.uid() policy still gates reads, and the
@@ -491,31 +576,31 @@ END $$;
 SET request.jwt.claim.sub = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1';
 DO $$ BEGIN
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.team_memberships
+    (SELECT count(*) FROM public.org_memberships
       WHERE user_id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1'::uuid) = 1,
     'RLS: owner reads own membership row');
   BEGIN
-    PERFORM api_key FROM public.team_memberships LIMIT 1;
+    PERFORM api_key FROM public.org_memberships LIMIT 1;
     RAISE EXCEPTION 'FAIL: authenticated must not read api_key column';
   EXCEPTION WHEN insufficient_privilege THEN NULL; END;
 END $$;
 RESET request.jwt.claim.sub;
-RESET app.current_team_id;
+RESET app.current_org_id;
 RESET ROLE;
 
 -- ============================================================================
 -- SECTION 8 — cleanup (audit rows exempt; append-only)
 -- ============================================================================
-DELETE FROM public.api_keys WHERE team_id LIKE '%-770';
-DELETE FROM public.team_memberships WHERE team_id LIKE '%-770' OR identity LIKE '%770%';
-DELETE FROM public.teams WHERE id LIKE '%-770';
+DELETE FROM public.api_keys WHERE org_id LIKE '%-770';
+DELETE FROM public.org_memberships WHERE org_id LIKE '%-770' OR identity LIKE '%770%';
+DELETE FROM public.organizations WHERE id LIKE '%-770';
 DELETE FROM auth.users WHERE email LIKE '%770test%';
 
 DO $$ BEGIN
   PERFORM tests.assert(
-    NOT EXISTS (SELECT 1 FROM public.teams WHERE id LIKE '%-770'),
-    'cleanup: no fixture teams left');
+    NOT EXISTS (SELECT 1 FROM public.organizations WHERE id LIKE '%-770'),
+    'cleanup: no fixture organizations left');
   PERFORM tests.assert(
-    NOT EXISTS (SELECT 1 FROM public.team_memberships WHERE team_id LIKE '%-770'),
+    NOT EXISTS (SELECT 1 FROM public.org_memberships WHERE org_id LIKE '%-770'),
     'cleanup: no fixture memberships left');
 END $$;

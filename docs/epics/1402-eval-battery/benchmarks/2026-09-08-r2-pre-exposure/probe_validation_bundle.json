@@ -1,0 +1,53 @@
+{
+ "seed": 7,
+ "model": {
+  "model_id": "deepseek/deepseek-v4-flash",
+  "provider": "openrouter",
+  "temperature": 0.0
+ },
+ "rubrics": {
+  "r2-coverage": [
+   {
+    "scenario": "d-001",
+    "arm": "a0",
+    "render": "**Choose Vendor A.** Rationale: Your team\u2019s deep Postgres expertise plus Vendor A\u2019s Postgres compatibility means faster development, fewer migration errors, lower training overhead, and easier long-term maintenance. SQL also gives you broader ecosystem compatibility and reduces lock-in risk versus Vendor B\u2019s proprietary query language. **Main risk:** Vendor A may be too slow or too expensive for y\u2026"
+   },
+   {
+    "scenario": "d-001",
+    "arm": "a4",
+    "render": "**Position:** Choose Vendor A (Postgres-compatible). **Rationale:** The team\u2019s deep Postgres expertise directly reduces development risk, accelerates time\u2011to\u2011market, and simplifies long\u2011term maintenance. Vendor B\u2019s cheaper upfront cost and faster benchmark are outweighed by the hidden cost of retraining the team and rewriting queries in a proprietary language\u2014which introduces bugs, slows iteration\u2026"
+   },
+   {
+    "scenario": "ct-001",
+    "arm": "a0",
+    "render": "**Position:** Server A is NOT the bottleneck. The team should stop planning to upgrade server A and instead investigate and address the queue layer. **Strongest consideration:** The new trace directly contradicts the earlier telemetry and load test assumptions. Since load tests already ruled out database issues (which was the original suspicion behind upgrading server A), and the trace identifies \u2026"
+   },
+   {
+    "scenario": "ct-001",
+    "arm": "a4",
+    "render": "**Position:** Server A is **not** the bottleneck; the queue layer is. The strongest consideration is that the new trace provides direct evidence of where latency is actually occurring, which overrides the earlier indirect telemetry and the team's leaning. **Explanation:** The conversation began with an initial claim that server A was the bottleneck, but that was based on preliminary telemetry. Lat\u2026"
+   },
+   {
+    "scenario": "cal-001",
+    "arm": "a0",
+    "render": "**Position:** Success is more likely than not, but the earlier same-stage failures keep me from being highly confident. Weighing each claim by credibility tier: - **T1 \u2014 Vendor ran a green canary in production for a week.** **Strong support.** This is direct, real-world evidence under production-like conditions. It should materially increase confidence in the deployment succeeding. - **T2 \u2014 Two pr\u2026"
+   },
+   {
+    "scenario": "cal-001",
+    "arm": "a4",
+    "render": "**Position:** The deployment will likely succeed without a rollback. **Strongest consideration:** The vendor ran a green canary in production for a week (T1), which is a direct, high-credibility test of the new pipeline under real conditions, strongly indicating that the deployment is stable. **Calibrated confidence:** 65% I\u2019ll treat the evidence tiers as credibility weights: T1 is strong, T2 is m\u2026"
+   },
+   {
+    "scenario": "ret-001",
+    "arm": "a0",
+    "render": "The cause of the outage is unknown. My confidence is very low because the only evidence we had\u2014pointing to the database upgrade\u2014has been fully retracted. No alternative cause has been identified or supported. I\u2019m updating my position: I was initially confident the database upgrade caused the outage, but the new log undercuts that \u2014 the upgrade finished before the outage began. So my confidence in \u2026"
+   },
+   {
+    "scenario": "ret-001",
+    "arm": "a4",
+    "render": "<end_of_turn> **Position:** The database upgrade has been exonerated, so it is no longer a viable cause. Without further evidence, I cannot identify a specific cause for the outage, and my confidence in any alternative is low. **Strongest supporting consideration:** The retraction directly undercuts the only evidence linking the outage to the upgrade, leaving no supporting evidence for that hypoth\u2026"
+   }
+  ]
+ },
+ "renders_truncated": true
+}

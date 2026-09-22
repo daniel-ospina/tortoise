@@ -1,0 +1,37 @@
+{
+  "per_turn": [
+    {
+      "should_retrieve": false,
+      "turn": 1
+    },
+    {
+      "should_retrieve": false,
+      "turn": 2
+    },
+    {
+      "pointers": [
+        "pt_alice_widgetco_pricing"
+      ],
+      "should_retrieve": true,
+      "turn": 3
+    },
+    {
+      "should_retrieve": false,
+      "turn": 4
+    },
+    {
+      "should_retrieve": false,
+      "turn": 5
+    },
+    {
+      "pointers": [
+        "pt_alice_widgetco_pricing"
+      ],
+      "should_retrieve": true,
+      "turn": 6
+    }
+  ],
+  "schema_version": 1,
+  "session_id": "kta01_reminder_turns",
+  "suite": "know_to_ask"
+}

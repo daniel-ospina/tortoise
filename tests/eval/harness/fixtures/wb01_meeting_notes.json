@@ -1,0 +1,23 @@
+{
+  "holdout": false,
+  "seed": 5,
+  "suite": "write_back",
+  "turns": [
+    {
+      "content": "Alice said the Widget Co pricing was too aggressive and we should push for a 10% cut.",
+      "role": "user"
+    },
+    {
+      "content": "Noted \u2014 I'll record that as a decision candidate.",
+      "role": "assistant"
+    },
+    {
+      "content": "Diego confirmed the Aurora perf regression is a write-path queue issue, not the indexer.",
+      "role": "user"
+    },
+    {
+      "content": "Got it \u2014 recording the root-cause narrowing.",
+      "role": "assistant"
+    }
+  ]
+}

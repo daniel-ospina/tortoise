@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "session_id": "iso_b_mercury",
+  "suite": "isolation",
+  "teams": {
+    "team_a": {
+      "anchors": [
+        "ships its alpha next Tuesday"
+      ]
+    },
+    "team_b": {
+      "anchors": [
+        "incident postmortem is scheduled Friday",
+        "on-call rotation is fixed",
+        "retry fix before the postmortem"
+      ]
+    }
+  }
+}

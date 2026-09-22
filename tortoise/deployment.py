@@ -49,7 +49,14 @@ def serve_http():
 
     host = args.host or selfhost.HOST
     port = args.port or selfhost.PORT
-    uvicorn.run(selfhost.app, host=host, port=port)
+    # #2203: bound the graceful drain (see tortoise/selfhost.py __main__) —
+    # docker stop SIGKILLs at 10s; an unbounded drain on long-lived MCP SSE
+    # streams would let that SIGKILL preempt the termination teardown that
+    # closes an embedded redis-server child (uvicorn re-raises the signal
+    # into the #2203 guard at the end of the drain; interpreter-exit atexit
+    # is the backstop).
+    uvicorn.run(selfhost.app, host=host, port=port,
+                timeout_graceful_shutdown=5)
 
 
 def health(db=None) -> dict:

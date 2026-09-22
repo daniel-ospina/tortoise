@@ -44,9 +44,22 @@ class Scorer(Protocol):
     def score(self, episode: EpisodeResult, scenario,
               rubric_id: str | None = None) -> ScorerResult: ...
 
+    def expected_coverage(self, scenario, *, run_mode: str = "mock") -> set:
+        """Per-episode schema-v1.1 EXPECTED set computed on the episode
+        BEFORE scoring via the scorer seam (Task-1 expectation rule — no
+        arms.yaml capability term). Default: EMPTY expected => gap empty,
+        mock/real neutral. HarnessScorer never gates; ProbeScorer fills the
+        MANDATORY x scenario/family-conditional set for real episodes."""
+        return set()
+
 
 class HarnessScorer:
     """Trajectory-derived emission metrics (default scorer, owned here)."""
+
+    def expected_coverage(self, scenario, *, run_mode: str = "mock") -> set:
+        """Harness metrics are trajectory-derived, not schema-log gated:
+        empty expected => gap empty, mock/real neutral."""
+        return set()
 
     def score(self, episode: EpisodeResult, scenario,
               rubric_id: str | None = None) -> ScorerResult:

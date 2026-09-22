@@ -1,0 +1,207 @@
+{
+  "attribution_hazards": [
+    {
+      "id": "wp06_quarry_rollout_h_01",
+      "planted_turn": 13,
+      "quote": "we killed a lease-holding worker mid-batch on four shards",
+      "source": "maya"
+    },
+    {
+      "id": "wp06_quarry_rollout_h_02",
+      "planted_turn": 19,
+      "quote": "I would rather it be one person with the runbook open",
+      "source": "diego"
+    }
+  ],
+  "distractor_leakage_tolerance": 1,
+  "distractors": [
+    {
+      "anchor": "queued it behind the nightly embedding job",
+      "id": "wp06_quarry_rollout_d_01",
+      "planted_turn": 13,
+      "statement": "The chaos run waited for the nightly embedding job."
+    },
+    {
+      "anchor": "my shift ends at six",
+      "id": "wp06_quarry_rollout_d_02",
+      "planted_turn": 15,
+      "statement": "Routine note that the shift ends at six."
+    }
+  ],
+  "planted_operators": [
+    {
+      "expected_kind": "SUPPORTS",
+      "from": {
+        "planted_turn": 13,
+        "verbatim_anchor": "every batch was claimed exactly once after the expiry"
+      },
+      "id": "wp06_quarry_rollout_op_01",
+      "reason": "chaos-run observation (t13) supports the scope-independence hypothesis (t9) \u2014 ONTOLOGY \u00a73.1 IMPL 'A supports/implies B' + \u00a78 semantic type supports|IMPL (Evidence supports Claim); asst t14 states the relation explicitly ('the chaos run supports the claim that...'). from = observation/evidence, to = hypothesis.",
+      "relation_turn": 14,
+      "to": {
+        "planted_turn": 9,
+        "verbatim_anchor": "the lease makes that impossible no matter how we roll out"
+      }
+    }
+  ],
+  "planted_units": [
+    {
+      "depth_bucket": "early",
+      "id": "wp06_quarry_rollout_u_01",
+      "kind": "fact",
+      "notability": "medium",
+      "planted_turn": 1,
+      "verbatim_anchor": "the staging matrix is green"
+    },
+    {
+      "depth_bucket": "early",
+      "id": "wp06_quarry_rollout_u_02",
+      "kind": "fact",
+      "notability": "medium",
+      "planted_turn": 1,
+      "verbatim_anchor": "until the October freeze"
+    },
+    {
+      "depth_bucket": "early",
+      "id": "wp06_quarry_rollout_u_03",
+      "kind": "decision",
+      "notability": "high",
+      "planted_turn": 3,
+      "verbatim_anchor": "run the chaos harness against both rollout shapes"
+    },
+    {
+      "depth_bucket": "early",
+      "id": "wp06_quarry_rollout_u_04",
+      "kind": "idea",
+      "notability": "high",
+      "planted_turn": 5,
+      "verbatim_anchor": "we could re-enter the duplicate-processing race while the queue drains"
+    },
+    {
+      "depth_bucket": "early",
+      "id": "wp06_quarry_rollout_u_05",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 7,
+      "verbatim_anchor": "two workers claiming one batch at the exact moment a region toggles"
+    },
+    {
+      "depth_bucket": "middle",
+      "id": "wp06_quarry_rollout_u_06",
+      "kind": "idea",
+      "notability": "high",
+      "planted_turn": 11,
+      "verbatim_anchor": "one day of rollout instead of a week of canary watching"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp06_quarry_rollout_u_07",
+      "kind": "decision",
+      "notability": "high",
+      "planted_turn": 19,
+      "verbatim_anchor": "one person with the runbook open"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp06_quarry_rollout_u_08",
+      "kind": "entity",
+      "notability": "high",
+      "planted_turn": 20,
+      "verbatim_anchor": "Maya is the natural driver for the flip"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp06_quarry_rollout_u_09",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 21,
+      "verbatim_anchor": "lease migration already landed ahead of Friday's maintenance window"
+    }
+  ],
+  "salient_units": [
+    {
+      "id": "wp06_quarry_rollout_u_01",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "the staging matrix is green"
+      }
+    },
+    {
+      "id": "wp06_quarry_rollout_u_02",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "until the October freeze"
+      }
+    },
+    {
+      "id": "wp06_quarry_rollout_u_03",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "run the chaos harness against both rollout shapes"
+      }
+    },
+    {
+      "id": "wp06_quarry_rollout_u_04",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "we could re-enter the duplicate-processing race while the queue drains"
+      }
+    },
+    {
+      "id": "wp06_quarry_rollout_u_05",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "two workers claiming one batch at the exact moment a region toggles"
+      }
+    },
+    {
+      "id": "wp06_quarry_rollout_u_06",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "one day of rollout instead of a week of canary watching"
+      }
+    },
+    {
+      "id": "wp06_quarry_rollout_u_07",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "one person with the runbook open"
+      }
+    },
+    {
+      "id": "wp06_quarry_rollout_u_08",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "Maya is the natural driver for the flip"
+      }
+    },
+    {
+      "id": "wp06_quarry_rollout_u_09",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "lease migration already landed ahead of Friday's maintenance window"
+      }
+    }
+  ],
+  "scenario": "Diego and Maya decide the rollout shape for the quarry lease fix: the chaos harness supports the scope-independence claim (SUPPORTS) and they commit to all-at-once behind a single global kill flag (the decision the follow-up session overturns).",
+  "schema_version": 1,
+  "session_id": "wp06_quarry_rollout"
+}

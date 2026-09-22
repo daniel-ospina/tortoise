@@ -10,7 +10,12 @@
   --bg-soft: #0d1a2d;
   --border: rgba(255, 255, 255, 0.12);
   --text: #cbd5e1;
-  --text-dim: #64748b;
+  /* #2331: --text-dim raised #64748b → #94a3b8 (slate-400) — the old token
+     measured 3.67:1 on --surface and 4.14:1 on --bg, below the WCAG AA 4.5:1
+     floor for 12px body/label text (.dim, nav inactive, table headers).
+     slate-400: 6.81:1 on surface, 7.69:1 on bg, 6.20:1 on hover — AA with
+     hierarchy headroom under --text (#cbd5e1, ~10:1). */
+  --text-dim: #94a3b8;
   --accent: #06b6d4;
   --accent-hover: #0891b2;
   --green: #4ade80;
@@ -30,11 +35,33 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 
 /* Layout */
 .app { max-width: 960px; margin: 0 auto; padding: 0 20px 60px; }
-header { display: flex; align-items: center; gap: 16px; padding: 16px 0; border-bottom: 1px solid rgba(255,255,255,0.06); margin-bottom: 24px; }
+header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; padding: 16px 0; border-bottom: 1px solid rgba(255,255,255,0.06); margin-bottom: 24px; }
+header.dash-header { gap: 12px 16px; }
 header .logo { font-weight: 700; font-size: 18px; }
-header nav { flex: 1; display: flex; gap: 8px; }
+header nav { flex: 1; min-width: 200px; display: flex; flex-wrap: wrap; gap: 8px; }
 header nav button { background: none; border: none; color: var(--text-dim); padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 14px; }
 header nav button.active { color: var(--accent); background: rgba(6,182,212,0.1); }
+/* #2332: the right-side controls (Setup + account blob) are ONE atomic
+   cluster — wrapped in .header-cluster so they never scatter onto separate
+   rows when the header wraps. Wide (default): the cluster sits on the nav
+   line, pushed right (margin-left:auto); ≤920px the header becomes two
+   explicit rows (logo + cluster / nav full-width) so nothing wraps
+   mid-sequence (the old single flex-wrap line broke the nav, then the
+   Setup pill + account blob cascaded onto separate rows). */
+.header-cluster { margin-left: auto; display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+.header-cluster .setup-header { white-space: nowrap; }
+@media (max-width: 920px) {
+  header.dash-header { display: grid; grid-template-areas: "logo cluster" "nav nav"; align-items: center; row-gap: 10px; }
+  header.dash-header .logo { grid-area: logo; }
+  header.dash-header .header-cluster { grid-area: cluster; justify-self: end; margin-left: 0; max-width: 62vw; }
+  header.dash-header nav { grid-area: nav; flex: none; min-width: 0; width: 100%; }
+  /* #2332 (review P1): the tier-badge pills (Upgrade / Manage subscription /
+     flagged / Team tier) are direct header children after the cluster —
+     without an area they would auto-place into an implicit narrow track and
+     overflow. Span them across the full header on their own rows below the
+     nav. */
+  header.dash-header > .tier-badge { grid-column: 1 / -1; justify-self: start; }
+}
 
 /* Buttons */
 button { background: var(--accent); color: #04121a; border: none; padding: 10px 16px; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 14px; }
@@ -58,8 +85,41 @@ a { color: var(--accent); }
 /* Cards */
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 24px; }
 .card { background: var(--surface); border: 1px solid rgba(255,255,255,0.06); border-radius: 10px; padding: 16px; }
-.card-val { font-size: 28px; font-weight: 700; color: var(--accent); }
-.card-label { font-size: 13px; color: var(--text-dim); margin-top: 2px; }
+.card-val { font-size: 28px; font-weight: 700; color: var(--accent); line-height: 1.2; } /* #1842 P2-2: fixed line box 28×1.2=33.6px so the skeleton slot (1.2em) swaps without CLS */
+.card-label { font-size: 13px; color: var(--text-dim); margin-top: 2px; line-height: 1.2; } /* #1842 P2-2: 13×1.2=15.6px */
+
+/* #1841: overview skeleton frames + per-card shimmer — dark-theme slate
+   grays at low alpha over the surface (a light #e8e8e8 bar would glare on
+   this theme); 1.4s sweep, disabled under prefers-reduced-motion. */
+@keyframes shimmer {
+  0%   { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+.skeleton {
+  display: inline-block;
+  vertical-align: middle;
+  line-height: 1; /* #1842 P2-2: the skeleton's own line box tracks font-size; the box height from the JSX slot styles (1.2em/1.2em) is what matches the card line boxes */
+  background: linear-gradient(90deg, rgba(148, 163, 184, 0.14) 25%, rgba(148, 163, 184, 0.26) 50%, rgba(148, 163, 184, 0.14) 75%);
+  background-size: 800px 100%;
+  animation: shimmer 1.4s infinite linear;
+  border-radius: 4px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .skeleton { animation: none; background: rgba(148, 163, 184, 0.14); }
+}
+/* #1841: visually-hidden live-region text (role=status progress cue). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
 
 /* Quickstart */
 .quickstart { background: var(--surface); border: 1px solid rgba(255,255,255,0.06); border-radius: 10px; padding: 16px; }
@@ -68,6 +128,8 @@ a { color: var(--accent); }
 
 /* Keys */
 .row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+/* #2735: rotate's one-time replacement reveal (regenerateKey). #2667 dropped
+   this class with the standalone block, but rotate still needs it. */
 .new-key { background: rgba(74,222,128,0.08); border: 1px solid rgba(74,222,128,0.3); border-radius: 10px; padding: 14px; margin-bottom: 16px; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
 .key-value { font-size: 13px; word-break: break-all; }
 
@@ -79,6 +141,11 @@ tbody tr:last-child td { border-bottom: none; }
 
 .live { color: var(--green); }
 .revoked { color: var(--red); }
+/* #2426: API-key expiry states — the keys-table Expires cell. .expiring =
+   amber ≤14d-to-go ('in N days'); .expired = terminal red (row stays listed
+   as a tombstone — rotate re-applies the lifetime span with a fresh clock). */
+.expiring { color: #fbbf24; }
+.expired { color: var(--red); }
 
 /* #300: tier badge + inline forms */
 .tier-badge {
@@ -96,6 +163,8 @@ tbody tr:last-child td { border-bottom: none; }
 button.tier-badge { background: transparent; font-family: inherit; cursor: pointer; }
 button.tier-badge:disabled { opacity: 0.6; cursor: wait; }
 .inline-form { display: flex; gap: 8px; align-items: center; }
+/* #2426: the API-Keys-tab create form grew an expiry <select> (+ Custom
+   date input) — wrap on narrow viewports instead of overflowing the row */
 .inline-form input, .inline-form select {
   background: var(--surface);
   border: 1px solid rgba(255,255,255,0.12);
@@ -171,7 +240,7 @@ button.tier-badge:disabled { opacity: 0.6; cursor: wait; }
 .switch[data-on='true']::after { left: 20px; }
 
 /* #1148-ux: account blob (workspace switcher — GitHub/Vercel/Linear pattern) */
-.account-blob { position: relative; margin-left: auto; }
+.account-blob { position: relative; }
 .account-blob-btn {
   display: inline-flex; align-items: center; gap: 8px;
   padding: 5px 10px; border-radius: 8px;
@@ -191,49 +260,134 @@ button.tier-badge:disabled { opacity: 0.6; cursor: wait; }
 .account-name { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .account-menu {
   position: absolute; top: calc(100% + 6px); right: 0; z-index: 50;
-  min-width: 220px; padding: 6px;
+  min-width: 220px; max-height: calc(100vh - 120px); overflow-y: auto; padding: 6px;
   background: var(--surface, #0f172a); border: 1px solid var(--border, #334155);
   border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
 }
 .account-menu-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; opacity: 0.6; padding: 4px 8px 6px; }
-.account-menu button[role='menuitem'] {
+/* #2494: two-section menu — section wrappers keep no extra padding. */
+.account-menu-section { padding: 2px 0; background: rgba(255,255,255,0.02); border-radius: 6px; margin: 0 2px; }
+/* #2494: org context row — mirrors identity-row layout with small avatar. */
+.account-menu-org { display: flex; align-items: center; gap: 8px; padding: 6px 12px 4px; }
+.account-menu-org .account-org-name { font-weight: 600; font-size: 13px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-menu-org .tier-badge { flex: none; }
+/* #2494: micro-divider between Profile and Log out in Personal Account section. */
+.account-menu-micro-divider { height: 1px; background: var(--border, #334155); margin: 4px 0; }
+/* #1874: live disclosure-row styles — the P2-1 a11y change dropped
+   role=menuitem, so the old button[role='menuitem'] selectors were dead and
+   menu buttons fell through to the global filled-accent button rule. */
+.account-menu button {
   display: flex; align-items: center; gap: 8px; width: 100%;
-  padding: 7px 8px; border-radius: 6px; border: none; background: none;
-  color: var(--text, #fff); font-size: 13px; text-align: left; cursor: pointer;
+  padding: 8px 12px; border-radius: 6px; border: none; background: none;
+  color: var(--text-dim, #94a3b8); font-size: 13px; font-weight: 400;
+  text-align: left; cursor: pointer;
 }
-.account-menu button[role='menuitem']:hover { background: rgba(6,182,212,0.1); }
-.account-menu button[role='menuitem'].active { color: var(--accent, #06b6d4); }
+.account-menu button:hover { background: rgba(6,182,212,0.1); color: var(--text, #fff); }
+.account-menu button.active { color: var(--accent, #06b6d4); }
 .account-menu .account-check { margin-left: auto; }
 .account-menu-empty { padding: 6px 8px; font-size: 13px; }
 .account-menu-divider { height: 1px; background: var(--border, #334155); margin: 6px 0; }
 .account-menu-logout { color: #f87171 !important; }
-/* #1148-ux: graph selector moved into the API Keys page (page-scoped context) */
-.page-graph-selector {
-  display: inline-flex; align-items: center; gap: 10px;
-  margin-bottom: 16px; padding: 10px 14px;
-  border: 1px solid var(--border); border-radius: 10px;
-  background: var(--surface); max-width: 360px;
+.account-menu-create { color: var(--accent, #06b6d4); font-weight: 600; }
+.account-invite { display: flex; align-items: center; gap: 8px; padding: 6px 12px; }
+.account-invite-text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.account-invite-team { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-invite-error { color: var(--red, #f87171); font-size: 12px; }
+.account-invite-actions { display: flex; gap: 6px; }
+.account-invite-actions .ghost.small { padding: 3px 8px; font-size: 12px; }
+.account-identity { display: flex; align-items: center; gap: 10px; padding: 10px 12px; }
+.account-identity-text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.account-identity-name { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-identity-email { font-size: 12px; opacity: 0.6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* #1876: per-tenant billing team selector + wrapping header row (`.row` has
+   no flex-wrap — with the select + Manage-subscription a 375px viewport
+   would overflow). */
+.billing-team-select {
+  background: var(--surface, #0f172a); color: var(--text, #e2e8f0);
+  border: 1px solid var(--border, #334155); border-radius: 6px;
+  padding: 4px 8px; font-size: 13px; cursor: pointer;
 }
-.page-graph-selector label {
+.billing .row { flex-wrap: wrap; gap: 8px; }
+/* #1148-ux: graph selector moved into the API Keys page (page-scoped context) */
+/* #1845: source-scope selector (repo + branch) inside the Memory-sources rows.
+   Shares the page-graph-selector look: uppercase label + accent-focus select,
+   wrapped in a subtle surface pill. Inline-flex so repo + branch + preview sit
+   on one line and wrap gracefully on narrow panels. */
+.scope-selector {
+  display: inline-flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  margin: 4px 0; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface); max-width: 100%;
+}
+.scope-selector label {
   font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
   color: var(--text-dim); white-space: nowrap;
 }
-.page-graph-selector select {
-  flex: 1; font-size: 13px; color: var(--text);
+.scope-selector select {
+  font-size: 13px; color: var(--text);
   background: var(--surface-hover); border: 1px solid var(--border);
   border-radius: 6px; padding: 5px 8px;
 }
-.page-graph-selector select:focus { border-color: var(--accent); }
+.scope-selector select:focus { border-color: var(--accent); }
+.scope-selector .dim { margin-left: 2px; }
+
+/* #1845: multi-repo scope selectors — checkbox list ("All repos" +
+   per-repo checkboxes), per-repo branch pickers (docs row). Vertical
+   stack inside the surface pill; rows keep the repo + branch inline. */
+.scope-fieldset {
+  border: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 4px; min-width: 220px;
+  max-width: 100%;
+}
+.scope-fieldset legend {
+  padding: 0; margin-bottom: 2px; text-transform: uppercase;
+  letter-spacing: 0.08em; font-size: 11px;
+}
+.scope-option {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 13px !important; text-transform: none !important;
+  letter-spacing: 0 !important; color: var(--text) !important;
+  white-space: nowrap; cursor: pointer; padding: 1px 0;
+}
+.scope-option input[type="checkbox"] { accent-color: var(--accent, #06b6d4); cursor: pointer; }
+.scope-repo-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.scope-branch {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px !important; text-transform: none !important;
+  letter-spacing: 0 !important; color: var(--text-dim) !important;
+}
+.scope-branch select { padding: 3px 6px; font-size: 12px; }
 
 /* #1148-ux review P4-1: visible focus ring for all interactive controls */
 button:focus-visible, select:focus-visible, a:focus-visible, input:focus-visible, [tabindex]:focus-visible {
   outline: 2px solid var(--accent, #06b6d4);
   outline-offset: 2px;
 }
+/* #3890 (WCAG 2.4.11 Focus Not Obscured): a deep-linked section heading is
+   brought into view by focus(), and must not land flush against the viewport
+   top. The dashboard header is not sticky today, so this is viewport-edge
+   clearance plus defensive padding for any future sticky chrome.
+   scroll-padding-top on the scroll port + scroll-margin-top on the target
+   both keep it clear. */
+html { scroll-padding-top: 24px; }
+#settings-memory-heading { scroll-margin-top: 24px; }
 /* #1148-ux review P4-2: switch knob visible against the off-track */
 .switch::after { border: 1px solid rgba(255,255,255,0.4); }
 /* #1148-ux review P4-1: busy state for the toggle */
 .switch[disabled] { opacity: 0.6; cursor: not-allowed; }
+/* #1894: an indexed docs switch is disabled but ON — never dim it to look
+   off (the docs source is terminal once indexed; a dimmed cyan switch reads
+   as "off" — the exact ambiguity this fix removes). Scoped to the docs
+   switch's terminal case via data-locked-on (set only when docsIndexed) so
+   the generic .switch[disabled] busy-dim (#1148-ux review P4-1) still
+   applies to other switches while their toggle is busy. */
+.switch[disabled][data-on='true'][data-locked-on] { opacity: 1; cursor: not-allowed; }
+
+/* #1894: the docs indexed-state label — emphasized (non-dim) so an
+   indexed source is unmistakably ON, with the last-indexed relative time. */
+.memory-source-state { font-size: 13px; margin: 4px 0 0; color: var(--accent, #06b6d4); font-weight: 600; }
 
 /* #1148-ux review P3-2: banner title is the first top-level heading in the
    authed view (no h1 there) — render it at h2 weight but visually prominent. */
@@ -255,7 +409,17 @@ button:focus-visible, select:focus-visible, a:focus-visible, input:focus-visible
 .protect-full p { font-size: 15px; }
 
 /* #1148-ux review: per-key on/off toggle + trash */
-.key-actions { display: inline-flex; align-items: center; gap: 0.5rem; }
+.key-actions { display: inline-flex; align-items: center; gap: 0.5rem; white-space: nowrap; }
+/* #2246 (ADR-010): uniform 4-action rows (rename/toggle/trash/Rotate) overflow
+   320-375px viewports — wrap the keys table in a horizontal scroller with a
+   sane minimum so rows never crush. The section's table also gets scope="col"
+   headers (a11y) for the same rewrite. */
+.keys-table-wrap { overflow-x: auto; }
+.keys-table-wrap table { min-width: 620px; }
+/* #2784: the Last-backup column makes 6 — the same mobile crush as the keys
+   table (#2246), so the same scroller + sane minimum. */
+.graphs-table-wrap { overflow-x: auto; }
+.graphs-table-wrap table { min-width: 560px; }
 .key-toggle {
   position: relative; width: 34px; height: 19px; border-radius: 10px;
   border: 1px solid var(--border); background: var(--surface-hover);
@@ -270,6 +434,43 @@ button:focus-visible, select:focus-visible, a:focus-visible, input:focus-visible
 .key-toggle[disabled] { opacity: 0.6; cursor: not-allowed; }
 .key-trash { font-size: 14px; padding: 3px 7px; }
 .key-trash:hover { border-color: var(--red); color: var(--red); }
+/* key labels (20260825000001): name cell + inline rename */
+.key-name {
+  display: inline-flex; align-items: center; gap: 0.4rem; min-height: 24px;
+  max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.key-rename { font-size: 12px; padding: 2px 5px; opacity: 0.55; flex: none; }
+.key-name:hover .key-rename { opacity: 1; }
+.key-name-input { width: 160px; max-width: 100%; padding: 3px 8px; font-size: 13px; background: var(--surface, #0d1a2d); color: var(--text, #e2e8f0); border: 1px solid var(--border, #1e293b); border-radius: 4px; }
+
+/* #2701: graph-name inline rename + row actions (mirror the key-name
+   family — same ✏️ hover-reveal, same edit input, same trash styling). */
+.graph-name {
+  display: inline-flex; align-items: center; gap: 0.4rem; min-height: 24px;
+  max-width: 28ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.graph-rename { font-size: 12px; padding: 2px 5px; opacity: 0.55; flex: none; }
+.graph-name:hover .graph-rename { opacity: 1; }
+.graph-name-input { width: 160px; max-width: 100%; padding: 3px 8px; font-size: 13px; background: var(--surface, #0d1a2d); color: var(--text, #e2e8f0); border: 1px solid var(--border, #1e293b); border-radius: 4px; }
+.graph-actions { display: inline-flex; align-items: center; gap: 0.5rem; white-space: nowrap; }
+.graph-trash-wrap { display: inline-flex; }
+.graph-trash { font-size: 14px; padding: 3px 7px; }
+.graph-trash:not(:disabled):hover { border-color: var(--red, #f87171); color: var(--red, #f87171); }
+.graph-trash:disabled { opacity: 0.45; cursor: not-allowed; }
+.graph-delete-modal h3 { margin-top: 0; }
+.graph-delete-modal .danger-note { color: var(--red, #f87171); font-weight: 600; margin: 0.4rem 0; }
+.graph-delete-modal .new-key-actions { display: flex; gap: 8px; }
+.graph-delete-modal .new-key-actions button { flex: 1; }
+.graph-delete-modal button.danger { background: var(--red, #dc2626); border-color: var(--red, #dc2626); color: #fff; }
+.graph-delete-modal button.danger:disabled { opacity: 0.5; cursor: not-allowed; }
+/* #2778: scoped to .modal so this rule (0,2,0) out-specifies the shared
+   `.modal input` rule (0,1,1) added below — the destructive red border must
+   survive the dialog-field default. */
+.modal .delete-confirm-input {
+  width: 100%; box-sizing: border-box; padding: 6px 10px; font-size: 14px;
+  background: var(--surface, #0d1a2d); color: var(--text, #e2e8f0);
+  border: 1px solid var(--red, #f87171); border-radius: 6px;
+}
 
 /* #1148-ux review: combined login/signup card */
 .auth-mode-toggle { display: flex; gap: 4px; margin-bottom: 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 3px; }
@@ -385,19 +586,204 @@ button:focus-visible, select:focus-visible, a:focus-visible, input:focus-visible
 }
 
 /* #1643: onboarding wizard (post-key steps) */
-.wizard { margin-top: 1.25rem; border-top: 1px solid var(--border, #1e293b); padding-top: 1rem; }
-.wizard-progress { display: flex; gap: 6px; margin-bottom: 0.75rem; }
+/* #2912: welcome header — the stage is the h1 (the org drops to an eyebrow).
+   Previously the card opened with "<org> is set up", a receipt for step 0 that
+   said nothing about the current step, and the step's own heading lived inside
+   the card at body weight. */
+.welcome-head { margin-bottom: 1.4rem; }
+.welcome-eyebrow {
+  display: inline-block;
+  margin: 0 0 0.55rem;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.welcome-title {
+  font-family: var(--serif, Georgia, serif);
+  font-weight: 400;
+  font-size: 30px;
+  line-height: 1.2;
+  color: var(--text);
+  margin: 0 0 0.55rem;
+}
+.welcome-lede {
+  margin: 0;
+  max-width: 54ch;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+.wizard { margin-top: 1rem; border-top: 1px solid var(--border, #1e293b); padding-top: 1.1rem; }
+.wizard-progress { display: flex; gap: 6px; margin-bottom: 1.25rem; }
 .wizard-step { flex: 1; height: 4px; border-radius: 2px; background: rgba(255,255,255,0.1); }
 .wizard-step.active { background: var(--accent, #38bdf8); }
 .wizard-step.done { background: var(--green, #4ade80); }
-.wizard-title { font-weight: 600; margin-bottom: 0.25rem; }
+/* kept for the ARCHIVED legacy render (A0 rollback path) */
+.wizard-title { font-weight: 600; margin-bottom: 0.75rem; }
 .wizard-sub { font-size: 13px; }
 .harness-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
 .harness-tab { padding: 6px 12px; font-size: 13px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 6px; color: var(--text, #e2e8f0); cursor: pointer; }
 .harness-tab.active { background: var(--accent, #38bdf8); color: #04121a; border-color: var(--accent, #38bdf8); }
+
+/* ── #2912: the connect step's two-level harness chooser + numbered blocks ──
+   The step is a stack of separated units with one heading scale:
+     h1 stage (welcome-title) → block title (wizard-block-title, numbered)
+     → caption (wizard-caption) → payload (wizard-prompt-card).
+   Before this the tab row, pills, captions, cards and nav all sat on ad-hoc
+   inline margins, so nothing communicated order or hierarchy. */
+/* #2912: the live owner/self connect body stacks numbered blocks with a fixed
+   rhythm. This is a NEW class on purpose — `className="harness"` is shared with
+   the member/capped branch and with the ARCHIVED A0-rollback render, which must
+   still reproduce its pre-#2912 layout byte-for-byte (the rollback flips
+   LEGACY_WIZARD_ARCHIVED and rebuilds from this CSS). */
+.harness-connect { display: flex; flex-direction: column; gap: 1.6rem; }
+/* the gap owns the spacing above the nav — `.wizard-nav`'s own margin-top would
+   add to it (PR-gate UX: one step, three different rhythms between branches) */
+.harness-connect > .wizard-nav, .connect-build > .wizard-nav { margin-top: 0; }
+.connect-build { display: flex; flex-direction: column; gap: 1.6rem; }
+.harness-chooser { display: flex; flex-direction: column; gap: 0.55rem; }
+.wizard-field-label {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.harness-families { display: flex; flex-wrap: wrap; gap: 8px; }
+.harness-family {
+  padding: 9px 18px;
+  border-radius: 999px;
+  border: 1px solid var(--border, #1e293b);
+  background: var(--surface, #0d1a2d);
+  color: var(--text, #e2e8f0);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.harness-family:hover { background: var(--surface-hover, #12223d); border-color: var(--accent, #06b6d4); }
+.harness-family.active {
+  background: rgba(6, 182, 212, 0.12);
+  border-color: var(--accent, #06b6d4);
+  color: var(--accent, #06b6d4);
+}
+.harness-surfaces { display: flex; flex-wrap: wrap; gap: 8px; padding-left: 2px; }
+.harness-surface {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 7px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border, #1e293b);
+  background: transparent;
+  color: var(--text, #e2e8f0);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+.harness-surface:hover { background: rgba(6, 182, 212, 0.06); border-color: var(--accent, #06b6d4); }
+.harness-surface.active { border-color: var(--accent, #06b6d4); background: rgba(6, 182, 212, 0.10); }
+.harness-surface-hint { font-size: 11px; font-weight: 400; color: var(--text-dim); }
+.harness-surface.active .harness-surface-hint { color: var(--accent, #06b6d4); opacity: 0.85; }
+/* `margin: 0` is load-bearing: the global `main section { margin-bottom: 32px }`
+   (0,0,2) out-specifies the `*` reset and would stack with the parent block
+   gap (`.harness-connect` / `.connect-build`), rendering 58px between numbered
+   blocks instead of 26px and pushing the nav 78px down (review cycle 3,
+   measured in Chromium). `.wizard-block` (0,1,0) beats the type-selector pair. */
+.wizard-block { margin: 0; border-top: 1px solid var(--border, #1e293b); padding-top: 1.15rem; }
+.wizard-block-title {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0 0 0.75rem;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--text, #e2e8f0);
+}
+.wizard-block-step {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: rgba(6, 182, 212, 0.14);
+  color: var(--accent, #06b6d4);
+  font-size: 12px;
+  font-weight: 700;
+}
+.wizard-block-body { display: flex; flex-direction: column; gap: 0.7rem; }
+.wizard-caption { margin: 0; font-size: 13px; line-height: 1.6; color: var(--text, #e2e8f0); }
+.wizard-note { margin: 0; font-size: 12px; line-height: 1.6; color: var(--text-dim); }
+.wizard-fields { margin: 0; padding-left: 1.15rem; display: flex; flex-direction: column; gap: 0.35rem; font-size: 13px; line-height: 1.5; color: var(--text-dim); }
+.key-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin: 0; }
+.wizard-prompt-card {
+  background: var(--bg-soft, #0d1a2d);
+  border: 1px solid var(--border, #1e293b);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+/* The long prompts (Claude Web/Desktop workflows ≈ 1000 chars) scroll INSIDE
+   the card, but the copy control must never scroll away with them — only the
+   <pre> is a scroll container. (#2912 review P1: a max-height on the card
+   clipped the Copy button off-screen on arrival.) */
+.wizard-prompt-text {
+  margin: 0;
+  max-height: 240px;
+  overflow: auto;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--text, #e2e8f0);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.wizard-prompt-actions { display: flex; justify-content: center; }
+.key-pills { display: flex; gap: 0.5rem; margin-bottom: 0; }
+/* #2912 (review cycle 2): the chooser pills set their background at (0,1,0),
+   which the global `button:hover` (0,1,1) overrode — hovering an UNPICKED pill
+   flipped it to solid accent under light text and read as selected. These
+   :hover rules restore a surface background. (`.key-pills button` is (0,1,1)
+   and declared later, so it never had that bug — its rule is deliberate hover
+   feedback.) */
+.key-pills button:hover { background: var(--surface-hover, #12223d); }
+.key-pills button { flex: 1; padding: 0.5rem 0.75rem; border: 1px solid var(--border,#1e293b); border-radius: 8px; background: var(--surface,#0d1a2d); cursor: pointer; text-align: left; display: flex; flex-direction: column; }
+.key-pills button.active { border-color: var(--accent,#06b6d4); background: rgba(6,182,212,0.08); }
+.key-pills button strong { font-size: 13px; color: var(--text,#e2e8f0); }
+.key-pills button span { font-size: 12px; color: var(--text-dim,#94a3b8); }
+/* #2361 review-r2 (a11y P1): fork-option had NO rule — it fell through to
+   the global button color (#04121a) on the dark surface → ~1.09:1 invisible
+   labels on the core choice UI. Fix + give .active a real highlight. */
+.fork-option { color: var(--text, #e2e8f0); }
+.fork-option.active {
+  border-color: var(--accent, #38bdf8) !important;
+  background: rgba(6, 182, 212, 0.12) !important;
+}
+.fork-option:disabled { cursor: default; opacity: 0.85; }
 .wizard-actions { display: flex; gap: 10px; margin-top: 1rem; flex-wrap: wrap; }
 .wizard-actions .btn-primary, .wizard-actions button.btn-primary { background: var(--accent, #38bdf8); color: #04121a; }
 .wizard-actions .ghost, .wizard-actions a.ghost { background: none; border: 1px solid rgba(255,255,255,0.12); color: var(--text, #e2e8f0); padding: 8px 14px; border-radius: 8px; text-decoration: none; font-size: 13px; }
+/* #3428/#2937 (lane B3): the done step's only real control is deliberately
+   demoted — nothing on that screen IS the next step (the next step happens in
+   the user's own terminal), so the dashboard exit is a quiet text link: no
+   fill, no border, and no arrow (an arrow means "advance"). Owner-approved
+   2026-09-14 on #3428. */
+/* review cycle 8 item 8: a form control (button) does not inherit the app
+   typeface — the UA default (Arial) applied here, and this is the one control
+   deliberately demoted to READ AS BODY TEXT, so the default was visible exactly
+   where it must not be. Precedent: `button.tier-badge` above (#1290). */
+.wizard-actions .done-link { background: none; border: none; padding: 0; margin: 0; color: inherit; opacity: 0.75; text-decoration: underline; font-size: 13px; font-weight: 400; cursor: pointer; font-family: inherit; }
+.wizard-actions .done-link:hover { opacity: 1; }
 .skill-row { display: flex; flex-direction: column; gap: 2px; padding: 0.6rem 0; border-bottom: 1px solid rgba(255,255,255,0.06); }
 .skill-row:last-of-type { border-bottom: none; }
 .skill-row strong { font-size: 14px; }
@@ -426,6 +812,8 @@ button:focus-visible, select:focus-visible, a:focus-visible, input:focus-visible
   align-items: center;
   gap: 10px;
   margin-left: auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 .wizard-nav-spacer { flex: 1; }
 
@@ -476,7 +864,9 @@ input, textarea, select {
   caret-color: var(--text, #e2e8f0);
 }
 input::placeholder, textarea::placeholder {
-  color: rgba(226, 232, 240, 0.45);
+  /* #2361 review-r1 (I7): 0.45 alpha placeholder failed WCAG AA on the dark
+     surface — raise to 0.62 (≈ #e2e8f0 at 62% → contrast ~4.8:1). */
+  color: rgba(226, 232, 240, 0.62);
 }
 
 /* #1691: the wizard's copied setup (harness prompts) — the long Pi/Web
@@ -495,4 +885,158 @@ input::placeholder, textarea::placeholder {
   font-size: 13px;
   line-height: 1.6;
   color: var(--text, #e2e8f0);
+}
+
+/* ── #1765: recovery banner (protect-banner family — persistent security
+      notice, NOT the transient green .banner) ─────────────────────────── */
+.recovery-banner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.8rem 1.5rem;
+  margin: 0.6rem 1.5rem;
+  border-left: 4px solid var(--accent, #06b6d4);
+  background: linear-gradient(90deg, rgba(6, 182, 212, 0.12), rgba(6, 182, 212, 0.03));
+  border-radius: 6px;
+  color: var(--text, #e2e8f0);
+  font-size: 14px;
+}
+.recovery-banner-copy { flex: 1 1 260px; line-height: 1.5; }
+.recovery-banner-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+
+/* ── #1765: re-auth dialog ─────────────────────────────────────────────── */
+.modal-backdrop {
+  position: fixed; inset: 0;
+  background: rgba(2, 6, 23, 0.7);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 60;
+}
+.modal {
+  background: var(--surface, #0d1a2d);
+  border: 1px solid var(--border, #1e293b);
+  border-radius: 8px;
+  padding: 1.2rem 1.5rem;
+  max-width: 420px;
+  width: 92%;
+}
+.modal h2 { margin: 0 0 0.4rem; font-size: 16px; }
+.modal .claim-actions { justify-content: flex-start; }
+/* #2778 (a11y): dialog text fields were the one unstyled input surface — the
+   global `input, textarea, select` rule above sets no background, so the
+   create-organization dialog's bare <input> fell back to the UA white while
+   inheriting the dark theme's light text (measured 1.48:1; WCAG AA needs
+   4.5:1). Theme every dialog field by default so the next modal cannot
+   repeat it. The border is deliberately stronger than `--border`
+   (rgba(255,255,255,0.12) is only 1.41:1 over the identical --surface panel):
+   with the field background the same as the panel, the border is the only cue
+   that identifies the control, so it must clear the WCAG 1.4.11 non-text 3:1
+   floor — 0.36 measures ≈3.3:1. This rule has the same specificity (0,1,1) as
+   `.inline-form input` but comes later, so dialog inline-form fields (key
+   create / reauth) deliberately inherit the compliant border while keeping
+   their own `font-family: var(--mono)` (not declared here).
+   `.modal .delete-confirm-input` (0,2,0) out-specifies this one and keeps its
+   destructive red border. */
+.modal input, .modal textarea, .modal select {
+  background: var(--surface, #0d1a2d);
+  border: 1px solid rgba(255, 255, 255, 0.36);
+  color: var(--text, #cbd5e1);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 14px;
+}
+
+/* #1003: new-key modal — wider than the standard modal because it holds the key-value <code> block */
+.modal.key-create-modal { max-width: 540px; }
+.key-create-modal .key-value { font-size: 12px; padding: 8px 10px; background: var(--bg-soft, #0f172a); border: 1px solid var(--border, #1e293b); border-radius: 6px; word-break: break-all; margin: 6px 0; }
+.key-create-modal .new-key-actions { display: flex; gap: 8px; margin-top: 10px; }
+.key-create-modal .new-key-actions button { flex: 1; }
+
+/* ── #1765: profile tab ────────────────────────────────────────────────── */
+.profile-tab h2 { font-size: 18px; margin: 0 0 0.3rem; }
+.profile-tab h3 { font-size: 15px; margin: 1.2rem 0 0.4rem; color: var(--text-dim, #94a3b8); }
+.profile-tab table { width: 100%; border-collapse: collapse; margin: 0.6rem 0; }
+.profile-tab th, .profile-tab td {
+  text-align: left; padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--border, #1e293b);
+  font-size: 14px;
+}
+/* #1728 Slice 3 (Tasks 16-17): Memory sources panel — shared by the wizard
+   step-1 and the dashboard Overview — one component, one style block. The
+   per-harness status rows use the canonical 4-state vocabulary
+   (off → install-pending → waiting → active). #1927: the .reask-pane block
+   was removed with the consent gate. */
+.memory-sources { display: flex; flex-direction: column; gap: 6px; }
+.harness-statuses { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.harness-status {
+  border: 1px solid var(--border, #1e293b);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--bg-soft, #0d1a2d);
+}
+.harness-status.current { border-color: rgba(6, 182, 212, 0.5); }
+.harness-status-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.harness-status-head strong { font-size: 13px; }
+.capture-state {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border, #1e293b);
+  color: var(--text-dim, #64748b);
+  white-space: nowrap;
+}
+.harness-status.status-active .capture-state { color: var(--green, #4ade80); border-color: rgba(74, 222, 128, 0.4); }
+.harness-status.status-waiting .capture-state { color: var(--accent, #06b6d4); border-color: rgba(6, 182, 212, 0.4); }
+.harness-status.status-install-pending .capture-state { color: #facc15; border-color: rgba(196, 167, 60, 0.4); }
+.harness-status .snippet { margin-top: 8px; font-size: 12px; }
+.harness-status .error.small { margin-top: 6px; }
+
+
+/* #2001 (W5): Setup-guide card — the checklist rows mirror the graph-held
+   FLOW state (fork-aware; capture-disclosed renders info-only). */
+.setup-guide-rows { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.setup-guide-rows li { font-size: 12px; color: var(--text-dim); }
+.setup-guide-rows li.done { color: var(--accent); }
+.setup-guide-degraded { font-size: 11px; margin-top: 6px; }
+
+/* #2000 (W4): Settings tab — the 7th tab (R2-11), four homes (epic plan P3).
+   Homes stack as card-like sections; h3s mirror the profile-tab scale. */
+.settings-home { margin-bottom: 24px; }
+.settings-home h3 { font-size: 15px; margin: 0 0 4px; color: var(--text); }
+.settings-home > p { margin: 0 0 10px; }
+.settings-home .card { max-width: 560px; }
+.captured-sessions { margin-top: 6px; }
+.captured-session:last-child { border-bottom: none !important; }
+
+/* ── #2116 (C7): dashboard Graphs tab — meter, key panel, delete, reveal ── */
+.graph-del-confirm { color: var(--text-dim, #94a3b8); font-size: 12px; margin-left: 6px; }
+.graph-del-confirm .danger { color: var(--red, #f87171); border-color: var(--red, #f87171); }
+tr.graph-delete-arm td { background: rgba(248, 113, 113, 0.06); }
+.trash-section { margin-top: 18px; border-top: 1px solid var(--border, #1e293b); padding-top: 10px; }
+.trash-section summary { cursor: pointer; color: var(--text-dim, #94a3b8); font-size: 13px; margin-bottom: 8px; }
+.trash-section table { margin-top: 6px; }
+.row-dim td { opacity: 0.55; }
+.graph-key-panel {
+  margin-top: 10px;
+  border: 1px solid var(--border, #1e293b);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--bg-soft, #0d1a2d);
+}
+.graph-key-panel-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  margin-bottom: 8px;
+}
+.graph-key-panel table { margin-top: 6px; }
+.graph-key-panel .inline-form { margin: 6px 0; }
+.badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border, #1e293b);
+  color: var(--text-dim, #94a3b8);
+  font-size: 11px;
+  vertical-align: 1px;
 }

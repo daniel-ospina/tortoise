@@ -556,7 +556,8 @@ class TestE2E11IntegrationGate:
 
     @pytest.mark.skipif(
         not os.environ.get("TORTOISE_DB_URI"),
-        reason="real FalkorDB required (docker TORTOISE_DB_URI not set)")
+        reason="requires TORTOISE_DB_URI (real FalkorDB for the e2e11 "
+        "integration smoke — URI-unset shapes skip by design)")
     def test_e2e11_real_mode_smoke(self, sdk_factory):
         """Real-mode smoke: with TORTOISE_DB_URI set the REAL search_graph
         (not the fake) drives S3 — graph state parity asserted on the same

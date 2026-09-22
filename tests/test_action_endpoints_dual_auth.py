@@ -1,0 +1,361 @@
+"""#1852: seed/index ACTION endpoints accept the session JWT (dual-auth).
+
+The #1833 read set was converted to ``get_current_org_session_ungated``;
+these 8 action/write endpoints were missed — a dashboard session JWT
+(eyJ...) hit ``get_current_org``'s tt_-only gate → 401 "Invalid API key
+format" for OAuth users (wizard "Seed my graph" + MemorySources re-index +
+job-status polls).
+
+Each test here asserts BOTH lanes on every converted endpoint:
+- session JWT (eyJ) → the handler runs past the dependency (200, or the
+  endpoint's own post-auth response — never 401);
+- tt_ API key → unchanged behavior.
+
+Harness mirrors test_dashboard_login's TestDashboardLoginGate: Supabase-mode
+FakeControlPlane, team minted via /v1/agent/signup, owner membership seeded
+for the session user, ``sa.verify_session_jwt`` patched (same seam as #1082
+tests). SDK construction is redirected to a per-test temp embedded DB
+(mirrors test_session_key_http) so the create endpoints write hermetically.
+"""
+from __future__ import annotations
+
+import os
+import sys
+import time
+import uuid
+
+os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import pytest  # noqa: I001
+from fastapi.testclient import TestClient
+from types import SimpleNamespace
+
+import tortoise.hosted_api as ha_mod
+import tortoise.supabase_control as sc
+from tortoise.hosted_api import app
+
+from tests._http_fixtures import patched_tortoise_sdk
+from tests.fake_control_plane import FakeControlPlane
+
+_SUPABASE_URL = "https://actiondual.test.supabase.co"
+
+
+# ── Fixtures ────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def env(monkeypatch, tmp_path):
+    """Supabase-mode FakeControlPlane + temp embedded DB (mirrors
+    test_dashboard_login._env + test_session_key_http's SDK patch)."""
+    monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+    monkeypatch.setenv("SUPABASE_URL", _SUPABASE_URL)
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-action-dual-test")
+    monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
+    fake = FakeControlPlane()
+    monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+    db_path = str(tmp_path / "action-dual.db")
+    ha_mod._INDEX_JOBS.clear()
+    # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk) —
+    # patch __init__ → temp DB + #1950 TORTOISE_DB_PATH pin + close-then-
+    # clear at enter; pop-pin → restore __init__ → deterministic anchor
+    # close → clear overrides at exit (replaces the local
+    # _patch/_restore_tortoise_sdk_init copies).
+    with patched_tortoise_sdk(db_path):
+        try:
+            with TestClient(app) as client:
+                yield client, fake
+        finally:
+            ha_mod._INDEX_JOBS.clear()
+
+
+def _provision_anon(client):
+    """Mint an anonymous team via /v1/agent/signup (Supabase mode)."""
+    r = client.post("/v1/agent/signup", json={})
+    assert r.status_code == 200, r.text
+    data = r.json()
+    return data["key"], data["org_id"]
+
+
+def _patch_session_user(monkeypatch, user_id: str):
+    """Patch the JWT verifier so 'Bearer eyJ.sess' resolves to user_id
+    (same seam as test_dashboard_login._patch_session_user)."""
+    async def _fake(request):
+        return {"user_id": user_id, "email": "owner@example.com",
+                "sub": user_id}
+    import tortoise.session_auth as sa
+    monkeypatch.setattr(sa, "verify_session_jwt", _fake)
+
+
+def _seed_owner_membership(fake, org_id: str, user_id: str):
+    """Give the session user an owner membership so _session_user_org's
+    membership resolution + ?org_id= ownership check pass."""
+    fake.tables.setdefault("org_memberships", []).append({
+        "id": str(uuid.uuid4()), "org_id": org_id, "user_id": user_id,
+        "role": "owner", "status": "active", "created_at": "2026-01-01T00:00:00Z",
+        "identity": None, "lookup_hash": None,
+    })
+
+
+def _seed_github_creds(fake, org_id: str):
+    """Seed github_token_enc/github_org on the teams row so the index POSTs
+    pass the connect check. The blob is deliberately NOT fernet — the
+    background job fails fast at decrypt (no network), exactly the
+    established pattern in test_index_docs_api."""
+    for t in fake.tables.get("organizations", []):
+        if t.get("id") == org_id:
+            t["github_token_enc"] = "garbage-not-fernet"
+            t["github_org"] = "acme"
+            return
+    raise AssertionError(f"team row for {org_id} not found in fake plane")
+
+
+@pytest.fixture
+def session_user(env, monkeypatch):
+    """Provision a team, patch the session JWT verifier, seed the owner
+    membership + GitHub creds. Yields a SimpleNamespace holding the client,
+    the fake plane, the tt_ key and the org_id."""
+    client, fake = env
+    key, org_id = _provision_anon(client)
+    user_id = str(uuid.uuid4())
+    _patch_session_user(monkeypatch, user_id)
+    _seed_owner_membership(fake, org_id, user_id)
+    _seed_github_creds(fake, org_id)
+    return SimpleNamespace(client=client, fake=fake, key=key, org_id=org_id)
+
+
+def _drain_job(client, job_id: str, timeout_s: float = 3.0, *, docs: bool = False):
+    """Best-effort poll until the background job reaches a terminal state
+    (decrypt-fail is immediate; the entry stays pollable regardless).
+    Authenticates explicitly as the session user (the endpoint is
+    session-auth now — do not rely on the patched verifier ignoring a
+    headerless request)."""
+    deadline = time.time() + timeout_s
+    prefix = "/v1/index/docs" if docs else "/v1/index/github"
+    while time.time() < deadline:
+        r = client.get(f"{prefix}/{job_id}",
+                       headers={"Authorization": "Bearer eyJ.sess"})
+        if r.status_code == 200 and r.json().get("status") in ("completed", "failed"):
+            return r.json()
+        time.sleep(0.02)
+    return None
+
+
+def _set_dashboard_key_login(fake, org_id: str, enabled: bool):
+    """Flip teams.dashboard_key_login (the #1148 flag)."""
+    for t in fake.tables.get("organizations", []):
+        if t.get("id") == org_id:
+            t["dashboard_key_login"] = enabled
+            return
+    raise AssertionError(f"team row for {org_id} not found in fake plane")
+
+
+# ── Seed/write endpoints ────────────────────────────────────────────────────
+
+
+class TestCreateEndpointsDualAuth:
+    def test_create_object_session_jwt(self, session_user):
+        c = session_user.client
+        r = c.post("/v1/objects", headers={"Authorization": "Bearer eyJ.sess"},
+                   json={"name": "WizardProject", "objectKind": "project"})
+        assert r.status_code == 200, r.text
+        assert r.json()["name"] == "WizardProject"
+
+    def test_create_object_tt_key(self, session_user):
+        c = session_user.client
+        r = c.post("/v1/objects", headers={"Authorization": f"Bearer {session_user.key}"},
+                   json={"name": "KeyProject", "objectKind": "project"})
+        assert r.status_code == 200, r.text
+        assert r.json()["name"] == "KeyProject"
+
+    def test_create_subject_session_jwt(self, session_user):
+        c = session_user.client
+        r = c.post("/v1/subjects", headers={"Authorization": "Bearer eyJ.sess"},
+                   json={"name": "Alice", "subjectKind": "person"})
+        assert r.status_code == 200, r.text
+        assert r.json()["name"] == "Alice"
+
+    def test_create_subject_tt_key(self, session_user):
+        c = session_user.client
+        r = c.post("/v1/subjects", headers={"Authorization": f"Bearer {session_user.key}"},
+                   json={"name": "Bob", "subjectKind": "person"})
+        assert r.status_code == 200, r.text
+        assert r.json()["name"] == "Bob"
+
+    def test_create_point_session_jwt(self, session_user):
+        """The quota + abuse + metering bookkeeping must all work with the
+        session dict (no key_id dependency — _check_team_limit/_record_write_op/
+        _abuse_record_points read via .get, so a session dict never 500s)."""
+        c = session_user.client
+        r = c.post("/v1/points", headers={"Authorization": "Bearer eyJ.sess"},
+                   json={"content": "session-seeded point", "kind": "statement"})
+        assert r.status_code == 200, r.text
+        assert r.json()["content"] == "session-seeded point"
+
+    def test_create_point_tt_key(self, session_user):
+        c = session_user.client
+        r = c.post("/v1/points", headers={"Authorization": f"Bearer {session_user.key}"},
+                   json={"content": "key-seeded point", "kind": "statement"})
+        assert r.status_code == 200, r.text
+        assert r.json()["content"] == "key-seeded point"
+
+    def test_create_point_session_jwt_quota_enforced(self, session_user):
+        """The points gate still runs on the session lane: cap the team at 0
+        points → session-authed write 402s (fail-closed), proving the quota
+        path reads the session dict's max_points, not a key field."""
+        for t in session_user.fake.tables.get("organizations", []):
+            if t.get("id") == session_user.org_id:
+                t["graph_size_cap"] = 0
+        r = session_user.client.post("/v1/points", headers={"Authorization": "Bearer eyJ.sess"},
+                                     json={"content": "over-cap point", "kind": "statement"})
+        assert r.status_code == 402, r.text
+
+    def test_create_point_session_jwt_no_membership_403(self, env, monkeypatch):
+        """The session lane's cross-tenant guard (_session_user_org) holds on
+        the action surface: a valid session user WITHOUT a team membership is
+        403 — never a keyless write into someone's graph."""
+        client, _ = env
+        _provision_anon(client)  # mint the team (unclaimed by any session user)
+        user_id = str(uuid.uuid4())
+        _patch_session_user(monkeypatch, user_id)
+        # deliberately NO _seed_owner_membership — the session user has no
+        # membership in any team → _session_user_org 403s
+        r = client.post("/v1/points", headers={"Authorization": "Bearer eyJ.sess"},
+                        json={"content": "no-membership point", "kind": "statement"})
+        assert r.status_code == 403, r.text
+
+    def test_create_point_flag_off_team_tt_key_still_200(self, session_user):
+        """Pins the UNGATED semantic (#1852): a dashboard_key_login=false team's
+        tt_ keys must keep seeding the graph — the #1148 gate covers account
+        management, never graph operations. A future swap to the GATED
+        dependency would break flag-off agents and this test catches it."""
+        _set_dashboard_key_login(session_user.fake, session_user.org_id, False)
+        r = session_user.client.post(
+            "/v1/points", headers={"Authorization": f"Bearer {session_user.key}"},
+            json={"content": "flag-off seed", "kind": "statement"})
+        assert r.status_code == 200, r.text
+
+    def test_index_github_flag_off_team_tt_key_still_200(self, session_user):
+        """Same ungated pin for the index action lane."""
+        _set_dashboard_key_login(session_user.fake, session_user.org_id, False)
+        r = session_user.client.post(
+            "/v1/index/github", headers={"Authorization": f"Bearer {session_user.key}"},
+            json={"org": "acme"})
+        assert r.status_code == 200, r.text
+
+
+# ── GitHub index endpoints ──────────────────────────────────────────────────
+
+
+class TestGitHubIndexDualAuth:
+    def test_index_github_session_jwt(self, session_user):
+        c = session_user.client
+        r = c.post("/v1/index/github", headers={"Authorization": "Bearer eyJ.sess"},
+                   json={"org": "acme"})
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "started"
+        _drain_job(c, r.json()["job_id"])
+
+    def test_index_github_tt_key(self, session_user):
+        c = session_user.client
+        r = c.post("/v1/index/github", headers={"Authorization": f"Bearer {session_user.key}"},
+                   json={"org": "acme"})
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "started"
+
+    def test_index_github_repoll_session_jwt(self, session_user):
+        c = session_user.client
+        r = c.post("/v1/index/github/re-poll",
+                   headers={"Authorization": "Bearer eyJ.sess"}, json={})
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "started"
+        _drain_job(c, r.json()["job_id"])
+
+    def test_index_github_repoll_tt_key(self, session_user):
+        c = session_user.client
+        r = c.post("/v1/index/github/re-poll",
+                   headers={"Authorization": f"Bearer {session_user.key}"}, json={})
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "started"
+
+    def test_index_github_job_status_session_jwt(self, session_user):
+        """Job created under KEY auth → polled under a SESSION JWT (the
+        MemorySources re-index flow polls with the same session credential)."""
+        c = session_user.client
+        created = c.post("/v1/index/github",
+                         headers={"Authorization": f"Bearer {session_user.key}"},
+                         json={"org": "acme"})
+        job_id = created.json()["job_id"]
+        r = c.get(f"/v1/index/github/{job_id}",
+                  headers={"Authorization": "Bearer eyJ.sess"})
+        assert r.status_code == 200, r.text
+        assert r.json()["job_id"] == job_id
+
+    def test_index_github_job_status_tt_key(self, session_user):
+        c = session_user.client
+        created = c.post("/v1/index/github",
+                         headers={"Authorization": f"Bearer {session_user.key}"},
+                         json={"org": "acme"})
+        job_id = created.json()["job_id"]
+        r = c.get(f"/v1/index/github/{job_id}",
+                  headers={"Authorization": f"Bearer {session_user.key}"})
+        assert r.status_code == 200, r.text
+        assert r.json()["job_id"] == job_id
+
+    def test_index_github_job_status_cross_tenant_404(self, session_user):
+        """Cross-tenant isolation unchanged on the session lane: a job owned
+        by another team still 404s (job.get('org_id') != team dict's id)."""
+        c = session_user.client
+        # second team owns the job
+        key2, team2 = _provision_anon(c)
+        _seed_github_creds(session_user.fake, team2)
+        created = c.post("/v1/index/github",
+                         headers={"Authorization": f"Bearer {key2}"},
+                         json={"org": "acme"})
+        job_id = created.json()["job_id"]
+        r = c.get(f"/v1/index/github/{job_id}",
+                  headers={"Authorization": "Bearer eyJ.sess"})
+        assert r.status_code == 404, r.text
+
+
+# ── Docs index endpoints ────────────────────────────────────────────────────
+
+
+class TestDocsIndexDualAuth:
+    def test_index_docs_session_jwt(self, session_user):
+        c = session_user.client
+        r = c.post("/v1/index/docs", headers={"Authorization": "Bearer eyJ.sess"},
+                   json={"org": "acme"})
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "started"
+        _drain_job(c, r.json()["job_id"], docs=True)
+
+    def test_index_docs_tt_key(self, session_user):
+        c = session_user.client
+        r = c.post("/v1/index/docs", headers={"Authorization": f"Bearer {session_user.key}"},
+                   json={"org": "acme"})
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "started"
+
+    def test_index_docs_job_status_session_jwt(self, session_user):
+        c = session_user.client
+        created = c.post("/v1/index/docs",
+                         headers={"Authorization": f"Bearer {session_user.key}"},
+                         json={"org": "acme"})
+        job_id = created.json()["job_id"]
+        r = c.get(f"/v1/index/docs/{job_id}",
+                  headers={"Authorization": "Bearer eyJ.sess"})
+        assert r.status_code == 200, r.text
+        assert r.json()["job_id"] == job_id
+
+    def test_index_docs_job_status_tt_key(self, session_user):
+        c = session_user.client
+        created = c.post("/v1/index/docs",
+                         headers={"Authorization": f"Bearer {session_user.key}"},
+                         json={"org": "acme"})
+        job_id = created.json()["job_id"]
+        r = c.get(f"/v1/index/docs/{job_id}",
+                  headers={"Authorization": f"Bearer {session_user.key}"})
+        assert r.status_code == 200, r.text
+        assert r.json()["job_id"] == job_id

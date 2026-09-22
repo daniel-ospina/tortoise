@@ -3,9 +3,9 @@
 Thin single-tenant FastAPI app: MCP Streamable HTTP at /mcp + /health.
 NO Supabase, NO hosted platform machinery (registry auth, tenant
 provisioning, dream queue). The self-host image ships this app — grep gate:
-no hosted_api / supabase / TeamResolutionMiddleware imports reachable from
+no hosted_api / supabase / OrgResolutionMiddleware imports reachable from
 this module (auth_mode is "static"|"none", so create_http_app never imports
-TeamResolutionMiddleware).
+OrgResolutionMiddleware).
 
 Environment:
   TORTOISE_DB_URI        durable FalkorDB (connection string) — recommended
@@ -21,6 +21,7 @@ Environment:
 """
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 import sys
@@ -44,6 +45,141 @@ ALLOWED_ORIGINS = os.environ.get(
 # Role-scoped server (#523): TORTOISE_TOOL_GROUP=memory exposes only that
 # group's tools to the agent (keeps the tool-selection surface under ~20).
 TOOL_GROUP = os.environ.get("TORTOISE_TOOL_GROUP")
+
+# #2988: wall bound for /health/ready's probe. A black-holed DB must be
+# REPORTED (503) rather than waited out — it is a safety net, not the mechanism.
+# NOTE this path does NOT share the hosted layered-timeout ALIGNMENT: the probe
+# below wraps ``sdk._get_proj()``, which has NO inner bound of its own (only the
+# FalkorDB client's socket timeouts), so the outer bound cannot be kept above an
+# inner deadline it can rely on — it is the only deadline there is, and the
+# worker it abandons is freed by the pool's own timeout rather than by an inner
+# one (see the pool comment below). ``hosted_api._READY_PROBE_TIMEOUT_S`` was
+# superseded by the hosted ``_READY_PROBE`` / ``CONTROL_PLANE_HARD_TIMEOUT``
+# bounds; this constant is the self-host path's own independent backstop.
+_READY_PROBE_TIMEOUT_S = 6.0
+
+# ── #3035 / #3287 / #3286: each health probe gets its OWN DAEMON pool ─────────
+#
+# #2988 (PR #3009) moved the probes OFF the event loop. It did not give them a
+# pool of their own: ``asyncio.to_thread`` submits to the loop's DEFAULT
+# ThreadPoolExecutor, whose queue is UNBOUNDED — a submission never fails, it
+# just waits. So the probe does not have to hang to be slow, it only has to
+# QUEUE behind unrelated ``to_thread`` work in this process. And ``wait_for``
+# bounds the ANSWER, not the TRUTH: a starved readiness probe reports not_ready
+# while the DB is fine, which is a lie that fails the publish.
+#
+# Measured on main (both probes stubbed to ~0ms, DB healthy; one unrelated task
+# occupying the default executor's only worker): GET /health never answered
+# within 8s, and GET /health/ready returned a FALSE 503 after 6021ms with the
+# probe never having run. ``publish-selfhost.yml`` curls /health/ready on every
+# publish (a non-200 fails the publish) and polls /health for up to 60s.
+#
+# The pool itself is ``monitoring.daemon_worker`` — the shared, reviewed
+# primitive (#3498's bounded multi-worker form) — not a second bespoke executor.
+# #3286 recorded that unification and was blocked on #3062, which landed
+# 2026-09-13; this is its selfhost half. Two properties come from the primitive
+# rather than from this module, and BOTH matter here:
+#
+#   * DAEMON workers. A ``ThreadPoolExecutor``'s workers are NON-daemon, and
+#     ``concurrent.futures.thread._python_exit`` JOINS them at interpreter exit,
+#     so a probe parked in a socket read delays process exit by up to its socket
+#     timeout. This module cares: #2203 bounds the graceful drain because
+#     ``docker stop`` SIGKILLs 10s after SIGTERM, and a wedged non-daemon worker
+#     would eat that budget. A daemon worker is abandoned at exit instead.
+#     (``asyncio.to_thread`` rode the default executor, whose workers are
+#     non-daemon too — the same hang class, one layer down.)
+#   * A BOUNDED backlog (``_SingleSlotWorker.MAX_BACKLOG`` = 32). A saturated
+#     pool REFUSES the submission (``_WorkerBacklogFull``) instead of buffering
+#     without bound — this change's own complaint about the default executor
+#     ("a submission never fails, it just waits") applied to its replacement.
+#
+# TWO pools, not one — because the two probes are NOT bounded alike, and a
+# liveness probe that shares a pool with an unbounded probe is not a liveness
+# probe (this issue's own premise):
+#
+#   /health      -> ``_LIVENESS_PROBE_WORKER``. Its probe is ``probe_db``, which
+#                   is hard-bounded INTERNALLY: ``_probe_once`` runs both phases
+#                   on the shared named daemon probe worker
+#                   (``monitoring._probe_worker()``) under ``PROBE_TIMEOUT``
+#                   (1.5s, plus a single 0.1s transient retry). THIS pool's
+#                   worker therefore always comes back, so one would do; two
+#                   costs nothing and absorbs a concurrent poll.
+#
+#   /health/ready -> ``_READY_PROBE_WORKER``. Its probe is ``sdk._get_proj()``
+#                   called DIRECTLY — the engine's real path, deliberately not
+#                   ``probe_db`` — and that has NO inner bound: it is bounded
+#                   only by the FalkorDB client's own socket timeouts (5s
+#                   connect / 10s read on the host lane; the embedded lane's
+#                   read timeout is the operator-configurable one added for
+#                   #3350). Concurrent readiness probes can therefore park every
+#                   worker of this pool until their sockets give up. That must
+#                   not be able to take /health down with it — hence two pools
+#                   rather than one pool of N. A shared pool is reproduced as a
+#                   hang in
+#                   test_liveness_answers_while_readiness_workers_are_parked.
+#
+#                   Because its workers really do park, this pool must NOT be
+#                   NARROWER than the executor it replaced. The point of the
+#                   change is isolation from UNRELATED work, not smallness: a
+#                   2-worker pool narrows the cushion from the default
+#                   executor's ``min(32, cpu+4)`` (6 on the 2-vCPU hosted box),
+#                   and a 3rd concurrent readiness request would then queue,
+#                   spend its whole ``_READY_PROBE_TIMEOUT_S`` waiting, and
+#                   report a FALSE 503 for a healthy DB — the same symptom this
+#                   change exists to remove, reached through readiness fan-in
+#                   instead of through unrelated load. Width is pinned by
+#                   test_probe_pools_are_the_daemon_seam_with_distinct_names and
+#                   exercised by test_readiness_fan_in_does_not_produce_a_false_503.
+#
+# Residual (pre-existing #2988, NOT introduced here): the client read timeout
+# (10s) exceeds ``_READY_PROBE_TIMEOUT_S`` (6.0s), so for a genuinely
+# black-holed DB the OUTER bound wins the race and leaves the readiness worker
+# parked until its socket times out. That is NOT merely a latency cost — it is
+# what makes the fan-in above possible, because a parked worker cannot serve the
+# next request — and it needs an inner bound on ``_get_proj`` so the worker
+# frees itself (the hosted twin keeps the outer strictly above the inner for
+# exactly this reason). Filed as #3320; this pool's width is the mitigation, not
+# the fix.
+#
+# Why not ``asyncio.to_thread``: it ALWAYS uses the shared default executor —
+# there is no way to pass a pool, which is the whole defect. Why not a bare
+# ``loop.run_in_executor(pool, ...)``: it does not propagate contextvars
+# (cpython#78195), and ``to_thread`` did — the SDK/projection layer reads them,
+# so ``_submit_probe`` copies the context in the CALLING thread and runs ``fn``
+# under it in the worker.
+_LIVENESS_PROBE_WORKER = "selfhost-liveness-probe"
+_READY_PROBE_WORKER = "selfhost-ready-probe"
+#: Liveness width: its pool worker always returns (``probe_db`` is inner-bounded),
+#: so this only needs to absorb an overlapping poll.
+_LIVENESS_PROBE_WORKERS = 2
+#: Readiness width: 8 >= the 6 workers the shared default executor provided on
+#: the smallest hosted box (``min(32, cpu+4)``, 2 vCPU). Isolation is the fix;
+#: narrowing the pool is not.
+_READY_PROBE_WORKERS = 8
+
+
+def _probe_worker(name: str, workers: int):
+    """The named process-wide DAEMON pool for one probe lane.
+
+    Resolved lazily on first use: ``daemon_worker`` starts its threads when it
+    is CALLED, so a module-level call would spawn them at import. The registry
+    is process-wide and keyed by name, so repeated calls return the SAME pool
+    (and ``workers`` only applies at the first creation).
+    """
+    from tortoise.monitoring import daemon_worker  # lazy — liveness stays cheap
+
+    return daemon_worker(name, workers=workers)
+
+
+def _submit_probe(pool, fn):
+    """Submit a health probe to a DEDICATED daemon pool, propagating contextvars.
+
+    ``pool`` is always one of the two lanes above (resolved by ``_probe_worker``)
+    — never the loop's default executor (#3035), and never a pool shared between
+    the liveness and the readiness handler.
+    """
+    ctx = contextvars.copy_context()
+    return pool.submit(lambda: ctx.run(fn))
 
 
 def _auth_mode() -> str:
@@ -74,6 +210,25 @@ if not os.environ.get("TORTOISE_DB_URI"):
 
     print(f"tortoise selfhost: {EMBEDDED_EVAL_BANNER}", file=sys.stderr)
     _logger.warning(EMBEDDED_EVAL_BANNER)
+
+# #2203: this module is the daemon entry point for BOTH the docker image CMD
+# (`uvicorn tortoise.selfhost:app`) and `python -m tortoise.selfhost` — neither
+# funnels through tortoise.__main__.main(), so the daemon must install the
+# terminating-signal guard itself. uvicorn replaces SIGTERM with its own
+# graceful handler while serving, then restores THIS guard as the original
+# disposition and re-raises the signal at the end of the drain — the guard's
+# handler closes every live embedded redis-server child before the final
+# death. SIGHUP is NOT handled by uvicorn, so a terminal/session death
+# (SIGHUP) fires the guard immediately mid-service: the embedded server is
+# closed under any live requests and the process dies — the desired
+# semantics for a session-death orphan (prompt child teardown, not a
+# graceful HTTP drain). See install_embedded_signal_cleanup. Idempotent;
+# no-op when the platform lacks the signal or a host handler is installed.
+from tortoise.embedded_lifecycle import (  # noqa: E402
+    install_embedded_signal_cleanup,
+)
+
+install_embedded_signal_cleanup()
 
 _ALLOWED_HOSTS = [o.split("//")[1].split("/")[0] for o in ALLOWED_ORIGINS if "//" in o]
 
@@ -126,6 +281,7 @@ app.add_middleware(
 )
 
 
+
 @app.get("/health")
 async def health():
     """Liveness — process up (+ deep DB probe, #1384).
@@ -135,6 +291,9 @@ async def health():
     500ing — visible immediately, no graph-touching request needed (#1381).
     Probes TortoiseSDK(namespace="selfhost") — the SAME connection the MCP
     tools resolve (mirrors /health/ready).
+
+    #3287: the probe runs on its OWN pool, so unrelated ``to_thread`` work can
+    never starve it (a queued probe used to hang this endpoint indefinitely).
     """
     import asyncio  # noqa: I001
     from tortoise.monitoring import probe_db  # lazy — liveness stays cheap
@@ -146,8 +305,12 @@ async def health():
         return probe_db(sdk)
 
     try:
-        # to_thread: a hung probe must not stall the event loop.
-        db = await asyncio.to_thread(_probe)
+        # OFF the event loop (#2988) and OFF the shared default executor
+        # (#3287): a hung probe must not stall the loop, and a busy loop must
+        # not starve the probe. Liveness has its OWN pool — see the module
+        # comment on why it must not share one with /health/ready.
+        db = await asyncio.wrap_future(_submit_probe(
+            _probe_worker(_LIVENESS_PROBE_WORKER, _LIVENESS_PROBE_WORKERS), _probe))
     except Exception as exc:  # noqa: BLE001, RUF100
         db = {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
     return JSONResponse(
@@ -166,11 +329,37 @@ async def health_ready():
     real DB (not a divergent default path). Exception details are logged
     server-side only (no internal info disclosure).
     """
-    try:
+    # #2988 — THE PROBE MUST NOT RUN ON THE EVENT LOOP. Building the SDK and
+    # touching the DB is synchronous I/O: run inline, one stalled socket froze
+    # every route in this process for as long as the socket waited, and
+    # publish-selfhost.yml curls this endpoint on every publish. /health above
+    # already dispatches its probe off-loop for the same reason; this handler
+    # was missed. Off-loop AND bounded, so a black-holed DB is reported (503)
+    # rather than waited out.
+    #
+    # #3287 — off-loop is not enough: ``to_thread`` still used the loop's
+    # SHARED default executor, so unrelated work could queue the probe past
+    # ``_READY_PROBE_TIMEOUT_S`` and turn a healthy DB into a FALSE 503 —
+    # blocking the publish that curls this endpoint. The probe now runs on its
+    # own pool (_READY_PROBE_WORKER); the bound stays, so a genuinely
+    # black-holed DB is still REPORTED rather than waited out. This pool is
+    # deliberately NOT the liveness pool — see the module comment.
+    import asyncio
+
+    def _probe() -> None:
         from tortoise.sdk import TortoiseSDK  # lazy — liveness stays cheap
 
         sdk = TortoiseSDK(namespace="selfhost")
         sdk._get_proj()  # touch the DB (hosted_api release_command pattern)
+
+    try:
+        # Dedicated pool (#3287): queueing behind unrelated work turned this
+        # endpoint into a FALSE 503 — a failing deploy gate for a healthy DB.
+        await asyncio.wait_for(
+            asyncio.wrap_future(_submit_probe(
+                _probe_worker(_READY_PROBE_WORKER, _READY_PROBE_WORKERS), _probe)),
+            timeout=_READY_PROBE_TIMEOUT_S,
+        )
         return JSONResponse({"status": "ready"})
     except Exception as exc:  # noqa: BLE001, RUF100
         _logger.warning("health/ready failed: %s", exc)
@@ -181,4 +370,10 @@ if __name__ == "__main__":
     # `python -m tortoise.selfhost` (T1.4 smoke invocation)
     import uvicorn
 
-    uvicorn.run(app, host=HOST, port=PORT)
+    # #2203: bound the graceful drain so `docker stop`'s 10s-then-SIGKILL
+    # cannot preempt the termination teardown that closes the embedded
+    # redis-server child: a long-lived MCP SSE stream would otherwise hold
+    # the drain open until SIGKILL orphans the server (uvicorn re-raises
+    # the signal into the #2203 guard at the end of the drain; atexit is
+    # the interpreter-exit backstop).
+    uvicorn.run(app, host=HOST, port=PORT, timeout_graceful_shutdown=5)

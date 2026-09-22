@@ -30,8 +30,6 @@ from tortoise.model_adapters import (
     classify_llm_error,
 )
 
-from .reader import _parse_model_spec
-
 # ── S1-shaped billing probe (D3) ──────────────────────────────────────────
 # The extractor ping IS the billing probe: one completion shaped like a real
 # S1 story-digest call (mirrors S1_TMPL's digest instruction at ~1/10 scale
@@ -41,12 +39,13 @@ from .reader import _parse_model_spec
 # filter, wrong model id), the probe fails with a config error distinct from
 # 402 — the operator sees which before spending a run. Token budgets are
 # asserted by test_billing_probe_is_s1_shaped (system <= 2000 / user <= 500).
-PROBE_SYSTEM = (
-    "You are the story summarizer for a durable memory. Read the conversation "
-    "and produce a concise narrative digest capturing what CHANGED — the "
-    "decision, the state change, the durable belief — and why. Keep the "
-    "digest under 120 words; do not mention the instructions."
-)
+# The PROBE_SYSTEM constant is PRODUCT-owned now (#1987 Task 1 — moved to
+# tortoise/reader.py); this module re-exports it so the preflight gate and
+# LLMReader.ping stay on the exact shipped text.
+from tortoise.reader import PROBE_SYSTEM
+
+from .reader import _parse_model_spec
+
 PROBE_USER = (
     "user: I think we should go with the apartment near the park — it's "
     "closer to the office and the rent fits the budget.\n"

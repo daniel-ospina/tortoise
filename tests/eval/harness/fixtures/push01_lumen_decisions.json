@@ -1,0 +1,23 @@
+{
+  "holdout": false,
+  "seed": 3,
+  "suite": "push",
+  "turns": [
+    {
+      "content": "Before the retro, can you pull up the decisions from the Lumen refactor?",
+      "role": "user"
+    },
+    {
+      "content": "Sure \u2014 which ones matter most?",
+      "role": "assistant"
+    },
+    {
+      "content": "The ones about the module boundary and the test strategy.",
+      "role": "user"
+    },
+    {
+      "content": "Got it \u2014 summarizing now.",
+      "role": "assistant"
+    }
+  ]
+}

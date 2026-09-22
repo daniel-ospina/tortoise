@@ -1,0 +1,23 @@
+{
+  "corpus": "write_path",
+  "files": {
+    "fixtures/wp01_quarry_debug.json": "sha256:3faf9323fe5641bdb792df81a487b2d89f04c1b62bc033c3f711020d26ec5cd3",
+    "fixtures/wp02_lumen_refactor.json": "sha256:fd44a5fecb99c62e80230712594c7e31c0eb9cddc9062b67544d23deaf9ee242",
+    "fixtures/wp03_ember_design.json": "sha256:eb1c144fb794469794a12b6c47d4241cbb40b1bf413c0ca09ca3e05b34fdef25",
+    "fixtures/wp04_aurora_perf.json": "sha256:cdd59cbe991c4b2c8b4e1c7b3d7189bb21430404aa60a52dedd69f9062f2b971",
+    "fixtures/wp05_retro_writeup.json": "sha256:9572e302e727917ec20a633873e6862a7737236b2da7cc21e614fad12ca930a8",
+    "fixtures/wp06_quarry_rollout.json": "sha256:a8255802f428be4e9510bb3959772c5936479bbdb34786612f8bb1609d61c1fa",
+    "fixtures/wp07_bluepeak_followup.json": "sha256:96bcd85c8c32bcfb09c2032e18558f09488f4ff4b964b188f26f17d4a0a2513e",
+    "gold/wp01_quarry_debug.gold.json": "sha256:41998b1822120a06a0c50311c52da7170bf7d17a3ac0e89bbb2643e110a77a93",
+    "gold/wp02_lumen_refactor.gold.json": "sha256:2960f3d48d1b948dce021d460e7dd8888aa216cd4356bb612d8a78407a2d51e9",
+    "gold/wp03_ember_design.gold.json": "sha256:c2bef729e95340227b635cc2e8c3f6fc0dce99b21d8661554ce367188d7f4729",
+    "gold/wp04_aurora_perf.gold.json": "sha256:8476fa939a42703fea004adae982b6ea616e05bf08d13e4b5593e1da99456658",
+    "gold/wp05_retro_writeup.gold.json": "sha256:bb74fbc6adddf2f77210f1436840825f76c31e8983f0c71eed9df51f156eca61",
+    "gold/wp06_quarry_rollout.gold.json": "sha256:77ec92586da389f28fa795ffdc0c8daf338ec71abe51c272e4d724e8756857ef",
+    "gold/wp07_bluepeak_followup.gold.json": "sha256:41a34efeecfebb184f0ce69da3966b1295dd61d0ba3c8336f06bd6f9d906c6d1"
+  },
+  "fixtures_hash": "sha256:943a99ec619b4c67b8e31fefb90316ea023bbaddd1905d835b9d930243518324",
+  "generator": "tests/eval/write_path/generate_corpus.py",
+  "schema_version": 1,
+  "seed": 42
+}

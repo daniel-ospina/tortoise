@@ -41,7 +41,7 @@ Edge cases covered: empty corpus (harness refuses, CLI exit 5, §6); arm API dow
 | Workflow | Steps | Automation | Manual trigger | Surfaces |
 |---|---|---|---|---|
 | W1 Battery execution | corpus load (refuse if empty) → arm isolation init → Tier-1 probes (matched pairs) → Tier-2 streams → Tier-3 sweep → artifacts | Full run automation, pinned seeds | Launch command | S1–S4, S7, S8 |
-| W2 Matched-recall pre-pass | factual probe subset → top-K F1 (K=5) per arm → symmetric trigger (any arm ≥0.10 F1 below corpus-best) → balanced subset or INCONCLUSIVE (<50%) | Automatic before reasoning battery | None (pre-committed) | S4, S5, S8 |
+| W2 Matched-recall pre-pass | factual probe subset → top-K F1 (K=5) per arm → symmetric trigger (any arm ≥0.10 F1 below corpus-best) → balanced subset or INCONCLUSIVE (<50%) — *“any arm” is now read as `trigger_population` (`{a1, a2, a2b, a3, a4}`; `a0` excluded — amended 2026-09-12, #3327; original wording preserved; see §3.2.1/§7 of `docs/benchmarks/comparison-systems.md`)* | Automatic before reasoning battery | None (pre-committed) | S4, S5, S8 |
 | W3 Judge validation | per-rubric AB+BA (p<0.05), chance-corrected reliability (≥0.7), IRT item-infit (0.7–1.3), stress set (single-anchor, all-identical anchors, contradictory anchors) → pass/block; validation record → run artifact | Automatic gate before scoring; mid-stream re-validation on rubric change | Analyst triggers on rubric change | S6 |
 | W4 Verdict assembly | aggregate profile → classify metrics → apply verdict rule (all 4 branches) → mitigation paths → artifacts list; missing metric → report-incomplete flag (never fabricated) | Automatic from run artifacts | PO sign-off on claim wording | S6, S7 |
 | W5 Weakness mitigation loop | pick WEAK → engineer implements → re-run battery → compare profile | Re-run automated | Engineer per weakness | S1–S8 |
@@ -74,7 +74,13 @@ Verdict report shape (the PO-facing artifact) — non-UNIQUE state shown (MECHAN
 ```
 Profile: metric × arm delta matrix (all 14 families: R1–R5, L1–L6, D2–D4)
   R1  surfaced-rate      A4 0.92 | A2 0.00 | A0 0.00    → STRUCTURAL (mechanism)
-  R2  coverage subscore  A4 0.51 | A2 0.50 | A0 0.50    → PARITY
+  R2  coverage subscore  A4 0.50 | A2 n/a  | A0 0.00    → STRONG
+      (AMENDMENT #2292: the mock-era "A4 0.51 | A0 0.50 -> PARITY" row was
+      STALE — it predates the arm-neutral JUDGED subscore (validated rubric,
+      #2292) and the canonical gate form (decision (e): ratio >= 1.5x WITH
+      the a0=0 floor — control == 0 => pass iff treatment > 0). a0 (no-store
+      control) judged subscore = 0.00 floor; A4 0.50 clears the floor.
+      Measured values land with #1416's real run.)
   R3  Brier              A4 0.26 | A2 0.27 | A0 0.27    → PARITY
   R4  defeat-condition   A4 0.80 | A2 n/a  | A0 n/a     → STRUCTURAL (mechanism)
   R5  update-correct     A4 0.55 | A2 0.54 | A0 0.53    → PARITY
@@ -168,7 +174,7 @@ Fleshes out the 7 high-level E2Es from scope into executable scenarios (setup / 
 **E2E-1.1 — Tier-1 battery produces gate values, not just emission**
 **Setup:** corpus v1 (≥60 scenarios: 20 decision, 15 contradiction-pair with pinned k=5, 15 calibration-with-known-outcome, 10 retraction); thresholds [cal]-locked; arms A4 + A0; seed S; temp 0.
 **Steps:** `battery run --tier 1 --arms a4,a0`.
-**Assert:** per-scenario `run_artifact.json` exists with run_id = seed+arm+scenario; **each probe's value is checked against its AC gate** (R1: surfaced ≥90%, flip-flop ≤10%, FP ≤5%; R2: coverage subscore delta ≥1.5× vs A0 AND Tier-1 mechanism gate ≥80% of decisions reach 3+ Challenge/Deepen cycles; R3: Brier ≤ A0 − 0.05 AND honest-undecided ≥80% AND confident-wrong ≤10%; R4: defeat-condition precision ≥70% AND ≥1 real defeat condition per decision; R5: correct-direction ≥90%, over-reaction ≤10%); thresholds read from thresholds.yaml (behavioral boundary assertion, not filename coupling); zero fallback/failed episodes or count reported <5%.
+**Assert:** per-scenario `run_artifact.json` exists with run_id = seed+arm+scenario; **each probe's value is checked against its AC gate** (R1: surfaced ≥90%, flip-flop ≤10%, FP ≤5%; R2: JUDGED coverage subscore ratio ≥1.5× vs A0 WITH the a0=0 floor (control == 0 ⇒ gate passes iff treatment > 0; one canonical form — #2292 decision (e); the Tier-1 mechanism gate ≥80% of decisions reach 3+ Challenge/Deepen cycles stays a separate diagnostic, never a Tier-3 verdict input); R3: Brier ≤ A0 − 0.05 AND honest-undecided ≥80% AND confident-wrong ≤10%; R4: defeat-condition precision ≥70% AND ≥1 real defeat condition per decision; R5: correct-direction ≥90%, over-reaction ≤10%); thresholds read from thresholds.yaml (behavioral boundary assertion, not filename coupling); zero fallback/failed episodes or count reported <5%.
 
 **E2E-1.2 — Contradiction pair fires (R1)**
 **Setup:** the 15 contradiction scenarios, k=5 fixed (injection-turn field), N ≥ 20 runs (15 × ≥2 seeds).
@@ -244,7 +250,7 @@ Fleshes out the 7 high-level E2Es from scope into executable scenarios (setup / 
 ### Parity + gates (scope E2E-4, E2E-5)
 
 **E2E-4.1 — Parity leg on released benchmarks**
-**Setup:** LongMemEval (commit pinned at implementation), LoCoMo (vY), MemoryArena (HF dataset+rev pinned), MemoryAgentBench (rev pinned), **ForgetEval-class staleness/drift probe (pinned rev — scope in-scope #6)** — exact values recorded in run_artifact; 6 arms; **methodology-unchanged check: judge rubric id + reader prompt hash identical to the #1144 baseline record (stored hash, not "unchanged" prose)**.
+**Setup:** LongMemEval (commit pinned at implementation), LoCoMo (vY), MemoryArena (HF dataset+rev pinned), MemoryAgentBench (rev pinned), **ForgetEval-class staleness/drift probe (pinned rev — scope in-scope #6)** — exact values recorded in run_artifact; 6 arms; **methodology-unchanged check: judge rubric id + reader prompt + PROTOCOL hash (seed/model_pin/temperature/event-schema/tool-surface — #2284 Task 6) identical to the #1144 baseline record (stored hash, not "unchanged" prose)**. The #1144 baseline record MUST carry all three hashes: an old 2-tuple record keeps matching on reader+rubric (back-compat) but the run is protocol-unknown and the parity record forces a #1144 re-record — a decide-loop/protocol change (schema bump, model pin change) trips the check end-to-end.
 **Assert:** per-benchmark parity table incl. staleness/drift probe (supersession-vs-stale answers, per research brief Strategy Context); runner refuses to run on version mismatch (interface §6); saturation context cross-referenced to published baselines.
 
 **E2E-5.1 — Judge validation gate**
@@ -267,8 +273,8 @@ Fleshes out the 7 high-level E2Es from scope into executable scenarios (setup / 
 **Assert:** report_status=incomplete_missing_metrics; no fabricated values; claim shipping blocked (report_status gate).
 
 **E2E-7.1 — Determinism**
-**Setup:** same run twice, seed S.
-**Assert:** metric values identical within tolerance |Δ| ≤ 1e-6 (per-metric epsilon in thresholds.yaml; compared across the two run_artifact.json files); calibration mode prints deltas without asserting (re-lock is a reviewable table change).
+**Setup:** same run twice, seed S. Scope split by field class: **transcript-locked derived/objective fields** (n_turns / n_tool_calls / re_derivations / total_tokens / outcome_* — computed deterministically from the locked transcript) are compared across the two run_artifact.json files under `determinism.tolerances` per metric (fallback `determinism.epsilon`); **model-text/judged fields** are NOT bit-comparable (temp-0 ≠ bit-deterministic; arXiv 2606.26185/2602.14349) — each run records a **nondeterminism fingerprint** of its model-generated/judged content, and derived-field comparisons are annotated by fingerprint (a deterministic metric can never be compared across non-matching model legs unnoticed).
+**Assert:** transcript-locked derived/objective |Δ| ≤ 1e-6 (measured |Δ| = 0.0 over the mock determinism lane — the tolerance table in thresholds.yaml is SEEDED from those measured deltas, #2284 Task 7; never a test-local constant); per-metric model-text/judged tolerances are re-locked by sibling #2292 over that seed from exposure-measured numbers — values stay **TBD(EXPOSURE)** until exposure part 1 (#2284 Task 8) measures them; token-budget numbers (arms.yaml `expected_tokens_per_episode`, the 800 tok/ep guess) are annotated `measured_after_exposure` and stay provisional until then; calibration mode prints deltas without asserting (re-lock is a reviewable table change; determinism tolerance rows fold into the same cal-table hash the `calibrate --print` route prints — a tolerance re-lock drifts the hash, so it is never silent tuning). **Coordination:** this seed + §7 wording must merge before sibling #2292 re-locks measured values over it — no parallel silent edits to the same thresholds.yaml/04-plan rows.
 
 **E2E-7.2 — Weakness mitigation loop (scope item #9, J3/W5)**
 **Setup:** verdict WEAK-UNMITIGATED on R5 (fixture); mitigation path documented.
@@ -301,7 +307,7 @@ Fleshes out the 7 high-level E2Es from scope into executable scenarios (setup / 
 | Falsification outcome (claim fails) | Medium | Pre-committed branches (MECHANISM-NOT-UNIQUE / WEAK-UNMITIGATED / INCONCLUSIVE); retention story independent |
 | Recall mismatch → INCONCLUSIVE | Medium | Symmetric trigger pre-committed; driven test (E2E-3.7); re-scope comparator branch defined |
 | Token-trajectory gate single-source (SEA-Eval) | Medium | ⚠️ provisional label; corroboration sought; gate stays but flagged |
-| Compute cost (500–1,000 episodes) | Medium | Batch scenario setup (N+1 flag); within #1144 budget; budget.yaml guard |
+| Compute cost (500–1,000 episodes) | Medium | Batch scenario setup (N+1 flag); within #1144 budget; budget.yaml guard; token numbers = 800 tok/ep guess **TBD(EXPOSURE)** → arms.yaml `expected_tokens_per_episode` re-locked from measured probe data (exposure part 1, #2284 Task 8) |
 | EP calibration discipline violated | Medium | [cal] table reviewable-only; calibration mode prints (W6); ep_outcome honest-UNDEC (E2E-1.3) |
 | Report fabricated on missing data | Medium | report_status=incomplete gate (E2E-6.2); never fabricated |
 

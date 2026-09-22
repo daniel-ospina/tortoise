@@ -10,8 +10,9 @@
 # Build mechanics follow the Prefect `prefect-client` pattern: a separate
 # dist built from the same monorepo via a staging script that selects the
 # client subset of the `tortoise` package (client/build_client.sh). Shared
-# modules (mcp_client, config, exceptions) are COPIED from the canonical repo
-# tree at build time — single source of truth, zero drift.
+# modules (mcp_client, config, exceptions, status_vocabulary) are COPIED from
+# the canonical repo tree at build time — single source of truth, zero drift
+# (client/shared_modules.sh derives the set from build_client.sh's own copies).
 #
 # License boundary (#526): the engine stays BSL-1.1; this dist re-licenses
 # ONLY the shipped client modules under Apache-2.0 (MongoDB/Redis driver

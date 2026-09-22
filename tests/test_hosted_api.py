@@ -11,8 +11,11 @@ Covers:
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
+import threading
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -25,27 +28,51 @@ os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
 from tortoise.hosted_api import (  # noqa: I001
     app,
-    get_current_team,
+    get_current_org,
     get_current_user,
     ForwardedProtoMiddleware,
 )
 from tortoise.sdk import TortoiseSDK
 
+# The autouse ``_reset_health_probe`` fixture replaces
+# ``hosted_api._health_probe_interval`` with a near-infinite lambda for EVERY
+# test in this module (so the background refresher cannot overwrite a test's
+# patched verdict). Clamp assertions must use the REAL resolver, captured here
+# before any fixture runs.
+import tortoise.hosted_api as _ha_mod
+
+_REAL_HEALTH_PROBE_INTERVAL = _ha_mod._health_probe_interval
+
 
 # ── Test constants ───────────────────────────────────────────────────────────
 
-TEST_TEAM_ID = "team-001"  # epic #1647 (T7): a TEAM id, not a test namespace — a "test-" prefix would trip the SDK's hyphenated test-* normalization (sdk.py) and map the team graph to test_team_001_tortoise while team_graph_name resolves team_team-001 (backup dump divergence)
+TEST_ORG_ID = "team-001"
+# #1719 (Task 3): org_memberships.user_id is a uuid column — real JWT
+# subjects are UUIDs; non-UUID user_id literals are prod-impossible
+# (FakeControlPlane fidelity raises HTTP 400 on them).
+_U1 = "9f2c1a40-0000-4a00-8000-000000000001"
+_U2 = "9f2c1a40-0000-4a00-8000-000000000002"
+_U9 = "9f2c1a40-0000-4a00-8000-000000000009"
+_U_INTRUDER = "9f2c1a40-0000-4a00-8000-00000000000d"
+  # epic #1647 (T7): a TEAM id, not a test namespace — a "test-" prefix would trip the SDK's hyphenated test-* normalization (sdk.py) and map the team graph to test_team_001_tortoise while org_graph_name resolves team_team-001 (backup dump divergence)
 TEST_TEAM = {
-    "team_id": TEST_TEAM_ID,
+    "org_id": TEST_ORG_ID,
     "key_id": "test-key-001",
     "tier": "free",
-    # get_current_team always resolves the full limits dict — test stubs must
+    # C1/C2 tenancy fields (the resolution dict a tt_ legacy key would
+    # produce: deleg NULL, scopes [] → legacy_full_access owner class).
+    "graph_id": None,
+    "scopes": [],
+    "legacy_full_access": True,
+    "delegation_depth": None,
+    "created_by_key_id": None,
+    # get_current_org always resolves the full limits dict — test stubs must
     # match, or fail-closed quota enforcement 500s instead of passing (#310).
     "max_users": 1,
     "max_graphs": 1,
     "max_points": 10000,
     "max_api_keys": 2,
-    "max_sessions": 1000,
+    "max_sessions": None,
 }
 
 
@@ -54,7 +81,7 @@ TEST_TEAM = {
 
 def _count_about_edges(point_id: str, object_id: str) -> int:
     import tortoise.hosted_api as ha
-    sdk = ha._make_sdk(namespace=TEST_TEAM["team_id"])
+    sdk = ha._make_sdk(namespace=TEST_TEAM["org_id"])
     proj = sdk._get_proj()
     rows = proj.g.query(
         "MATCH (p:Point {id:$pid})-[:aboutObject]->(o {id:$oid}) RETURN count(*)",
@@ -65,12 +92,32 @@ def _count_about_edges(point_id: str, object_id: str) -> int:
 
 def _count_stub_nodes() -> int:
     import tortoise.hosted_api as ha
-    sdk = ha._make_sdk(namespace=TEST_TEAM["team_id"])
+    sdk = ha._make_sdk(namespace=TEST_TEAM["org_id"])
     proj = sdk._get_proj()
     rows = proj.g.query(
         "MATCH (n) WHERE (n:Point OR n:Subject OR n:Operator) "
         "AND n.content IS NULL AND n.name IS NULL RETURN count(n)").result_set
     return rows[0][0] if rows else 0
+
+
+def _listed_key(client, kid, timeout: float = 3.0) -> dict:
+    """Return the GET /v1/team/keys row for `kid`, tolerating the embedded
+    lane's write-visibility lag (a just-minted node may not be visible on an
+    immediate read — the #1502-class single-writer race; the canonical docker
+    lane is instant). Bounded retry — a genuinely missing key still fails with
+    a clear message instead of a bare IndexError."""
+    import time
+    deadline = time.monotonic() + timeout
+    while True:
+        keys = client.get("/v1/team/keys").json()["keys"]
+        hit = [k for k in keys if k["id"] == kid]
+        if hit:
+            return hit[0]
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"minted key {kid} missing from list after {timeout:.1f}s: "
+                f"{[k['id'] for k in keys]}")
+        time.sleep(0.15)
 
 
 def _patch_tortoise_sdk_init(db_path: str):
@@ -79,8 +126,12 @@ def _patch_tortoise_sdk_init(db_path: str):
 
     _orig_init = ha_mod.TortoiseSDK.__init__
 
-    def _patched_init(self, db_path_arg=None, *, namespace=None, **kwargs):
-        _orig_init(self, db_path, namespace=namespace)
+    def _patched_init(self, db_path_arg=None, *, namespace=None,
+                      graph_name=None, **kwargs):
+        # graph_name (C5 #2114 D-C5-1 seam): forward it — swallowing the
+        # kwarg would silently open the DEFAULT team graph for a custom
+        # graph request (cross-graph test blindness).
+        _orig_init(self, db_path, namespace=namespace, graph_name=graph_name)
 
     ha_mod.TortoiseSDK.__init__ = _patched_init
     # Break the _make_sdk embedded fallback anchor (#1470): _FALLBACK_KEEPALIVE
@@ -98,6 +149,31 @@ def _restore_tortoise_sdk_init(original_init):
     import tortoise.hosted_api as ha_mod
 
     ha_mod.TortoiseSDK.__init__ = original_init
+    # #1502-class: evict the embedded-fallback anchor created DURING this
+    # test (e.g. by the registry-mode rename helper's _make_sdk). Without
+    # this, a stale anchor bound to this test's temp DB leaks into the next
+    # test file's run (dead socket / stale rows) — the #1497 pattern from
+    # test_writer_inventory.
+    #
+    # #1950: clearing ALONE leaked the anchored SDKs — the redislite daemon
+    # stays alive until its last connection is GC'd (nondeterministic), so a
+    # later test whose tempdir reuses the same path hits EmbeddedStoreBusyError
+    # and a mid-test anchor eviction can tear the daemon down between a
+    # consent seed and the gate read (intermittent 403). Close the anchors
+    # deterministically (redislite SHUTDOWN SAVE) before dropping the dict.
+    _close_keepalive_anchors(ha_mod)
+
+
+def _close_keepalive_anchors(ha_mod) -> None:
+    """Close every _FALLBACK_KEEPALIVE anchor, then drop the dict."""
+    keepalive = ha_mod._FALLBACK_KEEPALIVE
+    for ns in list(keepalive):
+        anchor = keepalive.pop(ns, None)
+        if anchor is not None:
+            try:  # noqa: SIM105
+                anchor.close()
+            except Exception:
+                pass
 
 
 @pytest.fixture
@@ -106,20 +182,47 @@ def client():
 
     All /v1/* endpoints receive TEST_TEAM as the authenticated team.
     All TortoiseSDK instances use the same temp embedded DB.
+    # #1927: the team's onboarding state is seeded with session_recording=True
+    # (the default) so the session-capture tests exercise the pipeline gates
+    # deterministically; the off-switch tests seed their own state.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
 
         # Override auth — skip API key lookup
-        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
 
         # Patch SDK to use temp DB file
         _orig_init = _patch_tortoise_sdk_init(db_path)
+        # #1950: pin TORTOISE_DB_PATH to the SAME temp DB the patched init
+        # forces, so _make_sdk's keepalive anchor path matches and the anchor
+        # is REUSED instead of evicted + closed on every registry access (each
+        # eviction shut the redislite daemon down mid-test, losing the consent
+        # seed between this fixture's write and the gate read → 403).
+        os.environ["TORTOISE_DB_PATH"] = db_path
+        import tortoise.hosted_api as ha_mod
+        # #1927: provision the Team node first (the state writer is
+        # MATCH...SET — a silent no-op without it), then seed the flag so the
+        # session-capture tests run deterministically.
+        ha_mod._make_sdk(namespace="registry")._get_registry().query(
+            "CREATE (t:Team {id:$id, onboarding_state:$st})",
+            params={"id": TEST_ORG_ID, "st": "{}"},
+        )
+        state = ha_mod._update_onboarding_state(
+            TEST_ORG_ID, session_recording=True)
+        # #1950: self-verify the consent seed — if the write silently no-ops,
+        # every session-capture test 403s downstream; fail loud HERE with the
+        # actual persisted state instead.
+        assert state.get("session_recording") is True, state
+        assert ha_mod._get_onboarding_state(TEST_ORG_ID).get(
+            "session_recording") is True, \
+            "consent seed not visible to the gate read"
 
         try:
             with TestClient(app) as tc:
                 yield tc
         finally:
+            os.environ.pop("TORTOISE_DB_PATH", None)
             _restore_tortoise_sdk_init(_orig_init)
             app.dependency_overrides.clear()
 
@@ -161,6 +264,54 @@ def llm_extraction_provider(monkeypatch):
 # Health Endpoints
 # ═══════════════════════════════════════════════════════════════════════════════
 
+@pytest.fixture(autouse=True)
+def _reset_health_probe(monkeypatch):
+    """#2850: /health and /health/ready share a module-level single-flight probe
+    coordinator. The hang tests below deliberately wedge it; without this
+    reset the wedge would leak into every later test in this file.
+
+    The background refresher is also stretched to a near-infinite interval for
+    the module: it would otherwise re-probe behind a test's back and overwrite
+    a deliberately patched verdict. The refresher's own behavior is covered by
+    ``test_health_probe_loop_refreshes_the_coordinator``.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    monkeypatch.setattr(ha_mod, "_health_probe_interval", lambda: 3600.0)
+    ha_mod._HEALTH_PROBE.reset()
+    ha_mod._READY_PROBE.reset()
+    ha_mod._CONTROL_PLANE_PROBE.reset()
+    # Round-2 review: reset the process-global SDK CACHE too, not just the
+    # coordinators. A probe worker left over from a previous test can rebuild
+    # ``_probe_sdk`` with the previous env key after this fixture has run, which
+    # is what made ``test_probe_connection_is_reused_not_rebuilt_per_call``
+    # count 2 builds (green in the docker lane, red in the embedded lane).
+    ha_mod._probe_sdk_reset()
+    yield
+    ha_mod._HEALTH_PROBE.reset()
+    ha_mod._READY_PROBE.reset()
+    ha_mod._CONTROL_PLANE_PROBE.reset()
+    ha_mod._probe_sdk_reset()
+
+
+def _force_probe_refresh(ha_mod, timeout: float = 10.0) -> dict:
+    """Make /health's in-memory verdict deterministic for a test (#2850).
+
+    ``/health`` is now PURE IN-MEMORY — it never runs the probe itself, so
+    monkeypatching ``_probe_db`` and immediately GETting ``/health`` would race
+    the background refresher (and could report a verdict produced by the
+    unpatched probe). Reset the single-flight coordinator and run it once
+    synchronously so the next ``/health`` reports exactly this result.
+
+    This is the seam that replaced request-driven probing: the request path no
+    longer does I/O, so a test that wants a specific DB verdict has to state it
+    (patch ``_probe_db``) and then force the refresh.
+    """
+    probe = ha_mod._HEALTH_PROBE
+    probe.reset()
+    return probe.wait(timeout)
+
+
 class TestHealthEndpoints:
     """GET /health and GET /health/security."""
 
@@ -168,12 +319,38 @@ class TestHealthEndpoints:
         """Liveness — process up. Deep DB check (#1384) rides along in `db`
         but never gates liveness (the DB gate is /health/ready, #338 follow-up
         — a DB-coupled /health caused cold-start deploy failures)."""
+        import tortoise.hosted_api as ha_mod
+
+        # #2850: /health reads memory only; force the refresher's first
+        # completed verdict so the assertion is not racing it.
+        _force_probe_refresh(ha_mod)
         r = client.get("/health")
         assert r.status_code == 200
         body = r.json()
         assert body["status"] == "ok"
         assert body["db"]["ok"] is True
         assert isinstance(body["db"]["latency_ms"], (int, float))
+
+    def test_health_probe_passes_no_setup_allowance(self, client, monkeypatch):
+        """#3143 review: the hosted liveness gate must keep the tight shared
+        budget. ``_probe_db()`` is the hosted leg of the platform `/health`
+        direct callers and is NOT covered by the selfhost pin; a regression
+        threading the MCP cold-start allowance into it would silently turn the
+        documented ~1.5s bound (#1384) into setup + 1.5s."""
+        import tortoise.hosted_api as ha_mod
+        import tortoise.monitoring as mon
+
+        seen = {}
+        real_probe_db = mon.probe_db
+
+        def _spy_probe_db(sdk, setup_timeout=None):
+            seen["setup_timeout"] = setup_timeout
+            return real_probe_db(sdk, setup_timeout=setup_timeout)
+
+        monkeypatch.setattr(mon, "probe_db", _spy_probe_db)
+        result = ha_mod._probe_db()
+        assert seen["setup_timeout"] is None, seen
+        assert "ok" in result
 
     def test_health_degraded_when_db_down(self, client, monkeypatch):
         """#1384: a stopped FalkorDB flips /health to degraded — 200, never
@@ -185,6 +362,7 @@ class TestHealthEndpoints:
             lambda: {"ok": False, "latency_ms": 12.3,
                      "error": "ConnectionError: NXDOMAIN"},
         )
+        _force_probe_refresh(ha_mod)
         r = client.get("/health")
         assert r.status_code == 200
         body = r.json()
@@ -200,6 +378,7 @@ class TestHealthEndpoints:
             raise RuntimeError("probe exploded")
 
         monkeypatch.setattr(ha_mod, "_probe_db", _boom)
+        _force_probe_refresh(ha_mod)
         r = client.get("/health")
         assert r.status_code == 200
         body = r.json()
@@ -213,6 +392,326 @@ class TestHealthEndpoints:
         assert r.status_code == 200
         assert r.json() == {"status": "ok", "db": "connected"}
 
+    # ── #2850 P0: liveness must survive a black-holed FalkorDB ──────────
+
+    def test_health_returns_bounded_when_probe_hangs_forever(self, client, monkeypatch):
+        """The 2026-09-10 incident: a stalled FalkorDB made Fly's http_check
+        (15s) fail while the process was still serving. A probe that NEVER
+        returns must not stop /health from answering — the handler reads the
+        hard-bounded coordinator, never the shared asyncio default executor."""
+        import threading
+        import time
+
+        import tortoise.hosted_api as ha_mod
+
+        started = threading.Event()
+
+        def _hang():
+            started.set()
+            time.sleep(600)  # black-holed connect: never returns
+            return {"ok": True, "latency_ms": 0.0, "error": None}
+
+        monkeypatch.setattr(ha_mod, "_probe_db", _hang)
+        monkeypatch.setattr(ha_mod._HEALTH_PROBE, "_timeout", 0.3)
+        # #2850: /health reads memory only — start the (hanging) probe through
+        # the coordinator so the assertion races nothing.
+        _force_probe_refresh(ha_mod, timeout=0.1)
+
+        start = time.monotonic()
+        r = client.get("/health")
+        elapsed = time.monotonic() - start
+
+        assert r.status_code == 200
+        assert elapsed < 5.0, f"/health took {elapsed:.2f}s with a hung probe"
+        assert started.is_set()
+        body = r.json()
+        assert body["status"] == "degraded"
+        assert body["db"]["ok"] is False
+        # The stall is observable — not a fossil "ok".
+        assert body["probe"]["in_flight"] is True
+
+    def test_health_repeated_hung_checks_do_not_accumulate(self, client, monkeypatch):
+        """A 15s-interval checker hitting a wedged DB must not spawn a probe
+        thread per check: concurrent/repeated reads coalesce onto the one
+        in-flight probe."""
+        import threading
+        import time
+
+        import tortoise.hosted_api as ha_mod
+
+        calls = {"n": 0}
+
+        def _hang():
+            calls["n"] += 1
+            time.sleep(600)
+            return {"ok": True, "latency_ms": 0.0, "error": None}
+
+        monkeypatch.setattr(ha_mod, "_probe_db", _hang)
+        monkeypatch.setattr(ha_mod._HEALTH_PROBE, "_timeout", 0.05)
+        _force_probe_refresh(ha_mod, timeout=0.05)
+
+        before = sum(1 for t in threading.enumerate() if t.is_alive())
+        for _ in range(6):
+            r = client.get("/health")
+            assert r.status_code == 200
+        after = sum(1 for t in threading.enumerate() if t.is_alive())
+
+        assert calls["n"] == 1, f"probe ran {calls['n']}x — reads were not coalesced"
+        assert after - before <= 1, f"{after - before} probe threads accumulated"
+
+    def test_health_ready_fails_closed_when_probe_hangs(self, client, monkeypatch):
+        """Readiness stays fail-closed (503) — but DROPPING the old unbounded
+        on-loop ``_get_proj().g.query()`` means a hung DB can no longer block
+        the event loop for every other request. Readiness reads its OWN
+        coordinator (``_READY_PROBE``), so it probes LIVE rather than joining
+        the liveness refresher's in-flight probe."""
+        import time
+
+        import tortoise.hosted_api as ha_mod
+
+        def _hang():
+            time.sleep(600)
+            return {"ok": True, "latency_ms": 0.0, "error": None}
+
+        monkeypatch.setattr(ha_mod, "_probe_db", _hang)
+        monkeypatch.setattr(ha_mod._READY_PROBE, "_timeout", 0.2)
+
+        r = client.get("/health/ready")
+        assert r.status_code == 503
+
+    def test_health_ready_never_serves_a_pre_outage_verdict(self, client, monkeypatch):
+        """#2850 review P1: readiness must not answer 200 from a completed probe.
+
+        Readiness records ``{ok: True}``; the plane then dies; the next probe
+        cannot finish before ``run()``'s deadline. Pre-fix, ``run()`` returned
+        ``_view_locked()`` — the stale completed verdict, still inside the 30s
+        ``stale_after`` window — so /health/ready answered 200 "connected" for
+        ~5s while the plane was dead (which matters because deploy-hosted.yml
+        asserts readiness LAST). The autouse ``_reset_health_probe`` fixture
+        resets the coordinators before every test, which is why priming has to
+        happen INSIDE the test and the old suite missed this.
+        """
+        import time
+
+        import tortoise.hosted_api as ha_mod
+
+        # Prime the readiness coordinator with a completed OK.
+        monkeypatch.setattr(
+            ha_mod, "_probe_db",
+            lambda: {"ok": True, "latency_ms": 0.5, "error": None})
+        ha_mod._READY_PROBE.reset()
+        assert ha_mod._READY_PROBE.wait(timeout=2.0)["ok"] is True
+
+        # The plane dies and the probe wedges; the read budget expires.
+        def _hang():
+            time.sleep(600)
+            return {"ok": True, "latency_ms": 0.0, "error": None}
+
+        monkeypatch.setattr(ha_mod, "_probe_db", _hang)
+        monkeypatch.setattr(ha_mod._READY_PROBE, "_timeout", 0.2)
+
+        r = client.get("/health/ready")
+        assert r.status_code == 503, (
+            "readiness answered from a completed pre-outage probe")
+
+    def test_in_flight_gauge_tracks_requests_and_releases(self):
+        """#2850 review P0: the watchdog's idle gate is fed by this gauge.
+
+        Two halves: a request is counted WHILE it is in flight (so a loop
+        blocked serving it is never mistaken for a wedge), and the slot is
+        released exactly once, including on an exception — a leaked count
+        would permanently disarm the kill.
+        """
+        import asyncio
+
+        import tortoise.hosted_api as ha_mod
+        import tortoise.monitoring as monitoring
+
+        seen = {}
+
+        async def _inner(scope, receive, send):
+            seen["during"] = monitoring.workload_in_flight()
+
+        async def _drive():
+            await ha_mod.InFlightMiddleware(_inner)({"type": "http"}, None, None)
+
+        assert monitoring.workload_in_flight() == 0
+        asyncio.run(_drive())
+        assert seen["during"] == 1
+        assert monitoring.workload_in_flight() == 0
+
+        async def _boom(scope, receive, send):
+            raise RuntimeError("handler exploded")
+
+        with pytest.raises(RuntimeError):
+            asyncio.run(
+                ha_mod.InFlightMiddleware(_boom)({"type": "http"}, None, None))
+        assert monitoring.workload_in_flight() == 0, "in-flight slot leaked"
+
+    def test_in_flight_gauge_is_wired_into_the_real_app(self, client, monkeypatch):
+        """#2850 round-2 review: the class-level test above proves
+        ``InFlightMiddleware`` WORKS, not that it is INSTALLED. Deleting
+        ``app.add_middleware(InFlightMiddleware)`` would leave every other test
+        green while the watchdog's idle predicate silently read 0 forever — and
+        the kill would then fire mid-request, which is the P0 this whole issue
+        exists to remove.
+        """
+        import tortoise.hosted_api as ha_mod
+        import tortoise.monitoring as monitoring
+
+        # (a) registered, and second-outermost: WaitBoundMiddleware (#3834) is
+        # registered last and so wraps it. Starlette's add_middleware INSERTS at
+        # index 0, so the LAST-registered middleware is first in the list.
+        classes = [m.cls for m in ha_mod.app.user_middleware]
+        assert ha_mod.InFlightMiddleware in classes, (
+            "InFlightMiddleware is not installed — the idle gate always reads 0")
+        # #3834: WaitBoundMiddleware is now registered LAST (outermost), so the
+        # gauge sits immediately inside it. That order is REQUIRED, not
+        # incidental: the bound ABANDONS (never cancels) a breached handler, and
+        # the gauge must keep counting that handler until it genuinely finishes.
+        # Reversing the two would release the gauge at the 10 s refusal while the
+        # abandoned work still runs — the exact #2850 mis-read. The gauge still
+        # wraps every handler and every short-circuiting middleware.
+        assert classes[0] is ha_mod.WaitBoundMiddleware, (
+            f"the wait bound must be outermost (registered last): {classes!r}")
+        assert classes[1] is ha_mod.InFlightMiddleware, (
+            f"the gauge must wrap every handler (registered second-outermost): {classes!r}")
+
+        # (b) a REAL request through the module-level app: the gauge is >= 1
+        # WHILE the handler runs, and released afterwards. ``/health`` is read
+        # from memory only, so spying on this seam does not perturb timing.
+        seen = {}
+        real = ha_mod.loop_heartbeat_info
+
+        def _spy():
+            seen["during"] = monitoring.workload_in_flight()
+            return real()
+
+        monkeypatch.setattr(ha_mod, "loop_heartbeat_info", _spy)
+        assert monitoring.workload_in_flight() == 0
+        r = client.get("/health")
+        assert r.status_code == 200
+        assert seen.get("during", 0) >= 1, (
+            "the wired gauge did not count a real request in flight")
+        assert monitoring.workload_in_flight() == 0, "in-flight slot leaked"
+
+    def test_health_probe_interval_is_clamped_below_the_stale_window(self, monkeypatch):
+        """A refresh period above PROBE_STALE_AFTER reports a HEALTHY DB as
+        degraded and then fails the deploy gate (review P2)."""
+        import tortoise.hosted_api as ha_mod
+        from tortoise.monitoring import PROBE_STALE_AFTER
+
+        monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", "3600")
+        assert _REAL_HEALTH_PROBE_INTERVAL() <= PROBE_STALE_AFTER / 2.0
+        monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", "5")
+        assert _REAL_HEALTH_PROBE_INTERVAL() == 5.0
+        monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", "-3")
+        assert _REAL_HEALTH_PROBE_INTERVAL() == ha_mod.HEALTH_PROBE_REFRESH_S
+
+    def test_non_finite_health_probe_interval_falls_back_to_default(
+            self, monkeypatch, caplog):
+        """Round-2 review P2: ``float()`` accepts ``nan``/``inf`` and neither
+        is caught by ``v <= 0`` (``nan <= 0`` is False) nor by the ``v > cap``
+        clamp (``nan > cap`` is False). A nan period flows into
+        ``asyncio.sleep(nan)``, which returns almost immediately — the refresher
+        becomes a busy loop hammering the DB probe and the event loop; an
+        infinite period means the probe never refreshes, so a healthy DB reads
+        stale forever. Both must fall back to the default, at ERROR.
+        """
+        import logging
+
+        import tortoise.hosted_api as ha_mod
+
+        for raw in ("nan", "NaN", "inf", "Infinity", "-inf"):
+            caplog.clear()
+            monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", raw)
+            with caplog.at_level(logging.ERROR, logger="tortoise.hosted_api"):
+                period = _REAL_HEALTH_PROBE_INTERVAL()
+            assert period == ha_mod.HEALTH_PROBE_REFRESH_S, (raw, period)
+            assert any(r.levelno >= logging.ERROR for r in caplog.records), raw
+
+    def test_sub_floor_health_probe_interval_falls_back_to_default(
+            self, monkeypatch, caplog):
+        """Round-3 review P2: a finite but tiny period busy-loops the probe
+        exactly as ``nan`` did — ``1e-9`` is ~50 generations/s, each spawning a
+        daemon thread and issuing a DB round trip. The upper clamp was
+        one-sided; a floor is required too."""
+        import logging
+
+        import tortoise.hosted_api as ha_mod
+
+        for raw in ("1e-9", "0.001", "0.49"):
+            caplog.clear()
+            monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", raw)
+            with caplog.at_level(logging.WARNING, logger="tortoise.hosted_api"):
+                period = _REAL_HEALTH_PROBE_INTERVAL()
+            assert period == ha_mod.HEALTH_PROBE_REFRESH_S, (raw, period)
+            assert any(r.levelno >= logging.WARNING for r in caplog.records), raw
+        # At/above the floor is honoured.
+        monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", "0.5")
+        assert _REAL_HEALTH_PROBE_INTERVAL() == 0.5
+
+    def test_probe_connection_is_reused_not_rebuilt_per_call(self, monkeypatch):
+        """The probe must own ONE bounded DB connection, not build+leak a
+        fresh SDK on every check (the connection half of the #2850 leak).
+
+        Round-2 review: the old form asserted ``calls["n"] == 1`` and raced a
+        PROCESS-GLOBAL SDK cache — a leftover probe thread from a previous test
+        can rebuild ``_probe_sdk`` (computing the PREVIOUS env key before our
+        ``monkeypatch.setenv`` lands) after our reset, making the count 2 (green
+        in the docker lane, red in the embedded one). ``HealthProbe.reset()``
+        nulls its ``_worker`` handle, so the leftover thread cannot be joined.
+        Fixed by counting only the builds made on THIS test's thread, and by
+        pinning ``_probe_sdk_key`` so no thread can compute a mismatching key.
+        The autouse fixture also resets the SDK cache, not just the probe
+        coordinators.
+        """
+        from unittest.mock import MagicMock
+
+        import tortoise.hosted_api as ha_mod
+
+        own_thread = threading.current_thread().name
+        calls = {"all": 0, "own": 0}
+
+        def _factory(*, namespace=None, graph_name=None):
+            # Only builds made by THIS test's two ``_probe_db()`` calls count.
+            # Leftover ``tortoise-health-probe`` threads from earlier tests
+            # share the process-global cache (and cannot be joined —
+            # ``HealthProbe.reset()`` drops its ``_worker`` handle), so
+            # counting them is what made the old assertion flaky.
+            calls["all"] += 1
+            if threading.current_thread().name == own_thread:
+                calls["own"] += 1
+            sdk = MagicMock()
+            sdk._get_proj.return_value.g.query.return_value = MagicMock()
+            return sdk
+
+        monkeypatch.setattr(ha_mod, "_make_sdk", _factory)
+        monkeypatch.setenv("TORTOISE_DB_PATH", "/tmp/tortoise-probe-reuse-test.db")
+        # Also pin the cache key so a leftover thread cannot churn the cache
+        # with a pre-setenv key while we hold the two handles we compare.
+        monkeypatch.setattr(ha_mod, "_probe_sdk_key",
+                            lambda: ("pinned", "reuse-test"))
+
+        ha_mod._probe_sdk_reset()
+        try:
+            first = ha_mod._probe_db()
+            first_sdk = ha_mod._PROBE_SDK_CACHE["sdk"]
+            assert first_sdk is not None
+            second = ha_mod._probe_db()
+            second_sdk = ha_mod._PROBE_SDK_CACHE["sdk"]
+        finally:
+            ha_mod._probe_sdk_reset()
+
+        assert first["ok"] is True and second["ok"] is True
+        assert first_sdk is second_sdk, (
+            "the probe rebuilt its connection between two consecutive checks")
+        # Our TWO checks may build at most ONE SDK (a per-call rebuild needs 2).
+        # Zero is possible when a still-running probe from an earlier test won
+        # the race and warmed the cache first — that does not weaken the point.
+        assert calls["own"] <= 1, (
+            f"the two checks built the SDK {calls['own']}x — not reused")
+
     def test_health_security_returns_posture(self, client):
         r = client.get("/health/security")
         assert r.status_code == 200
@@ -222,6 +721,272 @@ class TestHealthEndpoints:
         assert body["hashing"] == "pbkdf2_hmac_sha256"
         assert "api_auth_enforced" in body
         assert isinstance(body["api_auth_enforced"], bool)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# #2850 / #2953 — liveness/readiness decouple + bind-before-boot-sweeps
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _free_tcp_port() -> int:
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+class TestLivenessDecouple:
+    """#2850: the "am I alive?" answer must not share fate with the work."""
+
+    def test_health_returns_instantly_with_a_saturated_shared_executor(self, monkeypatch):
+        """THE regression test for the 2026-09-10 outage.
+
+        ``/health`` used to be ``await asyncio.to_thread(_probe_db)`` — a
+        submission to the event loop's DEFAULT ThreadPoolExecutor, shared with
+        ~89 other ``to_thread`` call sites whose queue wait has NO timeout.
+        Fill that pool with blocked DB calls and the pre-fix handler could not
+        answer at all. The handler must now return from pure in-memory state,
+        so a saturated pool is irrelevant to it.
+        """
+        import asyncio
+        import concurrent.futures
+        import threading
+        import time
+
+        import tortoise.hosted_api as ha_mod
+
+        async def _run() -> tuple[float, dict]:
+            loop = asyncio.get_running_loop()
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            loop.set_default_executor(pool)
+            gate = threading.Event()
+            # 8 submissions onto a 1-worker pool: 1 runs, 7 queue forever.
+            for _ in range(8):
+                loop.run_in_executor(None, gate.wait, 30)
+            await asyncio.sleep(0.05)
+            started = time.monotonic()
+            try:
+                body = await ha_mod.health()
+            finally:
+                gate.set()
+                pool.shutdown(wait=False)
+            return time.monotonic() - started, body
+
+        elapsed, body = asyncio.run(_run())
+        assert elapsed < 0.5, (
+            f"/health took {elapsed:.2f}s behind a saturated shared executor — "
+            "the handler is still doing a thread hand-off")
+        assert body["status"] in ("ok", "degraded")
+        assert "db" in body
+
+    def test_health_probe_loop_refreshes_the_coordinator(self, monkeypatch):
+        """The refresher is what keeps /health's memory honest — if it dies or
+        stops, the DB verdict freezes (and goes stale → degraded). Run it for a
+        couple of short cycles and prove it lands a fresh verdict with no
+        request at all."""
+        import asyncio
+        import contextlib
+
+        import tortoise.hosted_api as ha_mod
+
+        calls = {"n": 0}
+
+        def _probe():
+            calls["n"] += 1
+            return {"ok": True, "latency_ms": 0.5, "error": None}
+
+        monkeypatch.setattr(ha_mod, "_probe_db", _probe)
+        monkeypatch.setattr(ha_mod, "_health_probe_interval", lambda: 0.05)
+        ha_mod._HEALTH_PROBE.reset()
+
+        async def _run():
+            task = asyncio.get_running_loop().create_task(ha_mod._health_probe_loop())
+            await asyncio.sleep(0.4)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        asyncio.run(_run())
+        assert calls["n"] >= 1, "the refresher never probed"
+        view = ha_mod._HEALTH_PROBE.snapshot()
+        assert view["ok"] is True, view
+
+    def test_health_probe_refresh_budget_tracks_the_resolved_interval(
+            self, monkeypatch):
+        """Round-4 review P2: the ``/health`` self-heal gate must equal the
+        refresher's RESOLVED period, not the hardcoded ``HEALTH_PROBE_REFRESH_S``
+        (10s). With an operator period in 0.5-15s, a frozen 10s gate let
+        ``/health`` start a duplicate DB probe once per cycle while the
+        refresher was still healthy."""
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setattr(ha_mod, "_health_probe_interval", lambda: 12.5)
+        assert ha_mod._HEALTH_PROBE._refresh_budget_now() == 12.5, (
+            "the /health self-heal gate is frozen at the hardcoded default, "
+            "not the resolved refresher period")
+
+    def test_health_shape_is_backwards_compatible(self, client):
+        """The dashboard and the deploy workflow read this shape; the #2850
+        fields are additive and status stays 200 either way."""
+        r = client.get("/health")
+        assert r.status_code == 200
+        body = r.json()
+        assert set(body) >= {"status", "db"}
+        assert body["status"] in ("ok", "degraded")
+        assert set(body["db"]) >= {"ok", "latency_ms", "error"}
+        assert "loop_stale_ms" in body
+
+    def test_health_reports_a_live_loop_heartbeat(self, client):
+        """The lifespan arms the heartbeat, so a serving app reports a fresh
+        loop (the whole point of the /healthz signal)."""
+        import tortoise.monitoring as monitoring
+
+        body = client.get("/health").json()
+        assert body["loop_stale_ms"] is not None
+        assert body["loop_stale_ms"] < monitoring.LOOP_STALE_AFTER * 1000
+
+    def test_lifespan_starts_the_dedicated_healthz_listener(self, client):
+        """#2850 item 4: the app start-up must bind the dedicated port, and it
+        must answer 200 while the loop is healthy."""
+        import urllib.request
+
+        import tortoise.hosted_api as ha_mod
+
+        server = getattr(ha_mod.app.state, "_healthz_server", None)
+        assert server is not None, "lifespan did not start the /healthz listener"
+        port = server.server_address[1]
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=5) as r:
+            assert r.status == 200
+            payload = r.read()
+        assert b"\"status\": \"ok\"" in payload or b'"status":"ok"' in payload
+
+
+class TestBootOrder:
+    """#2953: uvicorn binds the listening socket only AFTER
+    ``lifespan.startup()`` returns, so nothing in the startup half may await
+    real work — the boot sweeps used to."""
+
+    def test_port_accepts_connections_while_boot_sweeps_block(self, monkeypatch):
+        """The regression test for #2953.
+
+        Patch the event sweep to block on an event. Pre-fix, ``_lifespan``
+        awaited it during startup, so ``loop.create_server`` was never reached
+        and the machine accepted NOTHING for the sweep's whole duration (every
+        deploy and restart). Post-fix the sweep runs as a background task: the
+        socket is already bound while the sweep is still blocked inside.
+        """
+        import socket
+        import threading
+        import time
+
+        import uvicorn
+        from fastapi import FastAPI
+
+        import tortoise.hosted_api as ha_mod
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        def _blocking_sweep() -> None:
+            entered.set()
+            release.wait(60)
+
+        monkeypatch.setattr(ha_mod, "_sweep_events", _blocking_sweep)
+        monkeypatch.setattr(ha_mod, '_purge_deleted_orgs', lambda: None)
+        monkeypatch.setenv("TORTOISE_LOOP_STALL_EXIT_S", "0")
+        monkeypatch.setenv("TORTOISE_HEALTHZ_PORT", str(_free_tcp_port()))
+
+        # A bare app wired to the REAL lifespan: this test is about startup
+        # ordering, not about any route.
+        app_under_test = FastAPI(lifespan=ha_mod._lifespan)
+        server = uvicorn.Server(uvicorn.Config(
+            app_under_test, host="127.0.0.1", port=0, log_level="error"))
+        thread = threading.Thread(target=server.run, daemon=True)
+        thread.start()
+        try:
+            port = None
+            deadline = time.monotonic() + 30.0
+            while time.monotonic() < deadline:
+                if server.started and server.servers:
+                    port = server.servers[0].sockets[0].getsockname()[1]
+                    break
+                time.sleep(0.05)
+            assert port is not None, "server never started"
+            with socket.create_connection(("127.0.0.1", port), timeout=2.0):
+                pass  # bound AND accepting while the sweep is still blocked
+            # The listener the lifespan started is on app_under_test.state.
+            assert app_under_test.state._healthz_server is not None
+            wait_until = time.monotonic() + 5.0
+            while not entered.is_set() and time.monotonic() < wait_until:
+                time.sleep(0.02)
+            assert entered.is_set(), (
+                "the boot sweep never ran — the assertion above is vacuous")
+            assert not release.is_set(), (
+                "the sweep finished before we connected — cannot distinguish "
+                "blocking startup from a background task")
+        finally:
+            # Shut down WITHOUT releasing the sweep: the lifecycle must not
+            # wait for a blocked sweep thread (cancellation is delivered at the
+            # await, the abandoned worker keeps running as a daemon).
+            server.should_exit = True
+            thread.join(timeout=20)
+            shutdown_was_prompt = not thread.is_alive()
+            release.set()
+            import tortoise.monitoring as monitoring
+
+            monitoring.stop_health_listener(
+                getattr(app_under_test.state, "_healthz_server", None))
+        assert shutdown_was_prompt, "shutdown hung on the blocked boot sweep"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Build/version surface (#2208)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestVersionEndpoint:
+    """GET /v1/version — public version/sha surface so clients (and the
+    onboarding skill) can detect an outdated server before authenticating.
+    """
+
+    def test_version_returns_package_version(self, client):
+        import tortoise
+
+        r = client.get("/v1/version")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["version"] == tortoise.__version__
+        assert "commit_sha" in body
+        # #2208 review F5: openapi info.version must mirror the package
+        # version (was a stale hardcoded "0.1.0") — pin it so drift fails loud.
+        assert app.version == tortoise.__version__
+
+    def test_version_is_public_no_auth(self, unauth_client):
+        """Skew detection must work BEFORE auth — no Authorization header."""
+        r = unauth_client.get("/v1/version")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["version"]
+
+    def test_version_commit_sha_reads_env(self, client, monkeypatch):
+        """commit_sha mirrors the deploy-time TORTOISE_GIT_SHA (baked by
+        deploy-hosted.yml); None when no deploy pipeline set it."""
+        monkeypatch.setenv("TORTOISE_GIT_SHA", "16075c8f2ff182b44614d6a83dc4d92933ae70db")
+        r = client.get("/v1/version")
+        assert r.status_code == 200
+        assert r.json()["commit_sha"] == "16075c8f2ff182b44614d6a83dc4d92933ae70db"
+
+        monkeypatch.delenv("TORTOISE_GIT_SHA")
+        r = client.get("/v1/version")
+        assert r.status_code == 200
+        assert r.json()["commit_sha"] is None
+
+    def test_version_commit_sha_blank_env_is_null(self, client, monkeypatch):
+        """An empty (not unset) TORTOISE_GIT_SHA must not leak as "" — null."""
+        monkeypatch.setenv("TORTOISE_GIT_SHA", "")
+        r = client.get("/v1/version")
+        assert r.status_code == 200
+        assert r.json()["commit_sha"] is None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -294,11 +1059,11 @@ class TestLastUsedAtTracking:
     """API key last_used_at is set on successful authentication."""
 
     def test_last_used_at_set_on_successful_auth(self):
-        """#685: get_current_team updates key.last_used_at on valid auth."""
+        """#685: get_current_org updates key.last_used_at on valid auth."""
         import asyncio  # noqa: I001
         from unittest.mock import MagicMock
         from tortoise.auth import hash_api_key
-        from tortoise.hosted_api import _make_sdk, get_current_team
+        from tortoise.hosted_api import _make_sdk, get_current_org
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
@@ -306,7 +1071,7 @@ class TestLastUsedAtTracking:
             try:
                 sdk = _make_sdk(namespace="registry")
 
-                # Seed a Team node (get_current_team queries Team after auth)
+                # Seed a Team node (get_current_org queries Team after auth)
                 sdk._get_registry().query(
                     "CREATE (t:Team {id: $id, tier: 'free'})",
                     params={"id": "test-team-lua"},
@@ -316,7 +1081,7 @@ class TestLastUsedAtTracking:
                 key_token = "tt_testkey_last_used_at_000000001"
                 key_hash = hash_api_key(key_token)
                 sdk._get_registry().query(
-                    "CREATE (k:APIKey {id: $id, team_id: $tid, "
+                    "CREATE (k:APIKey {id: $id, org_id: $tid, "
                     "key_hash: $kh, key_prefix: $kp, created_by: $cb})",
                     params={
                         "id": "test-key-lua",
@@ -333,9 +1098,9 @@ class TestLastUsedAtTracking:
                 request.headers = {"Authorization": f"Bearer {key_token}"}
                 request.state = MagicMock()
 
-                result = asyncio.run(get_current_team(request))
+                result = asyncio.run(get_current_org(request))
 
-                assert result["team_id"] == "test-team-lua"
+                assert result["org_id"] == "test-team-lua"
                 assert result["key_id"] == "test-key-lua"
 
                 # Verify last_used_at was written — a parseable recent ISO-8601
@@ -356,6 +1121,119 @@ class TestLastUsedAtTracking:
             finally:
                 _restore_tortoise_sdk_init(_orig_init)
 
+    def test_get_current_team_returns_c1_tenancy_fields(self):
+        """C1 (#2110): the registry resolve path returns graph scope + scopes +
+        legacy class + delegation (parity with resolve_api_key). Legacy key
+        (no props) → graph_id None, scopes [], legacy_full_access True;
+        minted key → scopes + deleg=0, not legacy."""
+        import asyncio  # noqa: I001
+        from unittest.mock import MagicMock
+        from tortoise.auth import hash_api_key
+        from tortoise.hosted_api import _make_sdk, get_current_org
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            _orig_init = _patch_tortoise_sdk_init(db_path)
+            try:
+                sdk = _make_sdk(namespace="registry")
+                sdk._get_registry().query(
+                    "CREATE (t:Team {id: $id, tier: 'free', "
+                    "graph_name: 'team_legacy-team'})",
+                    params={"id": "legacy-team"},
+                )
+                # Legacy key: no tenancy props (pre-C1 node)
+                legacy_token = "tt_legacy_key_c1_000000001"
+                sdk._get_registry().query(
+                    "CREATE (k:APIKey {id: $id, org_id: $tid, "
+                    "key_hash: $kh, key_prefix: $kp, created_by: $cb})",
+                    params={
+                        "id": "legacy-key", "tid": "legacy-team",
+                        "kh": hash_api_key(legacy_token),
+                        "kp": legacy_token[:10], "cb": "test",
+                    },
+                )
+                request = MagicMock()
+                request.url.path = "/v1/points"
+                request.headers = {
+                    "Authorization": f"Bearer {legacy_token}"}
+                request.state = MagicMock()
+                result = asyncio.run(get_current_org(request))
+                assert result["org_id"] == "legacy-team"
+                assert result["graph_id"] is None
+                assert result["graph_namespace"] == "team_legacy-team"  # default
+                assert result["scopes"] == []
+                assert result["legacy_full_access"] is True
+                assert result["delegation_depth"] is None
+                assert result["created_by_key_id"] is None
+
+                # Minted key: scopes + deleg=0 → NOT legacy
+                minted_token = "tt_minted_key_c1_000000001"
+                sdk._get_registry().query(
+                    "CREATE (k:APIKey {id: $id, org_id: $tid, "
+                    "key_hash: $kh, key_prefix: $kp, created_by: $cb, "
+                    "graph_id: 'g_abc123def4567890', "
+                    "scopes: ['graphs:read', 'graphs:write'], "
+                    "delegation_depth: 0, "
+                    "created_by_key_id: 'parent-key'})",
+                    params={
+                        "id": "minted-key", "tid": "legacy-team",
+                        "kh": hash_api_key(minted_token),
+                        "kp": minted_token[:10], "cb": "test",
+                    },
+                )
+                sdk._get_registry().query(
+                    "CREATE (g:Graph {id: 'g_abc123def4567890', "
+                    "org_id: 'legacy-team', name: 'prod', "
+                    "kind: 'custom', namespace: 'team_legacy-team_g_g_abc123def4567890'})",
+                )
+                request.headers = {
+                    "Authorization": f"Bearer {minted_token}"}
+                result2 = asyncio.run(get_current_org(request))
+                assert result2["graph_id"] == "g_abc123def4567890"
+                assert result2["graph_namespace"] == \
+                    "team_legacy-team_g_g_abc123def4567890"
+                assert result2["scopes"] == ["graphs:read", "graphs:write"]
+                assert result2["legacy_full_access"] is False
+                assert result2["delegation_depth"] == 0
+                assert result2["created_by_key_id"] == "parent-key"
+
+                # Graph-bound key whose node is missing → fail-closed None
+                # (never widen onto the default graph; security review P1)
+                orphan_token = "tt_orphan_key_c1_000000001"
+                sdk._get_registry().query(
+                    "CREATE (k:APIKey {id: $id, org_id: $tid, "
+                    "key_hash: $kh, key_prefix: $kp, created_by: $cb, "
+                    "graph_id: 'g_ghost000000000000', delegation_depth: 0})",
+                    params={
+                        "id": "orphan-key", "tid": "legacy-team",
+                        "kh": hash_api_key(orphan_token),
+                        "kp": orphan_token[:10], "cb": "test",
+                    },
+                )
+                request.headers = {
+                    "Authorization": f"Bearer {orphan_token}"}
+                result3 = asyncio.run(get_current_org(request))
+                assert result3["graph_id"] == "g_ghost000000000000"
+                assert result3["graph_namespace"] is None  # fail-closed
+                assert result3["legacy_full_access"] is False
+
+                # provision_tenant-shaped Team node (NO graph_name prop):
+                # team-wide key falls back to org_{org_id} convention
+                sdk._get_registry().query(
+                    "CREATE (t:Team {id: 'pt-team', tier: 'free'})",
+                )
+                pt_token = "tt_pt_key_c1_000000000001"
+                sdk._get_registry().query(
+                    "CREATE (k:APIKey {id: 'pt-key', org_id: 'pt-team', "
+                    "key_hash: $kh, key_prefix: $kp, created_by: 'x'})",
+                    params={"kh": hash_api_key(pt_token), "kp": pt_token[:10]},
+                )
+                request.headers = {"Authorization": f"Bearer {pt_token}"}
+                result4 = asyncio.run(get_current_org(request))
+                assert result4["graph_namespace"] == "org_pt-team"  # derived
+            finally:
+                _restore_tortoise_sdk_init(_orig_init)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Points Endpoints
@@ -373,15 +1251,38 @@ class TestPointsCreate:
         assert body["content"] == "hello world"
         assert body["kind"] == "statement"
 
-    def test_create_point_enqueues_dream(self, client):
-        """#85: create_point triggers the per-tenant dream queue."""
+    def test_create_point_enqueues_dream(self, client, monkeypatch):
+        """#85: create_point triggers the per-tenant dream queue.
+
+        #2850: this used to read ``_DREAM_QUEUES`` from the TEST thread right
+        after the request while the worker's debounce (``_DREAM_DEBOUNCE_S``)
+        drains and evicts that same queue on the LOOP thread. The assertion
+        only passes when the response is delivered inside that window, and the
+        window is lost deterministically once boot maintenance shares the GIL
+        with the worker's blocking ``sdk.dream()`` — which is now the normal
+        case, because the #2953 boot sweeps no longer run before the bind.
+        Spy on the enqueue instead: the call site is what this test is about,
+        it is recorded synchronously inside the request, and it pins the
+        PAYLOAD (the new point's id as the dirty root) — so the assertion no
+        longer depends on cross-thread timing and covers strictly more.
+        """
         import tortoise.hosted_api as ha
+
+        calls: list[tuple[str, list[str]]] = []
+        real_enqueue = ha._enqueue_dream
+
+        def _spy(org_id, dirty_roots, **kwargs):
+            calls.append((org_id, list(dirty_roots)))
+            return real_enqueue(org_id, dirty_roots, **kwargs)
+
+        monkeypatch.setattr(ha, "_enqueue_dream", _spy)
         # Fresh queue state for this test.
-        ha._DREAM_QUEUES.pop(TEST_TEAM_ID, None)
+        ha._DREAM_QUEUES.pop(TEST_ORG_ID, None)
         r = client.post("/v1/points", json={"content": "dream trigger"})
         assert r.status_code == 200, r.text
-        assert TEST_TEAM_ID in ha._DREAM_QUEUES
-        assert not ha._DREAM_QUEUES[TEST_TEAM_ID].empty()
+        assert [c[0] for c in calls] == [TEST_ORG_ID]
+        assert calls[0][1] == [r.json()["id"]], \
+            "the created point must be the enqueued dirty root"
 
     def test_create_point_with_explicit_kind(self, client):
         r = client.post(
@@ -509,13 +1410,13 @@ class TestTeamInfo:
         r = client.get("/v1/team")
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["team_id"] == TEST_TEAM_ID
+        assert body["org_id"] == TEST_ORG_ID
         assert body["tier"] == "free"
         assert body["max_users"] == 1
         assert body["max_graphs"] == 1
         # max_teams removed (D1): multi-team is a user capability, not a tier
         # field — the response omits it (None) rather than a pre-existing 500.
-        assert body["max_teams"] is None
+        assert body["max_orgs"] is None
         assert "point_count" in body
         assert isinstance(body["point_count"], int)
 
@@ -682,6 +1583,446 @@ class TestKeysCreate:
         assert r1.json()["key"] != r2.json()["key"]
         assert r1.json()["id"] != r2.json()["id"]
 
+    def test_create_key_with_name_roundtrips(self, client):
+        # 20260825000001: optional label rides the mint body and survives.
+        r = client.post("/v1/team/keys", json={"name": "CI deploy"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["name"] == "CI deploy"
+        # the label appears in the list response
+        assert _listed_key(client, body["id"])["name"] == "CI deploy"
+
+    def test_create_key_name_optional_and_defaults_unnamed(self, client):
+        # no body / empty label → stored unnamed (name null in the list).
+        # Cap is 2 keys/team (TEST_TEAM.max_api_keys), so at most two mints.
+        for body in (None, {"name": "   "}):
+            r = client.post("/v1/team/keys", json=body) if body is not None else client.post("/v1/team/keys")
+            assert r.status_code == 200, r.text
+            kid = r.json()["id"]
+            assert _listed_key(client, kid).get("name") is None, f"body={body!r}"
+
+    def test_create_key_name_clamped_to_64_chars(self, client):
+        long = "x" * 200
+        r = client.post("/v1/team/keys", json={"name": long})
+        assert r.status_code == 200, r.text
+        assert r.json()["name"] == "x" * 64
+        assert _listed_key(client, r.json()["id"])["name"] == "x" * 64
+
+
+class TestKeysExpiry2426:
+    """#2426: configurable API-key expiration on mint — REGISTRY lane.
+
+    POST /v1/team/keys accepts optional {expires_in (days 1-366) XOR
+    expires_at (ISO)}; the registry APIKey node stores expires_at and the
+    response echoes it. Absent = Never — the legacy byte-identical shape
+    ({id,key,key_prefix,created_at,name}) is preserved (exact-equality pin
+    in test_writer_inventory). Enforcement already lives in auth (~1558-1570);
+    these tests pin the WRITE + echo + 422 matrix + cap-accounting
+    (expired-but-unrevoked durables stop counting against max_api_keys) +
+    the expired-key-does-not-authenticate behavior for a MINTED expiry.
+    """
+
+    @staticmethod
+    def _approx_days(iso_a: str, iso_b: str) -> float:
+        """Whole days between two ISO timestamps (server clock = client
+        clock in-test; a 30d mint should land within ~2 minutes of now+30d)."""
+        from datetime import datetime
+        ta = datetime.fromisoformat(iso_a.replace("Z", "+00:00"))
+        tb = datetime.fromisoformat(iso_b.replace("Z", "+00:00"))
+        return (ta - tb).total_seconds() / 86400.0
+
+    def test_expires_in_mint_echoes_and_lists(self, client):
+        r = client.post("/v1/team/keys", json={"expires_in": 30})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert "expires_at" in body, "an expiring mint must echo expires_at"
+        exp = body["expires_at"]
+        # expires_at ≈ now + 30 days (±2 min for handler/clock skew)
+        skew = self._approx_days(exp, datetime.now(UTC).isoformat())
+        assert 29.9 <= skew <= 30.1, f"expires_at not ~now+30d: {exp} ({skew:.3f}d)"
+        # the stored registry node carries the same expiry (list round-trip)
+        listed = _listed_key(client, body["id"])
+        assert listed.get("expires_at") == exp
+        # minted key still authenticates (expiry in the future)
+        assert r.status_code == 200
+
+    def test_expires_at_iso_mint(self, client):
+        from datetime import datetime
+        # date-only expires_at → end of that UTC day (valid through the date)
+        target = (datetime.now(UTC) + timedelta(days=5)).date().isoformat()
+        r = client.post("/v1/team/keys", json={"expires_at": target})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["expires_at"].startswith(target + "T23:59:59"), body["expires_at"]
+        # full ISO datetime with Z normalizes too
+        later = (datetime.now(UTC) + timedelta(days=10)).isoformat()
+        r2 = client.post("/v1/team/keys", json={"expires_at": later})
+        assert r2.status_code == 200, r2.text
+        assert self._approx_days(r2.json()["expires_at"], later) == 0.0
+
+    def test_expires_at_offset_normalized_to_utc(self, client):
+        """#2426 code-review P2: an explicit non-UTC offset (e.g. +05:00)
+        must be stored UTC-normalized — every registry-lane expiry predicate
+        compares lexicographic ISO strings against a +00:00 now, so an offset
+        expiry would authenticate hours late/early and diverge from the
+        supabase lane's instant compare."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        # 5 days out at +05:00 → stored form must be the SAME instant as the
+        # equivalent +00:00 datetime (offset stripped, not preserved).
+        inst = datetime.now(UTC) + timedelta(days=5)
+        local = inst.astimezone(ZoneInfo("Asia/Karachi"))  # +05:00, no DST
+        r = client.post("/v1/team/keys", json={"expires_at": local.isoformat()})
+        assert r.status_code == 200, r.text
+        stored = r.json()["expires_at"]
+        assert stored.endswith("+00:00"), f"must be UTC-normalized: {stored}"
+        assert self._approx_days(stored, inst.isoformat()) == 0.0
+
+    def test_never_body_keeps_legacy_shape_and_lists_never(self, client):
+        # #2426: absent expiry = Never — no expires_at key in the response
+        # (legacy byte-identical envelope) and the listed row has expires_at
+        # null. The pre-#2426 client never sees a new response key.
+        for body in (None, {"name": "forever"}):
+            r = client.post("/v1/team/keys", json=body) if body else client.post("/v1/team/keys")
+            assert r.status_code == 200, r.text
+            assert "expires_at" not in r.json(), f"Never mint must not echo expires_at: {r.json()}"
+            assert _listed_key(client, r.json()["id"]).get("expires_at") is None
+
+    @pytest.mark.parametrize("body", [
+        {"expires_in": 0},
+        {"expires_in": -1},
+        {"expires_in": 367},
+        {"expires_in": "30"},        # string days — reject
+        {"expires_in": 1.5},          # float days — reject
+        {"expires_in": True},         # bool is not a day count
+        {"expires_at": "not-a-date"},
+        {"expires_at": "2026-13-45"},
+        {"expires_at": 12345},
+        {"expires_at": "2020-01-01"},  # past — would mint a dead key
+        {"expires_in": 30, "expires_at": "2030-01-01"},  # both — exclusive
+        {"expires_at": "2099-01-01"},  # beyond the 366-day ceiling
+    ])
+    def test_validation_422_matrix(self, client, body):
+        r = client.post("/v1/team/keys", json=body)
+        assert r.status_code == 422, f"body={body} → {r.status_code}: {r.text}"
+
+    def test_expired_durable_frees_a_cap_slot(self, client):
+        """#2426 cap accounting: an expired-but-unrevoked durable stops
+        counting against max_api_keys — a team at cap with an expired key
+        can mint again (never wedged). Without the fix the third mint 402s
+        forever."""
+        from datetime import datetime
+
+        import tortoise.hosted_api as ha_mod
+        a = client.post("/v1/team/keys", json={"name": "expiring", "expires_in": 30})
+        b = client.post("/v1/team/keys", json={"name": "keeper"})
+        assert a.status_code == 200 and b.status_code == 200
+        # at cap (free max_api_keys=2) → 402 control
+        assert client.post("/v1/team/keys").status_code == 402
+        # expire key `a` (direct node write — mint-time validation forbids
+        # past expiries by construction)
+        past = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+        ha_mod._make_sdk(namespace="registry")._get_registry().query(
+            "MATCH (k:APIKey {id:$id}) SET k.expires_at = $ea",
+            params={"id": a.json()["id"], "ea": past},
+        )
+        # expired durable no longer counts → the cap slot is free
+        r = client.post("/v1/team/keys", json={"name": "replacement"})
+        assert r.status_code == 200, r.text
+
+    def test_expired_key_does_not_authenticate(self, client):
+        """#2426 pin: a minted expiry is ENFORCED by the existing auth layer
+        (hosted_api ~1558-1570, registry lane) — once expires_at passes, the
+        key 401s even though it is unrevoked and counted nowhere."""
+        from datetime import datetime
+
+        import tortoise.hosted_api as ha_mod
+        r = client.post("/v1/team/keys", json={"expires_in": 30})
+        assert r.status_code == 200, r.text
+        kid, key = r.json()["id"], r.json()["key"]
+        app.dependency_overrides.clear()  # real auth (registry lookup)
+        try:
+            live = client.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
+            assert live.status_code == 200, live.text
+            past = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+            ha_mod._make_sdk(namespace="registry")._get_registry().query(
+                "MATCH (k:APIKey {id:$id}) SET k.expires_at = $ea",
+                params={"id": kid, "ea": past},
+            )
+            dead = client.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
+            assert dead.status_code == 401, dead.text
+        finally:
+            app.dependency_overrides.clear()
+
+
+class TestRevokedKeysDoNotConsumeCap2481:
+    """#2481 (REGISTRY lane) — revoked keys are audit tombstones, never
+    max_api_keys budget consumers. The reported bug: after revoking a key
+    a team could not mint a replacement while only revoked tombstones
+    remained. Audit result: the standalone mint gates all count via
+    quota._count_resource with the predicate `revoked_at IS NULL AND
+    (expires_at IS NULL OR > now) AND (created_via IS NULL OR <>
+    'bootstrap')` (#2426 expiry; #4140/R13 bootstrap) — revoked rows never
+    count. (The recovery-mint lanes carry their OWN predicates with the
+    same exclusions; #4140's rule is one LOGICAL predicate, not one literal
+    string.) These tests PIN that: revoke-then-mint succeeds at cap, a
+    pre-existing tombstone stack alone can never 402 (legacy mint) or 409
+    (scoped mint), and only a true ACTIVE overage still 402s/409s
+    (active-key semantics unchanged)."""
+
+    def test_revoke_then_mint_succeeds_at_cap(self, client):
+        """Team at max (2 active) revokes one key → the revoked row must
+        not hold the slot; a replacement mint immediately succeeds."""
+        a = client.post("/v1/team/keys")
+        b = client.post("/v1/team/keys")
+        assert a.status_code == 200 and b.status_code == 200
+        # control: at the cap with 2 ACTIVE keys → 402
+        assert client.post("/v1/team/keys").status_code == 402
+        # revoke one key → its tombstone must NOT consume the cap slot
+        r = client.delete(f"/v1/team/keys/{a.json()['id']}")
+        assert r.status_code == 200 and r.json()["revoked"] is True
+        m = client.post("/v1/team/keys", json={"name": "replacement"})
+        assert m.status_code == 200, m.text
+
+    def test_revoked_tombstone_stack_never_blocks_mint(self, client):
+        """Repeated create+revoke leaves only revoked tombstones behind;
+        the team must mint at the cap on every cycle. The 402 (legacy mint)
+        and 409 (scoped mint) gates fire ONLY on a true ACTIVE overage —
+        never on the tombstone stack."""
+        for i in range(4):
+            r = client.post("/v1/team/keys", json={"name": f"cycle-{i}"})
+            assert r.status_code == 200, r.text
+            d = client.delete(f"/v1/team/keys/{r.json()['id']}")
+            assert d.status_code == 200, d.text
+        # every key this team ever minted is now a revoked tombstone → two
+        # fresh mints land; a third 402s ONLY because 2 are ACTIVE.
+        k1 = client.post("/v1/team/keys")
+        k2 = client.post("/v1/team/keys")
+        assert k1.status_code == 200 and k2.status_code == 200
+        assert client.post("/v1/team/keys").status_code == 402
+        # the scoped-mint 409 gate reads the SAME count — tombstones cannot
+        # 409 it either; the 2 active keys can.
+        assert client.post("/v1/team/keys",
+                           json={"scopes": ["graphs:read"]}).status_code == 409
+        # revoke one active key → BOTH the 402 and 409 surfaces free up
+        assert client.delete(
+            f"/v1/team/keys/{k1.json()['id']}").status_code == 200
+        # scoped-mint 409 surface first (tombstones still present)
+        s = client.post("/v1/team/keys", json={"scopes": ["graphs:read"]})
+        assert s.status_code == 200, s.text
+        # legacy-mint 402 surface too
+        assert client.delete(
+            f"/v1/team/keys/{s.json()['id']}").status_code == 200
+        assert client.post("/v1/team/keys").status_code == 200
+
+
+class TestBootstrapKeysCapExempt4140:
+    """#4140 / R13 (REGISTRY lane) — bootstrap (24h session) keys are
+    cap-EXEMPT: they never consume a ``max_api_keys`` slot on the standalone
+    mint gate, while every DURABLE credential (provisioned / recovery / NULL
+    legacy created_via) still does. The bug: ``quota._count_resource
+    ("api_keys")`` counted bootstrap nodes, so a free org (allowance 2) with
+    one session key could mint only one durable key before 402.
+
+    The exemption is NULL-TOLERANT — a legacy node with no ``created_via``
+    is DURABLE and must count (the over-exemption direction this predicate
+    must fail closed on)."""
+
+    @staticmethod
+    def _seed(kid, *, created_via="provisioned", expires_at=None,
+              revoked_at=None):
+        from datetime import UTC, datetime
+
+        import tortoise.hosted_api as ha_mod
+        ha_mod._make_sdk(namespace="registry")._get_registry().query(
+            "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:'h', "
+            "key_prefix:$kp, created_by:$cb, created_at:$now, "
+            "created_via:$cv, expires_at:$ea, revoked_at:$ra})",
+            params={"id": kid, "tid": TEST_ORG_ID, "kp": f"tt{kid[:8]}",
+                    "cb": _U1, "now": datetime.now(UTC).isoformat(),
+                    "cv": created_via, "ea": expires_at, "ra": revoked_at},
+        )
+
+    def test_count_excludes_live_bootstrap(self, client):
+        from datetime import UTC, datetime, timedelta
+
+        from tortoise.quota import _count_resource
+        future = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
+        self._seed("b1", created_via="bootstrap", expires_at=future)
+        self._seed("b2", created_via="bootstrap", expires_at=future)
+        self._seed("d1", created_via="provisioned")
+        assert _count_resource(TEST_ORG_ID, "api_keys") == 1
+
+    def test_count_includes_every_durable_class(self, client):
+        from datetime import UTC, datetime, timedelta
+
+        from tortoise.quota import _count_resource
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        self._seed("p", created_via="provisioned")
+        self._seed("r", created_via="recovery")
+        self._seed("n", created_via=None)          # legacy NULL → durable
+        self._seed("other", created_via="agent_signup")
+        # near-miss literals are NOT the exact exemption
+        self._seed("cap", created_via="Bootstrap")
+        self._seed("sp", created_via="bootstrap ")
+        self._seed("boot", created_via="bootstrap", expires_at=future)
+        assert _count_resource(TEST_ORG_ID, "api_keys") == 6
+
+    def test_count_excludes_expired_and_revoked_durable(self, client):
+        from datetime import UTC, datetime, timedelta
+
+        from tortoise.quota import _count_resource
+        past = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+        self._seed("expired", created_via="provisioned", expires_at=past)
+        self._seed("revoked", created_via="provisioned", revoked_at=past)
+        self._seed("live", created_via="provisioned")
+        assert _count_resource(TEST_ORG_ID, "api_keys") == 1
+
+    def test_standalone_mint_gate_ignores_bootstrap_and_blocks_at_cap(
+            self, client):
+        """Boundary: with free max_api_keys=2, two live bootstrap nodes
+        occupy NO slot (both durable mints land); the third durable mint
+        402s (legacy mint)."""
+        from datetime import UTC, datetime, timedelta
+        future = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
+        self._seed("b1", created_via="bootstrap", expires_at=future)
+        self._seed("b2", created_via="bootstrap", expires_at=future)
+        assert client.post("/v1/team/keys", json={"name": "d1"}).status_code == 200
+        assert client.post("/v1/team/keys", json={"name": "d2"}).status_code == 200
+        assert client.post("/v1/team/keys", json={"name": "d3"}).status_code == 402
+        # the scoped-mint 409 gate reads the SAME count → same boundary
+        assert client.post(
+            "/v1/team/keys", json={"scopes": ["graphs:read"]}).status_code == 409
+
+    def test_null_legacy_durable_still_consumes_a_slot(self, client):
+        """Over-exemption guard: a node with NULL created_via is DURABLE —
+        two of them fill the free cap and the next mint 402s. This is the
+        direction the predicate must fail closed on."""
+        self._seed("n1", created_via=None)
+        self._seed("n2", created_via=None)
+        assert client.post("/v1/team/keys").status_code == 402
+
+
+class TestKeyAllowance3874:
+    """#3874: /v1/team exposes the org's API-key allowance BEFORE the cap,
+    from the same source the mint gate enforces — the pre-cap read and the
+    at-cap 402 must agree, so a future change to one cannot silently desync
+    the other.
+
+    EXECUTES the real path: the allowance is read from a live GET /v1/team on
+    the REAL registry key-auth lane (not the dependency-override stub, which
+    would just echo whatever the test injected), then keys are minted through
+    POST /v1/team/keys until the gate refuses.
+    """
+
+    def test_pre_cap_allowance_equals_at_cap_refusal(self, client):
+        import re
+
+        import tortoise.hosted_api as ha_mod
+
+        # A stored allowance that differs from BOTH the free-tier pricing
+        # default and the TEST_TEAM stub (2) — so a surface that ignores the
+        # stored limit, or falls back to a hardcode, cannot pass.
+        stored = 4
+        ha_mod._make_sdk(namespace="registry")._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.max_api_keys = $n",
+            params={"id": TEST_ORG_ID, "n": stored},
+        )
+
+        # Mint the auth credential under the override — the override only
+        # supplies the org DICT; the mint gate already reads the stored limit.
+        boot = client.post("/v1/team/keys")
+        assert boot.status_code == 200, boot.text
+        token = boot.json()["key"]
+
+        # Drop the override → the REAL registry key-auth lane resolves /v1/team
+        # (the override would otherwise return TEST_TEAM's injected value).
+        app.dependency_overrides.pop(get_current_org, None)
+        try:
+            h = {"Authorization": f"Bearer {token}"}
+
+            # (a) PRE-CAP: the allowance is readable before any cap is hit.
+            body = client.get("/v1/team", headers=h).json()
+            allowance = body["max_api_keys"]
+            assert allowance == stored, (
+                "pre-cap surface did not expose the org's stored allowance: "
+                f"{allowance!r} != {stored!r}")
+
+            # (b) The mint gate's OWN resolver agrees with the exposed field.
+            gate_limit = ha_mod._org_node_sync_limits(TEST_ORG_ID)["max_api_keys"]
+            assert gate_limit == allowance, (
+                "the exposed allowance and the mint gate's resolver disagree: "
+                f"{allowance!r} != {gate_limit!r}")
+
+            # (c) Every mint below the advertised allowance succeeds — the
+            # number is the enforced bound, not merely echoed (the boot key
+            # already occupies one slot).
+            for i in range(stored - 1):
+                r = client.post("/v1/team/keys", headers=h,
+                                json={"name": f"fill-{i}"})
+                assert r.status_code == 200, (
+                    f"mint {i + 2}/{stored} refused below the advertised "
+                    f"allowance: {r.status_code} {r.text}")
+
+            # (d) AT-CAP: the refusal names the SAME allowance (the dashboard
+            # parses this number for its at-cap notice).
+            r = client.post("/v1/team/keys", headers=h)
+            assert r.status_code == 402, r.text
+            m = re.search(r"limit reached \((\d+)\)", r.json()["detail"])
+            assert m is not None, r.text
+            assert int(m.group(1)) == allowance, (
+                f"pre-cap allowance {allowance} != at-cap refusal {m.group(1)} "
+                "— the two surfaces desynced")
+        finally:
+            app.dependency_overrides[get_current_org] = \
+                lambda: dict(TEST_TEAM)
+
+    def test_session_lane_allowance_comes_from_the_gate_resolver(
+            self, monkeypatch):
+        """#3874: the SESSION lane (the lane the dashboard's /v1/team call
+        actually uses — Supabase mode) must take its max_api_keys from the
+        MINT GATE's own resolver, not a precedence copied into the session
+        lane. If it keeps a second source, a future stored allowance could
+        be enforced by the gate while the pre-cap surface advertises the
+        tier default (the exact desync the issue forbids).
+
+        Pinned sharply by substituting the gate resolver: a session lane
+        with its own source would return the tier default (2), not 9.
+        """
+        from starlette.datastructures import Headers
+        from starlette.requests import Request
+
+        import tortoise.hosted_api as ha_mod
+        import tortoise.supabase_control as sc
+        from tests.fake_control_plane import FakeControlPlane
+
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("SUPABASE_URL", "https://3874.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-3874")
+        # Abuse telemetry must not fire — best-effort, but keep it inert.
+        monkeypatch.setenv("TORTOISE_ABUSE_DISABLED", "1")
+        fake = FakeControlPlane()
+        fake.seed("organizations", [{"id": TEST_ORG_ID, "tier": "free",
+                                     "name": "3874 Org"}])
+        fake.seed("org_memberships", [{
+            "user_id": _U1, "org_id": TEST_ORG_ID, "role": "owner",
+            "status": "active"}])
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+        # The gate's resolver is the ONE allowance source. Substituting it
+        # must flow straight through the session lane.
+        monkeypatch.setattr(ha_mod, "_org_node_sync_limits",
+                            lambda _org_id: {"max_api_keys": 9})
+
+        request = Request({
+            "type": "http", "method": "GET", "path": "/v1/team",
+            "query_string": b"", "headers": Headers({}).raw,
+        })
+        team = asyncio.run(ha_mod._session_user_org(request, {"user_id": _U1}))
+        assert team["org_id"] == TEST_ORG_ID, team
+        assert team["max_api_keys"] == 9, (
+            "the session lane must read the allowance from the mint gate's "
+            f"resolver, got {team['max_api_keys']!r}")
+
 
 class TestKeysList:
     """GET /v1/team/keys — list API keys (hashes only)."""
@@ -718,6 +2059,222 @@ class TestKeysList:
             assert "key_prefix" in k
             assert "created_at" in k
             # last_used_at and revoked_at may be None — fine
+
+    def test_list_keys_includes_name_field(self, client):
+        # 20260825000001: every listed key carries the (nullable) label.
+        kid = client.post("/v1/team/keys", json={"name": "ci"}).json()["id"]
+        listed = _listed_key(client, kid)
+        assert "name" in listed
+        assert listed.get("name") == "ci"
+        r = client.get("/v1/team/keys")
+        assert all("name" in k for k in r.json()["keys"])
+
+
+class TestKeysRename:
+    """PATCH /v1/team/keys/{id} — rename (label) / toggle. Registry path.
+
+    The endpoint is session-authed (get_current_user dependency) and enforces
+    owner/admin via _require_owner_admin in BOTH modes — registry mode
+    resolves the Membership graph, so the tests seed an owner membership.
+    Supabase-mode rename/toggle/403 coverage lives in test_dashboard_login.py.
+    """
+
+    def _override_session_user(self):
+        # Stub the session JWT (registry mode skips JWT verification) and
+        # seed an owner Membership so _require_owner_admin passes.
+        app.dependency_overrides[get_current_user] = \
+            lambda: {"user_id": _U1, "email": "owner@example.com"}
+        import tortoise.hosted_api as ha
+        sdk = ha._make_sdk(namespace="registry")
+        sdk._get_registry().query(
+            "MERGE (m:Membership {user_id:$uid, org_id:$tid, status:'active'}) "
+            "SET m.role='owner'",
+            params={"uid": _U1, "tid": TEST_ORG_ID},
+        )
+
+    def _override_non_owner(self):
+        # Session user with NO membership — _require_owner_admin must 403.
+        app.dependency_overrides[get_current_user] = \
+            lambda: {"user_id": _U_INTRUDER, "email": "intruder@example.com"}
+
+    def test_rename_key_updates_label(self, client):
+        self._override_session_user()
+        kid = client.post("/v1/team/keys", json={"name": "staging"}).json()["id"]
+        r = client.patch(f"/v1/team/keys/{kid}", json={"name": "prod"})
+        assert r.status_code == 200, r.text
+        # registry mode has no enabled column — echo preserves the #1148
+        # no-op contract {key_id, enabled: True} alongside the applied name
+        assert r.json() == {"key_id": kid, "enabled": True, "name": "prod"}
+        listed = _listed_key(client, kid)
+        assert listed["name"] == "prod"
+
+    def test_rename_clears_label_with_empty_string(self, client):
+        self._override_session_user()
+        kid = client.post("/v1/team/keys", json={"name": "staging"}).json()["id"]
+        r = client.patch(f"/v1/team/keys/{kid}", json={"name": "   "})
+        assert r.status_code == 200, r.text
+        assert r.json()["name"] is None
+        listed = _listed_key(client, kid)
+        assert listed.get("name") is None
+
+    def test_rename_clears_label_with_null(self, client):
+        # The dashboard sends JSON null to clear a label — null must be
+        # applied (field present), not treated as absent (P1 review fix).
+        self._override_session_user()
+        kid = client.post("/v1/team/keys", json={"name": "staging"}).json()["id"]
+        r = client.patch(f"/v1/team/keys/{kid}", json={"name": None})
+        assert r.status_code == 200, r.text
+        assert r.json()["name"] is None
+        listed = _listed_key(client, kid)
+        assert listed.get("name") is None
+
+    def test_rename_clamps_to_64_chars(self, client):
+        self._override_session_user()
+        kid = client.post("/v1/team/keys").json()["id"]
+        r = client.patch(f"/v1/team/keys/{kid}", json={"name": "x" * 200})
+        assert r.status_code == 200, r.text
+        assert r.json()["name"] == "x" * 64
+
+    def test_rename_and_toggle_in_one_patch(self, client):
+        self._override_session_user()
+        kid = client.post("/v1/team/keys", json={"name": "ci"}).json()["id"]
+        r = client.patch(f"/v1/team/keys/{kid}", json={"enabled": False, "name": "off-ci"})
+        assert r.status_code == 200, r.text
+        # registry mode: enabled is a no-op (no flag column) — name applies
+        assert r.json()["key_id"] == kid
+        assert r.json()["name"] == "off-ci"
+
+    def test_rename_unknown_key_404(self, client):
+        self._override_session_user()
+        r = client.patch("/v1/team/keys/does-not-exist", json={"name": "x"})
+        assert r.status_code == 404, r.text
+
+    def test_rename_non_owner_403(self, client):
+        # Registry mode enforces owner/admin like supabase mode (P2 review
+        # fix) — a user with no membership cannot rename any key by id.
+        self._override_non_owner()
+        kid = client.post("/v1/team/keys", json={"name": "staging"}).json()["id"]
+        r = client.patch(f"/v1/team/keys/{kid}", json={"name": "hijacked"})
+        assert r.status_code == 403, r.text
+        # label unchanged
+        listed = _listed_key(client, kid)
+        assert listed.get("name") == "staging"
+
+    # ── #1708 D7: additive created_via/expires_at (registry lane) ───────────
+    def test_list_keys_has_created_via_expires_at_fields(self, client, monkeypatch):
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+        client.post("/v1/team/keys")
+        r = client.get("/v1/team/keys")
+        for k in r.json()["keys"]:
+            assert "created_via" in k
+            assert "expires_at" in k
+
+    def test_list_keys_agent_signup_registry_writes_props(self, client, monkeypatch):
+        """#1709: the registry-lane agent_signup mint now WRITES created_via/
+        expires_at props (parity with the Supabase lane) — the list endpoint
+        round-trips them (no longer None). The client fixture overrides
+        get_current_org → TEST_TEAM, so re-point the override at the minted
+        team before GET (list_api_keys is team-scoped; the signup key lives
+        under its own fresh org_id)."""
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+        r = client.post("/v1/agent/signup", json={})
+        assert r.status_code == 200, r.text
+        signup_team = r.json()["org_id"]
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM, org_id=signup_team)
+        r = client.get("/v1/team/keys")
+        keys = r.json()["keys"]
+        assert keys, "signup team should have exactly one key"
+        assert keys[0]["created_via"] == "provisioned"  # #1709 registry parity
+        assert keys[0]["expires_at"] is None            # durable key — no expiry
+        app.dependency_overrides.clear()
+
+    def test_list_keys_create_api_key_registry_writes_props(self, client, monkeypatch):
+        """#1753: the registry-lane create_api_key mint writes created_via/
+        expires_at props too (parity with the agent_signup + Supabase lanes) —
+        without them the selfhost dashboard lists durable keys as
+        'ephemeral · session' and hides rename. Mint via POST /v1/team/keys
+        (TEST_TEAM), then the list round-trips the props."""
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+        r = client.post("/v1/team/keys", json={"name": "ci"})
+        assert r.status_code == 200, r.text
+        kid = r.json()["id"]
+        listed = _listed_key(client, kid)
+        assert listed["created_via"] == "provisioned"  # #1753 registry parity
+        assert listed["expires_at"] is None            # durable key — no expiry
+
+
+class TestListApiKeysSupabase:
+    """#1708 D7: Supabase lane — org_api_keys reads created_via/expires_at
+    through the seam; real-key auth pins the disabled/expired → 401 contract
+    the CLI reuse path (401 → re-mint) depends on. Reuses the client fixture
+    (lifespan/MCP-mount + SDK-init patch + _FALLBACK_KEEPALIVE hygiene)."""
+
+    @pytest.fixture(autouse=True)
+    def _supabase_env(self, client, monkeypatch):
+        import tortoise.supabase_control as sc
+        from tests.fake_control_plane import FakeControlPlane
+
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("SUPABASE_URL", "https://listkeys.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-listkeys")
+        fake = FakeControlPlane()
+        fake.seed("api_keys", [{
+            "id": "k1", "org_id": "team-001", "key_prefix": "tt_abcdef1234",
+            "created_at": "2026-08-01T00:00:00Z", "last_used_at": None,
+            "revoked_at": None, "enabled": True,
+            "created_via": "bootstrap", "expires_at": "2026-08-02T00:00:00Z",
+        }])
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM, org_id="team-001")
+        yield fake
+        app.dependency_overrides.clear()
+
+    def test_list_keys_supabase_round_trips_created_via(self, client):
+        r = client.get("/v1/team/keys")
+        k = r.json()["keys"][0]
+        assert k["created_via"] == "bootstrap"
+        assert k["expires_at"] == "2026-08-02T00:00:00Z"
+
+    def test_disabled_key_401_on_team(self, client, _supabase_env, monkeypatch):
+        """Pins the reuse suite's '401 → re-mint' contract at the server auth
+        boundary: a disabled key must 401 (a fail-open regression here would
+        make reuse silently reuse a disabled key).
+        #1096 residual: while a Supabase schema is one migration behind
+        (enabled column absent), the drift-tolerant seam re-authenticates a
+        disabled key — accepted degrade window, documented in the PR body."""
+        fake = _supabase_env
+        app.dependency_overrides.pop(get_current_org, None)  # real key auth
+        from tortoise.auth import lookup_hash
+        token = "tt_disabled_0000000000000000001"
+        fake.seed("api_keys", [{
+            "id": "k-disabled", "org_id": "team-001",
+            "lookup_hash": lookup_hash(token), "key_prefix": token[:10],
+            "created_at": "2026-08-01T00:00:00Z", "last_used_at": None,
+            "revoked_at": None, "enabled": False,
+            "created_via": "provisioned", "expires_at": None,
+        }])
+        fake.seed("organizations", [{"id": "team-001", "name": "T", "tier": "free"}])
+        r = client.get("/v1/team", headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 401, r.text
+
+    def test_expired_key_401_on_team(self, client, _supabase_env, monkeypatch):
+        """Same contract pin for past-expires_at keys (24h bootstrap expiry)."""
+        fake = _supabase_env
+        app.dependency_overrides.pop(get_current_org, None)  # real key auth
+        from tortoise.auth import lookup_hash
+        token = "tt_expired_00000000000000000001"
+        fake.seed("api_keys", [{
+            "id": "k-expired", "org_id": "team-001",
+            "lookup_hash": lookup_hash(token), "key_prefix": token[:10],
+            "created_at": "2026-08-01T00:00:00Z", "last_used_at": None,
+            "revoked_at": None, "enabled": True,
+            "created_via": "bootstrap",
+            "expires_at": "2026-08-02T00:00:00Z",  # in the past
+        }])
+        fake.seed("organizations", [{"id": "team-001", "name": "T", "tier": "free"}])
+        r = client.get("/v1/team", headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 401, r.text
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -780,6 +2337,16 @@ class TestSessionCapture:
         # crashes the response) — assert list-ness, not emptiness.
         assert body["errors"] == []
         assert isinstance(body["warnings"], list)
+        # #2335 WI-1a: the receipt carries the stats key (always-present
+        # additive contract) — the hosted llm:mock lane runs the REAL v2
+        # extractor, so the full extractor_v2 telemetry is present
+        # (entities/chunks/s4_merge/recovery/llm), NOT the empty M2 shape.
+        assert "stats" in body, "hosted receipt must carry the stats key"
+        st = body["stats"]
+        assert isinstance(st, dict) and st, "hosted v2 capture carries real stats"
+        assert st.get("chunks", 0) >= 1, st
+        assert isinstance(st.get("llm"), dict)
+        assert isinstance(st.get("recovery"), dict)
 
     def test_capture_session_with_explicit_id(self, client):
         r = client.post(
@@ -814,7 +2381,7 @@ class TestSessionCapture:
         assert r.status_code == 422, r.text
         assert "extractable content" in r.json()["detail"]
         import tortoise.hosted_api as ha_mod
-        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
         sessions = sdk._get_proj().g.query(
             "MATCH (s:Session) RETURN count(s)").result_set
         assert sessions[0][0] == 0, \
@@ -828,10 +2395,12 @@ class TestSessionCapture:
 
     def test_capture_session_no_content_dedup_across_captures(self, client, monkeypatch):
         monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")  # M2-mock-specific
-        """#490/#822: re-capturing the SAME session MERGEs turn Points but the
-        M2 LLM extraction writes fresh Points per capture — content-hash
-        dedup is a later pipeline stage (epic #909 W-2 #784), not part of
-        capture."""
+        """#490/#822 + #1727 (Task 11, T2-P2c): re-capturing the SAME
+        session_id is idempotent — the turn Points MERGE (1 total) and the
+        M2 LLM extraction is SKIPPED on the re-POST (session already existed),
+        so exactly ONE LLM point exists for the capture (the pre-1727
+        behavior minted fresh LLM points per capture; the plan pins the
+        idempotency scope = Session + turn Points, extraction skipped)."""
         conv = [
             {"role": "user", "content": "Let's use PostgreSQL for the backend."},
         ]
@@ -840,16 +2409,21 @@ class TestSessionCapture:
         assert r1.status_code == 200, r1.text
         r2 = client.post("/v1/sessions", json=payload)
         assert r2.status_code == 200, r2.text
+        assert r2.json()["extraction_mode"] == "replayed", r2.json()
+        assert r2.json()["extracted"] == 0, r2.json()
+        # #2335 WI-1a: replayed receipt carries stats == {} (empty-on-replay)
+        assert r2.json()["stats"] == {}, r2.json()["stats"]
 
         # Turn Point MERGEs across captures (idempotent): 1 turn point
-        # containing PostgreSQL + 2 LLM points (one per capture, no dedup).
+        # containing PostgreSQL + 1 LLM point (extraction ran once — the
+        # re-POST skipped it).
         import tortoise.hosted_api as ha_mod
-        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
         proj = sdk._get_proj()
         r = proj.g.query(
             "MATCH (p:Point) WHERE p.content CONTAINS 'PostgreSQL' RETURN count(p)"
         ).result_set
-        assert r[0][0] == 3, f"expected 3 (1 turn + 2 LLM points), got {r[0][0]}"
+        assert r[0][0] == 2, f"expected 2 (1 turn + 1 LLM), got {r[0][0]}"
 
     def test_capture_session_llm_points_are_fresh_ulids(self, client, monkeypatch):
         monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")  # M2-mock-specific
@@ -884,7 +2458,7 @@ class TestSessionCapture:
         assert r1.status_code == 200 and r2.status_code == 200
 
         import tortoise.hosted_api as ha_mod
-        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
         proj = sdk._get_proj()
         # "ok" triggers no decision/claim extraction → only turn Points exist.
         # Two distinct sessions (auto-generated ids) must yield TWO turn
@@ -907,7 +2481,7 @@ class TestSessionCapture:
             assert r.status_code == 200, r.text
 
         import tortoise.hosted_api as ha_mod
-        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
         proj = sdk._get_proj()
         r = proj.g.query(
             "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
@@ -954,7 +2528,7 @@ class TestSessionCapture:
         assert any("provider returned 500" in e for e in body["errors"])
         assert body["warnings"] == [], "failure carries errors, never warnings"
         import tortoise.hosted_api as ha_mod
-        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
         proj = sdk._get_proj()
         turns = proj.g.query(
             "MATCH (t:Point {pointKind:'event'}) RETURN count(t)").result_set
@@ -989,7 +2563,7 @@ class TestSessionCapture:
         assert any("RuntimeError" in e for e in body["errors"])
         assert body["warnings"] == [], "failure carries errors, never warnings"
         import tortoise.hosted_api as ha_mod
-        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
         proj = sdk._get_proj()
         wired = proj.g.query(
             "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
@@ -1043,7 +2617,7 @@ class TestSessionCapture:
             assert r.status_code == 200, (content, r.text)
             assert r.json()["turns"] == 1
         import tortoise.hosted_api as ha_mod
-        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
         expected = {"coerce-s1": "[user] {'text': 'we decided to ship v2'}",
                     "coerce-s2": "[user] 12345",
                     "coerce-s4": "[user] False",
@@ -1075,7 +2649,7 @@ class TestSessionCapture:
         shared test projection so the raw-graph query patch is in the write
         path (same embedded DB either way)."""
         import tortoise.hosted_api as ha_mod
-        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
         proj = sdk._get_proj()
         _raw = proj.g._g
         _real_query = _raw.query  # _GuardedGraph.query is a read-only slot method
@@ -1088,6 +2662,12 @@ class TestSessionCapture:
         monkeypatch.setattr(_raw, "query", _boom_stamp)
         monkeypatch.setattr("tortoise.sdk.TortoiseSDK._get_proj",
                             lambda self: proj)
+        # #1727 (Task 11): the _get_proj patch also redirects the consent
+        # gate's REGISTRY read into the team projection (a namespace-shifted
+        # registry graph the fixture seed can't reach) — patch the gate read
+        # directly so this stamping-behavior test reaches the stamping block.
+        monkeypatch.setattr(ha_mod, "_get_onboarding_state",
+                            lambda org_id: {"session_recording": True})
         r = client.post("/v1/sessions", json={
             "conversation": [{"role": "user", "content": "I think auth is the top issue."}]})
         assert r.status_code == 200, r.text
@@ -1129,10 +2709,10 @@ class TestSessionCapture:
         422 — the assertion discriminates; non-blank → 2+est > 1 → 402 either
         order (control)."""
         import tortoise.hosted_api as ha_mod
-        from tortoise.hosted_api import app, get_current_team
-        app.dependency_overrides[get_current_team] = lambda: {
+        from tortoise.hosted_api import app, get_current_org
+        app.dependency_overrides[get_current_org] = lambda: {
             **TEST_TEAM, "max_points": 1}
-        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
         sdk.create_point(kind="statement", content="pre-existing non-episodic point 1")
         sdk.create_point(kind="statement", content="pre-existing non-episodic point 2")
         r = client.post("/v1/sessions", json={"conversation": []})
@@ -1140,6 +2720,391 @@ class TestSessionCapture:
         r2 = client.post("/v1/sessions", json={
             "conversation": [{"role": "user", "content": "I think auth is the top issue."}]})
         assert r2.status_code == 402, r.text  # non-blank over quota: 402 still fires
+
+
+    def test_capture_error_contract_hosted_diagnostics(self, client, monkeypatch):
+        """#2335 WI-2: hosted capture resp carries headline errors + raw
+        diagnostics (byte-parity with the sdk receipt)."""
+        import tortoise.extractor_v2 as ev2
+
+        def _v2_out(*a, **kw):
+            return {
+                "session_id": kw.get("session_id", "s"),
+                "story_arc": "", "embed_list": {},
+                "search": {"mode": "embedded", "degraded": True},
+                "payload": None,
+                "chain_notes": [], "link_before_create": [], "supersessions": [],
+                "warnings": [], "minted_kinds": [],
+                "errors": [
+                    "no embed list produced (S2/S4 empty) — nothing to embed"],
+                "stats": {"llm": {"calls": 1}, "recovery": {}},
+                "error_census": {"empty_embed_list": 1},
+            }
+        monkeypatch.setattr(ev2, "extract_session_v2", _v2_out)
+        conv = [{"role": "user", "content": "Let's use PostgreSQL."}]
+        r = client.post("/v1/sessions", json={
+            "session_id": "err-contract-hosted", "conversation": conv})
+        assert r.status_code == 200, r.text
+        b = r.json()
+        headline = b["errors"][0]
+        for tok in ("S2", "S4", "embed list"):
+            assert tok.lower() not in headline.lower(), (headline, tok)
+        assert b["diagnostics"] == [
+            "no embed list produced (S2/S4 empty) — nothing to embed"]
+        # the report hook rides the errored hosted receipt
+        assert b["report_url"].endswith(
+            "issues/new?template=bug_report.yml"), b["report_url"]
+
+
+class TestSessionCaptureWriteVerb:
+    """W5 (#2104): POST /v1/sessions speaks the frozen memory_write_v1 write
+    verb (S12/DM-2) — protocol_version REQUIRED, provenance REQUIRED,
+    per-point status/ep_updated/dedup enriched in place (D8 additive); the
+    provenance stamp carries source_session/source_harness/ingested_at
+    (S1); and the gate order pins the S2 amendment (boundary 422 precedes
+    the recording-off 409)."""
+
+    CONVERSATION = [  # noqa: RUF012
+        {"role": "user", "content": "W5 write-verb provenance contract test."},
+    ]
+
+    def test_capture_response_speaks_write_verb(self, client):
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-verb-session",
+            "harness": "codex",
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["protocol_version"] == "memory_write_v1"
+        assert body["status"] in ("ok", "partial")
+        assert body["error"] is None
+        prov = body["provenance"]
+        assert prov["source_session"] == "w5-verb-session"
+        assert prov["source_harness"] == "codex"
+        assert prov["ingested_at"]
+        # Legacy surface intact (D8) + per-point verb facts enriched.
+        assert body["extracted"] == len(body["points"])
+        for p in body["points"]:
+            assert "ep_updated" in p and "dedup" in p and "status" in p
+            assert p.get("point_id") == p.get("id")  # frozen-verb schema alias
+
+    def test_capture_no_harness_normalizes_provenance_unknown(self, client):
+        """P2-1 (review): a no-harness capture (T1-P3: harness optional) must
+        still carry a complete provenance — source_harness normalizes to
+        "unknown" in the stamp AND the envelope (FalkorDB SET null would
+        DELETE the property, leaving provenance incomplete)."""
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-noharness-session",
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["provenance"]["source_harness"] == "unknown"
+        import tortoise.hosted_api as ha_mod
+        ids = [p["id"] for p in body["points"]]
+        if ids:
+            rows = ha_mod._make_sdk(namespace=TEST_ORG_ID)._get_proj().g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids "
+                "RETURN n.source_harness",
+                params={"ids": ids},
+            ).result_set
+            for row in rows:
+                assert row[0] == "unknown"
+
+    def test_capture_points_stamped_with_provenance(self, client):
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-provenance-session",
+            "harness": "pi",
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        ids = [p["id"] for p in body["points"]]
+        assert ids, "mock extraction produced no points"
+        import tortoise.hosted_api as ha_mod
+        sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
+        proj = sdk._get_proj()
+        rows = proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, "
+            "n.source_session, n.source_harness, n.ingested_at, n.eventId",
+            params={"ids": ids},
+        ).result_set
+        by_id = {r[0]: r for r in rows}
+        for pid in ids:
+            assert pid in by_id, f"{pid} missing from graph"
+            _id, src_sess, src_har, ingested, event_id = by_id[pid]
+            assert src_sess == "w5-provenance-session"
+            assert src_har == "pi"
+            assert ingested
+            assert event_id  # ontology-compliant provenance kept
+
+    def test_capture_ingest_ep_user_visible_e2e5(self, client, monkeypatch):
+        """W5 Phase C (#2104, indicator 3 / E2E-5 acceptance): EP updates on
+        ingestion verified at the USER-VISIBLE level — after a capture the
+        write-verb response carries ``ep_updated: true`` per extracted claim
+        and the claims carry persisted EP posteriors (has_ep true); the
+        pre-ingestion uncalibrated state (has_ep false — structurally, the W2
+        strict bar was 0.0 while captured claims were draft) DIFFERS.
+
+        Phase C promotes the extracted claims AND their capture operators to
+        live on the capture path ONLY (the episodic turn stream stays draft)
+        and runs a BOUNDED ingest EP pass (local — dirty-root refresh, never
+        a full-graph pass) at the END of the capture write path, BEFORE the
+        verb's enrichment read (ep_updated = graph truth post-EP — never
+        fabricated). The m2 echo lane is used so the cue-word conversation
+        produces a WIRED claim pair (operator-less claims have no EP factors
+        and stay honestly uncalibrated)."""
+        monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+        conv = [
+            {"role": "user", "content": "The auth dead-end is the top issue "
+                                         "because it blocks every deploy."},
+            {"role": "assistant", "content": "Therefore we should ship serve "
+                                               "--http first."},
+        ]
+        r = client.post("/v1/sessions", json={
+            "conversation": conv,
+            "session_id": "w5c-e2e5-session",
+            "harness": "codex",
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        ids = [p["id"] for p in body["points"]]
+        assert len(ids) >= 2, body
+        for p in body["points"]:
+            # user-visible EP-on-ingest: claims are live AND calibrated
+            assert p["status"] == "live", p
+            assert p["ep_updated"] is True, p
+        import tortoise.hosted_api as ha_mod
+        proj = ha_mod._make_sdk(namespace=TEST_ORG_ID)._get_proj()
+        cal = proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids AND "
+            "(n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) "
+            "RETURN count(n)",
+            params={"ids": ids},
+        ).result_set
+        assert cal[0][0] == len(ids), \
+            f"every wired claim must calibrate post-ingest ({cal[0][0]}/{len(ids)})"
+        # the episodic turn stream stays draft (turn stream, not beliefs)
+        trows = proj.g.query(
+            "MATCH (t:Point) WHERE t.is_episodic = true RETURN DISTINCT t.status"
+        ).result_set
+        assert trows and all(st == "draft" for (st,) in trows), trows
+
+    def test_capture_isolated_claim_ep_updated_stays_honest(self, client):
+        """Anti-gaming pin (W5 Phase C #2104): an OPERATOR-LESS extracted
+        claim (the deterministic v2 mock seam emits one isolated point with
+        no operators) has no EP factors — the bounded ingest pass trivially
+        stamps lastDreamedAt but can never fabricate persisted α/β, so the
+        verb's ``ep_updated`` (has_ep = the point actually carries EP
+        params) stays False. Promotion is capture-scoped: the claim is live,
+        but uncalibrated-by-construction is reported honestly."""
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5c-isolated-session",
+            "harness": "pi",
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["extracted"] >= 1
+        assert all(p["ep_updated"] is False for p in body["points"]), \
+            body["points"]
+
+    def test_capture_gate_boundary_422_before_409(self, client):
+        """S2 amendment (verified order): the boundary 422 (invalid harness
+        — Pydantic SessionRequest validation, fires before the handler on
+        REST) precedes the recording-off 409.  Recording off must never mask
+        a malformed payload."""
+        import tortoise.hosted_api as ha_mod
+        ha_mod._update_onboarding_state(
+            TEST_ORG_ID, session_recording=False)
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "harness": "not-a-real-harness",  # boundary failure
+        })
+        assert r.status_code == 422, (r.status_code, r.text)
+        assert "harness" in r.text.lower()
+
+    def test_capture_gate_409_when_recording_off(self, client):
+        """Recording off + VALID payload -> 409 (state-conflict), no Session
+        write, no receipt."""
+        import tortoise.hosted_api as ha_mod
+        ha_mod._update_onboarding_state(
+            TEST_ORG_ID, session_recording=False)
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-recording-off-session",
+        })
+        assert r.status_code == 409, r.text
+        sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
+        rows = sdk._get_proj().g.query(
+            "MATCH (s:Session {id:$sid}) RETURN count(s)",
+            params={"sid": "w5-recording-off-session"},
+        ).result_set
+        assert rows[0][0] == 0  # no Session write when recording off
+
+    def test_capture_true_retry_failed_session_reattempts(self, client, monkeypatch):
+        """#2335 WI-2b (hosted twin): a capture that FAILS records
+        capture_ok=False; a same-session re-POST RE-ATTEMPTS extraction and,
+        on success, the receipt reflects the retry (not a no-op replay)."""
+        import tortoise.extractor_v2 as ev2
+        calls = {"n": 0}
+
+        def _v2_fail_then_succeed(*a, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {
+                    "session_id": kw.get("session_id", "s"),
+                    "story_arc": "", "embed_list": {},
+                    "search": {"mode": "embedded", "degraded": True},
+                    "payload": None,
+                    "chain_notes": [], "link_before_create": [],
+                    "supersessions": [], "warnings": [], "minted_kinds": [],
+                    "errors": ["RuntimeError: provider returned 500"],
+                    "stats": {"llm": {"calls": 1}, "recovery": {}},
+                    "error_census": {},
+                }
+            return {
+                "session_id": kw.get("session_id", "s"),
+                "story_arc": "story", "embed_list": {},
+                "search": {"mode": "embedded", "degraded": True},
+                "payload": {"entities": [], "events": [], "points": [
+                    {"content": "the retry worked", "pointKind": "statement",
+                     "about_entities": []}], "operators": []},
+                "chain_notes": [], "link_before_create": [],
+                "supersessions": [], "warnings": [], "minted_kinds": [],
+                "stats": {"llm": {"calls": 1}, "recovery": {}},
+                "error_census": {},
+            }
+        monkeypatch.setattr(ev2, "extract_session_v2", _v2_fail_then_succeed)
+        conv = [{"role": "user", "content": "we decided X"}]
+        payload = {"conversation": conv, "session_id": "h-retry-2335"}
+        r1 = client.post("/v1/sessions", json=payload)
+        assert r1.status_code == 200, r1.text
+        assert r1.json()["errors"], "first attempt fails"
+        r2 = client.post("/v1/sessions", json=payload)
+        assert r2.status_code == 200, r2.text
+        b2 = r2.json()
+        assert b2["extraction_mode"] != "replayed", b2
+        assert calls["n"] == 2, "the retry must re-run extraction"
+        # capture_ok now True on the Session node
+        import tortoise.hosted_api as ha_mod
+        rows = ha_mod.TortoiseSDK(
+            namespace=TEST_ORG_ID)._get_proj().g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.capture_ok",
+            params={"sid": "h-retry-2335"}).result_set
+        assert rows and rows[0][0] is True, rows
+
+    def test_capture_true_retry_m2_failed_session_replays(self, client,
+                                                           monkeypatch):
+        """#2335 WI-2b / review (PR #2473): TRUE retry is v2-lane (hosted
+        twin). A FAILED M2 capture leaves live partial claims; the same-
+        session re-POST replays (no re-run, no duplicates)."""
+        monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+        calls = {"n": 0}
+
+        class _PartialFailingSessionExtractor:
+            version = "partial-m2@0"
+
+            def run(self, transcript, source_id, api):
+                calls["n"] += 1
+                api.add_point("decision: ship serve first",
+                              {"source": source_id})
+                raise RuntimeError("provider rate limited mid-run")
+
+        monkeypatch.setattr(
+            "tortoise.sdk._build_session_llm_extractor",
+            lambda: _PartialFailingSessionExtractor())
+        payload = {"conversation": [
+            {"role": "user", "content": "we decided X"}],
+            "session_id": "h-m2-failed-2335"}
+        r1 = client.post("/v1/sessions", json=payload)
+        assert r1.status_code == 200, r1.text
+        assert r1.json()["errors"], "first m2 attempt fails"
+        assert r1.json()["extracted"] >= 1
+        r2 = client.post("/v1/sessions", json=payload)
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["extraction_mode"] == "replayed", r2.json()
+        assert calls["n"] == 1, "m2 failed session must not re-extract"
+        import tortoise.hosted_api as ha_mod
+        sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
+        proj = sdk._get_proj()
+        row = proj.g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, "
+            "s.capture_extractor", params={"sid": "h-m2-failed-2335"}
+        ).result_set
+        assert row[0][0] is False and row[0][1] == "m2", row
+
+    def test_capture_replay_zero_new_nodes_verb_ok(self, client):
+        """Idempotency: re-POST of the same session_id (recording on) writes
+        0 new nodes — extraction is skipped, the verb still speaks ok."""
+        for _ in range(2):
+            r = client.post("/v1/sessions", json={
+                "conversation": self.CONVERSATION,
+                "session_id": "w5-replay-session",
+            })
+            assert r.status_code == 200, r.text
+        first = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-replay-session",
+        }).json()
+        assert first["protocol_version"] == "memory_write_v1"
+        # A replay extracts nothing new: the verb reports the (empty)
+        # point set honestly.
+        assert first["extracted"] == 0
+
+
+    def test_capture_session_id_overlong_rejected_boundary_422(self, client):
+        """P2 (review round 1): session_id becomes the point-level
+        source_session — unbounded caller strings would amplify onto every
+        extracted point.  Over-long ids fail the boundary 422 (Pydantic
+        max_length) BEFORE the recording gate."""
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "x" * 500,
+        })
+        assert r.status_code == 422, r.text
+
+    def test_capture_enrichment_failure_never_500s_committed_capture(
+            self, client, monkeypatch):
+        """P1 (review round 1): a transient failure in the post-write
+        enrichment read must NOT 500 a committed capture (D4 posture) — it
+        degrades to an additive warning and the verb reports what it could."""
+        # Patch the enrichment read's Graph.query at the HANDLE CLASS level
+        # on BOTH lanes (#1647 docker-lane redirect: the test-* team maps to
+        # a SERVER-backed graph — falkordb.graph.Graph — while the carve-out
+        # lane uses the embedded redislite handle; the boom must reach
+        # whichever class the lane actually executes). Selective so unrelated
+        # queries in the same window pass through untouched.
+        from redislite.falkordb_client import Graph as _EmbeddedGraph
+        _graph_classes = [_EmbeddedGraph]
+        try:
+            from falkordb.graph import Graph as _ServerGraph
+            _graph_classes.append(_ServerGraph)
+        except Exception:
+            pass
+        _orig_query = {cls: cls.query for cls in _graph_classes}
+
+        def _selective_boom(self, cypher, params=None, timeout=None):
+            if "posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL" in cypher:
+                raise RuntimeError("transient graph failure")
+            return _orig_query[type(self)](self, cypher, params=params,
+                                           timeout=timeout)
+
+        for cls in _graph_classes:
+            monkeypatch.setattr(cls, "query", _selective_boom)
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-enrich-fail-session",
+        })
+        # Committed + 200; the failure is additive, never a 500.
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["protocol_version"] == "memory_write_v1"
+        # facts={} -> every extracted point is skipped -> the verb is
+        # PARTIAL, never an unqualified ok over unverifiable points.
+        assert body["status"] == "partial"
+        assert any("enrichment read failed" in w for w in body["warnings"])
 
 
 class TestSessionList:
@@ -1221,6 +3186,29 @@ class TestSessionDetail:
         assert "content" in ep
         assert "kind" in ep
 
+    def test_detail_exposes_the_session_source_node(self, client):
+        """#3809: the detail carries the session's graph Source node
+        (``session:<id>``, sourceKind ``agentSession``) so
+        ``tortoise session verify`` can prove the "in the graph as a source"
+        link over the REST surface rather than inferring it from turn points.
+
+        Mutation: drop the ``source`` query/field from ``get_session_detail`` —
+        the key is absent and this REDs."""
+        r = client.post("/v1/sessions", json={
+            "conversation": [
+                {"role": "user", "content": "We decided to use FalkorDB."},
+                {"role": "assistant", "content": "Noted."},
+            ],
+            "session_id": "detail-source-test",
+        })
+        assert r.status_code == 200, r.text
+        sid = r.json()["session_id"]
+        body = client.get(f"/v1/sessions/{sid}").json()
+        assert "source" in body, body
+        assert body["source"] is not None, body
+        assert body["source"]["url"] == f"session:{sid}"
+        assert body["source"]["sourceKind"] == "agentSession"
+
     def test_detail_cross_team_isolation(self, client):
         """Session from a different namespace is not found (404).
 
@@ -1228,9 +3216,9 @@ class TestSessionDetail:
         namespaces isolate graphs — a session written to namespace
         ``test_hosted_other_team_999_<uuid>`` (epic #1647 T7 per-test
         namespace) is invisible to the endpoint which resolves
-        ``TEST_TEAM_ID`` (``team-001``).
+        ``TEST_ORG_ID`` (``team-001``).
         """
-        from datetime import datetime, timezone  # noqa: I001
+        from datetime import datetime  # noqa: I001
         from tortoise.hosted_api import _make_sdk
 
         sdk_b = _make_sdk(namespace=f"test_hosted_other_team_999_{os.urandom(4).hex()}")
@@ -1262,10 +3250,10 @@ class TestSessionDetail:
 
     def test_detail_role_parsing_no_brackets(self, client):
         """Content without [role] prefix → role 'unknown'."""
-        from datetime import datetime, timezone  # noqa: I001
+        from datetime import datetime  # noqa: I001
         from tortoise.hosted_api import _make_sdk
 
-        sdk = _make_sdk(namespace=TEST_TEAM_ID)
+        sdk = _make_sdk(namespace=TEST_ORG_ID)
         proj = sdk._get_proj()
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
@@ -1381,8 +3369,18 @@ def internal_client():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
 
-        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
         _orig_init = _patch_tortoise_sdk_init(db_path)
+        # C3 (#2112): seed the Team node the auth override bypasses — the
+        # registry mint path (sdk.apikey_create) validates the team exists
+        # (mirror of the client fixture's seed; production teams always
+        # exist — the override skips the resolution that would have found
+        # them).
+        import tortoise.hosted_api as ha_mod2
+        ha_mod2._make_sdk(namespace="registry")._get_registry().query(
+            "CREATE (t:Team {id:$id})",
+            params={"id": TEST_ORG_ID},
+        )
 
         try:
             with TestClient(app) as tc:
@@ -1393,6 +3391,38 @@ def internal_client():
             os.environ["FASTAPI_INTERNAL_KEY"] = old_key
 
 
+def test_register_journals_minted_team_graph(tmp_path, monkeypatch):
+    """#1686: /v1/register's team_* mint is journaled (registry branch —
+    the direct select_graph mint, not team_create) so the session sweep
+    drops it. Mirrors the billing_client embedded pattern: delenv URI +
+    TORTOISE_DB_PATH → the register handler constructs embedded; a temp
+    journal env makes the membership assertion exact. No docker needed."""
+    import os as _os
+
+    from fastapi.testclient import TestClient
+
+    from tests._embedded import _read_journal_file
+    from tortoise.hosted_api import app
+
+    db = _os.path.join(tmp_path, "register_api.db")
+    journal = tmp_path / "register.graphs.jsonl"
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.setenv("TORTOISE_DB_PATH", db)
+    monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
+    monkeypatch.setenv("TORTOISE_TEST_JOURNAL_FILE", str(journal))
+    with TestClient(app) as tc:
+        r = tc.post("/v1/register", json={
+            "email": "journal-owner@example.com",
+            "password": "supersecret1",
+        })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    gn = body["graph_name"]
+    assert gn.startswith("org_")
+    assert gn in _read_journal_file(str(journal)), \
+        "register_user mint must be journaled (#1686)"
+
+
 class TestInternalProvision:
     """POST /internal/provision — tenant provisioning."""
 
@@ -1400,8 +3430,8 @@ class TestInternalProvision:
 
     def test_provision_valid_returns_200(self, internal_client):
         payload = {
-            "team_id": "provisioned-team-1",
-            "team_name": "Provisioned Team",
+            "org_id": "provisioned-team-1",
+            "org_name": "Provisioned Team",
             "api_key_hash": "abc123hash",
             "created_by": "user-001",
         }
@@ -1409,8 +3439,30 @@ class TestInternalProvision:
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["status"] == "provisioned"
-        assert body["team_id"] == "provisioned-team-1"
+        assert body["org_id"] == "provisioned-team-1"
         assert "graph_name" in body
+
+
+    def test_provision_journals_minted_graph(self, internal_client, monkeypatch, tmp_path):
+        """#1686: /internal/provision's team_* mint (tenant_provision) is
+        journaled via the product-side seam so the session sweep drops it."""
+        from tests._embedded import _read_journal_file
+
+        journal = tmp_path / "provision.graphs.jsonl"
+        monkeypatch.setenv("TORTOISE_TEST_JOURNAL_FILE", str(journal))
+        payload = {
+            "org_id": "provisioned-team-9",
+            "org_name": "Provisioned Team 9",
+            "api_key_hash": "abc123hash",
+            "created_by": "user-009",
+        }
+        r = internal_client.post("/internal/provision", json=payload,
+                                 headers=self.INTERNAL_HEADERS)
+        assert r.status_code == 200, r.text
+        gn = r.json()["graph_name"]
+        assert gn.startswith("org_")
+        assert gn in _read_journal_file(str(journal)), \
+            "tenant_provision mint must be journaled (#1686)"
 
     def test_provision_missing_fields_returns_400(self, internal_client):
         r = internal_client.post("/internal/provision", json={}, headers=self.INTERNAL_HEADERS)
@@ -1419,7 +3471,7 @@ class TestInternalProvision:
     def test_provision_wrong_internal_key_returns_401(self, internal_client):
         r = internal_client.post(
             "/internal/provision",
-            json={"team_id": "t1", "team_name": "n", "api_key_hash": "h", "created_by": "u"},
+            json={"org_id": "t1", "org_name": "n", "api_key_hash": "h", "created_by": "u"},
             headers={"Authorization": "Bearer wrong-key"},
         )
         assert r.status_code == 401, r.text
@@ -1427,7 +3479,7 @@ class TestInternalProvision:
     def test_provision_missing_auth_returns_401(self, internal_client):
         r = internal_client.post(
             "/internal/provision",
-            json={"team_id": "t1", "team_name": "n", "api_key_hash": "h", "created_by": "u"},
+            json={"org_id": "t1", "org_name": "n", "api_key_hash": "h", "created_by": "u"},
         )
         assert r.status_code == 401, r.text
 
@@ -1440,19 +3492,19 @@ class TestInternalDemo:
     def test_demo_valid_returns_200(self, internal_client):
         r = internal_client.post(
             "/internal/demo",
-            json={"team_id": "demo-team-1"},
+            json={"org_id": "demo-team-1"},
             headers=self.INTERNAL_HEADERS,
         )
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["status"] == "demo_created"
-        assert body["team_id"] == "demo-team-1"
+        assert body["org_id"] == "demo-team-1"
         assert "session_id" in body
         assert body["points"] > 0
         assert "layers" in body
 
     def test_demo_idempotent_second_call_returns_already_seeded(self, internal_client):
-        payload = {"team_id": "demo-team-2"}
+        payload = {"org_id": "demo-team-2"}
         h = self.INTERNAL_HEADERS
 
         r1 = internal_client.post("/internal/demo", json=payload, headers=h)
@@ -1463,7 +3515,7 @@ class TestInternalDemo:
         assert r2.status_code == 200, r2.text
         assert r2.json()["status"] == "already_seeded"
 
-    def test_demo_missing_team_id_returns_400(self, internal_client):
+    def test_demo_missing_org_id_returns_400(self, internal_client):
         r = internal_client.post(
             "/internal/demo", json={}, headers=self.INTERNAL_HEADERS
         )
@@ -1472,13 +3524,13 @@ class TestInternalDemo:
     def test_demo_wrong_internal_key_returns_401(self, internal_client):
         r = internal_client.post(
             "/internal/demo",
-            json={"team_id": "t1"},
+            json={"org_id": "t1"},
             headers={"Authorization": "Bearer wrong-key"},
         )
         assert r.status_code == 401, r.text
 
     def test_demo_missing_auth_returns_401(self, internal_client):
-        r = internal_client.post("/internal/demo", json={"team_id": "t1"})
+        r = internal_client.post("/internal/demo", json={"org_id": "t1"})
         assert r.status_code == 401, r.text
 
 
@@ -1523,13 +3575,13 @@ class TestCrossTenantIsolation:
 
     def test_team_isolation(self, client, internal_client):
         # Provision two teams
-        for team_id in ("iso-team-a", "iso-team-b"):
+        for org_id in ("iso-team-a", "iso-team-b"):
             r = internal_client.post(
                 "/internal/provision",
                 json={
-                    "team_id": team_id,
-                    "team_name": f"Team {team_id}",
-                    "api_key_hash": f"hash-{team_id}",
+                    "org_id": org_id,
+                    "org_name": f"Team {org_id}",
+                    "api_key_hash": f"hash-{org_id}",
                     "created_by": "tester",
                 },
                 headers={"Authorization": f"Bearer {_INTERNAL_KEY}"},
@@ -1578,7 +3630,7 @@ class TestIssueInsightAPI:
         from tortoise.hosted_api import _make_sdk
 
         # Team A indexes repo acme/app in ITS namespace.
-        sdk_a = _make_sdk(namespace=TEST_TEAM_ID)
+        sdk_a = _make_sdk(namespace=TEST_ORG_ID)
         sdk_a.create_point(
             kind="observation", content="acme/app #1: login bug on iOS",
             source="github", github_repo="acme/app", github_number=1, github_state="open",
@@ -1591,9 +3643,9 @@ class TestIssueInsightAPI:
             "repo": "acme/app", "prior_issues": 1, "open": 1,
         }
 
-        # Team B: different team_id -> different namespace, same DB file.
-        app.dependency_overrides[get_current_team] = lambda: dict(
-            TEST_TEAM, team_id="team-002")
+        # Team B: different org_id -> different namespace, same DB file.
+        app.dependency_overrides[get_current_org] = lambda: dict(
+            TEST_TEAM, org_id="team-002")
         sdk_b = _make_sdk(namespace="team-002")
         sdk_b.create_point(
             kind="observation", content="b-corp/web #3: unrelated styling tweak",
@@ -1731,7 +3783,7 @@ class TestSessionEventAlignment:
 
         # The client fixture patched TortoiseSDK.__init__ to use the temp DB,
         # so constructing an SDK inside the test reads the same graph.
-        sdk = TortoiseSDK(namespace=TEST_TEAM_ID)
+        sdk = TortoiseSDK(namespace=TEST_ORG_ID)
         proj = sdk._get_proj()
 
         # The :Session node exists
@@ -1810,28 +3862,28 @@ class TestBackupEndpoints:
         _store = _MS()  # SHARED instance — _backup_storage is called per request
         monkeypatch.setattr(_ha, "_backup_storage", lambda: _store)
         # Decouple the machinery tests from the tier gate (#656): pricing.json
-        # marks pro.daily_backups "planned" (not live), so no tier passes the
+        # marks pro.hourly_backups "planned" (not live), so no tier passes the
         # gate today. This fixture represents "Pro WITH the feature enabled" —
         # the gate allowlist itself is tested by test_backup_tier_allowlist_from_pricing.
         from tortoise import pricing as _pricing
         monkeypatch.setattr(
-            _pricing, "daily_backups_enabled", lambda tier: tier == "pro"
+            _pricing, "hourly_backups_enabled", lambda tier: tier == "pro"
         )
-        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM, tier="pro")
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM, tier="pro")
         # Epic #1647 (docker lane): the backup/restore seam resolves the team
-        # graph via team_graph_name() → "team_{id}" — but on the server lane
+        # graph via org_graph_name() → "org_{id}" — but on the server lane
         # the team SDK writes to the REDIRECT-derived guard-passing graph
         # (test_<stem>_<hash12(session+path+name)>). Without a seam, restore's
         # live_name ("team_team-001") is empty on the server → the
         # empty-backup-over-live 409 guard sees 0 live nodes and restore
         # succeeds over live data (the #1635 guard is DEFEATED). Route
-        # team_graph_name to the SDK's actual graph in BOTH lanes (embedded:
+        # org_graph_name to the SDK's actual graph in BOTH lanes (embedded:
         # the fixture-patched db_path SDK resolves team_team-001 verbatim;
         # server: the derived graph). The registry-source arg is unused by the
         # seam (the registry stamp is the historical literal either way).
         import tortoise.backup_sweep as _bs
-        _sdk_graph = _ha._make_sdk(namespace=TEST_TEAM_ID)._get_proj().graph_name
-        monkeypatch.setattr(_bs, "team_graph_name",
+        _sdk_graph = _ha._make_sdk(namespace=TEST_ORG_ID)._get_proj().graph_name
+        monkeypatch.setattr(_bs, "org_graph_name",
                             lambda source, tid: _sdk_graph)
         yield client
         app.dependency_overrides.clear()
@@ -1844,12 +3896,12 @@ class TestBackupEndpoints:
         assert r.status_code == 402
 
     def test_backup_solo_tier_402(self, client):
-        """Solo tier cannot create backups (daily_backups:false in pricing.json).
+        """Solo tier cannot create backups (hourly_backups:false in pricing.json).
 
         Regression test for #656 — the old gate blocked only (None, 'free'),
         so a solo-tier team would have slipped past the backups gate.
         """
-        app.dependency_overrides[get_current_team] = lambda: dict(
+        app.dependency_overrides[get_current_org] = lambda: dict(
             TEST_TEAM, tier="solo"
         )
         try:
@@ -1867,7 +3919,7 @@ class TestBackupEndpoints:
 
     def test_backup_tier_allowlist_from_pricing(self, client):
         """The gate strictly mirrors pricing.json: only a real JSON `true`
-        for features.daily_backups passes. "planned" (string) is NOT live —
+        for features.hourly_backups passes. "planned" (string) is NOT live —
         so today NO tier passes (feature not shipped), and flipping pricing.json
         to `true` enables a tier with zero code change (#656).
 
@@ -1879,38 +3931,38 @@ class TestBackupEndpoints:
         pricing = _load_pricing()
         expected_allowed = [
             tier for tier, spec in pricing.get("tiers", {}).items()
-            if spec.get("features", {}).get("daily_backups") is True
+            if spec.get("features", {}).get("hourly_backups") is True
         ]
         expected_blocked = [
             tier for tier in pricing.get("tiers", {})
             if tier not in expected_allowed
         ]
-        # Every tier in pricing.json behaves per its daily_backups flag.
+        # Every tier in pricing.json behaves per its hourly_backups flag.
         for tier in expected_allowed:
-            app.dependency_overrides[get_current_team] = lambda t=tier: dict(
+            app.dependency_overrides[get_current_org] = lambda t=tier: dict(
                 TEST_TEAM, tier=t
             )
             try:
                 r = client.post("/backups")
                 assert r.status_code != 402, (
-                    f"{tier} has daily_backups:true in pricing.json but was blocked: {r.text}"
+                    f"{tier} has hourly_backups:true in pricing.json but was blocked: {r.text}"
                 )
             finally:
                 app.dependency_overrides.clear()
         for tier in expected_blocked:
-            app.dependency_overrides[get_current_team] = lambda t=tier: dict(
+            app.dependency_overrides[get_current_org] = lambda t=tier: dict(
                 TEST_TEAM, tier=t
             )
             try:
                 r = client.post("/backups")
                 assert r.status_code == 402, (
-                    f"{tier} lacks daily_backups:true in pricing.json but passed the gate"
+                    f"{tier} lacks hourly_backups:true in pricing.json but passed the gate"
                 )
             finally:
                 app.dependency_overrides.clear()
 
         # Unknown tier → 402 (falls back to free limits).
-        app.dependency_overrides[get_current_team] = lambda: dict(
+        app.dependency_overrides[get_current_org] = lambda: dict(
             TEST_TEAM, tier="enterprise"
         )
         try:
@@ -1924,9 +3976,9 @@ class TestBackupEndpoints:
         r = pro_client.post("/backups")
         assert r.status_code == 201, r.text
         manifest = r.json()
-        assert manifest["team_id"] == TEST_TEAM_ID
+        assert manifest["org_id"] == TEST_ORG_ID
         assert manifest["node_count"] == 0
-        assert manifest["backup_id"].startswith(TEST_TEAM_ID + "/")
+        assert manifest["backup_id"].startswith(TEST_ORG_ID + "/")
 
         r = pro_client.get("/backups")
         assert r.status_code == 200
@@ -1953,7 +4005,7 @@ class TestBackupEndpoints:
         """Nonexistent backup object → clean 400, not 500."""
         r = pro_client.post(
             "/backups/restore",
-            json={"backup_key": f"backups/{TEST_TEAM_ID}/20260101T000000Z/dump.enc", "confirm": True},
+            json={"backup_key": f"backups/{TEST_ORG_ID}/20260101T000000Z/dump.enc", "confirm": True},
         )
         assert r.status_code == 400
         assert "not found" in r.json()["detail"]
@@ -1991,6 +4043,99 @@ class TestSessionFloodGate:
         assert r.status_code == 400, r.text
         assert "cap" in r.text.lower()
 
+    def test_turn_cap_exceeded_record(self, client, caplog):
+        """#2335 WI-1c: the turn-cap refusal emits a structured record naming
+        the cap + the demand (the >500-turn population is a leading indicator
+        — currently invisible on the product lane)."""
+        import logging
+
+        from tortoise.quota import MAX_SESSION_TURNS
+
+        conversation = [{"role": "user", "content": "hi"}] * (MAX_SESSION_TURNS + 1)
+        with caplog.at_level(logging.WARNING, logger="tortoise.api"):
+            r = client.post("/v1/sessions", json={
+                "session_id": "cap-record-session", "conversation": conversation,
+            })
+        assert r.status_code == 400, r.text
+        hits = [rec.getMessage() for rec in caplog.records
+                if "turn_cap_exceeded" in rec.getMessage()]
+        assert hits, "the turn-cap refusal must emit a structured record"
+        assert str(MAX_SESSION_TURNS + 1) in hits[0], hits[0]
+        assert str(MAX_SESSION_TURNS) in hits[0], hits[0]
+
+    def test_backfill_window_lands_below_the_handler_cap(self, client):
+        """#3575 P1-A: the backfill window must land at/below the HANDLER cap
+        (`MAX_SESSION_TURNS`), not the Pydantic `max_length` — a 1005-turn
+        session windowed to 1000 still 400s THIS route and writes NO receipt.
+
+        Posting the real windowed payload through the app (not merely
+        `SessionRequest(...)`) is the only assertion that bites: the Pydantic
+        boundary (1000) silently accepts a payload the handler then rejects.
+        """
+        from tortoise.quota import MAX_SESSION_TURNS
+        from tortoise.session_import import window_turns
+
+        conversation = [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": f"turn {i}"}
+            for i in range(1005)
+        ]
+        windowed, dropped = window_turns(conversation)
+        assert dropped == 1005 - len(windowed)
+        # Hit the REAL route first: the Pydantic boundary (max_length=1000)
+        # accepts `windowed`, so only the handler's own cap rejects it.
+        r = client.post("/v1/sessions", json={
+            "session_id": "backfill-window-over-cap",
+            "conversation": windowed,
+        })
+        assert r.status_code == 200, (
+            f"window kept {len(windowed)} turns; handler cap is "
+            f"{MAX_SESSION_TURNS} — the real route refused and the receipt "
+            f"is never written: {r.status_code} {r.text}"
+        )
+
+    def test_capture_observation_line_hosted(self, client, caplog):
+        """#2335 WI-1d: the hosted capture emits the observation line with
+        lane=hosted + the size fields (the hosted llm:mock lane runs the
+        real v2 extractor, so chunks/edus/max-tokens are present)."""
+        import json as _json
+        import logging
+        conv = [{"role": "user", "content": "Let's use PostgreSQL."},
+                {"role": "assistant", "content": "Agreed."}]
+        # the observation line is emitted by the SHARED sdk helper (_logger
+        # = "tortoise.sdk") — capture at the propagation root
+        with caplog.at_level(logging.INFO, logger="tortoise"):
+            r = client.post("/v1/sessions", json={
+                "session_id": "obs-hosted", "conversation": conv})
+        assert r.status_code == 200, r.text
+        lines = [rec.getMessage() for rec in caplog.records
+                 if "capture_observation" in rec.getMessage()]
+        assert lines, "a hosted capture must emit the observation line"
+        obs = _json.loads(lines[0].split("capture_observation ", 1)[1])
+        assert obs["lane"] == "hosted"
+        assert obs["mode"].startswith("llm:")
+        assert obs["chunks"] == 1, obs
+        assert obs["edus"] == 2, obs
+
+    def test_quota_refusal_record(self, client, caplog):
+        """#2335 WI-1c: the 402 points-gate raise emits a structured record
+        with est-at-refusal / count / max / tier — the hosted-low proxy for
+        the 402-filtered population (refusal-heavy = UNKNOWN, not covered)."""
+        import logging
+        dense = ("we should go. " * 300)  # 4500 chars < 5000 turn limit
+        conversation = [{"role": "user", "content": dense}] * 51
+        with caplog.at_level(logging.WARNING, logger="tortoise.api"):
+            r = client.post("/v1/sessions", json={
+                "session_id": "quota-record-session", "conversation": conversation,
+            })
+        assert r.status_code == 402, r.text[:200]
+        hits = [rec.getMessage() for rec in caplog.records
+                if "quota_refusal" in rec.getMessage()]
+        assert hits, "the 402 raise must emit a structured refusal record"
+        msg = hits[0]
+        # est-at-refusal, count, max, tier all present
+        assert "est=" in msg and "max=" in msg, msg
+        assert "tier=" in msg, msg
+
     def test_extraction_amplifier_402_zero_growth(self, client):
         """Dense sentence content → extraction-aware estimate exceeds the
         points quota → 402 BEFORE any write (zero node growth)."""
@@ -2006,9 +4151,9 @@ class TestSessionFloodGate:
         })
         assert r.status_code == 402, r.text[:300]
         # Zero growth: no Session node created (check the TEAM graph — the
-        # session writes go to namespace team_{team_id})
+        # session writes go to namespace org_{org_id})
         from tortoise.hosted_api import TortoiseSDK as _HASDK
-        rows = _HASDK(namespace=TEST_TEAM_ID)._get_proj().g.query(
+        rows = _HASDK(namespace=TEST_ORG_ID)._get_proj().g.query(
             "MATCH (s:Session {id:$sid}) RETURN count(s)",
             params={"sid": "dense-session"},
         ).result_set
@@ -2037,7 +4182,7 @@ class TestSessionFloodGate:
         })
         assert r.status_code == 200, r.text[:200]
         from tortoise.hosted_api import TortoiseSDK as _HASDK
-        proj = _HASDK(namespace=TEST_TEAM_ID)._get_proj()
+        proj = _HASDK(namespace=TEST_ORG_ID)._get_proj()
         rows = proj.g.query(
             "MATCH (p:Point) WHERE (p.is_episodic IS NULL OR p.is_episodic = false) "
             "AND p.pointKind <> 'event' RETURN count(p)",
@@ -2052,7 +4197,7 @@ class TestDreamBudget:
         rejects after MAX_DREAM_FULL_PER_HOUR (accumulation path, not seeding)."""
         import tortoise.hosted_api as ha
         from tortoise.quota import MAX_DREAM_FULL_PER_HOUR
-        ha._DREAM_FULL_BUCKETS.pop(TEST_TEAM_ID, None)
+        ha._DREAM_FULL_BUCKETS.pop(TEST_ORG_ID, None)
         try:
             for _ in range(MAX_DREAM_FULL_PER_HOUR):
                 r = client.post("/v1/dream?full=true", json={})
@@ -2060,16 +4205,16 @@ class TestDreamBudget:
             r = client.post("/v1/dream?full=true", json={})
             assert r.status_code == 429, f"expected 429, got {r.status_code}: {r.text[:200]}"
         finally:
-            ha._DREAM_FULL_BUCKETS.pop(TEST_TEAM_ID, None)
+            ha._DREAM_FULL_BUCKETS.pop(TEST_ORG_ID, None)
 
     def test_full_dream_within_budget_ok(self, client):
         import tortoise.hosted_api as ha
-        ha._DREAM_FULL_BUCKETS.pop(TEST_TEAM_ID, None)
+        ha._DREAM_FULL_BUCKETS.pop(TEST_ORG_ID, None)
         try:
             r = client.post("/v1/dream?full=true", json={})
             assert r.status_code == 200, r.text[:200]
         finally:
-            ha._DREAM_FULL_BUCKETS.pop(TEST_TEAM_ID, None)
+            ha._DREAM_FULL_BUCKETS.pop(TEST_ORG_ID, None)
 
 
 # ── #686: fail-closed quota enforcement at HTTP layer ──
@@ -2078,7 +4223,7 @@ class TestQuotaFailClosed:
     """Verify that quota check failures surface as 500, never silently pass."""
 
     def test_quota_check_error_returns_500(self, client, monkeypatch):
-        """When enforce_team_limit raises QuotaCheckError, the endpoint
+        """When enforce_org_limit raises QuotaCheckError, the endpoint
         returns 500 with a descriptive detail — fail-closed, never silent."""
         from tortoise.quota import QuotaCheckError  # noqa: I001
         import tortoise.quota as quota_mod
@@ -2086,7 +4231,7 @@ class TestQuotaFailClosed:
         def _fail_count(_limits, _resource, sdk=None):
             raise QuotaCheckError("simulated count query failure")
 
-        monkeypatch.setattr(quota_mod, "enforce_team_limit", _fail_count)
+        monkeypatch.setattr(quota_mod, "enforce_org_limit", _fail_count)
 
         r = client.post("/v1/points", json={"content": "should fail"})
         assert r.status_code == 500, f"expected 500, got {r.status_code}: {r.text[:200]}"
@@ -2096,7 +4241,7 @@ class TestQuotaFailClosed:
         )
 
     def test_quota_exceeded_returns_402(self, client, monkeypatch):
-        """When enforce_team_limit raises QuotaExceededError, the endpoint
+        """When enforce_org_limit raises QuotaExceededError, the endpoint
         returns 402 (payment required) — normal over-limit behavior."""
         from tortoise.quota import QuotaExceededError  # noqa: I001
         import tortoise.quota as quota_mod
@@ -2104,7 +4249,7 @@ class TestQuotaFailClosed:
         def _fail_exceeded(_limits, _resource, sdk=None):
             raise QuotaExceededError("Team points limit reached (1000)")
 
-        monkeypatch.setattr(quota_mod, "enforce_team_limit", _fail_exceeded)
+        monkeypatch.setattr(quota_mod, "enforce_org_limit", _fail_exceeded)
 
         r = client.post("/v1/points", json={"content": "should be over limit"})
         assert r.status_code == 402, f"expected 402, got {r.status_code}: {r.text[:200]}"
@@ -2203,8 +4348,8 @@ class TestEventReplay:
 
     def test_tenant_cannot_see_other_team_events(self, client):
         """Team A cannot see team B's events — trust boundary.
-        #432: team scoping is via graph namespace, not a team_id property."""
-        # Team A (TEST_TEAM_ID) queries events — must be empty.
+        #432: team scoping is via graph namespace, not a org_id property."""
+        # Team A (TEST_ORG_ID) queries events — must be empty.
         r = client.get("/v1/events")
         assert r.status_code == 200, r.text[:200]
         body = r.json()
@@ -2348,7 +4493,7 @@ class TestEventReplay:
 
     def test_event_has_required_fields(self, client):
         """Every event has seq, ts, type, event_id, payload.
-        #432: no team_id property — scoping is via graph namespace."""
+        #432: no org_id property — scoping is via graph namespace."""
         r = client.post("/v1/points", json={
             "content": "Structure check",
             "kind": "statement",
@@ -2435,15 +4580,15 @@ class TestInviteEndpointsRegistry:
             params={"id": "team-inv-001", "name": "invite-team"},
         )
         reg.query(
-            "CREATE (m:Membership {user_id: $uid, team_id: $tid, "
+            "CREATE (m:Membership {user_id: $uid, org_id: $tid, "
             "role: 'owner', status: 'active'})",
-            params={"uid": "user-1", "tid": "team-inv-001"},
+            params={"uid": _U1, "tid": "team-inv-001"},
         )
         return client, sdk
 
     @pytest.fixture
     def session_user(self):
-        """JWT session user (get_current_user is NOT the get_current_team
+        """JWT session user (get_current_user is NOT the get_current_org
         override the client fixture applies)."""
 
         def _set(user_id: str, email: str | None = None):
@@ -2458,9 +4603,9 @@ class TestInviteEndpointsRegistry:
         """E2E-3 registry path: mint → accept → membership with the invited
         role; a used invite cannot be re-accepted."""
         tc, sdk = registry_env
-        session_user("user-1")
+        session_user(_U1)
         r = tc.post("/v1/invites", json={
-            "team_id": "team-inv-001", "email": "bob@example.com",
+            "org_id": "team-inv-001", "email": "bob@example.com",
             "role": "admin"})
         assert r.status_code == 200, r.text
         body = r.json()
@@ -2468,15 +4613,15 @@ class TestInviteEndpointsRegistry:
         assert body["role"] == "admin"
         token = body["token"]
 
-        session_user("user-2", "bob@example.com")
+        session_user(_U2, "bob@example.com")
         r = tc.post("/v1/invites/accept", json={"token": token})
         assert r.status_code == 200, r.text
-        assert r.json() == {"team_id": "team-inv-001", "role": "admin"}
+        assert r.json() == {"org_id": "team-inv-001", "role": "admin"}
 
         rows = sdk._get_registry().query(
-            "MATCH (m:Membership {team_id:$tid, user_id:$uid, status:'active'}) "
+            "MATCH (m:Membership {org_id:$tid, user_id:$uid, status:'active'}) "
             "RETURN m.role",
-            params={"tid": "team-inv-001", "uid": "user-2"},
+            params={"tid": "team-inv-001", "uid": _U2},
         ).result_set
         assert rows and rows[0][0] == "admin"  # invited role preserved
 
@@ -2488,21 +4633,21 @@ class TestInviteEndpointsRegistry:
         """The owner/admin gate must hold on the registry path too."""
         tc, sdk = registry_env
         sdk._get_registry().query(
-            "CREATE (m:Membership {user_id: $uid, team_id: $tid, "
+            "CREATE (m:Membership {user_id: $uid, org_id: $tid, "
             "role: 'member', status: 'active'})",
-            params={"uid": "user-9", "tid": "team-inv-001"},
+            params={"uid": _U9, "tid": "team-inv-001"},
         )
-        session_user("user-9")
+        session_user(_U9)
         r = tc.post("/v1/invites", json={
-            "team_id": "team-inv-001", "email": "bob@example.com",
+            "org_id": "team-inv-001", "email": "bob@example.com",
             "role": "member"})
         assert r.status_code == 403
 
     def test_mint_dedup_409_and_free_tier_402(self, registry_env,
                                               session_user):
         tc, sdk = registry_env
-        session_user("user-1")
-        payload = {"team_id": "team-inv-001", "email": "bob@example.com",
+        session_user(_U1)
+        payload = {"org_id": "team-inv-001", "email": "bob@example.com",
                    "role": "member"}
         assert tc.post("/v1/invites", json=payload).status_code == 200
         assert tc.post("/v1/invites", json=payload).status_code == 409
@@ -2513,38 +4658,38 @@ class TestInviteEndpointsRegistry:
             params={"id": "team-free-002", "name": "free-team"},
         )
         sdk._get_registry().query(
-            "CREATE (m:Membership {user_id: $uid, team_id: $tid, "
+            "CREATE (m:Membership {user_id: $uid, org_id: $tid, "
             "role: 'owner', status: 'active'})",
-            params={"uid": "user-1", "tid": "team-free-002"},
+            params={"uid": _U1, "tid": "team-free-002"},
         )
         r = tc.post("/v1/invites", json={
-            "team_id": "team-free-002", "email": "x@example.com",
+            "org_id": "team-free-002", "email": "x@example.com",
             "role": "member"})
         assert r.status_code == 402
 
     def test_list_and_rescind_registry_path(self, registry_env, session_user):
         tc, sdk = registry_env  # noqa: RUF059
-        session_user("user-1")
+        session_user(_U1)
         r = tc.post("/v1/invites", json={
-            "team_id": "team-inv-001", "email": "bob@example.com",
+            "org_id": "team-inv-001", "email": "bob@example.com",
             "role": "member"})
         invite_id = r.json()["invite_id"]
         token = r.json()["token"]
 
-        r = tc.get("/v1/invites?team_id=team-inv-001")
+        r = tc.get("/v1/invites?org_id=team-inv-001")
         assert r.status_code == 200
         assert [i["id"] for i in r.json()] == [invite_id]
 
-        r = tc.delete(f"/v1/invites/{invite_id}?team_id=team-inv-001")
+        r = tc.delete(f"/v1/invites/{invite_id}?org_id=team-inv-001")
         assert r.status_code == 200, r.text
         assert r.json()["revoked"] is True
 
-        r = tc.get("/v1/invites?team_id=team-inv-001")
+        r = tc.get("/v1/invites?org_id=team-inv-001")
         assert r.status_code == 200
         assert r.json() == []  # revoked no longer pending
 
         # revoked invite cannot be accepted (E2E-3)
-        session_user("user-2", "bob@example.com")
+        session_user(_U2, "bob@example.com")
         r = tc.post("/v1/invites/accept", json={"token": token})
         assert r.status_code == 400
 
@@ -2588,6 +4733,94 @@ class TestBackupStorageSeam:
         with pytest.raises(RuntimeError, match="unknown"):
             _ha._backup_storage()
 
+    def test_r2_mode_returns_shared_singleton(self, monkeypatch):
+        """#3968 — the R2 path is a process-wide singleton too.
+
+        N successive `_backup_storage()` calls must construct ONE `R2Storage`
+        (and therefore one boto3 client via `_s3()`), not N. This is the
+        indicator the issue names: the #3820 process-start-UNKNOWN resolve
+        retries one read per delivered write, and each retry used to pay a full
+        client construction."""
+        from tortoise import hosted_api as _ha
+
+        monkeypatch.delenv("TORTOISE_BACKUP_STORAGE", raising=False)
+        monkeypatch.setenv("R2_ACCOUNT_ID", "acct")
+        monkeypatch.setenv("R2_ACCESS_KEY_ID", "ak")
+        monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "sk")
+        monkeypatch.setenv("R2_BUCKET", "bkt")
+        monkeypatch.setattr(_ha, "_R2_BACKUP_STORE", None)
+        monkeypatch.setattr(_ha, "_R2_BACKUP_STORE_CONFIG", None)
+
+        real = _ha.R2Storage
+        built: list = []
+
+        def _spy(*a, **k):
+            store = real(*a, **k)
+            built.append(store)
+            return store
+
+        monkeypatch.setattr(_ha, "R2Storage", _spy)
+        stores = [_ha._backup_storage() for _ in range(5)]
+
+        assert len(built) == 1, (
+            "N calls must construct the R2 store ONCE (#3968); "
+            f"built {len(built)}"
+        )
+        assert all(s is stores[0] for s in stores), "callers must share one store"
+        assert isinstance(stores[0], real)
+
+    def test_r2_mode_rebuilds_when_config_changes(self, monkeypatch):
+        """Credential freshness — the cache key is the resolved R2 config.
+
+        A changed `R2_*` env (a rotation, or a test's monkeypatch) must rebuild
+        rather than serve a store pinned to the old credentials."""
+        from tortoise import hosted_api as _ha
+
+        monkeypatch.delenv("TORTOISE_BACKUP_STORAGE", raising=False)
+        monkeypatch.setenv("R2_ACCOUNT_ID", "acct")
+        monkeypatch.setenv("R2_ACCESS_KEY_ID", "ak")
+        monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "sk")
+        monkeypatch.setenv("R2_BUCKET", "bkt-a")
+        monkeypatch.setattr(_ha, "_R2_BACKUP_STORE", None)
+        monkeypatch.setattr(_ha, "_R2_BACKUP_STORE_CONFIG", None)
+
+        a = _ha._backup_storage()
+        b = _ha._backup_storage()
+        assert a is b, "an unchanged config must reuse the cached store"
+
+        monkeypatch.setenv("R2_BUCKET", "bkt-b")
+        c = _ha._backup_storage()
+        assert c is not a, "a changed R2 config must NOT serve the cached store"
+        assert (a._bucket, c._bucket) == ("bkt-a", "bkt-b")
+
+        # R2_ACCOUNT_ID changes the DERIVED endpoint, so it must invalidate too.
+        monkeypatch.setenv("R2_ACCOUNT_ID", "acct-2")
+        d = _ha._backup_storage()
+        assert d is not c, "a changed R2_ACCOUNT_ID (→ endpoint) must invalidate the cache"
+        assert d._endpoint == "https://acct-2.r2.cloudflarestorage.com"
+
+    def test_r2_mode_fail_closed_survives_a_populated_cache(self, monkeypatch):
+        """A cached store must never mask a now-incomplete config.
+
+        The key is compared before any cache return, so removing an `R2_*` var
+        still raises the fail-closed RuntimeError — the cache cannot outlive
+        the config that justified it."""
+        from tortoise import hosted_api as _ha
+
+        monkeypatch.delenv("TORTOISE_BACKUP_STORAGE", raising=False)
+        monkeypatch.setenv("R2_ACCOUNT_ID", "acct")
+        monkeypatch.setenv("R2_ACCESS_KEY_ID", "ak")
+        monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "sk")
+        monkeypatch.setenv("R2_BUCKET", "bkt")
+        monkeypatch.setattr(_ha, "_R2_BACKUP_STORE", None)
+        monkeypatch.setattr(_ha, "_R2_BACKUP_STORE_CONFIG", None)
+
+        assert _ha._backup_storage() is not None  # cache now populated
+
+        monkeypatch.delenv("R2_ACCOUNT_ID", raising=False)
+        with pytest.raises(RuntimeError, match="R2 not configured"):
+            _ha._backup_storage()
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # #985 — Redirect Location scheme behind the Fly proxy
@@ -2614,6 +4847,12 @@ class TestProxyProtoRedirect:
         from starlette.responses import PlainTextResponse
         from starlette.routing import Mount, Route
 
+        # NOTE (#2864): this mini-app deliberately omits
+        # McpPathCanonicalizerMiddleware. On the real app `/mcp` no longer
+        # redirects at all; these tests now exercise ForwardedProtoMiddleware
+        # GENERICALLY — for any other trailing-slash redirect the app emits.
+        # Do not "fix" a 307 failure here by adding the canonicalizer: the
+        # 307 is the fixture's point.
         sub = Starlette(routes=[Route("/", lambda _r: PlainTextResponse("root ok"))])
         app = Starlette(routes=[Mount("/mcp", app=sub)])
         app.add_middleware(ForwardedProtoMiddleware)
@@ -2692,7 +4931,7 @@ def test_make_sdk_reuses_healthy_anchor(monkeypatch):
         with tempfile.TemporaryDirectory() as td:
             db = os.path.join(td, "test.db")
             monkeypatch.setenv("TORTOISE_DB_PATH", db)
-            sdk1 = ha._make_sdk(namespace=ns)
+            sdk1 = ha._make_sdk(namespace=ns)  # noqa: F841
             anchor1 = ha._FALLBACK_KEEPALIVE.get(ns)
             assert anchor1 is not None, "anchor not stored"
             assert anchor1._proj is not None, "anchor not connected"
@@ -2727,7 +4966,7 @@ def test_make_sdk_rebinds_stale_anchor(monkeypatch):
         with tempfile.TemporaryDirectory() as td1:
             db1 = os.path.join(td1, "a.db")
             monkeypatch.setenv("TORTOISE_DB_PATH", db1)
-            sdk1 = ha._make_sdk(namespace=ns)
+            sdk1 = ha._make_sdk(namespace=ns)  # noqa: F841
             anchor1 = ha._FALLBACK_KEEPALIVE.get(ns)
             assert anchor1 is not None, "anchor not stored"
             assert anchor1._proj is not None
@@ -2746,6 +4985,422 @@ def test_make_sdk_rebinds_stale_anchor(monkeypatch):
             assert sdk2._get_proj() is not None
     finally:
         ha._FALLBACK_KEEPALIVE.pop(ns, None)
+
+
+@pytest.mark.embedded_only  # #2172 embedded keepalive anchor race (URI-less lane, D14)
+def test_make_sdk_concurrent_first_calls_single_anchor(monkeypatch):
+    """#2172: concurrent first _make_sdk calls for one namespace must create
+    exactly ONE keepalive anchor. The check-then-create race (two threads
+    both spawning on the same embedded db_path; the setdefault loser dropped
+    UNCLOSED → daemon socket unlinked mid-test → 503 / redis.socket
+    ConnectionError — the #2065/#2172 double-upload flake class) is closed
+    by _KEEPALIVE_LOCK. Regression: an __init__ construction probe scoped to
+    each round's db asserts post-fix counts (1 anchor + 2 fresh SDKs), no
+    ORPHAN construction (pre-fix: a 4th construction — the loser's anchor —
+    dropped unclosed), returned SDKs are distinct live clients attached to
+    the anchor's data-bearing server (sentinel round-trip), NOT the shared
+    anchor itself. The probe parks each counted construction ~300ms so the
+    pre-fix double-create is ~deterministic (the winner's construction is
+    held open while the loser reaches its own); under the lock only one
+    anchor construction can exist, so the park only costs time and can never
+    deadlock (join timeout is the net). Each round races a FRESH db file (no
+    daemon SAVE/socket teardown churn between rounds) and round 3 seeds a
+    STALE path-drifted anchor so the in-lock stale-evict + re-check branch is
+    exercised under contention too."""
+    import threading
+    import time
+    import uuid
+
+    import tortoise.hosted_api as ha
+
+    ns = f"anchor-race-{uuid.uuid4().hex}"
+    _orig_init = TortoiseSDK.__init__
+
+    def _make_counter(target_db: str):
+        made: list = []
+
+        def _counting_init(self, db_path=None, *, namespace=None, **kwargs):
+            if db_path == target_db:
+                made.append(self)
+                time.sleep(0.3)  # widen the pre-fix race window (docstring)
+            _orig_init(self, db_path, namespace=namespace, **kwargs)
+
+        return made, _counting_init
+
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            for _round in range(4):
+                if _round == 3:
+                    # Seed an anchor bound to a DIFFERENT path so this round
+                    # races from a stored-but-stale keepalive entry. Seed
+                    # constructions target seed.db — the round counter (filters
+                    # on round-3.db) is not installed yet, so they aren't
+                    # counted; they also don't park (db mismatch).
+                    seed_db = os.path.join(td, "seed.db")
+                    monkeypatch.setenv("TORTOISE_DB_PATH", seed_db)
+                    seeded_fresh = ha._make_sdk(namespace=ns)
+                    seeded_fresh.close()
+                    stale = ha._FALLBACK_KEEPALIVE.pop(ns, None)
+                    assert stale is not None, "seed anchor not stored"
+                    ha._FALLBACK_KEEPALIVE[ns] = stale  # pre-store: both threads see it
+                db = os.path.join(td, f"round-{_round}.db")
+                monkeypatch.setenv("TORTOISE_DB_PATH", db)
+                constructed, counting_init = _make_counter(db)
+                monkeypatch.setattr(TortoiseSDK, "__init__", counting_init)
+                results: list = []
+                errors: list = []
+                barrier = threading.Barrier(2)
+
+                def _go(_barrier=barrier, _results=results, _errors=errors):
+                    try:
+                        _barrier.wait(timeout=10)
+                        _results.append(ha._make_sdk(namespace=ns))
+                    except Exception as e:
+                        _errors.append(e)
+
+                threads = [threading.Thread(target=_go, daemon=True)
+                           for _ in range(2)]
+                for t in threads:
+                    t.start()
+                try:
+                    for t in threads:
+                        t.join(timeout=30)
+                        assert not t.is_alive(), (
+                            f"round {_round}: _make_sdk hung — a lock "
+                            f"regression would deadlock here")
+                    assert not errors, f"round {_round}: thread raised: {errors!r}"
+                    anchors = [v for k, v in ha._FALLBACK_KEEPALIVE.items()
+                               if k == ns]
+                    # Dict keys are unique, so this list has 0 or 1 entries —
+                    # a miss means the anchor was never stored (e.g. a fix
+                    # that builds but never inserts).
+                    assert anchors, (
+                        f"round {_round}: no anchor stored for {ns!r}")
+                    anchor = anchors[0]
+                    assert anchor._proj is not None, "anchor not connected"
+                    assert ha._anchor_usable(anchor, db) is True
+                    # Lower bound, not equality: a legitimate env-fault
+                    # recovery (the lock winner's eager connect fails, the
+                    # loser's in-lock re-check evicts it and recreates) adds
+                    # a second, CLOSED anchor construction on correct code.
+                    # The discriminator is the closed-aware orphan assert.
+                    assert len(constructed) >= 1 + len(results), (
+                        f"round {_round}: expected >= 1 anchor + 1 per "
+                        f"returned fresh SDK = {1 + len(results)} "
+                        f"constructions, got {len(constructed)} — an anchor "
+                        f"or fresh SDK was never built")
+                    # Fresh-per-request contract: returned SDKs are NOT the
+                    # shared anchor (a regression returning it would share
+                    # mutable session state across requests — the #493 class).
+                    assert all(s is not anchor for s in results), (
+                        f"round {_round}: a returned SDK IS the shared anchor")
+                    assert len({id(s) for s in results}) == 2, (
+                        f"round {_round}: returned SDKs are not distinct")
+                    returned = {id(s) for s in results}
+                    # Closed-aware orphan check: every construction must be
+                    # the stored anchor, a returned SDK, or a CLOSED evicted
+                    # candidate (the env-fault recovery path closes what it
+                    # evicts). Pre-fix the #2172 loser was dropped OPEN —
+                    # unclosed and unaccounted — which is exactly the leak.
+                    unclosed_orphans = [
+                        inst for inst in constructed
+                        if not getattr(inst, "_t_closed", False)
+                        and inst is not anchor
+                        and id(inst) not in returned]
+                    assert not unclosed_orphans, (
+                        f"round {_round}: {len(unclosed_orphans)} UNCLOSED "
+                        f"construction(s) neither stored nor returned — a "
+                        f"dropped-unclosed SDK (the #2172 race) leaks here")
+                    # Data-plane probe: a node written through the anchor's
+                    # graph must be readable via every returned SDK — proves
+                    # they attach to the anchor's data-bearing daemon, not a
+                    # silently-empty or other-path server (#1607/#2065). Raw
+                    # graph query through _get_proj().g is the established
+                    # test idiom (test_index_surfacing.py).
+                    sentinel = f"race-{ns}-{_round}"
+                    anchor._get_proj().g.query(
+                        "CREATE (n:RaceSentinel {rk: $rk})", {"rk": sentinel})
+                    for sdk in results:
+                        seen = sdk._get_proj().g.query(
+                            "MATCH (n:RaceSentinel {rk: $rk}) RETURN count(n)",
+                            {"rk": sentinel}).result_set[0][0]
+                        assert seen == 1, (
+                            f"round {_round}: returned SDK missed the "
+                            f"anchor's write — decoupled server")
+                    if _round == 3:
+                        assert anchor is not stale, "stale anchor re-served"
+                        assert stale._t_closed is True, (
+                            "stale anchor evicted but never closed — the "
+                            "dropped-unclosed daemon leak #2172 prevents")
+                        assert stale._proj is None
+                finally:
+                    # Deterministic round teardown (close-then-pop, #1950):
+                    # shut every daemon we started. Under FIXED code nothing
+                    # was dropped (the orphans assert proved it).
+                    for sdk in results:
+                        try:  # noqa: SIM105
+                            sdk.close()
+                        except Exception:
+                            pass
+                    leftover = ha._FALLBACK_KEEPALIVE.pop(ns, None)
+                    if leftover is not None:
+                        try:  # noqa: SIM105
+                            leftover.close()
+                        except Exception:
+                            pass
+        finally:
+            leftover = ha._FALLBACK_KEEPALIVE.pop(ns, None)
+            if leftover is not None:
+                try:  # noqa: SIM105
+                    leftover.close()
+                except Exception:
+                    pass
+
+
+@pytest.mark.embedded_only  # #2172 embedded keepalive anchor race (URI-less lane, D14)
+def test_registry_anchor_reuses_healthy_anchor(monkeypatch):
+    """#2172: the registry anchor's healthy-hit fast path (lock-free return
+    of the stored anchor) must never replace or evict a healthy anchor.
+    _make_sdk's twin is pinned by test_make_sdk_reuses_healthy_anchor; the
+    registry path is request-hot in embedded selfhost mode (four per-request
+    helpers call _registry_anchor) and pre-fix used a replacement-prone
+    direct assignment, so pin it explicitly."""
+    import tortoise.hosted_api as ha
+
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            db = os.path.join(td, "registry.db")
+            monkeypatch.setenv("TORTOISE_DB_PATH", db)
+            anchor1 = ha._registry_anchor()
+            assert ha._FALLBACK_KEEPALIVE.get("registry") is anchor1
+            assert ha._anchor_usable(anchor1, db) is True
+            # second call: same object — no eviction, no replacement
+            anchor2 = ha._registry_anchor()
+            assert anchor2 is anchor1, "healthy anchor replaced"
+            assert ha._FALLBACK_KEEPALIVE.get("registry") is anchor1
+            assert anchor1._proj is not None
+        finally:
+            leftover = ha._FALLBACK_KEEPALIVE.pop("registry", None)
+            if leftover is not None:
+                try:  # noqa: SIM105
+                    leftover.close()
+                except Exception:
+                    pass
+
+
+@pytest.mark.embedded_only  # #2172 embedded keepalive anchor race (URI-less lane, D14)
+def test_registry_anchor_concurrent_first_calls_single_anchor(monkeypatch):
+    """#2172: _registry_anchor() and _make_sdk(namespace="registry") share
+    the "registry" keepalive key through TWO separate check-then-set code
+    paths — the lock must serialize BOTH so a concurrent cold start yields
+    one anchored server. Mode 1 (registry ×2): concurrent _registry_anchor()
+    calls must return the SAME object — identity is the direct check, since
+    _registry_anchor returns the stored anchor itself; pre-fix the
+    direct-assignment loser leaked its own unclosed anchor and each thread
+    returned a different one. Mode 2 (make_sdk-vs-registry): the mixed
+    cold-start race (hosted_api.py:991 pattern) must produce exactly one
+    anchor plus one fresh SDK, distinct and attached to the same server.
+    Mode 3 (registry-stale-race): seeds a path-drifted "registry" anchor so
+    the concurrent stale-evict branch is exercised for this path too. The
+    same ~300ms construction park makes the pre-fix race ~deterministic."""
+    import threading
+    import time
+
+    import tortoise.hosted_api as ha
+
+    _orig_init = TortoiseSDK.__init__
+
+    def _make_counter(target_db: str):
+        made: list = []
+
+        def _counting_init(self, db_path=None, *, namespace=None, **kwargs):
+            if db_path == target_db:
+                made.append(self)
+                time.sleep(0.3)  # widen the pre-fix race window (docstring)
+            _orig_init(self, db_path, namespace=namespace, **kwargs)
+
+        return made, _counting_init
+
+    modes = (
+        ("registry-x2",
+         (ha._registry_anchor, ha._registry_anchor),
+         True, False),
+        ("make-sdk-vs-registry",
+         (lambda: ha._make_sdk(namespace="registry"), ha._registry_anchor),
+         False, False),
+        ("registry-stale-race",
+         (ha._registry_anchor, ha._registry_anchor),
+         True, True),
+    )
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            for label, callers, expect_identity, seed_stale in modes:
+                if seed_stale:
+                    # Seed an anchor on a drifted path (see test 1 round 3).
+                    seed_db = os.path.join(td, f"{label}-seed.db")
+                    monkeypatch.setenv("TORTOISE_DB_PATH", seed_db)
+                    seeded_fresh = ha._make_sdk(namespace="registry")
+                    seeded_fresh.close()
+                    stale = ha._FALLBACK_KEEPALIVE.pop("registry", None)
+                    assert stale is not None, "seed anchor not stored"
+                    ha._FALLBACK_KEEPALIVE["registry"] = stale
+                db = os.path.join(td, f"{label}.db")
+                monkeypatch.setenv("TORTOISE_DB_PATH", db)
+                constructed, counting_init = _make_counter(db)
+                monkeypatch.setattr(TortoiseSDK, "__init__", counting_init)
+                results: list = []
+                errors: list = []
+                barrier = threading.Barrier(2)
+
+                def _go(fn, _barrier=barrier, _results=results,
+                        _errors=errors):
+                    try:
+                        _barrier.wait(timeout=10)
+                        _results.append(fn())
+                    except Exception as e:
+                        _errors.append(e)
+
+                threads = [threading.Thread(target=_go, args=(fn,), daemon=True)
+                           for fn in callers]
+                for t in threads:
+                    t.start()
+                try:
+                    for t in threads:
+                        t.join(timeout=30)
+                        assert not t.is_alive(), (
+                            f"{label}: cold-start call hung — a lock "
+                            f"regression would deadlock here")
+                    assert not errors, f"{label}: thread raised: {errors!r}"
+                    anchor = ha._FALLBACK_KEEPALIVE.get("registry")
+                    assert anchor is not None, f"{label}: anchor not stored"
+                    assert anchor._proj is not None, f"{label}: not connected"
+                    assert ha._anchor_usable(anchor, db) is True
+                    fresh_count = sum(1 for s in results if s is not anchor)
+                    # Lower bound, not equality — a legit env-fault recovery
+                    # (winner's eager connect fails; loser's in-lock re-check
+                    # evicts + recreates) adds a second, CLOSED anchor
+                    # construction on correct code. The discriminator is the
+                    # closed-aware orphan assert below.
+                    assert len(constructed) >= 1 + fresh_count, (
+                        f"{label}: expected >= 1 anchor + 1 per returned "
+                        f"fresh SDK = {1 + fresh_count} constructions, got "
+                        f"{len(constructed)} — an anchor was never built")
+                    if expect_identity:
+                        if results[0] is results[1]:
+                            assert results[0] is anchor, f"{label}: wrong object"
+                        else:
+                            # Distinct results carry two signatures.
+                            # Regression: the pre-fix direct-assignment loser
+                            # was dropped OPEN — two open distinct anchors.
+                            # Env-fault recovery (CORRECT code): the winner's
+                            # eager connect failed and the loser's in-lock
+                            # re-check evicted + CLOSED it, then created the
+                            # stored anchor. _t_closed disambiguates, so the
+                            # test stays red on the bug and green on the
+                            # fault, with a self-diagnosing message.
+                            assert (
+                                getattr(results[0], "_t_closed", False)
+                                or getattr(results[1], "_t_closed", False)
+                            ), (
+                                f"{label}: two OPEN distinct anchors — the "
+                                f"#2172 double-create (the env-fault recovery "
+                                f"closes the evicted anchor; an open dropped "
+                                f"anchor is the regression signature)")
+                            assert anchor in results, (
+                                f"{label}: evicted anchor not replaced")
+                    else:
+                        if sum(1 for s in results if s is anchor) == 1:
+                            # Healthy shape: the _registry_anchor caller
+                            # returned the stored anchor; the _make_sdk
+                            # caller returned a distinct fresh SDK attached
+                            # to the same server (sentinel proves it).
+                            assert len({id(s) for s in results}) == 2, (
+                                f"{label}: results not distinct")
+                            fresh = next(s for s in results
+                                         if s is not anchor)
+                            sentinel = f"race-registry-{label}"
+                            anchor._get_proj().g.query(
+                                "CREATE (n:RaceSentinel {rk: $rk})",
+                                {"rk": sentinel})
+                            seen = fresh._get_proj().g.query(
+                                "MATCH (n:RaceSentinel {rk: $rk}) "
+                                "RETURN count(n)",
+                                {"rk": sentinel}).result_set[0][0]
+                            assert seen == 1, (
+                                f"{label}: fresh SDK missed the anchor's "
+                                f"write — decoupled server")
+                        else:
+                            # Env-fault recovery shape (mirror of the
+                            # identity branch): the lock winner's eager
+                            # connect failed, the loser's in-lock re-check
+                            # evicted + CLOSED the winner's anchor and built
+                            # the stored one — which NO caller returns
+                            # (_make_sdk never returns the anchor). Results
+                            # are exactly [closed evicted anchor, live fresh
+                            # SDK]; the data-plane check proves the live SDK
+                            # attaches to the STORED anchor's daemon.
+                            evicted = [s for s in results
+                                       if getattr(s, "_t_closed", False)]
+                            assert len(evicted) == 1, (
+                                f"{label}: stored anchor missing from "
+                                f"results with {len(evicted)} closed "
+                                f"result(s) — expected exactly the one "
+                                f"evicted anchor (two OPEN distinct results "
+                                f"would be the #2172 double-create)")
+                            live = next(s for s in results
+                                        if not getattr(s, "_t_closed", False))
+                            assert live is not anchor, (
+                                f"{label}: live result IS the stored anchor")
+                            assert anchor._proj is not None
+                            sentinel = f"race-registry-{label}-fault"
+                            anchor._get_proj().g.query(
+                                "CREATE (n:RaceSentinel {rk: $rk})",
+                                {"rk": sentinel})
+                            seen = live._get_proj().g.query(
+                                "MATCH (n:RaceSentinel {rk: $rk}) "
+                                "RETURN count(n)",
+                                {"rk": sentinel}).result_set[0][0]
+                            assert seen == 1, (
+                                f"{label}: surviving SDK missed the stored "
+                                f"anchor's write — decoupled server")
+                    returned = {id(s) for s in results}
+                    unclosed_orphans = [
+                        inst for inst in constructed
+                        if not getattr(inst, "_t_closed", False)
+                        and inst is not anchor
+                        and id(inst) not in returned]
+                    assert not unclosed_orphans, (
+                        f"{label}: {len(unclosed_orphans)} UNCLOSED "
+                        f"construction(s) neither stored nor returned — a "
+                        f"dropped-unclosed SDK (the #2172 race) leaks here")
+                    if seed_stale:
+                        assert anchor is not stale, "stale anchor re-served"
+                        assert stale._t_closed is True, (
+                            "stale anchor evicted but never closed — the "
+                            "dropped-unclosed daemon leak #2172 prevents")
+                        assert stale._proj is None
+                finally:
+                    for sdk in results:
+                        try:  # noqa: SIM105
+                            sdk.close()
+                        except Exception:
+                            pass
+                    leftover = ha._FALLBACK_KEEPALIVE.pop("registry", None)
+                    if leftover is not None:
+                        try:  # noqa: SIM105
+                            leftover.close()
+                        except Exception:
+                            pass
+        finally:
+            # Leave no anchored "registry" server bound to our tempdir for
+            # whichever test runs next (it cold-starts its own).
+            leftover = ha._FALLBACK_KEEPALIVE.pop("registry", None)
+            if leftover is not None:
+                try:  # noqa: SIM105
+                    leftover.close()
+                except Exception:
+                    pass
+
 
 class TestRateLimitRealClientIP:
     """#1559: the per-IP rate-limit fallback must key on the REAL client IP
@@ -2866,7 +5521,7 @@ class TestCaptureSpeakerParity:
         })
         assert r.status_code == 200, r.text[:200]
         from tortoise.hosted_api import TortoiseSDK as _HASDK
-        rows = _HASDK(namespace=TEST_TEAM_ID)._get_proj().g.query(
+        rows = _HASDK(namespace=TEST_ORG_ID)._get_proj().g.query(
             "MATCH (t:Point {pointKind:'event'}) RETURN t.speaker"
         ).result_set
         assert rows and rows[0][0] == "user", rows
@@ -2878,7 +5533,7 @@ class TestCaptureSpeakerParity:
             "session_id": "sp-none", "conversation": [{"role": None, "content": "short sentence here."}]})
         assert r.status_code == 200, r.text[:200]
         from tortoise.hosted_api import TortoiseSDK as _HASDK
-        rows = _HASDK(namespace=TEST_TEAM_ID)._get_proj().g.query(
+        rows = _HASDK(namespace=TEST_ORG_ID)._get_proj().g.query(
             "MATCH (t:Point {pointKind:'event'}) RETURN t.speaker"
         ).result_set
         assert rows and rows[0][0] == "unknown", rows
@@ -2890,7 +5545,7 @@ class TestCaptureSpeakerParity:
             "session_id": "sp-123", "conversation": [{"role": 123, "content": "short sentence here."}]})
         assert r.status_code == 200, r.text[:200]
         from tortoise.hosted_api import TortoiseSDK as _HASDK
-        rows = _HASDK(namespace=TEST_TEAM_ID)._get_proj().g.query(
+        rows = _HASDK(namespace=TEST_ORG_ID)._get_proj().g.query(
             "MATCH (t:Point {pointKind:'event'}) RETURN t.speaker"
         ).result_set
         assert rows and rows[0][0] == "123", rows
@@ -2906,7 +5561,7 @@ class TestCaptureSpeakerParity:
             "conversation": [{"role": "user", "content": content}]})
         assert r.status_code == 200, r.text[:300]
         from tortoise.hosted_api import TortoiseSDK as _HASDK
-        rows = _HASDK(namespace=TEST_TEAM_ID)._get_proj().g.query(
+        rows = _HASDK(namespace=TEST_ORG_ID)._get_proj().g.query(
             "MATCH (t:Point {pointKind:'event'}) RETURN t.content"
         ).result_set
         assert rows and rows[0][0] == "[user] " + content[:5000], rows
@@ -2926,7 +5581,7 @@ class TestCaptureStoredTurnParity:
         r = client.post("/v1/sessions", json={
             "session_id": "byte-same", "conversation": conv})
         assert r.status_code == 200, r.text[:200]
-        hosted_turns = _stored_turns(_HASDK(namespace=TEST_TEAM_ID))
+        hosted_turns = _stored_turns(_HASDK(namespace=TEST_ORG_ID))
         # sdk capture of the same conversation + session_id
         sdk = TortoiseSDK(db_path=str(tmp_path / "t.db"))
         sdk.capture_session(conv, session_id="byte-same")
@@ -2950,10 +5605,349 @@ class TestV2SessionFloodGate:
         assert r.status_code == 402, r.text[:300]
         # Zero growth: no Session node created (pre-write gate).
         from tortoise.hosted_api import TortoiseSDK as _HASDK
-        rows = _HASDK(namespace=TEST_TEAM_ID)._get_proj().g.query(
+        rows = _HASDK(namespace=TEST_ORG_ID)._get_proj().g.query(
             "MATCH (s:Session {id:$sid}) RETURN count(s)",
             params={"sid": "dense-v2-session"}).result_set
         assert rows[0][0] == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# #2600 (Phase 1, Task 2) — Session.actor_user_id stamp via the REAL registry
+# auth face. POST /v1/sessions is key-only (get_current_org_gated) — on the
+# docker lane (registry CP) the two "members" are registry-seeded keys with
+# distinct UUID creators (sdk.apikey_create(created_by=<uuid>)), authenticated
+# with the real tt_ keys (NO DI override — an override dict bypasses the
+# registry branch's created_by → actor_user_id alias + _data_sdk ContextVar
+# set, so a DI-seam capture would be actor-less for the wrong reason).
+
+_2600_UUID_A = "11111111-1111-4111-8111-111111111111"
+_2600_UUID_B = "22222222-2222-4222-8222-222222222222"
+
+
+class TestSessionActorStamp2600:
+    """Session MERGE actor clause — first-writer-wins coalesce + legacy
+    backfill, asserted via DIRECT graph read (list_sessions does not expose
+    actor_user_id until Task 5)."""
+
+    def _data_sdk(self, org_id: str):
+
+        """Open the TEAM data graph directly (Session nodes live in the
+        namespace org_{tid} — NOT the registry projection the mint SDK
+        returns)."""
+        import tortoise.hosted_api as ha_mod
+        return ha_mod._make_sdk(namespace=org_id)
+
+    def _session_actor(self, org_id: str, session_id: str):
+        rows = self._data_sdk(org_id)._get_proj().g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.actor_user_id",
+            params={"sid": session_id}).result_set
+        return rows[0][0] if rows else None
+
+    def _setup(self, tmp_path):
+        """Temp registry + seeded pro team + real-auth TestClient (no DI
+        override). Returns (sdk, org_id, client)."""
+        import tortoise.hosted_api as ha_mod
+        db_path = os.path.join(tmp_path, "stamp.db")
+        _orig = _patch_tortoise_sdk_init(db_path)
+        os.environ["TORTOISE_DB_PATH"] = db_path
+        sdk = ha_mod._make_sdk(namespace="registry")
+        tid = "team-2600-stamp"
+        _seed_team_graphs(sdk, tid, "pro", None)
+        try:
+            with TestClient(ha_mod.app,
+                            raise_server_exceptions=False) as tc:
+                yield sdk, tid, tc
+        finally:
+            os.environ.pop("TORTOISE_DB_PATH", None)
+            _restore_tortoise_sdk_init(_orig)
+
+    def test_registry_member_capture_stamps_actor(self, tmp_path):
+        """key minted with created_by=<uuidA> → capture (fresh session_id)
+        → Session.actor_user_id == uuidA (direct graph read) + harness
+        present + Session count 1."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            keyA = sdk.apikey_create(tid, _2600_UUID_A)
+            hA = {"Authorization": f"Bearer {keyA['api_key']}"}
+            r = tc.post("/v1/sessions", headers=hA, json={
+                "conversation": [{"role": "user", "content": "we should ship actor attribution first."},
+                                  {"role": "assistant", "content": "agree — stamp it at capture."}],
+                "session_id": "s-stamp-2600-a", "harness": "claude"})
+            assert r.status_code == 200, r.text[:300]
+            rows = self._data_sdk(tid)._get_proj().g.query(
+                "MATCH (s:Session {id:$sid}) RETURN s.actor_user_id, s.harness",
+                params={"sid": "s-stamp-2600-a"}).result_set
+            assert rows and rows[0][0] == _2600_UUID_A, rows
+            assert rows[0][1] == "claude", rows
+        finally:
+            gen.close()
+
+    def test_two_members_stamp_their_own_sessions(self, tmp_path):
+        """uuidA and uuidB each capture their OWN session → each Session
+        carries its actor; never cross-contaminated (deterministic,
+        unconditional per-session actor)."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            keyA = sdk.apikey_create(tid, _2600_UUID_A)
+            keyB = sdk.apikey_create(tid, _2600_UUID_B)
+            hA = {"Authorization": f"Bearer {keyA['api_key']}"}
+            hB = {"Authorization": f"Bearer {keyB['api_key']}"}
+            for h, sid, _expect in ((hA, "s-stamp-2600-ba", _2600_UUID_A),
+                                   (hB, "s-stamp-2600-bb", _2600_UUID_B)):
+                r = tc.post("/v1/sessions", headers=h, json={
+                    "conversation": [{"role": "user", "content": "member capture."},
+                                      {"role": "assistant", "content": "stamped."}],
+                    "session_id": sid})
+                assert r.status_code == 200, r.text[:300]
+            rows = self._data_sdk(tid)._get_proj().g.query(
+                "MATCH (s:Session) WHERE s.id IN $sids RETURN s.id, s.actor_user_id "
+                "ORDER BY s.id",
+                params={"sids": ["s-stamp-2600-ba", "s-stamp-2600-bb"]}).result_set
+            by_sid = {row[0]: row[1] for row in rows}
+            assert by_sid == {"s-stamp-2600-ba": _2600_UUID_A,
+                              "s-stamp-2600-bb": _2600_UUID_B}, by_sid
+        finally:
+            gen.close()
+
+    def test_cross_actor_repost_keeps_first_writer(self, tmp_path):
+        """P1-1 coalesce discriminator: A captures S; B re-POSTs the SAME
+        session_id → Session.actor_user_id stays A (first-writer-wins — a
+        plain SET would show B). Node count unchanged (#1727)."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            keyA = sdk.apikey_create(tid, _2600_UUID_A)
+            keyB = sdk.apikey_create(tid, _2600_UUID_B)
+            hA = {"Authorization": f"Bearer {keyA['api_key']}"}
+            hB = {"Authorization": f"Bearer {keyB['api_key']}"}
+            conv = [{"role": "user", "content": "we should open the beta."},
+                    {"role": "assistant", "content": "agreed."}]
+            r1 = tc.post("/v1/sessions", headers=hA, json={
+                "conversation": conv, "session_id": "s-stamp-2600-fww"})
+            assert r1.status_code == 200, r1.text[:300]
+            r2 = tc.post("/v1/sessions", headers=hB, json={
+                "conversation": conv, "session_id": "s-stamp-2600-fww"})
+            assert r2.status_code == 200, r2.text[:300]
+            rows = self._data_sdk(tid)._get_proj().g.query(
+                "MATCH (s:Session {id:$sid}) RETURN s.actor_user_id",
+                params={"sid": "s-stamp-2600-fww"}).result_set
+            assert rows[0][0] == _2600_UUID_A, \
+                f"cross-actor re-POST overwrote the first writer: {rows}"
+        finally:
+            gen.close()
+
+    def test_legacy_null_actor_session_backfilled_on_repost(self, tmp_path):
+        """Legacy backfill pin: seed a Session node WITHOUT actor_user_id
+        (pre-#2600 shape) → member B re-POSTs it → coalesce backfills B onto
+        the Session (true-retry merge); the session's legacy turn Points
+        carry no actor at the EVENT level (they were written pre-stamp)."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            # seed the legacy Session + its turn Point (the pre-#2600 shape:
+            # no actor_user_id anywhere) in the TEAM data graph
+            proj = self._data_sdk(tid)._get_proj()
+            proj.g.query(
+                "CREATE (s:Session {id:$sid, created_at:$now, turn_count:1, "
+                "is_episodic:true})-[:CONTAINS]->"
+                "(t:Point {id:$tid, content:'[user] legacy', pointKind:'event', "
+                "is_operator:false, is_episodic:true})",
+                params={"sid": "s-stamp-2600-legacy",
+                        "now": datetime.now(UTC).isoformat(),
+                        "tid": "s-stamp-2600-legacy_t0"})
+            keyB = sdk.apikey_create(tid, _2600_UUID_B)
+            hB = {"Authorization": f"Bearer {keyB['api_key']}"}
+            r = tc.post("/v1/sessions", headers=hB, json={
+                "conversation": [{"role": "user", "content": "true-retry legacy backfill."},
+                                  {"role": "assistant", "content": "ok."}],
+                "session_id": "s-stamp-2600-legacy"})
+            assert r.status_code == 200, r.text[:300]
+            rows = proj.g.query(
+                "MATCH (s:Session {id:$sid}) RETURN s.actor_user_id",
+                params={"sid": "s-stamp-2600-legacy"}).result_set
+            assert rows[0][0] == _2600_UUID_B, \
+                f"legacy null-actor session not backfilled on re-POST: {rows}"
+        finally:
+            gen.close()
+
+    def test_actorless_key_repost_keeps_first_writer(self, tmp_path):
+        """P1-1 variant: the pre-#2600 'api' class (non-UUID created_by) is
+        NOT an actor — its re-POST must not erase A's stamp (missing clause
+        ≠ wipe)."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            keyA = sdk.apikey_create(tid, _2600_UUID_A)
+            legacy = sdk.apikey_create(tid, "api")
+            hA = {"Authorization": f"Bearer {keyA['api_key']}"}
+            hL = {"Authorization": f"Bearer {legacy['api_key']}"}
+            conv = [{"role": "user", "content": "attribution contract."},
+                    {"role": "assistant", "content": "locked."}]
+            r1 = tc.post("/v1/sessions", headers=hA, json={
+                "conversation": conv, "session_id": "s-stamp-2600-api"})
+            assert r1.status_code == 200, r1.text[:300]
+            r2 = tc.post("/v1/sessions", headers=hL, json={
+                "conversation": conv, "session_id": "s-stamp-2600-api"})
+            assert r2.status_code == 200, r2.text[:300]
+            rows = self._data_sdk(tid)._get_proj().g.query(
+                "MATCH (s:Session {id:$sid}) RETURN s.actor_user_id",
+                params={"sid": "s-stamp-2600-api"}).result_set
+            assert rows[0][0] == _2600_UUID_A, rows
+        finally:
+            gen.close()
+
+    def _v2_fail_once_extractor(self, calls, *, fail_count=1):
+        """A v2 extractor stub that returns errors for the first N calls
+        (capture_ok=False shape) then succeeds (mirrors the #2335 hosted
+        twin's _v2_fail_then_succeed)."""
+        def _fake(*a, **kw):
+            calls["n"] += 1
+            if calls["n"] <= fail_count:
+                return {
+                    "session_id": kw.get("session_id", "s"),
+                    "story_arc": "", "embed_list": {},
+                    "search": {"mode": "embedded", "degraded": True},
+                    "payload": None,
+                    "chain_notes": [], "link_before_create": [],
+                    "supersessions": [], "warnings": [], "minted_kinds": [],
+                    "errors": ["RuntimeError: provider returned 500"],
+                    "stats": {"llm": {"calls": 1}, "recovery": {}},
+                    "error_census": {},
+                }
+            return {
+                "session_id": kw.get("session_id", "s"),
+                "story_arc": "story", "embed_list": {},
+                "search": {"mode": "embedded", "degraded": True},
+                "payload": {"entities": [], "events": [], "points": [
+                    {"content": "the retry worked", "pointKind": "statement",
+                     "about_entities": []}], "operators": []},
+                "chain_notes": [], "link_before_create": [],
+                "supersessions": [], "warnings": [], "minted_kinds": [],
+                "stats": {"llm": {"calls": 1}, "recovery": {}},
+                "error_census": {},
+            }
+        return _fake
+
+    def test_failed_prior_true_retry_keeps_first_writer_actor(self,
+                                                              tmp_path,
+                                                              monkeypatch):
+        """P2 shape (i): A's capture FAILS (extractor returns errors →
+        capture_ok=False); B true-retries the same session → the retry
+        re-runs extraction (mode != replayed) AND Session.actor_user_id
+        STILL == A (coalesce first-writer — the failed attempt's stamp is
+        A's, never overwritten by the successful retry)."""
+        import tortoise.extractor_v2 as ev2
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            calls = {"n": 0}
+            monkeypatch.setattr(ev2, "extract_session_v2",
+                                self._v2_fail_once_extractor(calls))
+            keyA = sdk.apikey_create(tid, _2600_UUID_A)
+            keyB = sdk.apikey_create(tid, _2600_UUID_B)
+            hA = {"Authorization": f"Bearer {keyA['api_key']}"}
+            hB = {"Authorization": f"Bearer {keyB['api_key']}"}
+            conv = [{"role": "user", "content": "we decided to ship the retry contract."}]
+            r1 = tc.post("/v1/sessions", headers=hA, json={
+                "conversation": conv, "session_id": "s-stamp-2600-retry"})
+            assert r1.status_code == 200, r1.text[:300]
+            assert r1.json()["errors"], "first attempt must fail"
+            # A's failed attempt DID stamp the Session (the MERGE runs
+            # before extraction; capture_ok=False is recorded after).
+            rows = self._data_sdk(tid)._get_proj().g.query(
+                "MATCH (s:Session {id:$sid}) RETURN s.actor_user_id, s.capture_ok",
+                params={"sid": "s-stamp-2600-retry"}).result_set
+            assert rows and rows[0][0] == _2600_UUID_A, rows
+            assert rows[0][1] is False, rows
+            # B true-retries → extraction re-runs (mode != replayed) and
+            # the Session actor STAYS A.
+            r2 = tc.post("/v1/sessions", headers=hB, json={
+                "conversation": conv, "session_id": "s-stamp-2600-retry"})
+            assert r2.status_code == 200, r2.text[:300]
+            assert r2.json()["extraction_mode"] != "replayed", r2.json()
+            assert calls["n"] == 2, "the true retry must re-run extraction"
+            rows = self._data_sdk(tid)._get_proj().g.query(
+                "MATCH (s:Session {id:$sid}) RETURN s.actor_user_id, s.capture_ok",
+                params={"sid": "s-stamp-2600-retry"}).result_set
+            assert rows[0][0] == _2600_UUID_A, \
+                f"true retry must keep A as first writer: {rows}"
+            assert rows[0][1] is True, rows
+        finally:
+            gen.close()
+
+    def test_raise_shape_repost_replays_keeps_actor(self, tmp_path,
+                                                     monkeypatch):
+        """P2 shape (ii): the extractor RAISES on A's capture (pre-MERGE or
+        mid-run → 503 path, capture_ok=None → legacy replay) → B's re-POST
+        REPLAYS (extraction skipped) and the Session keeps A (if stamped)
+        or stays null-actor — never B (zero B events)."""
+        import tortoise.extractor_v2 as ev2
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            calls = {"n": 0}
+
+            def _raising(*a, **kw):
+                calls["n"] += 1
+                raise RuntimeError("provider exploded mid-run")
+
+            monkeypatch.setattr(ev2, "extract_session_v2", _raising)
+            keyA = sdk.apikey_create(tid, _2600_UUID_A)
+            keyB = sdk.apikey_create(tid, _2600_UUID_B)
+            hA = {"Authorization": f"Bearer {keyA['api_key']}"}
+            hB = {"Authorization": f"Bearer {keyB['api_key']}"}
+            conv = [{"role": "user", "content": "raise shape capture."}]
+            r1 = tc.post("/v1/sessions", headers=hA, json={
+                "conversation": conv, "session_id": "s-stamp-2600-raise"})
+            # A 503 OR a 500 — both leave capture_ok=None (the capture_ok
+            # SET never runs on a raised extraction); accept either and
+            # assert the no-re-extract + first-writer contract below.
+            assert r1.status_code in (500, 503), r1.text[:300]
+            # A's Session IS stamped before the extractor raise (the Session
+            # MERGE runs before extraction); capture_ok stays None (legacy
+            # replay shape).
+            rows = self._data_sdk(tid)._get_proj().g.query(
+                "MATCH (s:Session {id:$sid}) RETURN s.actor_user_id, s.capture_ok",
+                params={"sid": "s-stamp-2600-raise"}).result_set
+            assert rows and rows[0][0] == _2600_UUID_A, rows
+            assert rows[0][1] is None, rows
+            r2 = tc.post("/v1/sessions", headers=hB, json={
+                "conversation": conv, "session_id": "s-stamp-2600-raise"})
+            # capture_ok=None → legacy REPLAY (extraction skipped): 200
+            # replayed, the Session keeps A, extractor never re-runs.
+            assert r2.status_code == 200, r2.text[:300]
+            assert r2.json()["extraction_mode"] == "replayed", r2.json()
+            rows = self._data_sdk(tid)._get_proj().g.query(
+                "MATCH (s:Session {id:$sid}) RETURN s.actor_user_id",
+                params={"sid": "s-stamp-2600-raise"}).result_set
+            assert rows[0][0] == _2600_UUID_A, rows
+            assert calls["n"] == 1, \
+                "a raise-shaped failed capture must NOT re-extract on re-POST"
+        finally:
+            gen.close()
+
+    def test_actorless_legacy_key_capture_is_unattributed(self, tmp_path):
+        """A key whose created_by is NOT a UUID (legacy 'api' class) is
+        unattributed — its capture writes a Session with NO actor_user_id
+        (strip-and-ignore documented residual: never a fabricated actor)."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            legacy = sdk.apikey_create(tid, "api")
+            hL = {"Authorization": f"Bearer {legacy['api_key']}"}
+            r = tc.post("/v1/sessions", headers=hL, json={
+                "conversation": [{"role": "user", "content": "legacy key capture."},
+                                  {"role": "assistant", "content": "ok."}],
+                "session_id": "s-stamp-2600-legacy-key"})
+            assert r.status_code == 200, r.text[:300]
+            rows = self._data_sdk(tid)._get_proj().g.query(
+                "MATCH (s:Session {id:$sid}) RETURN s.actor_user_id",
+                params={"sid": "s-stamp-2600-legacy-key"}).result_set
+            assert rows and rows[0][0] is None, rows
+        finally:
+            gen.close()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -3000,7 +5994,7 @@ class TestSearchOffloadConcurrency:
                 # before the gather's worker threads construct their SDKs — a
                 # raced constructor would spawn a second daemon (split-brain)
                 # or hit the socket before it appears.
-                pre = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+                pre = ha_mod._make_sdk(namespace=TEST_ORG_ID)
                 pre._get_proj()  # eager: ensure the daemon socket is up
                 # Install the stub AFTER the pre-warm so the pre-warm doesn't
                 # consume/break the shared barrier.
@@ -3011,8 +6005,8 @@ class TestSearchOffloadConcurrency:
                     from tortoise.hosted_api import search
                     t0 = time.monotonic()
                     await asyncio.wait_for(asyncio.gather(
-                        search("falkordb traversal", limit=10, team=TEST_TEAM),
-                        search("graph performance", limit=10, team=TEST_TEAM),
+                        search("falkordb traversal", limit=10, org=TEST_TEAM),
+                        search("graph performance", limit=10, org=TEST_TEAM),
                     ), timeout=15)
                     return time.monotonic() - t0
 
@@ -3037,12 +6031,12 @@ class TestSearchOffloadConcurrency:
             db_path = os.path.join(tmpdir, "test.db")
             _orig_init = _patch_tortoise_sdk_init(db_path)
             try:
-                ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+                ha_mod._make_sdk(namespace=TEST_ORG_ID)
                 monkeypatch.setattr(EmbeddingModel, "get", lambda: None)
 
                 from tortoise.hosted_api import search
                 result = asyncio.run(search("anything", limit=10,
-                                            team=TEST_TEAM))
+                                            org=TEST_TEAM))
                 # Empty temp DB -> FTS finds nothing; the meaningful assert is
                 # 200-shaped (no HTTPException) + count == 0.
                 assert result == {"results": [], "count": 0}
@@ -3060,12 +6054,12 @@ class TestSearchOffloadConcurrency:
             db_path = os.path.join(tmpdir, "test.db")
             _orig_init = _patch_tortoise_sdk_init(db_path)
             try:
-                ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+                ha_mod._make_sdk(namespace=TEST_ORG_ID)
 
                 from tortoise.hosted_api import topic_summary
                 result = asyncio.run(topic_summary(
                     "some topic", max_seeds=50, max_hops=1,
-                    include_relationships=True, team=TEST_TEAM))
+                    include_relationships=True, org=TEST_TEAM))
                 # Empty DB -> empty-but-shaped summary (no 500).
                 assert isinstance(result, dict)
                 assert result.get("topic") == "some topic"
@@ -3131,3 +6125,3352 @@ class TestEmbedderThreadSafety:
             denom = (np.linalg.norm(v0) * np.linalg.norm(vi))
             cos = float(np.dot(v0, vi) / denom) if denom else 0.0
             assert cos > 0.999, f"concurrent encodes diverged: cos={cos}"
+
+
+# ── #2032 body-sweep caps (internal + auth-gated surfaces) ─────────────────
+
+
+def _oversized_chunked(n_chunks: int = 8, step: int = 8192):
+    """Chunked generator, NO content-length — forces the streaming-cap path."""
+    for _ in range(n_chunks):
+        yield b"x" * step
+
+
+class TestBodySweepCaps:
+    def test_provision_tenant_oversized_413(self, internal_client, monkeypatch):
+        """/internal/provision — oversized chunked body → 413 (registry lane;
+        in Supabase mode the 503 gate precedes the read, so the cap is
+        unreachable there by design)."""
+        import tortoise.hosted_api as ha_mod
+        monkeypatch.setattr(ha_mod, "_BODY_MAX_BYTES", 256)
+        r = internal_client.post(
+            "/internal/provision", content=_oversized_chunked(),
+            headers={"Authorization": f"Bearer {_INTERNAL_KEY}"})
+        assert r.status_code == 413
+        assert r.json()["detail"] == ha_mod._BODY_413_DETAIL
+
+    def test_create_demo_graph_oversized_413(self, internal_client, monkeypatch):
+        import tortoise.hosted_api as ha_mod
+        monkeypatch.setattr(ha_mod, "_BODY_MAX_BYTES", 256)
+        r = internal_client.post(
+            "/internal/demo", content=_oversized_chunked(),
+            headers={"Authorization": f"Bearer {_INTERNAL_KEY}"})
+        assert r.status_code == 413
+
+    def test_create_api_key_oversized_413(self, internal_client, monkeypatch):
+        """create_api_key — auth runs before the cap (401 first); the 413
+        must NOT be swallowed into the name=None catch-all."""
+        import tortoise.hosted_api as ha_mod
+        monkeypatch.setattr(ha_mod, "_BODY_MAX_BYTES", 256)
+        r = internal_client.post(
+            "/v1/team/keys", content=_oversized_chunked(),
+            headers={"content-type": "application/json"})
+        assert r.status_code == 413
+        assert r.json()["detail"] == ha_mod._BODY_413_DETAIL
+
+    def test_create_api_key_valid_body_still_mints(self, internal_client):
+        """An under-cap body still mints a key (the capped read is
+        byte-transparent)."""
+        r = internal_client.post(
+            "/v1/team/keys", json={"name": "sweep-label"})
+        assert r.status_code == 200, r.text
+        assert r.json()["key"].startswith("tt_")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# C2 (#2111): provisioning service + graph lifecycle
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _seed_team_graphs(sdk, org_id: str, tier: str, max_graphs,
+                      max_api_keys: int = 20) -> None:
+    """Seed a Team node with the C1/C2 quota columns (registry mode) PLUS
+    the kind='default' Graph node (team_create creates it in production —
+    registry graph_count starts at 1 (the default slot), mirroring the
+    Supabase seam's 1 + count(custom active))."""
+    sdk._get_registry().query(
+        "CREATE (t:Team {id:$id, tier:$tier, max_graphs:$mg, "
+        "max_api_keys:$mak, graph_name: $gn})",
+        params={"id": org_id, "tier": tier, "mg": max_graphs,
+                "mak": max_api_keys, "gn": f"org_{org_id}"},
+    )
+    sdk._graph_create(org_id, "default", kind="default")
+
+
+def _mint_caller_key(sdk, org_id: str, *, scopes: list | None,
+                     deleg: int | None = None) -> dict:
+    """Mint an OWNER-level caller key (deleg NULL) with the given scopes —
+    the provisioning endpoint's caller credential."""
+    return sdk.apikey_create(org_id, "owner-test", scopes=scopes,
+                             delegation_depth=deleg)
+
+
+class TestProvisioningService:
+    """The ONE provisioning service (E2E-1/3/7) — key-driven + session alias."""
+
+    def _setup(self, tmp_path, tier, max_graphs, max_api_keys=20):
+        """Temp registry + seeded team. Returns (sdk, org_id, client)."""
+        import tortoise.hosted_api as ha_mod
+        db_path = os.path.join(tmp_path, "test.db")
+        _orig = _patch_tortoise_sdk_init(db_path)
+        os.environ["TORTOISE_DB_PATH"] = db_path
+        sdk = ha_mod._make_sdk(namespace="registry")
+        tid = f"team-{tier}-{abs(hash(tier)) % 100000}"
+        _seed_team_graphs(sdk, tid, tier, max_graphs, max_api_keys)
+        try:
+            with TestClient(ha_mod.app, raise_server_exceptions=False) as tc:
+                yield sdk, tid, tc
+        finally:
+            os.environ.pop("TORTOISE_DB_PATH", None)
+            _restore_tortoise_sdk_init(_orig)
+
+    def test_key_driven_mint_201_envelope(self, tmp_path):
+        """E2E-1: a graphs:create-scoped owner key mints a graph + per-graph
+        key with the 201 envelope; plaintext revealed once; key is tk_."""
+        gen = self._setup(tmp_path, "pro", None)
+        sdk, tid, tc = next(gen)
+        try:
+            key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
+            r = tc.post(f"/v1/organizations/{tid}/graphs",
+                        json={"name": "acme-prod",
+                              "scopes": ["graphs:read", "graphs:write"]},
+                        headers={"Authorization": f"Bearer {key['api_key']}"})
+            assert r.status_code == 201, r.text
+            body = r.json()
+            assert body["revealed_once"] is True
+            assert body["key_plaintext"].startswith("tk_")
+            assert body["graph"]["name"] == "acme-prod"
+            assert body["graph"]["kind"] == "custom"
+            assert body["key"]["scopes"] == ["graphs:read", "graphs:write"]
+            assert body["key"]["graph_id"] == body["graph"]["id"]
+            # Reveal-once: listing keys never re-exposes plaintext
+            keys = sdk.apikey_list(tid)
+            for k in keys:
+                assert "key_plaintext" not in k
+            # minted key has deleg=0 (one-level-deep by construction)
+            gid = body["graph"]["id"]
+            node = sdk._get_registry().query(
+                "MATCH (k:APIKey {graph_id:$gid}) RETURN k.delegation_depth, "
+                "k.scopes, k.graph_id, k.id",
+                params={"gid": gid}).result_set[0]
+            assert node[0] == 0
+            assert node[1] == ["graphs:read", "graphs:write"]
+            assert node[2] == gid
+            # Envelope key.id matches the ACTUAL registry node id (C3
+            # revoke/shrink-by-id must hit the real node).
+            assert body["key"]["id"] == node[3]
+            # Envelope plaintext VERIFIES against the stored hash (a
+            # revealed key must actually work — registry apikey_create
+            # generates its own plaintext).
+            from tortoise.auth import verify_api_key
+            node_row = sdk._get_registry().query(
+                "MATCH (k:APIKey {id:$kid}) RETURN k.key_hash",
+                params={"kid": node[3]}).result_set
+            assert verify_api_key(body["key_plaintext"], node_row[0][0]) is True
+            assert node[2] == gid
+        finally:
+            gen.close()
+
+    def test_child_policy_strips_escalation_scopes(self, tmp_path):
+        """W1: graphs:create requested on the MINTED key is stripped (child
+        policy) — the minted key can never escalate."""
+        gen = self._setup(tmp_path, "pro", None)
+        sdk, tid, tc = next(gen)
+        try:
+            key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
+            r = tc.post(f"/v1/organizations/{tid}/graphs",
+                        json={"name": "g1",
+                              "scopes": ["graphs:read", "graphs:create",
+                                         "keys:manage"]},
+                        headers={"Authorization": f"Bearer {key['api_key']}"})
+            assert r.status_code == 201, r.text
+            gid = r.json()["graph"]["id"]
+            node = sdk._get_registry().query(
+                "MATCH (k:APIKey {graph_id:$gid}) RETURN k.scopes",
+                params={"gid": gid}).result_set[0][0]
+            assert node == ["graphs:read"]  # escalation stripped
+        finally:
+            gen.close()
+
+    def test_duplicate_name_409(self, tmp_path):
+        """E2E-1: 409 on a duplicate active name."""
+        gen = self._setup(tmp_path, "pro", None)
+        sdk, tid, tc = next(gen)
+        try:
+            key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
+            hdr = {"Authorization": f"Bearer {key['api_key']}"}
+            assert tc.post(f"/v1/organizations/{tid}/graphs", json={"name": "dup"},
+                           headers=hdr).status_code == 201
+            r = tc.post(f"/v1/organizations/{tid}/graphs", json={"name": "dup"},
+                        headers=hdr)
+            assert r.status_code == 409, r.text
+            assert "already exists" in r.json()["detail"]
+        finally:
+            gen.close()
+
+    def test_free_tier_402_upgrade_cta(self, tmp_path):
+        """E2E-3: free (max 1, default fills slot) → 402 upgrade-CTA FIRST."""
+        gen = self._setup(tmp_path, "free", 1)
+        sdk, tid, tc = next(gen)
+        try:
+            key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
+            r = tc.post(f"/v1/organizations/{tid}/graphs", json={"name": "x"},
+                        headers={"Authorization": f"Bearer {key['api_key']}"})
+            assert r.status_code == 402, r.text
+            assert "Upgrade" in r.json()["detail"]
+            assert r.headers.get("X-Upgrade-CTA") == "pro"
+        finally:
+            gen.close()
+
+    def test_solo_first_custom_allowed_third_409(self, tmp_path):
+        """E2E-3: solo (max 2) provisions its 1st custom (201); a 3rd →
+        409 + X-Graph-Quota header."""
+        gen = self._setup(tmp_path, "solo", 2)
+        sdk, tid, tc = next(gen)
+        try:
+            key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
+            hdr = {"Authorization": f"Bearer {key['api_key']}"}
+            r1 = tc.post(f"/v1/organizations/{tid}/graphs", json={"name": "c1"},
+                         headers=hdr)
+            assert r1.status_code == 201, r1.text
+            r2 = tc.post(f"/v1/organizations/{tid}/graphs", json={"name": "c2"},
+                         headers=hdr)
+            assert r2.status_code == 409, r2.text  # 2 of 2 reached
+            assert r2.headers.get("X-Graph-Quota") == "2/2"
+        finally:
+            gen.close()
+
+    def test_cross_team_key_404(self, tmp_path):
+        """P1 #6: a team-A key hitting /v1/organizations/B/graphs → 404 (no
+        existence oracle, no privilege confusion)."""
+        gen = self._setup(tmp_path, "pro", None)
+        sdk, tid, tc = next(gen)
+        try:
+            key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
+            r = tc.post("/v1/organizations/team-other-000/graphs",
+                        json={"name": "x"},
+                        headers={"Authorization": f"Bearer {key['api_key']}"})
+            assert r.status_code == 404, r.text
+        finally:
+            gen.close()
+
+    def test_minted_key_cannot_provision_403(self, tmp_path):
+        """E2E-4-negative: a minted key (deleg=0) is one-level-deep — it can
+        never provision (403), even if scopes were somehow granted."""
+        gen = self._setup(tmp_path, "pro", None)
+        sdk, tid, tc = next(gen)
+        try:
+            # Mint a deleg=0 key WITH graphs:create via the raw registry (the
+            # app mint strips it, but the endpoint must 403 regardless).
+            import uuid
+
+            from tortoise.auth import hash_api_key
+            token = "tk_" + uuid.uuid4().hex
+            sdk._get_registry().query(
+                "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, "
+                "key_prefix:$kp, created_by:'x', graph_id:'g_x', "
+                "scopes:['graphs:create'], delegation_depth:0})",
+                params={"id": "minted-key", "tid": tid,
+                        "kh": hash_api_key(token), "kp": token[:10]},
+            )
+            r = tc.post(f"/v1/organizations/{tid}/graphs", json={"name": "x"},
+                        headers={"Authorization": f"Bearer {token}"})
+            assert r.status_code == 403, r.text
+        finally:
+            gen.close()
+
+    def test_minted_key_cannot_mint_team_key_403(self, tmp_path):
+        """Review P1-1 (code-review gate): a minted (deleg=0) key must not
+        mint an OWNER-level team key via POST /v1/team/keys — the child
+        policy covers capability surfaces, not just scope columns (the DB
+        CHECK constrains deleg=0 scopes; it cannot see this endpoint)."""
+        import uuid
+        gen = TestProvisioningService()._setup(tmp_path, "pro", None)
+        sdk, tid, tc = next(gen)
+        try:
+            from tortoise.auth import hash_api_key
+            token = "tk_" + uuid.uuid4().hex
+            sdk._get_registry().query(
+                "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, "
+                "key_prefix:$kp, created_by:'x', graph_id:'g_x', "
+                "scopes:['graphs:read'], delegation_depth:0})",
+                params={"id": "minted-key2", "tid": tid,
+                        "kh": hash_api_key(token), "kp": token[:10]},
+            )
+            r = tc.post("/v1/team/keys",
+                        headers={"Authorization": f"Bearer {token}"})
+            assert r.status_code == 403, r.text
+            # The centralized deleg gate in get_current_org_session fires
+            # (KEY_NOT_USER_MINTED) — minted keys cannot manage the team.
+            detail = r.json()["detail"]
+            if isinstance(detail, dict):
+                assert detail.get("error_code") == "KEY_NOT_USER_MINTED", \
+                    detail
+            else:
+                assert "minted" in detail.lower(), detail
+        finally:
+            gen.close()
+
+    def test_minted_key_activated_with_data_scope(self, tmp_path):
+        """C5 #2114 (D-C5-7 — replaces the C2/C3 dormancy pin): a MINTED
+        deleg=0 key with a DATA scope activates on the bound graph — but
+        ONLY its own graph (app-layer isolation, ACL OFF), and NEVER beyond
+        its scopes: a graphs:read child reads its custom graph, cannot read
+        the team default's points (cross-graph denied by _data_sdk's
+        ownership pre-check), cannot WRITE (graphs:read lacks graphs:write →
+        _require_scope 403), and a deleg=0 key without any data scope stays
+        dormant (KEY_NOT_USER_MINTED)."""
+        import uuid
+        gen = TestProvisioningService()._setup(tmp_path, "pro", None)
+        sdk, tid, tc = next(gen)
+        try:
+            from tortoise.auth import hash_api_key
+            # A real custom graph the child binds to (registry Graph node
+            # with the derived namespace — the ownership pre-check reads it).
+            g = sdk._graph_create(tid, "minted-g", kind="custom")
+            gid = g["graph_id"]
+            # Write a point to the DEFAULT graph (the cross-graph probe: the
+            # child must never see it).
+            sdk.create_point("default-only", content="default only")
+            token = "tk_" + uuid.uuid4().hex
+            sdk._get_registry().query(
+                "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, "
+                "key_prefix:$kp, created_by:'x', graph_id:$gid, "
+                "scopes:['graphs:read'], delegation_depth:0})",
+                params={"id": "minted-active", "tid": tid,
+                        "kh": hash_api_key(token), "kp": token[:10],
+                        "gid": gid},
+            )
+            h = {"Authorization": f"Bearer {token}"}
+            # 1) reads ITS graph: the custom graph is empty → [] (the
+            #    default graph's point must NOT surface — cross-graph).
+            r = tc.get("/v1/points", headers=h)
+            assert r.status_code == 200, r.text
+            body = r.json()
+            names = [p if isinstance(p, str)
+                     else (p.get("name") or p.get("id")) for p in body]
+            assert "default-only" not in names, (
+                "minted child saw the default graph's points (cross-graph): "
+                f"{names}")
+            # 2) graphs:read ≠ write → 403 INSUFFICIENT_SCOPE on a write.
+            r = tc.post("/v1/points",
+                        json={"content": "child-write"}, headers=h)
+            assert r.status_code == 403, r.text
+            detail = r.json()["detail"]
+            if isinstance(detail, dict):
+                assert detail.get("error_code") == "INSUFFICIENT_SCOPE", \
+                    detail
+            # 3) a deleg=0 key bound to a VANISHED graph fails closed (404 —
+            #    never widens onto the default) .
+            dead = "tk_" + uuid.uuid4().hex
+            sdk._get_registry().query(
+                "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, "
+                "key_prefix:$kp, created_by:'x', graph_id:'g_ghost', "
+                "scopes:['graphs:read'], delegation_depth:0})",
+                params={"id": "minted-ghost", "tid": tid,
+                        "kh": hash_api_key(dead), "kp": dead[:10]},
+            )
+            r = tc.get("/v1/points",
+                       headers={"Authorization": f"Bearer {dead}"})
+            assert r.status_code in (403, 404), r.text
+            # 4) a deleg=0 key with NO data scope stays dormant on data.
+            nodata = "tk_" + uuid.uuid4().hex
+            sdk._get_registry().query(
+                "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, "
+                "key_prefix:$kp, created_by:'x', graph_id:$gid, "
+                "scopes:['keys:manage'], delegation_depth:0})",
+                params={"id": "minted-nodata", "tid": tid,
+                        "kh": hash_api_key(nodata), "kp": nodata[:10],
+                        "gid": gid},
+            )
+            r = tc.get("/v1/points",
+                       headers={"Authorization": f"Bearer {nodata}"})
+            assert r.status_code == 403, r.text
+            detail = r.json()["detail"]
+            if isinstance(detail, dict):
+                assert detail.get("error_code") == "KEY_NOT_USER_MINTED", \
+                    detail
+        finally:
+            gen.close()
+
+    def test_session_alias_201(self, tmp_path):
+        """E2E-12 API-side: the session alias (POST /v1/graphs) routes
+        through the ONE service — same envelope, same gates; minted key is
+        tk_ and the session user is recorded as creator."""
+        import tortoise.hosted_api as ha_mod
+        gen = self._setup(tmp_path, "solo", 2)
+        sdk, tid, tc = next(gen)
+        try:
+            app.dependency_overrides[ha_mod.get_current_user] = \
+                lambda: {"user_id": "session-owner", "email": "o@x.com"}
+            sdk._get_registry().query(
+                "MERGE (m:Membership {user_id:'session-owner', org_id:$tid, "
+                "status:'active'}) SET m.role='owner'",
+                params={"tid": tid},
+            )
+            try:
+                r = tc.post("/v1/graphs",
+                            json={"org_id": tid, "name": "from-dash"})
+                assert r.status_code == 201, r.text
+                assert r.json()["key_plaintext"].startswith("tk_")
+                assert r.json()["revealed_once"] is True
+                # Registry mint records the session user as creator
+                # (session_user_id threading — #1511 parity).
+                kid = r.json()["key"]["id"]
+                node = sdk._get_registry().query(
+                    "MATCH (k:APIKey {id:$kid}) RETURN k.created_by",
+                    params={"kid": kid}).result_set
+                assert node[0][0] == "session-owner", node
+            finally:
+                app.dependency_overrides.pop(ha_mod.get_current_user, None)
+        finally:
+            gen.close()
+
+    def test_minted_key_session_login_403(self, tmp_path):
+        """Review P1-2 (code-review gate): a minted (deleg=0) key must NOT
+        drive the /v1/session/login exchange — it carries created_by = the
+        minting session user, so allowing the exchange would let any holder
+        of a least-privilege per-graph key sign in as the owner.
+
+        Supabase-mode only (the exchange resolves against the control
+        plane); seeds a deleg=0 api_keys row + a healthy team and asserts
+        the 403 KEY_NOT_USER_MINTED BEFORE the exchange tree runs."""
+        import uuid  # noqa: I001
+        import os
+        import tortoise.supabase_control as sc_mod
+        from tests.fake_control_plane import FakeControlPlane
+        from tests.test_supabase_control import FREE_TEAM, _membership_row
+        from tortoise.auth import lookup_hash as _lh
+        os.environ.setdefault("SUPABASE_URL", "https://test.supabase.co")
+        os.environ.setdefault("SUPABASE_SERVICE_ROLE_KEY", "svc_role_key_test")
+        fake = FakeControlPlane({
+            "organizations": [], "api_keys": [], "org_memberships": [],
+            "invitations": [],
+        })
+        # #2670: dashboard_key_login now DEFAULTS to false for human-created
+        # teams — seed it ON here so the FORCED dashboard-login gate passes
+        # and the minted-key guard below is the guard actually under test.
+        # (Without this, the exchange 403s dashboard_login_disabled first and
+        # the P1-2 minted-key property is never exercised.)
+        fake.seed("organizations", [dict(FREE_TEAM, dashboard_key_login=True)])
+        fake.seed("org_memberships",
+                  [_membership_row(user_id=_U1, org_id="team-free-001")])
+        token = "tk_" + uuid.uuid4().hex
+        fake.seed("api_keys", [{
+            "id": "mk-1", "org_id": "team-free-001",
+            "lookup_hash": _lh(token), "key_prefix": token[:10],
+            "created_via": "provisioned",
+            "created_by": _U1,  # the minting session user (owner)
+            "created_at": "2026-09-02T00:00:00Z", "revoked_at": None,
+            "expires_at": None, "graph_id": "g_1", "scopes": [],
+            "created_by_key_id": "k-caller", "delegation_depth": 0,
+        }])
+        _orig_cp = sc_mod.get_control_plane
+        sc_mod.get_control_plane = lambda: fake
+        try:
+            # hosted_api imported get_control_plane from supabase_control
+            # lazily per call — the module-level monkeypatch above covers
+            # it; also patch ha_mod's reference if any.
+            from fastapi.testclient import TestClient
+
+            import tortoise.hosted_api as ha_mod
+            with TestClient(ha_mod.app) as tc:
+                r = tc.post("/v1/session/login", json={"api_key": token})
+            assert r.status_code == 403, r.text
+            assert r.json()["detail"]["error_code"] == \
+                "KEY_NOT_USER_MINTED", r.text
+        finally:
+            sc_mod.get_control_plane = _orig_cp
+            os.environ.pop("SUPABASE_URL", None)
+            os.environ.pop("SUPABASE_SERVICE_ROLE_KEY", None)
+
+    def test_no_orphan_on_key_cap(self, tmp_path):
+        """D4/E2E-7: key-mint failure at max_api_keys rolls back the graph —
+        no graph-without-key, no orphan (409)."""
+        gen = self._setup(tmp_path, "pro", None, max_api_keys=0)
+        sdk, tid, tc = next(gen)
+        try:
+            key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
+            r = tc.post(f"/v1/organizations/{tid}/graphs", json={"name": "orphan-test"},
+                        headers={"Authorization": f"Bearer {key['api_key']}"})
+            assert r.status_code == 409, r.text
+            graphs = sdk.graph_list(tid)
+            assert not any(g["name"] == "orphan-test" for g in graphs), \
+                "graph minted despite key-cap failure — orphan!"
+        finally:
+            gen.close()
+
+    def test_revoke_caller_key_401(self, tmp_path):
+        """A revoked caller key cannot provision (401 — resolve rejects)."""
+        gen = self._setup(tmp_path, "pro", None)
+        sdk, tid, tc = next(gen)
+        try:
+            key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
+            sdk.apikey_revoke(key["id"])
+            r = tc.post(f"/v1/organizations/{tid}/graphs", json={"name": "x"},
+                        headers={"Authorization": f"Bearer {key['api_key']}"})
+            assert r.status_code in (401, 403), r.text
+        finally:
+            gen.close()
+
+    def test_forced_graph_write_failure_rolls_back_no_orphan(self,
+                                                            tmp_path,
+                                                            monkeypatch):
+        """D11 drill (code-review P1): a mint failure AFTER the graph write
+        must roll back — 500, no graph node, and NO orphan key bound to the
+        graph id (the graph-scoped revoke catches keys whose mint raised
+        after the key write committed, where the returned dict never
+        materialized)."""
+        import tortoise.hosted_api as ha_mod
+        gen = self._setup(tmp_path, "pro", None)
+        sdk, tid, tc = next(gen)
+        try:
+            key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
+            # Force the KEY MINT to fail AFTER the graph write (the risky
+            # window: minted is None, so only graph-scoped revocation can
+            # clean up the half-landed key). Registry mode: make
+            # apikey_create raise after creating the node by breaking the
+            # BELONGS_TO edge query via a bad team lookup on the audit
+            # path is fragile — instead monkeypatch apikey_create to do the
+            # real write THEN raise.
+            orig = ha_mod.TortoiseSDK.apikey_create
+
+            def _failing_mint(self, org_id, created_by, **kw):
+                # Do the REAL mint (node + edge land), then raise —
+                # simulating an exception between the key write and the
+                # helper's return.
+                orig(self, org_id, created_by, **kw)  # real mint lands first
+                raise RuntimeError("simulated post-write mint failure")
+
+            monkeypatch.setattr(ha_mod.TortoiseSDK, "apikey_create",
+                                _failing_mint)
+            try:
+                r = tc.post(f"/v1/organizations/{tid}/graphs",
+                            json={"name": "doomed"},
+                            headers={"Authorization":
+                                     f"Bearer {key['api_key']}"})
+                assert r.status_code == 500, r.text
+            finally:
+                monkeypatch.undo()
+            # Graph rolled back (no node named doomed)
+            graphs = sdk.graph_list(tid)
+            assert not any(g["name"] == "doomed" for g in graphs), \
+                "graph survived a failed mint — orphan!"
+            # No ACTIVE key minted by the caller survives: the failing
+            # apikey_create DID land a key (created_by_key_id = caller
+            # key id) before raising — graph-scoped revocation must have
+            # revoked it. Revoked keys stay listed (revoked_at set), so
+            # assert revocation, not absence.
+            caller_key_id = key["id"]
+            orphans = [k for k in sdk.apikey_list(tid)
+                       if k.get("created_by_key_id") == caller_key_id
+                       and k.get("revoked_at") is None]
+            assert not orphans, \
+                f"active orphan key(s) after failed mint: {orphans}"
+        finally:
+            gen.close()
+
+
+class TestGraphLifecycle:
+    """E2E-8 — delete soft-tombstone + cascade + quota release + name reuse
+    + default-guard; GET /v1/graphs status/key_count."""
+
+    def _provision(self, tc, tid, key, name):
+        return tc.post(f"/v1/organizations/{tid}/graphs", json={"name": name},
+                       headers={"Authorization": f"Bearer {key['api_key']}"})
+
+    def test_delete_cascade_release_reuse(self, tmp_path):
+        """Full E2E-8: delete → 204 → key 401 → slot freed (provision
+        succeeds) → same-name recreate 201 → default delete 403."""
+        gen = TestProvisioningService()._setup(tmp_path, "solo", 2)
+        sdk, tid, tc = next(gen)
+        try:
+            key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
+            # 1st custom (2 of 2 reached)
+            r = self._provision(tc, tid, key, "g1")
+            assert r.status_code == 201, r.text
+            gid = r.json()["graph"]["id"]
+            minted_plaintext = r.json()["key_plaintext"]
+            # Envelope key.id is a REAL key (listable — the registry node id)
+            listed = [k["id"] for k in sdk.apikey_list(tid)]
+            assert r.json()["key"]["id"] in listed
+            # Delete with a graphs:delete-scoped key
+            delkey = _mint_caller_key(sdk, tid, scopes=["graphs:delete"])
+            r = tc.delete(f"/v1/graphs/{gid}?org_id={tid}",
+                          headers={"Authorization":
+                                   f"Bearer {delkey['api_key']}"})
+            assert r.status_code == 204, r.text
+            # Key 401 on next use (revoked cascade)
+            r = tc.get("/v1/points",
+                       headers={"Authorization":
+                                f"Bearer {minted_plaintext}"})
+            assert r.status_code == 401, r.text
+            # Same-name recreate after delete → 201 (tombstone doesn't squat;
+            # the freed slot is reused by the SAME name first — solo allows
+            # 1 custom, so this must come before the new-name provision).
+            r = self._provision(tc, tid, key, "g1")
+            assert r.status_code == 201, r.text
+            gid2 = r.json()["graph"]["id"]
+            assert gid2 != gid  # recreate = new node (tombstone kept)
+            # Delete the RECREATED graph → slot freed → new-name provision
+            r = tc.delete(f"/v1/graphs/{gid2}?org_id={tid}",
+                          headers={"Authorization":
+                                   f"Bearer {delkey['api_key']}"})
+            assert r.status_code == 204, r.text
+            r = self._provision(tc, tid, key, "g2")
+            assert r.status_code == 201, r.text
+            # Default graph delete → 403
+            r = tc.delete(f"/v1/graphs/default?org_id={tid}",
+                          headers={"Authorization":
+                                   f"Bearer {delkey['api_key']}"})
+            assert r.status_code == 403, r.text
+        finally:
+            gen.close()
+
+    def test_registry_default_node_by_gid_403(self, tmp_path):
+        """The registry kind='default' node carries a RANDOM gid (not the
+        literal 'default') — deleting by that gid must 403 via the kind
+        lookup (not fall through to 404)."""
+        gen = TestProvisioningService()._setup(tmp_path, "solo", 2)
+        sdk, tid, tc = next(gen)
+        try:
+            delkey = _mint_caller_key(sdk, tid, scopes=["graphs:delete"])
+            default = next(g for g in sdk.graph_list(tid)
+                           if g["kind"] == "default")
+            r = tc.delete(f"/v1/graphs/{default['graph_id']}?org_id={tid}",
+                          headers={"Authorization":
+                                   f"Bearer {delkey['api_key']}"})
+            assert r.status_code == 403, r.text
+            # Unknown gid → 404
+            r = tc.delete(f"/v1/graphs/g_ghost{abs(hash('x'))%1000000}?"
+                          f"org_id={tid}",
+                          headers={"Authorization":
+                                   f"Bearer {delkey['api_key']}"})
+            assert r.status_code == 404, r.text
+        finally:
+            gen.close()
+
+    def test_list_gains_status_and_key_count(self, tmp_path):
+        """E2E-8 list half: GET /v1/graphs rows gain status + key_count;
+        point_count gone; default first."""
+        gen = TestProvisioningService()._setup(tmp_path, "solo", 2)
+        sdk, tid, tc = next(gen)
+        try:
+            import tortoise.hosted_api as ha_mod
+            app.dependency_overrides[ha_mod.get_current_user] = \
+                lambda: {"user_id": "list-owner", "email": "o@x.com"}
+            sdk._get_registry().query(
+                "MERGE (m:Membership {user_id:'list-owner', org_id:$tid, "
+                "status:'active'}) SET m.role='owner'",
+                params={"tid": tid},
+            )
+            try:
+                key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
+                r = self._provision(tc, tid, key, "listed")
+                assert r.status_code == 201, r.text
+                r = tc.get(f"/v1/graphs?org_id={tid}")
+                assert r.status_code == 200, r.text
+                rows = r.json()
+                assert rows[0]["kind"] == "default"  # default first
+                custom = next(x for x in rows if x["name"] == "listed")
+                assert custom["status"] == "active"
+                assert custom["key_count"] == 1
+                assert "point_count" not in custom
+            finally:
+                app.dependency_overrides.pop(ha_mod.get_current_user, None)
+        finally:
+            gen.close()
+
+    def test_missing_scope_delete_403(self, tmp_path):
+        """§6.2: 403 missing graphs:delete scope."""
+        gen = TestProvisioningService()._setup(tmp_path, "solo", 2)
+        sdk, tid, tc = next(gen)
+        try:
+            key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
+            r = self._provision(tc, tid, key, "g1")
+            gid = r.json()["graph"]["id"]
+            readkey = _mint_caller_key(sdk, tid, scopes=["graphs:read"])
+            r = tc.delete(f"/v1/graphs/{gid}?org_id={tid}",
+                          headers={"Authorization":
+                                   f"Bearer {readkey['api_key']}"})
+            assert r.status_code == 403, r.text
+        finally:
+            gen.close()
+
+    def test_default_row_key_count_zero_with_bound_default_key(self, tmp_path):
+        """#2306 lane-consistency half (registry): the default graph has NO
+        per-graph keys — GET /v1/graphs reports key_count 0 for the
+        kind='default' row even when a legacy bound-default APIKey node
+        (graph_id = the default node's real gid — minted pre-#2112 guard
+        or via a raw control-plane write) exists. Pre-fix the registry lane
+        surfaced such nodes as a count on the default row (the capstone
+        "1") while the supabase lane structurally cannot (api_keys.graph_id
+        REFERENCES graphs(id); 'default' is a DERIVED id, never a row id) —
+        the two lanes disagreed about the same cell.
+
+        Manageability half: the bound-default key stays LISTABLE and
+        REVOCABLE via the unfiltered key list (the API-Keys tab read) —
+        the default row has no per-graph key surface by design
+        (_ensure_graph_exists 404s default-kind mints; canManageGraphKeys is
+        kind-gated), so the key list is its management path."""
+        import uuid as _uuid
+
+        import tortoise.hosted_api as ha_mod
+        from tortoise.auth import hash_api_key
+        gen = TestProvisioningService()._setup(tmp_path, "pro", None)
+        sdk, tid, tc = next(gen)
+        try:
+            app.dependency_overrides[ha_mod.get_current_user] = \
+                lambda: {"user_id": "list-owner", "email": "o@x.com"}
+            app.dependency_overrides[get_current_org] = \
+                lambda: dict(TEST_TEAM, org_id=tid)
+            sdk._get_registry().query(
+                "MERGE (m:Membership {user_id:'list-owner', org_id:$tid, "
+                "status:'active'}) SET m.role='owner'",
+                params={"tid": tid},
+            )
+            default = next(g for g in sdk.graph_list(tid)
+                           if g["kind"] == "default")
+            # Legacy bound-default key (raw registry write — the pre-guard
+            # artifact shape the capstone showed as a default-row "1").
+            token = "tt_bd_" + _uuid.uuid4().hex[:16]
+            kid = "bd-key-" + _uuid.uuid4().hex[:12]
+            sdk._get_registry().query(
+                "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, "
+                "key_prefix:$kp, created_by:'legacy', graph_id:$gid})",
+                params={"id": kid, "tid": tid, "kh": hash_api_key(token),
+                        "kp": token[:10], "gid": default["graph_id"]},
+            )
+            r = tc.get(f"/v1/graphs?org_id={tid}")
+            assert r.status_code == 200, r.text
+            rows = r.json()
+            dflt = next(x for x in rows if x["kind"] == "default")
+            assert dflt["key_count"] == 0, rows  # no per-graph keys
+            # A custom graph's per-graph meter is unaffected (still counts).
+            key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
+            r = self._provision(tc, tid, key, "metered")
+            assert r.status_code == 201, r.text
+            custom_gid = r.json()["graph"]["id"]
+            r = tc.get(f"/v1/graphs?org_id={tid}")
+            custom = next(x for x in r.json() if x["graph_id"] == custom_gid)
+            assert custom["key_count"] == 1
+            # Manageability: the bound-default key appears on the UNFILTERED
+            # key list (the API-Keys tab's read)…
+            kr = tc.get(f"/v1/team/keys?org_id={tid}")
+            assert kr.status_code == 200, kr.text
+            listed = [k for k in kr.json()["keys"]
+                      if k.get("graph_id") == default["graph_id"]]
+            assert [k["id"] for k in listed] == [kid]
+            # …and revoking it by id from the API-Keys tab works (no
+            # default-row dead end).
+            dr = tc.delete(f"/v1/team/keys/{kid}?org_id={tid}")
+            assert dr.status_code == 200, dr.text
+            assert dr.json()["revoked"] is True
+            assert dr.json()["key_id"] == kid
+        finally:
+            app.dependency_overrides.pop(ha_mod.get_current_user, None)
+            app.dependency_overrides.pop(get_current_org, None)
+            gen.close()
+
+
+class TestProvisioningConcurrency:
+    """E2E-11 — concurrent provisioning never oversubscribes."""
+
+    @staticmethod
+    def _burst_mint(tc, tid, key, n):
+        """n genuinely-concurrent mints (thread pool — Starlette TestClient
+        is thread-safe per-request; the app's per-team asyncio.Lock
+        serializes count-then-insert across the interleaved requests).
+        Returns the list of Response objects."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _mint(i):
+            return tc.post(
+                f"/v1/organizations/{tid}/graphs", json={"name": f"c{i}"},
+                headers={"Authorization": f"Bearer {key['api_key']}"})
+
+        with ThreadPoolExecutor(max_workers=n) as ex:
+            return list(ex.map(_mint, range(n)))
+
+    def test_8_concurrent_on_1_free_slot(self, tmp_path):
+        """solo at 2/2 (default + 1 custom) → 8 concurrent mints → exactly 0
+        succeed (at cap) — graph_count never exceeds max. Genuinely
+        concurrent (thread pool — a sequential loop never contends the
+        lock; this exercises the steady-state 409 path under interleave)."""
+        gen = TestProvisioningService()._setup(tmp_path, "solo", 2)
+        sdk, tid, tc = next(gen)
+        try:
+            key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
+            # Fill the free slot: 1st custom (2 of 2)
+            r = tc.post(f"/v1/organizations/{tid}/graphs", json={"name": "full"},
+                        headers={"Authorization": f"Bearer {key['api_key']}"})
+            assert r.status_code == 201, r.text
+
+            results = self._burst_mint(tc, tid, key, 8)
+            statuses = [r.status_code for r in results]
+            assert statuses.count(201) == 0, f"oversubscribed: {statuses}"
+            assert statuses.count(409) == 8, statuses
+            assert sdk.graph_count(tid) <= 2
+        finally:
+            gen.close()
+
+    def test_8_concurrent_on_1_free_slot_gap(self, tmp_path):
+        """E2E-11 race: solo at 1/2 (default only — ONE free slot) → 8
+        concurrent mints → EXACTLY ONE 201, seven 409 (the per-team lock
+        serializes count-then-insert + the post-insert re-count backstop
+        rolls back any interleave over the cap; no oversubscription)."""
+        gen = TestProvisioningService()._setup(tmp_path, "solo", 2)
+        sdk, tid, tc = next(gen)
+        try:
+            key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
+            results = self._burst_mint(tc, tid, key, 8)
+            statuses = [r.status_code for r in results]
+            assert statuses.count(201) == 1, f"expected exactly 1 win: " \
+                f"{statuses}"
+            assert statuses.count(409) == 7, statuses
+            assert sdk.graph_count(tid) <= 2
+        finally:
+            gen.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# C3 (#2112): key lifecycle — scoped mint (D13), list enrichment, shrink-only
+# PATCH, deleg=0 dormancy on management (E2E-4 half / E2E-9 / E2E-12)
+
+class TestC3KeyLifecycle:
+    """C3 (#2112) key lifecycle (registry lane). E2E-9 scoped-key matrix,
+    E2E-12 shrink surfaces, E2E-4 minted-key-cannot-manage half. Session
+    mints ride the client fixture's auth override (session_user_id None →
+    created_by "api"); key-driven mints pop the override and authenticate
+    with the real minted token (registry resolve)."""
+
+    def _setup(self, tmp_path, max_api_keys: int = 20):
+        import tortoise.hosted_api as ha_mod
+        db_path = os.path.join(tmp_path, "test.db")
+        _orig = _patch_tortoise_sdk_init(db_path)
+        os.environ["TORTOISE_DB_PATH"] = db_path
+        sdk = ha_mod._make_sdk(namespace="registry")
+        tid = f"team-c3-{abs(hash(tmp_path.name)) % 100000}"
+        _seed_team_graphs(sdk, tid, "pro", None, max_api_keys=max_api_keys)
+        try:
+            with TestClient(ha_mod.app, raise_server_exceptions=False) as tc:
+                yield sdk, tid, tc
+        finally:
+            os.environ.pop("TORTOISE_DB_PATH", None)
+            _restore_tortoise_sdk_init(_orig)
+            # C3 hygiene: this class bypasses the module client fixture, so
+            # nothing else clears dependency_overrides — a leaked
+            # get_current_user/get_current_org override would bleed into the
+            # NEXT test file in the same pytest process (dashboard_login's
+            # Supabase-mode owner check 403s on the stale user).
+            app.dependency_overrides.clear()
+
+    def _session_mint(self, tc, tid, body):
+        """Session-face mint: the client fixture override supplies the team
+        dict with key_id REMOVED (a session JWT face — key_id None →
+        owner-class session mint; TEST_TEAM carries a key_id by default)."""
+        org_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1)
+        org_dict.pop("key_id", None)
+        org_dict.pop("delegation_depth", None)
+        app.dependency_overrides[get_current_org] = lambda: org_dict
+        import tortoise.hosted_api as ha_mod
+        sdk = ha_mod._make_sdk(namespace="registry")
+        sdk._get_registry().query(
+            "MERGE (m:Membership {user_id:$uid, org_id:$tid, status:'active'}) "
+            "SET m.role='owner'",
+            params={"uid": _U1, "tid": tid},
+        )
+        return tc.post("/v1/team/keys", json=body)
+
+    def test_session_mint_scoped_owner_key_201(self, tmp_path):
+        """E2E-9 setup: an owner-session mint carries scopes incl. escalation
+        (deleg NULL — owner class), tk_ prefix, and the envelope echoes the
+        scope state + reveal-once plaintext."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            r = self._session_mint(tc, tid, {
+                "name": "devops",
+                "scopes": ["graphs:create", "graphs:delete",
+                           "team:manage", "keys:manage"],
+            })
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["key"].startswith("tk_")
+            assert sorted(body["scopes"]) == sorted(
+                ["graphs:create", "graphs:delete", "team:manage", "keys:manage"])
+            assert body["delegation_depth"] is None  # owner class
+            assert body["graph_id"] is None  # team-wide
+            # Minted once, hash-only stored (verify against the stored hash).
+            rows_h = sdk._get_registry().query(
+                "MATCH (k:APIKey {id:$id}) RETURN k.key_hash",
+                params={"id": body["id"]},
+            ).result_set
+            from tortoise.auth import verify_api_key
+            assert verify_api_key(body["key"], rows_h[0][0]) is True
+            # Registry node carries the scopes + owner delegation.
+            rows = sdk._get_registry().query(
+                "MATCH (k:APIKey {id:$id}) RETURN k.scopes, k.delegation_depth",
+                params={"id": body["id"]},
+            ).result_set
+            assert sorted(rows[0][0]) == sorted(
+                ["graphs:create", "graphs:delete", "team:manage", "keys:manage"])
+            assert rows[0][1] is None
+        finally:
+            gen.close()
+
+    def test_scoped_key_mint_deleg0_child(self, tmp_path):
+        """E2E-9/J7: a keys:manage-scoped owner key mints a deleg=0 child —
+        scopes ∩ child policy (no escalation), created_by_key_id = caller,
+        tk_ prefix."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            # Owner key WITH keys:manage (mint capability).
+            owner = sdk.apikey_create(
+                tid, "owner-test", scopes=["keys:manage", "graphs:read"],
+            )["api_key"]
+            app.dependency_overrides.pop(get_current_org, None)  # real key auth
+            r = tc.post("/v1/team/keys",
+                        headers={"Authorization": f"Bearer {owner}"},
+                        json={"scopes": ["graphs:read", "graphs:write"]})
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["key"].startswith("tk_")
+            assert body["delegation_depth"] == 0  # child
+            assert sorted(body["scopes"]) == ["graphs:read", "graphs:write"]
+            # created_by_key_id lineage recorded on the node.
+            rows = sdk._get_registry().query(
+                "MATCH (k:APIKey {id:$id}) RETURN k.created_by_key_id, "
+                "k.delegation_depth",
+                params={"id": body["id"]},
+            ).result_set
+            assert rows[0][0] is not None  # caller key id
+            assert rows[0][1] == 0
+        finally:
+            gen.close()
+
+    def test_escalation_request_from_key_403(self, tmp_path):
+        """E2E-4/E2E-9: a key-minted path requesting escalation scopes → 403
+        (never silently stripped — §6.3)."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            owner = sdk.apikey_create(
+                tid, "owner-test", scopes=["keys:manage", "graphs:read"],
+            )["api_key"]
+            app.dependency_overrides.pop(get_current_org, None)
+            r = tc.post("/v1/team/keys",
+                        headers={"Authorization": f"Bearer {owner}"},
+                        json={"scopes": ["graphs:read", "keys:manage"]})
+            assert r.status_code == 403, r.text
+            assert "escalation" in r.text.lower()
+        finally:
+            gen.close()
+
+    def test_key_without_keys_manage_cannot_mint_403(self, tmp_path):
+        """J2: a scoped deleg-NULL key WITHOUT keys:manage may not mint."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            reader = sdk.apikey_create(
+                tid, "owner-test", scopes=["graphs:read"],
+            )["api_key"]
+            app.dependency_overrides.pop(get_current_org, None)
+            r = tc.post("/v1/team/keys",
+                        headers={"Authorization": f"Bearer {reader}"},
+                        json={"scopes": ["graphs:read"]})
+            assert r.status_code == 403, r.text
+            assert "keys:manage" in r.text
+        finally:
+            gen.close()
+
+    def test_unknown_scope_422_and_unknown_graph_404(self, tmp_path):
+        """422 on an off-allowlist scope; 404 on a graph-bound mint to an
+        unknown graph OR the literal "default" (the default graph is bound
+        by a team-wide key — graph_id absent — never a per-graph mint; the
+        supabase "default" id is a DERIVED row with no graphs-table row, so
+        an api_keys FK to it would 500)."""
+        gen = self._setup(tmp_path)
+        _sdk, tid, tc = next(gen)
+        try:
+            r = self._session_mint(tc, tid, {"scopes": ["graphs:explode"]})
+            assert r.status_code == 422, r.text
+            r = self._session_mint(tc, tid, {
+                "graph_id": "g_no_such_graph", "scopes": ["graphs:read"],
+            })
+            assert r.status_code == 404, r.text
+            # Literal "default" is not key-bindable (custom-only).
+            r = self._session_mint(tc, tid, {
+                "graph_id": "default", "scopes": ["graphs:read"],
+            })
+            assert r.status_code == 404, r.text
+        finally:
+            gen.close()
+
+    def test_graph_bound_empty_scopes_422(self, tmp_path):
+        """SECOND-MODEL-GATE S2 pin: a graph-bound mint with an EXPLICIT
+        empty scopes array would mint a deleg-NULL scopes=[] key that
+        resolution derives legacy_full_access=True (FULL access) while the
+        response echoes scopes:[] — the F2 footgun on the mint path. 422."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            g = sdk._graph_create(tid, "acme", kind="custom")
+            r = self._session_mint(tc, tid, {
+                "graph_id": g["graph_id"], "scopes": [],
+            })
+            assert r.status_code == 422, r.text
+            assert "at least one scope" in r.text
+        finally:
+            gen.close()
+
+    def test_legacy_body_mint_unchanged_tt(self, tmp_path):
+        """D15/R2: a {} body still mints the byte-identical legacy tt_ key —
+        the C3 fields are ABSENT because create_api_key conditionally adds
+        them only when scoped_request or child_mint (not via a response
+        model)."""
+        gen = self._setup(tmp_path)
+        _sdk, tid, tc = next(gen)
+        try:
+            r = self._session_mint(tc, tid, {})
+            assert r.status_code == 200, r.text
+            assert r.json()["key"].startswith("tt_")
+            assert "scopes" not in r.json()
+            assert "delegation_depth" not in r.json()
+            assert "graph_id" not in r.json()
+            assert "name" in r.json()  # pre-C3 field kept (None when unset)
+        finally:
+            gen.close()
+
+    def test_list_enriches_and_filters_by_graph(self, tmp_path):
+        """E2E-12: list rows carry the C1 tenancy columns; ?graph_id= narrows."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            # Custom graph + two keys (one bound to it).
+            g = sdk._graph_create(tid, "acme", kind="custom")
+            gid = g["graph_id"]
+            app.dependency_overrides[get_current_org] = \
+                lambda: dict(TEST_TEAM, org_id=tid, session_user_id=_U1, key_id=None)
+            # #2297 POLICY A: the SESSION face is owner/admin-gated — seed the
+            # owner Membership (pre-#2297 the mint had no role check, so this
+            # override never needed it; same pattern as _session_mint).
+            sdk._get_registry().query(
+                "MERGE (m:Membership {user_id:$uid, org_id:$tid, "
+                "status:'active'}) SET m.role='owner'",
+                params={"uid": _U1, "tid": tid},
+            )
+            r1 = tc.post("/v1/team/keys", json={"scopes": ["graphs:read"]})
+            assert r1.status_code == 200, r1.text
+            kid_teamwide = r1.json()["id"]
+            r2 = tc.post("/v1/team/keys",
+                         json={"graph_id": gid, "scopes": ["graphs:read"]})
+            assert r2.status_code == 200, r2.text
+            kid_graphbound = r2.json()["id"]
+            listed = tc.get("/v1/team/keys").json()["keys"]
+            by_id = {k["id"]: k for k in listed}
+            assert by_id[kid_teamwide]["graph_id"] is None
+            assert by_id[kid_graphbound]["graph_id"] == gid
+            assert by_id[kid_teamwide]["scopes"] == ["graphs:read"]
+            assert "delegation_depth" in by_id[kid_teamwide]
+            assert "created_by_key_id" in by_id[kid_teamwide]
+            # graph_id filter narrows to the bound key only.
+            filtered = tc.get("/v1/team/keys",
+                              params={"graph_id": gid}).json()["keys"]
+            assert [k["id"] for k in filtered] == [kid_graphbound]
+        finally:
+            gen.close()
+
+    def test_shrink_scopes_and_expand_422(self, tmp_path):
+        """E2E-12: PATCH {scopes} shrinks (write → read subset reflected in
+        the row); an expand-attempt → 422 (revoke+recreate semantics)."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            app.dependency_overrides[get_current_org] = \
+                lambda: dict(TEST_TEAM, org_id=tid, session_user_id=_U1, key_id=None)
+            import tortoise.hosted_api as ha_mod
+            ha_mod._make_sdk(namespace="registry")._get_registry().query(
+                "MERGE (m:Membership {user_id:$uid, org_id:$tid, "
+                "status:'active'}) SET m.role='owner'",
+                params={"uid": _U1, "tid": tid},
+            )
+            app.dependency_overrides[get_current_user] = \
+                lambda: {"user_id": _U1, "email": "owner@example.com"}
+            r = tc.post("/v1/team/keys", json={
+                "scopes": ["graphs:read", "graphs:write"]})
+            kid = r.json()["id"]
+            # Shrink: read+write → read.
+            r = tc.patch(f"/v1/team/keys/{kid}", json={"scopes": ["graphs:read"]})
+            assert r.status_code == 200, r.text
+            assert r.json()["scopes"] == ["graphs:read"]
+            rows = sdk._get_registry().query(
+                "MATCH (k:APIKey {id:$id}) RETURN k.scopes",
+                params={"id": kid},
+            ).result_set
+            assert rows[0][0] == ["graphs:read"]
+            # Expand attempt → 422.
+            r = tc.patch(f"/v1/team/keys/{kid}",
+                         json={"scopes": ["graphs:read", "graphs:write"]})
+            assert r.status_code == 422, r.text
+            # Unknown scope in a shrink → 422.
+            r = tc.patch(f"/v1/team/keys/{kid}", json={"scopes": ["team:manage"]})
+            assert r.status_code == 422, r.text
+        finally:
+            gen.close()
+
+    def test_minted_deleg0_key_cannot_manage_403(self, tmp_path):
+        """E2E-4 half: a deleg=0 child key hitting mint/revoke → 403 (the
+        central deleg gate in get_current_org_session fires first). Shrink
+        is session-gated (E2E-12 surface — get_current_user dep), so a key
+        face 401s there rather than reaching the deleg gate; E2E-4's
+        management set is create/delete/mint/revoke — shrink is not in it."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            owner = sdk.apikey_create(
+                tid, "owner-test", scopes=["keys:manage", "graphs:read"],
+            )["api_key"]
+            app.dependency_overrides.pop(get_current_org, None)
+            child = tc.post("/v1/team/keys",
+                            headers={"Authorization": f"Bearer {owner}"},
+                            json={"scopes": ["graphs:read"]}).json()["key"]
+            # Child mint → 403 (deleg gate).
+            r = tc.post("/v1/team/keys",
+                        headers={"Authorization": f"Bearer {child}"},
+                        json={"scopes": ["graphs:read"]})
+            assert r.status_code == 403, r.text
+            # Child revoke → 403.
+            other = sdk.apikey_create(tid, "owner-test")["api_key"]
+            r = tc.delete(f"/v1/team/keys/{other}",
+                          headers={"Authorization": f"Bearer {child}"})
+            assert r.status_code == 403, r.text
+        finally:
+            gen.close()
+
+
+class TestC3KeyCapAndEscalationBackstop:
+    """C3 (#2112): max_api_keys 409 on the scoped mint (D3 asymmetry — the
+    legacy {} owner mint keeps its historical 402), plus the registry SDK
+    escalation backstop (mirror of the Supabase DB CHECK)."""
+
+    def test_scoped_mint_at_cap_409_legacy_402(self, tmp_path):
+        """D3 pin: a SCOPED mint at max_api_keys → 409; the legacy {} owner
+        mint → 402 (its historical _check_team_limit semantic)."""
+        gen = TestC3KeyLifecycle()._setup(tmp_path, max_api_keys=1)
+        sdk, tid, tc = next(gen)
+        try:
+            # One key already exists (fills the cap of 1).
+            sdk.apikey_create(tid, "owner-test")
+            org_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1)
+            org_dict.pop("key_id", None)
+            app.dependency_overrides[get_current_org] = lambda: org_dict
+            # #2297 POLICY A: the SESSION face is owner/admin-gated — seed the
+            # owner Membership (pre-#2297 the mint had no role check, so this
+            # override never needed it; same pattern as _session_mint).
+            sdk._get_registry().query(
+                "MERGE (m:Membership {user_id:$uid, org_id:$tid, "
+                "status:'active'}) SET m.role='owner'",
+                params={"uid": _U1, "tid": tid},
+            )
+            # Scoped mint → 409 (the _KeyCapExceeded semantic).
+            r = tc.post("/v1/team/keys",
+                        json={"scopes": ["graphs:read"]})
+            assert r.status_code == 409, r.text
+            # Legacy {} mint → 402 (historical 402 semantic preserved).
+            r = tc.post("/v1/team/keys", json={})
+            assert r.status_code == 402, r.text
+        finally:
+            gen.close()
+
+    def test_registry_apikey_create_escalation_backstop(self, tmp_path):
+        """C2 #2b registry backstop: apikey_create(deleg=0 + escalation
+        scope) raises ControlPlaneError — selfhost parity with the Supabase
+        DB CHECK chk_minted_key_no_escalation."""
+        from tortoise.exceptions import ControlPlaneError
+        gen = TestC3KeyLifecycle()._setup(tmp_path)
+        sdk, tid, _tc = next(gen)
+        try:
+            with pytest.raises(ControlPlaneError, match="escalation"):
+                sdk.apikey_create(tid, "owner-test",
+                                  delegation_depth=0,
+                                  scopes=["graphs:read", "keys:manage"])
+            # deleg NULL + escalation scopes is the OWNER class — allowed.
+            ok = sdk.apikey_create(tid, "owner-test", scopes=["keys:manage"])
+            assert ok["api_key"].startswith("tt_")
+        finally:
+            gen.close()
+
+    def test_scoped_key_legacy_body_mint_403_or_deleg0(self, tmp_path):
+        """D13 row-3/4 P1 regression (VGATE #2112): a deleg-NULL SCOPED key
+        cannot mint a full-access owner key via the legacy {} body. Without
+        keys:manage → 403 (row 4). WITH keys:manage → a deleg=0 child with
+        lineage (created_by_key_id + deleg=0) and the child-policy default
+        scope — never an escalation to the owner class."""
+        gen = TestC3KeyLifecycle()._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            app.dependency_overrides.pop(get_current_org, None)  # key auth
+            # Reader key (graphs:read only) → {} mint 403 (no mint capability).
+            reader = sdk.apikey_create(
+                tid, "owner-test", scopes=["graphs:read"])["api_key"]
+            r = tc.post("/v1/team/keys",
+                        headers={"Authorization": f"Bearer {reader}"},
+                        json={})
+            assert r.status_code == 403, r.text
+            assert "keys:manage" in r.text
+            # keys:manage key → {} mint yields a deleg=0 child, NOT a
+            # full-access owner key.
+            mgr = sdk.apikey_create(
+                tid, "owner-test", scopes=["keys:manage", "graphs:read"])
+            mgr_id = mgr["id"]
+            r = tc.post("/v1/team/keys",
+                        headers={"Authorization": f"Bearer {mgr['api_key']}"},
+                        json={})
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["key"].startswith("tk_")
+            assert body["delegation_depth"] == 0
+            rows = sdk._get_registry().query(
+                "MATCH (k:APIKey {id:$id}) RETURN k.created_by_key_id, "
+                "k.delegation_depth, k.scopes",
+                params={"id": body["id"]},
+            ).result_set
+            assert rows[0][0] == mgr_id  # lineage stamped
+            assert rows[0][1] == 0
+            assert rows[0][2] == ["graphs:read"]  # child-policy default
+        finally:
+            gen.close()
+
+    def test_legacy_full_access_key_legacy_mint_ok(self, tmp_path):
+        """D13 row 2 back-compat: a legacy full-access key (deleg NULL,
+        scopes=[]) is the owner class — its legacy {} mint still mints a
+        full-access owner key (E2E-5)."""
+        gen = TestC3KeyLifecycle()._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            app.dependency_overrides.pop(get_current_org, None)  # key auth
+            legacy = sdk.apikey_create(tid, "owner-test")  # {} default = legacy
+            r = tc.post("/v1/team/keys",
+                        headers={"Authorization": f"Bearer {legacy['api_key']}"},
+                        json={})
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["key"].startswith("tt_")  # byte-identical legacy
+            assert "delegation_depth" not in body  # owner class, no C3 fields
+        finally:
+            gen.close()
+
+    def test_legacy_full_access_key_scoped_mint_owner_deleg_null(self, tmp_path):
+        """D13 row 2 scoped-body cell (VGATE F1 pin): a legacy full-access
+        key minting a SCOPED body gets the OWNER-class deleg-NULL mint with
+        the requested allowlisted scope — NOT a deleg=0 child / 403. Escalation
+        scopes ride too (owner class, like a session mint)."""
+        gen = TestC3KeyLifecycle()._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            app.dependency_overrides.pop(get_current_org, None)  # key auth
+            legacy = sdk.apikey_create(tid, "owner-test")
+            r = tc.post("/v1/team/keys",
+                        headers={"Authorization": f"Bearer {legacy['api_key']}"},
+                        json={"scopes": ["graphs:create", "graphs:write"]})
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["key"].startswith("tk_")
+            assert body["delegation_depth"] is None  # owner class
+            assert sorted(body["scopes"]) == ["graphs:create", "graphs:write"]
+            # Escalation scope allowed for owner-class callers.
+            r = tc.post("/v1/team/keys",
+                        headers={"Authorization": f"Bearer {legacy['api_key']}"},
+                        json={"scopes": ["keys:manage"]})
+            assert r.status_code == 200, r.text
+            assert r.json()["delegation_depth"] is None
+            assert r.json()["scopes"] == ["keys:manage"]
+        finally:
+            gen.close()
+
+    def test_shrink_to_empty_deleg_null_422(self, tmp_path):
+        """VGATE F2 pin: emptying a deleg-NULL scoped key's scopes would
+        reclassify it legacy full-access (scopes=[] + deleg NULL →
+        legacy_full_access) — a capability EXPANSION via the shrink endpoint.
+        422, both deleg-NULL and deleg=0 targets stay safe."""
+        gen = TestC3KeyLifecycle()._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            app.dependency_overrides.pop(get_current_org, None)  # key auth
+            # deleg-NULL scoped owner key.
+            scoped = sdk.apikey_create(
+                tid, "owner-test", scopes=["graphs:read", "graphs:write"])
+            # shrink to [] via session face (owner admin).
+            org_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1,
+                             key_id=None)
+            app.dependency_overrides[get_current_org] = lambda: org_dict
+            app.dependency_overrides[get_current_user] = lambda: {
+                "user_id": _U1, "email": "owner@example.com"}
+            sdk._get_registry().query(
+                "MERGE (m:Membership {user_id:$uid, org_id:$tid, "
+                "status:'active'}) SET m.role='owner'",
+                params={"uid": _U1, "tid": tid},
+            )
+            r = tc.patch(f"/v1/team/keys/{scoped['id']}",
+                         json={"scopes": []})
+            assert r.status_code == 422, r.text
+            assert "legacy full-access" in r.text or "Cannot empty" in r.text
+            # A real shrink (write→read) still works.
+            r = tc.patch(f"/v1/team/keys/{scoped['id']}",
+                         json={"scopes": ["graphs:read"]})
+            assert r.status_code == 200, r.text
+            assert r.json()["scopes"] == ["graphs:read"]
+        finally:
+            gen.close()
+
+    def test_legacy_full_access_key_within_cap_ok(self, tmp_path):
+        """Sanity: the legacy {} gate + cap asymmetry leaves the pinned
+        legacy 402 intact (max_api_keys=1; owner-class {} mint hits 402, not
+        a spurious 403 from the caller-class gate)."""
+        gen = TestC3KeyLifecycle()._setup(tmp_path, max_api_keys=1)
+        sdk, tid, tc = next(gen)
+        try:
+            sdk.apikey_create(tid, "owner-test")  # fill cap
+            org_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1,
+                             key_id=None)
+            app.dependency_overrides[get_current_org] = lambda: org_dict
+            # #2297 POLICY A: the SESSION face is owner/admin-gated — seed the
+            # owner Membership (pre-#2297 the mint had no role check, so this
+            # override never needed it; same pattern as _session_mint).
+            sdk._get_registry().query(
+                "MERGE (m:Membership {user_id:$uid, org_id:$tid, "
+                "status:'active'}) SET m.role='owner'",
+                params={"uid": _U1, "tid": tid},
+            )
+            r = tc.post("/v1/team/keys", json={})
+            assert r.status_code == 402, r.text
+        finally:
+            gen.close()
+
+
+class TestC3ReviewGatePins:
+    """Code-review fix pins (PR #2196 round 1): deleg-NULL SCOPED keys are
+    least-privilege — revoke/list require keys:manage (P1/P2); the shrink
+    PATCH validates all scopes before applying enabled/name (no partial
+    application); the unknown-scope 422 survives non-str members (no 500)."""
+
+    def test_scoped_reader_key_cannot_revoke_or_list(self, tmp_path):
+        """P1 pin: a deleg-NULL graphs:read-only key (NOT owner class) cannot
+        revoke another team key nor enumerate the key inventory. Legacy
+        full-access keys and keys:manage scoped keys still can."""
+        gen = TestC3KeyLifecycle()._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            app.dependency_overrides.pop(get_current_org, None)  # key auth
+            owner = sdk.apikey_create(tid, "owner-test")  # legacy full-access
+            reader = sdk.apikey_create(
+                tid, "owner-test", scopes=["graphs:read"])["api_key"]
+            mgr = sdk.apikey_create(
+                tid, "owner-test", scopes=["keys:manage"])["api_key"]
+            victim = sdk.apikey_create(tid, "owner-test")
+            # Reader cannot revoke the victim key.
+            r = tc.delete(f"/v1/team/keys/{victim['id']}",
+                          headers={"Authorization": f"Bearer {reader}"})
+            assert r.status_code == 403, r.text
+            assert "keys:manage" in r.text
+            # Reader cannot list the team's key inventory.
+            r = tc.get("/v1/team/keys",
+                       headers={"Authorization": f"Bearer {reader}"})
+            assert r.status_code == 403, r.text
+            # Victim still alive.
+            rows = sdk._get_registry().query(
+                "MATCH (k:APIKey {id:$id}) RETURN k.revoked_at",
+                params={"id": victim["id"]},
+            ).result_set
+            assert rows[0][0] is None
+            # Legacy full-access key CAN revoke (owner class, back-compat).
+            r = tc.delete(f"/v1/team/keys/{victim['id']}",
+                          headers={"Authorization": f"Bearer {owner['api_key']}"})
+            assert r.status_code == 200, r.text
+            # keys:manage deleg-NULL key CAN list.
+            r = tc.get("/v1/team/keys",
+                       headers={"Authorization": f"Bearer {mgr}"})
+            assert r.status_code == 200, r.text
+            assert len(r.json()["keys"]) >= 3
+        finally:
+            gen.close()
+
+    def test_shrink_422_is_noop_for_enabled_and_name(self, tmp_path):
+        """P2 partial-application pin: a PATCH body with a superset scopes
+        array + enabled:false + name must 422 WITHOUT persisting ANY of them
+        (validation runs before any mutation). Registry lane: enabled is a
+        no-op echo (no column) so the discriminating mutation is the name
+        write — pre-fix code persisted k.name before the scopes 422; the
+        post-fix code validates scopes first."""
+        gen = TestC3KeyLifecycle()._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            app.dependency_overrides.pop(get_current_org, None)
+            scoped = sdk.apikey_create(
+                tid, "owner-test", scopes=["graphs:read"])
+            # session face owner
+            org_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1,
+                             key_id=None)
+            app.dependency_overrides[get_current_org] = lambda: org_dict
+            app.dependency_overrides[get_current_user] = lambda: {
+                "user_id": _U1, "email": "owner@example.com"}
+            sdk._get_registry().query(
+                "MERGE (m:Membership {user_id:$uid, org_id:$tid, "
+                "status:'active'}) SET m.role='owner'",
+                params={"uid": _U1, "tid": tid},
+            )
+            r = tc.patch(f"/v1/team/keys/{scoped['id']}", json={
+                "enabled": False,
+                "name": "scratch",
+                "scopes": ["graphs:read", "graphs:write"],  # superset → 422
+            })
+            assert r.status_code == 422, r.text
+            # Nothing persisted: scopes AND name unchanged (pre-fix registry
+            # code wrote k.name before the 422 — this assert catches it).
+            rows = sdk._get_registry().query(
+                "MATCH (k:APIKey {id:$id}) RETURN k.scopes, k.name",
+                params={"id": scoped["id"]},
+            ).result_set
+            assert rows[0][0] == ["graphs:read"]
+            assert rows[0][1] != "scratch"
+        finally:
+            gen.close()
+
+    def test_unknown_scope_nonstr_422_not_500(self, tmp_path):
+        """P2 TypeError pin: a crafted body with a non-str scope member must
+        422 (never 500 from sorted() over mixed types)."""
+        gen = TestC3KeyLifecycle()._setup(tmp_path)
+        _sdk, tid, tc = next(gen)
+        try:
+            r = self._session_mint_owner(tc, tid,
+                                         {"scopes": ["graphs:read", 123]})
+            assert r.status_code == 422, r.text
+        finally:
+            gen.close()
+
+    def _session_mint_owner(self, tc, tid, body):
+        import tortoise.hosted_api as ha_mod
+        org_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1)
+        org_dict.pop("key_id", None)
+        app.dependency_overrides[get_current_org] = lambda: org_dict
+        sdk = ha_mod._make_sdk(namespace="registry")
+        sdk._get_registry().query(
+            "MERGE (m:Membership {user_id:$uid, org_id:$tid, status:'active'}) "
+            "SET m.role='owner'",
+            params={"uid": _U1, "tid": tid},
+        )
+        return tc.post("/v1/team/keys", json=body)
+
+
+# ── #2251 embedded path/namespace divergence regression ─────────────────────
+# Scoped plan: docs/epics/2026-09-05-2251-path-divergence/plan.md (A2).
+# Markerless (an embedded_only marker would dead-run: skipped in the docker
+# slow leg AND excluded from the D14 -k subset). Env-control per test via the
+# test_register_journals_minted_team_graph shape. Record-only __init__ spy
+# never delegates to the real ctor (no real DB opens, no EmbeddedStoreBusyError
+# on the shared matrix). Tests that mint the "registry" anchor close+clear it.
+
+
+def _record_only_sdk_init_spy(monkeypatch, ha_mod):
+    """Record (db_path, namespace, graph_name) on every TortoiseSDK
+    construction WITHOUT delegating to the real __init__ (no real DB opens).
+    Returns the record list; the spy is auto-undone by monkeypatch."""
+    records = []
+
+    def _spy(self, db_path=None, *, namespace=None, graph_name=None, **kw):
+        records.append((db_path, namespace, graph_name))
+
+    monkeypatch.setattr(ha_mod.TortoiseSDK, "__init__", _spy)
+    return records
+
+
+def _pin_hermetic_default_store(monkeypatch, tmp_path):
+    """Point the bare-construction default (config.DEFAULT_DB_PATH, bound at
+    import via expanduser — a HOME redirect does NOT move it) at a tmp store
+    so ANY construction that resolves the ~/.tortoise default (pre-fix bare
+    ctors, or a future bare-construction regression) lands hermetically and
+    never touches/creates the developer's real ~/.tortoise (#2251 stray-DB
+    side effect). resolve_db_path reads the module global at call time, so
+    the monkeypatch is effective post-import. The parent dir is created so a
+    pre-fix bare open SUCCEEDS against the empty store (returns the absent-
+    graph verdict) instead of failing open on a missing parent — the false-
+    green the guard must prevent. Returns the pinned path."""
+    import tortoise.config as tconfig
+
+    pinned = str(tmp_path / "home" / ".tortoise" / "tortoise.db")
+    os.makedirs(os.path.dirname(pinned), exist_ok=True)
+    monkeypatch.setattr(tconfig, "DEFAULT_DB_PATH", pinned)
+    return pinned
+
+
+class TestEmbeddedRegistryPathDivergence:
+    """#2251: _iter_registered_teams + _graph_has_team_namespace must read the
+    SAME embedded db + registry graph the writers use (registry_control_plane
+    via _make_sdk(namespace="registry")), not ns-less control_plane on
+    ~/.tortoise. Plan tests 1-4."""
+
+    def test_iter_registered_teams_reads_registry_control_plane(
+            self, monkeypatch, tmp_path):
+        """Graph-name leg (namespace fix) — discriminates even with paths
+        pinned: a Team seeded via the writer seam (ns=registry) must be
+        enumerated. Pre-fix: queries ns-less control_plane → []."""
+        import tortoise.hosted_api as ha_mod
+
+        # Force the registry branch (selfhost/registry control-plane mode).
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "conv.db"))
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        # is_supabase_enabled reads TORTOISE_CONTROL_PLANE=registry → False;
+        # belt-and-braces against ambient creds:
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+        try:
+            writer = ha_mod._make_sdk(namespace="registry")
+            writer._get_registry().query(
+                "CREATE (t:Team {id:$id, name:$name, deleted_at:null})",
+                params={"id": "2251-team-1", "name": "T2251"},
+            )
+            # Falsy-id row must be skipped (site-1 guard).
+            writer._get_registry().query(
+                "CREATE (t:Team {id:$id, name:$name, deleted_at:null})",
+                params={"id": "", "name": "Falsy"},
+            )
+            teams = ha_mod._iter_registered_orgs()
+            writer.close()
+        finally:
+            _close_keepalive_anchors(ha_mod)
+        assert {"org_id": "2251-team-1", "name": "T2251"} in teams, teams
+        assert all(t["org_id"] for t in teams), teams
+
+    def test_graph_has_team_namespace_probes_writer_db(
+            self, monkeypatch, tmp_path):
+        """Path leg — isolated env (URI + TORTOISE_DB_PATH unset, the bare-
+        construction default pointed at a tmp store): writer seam and both
+        site reads record ONE identical db_path + namespace='registry'.
+        Pre-fix: bare sites record db_path=None (real ctor never runs under
+        the spy) → mismatch vs writer's real path + namespace=None."""
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+        # config.DEFAULT_DB_PATH is bound at import time (expanduser) — a HOME
+        # redirect does NOT move it (resolve_db_path reads the module global at
+        # call time, so patching the attribute IS hermetic). Point it at a tmp
+        # store so a pre-fix bare-construction red run never touches the real
+        # ~/.tortoise (#2251's stray-DB side effect).
+        _pin_hermetic_default_store(monkeypatch, tmp_path)
+        records = _record_only_sdk_init_spy(monkeypatch, ha_mod)
+        ha_mod._FALLBACK_KEEPALIVE.clear()
+        try:
+            ha_mod._make_sdk(namespace="registry")  # writer shape
+            assert records, "writer seam constructed nothing"
+            writer_records = list(records)
+            records.clear()
+            ha_mod._iter_registered_orgs()
+            sweep_records = list(records)
+            assert sweep_records, "_iter_registered_teams constructed nothing"
+            records.clear()
+            ha_mod._graph_has_org_namespace("team-2251-x")
+            probe_records = list(records)
+            assert probe_records, "_graph_has_team_namespace constructed nothing"
+        finally:
+            ha_mod._FALLBACK_KEEPALIVE.clear()
+        # EVERY construction in the embedded leg must carry the resolved
+        # db_path (a bare/unanchored construction records db_path=None — the
+        # ~/.tortoise resolution happens inside the never-run real ctor). Do
+        # NOT filter None out: the path-divergence half is exactly the bug
+        # where the sites' constructions differ from the writer's path.
+        all_records = writer_records + sweep_records + probe_records
+        assert all(db is not None for db, _ns, _gn in all_records), \
+            f"bare (db_path=None) construction recorded: {all_records}"
+        paths = {db for db, _ns, _gn in all_records}
+        assert len(paths) == 1, f"divergent db_paths recorded: {all_records}"
+        (shared_path,) = paths
+        # Guard (b): the shared embedded path must not resolve under the
+        # bare-construction default store (tmp/home/.tortoise). Subpath check
+        # — dirname(shared_path) == .../.tortoise, never .../home itself.
+        assert str(tmp_path / "home") not in shared_path, all_records
+        for phase in (writer_records, sweep_records, probe_records):
+            assert all(ns == "registry" for _db, ns, _gn in phase), phase
+            assert all(gn is None for _db, _ns, gn in phase), phase
+
+    def test_iter_registered_teams_never_raises_on_sweep_failure(
+            self, monkeypatch, tmp_path):
+        """Site-1 best-effort contract: a raising _make_sdk (e.g.
+        EmbeddedStoreBusyError on a cross-process-held DB) must degrade to []
+        — never raise into _lifespan's boot path (plan surface map)."""
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+        # Hermetic red-run default: any construction resolving the bare
+        # ~/.tortoise default lands on a tmp store, never the real home.
+        _pin_hermetic_default_store(monkeypatch, tmp_path)
+
+        def _busy(namespace=None, graph_name=None):
+            raise RuntimeError("embedded store busy")
+
+        monkeypatch.setattr(ha_mod, "_make_sdk", _busy)
+        assert ha_mod._iter_registered_orgs() == []
+
+    def test_graph_has_team_namespace_real_verdict(self, monkeypatch, tmp_path):
+        """Consumer-visible verdict on a REAL embedded store: a minted
+        org_{tid} graph on the anchored/writer store → True; an unminted id
+        → False. Pre-fix the bare construction probed resolve_db_path()'s
+        default store (pointed at a tmp home here for hermeticity) → False
+        for the present graph (acceptance (e)(ii) re-enables the FLOW leg)."""
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+        # Hermetic bare-construction default: pre-fix (red) runs probe
+        # resolve_db_path()'s store — point it at a tmp home so the run never
+        # touches the real ~/.tortoise (#2251 stray-DB side effect).
+        _pin_hermetic_default_store(monkeypatch, tmp_path)
+        # Confine the post-fix writer/probe store to a per-test tmp file (the
+        # env-unset fallback would otherwise be the process-shared
+        # tempfile.gettempdir()/tortoise.db — cross-suite busy-probe risk,
+        # #1502/#1950 class). The discriminator survives: pre-fix never calls
+        # _resolve_embedded_db_path (inline policy), so its probe still hits
+        # the patched DEFAULT_DB_PATH tmp-home store ≠ this tmp store.
+        monkeypatch.setattr(
+            ha_mod, "_resolve_embedded_db_path",
+            lambda: str(tmp_path / "store.db"), raising=False)
+        tid = "team-2251-verdict"
+        try:
+            # Mint the team graph via the anchored writer seam (a real graph
+            # on the writers' /data-or-tempdir store).
+            ha_mod._make_sdk(namespace=tid)._get_proj()
+            # Post-fix: both sites resolve the SAME anchored store → True for
+            # a present graph, False for an absent one. Pre-fix this probed
+            # the (empty) default store → False for the present graph.
+            assert ha_mod._graph_has_org_namespace(tid) is True
+            assert ha_mod._graph_has_org_namespace("team-absent-999") is False
+        finally:
+            # Close every anchor minted (registry + the team graph) — the
+            # #1950 close-then-drop pattern.
+            _close_keepalive_anchors(ha_mod)
+
+    def test_iter_registered_teams_uri_mode_registry_namespace(
+            self, monkeypatch, tmp_path):
+        """Bug (a) is mode-independent: in URI mode the sweep must STILL
+        construct namespace='registry' (registry_control_plane), not bare
+        (control_plane). Record-spy: exactly one (db_path=None,
+        namespace='registry') construction; no real server touched."""
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setenv(
+            "TORTOISE_DB_URI", "docker://:pw@localhost:6379/2251_uri_ns")
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+        records = _record_only_sdk_init_spy(monkeypatch, ha_mod)
+        ha_mod._FALLBACK_KEEPALIVE.clear()
+        try:
+            teams = ha_mod._iter_registered_orgs()
+        finally:
+            ha_mod._FALLBACK_KEEPALIVE.clear()
+        # URI-branch _make_sdk returns a fresh TortoiseSDK(namespace="registry")
+        # with no db_path. The stub's _get_registry() raises → fail-open [].
+        assert teams == [], teams
+        assert records == [(None, "registry", None)], records
+
+    def test_supabase_mode_never_constructs_registry_sdk(
+            self, monkeypatch, tmp_path):
+        """Invariant guard (NOT a pre-fix discriminator — the early return
+        already exists): Supabase mode enumerates via the control plane and
+        must never construct the registry SDK (post-#669 no-recreate)."""
+        import tortoise.hosted_api as ha_mod
+        import tortoise.supabase_control as sc
+        from tests.fake_control_plane import FakeControlPlane
+
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("SUPABASE_URL", "https://2251.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-2251")
+        fake = FakeControlPlane()
+        fake.seed("organizations", [{"id": "supa-team-1", "name": "Supa T",
+                             "deleted_at": None}])
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+        records = _record_only_sdk_init_spy(monkeypatch, ha_mod)
+        ha_mod._FALLBACK_KEEPALIVE.clear()
+        try:
+            teams = ha_mod._iter_registered_orgs()
+        finally:
+            ha_mod._FALLBACK_KEEPALIVE.clear()
+        assert teams == [{"org_id": "supa-team-1", "name": "Supa T"}], teams
+        assert records == [], f"Supabase mode constructed {len(records)} SDKs"
+
+    def test_iter_registered_teams_supabase_query_failure_returns_empty(
+            self, monkeypatch, tmp_path):
+        """Supabase-mode boot contract: a control-plane query failure at boot
+        (transient PostgREST outage) must degrade to [] — never crash
+        _lifespan (the branch that runs in hosted production)."""
+        import tortoise.hosted_api as ha_mod
+        import tortoise.supabase_control as sc
+        from tests.fake_control_plane import FakeControlPlane
+
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("SUPABASE_URL", "https://2251b.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-2251b")
+        fake = FakeControlPlane()
+
+        def _query_boom(table, **kw):
+            raise RuntimeError("PostgREST transient outage")
+
+        monkeypatch.setattr(fake, "query", _query_boom)
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+        records = _record_only_sdk_init_spy(monkeypatch, ha_mod)
+        assert ha_mod._iter_registered_orgs() == []
+        assert records == [], "registry SDK must never be built in Supabase mode"
+
+    def test_graph_has_team_namespace_uri_mode_parity(
+            self, monkeypatch, tmp_path):
+        """URI-mode envelope: with TORTOISE_DB_URI set, _graph_has_team_namespace
+        constructs exactly one (db_path=None, namespace='registry') SDK and
+        does NOT populate _FALLBACK_KEEPALIVE — URI construction semantics
+        unchanged (plan test 4)."""
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setenv(
+            "TORTOISE_DB_URI", "docker://:pw@localhost:6379/2251_parity")
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        records = _record_only_sdk_init_spy(monkeypatch, ha_mod)
+        ha_mod._FALLBACK_KEEPALIVE.clear()
+        try:
+            ha_mod._graph_has_org_namespace("team-2251-uri")
+            # The no-anchor URI contract the docstring claims: URI mode must
+            # never populate the keepalive dict.
+            assert ha_mod._FALLBACK_KEEPALIVE.get("registry") is None
+        finally:
+            ha_mod._FALLBACK_KEEPALIVE.clear()
+        # URI-mode constructions carry no db_path (server mode). Under the
+        # record-only spy the stub SDK's _get_proj() raises → the fail-open
+        # except returns True deterministically (the success path is
+        # unreachable with a stub) — assert the exact construction record.
+        assert records == [(None, "registry", None)], records
+
+
+class TestOrgGraphNameRoundTrip:
+    """#3543 code review (P1) — a stored graph name must round-trip to the
+    SAME graph.
+
+    `_org_namespace` returned a prefix-STRIPPED namespace for
+    `_make_sdk(namespace=...)` to re-prefix. When #3543 changed the SDK's
+    namespace rule from `team_{ns}` to `org_{ns}`, a stored `team_{x}` stripped
+    to `x` and was re-prefixed into `org_{x}` — a different, ABSENT graph, i.e.
+    an empty dump with HTTP 200, the exact #873 failure the stored-name rule
+    exists to prevent. And `_graph_has_org_namespace` returning True on a
+    `team_*` hit while its caller opened `org_*` minted a spurious empty graph
+    — the pin-4 read-path write. Both are pinned here.
+    """
+
+    def test_stored_name_is_returned_verbatim(self):
+        import tortoise.hosted_api as ha_mod
+
+        assert ha_mod._org_graph_name({"graph_name": "team_x"}, "o1") == "team_x"
+        assert ha_mod._org_graph_name({"graph_name": "org_x"}, "o1") == "org_x"
+        # custom sub-graph: the full `org_{tid}_{gid}` must survive too
+        assert ha_mod._org_graph_name(
+            {"graph_name": "org_t1_g9"}, "o1") == "org_t1_g9"
+        # fallback only when nothing is stored
+        assert ha_mod._org_graph_name({}, "o1") == "org_o1"
+        assert ha_mod._org_graph_name({"graph_name": None}, "o1") == "org_o1"
+
+    def test_open_org_graph_sdk_addresses_the_listed_name(
+            self, monkeypatch):
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setattr(ha_mod, "_registry_existing_graphs",
+                            lambda: {"org_o1", "team_o2"})
+        monkeypatch.setattr(ha_mod, "_make_sdk", lambda **kw: ("sdk", kw))
+        # canonical → the namespace form is preserved (embedded keepalive key
+        # and every downstream sdk._namespace consumer stay identical)
+        assert ha_mod._open_org_graph_sdk("o1") == ("sdk", {"namespace": "o1"})
+        # legacy → the FULL name, verbatim. Opening `namespace="o2"` here
+        # would resolve to `org_o2`: a different graph, minted on read.
+        assert ha_mod._open_org_graph_sdk("o2") == (
+            "sdk", {"graph_name": "team_o2"})
+        # neither listed → None (caller keeps its inline fallback)
+        assert ha_mod._open_org_graph_sdk("o3") is None
+        # probe failed → also None; the caller's `or _make_sdk(namespace=)`
+        # restores the fail-open read that ends in 'unavailable' markers
+        monkeypatch.setattr(ha_mod, "_registry_existing_graphs", lambda: None)
+        assert ha_mod._open_org_graph_sdk("o1") is None
+
+    def test_has_org_namespace_accepts_both_and_fails_open(
+            self, monkeypatch):
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setattr(ha_mod, "_registry_existing_graphs",
+                            lambda: {"team_o9"})
+        assert ha_mod._graph_has_org_namespace("o9") is True
+        monkeypatch.setattr(ha_mod, "_registry_existing_graphs",
+                            lambda: {"org_o9"})
+        assert ha_mod._graph_has_org_namespace("o9") is True
+        monkeypatch.setattr(ha_mod, "_registry_existing_graphs",
+                            lambda: set())
+        assert ha_mod._graph_has_org_namespace("o9") is False
+        # graph-up-unknown stays fail-open (never-raise contract, #2251)
+        monkeypatch.setattr(ha_mod, "_registry_existing_graphs", lambda: None)
+        assert ha_mod._graph_has_org_namespace("o9") is True
+
+
+class TestResolveEmbeddedDbPath:
+    """_resolve_embedded_db_path corner tests (#2251 plan tests 5)."""
+
+    def test_unset_env_defaults_to_data(self, monkeypatch):
+        import tortoise.hosted_api as ha_mod
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        import os as _os
+
+        def _makedirs_ok(_path, **kw):
+            return None  # pretend /data is writable
+
+        monkeypatch.setattr(_os, "makedirs", _makedirs_ok)
+        assert ha_mod._resolve_embedded_db_path() == "/data/tortoise.db"
+
+    def test_env_honored_verbatim(self, monkeypatch):
+        import os as _os
+
+        import tortoise.hosted_api as ha_mod
+        monkeypatch.setenv("TORTOISE_DB_PATH", "/x/y/custom.db")
+
+        def _makedirs_ok(_path, **kw):
+            return None
+
+        monkeypatch.setattr(_os, "makedirs", _makedirs_ok)
+        assert ha_mod._resolve_embedded_db_path() == "/x/y/custom.db"
+
+    def test_env_relative_honored_verbatim_not_absified(self, monkeypatch):
+        """The resolver returns the env value verbatim — a RELATIVE path
+        WITH a directory component is NOT cwd-abs-ified (the deliberate
+        divergence from config.resolve_db_path, which _abs()-ifies). The
+        directory component is load-bearing: a bare filename has dirname("")
+        → makedirs("") raises, so it would fall through to the tempdir
+        fallback under a real os.makedirs; "relative/sub/custom.db" has a
+        non-empty dirname, so the verbatim claim holds with or without the
+        patch below."""
+        import os as _os
+
+        import tortoise.hosted_api as ha_mod
+        monkeypatch.setenv("TORTOISE_DB_PATH", "relative/sub/custom.db")
+
+        def _makedirs_ok(_path, **kw):
+            return None
+
+        monkeypatch.setattr(_os, "makedirs", _makedirs_ok)
+        assert ha_mod._resolve_embedded_db_path() == "relative/sub/custom.db"
+
+    def test_unwritable_data_falls_back_to_tempdir(self, monkeypatch):
+        import os as _os
+
+        import tortoise.hosted_api as ha_mod
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        # dirname-is-a-file: real makedirs raises FileExistsError (an OSError)
+        # deterministically — no /data assumption.
+        monkeypatch.setattr(_os, "makedirs", _raise_file_exists)
+        result = ha_mod._resolve_embedded_db_path()
+        assert os.path.dirname(result) == tempfile.gettempdir()
+        assert result.endswith("tortoise.db")
+
+    def test_empty_env_falls_back_to_tempdir(self, monkeypatch):
+        import os as _os
+
+        import tortoise.hosted_api as ha_mod
+        # dirname("") == "" → makedirs("") raises FileNotFoundError (OSError).
+        monkeypatch.setattr(_os, "makedirs", _raise_file_exists)
+        monkeypatch.setenv("TORTOISE_DB_PATH", "")
+        result = ha_mod._resolve_embedded_db_path()
+        assert os.path.dirname(result) == tempfile.gettempdir()
+        assert result.endswith("tortoise.db")
+
+
+def _raise_file_exists(path, **kw):
+    if path == "":
+        raise FileNotFoundError(f"no such dir: {path!r}")
+    raise FileExistsError(f"blocked: {path!r}")
+
+
+class TestRegistryExistingGraphs:
+    """_registry_existing_graphs probe-before-purge helper (#2251 review P2).
+
+    The retention sweep must not purge an ABSENT org_{tid} graph (an orphan
+    registry row from a partial provision) — the purge query would
+    materialize an empty graph. The helper lists the server-wide existing
+    graphs via the registry seam and returns None on probe failure so the
+    caller skips the cycle (best-effort)."""
+
+    def test_success_returns_set_of_graph_names(self, monkeypatch):
+        """A successful probe returns the graph names as a set — the sweep
+        gate then skips teams whose org_{tid} graph was never minted."""
+        import tortoise.hosted_api as ha_mod
+
+        class _FakeDb:
+            @staticmethod
+            def list_graphs():
+                return ["registry_control_plane", "team_a", "team_b"]
+
+        class _FakeProj:
+            db = _FakeDb()
+
+        closed = []
+
+        class _Sdk:
+            def _get_proj(self):
+                return _FakeProj()
+
+            def close(self):
+                closed.append(True)
+
+        monkeypatch.setattr(
+            ha_mod, "_make_sdk",
+            lambda namespace=None, graph_name=None: _Sdk())
+        assert ha_mod._registry_existing_graphs() == {
+            "registry_control_plane", "team_a", "team_b"}
+        assert closed == [True], "the probe SDK must be closed"
+
+    def test_probe_exception_returns_none(self, monkeypatch):
+        """A probe failure (list_graphs raise) → None — the caller skips the
+        sweep this cycle instead of purging blind (best-effort contract)."""
+        import tortoise.hosted_api as ha_mod
+
+        class _BoomProj:
+            class _db:
+                @staticmethod
+                def list_graphs():
+                    raise RuntimeError("list_graphs boom")
+
+            db = _db()
+
+        class _Sdk:
+            def _get_proj(self):
+                return _BoomProj()
+
+            def close(self):
+                return None
+
+        monkeypatch.setattr(
+            ha_mod, "_make_sdk",
+            lambda namespace=None, graph_name=None: _Sdk())
+        assert ha_mod._registry_existing_graphs() is None
+
+    def test_sdk_close_runs_when_list_graphs_raises(self, monkeypatch):
+        """close() runs on the exception path (finally) — no leaked probe
+        handle on the embedded keepalive daemon (mirror of the site-2
+        close-on-exception leak fix)."""
+        import tortoise.hosted_api as ha_mod
+
+        closed = []
+
+        class _BoomProj:
+            class _db:
+                @staticmethod
+                def list_graphs():
+                    raise RuntimeError("boom")
+
+            db = _db()
+
+        class _Sdk:
+            def _get_proj(self):
+                return _BoomProj()
+
+            def close(self):
+                closed.append(True)
+
+        monkeypatch.setattr(
+            ha_mod, "_make_sdk",
+            lambda namespace=None, graph_name=None: _Sdk())
+        assert ha_mod._registry_existing_graphs() is None
+        assert closed == [True], "close() must run on the exception path"
+
+
+class TestGraphHasTeamNamespaceExceptionPath:
+    """Site-2 close-on-exception leak fix: the fresh SDK is closed even when
+    list_graphs raises (finally), and the never-raise fail-open contract is
+    preserved when the construction itself raises. Env-isolated + hermetic
+    default store so a future bare-construction refactor cannot fall through
+    to the real ~/.tortoise behind the monkeypatch (#2251 stray-DB guard)."""
+
+    def test_close_runs_when_list_graphs_raises(self, monkeypatch, tmp_path):
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        _pin_hermetic_default_store(monkeypatch, tmp_path)
+
+        class _RaisingProj:
+            class _db:
+                @staticmethod
+                def list_graphs():
+                    raise RuntimeError("list_graphs boom")
+
+            db = _db()
+
+        closed = []
+
+        class _Sdk:
+            def _get_proj(self):
+                return _RaisingProj()
+
+            def close(self):
+                closed.append(True)
+
+        monkeypatch.setattr(
+            ha_mod, "_make_sdk",
+            lambda namespace=None, graph_name=None: _Sdk())
+        assert ha_mod._graph_has_org_namespace("team-leak") is True
+        assert closed == [True], "close() must run on the exception path"
+
+    def test_construction_raise_keeps_fail_open(self, monkeypatch, tmp_path):
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        _pin_hermetic_default_store(monkeypatch, tmp_path)
+
+        def _boom(namespace=None, graph_name=None):
+            raise RuntimeError("embedded store busy")
+
+        monkeypatch.setattr(ha_mod, "_make_sdk", _boom)
+        assert ha_mod._graph_has_org_namespace("team-busy") is True
+
+
+class TestSupabaseLaneV2AcceptErrorShape:
+    """W7 merge review P2 (supabase lane): the v2 mismatch accept's OTP
+    reject must return the DOCUMENTED invite_otp_invalid dict shape on the
+    supabase lane too — the seam's reachable wrong-code message is
+    "Invalid or expired verification code" (lowercase "verification"), and
+    a case-sensitive matcher on the capital-V defense-branch text missed it,
+    so a supabase-hosted wrong code fell through to a plain-string 403
+    (diverging from the registry lane's dict, which the HTTP fusion tests
+    pin). Registry-lane coverage exists in test_invite_fusion_http.py; the
+    supabase lane had none — this pins the mapping directly."""
+
+    def test_wrong_code_maps_to_invite_otp_invalid_dict(self, monkeypatch):
+        """Drive _accept_mismatch_v2 in supabase mode with a seam that
+        raises the reachable lowercase-message InvitationError — the handler
+        must translate it to the documented {error_code: invite_otp_invalid}
+        HTTP 403 dict (not a plain-string detail)."""
+        import asyncio
+
+        import tortoise.supabase_control as sc_mod
+        from tortoise.hosted_api import _accept_mismatch_v2
+        from tortoise.supabase_control import InvitationError
+
+        def _sb_accept_v2_stub(*args, **kwargs):
+            # the REACHABLE supabase OTP reject (lowercase "verification")
+            raise InvitationError("Invalid or expired verification code",
+                                  status=403)
+
+        async def _run():
+            return await _accept_mismatch_v2(
+                {"path": "fuse", "otp": "000000",
+                 "token": "tok-race"},
+                request=None,  # error path never touches request
+                user={"user_id": _U2, "email": "alice@example.com"},
+                invite={"email": "bob@example.com", "token": "tok-race"})
+
+        # _accept_mismatch_v2 binds _sb_accept_v2 / get_control_plane /
+        # is_supabase_enabled lazily from tortoise.supabase_control at call
+        # time — patch the SOURCE module, not ha_mod.
+        monkeypatch.setattr(sc_mod, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(sc_mod, "get_control_plane",
+                            lambda: object())
+        monkeypatch.setattr(sc_mod, "invitation_accept", _sb_accept_v2_stub)
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(_run())
+        assert ei.value.status_code == 403
+        detail = ei.value.detail
+        assert isinstance(detail, dict), (
+            f"supabase-lane OTP reject must be the dict shape, got: {detail!r}")
+        assert detail["error_code"] == "invite_otp_invalid"
+        assert "verification code" in detail["message"].lower()
+
+    def test_code_required_defense_branch_also_dict(self, monkeypatch):
+        """The seam's other OTP 403 (capital-V "Verification code required"
+        defense-in-depth text) maps to the same dict shape — case-insensitive
+        matcher covers both messages."""
+        import asyncio
+
+        import tortoise.supabase_control as sc_mod
+        from tortoise.hosted_api import _accept_mismatch_v2
+        from tortoise.supabase_control import InvitationError
+
+        def _sb_accept_v2_stub(*args, **kwargs):
+            raise InvitationError(
+                "Verification code required to accept on a mismatched email",
+                status=403)
+
+        async def _run():
+            return await _accept_mismatch_v2(
+                {"path": "fuse", "otp": "000000",
+                 "token": "tok-race"},
+                request=None,
+                user={"user_id": _U2, "email": "alice@example.com"},
+                invite={"email": "bob@example.com", "token": "tok-race"})
+
+        monkeypatch.setattr(sc_mod, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(sc_mod, "get_control_plane",
+                            lambda: object())
+        monkeypatch.setattr(sc_mod, "invitation_accept", _sb_accept_v2_stub)
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(_run())
+        assert ei.value.status_code == 403
+        assert ei.value.detail["error_code"] == "invite_otp_invalid"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #2600 Phase 1 Task 4 — REST boundary pin: forged actor claims in a raw JSON
+# body are SILENTLY DROPPED (Pydantic extra="ignore" on CreatePointRequest —
+# verified the model has NO model_config → v2 default extra="ignore"). The
+# store never gains the forged key and the response is 2xx, never 422.
+
+class TestCreatePointForgedActorSilentlyDropped:
+    """E2E-3 negative (REST leg, no model_config change)."""
+
+    def test_forged_actor_field_dropped_not_rejected(self, client):
+        """A raw JSON body carrying top-level actor keys → 2xx (never a 422);
+        the forged keys never reach the store; the point is created normally."""
+        import tortoise.hosted_api as ha_mod
+        r = client.post("/v1/points", json={
+            "content": "forged actor boundary pin",
+            "kind": "statement",
+            # forged top-level claims — Pydantic extra="ignore" drops them
+            "actor_user_id": "forged-actor-0000",
+            "owner": "forged-owner",
+        })
+        assert r.status_code == 200, r.text
+        pid = r.json()["id"]
+        sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
+        rows = sdk._get_proj().g.query(
+            "MATCH (p:Point {id:$id}) RETURN p.actor_user_id, p.owner",
+            params={"id": pid}).result_set
+        assert rows and list(rows[0]) == [None, None], \
+            f"forged fields must never reach the store: {rows}"
+
+    def test_forged_actor_field_absent_still_creates(self, client):
+        """Control: without the forged fields the request shape is unchanged
+        (2xx + point present) — the drop is additive."""
+        import tortoise.hosted_api as ha_mod
+        r = client.post("/v1/points", json={
+            "content": "clean boundary control",
+            "kind": "statement",
+        })
+        assert r.status_code == 200, r.text
+        pid = r.json()["id"]
+        sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
+        rows = sdk._get_proj().g.query(
+            "MATCH (p:Point {id:$id}) RETURN count(p)",
+            params={"id": pid}).result_set
+        assert rows and rows[0][0] == 1, rows
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #2600 (Phase 1, Task 5) — list_sessions/get_session_detail actor read path.
+# These are real-auth REGISTRY-lane tests (docker CP; minted tt_ keys — no
+# DI override). The registry lane carries NO membership email seam, so the
+# actor display contract here is RAW-ID-ONLY (email never appears on the
+# docker lane — the supabase email branch is pinned in
+# TestActorDisplayMap2600 directly against the shared helper + a
+# FakeControlPlane). Where a session must carry an actor, it is seeded
+# DIRECTLY in the team data graph namespace (Session + CONTAINS decision
+# Point) — the read surface does not care how the actor landed.
+
+class TestSessionActorReadPath2600:
+    """Read path: rows expose actor_user_id + harness + actor_display
+    (raw id on the registry lane); ?actor_user_id filter excludes legacy
+    null-actor rows; malformed filter → 422; value-level r[0..5] mapping
+    regression; one _actor_display_map call per request, zero when every
+    row is legacy."""
+
+    def _data_sdk(self, org_id: str):
+        import tortoise.hosted_api as ha_mod
+        return ha_mod._make_sdk(namespace=org_id)
+
+    def _setup(self, tmp_path, tag: str):
+        """Temp registry + seeded pro team + real-auth TestClient. Returns
+        (sdk, org_id, client, proj) with a FRESH team per call."""
+        import tortoise.hosted_api as ha_mod
+        db_path = os.path.join(tmp_path, f"rd_{tag}.db")
+        _orig = _patch_tortoise_sdk_init(db_path)
+        os.environ["TORTOISE_DB_PATH"] = db_path
+        sdk = ha_mod._make_sdk(namespace="registry")
+        tid = f"team-2600-rd-{tag}"
+        _seed_team_graphs(sdk, tid, "pro", None)
+        proj = self._data_sdk(tid)._get_proj()
+        try:
+            with TestClient(ha_mod.app,
+                            raise_server_exceptions=False) as tc:
+                yield sdk, tid, tc, proj
+        finally:
+            os.environ.pop("TORTOISE_DB_PATH", None)
+            _restore_tortoise_sdk_init(_orig)
+
+    def _seed_session(self, proj, sid: str, *, actor: str | None,
+                      created_at: str, turn_count: int = 1,
+                      harness: str | None = None,
+                      with_claim: bool = False) -> None:
+        """Seed a Session (+ optional CONTAINS decision Point for the
+        extracted count) directly in the team data graph."""
+        sets = f"created_at:$now, turn_count:$tc, is_episodic:true" \
+               f"{', actor_user_id:$uid' if actor else ''}" \
+               f"{', harness:$har' if harness else ''}"
+        params: dict = {"sid": sid, "now": created_at, "tc": turn_count}
+        if actor:
+            params["uid"] = actor
+        if harness:
+            params["har"] = harness
+        if with_claim:
+            pid = f"{sid}_c0"
+            proj.g.query(
+                f"CREATE (s:Session {{id:$sid, {sets}}})"
+                "-[:CONTAINS]->(p:Point {id:$pid, pointKind:'decision', "
+                "is_episodic:true})",
+                params={**params, "pid": pid})
+        else:
+            proj.g.query(
+                f"CREATE (s:Session {{id:$sid, {sets}}})", params=params)
+
+    def test_list_value_level_regression_all_six_bindings(self, tmp_path):
+        """Seed an attributed session with KNOWN created_at/turn_count/
+        harness + one decision claim and a legacy null-actor session; GET
+        /v1/sessions; assert id/created_at/turns/extracted/actor_user_id/
+        harness all equal the graph on the SAME row dict (catches an
+        off-by-N RETURN reshuffle) + actor_display == raw id (registry)."""
+        gen = self._setup(tmp_path, "vreg")
+        sdk, tid, tc, proj = next(gen)
+        try:
+            now = "2026-09-09T12:00:00.000000+00:00"
+            key = sdk.apikey_create(tid, _2600_UUID_A)
+            h = {"Authorization": f"Bearer {key['api_key']}"}
+            self._seed_session(proj, "s-rd-vreg-a", actor=_2600_UUID_A,
+                               created_at=now, turn_count=2,
+                               harness="claude", with_claim=True)
+            self._seed_session(proj, "s-rd-vreg-leg", actor=None,
+                               created_at="2026-09-09T11:00:00.000000+00:00",
+                               turn_count=1)
+            r = tc.get("/v1/sessions", headers=h)
+            assert r.status_code == 200, r.text
+            rows = {s["id"]: s for s in r.json()["sessions"]}
+            a = rows["s-rd-vreg-a"]
+            assert a["created_at"] == now
+            assert a["turns"] == 2
+            assert a["extracted"] == 1
+            assert a["actor_user_id"] == _2600_UUID_A
+            assert a["harness"] == "claude"
+            # registry lane: raw-id display, never an email
+            assert a["actor_display"] == _2600_UUID_A
+            leg = rows["s-rd-vreg-leg"]
+            assert leg["actor_user_id"] is None
+            assert leg["actor_display"] is None
+            assert leg["harness"] is None
+            assert leg["turns"] == 1 and leg["extracted"] == 0
+        finally:
+            gen.close()
+
+    def test_filter_returns_only_that_actor_and_excludes_legacy(
+            self, tmp_path):
+        gen = self._setup(tmp_path, "filt")
+        sdk, tid, tc, proj = next(gen)
+        try:
+            key = sdk.apikey_create(tid, _2600_UUID_A)
+            h = {"Authorization": f"Bearer {key['api_key']}"}
+            self._seed_session(proj, "s-rd-fil-a", actor=_2600_UUID_A,
+                               created_at="2026-09-09T12:00:00.000000+00:00")
+            self._seed_session(proj, "s-rd-fil-b", actor=_2600_UUID_B,
+                               created_at="2026-09-09T13:00:00.000000+00:00")
+            self._seed_session(proj, "s-rd-fil-leg", actor=None,
+                               created_at="2026-09-09T14:00:00.000000+00:00")
+            r = tc.get("/v1/sessions", headers=h,
+                       params={"actor_user_id": _2600_UUID_A})
+            assert r.status_code == 200, r.text
+            got = {s["id"] for s in r.json()["sessions"]}
+            assert got == {"s-rd-fil-a"}, got
+            # a legacy null-actor session NEVER appears under any filter
+            assert "s-rd-fil-leg" not in got
+            # other UUID → empty
+            r2 = tc.get("/v1/sessions", headers=h,
+                        params={"actor_user_id":
+                                "33333333-3333-4333-8333-333333333333"})
+            assert r2.status_code == 200 and r2.json()["sessions"] == [], r2.text
+        finally:
+            gen.close()
+
+    def test_filter_malformed_422(self, tmp_path):
+        gen = self._setup(tmp_path, "badf")
+        sdk, tid, tc, _proj = next(gen)
+        try:
+            key = sdk.apikey_create(tid, _2600_UUID_A)
+            h = {"Authorization": f"Bearer {key['api_key']}"}
+            for bad in ("email@example.com", "api", "garbage",
+                        "urn:uuid:11111111-1111-4111-8111-111111111111"):
+                r = tc.get("/v1/sessions", headers=h,
+                           params={"actor_user_id": bad})
+                assert r.status_code == 422, (bad, r.text)
+        finally:
+            gen.close()
+
+    def test_display_resolution_called_once_per_request(self, tmp_path,
+                                                       monkeypatch):
+        """3 sessions with DISTINCT actors → the membership fetch
+        (_actor_display_map) is called EXACTLY ONCE per list request (never
+        per row)."""
+        import tortoise.hosted_api as ha_mod
+        gen = self._setup(tmp_path, "once")
+        sdk, tid, tc, proj = next(gen)
+        try:
+            key = sdk.apikey_create(tid, _2600_UUID_A)
+            h = {"Authorization": f"Bearer {key['api_key']}"}
+            third = "33333333-3333-4333-8333-333333333333"
+            calls: list[list[str]] = []
+            _orig = ha_mod._actor_display_map
+
+            def _spy(actor_ids, org_id):
+                calls.append(list(actor_ids))
+                return _orig(actor_ids, org_id)
+
+            monkeypatch.setattr(ha_mod, "_actor_display_map", _spy)
+            for i, uid in enumerate((_2600_UUID_A, _2600_UUID_B, third)):
+                self._seed_session(proj, f"s-rd-once-{i}", actor=uid,
+                                   created_at=f"2026-09-09T1{i}:00:00.000000+00:00")
+            r = tc.get("/v1/sessions", headers=h)
+            assert r.status_code == 200, r.text
+            assert len(calls) == 1, f"expected ONE display fetch, got {len(calls)}"
+            assert set(calls[0]) == {_2600_UUID_A, _2600_UUID_B, third}, calls
+        finally:
+            gen.close()
+
+    def test_legacy_all_null_suppresses_display_fetch(self, tmp_path,
+                                                      monkeypatch):
+        """All rows null-actor (the universal legacy state at ship time) →
+        the display helper is NOT fired at all; response stays 200 with
+        actor_display: null (the any-actor gate in the shared helper)."""
+        import tortoise.hosted_api as ha_mod
+        gen = self._setup(tmp_path, "legall")
+        sdk, tid, tc, proj = next(gen)
+        try:
+            key = sdk.apikey_create(tid, _2600_UUID_A)
+            h = {"Authorization": f"Bearer {key['api_key']}"}
+            calls = []
+            _orig = ha_mod._actor_display_map
+            monkeypatch.setattr(
+                ha_mod, "_actor_display_map",
+                lambda actor_ids, org_id: (
+                    calls.append(list(actor_ids)), _orig(actor_ids, org_id))[1])
+            for i in range(2):
+                self._seed_session(proj, f"s-rd-legall-{i}", actor=None,
+                                   created_at=f"2026-09-09T1{i}:00:00.000000+00:00")
+            r = tc.get("/v1/sessions", headers=h)
+            assert r.status_code == 200, r.text
+            # the any-actor gate lives at the CALLER too: a legacy-only row
+            # set never invokes the display helper (never a CP fetch)
+            assert calls == [], calls
+            for s in r.json()["sessions"]:
+                assert s["actor_display"] is None
+        finally:
+            gen.close()
+
+    def test_detail_carries_actor_and_display(self, tmp_path, monkeypatch):
+        """get_session_detail: attributed session carries actor_user_id +
+        harness + actor_display (raw id on registry); the shared display
+        helper is called exactly once (never N) — and NOT called at all on
+        a null-actor detail."""
+        import tortoise.hosted_api as ha_mod
+        gen = self._setup(tmp_path, "det")
+        sdk, tid, tc, proj = next(gen)
+        try:
+            key = sdk.apikey_create(tid, _2600_UUID_A)
+            h = {"Authorization": f"Bearer {key['api_key']}"}
+            now = "2026-09-09T12:00:00.000000+00:00"
+            self._seed_session(proj, "s-rd-det-a", actor=_2600_UUID_A,
+                               created_at=now, turn_count=2, harness="pi",
+                               with_claim=True)
+            self._seed_session(proj, "s-rd-det-leg", actor=None,
+                               created_at="2026-09-09T11:00:00.000000+00:00")
+            calls = []
+            _orig = ha_mod._actor_display_map
+            monkeypatch.setattr(
+                ha_mod, "_actor_display_map",
+                lambda actor_ids, org_id: (
+                    calls.append(list(actor_ids)), _orig(actor_ids, org_id))[1])
+            ra = tc.get("/v1/sessions/s-rd-det-a", headers=h)
+            assert ra.status_code == 200, ra.text
+            body = ra.json()
+            assert body["actor_user_id"] == _2600_UUID_A
+            assert body["harness"] == "pi"
+            assert body["actor_display"] == _2600_UUID_A
+            assert body["turns"] == 2 and body["extracted"] == 1
+            # attributed detail → helper called ONCE with that actor
+            assert calls == [[_2600_UUID_A]], calls
+            calls.clear()
+            rl = tc.get("/v1/sessions/s-rd-det-leg", headers=h)
+            assert rl.status_code == 200, rl.text
+            assert rl.json()["actor_user_id"] is None
+            assert rl.json()["actor_display"] is None
+            # null-actor detail → helper NOT called (any-actor gate)
+            assert calls == [], calls
+        finally:
+            gen.close()
+
+    def test_list_explain_index_seek_on_actor_filter(self, tmp_path):
+        """E2E-8 EXPLAIN bound: the actor-filtered read is a Node By Index
+        Scan on Session.actor_user_id (never an All Node Scan). FILTER-FIRST
+        probe shape (no ORDER BY — a tiny graph could otherwise
+        label-scan+sort). Literal-inlined predicate (in-repo EXPLAIN
+        convention — test_indexes.py)."""
+        gen = self._setup(tmp_path, "explain")
+        _sdk, _tid, _tc, proj = next(gen)
+        try:
+            self._seed_session(proj, "s-rd-exp-a", actor=_2600_UUID_A,
+                               created_at="2026-09-09T12:00:00.000000+00:00")
+            self._seed_session(proj, "s-rd-exp-leg", actor=None,
+                               created_at="2026-09-09T11:00:00.000000+00:00")
+            plan = str(proj.g.explain(
+                "MATCH (s:Session {actor_user_id:'" + _2600_UUID_A +
+                "'}) RETURN s.id"))
+            assert "Node By Index Scan" in plan, plan
+            assert "All Node Scan" not in plan, plan
+            # REAL-QUERY drift pin: the parameterized list shape with the
+            # actor filter substituted (OPTIONAL MATCH + ORDER BY + LIMIT
+            # intact) — the actor predicate still plans as an index seek
+            # (the sort rides above it; on a tiny seeded graph the planner
+            # does not demote the seek).
+            real = str(proj.g.explain(
+                "MATCH (s:Session) WHERE s.actor_user_id = '" + _2600_UUID_A +
+                "' OPTIONAL MATCH (s)-[:CONTAINS]->(p:Point) "
+                "WHERE p.pointKind IN ['decision', 'statement'] "
+                "RETURN s.id, s.created_at, s.turn_count, count(p), "
+                "s.actor_user_id, s.harness "
+                "ORDER BY s.created_at DESC LIMIT 50"))
+            assert "Node By Index Scan" in real, real
+            assert "All Node Scan" not in real, real
+        finally:
+            gen.close()
+
+    def test_graph_bound_key_never_resolves_member_email(self, tmp_path,
+                                                       monkeypatch):
+        """#2664 code-review P2 #3: graph-bound keys (team dict carries
+        graph_id) must NOT resolve member emails (PII over-read) —
+        list_sessions falls back to the raw actor_user_id and never fires
+        _actor_display_map. The registry lane has no email seam, so the
+        spy call-count is the discriminator: team-wide key → 1 fetch,
+        graph-bound key → 0."""
+        import tortoise.hosted_api as ha_mod
+        from tortoise.auth import hash_api_key
+        gen = self._setup(tmp_path, "gateg")
+        sdk, tid, tc, proj = next(gen)
+        try:
+            # seed one attributed session in the team default graph
+            self._seed_session(proj, "s-gate-2600", actor=_2600_UUID_A,
+                               created_at="2026-09-09T12:00:00.000000+00:00")
+            # graph-bound key: registry APIKey with graph_id set + a Graph
+            # node whose namespace == the team default graph (bound default).
+            gid = "g_gate2600000000000000000000000"
+            gtoken = "tk_gatebound_26000000001"
+            sdk._get_registry().query(
+                "CREATE (k:APIKey {id:$kid, org_id:$tid, key_hash:$kh, "
+                "key_prefix:$kp, created_by:$cb, graph_id:$gid, "
+                "scopes:['graphs:read'], created_via:'provisioned'})",
+                params={"kid": "k-gate2600", "tid": tid,
+                        "kh": hash_api_key(gtoken),
+                        "kp": gtoken[:10], "cb": _2600_UUID_A,
+                        "gid": gid})
+            sdk._get_registry().query(
+                "CREATE (g:Graph {id:$gid, org_id:$tid, name:'default', "
+                "kind:'default', namespace:$ns})",
+                params={"gid": gid, "tid": tid,
+                        "ns": f"org_{tid}"})
+            calls: list[list[str]] = []
+            _orig = ha_mod._actor_display_map
+
+            def _spy(actor_ids, org_id_arg):
+                calls.append(list(actor_ids))
+                return _orig(actor_ids, org_id_arg)
+
+            monkeypatch.setattr(ha_mod, "_actor_display_map", _spy)
+            # graph-bound key → list_sessions must NOT fire the email lookup
+            hg = {"Authorization": f"Bearer {gtoken}"}
+            rg = tc.get("/v1/sessions", headers=hg)
+            assert rg.status_code == 200, rg.text[:300]
+            row = rg.json()["sessions"][0]
+            assert row["actor_user_id"] == _2600_UUID_A, row
+            assert row["actor_display"] == _2600_UUID_A, row  # raw-id fallback
+            assert calls == [], f"graph-bound key must NOT resolve emails: {calls}"
+            # team-wide key (same team graph) → the email lookup fires once
+            key = sdk.apikey_create(tid, _2600_UUID_A)
+            ht = {"Authorization": f"Bearer {key['api_key']}"}
+            rt = tc.get("/v1/sessions", headers=ht)
+            assert rt.status_code == 200, rt.text[:300]
+            assert len(calls) == 1, f"team-wide key should fire ONE fetch, got {calls}"
+        finally:
+            gen.close()
+
+
+class TestActorDisplayMap2600:
+    """Direct unit coverage of the SHARED _actor_display_map helper — the
+    registry-lane HTTP tests above exercise only the raw-id branch (docker
+    CP has no membership email). These pin the SUPABASE email seam against
+    FakeControlPlane rows of the REAL org_members output shape, the
+    any-actor gate, and full fail-soft — without an HTTP round trip."""
+
+    def test_registry_lane_returns_empty(self, monkeypatch):
+        """is_supabase_enabled() False (registry CP / no creds) → {} always
+        (no email seam for members) → caller falls back to raw id."""
+        import tortoise.hosted_api as ha_mod
+        import tortoise.supabase_control as sc_mod
+        monkeypatch.setattr(sc_mod, "is_supabase_enabled", lambda: False)
+        assert ha_mod._actor_display_map([_2600_UUID_A], "team-x") == {}
+
+    def test_empty_actor_ids_never_touches_cp(self, monkeypatch):
+        """The any-actor gate: [] returns BEFORE any CP read (all-legacy row
+        sets never fire the fetch)."""
+        import tortoise.hosted_api as ha_mod
+        import tortoise.supabase_control as sc_mod
+        boom = RuntimeError("CP must not be touched for []")
+        monkeypatch.setattr(sc_mod, "is_supabase_enabled",
+                            lambda: (_ for _ in ()).throw(boom))
+        assert ha_mod._actor_display_map([], "team-x") == {}
+
+    def test_supabase_email_seam_real_shape(self, monkeypatch):
+        """FakeControlPlane rows of the REAL org_members output shape:
+        accepted-invite ACTIVE row that retained invited_email → email
+        shown; active row WITHOUT invited_email → not in map (raw id);
+        invite-pending row (user_id None) → filtered (raw id); unknown id →
+        not in map (raw id)."""
+        import tortoise.hosted_api as ha_mod
+        import tortoise.supabase_control as sc_mod
+        from tests.fake_control_plane import FakeControlPlane
+        fake = FakeControlPlane()
+        fake.seed("org_memberships", [
+            {"org_id": "team-x", "user_id": _2600_UUID_A, "identity": None,
+             "role": "owner", "status": "active",
+             "invited_email": "ada@example.com"},
+            {"org_id": "team-x", "user_id": _2600_UUID_B, "identity": None,
+             "role": "member", "status": "active", "invited_email": None},
+            {"org_id": "team-x", "user_id": None, "identity": "anon-1",
+             "role": "agent", "status": "invited",
+             "invited_email": "pending@example.com"},
+        ])
+        monkeypatch.setattr(sc_mod, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(sc_mod, "get_control_plane", lambda: fake)
+        got = ha_mod._actor_display_map(
+            [_2600_UUID_A, _2600_UUID_B,
+             "33333333-3333-4333-8333-333333333333"], "team-x")
+        assert got == {_2600_UUID_A: "ada@example.com"}, got
+        # B (no email) + unknown id absent → caller falls back to raw id
+
+    def test_fail_soft_members_fetch_raising(self, monkeypatch):
+        """org_members raising (CP outage) → {} (never a doomed call, never
+        a 500) → caller falls back to raw id."""
+        import tortoise.hosted_api as ha_mod
+        import tortoise.supabase_control as sc_mod
+        monkeypatch.setattr(sc_mod, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(sc_mod, "get_control_plane",
+                            lambda: (_ for _ in ()).throw(RuntimeError("cp down")))
+        assert ha_mod._actor_display_map([_2600_UUID_A], "team-x") == {}
+
+    def test_fail_soft_supabase_disabled_raise(self, monkeypatch):
+        """is_supabase_enabled itself raising (env flip mid-flight) → {}."""
+        import tortoise.hosted_api as ha_mod
+        import tortoise.supabase_control as sc_mod
+        monkeypatch.setattr(
+            sc_mod, "is_supabase_enabled",
+            lambda: (_ for _ in ()).throw(RuntimeError("mode flip")))
+        assert ha_mod._actor_display_map([_2600_UUID_A], "team-x") == {}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #2600 (Phase 1, Task 6) — E2E-4 lane matrix (b1 supabase / b2 registry),
+# E2E-3 REST attribution negative + E2E-6 REST revocation. All drive the
+# REAL auth faces (minted keys with UUID creators / supabase api_keys rows)
+# — never the DI override (an override dict bypasses the registry/supabase
+# created_by → actor_user_id alias + _data_sdk ContextVar set, so a
+# DI-seam write would be actor-less for the wrong reason).
+
+class TestRestAttributionE2E2600:
+    """REST create_point via a REAL member-minted key → the :GraphEvent
+    PointAdded payload carries the key's server-resolved actor; a forged
+    actor claim in the raw JSON body is silently dropped (Pydantic
+    extra="ignore") — never stored, never a 422 (E2E-3 negative REST leg)."""
+
+    def _graph_point_added(self, org_id: str):
+        """Read :GraphEvent PointAdded payloads from the team data graph."""
+        import json
+
+        import tortoise.hosted_api as ha_mod
+        sdk = ha_mod._make_sdk(namespace=org_id)
+        rows = sdk._get_proj().g.query(
+            "MATCH (e:GraphEvent {type:'PointAdded'}) RETURN e.payload "
+            "ORDER BY e.seq").result_set
+        return [json.loads(r[0]) for r in rows]
+
+    def test_b2_registry_key_create_point_carries_actor(self, tmp_path):
+        """Registry CP: key minted with created_by=<uuidA> → REST
+        create_point → GraphEvent PointAdded payload actor == uuidA; a
+        forged actor_user_id in the raw body is dropped (2xx, node clean)."""
+        import tortoise.hosted_api as ha_mod
+        db_path = os.path.join(tmp_path, "e24b2.db")
+        _orig = _patch_tortoise_sdk_init(db_path)
+        os.environ["TORTOISE_DB_PATH"] = db_path
+        sdk = ha_mod._make_sdk(namespace="registry")
+        tid = "team-2600-e24b2"
+        _seed_team_graphs(sdk, tid, "pro", None)
+        try:
+            keyA = sdk.apikey_create(tid, _2600_UUID_A)
+            h = {"Authorization": f"Bearer {keyA['api_key']}"}
+            with TestClient(ha_mod.app,
+                            raise_server_exceptions=False) as tc:
+                r = tc.post("/v1/points", headers=h, json={
+                    "content": "b2 registry attributed point"})
+                assert r.status_code == 200, r.text
+                pid = r.json()["id"]
+                # forged claim in the raw body — silently dropped, 2xx
+                r2 = tc.post("/v1/points", headers=h, json={
+                    "content": "b2 forged body point",
+                    "actor_user_id": "forged-actor-xyz"})
+                assert r2.status_code == 200, r2.text
+                forged_pid = r2.json()["id"]
+            adds = self._graph_point_added(tid)
+            assert adds, "PointAdded events must exist on the team graph"
+            by_id = {a["id"]: a for a in adds}
+            assert by_id[pid]["actor_user_id"] == _2600_UUID_A, by_id[pid]
+            # the forged write still carries the SERVER-resolved actor (never
+            # the forged value — E2E-3: stored actor == server actor)
+            assert by_id[forged_pid]["actor_user_id"] == _2600_UUID_A, \
+                by_id[forged_pid]
+            # node never carries the forged key
+            proj = ha_mod._make_sdk(namespace=tid)._get_proj()
+            rows = proj.g.query(
+                "MATCH (p:Point {id:$id}) RETURN p.actor_user_id",
+                params={"id": forged_pid}).result_set
+            assert rows and rows[0][0] is None, \
+                f"forged key must never reach the node: {rows}"
+        finally:
+            os.environ.pop("TORTOISE_DB_PATH", None)
+            _restore_tortoise_sdk_init(_orig)
+
+    def test_b1_supabase_key_create_point_carries_actor(self, tmp_path,
+                                                        monkeypatch):
+        """Supabase CP (FakeControlPlane): api_keys.created_by=<uuidA> →
+        REST create_point → GraphEvent PointAdded actor == uuidA; forged
+        body claim silently dropped. Real tt_ key auth (no DI override)."""
+        import uuid as _uuid
+
+        import tortoise.hosted_api as ha_mod
+        import tortoise.supabase_control as sc_mod
+        from tests.fake_control_plane import FakeControlPlane
+        from tests.test_supabase_control import FREE_TEAM, _membership_row
+        from tortoise.auth import lookup_hash as _lh
+
+        db_path = os.path.join(tmp_path, "e24b1.db")
+        _orig = _patch_tortoise_sdk_init(db_path)
+        os.environ["TORTOISE_DB_PATH"] = db_path
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("SUPABASE_URL", "https://e24b1.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-e24b1")
+        fake = FakeControlPlane({
+            "organizations": [], "api_keys": [], "org_memberships": [],
+            "invitations": [],
+        })
+        fake.seed("organizations", [dict(FREE_TEAM)])
+        fake.seed("org_memberships",
+                  [_membership_row(user_id=_2600_UUID_A,
+                                   org_id="team-free-001")])
+        token = "tt_" + _uuid.uuid4().hex
+        fake.seed("api_keys", [{
+            "id": "k-e24b1", "org_id": "team-free-001",
+            "lookup_hash": _lh(token), "key_prefix": token[:10],
+            "created_via": "provisioned", "created_by": _2600_UUID_A,
+            "created_at": "2026-09-02T00:00:00Z", "revoked_at": None,
+            "expires_at": None, "graph_id": None, "scopes": [],
+            "created_by_key_id": None, "delegation_depth": None,
+        }])
+        monkeypatch.setattr(sc_mod, "get_control_plane", lambda: fake)
+        try:
+            with TestClient(ha_mod.app,
+                            raise_server_exceptions=False) as tc:
+                h = {"Authorization": f"Bearer {token}"}
+                r = tc.post("/v1/points", headers=h, json={
+                    "content": "b1 supabase attributed point"})
+                assert r.status_code == 200, r.text
+                pid = r.json()["id"]
+                r2 = tc.post("/v1/points", headers=h, json={
+                    "content": "b1 forged body point",
+                    "owner": "forged-owner"})
+                assert r2.status_code == 200, r2.text
+                forged_pid = r2.json()["id"]
+            adds = self._graph_point_added("team-free-001")
+            by_id = {a["id"]: a for a in adds}
+            assert by_id[pid]["actor_user_id"] == _2600_UUID_A, by_id[pid]
+            assert by_id[forged_pid]["actor_user_id"] == _2600_UUID_A, \
+                by_id[forged_pid]
+        finally:
+            os.environ.pop("TORTOISE_DB_PATH", None)
+            monkeypatch.delenv("TORTOISE_CONTROL_PLANE", raising=False)
+            monkeypatch.delenv("SUPABASE_URL", raising=False)
+            monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+            _restore_tortoise_sdk_init(_orig)
+
+    def test_e26_revoke_rest_write_401_keeps_prior_actor(self, tmp_path):
+        """E2E-6 (REST lane): revoke the key → subsequent REST writes 401 →
+        no orphaned attribution; the PRE-revocation PointAdded event keeps
+        its actor (the event store is not touched by revocation)."""
+        import tortoise.hosted_api as ha_mod
+        db_path = os.path.join(tmp_path, "e26.db")
+        _orig = _patch_tortoise_sdk_init(db_path)
+        os.environ["TORTOISE_DB_PATH"] = db_path
+        sdk = ha_mod._make_sdk(namespace="registry")
+        tid = "team-2600-e26"
+        _seed_team_graphs(sdk, tid, "pro", None)
+        try:
+            keyA = sdk.apikey_create(tid, _2600_UUID_A)
+            h = {"Authorization": f"Bearer {keyA['api_key']}"}
+            with TestClient(ha_mod.app,
+                            raise_server_exceptions=False) as tc:
+                # pre-revocation write → PointAdded with actor
+                r = tc.post("/v1/points", headers=h, json={
+                    "content": "pre-revoke attributed write"})
+                assert r.status_code == 200, r.text
+                # revoke keyA via a SECOND owner key (session lane is
+                # unavailable on the registry CP docker face — key-auth
+                # revoke requires keys:manage, owner class passes)
+                keyB = sdk.apikey_create(tid, _2600_UUID_B)
+                hB = {"Authorization": f"Bearer {keyB['api_key']}"}
+                kid = keyA["id"]
+                rr = tc.delete(f"/v1/team/keys/{kid}", headers=hB)
+                assert rr.status_code == 200, rr.text
+                # post-revoke write → 401 (key resolved per request; no
+                # cache on the REST lane)
+                r2 = tc.post("/v1/points", headers=h, json={
+                    "content": "post-revoke must 401"})
+                assert r2.status_code == 401, r2.text
+            # pre-revocation event keeps its actor
+            adds = self._graph_point_added(tid)
+            assert adds and all(
+                a.get("actor_user_id") == _2600_UUID_A for a in adds), adds
+        finally:
+            os.environ.pop("TORTOISE_DB_PATH", None)
+            _restore_tortoise_sdk_init(_orig)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #2600 (Phase 1, Task 6, Step 2) — E2E-5 dedup keeps BOTH actors (REAL
+# hosted auth faces). POST /v1/sessions is key-only; two members =
+# registry-seeded keys with distinct UUID creators authenticated through the
+# REAL registry auth face (sdk.apikey_create — NOT the DI override seam).
+# A FRESH PRIVATE team per test (final-verification P1: the mock v2 seam
+# mints a suite-wide constant claim, so a shared team namespace would make
+# A's own capture dedup-hit a pre-existing canonical — red for the wrong
+# reason). Assert: per-session actor via direct graph read + list read-back;
+# the shared claim has exactly ONE PointAdded GraphEvent (A's — B's
+# identical write returns the canonical and emits nothing).
+
+class TestE2E5TwoActorDedup2600:
+    def _data_sdk(self, org_id: str):
+        import tortoise.hosted_api as ha_mod
+        return ha_mod._make_sdk(namespace=org_id)
+
+    def _setup(self, tmp_path, tag: str):
+        import tortoise.hosted_api as ha_mod
+        db_path = os.path.join(tmp_path, f"e25_{tag}.db")
+        _orig = _patch_tortoise_sdk_init(db_path)
+        os.environ["TORTOISE_DB_PATH"] = db_path
+        sdk = ha_mod._make_sdk(namespace="registry")
+        tid = f"team-2600-e25-{tag}"
+        _seed_team_graphs(sdk, tid, "pro", None)
+        try:
+            with TestClient(ha_mod.app,
+                            raise_server_exceptions=False) as tc:
+                yield sdk, tid, tc
+        finally:
+            os.environ.pop("TORTOISE_DB_PATH", None)
+            _restore_tortoise_sdk_init(_orig)
+
+    def _session_actor(self, org_id: str, session_id: str):
+        rows = self._data_sdk(org_id)._get_proj().g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.actor_user_id",
+            params={"sid": session_id}).result_set
+        return rows[0][0] if rows else None
+
+    def _point_added_events(self, org_id: str):
+        import json
+        rows = self._data_sdk(org_id)._get_proj().g.query(
+            "MATCH (e:GraphEvent {type:'PointAdded'}) RETURN e.payload "
+            "ORDER BY e.seq").result_set
+        return [json.loads(r[0]) for r in rows]
+
+    def test_two_members_shared_claim_keeps_both_actors(self, tmp_path):
+        """A captures session_A (claim minted, DEDUP_NEW) → B captures
+        session_B with the SAME conversation (dedup-hit canonical, no new
+        PointAdded). Session_A.actor == A, Session_B.actor == B; exactly
+        ONE PointAdded GraphEvent for the shared claim content_hash — A's
+        (B emits nothing)."""
+        gen = self._setup(tmp_path, "dedup")
+        sdk, tid, tc = next(gen)
+        try:
+            # freshness precondition: zero Points on this FRESH team
+            proj = self._data_sdk(tid)._get_proj()
+            pre = proj.g.query("MATCH (p:Point) RETURN count(p)").result_set
+            assert pre and pre[0][0] == 0, pre
+            keyA = sdk.apikey_create(tid, _2600_UUID_A)
+            keyB = sdk.apikey_create(tid, _2600_UUID_B)
+            hA = {"Authorization": f"Bearer {keyA['api_key']}"}
+            hB = {"Authorization": f"Bearer {keyB['api_key']}"}
+            # the conversation the mock v2 seam deterministically turns into
+            # the suite-wide constant claim (dedup-keyed by content_hash)
+            conv = [
+                {"role": "user", "content": "we should invest in the strategy."},
+                {"role": "assistant", "content": "agreed — durable."},
+            ]
+            r1 = tc.post("/v1/sessions", headers=hA, json={
+                "conversation": conv, "session_id": "e25-2600-a"})
+            assert r1.status_code == 200, r1.text[:300]
+            b1 = r1.json()
+            r2 = tc.post("/v1/sessions", headers=hB, json={
+                "conversation": conv, "session_id": "e25-2600-b"})
+            assert r2.status_code == 200, r2.text[:300]
+            # per-session actor (deterministic, unconditional)
+            assert self._session_actor(tid, "e25-2600-a") == _2600_UUID_A
+            assert self._session_actor(tid, "e25-2600-b") == _2600_UUID_B
+            # B's capture dedup-hit the canonical claim(s) — zero net-new
+            # PointAdded events beyond A's (the seam mints the same claims
+            # for the same conversation; B's writes return canonicals)
+            adds = self._point_added_events(tid)
+            if b1.get("points"):
+                # event leg fires (mock seam determinism) → assert the
+                # two-actor dedup negative: no PointAdded carries B
+                assert adds, "seam minted claims, so PointAdded must exist"
+                assert all(a.get("actor_user_id") != _2600_UUID_B for a in adds), \
+                    f"B's dedup-hit must not mint PointAdded events: {adds}"
+                assert any(a.get("actor_user_id") == _2600_UUID_A
+                           for a in adds), adds
+                # exactly as many PointAdded as net-new claims (no dup)
+                assert len(adds) == len(b1["points"]), \
+                    f"PointAdded count must equal A's net-new claims: {adds}"
+            # list read-back (Task 5 surface) exposes both actors
+            keyA_r = tc.get("/v1/sessions", headers=hA).json()["sessions"]
+            by_sid = {s["id"]: s for s in keyA_r}
+            assert by_sid["e25-2600-a"]["actor_user_id"] == _2600_UUID_A, by_sid
+            assert by_sid["e25-2600-b"]["actor_user_id"] == _2600_UUID_B, by_sid
+        finally:
+            gen.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #2600 (Phase 1, Task 6, Step 3) — E2E-10 read-path attribution display,
+# ENDPOINT-PINNED on the SUPABASE lane (the registry lane is raw-id-only;
+# the email case is structurally impossible there). Drives list_sessions +
+# get_session_detail through the REAL supabase auth face (FakeControlPlane
+# + a real tt_ key minted in api_keys) and seeds Sessions directly in the
+# team graph. The email seam shape is the REAL one org_members produces:
+# an accepted-invite ACTIVE row that retained invited_email → email shown;
+# a row without invited_email / an unknown id → raw id; legacy null-actor →
+# actor_display null.
+
+class TestE2E10ReadPathDisplaySupabase2600:
+    def _setup_supabase(self, tmp_path, monkeypatch, *, members,
+                        key_creator=_2600_UUID_A, org_id="team-2600-e10",
+                        seed_sessions=None):
+        """Supabase-mode env + FakeControlPlane (team + membership rows +
+        api_keys with a UUID creator) + real-auth TestClient. Sessions are
+        seeded into the team graph namespace by the CALLER-supplied
+        seed_sessions(sdk) hook (so each test controls Session actor
+        shapes). Returns (tid, token, tc)."""
+        import uuid as _uuid
+
+        import tortoise.hosted_api as ha_mod
+        import tortoise.supabase_control as sc_mod
+        from tests.fake_control_plane import FakeControlPlane
+        from tortoise.auth import lookup_hash as _lh
+
+        db_path = os.path.join(tmp_path, "e10.db")
+        _orig = _patch_tortoise_sdk_init(db_path)
+        os.environ["TORTOISE_DB_PATH"] = db_path
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("SUPABASE_URL", "https://e10.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-e10")
+        fake = FakeControlPlane({
+            "organizations": [], "api_keys": [], "org_memberships": [],
+            "invitations": [],
+        })
+        fake.seed("organizations", [{"id": org_id, "name": "E10", "tier": "pro",
+                             "deleted_at": None}])
+        fake.seed("org_memberships", members)
+        token = "tt_" + _uuid.uuid4().hex
+        fake.seed("api_keys", [{
+            "id": "k-e10", "org_id": org_id,
+            "lookup_hash": _lh(token), "key_prefix": token[:10],
+            "created_via": "provisioned", "created_by": key_creator,
+            "created_at": "2026-09-02T00:00:00Z", "revoked_at": None,
+            "expires_at": None, "graph_id": None, "scopes": [],
+            "created_by_key_id": None, "delegation_depth": None,
+        }])
+        monkeypatch.setattr(sc_mod, "get_control_plane", lambda: fake)
+        try:
+            with TestClient(ha_mod.app,
+                            raise_server_exceptions=False) as tc:
+                yield org_id, token, tc
+        finally:
+            os.environ.pop("TORTOISE_DB_PATH", None)
+            monkeypatch.delenv("TORTOISE_CONTROL_PLANE", raising=False)
+            monkeypatch.delenv("SUPABASE_URL", raising=False)
+            monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+            _restore_tortoise_sdk_init(_orig)
+
+    def test_list_and_detail_show_email_for_accepted_invite_member(
+            self, tmp_path, monkeypatch):
+        """(i) Attributed session whose actor is an accepted-invite ACTIVE
+        member that retained invited_email → actor_user_id present AND
+        actor_display == the retained email on BOTH list_sessions and
+        get_session_detail (endpoint-pinned)."""
+        import tortoise.hosted_api as ha_mod
+        gen = self._setup_supabase(
+            tmp_path, monkeypatch,
+            members=[{"org_id": "team-2600-e10", "user_id": _2600_UUID_A,
+                      "identity": None, "role": "owner", "status": "active",
+                      "invited_email": "ada@example.com"}])
+        tid, token, tc = next(gen)
+        try:
+            sdk = ha_mod._make_sdk(namespace=tid)
+            proj = sdk._get_proj()
+            proj.g.query(
+                "CREATE (s:Session {id:$sid, created_at:$now, turn_count:2, "
+                "actor_user_id:$uid, is_episodic:true})",
+                params={"sid": "s-e10-email",
+                        "now": "2026-09-09T12:00:00.000000+00:00",
+                        "uid": _2600_UUID_A})
+            h = {"Authorization": f"Bearer {token}"}
+            rl = tc.get("/v1/sessions", headers=h)
+            assert rl.status_code == 200, rl.text
+            row = rl.json()["sessions"][0]
+            assert row["actor_user_id"] == _2600_UUID_A
+            assert row["actor_display"] == "ada@example.com", row
+            rd = tc.get("/v1/sessions/s-e10-email", headers=h)
+            assert rd.status_code == 200, rd.text
+            assert rd.json()["actor_display"] == "ada@example.com", rd.json()
+            assert rd.json()["actor_user_id"] == _2600_UUID_A, rd.json()
+        finally:
+            gen.close()
+
+    def test_list_shows_raw_id_when_membership_has_no_email(self, tmp_path,
+                                                            monkeypatch):
+        """(ii) Attributed session whose actor's membership row has NO
+        invited_email (the structurally common active-member shape) → raw
+        id display, never a fabricated email."""
+        import tortoise.hosted_api as ha_mod
+        gen = self._setup_supabase(
+            tmp_path, monkeypatch,
+            members=[{"org_id": "team-2600-e10", "user_id": _2600_UUID_B,
+                      "identity": None, "role": "member", "status": "active",
+                      "invited_email": None}],
+            key_creator=_2600_UUID_B)
+        tid, token, tc = next(gen)
+        try:
+            sdk = ha_mod._make_sdk(namespace=tid)
+            sdk._get_proj().g.query(
+                "CREATE (s:Session {id:$sid, created_at:$now, turn_count:1, "
+                "actor_user_id:$uid, is_episodic:true})",
+                params={"sid": "s-e10-raw",
+                        "now": "2026-09-09T12:00:00.000000+00:00",
+                        "uid": _2600_UUID_B})
+            h = {"Authorization": f"Bearer {token}"}
+            r = tc.get("/v1/sessions", headers=h)
+            assert r.status_code == 200, r.text
+            row = r.json()["sessions"][0]
+            assert row["actor_user_id"] == _2600_UUID_B
+            # no email seam → raw id (never an empty/None display)
+            assert row["actor_display"] == _2600_UUID_B, row
+        finally:
+            gen.close()
+
+    def test_legacy_null_actor_display_null_on_supabase_lane(self, tmp_path,
+                                                             monkeypatch):
+        """(iii) Legacy null-actor session → actor_user_id null →
+        actor_display null on the supabase lane too (the API contract is
+        lane-independent; the client renders '—')."""
+        import tortoise.hosted_api as ha_mod
+        gen = self._setup_supabase(
+            tmp_path, monkeypatch,
+            members=[{"org_id": "team-2600-e10", "user_id": _2600_UUID_A,
+                      "identity": None, "role": "owner", "status": "active",
+                      "invited_email": "ada@example.com"}])
+        tid, token, tc = next(gen)
+        try:
+            sdk = ha_mod._make_sdk(namespace=tid)
+            sdk._get_proj().g.query(
+                "CREATE (s:Session {id:$sid, created_at:$now, turn_count:1, "
+                "is_episodic:true})",
+                params={"sid": "s-e10-legacy",
+                        "now": "2026-09-09T12:00:00.000000+00:00"})
+            h = {"Authorization": f"Bearer {token}"}
+            rl = tc.get("/v1/sessions", headers=h)
+            assert rl.status_code == 200, rl.text
+            row = rl.json()["sessions"][0]
+            assert row["actor_user_id"] is None
+            assert row["actor_display"] is None, row
+            rd = tc.get("/v1/sessions/s-e10-legacy", headers=h)
+            assert rd.status_code == 200, rd.text
+            assert rd.json()["actor_display"] is None, rd.json()
+        finally:
+            gen.close()
+
+
+class _StubProbe:
+    """Minimal ``HealthProbe`` stand-in.
+
+    Needs ``reset()`` because the autouse probe fixture resets the three real
+    coordinators at teardown (``_HEALTH_PROBE`` / ``_READY_PROBE`` /
+    ``_CONTROL_PLANE_PROBE``) and cannot tell that this one was swapped in.
+    """
+
+    def __init__(self, result=None, exc: Exception | None = None):
+        self.result = result if result is not None else {
+            "ok": True, "latency_ms": 1.0, "error": None}
+        self.exc = exc
+        self.calls = 0
+
+    async def run(self):
+        self.calls += 1
+        if self.exc is not None:
+            raise self.exc
+        return self.result
+
+    def reset(self) -> None:
+        pass
+
+
+class TestFirstContactPrewarm:
+    """#3284 Move A + the HTTP-level bound on the cold-start first request.
+
+    ``session_auth`` owns the JWKS cache and its hard fetch bound; this class
+    pins the two things ``hosted_api`` owes it: the warm-up is SCHEDULED (as a
+    background task, behind the listener) and the bounded failure reaches the
+    client as a real HTTP response — JSON body + ``Retry-After`` — never a
+    zero-byte hang.
+    """
+
+    def test_lifespan_schedules_the_prewarm_as_a_task(self, client):
+        """The task must exist on app.state (it is a task because uvicorn
+        binds only after the startup half returns — #2953)."""
+        import tortoise.hosted_api as ha_mod
+
+        task = getattr(ha_mod.app.state, "_first_contact_task", None)
+        assert task is not None, "lifespan did not schedule the first-contact pre-warm"
+
+    def test_prewarm_warms_jwks_and_the_control_plane_in_supabase_mode(
+            self, monkeypatch):
+        import tortoise.hosted_api as ha_mod
+        import tortoise.session_auth as sa
+        import tortoise.supabase_control as sc
+
+        calls = {"jwks": 0, "control": 0}
+
+        async def _fake_fetch() -> bytes:
+            calls["jwks"] += 1
+            return b'{"keys": [{"kid": "kid-1", "kty": "EC"}]}'
+
+        class _Probe(_StubProbe):
+            pass
+
+        probe = _Probe()
+        monkeypatch.setattr(sa, "_fetch_jwks", _fake_fetch)
+        monkeypatch.setattr(sa, "_jwks", sa._JWKSCache())
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(ha_mod, "_CONTROL_PLANE_PROBE", probe)
+
+        asyncio.run(ha_mod._first_contact_prewarm())
+
+        assert calls["jwks"] == 1
+        assert probe.calls == 1
+        assert sa._jwks._keys == {"kid-1": {"kid": "kid-1", "kty": "EC"}}
+
+    def test_prewarm_is_inert_in_registry_mode(self, monkeypatch):
+        """No Supabase session auth / no control plane → no network at boot.
+        The FalkorDB plane is already pre-paid by the health refresher."""
+        import tortoise.hosted_api as ha_mod
+        import tortoise.session_auth as sa
+        import tortoise.supabase_control as sc
+
+        calls = {"jwks": 0}
+
+        async def _fake_fetch() -> bytes:
+            calls["jwks"] += 1
+            return b'{"keys": []}'
+
+        probe = _StubProbe(exc=AssertionError(
+            "control plane probed in registry mode"))
+
+        monkeypatch.setattr(sa, "_fetch_jwks", _fake_fetch)
+        monkeypatch.setattr(sa, "_jwks", sa._JWKSCache())
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: False)
+        monkeypatch.setattr(ha_mod, "_CONTROL_PLANE_PROBE", probe)
+
+        asyncio.run(ha_mod._first_contact_prewarm())
+        assert calls["jwks"] == 0
+        assert probe.calls == 0
+        assert sa._jwks._keys is None
+
+    def test_prewarm_never_raises_when_the_probe_explodes(self, monkeypatch):
+        import tortoise.hosted_api as ha_mod
+        import tortoise.session_auth as sa
+        import tortoise.supabase_control as sc
+
+        async def _boom() -> bytes:
+            raise RuntimeError("jwks unreachable")
+
+        monkeypatch.setattr(sa, "_fetch_jwks", _boom)
+        monkeypatch.setattr(sa, "_jwks", sa._JWKSCache())
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(ha_mod, "_CONTROL_PLANE_PROBE",
+                            _StubProbe(exc=RuntimeError("control plane unreachable")))
+
+        asyncio.run(ha_mod._first_contact_prewarm())  # must not raise
+
+    def test_empty_key_set_prewarm_log_is_not_a_transport_503(
+            self, monkeypatch, caplog):
+        """#2922: an empty 200 body must not be logged as a transport 503.
+
+        The reviewer's probe: a 200 with ``{"keys": []}`` was logged as
+        "pre-warm failed (None) — the first request will answer a bounded 503",
+        which is wrong twice over (the reason was None, and the request
+        actually answers 401 "Unknown signing key").
+        """
+        import logging as _logging
+
+        import tortoise.hosted_api as ha_mod
+        import tortoise.session_auth as sa
+        import tortoise.supabase_control as sc
+
+        async def _empty_fetch() -> bytes:
+            return b'{"keys": []}'
+
+        monkeypatch.setattr(sa, "_fetch_jwks", _empty_fetch)
+        monkeypatch.setattr(sa, "_jwks", sa._JWKSCache())
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(ha_mod, "_CONTROL_PLANE_PROBE", _StubProbe())
+
+        with caplog.at_level(_logging.WARNING):
+            asyncio.run(ha_mod._first_contact_prewarm())
+
+        text = caplog.text
+        assert "EMPTY key set" in text, text
+        assert "NOT a transport outage" in text, text
+        assert "bounded 503" not in text, (
+            "an empty key body answers 401, not 503: " + text)
+        assert sa._jwks._last_failure_at is None
+
+    def test_stale_serve_prewarm_log_is_not_ready(self, monkeypatch, caplog):
+        """#2922: a warm-up that served last-good keys must not log "ready".
+
+        With last-good keys cached, a raising fetch makes ``get()`` log
+        "serving stale" and return the OLD set, so the pre-fix empty-check is
+        false and the boot log said "JWKS pre-warm ready … (N keys)" for a down
+        upstream. The log must say the warm-up did NOT refresh.
+        """
+        import logging as _logging
+
+        import tortoise.hosted_api as ha_mod
+        import tortoise.session_auth as sa
+        import tortoise.supabase_control as sc
+
+        async def _boom() -> bytes:
+            raise OSError("jwks unreachable")
+
+        cache = sa._JWKSCache()
+        cache._keys = {"kid-1": {"kid": "kid-1", "kty": "EC"}}
+        monkeypatch.setattr(sa, "_jwks", cache)
+        monkeypatch.setattr(sa, "_fetch_jwks", _boom)
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(ha_mod, "_CONTROL_PLANE_PROBE", _StubProbe())
+
+        with caplog.at_level(_logging.WARNING):
+            asyncio.run(ha_mod._first_contact_prewarm())
+
+        text = caplog.text
+        assert "JWKS pre-warm ready" not in text, (
+            "a stale serve must not be logged as ready: " + text)
+        assert "did NOT refresh" in text, text
+        assert "last-good" in text, text
+        assert "jwks unreachable" in text, text
+
+    def test_empty_cache_transport_error_prewarm_log_is_not_an_empty_rotation(
+            self, monkeypatch, caplog):
+        """#2922/#3144: a RAISING fetch with an EMPTY cache is not a rotation.
+
+        ``_jwks`` is a module global that is NOT reset per lifespan, so a
+        previous empty 200 (or previous lifespan) leaves ``_keys == {}``. A
+        transport failure then takes the raise path — which returns the empty
+        set PLUS the real reason. Keyed off ``if not keys`` first, the report
+        said ``outcome="empty"`` and the boot log told the operator "NOT a
+        transport outage" during a real transport outage: the exact misreport
+        #2922 exists to prevent.
+        """
+        import logging as _logging
+
+        import tortoise.hosted_api as ha_mod
+        import tortoise.session_auth as sa
+        import tortoise.supabase_control as sc
+
+        async def _boom() -> bytes:
+            raise OSError("network down")
+
+        cache = sa._JWKSCache()
+        cache._keys = {}  # NOT cold (None): what a prior empty 200 leaves behind
+        monkeypatch.setattr(sa, "_jwks", cache)
+        monkeypatch.setattr(sa, "_fetch_jwks", _boom)
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(ha_mod, "_CONTROL_PLANE_PROBE", _StubProbe())
+
+        with caplog.at_level(_logging.WARNING):
+            asyncio.run(ha_mod._first_contact_prewarm())
+
+        text = caplog.text
+        assert "NOT a transport outage" not in text, text
+        assert "EMPTY key set" not in text, text
+        assert "network down" in text, text
+        # An EMPTY (not cold) cache answers 401, never 503: the log must not
+        # promise a 503-only outcome for a keyless set.
+        assert "401 'Unknown signing key' from an empty cached set" in text, text
+        assert cache._last_failure_at is None
+
+    @pytest.mark.parametrize(
+        "cached_keys", [None, {}], ids=["cold-cache", "empty-cache"])
+    def test_cooldown_blocked_prewarm_log_does_not_promise_a_fetch_attempt(
+            self, monkeypatch, caplog, cached_keys):
+        """#3284 P2: with a cooldown ALREADY armed, "the first request will
+        make its own bounded fetch attempt" is FALSE — the request path is
+        answered from the cooldown with ZERO fetches.
+
+        ``_jwks._last_failure_at`` is a module global that survives across
+        lifespans, so a boot warm-up can meet a cooldown armed by an EARLIER
+        lifespan (the warm-up's own ``arm_cooldown=False`` stops it ARMING the
+        cooldown, it does not stop it READING one). The boot log asserted a
+        request-path fetch that the cooldown short-circuits. The report's
+        ``error`` already carries the real reason verbatim; only the sentence
+        overpromised.
+        """
+        import logging as _logging
+        import time as _time
+
+        import tortoise.hosted_api as ha_mod
+        import tortoise.session_auth as sa
+        import tortoise.supabase_control as sc
+
+        fetches = {"n": 0}
+
+        async def _boom() -> bytes:
+            fetches["n"] += 1
+            raise OSError("network down")
+
+        cache = sa._JWKSCache()
+        cache._keys = cached_keys
+        # Armed by an EARLIER lifespan, before this boot warm-up runs.
+        cache._last_failure_at = _time.monotonic()
+        monkeypatch.setattr(sa, "_jwks", cache)
+        monkeypatch.setattr(sa, "_fetch_jwks", _boom)
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(ha_mod, "_CONTROL_PLANE_PROBE", _StubProbe())
+
+        with caplog.at_level(_logging.WARNING):
+            asyncio.run(ha_mod._first_contact_prewarm())
+
+        text = caplog.text
+        assert "JWKS pre-warm failed" in text, text
+        assert "cooldown" in text, (
+            "the sentence must state the cooldown that blocks the attempt: "
+            + text)
+        # ``error`` is never ``None`` on the ``else`` (transport_error) branch:
+        # the cold case reports the bounded-503 HTTPException, the empty case
+        # the cooldown reason. Check the real reason is present, not a bare
+        # ``(None)``.
+        expected_reason = (
+            "HTTPException 503" if cached_keys is None
+            else "refetch not attempted")
+        assert expected_reason in text, text
+        assert "(None)" not in text, text
+        assert "will make its own bounded fetch attempt" not in text, (
+            "an armed cooldown short-circuits the request-path fetch, so this "
+            "claim is false: " + text)
+        assert fetches["n"] == 0, "the boot warm-up was blocked by the cooldown"
+
+        # Prove the claim was false ON THE FIRST REQUEST: the request path
+        # (kid miss -> the force path ``verify_session_jwt`` takes) is answered
+        # from the cooldown with no fetch at all. Cold cache -> bounded 503;
+        # empty cache -> the keyless 401 path.
+        from fastapi import HTTPException
+        if cached_keys is None:
+            with pytest.raises(HTTPException) as ei:
+                asyncio.run(cache.get(force=True, kid="kid-1"))
+            assert ei.value.status_code == 503, ei.value
+        else:
+            assert asyncio.run(cache.get(force=True, kid="kid-1")) == {}, (
+                "an empty cached set is served as-is")
+        assert fetches["n"] == 0, (
+            "the first request DID fetch — the cooldown short-circuit the log "
+            "omitted would not have happened")
+
+    def test_slow_dead_jwks_still_yields_a_bounded_503_with_retry_after(
+            self, unauth_client, monkeypatch):
+        """The #3284 regression on the REAL HTTP surface.
+
+        A session-authenticated request (``Bearer eyJ…`` → the session-auth
+        lane) against a JWKS endpoint that outlives its budget must come back
+        as a bounded 503 carrying a JSON body and ``Retry-After`` — the exact
+        contract the issue asks for, and the one a client with a 10s budget can
+        act on. Pre-fix the request waited the fetch out (unbounded).
+        """
+        import time as _time
+
+        import tortoise.session_auth as sa
+        from tests import _session_jwt_utils as _jwt
+
+        # raising=False: pre-fix the knob does not exist, so this test fails on
+        # the BEHAVIOUR (the request waits the fetch out, and the 503 carries
+        # no Retry-After) rather than on a missing attribute.
+        monkeypatch.setattr(sa, "_JWKS_FETCH_TOTAL_S", 0.25, raising=False)
+        monkeypatch.setattr(sa, "_jwks", sa._JWKSCache())
+
+        async def _slow_dead_fetch() -> bytes:
+            await asyncio.sleep(5.0)  # far past every budget
+            raise OSError("jwks unreachable")
+
+        monkeypatch.setattr(sa, "_fetch_jwks", _slow_dead_fetch)
+        priv, _pub = _jwt.make_ec_keypair()
+        token = _jwt.mint_es256_token(priv, "kid-1", {
+            "sub": "user-3144", "aud": "authenticated", "email": "u@example.com",
+            "exp": int(_time.time()) + 600, "iat": int(_time.time()),
+        })
+
+        t0 = _time.monotonic()
+        r = unauth_client.get(
+            "/v1/onboarding/state",
+            headers={
+                "Authorization": f"Bearer {token}",
+                # A browser origin: the dashboard must be able to READ the
+                # Retry-After header. It is not CORS-safelisted, so the
+                # response needs Access-Control-Expose-Headers (#3284 P2).
+                "Origin": "https://app.premiselabs.co",
+            })
+        elapsed = _time.monotonic() - t0
+
+        assert r.status_code == 503, r.text[:300]
+        assert elapsed < 1.0, f"cold request took {elapsed:.3f}s — not bounded"
+        assert r.content, "zero-byte response body"
+        assert r.json().get("detail"), r.text[:200]
+        assert int(r.headers["Retry-After"]) >= 1
+        assert r.headers["access-control-allow-origin"] == "https://app.premiselabs.co"
+        exposed = r.headers.get("access-control-expose-headers", "")
+        assert "Retry-After" in exposed, (
+            "a browser client cannot read Retry-After without "
+            f"Access-Control-Expose-Headers (got {exposed!r})")

@@ -45,11 +45,27 @@ from tools.longmem_eval.ingest import ingest_haystack
 from tools.longmem_eval.judge import MockJudge
 from tools.longmem_eval.reader import MockReader
 from tools.longmem_eval.retrieve import retrieve_for_question
+from tortoise.model_adapters import (
+    MODELS,
+    DeepSeekDirectModel,
+    OpenRouterModel,
+    RotatingModel,
+    RoutingModel,
+    VeniceModel,
+    build_extractor_model,
+)
 from tortoise.sdk import TortoiseSDK
 
 MINI = Path(__file__).parent.parent / "fixtures" / "longmemeval_mini.json"
 
-_FAKE_DIM = 32
+_FAKE_DIM = 32  # token-hash bucket count — the vectors' only information
+# #4280: the STORED width must be the store's index width. A narrower vector is
+# refused by an indexed store (`create_point` → `encode_for_store` → the store's
+# `required_embedding_dim`), so this buckets into ``_FAKE_DIM`` and then
+# ZERO-PADS to :data:`EMBEDDING_DIM`. Padding adds only exact 0.0 terms, so
+# every cosine — and therefore every hand-computed rank/threshold in this
+# module — is unchanged, while the vector is storable on BOTH lanes (embedded
+# and a `TORTOISE_DB_URI` server, which has the 384-dim Point HNSW index).
 _TOKEN_RE = re.compile(r"[a-z0-9']+")
 
 
@@ -66,7 +82,7 @@ def _fake_vec(text: str) -> list[float]:
     dims: dict[str, float] = {}
     for tok in _TOKEN_RE.findall((text or "").lower()):
         dims[tok] = dims.get(tok, 0.0) + 1.0
-    vec = [0.0] * _FAKE_DIM
+    vec = [0.0] * emb.EMBEDDING_DIM
     for tok, c in dims.items():
         vec[zlib.crc32(tok.encode("utf-8")) % _FAKE_DIM] += c
     norm = math.sqrt(sum(v * v for v in vec)) or 1.0
@@ -252,7 +268,7 @@ def test_vector_search_passes_elevated_timeout(tmp_path, monkeypatch, fake_embed
         # embedded lane True, docker lane False (the redirect's
         # server-mode flag). The timeout + api + limit contract is
         # lane-independent.
-        _uri = os.environ.get("TORTOISE_DB_URI")
+        _uri = os.environ.get("TORTOISE_DB_URI") or None
         assert calls[0]["is_embedded"] == (_uri is None), (
             f"is_embedded={calls[0]['is_embedded']} must match the lane")
         # embedded lane: no vector-index API (brute-force); docker lane: the
@@ -489,6 +505,31 @@ def test_encode_cache_intercepts_ingest_and_reuses(tmp_path, monkeypatch):
             sdk.close()
 
 
+def test_encode_cache_intercepts_the_batched_embedder(tmp_path, monkeypatch):
+    """#4194: the cache wraps the BATCHED form too.
+
+    ``compute_embedding`` now delegates to ``compute_embeddings``, and the
+    capture turn write calls the batched form directly. Wrapping only the
+    single form would silently let that write path bypass the cache.
+    """
+    calls = {"n": 0}
+
+    def _counting_batch(texts, max_tokens=512):
+        calls["n"] += 1
+        return [_fake_vec(t) for t in texts]
+
+    monkeypatch.setattr(emb, "compute_embeddings", _counting_batch)
+    cache = encode_cache.EncodeCache(tmp_path / "c.json", model_id="m")
+    with cache.active():
+        assert emb.compute_embeddings(["a", "b"]) == [
+            _fake_vec("a"), _fake_vec("b")]
+        assert calls["n"] == 1  # ONE batched encode for both misses
+        assert emb.compute_embeddings(["a", "b"]) == [
+            _fake_vec("a"), _fake_vec("b")]
+        assert calls["n"] == 1  # second call served from the cache
+    assert emb.compute_embeddings is _counting_batch  # restored
+
+
 def test_encode_query_routes_through_active_cache(tmp_path):
     cache = encode_cache.EncodeCache(tmp_path / "c.json", model_id="m")
     with cache.active():
@@ -554,9 +595,475 @@ def test_checkpoint_truncated_outcome_reruns_just_that_question(tmp_path, capsys
         "corrupt" in capsys.readouterr().err.lower()
 
 
+def test_checkpoint_resume_gate_rejects_zero_session_recall(tmp_path, capsys):
+    """#1764 resume-quality gate: an outcome whose session_recall@k is all
+    zeros (the session never surfaced — dead-retrieval artifact) is rejected
+    at load and the question re-encodes; the healthy sibling resumes as-is
+    (single-population discipline — no stale outcomes in baselines)."""
+    cp = tmp_path / "state.json"
+    key = "embedded__hybrid__default__default"
+    healthy = _minimal_outcome("mini_ie_user_001", MARKER="keep-me")
+    dead = _minimal_outcome(
+        "mini_msr_002",
+        **{"session_recall@k": {"5": 0.0}, "turn_recall@k": {"5": 0.0}})
+    runner._save_checkpoint(str(cp), [healthy, dead], [],
+                            run_key=key, surface="embedded", retriever="hybrid",
+                            model=None, prompt=None)
+
+    outcomes, _report = runner.run_evaluation(
+        _mini()[:2], reader=MockReader(), judge=MockJudge(),
+        ks=(5,), top_k=5, split="s", work_dir=str(tmp_path), checkpoint=str(cp),
+    )
+    by_id = {o["question_id"]: o for o in outcomes}
+    # healthy outcome resumed untouched; the zero-recall one re-encoded
+    # (live mini retrieval is healthy — session_recall@5 == 1.0, no MARKER)
+    assert by_id["mini_ie_user_001"]["MARKER"] == "keep-me"
+    assert by_id["mini_msr_002"].get("MARKER") is None
+    assert by_id["mini_msr_002"]["session_recall@k"] == {"5": 1.0}
+    assert "resume-quality gate" in capsys.readouterr().err.lower()
+
+
+def test_checkpoint_resume_gate_rejects_dead_fts_leg(tmp_path, capsys):
+    """#1764: an outcome whose legs trace records fts.count=0 (the pilot's
+    crash artifact — FTS ran but returned no hits) is rejected at load and
+    re-encodes; the healthy sibling resumes untouched."""
+    cp = tmp_path / "state.json"
+    key = "embedded__hybrid__default__default"
+    healthy = _minimal_outcome("mini_ie_user_001", MARKER="keep-me",
+                               legs=[{"leg": "fts", "ran": True,
+                                      "degraded": False, "reason": "ok",
+                                      "count": 4}])
+    # the dead outcome carries the FULL dead shape — a dead FTS leg AND
+    # zero session recall (the session never surfaced). A healthy vector
+    # leg with non-zero session recall is NOT retrieval-dead (see the
+    # guard-rail matrix) — the pilot's artifact had both signals dead.
+    dead = _minimal_outcome(
+        "mini_msr_002",
+        **{"session_recall@k": {"5": 0.0}, "turn_recall@k": {"5": 0.0}},
+        legs=[{"leg": "fts", "ran": True, "degraded": False,
+               "reason": "empty_results", "count": 0},
+              {"leg": "vector", "ran": True, "degraded": False,
+               "reason": "ok", "count": 120}])
+    runner._save_checkpoint(str(cp), [healthy, dead], [],
+                            run_key=key, surface="embedded", retriever="hybrid",
+                            model=None, prompt=None)
+
+    outcomes, _report = runner.run_evaluation(
+        _mini()[:2], reader=MockReader(), judge=MockJudge(),
+        ks=(5,), top_k=5, split="s", work_dir=str(tmp_path), checkpoint=str(cp),
+    )
+    by_id = {o["question_id"]: o for o in outcomes}
+    assert by_id["mini_ie_user_001"]["MARKER"] == "keep-me"
+    assert by_id["mini_msr_002"].get("MARKER") is None
+    # the re-encoded outcome carries a healthy fts leg (live retrieval)
+    fts = next(leg for leg in by_id["mini_msr_002"]["legs"]
+               if leg["leg"] == "fts")
+    assert fts["count"] > 0
+    assert "resume-quality gate" in capsys.readouterr().err.lower()
+
+
+def test_checkpoint_resume_gate_keeps_healthy_outcome(tmp_path):
+    """#1764: a healthy outcome (fts leg with count > 0, non-zero session
+    recall) resumes as-is — the reader is NOT invoked for it again."""
+    cp = tmp_path / "state.json"
+    key = "embedded__hybrid__default__default"
+    healthy = _minimal_outcome("mini_ie_user_001", MARKER="keep-me",
+                               legs=[{"leg": "fts", "ran": True,
+                                      "degraded": False, "reason": "ok",
+                                      "count": 4}])
+    runner._save_checkpoint(str(cp), [healthy], [],
+                            run_key=key, surface="embedded", retriever="hybrid",
+                            model=None, prompt=None)
+
+    reader_calls = {"n": 0}
+
+    class _CountingReader(MockReader):
+        def answer(self, *args, **kwargs):
+            reader_calls["n"] += 1
+            return super().answer(*args, **kwargs)
+
+    outcomes, _report = runner.run_evaluation(
+        _mini()[:2], reader=_CountingReader(), judge=MockJudge(),
+        ks=(5,), top_k=5, split="s", work_dir=str(tmp_path), checkpoint=str(cp),
+    )
+    by_id = {o["question_id"]: o for o in outcomes}
+    assert by_id["mini_ie_user_001"]["MARKER"] == "keep-me"  # reused
+    assert reader_calls["n"] == 1  # only the non-checkpointed qid ran
+
+
+def test_checkpoint_resume_gate_keeps_breaker_open(tmp_path):
+    """#1764: breaker_open outcomes are LEGITIMATELY dropped — they must NOT
+    be re-run, even though their recorded session_recall@k is all zeros (the
+    breaker-open drop shape). The gate exempts them at load."""
+    cp = tmp_path / "state.json"
+    key = "embedded__hybrid__default__default"
+    dropped = {
+        "question_id": "mini_ie_user_001",
+        "question_type": "single-session-user",
+        "breaker_open": True,
+        "dropped_reason": "breaker_open",
+        "label": None, "hypothesis": None,
+        "session_recall@k": {"5": 0.0},
+        "turn_recall@k": {"5": 0.0},
+        "ndcg@10": None, "p@10": None, "p@5": None,
+    }
+    runner._save_checkpoint(str(cp), [dropped], [],
+                            run_key=key, surface="embedded", retriever="hybrid",
+                            model=None, prompt=None)
+
+    done, _ = runner._load_checkpoint(str(cp), run_key=key)
+    assert "mini_ie_user_001" in done  # kept — never re-run
+    assert done["mini_ie_user_001"]["breaker_open"] is True
+
+    # end-to-end: the breaker-open question stays dropped (reader untouched)
+    reader_calls = {"n": 0}
+
+    class _CountingReader(MockReader):
+        def answer(self, *args, **kwargs):
+            reader_calls["n"] += 1
+            return super().answer(*args, **kwargs)
+
+    outcomes, _report = runner.run_evaluation(
+        _mini()[:2], reader=_CountingReader(), judge=MockJudge(),
+        ks=(5,), top_k=5, split="s", work_dir=str(tmp_path), checkpoint=str(cp),
+    )
+    by_id = {o["question_id"]: o for o in outcomes}
+    assert by_id["mini_ie_user_001"].get("breaker_open") is True
+    assert reader_calls["n"] == 1  # mini_msr_002 only — breaker-open not re-run
+
+
+@pytest.mark.parametrize("outcome,expect", [
+    # guard rails: signals fire only on positive recorded evidence
+    (None, None),
+    ("not-a-dict", None),
+    ({}, None),
+    ({"question_id": "q"}, None),  # no legs, no recall keys
+    ({"question_id": "q", "legs": "not-a-list"}, None),
+    ({"question_id": "q", "legs": []}, None),
+    ({"question_id": "q", "legs": [{"leg": "vector", "count": 5}]}, None),
+    ({"question_id": "q", "legs": [{"leg": "fts"}]}, None),  # no count
+    ({"question_id": "q", "legs": [{"leg": "fts", "count": "0"}]},
+     None),  # non-numeric count is not evidence
+    ({"question_id": "q", "session_recall@k": {}}, None),
+    ({"question_id": "q", "session_recall@k": "x"}, None),
+    ({"question_id": "q", "session_recall@k": {"5": None}}, None),
+    # dead-FTS signal (single fts leg, no recall data recorded)
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": False,
+                 "reason": "empty_results", "count": 0}]},
+     "fts.count=0"),
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                 "reason": "query_failed", "count": 0}]},
+     "fts.count=0"),
+    # timeout: the strategy deadline expired (R3 #1542 D4 as_completed
+    # merge) — the query never completed, results discarded, genuinely dead
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                 "reason": "timeout", "count": 0}]},
+     "fts.count=0"),
+    # timed-out fts leg + HEALTHY session (another leg surfaced the
+    # session) → NOT retrieval-dead — the session positively surfaced
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                 "reason": "timeout", "count": 0}],
+      "session_recall@k": {"5": 1.0}},
+     None),
+    # unknown / corrupt reason strings (future vocabulary, hand-edited
+    # files, reason=None) are NOT dead — fail-open (the index_missing
+    # livelock lesson); vocabulary drift is warned about separately
+    # (test_resume_gate_unknown_leg_reason_pure_and_surfaced)
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                 "reason": "some_future_reason", "count": 0}]},
+     None),
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                 "reason": None, "count": 0}]},
+     None),
+    # R3 (#1542): index_missing is environmental/benign — expected in
+    # embedded FalkorDBLite (no FTS index); degrades quietly, does NOT trip
+    # the breaker. NOT a dead leg — rejecting it would reject every embedded
+    # outcome on every resume (livelock).
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                 "reason": "index_missing", "count": 0}]},
+     None),
+    # breaker_open is the breaker skipping the strategy — not a dead leg
+    # either (the caller separately keeps breaker_open OUTCOMES).
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": False, "degraded": True,
+                 "reason": "breaker_open", "count": 0}]},
+     None),
+    # dead-FTS + zero session recall (the pilot's artifact shape) — FTS
+    # reason surfaces first (both signals present)
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": False,
+                 "reason": "empty_results", "count": 0}],
+      "session_recall@k": {"5": 0.0}},
+     "fts.count=0"),
+    # dead FTS leg + HEALTHY session (a vector leg rescued the session) →
+    # NOT retrieval-dead — rejecting it would livelock (the re-encode
+    # reproduces the same FTS-empty shape on the next resume)
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": False,
+                 "reason": "empty_results", "count": 0}],
+      "session_recall@k": {"5": 1.0}},
+     None),
+    # corrupt recall values (strings/None) do NOT prove the session
+    # surfaced — a dead FTS leg is still rejected on corrupt data instead
+    # of being silently resumed
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": False,
+                 "reason": "empty_results", "count": 0}],
+      "session_recall@k": {"5": "0.0"}},
+     "fts.count=0"),
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": False,
+                 "reason": "empty_results", "count": 0}],
+      "session_recall@k": {"5": None}},
+     "fts.count=0"),
+    # non-finite recall (json.loads parses Infinity → float('inf')): inf is
+    # NOT a finite positive value — the dead-FTS signal must stay fail-OPEN
+    # closed (reject), not be silently rescued by a corrupt Infinity
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": False,
+                 "reason": "empty_results", "count": 0}],
+      "session_recall@k": {"5": float("inf")}},
+     "fts.count=0"),
+    # inf without a dead FTS leg is neither healthy nor all-zero — no signal
+    ({"question_id": "q", "turn_recall@k": {"5": 0.0},
+      "session_recall@k": {"5": float("inf")}},
+     None),
+    # bool False is an int subclass but NOT a recorded recall value — it
+    # must not count as "all zeros" (type-strict session_zero, mirroring
+    # session_healthy's bool exclusion)
+    ({"question_id": "q", "turn_recall@k": {"5": 0.0},
+      "session_recall@k": {"5": False}},
+     None),
+    # TR dual-entity-type trace: a live point leg rescues the event leg
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": False,
+                 "reason": "ok", "count": 2},
+                {"leg": "fts", "ran": True, "degraded": False,
+                 "reason": "empty_results", "count": 0}]},
+     None),
+    # zero-session signal
+    ({"question_id": "q", "turn_recall@k": {"5": 0.0},
+      "session_recall@k": {"5": 0.0}},
+     "session_recall@k all zeros"),
+    # legit sessionless (M6 N/A: turn_recall None) is exempt even when
+    # session_recall is all-zero and FTS is empty
+    ({"question_id": "q", "turn_recall@k": {"5": None},
+      "session_recall@k": {"5": 0.0},
+      "legs": [{"leg": "fts", "ran": True, "degraded": False,
+                 "reason": "empty_results", "count": 0}]},
+     None),
+])
+def test_resume_gate_reject_reason_guard_rails(outcome, expect):
+    """#1764: the gate fires only on positive recorded evidence — absent /
+    malformed data never rejects; a healthy fts entry or a legitimately
+    session-less outcome (M6 N/A-not-0.0) always passes."""
+    reason = runner.resume_gate_reject_reason(outcome)
+    if expect is None:
+        assert reason is None
+    else:
+        assert reason is not None and reason.startswith(expect)
+
+
+def test_resume_gate_unknown_leg_reason_pure_and_surfaced(tmp_path, capsys):
+    """#1764/code-review: the gate predicate is PURE — an fts leg with
+    count==0 and a reason OUTSIDE the known vocabulary (future vocabulary,
+    hand-edited files, reason=None) stays fail-open (NOT dead — the
+    index_missing livelock lesson), the predicate prints NOTHING (it is the
+    shared single source of truth called by both the runner and the
+    protocol scan — a print inside it double-fires in a real cmd_run flow
+    and fires in --dry-run contexts where no load decision happens), and
+    the vocabulary-drift event is surfaced by the callers that own the
+    load decision: ``unknown_leg_reasons`` classifies it and
+    ``_load_checkpoint`` warns once per gate-eligible outcome, naming qid
+    + the unknown reason(s)."""
+    # predicate: pure + fail-open (unknown future reason → not dead, no print)
+    reason = runner.resume_gate_reject_reason({
+        "question_id": "q-unknown",
+        "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                   "reason": "some_future_reason", "count": 0}]})
+    assert reason is None
+    assert "unknown" not in capsys.readouterr().err.lower()
+    # helper: the unknown reason strings (raw values, deduplicated)
+    assert runner.unknown_leg_reasons({
+        "question_id": "q-unknown",
+        "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                   "reason": "some_future_reason", "count": 0}]}) \
+        == ["some_future_reason"]
+    # reason=None (hand-edited/corrupt) → not dead, classified by helper
+    assert runner.resume_gate_reject_reason({
+        "question_id": "q-none",
+        "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                   "reason": None, "count": 0}]}) is None
+    assert runner.unknown_leg_reasons({
+        "question_id": "q-none",
+        "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                   "reason": None, "count": 0}]}) == [None]
+    # a known benign reason (index_missing) is not unknown
+    assert runner.unknown_leg_reasons({
+        "question_id": "q-benign",
+        "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                   "reason": "index_missing", "count": 0}]}) == []
+    # _load_checkpoint (the runner's load path) warns ONCE per gate-
+    # eligible outcome naming qid + the unknown reason(s), and still loads
+    # the outcome (fail-open)
+    cp = tmp_path / "state.json"
+    cp.write_text(json.dumps({
+        "format": runner.CHECKPOINT_FORMAT,
+        "run_key": "embedded__hybrid__default__default",
+        "outcomes": [_minimal_outcome("q-unknown", **{
+            "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                       "reason": "some_future_reason", "count": 0}],
+            "session_recall@k": {"5": 1.0},  # healthy — NOT rejected
+        })],
+    }), encoding="utf-8")
+    done, _ = runner._load_checkpoint(
+        str(cp), run_key="embedded__hybrid__default__default")
+    err = capsys.readouterr().err
+    assert "q-unknown" in err and "some_future_reason" in err
+    assert "unknown" in err.lower() and "fail-open" in err
+    assert "q-unknown" in done  # fail-open — loaded, not rejected
+
+
+def test_checkpoint_top_level_retriever_mismatch_warns(tmp_path, capsys):
+    """#1764/code-review: _load_checkpoint's retriever-mismatch warning
+    covers the checkpoint's first-class top-level ``retriever`` field as
+    well as the run_key segment — a top-level field that disagrees with
+    the forwarded retriever warns loudly, while the required-key set still
+    derives from the forwarded retriever (load behavior unchanged)."""
+    cp = tmp_path / "state.json"
+    outcome = _minimal_outcome("mini_ie_user_001")  # hybrid keys only
+    # top-level field says vector but no run_key claims it — the runner
+    # (forwarded hybrid) loads with hybrid keys; the disagreement warns.
+    cp.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "run_key": "embedded__hybrid__default__default",
+        "retriever": "vector",
+        "outcomes": [outcome],
+    }), encoding="utf-8")
+    done, _ = runner._load_checkpoint(
+        str(cp), run_key="embedded__hybrid__default__default")
+    err = capsys.readouterr().err
+    assert "retriever" in err and "!=" in err
+    assert "vector" in err
+    assert "mini_ie_user_001" in done  # hybrid keys → resumes
+
+    # matching top-level field → no warning
+    cp2 = tmp_path / "state2.json"
+    cp2.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "run_key": "embedded__hybrid__default__default",
+        "retriever": "hybrid",
+        "outcomes": [outcome],
+    }), encoding="utf-8")
+    done, _ = runner._load_checkpoint(
+        str(cp2), run_key="embedded__hybrid__default__default")
+    assert "mini_ie_user_001" in done
+    assert "!=" not in capsys.readouterr().err
+
+
+def test_checkpoint_resume_gate_keeps_sessionless_abstention(tmp_path, capsys):
+    """#1764: a legitimately session-less outcome (abstention question —
+    turn_recall@k all None per the M6 N/A-not-0.0 contract, session_recall
+    all zeros, FTS legitimately empty) resumes as-is — it is NOT a dead-leg
+    artifact and must not re-encode on every resume forever."""
+    cp = tmp_path / "state.json"
+    key = "embedded__hybrid__default__default"
+    abstention = _minimal_outcome(
+        "mini_abs_005_abs", MARKER="keep-me", label=False,
+        **{"session_recall@k": {"5": 0.0}, "turn_recall@k": {"5": None}},
+        legs=[{"leg": "fts", "ran": True, "degraded": False,
+               "reason": "empty_results", "count": 0}])
+    runner._save_checkpoint(str(cp), [abstention], [],
+                            run_key=key, surface="embedded", retriever="hybrid",
+                            model=None, prompt=None)
+
+    reader_calls = {"n": 0}
+
+    class _CountingReader(MockReader):
+        def answer(self, *args, **kwargs):
+            reader_calls["n"] += 1
+            return super().answer(*args, **kwargs)
+
+    outcomes, _report = runner.run_evaluation(
+        _mini()[:5], reader=_CountingReader(), judge=MockJudge(),
+        ks=(5,), top_k=5, split="s", work_dir=str(tmp_path), checkpoint=str(cp),
+    )
+    by_id = {o["question_id"]: o for o in outcomes}
+    assert by_id["mini_abs_005_abs"]["MARKER"] == "keep-me"  # reused
+    assert reader_calls["n"] == 4  # only the 4 non-checkpointed qids ran
+
+
+def test_checkpoint_vector_truncation_requires_vector_keys(tmp_path, capsys):
+    """#1764/code-review: _load_checkpoint honors the retriever's required
+    key set (forwarded from run_evaluation) — a vector-mode outcome missing
+    vector-specific keys (ndcg@10/p@10/p@5/ranked_ids) is truncated and
+    re-encoded, mirroring the protocol scan's vector-key truncation."""
+    cp = tmp_path / "state.json"
+    outcome = _minimal_outcome("mini_ie_user_001")  # hybrid keys only
+    runner._save_checkpoint(
+        str(cp), [outcome], [],
+        run_key="embedded__vector__minilm__default", surface="embedded",
+        retriever="vector", model="minilm", prompt=None)
+
+    # same key, retriever-aware load → truncated (missing vector keys)
+    done, _ = runner._load_checkpoint(
+        str(cp), run_key="embedded__vector__minilm__default",
+        retriever="vector")
+    assert "mini_ie_user_001" not in done
+    assert "truncated/corrupt" in capsys.readouterr().err.lower()
+
+    # the default (hybrid) load still sees the hybrid keys → resumes
+    done, _ = runner._load_checkpoint(
+        str(cp), run_key="embedded__vector__minilm__default")
+    assert "mini_ie_user_001" in done
+
+
+def test_checkpoint_retriever_mismatch_warns_not_refuses(tmp_path, capsys):
+    """#1764/code-review: _load_checkpoint cross-checks the forwarded
+    retriever against the run_key's retriever segment — a mismatch (vector
+    checkpoint loaded with the default hybrid retriever) emits a stderr
+    warning but does NOT change load behavior: the required-key set is
+    derived from the forwarded retriever, so the hybrid-keys outcome still
+    resumes."""
+    cp = tmp_path / "state.json"
+    outcome = _minimal_outcome("mini_ie_user_001", **{
+        "ndcg@10": 0.5, "p@10": 0.5, "p@5": 0.5, "ranked_ids": ["a"]})
+    runner._save_checkpoint(
+        str(cp), [outcome], [],
+        run_key="embedded__vector__minilm__default", surface="embedded",
+        retriever="vector", model="minilm", prompt=None)
+
+    # forwarding hybrid against a vector-keyed checkpoint → warn only
+    done, _ = runner._load_checkpoint(
+        str(cp), run_key="embedded__vector__minilm__default",
+        retriever="hybrid")
+    err = capsys.readouterr().err
+    assert "retriever" in err and "!=" in err
+    assert "mini_ie_user_001" in done  # load behavior unchanged
+
+    # matching retriever → no warning
+    done, _ = runner._load_checkpoint(
+        str(cp), run_key="embedded__vector__minilm__default",
+        retriever="vector")
+    assert "mini_ie_user_001" in done
+    assert "forwarded retriever" not in capsys.readouterr().err
+
+
 def test_checkpoint_write_failure_surfaces_error(tmp_path, monkeypatch):
     """An ENOSPC/OSError on the atomic checkpoint rename must surface as an
-    error — never silently drop the question from the denominator."""
+    error — never silently drop the question from the denominator.
+
+    #1785 (P2-10): the persist path now retries N times with backoff and
+    then aborts with a DISTINCT ``CheckpointPersistError`` (never a bare
+    OSError traceback; the ``checkpoint_abort`` run marker rides the
+    checkpoint so a resume refuses it)."""
     import os as _os
 
     cp = tmp_path / "state.json"
@@ -565,7 +1072,7 @@ def test_checkpoint_write_failure_surfaces_error(tmp_path, monkeypatch):
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(_os, "replace", _enospc)
-    with pytest.raises(OSError):
+    with pytest.raises(runner.CheckpointPersistError):
         runner.run_evaluation(
             _mini()[:1], reader=None, judge=None, ks=(5,), top_k=5, split="s",
             work_dir=str(tmp_path), checkpoint=str(cp), retrieval_only=True,
@@ -601,13 +1108,23 @@ def test_checkpoint_cross_surface_and_model_isolation(tmp_path, capsys):
     done, _ = runner._load_checkpoint(str(stale), run_key="embedded__vector__minilm__default")
     assert done == {}
 
-    # corrupt file → warn, never crash
+    # #1786 (P2-12, contract change): a corrupt file is QUARANTINED (guarded
+    # rename) and the loader REFUSES with an actionable error — the old
+    # silent fresh-start discarded the failures list + claim stamps and
+    # bypassed the fingerprint gate (--retry-failed state evaporated).
     corrupt = tmp_path / "corrupt.json"
     corrupt.write_text("{definitely not json", encoding="utf-8")
-    done, _ = runner._load_checkpoint(str(corrupt), run_key="embedded__vector__minilm__default")
-    assert done == {}
-    assert "warning" in capsys.readouterr().err.lower() or \
-        len(capsys.readouterr().err) > 0
+    with pytest.raises(runner.CheckpointStaleError) as ei:
+        runner._load_checkpoint(str(corrupt),
+                                run_key="embedded__vector__minilm__default")
+    assert "quarantined" in str(ei.value)
+    # the corrupt file was renamed away (guarded) — no stale .tmp artifact
+    # (the advisory .lock file persists by design — flock_exclusive creates
+    # it for every checkpoint op, pre-existing behavior)
+    assert not corrupt.exists()
+    quarantined = list(tmp_path.glob("corrupt.json.corrupt.*"))
+    assert len(quarantined) == 1
+    assert not list(tmp_path.glob("*.tmp"))
 
 
 def test_checkpoint_key_shape():
@@ -615,6 +1132,862 @@ def test_checkpoint_key_shape():
         "hnsw__vector__arctic-s__query"
     assert runner.checkpoint_key("embedded", "hybrid", None, None) == \
         "embedded__hybrid__default__default"
+
+
+def test_model_id_precedence_ladder():
+    """The ``_model_id`` attr-resolution ladder: None → None; a truthy
+    ``.model_id`` beats ``.id``; None/empty/whitespace-only ids never win
+    (fall through to the loud repr fallback); any non-blank id wins,
+    string-coerced (review #1742: ``if mid is not None and
+    str(mid).strip()`` — so a falsy NON-string id like 0 or False now wins
+    as "0"/"False"); repr is the last resort — pinned as repr, not str,
+    via sentinels. Case names ride the assertion messages for failure
+    attribution."""
+    from types import SimpleNamespace as _NS
+
+    class _SentinelRepr:
+        """repr-fallback probe: distinct ``__str__``/``__repr__`` sentinels so
+        a str fallback (or a bare ``object()`` oracle that re-derives the same
+        0x... address) cannot false-pass."""
+
+        def __init__(self, **attrs):
+            self.__dict__.update(attrs)
+
+        def __str__(self):
+            return "STR-sentinel"
+
+        def __repr__(self):
+            return "<REPR-sentinel>"
+
+    # One named case per attr-resolution clause of ``_model_id``. Attr-only
+    # stubs are data (SimpleNamespace); repr-fallback probes are sentinel
+    # instances so the last resort is pinned as repr, not str.
+    cases = [
+        ("no-model", None, None),
+        ("model_id-attr-wins", _NS(model_id="registry/deepseek-v4-flash"),
+         "registry/deepseek-v4-flash"),
+        ("id-only-falls-through", _NS(id="deepseek/deepseek-v4-flash"),
+         "deepseek/deepseek-v4-flash"),
+        ("model_id-beats-id", _NS(model_id="registry/win", id="loser"),
+         "registry/win"),
+        ("falsy-model_id-falls-to-id",
+         _NS(model_id="", id="deepseek/deepseek-v4-flash"),
+         "deepseek/deepseek-v4-flash"),
+        ("none-model_id-falls-to-id",
+         _NS(model_id=None, id="deepseek/deepseek-v4-flash"),
+         "deepseek/deepseek-v4-flash"),
+        ("model_id-beats-empty-id", _NS(model_id="registry/win", id=""),
+         "registry/win"),
+        ("model_id-beats-none-id", _NS(model_id="registry/win", id=None),
+         "registry/win"),
+        ("whitespace-model_id-is-truthy", _SentinelRepr(model_id=" "),
+         "<REPR-sentinel>"),
+        ("whitespace-id-is-truthy", _SentinelRepr(model_id="", id=" "),
+         "<REPR-sentinel>"),
+        ("falsy-model_id-absent-id-repr", _SentinelRepr(model_id=""),
+         "<REPR-sentinel>"),
+        ("none-model_id-absent-id-repr", _SentinelRepr(model_id=None),
+         "<REPR-sentinel>"),
+        ("no-attrs-repr-fallback", _SentinelRepr(), "<REPR-sentinel>"),
+        ("none-id-repr-fallback", _SentinelRepr(id=None), "<REPR-sentinel>"),
+        ("empty-id-repr-fallback", _SentinelRepr(id=""), "<REPR-sentinel>"),
+        ("both-falsy-none-empty-repr", _SentinelRepr(model_id=None, id=""),
+         "<REPR-sentinel>"),
+        ("both-falsy-empty-none-repr", _SentinelRepr(model_id="", id=None),
+         "<REPR-sentinel>"),
+        ("both-empty-empty-repr", _SentinelRepr(model_id="", id=""),
+         "<REPR-sentinel>"),
+        ("both-none-none-repr", _SentinelRepr(model_id=None, id=None),
+         "<REPR-sentinel>"),
+    ]
+    for name, model, expected in cases:
+        assert runner._model_id(model) == expected, f"case [{name}]"
+
+
+def test_model_id_fingerprint_uses_wire_id_not_repr():
+    """M4 #1732: model adapters expose ``.id`` (the API-facing wire id), not
+    ``.model_id`` — the old repr fallback embedded a memory address
+    (``<DeepSeekDirectModel object at 0x...>``), making the fingerprint
+    non-deterministic across processes and refusing every checkpoint resume
+    (CheckpointStaleError on ``extractor_model`` even with identical git_sha).
+
+    The literal wire-id equality is the #1732 guard: an address-bearing repr
+    can never equal the stable wire id. Because two fresh instances of the
+    same model are pinned to the SAME literal, identical fingerprints across
+    instances/runs follow — the resume-determinism contract.
+
+    Construction is offline (requests.Session() only, no API calls); built
+    inside the try so every constructed session is closed in the finally even
+    if a later constructor raises."""
+    specs = [
+        (OpenRouterModel, "deepseek/deepseek-v4-flash"),
+        (DeepSeekDirectModel, "deepseek-v4-pro"),
+        (VeniceModel, "deepseek-v4-flash"),
+    ]
+    adapters: list = []
+    expected: list = []
+    try:
+        for cls, wire_id in specs:
+            adapters.append(cls(wire_id))
+            adapters.append(cls(wire_id))  # determinism twin
+            expected += [wire_id, wire_id]
+        for model, wire_id in zip(adapters, expected, strict=True):
+            assert runner._model_id(model) == wire_id
+    finally:
+        for model in adapters:
+            model.close()
+
+
+def test_model_id_fingerprint_deterministic_at_composition_layer():
+    """M4 #1732, composition layer: ``_build_fingerprint`` embeds
+    ``_model_id(extractor_model)`` in the dict that is serialized to the
+    checkpoint and compared on resume (CheckpointStaleError on mismatch).
+    Fresh instances of the same model must produce IDENTICAL fingerprints (a
+    repr fallback embedding a per-instance 0x... address would differ and
+    refuse the resume); the field must also discriminate between models (the
+    cross-model resume refusal) and propagate None for retrieval-only runs."""
+    kw = dict(
+        reader_model="r", judge_model="j", ks=(5,), top_k=5, split="s",
+        ingest_mode="embedded", max_retries=1, dataset_fingerprint="x",
+        rerank_config={},
+    )
+
+    # retrieval-only runs carry no extractor → None propagates as None
+    assert runner._build_fingerprint(extractor_model=None, **kw)["extractor_model"] is None
+
+    adapters: list = []
+    try:
+        adapters.append(OpenRouterModel("deepseek/deepseek-v4-flash"))
+        adapters.append(OpenRouterModel("deepseek/deepseek-v4-flash"))  # determinism twin
+        adapters.append(OpenRouterModel("deepseek/deepseek-v4-pro"))  # same class, different id
+        adapters.append(DeepSeekDirectModel("deepseek-v4-pro"))  # different class
+        adapters.append(DeepSeekDirectModel("deepseek/deepseek-v4-flash"))  # diff class, SAME wire id
+
+        fp1 = runner._build_fingerprint(extractor_model=adapters[0], **kw)
+        fp2 = runner._build_fingerprint(extractor_model=adapters[1], **kw)
+        assert fp1 == fp2
+        assert fp1["extractor_model"] == "deepseek/deepseek-v4-flash"
+
+        # the discriminator must discriminate at both granularities — same
+        # class with a different wire id, and a different class — and
+        # ``extractor_model`` must be the ONLY differing field (no unrelated
+        # nondeterminism leaks into the fingerprint)
+        fp3 = runner._build_fingerprint(extractor_model=adapters[2], **kw)
+        fp4 = runner._build_fingerprint(extractor_model=adapters[3], **kw)
+        assert fp3["extractor_model"] == "deepseek/deepseek-v4-pro"
+        assert fp4["extractor_model"] == "deepseek-v4-pro"
+        assert runner._fingerprint_diffs(fp1, fp3) == ["extractor_model"]
+        assert runner._fingerprint_diffs(fp1, fp4) == ["extractor_model"]
+
+        # The fingerprint identity is wire-id-only by design (the #1732 fix):
+        # the SAME wire id across provider classes yields the same fingerprint
+        # — the provider is a routing detail, not part of the effective run
+        # config, so a cross-provider resume is deliberately accepted. Pin the
+        # contract so a future change to class-based identity is explicit.
+        fp5 = runner._build_fingerprint(extractor_model=adapters[4], **kw)
+        assert fp5 == fp1
+    finally:
+        for model in adapters:
+            model.close()
+
+
+def _pin_extractor_env(monkeypatch, *, keys: tuple[str, ...] = (),
+                       provider: str | None = None) -> None:
+    """Pin the extractor-router env to a deterministic provider set:
+    ``keys`` selects which of deepseek/openrouter/venice are "configured"
+    (env presence only — offline) and ``provider`` optionally sets an
+    explicit TORTOISE_EXTRACTOR_PROVIDER. 0 keys → the lenient
+    single-OpenRouter fallback (RoutingModel, 1 member); deepseek+openrouter
+    → RoutingModel (primary deepseek-direct + openrouter fallback — the
+    unset-env production default); all 3 → RotatingModel; an explicit
+    openrouter primary + deepseek fallback key → RoutingModel with a
+    NON-alphabetical primary (pins the (primary, fallback) join order)."""
+    for var in ("TORTOISE_EXTRACTOR_PROVIDER", "TORTOISE_EXTRACT_MODEL",
+                "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "VENICE_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    if provider is not None:
+        monkeypatch.setenv("TORTOISE_EXTRACTOR_PROVIDER", provider)
+    if "deepseek" in keys:
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
+    if "openrouter" in keys:
+        monkeypatch.setenv("OPENROUTER_API_KEY", "x")
+    if "venice" in keys:
+        monkeypatch.setenv("VENICE_API_KEY", "x")
+
+
+def test_model_id_wrapper_path_stable_no_address(monkeypatch):
+    """M7 #1739, Gap 1: the DEFAULT CLI extractor path (``--extractor-model``
+    unset → ``build_extractor_model()``) returns RoutingModel (1-2
+    providers) or RotatingModel (3+) — neither exposes ``.model_id`` nor
+    ``.id``, so the pre-fix ``_model_id`` fell through to ``repr(model)`` →
+    ``<...RoutingModel object at 0x...>``: every cross-process resume via
+    the default path raised CheckpointStaleError even with identical
+    git_sha (the #1549 baseline protocol's "run it in slices" path).
+
+    Post-fix ``_model_id`` composes the member adapters structurally
+    (``provider:wire-id``, joined by ``+``): deterministic, never
+    address-bearing, IDENTICAL across fresh instances. Pinned: 1-provider
+    RoutingModel (no keys — emits the BARE member fingerprint, comparable
+    to the equivalent bare MODELS entry), 2-provider RoutingModel
+    (deepseek+openrouter: primary deepseek-direct + openrouter fallback,
+    shape-prefixed ``routing:``) AND its non-alphabetical mirror (explicit
+    openrouter primary — discriminates the (primary, fallback) join order
+    from a sorted join), 3-provider RotatingModel (members SORTED by
+    provider, shape-prefixed ``rotating:`` — pool order is a routing
+    detail, so the joined literal is exact-pinnable), plus tuned wrappers
+    (max_tokens, temperature) proving the member tuning suffix rides the
+    wrapper composition. Constructing adapters is offline
+    (requests.Session only)."""
+    shapes = [
+        dict(keys=(), max_tokens=None, temperature=0.0,
+             cls=RoutingModel,
+             expected="deepseek/deepseek-v4-flash"),
+        dict(keys=("deepseek", "openrouter"), max_tokens=None,
+             temperature=0.0, cls=RoutingModel,
+             expected=("routing:deepseek-direct:deepseek-v4-flash"
+                       "+openrouter:deepseek/deepseek-v4-flash")),
+        dict(provider="openrouter", keys=("deepseek", "openrouter"),
+             max_tokens=None, temperature=0.0, cls=RoutingModel,
+             # non-alphabetical primary: a sorted-join regression would flip
+             # the members (deepseek-direct < openrouter), changing this
+             # literal — order IS effective config for RoutingModel
+             expected=("routing:openrouter:deepseek/deepseek-v4-flash"
+                       "+deepseek-direct:deepseek-v4-flash")),
+        dict(keys=("deepseek", "openrouter", "venice"), max_tokens=None,
+             temperature=0.0, cls=RotatingModel,
+             expected=("rotating:deepseek-direct:deepseek-v4-flash"
+                       "+openrouter:deepseek/deepseek-v4-flash"
+                       "+venice:deepseek-v4-flash")),
+        # tuning rides the wrapper composition too (member suffixes) — a
+        # tuned run-level build (any non-default max_tokens/temperature)
+        # must fingerprint differently from the uncapped one (the ingest_v2
+        # session-worker factory forwards the resolved max_tokens/
+        # temperature; the unset path is UNCAPPED — see _build_cli_extractor_model)
+        dict(keys=(), max_tokens=500, temperature=0.0, cls=RoutingModel,
+             expected="deepseek/deepseek-v4-flash|max_tokens=500"),
+        dict(keys=(), max_tokens=500, temperature=0.5, cls=RoutingModel,
+             expected=("deepseek/deepseek-v4-flash"
+                       "|max_tokens=500|temperature=0.5")),
+    ]
+    for shape in shapes:
+        _pin_extractor_env(monkeypatch, keys=shape["keys"],
+                           provider=shape.get("provider"))
+        adapters = []
+        try:
+            adapters.append(build_extractor_model(
+                max_tokens=shape["max_tokens"],
+                temperature=shape["temperature"]))
+            adapters.append(build_extractor_model(
+                max_tokens=shape["max_tokens"],
+                temperature=shape["temperature"]))
+            a, b = adapters
+            fp_a = runner._model_id(a)
+            fp_b = runner._model_id(b)
+            assert isinstance(a, shape["cls"]), (
+                f"keys={shape['keys']}: wrong wrapper class")
+            assert fp_a == fp_b, (
+                f"keys={shape['keys']}: not stable across instances")
+            assert "0x" not in fp_a, (
+                f"keys={shape['keys']}: address-bearing repr leaked: {fp_a!r}")
+            assert fp_a == shape["expected"], (
+                f"keys={shape['keys']}: {fp_a!r}")
+        finally:
+            for m in adapters:
+                m.close()  # every build-path model (OpenRouterModel subclasses, RoutingModel, RotatingModel) has close()
+
+
+def test_build_cli_extractor_model_fingerprints_serving_config(monkeypatch):
+    """M7 #1739 / #1742: ``_build_cli_extractor_model`` builds the model a
+    CLI run will actually serve AND fingerprint — the effective-config
+    contract holds on every CLI path shape: explicit registry model at
+    session_workers=1 (registry tuning applies), unset → the uncapped
+    router wrapper at session_workers=1, and the worker-FACTORY config at
+    session_workers>1. The factory can express only max_tokens/temperature
+    — expressible tuning is passed THROUGH (a spec'd run at sw>1
+    fingerprints identically to sw=1: the same effective config), entries
+    with inexpressible knobs (thinking_budget/disable_reasoning) are
+    REFUSED loudly, and the M5 unknown-spec gate applies on both paths
+    (a typo at sw>1 fails fast instead of passing a garbage wire id)."""
+    _pin_extractor_env(monkeypatch, keys=())
+    adapters = []
+    try:
+        # session_workers=1 + explicit spec → registry model (tuning applies)
+        adapters.append(runner._build_cli_extractor_model(
+            spec="deepseek-v4-pro", session_workers=1))
+        assert runner._model_id(adapters[-1]) == (
+            "deepseek/deepseek-v4-pro|max_tokens=500")
+        # session_workers=1 + unset → uncapped router wrapper (1-lane bare)
+        adapters.append(runner._build_cli_extractor_model(
+            spec=None, session_workers=1))
+        assert runner._model_id(adapters[-1]) == "deepseek/deepseek-v4-flash"
+        # session_workers>1 + spec: expressible tuning is served THROUGH the
+        # factory — identical fingerprint to session_workers=1 (the same
+        # effective config, so a sw toggle resumes cleanly)
+        adapters.append(runner._build_cli_extractor_model(
+            spec="deepseek-v4-pro", session_workers=4))
+        assert runner._model_id(adapters[-1]) == (
+            "deepseek/deepseek-v4-pro|max_tokens=500")
+        assert runner._model_id(adapters[-1]) == runner._model_id(adapters[0])
+        # session_workers>1 + unset → the worker-factory config: UNCAPPED,
+        # matching the session_workers=1 owner decision — the SAME
+        # fingerprint (an unset sw toggle keeps the same effective config)
+        adapters.append(runner._build_cli_extractor_model(
+            spec=None, session_workers=4))
+        assert runner._model_id(adapters[-1]) == "deepseek/deepseek-v4-flash"
+        assert runner._model_id(adapters[-1]) == runner._model_id(adapters[1])
+        # session_workers>1 + direct spec: the RESOLVED wire id is used — the
+        # registry key is never a valid wire id; the _REGISTRY_KEY_TO_ID remap
+        # gives every lane a valid id ('deepseek-flash-direct' →
+        # 'deepseek/deepseek-v4-flash' — the OpenRouter lane needs the
+        # prefixed id; bare ids 404 there; 'solar-pro4' → its entry id
+        # 'upstage/solar-pro4'). The lane set differs from session_workers=1
+        # (direct-only DeepSeekDirectModel vs the router wrapper), so the
+        # fingerprints legitimately DIFFER — a toggle is REFUSED (safe).
+        adapters.append(runner._build_cli_extractor_model(
+            spec="deepseek-flash-direct", session_workers=4))
+        assert runner._model_id(adapters[-1]) == "deepseek/deepseek-v4-flash"
+        adapters.append(runner._build_cli_extractor_model(
+            spec="deepseek-flash-direct", session_workers=1))
+        assert runner._model_id(adapters[-1]) == "deepseek-v4-flash"
+        assert runner._model_id(adapters[-2]) != runner._model_id(adapters[-1])
+        adapters.append(runner._build_cli_extractor_model(
+            spec="solar-pro4", session_workers=4))
+        assert runner._model_id(adapters[-1]) == "upstage/solar-pro4"
+        # MULTI-LANE env: a spec'd sw toggle is provider-routed at sw>1 (the
+        # router composition) vs the bare registry adapter at sw=1 → the
+        # fingerprints differ → the toggle is REFUSED (documented safe
+        # direction; the fingerprint records what each path serves)
+        _pin_extractor_env(monkeypatch, keys=("deepseek", "openrouter"))
+        adapters.append(runner._build_cli_extractor_model(
+            spec="deepseek-v4-pro", session_workers=1))
+        assert runner._model_id(adapters[-1]) == (
+            "deepseek/deepseek-v4-pro|max_tokens=500")
+        adapters.append(runner._build_cli_extractor_model(
+            spec="deepseek-v4-pro", session_workers=4))
+        assert runner._model_id(adapters[-1]) == (
+            "routing:deepseek-direct:deepseek-v4-pro|max_tokens=500"
+            "+openrouter:deepseek/deepseek-v4-pro|max_tokens=500")
+        assert runner._model_id(adapters[-2]) != runner._model_id(adapters[-1])
+        # the M5 pinning guard applies on BOTH paths (fail fast, never a
+        # garbage wire id in the checkpoint)
+        with pytest.raises(SystemExit):
+            runner._build_cli_extractor_model(spec="nope", session_workers=1)
+        with pytest.raises(SystemExit):
+            runner._build_cli_extractor_model(spec="nope", session_workers=4)
+        # inexpressible tuning at session_workers>1 → loud refusal (never a
+        # silent reasoning-on flip)
+        with pytest.raises(SystemExit):
+            runner._build_cli_extractor_model(
+                spec="deepseek-v4-pro-noreason", session_workers=4)
+    finally:
+        for m in adapters:
+            m.close()  # RoutingModel.close() exists since #1742 — plain close suffices
+
+
+def test_run_main_rejects_session_workers_without_v2(capsys):
+    """M7 #1739 / #1742: ``--session-workers > 1`` requires
+    ``--ingest-mode v2`` (the only mode with a worker factory) — rejected
+    loudly at the CLI (parser.error, exit 2, accurate message) instead of a
+    silent no-op (the flag was previously parsed but never threaded) or a
+    confusing fingerprint mismatch (the guard is v2-scoped)."""
+    with pytest.raises(SystemExit) as exc:
+        runner.run_main(["--session-workers", "2"])
+    assert exc.value.code == 2
+    assert ("session-workers > 1 requires --ingest-mode v2"
+            in capsys.readouterr().err)
+
+
+def test_run_evaluation_refuses_fingerprint_served_mismatch_at_session_workers(
+        tmp_path, monkeypatch):
+    """M7 #1739 / #1742: with ``session_workers > 1``, run_evaluation
+    refuses a spec'd extractor_model whose fingerprint does not match the
+    worker-factory config (a programmatic caller forgetting the resolved
+    session_worker_* trio would otherwise fingerprint one config and serve
+    another — a checkpoint accepted on resume over results produced by a
+    different model). The guard fires BEFORE the question loop (no
+    network)."""
+    _pin_extractor_env(monkeypatch, keys=())
+    extractor = MODELS["deepseek-v4-pro"]()
+    try:
+        with pytest.raises(ValueError, match="worker-factory config"):
+            runner.run_evaluation(
+                _mini()[:1], reader=MockReader(), judge=MockJudge(),
+                ks=(5,), top_k=5, split="s", work_dir=str(tmp_path),
+                ingest_mode="v2", extractor_model=extractor,
+                session_workers=2)
+    finally:
+        extractor.close()
+
+
+def test_run_main_v2_session_workers_threads_trio_guard_silent(monkeypatch,
+                                                               tmp_path):
+    """M7 #1739 / #1742: the legitimate CLI path — ``--ingest-mode v2
+    --session-workers N --extractor-model <spec>`` in a single-lane env —
+    reaches the question loop WITHOUT the fingerprint-vs-served ValueError:
+    run_main resolves the spec+tuning trio (``_session_worker_spec_tuning``),
+    builds the fingerprinted extractor_model the SAME way the worker factory
+    does, and threads the trio into run_evaluation — the guard compares
+    equal fingerprints and stays silent (a regression here would break every
+    real sw>1 CLI run). Offline: mocked reader/judge (--mock) + a
+    monkeypatched extract_session_v2 (no API)."""
+    import tortoise.extractor_v2 as ev2
+    _pin_extractor_env(monkeypatch, keys=())  # single-lane (lenient OpenRouter)
+    payload = {"entities": [], "events": [], "points": [
+        {"id": "pt_cli", "content": "the answer to the question",
+         "pointKind": "statement"}], "operators": []}
+
+    def _fake(model, conversation, **kw):
+        return {"payload": payload, "minted_kinds": [], "supersessions": [],
+                "errors": [], "warnings": []}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake)
+    out = tmp_path / "report.json"
+    report = runner.run_main(["--data", str(MINI), "--limit", "1",
+                              "--split", "s", "--ingest-mode", "v2",
+                              "--session-workers", "2",
+                              "--extractor-model", "deepseek-v4-pro",
+                              "--mock", "--output", str(out)])
+    # reached the question loop: 1 outcome, no ValueError from the guard
+    assert len(report["outcomes"]) == 1
+    assert report["methodology"]["ingest_mode"] == "v2"
+    assert out.is_file()
+
+
+def test_run_main_v2_session_workers_guard_fires_on_config_divergence(
+        monkeypatch, tmp_path):
+    """M7 #1739 / #1742 negative: when the run-level extractor_model
+    fingerprints DIFFERENTLY from the threaded worker-factory config, the
+    run is REFUSED pre-loop with the guard's ValueError (the safety net for
+    programmatic/regression cases — a misbehaving build path cannot silently
+    fingerprint one config while the workers serve another). Forced by
+    monkeypatching ``_build_cli_extractor_model`` to return a different
+    max_tokens than the resolved trio (the real build path stays
+    consistent); the diagnostic names the worker-factory config fix."""
+    import tortoise.extractor_v2 as ev2
+    _pin_extractor_env(monkeypatch, keys=())
+
+    def _fake(model, conversation, **kw):
+        return {"payload": {"entities": [], "events": [], "points": [],
+                             "operators": []},
+                "minted_kinds": [], "supersessions": [],
+                "errors": [], "warnings": []}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake)
+
+    def _mismatched(*, spec, session_workers):
+        # deliberately diverge from the resolved trio (max_tokens=500): the
+        # guard must catch fingerprint-vs-served divergence pre-loop
+        return OpenRouterModel("deepseek/deepseek-v4-pro",
+                               max_tokens=8000, temperature=0.0)
+
+    monkeypatch.setattr(runner, "_build_cli_extractor_model", _mismatched)
+    with pytest.raises(ValueError, match="worker-factory config"):
+        runner.run_main(["--data", str(MINI), "--limit", "1",
+                         "--split", "s", "--ingest-mode", "v2",
+                         "--session-workers", "2",
+                         "--extractor-model", "deepseek-v4-pro",
+                         "--mock"])
+
+
+def test_model_id_wrapper_shape_discriminates_routing_vs_rotating():
+    """M7 #1739 (code-review hardening): a failover RoutingModel and a
+    rotation pool over the SAME members are different effective configs —
+    the shape-prefixed composition (``routing:`` vs ``rotating:``) must
+    keep them apart (a plain ``provider:wire-id`` join would fingerprint
+    them identically and silently accept a cross-shape resume). Also pins
+    the single-lane rule: a 1-member wrapper emits the bare member
+    fingerprint, so the default path compares against the equivalent bare
+    MODELS entry (the #1732 single-adapter contract)."""
+    adapters = []
+    try:
+        adapters.append(OpenRouterModel("deepseek/deepseek-v4-flash"))
+        adapters.append(DeepSeekDirectModel("deepseek-v4-pro"))
+        a, b = adapters
+        routing = RoutingModel(a, b)
+        rotating = RotatingModel([a, b])
+        fp_routing = runner._model_id(routing)
+        fp_rotating = runner._model_id(rotating)
+        assert fp_routing == (
+            "routing:openrouter:deepseek/deepseek-v4-flash"
+            "+deepseek-direct:deepseek-v4-pro")
+        assert fp_rotating == (
+            "rotating:deepseek-direct:deepseek-v4-pro"
+            "+openrouter:deepseek/deepseek-v4-flash")
+        assert fp_routing != fp_rotating
+        # single-lane wrapper → bare member fingerprint
+        single = RoutingModel(a, None)
+        assert runner._model_id(single) == "deepseek/deepseek-v4-flash"
+        assert runner._model_id(single) == runner._model_id(a)
+        # max_tokens=0 is a REAL cap (not the uncapped None default) — it
+        # must ride the fingerprint (pins the is-not-None omission rule)
+        capped = OpenRouterModel("deepseek/deepseek-v4-flash", max_tokens=0)
+        uncapped = OpenRouterModel("deepseek/deepseek-v4-flash")
+        assert runner._model_id(capped) == (
+            "deepseek/deepseek-v4-flash|max_tokens=0")
+        assert runner._model_id(uncapped) == "deepseek/deepseek-v4-flash"
+        assert runner._model_id(capped) != runner._model_id(uncapped)
+        # memberless wrapper (defensive guard) → None, never an empty string
+        empty_routing = object.__new__(RoutingModel)
+        empty_routing.primary = None
+        empty_routing.fallback = None
+        empty_rotating = object.__new__(RotatingModel)
+        empty_rotating.providers = []
+        assert runner._model_id(empty_routing) is None
+        assert runner._model_id(empty_rotating) is None
+    finally:
+        for m in adapters:
+            m.close()
+
+
+def test_model_id_tuning_variants_discriminate():
+    """M7 #1739, Gap 2: three MODELS registry entries construct the SAME
+    wire id (``deepseek/deepseek-v4-pro``): ``deepseek-v4-pro``
+    (max_tokens=500), ``deepseek-v4-pro-xhigh`` (max_tokens=500,
+    temperature=0.0) and ``deepseek-v4-pro-noreason`` (max_tokens=8000,
+    disable_reasoning=True — reasoning OFF). -pro ≡ -xhigh are BYTE-IDENTICAL
+    configs (same fingerprint — correct, nothing differs); only -noreason is
+    the discriminating variant. The pre-fix fingerprint was wire-id-only:
+    identical fingerprints → a reasoning-ON checkpoint silently resumed by
+    reasoning-OFF ``-noreason`` — the "wrong fix silently reuses
+    mismatched-config results" hazard. Post-fix: non-default tuning rides
+    the fingerprint, so ``-noreason`` differs; identical tuning (base vs
+    ``-xhigh`` are the same effective config) stays equal. Also pins the
+    THIRD tuning knob (``thinking_budget`` — deepseek-r1-xhigh) and the
+    default-tuning omission branch for the pro wire-id family (bare id, no
+    suffix — the #1732 bare-wire-id contract)."""
+    adapters = []
+    try:
+        adapters.append(MODELS["deepseek-v4-pro-xhigh"]())
+        adapters.append(MODELS["deepseek-v4-pro-noreason"]())
+        adapters.append(MODELS["deepseek-v4-pro"]())
+        adapters.append(MODELS["deepseek-v4-pro-noreason"]())
+        adapters.append(MODELS["deepseek-r1-xhigh"]())
+        adapters.append(OpenRouterModel("deepseek/deepseek-v4-pro"))
+        adapters.append(OpenRouterModel("deepseek/deepseek-v4-pro",
+                                        max_tokens=500, temperature=0.5))
+        (xhigh, noreason, base, twin, r1_xhigh, default_pro,
+         warm) = adapters
+        fp_xhigh = runner._model_id(xhigh)
+        fp_noreason = runner._model_id(noreason)
+        assert fp_xhigh == "deepseek/deepseek-v4-pro|max_tokens=500"
+        assert fp_noreason == (
+            "deepseek/deepseek-v4-pro|max_tokens=8000|disable_reasoning=True")
+        assert fp_xhigh != fp_noreason
+        # base and -xhigh are the same effective config → same fingerprint
+        assert runner._model_id(base) == fp_xhigh
+        # determinism twin (the resume-acceptance contract)
+        assert runner._model_id(twin) == fp_noreason
+        # the third tuning knob: thinking_budget rides the fingerprint
+        assert runner._model_id(r1_xhigh) == (
+            "deepseek/deepseek-r1-0528|max_tokens=500|thinking_budget=2000")
+        # default tuning → bare wire id, no suffix (the omission branch)
+        assert runner._model_id(default_pro) == "deepseek/deepseek-v4-pro"
+        # the fourth knob: non-default temperature rides the fingerprint —
+        # same wire id + max_tokens as -xhigh, different temperature
+        assert runner._model_id(warm) == (
+            "deepseek/deepseek-v4-pro|max_tokens=500|temperature=0.5")
+        assert runner._model_id(warm) != fp_xhigh
+    finally:
+        for m in adapters:
+            m.close()
+
+
+def test_checkpoint_resume_gate_accepts_same_model_fresh_instance(tmp_path):
+    """M4 #1732, end-to-end: the checkpoint resume gate must accept a fresh
+    instance of the SAME extractor model (identical fingerprint) and refuse
+    a different model — CheckpointStaleError naming ``extractor_model``. This
+    is the outcome the bug actually broke: every resume was refused even with
+    identical git_sha because the fingerprint embedded a per-instance
+    0x... address."""
+    kw = dict(
+        reader_model="r", judge_model="j", ks=(5,), top_k=5, split="s",
+        ingest_mode="embedded", max_retries=1, dataset_fingerprint="x",
+        rerank_config={},
+    )
+    cp = tmp_path / "state.json"
+    adapters: list = []
+    try:
+        adapters.append(OpenRouterModel("deepseek/deepseek-v4-flash"))  # a
+        adapters.append(OpenRouterModel("deepseek/deepseek-v4-flash"))  # b: fresh, same model
+        adapters.append(DeepSeekDirectModel("deepseek-v4-pro"))  # c: different class
+        adapters.append(OpenRouterModel("deepseek/deepseek-v4-pro"))  # d: same class, diff id
+        adapters.append(DeepSeekDirectModel("deepseek/deepseek-v4-flash"))  # e: diff class, SAME wire id
+        a, b, c, d, e = adapters
+        runner._save_checkpoint(
+            str(cp), [_minimal_outcome("q1")], [],
+            fingerprint=runner._build_fingerprint(extractor_model=a, **kw))
+        # resume with a fresh instance of the same model → accepted
+        done, _ = runner._load_checkpoint(
+            str(cp),
+            expected_fingerprint=runner._build_fingerprint(
+                extractor_model=b, **kw))
+        assert "q1" in done
+        # a different model is refused, naming extractor_model as the ONLY
+        # differing field (a superset diff list fails the exact-match regex)
+        with pytest.raises(runner.CheckpointStaleError,
+                           match=r"differs on \['extractor_model'\]"):
+            runner._load_checkpoint(
+                str(cp),
+                expected_fingerprint=runner._build_fingerprint(
+                    extractor_model=c, **kw))
+        # same class but different wire id → also refused, same field
+        with pytest.raises(runner.CheckpointStaleError,
+                           match=r"differs on \['extractor_model'\]"):
+            runner._load_checkpoint(
+                str(cp),
+                expected_fingerprint=runner._build_fingerprint(
+                    extractor_model=d, **kw))
+        # multi-field drift → the gate names ALL differing fields (proves the
+        # exact-match superset guard: a second differing field must surface)
+        multi = runner._build_fingerprint(
+            extractor_model=c, **dict(kw, reader_model="other-reader"))
+        with pytest.raises(runner.CheckpointStaleError,
+                           match=r"differs on \['extractor_model', 'reader_model'\]"):
+            runner._load_checkpoint(str(cp), expected_fingerprint=multi)
+        # extractor ↔ None crossover: the checkpoint run_key does not encode
+        # extractor_model, so the fingerprint gate alone guards these — both
+        # directions must be refused
+        with pytest.raises(runner.CheckpointStaleError,
+                           match=r"differs on \['extractor_model'\]"):
+            runner._load_checkpoint(
+                str(cp),
+                expected_fingerprint=runner._build_fingerprint(
+                    extractor_model=None, **kw))
+        # the historical #1732 residue: a checkpoint written by the broken
+        # binary whose stored extractor_model is an address-bearing repr must
+        # be refused against a fresh wire-id fingerprint (the migration path)
+        cp_residue = tmp_path / "residue.json"
+        residue_fp = dict(runner._build_fingerprint(extractor_model=a, **kw))
+        residue_fp["extractor_model"] = "<OpenRouterModel object at 0x7f1234abcd>"
+        runner._save_checkpoint(
+            str(cp_residue), [_minimal_outcome("q1")], [],
+            fingerprint=residue_fp)
+        with pytest.raises(runner.CheckpointStaleError,
+                           match=r"differs on \['extractor_model'\]"):
+            runner._load_checkpoint(
+                str(cp_residue),
+                expected_fingerprint=runner._build_fingerprint(
+                    extractor_model=b, **kw))
+        # deliberate cross-provider acceptance (wire-id-only identity): the
+        # SAME wire id across provider classes resumes — provider is not part
+        # of the effective-config contract (pinned at composition in
+        # test_model_id_fingerprint_deterministic_at_composition_layer)
+        done, _ = runner._load_checkpoint(
+            str(cp),
+            expected_fingerprint=runner._build_fingerprint(
+                extractor_model=e, **kw))
+        assert "q1" in done
+        # retrieval-only (None↔None) resume path: accepted, not refused
+        cp_none = tmp_path / "none.json"
+        runner._save_checkpoint(
+            str(cp_none), [_minimal_outcome("q2")], [],
+            fingerprint=runner._build_fingerprint(extractor_model=None, **kw))
+        done, _ = runner._load_checkpoint(
+            str(cp_none),
+            expected_fingerprint=runner._build_fingerprint(
+                extractor_model=None, **kw))
+        assert "q2" in done
+        with pytest.raises(runner.CheckpointStaleError,
+                           match=r"differs on \['extractor_model'\]"):
+            runner._load_checkpoint(
+                str(cp_none),
+                expected_fingerprint=runner._build_fingerprint(
+                    extractor_model=a, **kw))
+    finally:
+        for model in adapters:
+            model.close()
+
+
+def test_checkpoint_resume_refuses_cross_tuning(tmp_path):
+    """M7 #1739, Gap 2 integration: a checkpoint written with
+    ``--extractor-model deepseek-v4-pro-xhigh`` (reasoning-ON, max_tokens=
+    500) REFUSES resume under ``deepseek-v4-pro-noreason`` (reasoning-OFF,
+    max_tokens=8000) — CheckpointStaleError naming ``extractor_model`` —
+    and a fresh same-tuning instance resumes. The wire id is IDENTICAL on
+    both sides: only the tuning discriminator can refuse (the exact
+    cross-tuning hazard the issue calls out — silently reusing
+    mismatched-config results). The default-tuning ↔ tuned directions are
+    also refused (every distinct tuning fingerprints differently)."""
+    kw = dict(
+        reader_model="r", judge_model="j", ks=(5,), top_k=5, split="s",
+        ingest_mode="embedded", max_retries=1, dataset_fingerprint="x",
+        rerank_config={},
+    )
+    cp = tmp_path / "state.json"
+    adapters = []
+    try:
+        adapters.append(MODELS["deepseek-v4-pro-xhigh"]())
+        adapters.append(MODELS["deepseek-v4-pro-xhigh"]())
+        adapters.append(MODELS["deepseek-v4-pro-noreason"]())
+        adapters.append(OpenRouterModel("deepseek/deepseek-v4-pro"))
+        xhigh, xhigh_twin, noreason, default_pro = adapters
+        runner._save_checkpoint(
+            str(cp), [_minimal_outcome("q1")], [],
+            fingerprint=runner._build_fingerprint(
+                extractor_model=xhigh, **kw))
+        # fresh same-tuning instance → accepted
+        done, _ = runner._load_checkpoint(
+            str(cp),
+            expected_fingerprint=runner._build_fingerprint(
+                extractor_model=xhigh_twin, **kw))
+        assert "q1" in done
+        # cross-tuning (same wire id!) → refused, naming extractor_model
+        with pytest.raises(runner.CheckpointStaleError,
+                           match=r"differs on \['extractor_model'\]"):
+            runner._load_checkpoint(
+                str(cp),
+                expected_fingerprint=runner._build_fingerprint(
+                    extractor_model=noreason, **kw))
+        # default tuning → also refused against the -xhigh checkpoint
+        with pytest.raises(runner.CheckpointStaleError,
+                           match=r"differs on \['extractor_model'\]"):
+            runner._load_checkpoint(
+                str(cp),
+                expected_fingerprint=runner._build_fingerprint(
+                    extractor_model=default_pro, **kw))
+    finally:
+        for m in adapters:
+            m.close()
+
+
+def test_checkpoint_wrapper_path_resume_same_config(tmp_path, monkeypatch):
+    """M7 #1739, Gap 1 integration: the DEFAULT wrapper path
+    (``build_extractor_model()``) must be checkpoint-resumable — a fresh
+    wrapper instance with the same effective config resumes (the #1549
+    "run it in slices" protocol); a different extractor wire id is refused
+    naming ``extractor_model``. Exercised at ALL THREE provider shapes the
+    default path can produce (1/2-provider RoutingModel, 3-provider
+    RotatingModel — the #1549 pilot default) PLUS the wrapper cross-tuning
+    direction: two wrappers differing ONLY in max_tokens must refuse each
+    other's checkpoints (the member tuning suffix discriminates on the
+    wrapper path, mirroring test_checkpoint_resume_refuses_cross_tuning).
+    Pre-fix every fresh instance embedded a distinct 0x... repr → all
+    resumes refused even with identical git_sha."""
+    kw = dict(
+        reader_model="r", judge_model="j", ks=(5,), top_k=5, split="s",
+        ingest_mode="embedded", max_retries=1, dataset_fingerprint="x",
+        rerank_config={},
+    )
+    for keys in ((), ("deepseek", "openrouter"),
+                 ("deepseek", "openrouter", "venice")):
+        _pin_extractor_env(monkeypatch, keys=keys)
+        cp = tmp_path / f"state-{len(keys)}.json"
+        adapters = []
+        try:
+            adapters.append(build_extractor_model(
+                max_tokens=None, temperature=0.0))
+            adapters.append(build_extractor_model(
+                max_tokens=None, temperature=0.0))  # fresh, same config
+            adapters.append(build_extractor_model(
+                model_id="deepseek/deepseek-v4-pro",
+                max_tokens=None, temperature=0.0))  # diff wire id
+            a, b, c = adapters
+            runner._save_checkpoint(
+                str(cp), [_minimal_outcome("q1")], [],
+                fingerprint=runner._build_fingerprint(
+                    extractor_model=a, **kw))
+            # fresh wrapper, same effective config → accepted
+            done, _ = runner._load_checkpoint(
+                str(cp),
+                expected_fingerprint=runner._build_fingerprint(
+                    extractor_model=b, **kw))
+            assert "q1" in done, f"keys={keys}"
+            # different wire id → refused, naming extractor_model
+            with pytest.raises(runner.CheckpointStaleError,
+                               match=r"differs on \['extractor_model'\]"):
+                runner._load_checkpoint(
+                    str(cp),
+                    expected_fingerprint=runner._build_fingerprint(
+                        extractor_model=c, **kw))
+        finally:
+            for m in adapters:
+                m.close()
+    # wrapper cross-tuning: same wire id + provider set, different max_tokens
+    # → refused (only the member tuning suffix discriminates)
+    _pin_extractor_env(monkeypatch, keys=())
+    cp = tmp_path / "state-tuning.json"
+    adapters = []
+    try:
+        adapters.append(build_extractor_model(
+            max_tokens=500, temperature=0.0))
+        adapters.append(build_extractor_model(
+            max_tokens=500, temperature=0.0))  # fresh, same tuning
+        adapters.append(build_extractor_model(
+            max_tokens=8000, temperature=0.0))  # diff tuning
+        a, b, c = adapters
+        runner._save_checkpoint(
+            str(cp), [_minimal_outcome("q1")], [],
+            fingerprint=runner._build_fingerprint(extractor_model=a, **kw))
+        done, _ = runner._load_checkpoint(
+            str(cp),
+            expected_fingerprint=runner._build_fingerprint(
+                extractor_model=b, **kw))
+        assert "q1" in done
+        with pytest.raises(runner.CheckpointStaleError,
+                           match=r"differs on \['extractor_model'\]"):
+            runner._load_checkpoint(
+                str(cp),
+                expected_fingerprint=runner._build_fingerprint(
+                    extractor_model=c, **kw))
+    finally:
+        for m in adapters:
+            m.close()
+
+
+def test_run_evaluation_resume_accepts_fresh_same_model_extractor(tmp_path):
+    """M4 #1732, runner seam: ``run_evaluation`` wires
+    ``_build_fingerprint(extractor_model=...)`` → ``_load_checkpoint(
+    checkpoint, fingerprint, run_key=...)`` → ``_save_checkpoint(...,
+    fingerprint)`` (run.py 824-834/1081). A second invocation with a FRESH
+    instance of the same extractor model must resume — the checkpointed qid
+    is skipped in ``_run_one`` (reader NOT called again) and no
+    CheckpointStaleError raised; a different model must be refused at the
+    gate. ``extractor_model`` feeds only the fingerprint inside
+    ``run_evaluation`` — no API calls — so the real adapter is offline-safe."""
+    cp = tmp_path / "state.json"
+    reader_calls = {"n": 0}
+
+    class _CountingReader(MockReader):
+        def answer(self, *args, **kwargs):
+            reader_calls["n"] += 1
+            return super().answer(*args, **kwargs)
+
+    reader = _CountingReader()
+    adapters: list = []
+    try:
+        adapters.append(OpenRouterModel("deepseek/deepseek-v4-flash"))
+        adapters.append(OpenRouterModel("deepseek/deepseek-v4-flash"))  # fresh, same model
+        adapters.append(DeepSeekDirectModel("deepseek-v4-pro"))  # different model
+        a, b, c = adapters
+
+        out1, _ = runner.run_evaluation(
+            _mini()[:1], reader=reader, judge=MockJudge(),
+            ks=(5,), top_k=5, split="s", work_dir=str(tmp_path),
+            checkpoint=str(cp), extractor_model=a)
+        assert len(out1) == 1
+        assert reader_calls["n"] == 1  # run 1 processed q1
+
+        # fresh instance of the same model → resume accepted: q1 is reused
+        # from the checkpoint, so the reader is NOT invoked again (a silent
+        # re-run would push the count to 2 and fail this)
+        out2, _ = runner.run_evaluation(
+            _mini()[:1], reader=reader, judge=MockJudge(),
+            ks=(5,), top_k=5, split="s", work_dir=str(tmp_path),
+            checkpoint=str(cp), extractor_model=b)
+        assert [o["question_id"] for o in out2] == \
+            [o["question_id"] for o in out1]
+        assert reader_calls["n"] == 1  # no re-run — q1 came from the checkpoint
+
+        # different model → refused at the gate, naming the field
+        with pytest.raises(runner.CheckpointStaleError,
+                           match=r"differs on \['extractor_model'\]"):
+            runner.run_evaluation(
+                _mini()[:1], reader=reader, judge=MockJudge(),
+                ks=(5,), top_k=5, split="s", work_dir=str(tmp_path),
+                checkpoint=str(cp), extractor_model=c)
+    finally:
+        for model in adapters:
+            model.close()
 
 
 # ── retrieval-only report shape ─────────────────────────────────────────────

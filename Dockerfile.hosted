@@ -47,6 +47,12 @@ RUN pip install --no-cache-dir '.[embeddings]' '.[backups]' '.[postgres]' \
 # lock-pinned in Layer 0 — this must NOT re-resolve anything (#494).
 ARG CACHEBUST=1
 COPY tortoise/ tortoise/
+# #1929 (G1 fix): the expansion-pack catalog must ship in the image — the
+# editable install at /app resolves `default_packs_dir()`'s repo-root leg to
+# /app/packs. The sample transcript ships too (documented mine-conversation
+# example + `tortoise demo` work in-container, CWD /app).
+COPY packs/ packs/
+COPY tests/sample_transcript.txt tests/
 COPY product/pricing.json product/pricing.json
 RUN pip install --no-cache-dir -e . --no-deps
 

@@ -12,6 +12,7 @@
     ]
   },
   "matched_recall": {},
+  "control_records": {},
   "report_status": "incomplete_missing_metrics",
   "families": {
     "measured": 0,

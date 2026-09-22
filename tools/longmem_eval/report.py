@@ -7,8 +7,9 @@ knowledge updates, abstention), per-type accuracy (the six raw dataset
 types), retrieval recall@k (session- and turn-level; paper-aligned _paper@k
 keys over non-_abs questions, M7), context tokens, latency (incl. the
 isolated ingest write-path cost, M7), an integrity block with the per-
-question error census (M7), leg-mix / pool-size / evidence written-·retrieved
-aggregates (M7) — together with a full methodology block (dataset id, split,
+question error census (M7) + a census-class-aware gate criterion (#1747),
+leg-mix / pool-size / evidence written-·retrieved aggregates (M7) —
+together with a full methodology block (dataset id, split,
 reader model, judge model, extraction approach, k values, token estimator,
 git sha, python version, workers, dataset fingerprint, the dataset recall-
 semantics audit record, run date) so numbers are honestly contextualized
@@ -27,11 +28,13 @@ import os  # noqa: F401
 import subprocess
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from tortoise.embeddings import EMBEDDING_MODEL
 
+from .costing import PRICING_MAP_VERSION
 from .dataset_audit import is_trusted
 
 # R3 (#1542) D5: the dense-leg methodology is ALWAYS emitted — a report can
@@ -49,6 +52,557 @@ DEFAULT_EMBEDDER_STATUS = {
 
 # question_type → paper category (the five abilities from the LongMemEval
 # paper; abstention is signalled by the ``_abs`` suffix, not a type).
+#: #1747: census classes that are RECOVERABLE (rate-limited) — self-
+#: correcting parse/truncation (the #1746 ladder) or transient provider
+#: conditions (retry with backoff). A question whose ONLY error-class signals
+#: are recoverable is still INVALID (it had extraction errors) but is
+#: rate-limited by ``integrity.threshold`` instead of vetoing the run — this
+#: is what makes ``valid=true`` reachable at 500-Q scale (≈24k session
+#: extractions guarantee a handful of transient/parse blips even on a
+#: healthy run). EVERYTHING not in this allowlist fails CLOSED: a fatal_*
+#: class, a bare ``ingest`` class, or an unknown class from a future
+#: extractor vocabulary vetoes the run rather than silently passing.
+RECOVERABLE_CENSUS_CLASSES = frozenset({
+    "parse_error",             # S2/S4 unparseable output (re-prompt ladder)
+    "truncated",               # stage cap hit (raise-the-cap triage)
+    "truncated_parse_error",   # #1746: truncated + unparseable after ladder
+    "partial_parse",           # #1746: accepted-but-partial (invalid-but-embedded)
+    "transient_429_rate_limit",  # provider rate limit (backoff, retry)
+    "transient_5xx",           # provider 5xx (backoff, retry)
+    "transient_timeout",       # call timeout (retry)
+    "transient_network",       # connection/network error (retry)
+    "transient_unknown",       # unclassified transient (retry-safe)
+    "s1_chunk_summary",        # #1780: co-occurs with the per-chunk
+    # exception-class bumps (transient_* → recoverable; fatal_* → still
+    # hard) — the S1-chunk summary duplicate must not flip a transient
+    # chunk failure to hard.
+})
+
+#: #1946: extraction-health gate constants. A per-question outcome is
+#: DEGRADED when its SEMANTIC extraction failed or was billing-killed — the
+#: reval3 shape: 33/50 questions ingested ZERO extracted points
+#: (``fatal_402_billing`` 1591 / ``s1_chunk_summary`` 1596 /
+#: ``empty_embed_list`` 1600 in the census) yet the run 'completed' and the
+#: report blended a 0.880 that was 66% raw-fallback. The integrity gate's
+#: census counted those errors but nothing ACTED on them; this gate flags
+#: the run and splits the report into healthy/degraded populations so the
+#: blend is visible, never silent.
+EXTRACTION_MIN_POINTS = 100
+#: #1946: census classes whose PRESENCE at any count degrades a question —
+#: billing intervened (the 500-Q must never certify a billing-limited run)
+#: or the embed list never materialized (no dense leg).
+EXTRACTION_KILLER_CENSUS_CLASSES = frozenset({
+    "fatal_402_billing",
+    "empty_embed_list",
+})
+#: #1946: the S1→S2 CASCADE class — degraded only AT SCALE (a handful of
+#: per-chunk digest failures on a productive extraction is benign; a count
+#: near the session scale means the semantic layer collapsed).
+EXTRACTION_DEGRADE_CENSUS_CLASSES = frozenset({"s1_chunk_summary"})
+#: #1946: per-question ``s1_chunk_summary`` count at which the question is
+#: degraded even when the points rule does not fire (co-occurs with the
+#: 402 cascade — reval3's partial questions carried 20-35).
+EXTRACTION_DEGRADE_MIN_COUNT = 10
+#: #1946: run-level flag threshold — the degraded FRACTION at which a run's
+#: extraction health status flips to "degraded" (a "material fraction",
+#: per the issue; reval3's 33-35/50 = 0.66-0.70 is far above any
+#: reasonable default). Independent of the integrity criterion (#1747's
+#: lane) — this is the additive population-split readout.
+EXTRACTION_HEALTH_DEGRADED_FRACTION = 0.25
+
+
+#: #1747: eval-failure classes that are transient-safe — the retry budget
+#: was BURNED (``retries_exhausted``), so the question failed, but the cause
+#: is recoverable → rate-limited like the census recoverable classes, not
+#: vetoed. EXACT site-prefixed strings (errors.py emits
+#: ``<site>:retries_exhausted`` for transient/unknown burns; ``ingest`` is
+#: bare and permanent): a tampered suffix (``evil:retries_exhausted``) must
+#: NOT match (fail-closed, security review). #1776: ingest-site transients
+#: grade ``ingest:retries_exhausted`` (recoverable — a single FalkorDB/
+#: network blip during ingest must not veto the whole run at any
+#: threshold), while structurally-fatal/parse ingest failures stay bare
+#: ``ingest`` (hard veto, excluded here). Everything else (``:fatal`` /
+#: ``:fatal_config`` / ``:parse`` — a local decode bug — / bare ``ingest`` /
+#: unclassified) is PERMANENT → hard veto.
+RECOVERABLE_EVAL_FAILURE_CLASSES = frozenset({
+    "reader:retries_exhausted",
+    "judge:retries_exhausted",
+    "ingest:retries_exhausted",  # #1776: transient-class ingest failures
+})
+
+
+def _outcome_grade(o: dict[str, Any]) -> str:
+    """#1747: grade one COMPLETED outcome for the integrity gate.
+
+    Returns ``"clean"`` / ``"recoverable"`` / ``"hard"``:
+
+    * ``"hard"`` — a census class outside ``RECOVERABLE_CENSUS_CLASSES``
+      (fatal_* / ingest / unknown — fail-closed), OR a NON-census error
+      string with an EMPTY census (``valid=False`` + no census classes:
+      no-embed-list / S5 failure / entity-resolution failure — structural
+      degradation that no retry or ladder can recover, so it must not ride
+      the rate threshold). NOTE (reviewer-pinned, #1747): a non-census
+      structural string CO-OCCURRING with a recoverable census class cannot
+      be distinguished here — the raw outcomes DO carry the error strings
+      (``ingest_error_text`` / ``ingest.errors``), but the grading layer
+      deliberately consumes only ``valid`` + ``error_classes`` (string-
+      matching is brittle and count heuristics false-positive on the
+      S1-chunk summary duplicate that double-reports already-census-bumped
+      chunk failures), so that mixed shape grades recoverable
+      (rate-limited). The realistic worst case is an S2 parse failure that
+      cascades to the structural "no embed list produced" string — the
+      question embeds zero points yet rides the rate; the extractor-side
+      fix (classify structural strings into the census) is the #1746 lane.
+      This limitation is documented here so the promise is scoped, not
+      overstated.
+    * ``"recoverable"`` — only recoverable census classes and the runner's
+      own flag agrees the question is invalid (``valid=False``).
+    * ``"clean"`` — no error signal; a recoverable-only census with the
+      runner's flag ``valid=True`` is also clean (the runner's binary flag
+      is the authority on whether error strings exist; the shape is
+      unreachable with the current runner — every census bump pairs an
+      ``errors.append`` — and is pinned as a drift guard).
+    """
+    ec = o.get("error_classes")
+    if "error_classes" in o and ec is None:
+        # PRESENT null (JSON null — malformed checkpoint merge) fails CLOSED
+        # to hard like the other falsy-but-present shapes (0/""/False); only
+        # a MISSING key means "no census" (round-10 review: get() conflated
+        # the two, certifying error_classes:null as clean).
+        return "hard"
+    if ec is None:
+        ec = {}  # distinguish MISSING from falsy-but-present (0/""/False):
+    # a falsy present value is malformed and must fail CLOSED to hard, not
+    # collapse to an empty census (security review, #1747).
+    if isinstance(ec, dict):
+        # Class presence = KEY presence (security review, #1747). The count
+        # VALUE never decides presence: a tampered checkpoint zeroing or
+        # falsing a hard class's count (``{"fatal_402_billing": 0}`` /
+        # ``false``) would otherwise launder it to clean — grader and record
+        # must agree, and the extractor never emits zero/absent counts, so
+        # ANY present key is a real (or anomalous, fail-closed) signal.
+        # Malformed count values ride only the census roll-up
+        # (``error_census_malformed``).
+        classes = set(ec)
+    else:  # legacy flat-list shape (defensive back-compat) — non-iterable /
+        # unhashable values (malformed checkpoint JSON) fail CLOSED to hard
+        # instead of crashing the report; a list carrying ANY non-str element
+        # also fails closed (mirrors the dict branch's non-str-key posture,
+        # security review, #1747).
+        if not isinstance(ec, (list, tuple, set, frozenset)):
+            return "hard"
+        if any(not isinstance(c, str) for c in ec):
+            return "hard"
+        classes = {c for c in ec if c}
+    if classes - RECOVERABLE_CENSUS_CLASSES:
+        return "hard"
+    # The runner's binary ``valid`` flag must be a REAL bool when PRESENT: a
+    # present non-bool flag (``"valid": "false"`` from a schema-less
+    # checkpoint) is malformed input and fails CLOSED to hard — truthiness
+    # coercion would fail OPEN and certify a structurally-degraded run as
+    # clean (security review, #1747). A MISSING flag keeps the historical
+    # back-compat default True (full_context cell outcomes and legacy pre-M7
+    # checkpoints carry no flag; a tampered checkpoint can always clear
+    # ``error_classes`` anyway — same trust model, documented).
+    flag = o.get("valid", True)
+    if not isinstance(flag, bool):
+        return "hard"
+    if classes:
+        return "recoverable" if not flag else "clean"
+    # census empty — the runner's binary flag is the only error signal.
+    return "hard" if not flag else "clean"
+
+
+# ══ PRODUCT-PARITY NOTE (eval-only) ══════════════════════════════════════
+# This is a QUALITY knob that lives in the eval harness and is NOT wired
+# into the product (tortoise/) path.
+#   Product default: liveness/readiness/security endpoints only — /health,
+#       /health/ready, /health/security (tortoise/hosted_api.py:1076-1185)
+#       and /health + /health/ready with deep DB probe
+#       (tortoise/selfhost.py:118-184); NO extraction-health gating of
+#       capture quality.
+#   Why eval-only:   #1946's gate classifies per-question extraction
+#       health + splits the report into healthy/degraded populations so a
+#       billing-degraded run (reval3: 33/50 questions ingested ZERO
+#       semantic points yet the run 'completed' at 0.880, 66% raw-
+#       fallback) is visible, never silent. Landed eval-side only (commit
+#       ad23cd71 — report.py population split + run.py).
+#   Ship-to-product: candidate feature — extraction-health gating of
+#       capture quality is unassigned; no tracking issue filed.
+#   Rationale:       the harness exists to IMPROVE the product;
+#       capture-quality health signals are candidate product features,
+#       not a harness invention.
+# ═════════════════════════════════════════════════════════════════════════
+def _outcome_extraction_health(o: dict[str, Any]) -> str:
+    """#1946: classify one COMPLETED outcome's extraction health.
+
+    Returns ``"healthy"`` or ``"degraded"``. DEGRADED when ANY of:
+
+    * ``ingest.points`` (the semantic extraction count written by the v2
+      leg) is a real number < ``EXTRACTION_MIN_POINTS`` — the issue's
+      "points_total < 100" shorthand; ``points_total`` counts raw chunks
+      + turns too and stays ~900-1100 on a 402-degraded run, so the real
+      semantic signal is ``ingest.points``. A question can extract ZERO
+      points with a CLEAN census (the extractor silently produces nothing)
+      — the points rule catches the silent shape the census cannot.
+    * ``points_total`` (the live pool size) < ``EXTRACTION_MIN_POINTS`` —
+      the graph itself is tiny, nothing to retrieve.
+    * the error census carries an ``EXTRACTION_KILLER_CENSUS_CLASSES``
+      class (fatal_402_billing / empty_embed_list) at ANY count — a
+      billing event is a run-level integrity event even when the question
+      partially extracted (reval3's 66f24dbb shape: points 202, 20 billing
+      errors).
+    * ``s1_chunk_summary`` at scale (count >= ``EXTRACTION_DEGRADE_MIN_COUNT``)
+      — the S1→S2 cascade class; low counts on a productive extraction are
+      benign (the integrity gate rate-limits them).
+
+    Deterministic mode (no ``ingest.points`` key — the deterministic leg
+    writes turns/chunks, no semantic extraction) is classified by census
+    ONLY: the points rules can never falsely degrade a deterministic run —
+    including the ``points_total`` rule (the raw chunk/turn pool can be
+    legitimately small on a dev slice). The full_context.py cell baseline
+    (the option-5 no-extraction sentinel ``{"sessions", "points": 0,
+    "errors": []}``) is also exempt from the points rules — extraction by
+    design, not failure (a killer census class on that shape still
+    degrades). Recoverable classes (parse_error / partial_parse /
+    transient_*) with points >= min are healthy — the integrity gate's
+    rate-limited classes are not extraction degradation. Malformed input
+    (non-numeric / non-finite points / points_total, non-dict non-list
+    error_classes) is None-safe and never crashes the report; a malformed
+    killer-shape error_classes value with an otherwise-healthy outcome is
+    classified by the points rule alone.
+    """
+    ing = o.get("ingest")
+    points = ing.get("points") if isinstance(ing, dict) else None
+    points_total = o.get("points_total")
+    ec = o.get("error_classes")
+    if isinstance(ec, dict):
+        classes = set(ec)
+        s1 = ec.get("s1_chunk_summary")
+    elif isinstance(ec, (list, tuple, set, frozenset)):
+        # legacy flat-list shape (defensive back-compat) — presence of the
+        # cascade class degrades: no counts exist to gate scale on, so
+        # presence IS scale (fail-closed toward degraded, mirroring the
+        # inline comment's promise).
+        classes = {c for c in ec if isinstance(c, str)}
+        s1 = (EXTRACTION_DEGRADE_MIN_COUNT
+              if "s1_chunk_summary" in classes else 0)
+    else:
+        classes = set()
+        s1 = 0
+    # census rules first (presence-based, apply in EVERY mode): a killer
+    # class on any shape — including the full-context sentinel — degrades.
+    if classes & EXTRACTION_KILLER_CENSUS_CLASSES:
+        return "degraded"
+    if (isinstance(s1, int) and not isinstance(s1, bool)
+            and s1 >= EXTRACTION_DEGRADE_MIN_COUNT):
+        return "degraded"
+    # full_context.py cell-baseline carve-out: the option-5 no-extraction
+    # sentinel ({"sessions", "points": 0, "errors": []} — raw context
+    # only, extraction by design) is exempt from the points rules. The
+    # sentinel is distinguishable from a real zero-extract by its minimal
+    # key set (the v2/deterministic legs always record more).
+    if (isinstance(ing, dict) and set(ing) == {"sessions", "points", "errors"}
+            and points == 0 and ing.get("errors") == []):
+        return "healthy"
+    # real numeric points only — bool / str / non-finite / None never fire
+    # the points rules (malformed checkpoint data must not fabricate a
+    # degraded or healthy verdict, mirroring _numeric's fail-closed type
+    # discipline).
+    if (isinstance(points, (int, float)) and not isinstance(points, bool)
+            and math.isfinite(points) and points < EXTRACTION_MIN_POINTS):
+        return "degraded"
+    # points_total (the live pool size) — a tiny graph is degraded, but the
+    # rule applies ONLY in semantic mode (the v2 leg always records
+    # ``ingest.points``): in deterministic mode the raw chunk/turn pool can
+    # be legitimately small (a dev slice) and the census-only promise must
+    # hold. In v2 mode the rule is largely subsumed by the points rule
+    # (pool ⊇ points) and catches the tiny-pool-with-productive-points
+    # contradiction.
+    if (isinstance(ing, dict) and "points" in ing
+            and isinstance(points_total, (int, float))
+            and not isinstance(points_total, bool)
+            and math.isfinite(points_total)
+            and points_total < EXTRACTION_MIN_POINTS):
+        return "degraded"
+    return "healthy"
+
+
+def _failure_grade(error_class: Any) -> str:
+    """#1747: grade one eval ``failures`` entry. ``"recoverable"`` iff the
+    class is EXACTLY a transient-safe site-prefixed ``retries_exhausted``
+    (the retry budget was burned, but the cause is recoverable → rate-limited
+    like the census recoverable classes). Everything else — permanent
+    classes (``:fatal`` / ``:fatal_config`` / ``:parse``), bare ``ingest``,
+    a missing class, a non-string value, or a tampered suffix like
+    ``evil:retries_exhausted`` — is ``"hard"`` (fail-closed; security
+    review, #1747)."""
+    if isinstance(error_class, str) and error_class in RECOVERABLE_EVAL_FAILURE_CLASSES:
+        return "recoverable"
+    return "hard"
+
+
+def _bounded_int(v: Any) -> int:
+    """int() coercion for usage-total reads that NEVER crashes: non-numeric /
+    non-finite / |v| > 1e300 values (a tampered checkpoint can carry
+    NaN/Infinity/arbitrary-precision literals) degrade to 0 instead of
+    raising ValueError/OverflowError at report assembly (round-2 code-review
+    P2 — mirrors _numeric's fail-closed posture; the sanitizer is the
+    primary choke point, this is the report-side belt)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return 0
+    if abs(v) > 1e300:
+        return 0
+    if isinstance(v, float) and not math.isfinite(v):
+        return 0
+    return int(v)
+
+
+def _numeric(v: Any) -> bool:
+    """A REAL numeric value for aggregation: int/float, NOT bool (a tampered
+    checkpoint true/false must fail closed, never aggregate as 1.0/0.0), and
+    FINITE (NaN/Infinity from a malformed checkpoint would poison every mean
+    and serialize as non-strict JSON — round-8/10 security review). Values are
+    magnitude-bounded (round-17 code-review P1: json.loads produces
+    arbitrary-precision ints, so a tampered/truncated checkpoint with a
+    309+-digit integer literal in ANY numeric field passes the type / bool /
+    finiteness checks and then ``float(v)`` raises OverflowError mid-report —
+    a multi-hour run aborts before any report is written and every resume
+    crashes on the retained poisoned value; the magnitude bound mirrors the
+    float-finiteness posture). The bound applies to BOTH int and float
+    magnitudes (round-18 gate-review cycle-3 P2): a finite float literal
+    like 1.5e308 is as easy to inject as a 309-digit int, and passed the
+    cycle-2 int-only bound — two such values sum past float max at the sum
+    sites, round() propagates inf, and _json_safe SILENTLY nulls the mean
+    with valid=True and n_excluded=0 (the PR's own 'never silent' principle;
+    no legitimate outcome value exceeds 1e300 — recall is 0-1, counts /
+    latencies / tokens are far below). abs(v) > 1e300 is excluded, never
+    converted. The 1e300 bound is also SUM-safe (round-18 code-review P2):
+    the old 1e308 bound prevented the per-value float(v) OverflowError but
+    NOT float-ARITHMETIC overflow at the sum sites — two accepted 10**308
+    values sum past float max (2e308 > 1.797e308) to inf, which round()
+    propagates and _json_safe SILENTLY nulls in the published mean with
+    valid=True and n_excluded=0. Excluding abs(v) > 1e300 keeps every n-way
+    sum finite (any realistic outcome count: n x 1e300 << 1.797e308), so an
+    accepted value can never overflow an aggregation to inf; values above
+    the bound are excluded, never converted)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    if abs(v) > 1e300:
+        return False
+    return not (isinstance(v, float) and not math.isfinite(v))
+
+
+# ── Entry shape-filter helpers (module scope: build_report's aggregation
+# predicate; the comparison consumer applies its own lighter
+# ``_compare_outcome_ok`` — skip breaker-open/label-less entries — so
+# stripped reports still compare best-effort while never grading the
+# breaker-open/label-less outcomes the report's aggregates excluded;
+# shape-broken-but-label-bearing outcomes still compare BY LABEL
+# (defensive reads prevent crashes; the divergence is surfaced via
+# top-level ``n_excluded`` / the comparison's ``skipped_excluded``). ──
+
+def _num(v: Any) -> bool:
+    """numeric-or-None — None is safe for float(v or 0.0) / skip-None sites;
+    bool and non-finite floats are excluded (fail-closed, security review)."""
+    return v is None or _numeric(v)
+
+
+def _recall_dict(v: Any, *, allow_none_values: bool = True) -> bool:
+    """recall dicts: dict with numeric values; None values are allowed
+    where the aggregation drops them (turn/evidence N/A semantics),
+    disallowed where they are summed directly (session recall). A None
+    VALUE (missing key) is admitted ONLY for keys the aggregation
+    dereferences via ``or {}`` (evidence/chunk — genuinely None-safe);
+    the keys dereferenced via ``o[...]`` (session/turn/context) use the
+    REAL-dict check ``_recall_dict_present`` below — never this
+    None-tolerant guard (round-7 root cause)."""
+    if v is None:
+        return True
+    if not isinstance(v, dict):
+        return False
+    for x in v.values():
+        if allow_none_values and x is None:
+            continue
+        if not _numeric(x):
+            return False
+    return True
+
+
+def _recall_dict_present(o: dict[str, Any], key: str,
+                         *, allow_none_values: bool = False) -> bool:
+    """session/turn recall are dereferenced via o[...] (no or-{}
+    fallback) — the key must be a PRESENT dict. Session values are summed
+    directly (no N/A → numeric only); turn values may be None (M6 N/A,
+    dropped from the mean). bools/non-finite are excluded everywhere
+    (security review)."""
+    v = o.get(key)
+    if not isinstance(v, dict):
+        return False
+    for x in v.values():
+        if allow_none_values and x is None:
+            continue
+        if not _numeric(x):
+            return False
+    return True
+
+
+def _leg_mix_ok(v: Any) -> bool:
+    """leg_mix: dict of NUMERIC (non-None) values with str keys — the
+    aggregation sums the values directly and sorts the keys, so None
+    values or non-str keys (programmatic mixed-type) must be excluded."""
+    if v is None:
+        return True
+    return (isinstance(v, dict)
+            and all(isinstance(k, str) for k in v)
+            and all(_numeric(x) for x in v.values()))
+
+
+def _ingest_ok(v: Any) -> bool:
+    """ingest stats: dict-or-None; evidence_turns / evidence_points are
+    compared with > 0, so when PRESENT they must be numeric (not None, not
+    bool, not NaN — security review)."""
+    if v is None:
+        return True
+    return (isinstance(v, dict)
+            and all(_numeric(v.get(k))
+                    for k in ("evidence_turns", "evidence_points")
+                    if k in v))
+
+
+def _rerank_pass_ok(v: Any) -> bool:
+    """rerank_pass (rerank runs only): every field the aggregation
+    dereferences must be coercible — degrade_reason str-or-None;
+    max_session_chunks/moved/dropped/selected_count numeric-or-None;
+    pool_recall@k None or a dict whose per-level values are dicts of
+    numeric-or-None (security review P1, rerank crash family)."""
+    if v is None:
+        return True
+    if not isinstance(v, dict):
+        return False
+    if (v.get("degrade_reason") is not None
+            and not isinstance(v["degrade_reason"], str)):
+        return False
+    for k in ("max_session_chunks", "moved", "dropped", "selected_count"):
+        x = v.get(k)
+        if x is not None and not _numeric(x):
+            return False
+    pr = v.get("pool_recall@k")
+    if pr is None:
+        return True
+    if not isinstance(pr, dict):
+        return False
+    for lvl in pr.values():
+        if lvl is None:
+            continue
+        if not isinstance(lvl, dict):
+            return False
+        if not all(x is None or _numeric(x) for x in lvl.values()):
+            return False
+    return True
+
+
+def _outcome_shape_ok(o: dict[str, Any], *,
+                      retrieval_only: bool = False) -> bool:
+    """Every key the aggregation dereferences directly must be present
+    with a coercible type — a malformed checkpoint outcome that passes
+    run.py's presence-only loader gate is EXCLUDED here instead of
+    crashing mid-report (security-review P1; the loader-side
+    REQUIRED_OUTCOME_KEYS type-hardening is tracked in #1770). Note the
+    asymmetry: session_recall@k VALUES are summed directly (no N/A), so
+    None values are excluded; turn/evidence recall values are dropped
+    when None (M6 N/A semantics), so None values are allowed; context
+    keys are dereferenced via o[...] and must be PRESENT and numeric.
+    ``label`` must be a REAL bool (round-12: a tampered label:null would
+    otherwise be silently counted as an incorrect answer instead of
+    excluded) — EXCEPT on retrieval-only runs, where the runner emits
+    ``label: None`` by design and the accuracy block is not published
+    (the label check is carved out so retrieval-only outcomes still
+    occupy the attempted set)."""
+    return (o.get("question_id") is not None
+            and "label" in o
+            and (retrieval_only or isinstance(o.get("label"), bool))
+            and isinstance(o.get("question_type", ""), str)
+            and _recall_dict_present(o, "session_recall@k")
+            and _recall_dict_present(o, "turn_recall@k",
+                                     allow_none_values=True)
+            and _recall_dict(o.get("evidence_recall@k"))
+            and _recall_dict(o.get("chunk_evidence_recall@k"))
+            and _recall_dict(o.get("evidence_retrieved@k"))
+            and _recall_dict(o.get("answer_string_evidence_recall@k"))
+            and (o.get("context_tokens") is not None
+                 and _num(o.get("context_tokens")))
+            and (o.get("context_point_count") is not None
+                 and _num(o.get("context_point_count")))
+            and all(_num(o.get(k)) for k in (
+                "pool_size", "evidence_written", "retrieval_latency_ms",
+                "rerank_latency_ms", "reader_latency_ms",
+                "judge_latency_ms", "ingest_latency_ms", "total_ms"))
+            and all(_num(o.get(k)) for k in ("ndcg@10", "p@10", "p@5"))
+            and _leg_mix_ok(o.get("leg_mix"))
+            and _ingest_ok(o.get("ingest"))
+            and _rerank_pass_ok(o.get("rerank_pass")))
+
+
+def _compare_outcome_ok(o: dict[str, Any]) -> bool:
+    """compare_reports' join predicate (round-11/12/13): an outcome is
+    comparable iff it carries a question identity and a REAL BOOL label —
+    the runner's Layer-1 projection materializes a missing label as
+    ``label: None`` and build_report's shape filter requires a real bool on
+    non-retrieval runs, so the comparison mirrors that policy exactly: a
+    projected label:None OR a tampered non-bool label (0/""/"true"/1 —
+    excluded from the report's aggregates) is SKIPPED, never graded as
+    wrong/correct, never hidden from skipped_excluded. Stripped pre-M7
+    reports carry real bools (best-effort M8 design); retrieval-only
+    reports' label:None outcomes are skipped (honest empty shared set)."""
+    return (isinstance(o, dict)
+            and o.get("question_id") is not None
+            and isinstance(o.get("label"), bool)
+            and not o.get("breaker_open"))
+
+
+def _qid_key(o: dict[str, Any]) -> tuple | str:
+    """#1747: collision-proof question-identity key shared by the integrity
+    grading map AND compare_reports — str qids key by value; non-str qids
+    (malformed checkpoint JSON) key under a tuple so a crafted string
+    question_id can never collide with a sentinel; value-identical
+    malformed qids dedupe (NaN/Inf canonicalized, unhashable values keyed by
+    repr — round-10 security review: id(o) let duplicate copies inflate
+    n_attempted). A MISSING qid (None) is NOT a shared identity — a
+    TYPE-TAGGED per-object key (round-11: the bare 2-tuple
+    ``("__anon__", id(o))`` could collide with a numeric qid equal to some
+    live object's id(); the missing key now carries a ``<missing>`` tag that
+    no JSON-native type name can equal) so distinct unknown-question
+    entries never undercount (reviewer-pinned, #1747). NOTE (round-16
+    doc-precision): ALL NON-FINITE qids (NaN/Inf) collapse into ONE shared
+    ``<nonfinite>`` bucket — NaN identity is undecidable, so duplicate
+    copies AND genuinely distinct corrupted qids are indistinguishable and
+    merge (fail-safe against copy-inflation of n_attempted, at the cost of
+    undercounting distinct corrupted questions within the documented
+    checkpoint trust model)."""
+    qid = o.get("question_id")
+    if isinstance(qid, str):
+        return qid
+    if qid is None:
+        return ("__anon__", "<missing>", id(o))
+    if isinstance(qid, float) and not math.isfinite(qid):
+        return ("__anon__", "<nonfinite>")
+    try:
+        hash(qid)
+    except TypeError:  # unhashable (list/dict) — canonical repr key
+        return ("__anon__", "<unhashable>", repr(qid))
+    # hashable non-str value — TYPE-TAGGED (round-14): Python bool/int/float
+    # equality would otherwise merge DISTINCT JSON tokens (true vs 1 vs 1.0
+    # — a tampered checkpoint) into one attempted question; the type-name
+    # tag keeps them distinct while value-identical same-type qids still
+    # dedupe. Collision-proof: the type-name tag is never a sentinel
+    # (JSON-native type names like int/float/bool/tuple can never equal
+    # "<missing>"/"<unhashable>") and is length-disjoint from the 2-tuple
+    # `<nonfinite>` key, so a crafted value can never collide with a
+    # sentinel.
+    return ("__anon__", type(qid).__name__, qid)
+
+
 PAPER_CATEGORY = {
     "single-session-user": "Information Extraction",
     "single-session-assistant": "Information Extraction",
@@ -60,13 +614,26 @@ PAPER_CATEGORY = {
 
 
 def category_of(question: dict) -> str:
+    # #1747: a non-str question_id (malformed checkpoint JSON) categorizes as
+    # "Other" instead of crashing the ``"_abs" in qid`` check.
+    if not isinstance(question.get("question_id"), str):
+        return "Other"
     if "_abs" in question["question_id"]:
         return "Abstention"
+    # round-10 review: a non-str question_type is unhashable (list) and would
+    # TypeError the PAPER_CATEGORY.get — malformed input categorizes as
+    # "Other" (compare_reports can then never crash on it).
+    if not isinstance(question.get("question_type"), str):
+        return "Other"
     return PAPER_CATEGORY.get(question["question_type"], "Other")
 
 
 def _mean(xs: list[float]) -> float:
-    return round(sum(xs) / len(xs), 4) if xs else 0.0
+    # #1747 (round-7): None entries are SKIPPED — a malformed checkpoint value
+    # can never TypeError the sum; callers that rely on N/A-drop semantics
+    # (turn/evidence recall) get it here instead of pre-filtering.
+    real = [x for x in xs if x is not None]
+    return round(sum(real) / len(real), 4) if real else 0.0
 
 
 def _percentile(xs: list[float], q: float) -> float:
@@ -118,6 +685,33 @@ def mcnemar_exact(w: int, l: int) -> float:  # noqa: E741 — w/l = A-wins/B-win
     return min(1.0, 2.0 * p)
 
 
+def build_methodology(*, seed: int, reader_model: str, temperature: float,
+                     event_schema: str,
+                     reader_prompt_hash: str = "",
+                     judge_rubric_id_hash: str = "") -> dict:
+    """#2292 Task 8 — the #1144 baseline-record PRODUCER methodology seam.
+
+    Emits the methodology base INCLUDING ``protocol_hash`` (additive key;
+    a baseline recorded through this builder carries the protocol leg, so
+    the parity unchanged-check sees protocol deltas — model pin / temp /
+    schema / tool surface — end to end). Reuses
+    battery.parity.runner.protocol_hash + TOOL_SURFACE_IDS: ONE protocol
+    derivation, never a second copy. Old-format reports (recorded before
+    this key) keep comparing on the 2-tuple with the existing warn path
+    (back-compat).
+    """
+    from battery.parity.runner import TOOL_SURFACE_IDS, protocol_hash
+    ph = protocol_hash(
+        seed=seed,
+        model={"model_id": reader_model, "temperature": float(temperature)},
+        event_schema=event_schema,
+        tool_surface=tuple(TOOL_SURFACE_IDS))
+    return {"reader_prompt_hash": reader_prompt_hash,
+            "judge_rubric_id_hash": judge_rubric_id_hash,
+            "protocol_hash": ph,
+            "reader_model": reader_model}
+
+
 def git_sha() -> str:
     try:
         out = subprocess.run(
@@ -127,6 +721,148 @@ def git_sha() -> str:
         return out.stdout.strip() or "unknown"
     except Exception:  # noqa: BLE001, RUF100
         return "unknown"
+
+
+def _pricing_verified_on() -> str:
+    """Most-recent verification date across the pricing map (the report's
+    snapshot records it so a reader knows how fresh the rates are)."""
+    from .costing import PRICING_MAP
+    dates = [str(e.get("verified_on", ""))
+             for fam in PRICING_MAP.values()
+             for e in fam.values() if e.get("verified_on")]
+    return max(dates) if dates else "unknown"
+
+
+def _usage_report_block(completed: list[dict[str, Any]],
+                        usage_overhead: dict[str, Any] | None
+                        ) -> dict[str, Any] | None:
+    """Build the conditional top-level ``usage`` block (A7 / Am 21).
+
+    Emit iff ≥1 completed outcome carries an ``llm_usage`` envelope OR
+    overhead rows exist; otherwise None (usage-free reports gain zero new
+    keys — the 258-pin byte contract). Cost is computed HERE from raw
+    envelopes (``price_usage_envelope`` never mutates the outcome's
+    ``llm_usage`` — deep-copy pinned by test). Semantics:
+
+    * per_question — evidence-bearing spend, keyed by qid (outcomes with an
+      envelope), tokens/calls/cost + priced/estimated flags;
+    * overhead — breaker-open + failed + preflight spend (the drained
+      collector envelope; never double-counted with per_question);
+    * cost — run totals + per-data-point USD over the evidence-bearing
+      WITH-usage subset (``evidence_written > 0`` and envelope present) +
+      coverage disclosure when 0 < with_usage < evidence_bearing.
+    """
+    from .costing import price_usage_envelope
+
+    per_question: dict[str, dict[str, Any]] = {}
+    pq_cost = 0.0
+    pq_all_priced = True
+    pq_any_estimated = False
+    for o in completed:
+        env = o.get("llm_usage")
+        if not isinstance(env, dict):
+            continue
+        by_stage = env.get("by_stage") or {}
+        total = env.get("total") or {}
+        if not by_stage:
+            continue
+        cost, priced, _bd = price_usage_envelope(env)
+        qid = o.get("question_id")
+        per_question[str(qid)] = {
+            "prompt_tokens": _bounded_int(total.get("prompt_tokens", 0)),
+            "completion_tokens": _bounded_int(
+                total.get("completion_tokens", 0)),
+            "calls": _bounded_int(total.get("calls", 0)),
+            "cost_usd": cost,
+            "priced": priced,
+            # stable boolean (round-2 code-review P3): the breakdown's
+            # ``estimated`` is a LIST of estimated lanes.
+            "estimated": bool(_bd.get("estimated")),
+        }
+        pq_cost += cost
+        pq_all_priced = pq_all_priced and priced
+        pq_any_estimated = (pq_any_estimated
+                            or bool(_bd.get("estimated")))
+
+    overhead: dict[str, Any] | None = None
+    oh_cost = 0.0
+    oh_priced = True
+    if (usage_overhead or {}).get("by_stage"):
+        oh_total = usage_overhead.get("total") or {}
+        cost, priced, bd = price_usage_envelope(usage_overhead)
+        oh_cost = cost
+        oh_priced = priced
+        overhead = {
+            "prompt_tokens": _bounded_int(oh_total.get("prompt_tokens", 0)),
+            "completion_tokens": _bounded_int(
+                oh_total.get("completion_tokens", 0)),
+            "calls": _bounded_int(oh_total.get("calls", 0)),
+            "cost_usd": cost,
+            "priced": priced,
+            "estimated": bool(bd.get("estimated")),
+            "lanes": bd["lanes"],
+        }
+        pq_any_estimated = pq_any_estimated or bool(bd.get("estimated"))
+
+    if not per_question and overhead is None:
+        return None
+
+    # per-data-point cost over the evidence-bearing WITH-usage subset
+    # (coverage disclosure when some evidence-bearing outcomes lack usage).
+    cov: list[dict[str, Any]] = [
+        o for o in completed
+        if int(o.get("evidence_written", 0) or 0) > 0]
+    with_usage: list[dict[str, Any]] = [
+        o for o in cov if isinstance(o.get("llm_usage"), dict)]
+    if with_usage:
+        ev_sum = sum(int(o.get("evidence_written", 0) or 0)
+                     for o in with_usage)
+        dp_cost = round(
+            sum(cost for cost, _p, _b in
+                (price_usage_envelope(o["llm_usage"]) for o in with_usage))
+            / ev_sum, 6) if ev_sum else None
+        dp_priced = all(
+            _p for _c, _p, _b in
+            (price_usage_envelope(o["llm_usage"]) for o in with_usage))
+    else:
+        dp_cost = None
+        dp_priced = True
+    coverage: dict[str, Any] = {
+        "evidence_bearing": len(cov),
+        "with_usage": len(with_usage),
+    }
+    if 0 < len(with_usage) < len(cov):
+        coverage["partial"] = True
+
+    block = {
+        "per_question": per_question,
+        "totals": {
+            "prompt_tokens": (
+                sum(pq["prompt_tokens"] for pq in per_question.values())
+                + (overhead["prompt_tokens"] if overhead else 0)),
+            "completion_tokens": (
+                sum(pq["completion_tokens"]
+                    for pq in per_question.values())
+                + (overhead["completion_tokens"] if overhead else 0)),
+            "calls": (
+                sum(pq["calls"] for pq in per_question.values())
+                + (overhead["calls"] if overhead else 0)),
+        },
+        "cost": {
+            "usd": round(pq_cost + oh_cost, 6),
+            "priced": pq_all_priced and oh_priced,
+            "estimated": pq_any_estimated,
+            "data_point_usd": dp_cost,
+            "data_point_n": len(with_usage),
+            "data_point_priced": dp_priced,
+        },
+        "coverage": coverage,
+        "priced": pq_all_priced and oh_priced,
+        "estimated": pq_any_estimated,
+    }
+    if overhead is not None:
+        block["overhead"] = overhead
+    return block
 
 
 def build_report(
@@ -179,6 +915,11 @@ def build_report(
     retrieval_only: bool = False,
     surface: str = "embedded",
     run_key: str | None = None,
+    # #2185 (Task 6): the drained collector overhead envelope (breaker-open +
+    # failed + preflight spend — never double-counted: per-question usage
+    # lives on the outcomes, everything else rides this envelope). None →
+    # no overhead section (byte-identical usage-free reports).
+    usage_overhead: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Aggregate per-question outcomes into the report + provenance dict.
 
@@ -187,16 +928,65 @@ def build_report(
     on one question must not abort the run or skew the aggregates).
 
     M7 (#1527) contract additions (additive-only; D11):
-      * ``integrity`` — validity + per-question error census (D1/D6): a run
-        with any failed question or ingest-error question is ``valid=false``
-        unless an override threshold (+ recorded justification) admits it;
-        the numbers are always recorded, so no degraded run can masquerade
-        as clean.
+      * ``integrity`` — validity + per-question error census (D1/D6): the
+        gate criterion is CENSUS-CLASS-AWARE (#1747) — ``valid == True`` iff
+        ``n_hard_invalid == 0`` AND ``n_excluded_hard == 0`` AND
+        ``invalid_rate <= threshold`` AND (outcome-derived attempted set
+        non-empty whenever any entry was excluded or dropped — a fully
+        excluded/dropped run never certifies; the guard keys off the
+        shape-filtered OUTCOME attempted set, NOT the failure-merged
+        n_attempted — a dropped run plus one recoverable failure entry must
+        not certify);
+        recoverable classes (parse_error / truncated / truncated_parse_error
+        / partial_parse / transient_* / s1_chunk_summary, plus
+        reader/judge/ingest:
+        retries_exhausted eval failures) are rate-limited (a healthy 500-Q run
+        admits a handful — the OLD binary ``len(errors)==0`` per-question
+        invalid made ``valid=true`` unreachable at scale); hard classes
+        (fatal_* / ingest / unknown census classes, non-census error strings
+        with an EMPTY census, permanent eval failures, malformed inputs —
+        a present non-bool valid flag / non-iterable, non-str, or falsy-
+        but-present NON-CONTAINER error_classes (0/""/False/a PRESENT
+        null; empty dict/list are the legitimate no-census shapes and
+        grade clean) — fail closed to hard) veto the run at any threshold (a mixed
+        recoverable+structural shape is rate-limited —
+        the #1746 lane); additive breakdown fields ``n_hard_invalid`` /
+        ``n_recoverable_invalid`` / ``recoverable_invalid_rate`` /
+        ``n_excluded`` (entries dropped by the entry shape filter — non-dict
+        junk + shape-broken dicts, outcomes AND failures; the
+        denominator shrink is observable, never silent) /
+        ``n_excluded_hard`` (hard grades on excluded/dropped outcomes that
+        still veto) /
+        ``criterion`` ride the block, and malformed non-int census counts
+        are preserved verbatim in ``error_census_malformed`` (per class,
+        distinct values — never mixed
+        into ``error_census``, never crashing the report); the same field
+        also preserves non-str legacy flat-list junk under the
+        ``<legacy-list>`` sentinel key and a PRESENT malformed top-level
+        ``error_classes`` shape (0 / "" / False / null / non-iterable)
+        under the ``<malformed-top-level>`` sentinel key (round-15/16: no
+        malformed evidence vanishes at any level); the numbers are
+        always recorded, so no degraded run can masquerade as clean.
+        Relationship to issue #1746 (its plan doc, D10 — "the flag's
+        semantics are #1747's lane"; the plan file lands with #1746): that
+        plan deliberately does NOT make ``integrity.valid`` its closing
+        condition — the flag's semantics are this issue's lane; the
+        run-protocol step-5 gate string (run_protocol.py) states the
+        justified threshold for the 500-Q baseline. The block also
+        carries ``gated_outcomes`` (#1900/#1937) — the whole-run
+        count of outcomes with a gate-red (``gate_reasons`` /
+        ``post_retrieval_reasons`` non-empty), readout-only and
+        grading-neutral: it surfaces data-availability flags
+        (``dataset_join_error``) on runs where no watchdog arm aborted.
       * ``leg_mix`` (D2) — per-leg ``match_source`` counts over the
         top_k context the reader saw + per-k over the deduped pool.
       * ``pool_size`` (D3) — live graph point count per question.
       * ``evidence`` (D4) — evidence written vs retrieved + vacuity over
-        evidence-bearing questions only (evidence_absent_n excluded).
+        evidence-bearing questions only (evidence_absent_n excluded) + the
+        #1901 re-calibrated vacuity (no_usable_evidence_rate@k/n/qids: no
+        evidence-bearing content of ANY kind in the top-k context — point OR
+        chunk anchor — over ALL questions; the legacy vacuity_rate stays
+        byte-identical, additive).
       * ``latency_ms.ingest`` (D5) — the isolated write-path cost.
       * paper-aligned ``retrieval.*_paper@k`` keys (non-_abs only, the
         official exclusion) alongside the legacy _abs-inclusive keys.
@@ -218,10 +1008,70 @@ def build_report(
             "computes it; programmatic callers must pass "
             "audit_dataset(instances)")
     trusted = is_trusted(dataset_semantics_audit)
+    # #1747 entry normalization (security review): entries that cannot be
+    # aggregated are EXCLUDED (the report ALWAYS builds and serializes):
+    # non-dict entries, and dict outcomes missing the keys the aggregation
+    # dereferences directly (label / session_recall@k / turn_recall@k as
+    # dicts / numeric context_tokens / context_point_count) — a malformed
+    # checkpoint outcome that passes run.py's presence-only loader gate would
+    # otherwise KeyError/AttributeError mid-report (security-review P1;
+    # loader-side REQUIRED_OUTCOME_KEYS hardening is tracked in #1770).
+    # Outcomes are copied with error_classes keys str()-coerced so
+    # json.dumps(sort_keys=True) never TypeErrors on a programmatic
+    # mixed-type key (identity for JSON checkpoints, whose keys are always
+    # strings). Non-str question_ids are NOT dropped — they are graded under
+    # collision-proof tuple keys so a hard census on a malformed-qid outcome
+    # still VETOES.
+    # The shape-predicate helpers (_outcome_shape_ok + friends) live at
+    # module scope so the report consumers (compare_reports) apply the SAME
+    # shape filter the aggregates used.
+    raw_n = len(outcomes)
+    # #1747 (round-8 review): non-dict failure entries are junk too — they
+    # count into n_excluded (the same "never silent" observability as
+    # outcome junk) instead of vanishing from the record.
+    n_failure_junk = sum(1 for f in (failures or []) if not isinstance(f, dict))
+    outcomes = [o for o in outcomes if isinstance(o, dict)]
+    # #1900/#1937: whole-run gated-outcome count — outcomes carrying a
+    # gate-red (non-empty ``gate_reasons``/``post_retrieval_reasons``
+    # union — the watchdog ``_n_gated_total`` definition) over the FULL
+    # outcome set (shape-broken dicts included (non-dict entries can't
+    # carry reasons); the watchdog counted every recorded question).
+    # Readout-only, derived from the outcomes so
+    # resumed runs count prior-session outcomes too (the watchdog's live
+    # counter only spans the current session): a revalidate-mode run has no
+    # coverage arm, so this field is the only in-report signal that
+    # data-availability flags were present. Never alters grading.
+    n_gated_outcomes = sum(
+        1 for o in outcomes
+        if (o.get("gate_reasons") or [])
+        or (o.get("post_retrieval_reasons") or []))
     # #1349: questions dropped by the vector arm (breaker_open) are excluded
-    # from the means and surfaced in ``dropped`` — never recall 0.
-    dropped = [o for o in outcomes if o.get("breaker_open")]
-    outcomes = [o for o in outcomes if not o.get("breaker_open")]
+    # from the means and surfaced in ``dropped`` — never recall 0. The
+    # breaker_open split runs BEFORE the shape filter: dropped questions may
+    # legitimately lack retrieval keys (no retrieval was run) and never reach
+    # the aggregations. n_excluded counts EVERY excluded entry (non-dict
+    # junk in outcomes AND failures + shape-broken dicts) so the denominator
+    # shrink is observable. VETO-ESCAPE GUARD (security-review P1): every
+    # non-mean outcome is still graded for the hard veto — a hard census on
+    # a malformed outcome (e.g. a truncated checkpoint that lost a recall
+    # key) must still veto; only the MEANS/accuracy use the shape-filtered
+    # set.
+    all_outcomes = [o for o in outcomes if isinstance(o, dict)]
+    dropped = [o for o in all_outcomes if o.get("breaker_open")]
+    gradable = [o for o in all_outcomes if not o.get("breaker_open")]
+    # single-pass grading (round-8 architecture review): shape + grade are
+    # computed ONCE per outcome so the shape filter and the veto scan can
+    # never disagree on a stale second evaluation.
+    graded = [(o, _outcome_shape_ok(o, retrieval_only=retrieval_only),
+               _outcome_grade(o)) for o in gradable]
+    shape_ok = [o for o, ok, _ in graded if ok]
+    n_excluded = raw_n - len(dropped) - len(shape_ok) + n_failure_junk
+    outcomes = [dict(o) for o in shape_ok]
+    for o in outcomes:
+        ec = o.get("error_classes")
+        if isinstance(ec, dict):
+            o["error_classes"] = {str(k): v for k, v in ec.items()}
+    failures = [f for f in (failures or []) if isinstance(f, dict)]
     n = len(outcomes)
 
     # ── accuracy ──
@@ -236,7 +1086,9 @@ def build_report(
              "question_type": o.get("question_type", "")}
         by_category.setdefault(category_of(q), []).append(o["label"])
         by_type.setdefault(q["question_type"], []).append(o["label"])
-        if "_abs" in q["question_id"]:
+        # #1747: a non-str question_id (malformed checkpoint JSON) must not
+        # TypeError the abstention filter — guard, don't crash.
+        if isinstance(q["question_id"], str) and "_abs" in q["question_id"]:
             abstention_labels.append(o["label"])
 
     # M8 (#1528) D3: every published accuracy carries its 95% Wilson CI
@@ -267,13 +1119,35 @@ def build_report(
     evidence_vacuity_rate: dict[str, float] = {}
     chunk_evidence_recall: dict[str, float] = {}
     chunk_evidence_recall_n: dict[str, int] = {}
+    # #1745 (C4): the reader-surface evidence metric — aggregated parallel
+    # to evidence_recall@k (same D5 denominator) so the pool->context drop
+    # is directly measurable (pool recall is the upper bound since C1).
+    reader_evidence_recall: dict[str, float] = {}
+    reader_evidence_recall_n: dict[str, int] = {}
+    # #1948: the reader-surface metric — evidence-bearing content (points
+    # AND chunks) in the FULL reader context / evidence-bearing content
+    # total, aggregated parallel to reader_evidence@k (which counts points
+    # only) so the pool@k rank-(20, cap] undercount is directly measurable.
+    reader_surface_recall: dict[str, float] = {}
+    reader_surface_recall_n: dict[str, int] = {}
+    # #1763: the re-baselined point-level answer-availability view (mark (d)
+    # answer_string) — aggregated parallel to evidence_recall@k so the legacy
+    # source-session-dominated metric stays byte-identical (D5 #1540
+    # comparability).
+    answer_string_recall: dict[str, float] = {}
+    answer_string_recall_n: dict[str, int] = {}
     for k in ks:
-        sr = [o["session_recall@k"].get(str(k), 0.0) for o in outcomes]
+        # #1747 (round-7): session/turn recall are dereferenced via .get with
+        # None-safe fallbacks — the shape filter excludes malformed outcomes,
+        # and the aggregation stays crash-proof regardless (a truncated
+        # checkpoint must never AttributeError mid-report).
+        sr = [(o.get("session_recall@k") or {}).get(str(k), 0.0)
+              for o in outcomes]
         session_recall[str(k)] = _mean(sr)
         # M6 (#1526): N/A (None) outcomes are DROPPED from the turn-level
         # mean too — a None coerced to 0.0 silently re-drags the vacuity the
         # epic excludes (bug-pattern flag 4).
-        tr = [o["turn_recall@k"].get(str(k)) for o in outcomes]
+        tr = [(o.get("turn_recall@k") or {}).get(str(k)) for o in outcomes]
         tr_real = [v for v in tr if v is not None]
         turn_recall[str(k)] = _mean(tr_real) if tr_real else 0.0
         # evidence_recall@k: mean over evidence-bearing outcomes ONLY (non-
@@ -294,6 +1168,40 @@ def build_report(
         if real_chunks:
             chunk_evidence_recall[str(k)] = _mean(real_chunks)
             chunk_evidence_recall_n[str(k)] = len(real_chunks)
+        # #1745 (C4): reader_evidence@k — evidence-marked hits actually
+        # present in context_points[:k] / marked total. The metric C1
+        # moves; N/A on empty denominators like evidence_recall@k.
+        rre = [(o.get("reader_evidence@k") or {}).get(str(k), None)
+               for o in outcomes]
+        real_rre = [v for v in rre if v is not None]
+        if real_rre:
+            reader_evidence_recall[str(k)] = _mean(real_rre)
+            reader_evidence_recall_n[str(k)] = len(real_rre)
+        # #1948: reader_surface@k — evidence-bearing points+chunks in the
+        # FULL reader context / evidence-bearing total. N/A on empty
+        # denominators like the other evidence metrics; k-independent by
+        # construction (the context is the same list for every k).
+        rrs = [(o.get("reader_surface@k") or {}).get(str(k), None)
+               for o in outcomes]
+        real_rrs = [v for v in rrs if v is not None]
+        if real_rrs:
+            reader_surface_recall[str(k)] = _mean(real_rrs)
+            reader_surface_recall_n[str(k)] = len(real_rrs)
+        # #1763: the answer-string re-baselined view — point-level answer
+        # availability (mark (d), gold answer string in the point's
+        # content/quote/search_keys). Aggregated parallel to
+        # evidence_recall@k. The per-outcome key is produced by the
+        # retrieval leg (the SAME seam chunk_evidence_recall@k is computed
+        # on — retrieve.py _recall_metrics, via evidence.answer_string_recall_at_k,
+        # which holds both the pool and the gold answer). Absent per-outcome
+        # keys → the aggregate stays absent (never fabricated from the
+        # ingest census — the numerator is a retrieval-time fact).
+        aas = [(o.get("answer_string_evidence_recall@k") or {})
+               .get(str(k), None) for o in outcomes]
+        real_as = [v for v in aas if v is not None]
+        if real_as:
+            answer_string_recall[str(k)] = _mean(real_as)
+            answer_string_recall_n[str(k)] = len(real_as)
 
     # M6 (D6): evidence_coverage — fraction of evidence-bearing questions
     # (dataset has >=1 evidence turn) whose ingest wrote evidence points
@@ -313,7 +1221,8 @@ def build_report(
     # print_retrieval_metrics.py exclusion). Legacy keys keep the
     # _abs-inclusive definition (back-compat through V3).
     paper_outcomes = [o for o in outcomes
-                      if "_abs" not in o.get("question_id", "")]
+                      if not (isinstance(o.get("question_id"), str)
+                              and "_abs" in o.get("question_id", ""))]
 
     def _paper_agg(key: str, k: int) -> float | None:
         vals = [(o.get(key) or {}).get(str(k)) for o in paper_outcomes]
@@ -335,35 +1244,423 @@ def build_report(
     p10 = _vmean("p@10")
     p5 = _vmean("p@5")
 
-    # ── M7 (D1): integrity — validity + per-question error census ──
-    # invalid = a failed question OR a completed question with
-    # n_ingest_errors > 0; n_attempted dedups by qid across outcomes+failures.
-    # M4 (#1524, D4/D5): the per-question ``error_classes`` is now the
-    # extractor's granular class→count census (fatal_402_billing /
-    # transient_429_rate_limit / parse_error / truncated / …) — rolled up
-    # here by exact count. ``failures`` keep their site-prefixed eval classes
-    # (errors.py: reader:retries_exhausted / judge:fatal / ingest) so the
-    # census still answers "where did failures come from" at a glance.
+    # ── M7 (D1) + #1747: integrity — census-class-aware gate criterion ──
+    # n_attempted dedups by qid across outcomes+failures. Each qid is graded
+    # ONCE via a qid-keyed map (outcome grade, overridden by a failure grade
+    # when a qid appears in both — failure-grade dominance: a question with a
+    # failure entry is invalid, and hard beats recoverable/clean):
+    #   hard       — fatal_*/ingest/unknown census classes OR a non-census
+    #                error string with an empty census (structural
+    #                degradation) → VETOES the run at any threshold
+    #   recoverable — only parse_error/truncated/truncated_parse_error/
+    #                partial_parse/transient_*/s1_chunk_summary classes with
+    #                the runner flag
+    #                valid=False → INVALID but rate-limited (threshold)
+    #   clean      — no error signal; a recoverable-only census with the
+    #                runner flag valid=True also grades clean (drift-pin:
+    #                test_report_integrity_recoverable_census_with_runner_
+    #                clean_is_valid — the runner's binary flag is the
+    #                authority on whether error strings exist)
+    # Eval ``failures`` are graded by their exact site-prefixed class:
+    # permanent (fatal/fatal_config/parse/ingest) → hard veto;
+    # transient-safe (reader/judge/ingest:retries_exhausted) → recoverable.
+    # Grading by qid (not per-entry) makes the invariant
+    # n_hard_invalid + n_recoverable_invalid == n_invalid hold BY
+    # CONSTRUCTION for every input — including the concurrent
+    # checkpoint-merge overlap (a qid completed by one worker and failed by
+    # another lands in both lists; the OLD per-entry sum broke the
+    # n_valid + n_invalid == n_attempted invariant — an overlapped failure
+    # was under-counted as silently clean, and duplicate outcome entries for
+    # one qid drove n_invalid negative — history-review P1, #1747). ``n_valid`` /
+    # ``n_invalid`` / ``invalid_rate`` keep their previous semantics for the
+    # production shape (n_invalid = every error-carrying or failed question)
+    # — the runner sets ``valid=False`` whenever error strings exist, so
+    # ``valid=True`` never co-occurs with a hard census class (drift shape
+    # pinned in test_report_integrity_hard_census_on_runner_clean_grades_hard);
+    # only the ``valid`` VERDICT gains the hard veto on top of the rate
+    # criterion.
     effective_threshold = float(integrity_threshold or 0.0)
-    failure_qids = {f.get("question_id") for f in (failures or [])}
-    attempted_qids = {o["question_id"] for o in outcomes} | failure_qids
-    n_attempted = len(attempted_qids)
-    n_valid = sum(1 for o in outcomes if o.get("valid", True))
-    n_invalid = n_attempted - n_valid
+    # #1747 grading: each qid is graded ONCE under a stable key. Str qids
+    # key by value; non-str qids (malformed checkpoint JSON) key by a
+    # COLLISION-PROOF tuple — a real string question_id can never equal a
+    # tuple, so a crafted qid like "<anon:0>" cannot overwrite a sentinel
+    # grade (security review), and value-identical malformed qids dedupe
+    # across outcomes and failures (hashable values) so failure-grade
+    # dominance applies to them too. Collisions on duplicate qids merge by
+    # MAX severity (hard > recoverable > clean) — a hard grade is never
+    # overwritten by a weaker one.
+    _SEV = {"clean": 0, "recoverable": 1, "hard": 2}
+
+    def _merge_grade(prev: str | None, grade: str) -> str:
+        if prev is None or _SEV[grade] >= _SEV[prev]:
+            return grade
+        return prev
+
+    grade_by_qid: dict[Any, str] = {}
+    # #1747 grading: the ATTEMPTED set = well-shaped outcomes + failures —
+    # the existing semantics (n_attempted / n_valid / n_invalid / invalid_rate
+    # keep the trusted denominator; n_excluded surfaces the shape-filtered
+    # shrink, never silent). Grades come from the single-pass ``graded`` list.
+    for o, ok, grade in graded:
+        if not ok:
+            continue  # excluded from the attempted set (n_excluded)
+        key = _qid_key(o)
+        grade_by_qid[key] = _merge_grade(grade_by_qid.get(key), grade)
+    for f in (failures or []):
+        key = _qid_key(f)
+        fg = _failure_grade(f.get("error_class"))
+        grade_by_qid[key] = _merge_grade(grade_by_qid.get(key), fg)
+    # VETO-ESCAPE GUARD (security review, #1747): every outcome EXCLUDED from
+    # the attempted set (shape-broken dict outcomes AND breaker_open vector-
+    # arm drops) is still graded for the HARD veto — a malformed outcome
+    # carrying a hard census class (a truncated checkpoint that lost a recall
+    # key, or a tampered checkpoint laundering a hard class under the breaker
+    # flag) cannot launder a fatal class out of the gate. Only the hard grade
+    # vetoes: recoverable classes on an excluded shape ride neither the rate
+    # (excluded denominator) nor the veto — the census roll-up below still
+    # records them as evidence. Published as ``n_excluded_hard`` so the veto
+    # is self-explanatory (n_hard_invalid excludes excluded outcomes by
+    # design; an operator never faces an unexplained valid=false).
+    n_excluded_hard = 0
+    for _, ok, grade in graded:
+        if not ok and grade == "hard":
+            n_excluded_hard += 1
+    for o in dropped:
+        if _outcome_grade(o) == "hard":
+            n_excluded_hard += 1
+    n_hard_invalid = sum(1 for g in grade_by_qid.values() if g == "hard")
+    n_recoverable_invalid = sum(
+        1 for g in grade_by_qid.values() if g == "recoverable")
+    n_valid = sum(1 for g in grade_by_qid.values() if g == "clean")
+    n_invalid = n_hard_invalid + n_recoverable_invalid
+    n_attempted = len(grade_by_qid)
+    # round-17 (code-review P2): the vacuity guard keys off the OUTCOME-
+    # derived attempted set (shape-filtered graded outcomes BEFORE failures
+    # are merged) — n_attempted itself counts failure qids, so a run whose
+    # ENTIRE outcome set was excluded or breaker-dropped PLUS one failure
+    # entry (e.g. reader:retries_exhausted) would otherwise report
+    # n_attempted=1, invalid_rate=1.0 ≤ threshold and certify valid — the
+    # documented 'a run whose entire outcome set was excluded OR dropped
+    # never certifies' promise (README example is outcome-set-wide) broken.
+    n_attempted_outcomes = sum(1 for o, ok, _ in graded if ok)
     invalid_rate = round(n_invalid / n_attempted, 4) if n_attempted else 0.0
+    recoverable_invalid_rate = (
+        round(n_recoverable_invalid / n_attempted, 4) if n_attempted else 0.0)
     census: Counter = Counter()
-    for o in outcomes:
-        ec = o.get("error_classes") or {}
+    malformed_census: dict[str, Any] = {}
+    # census over ALL non-dict dict outcomes (gradable shape-broken AND
+    # breaker_open drops included) so excluded outcomes' error classes are
+    # still recorded as evidence (the veto-escape guard's census-side
+    # mirror — a tampered checkpoint cannot hide a fatal class from the
+    # record by also breaking the shape or setting the breaker flag).
+    for o in all_outcomes:
+        has_ec = "error_classes" in o
+        ec = o.get("error_classes")
+        if not has_ec:
+            ec = {}  # a MISSING key means "no census".
         if isinstance(ec, dict):
             for cls, count in ec.items():
-                census[cls] += int(count or 0)
-        else:  # legacy flat-list shape (defensive back-compat)
-            census.update(ec)
+                # Collision-safe roll-up (reviewer-pinned, #1747): an int
+                # count sums into the typed accumulator under its str() key
+                # (JSON keys are always strings — str()-coercion keeps the
+                # published census and json.dumps(sort_keys=True) consistent
+                # for programmatic non-str keys; the round-15 note: distinct
+                # programmatic tokens like {1:1, "1":2} collapse in this
+                # EVIDENCE-ONLY field — the grader fails non-str keys closed
+                # to hard and the verdict never reads the census, so the
+                # collapse is intentional); EVERY
+                # other count value (None / str / float / bool / list /
+                # dict — malformed JSON) is preserved in the separate
+                # ``error_census_malformed`` field (accumulated per class so
+                # no malformed evidence vanishes). Grading is presence-by-key
+                # and independent of these fields (the veto cannot be
+                # laundered through them).
+                if isinstance(count, int) and not isinstance(count, bool):
+                    census[str(cls)] += count
+                else:
+                    # Uniform accumulator (round-11/12): error_census_malformed[
+                    # class] is ALWAYS a flat list of the DISTINCT malformed
+                    # count values — storing the first value as-is made the
+                    # shape depend on whether that first value was a
+                    # container. Non-finite counts are canonicalized to None
+                    # (NaN != NaN would defeat the membership dedup, and
+                    # None matches the serialized null).
+                    key = str(cls)
+                    acc = malformed_census.setdefault(key, [])
+                    stored = (None if (isinstance(count, float)
+                                       and not math.isfinite(count))
+                              else count)
+                    # round-16: membership is TYPE-EXACT — Python == would
+                    # collapse distinct JSON tokens (0 vs False, 1 vs 1.0,
+                    # True vs 1) and "no malformed evidence vanishes" would
+                    # silently drop the equal-valued cross-type token
+                    # (mirrors the round-14 _qid_key type-tag discipline).
+                    if not any(type(s) is type(stored) and s == stored
+                               for s in acc):
+                        acc.append(stored)
+        else:  # legacy flat-list shape (defensive back-compat): str elements
+            # ride the census; non-str elements are evidence-preserved in
+            # error_census_malformed (the grader fails the whole shape closed
+            # to hard — mirroring the dict branch's non-str-key posture).
+            if isinstance(ec, (list, tuple, set, frozenset)):
+                census.update([str(c) for c in ec if isinstance(c, str) and c])
+                junk = [c for c in ec if not isinstance(c, str)]
+                if junk:
+                    # accumulate DISTINCT junk across outcomes (round-12/13:
+                    # mirror the dict branch's membership dedup AND its
+                    # non-finite canonicalization — NaN != NaN would defeat
+                    # the membership check, so non-finite junk stores as
+                    # None, matching the serialized null).
+                    prev = malformed_census.setdefault("<legacy-list>", [])
+                    for c in junk:
+                        stored = (None if (isinstance(c, float)
+                                           and not math.isfinite(c)) else c)
+                        if not any(type(s) is type(stored) and s == stored
+                                   for s in prev):
+                            prev.append(stored)
+            else:
+                # MALFORMED TOP-LEVEL shape — a PRESENT falsy/null value
+                # (0 / "" / False / None) or a non-iterable / non-list
+                # value (5 / "abc" — malformed checkpoint JSON): the grader
+                # fails it CLOSED to hard, and the value is preserved as
+                # evidence under a sentinel key so "no malformed evidence
+                # vanishes" holds for top-level shapes too, not just count
+                # values (round-15 review).
+                stored = (None if (isinstance(ec, float)
+                                   and not math.isfinite(ec)) else ec)
+                acc = malformed_census.setdefault("<malformed-top-level>", [])
+                if not any(type(s) is type(stored) and s == stored
+                           for s in acc):
+                    acc.append(stored)
     for f in (failures or []):
         eclass = f.get("error_class")
-        if eclass:
+        if isinstance(eclass, str) and eclass:
             census[eclass] += 1
-    error_census = dict(sorted(census.items()))
+        elif eclass is not None and not isinstance(eclass, str):
+            # round-17 (code-review P2): a non-str error_class VALUE
+            # (int/dict/float/bool/list — malformed checkpoint JSON) grades
+            # hard and vetoes via _failure_grade, but used to VANISH from
+            # the record — absent from error_census AND
+            # error_census_malformed — contradicting the round-15/16 'no
+            # malformed evidence vanishes at any level' contract (outcome-
+            # side error_classes shapes are preserved under <legacy-list> /
+            # <malformed-top-level> sentinels). Preserved under the
+            # <failure-class> sentinel key with the SAME distinct-membership
+            # accumulator + non-finite canonicalization as the census
+            # branches. A MISSING error_class (None — the full_context cell
+            # producer's documented shape) is NOT malformed evidence: it is
+            # the deliberate fail-closed deferral to #1746 (grades hard,
+            # never rate-limited) and carries no value to preserve.
+            stored = (None if (isinstance(eclass, float)
+                               and not math.isfinite(eclass)) else eclass)
+            acc = malformed_census.setdefault("<failure-class>", [])
+            if not any(type(s) is type(stored) and s == stored
+                       for s in acc):
+                acc.append(stored)
+    error_census = dict(sorted(census.items(), key=lambda kv: str(kv[0])))
+    # #1746 (D7): the warning-only truncation readout — every truncated
+    # question is either in an error class (invalid) or listed here
+    # (criterion 3 structural: no UNRECORDED truncation with valid=true).
+    # Grade-based (``_outcome_grade == "clean"``) so the readout agrees
+    # with the report's own verdict semantics (a malformed valid flag never
+    # launders a question into the list); legacy checkpoints without llm
+    # telemetry project None → ``or 0`` keeps them excluded.
+    truncated_valid_qids = [
+        o.get("question_id") for o in outcomes
+        if (o.get("llm_truncated") or 0) > 0 and _outcome_grade(o) == "clean"
+    ]
+    # #2134 (Task 5): the ONE-SHOT ESCALATION readout. UNITS: a question is
+    # a multi-session haystack — ingest_v2 SUMS the per-session escalation
+    # counters, so one question can carry MULTIPLE escalation events
+    # (llm_escalations is an EVENT count per outcome; the 4-bucket invariant
+    # escalated == recovered + residual + abort + partial is literal PER
+    # OUTCOME and — as sums — at the event level below via n_escalations).
+    # MECHANISM vs OUTCOME: the buckets name the mechanism; the OUTCOME
+    # grading lives in error_classes. A residual/abort event grades invalid
+    # via truncated_parse_error ONLY on the S2/S4 seams (extract_session_v2
+    # callers) — an S1-seam residual/abort is benign by design (run_s1 keeps
+    # the truncated narrative, never raises), so an S1-only escalation
+    # question carries valid=true + escalated_*_qids membership + truncated
+    # recording with NO census entry. Cross-reference error_census when the
+    # question-level verdict matters; the qid lists below are mechanism-
+    # level (seam-agnostic) by design. Criterion 3's
+    # escalation arm: an escalation that RECOVERED is never an unrecorded
+    # truncation (truncated_valid_qids above already lists every
+    # clean+truncated question — an escalated-recovered question appears in
+    # BOTH, by design). Legacy checkpoints without the fields project
+    # None → ``or 0``.
+    escalated_qids = {
+        bucket: [o.get("question_id") for o in outcomes
+                 if (o.get(f"llm_escalations_{bucket}") or 0) > 0]
+        for bucket in ("recovered", "residual", "abort", "partial")
+    }
+    escalation_summary = {
+        # event-level totals — n_escalations == the 4-bucket sum BY
+        # CONSTRUCTION (each outcome's own invariant sums), so the report's
+        # escalation block is literally assertable at the event level.
+        "n_escalations": sum(
+            o.get("llm_escalations") or 0 for o in outcomes),
+        "n_escalated_questions": sum(
+            1 for o in outcomes if (o.get("llm_escalations") or 0) > 0),
+        "n_escalations_recovered": sum(
+            o.get("llm_escalations_recovered") or 0 for o in outcomes),
+        "n_escalations_residual": sum(
+            o.get("llm_escalations_residual") or 0 for o in outcomes),
+        "n_escalations_abort": sum(
+            o.get("llm_escalations_abort") or 0 for o in outcomes),
+        "n_escalations_partial": sum(
+            o.get("llm_escalations_partial") or 0 for o in outcomes),
+        # the D6 marginal-cost numerator maxes, read from the ingest
+        # max-preserving captures. SEMANTICS: the values are per-QUESTION
+        # maxes of the per-SESSION escalation-output TOTAL (a session that
+        # escalated in multiple stages — e.g. an S1 chunk + S2 — sums its
+        # stages before the ingest max) — an honest upper bound on "the
+        # biggest escalated emission this run paid for", NOT a per-call
+        # max. Both cost-delta terms (output AND prompt) are surfaced.
+        "escalation_output_tokens_max": max(
+            (o.get("escalation_tokens_output_max") or 0 for o in outcomes),
+            default=0),
+        "escalation_prompt_tokens_max": max(
+            (o.get("escalation_tokens_prompt_max") or 0 for o in outcomes),
+            default=0),
+        "escalation_base_output_tokens_max": max(
+            (o.get("escalation_tokens_base_output_max") or 0
+             for o in outcomes), default=0),
+        "escalation_base_prompt_tokens_max": max(
+            (o.get("escalation_tokens_base_prompt_max") or 0
+             for o in outcomes), default=0),
+        "escalated_valid_qids": escalated_qids["recovered"],
+        "escalated_residual_qids": escalated_qids["residual"],
+        "escalated_abort_qids": escalated_qids["abort"],
+        "escalated_partial_qids": escalated_qids["partial"],
+    }
+
+    # ── #2408 (Task 2): the S4 re-emit-tax census readout ────────────────
+    # DIAGNOSTIC-ONLY — never a gate limb; integrity.valid / _outcome_grade
+    # / census logic are untouched. Computed over EXTRACTION-CLEAN outcomes
+    # only (grade == "clean": runner valid flag AND no error_classes — a
+    # partial-accept session grades recoverable (valid=false) and is
+    # excluded, so a truncated list's verbatim counts can never pollute the
+    # unchanged-share) AND whose S4 merge actually RAN (a non-empty
+    # s4_merge dict — the 7-key shape is produced ONLY by the merge path;
+    # an S4-empty graceful-degradation session leaves s4_merge={} with a
+    # warning (never an error string, so it would otherwise grade clean and
+    # dilute r_b with a near-empty S4 emission — excluded here, per the
+    # #2408 plan-review D3 fix). Legacy/pre-#2408 outcomes without the
+    # fields are likewise excluded (nothing measured). R_b is reported
+    # twice: over all census outcomes AND excluding escalation-recovered
+    # sessions (the recovered band carries the escalated 32K emission —
+    # the #1789 with/without fallback convention, I-2-14). Every
+    # div-by-zero → None.
+    _clean = [
+        o for o in outcomes
+        if (_outcome_grade(o) == "clean"
+            and isinstance(o.get("s4_merge"), dict) and o.get("s4_merge"))]
+    _clean_no_esc = [
+        o for o in _clean if not (o.get("llm_escalations") or 0)]
+    _s2_total = sum(o.get("s2_out_tokens") or 0 for o in _clean)
+    _s4_total = sum(o.get("s4_out_tokens") or 0 for o in _clean)
+    _r_b = (_s4_total / _s2_total if _s2_total else None)
+    _s2_total_ne = sum(o.get("s2_out_tokens") or 0 for o in _clean_no_esc)
+    _s4_total_ne = sum(o.get("s4_out_tokens") or 0 for o in _clean_no_esc)
+    _r_b_ne = (_s4_total_ne / _s2_total_ne if _s2_total_ne else None)
+    _verb = sum((o.get("s4_merge") or {}).get("verbatim_reemissions", 0)
+                for o in _clean)
+    _corr = sum((o.get("s4_merge") or {}).get("corrected_by_s4", 0)
+                for o in _clean)
+    _s2_items = sum((o.get("s4_merge") or {}).get("s2_items", 0)
+                    for o in _clean)
+    _s4_items = sum((o.get("s4_merge") or {}).get("s4_items", 0)
+                    for o in _clean)
+    _redun = [((o.get("s4_out_tokens") or 0)
+               * min(1.0, ((o.get("s4_merge") or {}).get("verbatim_reemissions", 0)
+                           / (o.get("s4_merge") or {}).get("s4_items", 0)
+                           if (o.get("s4_merge") or {}).get("s4_items", 0)
+                           else 0.0)))
+              for o in _clean]  # factor clamped to [0,1]: a dup-key S2 list
+    # can carry verbatim > s4_items (per-S2-item count vs an S4 key set) —
+    # the proxy must never exceed the question's whole S4 emission
+    s4_reemit: dict[str, Any] = {
+        "criterion": (
+            "#2408 S4 re-emit-tax census (DIAGNOSTIC — never a gate limb): "
+            "R_b = S4/S2 healthy-path output-token ratio; unchanged_share = "
+            "verbatim_reemissions/s2_items (the #1789-I-2-11 S2-centric "
+            "view); corrections_share = (corrected_by_s4 - verbatim_"
+            "reemissions)/s4_items and gaps_share = (s4_items - "
+            "corrected_by_s4)/s4_items (true-corrections + gaps decompose "
+            "over s4_items with verbatim NOT double-counted; exact shares "
+            "presuppose a dup-key-free S2 list — a dup S2 key inflates "
+            "corrected_by_s4/verbatim above s4_items and corrections_share "
+            "is floor-clamped only); redundant_s4_tokens_total = the "
+            "token-weighted PROXY sum (verbatim-fraction x call total, "
+            "fraction clamped to [0,1] — a dup-key S2 list can carry "
+            "verbatim > s4_items; no tokenizer exists; item-count shares "
+            "are exact, token attribution is the labeled proxy). Computed "
+            "over "
+            "extraction-CLEAN outcomes only (grade clean + valid) whose S4 "
+            "merge RAN (non-empty s4_merge — S4-empty graceful-degradation "
+            "and legacy/no-field outcomes excluded; question-level "
+            "granularity: a multi-session haystack question enters as a "
+            "whole when any session merged); escalation-recovered sessions "
+            "reported separately via r_b_excl_escalated. Feed for the "
+            "#1789 delta-contract gate and the #2335 emission-contract "
+            "decision."),
+        "n_clean_questions": len(_clean),
+        "s2_out_tokens_total": _s2_total,
+        "s4_out_tokens_total": _s4_total,
+        "r_b": round(_r_b, 4) if _r_b is not None else None,
+        "r_b_excl_escalated": (
+            round(_r_b_ne, 4) if _r_b_ne is not None else None),
+        "verbatim_reemissions_total": _verb,
+        "corrected_by_s4_total": _corr,
+        "s2_items_total": _s2_items,
+        "s4_items_total": _s4_items,
+        "unchanged_share": (
+            round(_verb / _s2_items, 4) if _s2_items else None),
+        "corrections_share": (
+            # true corrections exclude verbatim re-emissions (corrected_by_s4
+            # counts ALL collisions incl. unchanged re-types) — otherwise
+            # verbatim would be double-counted and the composition shares
+            # would not decompose over s4_items
+            round(max(0, _corr - _verb) / _s4_items, 4)
+            if _s4_items else None),
+        "gaps_share": (
+            round(max(0, _s4_items - _corr) / _s4_items, 4)
+            if _s4_items else None),
+        "redundant_s4_tokens_total": round(sum(_redun), 2),
+        "redundant_s4_tokens_max": (
+            round(max(_redun), 2) if _redun else 0.0),
+        "per_question": [
+            {
+                "question_id": o.get("question_id"),
+                "s2_out_tokens": o.get("s2_out_tokens") or 0,
+                "s4_out_tokens": o.get("s4_out_tokens") or 0,
+                "r_b": (round((o.get("s4_out_tokens") or 0)
+                              / (o.get("s2_out_tokens") or 0), 4)
+                        if (o.get("s2_out_tokens") or 0) else None),
+                "verbatim_reemissions": (o.get("s4_merge") or {}).get(
+                    "verbatim_reemissions", 0),
+                "corrected_by_s4": (o.get("s4_merge") or {}).get(
+                    "corrected_by_s4", 0),
+                "s2_items": (o.get("s4_merge") or {}).get("s2_items", 0),
+                "s4_items": (o.get("s4_merge") or {}).get("s4_items", 0),
+                "unchanged_share": (
+                    round((o.get("s4_merge") or {}).get(
+                        "verbatim_reemissions", 0)
+                          / (o.get("s4_merge") or {}).get("s2_items", 0), 4)
+                    if (o.get("s4_merge") or {}).get("s2_items", 0) else None),
+                "redundant_s4_tokens": round(
+                    (o.get("s4_out_tokens") or 0)
+                    * min(1.0, ((o.get("s4_merge") or {}).get("verbatim_reemissions", 0)
+                                / (o.get("s4_merge") or {}).get("s4_items", 0)
+                                if (o.get("s4_merge") or {}).get("s4_items", 0)
+                                else 0.0)),
+                    2),
+                "llm_escalations": o.get("llm_escalations") or 0,
+            }
+            for o in _clean
+        ],
+    }
     checks = [
         "python >= 3.12 guard enforced at run entry",
         "dataset loaded and recall-semantics audited",
@@ -372,19 +1669,187 @@ def build_report(
         "per-question error census computed",
     ]
     integrity: dict[str, Any] = {
-        "valid": invalid_rate <= effective_threshold,
+        # #1747: hard failures VETO at any threshold; the recoverable-class /
+        # structural error RATE then rides the declared threshold. Threshold
+        # 0.0 = a fully clean run (the strict default); the run-protocol
+        # step-5 gate documents 0.02 as the justified default at 500-Q scale.
+        "valid": ((n_hard_invalid == 0) and (n_excluded_hard == 0)
+                  and (invalid_rate <= effective_threshold)
+                  # round-8/10/17 security review: a run whose ENTIRE outcome
+                  # set was excluded OR dropped (n_attempted_outcomes == 0
+                  # with n_excluded > 0 or breaker_open drops — a wholesale
+                  # corrupt checkpoint, or a vector-arm outage that breaker-
+                  # tripped every question) must never certify valid on an
+                  # empty OUTCOME denominator; failures alone do not count as
+                  # attempts here (round-17: a dropped run + one recoverable
+                  # failure entry must not resurrect the vacuous-valid hole
+                  # via the failure-merged n_attempted); a truly EMPTY
+                  # report (nothing excluded, nothing dropped) stays
+                  # vacuously valid.
+                  and not (n_attempted_outcomes == 0
+                           and (n_excluded > 0 or len(dropped) > 0))),
         "threshold": effective_threshold,
         "n_attempted": n_attempted,
+        "n_excluded": n_excluded,  # #1747: entries dropped by the entry
+        # shape filter (malformed checkpoint JSON in outcomes or failures) —
+        # the denominator shrink is observable, never silent (history-review
+        # P2).
+        "n_excluded_hard": n_excluded_hard,  # #1747 (round-8): hard grades
+        # on outcomes EXCLUDED from the attempted set (shape-broken dicts +
+        # breaker_open drops) — these veto the run; published so the veto is
+        # self-explanatory when n_hard_invalid == 0 yet valid == false.
         "n_valid": n_valid,
         "n_invalid": n_invalid,
         "n_failed": len(failures or []),  # M4 #1524 (D5): cross-ref
         "invalid_rate": invalid_rate,
+        # #1747 additive breakdown: hard-invalid questions (veto) vs
+        # recoverable-class questions (rate-limited) — the two never overlap;
+        # n_hard_invalid + n_recoverable_invalid == n_invalid.
+        "n_hard_invalid": n_hard_invalid,
+        "n_recoverable_invalid": n_recoverable_invalid,
+        "recoverable_invalid_rate": recoverable_invalid_rate,
         "error_census": error_census,
+        "error_census_malformed": (dict(sorted(malformed_census.items(),
+                                                key=lambda kv: str(kv[0])))
+                                    if malformed_census else {}),
+        # #1746 (D7): warning-only — a truncated question with no error
+        # classes is LISTED here (never in ``error_census``; ``valid``
+        # unaffected). A non-empty list is a #1747-flagged observation
+        # (benign truncation recovered by the ladder is legitimate), never
+        # a close-blocker by itself.
+        "truncated_valid_qids": truncated_valid_qids,
+        "n_truncated_valid": len(truncated_valid_qids),
+        # #2134 (Task 5): escalation telemetry rides the integrity dict —
+        # the report's Task-6 criterion (ZERO truncation-attributable
+        # residual/partial + no empty_embed_list) reads from here.
+        "escalation": escalation_summary,
+        # #2408 (Task 2): the S4 re-emit-tax census readout — DIAGNOSTIC
+        # only (never a gate limb; integrity.valid untouched).
+        "s4_reemit": s4_reemit,
+        # #1900/#1937: whole-run gated-outcome count (gate-red union per
+        # outcome — the watchdog's ``_n_gated_total`` at report time, from
+        # the outcomes list so resumed runs count prior-session outcomes
+        # too). Readout-only: surfaces data-availability flags (e.g.
+        # ``dataset_join_error``) present in the run even when no arm
+        # aborted (revalidate-mode runs have no coverage arm — a wholesale
+        # join breakage would otherwise finalize valid=true with no
+        # in-report signal); ``valid`` and all grading are unaffected.
+        "gated_outcomes": n_gated_outcomes,
+        "criterion": (
+            "#1747 census-class-aware: valid = (n_hard_invalid == 0) AND "
+            "(n_excluded_hard == 0) AND (invalid_rate <= threshold) AND "
+            "(outcome-derived attempted set non-empty whenever any entry "
+            "was excluded or dropped — a fully excluded/dropped run never "
+            "certifies; failures do not count as attempts for this guard); "
+            "hard = fatal_*/ingest/unknown census classes + non-census error "
+            "strings with an EMPTY census (mixed recoverable+structural "
+            "grades recoverable — #1746 lane) + permanent eval failures + "
+            "malformed inputs (present non-bool valid flag, non-iterable, "
+            "non-str, or falsy-but-present NON-CONTAINER error_classes — "
+            "0/\"\"/False/PRESENT-null; empty dict/list are the "
+            "legitimate no-census shapes and grade clean) fail "
+            "closed to hard + excluded outcomes (shape-broken dicts / "
+            "breaker_open drops) with a hard census still veto "
+            "(n_excluded_hard); "
+            "recoverable = parse_error/truncated/truncated_parse_error/"
+            "partial_parse/transient_*/s1_chunk_summary census classes + "
+            "reader/judge/ingest:retries_exhausted eval failures "
+            "(rate-limited, not vetoed)"
+        ),
         "checks": checks,
     }
     if integrity_justification:
         integrity["justified"] = True
         integrity["threshold_violation_justification"] = integrity_justification
+
+    # ── #1946: extraction-health gate — the population split + run-level
+    # flag that ACTS on the census the integrity gate counts. reval3:
+    # 33/50 questions ingested ZERO semantic points (fatal_402_billing /
+    # s1_chunk_summary / empty_embed_list at session scale) yet the run
+    # 'completed' and blended a 0.880 that was 66% raw-fallback — the
+    # integrity census counted the errors but nothing ACTED on them. This
+    # block classifies every shape-filtered outcome healthy/degraded and
+    # emits healthy_n / degraded_n / per-population accuracy so the blend
+    # is visible, never silent. Design: FLAG + split (not abort) — the
+    # healthy population carries the real full-stack signal (reval3:
+    # 14/17 = 0.824, n=17) and the degraded population's raw-fallback
+    # numbers are a useful baseline; abort pre-finalize would destroy
+    # salvageable data. The integrity gate already vetoes such runs
+    # (valid=false, 35 hard-invalid on reval3); the missing piece was the
+    # REPORT-level readout. Status is DEGRADED when the degraded fraction
+    # is material (>= EXTRACTION_HEALTH_DEGRADED_FRACTION) OR the run
+    # census carries ANY fatal_402_billing / empty_embed_list (a single
+    # billing event is a run-level integrity event — the 500-Q must never
+    # certify a billing-limited run). The split is always emitted
+    # regardless of status.
+    eh_health = [_outcome_extraction_health(o) for o in outcomes]
+    eh_healthy = [o for o, h in zip(outcomes, eh_health, strict=True)
+                  if h == "healthy"]
+    eh_degraded = [o for o, h in zip(outcomes, eh_health, strict=True)
+                   if h == "degraded"]
+    eh_healthy_n = len(eh_healthy)
+    eh_degraded_n = len(eh_degraded)
+    eh_denom = eh_healthy_n + eh_degraded_n
+    eh_degraded_fraction = (eh_degraded_n / eh_denom if eh_denom else 0.0)
+
+    def _pop_acc(outs: list[dict]) -> float | None:
+        if not outs:
+            return None  # an empty population's accuracy is None, never a
+        # fabricated 0.0 (a 0.0 would read as a score).
+        return _mean([1.0 if o["label"] else 0.0 for o in outs])
+
+    # the run-level flag: a material degraded fraction OR any killer-class
+    # census presence (fatal_402_billing / empty_embed_list — a single
+    # billing event flags the run; s1_chunk_summary alone rides the
+    # fraction, it is the recoverable-class cascade signal).
+    eh_status = ("degraded"
+                 if (eh_degraded_fraction >= EXTRACTION_HEALTH_DEGRADED_FRACTION
+                     or bool(set(error_census)
+                             & EXTRACTION_KILLER_CENSUS_CLASSES))
+                 else "healthy")
+    extraction_health: dict[str, Any] = {
+        "status": eh_status,
+        "threshold": EXTRACTION_HEALTH_DEGRADED_FRACTION,
+        "min_points": EXTRACTION_MIN_POINTS,
+        "census_classes": sorted(EXTRACTION_KILLER_CENSUS_CLASSES
+                                  | EXTRACTION_DEGRADE_CENSUS_CLASSES),
+        "healthy_n": eh_healthy_n,
+        "degraded_n": eh_degraded_n,
+        "degraded_fraction": round(eh_degraded_fraction, 4),
+        "per_population_accuracy": (
+            None if retrieval_only else {
+                "healthy": {"n": eh_healthy_n,
+                             "accuracy": _pop_acc(eh_healthy)},
+                "degraded": {"n": eh_degraded_n,
+                              "accuracy": _pop_acc(eh_degraded)},
+            }),
+        # degraded question ids — the operator's actionable list (string-
+        # coerced: checkpoint question_ids may be ints).
+        "degraded_qids": sorted(
+            {str(o.get("question_id")) for o in eh_degraded}),
+        "criterion": (
+            "#1946 extraction-health: per-question DEGRADED = "
+            "ingest.points < min_points (semantic extraction produced "
+            "< 100 points — the reval3 402 shape; points_total counts "
+            "raw chunks+turns, so ingest.points is the semantic signal) "
+            "OR points_total < min_points (tiny pool — semantic mode "
+            "only) OR a killer census class (fatal_402_billing / "
+            "empty_embed_list) present at any count OR s1_chunk_summary "
+            "at scale (count >= "
+            f"{EXTRACTION_DEGRADE_MIN_COUNT}); deterministic mode (no "
+            "ingest.points) and the full_context cell baseline (the "
+            "{\"sessions\", points: 0, \"errors\": []} no-extraction "
+            "sentinel) classify by census only — never falsely degraded "
+            "by the points rules; recoverable classes (parse_error / "
+            "partial_parse / transient_*) are healthy. "
+            "Run status = degraded when degraded_fraction >= "
+            f"{EXTRACTION_HEALTH_DEGRADED_FRACTION} OR any "
+            "fatal_402_billing / empty_embed_list in the run census "
+            "(a billing event is a run-level integrity event). The split "
+            "is always emitted — the blended accuracy is a two-population "
+            "mix and must be read per population"
+        ),
+    }
 
     # ── Retry-then-fix protocol: census → mechanical-fix triage (M4 #1524,
     # D6 — documented, never gated: integrity.valid is REPORTED, not a
@@ -451,6 +1916,93 @@ def build_report(
     retrieved_bearing = [
         float((o.get("evidence_retrieved@k") or {}).get(k_key, 0) or 0)
         for o in ev_written_outcomes]
+
+    # ── #1901: the re-calibrated vacuity — "the reader had NO usable
+    # evidence" (additive; the legacy ``vacuity_rate`` above stays
+    # byte-identical for D5 #1540 comparability, exactly as #1763 kept the
+    # legacy evidence_recall@k when it re-baselined the answer-string
+    # view). The legacy predicate (evidence_retrieved@k == 0 over
+    # evidence-bearing questions only) counts "evidence POINTS not in the
+    # top-k" as vacuous — misleading: on reval3 it flags 36/50 questions
+    # (3 with evidence points written but none surfaced in top-k + 33
+    # ingest-degraded with no points written at all, S1 429 rate limits),
+    # yet 32 of
+    # those 36 are answered CORRECTLY (the reader recovers the answer from
+    # chunk anchors / raw turns / correct abstention via the A1 #1762
+    # clause) — vacuous-acc 0.889 > non-vacuous 0.857, INVERTED. The
+    # re-calibrated predicate flags a question ONLY when the top-k context
+    # carries no evidence-bearing content of ANY kind: no marked extracted
+    # point (evidence_recall@k in {0.0, None} — None = N/A empty
+    # denominator, M6 #1526) AND no marked raw chunk anchor
+    # (chunk_evidence_recall@k in {0.0, None}). On reval3 that concentrates
+    # the failures: @20 → 9/50 vacuous with vacuous-acc 0.778 < non-vacuous
+    # 0.902 (the signal holds at every k: @5 0.765 < 0.939, @10 0.70 <
+    # 0.925). Denominator: ALL outcomes — the old evidence-bearing-only
+    # framing excluded the ingest-degraded questions that were exactly the
+    # misleading population. Emitted only when EVERY outcome carries a
+    # COMPLETE evidence seam (evidence_recall@k AND chunk_evidence_recall@k
+    # both present and covering the aggregation's ks) — fail-closed
+    # (reviewer-pinned, #1901 review rounds 1-2 P2): a MIXED pre-seam/
+    # post-seam checkpoint (resumed run / merged checkpoint set straddling
+    # the M6 seam) or a tampered dict missing a k key leaves the input
+    # state UNKNOWN, and unknown must never be counted as "no evidence"
+    # (the security-review posture: absent/unknown evidence never
+    # fabricates a vacuous classification; uniformly seam-less runs emit
+    # nothing). ──
+    def _no_evidence_value(v: Any) -> bool:
+        """#1901: a recall value meaning "no evidence-bearing content in the
+        top-k": 0.0 (evidence exists but nothing surfaced) or None (N/A —
+        empty denominator, M6 #1526 — no evidence points exist). Anything
+        else is a positive fraction = evidence WAS in the top-k."""
+        return v is None or v == 0.0
+
+    # shape-filtered values are numeric-or-None (bools/non-finite excluded
+    # by _outcome_shape_ok), so the == 0.0 comparison is safe here. The
+    # seam guard is SYMMETRIC and fail-closed (reviewer-pinned, #1901
+    # review round 2 P2): the re-calibrated readout is emitted ONLY when
+    # EVERY outcome carries BOTH recall dicts the predicate reads
+    # (evidence_recall@k AND chunk_evidence_recall@k) present AND covering
+    # every aggregated k. A missing/truncated dict — the mixed pre-seam/
+    # post-seam checkpoint (resumed run / merged checkpoint set) or a
+    # tampered k-truncated dict — leaves the input state UNKNOWN, and
+    # unknown must never be counted as "no evidence" (absent/unknown
+    # evidence never fabricates a vacuous classification; uniformly
+    # seam-less runs emit nothing).
+    def _recall_seam_complete(key: str) -> bool:
+        return all(
+            isinstance(o.get(key), dict)
+            and set(o.get(key) or {}) >= {str(k) for k in ks}
+            for o in outcomes)
+
+    _seam_complete = (_recall_seam_complete("evidence_recall@k")
+                      and _recall_seam_complete("chunk_evidence_recall@k"))
+    no_usable_evidence: dict[str, Any] | None = None
+    if _seam_complete:
+        vacuous_by_k: dict[str, list[dict]] = {str(k): [] for k in ks}
+        for o in outcomes:
+            for k in ks:
+                er = (o.get("evidence_recall@k") or {}).get(str(k), None)
+                cr = (o.get("chunk_evidence_recall@k") or {}).get(str(k), None)
+                if _no_evidence_value(er) and _no_evidence_value(cr):
+                    vacuous_by_k[str(k)].append(o)
+        vacuous_by_k = {str(k): vacuous_by_k[str(k)] for k in sorted(ks)}
+        # the vacuous question ids at the design-locked k (top_k) — the
+        # run-protocol consumer's "which questions were vacuous" list
+        # (mirrors dropped.questions / truncated_valid_qids). Falls back to
+        # the largest carried k when the outcomes' ks do not include top_k
+        # (pathological callers like reduced-ks tests — the legacy block's
+        # top_k reads use the same .get-defensive posture).
+        _qids_k = k_key if k_key in vacuous_by_k else str(max(ks))
+        no_usable_evidence = {
+            "no_usable_evidence_rate@k": {
+                str(k): round(len(qs) / n, 4) if n else 0.0
+                for k, qs in vacuous_by_k.items()},
+            "no_usable_evidence_n@k": {
+                str(k): len(qs) for k, qs in vacuous_by_k.items()},
+            "no_usable_evidence_qids": [
+                o.get("question_id")
+                for o in vacuous_by_k[_qids_k]],
+        }
     evidence = {
         "written_mean": (round(sum(written_all) / len(written_all), 2)
                          if written_all else 0.0),
@@ -462,10 +2014,36 @@ def build_report(
         "vacuity_rate": (round(
             sum(1.0 for v in retrieved_bearing if v == 0.0)
             / len(retrieved_bearing), 4) if retrieved_bearing else 0.0),
+        # #1901: the re-calibrated vacuity (see the computation above) —
+        # absent unless EVERY outcome carries a complete evidence + chunk
+        # seam (fail-closed: mixed pre-seam/post-seam checkpoints or a
+        # tampered/truncated recall dict emit nothing).
+        **(no_usable_evidence or {}),
+        # #1745 (C4): the per-mark-type breakdown aggregated from the
+        # checkpoint's per-question ``ingest.evidence_marks`` census
+        # (M6 #1526: source_session / verbatim / raw_chunk / answer_string
+        # — written by the v2 ingest leg (ingest_v2.py); the deterministic
+        # leg (ingest.py) records no per-mark census — ``marks`` stays
+        # absent on deterministic runs, never fabricated). The pilot
+        # census was 98.5%
+        # source-session (472/479), which is why the legacy
+        # evidence_recall@k denominator is mark-inflated; this aggregate
+        # makes the WHY observable at report level. Absent when outcomes
+        # carry no census (never fabricated).
+        "marks": {
+            mk: sum((((o.get("ingest") or {}).get("evidence_marks") or {})
+                     .get(mk, 0) or 0) for o in outcomes)
+            for mk in ("source_session", "verbatim", "raw_chunk",
+                       "answer_string")
+        } if any((o.get("ingest") or {}).get("evidence_marks")
+                 for o in outcomes) else {},
     }
 
     # ── context tokens ──
-    ctx = [o["context_tokens"] for o in outcomes]
+    # #1747 (round-7): .get with a numeric default — a missing/None
+    # context_tokens can never KeyError/TypeError the mean (the shape filter
+    # excludes such outcomes; this is the None-safe fallback layer).
+    ctx = [o.get("context_tokens", 0) for o in outcomes]
     ctx_mean = round(sum(ctx) / n, 1) if n else 0.0
 
     # ── latency (ms) ──
@@ -498,14 +2076,23 @@ def build_report(
                 reasons.append(reason)
         mcs = [float(rp.get("max_session_chunks") or 0) for rp in applied_ok]
         pool_recall_mean: dict[str, dict[str, float]] = {}
-        carriers = [rp.get("pool_recall@k") or {} for rp in applied_ok]
+        # #1747 (round-7 finding 5): pool_recall@k must be a DICT (and each
+        # per-level value a dict of numeric-or-None) — a malformed non-dict
+        # value (float/list/str from a truncated checkpoint) is skipped, never
+        # `.get`/`.items()`-ed into an AttributeError. The shape filter
+        # excludes such outcomes; this keeps the aggregation crash-proof even
+        # if a future call site forgets the filter.
+        carriers = [rp.get("pool_recall@k") for rp in applied_ok
+                    if isinstance(rp.get("pool_recall@k"), dict)]
         if carriers:
             for level in ("session", "turn", "evidence"):
                 ks_lists: dict[str, list[float]] = {}
                 for cr in carriers:
-                    lvl = cr.get(level) or {}
+                    lvl = cr.get(level)
+                    if not isinstance(lvl, dict):
+                        continue
                     for k, v in lvl.items():
-                        if v is not None:
+                        if isinstance(v, (int, float)) and not isinstance(v, bool):
                             ks_lists.setdefault(str(k), []).append(float(v))
                 pool_recall_mean[level] = {
                     str(k): round(sum(v) / len(v), 4)
@@ -548,20 +2135,50 @@ def build_report(
             }
         }
 
+    # #2185 (A7 / Am 21): the conditional usage/cost block — present iff
+    # ≥1 completed outcome carries an llm_usage envelope OR overhead rows
+    # exist (mock/retrieval-only runs emit NOTHING — the byte-identical
+    # report contract). Cost is computed HERE at report time from raw
+    # envelopes (never mutates outcome llm_usage); per-question spend is
+    # evidence-bearing outcome usage; breaker-open + failed + preflight
+    # spend rides ``usage_overhead`` (the drained collector envelope — live
+    # moves + the A4 load fold keep it authoritative across resume).
+    usage_block = _usage_report_block(gradable, usage_overhead)
+    if usage_block is not None:
+        # M5-style: usage-free reports never record a pricing snapshot —
+        # the snapshot rides ONLY when the block emits (no new keys on
+        # mock runs).
+        pricing_snapshot = {
+            "map_version": PRICING_MAP_VERSION,
+            "git_sha": git_sha(),
+            "verified_on": _pricing_verified_on(),
+        }
+        usage_block["pricing"] = pricing_snapshot
+
     # M7 (Gate 2): a not-trusted audit serializes EVERY recall key to null —
     # the report then contains no recall numbers until the dataset is
     # re-audited (E2E-3 Precondition 2).
     def _gated(value):
         return value if trusted else None
 
-    return {
+    report = {
         "benchmark": "LongMemEval",
         "dataset": dataset_id,
         "split": split,
         "n_questions": n,
+        # #1747: entries dropped by the entry shape filter (non-dict junk +
+        # shape-broken dicts, outcomes AND failures) — published at top level
+        # so gate_1349/compare_reports can reconcile n_questions vs
+        # len(outcomes) (round-8 architecture review: the runner's
+        # extra["outcomes"] Layer-1 projection can override the filtered
+        # list, so the divergence is observable here, never silent).
+        "n_excluded": n_excluded,
         # #1349: dropped-question accounting — emitted ONLY when a question
-        # was dropped (breaker_open), so the zero-dropped report shape is
-        # byte-identical to origin's published contract (golden-shape pin).
+        # was dropped (breaker_open), so the zero-dropped report carries NO
+        # "dropped"/"n_dropped" keys (round-8/17: the #1747 addition is the
+        # single top-level n_excluded key, pinned in the golden-shape test —
+        # the zero-dropped top-level shape is NOT byte-identical to origin's
+        # published contract anymore, only the dropped keys are).
         **({"dropped": {
                 "n": len(dropped),
                 "breaker_open": sum(1 for o in dropped
@@ -592,6 +2209,34 @@ def build_report(
             "evidence_coverage": evidence_coverage,
             "chunk_evidence_recall@k": _gated(chunk_evidence_recall or None),
             "chunk_evidence_recall_n@k": _gated(chunk_evidence_recall_n or None),
+            # #1745 (C4): the reader-surface evidence metric — the honest
+            # measure of "evidence the reader could see" (pool recall is
+            # the upper bound since C1's rank-interleaved assembly).
+            # Absent on outcomes without the key (stays None — never
+            # fabricated).
+            "reader_evidence@k": _gated(reader_evidence_recall or None),
+            "reader_evidence_n@k": _gated(reader_evidence_recall_n or None),
+            # #1948: the reader-surface metric — evidence-bearing content
+            # (points AND chunks) in the FULL reader context / evidence-
+            # bearing content total. The honest "did the reader see the
+            # evidence" measure: chunk@20 undercounts the rank-(20, cap]
+            # window (a marked chunk at pool rank 31 in context counts as
+            # read here), and reader_evidence@k counts points only.
+            "reader_surface@k": _gated(reader_surface_recall or None),
+            "reader_surface_n@k": _gated(reader_surface_recall_n or None),
+            # #1763: the re-baselined point-level answer-availability view
+            # (mark (d) answer_string). The pilot census is 98.5%
+            # source-session (472/479 marks), so the legacy evidence_recall@k
+            # measures "fraction of the answer session's points surfaced",
+            # NOT answer availability; the answer-string view re-baselines
+            # it. BOTH are emitted: the old metric is UNCHANGED (D5 #1540
+            # comparability). Populated per-outcome by the retrieval leg
+            # (answer_string_recall_at_k); absent on outcomes without the
+            # key (stays None — never fabricated).
+            "answer_string_evidence_recall@k": _gated(
+                answer_string_recall or None),
+            "answer_string_evidence_recall_n@k": _gated(
+                answer_string_recall_n or None),
             # M7 (D10): paper-aligned aggregates over non-_abs only.
             "session_recall_paper@k": _gated(session_recall_paper),
             "turn_recall_paper@k": _gated(turn_recall_paper),
@@ -603,7 +2248,8 @@ def build_report(
             **({"p@5": _gated(p5)} if p5 is not None else {}),
             "context_tokens_mean": ctx_mean,
             "context_point_count_mean": round(
-                sum(o["context_point_count"] for o in outcomes) / n, 2) if n else 0,
+                sum(o.get("context_point_count", 0) for o in outcomes) / n, 2)
+                if n else 0,
             # R6 (#1545): the same aggregate block, gated on the same
             # condition — a baseline report carries zero rerank keys.
             **({"rerank": rerank_agg} if rerank_agg is not None else {}),
@@ -623,9 +2269,16 @@ def build_report(
         },
         # M7 (D1/D2/D3/D4): the self-explanatory-report keys.
         "integrity": integrity,
+        # #1946: the extraction-health gate — healthy/degraded population
+        # split + per-population accuracy + run-level flag (see the block
+        # computation above). Always emitted: a degraded run can never
+        # masquerade as a single-population measurement.
+        "extraction_health": extraction_health,
         "leg_mix": leg_mix,
         "pool_size": pool_size,
         "evidence": evidence,
+        # #2185: the conditional usage/cost block (A7) — see above.
+        **({"usage": usage_block} if usage_block is not None else {}),
         "methodology": {
             "reader_prompt_hash": reader_prompt_hash,
             "judge_rubric_id_hash": judge_rubric_id_hash,
@@ -651,11 +2304,19 @@ def build_report(
                                      "date annotation on every retrieved chunk "
                                      "(question_date + haystack_dates surfaced — "
                                      "temporal-reasoning questions are "
-                                     "answerable); points-first budget-capped "
-                                     "context (UX decision 3, R1 #1540): "
-                                     "extracted points render in rank order, raw "
-                                     "turn-granular chunks backfill the remaining "
-                                     "context_token_cap tokens",
+                                     "answerable); rank-interleaved budget-capped "
+                                     "context (C1 #1745): extracted points and "
+                                     "raw turn-granular chunks render in TRUE "
+                                     "RRF rank order (the R1 point-then- "
+                                     "chunk tiering is deliberately reversed — "
+                                     "it starved the chunk leg), bounded by "
+                                     "context_token_cap tokens AND the "
+                                     "context_item_cap items "
+                                     "(default 40; TR questions keep the pinned "
+                                     "tr_top_k item cap AND render time-ascending "
+                                     "per R5 #1544 — dated first, stable within "
+                                     "a date, i.e. the reader's READING order, "
+                                     "not RRF rank)",
             "extraction_approach": extraction_approach,
             "retriever": retriever,
             "retrieval_arm": (
@@ -687,7 +2348,11 @@ def build_report(
                 "turns per non-overlapping window; candidates fetched "
                 "at max(k)*3 depth, deduped per-session to "
                 "max_chunks_per_session raw chunks in rank order, R1 "
-                "#1540)"
+                "#1540; #1745 C1: reader context is rank-interleaved "
+                "(points+chunks in true RRF order) bounded by "
+                "context_item_cap items + the token budget, C2: optional "
+                "evidence-mark rank boost, C5: max_chunks_per_session "
+                "default 3)"
                 + (f" + R6 rerank stage (cross-encoder + MMR, pool "
                    f"{rerank_config['pool_size']} — post-fusion "
                    "precision+diversity, #1545)"
@@ -710,15 +2375,68 @@ def build_report(
                                  "extracted points (pointKind <> "
                                  "session-transcript) in top-k — raw chunks are "
                                  "excluded from the turn/evidence numerator and "
-                                 "denominator (D5, no granularity bias), with the "
-                                 "deterministic evidence-turn-id fallback when the "
-                                 "graph has no marks; evidence_recall@k = marked "
+                                 "denominator (D5, no granularity bias); #1948 "
+                                 "(pinned): turn_recall@k and evidence_recall@k "
+                                 "are THE SAME formula (marked non-chunk hits in "
+                                 "top-k / evidence_point_count) whenever evidence "
+                                 "points exist — the reval3 turn-vs-evidence "
+                                 "aggregate split (0.722 vs 0.299) is a denominator/ "
+                                 "population artifact, not a retrieval phenomenon; "
+                                 "on degraded questions with zero evidence points "
+                                 "evidence_recall@k is None and turn_recall@k falls "
+                                 "back to the deterministic answer-turn binary (did "
+                                 "the answer TURN surface in top-k — 31/33 = 1.0 on "
+                                 "reval3's degraded population), so the turn/evidence "
+                                 "pair is a MIXED metric on mixed populations — "
+                                 "compare only on the evidence-bearing subset; "
+                                 "evidence_recall@k = marked "
                                  "extracted points surfaced / marked extracted "
                                  "points total, N/A (None) on empty denominators "
-                                 "(M6 #1526 — never forced 0.0); chunk containment "
+                                 "(M6 #1526 — never forced 0.0); #1745 (C2): when "
+                                 "the evidence-mark boost is enabled "
+                                 "(TORTOISE_LME_EVIDENCE_BOOST — OFF by default "
+                                 "in code, ON for the re-validation run) "
+                                 "evidence_recall@k is measured over the boosted "
+                                 "pool (marked hits re-ranked up by a stable rank "
+                                 "offset before the metric; the pre-boost ranking "
+                                 "is preserved in the per-question "
+                                 "ranked_ids_pre_boost ablation); reader_evidence@k "
+                                 "(C4 #1745) = the same fraction over "
+                                 "context_points[:k] (the independent "
+                                 "reader-surface measure — pool recall is an "
+                                 "APPROXIMATE upper bound: the budget walk's "
+                                 "skip-not-starve lets a lower-ranked marked "
+                                 "item enter the k-prefix, so reader_evidence@k "
+                                 "can exceed evidence_recall@k); #1948 "
+                                 "reader_surface@k = the honest reader-surface "
+                                 "measure: evidence-bearing content (points AND "
+                                 "chunks — the D5 union denominator) present in the "
+                                 "FULL reader context / evidence-bearing content "
+                                 "total — chunk@20 undercounts the rank-(20, "
+                                 "context-cap] window (a marked chunk at pool rank "
+                                 "31 in context counts as read here while "
+                                 "chunk_evidence_recall@20 = 0.0), and "
+                                 "reader_evidence@k counts points only; "
+                                 "k-independent by construction, N/A on empty "
+                                 "denominators; with C2 on it is "
+                                 "the BOOSTED-pool reader surface — the boost-off "
+                                 "ablation arm isolates C1; chunk containment "
                                  "is reported separately as chunk_evidence_recall@k "
                                  "(containment-marked raw chunks surfaced / marked "
-                                 "raw chunks total); evidence_recall_n@k = "
+                                 "raw chunks total); #1763 answer-string re-baseline: "
+                                 "answer_string_evidence_recall@k = answer-string-marked "
+                                 "points (gold answer string contained in content/quote/"
+                                 "search_keys — mark (d), computed at eval time since the "
+                                 "extractor never sees the gold answer) surfaced / "
+                                 "answer-string-marked points total, the point-level "
+                                 "answer-availability measure replacing the "
+                                 "source-session-dominated denominator; the legacy "
+                                 "evidence_recall@k denominator is UNCHANGED (D5 #1540 "
+                                 "comparability); the per-outcome re-baselined key is "
+                                 "produced by the retrieval leg (evidence.answer_string_recall_at_k "
+                                 "— the chunk_evidence_recall@k seam) and stays ABSENT from "
+                                 "the aggregate when outcomes carry no such key (never "
+                                 "fabricated); evidence_recall_n@k = "
                                  "evidence-bearing outcomes in the mean; "
                                  "evidence_vacuity_rate@k = fraction of "
                                  "evidence-bearing outcomes with 0.0 while "
@@ -733,7 +2451,40 @@ def build_report(
                                  "= share of evidence-bearing questions (ingest "
                                  "evidence_written > 0) with evidence_retrieved@k "
                                  "== 0 at top_k (evidence-absent abstentions "
-                                 "excluded from the denominator); recall numbers "
+                                 "excluded from the denominator); #1901: "
+                                 "evidence.no_usable_evidence_rate@k = the "
+                                 "RE-CALIBRATED vacuity — share of ALL questions "
+                                 "whose top-k context carried NO evidence-bearing "
+                                 "content of any kind (evidence_recall@k in "
+                                 "{0, None} AND chunk_evidence_recall@k in "
+                                 "{0, None}: no marked extracted point AND no "
+                                 "marked raw chunk anchor; None = N/A empty "
+                                 "denominator, M6 #1526); the legacy vacuity_rate "
+                                 "counted \"evidence points not in the top-k\" as "
+                                 "vacuous — misleading on reval3 (an ALL-questions "
+                                 "per-question reading flags 36/50, 3 with "
+                                 "evidence points written but none surfaced in "
+                                 "top-k + 33 "
+                                 "ingest-degraded by S1 429s (no points "
+                                 "written) — the legacy REPORT "
+                                 "metric itself is evidence-bearing-only, 3/17 = "
+                                 "0.1765, and excludes those 33; 32/36 correct via "
+                                 "chunk anchors / raw turns / "
+                                 "correct abstention: vacuous-acc 0.889 > "
+                                 "non-vacuous 0.857, INVERTED), while the "
+                                 "re-calibrated predicate concentrates failures "
+                                 "(reval3@20: 9/50 vacuous, vacuous-acc 0.778 < "
+                                 "non-vacuous 0.902); both are emitted, the legacy "
+                                 "keys unchanged (additive, D5 #1540 comparability "
+                                 "— the #1763 pattern); no_usable_evidence_qids "
+                                 "lists the vacuous question ids at top_k; "
+                                 "absent unless EVERY outcome carries a complete "
+                                 "evidence + chunk seam (fail-closed, symmetric: "
+                                 "a mixed pre-seam/ post-seam checkpoint — "
+                                 "resumed run or merged "
+                                 "checkpoint set — or a tampered recall dict "
+                                 "missing a k key leaves input state UNKNOWN and "
+                                 "emits nothing, never fabricated); recall numbers "
                                  "are published only under the dataset recall-"
                                  "semantics audit (methodology.dataset_semantics_"
                                  "audit; a not-trusted verdict serializes recall "
@@ -767,6 +2518,11 @@ def build_report(
                                 .get("available") else "unavailable"),
             **(r1_knobs or {}),
             **(r5_knobs or {}),
+            # #2185 (Task 6 acceptance): the pricing-map snapshot is
+            # recorded in the methodology ONLY when the usage block emits
+            # (usage-free reports gain zero new keys).
+            **({"usage_pricing": pricing_snapshot}
+               if usage_block is not None else {}),
         },
         "failures": failures or [],
         "n_failed": len(failures or []),
@@ -779,18 +2535,67 @@ def build_report(
         # Layer-1 projection), the ``**(extra or {})`` spread below
         # OVERRIDES this raw list with the projected one — which carries the
         # same per-question keys plus the validity/leg-mix/evidence
-        # instrumentation the gate's extract_report also reads.
+        # instrumentation the gate's extract_report also reads (and may
+        # carry raw shape-broken/NaN values the shape filter excluded from
+        # the MEANS — the divergence is observable via top-level
+        # ``n_excluded`` and sanitized to strict JSON at the return
+        # boundary, round-12).
         "outcomes": outcomes,
         **(rerank_report_block if rerank_report_block is not None else {}),
         **(extra or {}),
     }
+    # Round-12 security review: the returned report is strict JSON BY
+    # CONTRACT — _json_safe nulls non-finite projection values, str()-coerces
+    # mixed keys and normalizes sets, so every consumer (run.py compare /
+    # spot-check, save_report, tests) sees the same sanitized shape the file
+    # path gets.
+    return _json_safe(report)
+
+
+def _json_safe(obj: Any) -> Any:
+    """#1747: recursive JSON-normalization for save_report (and the report
+    returned by build_report, round-12 — the in-memory dict is strict JSON
+    by contract) — dict keys are str()-coerced so ``json.dumps
+    (sort_keys=True)`` never TypeErrors on a mixed-type key (the programmatic
+    mixed-key census shape, security review), sets become sorted lists (a
+    malformed checkpoint value can otherwise crash serialization), and
+    NON-FINITE floats/Decimals (NaN/Infinity from the raw extra[outcomes]
+    projection — the shape filter excludes them from the MEANS but the
+    projection can still publish them verbatim) become null so the persisted
+    record is always STRICT JSON (round-11/12 security review). Values are
+    expected JSON-derived (json.loads output + JSON-native programmatic
+    values)."""
+    if isinstance(obj, Decimal):
+        # Decimal is not JSON-native; a non-finite value (NaN/Inf/sNaN —
+        # finiteness checked BEFORE converting, since float(Decimal("sNaN"))
+        # raises ValueError) becomes null; a finite value converts to float,
+        # RE-CHECKED for finiteness (float(Decimal("1e400")) overflows to
+        # inf — a strict-JSON leak). Round-14 moved the conversion ahead of
+        # the check and silently regressed sNaN; this ordering fixes both.
+        if not obj.is_finite():
+            return None
+        f = float(obj)
+        return None if not math.isfinite(f) else f
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, tuple):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, (set, frozenset)):
+        # repr-key sort so a mixed-type set can never TypeError (security
+        # review, #1747).
+        return sorted((_json_safe(v) for v in obj), key=repr)
+    return obj
 
 
 def save_report(report: dict[str, Any], path: Path | str) -> Path:
     """Write the report JSON (pretty-printed) and return the path."""
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n",
+    p.write_text(json.dumps(_json_safe(report), indent=2, sort_keys=True) + "\n",
                  encoding="utf-8")
     return p
 
@@ -869,12 +2674,35 @@ def compare_reports(report_a: dict[str, Any], report_b: dict[str, Any]) -> dict[
         "failed by a run event (network/billing), not by content — they are not "
         "a difficulty sample (validity F5).",
     ]
-    oa = {o["question_id"]: o for o in report_a.get("outcomes", [])}
-    ob = {o["question_id"]: o for o in report_b.get("outcomes", [])}
-    fa = {f["question_id"] for f in report_a.get("failures", [])}
-    fb = {f["question_id"] for f in report_b.get("failures", [])}
-    shared = sorted(oa.keys() & ob.keys())
-    only_a, only_b = sorted(set(oa) - set(ob)), sorted(set(ob) - set(oa))
+    oa = {_qid_key(o): o for o in report_a.get("outcomes", [])
+          if _compare_outcome_ok(o)}
+    ob = {_qid_key(o): o for o in report_b.get("outcomes", [])
+          if _compare_outcome_ok(o)}
+    # #1747 (round-9/10/11 review): reports may carry non-str question_ids
+    # (graded under collision-proof keys) and failure entries WITHOUT
+    # question_id (per-object unknown questions). The join uses the SAME
+    # collision-proof `_qid_key` discipline as the grading map (int 1 and str
+    # "1" stay distinct — a raw str() coerced them together), and outcomes
+    # the report's own aggregates EXCLUDED (breaker_open drops, label-less
+    # malformed entries) are skipped from the comparison so it never crashes
+    # on them and never grades an entry the report excluded (round-11).
+    # Stripped reports (missing aux columns but with label) still compare
+    # best-effort with honest None aux columns (M8 design).
+    n_skipped_a = sum(1 for o in report_a.get("outcomes", [])
+                      if not _compare_outcome_ok(o))
+    n_skipped_b = sum(1 for o in report_b.get("outcomes", [])
+                      if not _compare_outcome_ok(o))
+    fa = {_qid_key(f) for f in report_a.get("failures", [])
+          if isinstance(f, dict) and f.get("question_id") is not None}
+    fb = {_qid_key(f) for f in report_b.get("failures", [])
+          if isinstance(f, dict) and f.get("question_id") is not None}
+    # Mixed str/tuple keys are not mutually sortable — sort by a canonical
+    # repr so a report with both str and non-str qids never TypeErrors.
+    def _sorted_qids(keys):
+        return sorted(keys, key=repr)
+    shared = _sorted_qids(oa.keys() & ob.keys())
+    only_a, only_b = (_sorted_qids(set(oa) - set(ob)),
+                      _sorted_qids(set(ob) - set(oa)))
     n_a, n_b = len(oa), len(ob)
     acc_a, acc_b = (sum(1 for o in oa.values() if o["label"]) / n_a if n_a else 0.0,
                     sum(1 for o in ob.values() if o["label"]) / n_b if n_b else 0.0)
@@ -929,7 +2757,7 @@ def compare_reports(report_a: dict[str, Any], report_b: dict[str, Any]) -> dict[
         flip_lists[c] = sorted(
             (_flip_row(q, c, oa[q], ob[q], q in fa, q in fb)
              for q in blk["shared"] if oa[q]["label"] != ob[q]["label"]),
-            key=lambda r: r["question_id"])
+            key=lambda r: repr(r["question_id"]))
 
     # overall decomposition (MSR-pinned: headline = shared + reliability + residual)
     n_shared = len(shared)
@@ -1013,8 +2841,17 @@ def compare_reports(report_a: dict[str, Any], report_b: dict[str, Any]) -> dict[
                                         if o.get("question_type") == t),
                                "shared": sum(1 for q in shared
                                              if oa[q].get("question_type") == t)}
-                           for t in sorted({o.get("question_type", "")
-                                            for o in [*oa.values(), *ob.values()]})},
+                           # round-10 review: a non-str question_type (list)
+                           # is unhashable — guard the set comprehension so
+                           # compare_reports never TypeErrors on it.
+                           for t in sorted({
+                               o.get("question_type")
+                               for o in [*oa.values(), *ob.values()]
+                               if isinstance(o.get("question_type"), str)})},
+            # round-11: outcomes the report's own aggregates EXCLUDED
+            # (breaker_open drops, label-less malformed entries) are skipped
+            # from the comparison — the skip is observable, never silent.
+            "skipped_excluded": {"a": n_skipped_a, "b": n_skipped_b},
         },
         "overall": {
             "headline_delta_pp": headline_pp,

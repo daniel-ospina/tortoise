@@ -249,7 +249,16 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
 
     def _superseded_w(alias: str = "n") -> str:
         """Supersession filter: superseded/outdated status OR the legacy
-        outdated=true flag (invalidate_point keeps the original status)."""
+        outdated=true flag (invalidate_point keeps the original status).
+
+        Deliberately NOT ``live.TERMINAL_EXCLUDED_STATUSES`` (#2901): this is
+        the SUPERSESSION shape, not the terminal shape. ``retracted`` /
+        ``archived`` / ``deprecated`` are terminal but are not produced by a
+        supersession write, so folding them in would make checks 3/4 flag
+        retraction/archival as "superseded with no CORRECTS edge" — a false
+        positive. The narrow set is the reason; the terminal set is the OTHER
+        question, answered once in live.py.
+        """
         return (f"({alias}.status IN ['superseded', 'outdated'] "
                 f"OR {alias}.outdated = true)")
 
@@ -502,8 +511,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             node_id=str(op_id),
             detail=(f"Low-confidence operator {op_id} (conf={conf}) → "
                     f"'{tgt_content}' has no mitigation"),
-            # strength= is the SDK/MCP kwarg (0-1, 0=neutralized); the value
-            # sits in the skill's documented relevance-attack range 0.10-0.50.
+            # strength= is the SDK/MCP kwarg — sanctioned band [0.10, 0.50],
+            # 0.50 = strongest dampening (single source: tortoise/weights.py
+            # module docstring, #2315); the skill's relevance-attack range.
             fix=(f"tortoise_mitigate_operator('{op_id}', 'Relevant because...', "
                  "strength=0.3)"),
         )

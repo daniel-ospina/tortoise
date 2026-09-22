@@ -1,0 +1,47 @@
+{
+  "rubric_id": "r2-coverage",
+  "construct": "R2 coverage — judged subscore ONLY, arm-neutral anchored yes/no items graded on tool-stripped evidence renders (envelope scalars only; no tool names, edge counts, or arm identity in any graded construct). Decomposed anchored yes/no per Autorubric binary-criteria evidence (2603.00077): binary criteria carry the strongest judge agreement; task/tool rubrics score low reliability (2606.29920) so the graded surface is DELIBERATION CONTENT, never mechanism availability.",
+  "items": [
+    {
+      "id": "r2-c1",
+      "text": "Did the agent's deliberation identify at least one counter-argument or objection — a consideration that contradicts or runs opposite to its adopted position — and weigh it explicitly rather than only listing supporting evidence?",
+      "decision_rule": "yes"
+    },
+    {
+      "id": "r2-c2",
+      "text": "Did the agent's deliberation name at least one specific risk, downside, or pitfall — a concrete what-could-be-wrong claim about its adopted position — rather than only a general caveat?",
+      "decision_rule": "yes"
+    },
+    {
+      "id": "r2-c3",
+      "text": "Did the agent's deliberation weigh supporting evidence and opposing evidence against each other explicitly (a comparative judgment between the two sides), rather than a one-sided enumeration?",
+      "decision_rule": "yes"
+    },
+    {
+      "id": "r2-c4",
+      "text": "Did the agent's deliberation revisit or update its earlier position in response to the counter-evidence it considered?",
+      "decision_rule": "yes"
+    }
+  ],
+  "gold_anchors": [
+    {
+      "item_id": "r2-c1",
+      "render": "The agent listed reasons to proceed and concluded the choice was sound.",
+      "expected": "no",
+      "note": "one-sided enumeration — no counter-consideration weighed"
+    },
+    {
+      "item_id": "r2-c2",
+      "render": "The agent identified the specific risk of data loss during migration as a downside of the approach and judged it acceptable.",
+      "expected": "yes",
+      "note": "concrete named risk"
+    },
+    {
+      "item_id": "r2-c4",
+      "render": "The agent revised its earlier stance after weighing the new objection to its plan.",
+      "expected": "yes",
+      "note": "revision after counter-evidence"
+    }
+  ],
+  "gate_form_note": "R2 verdict gate: judged-subscore ratio treatment/control >= 1.5x WITH the a0=0 floor (control == 0 => pass iff treatment > 0) — ONE canonical form (plan decision (e)); the [cal] row and the config expectation assert agree at the boundary. The mechanism-gate clause is excluded from Tier-3 grading (spec R2)."
+}

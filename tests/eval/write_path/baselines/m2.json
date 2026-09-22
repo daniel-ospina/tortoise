@@ -1,0 +1,169 @@
+{
+  "schema_version": 1,
+  "fixtures_hash": "sha256:943a99ec619b4c67b8e31fefb90316ea023bbaddd1905d835b9d930243518324",
+  "judge_pin": "w2-write-path-mechanical-v2",
+  "config": {
+    "lanes": [
+      "verbatim",
+      "facts",
+      "dream"
+    ],
+    "mode": "BPRE",
+    "harness": "all",
+    "seed": 42,
+    "extractor_posture": "m2"
+  },
+  "justification": "m2 deterministic re-measurement on the #2552 expanded operator gold (4 -> 15 planted edges): verdict PASS, every gated metric byte-identical to the staged carry-forward (macro/strict 1.0, leakage 15 structural on the echo lane, sessions/quote/provenance 1.0) \u2014 confirming the gold-only change does not move the graded metrics, as predicted (planted_operators is not a METRIC_VALUES input). run w2b-e695c315393e, head 058b427f1. Operator audit on this lane: 2/15 edge_correct (structural \u2014 the echo lane has no product relation extraction; its gate is determinism, never the operator bar), 343/343 reified operator Points eventId-stamped into the retrievable memory layer.",
+  "metrics": {
+    "salient_unit_survival_macro": 1.0,
+    "salient_unit_survival_strict": 1.0,
+    "distractor_leakage_per_run": 15,
+    "sessions_emitting": 1.0,
+    "quote_fidelity": 1.0,
+    "provenance_accuracy": 1.0
+  },
+  "history": [
+    {
+      "date": "2026-09-03T20:31:21Z",
+      "values": {
+        "salient_unit_survival_macro": 0.9722222222222222,
+        "salient_unit_survival_strict": 0.0,
+        "distractor_leakage_per_run": 11,
+        "sessions_emitting": 1.0,
+        "quote_fidelity": 1.0,
+        "provenance_accuracy": 1.0
+      },
+      "failure_classes": [
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "content_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "content_missing",
+        "ep_update_missing",
+        "ep_update_missing",
+        "ep_update_missing"
+      ],
+      "justification": "first m2 deterministic-lane baseline (CI can-fail gate): echo lane macro 0.972/strict 0.0/leakage 11 (structural on echo \u2014 the product leakage bar does not apply to m2; its gate is determinism) / sessions 1.0 / quote 1.0 (vacuous, no quotes in gold) / provenance 1.0 Receipt: receipts/w2b-m2-lane-2026-09-03.json (run w2b-076cbbdfcf6d, clean-head replay reproduced these numbers byte-identically, verdict PASS)."
+    },
+    {
+      "date": "2026-09-06T13:17:28Z",
+      "values": {
+        "salient_unit_survival_macro": 1.0,
+        "salient_unit_survival_strict": 1.0,
+        "distractor_leakage_per_run": 11,
+        "sessions_emitting": 1.0,
+        "quote_fidelity": 1.0,
+        "provenance_accuracy": 1.0
+      },
+      "failure_classes": [],
+      "justification": "mechanical-v2 pin + fix-wave re-baseline (#2405, 2026-09-06): (1) judge pin v1->v2 = the mechanical survival rule gained the paraphrase leg (grading.survival_match, gated on accepts_rephrase_linked). (2) Metrics moved INDEPENDENTLY of that leg: v1 baseline (09-03, macro 0.9722 / strict 0.0) predates the Phase C ep_update_missing fix-wave \u2014 all 72 v1 strict failures were ep_update_missing; current main's EP-on-ingest stamps every qualifying point (v2: 0 failed units, macro 1.0 / strict 1.0, repro'd twice). Deterministic echo lane; product leakage bar does not apply (leakage 11 structural).",
+      "protocol_change": true
+    },
+    {
+      "date": "2026-09-07T00:00:00Z",
+      "values": {
+        "salient_unit_survival_macro": 1.0,
+        "salient_unit_survival_strict": 1.0,
+        "distractor_leakage_per_run": 15,
+        "sessions_emitting": 1.0,
+        "quote_fidelity": 1.0,
+        "provenance_accuracy": 1.0
+      },
+      "failure_classes": [],
+      "justification": "corpus-bless (#2514): planted-operator gold + sessions wp06/wp07 added to the corpus (gold files carry the new sealed planted_operators section; graded-unit universe grew 72 -> 90 units; 11 -> 15 distractors). m2 numbers RE-MEASURED by a real deterministic echo replay of the extended corpus (receipts/w2b-m2-lane-2514-corpus-2026-09-07.json): macro/strict stay 1.0/1.0; distractor leakage 11 -> 15 is structural (the echo lane copies every distractor; its gate is determinism/reproduction, not the product leakage bar \u2014 posture guard). operator-edge audit (#2514) on this lane: 0/4 edges (structural \u2014 no relation extraction); 3/4 endpoint anchors content-present. Deterministic lane, byte-reproducible.",
+      "corpus_change": true
+    },
+    {
+      "date": "2026-09-22",
+      "values": {
+        "salient_unit_survival_macro": 1.0,
+        "salient_unit_survival_strict": 1.0,
+        "distractor_leakage_per_run": 15,
+        "sessions_emitting": 1.0,
+        "quote_fidelity": 1.0,
+        "provenance_accuracy": 1.0
+      },
+      "failure_classes": [],
+      "justification": "corpus_change STAGED (#2552): operator gold 4 -> 15 planted edges, fixtures_hash d17a99af2 -> 943a99ec6 (only gold changed). Metrics carried forward pending the deterministic m2 re-run on the new gold.",
+      "corpus_change": true
+    },
+    {
+      "date": "2026-09-22T14:29:28Z",
+      "values": {
+        "salient_unit_survival_macro": 1.0,
+        "salient_unit_survival_strict": 1.0,
+        "distractor_leakage_per_run": 15,
+        "sessions_emitting": 1.0,
+        "quote_fidelity": 1.0,
+        "provenance_accuracy": 1.0
+      },
+      "failure_classes": [],
+      "justification": "m2 deterministic re-measurement on the #2552 expanded operator gold (4 -> 15 planted edges): verdict PASS, every gated metric byte-identical to the staged carry-forward (macro/strict 1.0, leakage 15 structural on the echo lane, sessions/quote/provenance 1.0) \u2014 confirming the gold-only change does not move the graded metrics, as predicted (planted_operators is not a METRIC_VALUES input). run w2b-e695c315393e, head 058b427f1. Operator audit on this lane: 2/15 edge_correct (structural \u2014 the echo lane has no product relation extraction; its gate is determinism, never the operator bar), 343/343 reified operator Points eventId-stamped into the retrievable memory layer.",
+      "verdict": "pass"
+    }
+  ]
+}

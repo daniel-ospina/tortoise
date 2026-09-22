@@ -179,12 +179,12 @@ class TestInitApiKeyEnhancements:
 
     # ── --json success shape (agent consumption) ──────────────
     def test_json_output_valid_key(self, monkeypatch, tmp_path, capsys):
-        with mock.patch("urllib.request.urlopen", return_value=_ok_response(b'{"team_id": "team123"}')):
+        with mock.patch("urllib.request.urlopen", return_value=_ok_response(b'{"org_id": "team123"}')):
             rc = self._run(monkeypatch, tmp_path, ["init", "--api-key", "tt_testkey", "--json"])
         assert rc == 0
         out = json.loads(capsys.readouterr().out)  # stdout is pure JSON
         assert out["status"] == "connected"
-        assert out["team_id"] == "team123"
+        assert out["org_id"] == "team123"
         assert out["api_url"] == "https://api.premiselabs.co"
         assert out["mcp"]["endpoint"] == "https://api.premiselabs.co/mcp/"
         assert out["mcp"]["auth_header"] == "Bearer tt_testkey"
@@ -196,7 +196,7 @@ class TestInitApiKeyEnhancements:
         # cursor shape has no `type` field; codex is a command
         assert "type" not in out["mcp"]["configs"]["cursor"]["config"]["mcpServers"]["tortoise"]
         assert out["mcp"]["configs"]["codex"]["command"].startswith("codex mcp add tortoise")
-        assert out["onboarding_prompt_url"] == "https://premiselabs.co/onboarding-prompt.md"
+        assert out["onboarding_prompt_url"] == "https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md"
         assert out["config_path"].endswith(".tortoise")
         assert out["next_steps"]
         # config still saved with 600 perms
@@ -260,7 +260,7 @@ class TestInitApiKeyEnhancements:
         assert "codex mcp add" not in out  # only the claude config
         assert "Cursor" not in out
         assert "[2] Codex" not in out
-        assert "onboarding-prompt.md" in out
+        assert "tortoise-onboarding/SKILL.md" in out
 
     # ── --write-mcp-config ────────────────────────────────────
     def test_write_mcp_config_creates_file(self, monkeypatch, tmp_path, capsys):
@@ -365,7 +365,7 @@ class TestInitApiKeyEnhancements:
         assert out["api_url"] == "https://api.premiselabs.co"
         assert out["mcp"]["endpoint"] == "https://api.premiselabs.co/mcp/"
         assert set(out["mcp"]["configs"]) == {"claude", "codex", "cursor", "pi"}
-        assert out["onboarding_prompt_url"] == "https://premiselabs.co/onboarding-prompt.md"
+        assert out["onboarding_prompt_url"] == "https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md"
         assert out["next_steps"]
         assert out["config_path"].endswith(".tortoise")
 

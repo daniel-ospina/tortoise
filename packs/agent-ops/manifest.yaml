@@ -1,0 +1,50 @@
+namespace: agent-ops
+name: Agent Operations
+version: 0.1.0
+tier: free
+description: Operational rules with the why — rule objects, rationale points, and
+  the groundedIn link (the rules-with-why lifecycle)
+ontology:
+  extends: core
+  objectKinds:
+  - rule
+  pointKinds:
+  - rationale
+  eventKinds:
+  - ruleRevised
+  kindDefs:
+    rule:
+      description: An operational rule — a durable directive governing agent
+        behavior (confusable with a generic standard; a rule carries the why)
+      nearMisses:
+      - standard
+  relations:
+  - predicate: groundedIn
+    mechanism: IMPL
+    semantics: supports
+    fromKind: agent-ops:rule
+    toKind: agent-ops:rationale
+    extractable: true
+  chains:
+  - id: ruleLifecycle
+    name: Rule Lifecycle
+    description: A rule is grounded in its rationale; revisions supersede the old
+      rule with the reasoning intact
+    steps:
+    - rule
+    - rationale
+    - ruleRevised
+    enforcement: warn
+  memory_granularity: 'Durable: the rule text, the situation that created it, and
+    the reasoning that supports or undermines it. Ephemeral: rule mechanics,
+    approval logistics, tool-specific workarounds.'
+extraction:
+  active: true
+  sourceTypes:
+  - conversation
+  enforcement:
+    kinds:
+      rule: retry
+connectors: []
+tools: []
+depends_on: []

@@ -36,18 +36,26 @@ def client(tmp_path, monkeypatch):
     from tortoise.hosted_api import _make_sdk
     sdk = _make_sdk(namespace="registry")
     try:
-        team = sdk.team_create("e2e-team")
+        team = sdk.org_create("e2e-team")
     except Exception:
         # Already exists — look it up
         rows = sdk._get_registry().query(
             "MATCH (t:Team {name: $name}) RETURN t.id",
             params={"name": "e2e-team"}).result_set
         team = {"id": rows[0][0]}
-    real_team_id = team["id"]
-    from tortoise.hosted_api import get_current_team
-    app.dependency_overrides[get_current_team] = lambda: {
-        "team_id": real_team_id, "tier": "free", "key_id": "k1",
-        "max_users": 1, "max_graphs": 1, "max_teams": 1,
+    real_org_id = team["id"]
+    from tortoise.hosted_api import get_current_org
+    app.dependency_overrides[get_current_org] = lambda: {
+        "org_id": real_org_id, "tier": "free", "key_id": "k1",
+        # C5 #2114: C2 owner class (deleg-NULL + scopes [] → legacy full
+        # access) — the E2E journey uses the register-minted tt_ key.
+        "legacy_full_access": True, "max_users": 1, "max_graphs": 1,
+        "max_teams": 1,
+        # #1922: /v1/demo is quota-gated — the auth override must carry the
+        # fail-closed max_points cap or the seed path 500s. #4010: the same
+        # contract covers max_sessions (unlimited → explicit None).
+        "max_points": 10000,
+        "max_sessions": None,
     }
     with TestClient(app) as tc:
         yield tc
@@ -64,7 +72,7 @@ class TestOnboardingJourney:
         assert r.status_code == 200
         body = r.json()
         assert "api_key" in body and body["api_key"].startswith("tt_")
-        assert "team_id" in body
+        assert "org_id" in body
 
     def test_e2e_register_idempotent(self, client):
         """Registering twice returns already_registered (409) without re-key."""
@@ -84,7 +92,7 @@ class TestOnboardingJourney:
         assert r.status_code == 200
         onboarding = r.json()["onboarding"]
         assert onboarding["demo_created"] is False
-        assert onboarding["session_recording"] is False
+        assert onboarding["session_recording"] is True  # #1927: default-ON (ToS-covered)
         assert onboarding["github_connected"] is False
 
     def test_e2e_demo_graph_creates_content(self, client):
@@ -119,8 +127,12 @@ class TestOnboardingJourney:
         assert onboarding["prompt_pasted"] is True
         assert "github_connected" in onboarding  # other fields preserved
 
-    def test_e2e_onboarding_complete_flag(self, client):
-        """E2E-7: Setting onboarding_complete works (verification done)."""
+    def test_e2e_onboarding_complete_accept_and_drop(self, client):
+        """#1997 (W1): accept-and-drop. This fixture's org is NODE-ABSENT
+        (sdk.team_create — node init is hosted-provision-only) → the legacy
+        jsonb writer is kept and a client PATCH onboarding_complete still
+        lands (grandfathered pre-backfill fallback). The node-present drop
+        branch is covered in test_onboarding_state_split.py."""
         r = client.patch("/v1/onboarding/state", json={"onboarding_complete": True})
         assert r.status_code == 200
         assert r.json()["onboarding"]["onboarding_complete"] is True
@@ -131,9 +143,76 @@ class TestOnboardingJourney:
         assert r.status_code == 200
         assert r.json()["connected"] is False
 
-    def test_e2e_github_connect_returns_auth_url(self, client):
+    def test_e2e_github_connect_returns_auth_url(self, client, monkeypatch):
         """E2E-3: GitHub connect returns an authorize URL (mock client id)."""
-        os.environ["GITHUB_CLIENT_ID"] = "e2e-client"
+        # #4152: monkeypatch, not os.environ — a RAW assignment here LEAKED
+        # GITHUB_CLIENT_ID=e2e-client into the rest of the pytest process, so
+        # tests/test_github_connect.py::test_connect_returns_auth_url (which
+        # only setdefaults the var at import) asserted against e2e-client and
+        # failed whenever this file ran first on the same xdist worker.
+        monkeypatch.setenv("GITHUB_CLIENT_ID", "e2e-client")
         r = client.post("/v1/onboarding/github/connect", json={"org": "acme"})
         assert r.status_code == 200
         assert "github.com/login/oauth/authorize" in r.json()["auth_url"]
+
+
+class TestReAskStateKeyCompat:
+    """#1927: the re-ask machinery (Slice 3) was removed — `capture_revised`
+    and `capture_ask_shown` survive as backward-compat state keys (still
+    written by the off-switch PATCH + the session-recording endpoint) but are
+    INERT: no dashboard re-ask pane reads them and no gate derives from them.
+    These tests pin the keys as plain state keys that round-trip through the
+    allowlisted GET/PATCH surface."""
+
+    def _set_state(self, client, **extra):
+        from tortoise.hosted_api import _make_sdk, _update_onboarding_state
+        sdk = _make_sdk(namespace="registry")
+        # the fixture seeds the team via team_create (ULID id) — resolve the
+        # real id by name (state writes are MATCH...SET on the team node)
+        rows = sdk._get_registry().query(
+            "MATCH (t:Team {name: $name}) RETURN t.id",
+            params={"name": "e2e-team"}).result_set
+        org_id = rows[0][0]
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.onboarding_state = $st",
+            params={"id": org_id, "st": "{}"},
+        )
+        _update_onboarding_state(org_id, **extra)
+
+    def test_reask_keys_roundtrip(self, client):
+        """The backward-compat keys persist through the allowlisted state
+        surface (write via PATCH, read back via GET) as inert keys."""
+        self._set_state(client, session_recording=True,
+                        capture_revised=True, capture_ask_shown=True)
+        r = client.get("/v1/onboarding/state")
+        st = r.json()["onboarding"]
+        assert st["session_recording"] is True
+        assert st["capture_revised"] is True
+        assert st["capture_ask_shown"] is True
+
+    def test_off_switch_writes_compat_keys_no_reask_gate(self, client):
+        """Toggle-off via the session-recording endpoint is a plain state
+        write (session_recording=False + capture_revised) — no re-ask gate
+        fires on the next read, and re-enable round-trips clean."""
+        self._set_state(client, session_recording=True)
+        r = client.post("/v1/onboarding/session-recording", json={"enabled": False})
+        assert r.status_code == 200, r.text
+        st = r.json()["onboarding"]
+        assert st["session_recording"] is False
+        assert st["capture_revised"] is True
+        # no gate derives from the inert keys
+        r2 = client.post("/v1/onboarding/session-recording", json={"enabled": True})
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["onboarding"]["session_recording"] is True
+
+    def test_compat_key_patch_has_no_capture_effect(self, client):
+        """Patching the compat keys directly changes only those keys — the
+        capture surface (session_recording) is untouched."""
+        self._set_state(client, session_recording=True,
+                        capture_revised=True, capture_ask_shown=True)
+        r = client.patch("/v1/onboarding/state", json={"capture_ask_shown": False})
+        assert r.status_code == 200, r.text
+        st = r.json()["onboarding"]
+        assert st["capture_ask_shown"] is False
+        assert st["capture_revised"] is True
+        assert st["session_recording"] is True

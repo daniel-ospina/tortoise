@@ -1,0 +1,248 @@
+// #1997 (W1): the 4 human steps of the onboarding wizard — single source of
+// truth for step structure + copy. Pure (no React), node --test unit-tested
+// (setupGuide.js pattern).
+//
+// Epic #1976 plan P1 (wizard): org-create/join → fork card →
+// connect-consent → done. ALL other steps (install/seed/decide) are
+// agent-side or archived (the legacy #1643 wizard render lives in the
+// ARCHIVED section of main.jsx — never deleted, A0 rollback path).
+//
+// Contract (issue #1997 O/I/T + DE2E-1/2/3):
+// - EXACTLY 4 human steps, in this order.
+// - user-facing copy says "Organization" — never "team"/"workspace"
+//   (DE2E-2 copy sweep; the wizardArchived.test.js source-scan asserts the
+//   live render uses WIZARD_STEPS and the org-create dialog says
+//   Organization).
+// - org-create name REQUIRED with editable prefill (DE2E-3) — the client
+//   validation below mirrors POST /v1/onboarding/team (server regex).
+// - the fork card is once-per-org (set-once server-side); build branch
+//   renders the registry-backed capability catalog (W8 — the offline
+//   fallback lives in BUILD_CATALOG_PLACEHOLDER). #3913: rendering the
+//   catalog performs NO write — the dashboard records no `catalog-presented`
+//   step edge (the build fork completes on the two acts the server OBSERVES).
+
+// #3724: the not-connected OBSERVATION phrase is ONE source shared with the
+// Overview's connection card (connectionObservation.js) — the two surfaces
+// state the same server fact and used to drift apart as two literals.
+import { NO_CONNECTION_OBSERVED, SETUP_PAUSED_NO_CONNECTION_OBSERVED } from './connectionObservation.js'
+
+export const WIZARD_STEPS = Object.freeze([
+  {
+    id: 'org-create',
+    label: 'Create your Organization',
+    sub: "Name your organization — it's the memory space your agent uses. Or accept an invitation to join one.",
+  },
+  {
+    id: 'fork',
+    label: "Choose how you'll use Tortoise",
+    // #3218: "you pick once per organization" stays — the fork IS set-once
+    // (state.py _SEMANTICS['fork'] = SET_ONCE; a changed value is a 409
+    // fork_already_set). Only the `unsure` answer leaves fork NULL, so the
+    // "answer any time" affordance belongs on THAT option, never here.
+    sub: 'This tells your agent what to set up — you choose once per Organization.',
+  },
+  {
+    id: 'connect',
+    label: 'Connect your agent',
+    // #2912: the old sub ("Connect Tortoise to your Organization.") restated the
+    // label instead of saying what the step ASKS. The step is a harness pick.
+    sub: 'Pick which harness to connect.',
+  },
+  {
+    id: 'done',
+    label: "You're all set",
+    // #2912 (PR-gate UX): the step-3 body already ends with "Open Settings →
+    // Setup guide to follow what happens next" — the header sub used to repeat
+    // that sentence verbatim inside one viewport.
+    sub: 'Your agent takes over from here.',
+  },
+])
+
+// #2912 (PR-gate UX P1): the wizard header and the sr-only step announcement
+// must name the stage the SAME way. Two contexts override the step's own
+// label:
+//   - step 0 on an org-holding account is a read-only summary ("Your
+//     Organization"), not an invitation to create one;
+//   - the paused reconnect's whole point is that the agent is NOT connected,
+//     so rendering "You're all set" as the page <h1> directly above the lede
+//     "You're set up, but your agent isn't connected yet" contradicted itself.
+// Pure + exported so it is unit-tested (wizardFlow.test.js) instead of pinned
+// by a source-text grep.
+export function wizardStageLabel(step, { hasOrg = false, paused = false, connected = false, buildFork = false } = {}) {
+  if (step === 3) {
+    // A real connection OUTRANKS the local skip (#2361 r3): connect → Back →
+    // Skip must still read as connected, never as paused. Checked first so the
+    // two flags cannot compose into the false "paused" reading.
+    if (connected) return WIZARD_STEPS[3]?.label ?? ''
+    // #3428/#2937 (lane B3): step 3's own label ("You're all set") is itself a
+    // harness-connected CLAIM — the very claim the deleted human writer used to
+    // manufacture. With the writer gone, a user who finishes the connect step
+    // without a server-observed connection lands here with `paused` false, and
+    // the old code greeted them with "You're all set". `connected` is the
+    // caller's server-derived `serverHarnessConnected`.
+    //
+    // The default is deliberately `false` (fail-honest): a caller that forgets
+    // to pass `connected` understates the connection, which is the harmless
+    // direction — it can never claim a connection we did not observe.
+    //
+    // review cycle 4 (item 13) made the BUILD arm state what was OBSERVED
+    // instead of asserting the connection is absent. review cycle 6 (item 2)
+    // makes the SELF arms do the same, for the same two reasons: its body
+    // refuses to assert the absence too ("we can't tell it's connected yet"),
+    // and the categorical sentence is factually false for a user whose session
+    // was CAPTURED — capture writes Session nodes and extracted points but
+    // files only `capture-disclosed`, never `harness-connected`, so that user
+    // can be connected-and-capturing under a screen reading "Not connected
+    // yet".
+    //
+    // Both forks now print the observation phrasing, so the fork no longer
+    // SELECTS a string here. `buildFork` stays in the signature deliberately:
+    // both call sites pass it (that call shape is pinned in
+    // wizardArchived.test.js) and it records the fork input; it is simply no
+    // longer a discriminator.
+    if (paused) return SETUP_PAUSED_NO_CONNECTION_OBSERVED
+    return NO_CONNECTION_OBSERVED
+  }
+  if (step === 0 && hasOrg) return 'Your Organization'
+  return WIZARD_STEPS[step]?.label ?? ''
+}
+
+// The fork card (epic plan P4 / I-4): presentation fork, once per org,
+// nudge-not-force — NEVER a billing gate. Fork SEMANTICS are W2-owned;
+// W1 renders the shell + persists the set-once fork via the checkpoint.
+// #2407: THREE visible options. 'unsure' ("Not sure yet — decide later")
+// is NOT a fork VALUE — it records fork_unsure_at server-side (checkpoint
+// op {fork_unsure_at: true}) WITHOUT consuming the set-once fork: fork stays
+// None, so the card keeps rendering as answerable ('ask') and a later
+// explicit self/build pick is a fresh fork write (200, never a 409).
+export const WIZARD_FORK_OPTIONS = Object.freeze([
+  {
+    id: 'self',
+    label: 'For my internal setup',
+    description: 'Your agent files decisions and findings to your Organization memory graph.',
+  },
+  {
+    id: 'build',
+    label: 'Build an application on top',
+    // #3218: the build branch's step 2 is "Call the SDK" (main.jsx
+    // connect-build) — the description has to name the SDK, not just the
+    // capability catalog, or the copy promises a catalog and delivers an API.
+    description: 'You get the Tortoise SDK and the capability catalog — the indexers and extractors you can build with.',
+  },
+  {
+    id: 'unsure',
+    label: 'Not sure yet — decide later',
+    // #3218: 'unsure' is the ONLY path that does not consume the set-once
+    // fork (it writes fork_unsure_at; fork stays NULL) — so the deferral
+    // affordance is stated here and the set-once consequence is stated on the
+    // step sub, instead of one sentence asserting both.
+    description: 'Skip for now — nothing is locked in. Answer any time from Settings → Setup guide.',
+  },
+])
+
+// The static build-branch catalog list (#1997 W1): since #2004 (W8) the
+// SOURCE is the pullable registry endpoint (GET /v1/capabilities →
+// tortoise/tool_registry.py CAPABILITY_CATALOG); this list is the OFFLINE
+// FALLBACK the dashboard renders while the fetch is in flight or when the
+// endpoint is unreachable. The names/kinds/descriptions are kept
+// byte-identical to the registry's 3 launch rows (the JS unit tests pin
+// this shape; a registry rename must be mirrored here + in the Python
+// test_capability_catalog.py CANONICAL_NAMES). The fallback's render records
+// NOTHING: #3913 removed the `catalog-presented` step edge from the dashboard
+// entirely (the only client checkpoint write is the fork pick itself).
+export const BUILD_CATALOG_PLACEHOLDER = Object.freeze([
+  { name: 'Session recorder', kind: 'indexer', description: 'Files agent conversations to the graph.' },
+  { name: 'Session extractor', kind: 'extractor', description: 'Pulls decisions and findings out of recorded sessions.' },
+  { name: 'Document indexer', kind: 'indexer', description: 'Indexes documents you point your agent at.' },
+])
+
+// #2004 (W8): resolve the registry-backed catalog for the build-path card.
+// Returns the endpoint's module rows when the pull succeeds (non-empty
+// array of shape-complete rows — including the registry's future/planned
+// modules), else the static fallback above (identical names — honest
+// offline degrade, never a blank catalog). Pure helper (node --test
+// unit-tested).
+export function resolveBuildCatalog(modules, fallback = BUILD_CATALOG_PLACEHOLDER) {
+  if (!Array.isArray(modules) || modules.length === 0) return fallback
+  // shape validation: a row must be a name/kind/description object — a
+  // malformed payload renders the fallback instead of empty-name rows
+  // (first-party static registry today, but the helper degrades honestly)
+  const wellFormed = modules.every((row) => row && typeof row === 'object'
+    && typeof row.name === 'string' && row.name.length > 0
+    && typeof row.kind === 'string'
+    && typeof row.description === 'string' && row.description.length > 0)
+  return wellFormed ? modules : fallback
+}
+
+// #2325/#2333: connect-step mint names must be DISTINGUISHABLE — the old
+// fixed 'Setup command' label made rotate/regenerate rows identical under
+// the free cap of 2. Every connect mint is named org + date (+ a same-minute
+// collision guard), so repeated connects never produce two identically-
+// named rows. Pure helper (node --test unit-tested). UTC stamp → sortable
+// and unambiguous across timezones.
+export function durableKeyName(orgName, date = new Date(), existingNames = []) {
+  const orgRaw = (orgName && String(orgName).trim()) || 'your organization'
+  const pad = (n) => String(n).padStart(2, '0')
+  const stamp = `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())} UTC`
+  // #2325 (code-review P2): the server clamps key labels to 64 chars
+  // (hosted_api KEY_NAME_MAX, _clean_key_label s[:64] — silent), so the
+  // stamp + (n) suffix must never sit in the truncated tail. Bound the org
+  // segment first, keep the label ≤ 64, and run the collision guard against
+  // the clamped names the table actually stores.
+  const MAX = 64
+  const head = 'key for '
+  const tail = ` ${stamp}` // ~21 chars
+  const orgMax = MAX - head.length - tail.length - 5 // reserve room for " (nn)"
+  const org = orgRaw.length > orgMax ? orgRaw.slice(0, orgMax).replace(/[_-]+$/, '') : orgRaw
+  const base = `${head}${org}${tail}`
+  const seen = new Set(Array.isArray(existingNames) ? existingNames.filter(Boolean) : [])
+  let name = base
+  let n = 2
+  while (seen.has(name)) {
+    const suffix = ` (${n++})`
+    name = `${base.slice(0, MAX - suffix.length)}${suffix}`
+  }
+  return name
+}
+
+// Org-create name validation — mirrors the server (POST /v1/onboarding/team:
+// non-empty, ≤64 chars, /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/). REQUIRED with
+// editable prefill, never a silent username (DE2E-3). Returns an error
+// string or null.
+export function orgNameError(name) {
+  const trimmed = String(name || '').trim()
+  if (!trimmed) return 'Organization name is required'
+  if (trimmed.length > 64 || !/^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$/.test(trimmed)) {
+    return 'Invalid organization name — letters, numbers, spaces, dash, underscore only'
+  }
+  return null
+}
+
+// #1998 (W2): fork-card display-mode semantics (surface 4 — W1 renders the
+// shell, W2 owns semantics). Pure helper so the fork-card behavior is
+// unit-testable without React:
+//   'ask'  — fork never chosen (first org, a legacy org pre-opt-in, OR a
+//            #2407-deferred org — "Not sure yet" records fork_unsure_at but
+//            NEVER consumes the fork, so fork stays None and the card keeps
+//            asking): the fork card ASKS (once per org; set-once server-side).
+//   'set'  — fork already persisted (chosen earlier, or INHERITED by org B at
+//            creation — compact orgs never re-ask): the card renders a
+//            read-only summary + Continue, options disabled.
+// fork values are 'self' | 'build' (state.py FORK_VALUES) — 'unsure' is a
+// fork-card ANSWER, never a fork value (forkStepState('unsure') === 'ask').
+export function forkStepState(fork) {
+  return (fork === 'self' || fork === 'build') ? 'set' : 'ask'
+}
+
+// The LEGACY #1643 wizard's step labels — ARCHIVED-not-deleted (A0 rollback
+// path, epic §8). The archived render lives in main.jsx under the
+// ⛔ ARCHIVED header; wizardArchived.test.js asserts these labels still exist
+// in the source (DE2E-1: deletion would pass the surface-absence assertion
+// but break A0 rollback).
+export const LEGACY_LABELS = Object.freeze([
+  "Connect your tool",
+  "Memory sources",
+  "Your agent's toolkit",
+  "Seed your graph",
+  "You're set",
+])

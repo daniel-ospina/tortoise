@@ -170,7 +170,6 @@ def test_classify_path_based_live_redis_server_is_candidate(tmp_path, monkeypatc
     LIST), which this test does not exercise (classification only).
     """
     monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
-    from tortoise.embedded_reaper import _pid_is_redis
     proc = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(60)"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

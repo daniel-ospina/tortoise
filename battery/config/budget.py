@@ -21,6 +21,11 @@ DEFAULT_MAX_COST_USD = 50.0
 class BudgetConfig:
     max_episodes: int = DEFAULT_MAX_EPISODES
     max_estimated_cost_usd: float = DEFAULT_MAX_COST_USD
+    #: #2292 probe sub-cap (pre-authorized inside the dollar cap) + the
+    #: judge-leg reserve line (decision (c)) — the --evidence validation
+    #: path HARD-STOPS against the reserve.
+    probe_cap_usd: float = 3.0
+    judge_leg_reserve_usd: float = 1.5
 
     def over_budget(self, *, n_episodes: int, estimated_cost_usd: float,
                     requested_max_episodes: int | None = None) -> str | None:
@@ -48,11 +53,16 @@ def load_budget(path: str | Path) -> BudgetConfig:
     try:
         max_episodes = int(raw.get("max_episodes", DEFAULT_MAX_EPISODES))
         max_cost = float(raw.get("max_estimated_cost_usd", DEFAULT_MAX_COST_USD))
+        probe_cap = float(raw.get("probe_cap_usd", 3.0))
+        judge_reserve = float(raw.get("judge_leg_reserve_usd", 1.5))
     except (TypeError, ValueError) as e:
         raise ConfigError(f"budget {p}: invalid numeric field: {e}") from e
-    if max_episodes < 1 or max_cost < 0:
+    if max_episodes < 1 or max_cost < 0 or probe_cap < 0 or judge_reserve < 0:
         raise ConfigError(f"budget {p}: caps must be positive")
-    return BudgetConfig(max_episodes=max_episodes, max_estimated_cost_usd=max_cost)
+    return BudgetConfig(max_episodes=max_episodes,
+                        max_estimated_cost_usd=max_cost,
+                        probe_cap_usd=probe_cap,
+                        judge_leg_reserve_usd=judge_reserve)
 
 
 def estimate_cost(arm: "ArmConfig", n_episodes: int) -> float:  # noqa: F821, UP037

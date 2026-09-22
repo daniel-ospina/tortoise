@@ -128,7 +128,7 @@ curl -s https://api.premiselabs.co/v1/team \
 
 ## 6. Migrating from self-hosted to cloud
 
-Running Tortoise yourself and moving to hosted? The primary path is **`tortoise export` → hosted import**: export your selfhost graph to a versioned, encrypted artifact (`tortoise-export-v1`), then import it into a fresh hosted team via `POST /v1/teams/{team_id}/import`. Point IDs and edge topology are preserved (belief scores are derived — EP recomputes server-side). Verified end-to-end by the **E2E-12-D** suite's `test_parity_export_import` case, which asserts structure parity (node/edge counts, Point IDs, operator topology). The manual **replay** path below remains the documented fallback (and the only path on versions without the export tool). See [quickstart-selfhosted.md](quickstart-selfhosted.md) for the daemon side.
+Running Tortoise yourself and moving to hosted? The primary path is **`tortoise export` → hosted import**: export your selfhost graph to a versioned, encrypted artifact (`tortoise-export-v1`), then import it into a fresh hosted team via `POST /v1/organizations/{org_id}/import`. Point IDs and edge topology are preserved (belief scores are derived — EP recomputes server-side). Verified end-to-end by the **E2E-12-D** suite's `test_parity_export_import` case, which asserts structure parity (node/edge counts, Point IDs, operator topology). The manual **replay** path below remains the documented fallback (and the only path on versions without the export tool). See [quickstart-selfhosted.md](quickstart-selfhosted.md) for the daemon side.
 
 > ✅ **Automated export → import is the primary path** — replay remains supported as a fallback.
 
@@ -150,7 +150,7 @@ Running Tortoise yourself and moving to hosted? The primary path is **`tortoise 
 4. **Import the artifact** into the team graph (owner session auth):
 
    ```bash
-   curl -X POST https://api.premiselabs.co/v1/teams/<team_id>/import \
+   curl -X POST https://api.premiselabs.co/v1/organizations/<org_id>/import \
      -H "Authorization: Bearer <owner-session-jwt>" \
      -H "Content-Type: application/vnd.tortoise.export.v1" \
      -H "X-Tortoise-Import-Key: <key_b64>" \
@@ -158,7 +158,7 @@ Running Tortoise yourself and moving to hosted? The primary path is **`tortoise 
    ```
 
    Re-importing the same artifact is idempotent (`{"imported":false,"already":true}`); a failed/tampered artifact is quarantined (422) and never touches the live graph.
-5. **Verify parity** — the import response's `restored` counts should match your source graph; `tortoise team info` and `tortoise context` confirm the team and its memory digest, and the MCP tools `tortoise_check_structure` (chain integrity) and `tortoise_summarize_structure` (counts per gate) confirm the imported graph. Once hosted reaches parity, decommission the daemon at your leisure.
+5. **Verify parity** — the import response's `restored` counts should match your source graph; `tortoise team info` and `tortoise context` confirm the team and its memory digest, and the MCP tools `tortoise_check_structure` (chain integrity) and `tortoise_summarize_structure` (counts: total points + per-gate breakdown) confirm the imported graph. Once hosted reaches parity, decommission the daemon at your leisure.
 
 ### Fallback: manual replay
 
@@ -170,6 +170,21 @@ tortoise create-point "The decision was approved" --kind statement   # individua
 ```
 
 For bulk, use the REST API (`POST /v1/points`) or the SDK — both accept the same content.
+
+
+## 6.5 Expansion packs (optional)
+
+Tortoise ships five starter packs by default (`dev`, `marketing`,
+`product-strategy`, `pm`, `agent-ops`) — declarative YAML that extends the
+core ontology with domain vocabulary, chains, and extraction guidance.
+`tortoise_packs_list` shows your active packs.
+
+- **Install a custom pack per team:** `POST /v1/packs/manifests` with the
+  manifest YAML (or the `tortoise_pack_install` MCP tool) — validated against
+  the shared schema; ontology-only v1 (no connectors/tools on tenant packs).
+  Reserved starter namespaces are rejected.
+- **Author one:** same manifest format as self-host
+  ([docs/EXPANSION_PACKS.md](EXPANSION_PACKS.md)).
 
 ## 7. Beta feedback & bug reports
 

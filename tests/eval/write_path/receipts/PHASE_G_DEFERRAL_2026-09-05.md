@@ -1,0 +1,83 @@
+# Phase G product-lane re-bless — DEFERRED (2026-09-05)
+
+Epic #2080 W5 Phase G (#2104). The product-lane (LLM-extractor) re-run that
+would re-measure `tests/eval/write_path/baselines/main.json` could NOT be
+completed today: four consecutive sealed runs ended `inconclusive`
+(`run_status: failed`, `failure_origin: runner_error`) because the OpenRouter
+LLM extractor produced an EMPTY capture for one or more sessions per run (the
+runner voids the whole run when any session fails to emit; the lost session(s)
+differed every run — wp02, then wp03, then four of five, then wp01). Run
+receipts are preserved in this directory:
+
+| Receipt | Sessions emitting | Notes |
+|---|---|---|
+| w2b-phaseg-llm-2026-09-05.json  | 4/5 (wp02 lost) | macro 0.097 |
+| w2b-phaseg-llm-2026-09-05b.json | 4/5 (wp03 lost) | macro 0.292 |
+| w2b-phaseg-llm-2026-09-05c.json | 1/5 (wp05 only) | macro 0.014 |
+| w2b-phaseg-llm-2026-09-05d.json | 4/5 (wp01 lost) | macro 0.083 |
+
+## Diagnosis (evidence, not hypothesis)
+
+- Small OpenRouter completions are healthy (3/3 direct probes, ~1.5 s).
+- The hazard is the documented #1549 pattern: large session-transcript
+  completions stall mid-chunked-response; the extractor's deadline/retry
+  machinery eventually aborts → the capture degrades to EMPTY *without an
+  exception* → the runner correctly marks the session non-emitting and voids
+  the run (`verdict: inconclusive`). No product-side regression is present:
+  every run's emitting sessions carry clean quote_fidelity=1.0 and
+  provenance_accuracy=1.0, and the failure class is uniformly
+  content_missing on the empty session.
+- `cost_usd: 0.0` on every run is a separate usage-ATTRIBUTION gap in this
+  lane (real LLM content is produced — emitting sessions write 10-21 points
+  with transcript-accurate content), tracked in the follow-up below.
+
+## What IS verified (the CI-gate half of Phase G)
+
+The deterministic m2/echo lane gate passed and its baseline is blessed
+(`tests/eval/write_path/baselines/m2.json`, receipt
+w2b-m2-lane-2026-09-03.json): macro 0.9722, verdict PASS on clean replay —
+the can-fail CI gate for write-path regression. Phase C's fix-wave #1
+(ep_update_missing) shipped; the write-path baseline main.json (0.25) with
+its named failure classes (content_missing = extractor recall) remains the
+published W4 survival-target justification.
+
+## Follow-up (opened)
+
+Re-run `tests/eval/write_path/runner.py run` under stable OpenRouter
+conditions (or after the #1549 extractor retry/deadline hardening lands) to
+completion — a run with 5/5 sessions emitting is REQUIRED before blessing a
+revised main.json; also fix the lane's usage-attribution zero (cost_usd).
+Until then Phase G's product-lane blessing stays deferred; the epic gate's
+CI half stands.
+
+## Addendum (2026-09-06) — mechanical-v2 pin + next steps
+
+- **Mechanical judge pin bumped to `w2-write-path-mechanical-v2`** (#2405): the
+  survival rule gained a paraphrase leg (`grading.survival_match`, gated on
+  `accepts_rephrase_linked`, 0.45 anchor-coverage band + shared-token floor +
+  polarity gate). Runs under v2 are NOT comparable to the v1 baselines.
+- **m2.json protocol-re-blessed to v2** (macro 1.0 / strict 1.0 — the v1 09-03
+  baseline predated the Phase C ep_update_missing fix-wave; 70/72 v1 strict
+  failures were ep_update_missing, 2 content_missing now verbatim-written;
+  repro'd, PASS receipt w2b-m2-lane-2026-09-06-v2-pass.json).
+- **PENDING: main.json must protocol-re-bless under v2 after the next llm-lane
+  run** — the next product-lane run records v2 and will verdict `inconclusive`
+  (judge_pin_mismatch) against the v1 main.json until then. The sealed v1 run
+  w2b-phaseg-llm-2026-09-06c.json (5/5 emitting, captures ok=True; macro 0.375;
+  verdict regression on distractor leakage 1) is the last comparable v1 number.
+
+## Addendum 2 (2026-09-06) — v2 measurement landed; blessing blocked on leakage
+
+- **v2 llm-lane sealed run** `w2b-phaseg-llm-2026-09-06d.json` (5/5 emitting,
+  captures ok=True; judge pin w2-write-path-mechanical-v2; verdict
+  inconclusive / judge_pin_mismatch vs the still-v1 main.json — the enforced
+  protocol path): **macro 0.4722 / strict 0.4722** under the paraphrase-aware
+  rule (vs 0.375 verbatim-only) — the measurement fix rescued ~7 paraphrased
+  units (wp01 2/16 -> 6/16, wp05 3/15 -> 6/15). True content retention is
+  materially higher than the v1 number.
+- **Binding blocker: distractor leakage 4 > tolerance 1** (standing quality
+  bar — cannot be blessed away by re-pinning). Run-to-run extractor variance
+  (sealed v1 run c: leakage 1; this run: 4). Root cause: S2 has no
+  anti-routine gate — true-but-routine asides surface as memory points.
+  Filed as a follow-up (S2 relevance/exclusion gate) — product-side fix, then
+  re-run to leakage <= 1 and protocol-bless main.json (#2338).

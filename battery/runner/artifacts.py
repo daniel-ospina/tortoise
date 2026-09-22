@@ -1,4 +1,4 @@
-"""Artifact writers — run_artifact.json v1.0 + summary.json v1.0 (S7).
+"""Artifact writers — run_artifact.json v1.1 + summary.json v1.1 (S7).
 
 Schemas pinned in the plan (Task 6 Schema note); every write is
 schema-validated by the schema tests. Timestamps are recorded but never
@@ -13,14 +13,18 @@ from pathlib import Path
 from typing import Any
 
 from battery.enums import ModelCallOutcome
+from battery.runner.emit import (
+    validate_emitter_coverage,
+    validate_event_entry,
+)
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 
 _ARTIFACT_KEYS = (
     "schema_version", "run_id", "seed", "arm", "scenario_id", "tier", "model",
     "determinism", "episode_trace", "metric_values", "model_call_outcomes",
     "ep_outcome", "isolation_breach", "excluded", "setup", "timestamps",
-    "provenance",
+    "provenance", "event_log", "run_mode", "emitter_gap",
 )
 _SUMMARY_KEYS = ("schema_version", "arms", "run", "timestamps")
 
@@ -30,14 +34,43 @@ def run_id(seed: int, arm: str, scenario_id: str) -> str:
     return f"{seed}-{arm}-{scenario_id}"
 
 
+def run_mode_for(model: dict[str, Any] | None) -> str:
+    """mock|real discriminator: ``model.provider == "mock-agent"`` is the
+    MockArm (mock episodes keep an empty event log — never claimed real);
+    everything else is a real-mode artifact (emitter-gap applies)."""
+    return "mock" if (model or {}).get("provider") == "mock-agent" else "real"
+
+
 def build_run_artifact(
     *, seed: int, arm: str, scenario, episode, metric_values: dict[str, float],
     outcomes: dict[str, int], ep_outcome: str, excluded: dict[str, Any],
     setup_info: dict[str, Any], provenance: dict[str, Any],
     python_hash_seed: str, isolation_breach: bool = False,
     model: dict[str, Any] | None = None,
+    event_log: list[dict[str, Any]] | None = None,
+    expected: set[str] | None = None,
 ) -> dict[str, Any]:
-    """Assemble a schema-v1.0 run artifact (all top-level keys present)."""
+    """Assemble a schema-v1.1 run artifact (all top-level keys present).
+
+    Phase-2 FINAL coverage validation at artifact assembly: when ``expected``
+    is given (real episodes only — the runner computes the per-episode
+    expected set through the scorer seam BEFORE scoring), the post-
+    derivation log is validated against it and the uncovered fields are
+    recorded as ``emitter_gap``. Excluded episodes are exempt (the runner
+    passes ``expected=None`` and records the expected-vs-emitted snapshot in
+    the exclusion record) — an honest exclusion is never mislabeled an
+    emission bug, and the exemption cannot bypass the gap gate.
+    """
+    log = list(event_log) if event_log is not None else []
+    for entry in log:
+        validate_event_entry(entry)  # integrity: never a silent pass
+    if expected is not None:
+        emitter_gap = sorted(validate_emitter_coverage(log, expected=set(expected)))
+    else:
+        emitter_gap = []
+    model = model or {"provider": "mock-agent", "model_id": "mock-agent",
+                      "temperature": 0.0}
+    run_mode = run_mode_for(model)
     now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
     return {
         "schema_version": SCHEMA_VERSION,
@@ -46,8 +79,7 @@ def build_run_artifact(
         "arm": arm,
         "scenario_id": scenario.id,
         "tier": scenario.tier.value,
-        "model": model or {"provider": "mock", "model_id": "mock-agent",
-                           "temperature": 0.0},
+        "model": model,
         "determinism": {"seed": seed, "execution_order": "sequential",
                         "python_hash_seed": python_hash_seed},
         "episode_trace": episode.to_artifact_trace(),
@@ -59,6 +91,9 @@ def build_run_artifact(
         "setup": setup_info,
         "timestamps": {"written_utc": now},
         "provenance": provenance,
+        "event_log": log,
+        "run_mode": run_mode,
+        "emitter_gap": emitter_gap,
     }
 
 
@@ -74,13 +109,46 @@ def write_run_artifact(attempt_dir: Path, artifact: dict[str, Any]) -> Path:
 
 def build_summary(*, arms: list[dict[str, Any]], exit_code: int,
                   run_ids: list[str], artifacts: list[str], seed: int,
-                  timestamps: dict[str, str]) -> dict[str, Any]:
-    """Assemble a schema-v1.0 run summary (per-arm + run-level)."""
+                  run_mode: str = "mock",
+                  timestamps: dict[str, str],
+                  sessions: int = 1,
+                  l4_underpopulated: bool = False,
+                  budget_stopped: bool = False,
+                  budget_skipped: list[str] | None = None,
+                  retrieval_legs: list[str] | None = None,
+                  retrieval_degraded: bool = False) -> dict[str, Any]:
+    """Assemble a schema-v1.1 run summary (per-arm + run-level). The
+    run-level ``run.run_mode`` records the mode the runner RESOLVED at run
+    end (mock iff every arm resolved mock; PR #2341 review round 2, P2) so
+    the CLI report prefers it over re-inferring from artifact presence — a
+    summary-only all-arm-fail REAL run carries zero episode artifacts and
+    artifact inference would mislabel it mock.
+
+    ``sessions`` / ``l4_underpopulated`` (Task 10): the stream dimension
+    + the runner-stamped L4 underpopulation flag (a real run that included
+    L4 scenarios at sessions < 2). ``budget_stopped``/``budget_skipped``
+    (review #2629 P1-1): the mid-run dollar cap tripped — stamped with the
+    skipped unit ids so the stop is never a silent truncation. The CLI
+    report composes the run-level report_status from these.
+
+    ``retrieval_legs`` / ``retrieval_degraded`` (#2985): the retrieval
+    conditions that produced the run's numbers — the union of legs the
+    retrieval-reading arms OBSERVED via the product's ``leg_trace`` (never
+    an availability guess) and whether any leg degraded or a real retrieval
+    arm was refused by the preflight. A run with no retrieval arm (mock/a0)
+    records no legs and is not degraded by construction.
+    """
     return {
         "schema_version": SCHEMA_VERSION,
         "arms": arms,
         "run": {"exit_code": exit_code, "run_ids": run_ids,
-                "artifacts": artifacts, "seed": seed},
+                "artifacts": artifacts, "seed": seed, "run_mode": run_mode,
+                "sessions": sessions,
+                "l4_underpopulated": l4_underpopulated,
+                "budget_stopped": budget_stopped,
+                "budget_skipped": budget_skipped or [],
+                "retrieval_legs": list(retrieval_legs or []),
+                "retrieval_degraded": bool(retrieval_degraded)},
         "timestamps": timestamps,
     }
 

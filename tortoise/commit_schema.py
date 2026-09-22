@@ -45,6 +45,7 @@ from typing import Any, Iterable, Literal  # noqa: UP035
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from .file_indexer import provenance_basename
 from .ids import content_hash
 from .pack_registry import (
     CANONICAL_POINT_KINDS,
@@ -111,6 +112,17 @@ CORE_SOURCE_KINDS: frozenset[str] = frozenset(
     KNOWN_SOURCE_TYPES | set(SOURCE_KIND_DEFAULTS) | {"agentSession"}
 )
 
+# The canonical core event-kind set (ONTOLOGY §5 + the derived session
+# events). #1933 (epic #1891): this module-level set is the CORE BASE the
+# pack-aware Layer-1 event vocabulary unions with (it used to be a local
+# inside validate_layer1; hoisted so Vocab can reference it).
+EVENT_KINDS: frozenset[str] = frozenset({
+    "decision", "occurrence", "deployment", "review",
+    "extraction", "meeting", "experiment", "friction", "turn",
+    "sessionCaptured", "AgentSession", "documentCreated",
+    "roleCreated", "pointAdded", "humanApproval",
+})
+
 
 @dataclass(frozen=True)
 class Vocab:
@@ -118,9 +130,14 @@ class Vocab:
 
     point_kinds: frozenset[str]
     source_kinds: frozenset[str]
+    # #1933 (epic #1891): pack event kinds — the Layer-1 event gate used a
+    # HARDCODED set, so a mined pack event (e.g. agent-ops:ruleRevised →
+    # bare ``ruleRevised`` after the extractor's FIX-A stripping) 422'd.
+    event_kinds: frozenset[str] = frozenset(EVENT_KINDS)
 
     def __contains__(self, kind: str) -> bool:  # pragmatic: Vocab ⊇ kind
-        return kind in self.point_kinds or kind in self.source_kinds
+        return (kind in self.point_kinds or kind in self.source_kinds
+                or kind in self.event_kinds)
 
 
 def compile_vocab(packs_dir: Path | str | None = None) -> Vocab:
@@ -132,21 +149,28 @@ def compile_vocab(packs_dir: Path | str | None = None) -> Vocab:
     the namespaced one — pack_registry.list_all_kinds). Source kinds =
     ontology §5 source-type vocabulary (KNOWN_SOURCE_TYPES ∪ registered
     SOURCE_KIND_DEFAULTS incl. tier forms ∪ ``agentSession``) ∪ pack-declared
-    extraction sourceTypes.
+    extraction sourceTypes. Event kinds = the canonical core set ∪ each
+    pack's declared eventKinds in BOTH bare and ``ns:kind`` form (#1933 —
+    the extractor strips event kinds to bare form in the payload).
     """
     if packs_dir is None:
-        packs_dir = Path(__file__).resolve().parent.parent / "packs"
+        from tortoise.pack_registry import default_packs_dir
+        packs_dir = default_packs_dir()
     registry = PackRegistry(packs_dir)
     registry.load_all()
     pack_point: set[str] = set()
     pack_sources: set[str] = set()
+    pack_events: set[str] = set()
     for ns, pack in registry.packs.items():
         pack_point.update(pack.point_kinds)
         pack_point.update(f"{ns}:{k}" for k in pack.point_kinds)
         pack_sources.update(pack.extraction.get("sourceTypes") or [])
+        pack_events.update(pack.event_kinds)
+        pack_events.update(f"{ns}:{k}" for k in pack.event_kinds)
     return Vocab(
         point_kinds=frozenset(CORE_POINT_KINDS | pack_point),
         source_kinds=frozenset(CORE_SOURCE_KINDS | pack_sources),
+        event_kinds=frozenset(EVENT_KINDS | pack_events),
     )
 
 
@@ -180,12 +204,36 @@ def refresh_vocab() -> Vocab:
 
 
 class ProvenanceRef(BaseModel):
-    """Local file provenance — path is BASENAME only (privacy, W-7)."""
+    """Local file provenance — path is BASENAME only (privacy, W-7).
+
+    ``contentHash`` (#4005) is the client-computed sha256 of the RAW's
+    normalized text (``file_indexer.derive_source_content_hash``) — the
+    index entry's integrity anchor. Privacy-safe under W-7: a hash is not the
+    raw and never leaves the machine as content. Optional for back-compat
+    (old clients send none); the server NEVER substitutes ``hash(url)`` —
+    absent stays absent (see the hosted Source bridge).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     path: str = Field(min_length=1)
     spans: list[str] = Field(default_factory=list)
+    contentHash: str | None = None
+
+    @field_validator("path")
+    @classmethod
+    def _basename_required(cls, v: str) -> str:
+        # #4005 review P1/P2: a basename-less path (``/``, ``.``, ``..``,
+        # ``a/.``) used to pass Layer-1 and then either raise mid-write (a
+        # redacted 500 after the Session/Document/Event were already
+        # written) or fall through the writer's basename map and mint a
+        # bare-basename Source. Reject it here, before any write.
+        if not provenance_basename(v):
+            raise ValueError(
+                "path must carry a basename component (W-7: basenames only; "
+                f"got {v!r})"
+            )
+        return v
 
 
 class Source(BaseModel):
@@ -475,6 +523,18 @@ class CommitPayload(BaseModel):
     supersessions: list[SupersessionRecord] = Field(default_factory=list)  # #1350
     telemetry: Telemetry
 
+    @field_validator("session_id")
+    @classmethod
+    def _non_blank_session_id(cls, v: str) -> str:
+        # #4005 review P1: ``session_id=" "`` passed ``min_length=1`` and
+        # then raised inside the write's Source derivation AFTER the Session
+        # counters, Document and Event were written — a redacted 500 with the
+        # CommitRecord stuck ``partial`` and a non-converging retry. The id is
+        # the Source's collision domain, so reject a blank one at Layer-1.
+        if not v.strip():
+            raise ValueError("session_id must be a non-blank string")
+        return v
+
     @field_validator("captured_at")
     @classmethod
     def _iso8601(cls, v: str) -> str:
@@ -692,22 +752,28 @@ def validate_layer1(
     # a slot must match the emitted entity's (name, bare kind), not just the
     # name ("core:plan" ≡ "plan" via _bare_kind)
     entity_keys = {(e.name, _bare_kind(e.kind)) for e in payload.entities}
-    # The session Source identity = provenance path basename (privacy: paths
-    # are basename-only; the server derives the Session Source url from it).
-    session_source_ids = {Path(r.path).name for r in payload.provenance_refs}
+    # The session Source identity is the CANONICAL ``session:<session_id>``
+    # (#4005) — the same url the capture path materializes and delete_session
+    # deletes. Layer-1 therefore accepts a point/event ``source_ref`` when it
+    # names either a provenance basename (the W-7 client spelling) or an
+    # emitted ``sources[]`` url. BOTH sides of this set (and the writer's
+    # ``session_ref_urls`` map) derive the basename through the ONE shared
+    # ``file_indexer.provenance_basename`` primitive — they used to disagree
+    # on ``"."``/``"a/."`` and let a Layer-1-accepted ``source_ref`` fall
+    # through to a bare-basename Source (#4005 review P2).
+    session_source_ids = {provenance_basename(r.path)
+                          for r in payload.provenance_refs}
     source_urls = {s.url for s in payload.sources}
     emitted_operator_keys = {
         (o.src, o.dst, o.op_type) for o in payload.operators
     }
 
-    # Events (#1013): eventKind in the closed event vocab; about_entities
-    # referential; source_ref required.
-    EVENT_KINDS = {"decision", "occurrence", "deployment", "review",
-                   "extraction", "meeting", "experiment", "friction", "turn",
-                   "sessionCaptured", "AgentSession", "documentCreated",
-                   "roleCreated", "pointAdded", "humanApproval"}
+    # Events (#1013): eventKind in the closed event vocab (core ∪ pack
+    # eventKinds — #1933, epic #1891: the Layer-1 gate used a hardcoded
+    # local set, so a mined pack event like ``ruleRevised`` 422'd);
+    # about_entities referential; source_ref required.
     for i, ev in enumerate(payload.events):
-        if ev.eventKind not in EVENT_KINDS:
+        if ev.eventKind not in vocab.event_kinds:
             add(f"events[{i}].eventKind",
                 f"eventKind {ev.eventKind!r} not in the ontology event vocabulary")
         for name in ev.about_entities:

@@ -1,0 +1,16 @@
+{
+  "holdout": false,
+  "seed": 7,
+  "suite": "continuity",
+  "turns": [
+    {
+      "content": "Decision: we're moving the ingest retry to exponential backoff with a 5x cap. Maya proposed it, Leo seconded.",
+      "role": "user"
+    },
+    {
+      "content": "Recorded as a decision with the proposer attribution.",
+      "role": "assistant"
+    }
+  ],
+  "writer": true
+}

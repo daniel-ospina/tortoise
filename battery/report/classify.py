@@ -24,7 +24,13 @@ LOAD_BEARING_FAMILIES: frozenset[str] = frozenset({
 #: Families won by construction for A4 (the graph's primitives firing).
 STRUCTURAL_FAMILIES: frozenset[str] = frozenset({"R1", "R4"})
 
-CLASSIFICATIONS = ("STRONG", "STRUCTURAL", "PARITY", "WEAK")
+CLASSIFICATIONS = ("STRONG", "STRUCTURAL", "PARITY", "WEAK",
+                  "insufficient_n")
+
+#: Per-cell insufficient_n marker (Task 5): an attempted-but-unmeasured
+#: family cell (probe no-data sentinel) classifies insufficient_n — it is
+#: reported, never dropped, and can never enter the verdict (no vacuous
+#: pass from an unmeasured cell).
 
 
 @dataclass(frozen=True)
@@ -36,7 +42,7 @@ class CellClassification:
     load_bearing: bool
 
 
-def classify_cell(family: str, arm: str, value: float,
+def classify_cell(family: str, arm: str, value: float | None,
                   best_comparator: float,
                   delta_threshold: float = 0.10) -> CellClassification:
     """Classify one cell vs the best comparator arm.
@@ -45,7 +51,12 @@ def classify_cell(family: str, arm: str, value: float,
     - STRUCTURAL: family is a structural win for A4 (won by construction)
     - PARITY: within ±delta of the comparator
     - WEAK: comparator beats value by ≥ delta
+    - insufficient_n: the cell was attempted but produced no measured value
+      (probe no-data sentinel) — reported, never classified, never scored.
     """
+    if value is None:
+        return CellClassification(family, arm, None, "insufficient_n",
+                                  load_bearing=False)
     if (family in STRUCTURAL_FAMILIES and arm == "a4"
             and value >= best_comparator):
         # Structural label only when the primitive actually WON — an a4

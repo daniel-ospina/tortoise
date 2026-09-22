@@ -10,7 +10,9 @@ S6 of Memory System V1 epic (#5199).
 """
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -22,7 +24,7 @@ from tortoise.memory_orchestrator import (
     dispatch, merge, routeRead, translateNL, MergeResult  # noqa: F401
 )
 
-DB_PATH = os.path.join(tempfile.gettempdir(), "tortoise-test-s6.db")  # noqa: F821
+DB_PATH = os.path.join(tempfile.gettempdir(), "tortoise-test-s6.db")
 
 
 def setup_test_data(proj: FalkorProjection) -> None:
@@ -174,7 +176,7 @@ if __name__ == "__main__":
     finally:
         cleanup_test_data(proj)
         # Safety (issue #176): never unlink the canonical DB via this script
-        if os.path.realpath(db_path) == os.path.realpath(os.environ.get("TORTOISE_DB_PATH", os.path.expanduser("~/.tortoise/tortoise.db"))):  # noqa: F821
+        if os.path.realpath(db_path) == os.path.realpath(os.environ.get("TORTOISE_DB_PATH", os.path.expanduser("~/.tortoise/tortoise.db"))):
             print("REFUSING to unlink canonical DB path", db_path)
             raise SystemExit(2)
         Path(db_path).unlink(missing_ok=True)

@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>404 — Page Not Found | Premise Labs</title>
+  <meta name="robots" content="noindex">
+  <meta name="description" content="">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #060b14;
+      --text: #cbd5e1;
+      --text-dim: #94a3b8;
+      --accent: #06b6d4;
+      --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+      --serif: 'Georgia', 'Times New Roman', serif;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 14px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 2rem;
+    }
+
+    .code {
+      font-family: var(--mono);
+      font-size: 5rem;
+      font-weight: 700;
+      color: var(--accent);
+      line-height: 1;
+      margin-bottom: 1rem;
+      letter-spacing: -0.03em;
+    }
+
+    h1 {
+      font-family: var(--serif);
+      font-size: clamp(1.4rem, 3vw, 2rem);
+      font-weight: 400;
+      color: var(--text);
+      text-align: center;
+      margin-bottom: 0.75rem;
+      line-height: 1.3;
+    }
+
+    p {
+      color: var(--text-dim);
+      text-align: center;
+      max-width: 480px;
+      margin-bottom: 2rem;
+    }
+
+    .links {
+      display: flex;
+      gap: 1rem;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    .links a {
+      color: var(--accent);
+      text-decoration: none;
+      border: 1px solid var(--accent);
+      padding: 0.6rem 1.25rem;
+      font-size: 0.85rem;
+      transition: background 0.2s, color 0.2s;
+    }
+
+    .links a:hover {
+      background: var(--accent);
+      color: var(--bg);
+    }
+
+    .links a.primary {
+      background: var(--accent);
+      color: var(--bg);
+      font-weight: 600;
+    }
+
+    .links a.primary:hover {
+      background: #0891b2;
+    }
+  </style>
+</head>
+<body>
+  <div class="code">404</div>
+  <h1>This page doesn&rsquo;t exist.</h1>
+  <p>The link you followed may be broken, or the page may have moved to <code>tortoise.premiselabs.co</code>.</p>
+  <div class="links">
+    <a href="https://premiselabs.co/" class="primary">Home</a>
+    <a href="https://tortoise.premiselabs.co/">Tortoise</a>
+  </div>
+</body>
+</html>

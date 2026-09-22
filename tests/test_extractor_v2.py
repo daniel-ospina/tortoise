@@ -3,8 +3,11 @@
 Covers the verification checklist surfaces: chunker+compiler (unit),
 S2 map-to-embed (unit, mock), S3 graph search (graceful degradation +
 integration with the real backend, skip-if-unavailable), S5 embed execution
-(dependency order, link-before-create, supersession, chains, minted kinds),
-and the extract_session_v2 orchestrator (mock model, no LLM).
+(dependency order, link-before-create, supersession, minted kinds),
+and the extract_session_v2 orchestrator (mock model, no LLM). Chain
+enforcement scenarios live in tests/test_chain_enforcer.py (issue #1695,
+Task 1 — the deterministic validate_and_rewire superset; this module keeps
+validate_chains' warn-only backstop unit surface).
 """
 from __future__ import annotations
 
@@ -145,6 +148,36 @@ class TestMasterList:
         # and S2/S4's rendered master list carries it too
         assert "STATE-VALUE CARVE-OUT" in v2._render_master(v2.build_master_list())
 
+    def test_operational_value_carve_out_surfaces(self):
+        """#2453: the value carve-out EXTENDS to operational/decision values
+        — a concrete value (measurement, deadline/freeze, threshold/TTL,
+        version, count) that is the SUBJECT of a decision/observation/plan
+        is durable and carried VERBATIM (wp04 aurora_perf 0/13 root cause:
+        every gold unit was a value the mapper treated as disposable). The
+        clause rides the SAME shared block as the state clause, so it
+        surfaces wherever the state carve-out does — S1's granularity slot
+        AND the S2/S4 rendered master list (both verbose and core-only)."""
+        # S1's memory_granularity slot carries the operational clause too
+        gt = v2._granularity_text()
+        assert "OPERATIONAL-VALUE CARVE-OUT" in gt
+        assert "4.2 seconds" in gt
+        # S2/S4's rendered master list carries it (verbose + core-only)
+        for rendered in (v2._render_master(v2.build_master_list()),
+                         v2._render_master(v2.build_master_list(),
+                                           core_only=True)):
+            assert "OPERATIONAL-VALUE CARVE-OUT" in rendered
+            assert "VERBATIM" in rendered
+            assert "800 milliseconds" in rendered
+        # end-to-end: the rendered S2/S4 prompts carry it through the
+        # master-list slot
+        assert "OPERATIONAL-VALUE CARVE-OUT" in v2.render_s2_prompt()
+        assert "OPERATIONAL-VALUE CARVE-OUT" in v2.render_s4_prompt(
+            "STORY", {}, S2_FIXTURE)
+        # incidental logistics stay droppable — the carve-out must not
+        # become a hoarding licence (#2453 pairs with #2424)
+        assert "INCIDENTAL process logistics" in v2.STATE_VALUE_CARVE_OUT
+        assert "ids, hashes" in v2.STATE_VALUE_CARVE_OUT
+
 
 # ── Chunker + compiler ─────────────────────────────────────────────────────
 
@@ -201,17 +234,26 @@ class TestS2:
 
     def test_rejects_unparseable(self):
         # S2 retries once on parse failure (pilot #1549 fix) then raises.
+        # #1746 (D3): the retry is ERROR-INFORMED — the attempt-2 user
+        # message carries the parse-error block ("did not parse" + the
+        # offending region), never a same-prompt echo.
         model = MockModel(["no json here", "no json here"])
         with pytest.raises(ValueError):
             v2.run_s2(model, "STORY")
         assert len(model.calls) == 2  # one parse-retry happened before raising
+        user2 = model.calls[1][1]
+        assert "did not parse" in user2
+        assert "no json here" in user2  # the offending region rides along
 
     def test_parse_retry_recovers(self):
-        """Parse-retry (pilot #1549): an unparseable first output is re-prompted
-        and a valid second output succeeds."""
+        """Parse-retry (pilot #1549 + #1746 D3): an unparseable first output
+        is re-prompted ERROR-INFORMED and a valid second output succeeds."""
         model = MockModel(["not json", json.dumps(S2_FIXTURE)])
         out = v2.run_s2(model, "STORY")
         assert out  # recovered after the parse retry
+        user2 = model.calls[1][1]
+        assert "did not parse" in user2
+        assert "not json" in user2  # the offending region rides along
 
     def test_prompt_contains_master_and_chains(self):
         model = MockModel([json.dumps(S2_FIXTURE)])
@@ -262,6 +304,75 @@ class TestS2:
         assert "NEVER dropped" in v2.S4_TMPL or "never dropped" in v2.S4_TMPL
         assert "Tier-A" in v2.S4_TMPL
 
+    def test_s2_prompt_anti_routine_exclusion(self):
+        """#2424: S2 (the GRAPH MAPPER) carries the anti-routine exclusion
+        gate — true-but-routine content (routine operational asides,
+        status-quo/banal remarks, filler, small talk) is a NOOP for memory
+        (Mem0 semantics), NEVER emitted as a point/entity/event. The rule
+        lives in ONE shared constant and renders into BOTH mapping stages
+        (S2 and S4) from the {anti_routine} template slot; a future edit
+        cannot silently drop it from one prompt.
+
+        #2424 residual (clause-level): the same shared constant ALSO carries
+        the CLAUSE-LEVEL STRIP — the emission NOOP alone cannot stop a
+        routine aside that rides inside the prose of an otherwise-durable
+        point (the sealed run leaked BOTH wp03 distractors that way). The
+        strip instruction must render into both stages just like the NOOP.
+        """
+        assert "ANTI-ROUTINE EXCLUSION" in v2.ANTI_ROUTINE_EXCLUSION
+        assert "NOOP" in v2.ANTI_ROUTINE_EXCLUSION
+        assert "points, entities, or events" in v2.ANTI_ROUTINE_EXCLUSION
+        assert "the on-call room has been quiet lately" \
+            in v2.ANTI_ROUTINE_EXCLUSION
+        assert "CLAUSE-LEVEL STRIP" in v2.ANTI_ROUTINE_EXCLUSION
+        assert "NEVER a whole point" in v2.ANTI_ROUTINE_EXCLUSION
+        assert "When in doubt, EMIT" in v2.ANTI_ROUTINE_EXCLUSION
+        # the durable-claim example keeps a routine clause separable: the
+        # quiet-room aside must not ride the routing decision's prose
+        assert "emits the routing decision" \
+            in v2.ANTI_ROUTINE_EXCLUSION
+        assert "double duty IS durable entity state" \
+            in v2.ANTI_ROUTINE_EXCLUSION
+        assert "{anti_routine}" in v2.S2_TMPL       # the single-source slot
+        assert "{anti_routine}" in v2.S4_TMPL       # both mapping stages wire it
+        for prompt in (v2.render_s2_prompt(),
+                       v2.render_s2_prompt(core_only=True)):
+            assert "ANTI-ROUTINE EXCLUSION" in prompt
+            assert "VALUE FIDELITY" in prompt  # #2453 rides the same slot
+            assert "NOOP" in prompt
+            assert "the on-call room has been quiet lately" in prompt
+            assert "CLAUSE-LEVEL STRIP" in prompt
+            assert "emits the routing decision" in prompt
+            assert "When in doubt, EMIT" in prompt
+            assert "{anti_routine}" not in prompt   # placeholder fully filled
+        # S1 (narrative story register) deliberately gets the value clause
+        # but NOT the anti-routine gate — lock the asymmetry (the clause
+        # strip is part of the anti-routine block, so it is absent too).
+        s1 = (v2.S1_TMPL
+              .replace("{memory_granularity}", v2._granularity_text())
+              .replace("{date_anchor}", v2._date_anchor(None)))
+        assert "ANTI-ROUTINE EXCLUSION" not in s1
+        assert "NOOP" not in s1
+        assert "CLAUSE-LEVEL STRIP" not in s1
+        assert "OPERATIONAL-VALUE" in s1
+
+    def test_s4_prompt_anti_routine_exclusion(self):
+        """#2424: S4 (the GAP REVIEWER) applies the SAME anti-routine gate
+        — it must not ADD true-but-routine content as gaps (its TASK's
+        process-chatter exclusion extends to routine asides). The clause-
+        level residual strip (#2424) rides the same shared block into S4:
+        a routine aside embedded in an otherwise-durable S2 point must be
+        stripped from that point's prose, not re-emitted as decoration."""
+        for prompt in (v2.render_s4_prompt("STORY", {}, S2_FIXTURE),
+                       v2.render_s4_prompt("STORY", {}, S2_FIXTURE,
+                                           core_only=True)):
+            assert "ANTI-ROUTINE EXCLUSION" in prompt
+            assert "VALUE FIDELITY" in prompt  # #2453 rides the same slot
+            assert "TRUE IS NOT ENOUGH" in prompt
+            assert "CLAUSE-LEVEL STRIP" in prompt
+            assert "emits the routing decision" in prompt
+            assert "{anti_routine}" not in prompt
+
     def test_prompt_supersession_rules(self):
         """#1386: S2/S4 carry the supersession mapping rule + decision-event
         discipline (never fabricate) + recoup done-things as occurrences."""
@@ -303,6 +414,446 @@ class TestS2:
 
 
 # ── S3 graph search ────────────────────────────────────────────────────────
+
+class TestParseLadder:
+    """#1746 (D4/D5): the parse-boundary recovery ladder — sanitize (H2
+    control-char contamination) → bounded repair → schema-validated
+    partial-accept (H3 truncation) → error-informed re-prompt; every
+    recovery is a recorded event, failures keep their mechanism class."""
+
+    def test_sanitize_rung_recovers_control_chars(self):
+        """A raw newline INSIDE a string value (H2 output-side
+        contamination) breaks json.loads; the string-aware sanitize escapes
+        it → parses; the value round-trips (newline preserved); the
+        recovery is recorded in stats["recovery"]["sanitize"] == 1."""
+        contaminated = ('{"entities": [{"name": "gym' + chr(10) +
+                        'maintenance", "kind": "core:plan", '
+                        '"lifecycle": "created", "supersedes": null, '
+                        '"note": null}], "events": [], "operators": [], '
+                        '"points": []}')
+        stats: dict = {}
+        out = v2.run_s2(MockModel([contaminated]), "STORY", stats=stats)
+        assert out["entities"][0]["name"] == "gym\nmaintenance"
+        assert out["entities"][0]["kind"] == "core:plan"
+        assert stats["recovery"]["sanitize"] == 1
+
+    def test_sanitize_preserves_structural_whitespace(self):
+        """Control chars BETWEEN tokens (pretty-printed structural
+        whitespace) are untouched — rung 1 parses directly, no sanitize
+        fires; recovery stays empty."""
+        pretty = ('{\n  "entities": [],\n  "events": [],\n  '
+                  '"operators": [],\n  "points": []\n}')
+        stats: dict = {}
+        out = v2.run_s2(MockModel([pretty]), "STORY", stats=stats)
+        assert out == {"entities": [], "events": [], "operators": [],
+                       "points": []}
+        assert stats.get("recovery") in (None, {})
+
+    def test_sanitize_insufficient_counts_contamination_gap(self):
+        """Sanitize that alters but cannot fully repair (a contaminated
+        string cut mid-item — no complete embed item boundary exists after
+        it) records ``sanitize_insufficient`` and falls through to raise —
+        never corrupting (the D5 schema gate backstops any mis-tracked
+        scan). #2134 (Task 0 Step 5): escalation fires BEFORE the ladder on
+        a pre-escalation ``length``, so the rung is driven with a ``stop``
+        contaminated input — the #1746 error-informed re-prompt on a stop
+        parse-failure re-calls once (2 calls total)."""
+        # #2134 migration (Task 0 Step 5): escalation fires BEFORE the ladder
+        # on a pre-escalation `length`, so sanitize never runs on a length
+        # input — the rung is driven with a `stop` contaminated input (the
+        # ladder path; D3 error-informed re-prompt on stop → 2 calls).
+        class _Bad:
+            last_finish_reason = "stop"
+
+            def __init__(self):
+                self.calls = 0
+
+            def complete(self, *, system, user, max_tokens=None):
+                self.calls += 1
+                self.last_finish_reason = "stop"
+                return ('{"entities": [], "events": [], "operators": [], '
+                        '"points": [{"content": "x' + chr(10) + 'y", '
+                        '"pointKind": "statement"')
+
+        stats: dict = {}
+        with pytest.raises(ValueError):
+            v2.run_s2(_Bad(), "STORY", stats=stats)
+        assert stats["recovery"]["sanitize_insufficient"] >= 1
+
+    def test_repair_rung_missing_comma(self):
+        """A missing comma at a boundary join (`}"{`) is repaired by the
+        bounded rule list → the FULL output is recovered (schema-validated),
+        recovery["repair"] == 1."""
+        missing = ('{"entities": [], "events": [], "operators": [], '
+                   '"points": [{"content": "a", "pointKind": "statement"}'
+                   '{"content": "b", "pointKind": "statement"}]}')
+        stats: dict = {}
+        out = v2.run_s2(MockModel([missing]), "STORY", stats=stats)
+        assert [p["content"] for p in out["points"]] == ["a", "b"]
+        assert stats["recovery"]["repair"] == 1
+
+    def test_repair_rung_trailing_brace(self):
+        """An unterminated object (missing top-level closers — H3
+        truncation) is recovered by the bounded closer append →
+        recovery["repair"] == 1; the output is schema-valid."""
+        unterminated = ('{"entities": [], "events": [], "operators": [], '
+                        '"points": [{"content": "a", '
+                        '"pointKind": "statement"}]')
+        stats: dict = {}
+        out = v2.run_s2(MockModel([unterminated]), "STORY", stats=stats)
+        assert [p["content"] for p in out["points"]] == ["a"]
+        assert stats["recovery"]["repair"] == 1
+
+    def test_repair_rule_string_aware_repairs_boundary_only(self):
+        """#1780 (F5): a missing comma at a REAL boundary is repaired while
+        an in-string occurrence of a rule pattern (`}{` inside a content
+        value) is NEVER mutated — the string value round-trips unchanged
+        (the old whole-text ``replace`` corrupted it to ``a},{b``)."""
+        missing = ('{"entities": [], "events": [], "operators": [], '
+                   '"points": [{"content": "a}{b", "pointKind": "statement"}'
+                   '{"content": "c", "pointKind": "statement"}]}')
+        stats: dict = {}
+        out = v2.run_s2(MockModel([missing]), "STORY", stats=stats)
+        assert [p["content"] for p in out["points"]] == ["a}{b", "c"]
+        assert stats["recovery"]["repair"] == 1
+
+    def test_schema_validator_accepts_contract_shape(self):
+        """A valid embed-list shape passes; unknown keys, empty arrays and
+        extra fields ride through (permissive-on-extras structural gate)."""
+        ok, issues = v2._validate_output_shape({
+            "entities": [{"name": "x", "kind": "y",
+                           "lifecycle": "created"}],
+            "events": [],
+            "points": [{"content": "p", "pointKind": "statement"}],
+            "operators": [{"src": "a", "dst": "b", "op_type": "IMPL"}],
+            "chain_notes": [{"chain": "c", "finding": "f",
+                              "action": "warned", "note": "n"}],
+            "link_before_create": [{"searched_for": "s", "found": True}],
+            "retractions": [{"id": "r1"}],  # content | id
+            "unknown_section": [1, 2],
+        })
+        assert ok is True and issues == []
+
+    def test_schema_validator_rejects_shape_mismatch(self):
+        """A section as a dict (not a list), a missing required key, and a
+        non-primitive value all fail the structural gate."""
+        ok, issues = v2._validate_output_shape(
+            {"points": {"content": "dict-not-list"}})
+        assert ok is False
+        assert any("points" in i for i in issues)
+
+        ok2, issues2 = v2._validate_output_shape(
+            {"entities": [{"name": "x"}]})  # missing kind
+        assert ok2 is False
+        assert any("kind" in i for i in issues2)
+
+        ok3, _ = v2._validate_output_shape(
+            {"points": [{"content": ["non-primitive"]}]})
+        assert ok3 is False
+
+        ok4, _ = v2._validate_output_shape("not-an-object")
+        assert ok4 is False
+
+        ok5, issues5 = v2._validate_output_shape(
+            {"retractions": [{"note": "neither content nor id"}]})
+        assert ok5 is False
+        assert any("content or id" in i for i in issues5)
+
+        ok6, issues6 = v2._validate_output_shape(
+            {"link_before_create": [{"searched_for": "s", "found": "yes"}]})
+        assert ok6 is False  # found is declared bool (per-key type gate)
+        assert any("found" in i for i in issues6)
+
+    def test_partial_accept_recovers_truncated_list(self):
+        """D4 rung 4: an S4 output cut mid-points-item is recovered as the
+        longest schema-valid prefix → ``partial_parse`` in census + error
+        string; the partial list IS used (merged over the S2 base)."""
+        from tests.test_extractor_reliability import _conv
+
+        class _Model:
+            last_finish_reason = None
+
+            def __init__(self):
+                self.calls = 0
+
+            def complete(self, *, system, user, max_tokens=None):
+                self.calls += 1
+                if "STORY SUMMARIZER" in system:
+                    self.last_finish_reason = "stop"
+                    return "A narrative."
+                if "GAP REVIEWER" in system:
+                    # #2134: the BASE call truncates at 16K (length); the
+                    # ESCALATED call (max_tokens > 16000) returns the SAME
+                    # mid-`points`-item-2 cut but with finish=stop — the
+                    # terminal ladder parse (escalated_partial) recovers
+                    # item 1 as the longest valid prefix. No re-prompt fires
+                    # post-escalation (R3-1).
+                    self.last_finish_reason = ("length"
+                                               if (max_tokens or 0) <= 16000
+                                               else "stop")
+                    return ('{"entities": [], "events": [], "operators": [], '
+                            '"points": [{"content": "s4 point 1", '
+                            '"pointKind": "statement"}, {"content": "s4 point 2"')
+                # S2 (GRAPH MAPPER): the S2 base with one point.
+                self.last_finish_reason = "stop"
+                return ('{"entities": [], "events": [], "operators": [], '
+                        '"points": [{"content": "s2 base", '
+                        '"pointKind": "statement"}]}')
+
+        out = v2.extract_session_v2(_Model(), _conv())
+        # the honest classed partial path: escalation fired (length), the
+        # escalated stop+cut response partial-accepted via the terminal
+        # ladder → escalated_partial + partial_parse at the caller
+        assert out["error_census"]["partial_parse"] == 1  # S4 partial
+        assert any("partial" in e for e in out["errors"])
+        # the partial list IS used — merged over the S2 base (never replaced)
+        contents = [p["content"] for p in out["embed_list"]["points"]]
+        assert "s2 base" in contents and "s4 point 1" in contents
+        assert "s4 point 2" not in contents  # the truncated tail was dropped
+        assert out["stats"]["llm"]["truncated"] == 1  # S4 truncated
+        rec = out["stats"]["recovery"]
+        assert rec["escalated"] == 1 and rec["escalated_partial"] == 1
+        assert rec["escalated"] == (rec.get("escalated_recovered", 0)
+                                    + rec.get("escalated_residual", 0)
+                                    + rec.get("escalated_abort", 0)
+                                    + rec["escalated_partial"])
+        # the partial-accept never credits the repair rung (review-fix pin:
+        # a data-dropping accept is partial_parse, never recovery["repair"]).
+        assert rec.get("repair", 0) == 0
+
+    def test_partial_accept_rejects_empty_prefix(self):
+        """Truncation before any item (no complete embed item exists) →
+        failure, never a partial — a truncated-to-empty prefix never counts.
+        Uses a length-finish model so the deterministic retry-skip applies
+        (one call only)."""
+        class _Trunc:
+            last_finish_reason = "length"
+
+            def __init__(self):
+                self.calls = 0
+
+            def complete(self, *, system, user, max_tokens=None):
+                self.calls += 1
+                return ('{"entities": [], "events": [], "operators": [], '
+                        '"points": [')
+
+        model = _Trunc()
+        with pytest.raises(ValueError):
+            v2.run_s2(model, "STORY")
+        # #2134: the length now escalates ONCE (32K), still length -> residual
+        # fail-loud at exactly 2 calls (the empty-prefix head is still never
+        # a partial)
+        assert model.calls == 2
+        assert model.last_finish_reason == "length"
+
+    def test_truncated_skips_same_prompt_retry(self):
+        """D3 (#1746): a first parse-failing attempt with finish_reason ==
+        "length" SKIPS the same-prompt retry (deterministic failure) →
+        exactly ONE call, census ``truncated_parse_error``."""
+        class _Trunc:
+            last_finish_reason = "length"
+
+            def __init__(self):
+                self.calls = 0
+
+            def complete(self, *, system, user, max_tokens=None):
+                self.calls += 1
+                return "this is not JSON at all"
+
+        model = _Trunc()
+        stats: dict = {}
+        with pytest.raises(ValueError):
+            v2.run_s2(model, "STORY", stats=stats)
+        # #2134: the one-shot escalation fires at attempt-1 (length -> esc
+        # 32K), the escalated call is ALSO length -> residual fail-loud at
+        # exactly 2 calls; the 4-bucket invariant holds (escalated==1,
+        # escalated_residual==1)
+        assert model.calls == 2
+        assert stats["truncated"] is True
+        rec = stats["recovery"]
+        assert rec["escalated"] == 1
+        assert rec["escalated_residual"] == 1
+        assert rec["escalated"] == (rec.get("escalated_recovered", 0)
+                                    + rec["escalated_residual"]
+                                    + rec.get("escalated_abort", 0)
+                                    + rec.get("escalated_partial", 0))
+
+    def test_complete_records_prompt_and_completion_tokens_in_stats(self):
+        """#2134 Task 0: ``_complete`` writes the per-call token counts into
+        ``stats`` next to ``finish_reason`` (captured in the calling thread
+        by ``_call_once`` — never the shared adapter attrs read post-hoc).
+        A model that DOES NOT set the token attrs (all mocks lacking them)
+        normalizes to 0 via the None-guard — never a TypeError."""
+        class _WithTokens:
+            last_finish_reason = "stop"
+            def complete(self, *, system, user, max_tokens=None):
+                self.last_prompt_tokens = 1234
+                self.last_completion_tokens = 567
+                return '{"ok": true}'
+
+        stats: dict = {}
+        out = v2._complete(_WithTokens(), "s", "u", max_tokens=16000,
+                           stats=stats)
+        assert out == '{"ok": true}'
+        assert stats["prompt_tokens"] == 1234
+        assert stats["completion_tokens"] == 567
+        assert stats["finish_reason"] == "stop"
+        assert stats["attempts"] == 1
+
+        # None-attr arm (P2-36): a mock without the token attrs (the norm —
+        # _Bad/_Trunc/CapAware backstops) contributes 0, never a TypeError.
+        class _NoTokens:
+            last_finish_reason = "stop"
+            def complete(self, *, system, user, max_tokens=None):
+                return '{"ok": true}'
+
+        stats2: dict = {}
+        v2._complete(_NoTokens(), "s", "u", max_tokens=16000, stats=stats2)
+        assert stats2["prompt_tokens"] == 0
+        assert stats2["completion_tokens"] == 0
+
+    def test_complete_truncation_accumulates_recovery_tokens(self):
+        """#2134 Task 0 (P1-22): a ``length``-truncated call accumulates its
+        emitted token counts into the recovery-carried combined keys
+        (``truncation_prompt_tokens``/``truncation_completion_tokens``) so
+        the per-call overage rides the roll-up to the outcome — the
+        lower-bound read surface Task 1 consumes."""
+        class _TruncWithTokens:
+            last_finish_reason = "length"
+            def complete(self, *, system, user, max_tokens=None):
+                self.last_prompt_tokens = 200
+                self.last_completion_tokens = 16000  # filled the 16K budget
+                return '{"entities": []'
+
+        stats: dict = {}
+        v2._complete(_TruncWithTokens(), "s", "u", max_tokens=16000,
+                     stats=stats)
+        assert stats["truncated"] is True
+        assert stats["recovery"]["truncation_prompt_tokens"] == 200
+        assert stats["recovery"]["truncation_completion_tokens"] == 16000
+        # a non-truncated call never accumulates truncation tokens
+        class _StopNoTokens:
+            last_finish_reason = "stop"
+            def complete(self, *, system, user, max_tokens=None):
+                return '{"ok": true}'
+
+        stats2: dict = {}
+        v2._complete(_StopNoTokens(), "s", "u", max_tokens=16000,
+                     stats=stats2)
+        assert "recovery" not in stats2  # no recovery dict is ever created
+        # on a non-truncated call
+
+    def test_complete_parsed_seam_accumulates_per_seam_tokens(self):
+        """#2134 Task 0 (R3-6): ``_complete_parsed`` with ``seam="s2"``
+        (run_s2's wiring) accumulates the truncating call's tokens into the
+        PER-SEAM recovery keys in addition to the combined keys — keeping
+        the S2 overage separable from S4 for the Task-1 calibration read.
+        The kind_classifier path (seam=None) stays combined-only."""
+        class _S2Trunc:
+            last_finish_reason = "length"
+            def __init__(self):
+                self.calls = 0
+            def complete(self, *, system, user, max_tokens=None):
+                self.calls += 1
+                self.last_prompt_tokens = 400
+                self.last_completion_tokens = (16000
+                                               if max_tokens == 16000
+                                               else 32000)
+                # no recoverable prefix (mirrors the reject-empty-prefix
+                # fixture) → _parse_json_robust raises; the seam accumulation
+                # fired BEFORE the parse (right after finish is read).
+                return ('{"entities": [], "events": [], "operators": [], '
+                        '"points": [')
+
+        model = _S2Trunc()
+        stats: dict = {}
+        with pytest.raises(ValueError):
+            v2.run_s2(model, "STORY", stats=stats)  # seam="s2" wired in run_s2
+        # #2134 post-Task-3: the length escalates ONCE (32K), still length →
+        # residual fail-loud at exactly 2 calls; both truncating calls
+        # (base 16K + escalated 32K — the mock emits 16000 tokens each) land
+        # in the combined + per-seam s2 keys; s4 never fires.
+        assert model.calls == 2
+        rec = stats["recovery"]
+        assert rec["truncation_completion_tokens"] == 48000
+        assert rec["truncation_completion_tokens_s2"] == 32000
+        assert "truncation_completion_tokens_s4" not in rec
+        assert rec["escalated"] == 1 and rec["escalated_residual"] == 1
+        assert rec["escalation_base_output_tokens"] == 16000
+
+    def test_extractor_escalation_tokens_env_semantics(self, monkeypatch):
+        """#2134 Task 2 (D2): the escalation knob mirrors ask_env_int —
+        default 32000; a valid [16000..64000] value used AS-IS (never
+        saturated); below/above/garbage falls back to the default."""
+        monkeypatch.delenv("TORTOISE_EXTRACTOR_ESCALATION_TOKENS",
+                           raising=False)
+        assert v2._extractor_escalation_tokens(16000) == 32000
+        for raw, expect in (("16000", 16000), ("64000", 64000),
+                            ("32000", 32000)):
+            monkeypatch.setenv("TORTOISE_EXTRACTOR_ESCALATION_TOKENS", raw)
+            assert v2._extractor_escalation_tokens(16000) == expect
+        # out-of-range / garbage → default (never clamped to a bound)
+        for raw in ("15999", "64001", "0", "999999", "abc", "32.5", ""):
+            monkeypatch.setenv("TORTOISE_EXTRACTOR_ESCALATION_TOKENS", raw)
+            assert v2._extractor_escalation_tokens(16000) == 32000
+
+    def test_extractor_escalation_tokens_warns_when_esc_le_base(self,
+                                                                monkeypatch):
+        """#2134 P2-6: a resolved escalation value <= the base cap warns —
+        an un-escalatable truncation is RESIDUAL fail-loud, never a silent
+        partial (P2-15)."""
+        monkeypatch.setenv("TORTOISE_EXTRACTOR_ESCALATION_TOKENS", "16000")
+        with pytest.warns(UserWarning):
+            assert v2._extractor_escalation_tokens(16000) == 16000
+        monkeypatch.setenv("TORTOISE_EXTRACTOR_ESCALATION_TOKENS", "32000")
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert v2._extractor_escalation_tokens(16000) == 32000
+
+    def test_parse_canonical_strict_balanced(self):
+        """#2134 Task 2 (D3): full balanced JSON returns the dict
+        (fence-stripped); balanced complete-but-shorter JSON is ALSO
+        returned — the CALLER classifies a length-truncated shorter dict,
+        never this parser."""
+        ok = v2._parse_canonical_strict(
+            '{"entities": [{"name": "a"}]}')
+        assert ok == {"entities": [{"name": "a"}]}
+        fenced = v2._parse_canonical_strict(
+            '```json\n{"points": [{"content": "x"}]}\n```')
+        assert fenced == {"points": [{"content": "x"}]}
+        # balanced complete-but-shorter (a section-boundary-shaped cut that
+        # happens to be complete JSON) → the dict IS returned
+        shorter = v2._parse_canonical_strict(
+            '{"entities": [], "events": [], "operators": [], "points": []}')
+        assert shorter == {"entities": [], "events": [], "operators": [],
+                           "points": []}
+        assert v2._parse_canonical_strict(None) is None
+
+    def test_parse_canonical_strict_no_tail_cut_no_repair(self):
+        """#2134 Task 2 (D3/P2-9): a truncated-mid-list response that rung-1
+        (progressive tail-cut) WOULD reconstruct into a valid shorter dict
+        returns None here — this parser never tail-cuts, never repairs, and
+        an unterminated input is never accepted."""
+        # mid-list cut (unterminated points array) — _parse_json recovers it
+        # via tail-cut; _parse_canonical_strict must reject it
+        resp = ('{"entities": [], "events": [], "operators": [], '
+                '"points": [{"content": "p1", "pointKind": "statement"}, ')
+        assert v2._parse_canonical_strict(resp) is None
+        # garbage / no JSON block / unbalanced
+        assert v2._parse_canonical_strict("not json at all") is None
+        assert v2._parse_canonical_strict('{"entities": [') is None
+        assert v2._parse_canonical_strict('{"entities": ]}') is None
+        assert v2._parse_canonical_strict('') is None
+
+    def test_parse_error_with_stop_still_retries(self):
+        """D3 (#1746): a stop-class parse failure STILL gets the single
+        error-informed re-prompt — only the truncation class skips."""
+        model = MockModel(["no json here", "no json here"])
+        with pytest.raises(ValueError):
+            v2.run_s2(model, "STORY")
+        assert len(model.calls) == 2
+
 
 class TestS3:
     def test_backend_mode_embedded_when_unset(self, monkeypatch):
@@ -355,6 +906,348 @@ class TestS3:
         # both object and event queries were run
         types = {t for _, t in sdk.calls}
         assert "object" in types and "event" in types
+
+    def test_turn_echo_is_never_an_s3_prior(self, monkeypatch):
+        """#2552: a capture's own turn echoes are transcript, not memory.
+
+        On a fresh capture the session's turn Points (``{sid}_t{i}``) are the
+        only content in the graph, so S3 used to return them as the
+        link-before-create prior set: the extracted claim NOOP-folded onto its
+        own transcript echo and never became a memory Point."""
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+
+        class MockSDK:
+            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                if entity_type != "point":
+                    return []
+                return [
+                    {"id": "s1_t3", "content": "[user] the lease makes that "
+                     "impossible no matter how we roll out",
+                     "point_kind": "event"},
+                    {"id": "s1_t4", "content": "[assistant] then we re-plan",
+                     "point_kind": "event"},
+                    # a role OUTSIDE the prefix allowlist — the production turn
+                    # marker still identifies it as an echo
+                    {"id": "s1_t5", "content": "[developer] custom role turn",
+                     "point_kind": "event"},
+                    # a caller-minted Point in the session's turn namespace, but
+                    # NOT a turn — must survive the prior set
+                    {"id": "s1_t9", "content": "the lease forbids it",
+                     "point_kind": "statement"},
+                    {"id": "pt_real", "content": "a real claim",
+                     "point_kind": "statement"},
+                ]
+
+        res = v2.search_graph(MockSDK(), S2_FIXTURE, "STORY", session_id="s1")
+        assert [p["id"] for p in res["points"]] == ["s1_t9", "pt_real"]
+
+    def test_turn_echo_filter_is_anchored_not_shape_based(self):
+        """The id leg is exactly ``^{session_id}_t\\d+$``, never a shape guess.
+
+        ``create_point`` accepts explicit caller ids and ``retrieval.py``
+        records the D3 decision that "the shape of an id is not evidence that a
+        capture happened", so an unanchored ``_t\\d+$`` would silently drop a
+        real, caller-minted memory Point from every prior set."""
+        # this capture's own echoes
+        assert v2._is_turn_echo_id("s1", "s1_t0")
+        assert v2._is_turn_echo_id("wp06_quarry_rollout",
+                                   "wp06_quarry_rollout_t8")
+        # another session's turn is not ours to drop
+        assert not v2._is_turn_echo_id("s1", "s2_t8")
+        # a session id that PREFIXES another's must not over-match
+        assert not v2._is_turn_echo_id("s1", "s10_t3")
+        # caller-minted ids that merely LOOK like the shape — the class
+        # tests/test_d3_session_identity.py documents as reachable
+        assert not v2._is_turn_echo_id("s1", "acme_t5")
+        assert not v2._is_turn_echo_id("s1", "note_t12")
+        assert not v2._is_turn_echo_id("s1", "pt_foo_t3")
+        # exactly ``\d`` — NOT ``str.isdigit()``, which also accepts category-No
+        # numerics (superscript 2, circled 1) for which ``\d`` is False
+        assert not v2._is_turn_echo_id("s1", "s1_t\u00b2")
+        assert not v2._is_turn_echo_id("s1", "s1_t\u2460")
+        assert not v2._is_turn_echo_id("s1", "s1_t")        # no digits
+        assert not v2._is_turn_echo_id("s1", "s1_t3\n")    # no trailing NL
+        # content-addressed memory ids
+        assert not v2._is_turn_echo_id(
+            "s1",
+            "pt_e3f831d86cf073e2af58d9b542c5ca7be19ec7c114d307f675fce08b1672a8")
+        # regex metacharacters in the session id are escaped, not interpreted
+        assert v2._is_turn_echo_id("s.1", "s.1_t2")
+        assert not v2._is_turn_echo_id("s.1", "sx1_t2")
+        # no session named -> never drop (an unanchored match would be a guess)
+        assert not v2._is_turn_echo_id(None, "s1_t8")
+        assert not v2._is_turn_echo_id("", "s1_t8")
+        assert not v2._is_turn_echo_id("s1", None)
+
+    def test_turn_echo_filter_requires_a_turn_marker(self):
+        """Both legs must hold: a caller-minted Point carrying the session's
+        turn-namespace id but no turn marker is NOT a turn echo."""
+        assert v2._is_turn_echo_row("s1", {"id": "s1_t3",
+                                           "content": "[user] hello there"})
+        # the production turn marker — covers a role outside the allowlist
+        assert v2._is_turn_echo_row(
+            "s1", {"id": "s1_t5", "content": "[developer] custom role",
+                   "point_kind": "event"})
+        # same id, claim content and kind -> preserved
+        assert not v2._is_turn_echo_row(
+            "s1", {"id": "s1_t3", "content": "the lease forbids it",
+                   "point_kind": "statement"})
+        # transcript content but another session's id -> preserved
+        assert not v2._is_turn_echo_row(
+            "s1", {"id": "s2_t3", "content": "[user] hello"})
+        assert not v2._is_turn_echo_row(
+            None, {"id": "s1_t3", "content": "[user] hello"})
+
+    def test_turn_echo_content_pattern_matches_retrieval(self):
+        """The content leg IS ``retrieval._ROLE_PREFIX_RE`` — pinned
+        STRUCTURALLY (pattern + flags), so a role added to the production
+        pattern cannot leave this mirror stale."""
+        from tortoise.retrieval import _ROLE_PREFIX_RE
+        assert v2._TURN_ECHO_CONTENT_RE.pattern == _ROLE_PREFIX_RE.pattern
+        assert v2._TURN_ECHO_CONTENT_RE.flags == _ROLE_PREFIX_RE.flags
+
+    def test_turn_echo_id_agrees_with_the_graded_layer_pattern(self):
+        """The id leg is the graded layer's ``_turn_id_pattern`` identity on every
+        id WITHOUT a trailing newline — and deliberately STRICTER on the one that
+        has one (``fullmatch`` is ``\\A…\\Z``; the runner's ``.match`` + ``$``
+        accepts a single trailing newline). Both sides of that divergence are
+        asserted so the difference is pinned and visible rather than latent."""
+        from tests.eval.write_path.runner import _turn_id_pattern
+        pat = _turn_id_pattern("s1")
+        for pid in ("s1_t0", "s1_t12", "s2_t1", "s10_t1", "s1_t", "s1_tx",
+                    "pt_ab_t3", "acme_t5"):
+            assert v2._is_turn_echo_id("s1", pid) == bool(pat.match(pid)), pid
+        # the deliberate divergence: the runner's ``$`` accepts a trailing
+        # newline, this predicate does not (stricter = a missed drop, never
+        # memory loss)
+        assert bool(pat.match("s1_t3\n")) is True
+        assert v2._is_turn_echo_id("s1", "s1_t3\n") is False
+
+    def test_turn_echo_filter_is_point_only(self, monkeypatch):
+        """An echo-shaped id on the event/entity legs is untouched — the drop
+        is confined to ``entity_type == "point"``."""
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+
+        class MockSDK:
+            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                if entity_type == "point":
+                    return [{"id": "pt_real", "content": "a real claim",
+                             "point_kind": "statement"}]
+                if entity_type == "event":
+                    return [{"id": "s1_t3", "content": "[user] owner paused",
+                             "point_kind": "core:decision"}]
+                if entity_type in ("object", "subject"):
+                    # echo-shaped id AND transcript content — still preserved on
+                    # the entity leg, which carries no such drop
+                    return [{"id": "s1_t4", "content": "[user] a named entity",
+                             "point_kind": "core:plan"}]
+                return []
+
+        res = v2.search_graph(MockSDK(), S2_FIXTURE, "The story. First para.",
+                              session_id="s1")
+        assert [e["id"] for e in res["events"]] == ["s1_t3"]
+        assert [e["id"] for e in res["entities"]] == ["s1_t4"]
+        assert [p["id"] for p in res["points"]] == ["pt_real"]
+
+    def test_turn_echo_drop_refills_the_prior_window(self, monkeypatch):
+        """The drop runs AFTER the SDK's own ``[:limit]`` truncation (#898's
+        filter-before-truncation contract, applied here by hand), so the point
+        leg over-fetches and refills. The mock HONOURS ``limit`` exactly as
+        ``tortoise_fts_query`` does, so the behavioural assertion can only pass
+        if the refill is real."""
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+
+        class MockSDK:
+            def __init__(self):
+                self.asked = []
+
+            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                self.asked.append((entity_type, limit))
+                if entity_type != "point":
+                    return []
+                rows = ([{"id": f"s1_t{i}", "content": f"[user] turn {i}",
+                          "point_kind": "event"} for i in range(5)]
+                        + [{"id": "pt_real", "content": "a real claim",
+                            "point_kind": "statement"}])
+                return rows[:limit]  # the real callee truncates to `limit`
+
+        sdk = MockSDK()
+        res = v2.search_graph(sdk, S2_FIXTURE, "STORY", session_id="s1")
+        assert [p["id"] for p in res["points"]] == ["pt_real"]
+        # the point leg asked for exactly `limit + _PRIOR_OVERFETCH`; every other
+        # leg kept the exact window it always had
+        assert sdk.asked, "no queries ran"
+        assert {win for t, win in sdk.asked if t == "point"} == \
+            {3 + v2._PRIOR_OVERFETCH}, sdk.asked
+        assert {win for t, win in sdk.asked if t != "point"} == {3}, sdk.asked
+
+    def test_turn_echo_drop_refills_a_single_slot(self, monkeypatch):
+        """``limit=1`` — the minimal refill: one echo dropped, the real prior
+        still returned."""
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+
+        class MockSDK:
+            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                if entity_type != "point":
+                    return []
+                rows = [{"id": "s1_t0", "content": "[user] hi",
+                         "point_kind": "event"},
+                        {"id": "pt_real", "content": "a real claim",
+                         "point_kind": "statement"}]
+                return rows[:limit]
+
+        res = v2.search_graph(MockSDK(), S2_FIXTURE, "STORY", limit=1,
+                              session_id="s1")
+        assert [p["id"] for p in res["points"]] == ["pt_real"]
+
+    def test_turn_echo_window_bound_is_documented(self, monkeypatch):
+        """The refill pool is FINITE, its SIZE is pinned, and BOTH sides of its
+        boundary are asserted — not implied.
+
+        A capture can hold ``MAX_SESSION_TURNS`` (500) turns; when more echoes
+        than the window outrank a real prior, the prior is still starved. The
+        durable fix is a pre-truncation exclusion in the retrieval layer
+        (#4509); until then the pool is a deliberate constant, so growth is a
+        conscious change and its declared bound stays true."""
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+        # the pool size IS part of the documented contract — pinned, so a silent
+        # growth cannot turn the declared bound into a lie
+        assert v2._PRIOR_OVERFETCH == 12
+
+        def _prior_survives(echoes):
+            class MockSDK:
+                def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                    if entity_type != "point":
+                        return []
+                    rows = ([{"id": f"s1_t{i}", "content": f"[user] turn {i}",
+                              "point_kind": "event"} for i in range(echoes)]
+                            + [{"id": "pt_real", "content": "a real claim",
+                                "point_kind": "statement"}])
+                    return rows[:limit]
+            return bool(v2.search_graph(MockSDK(), S2_FIXTURE, "STORY",
+                                        session_id="s1")["points"])
+
+        # one echo short of the window -> the refill still surfaces the prior
+        assert _prior_survives(3 + v2._PRIOR_OVERFETCH - 1)
+        # AT the window bound the prior is starved — the documented limitation
+        assert not _prior_survives(3 + v2._PRIOR_OVERFETCH)
+
+    def test_turn_echo_drop_never_exceeds_the_limit(self, monkeypatch):
+        """The refill re-truncates: the prior set is never wider than ``limit``,
+        even though the point leg fetched ``limit + _PRIOR_OVERFETCH`` rows."""
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+
+        class MockSDK:
+            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                if entity_type != "point":
+                    return []
+                rows = [{"id": f"pt_{i}", "content": f"claim {i}",
+                         "point_kind": "statement"} for i in range(8)]
+                return rows[:limit]  # the real callee truncates to the request
+
+        res = v2.search_graph(MockSDK(), S2_FIXTURE, "STORY", session_id="s1")
+        assert len(res["points"]) == 3
+
+    def test_over_fetch_is_clamped_to_the_sdk_limit_bound(self, monkeypatch):
+        """The over-fetch must not push the callee past its documented bound,
+        the mirror constant must match the callee's REAL bound, and an
+        out-of-range ``limit`` must still reach the callee (which raises) rather
+        than being silently capped."""
+        import inspect
+
+        from tortoise.sdk import TortoiseSDK
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+        # drift guard: the bound is a hardcoded literal in the callee — pin the
+        # mirror against THAT source, not against itself
+        src = inspect.getsource(TortoiseSDK.tortoise_fts_query)
+        assert f"limit > {v2._FTS_LIMIT_MAX}" in src, (
+            f"_FTS_LIMIT_MAX={v2._FTS_LIMIT_MAX} does not match the callee's "
+            "documented bound — the clamp would let the over-fetch raise")
+
+        class MockSDK:
+            def __init__(self):
+                self.asked = []
+
+            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                self.asked.append((entity_type, limit))
+                return []
+
+        sdk = MockSDK()
+        v2._fts_rows(sdk, "point", "q", limit=v2._FTS_LIMIT_MAX - 1,
+                     session_id="s1")
+        assert sdk.asked == [("point", v2._FTS_LIMIT_MAX)], sdk.asked
+
+        sdk2 = MockSDK()
+        v2._fts_rows(sdk2, "point", "q", limit=v2._FTS_LIMIT_MAX + 1,
+                     session_id="s1")
+        assert sdk2.asked == [("point", v2._FTS_LIMIT_MAX + 1)], sdk2.asked
+
+    def test_over_fetch_only_when_a_session_can_be_filtered(self):
+        """No session -> nothing to drop -> no wider window (no wasted work)."""
+        class MockSDK:
+            def __init__(self):
+                self.asked = []
+
+            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                self.asked.append((entity_type, limit))
+                return []
+
+        sdk = MockSDK()
+        v2._fts_rows(sdk, "point", "q", limit=3)  # no session_id
+        v2._fts_rows(sdk, "point", "q", limit=3, session_id="s1")
+        assert sdk.asked == [("point", 3),
+                             ("point", 3 + v2._PRIOR_OVERFETCH)], sdk.asked
+
+    def test_extract_session_forwards_the_session_id_to_the_prior_search(
+            self, monkeypatch):
+        """The filter is inert unless ``extract_session_v2`` hands its session
+        id to ``search_graph`` — the wiring that activates #2552's fix. Pinned
+        because dropping that kwarg re-introduces the bug with the suite green."""
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+        seen = {}
+
+        class _ReachedS3(Exception):
+            pass
+
+        def _fake_search_graph(sdk, embed_list, story, **kw):
+            seen.update(kw)
+            raise _ReachedS3()
+
+        monkeypatch.setattr(v2, "search_graph", _fake_search_graph)
+        conv = [{"role": "user", "content": "we should ship the cache"},
+                {"role": "assistant", "content": "agreed"}]
+        with pytest.raises(_ReachedS3):
+            v2.extract_session_v2(MockModel([]), conv, session_id="sess-42")
+        assert seen.get("session_id") == "sess-42"
+
+    def test_capture_extraction_anchor_is_the_turn_id_session(self, monkeypatch):
+        """The session id the EXTRACTOR is handed is the same one the capture
+        minted the turn ids from (``f"{session_id}_t{i}"``) — the identity the
+        S3 filter anchors on. Pinned at the sdk seam, because the tests above can
+        only see the id the extractor is given, not where it came from: rewriting
+        ``sdk._extract_session_v2``'s forward to ``session_id=None`` leaves them
+        all green while the filter becomes a no-op on the real capture path."""
+        import tortoise.extractor_v2 as ev2
+        monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+        seen = {}
+
+        class _ReachedExtractor(Exception):
+            pass
+
+        def _recorder(model, conversation, **kw):
+            seen.update(kw)
+            raise _ReachedExtractor()
+
+        monkeypatch.setattr(ev2, "extract_session_v2", _recorder)
+        from tortoise.sdk import TortoiseSDK
+        sdk = object.__new__(TortoiseSDK)  # the request path needs no graph
+        with pytest.raises(_ReachedExtractor):
+            sdk._extract_session_v2([{"role": "user", "content": "hi"}],
+                                    "sess-7", "2026-01-01T00:00:00Z")
+        # the extraction anchor and the turn-id prefix are ONE identity
+        assert seen.get("session_id") == "sess-7"
+        assert v2._is_turn_echo_id(seen["session_id"],
+                                   f"{seen['session_id']}_t0")
 
     def test_degrades_on_backend_error(self, monkeypatch):
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
@@ -685,6 +1578,42 @@ class TestS5:
         result = v2.execute_embed(embed, search, session_id="s1")
         assert result["supersessions"][0]["superseded"] == "obj-old"
 
+    def test_superseded_lifecycle_with_ref_warns_never_guesses(self):
+        """Final-review P2 (#2164): an OLD entity emitted lifecycle='superseded'
+        with supersedes=<its replacement> is direction-ambiguous — recording
+        it would INVERT (superseded=<the LIVE replacement>, supersedes_by=<the
+        old name>) and capture would fold the live successor to superseded,
+        hiding it from recall_state. Never-guess: warn and record nothing;
+        the canonical shape is the NEW entity with lifecycle='created' +
+        supersedes=<old>."""
+        search = {"entities": [
+            {"id": "obj-old", "name": "strategy-A",
+             "kind": "core:strategy"},
+            {"id": "obj-new", "name": "strategy-B",
+             "kind": "core:strategy"},
+        ], "points": [], "events": []}
+        embed = {"entities": [
+            {"name": "strategy-A", "kind": "core:strategy",
+             "lifecycle": "superseded", "supersedes": "strategy-B",
+             "note": None}],
+            "events": [], "points": [], "operators": [],
+            "chain_notes": [], "link_before_create": []}
+        result = v2.execute_embed(embed, search, session_id="s1")
+        assert result["supersessions"] == [], (
+            "superseded-with-ref must never form a record — the ref target "
+            "is the LIVE successor; the record would invert the fold")
+        assert any("lifecycle='superseded' with supersedes" in w
+                   and "never-guess" in w for w in result["warnings"])
+        # canonical shape (NEW entity lifecycle='created' + ref) still records
+        embed["entities"] = [
+            {"name": "strategy-B", "kind": "core:strategy",
+             "lifecycle": "created", "supersedes": "strategy-A",
+             "note": None}]
+        result2 = v2.execute_embed(embed, search, session_id="s1")
+        assert result2["supersessions"] == [{
+            "superseded": "obj-old", "supersedes_by": "strategy-B",
+            "evidence": "entity lifecycle supersedes (conversation-driven)"}]
+
     def test_unresolvable_supersedes_warns_no_record(self):
         """#1386: a supersedes ref that matches nothing in S3 warns and is
         NOT recorded (never guess a graph id)."""
@@ -711,6 +1640,22 @@ class TestS5:
         out = v2.derive_supersessions(embed, search)
         assert out == [{"superseded": "obj-old", "supersedes_by": "strategy-B",
                         "evidence": "entity lifecycle supersedes (conversation-driven)"}]
+        # never-guess parity with execute_embed's collection: a 'superseded'
+        # entity carrying a ref (the OLD side) must NOT derive an inverted
+        # record. The search fixture must include BOTH sides so the guard
+        # regression is RED-capable (a ref to an unresolvable name returns []
+        # even with the guard removed).
+        both = {"entities": [
+            {"id": "obj-old", "name": "strategy-A", "kind": "core:strategy"},
+            {"id": "obj-new", "name": "strategy-B", "kind": "core:strategy"}],
+            "points": [], "events": []}
+        old_side = {"entities": [
+            {"name": "strategy-A", "kind": "core:strategy",
+             "lifecycle": "superseded", "supersedes": "strategy-B",
+             "note": None}],
+            "events": [], "points": [], "operators": [],
+            "chain_notes": [], "link_before_create": []}
+        assert v2.derive_supersessions(old_side, both) == []
 
     def test_supersession_kind_collision_warns_no_wrong_record(self):
         """Review fix (P1): a name colliding across kinds resolves to the
@@ -767,15 +1712,47 @@ class TestS5:
                                                       "content": "x"}])
         assert "supersessions" in out2
 
-    def test_unresolved_operator_dropped(self):
+    def test_unresolved_operator_endpoint_is_minted(self):
+        """#2552 mint-before-wire: the S2/S4 OPERATOR REFERENCING hard rule
+        tells the model that "If an endpoint of an IMPL/NAND/MITIGATES
+        relation has no point yet, CREATE the point first and reference it".
+        The seam enforced only the REFERENCE half — an endpoint naming a claim
+        the model did not also emit was dropped, so a non-compliant emission
+        lost the EDGE silently. Measured on the #2514 corpus: 2 of 4 planted
+        edges failed at the endpoint stage before any kind question arose.
+
+        Now the endpoint is materialized as a statement Point carrying the
+        model's OWN reference text (nothing invented) and the operator wires.
+        """
         embed = json.loads(json.dumps(S2_FIXTURE))
         embed["operators"].append({"src": "not a real content",
                                    "dst": "also not", "op_type": "IMPL"})
         result = v2.execute_embed(embed, {}, session_id="s1")
-        assert len(result["payload"]["operators"]) == 2  # dropped
-        assert any("did not resolve" in w for w in result["warnings"])
+        # Pass 1 emits IMPL/NAND in input order; pass 2 appends MITIGATES —
+        # so the appended IMPL is index 1 and the fixture's MITIGATES is last.
+        assert [o["op_type"] for o in result["payload"]["operators"]] == \
+            ["IMPL", "IMPL", "MITIGATES"]
+        minted = {p["content"]: p for p in result["payload"]["points"]}
+        assert minted["not a real content"]["pointKind"] == "statement"
+        assert minted["also not"]["pointKind"] == "statement"
+        op = result["payload"]["operators"][1]
+        assert op["src"] == minted["not a real content"]["id"]
+        assert op["dst"] == minted["also not"]["id"]
+        assert not any("did not resolve" in w for w in result["warnings"])
+        assert any("endpoint minted" in w for w in result["warnings"])
+        assert result["stats"]["operator_endpoints_minted"] == 2
 
-    def test_mitigates_unresolved_target_dropped(self):
+    def test_mitigates_unminted_target_endpoints_minted_and_impl_materialized(self):
+        """#2552, the measured `wp07_op_03 MITIGATES -> edge_missing` case.
+
+        The OUTPUT_CONTRACT declares a MITIGATES as ONE operator entry
+        carrying its ``target_edge`` — it never asks the model to ALSO repeat
+        that IMPL as its own operator entry, and `commit_ops`
+        (`apply_payload_operators`) resolves the mitigation against the
+        payload's IMPL set. A contract-compliant MITIGATES was therefore
+        ALWAYS dropped. Now the declared target IMPL is materialized (the
+        model asserted the edge by naming it) and the dampener has a target.
+        """
         embed = json.loads(json.dumps(S2_FIXTURE))
         embed["operators"] = [
             {"src": "single-flash with granularity is the working path",
@@ -783,9 +1760,162 @@ class TestS5:
              "target_edge": {"src": "ghost", "dst": "ghost2", "op_type": "IMPL"},
              "strength": 0.3}]
         result = v2.execute_embed(embed, {}, session_id="s1")
-        assert result["payload"]["operators"] == []
-        assert any("MITIGATES target edge not emitted" in w
-                   for w in result["warnings"])
+        types = [o["op_type"] for o in result["payload"]["operators"]]
+        assert types == ["IMPL", "MITIGATES"]
+        ids = {p["content"]: p["id"] for p in result["payload"]["points"]}
+        assert "ghost" in ids and "ghost2" in ids
+        assert result["payload"]["operators"][0] == {
+            "src": ids["ghost"], "dst": ids["ghost2"], "op_type": "IMPL",
+            "direction": "unidirectional"}
+        assert not any("target edge not emitted" in w for w in result["warnings"])
+        assert result["stats"]["operator_endpoints_minted"] == 2
+
+    def test_minted_endpoint_is_deduped_and_invents_nothing(self):
+        """#2552: two operators naming the SAME unminted endpoint mint ONE
+        Point (content-addressed dedup, same id space as the write path), and
+        the minted Point fabricates no provenance — no quote, no source turn,
+        no entities. Content is exactly the model's own reference text.
+        """
+        embed = json.loads(json.dumps(S2_FIXTURE))
+        embed["points"] = []
+        embed["events"] = []
+        embed["operators"] = [
+            {"src": "the missing claim", "dst": "the other missing claim",
+             "op_type": "IMPL"},
+            {"src": "the missing claim", "dst": "a third missing claim",
+             "op_type": "NAND"},
+        ]
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        pts = r["payload"]["points"]
+        contents = [p["content"] for p in pts]
+        assert contents.count("the missing claim") == 1
+        assert sorted(contents) == ["a third missing claim",
+                                    "the missing claim",
+                                    "the other missing claim"]
+        for p in pts:
+            assert p["pointKind"] == "statement"
+            assert p["quote"] == ""
+            assert "source_turn_id" not in p
+            assert p["about_entities"] == []
+            assert p["id"] == v2._content_id("pt", p["content"])
+        assert r["stats"]["operator_endpoints_minted"] == 3  # not 4 — deduped
+        # Two operators, three distinct endpoints, all wired.
+        assert [o["op_type"] for o in r["payload"]["operators"]] == ["IMPL", "NAND"]
+
+    def test_entity_named_operator_endpoint_is_never_minted(self):
+        """#2552 code-review (P2): the OPERATOR REFERENCING hard rule is
+        explicit — "NEVER use an entity name as an operator endpoint —
+        entities are wired through about_entities". Minting an entity-named
+        ref would fabricate a degenerate claim Point out of a participant
+        name, so the ref is NOT minted and the operator drops with its
+        ordinary warning (the pre-#2552 behaviour, correct HERE).
+        """
+        embed = json.loads(json.dumps(S2_FIXTURE))
+        embed["operators"] = [
+            {"src": "cleaning-pass tier",          # an EMITTED entity name
+             "dst": "The owner paused the solar cleaning tier",
+             "op_type": "IMPL"}]
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        assert r["payload"]["operators"] == []
+        assert r["stats"]["operator_endpoints_minted"] == 0
+        assert not any(p["content"] == "cleaning-pass tier"
+                       for p in r["payload"]["points"])
+        assert any("NOT minted" in w and "ENTITY" in w for w in r["warnings"])
+        assert any("did not resolve" in w for w in r["warnings"])
+
+    def test_over_long_operator_endpoint_ref_still_resolves(self):
+        """#2552 code-review (P2): `_mint_endpoint` truncates content at 1000
+        chars while `_resolve` probes the UNTRUNCATED ref. Without also
+        registering the full-ref key the mint is invisible to the operator
+        pass — the edge still drops AND the minted Point is orphaned, which is
+        exactly the outcome the pre-pass exists to prevent.
+        """
+        long_ref = "long endpoint claim " + ("x" * 1500)
+        embed = json.loads(json.dumps(S2_FIXTURE))
+        embed["operators"] = [
+            {"src": long_ref,
+             "dst": "The owner paused the solar cleaning tier",
+             "op_type": "IMPL"}]
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        ops = [o for o in r["payload"]["operators"] if o["op_type"] == "IMPL"]
+        assert len(ops) == 1
+        assert not any("did not resolve" in w for w in r["warnings"])
+        assert r["stats"]["operator_endpoints_minted"] == 1
+        minted = [p for p in r["payload"]["points"] if p["id"] == ops[0]["src"]]
+        assert len(minted) == 1
+        assert len(minted[0]["content"]) == 1000
+
+    def test_minted_endpoint_is_pruned_when_its_operator_drops(self):
+        """#2552 code-review (P2): the mint runs BEFORE the operator is known
+        to survive. A MITIGATES that declares no target edge is still dropped
+        loudly — its minted endpoints must go with it, or the payload commits
+        claim Points no operator references (an unsupported assertion in the
+        memory layer, worse than the edge loss the mint exists to fix).
+        """
+        embed = json.loads(json.dumps(S2_FIXTURE))
+        embed["points"] = []
+        embed["events"] = []
+        embed["operators"] = [
+            {"src": "orphan claim alpha", "dst": "orphan claim beta",
+             "op_type": "MITIGATES", "strength": 0.3}]
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        assert r["payload"]["operators"] == []
+        assert r["payload"]["points"] == []
+        assert r["stats"]["operator_endpoints_minted"] == 0
+        assert any("pruned" in w for w in r["warnings"])
+        assert any("target edge not emitted" in w for w in r["warnings"])
+
+    def test_planted_supports_lane_no_longer_reports_to_content_missing(self):
+        """#2552 measured case (wp06 op_01 SUPPORTS -> `to_content_missing`).
+
+        The model names the planted claim as an operator endpoint but does not
+        also emit it as a point. Through ``execute_embed`` ALONE — the real
+        fold the product lane runs, with no gold-derived monkeypatch — the
+        edge must survive AND the minted Point must carry the planted anchor,
+        or the corpus grader can only ever report `to_content_missing`.
+        """
+        obs = ("two workers grabbed the same batch twice from the ingest queue "
+               "and each marked its own copy complete")
+        claim = "nothing prevents two workers from claiming one batch"
+        embed = {
+            "entities": [], "events": [],
+            "points": [{"content": obs, "pointKind": "statement"}],
+            "operators": [{"src": obs, "dst": claim, "op_type": "IMPL"}],
+        }
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        ids = {p["content"]: p["id"] for p in r["payload"]["points"]}
+        assert claim in ids  # the endpoint the grader anchors on now exists
+        assert [o["op_type"] for o in r["payload"]["operators"]] == ["IMPL"]
+        assert r["payload"]["operators"][0]["src"] == ids[obs]
+        assert r["payload"]["operators"][0]["dst"] == ids[claim]
+
+    def test_planted_mitigates_lane_no_longer_reports_edge_missing(self):
+        """#2552 measured case (wp07 op_03 MITIGATES -> `edge_missing`): both
+        endpoints were present and NO edge was emitted. A MITIGATES naming an
+        action claim + a risk claim with its declared target_edge, and no
+        separately-emitted IMPL, must now reach the write path as the
+        IMPL + MITIGATES pair the payload contract requires.
+        """
+        action = "a lagging region's renewal cannot clobber a live lease"
+        risk = "clock skew between regions can make lease expiry unsafe"
+        embed = {
+            "entities": [], "events": [],
+            "points": [{"content": action, "pointKind": "statement"},
+                       {"content": risk, "pointKind": "statement"}],
+            "operators": [{"src": action, "dst": risk, "op_type": "MITIGATES",
+                           "strength": 0.4,
+                           "target": {"src": risk, "dst": action,
+                                      "op_type": "IMPL"}}],
+        }
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        ids = {p["content"]: p["id"] for p in r["payload"]["points"]}
+        assert [o["op_type"] for o in r["payload"]["operators"]] == \
+            ["IMPL", "MITIGATES"]
+        mit = r["payload"]["operators"][1]
+        assert mit["src"] == ids[action] and mit["dst"] == ids[risk]
+        assert mit["target"] == {"src": ids[risk], "dst": ids[action],
+                                 "op_type": "IMPL"}
+        assert r["stats"]["operator_endpoints_minted"] == 0
 
     def test_tier_a_point_passes_through_with_quote(self):
         """E2 (D4/D6): a Tier-A embed point yields a payload point with
@@ -918,59 +2048,6 @@ class TestE5FactValueContradiction:
         assert v2._fact_value_contradiction("gym at 5pm", ["gym"], existing)
         assert v2._fact_value_contradiction(
             "gym at 5pm", ["gym"], existing, when="")
-
-
-class TestChains:
-    def _embed_with_pair(self, about, kinds):
-        embed = {"entities": [
-            {"name": "arch", "kind": kinds[0], "lifecycle": "created",
-             "supersedes": None, "note": None},
-            {"name": "useCase", "kind": kinds[1], "lifecycle": "created",
-             "supersedes": None, "note": None}],
-            "events": [], "operators": [], "chain_notes": [],
-            "link_before_create": [],
-            "points": [{"content": "arch connects to useCase",
-                        "pointKind": "statement", "about_entities": about}]}
-        return embed
-
-    def test_reverse_chain_repaired_when_intermediate_exists(self):
-        # architecture (pos 6) connects to useCase (pos 1) — reverse chain
-        # order in productDelivery; a feature (pos 2) in the list is the
-        # nearest valid intermediate → repair is possible.
-        embed = self._embed_with_pair(
-            ["arch", "useCase"],
-            ["product-strategy:architecture", "product-strategy:useCase"])
-        embed["entities"].append({"name": "feature", "kind": "product-strategy:feature",
-                                  "lifecycle": "created", "supersedes": None,
-                                  "note": None})
-        notes = v2.validate_chains(embed)
-        assert notes, "reverse architecture→useCase must be flagged"
-        assert notes[0]["action"] == "repaired"
-        assert "feature" in notes[0]["note"]
-
-    def test_reverse_chain_warned_without_intermediate(self):
-        embed = self._embed_with_pair(
-            ["arch", "useCase"],
-            ["product-strategy:architecture", "product-strategy:useCase"])
-        notes = v2.validate_chains(embed)
-        assert notes[0]["action"] == "warned"
-        assert "do NOT invent" in notes[0]["note"]
-
-    def test_chain_order_ok_not_flagged(self):
-        embed = self._embed_with_pair(["useCase", "feature"],
-                                      ["product-strategy:useCase",
-                                       "product-strategy:feature"])
-        assert v2.validate_chains(embed) == []
-
-    def test_never_blocks(self):
-        # chain violations surface as notes; execute_embed never raises
-        embed = self._embed_with_pair(
-            ["arch", "useCase"],
-            ["product-strategy:architecture", "product-strategy:useCase"])
-        result = v2.execute_embed(embed, {}, session_id="s1")
-        assert any(n["action"] in ("repaired", "warned")
-                   for n in result["chain_notes"])
-        assert result["payload"]["points"]  # still emitted
 
 
 # ── Participant slots (#1418: object + event-as-content) ─────────────────────
@@ -1205,7 +2282,7 @@ class TestE3SourceTranscript:
 class TestE3Resolution:
     # The quote anchors on a NON-first turn (index 1) so a degenerate
     # first-turn-default resolver cannot pass the resolution tests.
-    EDUS = [{"index": 0, "role": "assistant", "text": "maybe try intervals for speed"},
+    EDUS = [{"index": 0, "role": "assistant", "text": "maybe try intervals for speed"},  # noqa: RUF012
             {"index": 1, "role": "user", "text": "my 5K best is 27:12"}]
 
     def _embed(self, **point_kwargs):
@@ -1586,6 +2663,918 @@ class TestOrchestrator:
                         {"role": "assistant", "content": "consider interval training"}]
 
 
+# ── A′ (#1695 Task 2): label-order randomization hook ────────────────────
+
+# The canonical kind order (insertion order of build_master_list) — the
+# golden the env-unset render must match byte-for-byte.
+def _canonical_verbose_render():
+    return v2._render_master_verbose(v2.build_master_list())
+
+
+class TestLabelOrder:
+    def test_env_unset_default_order_byte_identical(self, monkeypatch):
+        """Regression pin: TORTOISE_LABEL_ORDER unset → the render is
+        byte-identical to the canonical (pre-shuffle) order, through the
+        _render_master dispatcher."""
+        monkeypatch.delenv("TORTOISE_LABEL_ORDER", raising=False)
+        monkeypatch.delenv("TORTOISE_LABEL_ORDER_SEED", raising=False)
+        assert v2._label_order_rng("any story") is None
+        assert v2._render_master(v2.build_master_list()) == _canonical_verbose_render()
+
+    def test_seeded_shuffle_deterministic_per_story(self, monkeypatch):
+        """Same story → same seeded shuffle; different story → different
+        order (the A′ paired re-run contract)."""
+        monkeypatch.setenv("TORTOISE_LABEL_ORDER", "shuffle")
+        m = v2.build_master_list()
+        r1 = v2._render_master_verbose(m, v2._label_order_rng("story A"))
+        r2 = v2._render_master_verbose(m, v2._label_order_rng("story A"))
+        assert r1 == r2, "same story must reproduce the same kind order"
+        r3 = v2._render_master_verbose(m, v2._label_order_rng("story B"))
+        keys = lambda r: [ln for ln in r.split("\n") if ln.startswith("- core:")]  # noqa: E731
+        assert keys(r1) != keys(r3), "different stories must shuffle differently"
+        assert len(keys(r1)) == len(keys(r3))
+
+    def test_env_seed_override_deterministic_across_stories(self, monkeypatch):
+        """TORTOISE_LABEL_ORDER_SEED pins the order across stories (the
+        A/B's per-arm order confound control)."""
+        monkeypatch.setenv("TORTOISE_LABEL_ORDER", "shuffle")
+        monkeypatch.setenv("TORTOISE_LABEL_ORDER_SEED", "7")
+        m = v2.build_master_list()
+        r1 = v2._render_master_verbose(m, v2._label_order_rng("story A"))
+        r2 = v2._render_master_verbose(m, v2._label_order_rng("story B"))
+        assert r1 == r2, "the env seed overrides the story-derived seed"
+
+    def test_shuffle_reorders_kind_groups_only(self, monkeypatch):
+        """Only the KIND vocabulary randomizes — hint blocks (chains,
+        user-personal-state, memory-granularity, carve-out) keep their
+        canonical positions (byte-identical outside the kind groups)."""
+        monkeypatch.setenv("TORTOISE_LABEL_ORDER", "shuffle")
+        m = v2.build_master_list()
+        plain = v2._render_master_verbose(m)
+        shuffled = v2._render_master_verbose(m, v2._label_order_rng("s"))
+        for marker in ("CHAINS (the business logic",
+                       "USER-PERSONAL-STATE VOCABULARY",
+                       "MEMORY GRANULARITY (what to keep",
+                       "STATE-VALUE CARVE-OUT"):
+            assert plain.index(marker) == shuffled.index(marker)
+
+    def test_compact_render_shuffles_too(self, monkeypatch):
+        """Label-order randomization ships in ALL render modes; the compact
+        env-unset render stays byte-identical to its canonical form."""
+        m = v2.build_master_list()
+        compact_canonical = v2._render_master_compact(m, "story")
+        monkeypatch.setenv("TORTOISE_LABEL_ORDER", "shuffle")
+        r1 = v2._render_master_compact(m, "a", v2._label_order_rng("x"))
+        r2 = v2._render_master_compact(m, "a", v2._label_order_rng("x"))
+        assert r1 == r2
+        assert r1 != compact_canonical
+
+    def test_s2_prompt_uses_shuffled_master(self, monkeypatch):
+        """The end-to-end hook: render_s2_prompt picks up the shuffle via
+        _render_master when the env is set; byte-identical when unset."""
+        m = v2.build_master_list()
+        baseline = v2.render_s2_prompt(m)
+        monkeypatch.setenv("TORTOISE_LABEL_ORDER", "shuffle")
+        a = v2.render_s2_prompt(m)
+        b = v2.render_s2_prompt(m)
+        assert a == b
+        assert a != baseline  # the shuffle reorders the kind vocabulary
+
+
+# ── #1695 Task 5: the classify-later stage (flag-on pipeline) ─────────────
+
+CLASSIFY_SPEC = {
+    "dev:issue": {"text": "dev:issue: A tracked work item (synonyms: ticket)",
+                   "section": "objects", "description": "A tracked work item",
+                   "synonyms": ["ticket"], "examples": [],
+                   "nearMisses": ["dev:code"]},
+    "dev:code": {"text": "dev:code: Source code that implements features",
+                  "section": "objects", "description": "Source code",
+                  "synonyms": [], "examples": [], "nearMisses": []},
+    "core:plan": {"text": "core:plan: A plan state (commitment-state family)",
+                   "section": "objects", "description": "A plan state",
+                   "synonyms": [], "examples": [], "nearMisses": []},
+    "core:workflow": {"text": "core:workflow: A reusable procedural sequence",
+                       "section": "objects", "description": "A reusable sequence",
+                       "synonyms": [], "examples": [], "nearMisses": []},
+    "core:occurrence": {"text": "core:occurrence: A done-state event",
+                         "section": "events", "description": "An occurrence",
+                         "synonyms": [], "examples": [], "nearMisses": []},
+    "statement": {"text": "statement: A durable belief or claim",
+                   "section": "points", "description": "A claim",
+                   "synonyms": [], "examples": [], "nearMisses": []},
+}
+
+_CLASSIFY_KEYWORDS = ("ticket", "code", "plan", "workflow", "occurrence", "claim")
+
+
+class _KeywordEncoder:
+    """One-hot fixture encoder shared with tests/test_kind_classifier.py."""
+
+    def encode(self, texts):
+        import numpy as np
+        out = np.zeros((len(texts), len(_CLASSIFY_KEYWORDS)))
+        for i, t in enumerate(texts):
+            low = str(t).lower()
+            for j, kw in enumerate(_CLASSIFY_KEYWORDS):
+                if kw in low:
+                    out[i, j] = 1.0
+        return out, False
+
+
+class _BoomEncoder:
+    """Fail-open pin: encode() raises — the pipeline must never break."""
+
+    def encode(self, texts):
+        raise RuntimeError("embedder down")
+
+
+def _stub_classifier(model=None, encoder=None, llm_tail=False):
+    from tortoise.kind_classifier import KindClassifier
+    from tortoise.kind_index import KindIndex
+    return KindClassifier(encoder=encoder or _KeywordEncoder(),
+                          index=KindIndex.build(CLASSIFY_SPEC,
+                                                encoder=_KeywordEncoder(),
+                                                persist=False),
+                          model=model, llm_tail=llm_tail)
+
+
+def _hand_built_master() -> dict:
+    """The core-only golden's source of truth: a HAND-BUILT master list with
+    FIXED dict order — zero dependency on installed packs or on the pack-
+    manifest glob order (build_master_list()'s memory_granularity order
+    follows the filesystem readdir order of packs/*/manifest.yaml, which
+    differs across platforms: macOS HFS/APFS vs Linux ext4). The byte-pinned
+    golden fixture is generated from THIS dict and nothing else, so the
+    golden test is platform-independent. pack_kinds and chains are retained
+    for build_master_list() shape parity — the core-only render omits them
+    (asserted in test_core_only_render_byte_pinned_golden)."""
+    return {
+        "objects": {
+            "core:Project": "A project",
+            "core:WorkItem": "A unit of work",
+            "core:Problem": "A deviation between actual and desired state — "
+                            "problem-family parent (2026-08-31)",
+            "core:document": "A document artifact",
+            "core:tag": "A tag",
+            "core:user": "A user",
+            "core:skill": "A skill",
+            "core:tool": "A tool, CLI, or utility",
+            "core:agent": "An agent",
+            "core:workflow": "A reusable procedural sequence",
+            "core:agreement": "An agreement",
+            "core:standard": "A standard, spec, or canonical reference",
+            "core:other": "No fitting kind - the explicit uncertain bucket",
+            "core:strategy": "A strategy state (commitment-state family)",
+            "core:plan": "A plan state (commitment-state family)",
+            "core:goal": "A goal state (commitment-state family)",
+            "core:target": "A target state (commitment-state family)",
+        },
+        "subjects": {
+            "core:organization": "An organization — a company, agency, or "
+                                 "other collective entity",
+            "core:team": "A team — a group of people working together toward "
+                         "shared goals",
+            "core:role": "A role — a defined function or position held by a "
+                         "person or a team",
+            "core:legalPerson": "A legal person — an entity with legal "
+                                "standing (company, foundation, org)",
+            "core:naturalPerson": "A natural person — an individual human "
+                                  "being",
+        },
+        "points": {
+            "statement": "A durable belief, claim, or proposition — the "
+                          "extraction write kind",
+        },
+        "events": {
+            "core:decision": "A commitment event — a choice made with "
+                              "reasons that resolves confidence",
+            "core:occurrence": "An occurrence — something that happened at a "
+                                "point in time",
+            "core:deployment": "A deployment event — a product or release "
+                               "shipped to an environment",
+            "core:review": "A review event — a review of work, code, plan, or "
+                           "content",
+            "core:meeting": "A meeting event — a gathering that changed or "
+                            "confirmed state",
+            "core:experiment": "An experiment event — a test or calibration "
+                               "run with measured results",
+            "core:friction": "A friction event — a discovered obstacle, pain "
+                             "point, or workflow failure",
+        },
+        "pack_kinds": {
+            # Representative only — the core-only render drops the whole
+            # section (pack vocabulary is typed by the classify-later stage).
+            "dev:issue": "A unit of tracked work",
+        },
+        "chains": {
+            "epicToCode": {"path": ["epic", "issue", "code"],
+                            "note": "Work decomposition"},
+        },
+        "user_personal_state": {
+            "personal_best": "A personal record/achievement VALUE — times, "
+                             "distances, scores, quantities ('my personal best "
+                             "5K time is 27:12'). The VALUE is the fact; "
+                             "retain it verbatim.",
+            "schedule": "A recurring commitment VALUE — regular times, days, "
+                         "frequencies ('gym at 6pm', 'standup at 9:30'). The "
+                         "TIME is the fact; retain it verbatim.",
+            "preference": "A stated preference/choice VALUE — likes, "
+                           "dislikes, defaults, chosen options ('prefers dark "
+                           "mode', 'coffee not tea'). The CHOICE is the fact; "
+                           "retain it verbatim.",
+        },
+        # FIXED order (agent-ops, dev, marketing, pm, product-strategy) — the
+        # golden pins THIS order; it is independent of the packs' readdir order.
+        "memory_granularity": {
+            "agent-ops": "Durable: the rule text, the situation that created it, "
+                          "and the reasoning that supports or undermines it. "
+                          "Ephemeral: rule mechanics, approval logistics, "
+                          "tool-specific workarounds.",
+            "dev": "Durable: problem-family reasoning — incident root causes and "
+                   "the chosen vs rejected mitigations; debt items with "
+                   "cost-of-delay framing (velocity tax, incident risk, owner); "
+                   "theme/epic allocation decisions; the delivery flow shape "
+                   "(theme → epic → issue → PR → deployment). Ephemeral: "
+                   "issue/PR numbers, CI status, test counts, commit hashes, "
+                   "tool workarounds, sprint mechanics.",
+            "marketing": "Durable: campaign strategy — which "
+                          "campaigns/channels/audiences are being pursued and "
+                          "why, the positioning decisions, the reasoning, the "
+                          "actual content pieces (they ARE the product), and "
+                          "the metric snapshots showing whether a strategy is "
+                          "working. Ephemeral: publishing mechanics, "
+                          "scheduling logistics.",
+            "pm": "Durable: plan/goal/target state — what was decided, what's "
+                   "committed, the reasoning, and milestone outcomes. "
+                   "Ephemeral: card/board status, sprint burndown, assignment "
+                   "logistics, issue triage.",
+            "product-strategy": "Durable: the productDelivery chain itself — "
+                                 "which JTBDs/use-cases/features are being "
+                                 "pursued, the chosen vs rejected options at "
+                                 "each step, and the reasoning (what supports, "
+                                 "undermines, tempers each choice). A customer "
+                                 "/ competitor / market fact is durable if it "
+                                 "changes a decision. Ephemeral: ticket status, "
+                                 "sprint mechanics, meeting logistics.",
+        },
+    }
+
+
+class TestClassifyStage:
+    """The flag-on pipeline: stage order, kind-preservation re-stamp, slot
+    re-key, sentinel terminal, census wiring; and the flag-off
+    byte-identity regression."""
+
+    def _run(self, monkeypatch, s2_body, s4_body=None, session_id="fixed-s1",
+             kind_classifier=None, story="We shipped the ticket fix."):
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+
+        def resp(system, user):
+            if "STORY SUMMARIZER" in system:
+                return story
+            if "GRAPH MAPPER" in system:
+                return json.dumps(s2_body)
+            if "GAP REVIEWER" in system:
+                return json.dumps(s4_body if s4_body is not None else {
+                    "entities": [], "events": [], "points": [],
+                    "operators": [], "chain_notes": [],
+                    "link_before_create": []})
+            raise AssertionError(f"unexpected system prompt: {system[:50]}")
+
+        conv = [{"role": "user", "content": story}]
+        return v2.extract_session_v2(MockModel(resp), conv, session_id=session_id,
+                                     kind_classifier=kind_classifier)
+
+    def test_flag_on_happy_path_assigns_pack_kinds(self, monkeypatch):
+        """S2 emits pack-domain entities as 'unclassified'; the classifier
+        assigns real kinds that land in the payload (no minted kinds)."""
+        s2 = {"entities": [
+            {"name": "the ticket fix", "kind": "unclassified",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [],
+            "points": [{"content": "the claim is durable",
+                         "pointKind": "unclassified", "about_entities": []}]}
+        out = self._run(monkeypatch, s2, kind_classifier=_stub_classifier())
+        assert out["classify_later"]["enabled"] is True
+        assert out["classify_later"]["s2"]["assigned_knn"] >= 1
+        kinds = {e["kind"] for e in out["payload"]["entities"]}
+        assert "dev:issue" in kinds  # the classifier's kind, not unclassified
+        assert "unclassified" not in kinds
+        assert not out["minted_kinds"]
+        assert out["errors"] == []
+
+    def test_pack_event_kind_survives_execute_embed(self):
+        """FIX A candidate/write-gate alignment: a classifier-assigned pack
+        event kind (pm eventKinds — declared but kindDefs-less) is writable
+        at execute_embed — it survives unwritten-repaired (and is not flagged
+        minted), while a genuinely minted kind still repairs + flags."""
+        embed = {"entities": [], "events": [
+            {"content": "a card was created",
+             "eventKind": "pm:cardCreated", "about_entities": []},
+            {"content": "totally minted",
+             "eventKind": "totally:madeup", "about_entities": []},
+        ], "points": [], "operators": [], "chain_notes": [],
+            "link_before_create": []}
+        res = v2.execute_embed(embed, {}, session_id="s1")
+        kinds = {e["content"]: e["eventKind"] for e in res["payload"]["events"]}
+        assert kinds["a card was created"] == "cardCreated", \
+            "pack event kind survives execute_embed unwritten-repaired"
+        assert kinds["totally minted"] == "occurrence"
+        assert not any("pm:cardCreated" in m for m in res["minted_kinds"]), \
+            "the writable pack event kind is not flagged minted"
+        assert any("totally:madeup" in m for m in res["minted_kinds"])
+
+    def test_pack_object_kind_survives_execute_embed(self):
+        """FIX M candidate/write-gate alignment: a classifier-assigned pack
+        object/document kind (dev:apiSpec, pm:milestone, marketing:keyword —
+        declared but kindDefs-less, synthesized into the index's "objects"
+        section) is writable at execute_embed — it survives un-repaired and
+        is not flagged minted, while a genuinely minted kind still repairs
+        + flags."""
+        embed = {"entities": [
+            {"name": "the api spec", "kind": "dev:apiSpec",
+             "lifecycle": "created", "supersedes": None, "note": None},
+            {"name": "the milestone", "kind": "pm:milestone",
+             "lifecycle": "created", "supersedes": None, "note": None},
+            {"name": "the keyword", "kind": "marketing:keyword",
+             "lifecycle": "created", "supersedes": None, "note": None},
+            {"name": "totally minted", "kind": "totally:madeup",
+             "lifecycle": "created", "supersedes": None, "note": None},
+        ], "events": [], "points": [], "operators": [],
+            "chain_notes": [], "link_before_create": []}
+        res = v2.execute_embed(embed, {}, session_id="s1")
+        kinds = {e["name"]: e["kind"] for e in res["payload"]["entities"]}
+        assert kinds["the api spec"] == "dev:apiSpec", \
+            "synthesized object kind survives execute_embed un-repaired"
+        assert kinds["the milestone"] == "pm:milestone"
+        assert kinds["the keyword"] == "marketing:keyword"
+        assert kinds["totally minted"] == "core:other"
+        assert not any(m for m in res["minted_kinds"]
+                       if "dev:apiSpec" in m or "pm:milestone" in m
+                       or "marketing:keyword" in m), \
+            "the writable pack object kinds are not flagged minted"
+        assert any("totally:madeup" in m for m in res["minted_kinds"])
+        # the report alone agrees: only the genuine minted kind is flagged
+        clean = {"entities": [
+            {"name": "the api spec", "kind": "dev:apiSpec"},
+            {"name": "the milestone", "kind": "pm:milestone"},
+            {"name": "the keyword", "kind": "marketing:keyword"},
+        ], "events": [], "points": []}
+        assert v2._minted_kind_report(clean) == []
+
+    def test_point_item_never_assigned_pack_point_kind(self, monkeypatch):
+        """FIX A: a point item is never assigned a pack point kind — the
+        index's "points" section contains ONLY "statement", so the point
+        classification is trivial (design doc) and the write gate never
+        sees a pack point kind on a point."""
+        from tortoise.value_extractor import _clear_kind_spec_cache, compile_kind_index_spec
+        _clear_kind_spec_cache()
+        spec = compile_kind_index_spec()
+        points = {k for k, md in spec.items()
+                  if md.get("section") == "points"}
+        assert points == {"statement"}
+        assert "dev:requirement" not in spec
+        assert "dev:technicalDebt" not in spec
+
+    def test_flag_off_byte_identical_no_telemetry_growth(self, monkeypatch):
+        """kind_classifier=None + env unset → the pipeline is byte-
+        identical: fixed session_id, canonical payload equality across runs,
+        and the Layer-1 payload key set does NOT grow."""
+        monkeypatch.delenv("TORTOISE_CLASSIFY_LATER", raising=False)
+        r1 = self._run(monkeypatch, S2_FIXTURE)
+        r2 = self._run(monkeypatch, S2_FIXTURE)
+        assert r1["classify_later"]["enabled"] is False
+        assert r1["classify_later"]["s2"] == {} \
+            and r1["classify_later"]["union"] == {}
+        p1, p2 = r1["payload"], r2["payload"]
+        for skip in ("captured_at",):
+            p1.pop(skip), p2.pop(skip)
+        assert p1 == p2, "flag-off payloads must be canonically identical"
+        assert set(p1) == {
+            "schema_version", "session_id", "client_commit_id", "extractor",
+            "summary", "story_arc", "provenance_refs", "sources",
+            "entities", "points", "events", "operators", "supersessions",
+            "telemetry"}
+
+    def test_flag_off_prompts_byte_identical(self, monkeypatch):
+        """The flag-off S2/S4 prompts are byte-identical to the base
+        templates (the core-only variants are separate constants). The
+        exact-fragment pins catch template regressions (e.g. a joined
+        newline) that self-referential compares miss."""
+        monkeypatch.delenv("TORTOISE_CLASSIFY_LATER", raising=False)
+        assert v2.render_s2_prompt() == v2.render_s2_prompt()
+        base = (v2.S2_TMPL
+                .replace("{master_list}", v2._render_master(v2.build_master_list()))
+                .replace("{chains_text}", v2._render_chains(v2.build_master_list()))
+                .replace("{anti_routine}", v2._s2s4_rules())
+                .replace("{date_anchor}", v2._date_anchor(None, include_emission_rules=True))
+                .replace("{output_contract}", v2.OUTPUT_CONTRACT))
+        assert v2.render_s2_prompt() == base
+        assert v2.OUTPUT_CONTRACT_CORE_ONLY != v2.OUTPUT_CONTRACT
+        # exact-fragment pins (byte-regression guard for the templates)
+        s2 = v2.render_s2_prompt()
+        assert "OPERATOR REFERENCING (hard rule)\nOperators wire POINTS" in s2
+        assert "- CHAINS — mapping must respect the chain positions" in s2
+        assert "PACK-DOMAIN CONTENT" not in s2
+
+    def test_kind_preservation_restamp_observable(self, monkeypatch):
+        """S4 re-types an S2 classifier-typed entity as 'unclassified' → the
+        re-stamp folds the duplicate and the S2 kind survives; the override
+        is counted (census-observable)."""
+        s2 = {"entities": [
+            {"name": "the ticket fix", "kind": "unclassified",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [], "points": []}
+        # S4 re-emits the SAME entity re-typed as unclassified (violating
+        # the re-emit clause) — the re-stamp must fold it
+        s4 = {"entities": [
+            {"name": "the ticket fix", "kind": "unclassified",
+             "lifecycle": "unchanged", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [], "points": []}
+        out = self._run(monkeypatch, s2, s4_body=s4,
+                        kind_classifier=_stub_classifier())
+        assert out["classify_later"]["restamp_overrides"] >= 1
+        entities = out["payload"]["entities"]
+        assert len(entities) == 1, "no duplicate :Object on kind mismatch"
+        assert entities[0]["kind"] == "dev:issue"
+        assert any("re-typed by S4" in w for w in out["warnings"])
+
+    def test_section_aware_freeze(self, monkeypatch):
+        """The kind-freeze is section-aware: an entity named 'plan' with a
+        classifier kind does NOT freeze a point with the same content."""
+        s2 = {"entities": [
+            {"name": "plan", "kind": "unclassified",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [],
+            "points": [{"content": "plan", "pointKind": "unclassified",
+                         "about_entities": []}]}
+        out = self._run(monkeypatch, s2, kind_classifier=_stub_classifier())
+        # the entity freezes to core:plan; the POINT is classified
+        # independently (statement — the only point kind) — never re-stamped
+        # as core:plan by the entity's freeze
+        ent = out["payload"]["entities"][0]
+        pt = out["payload"]["points"][0]
+        assert ent["kind"] == "core:plan"
+        assert pt["pointKind"] == "statement"
+
+    def test_embedder_down_fail_open(self, monkeypatch):
+        """The embedder is down → the classifier falls back to best-core
+        kinds; the pipeline never raises; census counts embedding_error."""
+        s2 = {"entities": [
+            {"name": "the ticket fix", "kind": "unclassified",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [], "points": []}
+        out = self._run(monkeypatch, s2,
+                        kind_classifier=_stub_classifier(encoder=_BoomEncoder()))
+        assert out["payload"]["entities"][0]["kind"] == "core:other"
+        assert out["error_census"]["embedding_error"] >= 1
+        assert out["classify_later"]["s2"]["embedding_errors"] >= 1
+
+    def test_adjudication_fail_falls_back(self, monkeypatch):
+        """The LLM adjudication tail fails → kNN top-1 fallback + census
+        classify_error; kinds still land."""
+        class BoomModel(MockModel):
+            def complete(self, *, system, user, max_tokens=None):
+                if "KIND ADJUDICATOR" in system:
+                    raise RuntimeError("adjudicator down")
+                return "x"
+
+        s2 = {"entities": [
+            {"name": "the plan workflow", "kind": "unclassified",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [], "points": []}
+        clf = _stub_classifier(model=BoomModel([]), llm_tail=True)
+        out = self._run(monkeypatch, s2, kind_classifier=clf)
+        kinds = {e["kind"] for e in out["payload"]["entities"]}
+        assert "unclassified" not in kinds
+        assert out["error_census"]["classify_error"] >= 1
+
+    def test_unclassified_terminal_resolved_at_write(self, monkeypatch):
+        """A below-floor item keeps the sentinel in the list; execute_embed
+        repairs it to the best core kind + warning; the census counts the
+        terminal."""
+        s2 = {"entities": [
+            {"name": "xyzzy no keyword", "kind": "unclassified",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [], "points": []}
+        out = self._run(monkeypatch, s2, kind_classifier=_stub_classifier())
+        assert out["payload"]["entities"][0]["kind"] == "core:other"
+        assert any("unclassified" in w for w in out["warnings"])
+        assert out["error_census"]["unclassified_terminal"] >= 1
+
+    def test_s4_reemit_clause_in_core_only_template(self):
+        """The S4 core-only template teaches the re-emit clause; the flag-
+        off template never mentions it."""
+        assert "S2 ITEMS ARE TYPED" in v2.S4_TMPL_CORE_ONLY
+        assert "classifier" in v2.S4_TMPL_CORE_ONLY.lower()
+        assert "S2 ITEMS ARE TYPED" not in v2.S4_TMPL
+
+    def test_core_only_render_golden_structure(self):
+        """The core-only render is a pinned structural golden: kind groups
+        in order, no pack kinds, no chains; hint blocks retained."""
+        m = v2.build_master_list()
+        r = v2._render_master_core_only(m)
+        assert r.startswith("MASTER LIST — the closed vocabulary (CORE ONLY)")
+        order = [r.index(s) for s in
+                 ("OBJECTS (core)", "SUBJECTS (core)", "POINTS", "EVENTS",
+                  "USER-PERSONAL-STATE VOCABULARY", "MEMORY GRANULARITY",
+                  "STATE-VALUE CARVE-OUT")]
+        assert order == sorted(order), "section order is pinned"
+        assert "PACK KINDS" not in r and "CHAINS" not in r
+        assert "product-strategy:product" not in r
+        assert r == v2._render_master_core_only(m)  # deterministic (no shuffle)
+
+    def test_core_only_render_byte_pinned_golden(self):
+        """Task 5's byte-pinned golden fixture: the core-only master render
+        equals the committed golden byte-for-byte. The golden is rendered
+        from a HAND-BUILT master (fixed dict order — see _hand_built_master),
+        never from the installed packs, so the test is platform-independent
+        (build_master_list()'s memory-granularity order follows the pack-
+        manifest glob order, which differs between macOS and Linux). Also
+        pins determinism (render twice → equal) and the absence of the
+        PACK KINDS / CHAINS sections (the classify-later split).
+
+        FIX K (cycle 3): production coverage — the byte-pin never saw
+        build_master_list()'s readdir-order memory_granularity. Render BOTH
+        the fixture and the production master; assert byte-equality of every
+        section EXCEPT MEMORY GRANULARITY, whose entries must be
+        SET-EQUAL (order-independent) to the golden's."""
+        m = _hand_built_master()
+        r = v2._render_master_core_only(m)
+        assert r == v2._render_master_core_only(m)  # deterministic (no shuffle)
+        assert "PACK KINDS" not in r and "CHAINS" not in r
+        golden = (Path(__file__).resolve().parent / "fixtures"
+                  / "core_only_master.golden.txt")
+        assert golden.read_text(encoding="utf-8") == r, \
+            "core-only master render drifted from the golden fixture " \
+            "(regenerate via _hand_built_master: see the golden test docstring)"
+
+        # FIX K: production-render coverage — the granularity block is the
+        # ONLY readdir-order-dependent section; everything else must be
+        # byte-identical to the golden, and the granularity entries must be
+        # set-equal (same entries, any order).
+        marker = "MEMORY GRANULARITY (what to keep, what to strip)"
+        carve = "\nSTATE-VALUE CARVE-OUT"
+
+        def _split(render: str):
+            head, sep, tail = render.partition(marker)
+            assert sep, "granularity section present in the render"
+            g_lines, _, rest = tail.partition(carve)
+            return head, sorted(g_lines.split("\n")), carve + rest
+
+        prod = v2._render_master_core_only(v2.build_master_list())
+        p_head, p_g, p_rest = _split(prod)
+        g_head, g_g, g_rest = _split(r)
+        assert p_head == g_head, "production render (pre-granularity) must " \
+            "match the golden byte-for-byte"
+        assert p_rest == g_rest, "production render (post-granularity) must " \
+            "match the golden byte-for-byte"
+        assert p_g == g_g, "production granularity entries must be set-equal " \
+            "to the golden (readdir order differs across platforms)"
+        assert len(p_g) >= 4, "production render carries the installed packs"
+
+    def test_core_only_ups_block_keeps_not_kinds_guard(self):
+        """The core-only USER-PERSONAL-STATE block carries the E2 (#1534)
+        guard — the vocabulary is a classification hint, never a kind."""
+        r = v2._render_master_core_only(v2.build_master_list())
+        assert "USER-PERSONAL-STATE VOCABULARY (Tier-A classification " \
+               "hint — the VALUE is the fact, retain verbatim; these are " \
+               "NOT kinds: do NOT emit them as entity/event/point kinds)" in r
+
+    def test_core_only_s2_prompt_pack_namespaces_dynamic(self):
+        """The core-only S2 prompt's pack-namespace list is DYNAMIC —
+        derived from the INSTALLED packs (never hardcoded: epistemic-team
+        is not installed, and a future pack must route to unclassified)."""
+        m = v2.build_master_list()
+        prompt = v2.render_s2_prompt(m, core_only=True)
+        ns = sorted({k.rsplit(":", 1)[0] + ":" for k in m["pack_kinds"]})
+        assert ns, "installed pack namespaces must be non-empty"
+        assert "({})".format("/".join(ns)) in prompt
+        assert "epistemic-team:" not in prompt
+        assert "{pack_namespaces}" not in prompt, "placeholder must be filled"
+
+    def test_core_only_contract_sentinel_only_top_level(self):
+        """The sentinel lands on the TOP-LEVEL entities/events/points kind
+        fields — never on the participant-slot kind fields (the slots
+        schema keeps plain str; the write path would otherwise silently
+        undo the contract's slots advertisement)."""
+        c = v2.OUTPUT_CONTRACT_CORE_ONLY
+        # top-level fields widen
+        assert '"name": str, "kind": str|"unclassified", "lifecycle"' in c
+        assert '"eventKind": str|"unclassified",' in c
+        assert '"pointKind": "statement"|"unclassified",' in c
+        # slot schemas keep plain str — never advertise the sentinel
+        assert '"subject": [{"name": str, "kind": str' in c
+        assert '"object": [{"name": str, "kind": str' in c
+        assert '"event": [{"name": str, "kind": str' in c
+        assert '"kind": str|"unclassified", "confidence"' not in c
+
+    def test_core_only_derivations_anchors_present_in_base(self):
+        """The _CORE_ONLY constants are .replace-derivations of the base
+        templates/contract; a future base edit that breaks an anchor would
+        silently no-op the derives (a half-applied flag-on template). These
+        pins make that fail loudly in CI."""
+        # S2 anchors
+        assert ("- CHAINS — mapping must respect the chain positions "
+                "(WARN, then TRY TO REPAIR):\n"
+                "{chains_text}\n"
+                "  If a mapping would connect across a chain in a way that "
+                "violates it, WARN in\n"
+                "  chain_notes and TRY TO REPAIR by re-mapping toward the "
+                "nearest valid chain\n"
+                "  position. NEVER invent entities to satisfy a chain."
+                in v2.S2_TMPL)
+        assert ("MASTER LIST\n{master_list}\n\nCONDENSED SEMANTIC CORE"
+                in v2.S2_TMPL)
+        # S4 anchors
+        assert ("MASTER LIST (same closed vocabulary as S2 — no minted "
+                "kinds)\n{master_list}\n\n"
+                "CHAINS\n{chains_text}\n\nS1 STORY" in v2.S4_TMPL)
+        assert ("- Re-emit the S2 items you keep, corrected where the "
+                "search results show they\n"
+                "  already exist (lifecycle changed/unchanged + supersedes "
+                "= the existing id)." in v2.S4_TMPL)
+        # OUTPUT_CONTRACT anchors
+        assert '"name": str, "kind": str, "lifecycle"' in v2.OUTPUT_CONTRACT
+        assert '"eventKind": str,' in v2.OUTPUT_CONTRACT
+        assert '"pointKind": "statement",' in v2.OUTPUT_CONTRACT
+        # FIX D (cycle 3): the base's advisory "TRY TO REPAIR" chain_notes
+        # bullet exists EXACTLY ONCE in S4_TMPL, and the core-only
+        # derivation swaps it for the deterministic-enforcement wording
+        # ("CHAIN ENFORCEMENT IS DETERMINISTIC" must not be contradicted).
+        assert v2.S4_TMPL.count(
+            "- chain_notes: flag violations, TRY TO REPAIR toward the nearest "
+            "valid chain\n  position, never invent entities.") == 1
+        assert "deterministic post-extraction" in v2.S4_TMPL_CORE_ONLY
+        assert "do NOT attempt repairs yourself" in v2.S4_TMPL_CORE_ONLY
+        assert "TRY TO REPAIR toward the nearest valid chain" not in \
+            v2.S4_TMPL_CORE_ONLY
+        assert "TRY TO REPAIR toward the nearest valid chain" in v2.S4_TMPL
+
+    def test_unclassified_constant_shared_with_classifier(self):
+        """The sentinel constant must not drift between modules (a mismatch
+        would silently break the classify-later sentinel round-trip)."""
+        from tortoise.kind_classifier import UNCLASSIFIED as CL_UNCLASSIFIED
+
+        assert v2.UNCLASSIFIED == CL_UNCLASSIFIED == "unclassified"
+
+    def test_sentinel_never_flagged_minted(self):
+        """Below-floor items carry kind='unclassified' through to the
+        minted-kind report — the reserved sentinel is a terminal, not a
+        minted kind (final-review P2 false positive)."""
+        embed = {"entities": [
+            {"name": "xyzzy", "kind": "unclassified",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [{"content": "e", "eventKind": "unclassified"}],
+            "points": [{"content": "p", "pointKind": "unclassified"}],
+            "operators": [], "chain_notes": [], "link_before_create": []}
+        assert v2._minted_kind_report(embed) == []
+        # a real minted kind is still flagged (the report is not gutted)
+        bad = dict(embed)
+        bad["entities"] = [{"name": "x", "kind": "worktree",
+                             "lifecycle": "created", "supersedes": None,
+                             "note": None}]
+        assert any("worktree" in m for m in v2._minted_kind_report(bad))
+
+    def test_point_kind_report_agrees_with_point_gate(self):
+        """FIX P: the report's points lane agrees with the point write gate
+        — pack point kinds WITH kindDefs (dev:requirement,
+        product-strategy:useCase/...) sit in the master's pack_kinds
+        (the master-wide ``master_kind_forms`` bare forms would hide them)
+        but the gate repairs them to statement — the report must FLAG them."""
+        embed = {"entities": [], "events": [],
+                 "points": [
+                     {"content": "p1",
+                      "pointKind": "dev:requirement"},
+                     {"content": "p2",
+                      "pointKind": "product-strategy:useCase"},
+                     {"content": "p3", "pointKind": "statement"}],
+                 "operators": [], "chain_notes": [],
+                 "link_before_create": []}
+        minted = v2._minted_kind_report(embed)
+        assert any("dev:requirement" in m for m in minted), minted
+        assert any("product-strategy:useCase" in m for m in minted), minted
+        assert not any("statement" in m for m in minted)
+        # and execute_embed's point gate agrees: those kinds repair
+        res = v2.execute_embed(embed, {}, session_id="s1")
+        pk = {p["content"]: p["pointKind"] for p in res["payload"]["points"]}
+        assert pk["p1"] == "statement" and pk["p2"] == "statement"
+
+    def test_slot_survives_for_pack_object_kind(self):
+        """FIX M slot-lane consistency (reviewer P2): _clean_slots' subject/
+        object lane gates against the SAME widened object vocabulary as
+        execute_embed's entity gate — a slot referencing an emitted
+        dev:apiSpec entity keeps its kind and resolves (previously it was
+        repaired to core:other and dropped, silently losing the relation
+        for exactly the synthesized kinds FIX M preserves)."""
+        embed = {"entities": [
+            {"name": "the api spec", "kind": "dev:apiSpec",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [],
+            "points": [{"content": "the api spec is v2",
+                         "pointKind": "statement",
+                         "about_entities": ["the api spec"],
+                         "slots": {"subject": [
+                             {"name": "the api spec",
+                              "kind": "dev:apiSpec",
+                              "confidence": 0.9}]}}]}
+        res = v2.execute_embed(embed, {}, session_id="s1")
+        pt = res["payload"]["points"][0]
+        assert pt["slots"]["subject"][0]["kind"] == "dev:apiSpec", \
+            "the slot kind survives _clean_slots + _resolve_slot_refs"
+        assert not any("minted slot kind" in w for w in res["warnings"]), \
+            res["warnings"]
+
+    def test_fold_never_drops_different_non_sentinel_kind(self):
+        """A same-name duplicate carrying a DIFFERENT non-sentinel kind is
+        a distinct (name, kind) :Object (Layer-1) — the name-collision
+        fold must NOT delete it AND the S2 re-stamp must NOT clobber it
+        (only sentinel/missing/identical duplicates fold; only LOST kinds
+        re-stamp; cycle-3 P2)."""
+        def ent(name, kind):
+            return {"name": name, "kind": kind, "lifecycle": "created",
+                    "supersedes": None, "note": None}
+
+        merged = {"entities": [ent("plan", "core:plan"),
+                                ent("plan", "core:goal")],
+                  "events": [], "points": [], "operators": [],
+                  "chain_notes": [], "link_before_create": []}
+        warnings: list[str] = []
+        n = v2._restamp_s2_kinds(merged, {"entities:plan": "core:plan"},
+                                 warnings)
+        assert len(merged["entities"]) == 2, \
+            "the different-kind duplicate must survive the fold"
+        kinds = {e["kind"] for e in merged["entities"]}
+        assert kinds == {"core:plan", "core:goal"}, \
+            "the S2-registered copy keeps core:plan; the re-typed survivor " \
+            "keeps its original kind (core:goal)"
+        assert not any("folded into the S2" in w for w in warnings)
+        assert any("preserved as distinct" in w for w in warnings), \
+            "the preserved re-typed :Object is announced (observable census)"
+        assert n == 0, "a valid non-sentinel kind is never re-stamped"
+
+    def test_clean_slots_sentinel_no_minted_warning(self):
+        """FIX G: a participant slot kind 'unclassified' (the classify-later
+        sentinel) is carried WITHOUT the spurious 'minted slot kind'
+        repair warning — the sentinel is a terminal, not a minted kind
+        (as _rekey_slots already treats it)."""
+        warnings: list[str] = []
+        master = v2.build_master_list()
+        slots = v2._clean_slots(
+            {"subject": [{"name": "x", "kind": "unclassified",
+                            "confidence": 0.9}]},
+            warnings, "ctx", master)
+        assert not any("minted slot kind" in w for w in warnings), warnings
+        assert slots == {"subject": [
+            {"name": "x", "kind": "unclassified", "confidence": 0.9}]}
+        # a genuinely minted slot kind still warns + repairs (not gutted)
+        warnings2: list[str] = []
+        slots2 = v2._clean_slots(
+            {"subject": [{"name": "x", "kind": "worktree",
+                            "confidence": 0.9}]},
+            warnings2, "ctx", master)
+        assert any("minted slot kind" in w for w in warnings2)
+        assert slots2["subject"][0]["kind"] == "core:other"
+
+    def test_no_slot_kind_ever_carries_sentinel(self):
+        """FIX O: after _clean_slots + _resolve_slot_refs, NO payload slot
+        ever carries 'unclassified' — subject/object sentinel slots fail
+        closed at _resolve_slot_refs (no emitted entity resolves them),
+        and an EVENT-role sentinel slot (which passes through untouched)
+        is repaired to core:occurrence SILENTLY (the sentinel is only
+        advertised for top-level fields; 'sentinel never written' holds for
+        slot kinds too)."""
+        warnings: list[str] = []
+        master = v2.build_master_list()
+        slots = v2._clean_slots(
+            {"subject": [{"name": "s", "kind": "unclassified",
+                            "confidence": 0.8}],
+             "object": [{"name": "o", "kind": "unclassified",
+                          "confidence": 0.8}],
+             "event": [{"name": "e", "kind": "unclassified",
+                         "confidence": 0.8}]},
+            warnings, "ctx", master)
+        assert not any("minted slot kind" in w for w in warnings), warnings
+        resolved = v2._resolve_slot_refs(slots, set(), warnings, "ctx")
+        assert resolved is not None and "event" in resolved
+        # the event slot survives but with the fallback kind — never the
+        # sentinel
+        assert resolved["event"][0]["kind"] == "core:occurrence"
+        assert "subject" not in resolved and "object" not in resolved, \
+            "sentinel subject/object slots fail closed downstream"
+        # sweeping assertion: no slot kind across any role is the sentinel
+        for refs in resolved.values():
+            for r in refs:
+                assert r["kind"] != "unclassified"
+
+    def test_rekey_slots_skips_sentinel_entity_kind(self):
+        """An entity still carrying the 'unclassified' sentinel must not
+        copy it into slot kinds (_clean_slots would otherwise emit a
+        spurious 'minted slot kind' warning for the sentinel)."""
+        embed = {"entities": [
+            {"name": "xyzzy", "kind": "unclassified",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [],
+            "points": [{"content": "the claim", "pointKind": "statement",
+                         "about_entities": ["xyzzy"],
+                         "slots": {"subject": [
+                             {"name": "xyzzy", "kind": "core:other",
+                              "confidence": 0.9}]}}]}
+        n = v2._rekey_slots(embed)
+        assert n == 0, "the sentinel is never copied into a slot kind"
+        slot = embed["points"][0]["slots"]["subject"][0]
+        assert slot["kind"] == "core:other"
+
+    def test_slot_rekey_follows_classified_kind(self):
+        """Participant slot kinds follow the classified entity kind."""
+        embed = {"entities": [
+            {"name": "the ticket fix", "kind": "dev:issue",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [],
+            "points": [{"content": "the claim", "pointKind": "statement",
+                         "about_entities": ["the ticket fix"],
+                         "slots": {"subject": [
+                             {"name": "the ticket fix",
+                              "kind": "core:other", "confidence": 0.9}]}}]}
+        n = v2._rekey_slots(embed)
+        assert n == 1
+        slot = embed["points"][0]["slots"]["subject"][0]
+        assert slot["kind"] == "dev:issue"
+
+    def test_flag_on_via_env_toggle_only(self, monkeypatch):
+        """The env toggle alone (no injected classifier) enables the
+        classify-later pipeline — the single choke point. The default
+        classifier builder is monkeypatched so the test never waits on a
+        real index build (bge cold load / TF-IDF degrade)."""
+        monkeypatch.setenv("TORTOISE_CLASSIFY_LATER", "1")
+        monkeypatch.setattr(v2, "_default_kind_classifier",
+                            lambda model: _stub_classifier())
+        s2 = {"entities": [
+            {"name": "the ticket fix", "kind": "unclassified",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [], "points": []}
+        out = self._run(monkeypatch, s2)  # no injected classifier
+        assert out["classify_later"]["enabled"] is True
+        assert out["payload"]["entities"][0]["kind"] == "dev:issue"
+
+    def test_env_toggle_case_insensitive(self, monkeypatch):
+        """FIX B: TORTOISE_CLASSIFY_LATER matches case-insensitively —
+        True/TRUE/ON/yes all enable; only unset/0/off disable."""
+        for val in ("1", "true", "TRUE", "True", "yes", "on", "ON"):
+            monkeypatch.setenv("TORTOISE_CLASSIFY_LATER", val)
+            assert v2._classify_later_enabled() is True, val
+        monkeypatch.setenv("TORTOISE_CLASSIFY_LATER", "0")
+        assert v2._classify_later_enabled() is False
+        monkeypatch.setenv("TORTOISE_CLASSIFY_LATER", "off")
+        assert v2._classify_later_enabled() is False
+        monkeypatch.delenv("TORTOISE_CLASSIFY_LATER")
+        assert v2._classify_later_enabled() is False
+
+    def test_label_order_toggle_case_insensitive(self, monkeypatch):
+        """FIX B: TORTOISE_LABEL_ORDER=shuffle matches case-insensitively
+        (SHUFFLE/Shuffle enable the A′ label-order hook)."""
+        monkeypatch.delenv("TORTOISE_LABEL_ORDER", raising=False)
+        assert v2._label_order_rng("s") is None
+        for val in ("shuffle", "SHUFFLE", "Shuffle"):
+            monkeypatch.setenv("TORTOISE_LABEL_ORDER", val)
+            assert v2._label_order_rng("s") is not None, val
+
+    def test_numeric_name_survives_union_classify(self, monkeypatch):
+        """FIX C: a numeric (non-str) entity name must not raise
+        AttributeError in the union-classify block (_identity_key /
+        _restamp_s2_kinds / _rekey_slots coerce via str())."""
+        s2 = {"entities": [
+            {"name": 42, "kind": "unclassified",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [], "points": []}
+        out = self._run(monkeypatch, s2, kind_classifier=_stub_classifier())
+        assert out["errors"] == [], "no AttributeError through the union pass"
+        assert out["payload"]["entities"][0]["name"] == "42"
+
+    def test_norm_coerces_non_str(self):
+        """FIX C: _norm coerces non-str input instead of raising (the
+        falsy-or semantics mirror _collect_classify_items' defensive str():
+        a falsy value coerces to '')."""
+        assert v2._norm(42) == "42"
+        assert v2._norm(None) == ""
+        assert v2._norm(0) == ""  # falsy-or: 0 or "" → ""
+        assert v2._norm("  Mixed CASE ") == "mixed case"
+
+
 # ── S3 integration with the real backend (skip-if-unavailable) ─────────────
 
 def test_s3_real_backend_search(tmp_path):
@@ -1705,8 +3694,169 @@ class TestS4Merge:
         merged = v2.merge_embed_lists(s2, s4)
         stats = v2._s4_merge_stats(s2, s4, merged)
         assert stats == {"s2_items": 2, "s4_items": 2, "merged_items": 3,
-                         "corrected_by_s4": 1, "kept_from_s2": 1,
-                         "added_by_s4": 1}
+                         "corrected_by_s4": 1, "verbatim_reemissions": 1,
+                         "kept_from_s2": 1, "added_by_s4": 1}
+
+
+    def test_verbatim_reemissions_pure_reemit(self):
+        """S2 items re-emitted identical → every collision is verbatim."""
+        s2 = {"entities": [], "events": [], "points": [_pt("A"), _pt("B")],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        s4 = {"entities": [], "events": [], "points": [_pt("A"), _pt("B")],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        merged = v2.merge_embed_lists(s2, s4)
+        stats = v2._s4_merge_stats(s2, s4, merged)
+        assert stats["corrected_by_s4"] == 2
+        assert stats["verbatim_reemissions"] == 2
+
+    def test_verbatim_reemissions_correction_not_verbatim(self):
+        """S2 entity re-emitted with a changed lifecycle (name/kind/content
+        identical) → collision counts corrected_by_s4 but NOT verbatim."""
+        def ent(**kw):
+            return {"name": "auth-gate", "kind": "core:plan",
+                    "lifecycle": "created", "supersedes": None,
+                    "note": None, **kw}
+        s2 = {"entities": [ent()], "events": [], "points": [],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        s4 = {"entities": [ent(lifecycle="superseded")], "events": [],
+              "points": [], "operators": [], "chain_notes": [],
+              "link_before_create": []}
+        merged = v2.merge_embed_lists(s2, s4)
+        stats = v2._s4_merge_stats(s2, s4, merged)
+        assert stats["corrected_by_s4"] == 1
+        assert stats["verbatim_reemissions"] == 0
+
+    def test_verbatim_reemissions_event_kind_change_is_correction(self):
+        """Same event content with a changed eventKind → correction (NOT
+        verbatim — eventKind is not in the events merge key, so this IS a
+        collision the classifier must distinguish)."""
+        def ev(kind="deployment"):
+            return {"content": "v2 shipped", "eventKind": kind,
+                    "date": "2026-01-01"}
+        s2 = {"entities": [], "events": [ev()], "points": [],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        s4 = {"entities": [], "events": [ev(kind="rollback")], "points": [],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        merged = v2.merge_embed_lists(s2, s4)
+        stats = v2._s4_merge_stats(s2, s4, merged)
+        assert stats["corrected_by_s4"] == 1   # content collision
+        assert stats["verbatim_reemissions"] == 0  # eventKind changed
+
+    def test_verbatim_reemissions_optional_field_drop_stays_verbatim(self):
+        """S4 re-emits a point with identical content but drops the optional
+        confidence/quote fields → STILL a verbatim re-emission."""
+        p_full = {"content": "the fix shipped", "pointKind": "statement",
+                  "about_entities": [], "slots": None,
+                  "confidence": 0.9, "quote": "original quote"}
+        p_min = {"content": "the fix shipped", "pointKind": "statement",
+                 "about_entities": [], "slots": None}
+        s2 = {"entities": [], "events": [], "points": [p_full],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        s4 = {"entities": [], "events": [], "points": [p_min],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        merged = v2.merge_embed_lists(s2, s4)
+        stats = v2._s4_merge_stats(s2, s4, merged)
+        assert stats["corrected_by_s4"] == 1
+        assert stats["verbatim_reemissions"] == 1
+
+    def test_verbatim_reemissions_gap_not_counted(self):
+        """S4-only item (no S2 collision) → counts as added_by_s4, not
+        verbatim, not corrected."""
+        s2 = {"entities": [], "events": [], "points": [_pt("A")],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        s4 = {"entities": [], "events": [], "points": [_pt("C")],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        merged = v2.merge_embed_lists(s2, s4)
+        stats = v2._s4_merge_stats(s2, s4, merged)
+        assert stats["added_by_s4"] == 1
+        assert stats["verbatim_reemissions"] == 0
+        assert stats["corrected_by_s4"] == 0
+
+    def test_verbatim_reemissions_scoped_to_4_sections(self):
+        """chain_notes / link_before_create / retractions collisions are NOT
+        re-emission surfaces — never counted verbatim."""
+        s2 = {"entities": [], "events": [], "points": [],
+              "operators": [], "chain_notes": [{"chain": "c", "finding": "f"}],
+              "link_before_create": [{"searched_for": "x", "found": False}],
+              "retractions": []}
+        s4 = {"entities": [], "events": [], "points": [],
+              "operators": [], "chain_notes": [{"chain": "c", "finding": "f"}],
+              "link_before_create": [{"searched_for": "x", "found": True}],
+              "retractions": []}
+        merged = v2.merge_embed_lists(s2, s4)
+        stats = v2._s4_merge_stats(s2, s4, merged)
+        assert stats["verbatim_reemissions"] == 0
+
+    def test_verbatim_reemissions_entity_kind_lens(self):
+        """Entity kind folds through the KEY's kind lens: S4 re-emits the
+        same entity writing "plan" where S2 wrote "core:plan" → same merge
+        key (bare kind), verbatim (not a correction)."""
+        s2 = {"entities": [{"name": "gate", "kind": "core:plan",
+                            "lifecycle": "created", "supersedes": None,
+                            "note": None}], "events": [], "points": [],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        s4 = {"entities": [{"name": "gate", "kind": "plan",
+                            "lifecycle": "created", "supersedes": None,
+                            "note": None}], "events": [], "points": [],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        merged = v2.merge_embed_lists(s2, s4)
+        stats = v2._s4_merge_stats(s2, s4, merged)
+        assert stats["corrected_by_s4"] == 1
+        assert stats["verbatim_reemissions"] == 1
+
+    def test_verbatim_reemissions_pointkind_drift_is_not_verbatim(self):
+        """PR #2430 review A/B basis pin: the conservative full-equality
+        basis means a drift on ANY non-optional field (here pointKind on
+        same content) is NOT a verbatim re-emission — under the delta
+        contract the item WOULD be re-emitted, so it is not pure savings.
+        (Stricter than the #1789 field pin; documented on #1789.)"""
+        p1 = {"content": "the fix shipped", "pointKind": "statement",
+              "about_entities": [], "slots": None}
+        p2 = {"content": "the fix shipped", "pointKind": "decision",
+              "about_entities": [], "slots": None}
+        s2 = {"entities": [], "events": [], "points": [p1],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        s4 = {"entities": [], "events": [], "points": [p2],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        merged = v2.merge_embed_lists(s2, s4)
+        stats = v2._s4_merge_stats(s2, s4, merged)
+        assert stats["corrected_by_s4"] == 1    # same content → collision
+        assert stats["verbatim_reemissions"] == 0  # pointKind drift
+
+    def test_verbatim_reemissions_dup_key_capped_semantics(self):
+        """A duplicate merge key WITHIN one S2 list counts per-S2-item
+        (corrected_by_s4/verbatim can exceed s4_items) — the report clamps
+        the redundant proxy factor to [0,1]; the classifier itself stays a
+        per-item count (matches corrected_by_s4's basis)."""
+        ent = {"name": "gate", "kind": "core:plan", "lifecycle": "created",
+               "supersedes": None, "note": None}
+        s2 = {"entities": [ent, dict(ent)], "events": [], "points": [],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        s4 = {"entities": [dict(ent)], "events": [], "points": [],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        merged = v2.merge_embed_lists(s2, s4)
+        stats = v2._s4_merge_stats(s2, s4, merged)
+        assert stats["s2_items"] == 2
+        assert stats["s4_items"] == 1
+        assert stats["corrected_by_s4"] == 2  # per-S2-item vs S4 key set
+        assert stats["verbatim_reemissions"] == 2
+        # merge dedupes the dup to ONE entity (first-wins semantics)
+        assert len(merged["entities"]) == 1
+
+    def test_verbatim_reemissions_supersedes_change_is_correction(self):
+        """A supersedes change on a colliding operator → correction."""
+        def op(**kw):
+            return {"src": "a", "dst": "b", "op_type": "IMPL",
+                    "target_edge": None, **kw}
+        s2 = {"entities": [], "events": [], "points": [],
+              "operators": [op()], "chain_notes": [], "link_before_create": []}
+        s4 = {"entities": [], "events": [], "points": [],
+              "operators": [op(supersedes="q")], "chain_notes": [],
+              "link_before_create": []}
+        merged = v2.merge_embed_lists(s2, s4)
+        stats = v2._s4_merge_stats(s2, s4, merged)
+        assert stats["corrected_by_s4"] == 1
+        assert stats["verbatim_reemissions"] == 0
 
 
 class TestE4Orchestrator:
@@ -1779,7 +3929,7 @@ def test_parse_json_handles_markdown_fences():
     list in ```json code fences — the v2 strict regex reported 'no JSON block
     in output' for PERFECT JSON, driving the 666-parse_error census. The
     robust parser strips the fences."""
-    import json
+
     from tortoise.extractor_v2 import _parse_json
     fenced = '```json\n{"entities": [], "points": [{"content": "x"}]}\n```'
     r = _parse_json(fenced)
@@ -1792,3 +3942,1503 @@ def test_parse_json_handles_markdown_fences():
         raise AssertionError("expected ValueError")
     except ValueError:
         pass
+
+
+# ── #1787 Task 2: S2/S4 cap raise 8000→16000 — dense-list completeness ──────
+
+def test_s2_s4_cap_raised_to_16k_completes_dense_list(monkeypatch):
+    """#1787 — a dense-session embed list that overflows the old 8000 cap
+    must complete in full at the 16000 default: no partial_parse, no tail
+    loss, and every emitted point lands in the payload. The mock is
+    cap-aware: <=8000 → truncated JSON (finish=length), >8000 → full list."""
+    monkeypatch.delenv("TORTOISE_EXTRACTOR_MAX_TOKENS", raising=False)
+    dense_points = [
+        {"content": f"durable claim number {i} with a verbatim quote "
+                    f"\"{'word ' * 40}\" and search_keys [\"k{i}\", \"k{i}b\"]",
+         "pointKind": "statement", "about_entities": [f"entity-{i}"],
+         "quote": f"quote {i}: " + ("lorem ipsum dolor " * 25),
+         "search_keys": [f"k{i}", f"k{i}b"], "tier": "B",
+         "slots": {"subject": [{"name": f"entity-{i}", "kind": "core:thing",
+                                "confidence": 0.9}]}}
+        for i in range(45)
+    ]
+    full = json.dumps({"entities": [{"name": f"entity-{i}", "kind": "core:thing",
+                                     "lifecycle": "created", "supersedes": None}
+                                    for i in range(45)],
+                       "points": dense_points,
+                       "events": [], "operators": [], "chain_notes": [],
+                       "link_before_create": []})
+    # calibration asserts — the fixture must BOTH overflow 8K under real
+    # tokenization (or the test proves plumbing on a sub-8K fixture) AND FIT
+    # the 16000 default. 45 points = 47,577 bytes → ≥ 11.9K tokens at the
+    # pessimistic 4 chars/token bound (clears 8192) and ≤ 13.6K at 3.5
+    # chars/token (fits 16K) — inside [8K, 16K], the observed reval band:
+    assert len(full.encode("utf-8")) // 4 >= 8192, \
+        "fixture too small: the 45-point dense list must exceed 8K tokens " \
+        "(raise point count / quote length until the 4 chars/token bound clears)"
+    assert len(full.encode("utf-8")) // 3.5 <= 14000, \
+        "fixture too dense: the 45-point list must FIT the 16000 default " \
+        "(~3.5 chars/token packing; shrink point count / quote length until " \
+        "the upper bound clears — the observed reval lists are 8-16K, which " \
+        "is what 16K claims to cover)"
+    # the truncated form: cut GENUINELY mid-points-list, inside the points
+    # array at an item boundary after point k — leaving the array + outer
+    # object UNTERMINATED (rung-3 repair's `+ "}"` closers then cannot produce
+    # valid JSON, so rung 4 `_longest_valid_prefix` must recover the head).
+    k = 40
+    points_json = json.dumps(dense_points)
+    depth, closed = 0, 0
+    boundary = len(points_json)
+    for i, ch in enumerate(points_json):  # walk to the k-th point's close
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                closed += 1
+                if closed == k:
+                    boundary = i + 1
+                    break
+    truncated = full[:full.index('"points":') + len('"points":')] \
+        + points_json[:boundary]
+
+    class CapAwareModel:
+        def __init__(self):
+            self.captured = []
+            self.last_finish_reason = "stop"
+        def complete(self, *, system, user, max_tokens=None):
+            self.captured.append(max_tokens)
+            self.last_finish_reason = "length" if max_tokens and max_tokens <= 8000 \
+                else "stop"
+            return truncated if max_tokens and max_tokens <= 8000 else full
+
+    m = CapAwareModel()
+    stats = {"llm": {}}
+    out = v2.run_s2(m, story="a very dense session story " * 200, stats=stats)
+    assert v2._S2_S4_MAX_TOKENS > 8000              # the raise happened
+    assert m.captured[-1] == v2._S2_S4_MAX_TOKENS   # the default cap is used
+    assert len(out["points"]) == 45                 # full list, no tail loss
+    # clean at 16K: run_s2 returns the RAW parsed embed dict — there is NO
+    # `error_census` key on it. The partial_parse census bump lives in the
+    # S2/S4 stage callers, keyed on stats["partial"] — assert the same
+    # signal the callers check:
+    assert stats.get("partial") is not True          # clean at 16K
+    # #2134 backstop re-pin (Task 0 Step 5): force the OLD cap through
+    # _complete_parsed directly WITH the escalation knob monkeypatched to
+    # <= base — an un-escalatable truncation is RESIDUAL fail-loud (P2-15:
+    # never a silent rung-4 partial of the truncating attempt; the env range
+    # [16000..64000] makes esc=8000 unreachable via env — the helper is the
+    # only lever).
+    monkeypatch.setattr(v2, "_extractor_escalation_tokens", lambda b: 8000)
+    m2 = CapAwareModel()
+    stats2 = {"llm": {}}
+    with pytest.raises(ValueError) as ei:
+        v2._complete_parsed(m2, "sys", "usr", max_tokens=8000,
+                            stats=stats2)
+    assert ei.value.truncated is True   # fail-loud, classed truncated
+    assert stats2.get("partial") is not True  # never a silent partial
+
+
+def test_s2_s4_census_clean_at_16k_through_session(monkeypatch):
+    """#1787 P2-12 — MANDATORY mirror of the extract_session_v2-level census
+    test at the NEW cap: a dense session through extract_session_v2 with a
+    cap-aware mock at the 16000 default must produce NO partial_parse bump
+    (error_census["partial_parse"] absent/0) — asserted where the bump
+    actually lives (the S2/S4 stage callers)."""
+    from tests.test_extractor_reliability import _conv
+    monkeypatch.delenv("TORTOISE_EXTRACTOR_MAX_TOKENS", raising=False)
+
+    class CapAwareSessionModel:
+        def __init__(self):
+            self.calls = 0
+            self.last_finish_reason = "stop"
+        def complete(self, *, system, user, max_tokens=None):
+            self.calls += 1
+            self.last_finish_reason = ("length"
+                                       if max_tokens and max_tokens <= 8000
+                                       else "stop")
+            if "GAP REVIEWER" in system:
+                # S4: dense re-emit — full at 16000, truncated at <=8000
+                pts = [{"content": f"gap point {i} " + "word " * 40,
+                        "pointKind": "statement"} for i in range(40)]
+                if max_tokens and max_tokens <= 8000:
+                    # cut at the first point's closing brace (item boundary)
+                    # so rung 4 _longest_valid_prefix partial-accepts (a cut
+                    # with zero complete items falls through to _ParseError).
+                    pts_json = json.dumps(pts)
+                    boundary = pts_json.index('}') + 1
+                    return ('{"entities": [], "events": [], "operators": [], '
+                            '"points": ' + pts_json[:boundary])
+                return json.dumps({"entities": [], "events": [],
+                                   "operators": [], "points": pts,
+                                   "link_before_create": []})
+            if "STORY SUMMARIZER" in system:
+                return "A narrative."
+            return ('{"entities": [], "events": [], "operators": [], '
+                    '"points": [{"content": "s2 base", '
+                    '"pointKind": "statement"}]}')
+
+    out = v2.extract_session_v2(CapAwareSessionModel(), _conv())
+    assert out["error_census"].get("partial_parse", 0) == 0  # clean at 16K
+    # the old-cap path through the SAME callers still bumps the census —
+    # `_stage_cap` is read at call time by the S2/S4 callers, so
+    # monkeypatching it to 8000 exercises the genuine truncation →
+    # partial_parse path:
+    # #2134 re-pin (Task 0 Step 5): at the old cap with the escalation knob
+    # monkeypatched to <= base (the env range [16000..64000] makes esc=8000
+    # unreachable — the helper is the only lever), the genuine truncation is
+    # RESIDUAL fail-loud (truncated_parse_error, never a silent rung-4
+    # partial of the truncating attempt — P2-15).
+    monkeypatch.setattr(v2, "_stage_cap", lambda default: 8000)
+    monkeypatch.setattr(v2, "_extractor_escalation_tokens", lambda b: 8000)
+    out_old = v2.extract_session_v2(CapAwareSessionModel(), _conv())
+    assert out_old["error_census"].get("partial_parse", 0) == 0
+    assert out_old["error_census"].get("truncated_parse_error", 0) >= 1
+
+
+def test_multi_session_haystack_truncation_escalates_or_fails_loud(
+        monkeypatch):
+    """#2134 Task 6 Step 2 — the mock-only CI guard for the multi-session
+    haystack shape (extract_session_v2 runs per haystack session; a dense
+    session's S4 emit overflows the 16K cap). POST-fix: every truncating
+    session either ESCALATES-RECOVERS (aggregate: ZERO partial_parse /
+    ZERO truncated_parse_error, recovery.escalated == sessions, the full
+    list survives — never a silent shorter valid=true list) or FAILS LOUD
+    when no escalation headroom exists (esc<=base → residual
+    truncated_parse_error per session — the census, never a silent
+    partial-accept of the truncating attempt)."""
+    monkeypatch.delenv("TORTOISE_EXTRACTOR_MAX_TOKENS", raising=False)
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+    from tests.test_extractor_reliability import _conv
+
+    def _dense_s4(max_tokens):
+        pts = [{"content": f"gap point {i} " + "word " * 40,
+                "pointKind": "statement"} for i in range(40)]
+        pts_json = json.dumps(pts)
+        boundary = pts_json.index('}') + 1
+        return ('{"entities": [], "events": [], "operators": [], '
+                '"points": ' + pts_json[:boundary])
+
+    class _MultiSession:
+        """S4 emits a dense 40-item list: length-truncated at <=16000 (the
+        16K base cap), full at the 32000 escalation. S2 + S1 stay small."""
+        last_finish_reason = "stop"
+
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, *, system, user, max_tokens=None):
+            self.calls += 1
+            if "GAP REVIEWER" in system:
+                if max_tokens and max_tokens <= 16000:
+                    self.last_finish_reason = "length"
+                    return _dense_s4(max_tokens)
+                self.last_finish_reason = "stop"
+                pts = [{"content": f"gap point {i} " + "word " * 40,
+                        "pointKind": "statement"} for i in range(40)]
+                return json.dumps({"entities": [], "events": [],
+                                   "operators": [], "points": pts,
+                                   "link_before_create": []})
+            if "STORY SUMMARIZER" in system:
+                self.last_finish_reason = "stop"
+                return "A narrative."
+            self.last_finish_reason = "stop"
+            return ('{"entities": [], "events": [], "operators": [], '
+                    '"points": [{"content": "s2 base", '
+                    '"pointKind": "statement"}]}')
+
+    # three truncating haystack sessions → three escalation-recoveries
+    # (the per-session stats are already stage-rolled by extract_session_v2 —
+    # accumulate them the way ingest_v2 does, directly off stats["llm"] /
+    # stats["recovery"])
+    llm_agg = {"calls": 0, "retries": 0, "truncated": 0, "deadline_aborts": 0}
+    rec_agg: dict = {}
+    census_agg: dict = {}
+    for _ in range(3):
+        out = v2.extract_session_v2(_MultiSession(), _conv())
+        assert out["errors"] == []            # every truncation recovered
+        assert out["error_census"] == {}      # no partial, no residual
+        contents = [p["content"] for p in out["embed_list"]["points"]]
+        assert "s2 base" in contents
+        assert any(c.startswith("gap point 39") for c in contents)
+        _llm = out["stats"].get("llm") or {}
+        for _k in ("calls", "retries", "truncated", "deadline_aborts"):
+            llm_agg[_k] += _llm.get(_k, 0)
+        for _k, _v in (out["stats"].get("recovery") or {}).items():
+            rec_agg[_k] = rec_agg.get(_k, 0) + _v
+        for k, v in out["error_census"].items():
+            census_agg[k] = census_agg.get(k, 0) + v
+    assert llm_agg["truncated"] == 3          # criterion 3: recorded
+    assert rec_agg["escalated"] == 3
+    assert rec_agg["escalated_recovered"] == 3
+    assert rec_agg["escalated"] == (rec_agg["escalated_recovered"]
+                                    + rec_agg.get("escalated_residual", 0)
+                                    + rec_agg.get("escalated_abort", 0)
+                                    + rec_agg.get("escalated_partial", 0))
+    assert census_agg.get("partial_parse", 0) == 0
+
+    # fail-loud arm: no escalation headroom (esc == base 16000) → each
+    # session's S4 length is RESIDUAL — the census catches it (never a
+    # silent shorter valid=true list, never a rung-4 partial of the
+    # truncating attempt)
+    monkeypatch.setattr(v2, "_extractor_escalation_tokens", lambda b: 16000)
+    census_loud: dict = {}
+    for _ in range(3):
+        out = v2.extract_session_v2(_MultiSession(), _conv())
+        assert out["errors"]                   # fail-loud at the caller
+        for k, v in out["error_census"].items():
+            census_loud[k] = census_loud.get(k, 0) + v
+    assert census_loud.get("truncated_parse_error", 0) == 3
+    assert census_loud.get("partial_parse", 0) == 0
+
+
+def test_over_32k_residual_census_killer_not_partial_parse(monkeypatch):
+    """#2134 (plan Task 3 arm): a genuine >32K mega-session — S2 AND S4
+    BOTH still length-truncated after the ONE 32000 escalation — is
+    DOUBLE-RESIDUAL fail-loud: census truncated_parse_error per stage AND
+    the empty_embed_list killer class (the #1987/#2335 signal grades HARD
+    per report.py, never a silent partial-accept of the truncating
+    attempt, never partial_parse from a truncation-attributed response —
+    the conscious, reviewed migration from the #1746 recoverable-partial
+    net, pinned here)."""
+    monkeypatch.delenv("TORTOISE_EXTRACTOR_MAX_TOKENS", raising=False)
+    from tests.test_extractor_reliability import _conv
+
+    class _MegaSession:
+        """S2 + S4 truncate at EVERY budget (a >32K list never completes)."""
+        last_finish_reason = "length"
+        def complete(self, *, system, user, max_tokens=None):
+            if "STORY SUMMARIZER" in system:
+                self.last_finish_reason = "stop"
+                return "A narrative."
+            self.last_finish_reason = "length"
+            return ('{"entities": [], "events": [], "operators": [], '
+                    '"points": [{"content": "p1", '
+                    '"pointKind": "statement"}')
+
+    out = v2.extract_session_v2(_MegaSession(), _conv())
+    census = out["error_census"]
+    assert census.get("partial_parse", 0) == 0       # never a silent partial
+    assert census.get("truncated_parse_error", 0) == 2  # S2 + S4 residuals
+    assert census.get("empty_embed_list", 0) == 1    # killer class: HARD
+    rec = out["stats"]["recovery"]
+    assert rec["escalated"] == 2 and rec["escalated_residual"] == 2
+    assert rec["escalated"] == (rec.get("escalated_recovered", 0)
+                                + rec["escalated_residual"]
+                                + rec.get("escalated_abort", 0)
+                                + rec.get("escalated_partial", 0))
+    assert out["stats"]["llm"]["truncated"] == 2  # both recorded
+
+
+def test_s2_residual_then_s4_recovers(monkeypatch):
+    """#2134 (plan Task 3 arm): the designed rescue net — S2's emit is a
+    genuine >32K truncation (residual fail-loud, truncated_parse_error,
+    NO partial_parse) but S4's gap review fits the 32000 knob and RECOVERS
+    the list — the session still embeds (never an empty_embed_list on the
+    S2-only case)."""
+    monkeypatch.delenv("TORTOISE_EXTRACTOR_MAX_TOKENS", raising=False)
+    from tests.test_extractor_reliability import _conv
+
+    class _Rescue:
+        last_finish_reason = "stop"
+        def complete(self, *, system, user, max_tokens=None):
+            if "STORY SUMMARIZER" in system:
+                self.last_finish_reason = "stop"
+                return "A narrative."
+            if "GAP REVIEWER" in system and max_tokens and max_tokens > 16000:
+                self.last_finish_reason = "stop"
+                pts = [{"content": f"gp{i}",
+                        "pointKind": "statement"} for i in range(3)]
+                return ('{"entities": [], "events": [], "operators": '
+                        '[], "points": ' + json.dumps(pts) + '}')
+            self.last_finish_reason = "length"
+            return ('{"entities": [], "events": [], "operators": [], '
+                    '"points": [{"content": "p1", '
+                    '"pointKind": "statement"}')
+
+    out = v2.extract_session_v2(_Rescue(), _conv())
+    census = out["error_census"]
+    assert census.get("partial_parse", 0) == 0
+    assert census.get("truncated_parse_error", 0) == 1  # S2 residual only
+    assert census.get("empty_embed_list", 0) == 0       # S4 rescued
+    contents = [p["content"] for p in out["embed_list"]["points"]]
+    assert "gp0" in contents and "gp2" in contents  # S4 recovery embedded
+    rec = out["stats"]["recovery"]
+    assert rec["escalated"] == 2  # S2 (residual) + S4 (recovered)
+    assert rec["escalated_residual"] == 1
+    assert rec["escalated_recovered"] == 1
+
+
+def test_s4_dense_emit_completes_at_16k(monkeypatch):
+    """#1787 P1-C (cycle 5) — the S4 re-emit surface (output ≈ 2× S2 — the
+    DOMINANT truncation source) must be exercised by a genuinely dense S4
+    output at the NEW cap: full list, no partial_parse — then force the OLD
+    cap on the SAME fixture to prove the S4 partial-accept backstop still
+    fires."""
+    monkeypatch.delenv("TORTOISE_EXTRACTOR_MAX_TOKENS", raising=False)
+    dense_pts = [
+        {"content": f"s4 re-emit point {i} " + ("lorem ipsum dolor " * 30),
+         "pointKind": "statement", "about_entities": [f"entity-{i}"],
+         "quote": f"quote {i}: " + ("word " * 40),
+         "search_keys": [f"k{i}"], "tier": "B",
+         "slots": {"subject": [{"name": f"entity-{i}", "kind": "core:thing",
+                                "confidence": 0.9}]}}
+        for i in range(45)
+    ]
+    full = json.dumps({"entities": [{"name": f"entity-{i}", "kind": "core:thing",
+                                     "lifecycle": "created", "supersedes": None}
+                                    for i in range(45)],
+                       "points": dense_pts, "events": [], "operators": [],
+                       "chain_notes": [], "link_before_create": []})
+    # calibration asserts (same discipline as the S2 fixture): 45 points =
+    # 48,327 bytes → ≥ 12.1K tokens at 4 chars/token (clears 8192) and
+    # ≤ 13.8K at 3.5 (fits 16K):
+    assert len(full.encode("utf-8")) // 4 >= 8192, \
+        "S4 fixture too small: the 45-point dense re-emit list must exceed " \
+        "8K tokens (the S4 re-emit tax surface; raise point count / quote " \
+        "length until the 4 chars/token bound clears)"
+    assert len(full.encode("utf-8")) // 3.5 <= 14000, \
+        "S4 fixture too dense: must FIT the 16000 default (shrink until the " \
+        "upper bound clears)"
+
+    class S4CapAwareModel:
+        def __init__(self):
+            self.last_finish_reason = "stop"
+        def complete(self, *, system, user, max_tokens=None):
+            self.last_finish_reason = ("length" if max_tokens and max_tokens <= 8000
+                                       else "stop")
+            if max_tokens and max_tokens <= 8000:
+                # old-cap failure mode: cut mid-points-array (rung-4
+                # partial-accept recovers the head) — depth-walk to the
+                # 20th point's closing brace, leaving the array unterminated
+                # so rung-4 recovers the head with partial=True.
+                pts_json = json.dumps(dense_pts)
+                depth, closed, boundary = 0, 0, len(pts_json)
+                for i, ch in enumerate(pts_json):
+                    if ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                        if depth == 0:
+                            closed += 1
+                            if closed == 20:
+                                boundary = i + 1
+                                break
+                return ('{"entities": [], "events": [], "operators": [], '
+                        '"points": ' + pts_json[:boundary])
+            return full
+
+    m = S4CapAwareModel()
+    stats = {"llm": {}}
+    # _complete_parsed is the seam the S4 caller uses — drive the dense S4
+    # emit at the 16000 default:
+    out = v2._complete_parsed(m, "sys", "usr", max_tokens=16000, stats=stats)
+    assert len(out["points"]) == 45           # full S4 list, no tail loss
+    assert stats.get("partial") is not True   # clean at 16K — no partial_parse
+    # #2134 backstop re-pin (Task 0 Step 5): force the old 8000 cap WITH the
+    # escalation knob monkeypatched to <= base → an un-escalatable
+    # truncation is RESIDUAL fail-loud (P2-15: never a silent rung-4
+    # partial of the truncating attempt; env range [16000..64000] makes
+    # esc=8000 unreachable via env — the helper is the only lever).
+    monkeypatch.setattr(v2, "_extractor_escalation_tokens", lambda b: 8000)
+    m2 = S4CapAwareModel()
+    stats2 = {"llm": {}}
+    with pytest.raises(ValueError) as ei:
+        v2._complete_parsed(m2, "sys", "usr", max_tokens=8000, stats=stats2)
+    assert ei.value.truncated is True   # fail-loud, classed truncated
+    assert stats2.get("partial") is not True  # never a silent partial
+
+
+class TestEscalation2134:
+    """#2134 Task 3 — the one-shot S2/S4 escalation net + fail-loud residual
+    (R2/R3 contract: ONE escalated `_complete`; four buckets
+    recovered/residual/abort/partial; the escalated response is parsed ONCE
+    terminally — the #1746 error-informed re-prompt NEVER runs
+    post-escalation)."""
+
+    # a length-truncating S2 emit (mid-points cut) with an optional token
+    # attrs payload
+    TRUNC = ('{"entities": [], "events": [], "operators": [], '
+             '"points": [{"content": "p1", "pointKind": "statement"}, '
+             '{"content": "p2", "pointKind": "statement"}')
+    FULL = ('{"entities": [], "events": [], "operators": [], '
+            '"points": [{"content": "p1", "pointKind": "statement"}, '
+            '{"content": "p2", "pointKind": "statement"}, '
+            '{"content": "p3", "pointKind": "statement"}]}')
+
+    def _cap_aware(self, tokens=(16000, 32000)):
+        """attempt-1 (base) length+TRUNC; escalated call (esc) returns full
+        with stop."""
+        captured = []
+
+        class _M:
+            last_finish_reason = "stop"
+            def complete(self, *, system, user, max_tokens=None):
+                captured.append(max_tokens)
+                if max_tokens == tokens[1]:
+                    self.last_finish_reason = "stop"
+                    self.last_prompt_tokens = 900
+                    self.last_completion_tokens = tokens[1] - 200
+                    return self.__class__.FULL
+                self.last_finish_reason = "length"
+                self.last_prompt_tokens = 500
+                self.last_completion_tokens = tokens[0]
+                return self.__class__.TRUNC
+        _M.FULL = self.FULL
+        _M.TRUNC = self.TRUNC
+        return _M(), captured
+
+    def test_length_escalates_once_and_recovers(self):
+        """attempt-1 length at the 16K base → ONE escalated call at 32K
+        returns the full list: exactly 2 calls, recovered bucket, no
+        partial at the caller."""
+        m, captured = self._cap_aware()
+        stats: dict = {}
+        out = v2.run_s2(m, "STORY", stats=stats)
+        assert len(captured) == 2
+        assert captured[0] == 16000 and captured[1] == 32000
+        assert len(out["points"]) == 3  # full list recovered
+        rec = stats["recovery"]
+        assert rec["escalated"] == 1 and rec["escalated_recovered"] == 1
+        assert stats.get("partial") is not True
+        assert stats["truncated"] is True  # the truncation is RECORDED
+
+    def test_length_residual_fails_loud(self):
+        """The escalated call is STILL length → fail-loud truncated raise,
+        residual bucket, never a partial."""
+        calls = {"n": 0}
+
+        class _M:
+            last_finish_reason = "length"
+            def complete(self, *, system, user, max_tokens=None):
+                calls["n"] += 1
+                self.last_finish_reason = "length"
+                self.last_completion_tokens = max_tokens or 16000
+                return '{"entities": []'
+
+        stats: dict = {}
+        with pytest.raises(ValueError) as ei:
+            v2.run_s2(_M(), "STORY", stats=stats)
+        assert calls["n"] == 2  # base + ONE escalated call
+        assert ei.value.truncated is True
+        rec = stats["recovery"]
+        assert rec["escalated"] == 1 and rec["escalated_residual"] == 1
+        assert stats.get("partial") is not True
+
+    def test_length_residual_cut_at_section_boundary_fails_loud(self):
+        """A residual response cut cleanly BETWEEN sections (balanced
+        complete-but-shorter JSON that rungs 1-3 WOULD clean-parse) is STILL
+        fail-loud truncated — never a silent shorter valid dict (P1-7)."""
+        calls = {"n": 0}
+        BALANCED_SHORT = ('{"entities": [], "events": [], "operators": [], '
+                          '"points": [], "chain_notes": []}')
+
+        class _M:
+            last_finish_reason = "length"
+            def complete(self, *, system, user, max_tokens=None):
+                calls["n"] += 1
+                self.last_finish_reason = "length"
+                return BALANCED_SHORT
+
+        stats: dict = {}
+        with pytest.raises(ValueError) as ei:
+            v2.run_s2(_M(), "STORY", stats=stats)
+        assert ei.value.truncated is True  # balanced-but-shorter STILL fails
+        assert calls["n"] == 2
+        assert stats["recovery"]["escalated_residual"] == 1
+
+    def test_length_truncated_clean_parseable_still_escalates(self):
+        """attempt-1 is section-boundary-truncated such that rungs 1-3 would
+        clean-parse → escalation fires BEFORE any parse of the truncating
+        attempt (exactly 2 calls, full list, never a swallowed shorter
+        return — P2-10b)."""
+        BALANCED_SHORT = ('{"entities": [], "events": [], "operators": [], '
+                          '"points": [], "chain_notes": []}')
+
+        class _M:
+            last_finish_reason = "length"
+            def complete(self, *, system, user, max_tokens=None):
+                if max_tokens == 32000:
+                    self.last_finish_reason = "stop"
+                    return self.__class__.FULL
+                self.last_finish_reason = "length"
+                return BALANCED_SHORT
+        _M.FULL = self.FULL
+
+        m = _M()
+        stats: dict = {}
+        out = v2.run_s2(m, "STORY", stats=stats)
+        assert len(out["points"]) == 3
+        assert stats["recovery"]["escalated_recovered"] == 1
+        assert stats.get("partial") is not True
+
+    def test_non_length_no_escalation(self):
+        """A stop-finish call makes exactly one _complete call (common path
+        byte-identical)."""
+        calls = {"n": 0}
+
+        class _M:
+            last_finish_reason = "stop"
+            def complete(self, *, system, user, max_tokens=None):
+                calls["n"] += 1
+                self.last_finish_reason = "stop"
+                return self.__class__.FULL
+        _M.FULL = self.FULL
+
+        stats: dict = {}
+        out = v2.run_s2(_M(), "STORY", stats=stats)
+        assert calls["n"] == 1
+        assert len(out["points"]) == 3
+        assert "escalated" not in (stats.get("recovery") or {})
+
+    def test_length_on_reparse_attempt_escalates(self):
+        """[base stop-unparseable → error-informed re-prompt at base cap →
+        attempt-2 length] → the length escalates (3 calls total
+        [base, base-reprompt, esc]) AND llm.calls == 3 (R3-3 running totals)."""
+        calls = {"n": 0}
+
+        class _M:
+            last_finish_reason = "stop"
+            def complete(self, *, system, user, max_tokens=None):
+                calls["n"] += 1
+                if calls["n"] == 1:  # base: stop-unparseable
+                    self.last_finish_reason = "stop"
+                    return "not json"
+                if calls["n"] == 2:  # re-prompt at base: length
+                    self.last_finish_reason = "length"
+                    return '{"entities": []'
+                # escalated call: full
+                self.last_finish_reason = "stop"
+                return self.__class__.FULL
+        _M.FULL = self.FULL
+
+        stats: dict = {}
+        out = v2.run_s2(_M(), "STORY", stats=stats)
+        assert calls["n"] == 3
+        assert len(out["points"]) == 3
+        assert stats["recovery"]["escalated_recovered"] == 1
+        assert stats["attempts"] == 3  # llm.calls==3 at the roll-up
+
+    def test_escalated_stop_malformed_ladder_terminal(self):
+        """R2/R3: escalated response is stop-but-malformed WITH a valid
+        rung-4 prefix → the head is returned + partial_parse +
+        escalated_partial (NOT recovered), exactly 2 calls, NO re-prompt."""
+        calls = {"n": 0}
+
+        class _M:
+            last_finish_reason = "stop"
+            def complete(self, *, system, user, max_tokens=None):
+                calls["n"] += 1
+                if calls["n"] == 1:  # base length
+                    self.last_finish_reason = "length"
+                    return '{"entities": []'
+                # escalated: stop + malformed with a valid prefix
+                self.last_finish_reason = "stop"
+                return ('{"entities": [{"name": "e1", "kind": "core:thing"}, '
+                        '{"name": "e2"')  # rung-4 recovers e1
+
+        stats: dict = {}
+        out = v2.run_s2(_M(), "STORY", stats=stats)
+        assert calls["n"] == 2  # NO base-cap third call (R3-1/R3-2 pin)
+        assert stats.get("partial") is True
+        assert stats["recovery"]["escalated_partial"] == 1
+        assert stats["recovery"].get("escalated_recovered", 0) == 0
+        names = [e["name"] for e in out["entities"]]
+        assert "e1" in names and "e2" not in names
+
+    def test_escalated_call_abort_falls_back_to_head_reparse(self):
+        """The escalated call RAISES (transient-after-retries) →
+        escalated_abort + canonical-then-rung-4 head-reparse of the retained
+        truncating response, always classed partial_parse (never a silent
+        discard)."""
+        class _EscRaises:
+            last_finish_reason = "length"
+            def __init__(self):
+                self.calls = 0
+            def complete(self, *, system, user, max_tokens=None):
+                self.calls += 1
+                if max_tokens == 32000:
+                    raise TimeoutError("model call exceeded deadline")
+                self.last_finish_reason = "length"
+                # retained response: mid-list cut with ONE recoverable item
+                return ('{"entities": [], "events": [], "operators": [], '
+                        '"points": [{"content": "p1", '
+                        '"pointKind": "statement"}, {"content": "p2"')
+
+        stats: dict = {}
+        out = v2.run_s2(_EscRaises(), "STORY", stats=stats)
+        assert stats["recovery"]["escalated_abort"] == 1
+        assert stats["recovery"]["escalated"] == 1
+        assert stats.get("partial") is True
+        contents = [p["content"] for p in out["points"]]
+        assert contents == ["p1"]  # the recoverable head was used
+        # R3-3/P1-39 (review round): the escalated call's except-branch
+        # overwrote stats["attempts"] before raising (retries=1 → 2 esc
+        # attempts) — the abort arm re-accumulates base + esc so the session
+        # llm.calls roll-up counts all 3 calls (1 base + 2 esc).
+
+    def test_escalated_abort_llm_calls_counts_all_calls(self):
+        """R3-3/P1-39 (code-review round 2): the escalated-call RAISE path
+        re-accumulates base + esc attempts into the running totals — the
+        abort arm is not allowed to undercount `llm.calls` (base 1 + esc
+        retries=1 → 2 esc attempts = 3 total at the roll-up)."""
+        class _EscRaises:
+            last_finish_reason = "length"
+            def complete(self, *, system, user, max_tokens=None):
+                if max_tokens == 32000:
+                    raise TimeoutError("model call exceeded deadline")
+                self.last_finish_reason = "length"
+                return ('{"entities": [], "events": [], "operators": [], '
+                        '"points": [{"content": "p1", '
+                        '"pointKind": "statement"}, {"content": "p2"')
+
+        stats: dict = {}
+        v2.run_s2(_EscRaises(), "STORY", stats=stats)
+        assert stats["attempts"] == 3  # 1 base + 2 escalated (retries=1)
+        assert stats["recovery"]["escalated_abort"] == 1
+
+    def test_length_truncation_at_base_ge_esc_still_fails_loud(
+            self, monkeypatch):
+        """#2134: when the base cap is RAISED to >= the escalation knob
+        (the #1787 cap lever not in lockstep with the escalation budget),
+        an S2/S4 length is RESIDUAL fail-loud with NO escalation episode
+        recorded (escalated stays 0 — the guard fires before any counter
+        bump, matching the invariant)."""
+        monkeypatch.setattr(v2, "_extractor_escalation_tokens",
+                            lambda b: 20000)
+
+        class _M:
+            last_finish_reason = "length"
+            def complete(self, *, system, user, max_tokens=None):
+                self.last_finish_reason = "length"
+                return '{"entities": []'
+
+        stats: dict = {}
+        with pytest.raises(ValueError) as ei:
+            v2._complete_parsed(_M(), "sys", "usr", max_tokens=20000,
+                                stats=stats)
+        assert ei.value.truncated is True
+        rec = stats["recovery"]
+        assert rec.get("escalated", 0) == 0  # no episode fired
+        assert rec.get("escalated_residual", 0) == 0
+
+    def test_residual_seam_keys_are_per_list_max_not_sum(self):
+        """R3-6/plan contract (code-review round 2): on a residual episode
+        the base and escalated emissions are overlapping prefixes of the
+        SAME list — the per-seam key is the per-list LOWER BOUND (the
+        longest truncated emission, max), never a sum that exceeds the true
+        list size; the combined seam-less key keeps the total-spend SUM
+        semantics (both billed calls)."""
+        class _M:
+            last_finish_reason = "length"
+            def complete(self, *, system, user, max_tokens=None):
+                self.last_finish_reason = "length"
+                self.last_prompt_tokens = 500
+                self.last_completion_tokens = (16000 if max_tokens == 16000
+                                               else 32000)
+                return '{"entities": []'
+
+        stats: dict = {}
+        with pytest.raises(ValueError) as ei:
+            v2.run_s2(_M(), "STORY", stats=stats)
+        assert ei.value.truncated is True
+        rec = stats["recovery"]
+        # per-seam: max(16000 base, 32000 esc) == 32000 — a true list
+        # between 32K and 48K is bounded BELOW by 32K, never "48K+"
+        assert rec["truncation_completion_tokens_s2"] == 32000
+        assert rec["truncation_prompt_tokens_s2"] == 500
+        # combined: total truncation spend — both billed calls
+        assert rec["truncation_completion_tokens"] == 48000
+        assert rec["escalated"] == 1 and rec["escalated_residual"] == 1
+
+    def test_s1_esc_le_base_no_escalation_event(self, monkeypatch):
+        """run_s1 with no escalation headroom records NO escalation episode
+        (escalated == 0 == buckets — the 3-bucket invariant stays literal
+        under the no-headroom config; the per-seam s1 truncation keys DO
+        record the base truncation, matching _complete_parsed's ordering)."""
+        monkeypatch.setattr(v2, "_extractor_escalation_tokens",
+                            lambda b: b)  # esc == base -> no headroom
+        calls = {"n": 0}
+
+        class _M:
+            last_finish_reason = "length"
+            def complete(self, *, system, user, max_tokens=None):
+                calls["n"] += 1
+                self.last_finish_reason = "length"
+                self.last_completion_tokens = 1500
+                return "A truncated narrative."
+
+        stats: dict = {}
+        out = v2.run_s1(_M(), "CONV", stats=stats)
+        assert calls["n"] == 1  # no escalated call
+        assert out == "A truncated narrative."
+        rec = stats["recovery"]
+        assert rec.get("escalated", 0) == 0
+        assert rec.get("escalated_residual", 0) == 0
+        assert rec.get("escalated_recovered", 0) == 0
+        # the truncation itself IS recorded per-seam (R3-6) + combined
+        assert rec["truncation_completion_tokens_s1"] == 1500
+
+    def test_s1_recovered_escalation_does_not_inflate_seam_overage(self):
+        """R3-6/plan contract: the per-seam s1 keys measure TRUNCATED calls
+        only — a RECOVERED escalated call's full output lands in the
+        escalation_*_tokens delta, never in the truncation overage (a
+        recovered call was never length-truncated)."""
+        class _M:
+            last_finish_reason = "length"
+            def complete(self, *, system, user, max_tokens=None):
+                if max_tokens == 32000:
+                    self.last_finish_reason = "stop"
+                    self.last_completion_tokens = 6000
+                    return "A full recovered narrative."
+                self.last_finish_reason = "length"
+                self.last_completion_tokens = 1500
+                return "A truncated narrative."
+
+        stats: dict = {}
+        out = v2.run_s1(_M(), "CONV", stats=stats)
+        assert out == "A full recovered narrative."
+        rec = stats["recovery"]
+        assert rec["escalated_recovered"] == 1
+        # seam keys: base truncation only (1500), NEVER base + recovered
+        assert rec["truncation_completion_tokens_s1"] == 1500
+        # the recovered call's spend IS captured by the D6 delta
+        assert rec["escalation_output_tokens"] == 6000
+
+    def test_escalated_call_abort_on_reprompt_path_reparses_truncating_response(self):
+        """Plan Task 3 arm (second-model-gate): [base stop-unparseable →
+        error-informed re-prompt at base → attempt-2 LENGTH → esc RAISES]
+        must reparse the attempt-2 (length) response's head — the retained
+        response is the LATEST truncating emission, and the session
+        llm.calls roll-up counts all 4 calls (1 base + 1 re-prompt + 2 esc
+        attempts)."""
+        class _M:
+            last_finish_reason = "stop"
+            def __init__(self):
+                self.calls = 0
+            def complete(self, *, system, user, max_tokens=None):
+                self.calls += 1
+                if self.calls == 1:  # base: stop-garbage
+                    self.last_finish_reason = "stop"
+                    return "not json"
+                if self.calls == 2:  # re-prompt at base: length cut
+                    self.last_finish_reason = "length"
+                    return ('{"entities": [], "events": [], "operators": '
+                            '[], "points": [{"content": "p2head", '
+                            '"pointKind": "statement"}, {"content": "tail"')
+                # escalated call: raises
+                raise TimeoutError("model call exceeded deadline")
+
+        m = _M()
+        stats: dict = {}
+        out = v2.run_s2(m, "STORY", stats=stats)
+        assert m.calls == 4  # base + re-prompt + 2 escalated attempts
+        contents = [p["content"] for p in out["points"]]
+        assert contents == ["p2head"]  # attempt-2's head was reparsed
+        rec = stats["recovery"]
+        assert rec["escalated"] == 1 and rec["escalated_abort"] == 1
+        assert stats["attempts"] == 4  # 1 base + 1 re-prompt + 2 esc
+        assert stats.get("partial") is True
+
+    def test_escalated_call_stall_detection_bounded(self):
+        """Plan Task 3 arm (P1-6/P2-12b): the escalated _complete call passes
+        NO read-timeout kwarg (model_adapters stays at its (10, 60) stall
+        bound — only the deadline auto-scales with the esc budget)."""
+        seen = {}
+        import tortoise.extractor_v2 as _v2
+        orig = _v2._complete
+
+        class _M:
+            last_finish_reason = "length"
+            def complete(self, *, system, user, max_tokens=None):
+                self.last_finish_reason = "length"
+                return '{"entities": []'
+
+        def spy(model, system, user, *, max_tokens=None, retries=None,
+                **kw):
+            if max_tokens == 32000:
+                seen["kw"] = kw
+            return orig(model, system, user, max_tokens=max_tokens,
+                        retries=retries, **kw)
+        _v2._complete = spy
+        try:
+            stats: dict = {}
+            with pytest.raises(ValueError):
+                v2.run_s2(_M(), "STORY", stats=stats)
+        finally:
+            _v2._complete = orig
+        assert seen.get("kw") is not None
+        assert "read_timeout" not in seen["kw"]  # stall bound unscaled (P1-6)
+
+    def test_escalation_token_accumulation_single_call(self):
+        """D6/R3: the escalation delta == the escalated call's post-return
+        in-stats tokens; the base call's wasted output is the separate
+        escalation_base_* fields. (Abort-arm accumulate-NONE is exercised by
+        the abort test: no escalation_* delta keys are written there.)"""
+        m, _ = self._cap_aware()
+        stats: dict = {}
+        v2.run_s2(m, "STORY", stats=stats)
+        rec = stats["recovery"]
+        assert rec["escalation_output_tokens"] == 32000 - 200
+        assert rec["escalation_prompt_tokens"] == 900
+        assert rec["escalation_base_output_tokens"] == 16000
+        assert rec["escalation_base_prompt_tokens"] == 500
+
+    def test_escalated_call_deadline_scales(self):
+        """D5: the escalated call resolves a deadline >= 0.05 x esc — the
+        _complete seam computes _scaled_deadline(600, esc)."""
+        seen = {}
+
+        class _M:
+            last_finish_reason = "length"
+            def complete(self, *, system, user, max_tokens=None):
+                return "{}"
+        # patch _complete to observe the escalated call's deadline
+        import tortoise.extractor_v2 as _v2
+        orig = _v2._complete
+
+        def spy(model, system, user, *, max_tokens=None, retries=None,
+                **kw):
+            if max_tokens == 32000:
+                seen["deadline"] = _v2._scaled_deadline(600, max_tokens)
+            return orig(model, system, user, max_tokens=max_tokens,
+                        retries=retries, **kw)
+        _v2._complete = spy
+        try:
+            stats: dict = {}
+            with pytest.raises(ValueError):
+                v2.run_s2(_M(), "STORY", stats=stats)
+        finally:
+            _v2._complete = orig
+        assert seen["deadline"] >= 0.05 * 32000  # 1600s scaled
+
+class TestSeamOutTokens2408:
+    """#2408 Task 0 — the healthy-path per-seam output-token accumulator
+    (s2_out_tokens / s4_out_tokens): recorded ONLY on clean terminal success
+    (the final call whose list was embedded), never on abort/residual/
+    partial arms, never on seam=None."""
+
+    def _stop_model(self, tokens=1234, body=None):
+        class _M:
+            last_finish_reason = "stop"
+            def complete(self, *, system, user, max_tokens=None):
+                self.last_finish_reason = "stop"
+                self.last_prompt_tokens = 400
+                self.last_completion_tokens = tokens
+                return (body if body is not None else
+                        '{"entities": [], "events": [], "operators": [], '
+                        '"points": [{"content": "p1", "pointKind": "statement"}]}')
+        return _M()
+
+    def test_s2_success_records_out_tokens(self):
+        m = self._stop_model(tokens=1234)
+        stats: dict = {}
+        out = v2.run_s2(m, "STORY", stats=stats)
+        assert out["points"][0]["content"] == "p1"
+        rec = stats["recovery"]
+        assert rec["s2_out_tokens"] == 1234
+        assert "s4_out_tokens" not in rec
+        assert "truncation_completion_tokens_s2" not in rec
+
+    def test_s4_success_records_out_tokens(self):
+        m = self._stop_model(tokens=777)
+        stats: dict = {}
+        v2.run_s4(m, "STORY", {"degraded": False},
+                        {"entities": [], "events": [], "operators": [],
+                         "points": []}, stats=stats)
+        rec = stats["recovery"]
+        assert rec["s4_out_tokens"] == 777
+        assert "s2_out_tokens" not in rec
+
+    def test_escalation_recovered_records_out_tokens(self):
+        """A length-then-escalate-and-recover S2 call records the ESCALATED
+        call's tokens as s2_out_tokens (the list that got embedded); the
+        base call's truncated tokens stay in truncation_completion_tokens_s2.
+        No double count of a single concept."""
+        class _M:
+            last_finish_reason = "length"
+            def complete(self, *, system, user, max_tokens=None):
+                if max_tokens == 32000:
+                    self.last_finish_reason = "stop"
+                    self.last_completion_tokens = 31000
+                    return ('{"entities": [], "events": [], "operators": [], '
+                            '"points": [{"content": "p1", "pointKind": "statement"}, '
+                            '{"content": "p2", "pointKind": "statement"}]}')
+                self.last_finish_reason = "length"
+                self.last_completion_tokens = 16000
+                return ('{"entities": [], "events": [], "operators": [], '
+                        '"points": [{"content": "p1", "pointKind": "statement"}')
+        stats: dict = {}
+        out = v2.run_s2(_M(), "STORY", stats=stats)
+        assert len(out["points"]) == 2  # recovered
+        rec = stats["recovery"]
+        assert rec["s2_out_tokens"] == 31000       # the escalated list
+        assert rec["truncation_completion_tokens_s2"] == 16000  # the base
+        assert rec["escalated_recovered"] == 1
+
+    def test_residual_abort_partial_no_out_tokens(self):
+        """Residual (fail-loud), abort (escalated raise → head-reparse),
+        and rung-4 partial arms record NO sX_out_tokens — a partial-list
+        size must never masquerade as a healthy total."""
+        # residual: both calls length, no recoverable prefix
+        class _Residual:
+            last_finish_reason = "length"
+            def complete(self, *, system, user, max_tokens=None):
+                self.last_finish_reason = "length"
+                self.last_completion_tokens = max_tokens or 16000
+                return '{"entities": []'
+        stats: dict = {}
+        with pytest.raises(ValueError):
+            v2.run_s2(_Residual(), "STORY", stats=stats)
+        assert "s2_out_tokens" not in stats.get("recovery", {})
+        # rung-4 partial: stop-reason malformed with a schema-valid prefix
+        # head → _parse_json_robust partial-accepts (stats["partial"]=True)
+        PARTIAL_HEAD = ('{"entities": [{"name": "X", "kind": "core:plan", '
+                        '"lifecycle": "created", "supersedes": null, "note": null}], '
+                        '"events": [], "operators": [], "points": [{"content": "p1", '
+                        '"pointKind": "statement", "about_entities": [], "slots": null}],')
+        class _Partial:
+            last_finish_reason = "stop"
+            def complete(self, *, system, user, max_tokens=None):
+                self.last_finish_reason = "stop"
+                self.last_completion_tokens = 9000
+                return PARTIAL_HEAD  # truncated-malformed but valid prefix
+        stats2: dict = {}
+        out = v2.run_s2(_Partial(), "STORY", stats=stats2)
+        assert stats2.get("partial") is True
+        assert "s2_out_tokens" not in stats2.get("recovery", {})
+        assert out  # partial-accepted head still returned
+
+    def test_escalated_partial_arm_records_no_out_tokens(self):
+        """The escalated call returns stop-but-malformed with a valid prefix
+        head → rung-4 partial-accept on the ESCALATED response (escalated_
+        partial bucket, stats[partial]=True) — the partial head must NOT be
+        recorded as a healthy out-token total."""
+        PARTIAL_ESC = ('{"entities": [{"name": "X", "kind": "core:plan", '
+                       '"lifecycle": "created", "supersedes": null, "note": null}], '
+                       '"events": [], "operators": [], "points": [{"content": "p1", '
+                       '"pointKind": "statement", "about_entities": [], "slots": null}],')
+        calls = {"n": 0}
+
+        class _M:
+            last_finish_reason = "length"
+            def complete(self, *, system, user, max_tokens=None):
+                calls["n"] += 1
+                if max_tokens == 32000:
+                    self.last_finish_reason = "stop"
+                    self.last_completion_tokens = 31000
+                    return PARTIAL_ESC  # malformed-but-valid-prefix
+                self.last_finish_reason = "length"
+                self.last_completion_tokens = 16000
+                return '{"entities": []'
+
+        stats: dict = {}
+        v2.run_s2(_M(), "STORY", stats=stats)
+        assert calls["n"] == 2
+        rec = stats["recovery"]
+        assert rec["escalated"] == 1 and rec["escalated_partial"] == 1
+        assert stats.get("partial") is True
+        assert "s2_out_tokens" not in rec  # partial head never a healthy total
+
+    def test_seam_none_no_out_tokens(self):
+        """The kind_classifier adjudication shape (seam=None) contributes
+        no per-seam out-token key."""
+        m = self._stop_model(tokens=500)
+        stats: dict = {}
+        v2._complete_parsed(m, "s", "u", max_tokens=16000, stats=stats,
+                            seam=None)
+        assert "s2_out_tokens" not in stats.get("recovery", {})
+        assert "s4_out_tokens" not in stats.get("recovery", {})
+
+
+class TestS1Escalation2134:
+    """#2134 Task 4 — the S1 one-shot escalation wrap (three buckets:
+    recovered/residual/abort; no partial bucket — S1 has no parse ladder)."""
+
+    def _s1_model(self, mode, calls_box):
+        """mode: recover (esc returns stop+full) | residual (esc still
+        length) | abort (esc raises)."""
+        class _M:
+            last_finish_reason = "length"
+            def complete(self, *, system, user, max_tokens=None):
+                calls_box["n"] += 1
+                if max_tokens == 32000:  # escalated call
+                    if mode == "recover":
+                        self.last_finish_reason = "stop"
+                        return "A full recovered narrative."
+                    if mode == "residual":
+                        self.last_finish_reason = "length"
+                        self.last_completion_tokens = 32000
+                        return "A still-truncated narrative."
+                    raise TimeoutError("model call exceeded deadline")
+                # base call truncates
+                self.last_finish_reason = "length"
+                self.last_prompt_tokens = 700
+                self.last_completion_tokens = 1500
+                return "A truncated narrative."
+        return _M()
+
+    def test_s1_length_escalates_once_and_recovers(self):
+        calls = {"n": 0}
+        stats: dict = {}
+        out = v2.run_s1(self._s1_model("recover", calls), "CONV",
+                        stats=stats)
+        assert calls["n"] == 2
+        assert out == "A full recovered narrative."
+        rec = stats["recovery"]
+        assert rec["escalated"] == 1 and rec["escalated_recovered"] == 1
+        assert stats["truncated"] is True   # the truncation is RECORDED (P1-2)
+        # R3-3 mirror: llm.calls counts BOTH calls at the roll-up
+        assert stats["attempts"] == 2
+        # per-seam s1 keys (R3-6) + the escalation delta
+        assert rec["truncation_completion_tokens_s1"] >= 1500
+
+    def test_s1_non_length_single_call(self):
+        calls = {"n": 0}
+        class _Ok:
+            last_finish_reason = "stop"
+            def complete(self, *, system, user, max_tokens=None):
+                calls["n"] += 1
+                self.last_finish_reason = "stop"
+                return "A clean narrative."
+        out = v2.run_s1(_Ok(), "CONV", stats={})
+        assert calls["n"] == 1
+        assert out == "A clean narrative."
+
+    def test_s1_escalated_residual_returns_truncated_summary(self):
+        calls = {"n": 0}
+        stats: dict = {}
+        out = v2.run_s1(self._s1_model("residual", calls), "CONV",
+                        stats=stats)
+        assert calls["n"] == 2
+        assert out == "A still-truncated narrative."  # kept, not a raise
+        rec = stats["recovery"]
+        assert rec["escalated"] == 1 and rec["escalated_residual"] == 1
+        assert stats["truncated"] is True
+
+    def test_s1_escalated_call_abort_returns_attempt_summary(self):
+        calls = {"n": 0}
+        stats: dict = {}
+        out = v2.run_s1(self._s1_model("abort", calls), "CONV", stats=stats)
+        assert calls["n"] == 2
+        assert out == "A truncated narrative."  # attempt-1 kept (P1-21)
+        rec = stats["recovery"]
+        assert rec["escalated"] == 1 and rec["escalated_abort"] == 1
+
+    def test_s1_bucket_equality_at_rollup(self):
+        """escalated == recovered + residual + abort at the real
+        _rollup_recovery boundary across all three arms."""
+        llm_stats = {"calls": 0, "retries": 0, "truncated": 0,
+                     "deadline_aborts": 0}
+        recovery_stats: dict = {}
+        for mode in ("recover", "residual", "abort"):
+            stats: dict = {}
+            v2.run_s1(self._s1_model(mode, {"n": 0}), "CONV", stats=stats)
+            v2._rollup_llm(llm_stats, stats)
+            v2._rollup_recovery(recovery_stats, stats)
+        assert recovery_stats["escalated"] == 3
+        assert recovery_stats["escalated"] == (
+            recovery_stats.get("escalated_recovered", 0)
+            + recovery_stats.get("escalated_residual", 0)
+            + recovery_stats.get("escalated_abort", 0))
+        assert llm_stats["calls"] == 6  # 2 per escalated chunk
+        assert llm_stats["truncated"] == 3  # every escalation is recorded
+
+
+class TestEdusChunksRescue2335:
+    """#2335 WI-1b — the product-lane size/density fields: EDU(turn) count,
+    S1-chunk count (already in stats, pinned here), and the S4-full-rescue
+    episode counter (S2 produced nothing → S4 non-empty full re-emission
+    ~2×; today only llm.calls doubles). The rescue counter is a NEW guarded
+    increment — the S4 merge runs on EVERY non-empty S4, so counting every
+    merge would corrupt the measurement (the S2-empty guard is added)."""
+
+    def _conv(self, turns=3):
+        out = []
+        for i in range(turns):
+            out.append({"role": "user", "content": f"turn {i} content"})
+            out.append({"role": "assistant", "content": f"reply {i}"})
+        return out
+
+    def test_stats_carries_edu_count(self):
+        """EDU count (len(_edus_from_conversation) — content-bearing turns
+        only, 1:1 with the product EDU == turn) is surfaced in stats."""
+        from tortoise import extractor_v2 as v2
+        conv = self._conv(turns=3)
+
+        def resp(system, user):
+            if "STORY SUMMARIZER" in system:
+                return "The session covered the plan."
+            return json.dumps(S2_FIXTURE)
+
+        out = v2.extract_session_v2(MockModel(resp), conv)
+        st = out["stats"]
+        assert "edus" in st, "stats must carry the EDU(turn) count"
+        assert st["edus"] == 6, st  # 3 user + 3 assistant content turns
+        assert st["chunks"] == 1, st  # pinned: S1-chunk count already present
+
+    def test_s4_full_rescue_counts_when_s2_empty(self):
+        """S2 empty (any cause) + S4 non-empty full re-emission → the rescue
+        counter increments exactly once (the ~2× cost band)."""
+        from tortoise import extractor_v2 as v2
+        conv = [{"role": "user", "content": "we decided X"}]
+
+        calls = {"s2": 0, "s4": 0}
+        def resp(system, user):
+            if "STORY SUMMARIZER" in system:
+                return "We believed X."
+            if "MAPPER" in system:  # S2
+                calls["s2"] += 1
+                return json.dumps({"entities": [], "events": [], "points": [],
+                                   "operators": []})  # S2 EMPTY
+            if "GAP REVIEWER" in system:  # S4
+                calls["s4"] += 1
+                return json.dumps(S2_FIXTURE)  # S4 full re-emission
+            return json.dumps(S2_FIXTURE)
+
+        out = v2.extract_session_v2(MockModel(resp), conv)
+        st = out["stats"]
+        assert out["payload"] is not None, "S4 rescued the session"
+        assert calls["s4"] >= 1
+        assert st.get("s4_full_rescues", 0) == 1, (
+            "S2-empty → S4-full must count exactly one rescue episode")
+        assert st["s4_merge"]["added_by_s4"] > 0  # S4 rebuilt from empty
+
+    def test_no_rescue_when_s2_produced(self):
+        """Normal path (S2 produced content, S4 merges) → NO rescue count —
+        the merge runs on every non-empty S4, so without the S2-empty guard
+        this would over-count (the measurement-corruption hazard)."""
+        from tortoise import extractor_v2 as v2
+        conv = [{"role": "user", "content": "we decided X"}]
+
+        def resp(system, user):
+            if "STORY SUMMARIZER" in system:
+                return "We believed X."
+            if "MAPPER" in system:
+                return json.dumps(S2_FIXTURE)  # S2 produced content
+            if "GAP REVIEWER" in system:
+                return json.dumps(S2_FIXTURE)  # S4 merge (normal E4)
+            return json.dumps(S2_FIXTURE)
+
+        out = v2.extract_session_v2(MockModel(resp), conv)
+        st = out["stats"]
+        assert st.get("s4_full_rescues", 0) == 0, (
+            "a normal S4 merge over a non-empty S2 base is NOT a rescue")
+        # the S4 merge RAN over a non-empty S2 base (s4_merge present with
+        # the S2 items counted — rescued-or-not is about the S2-empty state)
+        assert st["s4_merge"]["s2_items"] > 0  # S2 base entered the merge
+
+
+class TestKindClassifierAdjudication2134:
+    def test_kind_classifier_adjudication_length_no_escalation(self):
+        """#2134 P1-30: the kind_classifier adjudication seam passes
+        escalate=False — a length at ADJUDICATION_MAX_TOKENS makes exactly
+        ONE _complete call (no 21x escalation) and today's ladder behavior
+        is preserved verbatim."""
+        calls = {"n": 0}
+
+        class _M:
+            last_finish_reason = "length"
+            def complete(self, *, system, user, max_tokens=None):
+                calls["n"] += 1
+                self.last_finish_reason = "length"
+                return "not json at all"
+
+        stats: dict = {}
+        with pytest.raises(ValueError) as ei:
+            v2._complete_parsed(_M(), "sys", "usr", max_tokens=1500,
+                                stats=stats, escalate=False)
+        assert calls["n"] == 1  # escalation is scoped OUT of this seam
+        assert ei.value.truncated is True
+        # wiring guard: the adjudication call site passes escalate=False
+        import tortoise.kind_classifier as kc
+        with open(kc.__file__) as _f:
+            src = _f.read()
+        assert "escalate=False" in src
+
+
+# ── #2552 layer-2 operator-emission semantics (remaining fix waves) ───────
+
+
+class TestOperatorSemantics2552:
+    """Hermetic emission-semantics pins for the #2552 remaining waves — the
+    #2514 operator corpus measured 0/4 edge_correct (diagnosis in PR #2556):
+    op_02 NEGATE src/dst inverted, op_03 MITIGATES emission gap (risk point
+    fused into the action, no mitigation structure), op_04 SUPERSEDE partial
+    (no point-level decision-reversal → CORRECTS path), plus the grader leg
+    (paraphrase band — graded in test_write_path_grading.py). Prompt-render
+    pins assert the emission CONTRACT reaches both mapping stages; the
+    execute_embed pins assert the deterministic folds. No API — hermetic."""
+
+    # ── prompt/output-contract pins ──────────────────────────────────────
+
+    def test_s2s4_prompts_carry_nand_direction_rule(self):
+        """op_02: both mapping stages instruct the NAND direction — src =
+        the ATTACKING counter-claim (the newer claim), dst = the claim under
+        attack (NAND points AT what it refutes, #909 new-claim-attacks-
+        existing). The inverted emission measured on the corpus (older
+        hypothesis listed as the attacker) must not survive an informed
+        mapper."""
+        for prompt in (v2.render_s2_prompt(), v2.render_s4_prompt("S", {}, {}),
+                       v2.render_s2_prompt(core_only=True),
+                       v2.render_s4_prompt("S", {}, {}, core_only=True)):
+            assert "new-claim-attacks-existing" in prompt
+            assert "NAND points AT what it refutes" in prompt
+            assert "ATTACKING counter-claim" in prompt
+        # the S2 semantic core (verbose) carries its own direction bullet
+        assert "NAND DIRECTION (#909" in v2.S2_TMPL
+
+    def test_s2s4_prompts_carry_risk_and_mitigation_structure(self):
+        """op_03: a risk/concern claim is its OWN durable point (never fused
+        into the action that closes it) and a mitigation is a graded
+        dampener ON AN OPERATOR edge (src = action content, target_edge =
+        the dampened edge, strength 0.10-0.50, w*(1-strength) never a
+        refutation) — the shared rule block reaches both mapping stages."""
+        for prompt in (v2.render_s2_prompt(), v2.render_s4_prompt("S", {}, {}),
+                       v2.render_s2_prompt(core_only=True),
+                       v2.render_s4_prompt("S", {}, {}, core_only=True)):
+            assert "RISK/RELEVANCE CLAIMS ARE DURABLE POINTS" in prompt
+            assert "MITIGATES = graded relevance dampener ON AN OPERATOR edge" in prompt
+            assert "w_eff = w * (1 - strength)" in prompt
+
+    def test_s4_prompt_carries_decision_reversal_rule_and_contract_key(self):
+        """op_04: the S4 rules carry the DECISION/CLAIM REVERSAL recipe
+        (point supersedes only against an EARLIER-session claim surfaced by
+        search; in-session reversals are state/validity semantics) and the
+        OUTPUT_CONTRACT's points fragment advertises the ``supersedes`` key
+        (id|content|null) so both mapping stages can emit it."""
+        assert "DECISION/CLAIM REVERSAL" in v2.S4_TMPL
+        assert '"supersedes": "existing-id|content|null"' in v2.OUTPUT_CONTRACT
+        for prompt in (v2.render_s2_prompt(), v2.render_s4_prompt("S", {}, {})):
+            assert "existing-id|content|null" in prompt
+
+    def test_anti_routine_gate_carves_out_risk_claims(self):
+        """op_03 guard: #2542 clause discipline stays inviolate — the risk/
+        relevance carve-out is ADDITIVE (never suppresses a durable claim),
+        and the operator rule block explicitly exempts risk claims from the
+        ANTI-ROUTINE NOOP gate."""
+        assert "NOT a routine aside under the ANTI-ROUTINE gate" in v2.OPERATOR_SEMANTICS_RULE
+        # carve-out is a carve-out: nothing in the NOOP gate text regresses
+        # the durable-substance strip guarantee (#2542)
+        assert "NEVER strip" in v2.ANTI_ROUTINE_EXCLUSION
+        assert "When in doubt" in v2.ANTI_ROUTINE_EXCLUSION
+
+    # ── deterministic folds ─────────────────────────────────────────────
+
+    NAND_EDUS = [  # noqa: RUF012
+        {"index": 0, "role": "user",
+         "text": "the flip must have raced the lease renewal when the region cut over"},
+        {"index": 1, "role": "user",
+         "text": "the flag did not cause the duplicates, it had been stable for two hours"},
+    ]
+    NAND_HYP = ("the flip must have raced the lease renewal when the "
+                "region cut over")
+    NAND_COUNTER = ("the flag did not cause the duplicates, it had been "
+                    "stable for two hours")
+
+    def _nand_embed(self, src: str, dst: str) -> dict:
+        pts = [
+            {"content": self.NAND_HYP, "pointKind": "statement",
+             "quote": self.NAND_HYP},
+            {"content": self.NAND_COUNTER, "pointKind": "statement",
+             "quote": self.NAND_COUNTER},
+        ]
+        return {"entities": [], "events": [], "points": pts,
+                "operators": [{"src": src, "dst": dst, "op_type": "NAND"}]}
+
+    def _nand_ids(self, result) -> dict:
+        return {p["content"]: p["id"] for p in result["payload"]["points"]}
+
+    def test_nand_inverted_emission_is_canonicalized_newer_src(self):
+        """op_02: a NAND whose src is the OLDER claim (asserted at an earlier
+        turn than dst) contradicts the #909 extraction default — execute_embed
+        swaps it so the newer counter-claim is src, with a counted warning.
+        The corpus gold geometry: the t11 counter-claim must src the t5
+        hypothesis it refutes."""
+        embed = self._nand_embed(self.NAND_HYP, self.NAND_COUNTER)  # inverted
+        r = v2.execute_embed(embed, {}, session_id="s1", edus=self.NAND_EDUS)
+        ids = self._nand_ids(r)
+        op = r["payload"]["operators"][0]
+        assert op["op_type"] == "NAND"
+        assert op["src"] == ids[self.NAND_COUNTER], "newer counter-claim must be src"
+        assert op["dst"] == ids[self.NAND_HYP]
+        assert op["direction"] == "unidirectional"
+        assert any("NAND direction canonicalized" in w for w in r["warnings"])
+
+    def test_nand_correct_direction_never_swapped(self):
+        """op_02 control: an already-correct emission (newer counter-claim
+        first) is left untouched — no warning, no swap."""
+        embed = self._nand_embed(self.NAND_COUNTER, self.NAND_HYP)
+        r = v2.execute_embed(embed, {}, session_id="s1", edus=self.NAND_EDUS)
+        ids = self._nand_ids(r)
+        op = r["payload"]["operators"][0]
+        assert op["src"] == ids[self.NAND_COUNTER]
+        assert op["dst"] == ids[self.NAND_HYP]
+        assert not any("canonicalized" in w for w in r["warnings"])
+
+    def test_nand_no_turn_ids_never_swapped(self):
+        """op_02 never-guess: without resolved source turns (no edus — e.g.
+        an endpoint is an existing-graph/event node or an unquoted point)
+        the fold keeps the model's order; the prompt rule is the lever."""
+        embed = self._nand_embed(self.NAND_HYP, self.NAND_COUNTER)
+        r = v2.execute_embed(embed, {}, session_id="s1")  # no edus
+        ids = self._nand_ids(r)
+        op = r["payload"]["operators"][0]
+        assert op["src"] == ids[self.NAND_HYP] and op["dst"] == ids[self.NAND_COUNTER]
+        assert not any("canonicalized" in w for w in r["warnings"])
+
+    def test_risk_point_minted_and_mitigates_folds_on_target_edge(self):
+        """op_03: the recipe folds end-to-end — the risk claim stays its OWN
+        payload point (never absorbed by the action point), and a MITIGATES
+        with src = the action point content + a target_edge present in the
+        SAME payload emits a payload operator with the resolved point ids,
+        the intact IMPL target, and the graded strength."""
+        obs = "the region clock drifted eleven seconds"
+        risk = "clock skew between regions can make lease expiry unsafe"
+        action = ("the skew-tolerant grace period is in place so a lagging "
+                  "region's renewal cannot clobber a live lease")
+        embed = {
+            "entities": [], "events": [],
+            "points": [
+                {"content": obs, "pointKind": "statement"},
+                {"content": risk, "pointKind": "statement"},
+                {"content": action, "pointKind": "statement"},
+            ],
+            "operators": [
+                {"src": obs, "dst": risk, "op_type": "IMPL"},
+                {"src": action, "dst": risk, "op_type": "MITIGATES",
+                 "target_edge": {"src": obs, "dst": risk, "op_type": "IMPL"},
+                 "strength": 0.3},
+            ],
+        }
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        contents = {p["content"] for p in r["payload"]["points"]}
+        assert risk in contents and action in contents and obs in contents
+        ids = {p["content"]: p["id"] for p in r["payload"]["points"]}
+        types = [o["op_type"] for o in r["payload"]["operators"]]
+        assert types == ["IMPL", "MITIGATES"]
+        mit = r["payload"]["operators"][1]
+        assert mit["src"] == ids[action] and mit["dst"] == ids[risk]
+        assert mit["target"] == {"src": ids[obs], "dst": ids[risk],
+                                 "op_type": "IMPL"}
+        assert mit["strength"] == 0.3
+        assert not any("MITIGATES target edge not emitted" in w for w in r["warnings"])
+
+    def test_mitigates_without_target_edge_drops_loudly_not_fabricated(self):
+        """op_03 honesty, narrowed by #2552: a MITIGATES that DECLARES no
+        target edge at all is dropped with a warning — the fold never invents
+        a target operator out of nothing. (A MITIGATES that declares a target
+        edge whose endpoints are unminted is a different case: #2552 mints the
+        endpoints and materializes the DECLARED edge — see
+        test_mitigates_unminted_target_endpoints_minted_and_impl_materialized.
+        The distinction is declaration: nothing declared is never invented.)
+        """
+        risk = "clock skew between regions can make lease expiry unsafe"
+        action = ("the skew-tolerant grace period is in place so a lagging "
+                  "region's renewal cannot clobber a live lease")
+        embed = {
+            "entities": [], "events": [],
+            "points": [
+                {"content": risk, "pointKind": "statement"},
+                {"content": action, "pointKind": "statement"},
+            ],
+            "operators": [
+                {"src": action, "dst": risk, "op_type": "MITIGATES",
+                 "strength": 0.3},
+            ],
+        }
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        assert r["payload"]["operators"] == []
+        assert any("MITIGATES target edge not emitted" in w for w in r["warnings"])
+        assert r["stats"]["operator_endpoints_minted"] == 0
+
+    def test_decision_reversal_point_supersedes_folds_corrects_record(self):
+        """op_04: the direct decision-reversal path — a NEW point whose
+        ``supersedes`` names an EARLIER-session decision (surfaced by the S3
+        search, cross-session by construction) folds a point-level pt_
+        supersession record that the write path applies as a CORRECTS
+        supersession (sdk.supersede). This is the channel the corpus's
+        cross-session SUPERSEDE (wp07 → wp06) needs — previously only the
+        content-revision UPDATE fold formed pt_ records."""
+        old_content = ("ship the lease fix all-at-once behind a single "
+                       "global kill flag")
+        search = {"entities": [], "events": [],
+                  "points": [{"id": "pt_d1", "content": old_content,
+                              "kind": "statement"}]}
+        embed = {
+            "entities": [], "events": [],
+            "points": [
+                {"content": "roll out per-service flags instead of one "
+                            "global kill flag",
+                 "pointKind": "statement",
+                 "supersedes": old_content},
+            ],
+            "operators": [],
+        }
+        r = v2.execute_embed(embed, search, session_id="s1")
+        new_pid = r["payload"]["points"][0]["id"]
+        assert new_pid.startswith("pt_")
+        record = next((s for s in r["supersessions"]
+                       if s["superseded"] == "pt_d1"), None)
+        assert record is not None, r["supersessions"]
+        assert record["supersedes_by"] == new_pid
+        assert "reversal" in record["evidence"]
+        # rides the payload's canonical supersessions channel (commit id)
+        assert any(s == record for s in r["payload"]["supersessions"])
+
+    def test_decision_reversal_unresolved_or_ambiguous_never_guesses(self):
+        """op_04 never-guess: a ``supersedes`` ref that matches no S3 prior
+        (or matches >1) is skipped with a warning — no fabricated record."""
+        old_content = ("ship the lease fix all-at-once behind a single "
+                       "global kill flag")
+        search = {"entities": [], "events": [],
+                  "points": [{"id": "pt_d1", "content": old_content,
+                              "kind": "statement"}]}
+        embed = {
+            "entities": [], "events": [],
+            "points": [
+                {"content": "roll out per-service flags instead of one "
+                            "global kill flag",
+                 "pointKind": "statement",
+                 "supersedes": "some decision that never existed"},
+            ],
+            "operators": [],
+        }
+        r = v2.execute_embed(embed, search, session_id="s1")
+        new_pid = r["payload"]["points"][0]["id"]
+        assert not any(s["supersedes_by"] == new_pid for s in r["supersessions"])
+        assert any("matches no S3 prior" in w for w in r["warnings"])
+        # ambiguous (two priors, same content) → skipped (never guess)
+        search2 = {"entities": [], "events": [],
+                   "points": [{"id": "pt_a", "content": old_content,
+                               "kind": "statement"},
+                              {"id": "pt_b", "content": old_content,
+                               "kind": "statement"}]}
+        embed["points"][0]["supersedes"] = old_content
+        r2 = v2.execute_embed(embed, search2, session_id="s1")
+        assert not any(s["supersedes_by"] == new_pid
+                       for s in r2["supersessions"])
+        assert any("ambiguous" in w for w in r2["warnings"])
+
+    def test_point_supersede_self_ref_skipped(self):
+        """op_04 self guard: a ref resolving to the point ITSELF (same id)
+        is skipped with a warning — a self-CORRECTS would poison the graph."""
+        content = "roll out per-service flags instead of one global kill flag"
+        # identical content in the search ⇒ the candidate is NOOP-folded and
+        # never emitted; the self-guard fires when the resolved prior id ==
+        # the emitted point id (defensive — content-addressing makes the
+        # honest path a NOOP first)
+        from tortoise.extractor_v2 import _content_id
+        pid = _content_id("pt", content)
+        search = {"entities": [], "events": [],
+                  "points": [{"id": pid, "content": content,
+                              "kind": "statement"}]}
+        embed = {"entities": [], "events": [],
+                 "points": [{"content": content, "pointKind": "statement",
+                             "supersedes": content}],
+                 "operators": []}
+        r = v2.execute_embed(embed, search, session_id="s1")
+        # NOOP fold — no payload point, no record, no CORRECTS
+        assert r["payload"]["points"] == []
+        assert all(s["superseded"] != s["supersedes_by"] for s in r["supersessions"])

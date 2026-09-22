@@ -176,6 +176,25 @@ def _free_port() -> int:
     return port
 
 
+def _live(msg: str) -> None:
+    """Write a boot-progress heartbeat straight to real stderr (fd 2).
+
+    #2108: the CI pytest step runs with --capture=sys (ci.yml), which wraps
+    sys.stdout/sys.stderr but leaves fd 2 untouched — so os.write(2, ...)
+    reaches the job log live. (Under pytest's DEFAULT fd capture, fd 2 is
+    dup2-redirected into the capture buffer, which would swallow these
+    heartbeats — keep the --capture=sys pairing.) Before this fix the job
+    log showed ZERO output for the whole up-to-2-min boot phase: pytest -q
+    dots sat in Python's block buffer on the tee pipe, and print() in
+    fixture setup was captured — which read as a hang and invited premature
+    cancels of healthy runs. A slow boot is now distinguishable from a real
+    hang."""
+    try:  # noqa: SIM105
+        os.write(2, f"\n[hosted-e2e] {msg}\n".encode())
+    except Exception:  # noqa: BLE001, RUF100 — never break the suite on a log hiccup
+        pass
+
+
 def _build_server_env(db_path: str, jwks_url: str, *, bare: bool) -> dict:
     """Explicit env contract — inherits the parent env, then applies the
     contract and SCRUBS vars that would silently flip server behavior
@@ -266,8 +285,12 @@ class _ServerProc:
     def wait_ready(self, timeout_s: float = 60.0) -> None:
         import urllib.request
 
-        deadline = time.time() + timeout_s
+        start = time.time()
+        deadline = start + timeout_s
         last_err = "no attempt"
+        # #2108: heartbeat every ~10s so a slow-but-healthy boot is visible
+        # in the CI log (see _live) instead of looking like a hang.
+        next_beat = start + 10.0
         while time.time() < deadline:
             if self.proc.poll() is not None:
                 raise RuntimeError(
@@ -280,6 +303,11 @@ class _ServerProc:
                         return
             except Exception as e:  # noqa: BLE001, RUF100
                 last_err = str(e)
+            now = time.time()
+            if now >= next_beat:
+                _live(f"{self.name} still booting ({now - start:.0f}s) — "
+                      f"/health/ready probe: {last_err}")
+                next_beat = now + 10.0
             time.sleep(0.25)
         raise RuntimeError(
             f"{self.name} not ready after {timeout_s}s ({last_err}):\n"
@@ -312,17 +340,21 @@ class _ServerProc:
             pass
 
 
-def _boot_with_retry(factory, attempts: int = 2):
+def _boot_with_retry(name: str, factory, attempts: int = 2):
     """Boot a server via factory() -> _ServerProc; retry on boot failure.
 
     Embedded FalkorDBLite version handshake is timing-sensitive under CPU
     contention (shared CI/dev machines) — a dead/slow boot is retried
-    rather than failing the whole suite. Returns the live server."""
+    rather than failing the whole suite. Returns the live server.
+    Emits live boot-progress heartbeats (#2108) — see _live()."""
     last_exc = None
     for attempt in range(1, attempts + 1):
+        _live(f"booting {name} server (attempt {attempt}/{attempts})")
         server = factory()
         try:
+            _live(f"{name} boot log: {server._log_path}")
             server.wait_ready()
+            _live(f"{name} ready at {server.base_url}")
             return server
         except Exception as e:  # noqa: BLE001, RUF100
             last_exc = e
@@ -350,6 +382,8 @@ def hosted_env():
         return
 
     tmpdirs: list[str] = []
+    _live("hosted_env: local mode — JWKS mock + hosted server boot "
+          "(uvicorn log: <tmpdir>/hosted-uvicorn.log; boot retried on failure)")
     keys = _JWKSKeys()
     jwks_srv, jwks_url = _start_jwks_server(keys)
 
@@ -362,7 +396,7 @@ def hosted_env():
                            os.path.join(d, "hosted.db"), jwks_url)
 
     try:
-        server = _boot_with_retry(_mk_hosted)
+        server = _boot_with_retry("hosted", _mk_hosted)
     except Exception:
         jwks_srv.shutdown()
         raise
@@ -382,6 +416,7 @@ def bare_hosted_server(hosted_env):
     if hosted_env["remote"]:
         pytest.skip("bare server is local-only (hermetic negatives)")
     tmpdirs: list[str] = []
+    _live("bare_hosted_server: local mode — JWKS mock + bare server boot")
     keys = _JWKSKeys()
     jwks_srv, jwks_url = _start_jwks_server(keys)
 
@@ -392,7 +427,7 @@ def bare_hosted_server(hosted_env):
                            os.path.join(d, "bare.db"), jwks_url, bare=True)
 
     try:
-        server = _boot_with_retry(_mk_bare)
+        server = _boot_with_retry("bare", _mk_bare)
     except Exception:
         jwks_srv.shutdown()
         raise
@@ -403,7 +438,7 @@ def bare_hosted_server(hosted_env):
         shutil.rmtree(d, ignore_errors=True)
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def api(playwright, hosted_env):
     """Playwright APIRequestContext bound to the hosted base URL."""
     # 30s default per request: fail fast when the server degrades instead
@@ -429,8 +464,14 @@ def session_jwt(hosted_env):
     return _mint
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def tenant_factory(api, hosted_env):
+    # module scope (was session): a module-scoped `api` cannot feed a
+    # session-scoped fixture (ScopeMismatch, #1721 review P0). Remote-mode
+    # (E2E_BASE_URL + ALLOW_PROD=1) note: the 3/hr/IP register-limit pool is
+    # now per-module instead of per-session — local hermetic mode (CI
+    # default, limiter disabled) is unaffected; remote runs may need the
+    # pool shared via a module-scoped hosted_env-only cache.
     """Disposable tenants via the public /v1/register surface.
 
     Local mode: fresh tenant per call (register limiter disabled). Remote
@@ -452,7 +493,7 @@ def tenant_factory(api, hosted_env):
         assert r.status == 200, f"register failed: {r.status} {r.text()}"
         body = r.json()
         tenant = {"email": email, "api_key": body["api_key"],
-                  "team_id": body["team_id"], "graph_name": body["graph_name"]}
+                  "org_id": body["org_id"], "graph_name": body["graph_name"]}
         created.append(tenant)
         if hosted_env["remote"]:
             pool.append(tenant)
@@ -484,7 +525,7 @@ def sign_stripe_event(event: dict, secret: str = WEBHOOK_SECRET) -> tuple[bytes,
     return body, f"t={ts},v1={sig}"
 
 
-def bump_team_tier(api, team_id: str, tier: str, *,
+def bump_team_tier(api, org_id: str, tier: str, *,
                    customer: str | None = None) -> str:
     """Drive the real webhook path to a tier bump (E2E-3-D semantics):
     checkout.session.completed binds team↔customer via client_reference_id
@@ -497,9 +538,9 @@ def bump_team_tier(api, team_id: str, tier: str, *,
         "id": f"evt_e2e_co_{uuid.uuid4().hex[:8]}",
         "type": "checkout.session.completed",
         "data": {"object": {
-            "client_reference_id": team_id,
+            "client_reference_id": org_id,
             "customer": cust,
-            "customer_details": {"email": f"e2e-{team_id[:8]}@e2e.premise-labs.dev"},
+            "customer_details": {"email": f"e2e-{org_id[:8]}@e2e.premise-labs.dev"},
         }},
     }
     body, sig = sign_stripe_event(checkout)

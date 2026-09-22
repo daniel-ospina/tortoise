@@ -1,0 +1,526 @@
+"""A7 (#2070) — ask-lane cross-encoder + MMR rerank (eval R6 port).
+
+The eval's proven rerank stage (``tools/longmem_eval/rerank.py``, R6 #1545)
+ported onto the eval-only ask lane: a cross-encoder scorer
+(``cross-encoder/ms-marco-MiniLM-L6-v2`` — ships in the ``embeddings``
+extra, NO new third-party dependency) + greedy MMR diversity, gated
+``TORTOISE_ASK_RERANK`` (fail-safe OFF — phase 2 of the scoping package,
+only to be enabled when the Step-0/2 diagnostics show recall@50 high +
+top-40 ordering poor AND the CPU budget fits).
+
+Contract (mirrors the eval's degrade-to-current contract, D8):
+
+  * **Disabled** (env off) → the pool passes through untouched.
+  * **Scorer load failure** → degrade to the untouched pool (the TTL
+    failure cache stops HF-hub hammering on a persistent outage).
+  * **Score exception or length-mismatched scores** → degrade to the
+    untouched pool (never a per-ask failure).
+  * **Reranked set exceeds the context budget** (issue #2976) → degrade to
+    the untouched (unreranked) pool and DECLARE the overrun in
+    ``degrade_reason`` / ``budget_tokens`` / ``budget_bytes``; the reranked
+    set is never silently truncated to fit.
+  * **No embeddings** (no scorer without the extra; degraded env) → the
+    gate is off by default, so nothing changes; when force-enabled, the
+    scorer loads from the extra and MMR falls back to Jaccard per-pair.
+
+ONE implementation (issue #2976): this module is the single owner of the
+scoring logic (``CrossEncoderScorer`` / ``FakeScorer`` / ``mmr_select`` /
+``_pair_sim`` / ``rerank_hits`` / ``load_scorer``). The eval lane
+(``tools/longmem_eval/rerank.py``) imports and re-exports these names — it
+keeps only its own env namespace and gate adapter, so the eval-only ask lane
+and the harness measure the SAME scorer and MMR code (no fork).
+
+The ``retrieval_degraded`` flag on the ask response is untouched by design
+(A2): a vector-leg-absent lane stays degraded and the rerank is never a
+silent success path — it is OFF unless explicitly enabled.
+
+MMR: MMR(d) = lambda*rel(d) - (1-lambda)*max_sim(d, selected), greedy, with
+a hard per-session cap (one session can't monopolize the context).
+"""
+from __future__ import annotations
+
+import logging
+import os
+import threading
+import time
+from collections.abc import Sequence
+
+from .env_truthy import TRUTHY, is_truthy  # #4097: the declared truthy contract
+
+logger = logging.getLogger(__name__)
+
+RERANK_MODEL_DEFAULT = "cross-encoder/ms-marco-MiniLM-L6-v2"
+RERANK_MAX_LENGTH = 512          # tokenizer-level (CrossEncoder max_length)
+RERANK_TRUNCATE_CHARS = 2048     # char pre-truncation (≈500 tokens) — the
+                                 # two limits are aligned so long raw
+                                 # transcripts cannot blow the tokenizer
+#: #4097: alias of `tortoise.env_truthy.TRUTHY` (a plain assignment, not an
+#: import-alias, so ruff's F401 cannot red it). The name is imported by
+#: tools/longmem_eval/rerank.py and tools/longmem_eval/retrieve.py, so it must
+#: stay bound.
+_TRUTHY = TRUTHY
+
+#: A7 (#2070): ask-lane rerank knobs (mirror the eval's TORTOISE_LME_RERANK_*
+#: namespace; the eval keeps its own knobs and is byte-identical-off).
+ASK_RERANK_ENV = "TORTOISE_ASK_RERANK"
+ASK_RERANK_MODEL_ENV = "TORTOISE_ASK_RERANK_MODEL"
+ASK_RERANK_CAP_ENV = "TORTOISE_ASK_RERANK_CAP"
+ASK_RERANK_LAMBDA_ENV = "TORTOISE_ASK_RERANK_LAMBDA"
+
+#: A7 default per-session cap + MMR lambda (mirror the eval's defaults:
+#: per-session 2, lambda 0.7 — measured in the R6 burn).
+DEFAULT_ASK_RERANK_PER_SESSION_CAP = 2
+DEFAULT_ASK_RERANK_LAMBDA = 0.7
+
+
+def rerank_enabled(flag: bool | None = None) -> bool:
+    """A7 gate. Explicit kwarg wins; else env TORTOISE_ASK_RERANK (fail-safe
+    OFF — only 1/true/yes/on enables, the declared contract since #4097)."""
+    if flag is not None:
+        return bool(flag)
+    return is_truthy(os.environ.get(ASK_RERANK_ENV))
+
+
+def _clamp_int(raw: str | int | None, default: int) -> int:
+    """Ask-lane int clamp — the ONE implementation shared by the env read
+    (``_env_int``) and any caller holding an explicit value that must resolve
+    IDENTICALLY to it (#2513): garbage, non-integer, blank or out-of-range
+    (< 1) values fall back to the default — never a crash. Accepting an
+    already-parsed int (as well as the env's str) is what lets the run path
+    clamp an explicit knob through the same function instead of re-deriving
+    the rule."""
+    if raw is None:
+        return default
+    text = str(raw).strip()
+    if not text:
+        return default
+    try:
+        value = int(text)
+    except ValueError:
+        return default
+    if value < 1:
+        return default
+    return value
+
+
+def _env_int(name: str, default: int) -> int:
+    """Ask-lane env int with clamp: garbage or out-of-range (< 1) values fall
+    back to the default — never a crash. Thin wrapper over ``_clamp_int`` so
+    the env path and an explicit-value caller can never diverge."""
+    return _clamp_int(os.environ.get(name), default)
+
+
+def _env_float(name: str, default: float) -> float:
+    """Ask-lane env float with clamp: garbage or out-of-range values fall
+    back to the default; boundary values (0.0 / 1.0) accepted."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw.strip())
+    except ValueError:
+        return default
+    if not (0.0 <= value <= 1.0):
+        return default
+    return value
+
+
+def mmr_select(
+    scores: dict[int, float],
+    sims: dict[tuple[int, int], float],
+    sessions: dict[int, str],
+    *,
+    top_k: int,
+    per_session_cap: int,
+    lambda_: float,
+) -> tuple[list[int], list[int]]:
+    """Greedy MMR with a hard per-session cap (ported from the eval R6).
+
+    Returns (selected_indices, dropped_indices) in selection order. A
+    candidate whose session already has ``per_session_cap`` selected hits is
+    skipped; candidates ABSENT from ``sessions`` (or with an empty session
+    id) are their own group and are never capped by other hits. Selection
+    stops when the pool is exhausted or ``top_k`` is reached — the caller
+    reports ``len(selected)`` (never implied ``top_k``).
+    """
+    if per_session_cap < 1:
+        raise ValueError(f"per_session_cap must be >= 1, got {per_session_cap}")
+    if not (0.0 <= lambda_ <= 1.0):
+        raise ValueError(f"lambda_ must be in [0,1], got {lambda_}")
+    cands = sorted(scores)          # deterministic tie-break by index
+    selected: list[int] = []
+    dropped: list[int] = []
+    session_counts: dict[str, int] = {}
+    for _ in range(min(top_k, len(cands))):
+        best, best_val = None, float("-inf")
+        for i in cands:
+            if i in selected:
+                continue
+            sid = sessions.get(i)
+            if sid and session_counts.get(sid, 0) >= per_session_cap:
+                continue            # capped (empty/missing sid → never capped)
+            rel = scores[i]
+            sim = max((sims.get((i, j), sims.get((j, i), 0.0))
+                       for j in selected), default=0.0)
+            val = lambda_ * rel - (1.0 - lambda_) * sim
+            if val > best_val:
+                best, best_val = i, val
+        if best is None:
+            break
+        selected.append(best)
+        sid = sessions.get(best)
+        if sid:
+            session_counts[sid] = session_counts.get(sid, 0) + 1
+    dropped = [i for i in cands if i not in selected]
+    return selected, dropped
+
+
+def _model_name() -> str:
+    return (os.environ.get(ASK_RERANK_MODEL_ENV, RERANK_MODEL_DEFAULT)
+            .strip() or RERANK_MODEL_DEFAULT)
+
+
+class CrossEncoderScorer:
+    """Lazy-loaded cross-encoder. Scores (query, content) pairs → sigmoid
+    normalized (0,1). MS MARCO models return logits; the sigmoid is needed
+    only to put rel on the same scale as the MMR similarity term (ranking is
+    unchanged without it)."""
+
+    def __init__(self, model: str, max_length: int = RERANK_MAX_LENGTH):
+        import threading as _t
+
+        from sentence_transformers import CrossEncoder
+        self._model = CrossEncoder(model, max_length=max_length)
+        self._lock = _t.Lock()   # serializes predict() under threads
+
+    def score(self, query: str, contents: Sequence[str]) -> list[float]:
+        with self._lock:
+            import torch
+            # char pre-truncation lives in rerank_hits (both scorers
+            # exercise it — D7); max_length is the tokenizer backstop
+            pairs = [(query, c) for c in contents]
+            logits = self._model.predict(pairs)     # v3+ API (score_pairs deprecated)
+            return [float(torch.sigmoid(torch.tensor(x))) for x in logits]
+
+
+class FakeScorer:
+    """Deterministic test double: query-token-overlap over content length
+    (no model). Normalizing by content length keeps near-duplicates strictly
+    below the exact match (pure query-overlap would tie them)."""
+
+    def score(self, query: str, contents: Sequence[str]) -> list[float]:
+        qtoks = set(query.lower().split())
+        out = []
+        for c in contents:
+            ctoks = set(c.lower().split())
+            out.append(len(qtoks & ctoks) / max(len(ctoks), 1))
+        return out
+
+
+_scorer_lock = threading.Lock()
+_scorer_cache: dict[str, CrossEncoderScorer] = {}   # successes — permanent
+_fail_cache: dict[str, float] = {}                  # failures — short-TTL only
+                                                    # (a persistent outage is
+                                                    # retried at most ~1/min,
+                                                    # not 500×/run — D8b)
+_RETRY_TTL_S = 60.0
+_NOW = time.monotonic
+
+
+def load_scorer(
+    name: str,
+    *,
+    cls=None,
+    lock=None,
+    cache: dict | None = None,
+    fail_cache: dict | None = None,
+    now=None,
+    retry_ttl_s: float | None = None,
+) -> tuple[CrossEncoderScorer | None, str]:
+    """The ONE lazy-load + cache policy for the cross-encoder (issue #2976).
+
+    Returns ``(scorer, reason)``; success is cached permanently, a load
+    failure is cached for ``retry_ttl_s`` (a persistent outage degrades
+    quickly instead of hammering the HF hub). ``cls`` / ``lock`` / ``cache``
+    / ``fail_cache`` / ``now`` are injectable so the eval lane can keep its
+    own env namespace and module-level test seams while sharing this body.
+
+    DOUBLE-CHECKED LOCKING: the lock is held ACROSS construction — a
+    concurrent cache miss blocks until the first thread's constructor
+    finishes, then returns the cached instance."""
+    cls = cls or CrossEncoderScorer
+    lock = lock if lock is not None else _scorer_lock
+    cache = cache if cache is not None else _scorer_cache
+    fail_cache = fail_cache if fail_cache is not None else _fail_cache
+    now = now or _NOW
+    ttl = _RETRY_TTL_S if retry_ttl_s is None else retry_ttl_s
+    with lock:
+        if name in cache:
+            return cache[name], ""
+        if name in fail_cache and now() - fail_cache[name] < ttl:
+            return None, (f"{name}: load failed recently "
+                          f"(retry in ~{ttl:.0f}s)")
+        try:
+            sc = cls(name)                     # constructed INSIDE the lock
+        except Exception as e:
+            logger.warning("cross-encoder %s unavailable — rerank degrades "
+                           "to the untouched pool: %s", name, e)
+            fail_cache[name] = now()
+            return None, f"{name}: {e!r}"
+        cache[name] = sc
+        fail_cache.pop(name, None)
+        return sc, ""
+
+
+def get_scorer(model: str | None = None) -> tuple[CrossEncoderScorer | None, str]:
+    """Load (cache) the ask-lane cross-encoder via the shared
+    ``load_scorer`` policy; resolves the model name from
+    ``TORTOISE_ASK_RERANK_MODEL`` when not given."""
+    return load_scorer(model or _model_name())
+
+
+def _fetch_embeddings(proj, ids: list[str]) -> dict[str, list[float]]:
+    """One-query stored-embedding fetch for MMR similarity (D7).
+
+    Values arrive as round-tripped float lists (follow the existing
+    stored-embedding fetch pattern in sdk.py). Missing / empty values
+    are simply absent → per-pair Jaccard fallback (never a crash)."""
+    if not ids or proj is None:
+        return {}
+    rows = proj.g.query(
+        "MATCH (n:Point) WHERE n.id IN $ids AND n.embedding IS NOT NULL "
+        "RETURN n.id, n.embedding",
+        params={"ids": ids},
+    ).result_set
+    return {r[0]: r[1] for r in rows if isinstance(r[1], list) and r[1]}
+
+
+def _token_set(text: str) -> set[str]:
+    return set(text.lower().split())
+
+
+def _pair_sim(text_a: str, text_b: str,
+              emb_a: list[float] | None, emb_b: list[float] | None) -> float:
+    """MMR similarity in [0,1], scale-consistent across the pool (D7):
+    ``(1 + cos)/2`` over the point ``embedding`` property when BOTH sides
+    have a finite, same-dimension embedding; per-pair Jaccard token overlap
+    fallback otherwise (missing / NaN / Inf / dimension mismatch — embedder
+    drift must fall back, never crash). A zero/zero token union must not
+    raise (``max(len(a|b), 1)``)."""
+    if emb_a is not None and emb_b is not None:
+        try:
+            import numpy as np
+            va = np.asarray(emb_a, dtype=np.float64)
+            vb = np.asarray(emb_b, dtype=np.float64)
+            if (va.size and vb.size and va.shape == vb.shape
+                    and bool(np.isfinite(va).all()) and bool(np.isfinite(vb).all())):
+                denom = float(np.linalg.norm(va) * np.linalg.norm(vb))
+                if denom > 0.0:
+                    cos = float(np.dot(va, vb) / denom)
+                    return max(0.0, min(1.0, (1.0 + cos) / 2.0))
+        except Exception:
+            pass
+    ta, tb = _token_set(text_a), _token_set(text_b)
+    union = len(ta | tb)
+    return (len(ta & tb) / union) if union else 0.0
+
+
+def rerank_hits(
+    query: str,
+    hits: list[dict],
+    *,
+    scorer,
+    proj,
+    top_k: int,
+    per_session_cap: int,
+    lambda_: float,
+) -> tuple[list[dict], dict]:
+    """Cross-encoder rerank + greedy MMR over ``hits`` (the deduped pool).
+
+    Returns ``(selected_only_list, stats)`` — the selected-only reordered
+    list (length ≤ ``top_k``) plus per-call stats. A score exception OR a
+    length-mismatched result degrades (``applied: False`` +
+    ``degrade_reason``) — the caller keeps the untouched pool, never a
+    per-ask failure.
+
+    (1) ``RERANK_TRUNCATE_CHARS`` char pre-truncation on every hit content
+    via ``(content or "")[:...]`` — a ``None`` content truncates to ``""``
+    (scored 0.0; NO degrade from None-content alone). Both scorers exercise
+    the truncation (D7). (2) per-session cap keyed on ``session_id`` (empty
+    ids exempt — their own group). (3) ``mmr_select``. (4) ``reranked`` /
+    ``mmr_promoted`` stamped on the selected hits.
+    """
+    contents = [(h.get("content") or "")[:RERANK_TRUNCATE_CHARS] for h in hits]
+    try:
+        scores = scorer.score(query, contents)
+    except Exception as e:
+        return list(hits), {"applied": False, "degrade_reason": f"{e!r}"}
+    if not isinstance(scores, (list, tuple)) or len(scores) != len(contents):
+        return list(hits), {
+            "applied": False,
+            "degrade_reason": "scorer returned length-mismatched scores "
+                              f"({len(scores) if isinstance(scores, (list, tuple)) else '?'} "
+                              f"vs {len(contents)})",
+        }
+
+    emb = _fetch_embeddings(proj, [h["id"] for h in hits])
+    sims: dict[tuple[int, int], float] = {}
+    for i in range(len(hits)):
+        for j in range(i + 1, len(hits)):
+            sims[(i, j)] = _pair_sim(
+                contents[i], contents[j],
+                emb.get(hits[i]["id"]), emb.get(hits[j]["id"]))
+
+    sessions = {i: (hits[i].get("session_id") or "") for i in range(len(hits))}
+    score_map = {i: float(scores[i]) for i in range(len(hits))}
+    selected, dropped = mmr_select(
+        score_map, sims, sessions, top_k=top_k,
+        per_session_cap=per_session_cap, lambda_=lambda_)
+
+    out: list[dict] = []
+    moved = 0
+    for rank, i in enumerate(selected):
+        h = dict(hits[i])
+        if rank != i:
+            h["reranked"] = True
+            moved += 1
+        if rank < i:
+            h["mmr_promoted"] = True
+        out.append(h)
+
+    session_counts: dict[str, int] = {}
+    for i in selected:
+        sid = hits[i].get("session_id") or ""
+        if sid:                       # empty-session hits are singletons
+            session_counts[sid] = session_counts.get(sid, 0) + 1
+    stats = {
+        "applied": True,
+        "moved": moved,
+        "dropped": len(dropped),
+        "per_session_cap": per_session_cap,
+        "lambda_": lambda_,
+        "selected_count": len(selected),
+        "max_session_chunks": max(session_counts.values(), default=0),
+    }
+    return out, stats
+
+
+def context_budget_overrun(
+    hits: list[dict],
+    *,
+    max_context_tokens: int | None = None,
+    max_context_bytes: int | None = None,
+    question_date: str | None = None,
+) -> tuple[list[str], int, int]:
+    """Check the rendered reranked set against the existing context caps.
+
+    Returns ``(reasons, tokens, nbytes)`` — ``reasons`` is empty when the
+    set fits. Pure; the caller decides how to degrade (the ask lane degrades
+    to the untouched pool — never a silent truncation of the reranked set).
+    """
+    from .retrieval import estimate_tokens_ask, render_context
+    text = render_context(hits, question_date=question_date)
+    # #4105: assembly charges the non-ASCII surcharge (`_ask_token_surcharge`),
+    # so the guard must read the SAME estimator or it is no longer "never less
+    # strict than assembly" on CJK/emoji pools — a set this guard accepts
+    # would then be whole-hit-dropped at assembly, the silent truncation the
+    # guard exists to forbid. Identical to `estimate_tokens` for ASCII text.
+    tokens = estimate_tokens_ask(text)
+    nbytes = len(text.encode("utf-8"))
+    reasons: list[str] = []
+    if max_context_tokens is not None and tokens > max_context_tokens:
+        reasons.append(f"tokens {tokens} > {max_context_tokens}")
+    if max_context_bytes is not None and nbytes + 2 > max_context_bytes:
+        # +2 conservative framing allowance — assemble_context charges the
+        # block separator bytes too (and over-counts the last block by 2), so
+        # the guard must be at least as strict or a set that "fits" here could
+        # still lose its lowest-ranked hit at assembly (a silent truncation).
+        reasons.append(f"bytes {nbytes} (+2 framing) > {max_context_bytes}")
+    return reasons, tokens, nbytes
+
+
+def ask_lane_rerank(
+    query: str,
+    hits: list[dict],
+    *,
+    proj,
+    top_k: int,
+    enabled: bool | None = None,
+    max_context_tokens: int | None = None,
+    max_context_bytes: int | None = None,
+    question_date: str | None = None,
+) -> tuple[list[dict], dict]:
+    """A7 eval-lane entry: the ask lane's rerank stage, gated + degrade-safe.
+
+    Resolves the ask-lane knobs (``TORTOISE_ASK_RERANK`` gate,
+    ``TORTOISE_ASK_RERANK_MODEL`` / ``_CAP`` / ``_LAMBDA``), loads the TTL-
+    cached scorer, and reranks the deduped pool to ``top_k``. Every failure
+    path returns ``(hits, stats)`` with ``applied: False`` + a reason — the
+    caller keeps the untouched pool (degrade-to-current). Returns the
+    rerank stats for logging; the ask response shape is unchanged.
+
+    Budget guard (issue #2976): the measured rerank lever costs ~6.6x
+    context, so when ``max_context_tokens`` / ``max_context_bytes`` are
+    supplied the reranked set is checked against them and the WHOLE PASS is
+    refused (degrade to the unreranked order, ``degrade_reason`` starting
+    ``reranked-set-exceeds-context-budget``) rather than silently truncated
+    to fit. The caps are the same ones ``assemble_context`` enforces and the
+    token leg reads the SAME estimator assembly charges
+    (``estimate_tokens_ask``, surcharge included — #4105), while the byte
+    check adds the same +2 framing slack, so the guard is never less strict
+    than assembly; the default path and the guard agree by construction. The
+    check runs BEFORE the A8 evidence package — which can
+    only shrink the pool — so it is deliberately conservative: it may
+    over-refuse, never under-refuse.
+    """
+    if not rerank_enabled(enabled):
+        return list(hits), {"applied": False, "degrade_reason": "disabled"}
+    if not hits:
+        return list(hits), {"applied": False, "degrade_reason": "empty_pool"}
+    scorer, reason = get_scorer()
+    if scorer is None:
+        return list(hits), {"applied": False, "degrade_reason": reason}
+    cap = _env_int(ASK_RERANK_CAP_ENV, DEFAULT_ASK_RERANK_PER_SESSION_CAP)
+    lambda_ = _env_float(ASK_RERANK_LAMBDA_ENV, DEFAULT_ASK_RERANK_LAMBDA)
+    try:
+        selected, stats = rerank_hits(
+            query, hits, scorer=scorer, proj=proj,
+            top_k=max(top_k, 1), per_session_cap=cap, lambda_=lambda_)
+    except Exception as e:  # noqa: BLE001, RUF100 — degrade, never raise
+        return list(hits), {"applied": False, "degrade_reason": f"{e!r}"}
+    if not stats.get("applied"):
+        return selected, stats          # already degraded (score failure)
+    # The budget guard is deliberately INSIDE the never-raise envelope: the
+    # rendering it performs touches hit properties the scorer path never
+    # reads, so a malformed hit (e.g. a non-dict ``superseded_by``) must
+    # degrade, never escape as an exception (the A7 contract).
+    if max_context_tokens is not None or max_context_bytes is not None:
+        try:
+            reasons, tokens, nbytes = context_budget_overrun(
+                selected, max_context_tokens=max_context_tokens,
+                max_context_bytes=max_context_bytes,
+                question_date=question_date)
+        except Exception as e:  # noqa: BLE001, RUF100 — degrade, never raise
+            logger.warning(
+                "ask rerank budget check failed (%r) — degrading to the "
+                "unreranked order", e)
+            return list(hits), {
+                "applied": False,
+                "degrade_reason": (
+                    f"reranked-set-context-check-failed: {e!r}"),
+            }
+        if reasons:
+            logger.warning(
+                "ask rerank refused (context budget): %s — degrading to the "
+                "unreranked order", "; ".join(reasons))
+            return list(hits), {
+                "applied": False,
+                "degrade_reason": (
+                    "reranked-set-exceeds-context-budget: "
+                    + "; ".join(reasons)),
+                "budget_tokens": tokens,
+                "budget_bytes": nbytes,
+                "max_context_tokens": max_context_tokens,
+                "max_context_bytes": max_context_bytes,
+            }
+    return selected, stats

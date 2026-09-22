@@ -1,10 +1,37 @@
+---
+title: "Registry Graph Schema"
+type: engineering
+domain: platform
+doc_status: live
+created: 2025-08-01
+ownedBy: epistemic-team
+subjects:
+  team: epistemic-team
+aboutObjects:
+- tortoise-hosted-platform
+---
+
 # Registry Graph Schema
 
+> **Retention/deletion windows:** the single source of truth is `docs/retention-and-deletion.md`. Do not restate a window here — link that document.
+
 The registry graph is a dedicated FalkorDB namespace (`registry`) storing control-plane entities for the Tortoise Hosted Platform. It is separate from tenant namespaces. Control-plane data migrates to Supabase under #669 (managed backups + PITR); until then it has no operator-controlled backup — see #596/#669.
+
+## Definitions — account layer vs in-graph Subjects (#2311)
+
+Two layers coexist and must not share one word:
+
+- **Organization account** — the account-level unit of the product (owner direction 2026-09-06). An organization account owns **one or more graphs** and carries billing/tenure/membership. This is what the registry `Team` entity below (and the `teams` table, and the remaining `team_*` internals) represents: the account-layer *contract* identifiers are now `org_id` / `org_memberships` / `/v1/organizations` (#3543), while **legacy internal code/DB identifiers still read "team"** and are deliberately unchanged in this vocabulary-first phase (phase-2 candidates). User-facing copy and docs call this unit an *organization account* (or *organization* where UI shorthand is established).
+- **In-graph Subjects** — `organization` and `team` **Subject kinds inside a memory graph** (ONTOLOGY.md §5/§6), e.g. the onboarding seed's org Subject + person. These live in the knowledge layer and are semantically distinct from the account layer; the Subject kinds are **not renamed** by #2311.
+
+Cross-references: ONTOLOGY.md §5 (Subject Kind Vocabulary) / §6 (Subclass Model); docs/00_index.md.
 
 ## Entity Types
 
 ### Team
+
+> The `Team` entity is the control-plane row for an **organization account** (see Definitions above). The name is a legacy code identifier — unchanged in phase 1 of #2311.
+
 ```
 (:Team {
   id: string,              // ULID
@@ -22,52 +49,162 @@ The registry graph is a dedicated FalkorDB namespace (`registry`) storing contro
   max_graphs: integer?,    // null = unlimited; 1 for free tier
   max_api_keys: integer?,  // tier-derived from pricing.json (free=2)
   max_points: integer?,    // = pricing.json max_graph_nodes (points quota counts graph nodes)
-  max_sessions: integer?,  // flat 1000 across tiers
+  max_sessions: integer?,  // not written by apply_limits/team creation since #4010 (sessions are UNLIMITED for every tier; a stored value is NOT honoured as a cap). sdk.org_update is still a writer, so the property can exist; graph-scripts/clear_max_sessions_4010.py deletes it
   backup_enabled: boolean,
   backup_latest_at: datetime?
 })
 ```
 
 ### WebhookEvent (idempotency markers — #310)
+
 ```
 (:WebhookEvent {
   event_id: string,      // Stripe event.id — unique dedup key (SET-then-marker)
   type: string,          // "checkout.session.completed" | "invoice.payment_failed" | "customer.subscription.updated" | "customer.subscription.deleted"
   received_at: datetime,
-  team_id: string?,      // bound team when resolvable
+  org_id: string?,      // bound team when resolvable
 })
 ```
 
 ### Membership
+
 ```
 (:Membership {
   id: string,       // ULID
   user_id: uuid,    // Supabase auth.users id
-  team_id: string,  // references Team.id
+  org_id: string,  // references Team.id
   role: string,     // "owner" | "admin"
   joined_at: datetime
 })
 ```
 
+### Graph (epic #2083, C1/C2 — multi-graph tenancy)
+
+#2304 lifecycle props (added 2026-09-06): `deleted_at` (ISO-8601 — delete
+stamp, grace-window start; absent = legacy tombstone), `purged_at` (physical
+erasure stamp — row kept as audit), `purged_residual` (bool — namespace
+retained by the ownership guard, operator review). Supabase lane mirrors these
+as `graphs.deleted_at / purged_at / purged_residual` (migration
+20260906000001).
+
+```
+(:Graph {
+  id: string,        // g_<16 hex> (random hex — NOT a ULID); the DEFAULT
+                     // graph's id is the DERIVED default (registry:
+                     // kind='default' node; supabase: the literal 'default'
+                     // — no graphs row, derived from teams.graph_name)
+  org_id: string,   // references Team.id
+  name: string,      // display name (default graph: "default")
+  kind: string,      // "default" | "custom"
+  namespace: string, // FalkorDB tenant namespace (the DEFAULT graph's ns
+                     // IS the team namespace team_<name>; customs =
+                     // team_<org_id>_<gid> — the graph SWITCHER/contexts
+                     // ride this)
+  status: string,    // "active" | "deleted" (tombstone; list filters)
+  recording: boolean?,  // C6 #2115 / #2302 session_recording override — true/false
+                     // = per-graph override; NULL = inherit the team default.
+                     // Writable via PATCH /v1/graphs/{graph_id} AND the
+                     // tortoise_graph_set_recording MCP tool (team:manage
+                     // scope / owner-admin); read-back in GET /v1/graphs.
+                     // The team default lives on onboarding_state.session_recording
+                     // (the #1927 flag) — a NULL override inherits it and a
+                     // per-graph override NEVER re-enables a team OFF.
+  created_at: datetime
+})
+```
+
+Default-graph semantics (the no-migration contract):
+
+- The default graph is **graph 0** — the team's pre-epic namespace. It is
+  DERIVED, never materialized into a tenant data store: supabase mode reads
+  `teams.graph_name`; registry mode has a `kind='default'` Graph node whose
+  namespace IS the team namespace. **No backfill, no data move.**
+- **No per-graph keys (epic #2083 C7 follow-up, #2306):** the default graph
+  is NOT key-bindable in either lane — graph-bound mints 404 on the
+  kind='default' node/row (`_ensure_graph_exists`). Consequently the
+  default row's `key_count` on GET /v1/graphs is ALWAYS 0, and the two
+  lanes cannot disagree about it:
+  - Supabase enforces this structurally: `api_keys.graph_id REFERENCES
+    graphs(id)` — the default row's id is the DERIVED literal `'default'`
+    (never a graphs.id), so no api_keys row can reference it; the keys
+    that RESOLVE to the default graph are the TEAM-WIDE rows (graph_id
+    NULL), managed on the API-Keys tab, never counted on a graph row. A
+    kind='default' graphs row exists only after a recording-override
+    upsert (set_graph_recording) and carries its OWN g_ id — any key
+    bound to it references that id, not `'default'`.
+  - Registry (selfhost) is the drift surface: the kind='default' node has a
+    REAL gid (g_<hex>), so `graph_active_key_count` against it counts
+    legacy bound-default APIKey nodes (minted pre-guard / raw
+    control-plane writes). The list seam (#2306) therefore short-circuits
+    default-kind rows to 0 BEFORE any lane count — the node is not
+    key-bindable and such rows must not resurface as a count on the
+    Graphs tab (the pre-fix capstone "1" with no management path).
+  - Legacy bound-default keys are NOT mintable today but stay LISTABLE +
+    REVOCABLE via the unfiltered GET /v1/team/keys (the API-Keys tab) —
+    that is their management path. The dashboard's default row renders the
+    suppressed cell + an "API Keys tab" affordance instead of a number it
+    cannot act on.
+- Existing (pre-epic) API keys have `graph_id` NULL and resolve to the
+  default graph — legacy keys keep working untouched (E2E-5 zero-action).
+- The default graph occupies quota slot 1 (`max_graphs_per_team`) and is
+  NOT deletable (delete_graph 403s; the UI locks the row).
+- Tenant namespaces carry their own `:Point`/graph data; only the registry
+  namespace holds `:Graph` control-plane rows.
+- **Backups are per-graph since #2313:** every active graph (default +
+  custom) is swept hourly with its own archive pool
+  (`backups/{org_id}/{graph}/{ts}_{rnd}/…`; default graph segment = the
+  literal `default`), per-graph state
+  (`ops/teams/{team}/graphs/{graph_id}/state.json`), independent retention
+  (24 hourly + 7 daily + 4 weekly ≈35 objects/pool: all <24 h + newest per
+  UTC day within 7 d + 4 weekly — #2373 day-bucket anchors) and per-graph
+  staleness incidents.
+  Deleted (tombstoned) graphs are never swept and their archives are
+  restore-refused (tombstone guard; #2304 trash semantics). Their nested
+  archive pools are therefore NEVER pruned and accumulate until #2304's
+  purge decision lands (mechanism recorded post-#2313 audit, #2378).
+
 ### APIKey
+
 ```
 (:APIKey {
-  id: string,         // ULID
-  team_id: string,    // references Team.id
-  key_hash: string,   // SHA-256(pepper + key) — never plaintext
-  key_prefix: string, // first 8 chars for display
-  created_by: uuid,   // Supabase user who created it
+  id: string,              // ULID
+  org_id: string,         // references Team.id
+  graph_id: string?,       // C1: NULL = team-wide key → default graph;
+                           // set = bound to ONE custom graph (no per-graph
+                           // key exists for the default graph — graph-bound
+                           // mints 404 on kind='default' nodes)
+  scopes: string[],        // C1: FLAT allowlist ["graphs:read",
+                           // "graphs:write"] (escalation, owner-only:
+                           // graphs:create/delete, keys:manage, team:manage);
+                           // [] = legacy full-access class (auth-architecture §6)
+  delegation_depth: integer?, // 0 = minted (deleg=0, cannot mint);
+                           // NULL = owner-minted
+  created_by_key_id: string?, // mint lineage (which key minted this one)
+  key_hash: string,        // SHA-256(pepper + key) — never plaintext
+  key_prefix: string,      // first 8 chars for display
+  created_by: uuid,        // Supabase user who created it
   created_at: datetime,
   last_used_at: datetime?,
   revoked_at: datetime?
 })
 ```
 
+Key-class derivation (resolution, D2 — all three lanes agree):
+
+- `legacy_full_access` ⇔ `delegation_depth IS NULL AND scopes = []` — the
+  pre-epic owner class (full team access, tt_ prefix).
+- `delegation_depth = 0` (minted child) can NEVER hold escalation scopes
+  (`graphs:create/delete`, `keys:manage`, `team:manage`) — DB CHECK
+  `chk_minted_key_no_escalation` + resolution both enforce (D1/D13).
+- A scoped deleg-NULL key with an EMPTY array is the same footgun the
+  shrink branch 422s: per-graph keys require ≥1 explicit scope.
+
 ### Invitation
+
 ```
 (:Invitation {
   id: string,        // ULID
-  team_id: string,   // references Team.id
+  org_id: string,   // references Team.id
   email: string,
   role: string,      // always "admin" — only admins can be invited
   token: uuid,
@@ -79,16 +216,28 @@ The registry graph is a dedicated FalkorDB namespace (`registry`) storing contro
 ```
 
 ## Relationships
+
 ```
 (:Membership) -[:BELONGS_TO]-> (:Team)
 (:APIKey) -[:BELONGS_TO]-> (:Team)
+(:APIKey) -[:SCOPED_TO]-> (:Graph)     // graph-bound keys (C1); team-wide keys
+                                       // (graph_id NULL) resolve to the default graph
 (:Invitation) -[:FOR_TEAM]-> (:Team)
+(:Graph) -[:BELONGS_TO]-> (:Team)      // every graph (default + custom)
 ```
+
+## Quota definition (epic #2083)
+
+`max_graphs_per_team` (Team.max_graphs) counts graph rows: the DEFAULT graph
+occupies slot 1; customs occupy the rest. Tier caps (product/pricing.json):
+free=1, solo=2, pro/team NULL (∞ — owner decision, Gate #2 2026-09-01). The
+create flow gates: 402 when the tier is in the blocked set (free/anon),
+409 when at cap (both modes; per-team lock serializes count-then-insert).
 
 ## Authorization Matrix
 
 | Operation | Free Owner | Pro Owner | Pro Admin |
-|-----------|-----------|-----------|-----------|
+| ----------- | ----------- | ----------- | ----------- |
 | Create/query Points | ✅ | ✅ | ✅ |
 | Create graphs | ❌ (max 1) | ✅ | ✅ |
 | Invite members | ❌ (max 1) | ✅ (max 2) | ❌ |

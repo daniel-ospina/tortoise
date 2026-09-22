@@ -1,0 +1,11 @@
+{
+  "holdout": false,
+  "seed": 8,
+  "suite": "continuity",
+  "turns": [
+    {
+      "content": "What did we decide about ingest retries last week?",
+      "role": "user"
+    }
+  ]
+}

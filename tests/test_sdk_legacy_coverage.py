@@ -169,19 +169,19 @@ class TestMitigateOperator:
 
 class TestTeamCreate:
     def test_team_create_returns_team(self, sdk):
-        result = sdk.team_create("team-alpha")
+        result = sdk.org_create("team-alpha")
 
         assert result["name"] == "team-alpha"
-        assert result["graph_name"] == "team_team-alpha"
+        assert result["graph_name"] == "org_team-alpha"
         assert result["api_key"].startswith("tt_")
 
     def test_team_create_namespaces_graph(self, sdk):
-        sdk.team_create("team-beta")
+        sdk.org_create("team-beta")
 
         # A team-scoped SDK reads its own namespace graph (same embedded DB)
-        team_sdk = TortoiseSDK(db_path=sdk._db_path, namespace="team-beta")
+        org_sdk = TortoiseSDK(db_path=sdk._db_path, namespace="team-beta")
         try:
-            proj = team_sdk._get_proj()
+            proj = org_sdk._get_proj()
             # Epic #1647 (PR #1684 CI-fix): the embedded lane's namespace
             # graph is the raw team_team-beta; the docker lane's redirect
             # derives a per-path test_<stem>_<hash> graph. Both isolate the
@@ -198,14 +198,14 @@ class TestTeamCreate:
                 assert proj.graph_name != base_name, (
                     f"team graph {proj.graph_name} collides with base {base_name}")
             else:
-                assert proj.graph_name == "team_team-beta"
+                assert proj.graph_name == "org_team-beta"
         finally:
-            team_sdk.close()
+            org_sdk.close()
 
     @pytest.mark.parametrize("bad", ["bad name!", "", "x" * 65])
     def test_team_create_rejects_bad_names(self, sdk, bad):
         with pytest.raises(ControlPlaneError):
-            sdk.team_create(bad)
+            sdk.org_create(bad)
 
 
 # ── set_point_baseline / calibrate_summary ─────────────────────────────
@@ -223,7 +223,7 @@ class TestBaselineCalibration:
         try:
             point = fresh.get_point(pid)
             assert point["baseline_set"] is True
-            assert point["baseline_source"] == "explicit"
+            assert point["baseline_source"] == "set-by-author"
             assert point["ep_alpha"] == 5.0
             assert point["ep_beta"] == 2.0
         finally:

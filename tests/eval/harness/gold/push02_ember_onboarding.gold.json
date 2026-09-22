@@ -1,0 +1,31 @@
+{
+  "per_turn": [
+    {
+      "pointers": [
+        "pt_ember_flow",
+        "pt_ember_consent"
+      ],
+      "should_retrieve": true,
+      "turn": 1
+    },
+    {
+      "should_retrieve": false,
+      "turn": 2
+    },
+    {
+      "pointers": [
+        "pt_ember_flow",
+        "pt_ember_consent"
+      ],
+      "should_retrieve": true,
+      "turn": 3
+    },
+    {
+      "should_retrieve": false,
+      "turn": 4
+    }
+  ],
+  "schema_version": 1,
+  "session_id": "push02_ember_onboarding",
+  "suite": "push"
+}

@@ -53,3 +53,6 @@ Reviewer verified: (1) **mutually exclusive** — recording/raise splits explici
 1. E2E-6.1 ownership split — #1415 owns report mechanism (fixtures + E2E-6.2), #1416 owns real-run claim filing (invokes `report.assemble()`, not assembles).
 2. CLI split — #1406 owns subcommand dispatch/exit codes; #1415 owns calibrate logic + added `battery report` subcommand (plan §6 contract updated).
 3. Scenario-content ownership — #1407 corpus is the single owner of ALL scenario packs incl. stream-tier (6 families, 10 interdependent, wave variants, A/¬A sessions, drift scenarios, D3 feedback tasks).
+
+## Sibling #2292 (rubric/model/budget feasibility — MERGED-path amendment)
+| #2292 | Rubric/model/budget feasibility | rubric JSON + judge validation record + model pin + measured budget + parity producer | R2 judged-subscore gate (arm-neutral anchored yes/no rubric, validated on real text: retest 1.00 / AC1 0.849); model pin deepseek/deepseek-v4-flash temp 0 (decision a); probe-measured tokens (a0/a4 26409) + token_table_hash machinery; thresholds post-I-1 rows + fp/flip placeholder rows + R2 1.5x floor canonical form; report.py protocol_hash producer (#1144 cross-note). Consumed at #2284 Task-8 exposure. |

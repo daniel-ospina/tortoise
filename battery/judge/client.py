@@ -5,17 +5,19 @@ fallback). Reuses the repo's model-adapter pattern (tools/judge_harness.py
 → tests/model_adapters.py OpenRouterModel) so validation runs are hermetic
 when no model key is present (mock judge) and real when configured.
 """
-from __future__ import annotations  # noqa: I001
+from __future__ import annotations
 
 import json
-
-from dataclasses import dataclass
-from typing import Callable  # noqa: UP035
 import os
 import random
+import re
+from dataclasses import dataclass
+from typing import Callable  # noqa: UP035
 
 from battery.arms.base import ArmUnavailable
+from battery.config.prices import RATES_PER_1M_USD
 from battery.enums import ModelCallOutcome
+from battery.exceptions import ConfigError
 
 
 @dataclass
@@ -27,6 +29,18 @@ class JudgeCall:
     verdict: str
     confidence: float
     outcome: ModelCallOutcome = ModelCallOutcome.OK
+    #: Usage capture (#2292 Task 3): real OpenRouter usage block parsed into
+    #: the JudgeCall so judge spend is METERED (decision (c) — judge spend
+    #: accumulates under its own line, never folded into the model-under-test
+    #: row). Zero on mock calls.
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cost_usd: float = 0.0
+    #: #2906 — how this call's cost was priced ("provider_reported" when the
+    #: response carried `usage.cost`, else "estimated" from the fallback
+    #: table). Persisted so a judge spend figure never implies provenance it
+    #: does not have (review #2915 P2).
+    cost_basis: str = "estimated"
 
 
 class JudgeClient:
@@ -54,6 +68,12 @@ class JudgeClient:
     def real(self) -> bool:
         return self._real
 
+    @property
+    def model_id(self) -> str:
+        """Resolved model id ("" in mock mode). Public so the evidence
+        validation pair-guard can compare the two judge configs."""
+        return self._model_id
+
     def judge(self, rubric_id: str, item_id: str, prompt: str,
               temperature: float = 0.0) -> JudgeCall:
         """Score one item against the rubric. Raises ArmUnavailable on
@@ -70,7 +90,13 @@ class JudgeClient:
         verdict = str(out.get("verdict", ""))
         conf = float(out.get("confidence", 0.5))
         return JudgeCall(rubric_id=rubric_id, item_id=item_id,
-                         verdict=verdict, confidence=conf)
+                         verdict=_canonical_verdict(verdict),
+                         confidence=conf,
+                         prompt_tokens=int(out.get("prompt_tokens", 0) or 0),
+                         completion_tokens=int(
+                             out.get("completion_tokens", 0) or 0),
+                         cost_usd=float(out.get("cost_usd", 0.0) or 0.0),
+                         cost_basis=str(out.get("cost_basis", "estimated")))
 
     def _mock_judge(self, prompt: str) -> dict:
         """Deterministic mock: seeds from the prompt hash so validation
@@ -96,10 +122,82 @@ class JudgeClient:
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode())
         content = data["choices"][0]["message"]["content"]
+        usage = data.get("usage") or {}
+        # Metered judge spend (decision (c)): parse the OpenRouter usage
+        # block so the --evidence path can HARD-STOP against the reserve.
+        # Fail-closed on an ABSENT usage block (review #2575 pro-gate
+        # P2-1): usage-missing responses are unmetered — pt=ct=0 would
+        # cost $0.00 and sail past the reserve. A real judge call always
+        # bills tokens; usage absence means the meter cannot see spend.
+        if not usage:
+            raise ConfigError(
+                "judge response carries NO usage block — spend unmetered; "
+                "fail-closed (reserve HARD STOP cannot meter an absent "
+                "usage)")
+        pt = int(usage.get("prompt_tokens", 0) or 0)
+        ct = int(usage.get("completion_tokens", 0) or 0)
+        # #2906: `usage["cost"]` is the provider's authoritative charge and a
+        # genuine 0.0 (a free/zero-priced call) is a VALUE, not an absence —
+        # `or` would silently re-price it from the fallback table. Check for
+        # None explicitly; the fallback is only for a provider that reports no
+        # cost at all.
+        reported = usage.get("cost")
+        cost = (float(reported) if reported is not None
+                else _openrouter_cost(data.get("model", ""), pt, ct))
         try:
-            return json.loads(content)
+            parsed = json.loads(content)
+            parsed.setdefault("prompt_tokens", pt)
+            parsed.setdefault("completion_tokens", ct)
+            parsed.setdefault("cost_usd", cost)
+            # #2906: the label travels with the number — provider-reported
+            # only when the response itself carried the charge.
+            parsed.setdefault(
+                "cost_basis",
+                "provider_reported" if reported is not None else "estimated")
+            return parsed
         except json.JSONDecodeError:
-            return {"verdict": content.strip(), "confidence": 0.5}
+            return {"verdict": content.strip(), "confidence": 0.5,
+                    "prompt_tokens": pt, "completion_tokens": ct,
+                    "cost_usd": cost}
+
+
+_VERDICT_WORD = re.compile(r"\b(yes|no|better|worse|tie)\b")
+
+
+def _canonical_verdict(raw: str) -> str:
+    """Normalize a model verdict into the canonical vocabulary label.
+
+    Real judges answer plain text ("YES", "No.", "The answer is NO
+    because ...") not always JSON — case/punctuation/prose noise would
+    otherwise make byte-identical retest prompts disagree and collapse the
+    retest/kappa/gold legs on parse artifacts, never on judge behavior.
+    """
+    if not raw:
+        return ""
+    m = _VERDICT_WORD.search(raw.strip().lower())
+    return m.group(1) if m else raw.strip()
+
+
+def _openrouter_cost(model: str, pt: int, ct: int) -> float:
+    """OpenRouter per-1M-token price table (fallback when the usage block
+    omits ``cost``). Judge-model rows only — approximate is fine for a
+    reserve HARD STOP (the cap is a guard, never a bill)."""
+    prices = {
+        "gpt-4o": (2.50, 10.00), "gpt-4o-2024-08-06": (2.50, 10.00),
+        "opus": (15.00, 75.00), "claude": (3.00, 15.00),
+        # #2874: the ONE declared basis (battery/config/prices.py) — this row
+        # used to be a local copy that had drifted from every real price.
+        "deepseek": RATES_PER_1M_USD,
+    }
+    p_in, p_out = (15.00, 75.00)  # fail-closed default: the table MAX — an
+    # unknown judge model is NEVER unmetered (a 0-cost fallback would let an
+    # unmetered model sail past the reserve; over-estimating trips the HARD
+    # STOP early, the safe direction). Review #2575 B-P2.
+    for key, (i_, o_) in prices.items():
+        if key in model.lower():
+            p_in, p_out = i_, o_
+            break
+    return (pt * p_in + ct * p_out) / 1_000_000.0
 
 
 def build_abba_prompts(item_a: str, item_b: str, rubric_text: str,

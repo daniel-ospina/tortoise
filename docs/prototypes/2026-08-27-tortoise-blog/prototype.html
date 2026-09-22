@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tortoise Blog — Prototype</title>
+<style>
+  :root {
+    --bg: #060b14; --bg-soft: #0b1220; --text: #cbd5e1; --text-dim: #94a3b8;
+    --accent: #06b6d4; --accent-glow: rgba(6,182,212,.35); --green: #4ade80;
+    --gold: #f59e0b; --border: #1e293b;
+    --serif: 'Georgia','Times New Roman',serif; --mono: 'SF Mono','Cascadia Code','Fira Code',monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: var(--mono); font-size: 14px; line-height: 1.6; -webkit-font-smoothing: antialiased; }
+  a { color: var(--accent); text-decoration: none; }
+
+  /* Preview toggle (not part of the site) */
+  .preview-toggle { position: fixed; bottom: 16px; right: 16px; z-index: 50; display: flex; gap: 8px; }
+  .preview-toggle button { background: var(--accent); color: #04141a; border: 0; padding: 8px 14px; font-family: var(--mono); font-size: 12px; border-radius: 6px; cursor: pointer; font-weight: 700; }
+  .preview-toggle button.secondary { background: #1e293b; color: var(--text); }
+  .view { display: none; }
+  .view.active { display: block; }
+
+  /* Nav */
+  nav { display: flex; align-items: center; justify-content: space-between; padding: 18px 32px; border-bottom: 1px solid var(--border); }
+  .brand { font-size: 15px; letter-spacing: .08em; color: #fff; font-weight: 700; }
+  .brand span { color: var(--accent); }
+  nav .links a { margin-left: 24px; color: var(--text-dim); font-size: 13px; }
+  nav .links a.active { color: var(--accent); }
+  nav .links .cta { background: var(--accent); color: #04141a; padding: 6px 14px; border-radius: 6px; font-weight: 700; }
+
+  /* Index */
+  .index-wrap { max-width: 1080px; margin: 0 auto; padding: 56px 32px 80px; }
+  .index-head h1 { font-family: var(--serif); font-size: 42px; color: #fff; font-weight: 400; }
+  .index-head p { color: var(--text-dim); margin-top: 8px; max-width: 560px; }
+  .tags-row { display: flex; gap: 8px; margin: 28px 0; flex-wrap: wrap; }
+  .tag { border: 1px solid var(--border); color: var(--text-dim); padding: 4px 12px; border-radius: 999px; font-size: 12px; }
+  .tag.active { border-color: var(--accent); color: var(--accent); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 24px; margin-top: 8px; }
+  .card { background: var(--bg-soft); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; transition: border-color .15s; }
+  .card:hover { border-color: var(--accent); }
+  .card .cover { height: 160px; display: flex; align-items: flex-end; padding: 12px 16px; font-size: 11px; color: rgba(255,255,255,.85); background-size: cover; }
+  .cover.c1 { background: linear-gradient(135deg, #0e7490, #164e63 60%, #060b14); }
+  .cover.c2 { background: linear-gradient(135deg, #14532d, #0f172a 65%, #060b14); }
+  .cover.c3 { background: linear-gradient(135deg, #78350f, #1e293b 65%, #060b14); }
+  .cover .badge { background: rgba(4,20,26,.7); border: 1px solid var(--accent); color: var(--accent); padding: 2px 8px; border-radius: 999px; }
+  .card .body { padding: 16px; }
+  .card h3 { font-family: var(--serif); font-size: 20px; color: #fff; font-weight: 400; line-height: 1.35; }
+  .card p { color: var(--text-dim); font-size: 13px; margin-top: 8px; }
+  .card .meta { display: flex; gap: 12px; margin-top: 12px; color: #64748b; font-size: 11px; }
+  .empty-state { border: 1px dashed var(--border); border-radius: 12px; padding: 64px 24px; text-align: center; color: var(--text-dim); margin-top: 24px; }
+
+  /* Article */
+  .article-wrap { max-width: 720px; margin: 0 auto; padding: 48px 32px 100px; }
+  .crumb { color: var(--text-dim); font-size: 12px; }
+  .crumb a { color: var(--text-dim); } .crumb a:hover { color: var(--accent); }
+  .crumb .sep { margin: 0 8px; opacity: .5; }
+  h1.article-title { font-family: var(--serif); font-size: 40px; line-height: 1.2; color: #fff; font-weight: 400; margin-top: 16px; }
+  .article-meta { display: flex; align-items: center; gap: 14px; margin-top: 14px; color: var(--text-dim); font-size: 12px; }
+  .article-meta .dot { opacity: .4; }
+  .share-bar { display: flex; align-items: center; gap: 10px; margin: 20px 0; padding: 14px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+  .share-bar .label { color: var(--text-dim); font-size: 12px; margin-right: 4px; }
+  .share-bar a, .share-bar button { width: 34px; height: 34px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-soft); color: var(--text-dim); display: flex; align-items: center; justify-content: center; font-size: 14px; cursor: pointer; }
+  .share-bar a:hover, .share-bar button:hover { color: var(--accent); border-color: var(--accent); }
+  .cover-img { margin: 24px 0; border-radius: 12px; border: 1px solid var(--border); height: 320px; display: flex; align-items: flex-end; padding: 20px; font-size: 13px; color: rgba(255,255,255,.9); background: linear-gradient(160deg, #0e7490, #164e63 55%, #060b14); }
+  .cover-img .caption { font-size: 11px; color: rgba(255,255,255,.6); }
+  .article-body { font-size: 15px; line-height: 1.75; color: var(--text); font-family: var(--mono); }
+  .article-body h2 { font-family: var(--serif); font-size: 26px; color: #fff; font-weight: 400; margin: 40px 0 14px; }
+  .article-body h3 { font-family: var(--serif); font-size: 20px; color: #fff; font-weight: 400; margin: 28px 0 10px; }
+  .article-body p { margin: 14px 0; }
+  .article-body ul { margin: 14px 0 14px 22px; }
+  .article-body li { margin: 6px 0; }
+  .article-body blockquote { border-left: 2px solid var(--accent); padding-left: 16px; color: var(--text-dim); margin: 20px 0; font-style: italic; }
+  .article-body code { background: #0b1220; border: 1px solid var(--border); padding: 1px 6px; border-radius: 4px; font-size: 13px; color: var(--green); }
+  .article-body pre { background: #0b1220; border: 1px solid var(--border); border-radius: 8px; padding: 16px; overflow-x: auto; margin: 16px 0; }
+  .inline-img { margin: 20px 0; border-radius: 8px; border: 1px solid var(--border); height: 220px; background: linear-gradient(135deg, #14532d, #0f172a 65%, #060b14); }
+  .end-note { margin-top: 40px; padding: 20px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-soft); color: var(--text-dim); font-size: 13px; }
+  .end-note strong { color: var(--accent); }
+  /* Mobile share bar */
+  .mobile-share { display: none; }
+
+  @media (max-width: 720px) {
+    .index-wrap { padding: 36px 20px 60px; }
+    .index-head h1 { font-size: 32px; }
+    .article-wrap { padding: 32px 20px 120px; }
+    h1.article-title { font-size: 30px; }
+    .mobile-share { display: flex; position: fixed; bottom: 0; left: 0; right: 0; background: rgba(6,11,20,.96); border-top: 1px solid var(--border); padding: 10px 16px; gap: 10px; justify-content: center; z-index: 40; }
+    .mobile-share a, .mobile-share button { width: 38px; height: 38px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-soft); color: var(--text-dim); display: flex; align-items: center; justify-content: center; cursor: pointer; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ───────────── INDEX VIEW ───────────── -->
+<div id="view-index" class="view active">
+  <nav>
+    <div class="brand">Tortoise<span>.</span></div>
+    <div class="links">
+      <a href="#">Docs</a>
+      <a href="#" class="active">Blog</a>
+      <a href="#">Pricing</a>
+      <a href="#" class="cta">Log in</a>
+    </div>
+  </nav>
+  <div class="index-wrap">
+    <div class="index-head">
+      <h1>Blog</h1>
+      <p>Memory for agents to remember why, not just what. Notes on the epistemic graph, EP belief propagation, and building agents that reason over what they know.</p>
+    </div>
+    <div class="tags-row">
+      <span class="tag active">All</span>
+      <span class="tag">Epistemic graphs</span>
+      <span class="tag">EP propagation</span>
+      <span class="tag">Agents</span>
+      <span class="tag">Self-hosting</span>
+    </div>
+    <div class="grid">
+      <a class="card" href="#" onclick="showArticle(); return false;">
+        <div class="cover c1"><span class="badge">New</span></div>
+        <div class="body">
+          <h3>Why Confidence Is a Belief, Not a Score</h3>
+          <p>EP belief propagation treats every relationship as evidence. What that means for how agents should weigh what they know.</p>
+          <div class="meta"><span>Aug 27, 2026</span><span>·</span><span>6 min read</span></div>
+        </div>
+      </a>
+      <a class="card" href="#" onclick="showArticle(); return false;">
+        <div class="cover c2"></div>
+        <div class="body">
+          <h3>Running Tortoise Self-Hosted in 10 Minutes</h3>
+          <p>One Docker image, an external FalkorDB, no Supabase. The thin single-tenant daemon explained.</p>
+          <div class="meta"><span>Aug 12, 2026</span><span>·</span><span>4 min read</span></div>
+        </div>
+      </a>
+      <a class="card" href="#" onclick="showArticle(); return false;">
+        <div class="cover c3"></div>
+        <div class="body">
+          <h3>NANDs, Mitigations, and the Shape of Disagreement</h3>
+          <p>How the graph models contradiction — and why an agent that can disagree with itself is more trustworthy.</p>
+          <div class="meta"><span>Jul 30, 2026</span><span>·</span><span>8 min read</span></div>
+        </div>
+      </a>
+    </div>
+    <div id="empty-state" class="empty-state" style="display:none">
+      No posts yet — the first one is being written by an agent right now.
+    </div>
+  </div>
+</div>
+
+<!-- ───────────── ARTICLE VIEW ───────────── -->
+<div id="view-article" class="view">
+  <nav>
+    <div class="brand">Tortoise<span>.</span></div>
+    <div class="links">
+      <a href="#">Docs</a>
+      <a href="#" onclick="showIndex(); return false;">Blog</a>
+      <a href="#">Pricing</a>
+      <a href="#" class="cta">Log in</a>
+    </div>
+  </nav>
+  <div class="article-wrap">
+    <div class="crumb"><a href="#" onclick="showIndex(); return false;">Blog</a><span class="sep">/</span><span>Why Confidence Is a Belief, Not a Score</span></div>
+    <h1 class="article-title">Why Confidence Is a Belief, Not a Score</h1>
+    <div class="article-meta">
+      <span>By Tortoise team</span><span class="dot">·</span><span>Aug 27, 2026</span><span class="dot">·</span><span>6 min read</span><span class="dot">·</span><span>epistemic graphs</span>
+    </div>
+
+    <div class="share-bar">
+      <span class="label">Share</span>
+      <a href="#" title="X">𝕏</a>
+      <a href="#" title="LinkedIn">in</a>
+      <a href="#" title="Facebook">f</a>
+      <a href="#" title="WhatsApp">wa</a>
+      <button title="Copy link">⧉</button>
+    </div>
+
+    <div class="cover-img">
+      <div class="caption">A belief propagates through the graph like evidence through a network.</div>
+    </div>
+
+    <div class="article-body">
+      <p>When an agent says "I am 0.82 confident in this claim," most people read that as a score — a single number attached to a fact. In Tortoise, it is not a score. It is a <em>belief</em>: the output of an inference process over everything else the graph knows.</p>
+      <h2>Evidence flows like water</h2>
+      <p>Every edge in the graph expresses how one belief affects another. When new evidence arrives at one node, it propagates — strengthening what supports it, weakening what contradicts it. That is EP belief propagation, and it changes what confidence <em>means</em>.</p>
+      <blockquote>A confidence without a structure behind it is a guess with formatting.</blockquote>
+      <p>This is why a graph-engineered memory behaves differently from a vector store with metadata. Retrieval gives you neighbors; propagation gives you <em>consequences</em>.</p>
+      <h2>What changes when you model it this way</h2>
+      <ul>
+        <li><strong>Contradiction is first-class.</strong> A NAND edge between two claims is a fact about the world, not a cleanup task.</li>
+        <li><strong>Mitigations modulate strength.</strong> A low-confidence operator can carry a mitigation that says <em>why</em>.</li>
+        <li><strong>Confidence decays with distance.</strong> Hops dilute belief — the graph is honest about what it inferred vs. what it observed.</li>
+      </ul>
+      <div class="inline-img"></div>
+      <h2>Beliefs you can audit</h2>
+      <p>Because the confidence is a product of structure, it is explainable. Ask the graph why a claim sits at 0.82 and it can walk you back through the evidence that raised it and the counter-evidence that capped it.</p>
+      <pre><code># Every relationship expresses how one belief affects another
+claim = graph.get("agents-should-remember-why")
+for edge in graph.antecedents(claim.id):
+    print(edge.operator.op_type, edge.source.confidence)</code></pre>
+      <p>A score answers "how sure?" A belief answers "and <em>why</em>?" For agents that need to justify what they know, that is the difference that matters.</p>
+    </div>
+
+    <div class="end-note">
+      <strong>More from the blog →</strong> Next up: NANDs, mitigations, and the shape of disagreement. Subscribe via <a href="#">RSS</a>.
+    </div>
+  </div>
+
+  <!-- mobile fixed share bar -->
+  <div class="mobile-share">
+    <a href="#" title="X">𝕏</a>
+    <a href="#" title="LinkedIn">in</a>
+    <a href="#" title="Facebook">f</a>
+    <a href="#" title="WhatsApp">wa</a>
+    <button title="Copy link">⧉</button>
+  </div>
+</div>
+
+<!-- preview toggle (not part of the site) -->
+<div class="preview-toggle">
+  <button onclick="showIndex()">Index</button>
+  <button class="secondary" onclick="showArticle()">Article</button>
+  <button class="secondary" onclick="showEmpty()">Empty</button>
+</div>
+
+<script>
+  function showIndex(){ document.getElementById('view-index').classList.add('active'); document.getElementById('view-article').classList.remove('active'); document.getElementById('empty-state').style.display='none'; document.querySelectorAll('#view-index .card').forEach(c=>c.style.display=''); window.scrollTo(0,0); }
+  function showArticle(){ document.getElementById('view-article').classList.add('active'); document.getElementById('view-index').classList.remove('active'); window.scrollTo(0,0); }
+  function showEmpty(){ document.getElementById('view-index').classList.add('active'); document.getElementById('view-article').classList.remove('active'); document.querySelectorAll('#view-index .card').forEach(c=>c.style.display='none'); document.getElementById('empty-state').style.display='block'; window.scrollTo(0,0); }
+</script>
+</body>
+</html>

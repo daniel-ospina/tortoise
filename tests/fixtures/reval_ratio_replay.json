@@ -1,0 +1,393 @@
+{
+ "failures": [
+  {
+   "qid": "726462e0"
+  },
+  {
+   "qid": "7527f7e2"
+  },
+  {
+   "qid": "5d3d2817"
+  },
+  {
+   "qid": "66f24dbb"
+  }
+ ],
+ "outcomes": [
+  {
+   "expected": 1379,
+   "ingest_mode": "v2",
+   "pool_size": 49,
+   "qid": "118b2229",
+   "question_type": "single-session-user",
+   "session_recall@20": 0.0
+  },
+  {
+   "expected": 1425,
+   "ingest_mode": "v2",
+   "pool_size": 52,
+   "qid": "1e043500",
+   "question_type": "single-session-user",
+   "session_recall@20": 0.0
+  },
+  {
+   "expected": 1510,
+   "ingest_mode": "v2",
+   "pool_size": 39,
+   "qid": "e47becba",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1522,
+   "ingest_mode": "v2",
+   "pool_size": 89,
+   "qid": "51a45a95",
+   "question_type": "single-session-user",
+   "session_recall@20": 0.0
+  },
+  {
+   "expected": 1710,
+   "ingest_mode": "v2",
+   "pool_size": 8,
+   "qid": "58bf7951",
+   "question_type": "single-session-user",
+   "session_recall@20": 0.0
+  },
+  {
+   "expected": 1289,
+   "ingest_mode": "v2",
+   "pool_size": 489,
+   "qid": "c5e8278d",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1365,
+   "ingest_mode": "v2",
+   "pool_size": 650,
+   "qid": "6ade9755",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1401,
+   "ingest_mode": "v2",
+   "pool_size": 673,
+   "qid": "6f9b354f",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1439,
+   "ingest_mode": "v2",
+   "pool_size": 765,
+   "qid": "58ef2f1c",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1359,
+   "ingest_mode": "v2",
+   "pool_size": 834,
+   "qid": "f8c5f88b",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1303,
+   "ingest_mode": "v2",
+   "pool_size": 1303,
+   "qid": "3b6f954b",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1382,
+   "ingest_mode": "v2",
+   "pool_size": 1382,
+   "qid": "c960da58",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1234,
+   "ingest_mode": "v2",
+   "pool_size": 1234,
+   "qid": "ad7109d1",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1411,
+   "ingest_mode": "v2",
+   "pool_size": 1411,
+   "qid": "94f70d80",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1425,
+   "ingest_mode": "v2",
+   "pool_size": 211,
+   "qid": "af8d2e46",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1408,
+   "ingest_mode": "v2",
+   "pool_size": 276,
+   "qid": "dccbc061",
+   "question_type": "single-session-user",
+   "session_recall@20": 0.0
+  },
+  {
+   "expected": 1430,
+   "ingest_mode": "v2",
+   "pool_size": 448,
+   "qid": "c8c3f81d",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1401,
+   "ingest_mode": "v2",
+   "pool_size": 850,
+   "qid": "8ebdbe50",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1352,
+   "ingest_mode": "v2",
+   "pool_size": 976,
+   "qid": "6b168ec8",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1351,
+   "ingest_mode": "v2",
+   "pool_size": 1351,
+   "qid": "75499fd8",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1415,
+   "ingest_mode": "v2",
+   "pool_size": 1415,
+   "qid": "21436231",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1352,
+   "ingest_mode": "v2",
+   "pool_size": 1352,
+   "qid": "95bcc1c8",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1382,
+   "ingest_mode": "v2",
+   "pool_size": 1382,
+   "qid": "0862e8bf",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1461,
+   "ingest_mode": "v2",
+   "pool_size": 1461,
+   "qid": "853b0a1d",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1270,
+   "ingest_mode": "v2",
+   "pool_size": 1270,
+   "qid": "b86304ba",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1456,
+   "ingest_mode": "v2",
+   "pool_size": 1456,
+   "qid": "a06e4cfe",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1465,
+   "ingest_mode": "v2",
+   "pool_size": 1465,
+   "qid": "37d43f65",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1367,
+   "ingest_mode": "v2",
+   "pool_size": 1367,
+   "qid": "d52b4f67",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1354,
+   "ingest_mode": "v2",
+   "pool_size": 1354,
+   "qid": "25e5aa4f",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1303,
+   "ingest_mode": "v2",
+   "pool_size": 1303,
+   "qid": "caf9ead2",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1320,
+   "ingest_mode": "v2",
+   "pool_size": 1320,
+   "qid": "8550ddae",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1467,
+   "ingest_mode": "v2",
+   "pool_size": 1467,
+   "qid": "60d45044",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1366,
+   "ingest_mode": "v2",
+   "pool_size": 1366,
+   "qid": "3f1e9474",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1384,
+   "ingest_mode": "v2",
+   "pool_size": 1384,
+   "qid": "86b68151",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1388,
+   "ingest_mode": "v2",
+   "pool_size": 1388,
+   "qid": "577d4d32",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1342,
+   "ingest_mode": "v2",
+   "pool_size": 1342,
+   "qid": "15745da0",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1413,
+   "ingest_mode": "v2",
+   "pool_size": 1413,
+   "qid": "ec81a493",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1414,
+   "ingest_mode": "v2",
+   "pool_size": 1414,
+   "qid": "e01b8e2f",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1460,
+   "ingest_mode": "v2",
+   "pool_size": 1460,
+   "qid": "bc8a6e93",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1334,
+   "ingest_mode": "v2",
+   "pool_size": 1334,
+   "qid": "ccb36322",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1235,
+   "ingest_mode": "v2",
+   "pool_size": 1235,
+   "qid": "b320f3f8",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1418,
+   "ingest_mode": "v2",
+   "pool_size": 1418,
+   "qid": "001be529",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1347,
+   "ingest_mode": "v2",
+   "pool_size": 1347,
+   "qid": "19b5f2b3",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1546,
+   "ingest_mode": "v2",
+   "pool_size": 1546,
+   "qid": "4fd1909e",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1252,
+   "ingest_mode": "v2",
+   "pool_size": 1252,
+   "qid": "545bd2b5",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  },
+  {
+   "expected": 1422,
+   "ingest_mode": "v2",
+   "pool_size": 1422,
+   "qid": "8a137a7f",
+   "question_type": "single-session-user",
+   "session_recall@20": 1.0
+  }
+ ],
+ "source": {
+  "built_from": "reval.checkpoint.json (1509-REVAL worktree, read-only)",
+  "checkpoint_git_sha": "57f439782457eb54b6bca855dc878f0cc7ba928b",
+  "dataset_digest": "d6f21ea9d60a0d56",
+  "note": "46 outcomes + 4 failures; ratio tier replay \u2014 flags exactly the 15 sub-1.0 questions, passes 31 full-graph.",
+  "split": "s"
+ }
+}

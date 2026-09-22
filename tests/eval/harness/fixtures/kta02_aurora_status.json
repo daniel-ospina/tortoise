@@ -1,0 +1,27 @@
+{
+  "holdout": true,
+  "seed": 2,
+  "suite": "know_to_ask",
+  "turns": [
+    {
+      "content": "What's the status on the Aurora perf work?",
+      "role": "user"
+    },
+    {
+      "content": "The Aurora profile run showed a 12% regression on the write path.",
+      "role": "assistant"
+    },
+    {
+      "content": "Who owns the follow-up?",
+      "role": "user"
+    },
+    {
+      "content": "Diego is tracking it in the perf board.",
+      "role": "assistant"
+    },
+    {
+      "content": "Okay \u2014 I'll ping Diego later.",
+      "role": "user"
+    }
+  ]
+}

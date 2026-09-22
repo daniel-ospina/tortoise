@@ -5,9 +5,11 @@ migrated in #398; the stale live-FalkorDB skip probe was removed as part of
 #344 so the fail-closed default-flip tests actually execute.
 """
 import os  # noqa: I001
+import shutil
 
 import pytest
 from tortoise.sdk import TortoiseSDK
+from tortoise.sdk import BASELINE_SOURCE_INHERITED
 from tortoise.exceptions import CalibrationError
 
 
@@ -24,6 +26,7 @@ def sdk():
     s = TortoiseSDK(db_path)
     yield s
     s.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 # ── Pipeline E2E ────────────────────────────────────────────────
@@ -223,7 +226,7 @@ def test_source_inheritance(sdk):
     assert point.get("ep_alpha") == 5
     assert point.get("ep_beta") == 1
     assert point.get("baseline_set") is True
-    assert point.get("baseline_source") == "inherited"
+    assert point.get("baseline_source") == BASELINE_SOURCE_INHERITED
 
 
 def test_source_inheritance_multi_source(sdk):
@@ -255,7 +258,7 @@ def test_source_inheritance_multi_source(sdk):
     point = sdk.get_point(p["id"])
     assert point.get("ep_alpha") == 6  # log-scale aggregation: 1 + 4*1 + 1*1
     assert point.get("ep_beta") == 1
-    assert point.get("baseline_source") == "inherited"
+    assert point.get("baseline_source") == BASELINE_SOURCE_INHERITED
 
 
 # ── baseline_set flag ───────────────────────────────────────────

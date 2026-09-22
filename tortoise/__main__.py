@@ -1,18 +1,63 @@
 """CLI entry point: python -m tortoise <command>"""
-from __future__ import annotations  # noqa: I001
+from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
+
+# #2201: single source of truth for markdown discovery. The "Found N markdown
+# files" count announced during `tortoise init` and `tortoise onboard` (whose
+# step-3 index runs the REAL indexer, so the indexer's own line is the one
+# announce) comes from the SAME walk the indexer performs — count == walk
+# always. In-repo paths beneath a _NON_CONTENT_DIRS component are excluded:
+# they are never repo content, so counting them made the onboard announce
+# hundreds of files it would never index (652 announced vs 527 walked in the
+# #2201 repro). Exclusion matches in-repo components only — never checkout
+# ancestors.
+
+# #2201: directory names that never hold repo content. Matched as in-repo
+# path COMPONENTS only (see _markdown_files) — `docs/venv/` is dropped while
+# a repo merely LIVING under an ancestor dir named venv/ is not.
+_NON_CONTENT_DIRS = frozenset({".venv", "venv", ".git", "node_modules", "__pycache__"})
+
+
+def _markdown_files(root: Path | str) -> list[Path]:
+    """Sorted *.md files under `root` that the indexer will walk (and
+    init/onboard announce).
+
+    Discoverability is the membership criterion, not readability — unreadable
+    entries (e.g. a dangling symlink) are deliberately retained and skipped
+    at read time (#2201); pre-filtering them here would silently re-break
+    the count == walk invariant. Excludes anything beneath a non-content
+    directory (_NON_CONTENT_DIRS — component match against in-repo paths
+    only, so `docs/venv/` is dropped the way the indexer always dropped it,
+    while `docs/venv-setup/` is kept). Used by the init/onboard counts AND
+    the indexer walk so the announced count always matches the walk.
+    """
+    root = Path(root)
+    return sorted(
+        f for f in root.rglob("*.md")
+        if not _NON_CONTENT_DIRS.intersection(f.relative_to(root).parts)
+    )
+
 
 def _cmd_rebuild(args):
     print(f"Rebuilding from {args.dir} → {args.db}")
     try:
-        from tortoise.projection import FalkorProjection
+        from tortoise.projection import FalkorProjection, RebuildDroppedEpisodicPoints
         # skip_health_check: `rebuild` IS the recovery tool — a broken DB must
         # not block its own rebuild (ops safety #428).
         proj = FalkorProjection(args.db, skip_health_check=True)
         counts = proj.rebuild_all(args.dir)
         print(f"Done: {counts['nodes']} nodes, {counts['edges']} edges from {counts['events']} events")
+    except RebuildDroppedEpisodicPoints as e:
+        # #3947 review (cycle 2, D5): the refusal is the intended outcome for a
+        # store whose episodic roster cannot be proven recoverable, so it must
+        # reach the operator as the message it was written to be — not as a
+        # traceback on a supported ops path. Nothing was wiped; exit non-zero
+        # so a scripted caller cannot read the refusal as success.
+        print(f"Refused: {e}", file=sys.stderr)
+        return 1
     except ImportError as e:
         print(f"FalkorDB unavailable ({e}). Use InMemory rebuild:", file=sys.stderr)
         from tortoise.log import EventLog  # noqa: I001
@@ -270,7 +315,7 @@ def _cmd_init(args):
                     _emit_json({
                         "status": "connected",
                         "already_connected": True,
-                        "team_id": existing.get("team_id"),
+                        "org_id": existing.get("org_id"),
                         "api_url": existing_api_url,
                         "mcp": {
                             "endpoint": f"{existing_api_url}/mcp/",
@@ -326,14 +371,14 @@ def _cmd_init(args):
 
         # Validation outcome: (error_kind, message, http_code) or None when the
         # key validated. Hard-fail kinds → config NOT saved; warn kinds → saved.
-        team_id = None
+        org_id = None
         fail: tuple[str, str, int | None] | None = None
 
         try:
             for attempt in range(2):
                 try:
-                    team_data = _validate_key()
-                    team_id = (team_data or {}).get("team_id") if isinstance(team_data, dict) else None
+                    org_data = _validate_key()
+                    org_id = (org_data or {}).get("org_id") if isinstance(org_data, dict) else None
                     if not json_mode:
                         print("✅ API key validated against Tortoise Cloud")
                     break
@@ -345,11 +390,11 @@ def _cmd_init(args):
                             body = e.read().decode()
                         except Exception:
                             pass
-                        # #308: suspended teams get a structured 403 — surface
+                        # #308: suspended orgs get a structured 403 — surface
                         # the appeal link instead of the generic rejection.
                         sus = _suspended_info(body)
                         if sus is not None:
-                            fail = ("team_suspended", f"Team suspended — {sus[0]}", e.code)
+                            fail = ("org_suspended", f"Team suspended — {sus[0]}", e.code)
                         else:
                             fail = ("key_rejected", f"API rejected the key ({e.code}): {body.strip() or e.reason}", e.code)
                         if not json_mode:
@@ -418,7 +463,7 @@ def _cmd_init(args):
             # Machine-consumable output — full shape for agents (#304).
             _emit_json({
                 "status": "connected",
-                "team_id": team_id,
+                "org_id": org_id,
                 "api_url": base_url,
                 "mcp": {
                     "endpoint": f"{base_url}/mcp/",
@@ -452,8 +497,9 @@ def _cmd_init(args):
         print()
         _print_mcp_configs(args.api_key, base_url, harness)
         print()
-        print("── Onboarding Prompt ──")
-        print("Paste this into your agent to complete setup:")
+        print("── Onboarding skill ──")
+        print("Give this skill to your agent to complete setup (tortoise-onboarding —")
+        print("the successor to the archived onboarding prompt, M8):")
         print(f"  {ONBOARDING_PROMPT_URL}")
         print()
         print("Next steps:")
@@ -520,7 +566,38 @@ def _cmd_init(args):
             from tortoise.projection import FalkorProjection
             _proj = FalkorProjection(db_path)
             _proj.g.query("RETURN 1")
+            # #2210: the probe above opened this embedded store (redislite
+            # daemon) but raw FalkorProjection never registers the path in
+            # sdk._embedded_busy_known — so the TortoiseSDK below would fail
+            # its cross-process busy probe against OUR OWN daemon's pidfile
+            # and silently skip the welcome write + count (init printed
+            # 'Points: ?' on every embedded first run). Mark it same-process
+            # so the SDK reuses the daemon by construction.
+            #
+            # Corner (accepted): if the probe ATTACHED to a daemon held by
+            # another live process instead of starting one (redislite never
+            # runs two daemons for a path), the mark also covers that attach
+            # and init writes through the shared daemon. HEAD's behavior in
+            # that eval-only misuse was a silent no-op + '?', so this only
+            # turns a masked non-write into a masked write — never a second
+            # daemon, never a new loud failure.
+            from tortoise.sdk import _mark_embedded_opened
+            _mark_embedded_opened(db_path)
             print(f"  ✅ Embedded mode initialized at {db_path} (single-writer, eval only — docker compose for durable multi-writer)")
+            # #2200: a URI-less run that lands on the canonical embedded
+            # default is a SILENT fallback onto the eval-only engine — gate
+            # it loudly (stderr, EMBEDDED_EVAL_BANNER precedent #942) instead
+            # of proceeding as if a durable system came up. Explicit embedded
+            # choices (--path / TORTOISE_DB_PATH) keep the eval-only label on
+            # the success line but are not this fallback.
+            if (_is_embedded_default_fallback(db_path, getattr(args, "path", None))
+                    and getattr(args, "from_onboard", False) is not True):
+                # #2200: the standalone gate is suppressed when _cmd_onboard
+                # runs init in-process (from_onboard=True) — the wizard's
+                # completion gate prints the notice once, next to
+                # "Onboarding complete."
+                from tortoise._embedded import EMBEDDED_FALLBACK_NOTICE
+                print(EMBEDDED_FALLBACK_NOTICE, file=sys.stderr)
             graph_ready = True
         except ImportError:
             # Reachable when falkordblite is actually missing: tortoise/__init__
@@ -567,9 +644,15 @@ def _cmd_init(args):
         status = sdk.status()
         point_count = status.get("counts", {}).get("Point", 0)
     except Exception:
-        point_count = "?"
+        # #2210: the welcome-write or status read failed — never print a
+        # '?' placeholder a user can't act on. Omit the count and point at
+        # doctor so the failure is diagnosable, not masked.
+        point_count = None
 
-    print(f"  Graph: tortoise  |  Points: {point_count}")
+    if point_count is None:
+        print("  Graph: tortoise  |  Points: unavailable — run 'tortoise doctor'")
+    else:
+        print(f"  Graph: tortoise  |  Points: {point_count}")
     print()
     print("Graph ready. The graph starts empty — it fills as you and your agents")
     print("file decisions, observations, and findings.")
@@ -593,7 +676,9 @@ def _cmd_init(args):
         )
         if result.returncode == 0:
             repo_root = result.stdout.strip()
-            md_count = len(list(__import__("pathlib").Path(repo_root).rglob("*.md")))
+            # #2201: share the indexer's discovery so the count excludes .venv
+            # and other non-content dirs (previously counted everything).
+            md_count = len(_markdown_files(repo_root))
             auto_index = getattr(args, 'yes', False)
             if md_count > 0:
                 if auto_index:
@@ -629,67 +714,835 @@ def _cmd_init(args):
     return 0
 
 
-def _cmd_signup(args) -> int:
-    """Zero-email signup (issue #663): mint a working tt_ key from the CLI.
 
-    No email, no dashboard, no Supabase account — the agent/CLI equivalent
-    of Mem0's 4-command key mint and Hindsight's npx self-install. Saves
-    the config to .tortoise so `tortoise create-point` etc. work immediately.
+def _read_stored_signup_token_with_source() -> tuple[str | None, Path | None]:
+    """Stored st_ token from the active configs (#1709), WITH its source.
+
+    cwd/.tortoise first (legacy shape), then the #1708 global
+    ~/.tortoise/credentials.json (the canonical store). The field is
+    additive in either file — the two land compatibly. Returns
+    (token, source_path); #1752 needs the path to warn about source
+    divergence (revoke/recover read the token from a DIFFERENT config
+    than the auth key).
+    """
+    import json as _j
+    from pathlib import Path
+    for path in (Path.cwd() / ".tortoise",
+                 Path.home() / ".tortoise" / "credentials.json"):
+        try:
+            cfg = _j.loads(path.read_text())
+        except Exception:
+            continue
+        tok = cfg.get("signup_token") if isinstance(cfg, dict) else None
+        if isinstance(tok, str) and tok:
+            return tok, path
+    return None, None
+
+
+def _read_stored_signup_token() -> str | None:
+    """Stored st_ token from the active configs (#1709) — token only.
+
+    Thin wrapper over _read_stored_signup_token_with_source preserving the
+    pre-#1752 single-value contract for _cmd_signup.
+    """
+    return _read_stored_signup_token_with_source()[0]
+
+
+def _resolve_same_source_token(args, cfg_path, cfg, surface: str = "revoke") -> str | None:
+    """#1752: signup token for revoke/recover resolved from the SAME
+    config the auth key came from (the #1708 env → cwd → global resolver).
+
+    --token wins (the user's explicit choice — used as-is, silently); else
+    the resolved config's OWN signup_token (same file as the key → no
+    divergence); else the cwd→global stored read — with a stderr warning
+    naming BOTH sources when they diverge (mirrors the #1708 env-shadow
+    warning style). An env key has NO token, so any stored token is
+    necessarily a different source → always warned. With no key source at
+    all (keyless `recover`) the stored token is used silently — there is
+    nothing to diverge from.
+    """
+    import os as _os
+    import sys as _sys
+    token = getattr(args, "token", None)
+    if token:
+        return token
+    if isinstance(cfg, dict):
+        tok = cfg.get("signup_token")
+        if isinstance(tok, str) and tok:
+            return tok
+    stored_token, stored_src = _read_stored_signup_token_with_source()
+    if stored_token is None:
+        return None
+    if stored_src == cfg_path:
+        return stored_token  # defensive — same file, nothing to warn about
+    if cfg_path is not None:
+        key_src = str(cfg_path)
+    elif _os.environ.get("TORTOISE_API_KEY", "").strip():
+        key_src = "TORTOISE_API_KEY (env)"
+    else:
+        return stored_token  # no key source at all (keyless recover)
+    print(f"⚠️  note: your recovery token comes from {stored_src}, but your "
+          f"API key comes from {key_src} — if they are different teams, "
+          "revoke/recover will fail with 403.", file=_sys.stderr)
+    return stored_token
+
+
+def _read_stored_config_api_url() -> str | None:
+    """Stored api_url from the active configs (#1749 token-only fallback).
+
+    Same candidates as _read_stored_signup_token (cwd/.tortoise legacy
+    shape, then the #1708 global ~/.tortoise/credentials.json). Used when
+    _resolve_config_path raises _ConfigError on a config that parses but
+    carries no api_key — recover authenticates with the signup token and
+    only needs the URL, so a keyless config must not block recovery.
+    """
+    import json as _j
+    from pathlib import Path
+    for path in (Path.cwd() / ".tortoise",
+                 Path.home() / ".tortoise" / "credentials.json"):
+        try:
+            cfg = _j.loads(path.read_text())
+        except Exception:
+            continue
+        url = cfg.get("api_url") if isinstance(cfg, dict) else None
+        if isinstance(url, str) and url.strip():
+            return url.strip()
+    return None
+
+
+def _token_only_config_path():
+    """First active config carrying a signup_token but NO usable api_key —
+    the exact recoverable config-loss state (#1756). Scans the same
+    candidates as _read_stored_signup_token (cwd/.tortoise legacy shape,
+    then the #1708 global ~/.tortoise/credentials.json).
+
+    A token-bearing candidate that ALSO has a usable key is not this state
+    (the resolver would have accepted it — the hint would be wrong); a
+    genuinely corrupt file (unparseable JSON / invalid UTF-8) is skipped
+    here and stays on the corrupt-config path. The resolver raises
+    _ConfigError on this shape (missing/non-str api_key trips its
+    invariant), so _cmd_signup can point at `tortoise recover` instead of
+    the destructive "delete it / --force" boilerplate.
+
+    Returns (token_only_path, shadow_path): shadow_path is a LATER
+    candidate holding a usable api_key (the user's key is NOT lost — a
+    legacy token-only file shadows it); None when the key is genuinely
+    lost.
+    """
+    import json as _j
+    from pathlib import Path
+    candidates = (Path.cwd() / ".tortoise",
+                  Path.home() / ".tortoise" / "credentials.json")
+    seen_token_only = None
+    for path in candidates:
+        try:
+            cfg = _j.loads(path.read_text())
+        except Exception:
+            continue
+        if not isinstance(cfg, dict):
+            continue
+        key = cfg.get("api_key")
+        if isinstance(key, str) and key.strip():
+            if seen_token_only is not None:
+                # a later candidate holds a usable key — the token-only file
+                # only SHADOWS it; recover would write the global store and
+                # leave the shadow in place (the next command fails the same
+                # way). The handler prints a shadow note instead of the
+                # "key lost" hint (review P2, #1756).
+                return seen_token_only, path
+            continue
+        tok = cfg.get("signup_token")
+        if isinstance(tok, str) and tok and seen_token_only is None:
+            seen_token_only = path
+    if seen_token_only is not None:
+        return seen_token_only, None
+    return None, None
+
+
+def _is_invalid_signup_token(body: str) -> bool:
+    """True when a 422 body is the uniform invalid_signup_token detail (#1709)."""
+    try:
+        import json as _j
+        detail = (_j.loads(body) or {}).get("detail")
+    except Exception:
+        return False
+    return isinstance(detail, dict) and detail.get("error_code") == "invalid_signup_token"
+
+
+def _cmd_recover(args) -> int:
+    """Keyless config-loss recovery (#1709): POST /v1/agent/recover with the
+    saved st_ token → a NEW key on the SAME org; config rewritten, data
+    intact. The token is persisted back into the config — the recover
+    endpoint does NOT re-issue tokens (rotation rejected), so without
+    persistence this surface would be one-shot-only and the NEXT key-loss
+    would silently fresh-mint and orphan the recovered org.
     """
     import json, os, sys, uuid  # noqa: E401, I001
     from pathlib import Path
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
 
+    # #1752: resolve the token from the SAME config the auth key comes from
+    # (env → cwd → global). A corrupt config must NOT block keyless
+    # recovery via --token — fall back to the stored-token read with no
+    # key source, which prints no divergence warning (nothing to diverge).
+    try:
+        _cfg_path, _cfg, _api_key, _api_url = _resolve_config_path()
+    except _ConfigError:
+        _cfg_path, _cfg = None, None
+    token = _resolve_same_source_token(args, _cfg_path, _cfg, surface="recover")
+    if not token:
+        print("No recovery token found. Pass --token st_... or run "
+              "'tortoise signup' first.", file=sys.stderr)
+        return 1
+    # API host via the #1708 resolver chain (env → cwd → global), mirroring
+    # _cmd_token_revoke — the stored config's api_url must beat the default
+    # host (#1749: env-only resolution made recovery dead on any non-default
+    # host — it POSTed to prod and 422'd with a misleading message).
     api_url = os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
-    device_id = f"anon-{uuid.uuid4().hex[:12]}"
-
-    print(f"Signing up for a free hosted team (anonymous, no email)…")  # noqa: F541
+    try:
+        _cfg_path, _cfg, _api_key, resolved_url = _resolve_config_path()
+        if resolved_url:
+            api_url = resolved_url
+    except _ConfigError:
+        # A token-only config (valid JSON, no api_key) trips the resolver's
+        # api_key invariant — recover authenticates with the signup token
+        # (no key needed), so read the stored api_url directly instead of
+        # failing on the recover surface (#1749).
+        stored_url = _read_stored_config_api_url()
+        if stored_url:
+            api_url = stored_url
+    base = api_url.rstrip("/")
+    print("Recovering your team key with the saved recovery token…")
     try:
         req = Request(
-            f"{api_url}/v1/agent/signup",
-            data=json.dumps({"identity": device_id}).encode(),
-            headers={"Content-Type": "application/json", "X-Device-Id": device_id},
+            f"{base}/v1/agent/recover",
+            data=json.dumps({"signup_token": token}).encode(),
+            headers={"Content-Type": "application/json"},
             method="POST",
         )
         with urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read())
     except HTTPError as e:
         body = e.read().decode() if e.fp else ""
-        if e.code == 429:
-            # #1081 P3: friendly retry window + support pointer instead of the
-            # raw JSON body. Retry-After is the RFC 7231 contract; tolerate
-            # both seconds and (hypothetically) HTTP-date via isdigit guard.
-            retry = (e.headers.get("Retry-After")
-                     if e.headers and e.headers.get("Retry-After") else None)
-            when = f"{int(retry)}s" if (retry and retry.isdigit()) else "later"
-            print(f"Signup rate limit reached — try again in {when}. "
-                  "Need more keys? Contact support@premiselabs.co.",
+        if e.code == 422:
+            print("Recovery failed: invalid signup token. (Truncated or revoked? "
+                  "The old team may still be reachable via its key.)",
                   file=sys.stderr)
             return 1
-        print(f"Signup failed ({e.code}): {body}", file=sys.stderr)
+        if e.code == 403:
+            sus = _suspended_info(body)
+            if sus is not None:
+                print(f"Recovery failed: {sus[0]}", file=sys.stderr)
+                return 1
+            print(f"Recovery failed (403): {body}", file=sys.stderr)
+            return 1
+        print(f"Recovery failed ({e.code}): {body}", file=sys.stderr)
         return 1
     except (URLError, ValueError, json.JSONDecodeError) as e:
-        print(f"Cannot reach API at {api_url}: {e}", file=sys.stderr)
+        print(f"Cannot reach API at {base}: {e}", file=sys.stderr)
         return 1
 
-    # Save config so the key works immediately
-    config_path = Path.cwd() / ".tortoise"
+    if not (isinstance(data, dict) and "key" in data and "org_id" in data):
+        # #1709 fixer P2.2: a 200 with valid JSON but no key/org_id (proxy/
+        # edge garbage) must not KeyError-traceback on the derefs below —
+        # mirror _cmd_signup's malformed-response guard (fail-soft: the
+        # recovery may have committed server-side, so never blindly retry).
+        print("Recovery may have succeeded but the response was malformed "
+              "(missing 'key' or 'org_id') — check the dashboard or support "
+              "before re-running; do NOT blindly retry.", file=sys.stderr)
+        return 1
+
     config = {
         "api_key": data["key"],
         "api_url": api_url,
-        "team_id": data["team_id"],
-        "team_name": data["team_name"],
+        "org_id": data["org_id"],
+        "org_name": data.get("org_name"),
+        "signup_token": token,  # ⛔ persist — recovery must not be one-shot
     }
-    config_path.write_text(json.dumps(config, indent=2) + "\n")
-    os.chmod(config_path, 0o600)
-
-    print(f"✅ Free team created: {data['team_name']}")
+    # Write to the #1708 global store (0600, dir 0700, atomic) — same shape
+    # _cmd_signup uses, so resolver precedence stays consistent.
+    try:
+        home_dir = Path.home() / ".tortoise"
+        home_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(home_dir, 0o700)
+        config_path = home_dir / "credentials.json"
+        tmp_path = home_dir / f"credentials.json.tmp-{uuid.uuid4().hex}"
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(config, indent=2) + "\n")
+        os.replace(tmp_path, config_path)
+    except OSError as e:
+        print(f"Recovered key could NOT be saved to config: {e}", file=sys.stderr)
+        print(f"   API key (save it now): {data['key']}", file=sys.stderr)
+        return 1
+    print(f"✅ Key recovered on team {data.get('org_name')} (data intact)")
     print(f"   API key: {data['key']}")
     print(f"   Config saved to {config_path} (shown once — store it)")
+    print(f"   Recovery token kept: {token[:14]}…")
+    return 0
+
+
+def _cmd_token_revoke(args) -> int:
+    """User-facing signup-token revocation (#1715): POST
+    /v1/agent/token/revoke with the saved (or --token) st_ token → the
+    token can no longer recover keys on the org. The request is
+    authenticated with the stored org key (env → cwd → global resolver,
+    #1708) — the same credential that proves org ownership server-side;
+    the endpoint is org-scoped, so a leaked token is killable the moment
+    it is noticed. Prints confirmation; the stored config is left intact
+    (the revoked token simply 422s on any later recover).
+
+    #1755 UX gate: revocation is PERMANENT (no un-revoke RPC exists) — a
+    stray invocation permanently destroys the org's only keyless-recovery
+    path. Requires explicit [y/N] confirmation unless --force, mirroring
+    _cmd_org_keys_revoke; non-interactive runs fail closed (no revoke).
+    """
+    import json, sys  # noqa: E401, I001
+    from urllib.error import HTTPError, URLError
+    from urllib.request import Request, urlopen
+
+    try:
+        _cfg_path, _cfg, api_key, api_url = _resolve_config_path()
+    except _ConfigError as e:
+        print(f"Config at {e} is corrupt or unreadable — cannot authenticate "
+              "the revoke request.", file=sys.stderr)
+        return 1
+    if not api_key:
+        print("No stored API key found. Run 'tortoise signup' or "
+              "'tortoise init --api-key <key>' first — the revoke request "
+              "must be authenticated by the team's key.", file=sys.stderr)
+        return 1
+    # #1752: the token must come from the SAME config the auth key came
+    # from — an env key has no token, so a stored token from another source
+    # is used only with a warning naming the shadow source (no silent 403
+    # "Not your signup token" dead-end when the sources are different orgs).
+    token = _resolve_same_source_token(args, _cfg_path, _cfg)
+    if not token:
+        print("No recovery token found. Pass --token st_... or run "
+              "'tortoise signup' first.", file=sys.stderr)
+        return 1
+    # #1755 confirmation gate — revoke is PERMANENT (no un-revoke RPC
+    # exists) and removes the org's only keyless-recovery path. Only an
+    # explicit yes proceeds; --force skips the prompt for scripts; a
+    # non-interactive run without --force fails CLOSED (no revoke).
+    if not getattr(args, "force", False):
+        abort_msg = ("Revoke aborted — no changes made. The recovery token "
+                     "is PERMANENT once revoked (no undo); use --force to "
+                     "revoke anyway.")
+        print("⚠️  Revoking the recovery token is PERMANENT — it removes your "
+              "team's only keyless-recovery path and there is NO undo.",
+              file=sys.stderr)
+        if not sys.stdin.isatty():
+            print(abort_msg, file=sys.stderr)
+            return 1
+        try:
+            answer = input("Revoke the signup token anyway? [y/N]: ")
+        except EOFError:
+            answer = "n"
+        if answer.strip().lower() not in ("y", "yes"):
+            print(abort_msg, file=sys.stderr)
+            return 1
+    base = (api_url or "https://api.premiselabs.co").rstrip("/")
+    print("Revoking the signup token — it can no longer recover keys on this team…")
+    try:
+        req = Request(
+            f"{base}/v1/agent/token/revoke",
+            data=json.dumps({"signup_token": token}).encode(),
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {api_key}"},
+            method="POST",
+        )
+        with urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        if e.code == 422:
+            print("Revoke failed: invalid signup token.", file=sys.stderr)
+            return 1
+        if e.code == 404:
+            print("Revoke failed: signup token not found on this team.",
+                  file=sys.stderr)
+            return 1
+        if e.code == 401:
+            print("Revoke failed (401): the stored API key was rejected. Run "
+                  "'tortoise signup' or 'tortoise init --api-key <key>'.",
+                  file=sys.stderr)
+            return 1
+        if e.code == 403:
+            sus = _suspended_info(body)
+            if sus is not None:
+                print(f"Revoke failed: {sus[0]}", file=sys.stderr)
+                return 1
+            print(f"Revoke failed (403): {body}", file=sys.stderr)
+            return 1
+        print(f"Revoke failed ({e.code}): {body}", file=sys.stderr)
+        return 1
+    except (URLError, ValueError, json.JSONDecodeError) as e:
+        print(f"Cannot reach API at {base}: {e}", file=sys.stderr)
+        return 1
+
+    if not isinstance(data, dict):
+        # #1715 fixer guard (mirrors _cmd_recover P2.2): a 200 with valid
+        # JSON but no fields must not KeyError-traceback.
+        print("Revoke may have succeeded but the response was malformed — "
+              "check the dashboard or retry once.", file=sys.stderr)
+        return 1
+    if data.get("already"):
+        print(f"ℹ️  The signup token {token[:14]}… was already revoked.")
+    else:
+        print(f"✅ Signup token {token[:14]}… revoked — it can no longer "
+              f"recover keys on this team.")
+    print("   If this was your saved recovery token, the next "
+          "'tortoise recover' or token-present signup will return an "
+          "invalid-signup-token error.")
+    return 0
+
+
+def _cmd_signup(args) -> int:
+    """Zero-email signup (issue #663): mint a working tt_ key from the CLI.
+
+    No email, no dashboard, no Supabase account — the agent/CLI equivalent
+    of Mem0's 4-command key mint and Hindsight's npx self-install. Saves
+    the config to ~/.tortoise/credentials.json (#1708) so `tortoise
+    create-point` etc. work immediately.
+    """
+    import json
+    import os
+    import sys
+    import time
+    import uuid
+    from pathlib import Path
+    from urllib.error import HTTPError, URLError
+    from urllib.request import Request, urlopen
+
+    # Normalize once (#1708 fixer, P2): the reuse-GET rstrips its base but the
+    # mint POST used the raw env URL — a trailing-slash TORTOISE_API_URL hit
+    # `//v1/agent/signup` → 404. Both URLs derive from this normalized base.
+    api_url = os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co").rstrip("/")
+    home_dir = Path.home() / ".tortoise"
+    config_path = home_dir / "credentials.json"
+
+    # ── Reuse-before-mint (#1708 D2/D3) ────────────────────────────────────
+    # A stored key (env → cwd/.tortoise → ~/.tortoise/credentials.json per D1)
+    # is validated with the same REQUEST SHAPE _cmd_init uses (GET /v1/team,
+    # Bearer header, timeout=10) — but the error semantics deliberately
+    # diverge: init warns-and-saves offline (an unvalidatable key still gets
+    # written), while signup FAIL-CLOSES on an unvalidatable existing key
+    # (#1708 — the duplicate-mint incident). 200 = reuse, 0 new keys;
+    # 401/non-suspended-403 = re-mint (global-store fallback below);
+    # SUSPENDED-403 and cannot-validate (429/5xx/network/timeout/garbage-200)
+    # = fail-closed exit 1 — never mint on an unvalidatable existing key.
+    force = getattr(args, "force", False)
+    mint_url = api_url  # may be overridden when re-minting after a 401/403
+    reminting_after_401 = False
+    legacy_device_id = None
+
+    def _global_key_status(base: str) -> str:
+        """Validate the key in the GLOBAL store the mint would overwrite
+        (#1708 fixer, P1: env/cwd key-shadow defeats remint idempotency).
+
+        The 401/403 source may be a higher-precedence key (env or a legacy
+        cwd/.tortoise config) that still shadows the global store at read
+        time — re-running would re-validate the dead source and mint ANOTHER
+        org (the exact duplicate-mint incident #1708 fixes). When the
+        shadowing source is rejected, check the store the mint would write:
+
+          "valid"         — GET /v1/team 200 → reuse instead of minting.
+          "invalid"       — no store / no key / 401 / non-SUSPENDED 403 → mint.
+          "suspended"     — SUSPENDED 403 → fail closed, never mint over it.
+          "unvalidatable" — 429/5xx/network/timeout/garbage → fail closed.
+        """
+        if not config_path.is_file():
+            return "invalid"
+        try:
+            store = json.loads(config_path.read_text())
+        except (json.JSONDecodeError, ValueError, OSError):
+            # ValueError: UnicodeDecodeError from read_text (invalid UTF-8) is
+            # a ValueError subclass — a corrupt store is FAIL-CLOSED (D6):
+            # never mint over an unreadable store (the org it belonged to
+            # would be orphaned and its signup budget silently burned).
+            return "unvalidatable"
+        if not isinstance(store, dict):
+            return "unvalidatable"
+        store_key = store.get("api_key")
+        if not isinstance(store_key, str) or not store_key.strip():
+            return "invalid"
+        store_base = (store.get("api_url") or base).rstrip("/")
+        try:
+            req = Request(
+                f"{store_base}/v1/team",
+                headers={"Authorization": f"Bearer {store_key}"},
+            )
+            with urlopen(req, timeout=10) as resp:
+                json.loads(resp.read())
+            return "valid"
+        except HTTPError as e:
+            body = e.read().decode() if e.fp else ""
+            if e.code in (401, 403):
+                if e.code == 403 and _suspended_info(body) is not None:
+                    return "suspended"
+                return "invalid"
+            return "unvalidatable"
+        except (URLError, ValueError, json.JSONDecodeError, TimeoutError, OSError):
+            return "unvalidatable"
+    if not force:
+        try:
+            cfg_path, cfg, existing_key, existing_url = _resolve_config_path()
+        except _ConfigError as e:
+            # #1756: a config that parses with a signup_token but no api_key
+            # is the EXACT state `tortoise recover` is designed for — the
+            # corrupt-config boilerplate ("fix or delete it, or use --force")
+            # is destructive here: deleting destroys the recovery token and
+            # --force mints a NEW org, orphaning the old one. Point at
+            # recovery; genuinely corrupt files keep the boilerplate below.
+            token_only, shadow = _token_only_config_path()
+            if token_only is not None:
+                if shadow is not None:
+                    # "key lost" is false here: a later candidate holds a
+                    # usable key and the token-only file only shadows it —
+                    # recover would write the global store and leave the
+                    # shadow in place (the next command fails identically).
+                    print(f"⚠️  Found a recovery token but no API key in "
+                          f"{token_only} — however, a usable API key exists "
+                          f"in {shadow}. Your key is NOT lost: you can delete "
+                          f"{token_only} (or run `tortoise recover` to mint a "
+                          f"fresh key on the same team).",
+                          file=sys.stderr)
+                else:
+                    print(f"⚠️  Found a recovery token but no API key in "
+                          f"{token_only} — your key was likely lost. Run "
+                          "`tortoise recover` to get a NEW key on the SAME team "
+                          "(data intact). Do NOT delete this file and do NOT use "
+                          "--force — that would orphan your team.",
+                          file=sys.stderr)
+                return 1
+            print(f"Config at {e} is corrupt or unreadable — fix or delete it, "
+                  "or use --force.", file=sys.stderr)
+            return 1  # never mint on a corrupt config (D6)
+        if existing_key:
+            base = (existing_url or api_url).rstrip("/")
+            try:
+                req = Request(
+                    f"{base}/v1/team",
+                    headers={"Authorization": f"Bearer {existing_key}"},
+                )
+                with urlopen(req, timeout=10) as resp:
+                    json.loads(resp.read())
+                src = str(cfg_path) if cfg_path else "TORTOISE_API_KEY"
+                print(f"✅ Already have a Tortoise Cloud key ({src}) — reusing it.")
+                print("   Run 'tortoise team keys' or 'tortoise create-point \"hello\"' to use it.")
+                print("   To mint a fresh key instead: tortoise signup --force")
+                return 0
+            except HTTPError as e:
+                body = e.read().decode() if e.fp else ""
+                if e.code in (401, 403):
+                    # #308: SUSPENDED 403 must NOT mint (mirrors the other
+                    # _cmd_* org handlers — a suspended org must not be
+                    # silently orphaned by a fresh anonymous mint).
+                    sus = _suspended_info(body)
+                    if sus is not None:
+                        print(f"{sus[0]}", file=sys.stderr)
+                        return 1
+                    # #1708 fixer (P1): before minting, check the GLOBAL store
+                    # the mint would write to. When the 401/403 came from a
+                    # higher-precedence source (env/cwd), a valid global key
+                    # must be REUSED — otherwise every re-run re-validates the
+                    # dead source and mints ANOTHER org (the duplicate-mint
+                    # incident). The store's own host is used when it differs.
+                    if cfg_path != config_path:
+                        gs = _global_key_status(base)
+                        if gs == "valid":
+                            shadow_src = ("TORTOISE_API_KEY" if cfg_path is None
+                                          else f"{cfg_path} (cwd config)")
+                            print(f"✅ Reusing your stored key at {config_path} — "
+                                  f"{shadow_src} was rejected ({e.code}) and shadows it.")
+                            print(f"   Unset TORTOISE_API_KEY or remove "
+                                  f"{Path.cwd() / '.tortoise'} to use your stored key.",
+                                  file=sys.stderr)
+                            return 0
+                        if gs == "suspended":
+                            print("The stored key at ~/.tortoise/credentials.json is "
+                                  "SUSPENDED — not minting over it. Resolve the "
+                                  "suspension, delete the file, or use --force.",
+                                  file=sys.stderr)
+                            return 1
+                        if gs == "unvalidatable":
+                            print("Cannot validate the stored key at "
+                                  "~/.tortoise/credentials.json — not minting to "
+                                  "avoid duplicate keys. Retry later or use --force.",
+                                  file=sys.stderr)
+                            return 1
+                    print(f"Stored key is invalid ({e.code}) — minting a fresh one.",
+                          file=sys.stderr)
+                    reminting_after_401 = True
+                    mint_url = base  # re-mint against the validated config's host (D2)
+                    # device_id backfill: a legacy cwd/.tortoise has none —
+                    # persist it so client identity stays anchored (future #1709).
+                    if isinstance(cfg, dict):
+                        legacy_device_id = cfg.get("device_id")
+                else:
+                    print(f"Cannot validate existing key (API error {e.code}) — not "
+                          "minting to avoid duplicate keys. Retry later or use --force.",
+                          file=sys.stderr)
+                    return 1
+            except (URLError, ValueError, json.JSONDecodeError, TimeoutError, OSError) as e:
+                # TimeoutError/OSError: socket.timeout from resp.read() after
+                # headers arrive (flaky proxy/captive-portal stall) is NOT a
+                # URLError — without it the D2 contract degrades into a traceback.
+                print(f"Cannot validate existing key ({e}) — not minting to avoid "
+                      "duplicate keys. Retry later or use --force.", file=sys.stderr)
+                return 1
+
+    # Stable device_id (#1708): reuse a previously stored one (server still
+    # ignores it — #741(a) unchanged; it anchors CLIENT-side reuse and the
+    # future #1709 dedupe). Read from the GLOBAL credentials store, plus the
+    # legacy-config backfill captured above.
+    stored = {}
+    if config_path.is_file():
+        try:
+            stored = json.loads(config_path.read_text())
+        except (json.JSONDecodeError, ValueError, OSError):
+            # ValueError: UnicodeDecodeError (invalid UTF-8) — same as a parse
+            # error: treat the store as absent, never traceback.
+            stored = {}
+        if not isinstance(stored, dict):
+            stored = {}
+    if not stored.get("device_id") and legacy_device_id:
+        stored["device_id"] = legacy_device_id
+    device_id = stored.get("device_id") or f"anon-{uuid.uuid4().hex[:12]}"
+
+    # #1709: a stored st_ signup token re-presents the SAME org on re-signup
+    # (keyless recovery — the dedupe check). Read from the active configs.
+    stored_token = _read_stored_signup_token()
+    if force:
+        # #1709 fixer P2.4: --force is the documented escape hatch — a FRESH
+        # mint, never a recovery. Without this the stored token was still
+        # re-presented and --force silently performed a RECOVERY (a suspended
+        # org + dead token could never be escaped). Clearing it here also
+        # makes the recovery/fresh-mint branch distinction below purely
+        # request-shaped (P2.5).
+        stored_token = None
+
+    while True:
+        print(f"Signing up for a free hosted team (anonymous, no email)…")  # noqa: F541
+        payload = {"identity": device_id}
+        if stored_token:
+            # #1709: token possession = the dedupe credential — the server
+            # RECOVERS the same org (new key, no second org).
+            payload["signup_token"] = stored_token
+        try:
+            req = Request(
+                f"{mint_url}/v1/agent/signup",
+                data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json", "X-Device-Id": device_id},
+                method="POST",
+            )
+            with urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read())
+        except HTTPError as e:
+            body = e.read().decode() if e.fp else ""
+            if e.code == 429:
+                # #1081 P3: friendly retry window + support pointer instead of the
+                # raw JSON body. Retry-After is the RFC 7231 contract; tolerate
+                # both seconds and (hypothetically) HTTP-date via isdigit guard.
+                retry = (e.headers.get("Retry-After")
+                         if e.headers and e.headers.get("Retry-After") else None)
+                when = f"{int(retry)}s" if (retry and retry.isdigit()) else "later"
+                if reminting_after_401:
+                    # D2: a revoked stored key + exhausted budget — the user must
+                    # not be told to "wait" as if nothing else is wrong.
+                    print(f"Signup rate limit reached — try again in {when}. "
+                          "Note: your stored key is ALSO invalid — fix or revoke it, "
+                          "or --force a fresh mint after the window. "
+                          "Need more keys? Contact support@premiselabs.co.",
+                          file=sys.stderr)
+                else:
+                    print(f"Signup rate limit reached — try again in {when}. "
+                          "Need more keys? Contact support@premiselabs.co.",
+                          file=sys.stderr)
+                return 1
+            if e.code == 422 and stored_token and _is_invalid_signup_token(body):
+                # #1709 P3: a revoked/truncated token must NOT silently orphan the
+                # original org — warn FIRST and require confirmation before
+                # clearing the token + minting a NEW org. Non-interactive runs
+                # fail CLOSED (no mint, no orphan).
+                print("⚠️  Your recovery token is invalid — this will create a NEW "
+                      "team; the old team will be unreachable.", file=sys.stderr)
+                if not sys.stdin.isatty():
+                    print("Non-interactive — aborting. Remove the invalid token from "
+                          "your config and re-run to mint fresh.", file=sys.stderr)
+                    return 1
+                ans = input("Type YES to continue with a fresh team: ")
+                if ans.strip() != "YES":
+                    print("Aborted — no new team created.", file=sys.stderr)
+                    return 1
+                stored_token = None  # cleared; fresh mint below
+                continue
+            if e.code == 403:
+                sus = _suspended_info(body)
+                if sus is not None:
+                    print(f"This team is suspended: {sus[0]}", file=sys.stderr)
+                    return 1
+            print(f"Signup failed ({e.code}): {body}", file=sys.stderr)
+            return 1
+        except URLError as e:
+            print(f"Cannot reach API at {mint_url}: {e}", file=sys.stderr)
+            return 1
+        except (ValueError, json.JSONDecodeError, TimeoutError, OSError):
+            # 200-with-garbage (proxy/mitm) or a stall after the server accepted:
+            # the server DID mint — "Cannot reach API" would mislead the user into
+            # retrying (the double-fire pattern).
+            print("A key may have been minted but the response was unreadable — "
+                  "check the dashboard or support before re-running; "
+                  "do NOT blindly retry.", file=sys.stderr)
+            return 1
+    
+        break
+    if not (isinstance(data, dict) and "key" in data):
+        # 200 with valid JSON but no `key` (edge/proxy): the server may still
+        # have minted — same fail-soft contract as the garbage-200 leg above.
+        # data["key"] must never be dereferenced outside the try (that was an
+        # unhandled KeyError traceback, not the documented fail-soft path).
+        print("A key may have been minted but the response was malformed "
+              "(no 'key' field) — check the dashboard or support before "
+              "re-running; do NOT blindly retry.", file=sys.stderr)
+        return 1
+
+    # Save config so the key works immediately — global credentials store
+    # (#1708 D4): ~/.tortoise/credentials.json (0600), dir 0700, atomic
+    # unique-tmp write — fixes the IsADirectoryError crash when cwd == ~
+    # (previously wrote to cwd/.tortoise which IS the data home directory).
+    # #1709: the signup_token is an ADDITIVE field (mint → the fresh token;
+    # recovery → the stored token is kept — the server never re-issues tokens).
+    # #1709 fixer P2.5: a response signup_token is ONLY authoritative on the
+    # fresh-mint branch — distinguish by whether the request PRESENTED a token
+    # (stored_token non-None here ⟺ the successful request was a recovery; the
+    # 422-confirm branch cleared it before continuing). A proxy-injected
+    # signup_token on the recovery branch must never overwrite the real
+    # stored credential.
+    new_token = data.get("signup_token") if not stored_token else None
+    config = {
+        "api_key": data["key"],
+        "api_url": mint_url,
+        "org_id": data.get("org_id"),
+        "org_name": data.get("org_name"),
+        "device_id": device_id,
+    }
+    if new_token:
+        config["signup_token"] = new_token
+    elif stored_token:
+        config["signup_token"] = stored_token
+    try:
+        home_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(home_dir, 0o700)
+        # Sweep stale tmp-* files (a crashed writer leaves one behind — key
+        # material residue; unbounded accumulation is the failure mode).
+        # Age-guarded (#1708 fixer, P2): sweeping FRESH tmps lets concurrent
+        # writers delete each other's in-flight file → FileNotFoundError on
+        # os.replace → a spurious "minted but could NOT be saved" orphan.
+        now = time.time()
+        for stale in home_dir.glob("credentials.json.tmp-*"):
+            try:
+                if now - stale.stat().st_mtime > 3600:
+                    stale.unlink()
+            except OSError:
+                pass
+        # tmp born at 0600 via os.open(O_EXCL) — write_text would create at
+        # umask (0644) with a plaintext-key window before the chmod; the
+        # unique per-writer name prevents concurrent-writer clobbering.
+        tmp_path = home_dir / f"credentials.json.tmp-{uuid.uuid4().hex}"
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(config, indent=2) + "\n")
+        # NO suppress(FileNotFoundError) here: os.replace can never lose a
+        # rename race (POSIX last-writer-wins; the target being absent is
+        # fine). The only way it raises FileNotFoundError is a MISSING SOURCE
+        # — the fresh unique tmp was deleted (e.g. forward clock jump makes
+        # the age-guarded sweep eat it) — which means nothing was saved, and
+        # a silent exit-0 would be a minted-but-lost key with a false
+        # success. Let it fall through to the except OSError orphan handler
+        # (echo key + exit 1) — the correct fail-closed outcome.
+        os.replace(tmp_path, config_path)
+    except OSError as e:
+        # Orphan class: the key was minted but cannot be saved — echo it AND
+        # the recovery token (the success-path shown-once contract) and fail
+        # closed so the user never loses either and never silently re-mints
+        # (the incident pattern #1750 fixes: a re-run minted a SECOND org
+        # and the first's token was never shown).
+        print(f"A key was minted but could NOT be saved to {config_path}: {e}",
+              file=sys.stderr)
+        print(f"Your API key (store it manually): {data['key']}", file=sys.stderr)
+        orphan_token = config.get("signup_token")
+        if orphan_token:
+            print(f"   Recovery token (save it now): {orphan_token}", file=sys.stderr)
+            print("   RECOVERY TOKEN — save this: it is the only way back into "
+                  "this team if your key is lost.", file=sys.stderr)
+        if stored_token:
+            # recovery-orphan leg: the server recovered the SAME org, only the
+            # save failed — re-running re-presents the token and re-recovers
+            # the SAME org; no new org is created (review P2, #1750).
+            print("Fix the path permissions and re-run — recovery is re-attempted "
+                  "on the SAME team (no new team is created). "
+                  "The key+token above are your only access until then.",
+                  file=sys.stderr)
+        elif orphan_token:
+            # fresh-mint-orphan leg: a re-run with no stored key mints a SECOND
+            # org and orphans the first — warn hard (the incident pattern).
+            print("Fix the path permissions and re-run, or use the key directly — "
+                  "but do NOT re-run blindly: this creates a NEW team; the old "
+                  "team's key+token above are your only access.", file=sys.stderr)
+        else:
+            # fresh mint returned no token — only the key exists above.
+            print("Fix the path permissions and re-run, or use the key directly — "
+                  "but do NOT re-run blindly: this creates a NEW team; the API "
+                  "key above is your only access.", file=sys.stderr)
+        return 1
+
+    # D3 (generalized, #1708 fixer P1): whenever a mint happened while a
+    # higher-precedence source (env or a legacy cwd/.tortoise config) still
+    # shadows the global store at read time (env → cwd → global per D1), warn —
+    # the new key won't be used until the shadow is removed. Previously gated
+    # on --force only, so the env-401 remint path exited 0 with NO warning
+    # (the dead shadow that re-401s every subsequent run → duplicate mints).
+    shadow_srcs = []
+    if os.environ.get("TORTOISE_API_KEY", "").strip():
+        shadow_srcs.append("TORTOISE_API_KEY (env wins)")
+    cwd_cfg = Path.cwd() / ".tortoise"
+    if cwd_cfg.is_file():
+        shadow_srcs.append(f"{cwd_cfg} (cwd wins over ~/.tortoise)")
+    if shadow_srcs:
+        print(f"⚠️  {' and '.join(shadow_srcs)} shadow{'s' if len(shadow_srcs) == 1 else ''} "
+              "this new key at read time — unset/remove it to use the key just minted.",
+              file=sys.stderr)
+
+    # #1751: the success message must key off whether a token was PRESENTED
+    # (stored_token — a recovery) vs whether the mint RETURNED one (new_token —
+    # a fresh mint). A fresh mint whose response lacks signup_token (server
+    # version skew / a field-stripping proxy) is NOT a recovery — "data intact"
+    # would be false — so say "Free org created" and warn the recovery
+    # backdoor was not issued (the same fail-soft contract as the missing-key
+    # leg: never misreport, never silently drop a credential).
+    if stored_token:
+        print(f"✅ Key recovered on existing team: {data.get('org_name')} (data intact)")
+    else:
+        print(f"✅ Free team created: {data.get('org_name')}")
+        if not new_token:
+            print("⚠️  Recovery backdoor NOT created — the server did not return "
+                  "a signup token; you cannot use `tortoise recover` for this "
+                  "team. The API key above is your only access — store it safely.",
+                  file=sys.stderr)
+    print(f"   API key: {data['key']}")
+    print(f"   Config saved to {config_path} (shown once — store it)")
+    if new_token:
+        # #1709: the recovery token is the SINGLE save point (the only way
+        # back into this org if the key is lost). Shown once, like the key.
+        print(f"   Recovery token: {new_token}")
+        print("   RECOVERY TOKEN — save this: it is the only way back into "
+              "this team if your key is lost.")
     if getattr(args, "claim", False):
-        # #1082: the anonymous team can attach a verified identity (same key,
-        # same team, memories intact) — one-time human act, no device flow.
+        # #1082: the anonymous org can attach a verified identity (same key,
+        # same org, memories intact) — one-time human act, no device flow.
         dashboard = os.environ.get(
             "TORTOISE_DASHBOARD_URL", "https://app.premiselabs.co")
         print()
@@ -704,8 +1557,8 @@ def _cmd_signup(args) -> int:
     return 0
 
 
-def _cmd_team_info(args) -> int:
-    """Show team info from Tortoise Cloud API."""
+def _cmd_org_info(args) -> int:
+    """Show org info from Tortoise Cloud API."""
     import json, sys  # noqa: E401, I001
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
@@ -734,7 +1587,7 @@ def _cmd_team_info(args) -> int:
         print(f"Cannot reach API at {api_url}: {e.reason}", file=sys.stderr)
         return 1
 
-    print(f"Team:       {data.get('team_id', '?')}")
+    print(f"Team:       {data.get('org_id', '?')}")
     print(f"Tier:       {data.get('tier', 'free')}")
     print(f"Points:     {data.get('point_count', 0)}")
     print(f"Max users:  {data.get('max_users', 1)}")
@@ -742,33 +1595,104 @@ def _cmd_team_info(args) -> int:
     return 0
 
 
-ONBOARDING_PROMPT_URL = "https://premiselabs.co/onboarding-prompt.md"
+ONBOARDING_PROMPT_URL = "https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md"
 
 
-def _read_config(json_mode: bool = False) -> tuple[dict | None, str | None, str | None]:
-    """Read .tortoise config → (config, api_key, api_url).
+class _ConfigError(Exception):
+    """Candidate config file exists but is corrupt or unreadable."""
 
-    Shared by the hosted-team commands (team info, team keys *). Prints the
-    failure reason to stderr; callers must return 1 when api_key is None.
-    With json_mode, also emits the machine-readable error on stdout so the
-    --json contract holds even for config failures (#875 P2).
+
+def _resolve_config_path(include_env: bool = True, *,
+                         global_only: bool = False) -> tuple[Path | None, dict | None, str | None, str | None]:
+    """Shared config resolver — env → cwd/.tortoise → ~/.tortoise/credentials.json (#1708 D1/D5/D6).
+
+    Returns (config_path, config, api_key, api_url) or (None, None, None, None).
+    INVARIANT: whenever api_key is not None, config is a dict (env candidate is
+    synthesized as {"api_key": key, "api_url": url} — callers like
+    _cmd_org_keys_list do config.get(...) unconditionally and must never see None).
+    - Empty/whitespace env TORTOISE_API_KEY (.strip()) is treated as unset
+      (prevents a lockout shadow where a bad env key beats a good stored one).
+    - A candidate file that exists but fails JSON parse / is unreadable / has a
+      non-string api_key raises _ConfigError(path) (catch (OSError, JSONDecodeError,
+      TypeError)). An empty api_key in a file is treated as "no config here" —
+      the next candidate wins.
+    - A directory at a candidate path (cwd/.tortoise in some repos; the global
+      path's directory is by design) is skipped as "no config here" (D5).
+    - CO-SOURCE (#2369 D1.1): a FILE-sourced key resolves its URL from the SAME
+      file or the built-in default ONLY — the env TORTOISE_API_URL override
+      applies ONLY when the key ALSO came from env. One identity = one source
+      chain (no split-brain): a poisoned env must never redirect a stored key
+      to an attacker host.
+    - include_env=False: file candidates only (used by the transmitting
+      surfaces, D1b — env alone must never flip the local-memory SessionStart
+      hook / per-turn reflex to hosted mode).
+    - global_only=True (#2369 D1.2): the cwd/.tortoise candidate is SKIPPED —
+      surfaces that transmit prompts (the per-turn volunteer reflex + the
+      session-start hosted digest) resolve their identity from the user-global
+      config only; a repo-supplied .tortoise must never authorize transmission
+      to a host the repo (attacker-controllable) chose.
     """
     import json as _json
     import os as _os
     from pathlib import Path
 
-    config_path = Path.cwd() / ".tortoise"
-    if not config_path.exists():
-        return _cmd_fail(json_mode, "no_config",
-                         "No .tortoise config found. Run 'tortoise init --api-key <key>' first."), None, None
+    if include_env:
+        env_key = _os.environ.get("TORTOISE_API_KEY")
+        if env_key and env_key.strip():
+            env_url = _os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
+            return None, {"api_key": env_key, "api_url": env_url}, env_key, env_url
+
+    if global_only:
+        candidates = (Path.home() / ".tortoise" / "credentials.json",)
+    else:
+        candidates = (Path.cwd() / ".tortoise",
+                      Path.home() / ".tortoise" / "credentials.json")
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            config = _json.loads(path.read_text())
+        except (OSError, _json.JSONDecodeError, ValueError, TypeError) as e:
+            # ValueError: UnicodeDecodeError from read_text (invalid UTF-8) is
+            # a ValueError subclass — same corrupt-config contract as a parse error.
+            raise _ConfigError(path) from e
+        if not isinstance(config, dict):
+            # Parses but isn't an object ([1,2,3]) — config.get would raise
+            # AttributeError outside the try; the documented contract is
+            # _ConfigError (fixer cycle 1, P2).
+            raise _ConfigError(path)
+        api_key = config.get("api_key")
+        if not isinstance(api_key, str):
+            raise _ConfigError(path)
+        if not api_key.strip():
+            continue
+        # #2369 D1.1 co-source: the key is FILE-sourced, so the URL resolves
+        # from the SAME file or the built-in default only — never from env
+        # (a poisoned TORTOISE_API_URL must not redirect the stored key).
+        api_url = config.get("api_url") or "https://api.premiselabs.co"
+        return path, config, api_key, api_url
+    return None, None, None, None
+
+
+def _read_config(json_mode: bool = False) -> tuple[dict | None, str | None, str | None]:
+    """Read the resolved config → (config, api_key, api_url) (env → cwd → global).
+
+    Thin wrapper over _resolve_config_path preserving the legacy 3-tuple +
+    _cmd_fail contract for the hosted-org commands (org info, org keys *).
+    Prints the failure reason to stderr; callers must return 1 when api_key is
+    None. With json_mode, also emits the machine-readable error on stdout so
+    the --json contract holds even for config failures (#875 P2).
+    """
     try:
-        config = _json.loads(config_path.read_text())
-    except _json.JSONDecodeError:
-        return _cmd_fail(json_mode, "no_config", f"Invalid .tortoise config at {config_path}"), None, None
-    api_key = config.get("api_key")
-    api_url = config.get("api_url") or _os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
-    if not api_key:
-        return _cmd_fail(json_mode, "no_config", "No api_key in .tortoise config."), None, None
+        _path, config, api_key, api_url = _resolve_config_path()
+    except _ConfigError as e:
+        reason = str(e.__cause__) if e.__cause__ else "api_key missing or invalid"
+        return (_cmd_fail(json_mode, "no_config",
+                          f"Invalid config at {e}: {reason}"), None, None)
+    if api_key is None:
+        return (_cmd_fail(json_mode, "no_config",
+                          "No .tortoise config found. Run 'tortoise init --api-key <key>' first, "
+                          "or run 'tortoise signup' for a free hosted key."), None, None)
     return config, api_key, api_url
 
 
@@ -794,7 +1718,7 @@ def _cmd_fail(json_mode: bool, error: str, message: str, **extra: object) -> int
 def _suspended_info(body: str) -> tuple[str, str | None] | None:
     """#308 (R5): parse a 403 body for the SUSPENDED detail code.
 
-    Returns (message, appeal_url) when the team is suspended, else None —
+    Returns (message, appeal_url) when the org is suspended, else None —
     unparseable/other bodies keep each caller's pre-#308 behavior."""
     try:
         import json as _j
@@ -803,13 +1727,13 @@ def _suspended_info(body: str) -> tuple[str, str | None] | None:
         return None
     if not isinstance(detail, dict) or detail.get("code") != "SUSPENDED":
         return None
-    msg = detail.get("message") or "This team has been suspended due to unusual activity."
+    msg = detail.get("message") or "This organization has been suspended due to unusual activity."
     url = detail.get("appeal_url")
     return (f"{msg} Appeal: {url}" if url else msg, url)
 
 
 def _harness_mcp_config(harness: str, api_key: str, api_url: str) -> dict:
-    """MCP config for one harness — mirrors website/welcome.html (#497/#529).
+    """MCP config for one harness — mirrors website/apps/dashboard/public/welcome.html (#497/#529).
 
     Hosted (HTTP) shapes — pinned by tests/test_onboarding_variants.py T3:
     - claude: {"mcpServers": {"tortoise": {"type": "http", ...}}} — a url
@@ -825,6 +1749,8 @@ def _harness_mcp_config(harness: str, api_key: str, api_url: str) -> dict:
     endpoint = api_url.rstrip("/") + "/mcp/"
     if harness == "codex":
         return {"command": f"codex mcp add tortoise --url {endpoint} --bearer-token-env-var TORTOISE_API_KEY"}
+    # Cursor supports the ${env:VAR} expansion; pi's mcp-client does NOT
+    # (it expands plain ${VAR} only — an env: prefix yields an empty header).
     header = "${env:TORTOISE_API_KEY}" if harness == "cursor" else "${TORTOISE_API_KEY}"
     server: dict = {
         "url": endpoint,
@@ -864,7 +1790,7 @@ def _print_mcp_configs(api_key: str, api_url: str, harness: str | None) -> None:
     """Print per-harness MCP config (hosted HTTP shape, #304/#981).
 
     With --harness, print only that harness; without, print the selector UI.
-    Shapes mirror website/welcome.html Block A (T3-pinned): claude's CLI
+    Shapes mirror website/apps/dashboard/public/welcome.html Block A (T3-pinned): claude's CLI
     one-liner + type:http .mcp.json alternative, env-expansion forms for
     cursor/pi, codex mcp add command.
     """
@@ -958,8 +1884,8 @@ def _write_mcp_config_file(api_key: str, api_url: str, harness: str, force: bool
     return 0
 
 
-def _cmd_team_keys_list(args) -> int:
-    """List team API keys (GET /v1/team/keys). Hashes only — no plaintext."""
+def _cmd_org_keys_list(args) -> int:
+    """List org API keys (GET /v1/team/keys). Hashes only — no plaintext."""
     import json as _json  # noqa: I001
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
@@ -981,7 +1907,7 @@ def _cmd_team_keys_list(args) -> int:
         if e.code in (401, 403):
             sus = _suspended_info(body)  # #308
             if sus is not None:
-                return _cmd_fail(json_mode, "team_suspended",
+                return _cmd_fail(json_mode, "org_suspended",
                                  f"Team suspended — {sus[0]}", http_code=e.code,
                                  appeal_url=sus[1])
             return _cmd_fail(json_mode, "key_rejected",
@@ -1001,22 +1927,23 @@ def _cmd_team_keys_list(args) -> int:
 
     keys = data.get("keys", [])
     if getattr(args, "json", False):
-        _emit_json({"team_id": config.get("team_id"), "keys": keys})
+        _emit_json({"org_id": config.get("org_id"), "keys": keys})
         return 0
 
-    team_id = config.get("team_id")
-    print(f"API keys for team {team_id}:" if team_id else "API keys:")
-    print(f"  {'ID':<14}{'Prefix':<14}{'Created':<26}{'Last used':<26}Status")
+    org_id = config.get("org_id")
+    print(f"API keys for team {org_id}:" if org_id else "API keys:")
+    print(f"  {'ID':<14}{'Name':<20}{'Prefix':<14}{'Created':<26}{'Last used':<26}Status")
     for k in keys:
         status = "revoked" if k.get("revoked_at") else "active"
         last = k.get("last_used_at") or "never"
-        print(f"  {str(k.get('id') or ''):<14}{str(k.get('key_prefix') or ''):<14}"  # noqa: RUF010
+        name = str(k.get('name') or '')[:20]
+        print(f"  {str(k.get('id') or ''):<14}{name:<20}{str(k.get('key_prefix') or ''):<14}"  # noqa: RUF010
               f"{str(k.get('created_at') or ''):<26}{str(last):<26}{status}")  # noqa: RUF010
     return 0
 
 
-def _cmd_team_keys_create(args) -> int:
-    """Mint a new team API key (POST /v1/team/keys). Key shown exactly once."""
+def _cmd_org_keys_create(args) -> int:
+    """Mint a new org API key (POST /v1/team/keys). Key shown exactly once."""
     import json as _json  # noqa: I001
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
@@ -1026,10 +1953,16 @@ def _cmd_team_keys_create(args) -> int:
     if api_key is None:
         return 1
 
+    # Optional label (20260825000001) — clamp client-side to the same 64-char
+    # cap the API enforces, so a long label is truncated instead of erroring.
+    name = getattr(args, "name", None)
+    body = {}
+    if name:
+        body["name"] = str(name)[:64]
     try:
         req = Request(
             f"{api_url}/v1/team/keys",
-            data=b"{}",
+            data=_json.dumps(body).encode(),
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             method="POST",
         )
@@ -1047,7 +1980,7 @@ def _cmd_team_keys_create(args) -> int:
         if e.code in (401, 403):
             sus = _suspended_info(body)  # #308
             if sus is not None:
-                return _cmd_fail(json_mode, "team_suspended",
+                return _cmd_fail(json_mode, "org_suspended",
                                  f"Team suspended — {sus[0]}", http_code=e.code,
                                  appeal_url=sus[1])
             return _cmd_fail(json_mode, "key_rejected",
@@ -1071,20 +2004,23 @@ def _cmd_team_keys_create(args) -> int:
             "key_prefix": data.get("key_prefix"),
             "id": data.get("id"),
             "created_at": data.get("created_at"),
-            "team_id": config.get("team_id"),
+            "name": data.get("name"),
+            "org_id": config.get("org_id"),
         })
         return 0
 
     print(f"Created new API key: {data.get('key')}")
     print(f"  Key prefix:  {data.get('key_prefix')}")
     print(f"  Key ID:      {data.get('id')}")
+    if data.get("name"):
+        print(f"  Name:        {data.get('name')}")
     print(f"  ⚠️  Store this key — it won't be shown again.")  # noqa: F541
     print(f"  ⚠️  This key has full access to your team's graph.")  # noqa: F541
     return 0
 
 
-def _cmd_team_keys_revoke(args) -> int:
-    """Revoke a team API key (DELETE /v1/team/keys/{id}). Soft delete."""
+def _cmd_org_keys_revoke(args) -> int:
+    """Revoke an org API key (DELETE /v1/team/keys/{id}). Soft delete."""
     import json as _json  # noqa: I001
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
@@ -1115,11 +2051,11 @@ def _cmd_team_keys_revoke(args) -> int:
         if e.code == 404:
             return _cmd_fail(json_mode, "not_found", "API key not found", http_code=404)
         if e.code == 403:
-            # #308: a suspended team's revoke also 403s — the SUSPENDED
-            # detail (with appeal link) must not masquerade as cross-team.
+            # #308: a suspended org's revoke also 403s — the SUSPENDED
+            # detail (with appeal link) must not masquerade as cross-org.
             sus = _suspended_info(body)
             if sus is not None:
-                return _cmd_fail(json_mode, "team_suspended",
+                return _cmd_fail(json_mode, "org_suspended",
                                  f"Team suspended — {sus[0]}", http_code=403,
                                  appeal_url=sus[1])
             return _cmd_fail(json_mode, "cross_team",
@@ -1158,27 +2094,19 @@ def _cmd_team_keys_revoke(args) -> int:
 
 def _cmd_create_point(args) -> int:
     """Create a Point via Tortoise Cloud API."""
-    import json as _json, os, sys as _sys  # noqa: E401, I001
-    from pathlib import Path
+    import json as _json, sys as _sys  # noqa: E401, I001
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
 
-    # Read config
-    config_path = Path.cwd() / ".tortoise"
-    if not config_path.exists():
-        print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.", file=_sys.stderr)
-        return 1
-
+    # Shared resolver (#1708 D1): env → cwd/.tortoise → ~/.tortoise/credentials.json
     try:
-        config = _json.loads(config_path.read_text())
-    except _json.JSONDecodeError:
-        print(f"Invalid .tortoise config at {config_path}", file=_sys.stderr)
+        _cfg_path, _config, api_key, api_url = _resolve_config_path()
+    except _ConfigError as e:
+        print(f"Invalid config at {e} — fix or delete it, or run "
+              "'tortoise init --api-key <key>'.", file=_sys.stderr)
         return 1
-
-    api_key = config.get("api_key")
-    api_url = config.get("api_url") or os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
-    if not api_key:
-        print("No api_key in .tortoise config.", file=_sys.stderr)
+    if api_key is None:
+        print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.", file=_sys.stderr)
         return 1
 
     payload = {
@@ -1215,6 +2143,50 @@ def _cmd_create_point(args) -> int:
     return 0
 
 
+def _context_source_label(api_url: str | None) -> str:
+    """Hosted-mode source label for the session-start digest header (#2209).
+
+    Names which memory is answering so a stored hosted key can never
+    silently flip the hook's digest local to hosted without a visible
+    switch. Returns 'hosted (<host>)' with scheme/path stripped (e.g.
+    'hosted (api.premiselabs.co)'); falls back to the raw URL when it has
+    no parseable host. Userinfo (basic-auth credentials) is stripped so a
+    credentialed api_url never leaks into the injected digest (review P2,
+    #2209). Local mode uses the plain 'local' label at the call site.
+    """
+    from urllib.parse import urlsplit
+    url = (api_url or "").strip()
+    if not url:
+        return "hosted"
+    try:
+        netloc = urlsplit(url if "://" in url else f"//{url}").netloc
+    except ValueError:
+        return f"hosted ({url.rsplit('@', 1)[-1]})"
+    netloc = netloc.rsplit("@", 1)[-1]  # never echo userinfo (user:pass@)
+    return f"hosted ({netloc or url})"
+
+
+def _emit_hosted_mode_note(verb: str, cfg_path: Path | None,
+                           api_url: str | None) -> None:
+    """#2369 D1.3: run-time stderr note when a transmitting surface runs
+    hosted against a FILE config — names the endpoint mode so a future
+    redirect (env regression, tampered file) is visible at run time.
+
+    stderr ONLY: the reflex stdout is injected into the agent turn and must
+    stay clean. The note opens with a stable marker ("tortoise: hosted-mode
+    note:") that the SHIPPED per-turn hook (claude-hooks/volunteer-turn.sh)
+    relays from the reflex's captured stderr into the harness log — the
+    endpoint is visible per hosted run without leaking reflex error noise
+    into the agent context.
+    """
+    import sys as _sys
+    if cfg_path is None:
+        return  # env-sourced identity — nothing to name
+    label = _context_source_label(api_url)
+    print(f"tortoise: hosted-mode note: {verb}: transmitting to {label} "
+          f"— identity file {cfg_path}", file=_sys.stderr)
+
+
 def _cmd_context(args) -> int:
     """Print a compact memory digest for agent session-start injection.
 
@@ -1222,25 +2194,39 @@ def _cmd_context(args) -> int:
     injected into the session context automatically, so the agent starts
     each session knowing what Tortoise already remembers.
 
-    Hosted mode (\".tortoise\" config): calls the hosted API.
-    Local mode (embedded/Docker): uses TortoiseSDK.session_context().
+    Hosted mode (user-global ~/.tortoise/credentials.json only): calls the
+    hosted API. Local mode (embedded/Docker): uses
+    TortoiseSDK.session_context().
+
+    #2209: the digest header always names which memory is answering
+    ("hosted (api.premiselabs.co)" vs "local") — a stored hosted key must
+    never swap the source silently.
     """
     import json as _json, os as _os, sys as _sys  # noqa: E401, I001
-    from pathlib import Path
 
-    config_path = Path.cwd() / ".tortoise"
+    # Transmitting-identity resolver (#2369 D1, supersedes #1708 D1b): the
+    # session-start hosted digest transmits the stored Bearer key, so its
+    # identity is co-sourced — file keys resolve their URL from the SAME
+    # file or the built-in default only (never env), and only the
+    # user-global ~/.tortoise/credentials.json counts (a repo/cwd .tortoise
+    # must never flip this documented hook to an attacker-chosen host). Env
+    # alone (a bare TORTOISE_API_KEY in dev shells) still never flips it to
+    # hosted mode.
     api_key = None
-    api_url = _os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
+    api_url = None
+    try:
+        _cfg_path, _cfg, api_key, api_url = _resolve_config_path(include_env=False, global_only=True)
+    except _ConfigError as e:
+        print(f"Warning: config at {e} is corrupt or unreadable — falling back "
+              "to local memory mode.", file=_sys.stderr)
+        api_key = None
 
-    if config_path.exists():
-        try:
-            cfg = _json.loads(config_path.read_text())
-            api_key = cfg.get("api_key")
-            api_url = cfg.get("api_url") or api_url
-        except _json.JSONDecodeError:
-            pass
+    # #2209: which memory is answering — computed once the resolver has
+    # picked a mode, stamped on the digest header / empty notice below.
+    source_label = _context_source_label(api_url) if api_key else "local"
 
     if api_key:
+        _emit_hosted_mode_note("context", _cfg_path, api_url)
         # ── Hosted: query the API ──
         from urllib.request import Request, urlopen  # noqa: I001
         from urllib.error import URLError, HTTPError
@@ -1272,10 +2258,10 @@ def _cmd_context(args) -> int:
             return 1
 
     if data.get("no_prior_sessions") or not (data.get("diary_entries") or data.get("recent_points") or data.get("recent_events")):
-        print("<Tortoise memory is empty — no prior sessions yet.>")
+        print(f"<Tortoise memory is empty — no prior sessions yet. Source: {source_label}>")
         return 0
 
-    print("# Tortoise memory (from previous sessions)")
+    print(f"# Tortoise memory (from previous sessions) — {source_label}")
 
     diary = data.get("diary_entries") or []
     if diary:
@@ -1305,40 +2291,1051 @@ def _cmd_context(args) -> int:
     return 0
 
 
+def _cmd_volunteer(args) -> int:
+    """Per-turn volunteering-memory reflex (epic #2080 end-state seams).
+
+    Reads a turn window (JSON list of {role, content} turns, a bare-string
+    prompt, or {window, session_id, min_confidence, ...}) from --file or
+    stdin, runs the ONE canonical reflex pipeline (hosted POST /v1/context
+    when a hosted key is configured, else the local SDK volunteer_context —
+    both share tortoise/volunteer.py), and prints the injected block text
+    (default) or the full response contract (--json).
+
+    Hook ergonomics: clean silence (no pointers above the gate) prints
+    nothing and exits 0 — never an error. Failures are honest: text mode
+    prints to stderr and exits 1; --json mode emits {status: error, ...} on
+    stdout (per-harness hooks append ``|| true`` so a failed reflex can
+    never break the agent turn — fail-open content).
+    """
+    import json as _json, os as _os, sys as _sys  # noqa: E401, I001
+
+    def _fail(msg: str) -> int:
+        # Machine contract: --json failures emit {status: error, ...} on
+        # STDOUT (the repo-wide _cmd_fail convention); text mode uses stderr.
+        if args.json:
+            print(_json.dumps({"status": "error", "error": msg}))
+        else:
+            print(msg, file=_sys.stderr)
+        return 1
+
+    raw = None
+    if args.file:
+        try:
+            raw = Path(args.file).read_text(encoding="utf-8")
+        except OSError as e:
+            return _fail(f"Cannot read window file {args.file}: {e}")
+    else:
+        raw = _sys.stdin.read()
+    if not raw or not raw.strip():
+        # Empty window → clean silence (no pointers), NOT a degradation.
+        if args.json:
+            print(_json.dumps({"pointers": [], "why": [], "surfaced": [],
+                               "block": "", "degraded_reason": None}))
+        return 0
+
+    # Disambiguation: a prompt window is EITHER a JSON contract shape (a list
+    # of {role, content} turns, a JSON string prompt, or {window: [...]})
+    # OR — for hook ergonomics — a RAW prompt text blob. Input that parses as
+    # JSON but is not a contract shape (scalars, non-turn lists, foreign
+    # dicts like {"prompt": ...}) is treated as raw prompt text, never an
+    # error: a UserPromptSubmit hook pipes raw text and a prompt can look
+    # like JSON. No silent truncation: the full raw input becomes the turn.
+    payload = None
+    try:
+        payload = _json.loads(raw)
+    except ValueError:
+        payload = None
+    window = None
+    session_id = args.session_id
+    # #2383: honor the advertised payload knobs when the window came in as a
+    # {window, session_id, min_confidence, max_pointers, why} contract dict
+    # (previously only window/session_id were read and the rest silently
+    # dropped to CLI defaults).
+    payload_min_c = None
+    payload_max_p = None
+    payload_why = None
+    if (isinstance(payload, dict)
+            and isinstance(payload.get("window"), list)
+            and all(isinstance(t, dict) for t in payload["window"])):
+        window = payload["window"]
+        session_id = payload.get("session_id") or args.session_id
+        if isinstance(payload.get("min_confidence"), (int, float)):
+            payload_min_c = min(1.0, max(0.0, float(payload["min_confidence"])))
+        if isinstance(payload.get("max_pointers"), int):
+            payload_max_p = min(5, max(1, int(payload["max_pointers"])))
+        if isinstance(payload.get("why"), bool):
+            payload_why = bool(payload["why"])
+    elif isinstance(payload, str):
+        window = [{"role": "user", "content": payload}]
+    elif (isinstance(payload, list) and payload
+          and all(isinstance(t, dict) for t in payload)):
+        window = payload
+    if window is None:
+        window = [{"role": "user", "content": raw.strip()}]
+    window = [t for t in window
+              if isinstance(t, dict) and str(t.get("content") or "").strip()]
+    if not window:
+        if args.json:
+            print(_json.dumps({"pointers": [], "why": [], "surfaced": [],
+                               "block": "", "degraded_reason": None}))
+        return 0
+
+    # Transmitting-identity resolver (#2369 D1, supersedes #1708 D1b): the
+    # per-turn reflex POSTs the full prompt window + Bearer key, so its
+    # identity is co-sourced — file keys resolve their URL from the SAME
+    # file or the built-in default only (never env), and only the
+    # user-global ~/.tortoise/credentials.json counts (a repo/cwd .tortoise
+    # — attacker-controllable — must never redirect the reflex to a host it
+    # chose). Env alone (a bare TORTOISE_API_KEY) still never flips it to
+    # hosted mode (the documented local-memory hook posture — mirrors
+    # _cmd_context).
+    api_key = None
+    api_url = None
+    try:
+        _cfg_path, _cfg, api_key, api_url = _resolve_config_path(include_env=False, global_only=True)
+    except _ConfigError as e:
+        print(f"Warning: config at {e} is corrupt or unreadable — falling back "
+              "to local memory mode.", file=_sys.stderr)
+        api_key = None
+
+    if api_key:
+        # #2369 D1.3: name the endpoint mode on stderr (the shipped hook
+        # relays this marker to the harness log; stdout stays the injection
+        # channel).
+        _emit_hosted_mode_note("volunteer", _cfg_path, api_url)
+
+    body = {
+        "window": window,
+        "session_id": session_id,
+        "min_confidence": (payload_min_c
+                           if payload_min_c is not None
+                           else getattr(args, "min_confidence", 0.7)),
+        "max_pointers": (payload_max_p
+                         if payload_max_p is not None
+                         else int(getattr(args, "max_pointers", 3))),
+        "why": (payload_why
+                if payload_why is not None
+                else not getattr(args, "no_why", False)),
+    }
+    if api_key:
+        from urllib.request import Request, urlopen  # noqa: I001
+        from urllib.error import URLError, HTTPError
+        try:
+            req = Request(
+                f"{api_url.rstrip('/')}/v1/context",
+                data=_json.dumps(body).encode("utf-8"),
+                headers={"Authorization": f"Bearer {api_key}",
+                         "Content-Type": "application/json"},
+            )
+            with urlopen(req, timeout=15) as resp:
+                data = _json.loads(resp.read())
+        except HTTPError as e:
+            eb = e.read().decode() if e.fp else ""
+            return _fail(f"Cannot reach Tortoise API ({e.code}): {eb}")
+        except (URLError, ValueError) as e:
+            return _fail(f"Cannot reach Tortoise API: "
+                         f"{getattr(e, 'reason', e)}")
+    else:
+        try:
+            from tortoise.sdk import TortoiseSDK
+            sdk = TortoiseSDK() if _os.environ.get("TORTOISE_DB_URI") else \
+                TortoiseSDK(db_path=_os.environ.get("TORTOISE_DB_PATH"))
+            data = sdk.volunteer_context(
+                window=window,
+                session_id=session_id,
+                min_confidence=body["min_confidence"],
+                max_pointers=body["max_pointers"],
+                why=body["why"],
+            )
+        except Exception as e:
+            return _fail(f"Tortoise unavailable: {e}")
+
+    if args.json:
+        print(_json.dumps(data))
+        return 0
+    block = data.get("block") or ""
+    if block.strip():
+        print(block)
+    return 0
+
+
+def _cmd_install_hooks(args) -> int:
+    """`tortoise install <harness>` — the full harness seam (#3808).
+
+    Two independent halves:
+
+    * the per-turn READ hook (``volunteer-turn.sh``) — codex / claude / cline;
+    * the per-session CAPTURE seam (``tortoise.capture_install``) — claude
+      (SessionStart/SessionEnd scripts + merged ``settings.json`` entry),
+      codex (the SessionEnd capture hook + its merged ``$CODEX_HOME/
+      hooks.json`` registration), and pi (the in-repo capture extension).
+
+    Capture used to be a copy-paste block in the dashboard: the installer gave
+    a user the read path and nothing that files a session — and because the
+    capture hook is fail-open, a hand-merge that missed the ``timeout`` filed
+    sessions silently.  Installing it here is what makes the seam real.
+
+    Capture failures are loud: a non-zero exit and a message on stderr — never
+    a printed success over an install that did not land.
+    """
+    from tortoise.capture_install import install_capture
+
+    harness = getattr(args, "harness", None)
+    listing = getattr(args, "list", False) or not harness
+    uninstall = getattr(args, "uninstall", False)
+
+    # `--uninstall` is scoped to the read-hook registration (its documented
+    # contract) and never removes the capture scripts out from under a project.
+    # `pi` has NO read-hook registration, so it must not fall through to
+    # `_install_read_hook`'s cline target (a non-codex/claude harness lands in
+    # that `else` branch): `tortoise install pi --uninstall` would otherwise
+    # inspect — and could rewrite — `<dir>/.cline/hooks/UserPromptSubmit`.
+    if uninstall and harness == "pi":
+        print("pi has no shell-hook read seam — nothing for --uninstall to "
+              "remove. The pi capture extension (~/.pi/agent/extensions/"
+              "tortoise-capture.ts) is left in place; delete that file to "
+              "uninstall it.")
+        return 0
+    # `cursor` has no shell-hook read seam either: routing `--uninstall` to
+    # `_install_read_hook` exited 1 with "no shell-hook read seam" while the
+    # HOME-scoped capture hook stayed live — the opposite of what a user
+    # asking to uninstall capture concluded (#3819).
+    if uninstall and harness == "cursor":
+        print("cursor has no shell-hook read seam — nothing for --uninstall to "
+              "remove. The capture seam is left in place: delete "
+              "~/.cursor/hooks/tortoise-session-end.sh and its "
+              "sessionEnd entry in ~/.cursor/hooks.json to "
+              "uninstall capture.")
+        return 0
+    # `--list` / no harness prints the catalogue.
+    if listing or uninstall:
+        rc = _install_read_hook(args)
+        if uninstall and harness == "claude":
+            # Claude is the one harness with a SECOND half: the capture seam
+            # (every script in `CLAUDE_CAPTURE_HOOKS` + its registration).
+            # `--uninstall` is scoped to the read-hook registration and never
+            # deletes a project's capture scripts, so the run must SAY that
+            # instead of leaving a user to conclude "Uninstalled
+            # volunteer-turn.sh" meant the seam was gone while the capture
+            # registrations stayed live (#3808 R14).  The accounting is DERIVED
+            # from the declaration, not retyped: naming two of three scripts
+            # reads as complete while leaving the third's registration live and
+            # unmentioned (#3963).
+            from pathlib import Path as _P
+
+            from tortoise.capture_install import CLAUDE_CAPTURE_HOOKS
+
+            root = _P(getattr(args, "dir", "."))
+            scripts = " and ".join(f".claude/hooks/{name}"
+                                   for name, _, _ in CLAUDE_CAPTURE_HOOKS)
+            events = "/".join(sorted({event
+                                       for _, event, _ in CLAUDE_CAPTURE_HOOKS}))
+            print(
+                "Note: `--uninstall` removes only the per-turn read hook "
+                "(volunteer-turn.sh). If the capture seam is installed it is "
+                f"left in place — {scripts} plus their {events} entries in "
+                f"{root / '.claude' / 'settings.json'} are untouched. Delete "
+                "those to uninstall capture."
+            )
+        return rc
+
+    # Validate the read half BEFORE the capture half writes.  `tortoise install
+    # claude` and `tortoise install codex` each install two halves; if the read
+    # half refuses (a malformed ``UserPromptSubmit``, a symlink that escapes the
+    # root, a foreign cline hook) the command must fail with NOTHING written,
+    # not leave a project with capture installed and the read registration
+    # refused.  The read half's own dry run performs the exact checks the real
+    # run does and writes nothing.  ``pi`` has no read hook; ``cline`` no
+    # capture.
+    if harness in ("claude", "codex"):
+        refusal = _read_hook_refusal(args)
+        if refusal != 0:
+            return refusal
+
+    # Capture first: if any half of the seam is REFUSED (the read half's
+    # shape/symlink checks above, or the capture half's own pre-flight), the
+    # command fails with NOTHING written rather than leave a project with a
+    # read hook and a silently-absent capture step.
+    if harness in ("claude", "codex", "pi", "cursor"):
+        rc = _install_capture_seam(args, install_capture)
+        if rc != 0:
+            return rc
+    if harness == "pi":
+        # Pi has no shell-hook read seam — its only seam is the capture
+        # extension; `_install_capture_seam` already reported the install,
+        # the no-op, and the MCP/restart guidance.
+        return 0
+    if harness == "cursor":
+        # Cursor has no shell-hook read seam either: the sessionEnd capture
+        # hook is its only seam, and `_install_capture_seam` already reported
+        # the install, the no-op, and the IDE-only disclosure.  Falling
+        # through to `_install_read_hook` would inspect (and could rewrite) a
+        # CLINE registration as if it were Cursor's.
+        return 0
+    return _install_read_hook(args)
+
+
+#: Pi's capture seam is its whole install; the MCP wiring is set up by the
+#: dashboard (or ``tortoise setup``), and the extension only loads in a fresh
+#: Pi process. Printed after a real (non-dry-run) run, whether or not that run
+#: wrote the file.
+_PI_MCP_GUIDANCE = (
+    "The Tortoise MCP config comes from the dashboard's Pi setup (or "
+    "`tortoise setup`); restart Pi from a NEW terminal — a /reload keeps the "
+    "old environment."
+)
+
+
+def _install_capture_seam(args, install_capture) -> int:
+    """Install the capture seam for ``args.harness`` and report honestly.
+
+    The success sentence is printed ONLY by a run that actually changed
+    something: ``install_capture`` is idempotent, so a re-run (which is also
+    the upgrade path) must report the no-op — never "installed" over a run
+    that wrote nothing (#3808 R13).
+    """
+    from pathlib import Path as _P
+
+    result = install_capture(
+        args.harness,
+        root=_P(getattr(args, "dir", ".")),
+        dry_run=getattr(args, "dry_run", False),
+    )
+    if not result.ok:
+        print(f"Capture install FAILED for {args.harness}: {result.error}",
+              file=sys.stderr)
+        return 1
+    for action in result.actions:
+        print(action)
+    if not result.changed:
+        print(f"{args.harness} capture seam already installed — nothing to do.")
+    if args.harness == "pi" and not getattr(args, "dry_run", False):
+        # Under `--dry-run` nothing was written, so the success sentence would
+        # be a lie (the action lines already said what WOULD happen).
+        claim = "Pi capture extension installed. " if result.changed else ""
+        print(f"{claim}{_PI_MCP_GUIDANCE}")
+    if args.harness == "codex" and not getattr(args, "dry_run", False):
+        # #3818 P1-3: the capture registration is HOME-scoped ($CODEX_HOME/
+        # hooks.json — the ONE hook source Codex 0.154.0 reads). Codex refuses
+        # to RUN an untrusted hook, so a user who only trusts the (dead)
+        # project-local .codex/hooks.json captures nothing while the install
+        # prints success. Name the ACTUAL effective file.
+        from tortoise.capture_install import codex_home
+        codex_root = codex_home(_P.home())
+        print(
+            f"Codex runs a hook only after you TRUST it. The capture hook "
+            f"registered in {codex_root / 'hooks.json'} is HOME-scoped: "
+            "trust it from the Hooks menu on the next interactive `codex` run "
+            "(non-interactive runs need `codex exec "
+            "--dangerously-bypass-hook-trust`). Trusting a project-local "
+            ".codex/hooks.json does NOT cover it - Codex reads hook "
+            "registrations from $CODEX_HOME/hooks.json.")
+    if args.harness == "cursor" and not getattr(args, "dry_run", False):
+        # #3819 (owner ruling): the IDE-only limitation is DISCLOSED where the
+        # user chooses Cursor — the install surface — not buried. Cursor's own
+        # docs: "Cloud agents have no editor-lifetime session boundary."
+        from tortoise.capture_install import cursor_home
+        cursor_root = cursor_home(_P.home())
+        print(
+            f"Cursor's sessionEnd hook is IDE-ONLY. The capture hook "
+            f"registered in {cursor_root / 'hooks.json'} fires for LOCAL "
+            "desktop-editor sessions (the expected surface). CURSOR CLOUD "
+            "AGENT sessions are NOT captured — Cursor's docs: 'Cloud agents "
+            "have no editor-lifetime session boundary. sessionEnd is tied to "
+            "the IDE session, not a cloud agent chat.' If you use cloud "
+            "agents, their sessions are not filed by this seam.")
+    return 0
+
+
+def _install_read_hook(args) -> int:
+    """`tortoise install <harness>` read half — the read-hook registration.
+
+    A thin boundary around :func:`_install_read_hook_impl`: the whole read
+    half runs inside ONE catch-all, so any failure on the read/parse/merge
+    path is a populated ``Install failed`` message with a non-zero exit —
+    never an uncaught traceback out of the CLI (#3808 R23).
+
+    The raise-set this boundary must cover is enumerated from the code
+    paths, *not* from the exceptions that happened to be filed:
+
+    * ``OSError`` and subclasses — ``IsADirectoryError`` (a directory where
+      the registration file belongs), ``PermissionError`` (a ``settings.json``
+      the process may not read), ``FileExistsError``/``NotADirectoryError``
+      (a FILE where an intermediate directory belongs), ELOOP from
+      ``Path.resolve``, and any write that fails at the last moment;
+    * ``RuntimeError`` — ``Path.resolve()`` raises it (deliberately, not
+      ``OSError``) on a symlink cycle; ``RecursionError`` (a subclass) from
+      ``json.loads`` on a deeply nested document;
+    * ``ValueError`` — ``UnicodeDecodeError`` from a non-UTF-8
+      ``settings.json`` (#3988), and the locally-handled ``JSONDecodeError``
+      / ``shlex.split`` / ``relative_to`` cases;
+    * ``TypeError`` — valid JSON of the wrong SHAPE, e.g. ``{"hooks": null}``,
+      where ``setdefault`` hands back the ``None`` and the subscript raises
+      (#3987);
+    * ``MemoryError`` — a huge file, re-raised below rather than converted;
+    * anything unenumerated a future read/parse/merge path adds.
+
+    The last member is the reason this is a CATCH-ALL and not a list: an
+    ``except (A, B, ...)`` boundary is refutable by the next unenumerated
+    member, which is exactly how ``TypeError`` (#3987) and
+    ``UnicodeDecodeError`` (#3988) escaped the previous
+    ``(OSError, RuntimeError)`` tuple. ``except Exception`` cannot be escaped
+    by an unenumerated ``Exception``; the two ``BaseException`` control-flow
+    signals (``KeyboardInterrupt``, ``SystemExit``) are outside it and
+    propagate. ``MemoryError`` is the one member where a refusal is the wrong
+    answer — the refusal message itself allocates — so it is re-raised first.
+    """
+    try:
+        return _install_read_hook_impl(args)
+    except MemoryError:
+        raise  # resource exhaustion is not a refusal; the handler allocates
+    except Exception as e:
+        print(f"Install failed: {e.__class__.__name__}: {e}",
+              file=sys.stderr)
+        return 1
+
+
+def _read_hook_refusal(args) -> int:
+    """Validate the read half with a write-free dry run, discarding its report.
+
+    Returns the read half's status (0 = it will install or no-op; non-zero =
+    it refuses).  ``_cmd_install_hooks`` calls this BEFORE the capture half
+    writes, so a read-half refusal fails the install with NOTHING on disk
+    instead of leaving the capture scripts and their registrations installed
+    (#3808 R20).  The dry run runs the same checks on the same files as the
+    real run; only its ``[dry-run] would …`` stdout is swallowed.
+    """
+    import contextlib
+    import io
+
+    probe = argparse.Namespace(**vars(args))
+    probe.dry_run = True
+    with contextlib.redirect_stdout(io.StringIO()):
+        return _install_read_hook(probe)
+
+
+def _install_read_hook_impl(args) -> int:
+    """Agent-first harness seam onboarding (epic #2080 #2123/#2124).
+
+    Writes the per-harness UserPromptSubmit hook registration pointing at the
+    SHIPPED volunteer-turn.sh (resolved from this package, so the registration
+    survives site-package installs), enabling the per-turn volunteering-memory
+    reflex in codex / claude / cline.
+
+    Safety contract:
+    - Existing unrelated registrations are NEVER touched: claude settings.json
+      hooks are merged key-wise; codex hooks.json entries are appended only
+      when our registration is absent; an existing cline UserPromptSubmit hook
+      that is not ours is REFUSED (printed conflict), never overwritten.
+    - --uninstall removes ONLY registrations whose command references
+      volunteer-turn.sh (wrapper-aware for both flat and claude shapes).
+    - Symlinked targets that resolve OUTSIDE the install dir are refused
+      (a repo .codex/.claude/.cline symlink must not write through to
+      ~/.claude/settings.json or any other real file).
+    - The shipped hook path is shlex-quoted into every registration command
+      so spaces/quotes in the install path cannot break the harness exec.
+    """
+    import json as _json, os as _os, shlex as _shlex, sys as _sys  # noqa: E401, I001
+    from pathlib import Path as _P
+
+    if getattr(args, "list", False) or not getattr(args, "harness", None):
+        print("Installable harness seams (per-turn volunteering-memory hook "
+              "+ capture):")
+        print("  tortoise install codex   → <dir>/.codex/hooks.json "
+              "(UserPromptSubmit → volunteer-turn.sh codex) + capture: "
+              "tortoise-session-end.sh into <codex-home>/hooks with a merged "
+              "SessionEnd entry in <codex-home>/hooks.json")
+        print("  tortoise install claude  → <dir>/.claude/settings.json "
+              "(UserPromptSubmit → volunteer-turn.sh claude) + capture: "
+              "session-start.sh / session-end.sh into <dir>/.claude/hooks "
+              "with a merged SessionStart/SessionEnd entry (timeout 60)")
+        print("  tortoise install cline   → <dir>/.cline/hooks/UserPromptSubmit "
+              "(→ volunteer-turn.sh cline)")
+        print("  tortoise install pi      → ~/.pi/agent/extensions/"
+              "tortoise-capture.ts (the capture extension; Pi has no "
+              "shell-hook read seam)")
+        print("  tortoise install cursor  → ~/.cursor/hooks.json "
+              "(the sessionEnd capture hook; Cursor has no shell-hook read "
+              "seam. IDE-ONLY: Cursor cloud agent sessions are not captured)")
+        print("Other seams (docs/matrix only, this wave): "
+              "devin, gemini, opencode — see "
+              "docs/research/2026-09-01-gbrain-learnings/platform-seams.md")
+        return 0
+
+    root = _P(getattr(args, "dir", "."))
+    harness = args.harness
+    script = Path(__file__).resolve().parent / "claude-hooks" / "volunteer-turn.sh"
+    if not script.exists():
+        print(f"volunteer-turn.sh not found at {script} — cannot install",
+              file=_sys.stderr)
+        return 1
+    # Shell-quoted command fragment (spaces/quotes in the install path are
+    # legal in the harness command strings and the cline wrapper exec).
+    quoted_script = _shlex.quote(str(script))
+
+    # Per-harness registration targets. Registration contracts verified
+    # against harness primary docs: BOTH codex (.codex/hooks.json) and claude
+    # (.claude/settings.json) use the same event → matcher-group shape, where
+    # each event entry wraps handlers in {"hooks": [{type, command}]} — a flat
+    # {type, command} under the event key is silently ignored by codex's
+    # parser (hook_config.rs deserializes events as Vec<MatcherGroup>). Cline
+    # hooks are executable files at .cline/hooks/<EventName>.
+    if harness == "codex":
+        target = root / ".codex" / "hooks.json"
+        # Nested matcher-group shape (verified against codex primary docs).
+        registration = [{"hooks": [{"type": "command",
+                                    "command": f"{quoted_script} codex"}]}]
+    elif harness == "claude":
+        target = root / ".claude" / "settings.json"
+        registration = [{"hooks": [{"type": "command",
+                                    "command": f"{quoted_script} claude"}]}]
+    elif harness == "cline":
+        target = root / ".cline" / "hooks" / "UserPromptSubmit"
+        registration = None
+    else:
+        # Never let a harness with no read seam fall into the cline target —
+        # that would inspect and could rewrite a cline file as if it were the
+        # requested harness's registration (`tortoise install pi --uninstall`
+        # used to do exactly this).
+        print(f"{harness!r} has no shell-hook read seam — nothing to install "
+              "or remove here.", file=_sys.stderr)
+        return 1
+
+    dry = getattr(args, "dry_run", False)
+    uninstall = getattr(args, "uninstall", False)
+
+    # ── Symlink-escape guard: refuse when ANY existing component between the
+    #    install root and the target (including the leaf AND intermediate
+    #    dirs like .claude/ or .cline/hooks/) resolves OUTSIDE the resolved
+    #    root — a repo symlink must not write through to a real user file
+    #    (e.g. .claude/settings.json → ~/.claude/settings.json, or
+    #    .cline/ → a shared hooks dir). Resolution compares resolved paths on
+    #    both sides, so a root reached via a symlinked alias (macOS /tmp →
+    #    /private/tmp, worktrees) is NOT a false positive. ───────────────
+    root_r = root.resolve()
+    try:
+        rel_parts = target.relative_to(root).parts
+    except ValueError:
+        rel_parts = target.parts  # target outside root — fall back to leaf
+    cur = root
+    check_paths = [root]
+    for part in rel_parts:
+        cur = cur / part
+        check_paths.append(cur)
+    for cp in check_paths:
+        if cp.is_symlink():
+            resolved = cp.resolve()
+            if resolved != root_r and root_r not in resolved.parents:
+                print(f"Refusing: {cp} resolves to {resolved} — outside the "
+                      f"install dir {root_r}. Symlinked harness configs are "
+                      "not touched (unlink the symlink first or pass --dir "
+                      "explicitly).", file=_sys.stderr)
+                return 1
+
+    # #2383: uninstall with NO registration present must be a clean no-op —
+    # never fall through to the fresh-install write below (a double
+    # --uninstall previously INVERTED into a fresh install: exit 0 + a
+    # newly registered per-turn hook). Deliberately no is_symlink() carve-
+    # out: a DANGLING in-root symlink (exists() False) must also no-op —
+    # the R1 carve-out let it fall through and re-invert. Live symlinks
+    # (exists() True) take the normal branch below (read-through + write).
+    if uninstall and not target.exists():
+        print(f"No {harness} registration at {target} — nothing to remove.")
+        return 0
+
+    if harness == "cline":
+        # Cline hooks are files at .cline/hooks/<EventName> (project) or
+        # ~/.cline/hooks (global); hooks must also be enabled in settings.
+        marker_content = f"#!/usr/bin/env bash\nexec {quoted_script} cline\n"
+        if target.exists() and target.is_dir():
+            print(f"{target} is a directory — refusing to touch it.",
+                  file=_sys.stderr)
+            return 1
+        if target.exists():
+            existing_text = target.read_text(
+                encoding="utf-8", errors="replace")
+            if uninstall:
+                if "volunteer-turn.sh" not in existing_text:
+                    print(f"{target} is not a volunteer-turn.sh hook — refusing "
+                          "to delete it.", file=_sys.stderr)
+                    return 1
+            else:
+                if "volunteer-turn.sh" not in existing_text:
+                    print(f"{target} already exists and is not a "
+                          "volunteer-turn.sh hook — refusing to overwrite it. "
+                          "Remove it manually or install into another dir.",
+                          file=_sys.stderr)
+                    return 1
+        if dry:
+            print(f"[dry-run] would write {target}:")
+            print(marker_content.rstrip())
+        elif uninstall:
+            target.unlink()
+            print(f"Removed {target}")
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(marker_content)
+            _os.chmod(target, 0o755)
+            print(f"Installed {target}")
+            print("Then enable hooks in Cline settings (Hook feature) — "
+                  "project .cline/hooks or global ~/.cline/hooks both work.")
+        return 0
+
+    # ── codex / claude: JSON registration file (merge-aware). ──────────
+    def _entry_command(e) -> str:
+        """The command inside any registration entry shape (flat or wrapped).
+        Malformed entries (non-list "hooks", non-dict elements) yield "" —
+        they are treated as foreign and refused/left untouched, never crash."""
+        if isinstance(e, dict):
+            inner = e.get("command")
+            if inner is None:
+                hs = e.get("hooks")
+                if isinstance(hs, list) and hs and isinstance(hs[0], dict):
+                    inner = hs[0].get("command")
+            # Non-str commands (ints, dicts, ...) can never be ours.
+            return inner if isinstance(inner, str) else ""
+        return ""
+
+    existing = target.read_text(encoding="utf-8") if target.exists() else None
+    if existing is not None:
+        try:
+            existing_json = _json.loads(existing)
+        except ValueError:
+            print(f"{target} exists but is not valid JSON — refusing to touch "
+                  "it. Merge manually.", file=_sys.stderr)
+            return 1
+        if not isinstance(existing_json, dict):
+            print(f"{target} exists but its top level is not a JSON object — "
+                  "refusing to touch it. Merge manually.", file=_sys.stderr)
+            return 1
+        hooks = existing_json.get("hooks")
+        if hooks is not None and not isinstance(hooks, dict):
+            print(f"{target} exists but its \"hooks\" field is not a JSON "
+                  "object — refusing to touch it. Merge manually.",
+                  file=_sys.stderr)
+            return 1
+        hooks = hooks or {}
+        ups = hooks.get("UserPromptSubmit")
+        if ups is not None and not isinstance(ups, list):
+            print(f"{target} exists but its UserPromptSubmit entries are not "
+                  "a list — refusing to touch it. Merge manually.",
+                  file=_sys.stderr)
+            return 1
+        ups = ups or []
+        ours = [e for e in ups if "volunteer-turn.sh" in _entry_command(e)]
+        if uninstall:
+            if not ours:
+                # #2383: nothing of ours present — never rewrite the file
+                # and claim "Uninstalled".
+                print(f"No volunteer-turn.sh registration in {target} — "
+                      "nothing to remove.")
+                return 0
+            remaining = [e for e in ups if e not in ours]
+            if remaining:
+                hooks["UserPromptSubmit"] = remaining
+            else:
+                hooks.pop("UserPromptSubmit", None)
+            existing_json["hooks"] = hooks
+            if not hooks:
+                existing_json.pop("hooks", None)
+            out = _json.dumps(existing_json, indent=2) + "\n"
+            if dry:
+                print(f"[dry-run] would uninstall from {target}:")
+                print(out)
+            else:
+                target.write_text(out)
+                print(f"Uninstalled volunteer-turn.sh from {target}")
+            return 0
+        # Merge: append our registration under UserPromptSubmit only when no
+        # volunteer-turn.sh entry is present (idempotent — wrapper-aware).
+        if not ours:
+            ups.append(registration[0])
+            existing_json.setdefault("hooks", {})["UserPromptSubmit"] = ups
+        else:
+            # #2383/R2: an entry whose command points at a STALE script path
+            # (venv/python relocation, or a committed config cloned to
+            # another machine) is repaired in place — never left as a silent
+            # dead hook while install reports success. Repair is STRICT:
+            # only entries that are structurally ours (exactly two tokens:
+            # a volunteer-turn.sh path + this harness word) AND whose
+            # embedded path is verifiably dead are rewritten. Entries that
+            # merely CONTAIN the substring — user wrappers (firejail/
+            # venv-pinned), other products shipping their own
+            # volunteer-turn.sh, live-but-moved installs — are left
+            # untouched: rewriting them silently strips the security wrapper
+            # or hijacks a foreign hook (R2 finding).
+            desired = _entry_command(registration[0])
+            def _cmd_dict(e):
+                """The dict whose command carries the command, for either
+                the flat or the nested claude wrapper shape (or None)."""
+                if isinstance(e, dict) and isinstance(e.get("command"), str):
+                    return e
+                if isinstance(e, dict):
+                    hs = e.get("hooks")
+                    if (isinstance(hs, list) and hs
+                            and isinstance(hs[0], dict)
+                            and isinstance(hs[0].get("command"), str)):
+                        return hs[0]
+                return None
+
+            repaired = 0
+            live_ours = 0
+            foreign = []
+            for e in ours:
+                cmd_d = _cmd_dict(e)
+                if cmd_d is None:  # non-str command — never guess
+                    foreign.append(e)
+                    continue
+                cmd = cmd_d["command"]
+                try:
+                    toks = _shlex.split(cmd)
+                except ValueError:
+                    toks = []
+                structural_ours = (len(toks) == 2 and toks[1] == harness
+                                   and "volunteer-turn.sh" in toks[0])
+                if structural_ours and not Path(toks[0]).exists():
+                    # Verifiably dead path (venv/python relocation, cloned
+                    # config): repair in place.
+                    cmd_d["command"] = desired
+                    repaired += 1
+                elif structural_ours:
+                    # Live entry pointing at an existing script — our own
+                    # healthy registration (idempotent reinstall) OR a live
+                    # parallel-install path. Never hijack; count, don't warn.
+                    live_ours += 1
+                else:
+                    # Wrapper/customized/foreign: leave untouched.
+                    foreign.append(e)
+            if repaired and not dry:
+                print(f"Repaired {repaired} stale volunteer-turn.sh "
+                      f"registration(s) in {target}")
+            elif live_ours and not foreign and not dry:
+                print(f"volunteer-turn.sh already registered in {target} "
+                      "- up to date")
+            if foreign and not dry:
+                print(f"Left {len(foreign)} customized/foreign "
+                      "volunteer-turn.sh registration(s) untouched in "
+                      f"{target} (wrapped, not structurally ours, or a "
+                      "different product's hook)", file=_sys.stderr)
+        out = _json.dumps(existing_json, indent=2) + "\n"
+        if dry:
+            print(f"[dry-run] would merge into {target}:")
+            print(out)
+        elif not target.exists() or target.read_text(encoding="utf-8") != out:
+            # #3808: a re-run is the upgrade path, so a byte-identical
+            # document must not be rewritten — `tortoise install claude`
+            # running twice is a no-op only if neither half churns the file.
+            #
+            # The explicit encoding is load-bearing, not style (#3808 R24):
+            # the default is locale.getencoding(), so on an ASCII host a
+            # UTF-8 document with one non-ASCII byte raised UnicodeDecodeError
+            # — a ValueError, which the `(OSError, RuntimeError)` boundary
+            # above does not catch — and the CLI died with a traceback.  The
+            # sibling read above (``existing = target.read_text(...)``) has
+            # always passed utf-8.
+            target.write_text(out)
+            if not ours:
+                print(f"Merged volunteer-turn.sh into {target}")
+        return 0
+
+    if dry:
+        print(f"[dry-run] would write {target}:")
+        print(_json.dumps({"hooks": {"UserPromptSubmit": registration}},
+                          indent=2))
+    else:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            _json.dumps({"hooks": {"UserPromptSubmit": registration}},
+                        indent=2) + "\n")
+        print(f"Installed {target}")
+        if harness == "codex":
+            print("Project-local codex hooks require one-time trust: run "
+                  "`codex /hooks` in the project and approve the hook.")
+        print("Hook fires on every user prompt; empty output = clean silence "
+              "(nothing above the confidence gate or reflex unavailable).")
+    return 0
+
+
+def _cmd_hooks(args) -> int:
+    """Detect and repair drift in an already-installed capture-hook seam.
+
+    The install contract is two halves: the script bytes (marked with
+    ``# tortoise-hook-version: N``) and the ``settings.json`` entry that must
+    carry the load-bearing per-hook ``timeout`` (#3754/#3801).  Both are
+    checked here; ``upgrade`` merges the settings half rather than
+    overwriting it, and re-copies the scripts.  Harness-agnostic: the layout
+    registry in ``tortoise.hook_install`` supplies the targets.
+    """
+    import sys as _sys
+    from pathlib import Path as _P
+
+    from tortoise.hook_install import (
+        contract_version,
+        default_root,
+        detect_install,
+        get_layout,
+        upgrade_install,
+    )
+
+    try:
+        layout = get_layout(args.harness)
+    except ValueError as e:
+        print(str(e), file=_sys.stderr)
+        return 1
+    # An explicit `--dir` always wins (Claude's project-scoped install depends
+    # on it). With NO `--dir`, a layout that declares an env root (Codex)
+    # resolves through it — `${CODEX_HOME:-$HOME/.codex}` — because Codex reads
+    # its hooks ONLY from the HOME-scoped file: defaulting to the cwd inspected
+    # and "upgraded" the dead project-local path Codex never reads, printing
+    # `✅ ... upgraded.` while leaving the real install untouched — the silent
+    # no-capture this seam exists to prevent (#3818).
+    explicit_dir = getattr(args, "dir", None)
+    # The HOME that `default_root` consumed, when no explicit `--dir` was given.
+    # It is threaded into `upgrade_install` so the `hook-src-dir` record is
+    # written ONLY for a genuinely HOME-scoped root — an explicit `--dir` never
+    # consults HOME (#4110).
+    resolved_home = None
+    try:
+        # `_P.home()` is INSIDE the boundary because it can RAISE, not merely
+        # return a non-absolute path: with `$HOME` set to a literal `~` (or
+        # `~/x`) the expansion is a no-op and `pathlib` raises
+        # `RuntimeError("Could not determine home directory.")`; a RELATIVE
+        # `$HOME` (`relhome`) is returned verbatim and refused by
+        # `default_root` as a `ValueError`.  Those are two members of ONE
+        # raise-set, so the boundary is the sibling module's catch-all —
+        # `except MemoryError: raise` then `except Exception` — never an
+        # `except (ValueError, RuntimeError)` enumeration, which the next
+        # unenumerated member refutes (the shape that let `TypeError` #3987
+        # and `UnicodeDecodeError` #3988 escape `capture_install`'s old
+        # `(OSError, RuntimeError)` tuple; see tortoise/capture_install.py).
+        # Guarding the whole root-resolution expression covers the raise from
+        # `_P.home()`, not just the call after it.  Surface every member the
+        # way every other failure in this command is surfaced: a populated
+        # message on stderr plus a non-zero exit, never an uncaught traceback
+        # (#4024 P2-1).  The sibling call sites are already guarded
+        # (`capture_install`'s catch-all, `doctor`'s `except Exception`);
+        # this one was not.
+        # `_P.home()` stays INSIDE the boundary but in the ELSE arm: it can
+        # RAISE, so it must be guarded, but an explicit `--dir` makes HOME
+        # irrelevant (`_P(explicit_dir)` never consults it) — evaluating it
+        # above the ternary made an unresolvable HOME abort a `--dir` inspect
+        # or repair that would otherwise have worked.
+        if explicit_dir is not None:
+            root = _P(explicit_dir)
+        else:
+            resolved_home = _P.home()
+            root = default_root(layout, resolved_home)
+    except MemoryError:
+        raise  # resource exhaustion is not a refusal; the handler allocates
+    except Exception as e:
+        print(str(e), file=_sys.stderr)
+        # Same repair-hint shape as the drift refusal below.  It names a
+        # PLACEHOLDER dir rather than a concrete one: the root is exactly what
+        # could not be resolved, so echoing one back would teach a path that
+        # is itself unresolvable.
+        print("\nRun `tortoise hooks upgrade"
+              f"{'' if args.harness == 'claude' else ' --harness ' + args.harness}"
+              " --dir <absolute-dir>` to repair.", file=_sys.stderr)
+        return 1
+
+    if args.hooks_cmd == "status":
+        try:
+            findings = detect_install(root, args.harness)
+        except MemoryError:
+            raise  # resource exhaustion is not a refusal; the handler allocates
+        except Exception as e:
+            # A CATCH-ALL, not an enumeration: `detect_install` reads and
+            # parses `<root>/settings.json` (or `hooks.json`), and the raise-set
+            # is open-ended.  An `except OSError` (the previous form) let
+            # `json.loads`' `RecursionError` — a `RuntimeError` — escape on a
+            # deeply nested document, so `hooks status` died with a raw
+            # traceback (#4024 P2-2).  The next unenumerated member refutes any
+            # tuple, which is how `TypeError` (#3987) and `UnicodeDecodeError`
+            # (#3988) escaped `capture_install`'s old boundary.  Same shape as
+            # the root resolution above and `install_capture`'s catch-all.
+            print(f"Cannot inspect {root}: {e.__class__.__name__}: {e}",
+                  file=_sys.stderr)
+            return 1
+        version = contract_version(layout)
+        if getattr(args, "json", False):
+            import json as _json
+            print(_json.dumps({
+                "harness": args.harness,
+                "root": str(root),
+                "contract_version": version,
+                "current": not any(f.blocking for f in findings),
+                "findings": [
+                    {"kind": f.kind, "script": f.script, "event": f.event,
+                     "detail": f.detail, "blocking": f.blocking}
+                    for f in findings
+                ],
+            }, indent=2))
+        elif not findings:
+            print(f"✅ {args.harness} capture hooks in {root} are current "
+                  f"(contract v{version}).")
+        else:
+            print(f"Capture-hook install at {root} (contract v{version}):")
+            for f in findings:
+                print(f"  {f.line()}")
+            blocking = [f for f in findings if f.blocking]
+            if blocking:
+                # Some blocking kinds are NOT repairable by `upgrade` (it
+                # refuses rather than clobber an unreadable/unsafe path), so
+                # the hint must name the manual fix for those instead of
+                # recommending a command that will refuse.
+                _manual = frozenset({
+                    "unreadable-settings",
+                    "settings-unreadable-entry",
+                    "not-a-regular-file",
+                    "not-executable-symlink",
+                    "not-readable",
+                    "foreign-script",
+                })
+                kinds = {f.kind for f in blocking}
+                # `upgrade` refuses on ANY symlink in a target path, and the
+                # finding kinds for those are not knowable in advance, so
+                # treat any symlink finding as manual too.
+                symlinked_kinds = {f.kind for f in findings
+                                   if f.kind.startswith("symlinked")}
+                if kinds & _manual or symlinked_kinds:
+                    # A manual kind makes `upgrade` refuse the WHOLE run, so
+                    # recommending it (even alongside repairable findings)
+                    # would point at a command that refuses.
+                    print("\nSome findings need a manual fix before upgrade "
+                          "can run: "
+                          + ", ".join(sorted(
+                              (kinds & _manual) | symlinked_kinds))
+                          + ".")
+                elif kinds:
+                    print("\nRun `tortoise hooks upgrade"
+                          f"{'' if args.harness == 'claude' else ' --harness ' + args.harness}"
+                          f" --dir {root}` to repair.")
+        return 1 if any(f.blocking for f in findings) else 0
+
+    # upgrade (also performs a fresh install when nothing is present)
+    try:
+        result = upgrade_install(root, args.harness,
+                                 dry_run=getattr(args, "dry_run", False),
+                                 home=resolved_home)
+    except MemoryError:
+        raise  # resource exhaustion is not a refusal; the handler allocates
+    except Exception as e:
+        # The install path is fail-closed and its refusal TEXT tells the user
+        # to run this very command, so the command must never crash: same
+        # catch-all boundary as `status` above (#4024 P2-2).
+        print(f"Upgrade failed: {e.__class__.__name__}: {e}",
+              file=_sys.stderr)
+        return 1
+    if not result.ok:
+        print(result.refused, file=_sys.stderr)
+        return 1
+    prefix = "[dry-run] " if getattr(args, "dry_run", False) else ""
+    if not result.actions:
+        print(f"{prefix}✅ {args.harness} capture hooks at {root} already "
+              "current — nothing to do.")
+        return 0
+    for action in result.actions:
+        # `upgrade_install` already prefixes its planned actions when in
+        # dry-run; prefixing again here printed `[dry-run] [dry-run]`.
+        print(action)
+    if not getattr(args, "dry_run", False):
+        remaining = [f for f in result.findings_after if f.blocking]
+        if remaining:
+            print(f"⚠️ {len(remaining)} issue(s) remain after upgrade:",
+                  file=_sys.stderr)
+            for f in remaining:
+                print(f"  {f.line()}", file=_sys.stderr)
+            return 1
+        print(f"✅ {args.harness} capture hooks upgraded.")
+    return 0
+
+
 def _cmd_session(args) -> int:
     """Manage Tortoise Cloud sessions."""
-    import json, os, sys  # noqa: E401, I001
-    from pathlib import Path
+    import sys  # noqa: I001
     from urllib.request import Request, urlopen  # noqa: F401
     from urllib.error import URLError, HTTPError  # noqa: F401
 
-    # Read config
-    config_path = Path.cwd() / ".tortoise"
-    if not config_path.exists():
-        print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.", file=sys.stderr)
-        return 1
+    # #3963: `session spool` is the CHEAP local capture — no network, no
+    # credentials, and it must survive a BROKEN config. Dispatching it after the
+    # resolver (or after the api_key gate) made the per-turn mechanism of record
+    # a silent no-op for every local-only user, and turned a corrupt
+    # `credentials.json` into a total capture outage.
+    if args.session_cmd == "spool":
+        return _cmd_session_spool(args)
+    if args.session_cmd == "drain":
+        # ALWAYS exit 0 (it is backgrounded from SessionStart): with no config —
+        # or a CORRUPT one — there is simply nothing to file, and that is not an
+        # error the caller can act on.
+        return _cmd_session_drain_best_effort(args)
 
+    # Shared resolver (#1708 D1): env → cwd/.tortoise → ~/.tortoise/credentials.json
     try:
-        config = json.loads(config_path.read_text())
-    except json.JSONDecodeError:
-        print(f"Invalid .tortoise config at {config_path}", file=sys.stderr)
+        _cfg_path, _config, api_key, api_url = _resolve_config_path()
+    except _ConfigError as e:
+        print(f"Invalid config at {e} — fix or delete it, or run "
+              "'tortoise init --api-key <key>'.", file=sys.stderr)
         return 1
-
-    api_key = config.get("api_key")
-    api_url = config.get("api_url") or os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
-    if not api_key:
-        print("No api_key in .tortoise config.", file=sys.stderr)
+    if api_key is None:
+        print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.", file=sys.stderr)
         return 1
 
     if args.session_cmd == "capture":
         return _cmd_session_capture(args, api_key, api_url)
+    elif args.session_cmd == "probe":
+        return _cmd_session_probe(args, api_key, api_url)
+    elif args.session_cmd == "verify":
+        return _cmd_session_verify(args, api_key, api_url)
     elif args.session_cmd == "list":
         return _cmd_session_list(api_key, api_url)
     elif args.session_cmd == "view":
         return _cmd_session_view(args, api_key, api_url)
     else:
-        print("Unknown session command. Try capture, list, or view.", file=sys.stderr)
+        print("Unknown session command. Try capture, probe, verify, list, or "
+              "view.", file=sys.stderr)
         return 1
+
+
+def _cmd_session_verify(args, api_key: str, api_url: str) -> int:
+    """`tortoise session verify` — one-command behavioural install check.
+
+    Thin CLI boundary over :func:`tortoise.session_verify.verify_session_capture`:
+    the whole chain runs inside ONE catch-all, so every failure on the
+    resolve/fire/observe path is a populated message plus a non-zero exit —
+    never an uncaught traceback out of the CLI.  A ``MemoryError`` is
+    re-raised first (resource exhaustion is not a refusal; the handler
+    allocates).  Deliberately NOT an ``except (A, B)`` tuple — the next
+    unenumerated member refutes a finite enumeration (#3987/#3988 class).
+    """
+    from pathlib import Path
+
+    from tortoise.session_verify import (
+        EXIT_BROKEN,
+        render_report,
+        verify_session_capture,
+    )
+
+    try:
+        report = verify_session_capture(
+            args.harness,
+            api_key=api_key,
+            api_url=api_url,
+            home=Path.home(),
+            install_dir=getattr(args, "dir", None),
+            timeout=float(getattr(args, "timeout", 90.0)),
+            keep=bool(getattr(args, "keep", False)),
+        )
+    except MemoryError:
+        raise  # resource exhaustion is not a refusal; the handler allocates
+    except Exception as e:
+        print(f"verify failed: {e.__class__.__name__}: {e}", file=sys.stderr)
+        return EXIT_BROKEN
+    if getattr(args, "json", False):
+        import json as _json
+        print(_json.dumps(report, indent=2))
+    else:
+        print(render_report(report))
+    return int(report.get("exit_code", EXIT_BROKEN))
 
 
 def _parse_transcript(text: str) -> list:
@@ -1390,34 +3387,431 @@ def _parse_transcript(text: str) -> list:
     return turns
 
 
-def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
-    """Read transcript, parse into turns, POST to /v1/sessions."""
-    import json as _json, sys as _sys  # noqa: E401, I001
-    from pathlib import Path
+def _session_post(api_key: str, api_url: str):
+    """Build the POST callable the capture spool replays through (#3963).
+
+    Returns a ``handle(payload) -> PostOutcome`` so the spool never knows the
+    transport: network/timeout failures come back with ``status=None`` (the
+    spool retries with backoff), HTTP errors keep their status (permanent 4xx
+    are discarded *with a reason*, not retried).
+    """
+    import json as _json
+    from http.client import HTTPException
+    from urllib.error import HTTPError, URLError
     from urllib.request import Request, urlopen
-    from urllib.error import URLError, HTTPError
+
+    from tortoise.capture_spool import PostOutcome
+
+    def handle(payload: dict) -> PostOutcome:
+        try:
+            data = _json.dumps(payload).encode("utf-8")
+            req = Request(
+                f"{api_url}/v1/sessions",
+                data=data,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            with urlopen(req, timeout=30) as resp:
+                # `getattr` default keeps transcript-conversion fakes (and any
+                # transport that omits `.status`) working — a returned context
+                # manager is a success by construction.
+                return PostOutcome(ok=True, status=getattr(resp, "status", 200),
+                                   body=_json.loads(resp.read()))
+        except HTTPError as e:
+            body = e.read().decode() if e.fp else ""
+            return PostOutcome(ok=False, status=e.code, detail=body[:500])
+        except URLError as e:
+            return PostOutcome(ok=False, status=None,
+                               detail=str(getattr(e, "reason", e)))
+        except OSError as e:
+            # Transient transport failures urllib does NOT wrap: a read timeout
+            # after the headers (`TimeoutError` from resp.read()) and
+            # `http.client.RemoteDisconnected` from getresponse() are both
+            # OSErrors. They must defer, not crash the capture path.
+            return PostOutcome(ok=False, status=None, detail=str(e))
+        except ValueError as e:
+            # A 2xx with an empty / non-JSON body. The write may or may not have
+            # landed, and the idempotent key makes a retry safe → defer.
+            return PostOutcome(ok=False, status=None, detail=f"unparseable response: {e}")
+        except HTTPException as e:
+            # `http.client.HTTPException` derives from Exception, NOT OSError:
+            # a proxy/LB with a malformed status line, an over-long header, or a
+            # truncated body (`BadStatusLine`, `InvalidURL`, `LineTooLong`,
+            # `IncompleteRead`, `NotConnected`) would otherwise escape and abort
+            # the whole drain loop — the entries sorted after it never attempted.
+            return PostOutcome(ok=False, status=None, detail=f"malformed response: {e}")
+    return handle
+
+
+def _local_session_id(transcript_path) -> str:
+    """A STABLE session id for a transcript that arrives without one (#3963).
+
+    Anchored to the resolved path (not the content) so every per-turn snapshot
+    of one conversation addresses ONE spool entry. The stem keeps it readable;
+    the path digest disambiguates two files with the same basename.
+    """
+    import hashlib
+    from pathlib import Path
+
+    path = Path(transcript_path)
+    try:
+        anchor = str(path.resolve())
+    except OSError:  # pragma: no cover - resolution is best-effort
+        anchor = str(path)
+    digest = hashlib.sha256(anchor.encode("utf-8")).hexdigest()[:12]
+    return f"{path.stem[:240]}-{digest}"
+
+
+def _spool_transcript(args) -> dict:
+    """Parse a transcript and SPOOL it durably — no network (#3963).
+
+    Shared by ``session capture`` (spool then file) and ``session spool`` (the
+    per-turn Claude hook's cheap capture: spool only). Returns
+    ``{"rc", "root", "session_id", "turns", "harness", "source", "written"}``;
+    ``rc != 0`` means nothing usable was spooled (and the reason is on stderr).
+    """
+    import sys as _sys  # noqa: I001
+    from pathlib import Path
+    from tortoise.capture_spool import (
+        Snapshot,
+        spool_dir,
+        write_spool_entry,
+    )
+    from tortoise.session_attribution import derive_machine_id, sanitize_attribution_field
 
     transcript_path = Path(args.file)
-    if not transcript_path.exists():
+    # NO `transcript_path.exists()` pre-check: `Path.exists()` RAISES
+    # `PermissionError` when a parent directory lacks traverse permission (the
+    # same class as the spool-ROOT bug), so the guard below was unreachable and
+    # the CLI exited 1 with a traceback and no record. The read classifies it:
+    # ENOENT is "not found", every other failure is a recorded loss.
+    try:
+        text = transcript_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         print(f"Transcript file not found: {args.file}", file=_sys.stderr)
-        return 1
+        return {"rc": 1}
+    except (OSError, UnicodeDecodeError) as exc:
+        # `session spool` documents "always exits 0" because it is the per-turn
+        # mechanism of record: an unreadable or non-UTF-8 transcript must not
+        # raise a traceback out of the hook (it did), and the failure must be
+        # RECORDED, not just printed.
+        print(f"Transcript unreadable: {args.file} ({exc})", file=_sys.stderr)
+        from tortoise.capture_spool import record_discard
+        record_discard(spool_dir(), {
+            "session_id": _local_session_id(transcript_path),
+            "reason": "transcript_unreadable",
+            "detail": f"{args.file}: {exc}",
+        })
+        return {"rc": 1}
 
-    text = transcript_path.read_text(encoding="utf-8")
     turns = _parse_transcript(text)
 
     if not turns:
         print("No conversation turns found in transcript.", file=_sys.stderr)
-        return 1
+        return {"rc": 1}
 
-    payload = {
+    # #3963: align the CLI leg with the server's legal window. The Pi leg caps
+    # at the same bounds; without this a long Claude transcript POSTs >500 turns
+    # (hosted 400) → the spool entry is discarded as a permanent error instead
+    # of being filed.
+    from tortoise.quota import MAX_SESSION_TURNS
+    from tortoise.session_import import window_turns
+    turns = [{"role": t["role"], "content": t["content"][:5000]} for t in turns]
+    # The spool's store IS the record and the meta digest is computed over it, so
+    # what is stored must be what is posted. Non-conversational roles (the
+    # transcript's `System:` lines) are excluded by POLICY — the same policy the
+    # Pi leg applies at capture (extractTurns keeps user/assistant text only) —
+    # and the exclusion is REPORTED, never silent (#3963).
+    conversational = [t for t in turns if t["role"] in ("user", "assistant")]
+    if len(conversational) != len(turns):
+        print(f"ignored {len(turns) - len(conversational)} non-conversational turn(s) "
+              "(system/other roles are not filed)", file=_sys.stderr)
+    turns = conversational
+    if not turns:
+        print("No user/assistant turns found in transcript.", file=_sys.stderr)
+        return {"rc": 1}
+    turns, dropped = window_turns(turns)
+    if dropped:
+        print(f"windowed: dropped {dropped} oldest turn(s) past the {MAX_SESSION_TURNS}-turn cap",
+              file=_sys.stderr)
+
+    # #1727 Slice 2 (Task 14, T1-P11): harness + session_id pass through to
+    # SessionRequest. The hook forwards Claude Code's real session_id as the
+    # idempotency key so re-captures converge to ONE Session; the legacy no-arg
+    # form now derives a CONTENT-ADDRESSED id (#3963) instead of letting the
+    # server mint a random one — so a replay of the same transcript is
+    # idempotent even without the hook's metadata.
+    harness = getattr(args, "harness", None) or "claude"
+    # Without an explicit `--session-id`, derive one anchored to the TRANSCRIPT
+    # PATH — NOT to the content (#3963 review P2). A content-addressed id changes
+    # on every snapshot of a growing conversation, so the per-turn spool created
+    # ONE ENTRY PER TURN, filed as N separate sessions (N server-side
+    # extractions). A path-anchored id is stable across snapshots, so the per-turn
+    # capture appends to ONE entry and the eventual filing is one session. The
+    # path digest also keeps two distinct transcripts with the same basename from
+    # colliding (the server upserts on `session_id`). Capped: 240 + "-" + 12 = 253
+    # ≤ the server's `max_length` (256); a longer id is a 422 → a permanent
+    # discard of the whole capture.
+    session_id = getattr(args, "session_id", None) or _local_session_id(transcript_path)
+
+    # #2681: derive machine_id + forward model when provided. Derive-only
+    # sha256 of hostname\0username — never-throw, memoized per process.
+    machine_id = sanitize_attribution_field(derive_machine_id(), max_length=256) or ""
+    model = sanitize_attribution_field(getattr(args, "model", None), max_length=128) or None
+
+    root = spool_dir()
+    written = write_spool_entry(root, Snapshot(
+        session_id=session_id,
+        turns=turns,
+        source=transcript_path.stem,
+        machine_id=machine_id,
+        model=model,
+        harness=harness,
+    ))
+    return {
+        "rc": 0,
+        "root": root,
+        "session_id": session_id,
+        "turns": turns,
+        "harness": harness,
         "source": transcript_path.stem,
-        "conversation": turns,
+        "written": written,
     }
 
+
+def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
+    """Read a transcript, SPOOL it durably, then attempt the filing (#3963).
+
+    The spool write happens BEFORE the network call, so a cancelled SessionEnd
+    hook (Claude Code cancels at ~1.5 s — #3754) or a killed process loses the
+    *filing* only; the turns are already in ``~/.tortoise/capture-spool`` and
+    ``tortoise session drain`` files them at the next opportunity.
+    """
+    import sys as _sys
+
+    from tortoise.capture_spool import flush_spool, read_spool_meta
+
+    prep = _spool_transcript(args)
+    if prep["rc"] != 0:
+        return prep["rc"]
+    root = prep["root"]
+    session_id = prep["session_id"]
+    turns = prep["turns"]
+    harness = prep["harness"]
+    written = prep["written"]
+    for d in written["discards"]:
+        print(f"spool discard ({d['reason']}): {d['detail']}", file=_sys.stderr)
+
+    if not written["written"] and written["bytes"] == 0:
+        # The entry exceeded the per-entry bound (the discard above names it).
+        return 1
+
+    summary = flush_spool(root, _session_post(api_key, api_url), only_session_id=session_id)
+    for d in summary.discarded:
+        print(f"capture discarded ({d['reason']}): {d['detail']}", file=_sys.stderr)
+    outcome = summary.outcomes.get(session_id)
+    if outcome is None:
+        # Not attempted: already filed, inside its backoff window, or the entry
+        # was discarded above. Distinguish them — "already filed" for a pending
+        # retry is a lie to the operator (#3963 review).
+        if summary.lost or written["discards"]:
+            return 1
+        meta = read_spool_meta(root, session_id) or {}
+        if meta.get("filed_key") and meta.get("filed_key") == meta.get("capture_key"):
+            print(f"Session {session_id} already filed — nothing to capture.")
+            return 0
+        print(f"capture deferred: session {session_id} is spooled (backoff window) "
+              "and will retry", file=_sys.stderr)
+        print(f"Spooled session: {session_id}")
+        return 0
+    if not outcome.ok:
+        if summary.lost:
+            return 1
+        # TRANSIENT (network / 5xx / retryable 4xx): the capture is DURABLE in
+        # the spool — report the deferral honestly and exit 0 (the data is not
+        # lost; the hook must never be blocked by a capture failure).
+        print(
+            f"capture deferred: session {session_id} is spooled and will retry "
+            f"({outcome.status if outcome.status is not None else 'network error'})",
+            file=_sys.stderr,
+        )
+        print(f"Spooled session: {session_id}")
+        return 0
+
+    body = outcome.body or {}
+    server_session = body.get("session_id", body.get("id", session_id))
+    # #3963: a grown conversation re-POSTed under an existing session_id is
+    # replayed server-side (the turns land; extraction is deliberately skipped —
+    # the server extracts a session once). Surface it honestly instead of
+    # claiming a fresh extraction happened.
+    if body.get("extraction_mode") == "replayed":
+        print(f"Session {server_session} already captured — replayed (no new extraction).")
+        return 0
+    # P1 #1529: a status-only consumer must not report success on a failed
+    # capture — extraction failures surface as HTTP 200 + additive body
+    # errors with extraction_mode "error"/"empty" (the turn mutation already
+    # happened; the body is the failure surface). Exit 1 with the errors on
+    # stderr, never "Captured session: …" with extracted: 0.
+    if body.get("extraction_mode") in ("error", "empty") or body.get("errors"):
+        print(
+            f"capture failed: {body.get('errors') or body.get('extraction_mode')}",
+            file=_sys.stderr,
+        )
+        return 1
+    # #4188: never report an unqualified success for a DEFERRED capture — a
+    # keyless store is a 2xx with extraction skipped. Surface the receipt's
+    # no-provider mode + additive warnings (stderr), mirroring
+    # _cmd_session_import. Only the no-provider mode means "not extracted":
+    # "replayed" means a PRIOR capture SUCCEEDED, so its memory points DO
+    # exist — printing "memory points were not extracted" for it would be a
+    # false statement about the session.
+    #
+    # #3971 merge resolution: this block is origin/main's (#4188) and is kept
+    # for its INTENT, but RETARGETED to this branch's variables. Main binds
+    # `result` only in its own direct-POST version of this function; on this
+    # branch the response body arrives via `summary.outcomes` as `body`, so
+    # `result` is unbound here and adopting the hunk verbatim would raise
+    # NameError. The success line also keeps `server_session` (the
+    # server-assigned id) rather than main's locally-derived `session_id`.
+    from tortoise.sdk import _CAPTURE_NO_PROVIDER_MODE
+    _capture_mode = body.get("extraction_mode")
+    if _capture_mode == _CAPTURE_NO_PROVIDER_MODE:
+        print(f"  Extraction: {_capture_mode} — the turns were STORED but no "
+              "memory points were extracted", file=_sys.stderr)
+    if body.get("warnings"):
+        print("capture warnings: " + "; ".join(
+            str(w) for w in body["warnings"]), file=_sys.stderr)
+    print(f"Captured session: {server_session}")
+    print(f"  Turns: {len(turns)}")
+    print(f"  Source: {prep['source']}")
+    print(f"  Harness: {harness}")
+    return 0
+
+
+def _cmd_session_drain_best_effort(args) -> int:
+    """Resolve config for the drain and ALWAYS return 0 (#3963).
+
+    `session drain` is backgrounded from the SessionStart hook, so a missing or
+    corrupt `.tortoise` config must not surface as a non-zero exit — there is
+    nothing to file and nothing the caller can do about it.
+    """
+    import sys as _sys
+
+    # ONE blanket try around EVERYTHING — including the config resolver. That is
+    # deliberate: `_resolve_config_path()` calls `Path.is_file()`, which RAISES
+    # `PermissionError` (not `_ConfigError`) when `~/.tortoise` is unreadable, so
+    # a resolver-only outside the belt still let the backgrounded drain exit 1
+    # with a traceback. The drain is backgrounded from SessionStart: whatever
+    # goes wrong, its contract is exit 0 with the reason on stderr.
+    try:
+        _cfg_path, _config, api_key, api_url = _resolve_config_path()
+        if api_key is None:
+            print("spool drain: no .tortoise config — nothing to file",
+                  file=_sys.stderr)
+            return 0
+        return _cmd_session_drain(api_key, api_url,
+                                  getattr(args, "exclude_session_id", None))
+    except Exception as e:
+        print(f"spool drain: nothing filed — {e}", file=_sys.stderr)
+        return 0
+
+
+def _cmd_session_drain(api_key: str, api_url: str,
+                       exclude_session_id: str | None = None) -> int:
+    """Replay every spooled session that has not been filed (#3963).
+
+    This is the "next opportunity" the SessionStart hook wires in: an
+    interrupted session's filing survives in the spool and is delivered here.
+    Best-effort by contract — it must never block a session from starting, so
+    it always exits 0 and reports what it did.
+
+    ``exclude_session_id`` is the session that is LIVE right now (Claude Code
+    passes it on the SessionStart hook's stdin). Filing it would make the server
+    replay it — extraction is skipped once a session exists — so every turn
+    after a `--resume`/`clear`/`compact` would be stored but never mined. The
+    drain files OTHER sessions only, exactly as the Pi leg's `session_start`
+    flush does.
+    """
+    import sys as _sys
+
+    from tortoise.capture_spool import flush_spool, spool_dir
+
+    summary = flush_spool(spool_dir(), _session_post(api_key, api_url),
+                          exclude_session_id=exclude_session_id)
+    for d in summary.discarded:
+        print(f"spool discard ({d['reason']}): {d['session_id']} — {d['detail']}",
+              file=_sys.stderr)
+    if summary.attempted or summary.discarded:
+        print(
+            f"spool drain: filed {summary.filed}, deferred {summary.deferred}, "
+            f"skipped {summary.skipped}, held back {summary.held_back}, "
+            f"discarded {len(summary.discarded)}",
+            file=_sys.stderr,
+        )
+    return 0
+
+
+def _cmd_session_spool(args) -> int:
+    """Cheap capture: SPOOL a transcript, NO network (#3963).
+
+    This is what the per-turn Claude hook (``UserPromptSubmit``) calls. The
+    costly filing (which triggers server-side extraction) is deferred: the
+    SessionStart drain and the SessionEnd final flush do it. Spooling per turn
+    is what makes an interrupted / killed / laptop-closed session recoverable —
+    the durable record exists before the next turn starts.
+
+    Always exits 0: a turn must never be blocked, and a transient failure just
+    means the next turn's snapshot (which carries the whole conversation)
+    re-spools it. A PERMANENT problem (an entry past its bound) is reported and
+    recorded in `discarded.jsonl`.
+    """
+    import sys as _sys
+
+    prep = _spool_transcript(args)
+    if prep["rc"] != 0:
+        # Nothing usable in this snapshot — the next turn re-spools the same
+        # (growing) conversation, so this is not a loss.
+        return 0
+    written = prep["written"]
+    for d in written["discards"]:
+        print(f"spool discard ({d['reason']}): {d['detail']}", file=_sys.stderr)
+    if not written["written"] and written["bytes"] == 0:
+        # ALWAYS exit 0: this is the per-turn mechanism of record, and a
+        # non-zero exit would (a) contradict the documented contract and
+        # (b) let a caller treat a completed capture as a failure. The reason is
+        # on stderr and in `discarded.jsonl`.
+        return 0
+    print(f"Spooled session: {prep['session_id']}")
+    return 0
+
+
+def _cmd_session_probe(args, api_key: str, api_url: str) -> int:
+    """Fire the install-probe beacon — #1727 Slice 2 (Task 14, T2-P1).
+
+    POST /v1/sessions/install-probe with the harness name. The payload is
+    UNCONDITIONAL install telemetry (harness + timestamp only, no content) —
+    not gated on session_recording, but auth-gated (the .tortoise config
+    key). The server
+    records install_probe_{harness} on the org's onboarding state — the
+    dashboard's server-visible install signal (the browser cannot stat the
+    user's filesystem). The CLI resolves api_url from the .tortoise config
+    (self-hosted routing pin: probes target the configured TORTOISE_API_URL,
+    never a hardcoded hosted host). Always best-effort in hooks: an unset
+    config / unreachable API exits 1 — session-start.sh wraps it to exit 0.
+    """
+    import json as _json, sys as _sys  # noqa: E401, I001
+    from urllib.request import Request, urlopen
+    from urllib.error import URLError, HTTPError
+
+    harness = getattr(args, "harness", None) or "claude"
+    payload = {"harness": harness}
     try:
         data = _json.dumps(payload).encode("utf-8")
         req = Request(
-            f"{api_url}/v1/sessions",
+            f"{api_url}/v1/sessions/install-probe",
             data=data,
             headers={
                 "Authorization": f"Bearer {api_key}",
@@ -1425,7 +3819,7 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
             },
             method="POST",
         )
-        with urlopen(req, timeout=30) as resp:
+        with urlopen(req, timeout=15) as resp:
             result = _json.loads(resp.read())
     except HTTPError as e:
         body = e.read().decode() if e.fp else ""
@@ -1434,22 +3828,225 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
     except URLError as e:
         print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
         return 1
+    print(f"Install probe recorded for harness {result.get('harness', harness)} "
+          f"at {result.get('probe_at', '?')}")
+    return 0
 
-    session_id = result.get("session_id", result.get("id", "unknown"))
-    # P1 #1529: a status-only consumer must not report success on a failed
-    # capture — extraction failures surface as HTTP 200 + additive body
-    # errors with extraction_mode "error"/"empty" (the turn mutation already
-    # happened; the body is the failure surface). Exit 1 with the errors on
-    # stderr, never "Captured session: …" with extracted: 0.
-    if result.get("extraction_mode") in ("error", "empty") or result.get("errors"):
+
+def _capture_error_file(harness: str) -> Path:
+    """Local breadcrumb for a capture attempt that never wrote a receipt.
+
+    The dashboard's ``session_capture_last_error_{harness}`` is SERVER state,
+    so a pre-POST failure (an unreachable host, no config, 0 parsed turns)
+    never reaches it and the panel reads healthy while the session is lost.
+    This file is the local companion: ``tortoise sessions import`` writes it
+    on failure and removes it on a 2xx, so a silent no-capture is at least
+    observable on the machine that produced it (the rollout survives on disk
+    for a ``sessions import`` backfill).
+    """
+    import os
+    receipt_dir = Path(os.environ.get(
+        "TORTOISE_IMPORT_RECEIPT_DIR",
+        str(Path.home() / ".tortoise" / "import-receipts")))
+    return receipt_dir.parent / "capture-errors" / f"{harness}.json"
+
+
+def _record_capture_error(harness: str, detail: str) -> None:
+    """Write the local capture-failure breadcrumb. Best-effort only — a
+    breadcrumb write must never break the capture path it observes.
+
+    The record carries ``kind: capture-failure`` (a DIFFERENT kind from the
+    shipped hook's ``kind: install-inert``) because both writers share the
+    ``capture-errors/<harness>.json`` path: session verify must never read a
+    capture outage as an inert install, and nothing may read an inert install
+    as a failed capture.
+    """
+    import json as _json
+    import time
+    path = _capture_error_file(harness)
+    try:
+        from tortoise.hook_install import KIND_CAPTURE_FAILURE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_json.dumps({
+            "harness": harness,
+            "detail": detail,
+            "kind": KIND_CAPTURE_FAILURE,
+            "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _clear_capture_error(harness: str) -> None:
+    """Remove the failure breadcrumb after a 2xx receipt lands."""
+    import contextlib
+    with contextlib.suppress(OSError):
+        _capture_error_file(harness).unlink()
+
+
+def _cmd_sessions_import(args) -> int:
+    """T2 backfill (#1727 Slice 2, Task 15): import a historical session
+    transcript from a harness store (codex / claude-desktop / pi).
+
+    The parsed session is staged LOCALLY (data preservation), POSTed to
+    /v1/sessions with a deterministic idempotency key (explicit --session-id
+    or a content-hash-derived one), and a LOCAL receipt is written on a 2xx
+    (403/402/503 ⇒ exit 1, honest error, NO receipt) — EXCEPT a deferred keyless
+    2xx (`extraction_mode == "no-provider"`, #4188), which writes NO local
+    receipt so an explicit re-import can re-attempt extraction once a key is
+    configured. Re-import of the
+    same content is a no-op (receipt exists ⇒ already imported). A re-POST of
+    an already-extracted session converges server-side (same session_id ⇒ no
+    new Session or turn Points); a re-POST of a DEFERRED keyless session
+    re-attempts extraction and mints its memory Points (#4188). pi parses its
+    own record shape (#3667 — it no longer
+    aliases the codex parser, which returned 0 turns for real Pi sessions).
+    The parsed conversation is windowed to the hosted turn cap
+    (`MAX_SESSION_TURNS`, tortoise/quota.py — the SAME bound the live Pi
+    capture extension applies) keeping the most recent turns, with the
+    truncation reported — never a silent drop.
+
+    Every failure that does NOT reach a 2xx also writes a local breadcrumb
+    (``_record_capture_error``), and a 2xx clears it: a pre-POST failure
+    (unreachable host, no config, 0 turns) otherwise leaves the dashboard's
+    server-side failure key unset, so the panel would read healthy over a
+    session that was never captured.
+    """
+    import hashlib, json as _json, os, sys as _sys, time  # noqa: E401, I001
+    from pathlib import Path
+    from urllib.request import Request, urlopen
+    from urllib.error import URLError, HTTPError
+
+    from tortoise.session_import import MAX_TURNS, parse_transcript, window_turns
+
+    file_path = Path(args.file)
+    # CLI alias: --harness desktop ⇒ wire harness claude-desktop (canonical
+    # SessionRequest Literal member — receipt key session_capture_receipt_
+    # claude-desktop). Resolved BEFORE the existence check so a missing file
+    # still records its breadcrumb under the right harness.
+    harness = {"desktop": "claude-desktop"}.get(args.harness, args.harness)
+    if not file_path.exists():
+        print(f"Session file not found: {args.file}", file=_sys.stderr)
+        _record_capture_error(harness, f"session file not found: {args.file}")
+        return 1
+    try:
+        turns = parse_transcript(str(file_path), harness)
+    except ValueError as e:
+        print(f"parse failed: {e}", file=_sys.stderr)
+        _record_capture_error(harness, f"parse failed: {e}")
+        return 1
+    if not turns:
+        print("No conversation turns parsed from session file.", file=_sys.stderr)
+        _record_capture_error(
+            harness, f"no conversation turns parsed from {file_path.name}")
+        return 1
+
+    # The bound is the HANDLER's `MAX_SESSION_TURNS` (tortoise/quota.py) — not
+    # `SessionRequest.conversation`'s max_length=1000, which the handler then
+    # overrides with an HTTP 400 above 500. The live capture extension caps at
+    # the same constant, so this backfill leg must too — a 501–1000-turn file
+    # would otherwise clear the Pydantic boundary and still write no receipt.
+    # Keep the MOST RECENT turns and REPORT the truncation (never a silent drop).
+    parsed_total = len(turns)
+    turns, dropped_turns = window_turns(turns)
+    if dropped_turns:
         print(
-            f"capture failed: {result.get('errors') or result.get('extraction_mode')}",
+            f"Session has {parsed_total} turns; truncating to the most recent "
+            f"{MAX_TURNS} ({dropped_turns} older turns dropped — hosted "
+            f"conversation limit).",
             file=_sys.stderr,
         )
+
+    raw = file_path.read_bytes()
+    session_id = args.session_id or (
+        "imp_" + hashlib.sha256(raw).hexdigest()[:12])
+
+    # Local receipt — 2xx-only (a failed POST must never look imported).
+    receipt_dir = Path(os.environ.get(
+        "TORTOISE_IMPORT_RECEIPT_DIR",
+        str(Path.home() / ".tortoise" / "import-receipts")))
+    receipt = receipt_dir / f"{session_id}.json"
+    if receipt.exists():
+        print(f"Already imported: {session_id} (receipt present) — skipping.")
+        return 0
+
+    try:
+        _cfg_path, _config, api_key, api_url = _resolve_config_path()
+    except _ConfigError as e:
+        print(f"Invalid config at {e} — fix or delete it, or run "
+              "'tortoise init --api-key <key>'.", file=_sys.stderr)
+        _record_capture_error(harness, f"invalid config at {e}")
         return 1
-    print(f"Captured session: {session_id}")
-    print(f"  Turns: {len(turns)}")
-    print(f"  Source: {transcript_path.stem}")
+    if api_key is None:
+        print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.",
+              file=_sys.stderr)
+        _record_capture_error(
+            harness, "no .tortoise config found (run 'tortoise init "
+                     "--api-key <key>')")
+        return 1
+
+    payload = {"harness": harness, "session_id": session_id,
+               "source": file_path.stem, "conversation": turns}
+    try:
+        data = _json.dumps(payload).encode("utf-8")
+        req = Request(
+            f"{api_url}/v1/sessions",
+            data=data,
+            headers={"Authorization": f"Bearer {api_key}",
+                     "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=60) as resp:
+            result = _json.loads(resp.read())
+    except HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        # 403/402/503 ⇒ fail, NO receipt, honest error (Task 15 acceptance).
+        print(f"import failed (HTTP {e.code}): {body}", file=_sys.stderr)
+        _record_capture_error(harness, f"import failed (HTTP {e.code}): {body}")
+        return 1
+    except URLError as e:
+        print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
+        _record_capture_error(
+            harness, f"cannot reach API at {api_url}: {e.reason}")
+        return 1
+
+    # Any 2xx is a success — the server stored the Session and wrote its
+    # per-harness receipt state key. A degraded extraction (error/empty) or
+    # server-side errors/warnings still imported the session; surface them as
+    # warnings, not failures (403/402/503 ⇒ fail above via HTTPError).
+    if result.get("errors") or result.get("warnings") or \
+            result.get("extraction_mode") in ("error", "empty"):
+        print("import warnings: " + str(
+            result.get("errors") or result.get("warnings")
+            or result.get("extraction_mode")), file=_sys.stderr)
+
+    # A keyed 2xx ⇒ the receipt lands (the server also wrote the per-harness
+    # receipt state key; this LOCAL marker makes re-import a cheap no-op) and
+    # the local failure breadcrumb is cleared.
+    # #4188: a keyless capture STORES the turns and SKIPS extraction. Writing
+    # the local "imported" receipt would make every later explicit re-import
+    # skip the POST, so the session could never gain memory points once a key
+    # appears — and the owner ruling requires an EXPLICIT re-capture to
+    # extract (nothing here spends automatically). Deferred ⇒ NO local
+    # receipt: the server keeps the graph state truthful (capture_ok=False,
+    # lane "none") and re-running this import after the key is set re-attempts
+    # extraction on the #2335 TRUE-retry lane.
+    from tortoise.sdk import _CAPTURE_NO_PROVIDER_MODE
+    _clear_capture_error(harness)
+    if result.get("extraction_mode") == _CAPTURE_NO_PROVIDER_MODE:
+        print("import deferred: no LLM provider key — turns stored, "
+              "extraction skipped; re-run this import once a key is "
+              "configured.", file=_sys.stderr)
+        return 0
+    receipt_dir.mkdir(parents=True, exist_ok=True)
+    receipt.write_text(_json.dumps({
+        "session_id": result.get("session_id", session_id),
+        "harness": harness, "file": str(file_path),
+        "imported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "turns": len(turns),
+    }, indent=2), encoding="utf-8")
+    print(f"Imported session {result.get('session_id', session_id)} "
+          f"({len(turns)} turns, harness={harness})")
     return 0
 
 
@@ -1614,14 +4211,24 @@ def _mask_uri_userinfo(target: str) -> str:
     terminal/log. Host/port/path stay visible for debuggability (matches
     the FALKORDB_* legacy display mask, conf 95).
 
-    #720 P2 conf 68: the userinfo→host boundary is the LAST '@' of the
-    authority region (everything before the first '?'/'#'), NOT
-    urlsplit's netloc — a password may contain '/' (docker://user:p/ss@
-    host:... is RFC-invalid but urlparse/redis-py accept it, and
-    urlsplit's netloc cuts at the first '/'), which would split
-    mid-credential and leak the tail. The '://' may also sit mid-message
-    (RELATIVE_PATH_ERROR embeds the raw URI in prose), so every
-    scheme:// pattern in the string is scanned, not just a leading one.
+    #720 P2 conf 68: the userinfo→host boundary is the LAST '@' of
+    everything after the scheme, NOT urlsplit's netloc — a password may
+    contain '/' (docker://user:p/ss@host:... is RFC-invalid but
+    urlparse/redis-py accept it, and urlsplit's netloc cuts at the first
+    '/'), which would split mid-credential and leak the tail. The '://'
+    may also sit mid-message (RELATIVE_PATH_ERROR embeds the raw URI in
+    prose), so the scheme token is recovered by walking back over scheme
+    characters rather than assuming a leading position.
+
+    #2983 fail-closed: a literal '?'/'#'/'://'/'@' inside a password is
+    RFC-invalid (it should be %3F/%23) but is copy-pasteable, and each
+    used to truncate the region before the real '@' and re-emit the
+    credential in clear. The boundary is therefore the LAST '@' of the
+    whole remainder: over-reaching past a genuine query/fragment, or
+    across later prose or a second URI in the same message, is
+    diagnosability loss and never a leak (it mirrors
+    entrypoint.sh::_redact_uri). For well-formed URIs the output is
+    unchanged.
     """
     from urllib.parse import urlsplit
 
@@ -1655,26 +4262,18 @@ def _mask_uri_userinfo(target: str) -> str:
                     break
             except ValueError:
                 pass  # malformed authority (e.g. unmatched '[') — mask below
-        # The authority region runs to the earliest of: the start of the
-        # next URI's scheme token (a second URI in the same message), or a
-        # '?'/'#' delimiter (query/fragment never belong to userinfo — an
-        # '@' in a query value must not swallow the host).
+        # #2983 fail-closed: the userinfo→host boundary is the LAST '@' of
+        # everything that follows the scheme. A password may contain '?',
+        # '#', '://' or '@' (RFC-invalid, but copy-pasteable); bounding the
+        # region on any of those truncates it before the real '@' and
+        # re-emits credential material. Masking to the last '@' can
+        # over-reach — past a genuine query/fragment, or across later prose
+        # or a second URI in the same message — which loses diagnosability
+        # but never leaks, and mirrors entrypoint.sh::_redact_uri. For
+        # well-formed URIs (delimiters only after the userinfo '@') the
+        # output is unchanged.
         rest_start = j + 3
-        cut = None
-        for c in ("?", "#"):
-            pos = target.find(c, rest_start)
-            if pos >= 0 and (cut is None or pos < cut):
-                cut = pos
-        nxt = target.find("://", rest_start)
-        if nxt >= 0:
-            s = nxt
-            while s > rest_start and (target[s - 1].isalnum()
-                                      or target[s - 1] in "+-."):
-                s -= 1
-            if s < nxt and (cut is None or s < cut):
-                cut = s
-        region_end = cut if cut is not None else len(target)
-        authority = target[rest_start:region_end]
+        authority = target[rest_start:]
         at = authority.rfind("@")
         if at < 0:
             out.append(target[i:j + 3])
@@ -1682,7 +4281,7 @@ def _mask_uri_userinfo(target: str) -> str:
             continue
         out.append(target[i:k])
         out.append(f"{scheme}://:***@{authority[at + 1:]}")
-        i = region_end
+        i = len(target)
     return "".join(out)
 
 
@@ -1724,6 +4323,44 @@ def _projection_for(target: str):
     return FalkorProjection(path=target)
 
 
+def _is_embedded_default_fallback(target: str,
+                                  explicit_path: str | None,
+                                  db_path_env_set: bool | None = None) -> bool:
+    """True when a resolved target is the UNCHOSEN canonical embedded default.
+
+    #2200: the silent-default case — TORTOISE_DB_URI unset and no explicit
+    --path / TORTOISE_DB_PATH, so init/onboard land on embedded FalkorDBLite
+    (single-writer, eval only) without the user picking it. Explicit embedded
+    choices (--path, TORTOISE_DB_PATH, or a set TORTOISE_DB_URI — including
+    the legacy file-path form resolve_db_path treats as embedded) are labeled
+    eval-only by init's success line but are NOT this fallback — the user
+    chose them (quickstart Option C).
+
+    db_path_env_set: pass a SNAPSHOT taken before init ran. init's embedded
+    branch records the resolved path with os.environ.setdefault(...) (#715
+    conf 60), so an onboard completion gate reading the LIVE env after init
+    would see the var as set and misjudge a default fallback as an explicit
+    choice (the completion gate would never fire on a real run). None = read
+    the live env — the _cmd_init call site, where the gate runs BEFORE that
+    setdefault. Do not drift.
+    """
+    import os  # noqa: I001
+    from tortoise.config import is_db_uri
+
+    if is_db_uri(target):
+        return False
+    if explicit_path:
+        return False
+    # A SET TORTOISE_DB_URI is an explicit choice even when it carries no
+    # supported scheme (resolve_db_path treats an absolute file path there as
+    # embedded, backward compat) — "TORTOISE_DB_URI is unset" would be a lie.
+    if (os.environ.get("TORTOISE_DB_URI") or "").strip():
+        return False
+    if db_path_env_set is None:
+        db_path_env_set = bool((os.environ.get("TORTOISE_DB_PATH") or "").strip())
+    return not db_path_env_set
+
+
 def _cmd_onboard(args) -> int:
     """Guided onboarding: init → index → demo → doctor.
 
@@ -1731,6 +4368,7 @@ def _cmd_onboard(args) -> int:
     Non-interactive — skips prompts, just runs.
     Idempotent — re-running skips already-done steps.
     """
+    import os as _os
     import subprocess as _sp
     import sys as _sys
     from pathlib import Path
@@ -1758,9 +4396,19 @@ def _cmd_onboard(args) -> int:
     # #715 P2 conf 70: no_index=True disables init's own background
     # auto-index — onboard indexes ONCE, inline in step 3 below. Without it
     # a git repo gets indexed twice (init spawn + inline run).
+    # #2200: snapshot whether TORTOISE_DB_PATH was set BEFORE init runs —
+    # init's embedded branch records the resolved path via
+    # os.environ.setdefault(TORTOISE_DB_PATH), which would make the live env
+    # look user-chosen by the time the completion gate below reads it. The
+    # completion gate must distinguish a genuine default fallback (URI
+    # unset, nothing chosen) from an explicit embedded choice (Option C;
+    # --path is handled by the helper's explicit_path argument).
+    embedded_db_path_env_set = bool(
+        (_os.environ.get("TORTOISE_DB_PATH") or "").strip())
     banner("Initialize graph")
     rc = _cmd_init(argparse.Namespace(
-        path=getattr(args, 'path', None), yes=True, no_index=True))
+        path=getattr(args, 'path', None), yes=True, no_index=True,
+        from_onboard=True))
     if rc != 0:
         print("  ❌ Init failed")
         return rc
@@ -1774,9 +4422,13 @@ def _cmd_onboard(args) -> int:
     )
     if result.returncode == 0:
         repo_root = result.stdout.strip()
-        md_count = len(list(Path(repo_root).rglob("*.md")))
-        if md_count > 0:
-            print(f"  Found {md_count} markdown files. Indexing…")
+        # #2201: count only what the indexer will walk — .venv and other
+        # non-content dirs are excluded (previously inflated the count).
+        md_files = _markdown_files(repo_root)
+        if md_files:
+            # The inline indexer below announces its OWN "Found N markdown
+            # files. Indexing…" (same shared discovery) — the onboard path
+            # must have exactly ONE announce, so no duplicate count line here.
             # #1362: frontmatter validation is OPTIONAL + warn-only — surface
             # the shared flag so onboard users know the gate is on.
             from tortoise.frontmatter_validator import validation_enabled
@@ -1836,6 +4488,17 @@ def _cmd_onboard(args) -> int:
 
     print(f"\n{'='*50}")
     print("Onboarding complete.")
+    # #2200: a no-Docker wizard run that defaulted onto the canonical
+    # embedded path must never read as a durable setup — gate the completion
+    # the same way init gates the fallback (the eval-only engine is a
+    # clearly-labeled fallback, never the silent default). Explicit embedded
+    # choices keep init's eval-only success label; no extra gate here.
+    if _is_embedded_default_fallback(
+            db_target, getattr(args, "path", None),
+            db_path_env_set=embedded_db_path_env_set):
+        from tortoise._embedded import EMBEDDED_FALLBACK_NOTICE
+        print()
+        print(EMBEDDED_FALLBACK_NOTICE)
     print()
     print("Tortoise is ready. Agents can now:")
     print("  • Query the graph via tortoise_suggest_entry_points()")
@@ -1845,11 +4508,12 @@ def _cmd_onboard(args) -> int:
     print("Next: tortoise serve    — start MCP server for agents")
     print("      tortoise setup    — configure per-role memory")
     print()
-    # #544: reference the canonical onboarding prompt — paste into your agent
-    # after connecting it to the local MCP server to run the same yes/no flow
-    # hosted users get (same tool names over stdio).
-    print("Onboarding prompt — paste this into your agent to complete setup:")
-    print("  https://premiselabs.co/onboarding-prompt.md")
+    # #544/#1998 (M8): reference the ONE live onboarding skill — install it
+    # (curl -fsSL https://app.premiselabs.co/install-tortoise-skills.sh | bash -s -- --harness <h>)
+    # or hand its markdown to your agent after connecting it to the local MCP
+    # server (the archived prompt is retired — never two live scripts).
+    print("Onboarding skill — install or fetch this to complete setup:")
+    print("  https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md")
     return 0
 
 
@@ -1935,6 +4599,10 @@ def _cmd_export(args) -> int:
 
     try:
         dump = dump_graph(proj.g, graph_name=proj.graph_name)
+        # #1936: pack-config block rides INSIDE the payload (same integrity
+        # hash as the dump — additive v1.1, never an envelope sibling).
+        from tortoise.export import collect_pack_config
+        dump["pack_config"] = collect_pack_config(proj)
     except Exception as e:
         print(f"Error: graph dump failed: {e}", file=sys.stderr)
         proj.close()
@@ -2087,6 +4755,118 @@ def _cmd_validate(args) -> int:
     if violations and not getattr(args, "warn_only", False):
         return 1
     return 0
+
+
+# ── tortoise pack new / pack validate (#1931, epic #1891 slice 2) ────────
+
+# Starter namespaces a pack author must not claim (mirrors the hosted
+# upload's 422 reserved-namespace rejection — one guard, both surfaces).
+RESERVED_STARTER_NAMESPACES = frozenset(
+    ("dev", "pm", "marketing", "product-strategy", "agent-ops")
+)
+
+
+def _cmd_pack_new(args) -> int:
+    """tortoise pack new <namespace> — scaffold from the template.
+
+    Validates the namespace BEFORE writing (camelCase, no colons, not a
+    canonical kind, not a reserved starter name) so a broken pack is never
+    created. Writes <dir>/<namespace>/manifest.yaml filled with the
+    namespace + name + version.
+    """
+
+    from tortoise.pack_registry import (
+        CANONICAL_DOCUMENT_KINDS,
+        CANONICAL_EVENT_KINDS,
+        CANONICAL_OBJECT_KINDS,
+        CANONICAL_POINT_KINDS,
+    )
+
+    ns = (args.namespace or "").strip()
+    errors: list[str] = []
+    if not ns:
+        errors.append("namespace is required")
+    if ns and ":" in ns:
+        errors.append(f"namespace '{ns}' must not contain ':'")
+    if ns and ns[0].isupper():
+        errors.append(f"namespace '{ns}' should be camelCase (lowercase first letter)")
+    if ns and ns in RESERVED_STARTER_NAMESPACES:
+        errors.append(f"namespace '{ns}' is a reserved starter pack — pick a different name")
+    _canon = CANONICAL_OBJECT_KINDS | CANONICAL_POINT_KINDS | CANONICAL_EVENT_KINDS \
+        | CANONICAL_DOCUMENT_KINDS
+    if ns and ns in {k.lower() for k in _canon}:
+        errors.append(f"namespace '{ns}' collides with a canonical kind — pick a different name")
+    if errors:
+        for e in errors:
+            print(f"tortoise pack new: ✗ {e}", file=sys.stderr)
+        return 1
+
+    src = Path(__file__).resolve().parent.parent / "packs" / "_template" / "manifest.yaml"
+    if not src.exists():
+        print("tortoise pack new: ✗ template not found — install includes packs/_template/",
+              file=sys.stderr)
+        return 1
+    base = Path(args.dir) if args.dir else Path(__file__).resolve().parent.parent / "packs"
+    dest_dir = base / ns
+    dest = dest_dir / "manifest.yaml"
+    if dest.exists():
+        print(f"tortoise pack new: ✗ {dest} already exists", file=sys.stderr)
+        return 1
+    text = src.read_text()
+    text = text.replace("namespace:  # REQUIRED: set this (e.g., \"myapp\")",
+                        f"namespace: {ns}")
+    text = text.replace("name:  # REQUIRED: set this (e.g., \"My Domain Pack\")",
+                        f"name: {ns.title()} Pack")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest.write_text(text)
+    print(f"tortoise pack new: ✓ scaffolded {dest}")
+    print(f"  → edit kinds/chains, then run: tortoise pack validate {dest_dir}")
+    return 0
+
+
+def _cmd_pack_validate(args) -> int:
+    """tortoise pack validate <dir> — schema + cross-pack validation.
+
+    Reuses PackRegistry._validate + _validate_cross_pack_refs (thin glue —
+    the validator is the single source of truth). Exit 0 clean, 1 errors.
+    Accepts the pack dir (packs/<ns>) or its parent (a packs/ dir).
+    """
+    import json as _json
+
+    from tortoise.pack_registry import PackRegistry
+
+    target = Path(args.dir).resolve()
+    packs_dir = target.parent if (target / "manifest.yaml").exists() else target
+    if not packs_dir.is_dir():
+        print(f"tortoise pack validate: ✗ {packs_dir} is not a directory", file=sys.stderr)
+        return 1
+    reg = PackRegistry(packs_dir)
+    reg.load_all()
+    errors: dict[str, list[str]] = {}
+    for ns, errs in reg.errors.items():
+        if (packs_dir / ns / "manifest.yaml").exists() or ns == target.name:
+            errors[ns] = errs
+    ok = not errors
+    if getattr(args, "json", False):
+        print(_json.dumps({
+            "ok": ok,
+            "packs_dir": str(packs_dir),
+            "loaded": sorted(reg.packs),
+            "errors": errors,
+        }, indent=2))
+    else:
+        print(f"tortoise pack validate: {packs_dir}")
+        for ns in sorted(reg.packs):
+            print(f"  ✓ {ns}")
+        for ns, errs in errors.items():
+            print(f"  ✗ {ns}:")
+            for e in errs:
+                print(f"      {e}")
+        if ok:
+            print("✓ Clean — pack(s) validate")
+        else:
+            print(f"✗ {sum(len(v) for v in errors.values())} error(s)")
+    return 0 if ok else 1
 
 
 def _cmd_audit(args) -> int:
@@ -2281,7 +5061,7 @@ def _cmd_setup(args) -> int:
         print("No role entered. Skipping.")
         return 0
 
-    team_name = input("Team name (e.g., app, org-design): ").strip() or role_name
+    org_name = input("Team name (e.g., app, org-design): ").strip() or role_name
 
     config = {}
 
@@ -2355,7 +5135,7 @@ def _cmd_setup(args) -> int:
     print()
     print("=" * 50)
     output = {
-        "team": team_name,
+        "team": org_name,
         "role": role_name,
         "memory_filter": config,
     }
@@ -2367,7 +5147,7 @@ def _cmd_setup(args) -> int:
         try:
             with open("tortoise-setup.yaml", "w") as f:
                 f.write("# Tortoise memory_filter config\n")
-                f.write(f"# Role: {role_name}  Team: {team_name}\n")
+                f.write(f"# Role: {role_name}  Team: {org_name}\n")
                 f.write(yaml_text)
             print("Saved to tortoise-setup.yaml")
         except OSError as e:
@@ -2458,7 +5238,7 @@ def _cmd_index_github(args):
     (keyed by content hash via idempotency.document_key).
     """
     import atexit
-    import os  # noqa: F401
+    import os
     import subprocess
     import sys
     import tempfile
@@ -2526,13 +5306,10 @@ def _cmd_index_github(args):
             print(f"Clone failed: {result.stderr}", file=sys.stderr)
             return 1
 
-    # Walk .md files
-    md_files = sorted(repo_path.rglob("*.md"))
-    # ponytail: skip node_modules, .git, venv
-    md_files = [f for f in md_files if ".git/" not in str(f)
-                and "node_modules/" not in str(f)
-                and "venv/" not in str(f)
-                and "__pycache__" not in str(f)]
+    # Walk .md files — shared discovery (#2201): skips non-content dirs
+    # (.venv, venv, .git, node_modules, __pycache__) the same way the
+    # init/onboard counts do, so what we announce is what we read.
+    md_files = _markdown_files(repo_path)
     total = len(md_files)
     if total == 0:
         print("No markdown files found.")
@@ -2565,6 +5342,29 @@ def _cmd_index_github(args):
         print("Set --db to a Docker URI or ensure FalkorDB is running.", file=sys.stderr)
         return 1
 
+    # #2947: the embedded projection (and its redis-server child) is now fully
+    # built. Signalling DURING construction lands while an in-flight server
+    # command still holds a connection, so redislite's last-client cleanup
+    # guard (correctly) declines to shut the server down and the kill orphans
+    # it. Expose a readiness marker for a supervisor/test that must signal
+    # this process at a deterministic point; the index loop's next step is the
+    # first file read, which the test blocks on (a FIFO), so the projection is
+    # open and the process quiescent. Written as a file under
+    # TORTOISE_INDEX_READY_FILE purely to synchronize the regression test —
+    # normal runs see nothing (env unset).
+    _ready_file = os.environ.get("TORTOISE_INDEX_READY_FILE")
+    if _ready_file:
+        try:
+            with open(_ready_file, "w") as _fh:
+                _fh.write("ready\n")
+        except OSError:
+            # Narrow on purpose: a failure here surfaces as the test's
+            # readiness timeout, which names the marker path (and the child's
+            # rc, if the child has also exited) — more useful than a silently
+            # swallowed error in a process that is about to be signalled
+            # anyway. A non-OSError bug should not hide.
+            pass
+
     log_path = Path(tempfile.gettempdir()) / f"tortoise-index-{repo_name}.jsonl"
     log = EventLog(str(log_path))
     api = EventAPI(log, initiated_by="extractor", agent_id="github-indexer", projection=proj)
@@ -2587,11 +5387,24 @@ def _cmd_index_github(args):
     # Users can swap to LLM models via tortoise ingest for richer extraction.
     point_model = MockModel("cheap")
     relation_model = MockModel("reason")
-    indexed, skipped, errors = 0, 0, 0
+    indexed, skipped, unreadable, errors = 0, 0, 0, 0
+    # already_indexed counts ONLY the idempotent re-run class (content-hash
+    # skips) — those prove PRIOR success. No-claims skips (fresh-run files
+    # with nothing extractable) and unreadable skips prove nothing, and the
+    # summary line keeps `skipped` as their SUM (display unchanged).
+    already_indexed = 0
 
     for i, fp in enumerate(md_files, 1):
         rel = fp.relative_to(repo_path)
-        raw_text = fp.read_text(encoding="utf-8")
+        try:
+            raw_text = fp.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            # #2201: one unreadable file (dangling symlink, permission error,
+            # bad encoding) must never abort the whole run — skip it with a
+            # warning and keep indexing the rest.
+            unreadable += 1
+            print(f"  [{i}/{total}] {rel}… ⚠ skipped (unreadable: {e})", flush=True)
+            continue
         # ponytail: strip frontmatter before hashing — extractor may add
         # frontmatter, which would change the hash on the next run.
         text_for_hash = raw_text
@@ -2603,6 +5416,7 @@ def _cmd_index_github(args):
         if content_hash in indexed_hashes:
             print(f"  [{i}/{total}] {rel}… ⊙ (already indexed)")
             skipped += 1
+            already_indexed += 1
             continue
         print(f"  [{i}/{total}] {rel}…", end=" ", flush=True)
         try:
@@ -2638,7 +5452,8 @@ def _cmd_index_github(args):
         pass
 
     print()
-    print(f"Done: {indexed} indexed, {skipped} skipped, {errors} errors")
+    print(f"Done: {indexed} indexed, {skipped} skipped, "
+          f"{unreadable} unreadable, {errors} errors")
     if indexed > 0:
         print(f"  Log: {log_path}")
         print(f"  Graph: query with tortoise_suggest_entry_points()")  # noqa: F541
@@ -2646,7 +5461,22 @@ def _cmd_index_github(args):
     # Cleanup (only if we cloned)
     if tmpdir:
         __import__("shutil").rmtree(tmpdir, ignore_errors=True)
-    return 0 if errors == 0 else 1
+    # #32/#39 lineage: index failures must stay VISIBLE to callers/CI — the
+    # onboard step-3 gates "Onboarding complete." on this rc (#39 killed the
+    # silent-failure false-green). Failure arm: NOTHING was indexed while
+    # files were unreadable (the #2201 dangling-symlink/undecodable class).
+    # Rescues from that arm: (a) some files indexed → partial success, rc 0;
+    # (b) no unreadable files → a clean no-claims / pure re-run is the
+    # pre-existing "nothing to extract" success class, rc 0; (c) already-
+    # indexed re-run skips, which prove PRIOR success (a repo with a
+    # permanent unreadable file indexes 0 on re-run — readable docs are
+    # hash-skipped — and must return the same rc 0 its first run returned).
+    # No-claims skips prove nothing about the unreadable failures in the
+    # SAME run, so they never rescue the rc: a fresh run mixing an
+    # unreadable file with no-claim stubs (0 indexed) must exit 1 — the
+    # pre-fix rule read any `skipped > 0` as prior-success and masked it.
+    return 0 if errors == 0 and (
+        indexed > 0 or unreadable == 0 or already_indexed > 0) else 1
 
 
 def _cmd_doctor(args):
@@ -2700,6 +5530,8 @@ def _cmd_doctor(args):
     # Docker server to probe.
     if target is not None and is_db_uri(target):
         from urllib.parse import urlparse
+
+        from tortoise.config import parse_uri_userinfo
         # urlparse raises ValueError on malformed URIs (e.g. dangling IPv6
         # bracket `docker://:pw@[abc`) — keep ALL parsing inside the guard
         # so it surfaces as a clean ❌ + rc 1, never a traceback (#720 P2
@@ -2713,8 +5545,9 @@ def _cmd_doctor(args):
         try:
             parsed = urlparse(target)
             probe_host = parsed.hostname or "localhost"
-            probe_user = parsed.username or None
-            probe_pass = parsed.password or None
+            # #3039: decode userinfo through the single shared rule —
+            # urlparse does NOT percent-decode userinfo.
+            probe_user, probe_pass = parse_uri_userinfo(target)
             # Same graph derivation from_uri uses (parsed.path.lstrip('/') or
             # "tortoise") — probe the URI path's graph, never a hardcoded
             # "tortoise" (#720 P2 conf 62): a non-default graph name must be
@@ -2754,51 +5587,107 @@ def _cmd_doctor(args):
     # can never diverge, #720 conf 78). URI → from_uri projection, plain
     # path → embedded projection via _projection_for.
     if target is not None:
-        try:
-            from tortoise.sdk import TortoiseSDK
-            sdk = TortoiseSDK()
-            sdk._proj = _projection_for(target)
+        # #2204 pre-init guard: an EMBEDDED target with no Tortoise DB FILE is
+        # a never-initialized machine (e.g. `tortoise init` never ran). Probe-
+        # skipping is what makes doctor side-effect-free here: pre-#2204,
+        # starting the embedded server on a missing data dir printed a raw
+        # "*** FATAL CONFIG FILE ERROR" (redislite writes `dir <db-parent>`
+        # into its config); since the choke-point makedirs fix (#2204, in
+        # tortoise/__init__.py) that failure mode became a SILENT dir+DB
+        # creation — which is exactly the side effect the guard must prevent
+        # on a machine the user has not set up.
+        #
+        # "Initialized" = the DB FILE exists (`tortoise init` creates both
+        # the data dir and the file): a leftover dir with no DB file is still
+        # never-initialized, and probing it would silently spawn the server
+        # and mint a fresh tortoise.db as a side effect of a diagnostic
+        # (#720 review round 4 — doctor must not create state on a target it
+        # only inspects).
+        #
+        # Verdict split (review #2204): a missing DEFAULT target is the
+        # expected fresh-machine first-run state (⚠️, rc 0 — "doctor passes
+        # pre-init"), while a missing EXPLICITLY CONFIGURED target
+        # (TORTOISE_DB_URI / TORTOISE_DB_PATH / --db / --path resolved
+        # somewhere other than the canonical default) keeps the pre-#2204
+        # loud failure (❌, rc 1) — a typo'd/renamed path must never read as
+        # a healthy first-run, it reads as a config error with the target
+        # named.
+        _initialized = True
+        if not is_db_uri(target) and target != ":memory:":
             try:
-                status = sdk.status()
-                points = status.get("counts", {}).get("Point", 0)
-                total = status.get("total_entities", 0)
-                if points > 0:
-                    results.append(("Graph: health", "✅", f"{points} Points, {total} entities"))
-                else:
-                    results.append(("Graph: health", "⚠️", "0 Points — graph is empty (expected for new setups)"))
-                # #280 check 4: session-indexing health runs HERE, while the
-                # projection is still open — #720's finally-close would kill
-                # the embedded server before the session check could connect.
-                try:
-                    _chk4 = sdk.session_index_health()
-                    _fc = _chk4["file_count"]
-                    if _fc == 0:
-                        results.append(("Session indexing", "⚠️",
-                                        "corpus empty — nothing indexed (expected for new setups)"))
+                _p = Path(target).expanduser()
+                if not _p.is_file():
+                    _initialized = False
+                    if not _p.parent.is_dir():
+                        _missing = f"missing data dir {_p.parent}"
                     else:
-                        _delta = len(_chk4["unindexed"]) + len(_chk4["stale"])
-                        _dup = (f" — {len(_chk4.get('duplicates', []))} duplicate "
-                                f"sessionId(s) surfaced (merge/remove copies)"
-                                if _chk4.get("duplicates") else "")
-                        if _delta == 0:
-                            results.append(("Session indexing", "✅",
-                                            f"{_fc} corpus files all indexed "
-                                            f"({_chk4['indexed_events']} AgentSession Events total){_dup}"))
+                        _missing = (f"data dir {_p.parent} exists but no "
+                                    f"Tortoise DB file — `tortoise init` never "
+                                    f"completed")
+                else:
+                    _missing = None
+            except Exception:
+                # unparseable path — let the real probe below surface it
+                _initialized = True
+                _missing = None
+        if not _initialized:
+            from tortoise.config import DEFAULT_DB_PATH, _abs
+            _is_default_target = target == _abs(DEFAULT_DB_PATH)
+            _icon = "⚠️" if _is_default_target else "❌"
+            _detail = (
+                f"not set up yet — no Tortoise DB at {target}"
+                + (f" ({_missing})" if _missing else "")
+                + ". Run `tortoise init` to create it, or point "
+                "doctor at your setup with TORTOISE_DB_URI / "
+                "TORTOISE_DB_PATH / --db."
+            )
+            results.append(("Graph: health", _icon, _detail))
+        else:
+            try:
+                from tortoise.sdk import TortoiseSDK
+                sdk = TortoiseSDK()
+                sdk._proj = _projection_for(target)
+                try:
+                    status = sdk.status()
+                    points = status.get("counts", {}).get("Point", 0)
+                    total = status.get("total_entities", 0)
+                    if points > 0:
+                        results.append(("Graph: health", "✅", f"{points} Points, {total} entities"))
+                    else:
+                        results.append(("Graph: health", "⚠️", "0 Points — graph is empty (expected for new setups)"))
+                    # #280 check 4: session-indexing health runs HERE, while the
+                    # projection is still open — #720's finally-close would kill
+                    # the embedded server before the session check could connect.
+                    try:
+                        _chk4 = sdk.session_index_health()
+                        _fc = _chk4["file_count"]
+                        if _fc == 0:
+                            results.append(("Session indexing", "⚠️",
+                                            "corpus empty — nothing indexed (expected for new setups)"))
                         else:
-                            results.append(("Session indexing", "❌",
-                                            f"{_fc} files vs {_chk4['indexed_events']} Events — {_delta} unindexed/stale "
-                                            f"(run `tortoise index sessions`){_dup}"))
-                except Exception as _e:
-                    results.append(("Session indexing", "⚠️",
-                                    f"check unavailable: {str(_e)[:60]}"))
+                            _delta = len(_chk4["unindexed"]) + len(_chk4["stale"])
+                            _dup = (f" — {len(_chk4.get('duplicates', []))} duplicate "
+                                    f"sessionId(s) surfaced (merge/remove copies)"
+                                    if _chk4.get("duplicates") else "")
+                            if _delta == 0:
+                                results.append(("Session indexing", "✅",
+                                                f"{_fc} corpus files all indexed "
+                                                f"({_chk4['indexed_events']} AgentSession Events total){_dup}"))
+                            else:
+                                results.append(("Session indexing", "❌",
+                                                f"{_fc} files vs {_chk4['indexed_events']} Events — {_delta} unindexed/stale "
+                                                f"(run `tortoise index sessions`){_dup}"))
+                    except Exception as _e:
+                        results.append(("Session indexing", "⚠️",
+                                        f"check unavailable: {str(_e)[:60]}"))
 
-            finally:
-                # conf 52: close the projection in BOTH branches — the URI
-                # branch's from_uri projection must not leak.
-                if sdk._proj:
-                    sdk._proj.close()
-        except Exception as e:
-            results.append(("Graph: health", "❌", str(e)[:60]))
+                finally:
+                    # conf 52: close the projection in BOTH branches — the URI
+                    # branch's from_uri projection must not leak.
+                    if sdk._proj:
+                        sdk._proj.close()
+            except Exception as e:
+                results.append(("Graph: health", "❌", str(e)[:60]))
 
     # 5. MCP server
     mcp_running = False
@@ -2817,15 +5706,15 @@ def _cmd_doctor(args):
         results.append(("MCP server", "⚠️", "not running — tortoise serve"))
 
     # 5.5 Session extraction — LLM provider (#1197)
-    # POST /v1/sessions (capture) fails closed with 503 when no LLM provider
-    # key is configured (#822 — regex extraction removed as a product path;
-    # this is the beta testers' most-critical feature). Doctor surfaces the
-    # configured provider/model BEFORE testers hit a silent 503. Hosted mode
-    # (FLY_APP_NAME — precedent: hosted_api.py, sdk.py) treats
-    # provider-missing as a HARD failure: the flagship feature cannot work at
-    # all. Local/selfhosted is a warning — capture still fails closed, but
-    # there is no hosted SLA at stake. Mirrors hosted_api._llm_provider_available
-    # + sdk._build_session_llm_extractor exactly (the seam they must agree on).
+    # A missing LLM provider key no longer refuses a capture (#3892 owner
+    # ruling): the Session + its turn Points are still STORED and searchable,
+    # and only the LLM extraction into memory points is skipped. Doctor
+    # surfaces the missing provider BEFORE testers wonder why nothing reaches
+    # memory. Hosted mode (FLY_APP_NAME — precedent: hosted_api.py, sdk.py)
+    # still treats provider-missing as a HARD failure: the flagship extraction
+    # feature cannot work at all, so ops must not ship it. Local/selfhosted is
+    # a warning. Mirrors hosted_api._llm_provider_available +
+    # sdk._build_session_llm_extractor exactly (the seam they must agree on).
     import os as _os
     hosted = bool(_os.environ.get("FLY_APP_NAME"))
     mock_seam = _os.environ.get("TORTOISE_SESSION_LLM_MOCK", "").strip().lower() == "1"
@@ -2885,7 +5774,8 @@ def _cmd_doctor(args):
                         results.append(("OpenRouter model", "⚠️", warning))
         else:
             detail = (
-                "no LLM provider key — POST /v1/sessions fails closed (503). "
+                "no LLM provider key — captures are STORED (turns only), but "
+                "LLM extraction into memory is skipped. "
                 f"Set one of: {' / '.join(_LLM_PROVIDER_KEYS)} "
                 "(docs/infra-runbook.md §4.6)."
             )
@@ -2893,21 +5783,88 @@ def _cmd_doctor(args):
     except Exception as e:
         results.append(("Session extraction", "⚠️", f"check unavailable: {str(e)[:60]}"))
 
-    # 6. Harness detection
-    home = Path.home()
-    detections: list[str] = []
-    if (home / ".pi" / "agent" / "extensions" / "tortoise-context").exists():
-        detections.append("Pi (extension found)")
-    if (home / ".claude").exists() or Path(".claude").exists():
-        detections.append("Claude Code")
-    if (home / ".codex").exists() or Path(".codex").exists():
-        detections.append("Codex")
-    if Path(".cursor").exists():
-        detections.append("Cursor")
-    if detections:
-        results.append(("Harnesses", "✅", ", ".join(detections)))
-    else:
-        results.append(("Harnesses", "⚠️", "none detected — run tortoise setup to configure"))
+    # 6. Harness detection.  `Path.home()` sits INSIDE this boundary because
+    # it can RAISE, not merely return: with `$HOME` a literal `~` (`~/x`
+    # alike) the expansion is a no-op and `pathlib` raises
+    # `RuntimeError("Could not determine home directory.")` — the same
+    # raise-set member that traced back from `_cmd_hooks` (#4024 P2-1).  Same
+    # catch-all with the explicit `MemoryError` re-raise as the sibling
+    # seams, never an `except (A, B)` enumeration (see
+    # tortoise/capture_install.py).  A failed resolution is a WARNING row and
+    # leaves `home` None, so the detection block below is skipped rather than
+    # run against a substituted root.
+    home: Path | None = None
+    try:
+        home = Path.home()
+        detections: list[str] = []
+        if (home / ".pi" / "agent" / "extensions" / "tortoise-context").exists():
+            detections.append("Pi (extension found)")
+        if (home / ".claude").exists() or Path(".claude").exists():
+            detections.append("Claude Code")
+        if (home / ".codex").exists() or Path(".codex").exists():
+            detections.append("Codex")
+        if Path(".cursor").exists():
+            detections.append("Cursor")
+        if detections:
+            results.append(("Harnesses", "✅", ", ".join(detections)))
+        else:
+            results.append(("Harnesses", "⚠️",
+                            "none detected — run tortoise setup to configure"))
+    except MemoryError:
+        raise  # resource exhaustion is not a refusal; the handler allocates
+    except Exception as e:
+        results.append(("Harnesses", "⚠️",
+                        f"check unavailable: {str(e)[:60]}"))
+
+    # 7. Capture-hook install freshness (#3795/#3801). The install seam is a
+    # manual copy, so an already-installed host keeps a byte-frozen script and
+    # an un-timed settings entry — and silently files no sessions (the hook is
+    # fail-open). Drift is therefore a FAIL, not a warning. Read-only, and
+    # checked ONLY when a capture-hook install is actually present: a project
+    # that never installed the hooks must not be nagged (they may use the
+    # hosted MCP path alone). Also probed by `tortoise hooks status`.
+    #
+    # Each layout is checked at the root a REAL install uses — through the same
+    # `default_root` resolver the CLI uses: Claude is project-scoped (cwd) and
+    # Codex lives in `$CODEX_HOME`. Checking Codex at the cwd would report a
+    # green row for an install Codex never reads (#3818) — the same silent
+    # no-capture the row exists to catch.
+    try:
+        from tortoise.hook_install import (
+            contract_version,
+            default_root,
+            detect_install,
+            get_layout,
+            is_installed,
+        )
+        for _harness in ("claude", "codex", "cursor"):
+            _layout = get_layout(_harness)
+            # Claude is project-scoped (`root_env is None`) and ignores this
+            # argument; a `None` home (step 6 could not resolve it) is given
+            # the cwd so a codex layout still refuses as a populated
+            # `ValueError` rather than raising `TypeError` on `Path(None)`.
+            _root = default_root(_layout, home if home is not None else Path("."))
+            if not is_installed(_root, _harness):
+                continue
+            findings = detect_install(_root, _harness)
+            blocking = [f for f in findings if f.blocking]
+            version = contract_version(_layout)
+            label = ("Capture hooks" if _harness == "claude"
+                     else f"Capture hooks ({_harness})")
+            if not blocking:
+                results.append((label, "✅",
+                                f"install current (contract v{version})"))
+            else:
+                first = blocking[0]
+                results.append((
+                    label, "❌",
+                    f"{len(blocking)} stale issue(s) — run `tortoise hooks "
+                    f"status --harness {_harness}` for the repair path "
+                    f"({first.kind}: {first.detail})",
+                ))
+    except Exception as e:
+        results.append(("Capture hooks", "⚠️",
+                        f"check unavailable: {str(e)[:60]}"))
 
     # Print results
     for check, icon, detail in results:
@@ -3658,14 +6615,14 @@ def _cmd_serve_http(args) -> int:
 
     # ── HTTP mode: note the fresh-namespace semantics for existing stdio data ──
     # EVERY HTTP auth mode serves an isolated namespace, never the stdio
-    # 'tortoise' graph: tenant → team_{id}; static/none → team_selfhost
-    # (SELFHOST_TEAM_ID, see tortoise/mcp_auth.py). A stdio → static-auth LAN
+    # 'tortoise' graph: tenant → org_{id}; static/none → org_selfhost
+    # (SELFHOST_ORG_ID, see tortoise/mcp_auth.py). A stdio → static-auth LAN
     # switch would otherwise land on a silently empty graph — say it out loud.
     if not is_db_uri(db_uri):
         db_path = os.path.expanduser(os.environ.get("TORTOISE_DB_PATH") or resolve_db_path())
         try:
             if os.path.exists(db_path):
-                namespace = "team_{id}" if args.auth == "tenant" else "team_selfhost"
+                namespace = "org_{id}" if args.auth == "tenant" else "org_selfhost"
                 print(f"  ℹ️  HTTP ({args.auth}) mode uses a fresh {namespace} namespace — existing stdio data")
                 print("      remains in the 'tortoise' graph. See docs/infra-runbook.md §4.5.")
         except Exception:
@@ -3706,7 +6663,7 @@ def _cmd_serve_http(args) -> int:
         return 1
 
     if args.auth == "tenant":
-        # Inject the registry SDK built from the SAME canonical DB as the team
+        # Inject the registry SDK built from the SAME canonical DB as the org
         # SDK (avoids the /data default divergence — #702).
         registry_sdk = TortoiseSDK(namespace="registry")
         app = create_http_app(allowed_origins=origins, allowed_hosts=allowed_hosts,
@@ -3755,17 +6712,22 @@ def _cmd_serve_http(args) -> int:
     wrapper = FastAPI(lifespan=_local_lifespan)
     wrapper.mount("/mcp", app)
     print(f"Tortoise MCP (streamable-http) → http://{args.bind}:{args.port}/mcp")
-    uvicorn.run(wrapper, host=args.bind, port=args.port, log_level="info")
+    # #2203: bound the graceful drain so a `kill`/docker-stop SIGKILL at ~10s
+    # cannot preempt the interpreter-exit atexit teardown that closes an
+    # embedded redis-server child (long-lived MCP SSE streams would otherwise
+    # hold an unbounded drain open).
+    uvicorn.run(wrapper, host=args.bind, port=args.port, log_level="info",
+                timeout_graceful_shutdown=5)
     return 0
 
 
 def _cmd_key_create(args) -> int:
-    """Bootstrap a local registry team + tt_ API key for `serve --http --auth tenant`.
+    """Bootstrap a local registry org + tt_ API key for `serve --http --auth tenant`.
 
-    Mirrors hosted /internal/provision: Team + APIKey nodes in the registry
-    graph, TeamMeta in the team_{team_id} graph. Prints ONLY the apikey_create
-    key (the one apikey_verify actually matches — team_create's returned key
-    is stored on the Team node and never verifies).
+    Mirrors hosted /internal/provision: Org + APIKey nodes in the registry
+    graph, TeamMeta in the org_{org_id} graph. Prints ONLY the apikey_create
+    key (the one apikey_verify actually matches — org_create's returned key
+    is stored on the Org node and never verifies).
     """
     import os
     import sys
@@ -3783,7 +6745,7 @@ def _cmd_key_create(args) -> int:
     else:
         from tortoise.config import resolve_db_path
         print(f"key create: registry at {os.environ.get('TORTOISE_DB_PATH') or resolve_db_path()}")
-        # #942: team keys on embedded = single-writer eval only. The key-mint
+        # #942: org keys on embedded = single-writer eval only. The key-mint
         # moment is the enforcement point — interactive/foreground, unlike a
         # daemonized serve's stderr.
         from tortoise._embedded import EMBEDDED_EVAL_BANNER
@@ -3792,31 +6754,31 @@ def _cmd_key_create(args) -> int:
     sdk = TortoiseSDK(namespace="registry")
     reg = sdk._get_registry()
 
-    # Find an existing team with this name (idempotent re-runs), else create.
-    team_id = None
+    # Find an existing org with this name (idempotent re-runs), else create.
+    org_id = None
     rows = reg.query("MATCH (t:Team) RETURN t.id, t.name").result_set or []
     for tid, tname in rows:
         if tname == args.name:
-            team_id = tid
+            org_id = tid
             print(f"  ℹ️  Team {args.name!r} already exists — reusing.")
             break
-    if team_id is None:
+    if org_id is None:
         try:
-            result = sdk.team_create(args.name)
+            result = sdk.org_create(args.name)
         except ControlPlaneError as e:
             # conf 85: an invalid --name (spaces/punctuation, >64 chars,
             # blank) must surface as a clean CLI error, never a raw
             # ControlPlaneError traceback.
             print(f"  ❌ {e}", file=sys.stderr)
             return 1
-        team_id = result["id"]
-        print(f"  ✅ Team {args.name!r} created (id {team_id})")
+        org_id = result["id"]
+        print(f"  ✅ Team {args.name!r} created (id {org_id})")
 
-    # Seed the team_{team_id} graph the tools actually resolve (hosted parity).
+    # Seed the org_{org_id} graph the tools actually resolve (hosted parity).
     try:
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
-        team_graph = sdk._get_proj().db.select_graph(f"team_{team_id}")
-        team_graph.query(
+        org_graph = sdk._get_proj().db.select_graph(f"org_{org_id}")
+        org_graph.query(
             "CREATE (:TeamMeta {name: $name, created: $now})",
             params={"name": args.name, "now": now},
         )
@@ -3824,7 +6786,7 @@ def _cmd_key_create(args) -> int:
         print(f"  ⚠️  Could not seed team graph: {e}", file=sys.stderr)
 
     # Create the verifiable API key and print ONLY this one.
-    key = sdk.apikey_create(team_id, created_by="local-cli")
+    key = sdk.apikey_create(org_id, created_by="local-cli")
     print()
     print(f"✅ Created API key: {key['api_key']}")
     print("   Store it securely — the plaintext is shown once.")
@@ -3850,6 +6812,11 @@ def _cmd_key_create(args) -> int:
 def main(argv: list[str] | None = None) -> int:
     import os as _os  # noqa: I001
     from tortoise.config import SUPPORTED_URI_SCHEMES
+    # #3809: the harness choices for `session verify` come from the module's
+    # single HARNESSES tuple, which is itself derived from
+    # capture_install.CAPTURE_SEAM — one definition, never a second list that
+    # could drift.
+    from tortoise.session_verify import HARNESSES
 
     uri_schemes_hint = ", ".join(f"{s}://" for s in SUPPORTED_URI_SCHEMES)
 
@@ -3890,6 +6857,18 @@ def main(argv: list[str] | None = None) -> int:
     vld.add_argument("--db", default=None, help="Docker URI or file path (default: TORTOISE_DB_URI / FALKORDB_* / embedded path)")
     vld.add_argument("--json", action="store_true", help="Machine-readable JSON output")
     vld.add_argument("--warn-only", action="store_true", help="Report violations but exit 0 (pure advisory — never gates)")
+
+    # ── pack authoring (#1931, epic #1891 slice 2) ─────────────────────────
+    pk = sp.add_parser("pack", help="Expansion-pack authoring (scaffold + validate)")
+    pack_sp = pk.add_subparsers(dest="pack_cmd")
+    pn = pack_sp.add_parser("new", help="Scaffold a new expansion pack from the template")
+    pn.add_argument("namespace", help="Pack namespace (camelCase, no colons, not a reserved starter name)")
+    pn.add_argument("--dir", default=None,
+                    help="Output dir for <dir>/<namespace>/manifest.yaml (default: repo packs/ dir)")
+    pv = pack_sp.add_parser("validate", help="Validate a pack directory against the registry schema")
+    pv.add_argument("dir", help="Path to the pack dir containing manifest.yaml (or its parent packs/ dir)")
+    pv.add_argument("--db", default=None, help="DB target (unused for pure schema validation; kept for CLI convention)")
+    pv.add_argument("--json", action="store_true", help="Machine-readable JSON output")
     cc = sp.add_parser("check-consistency", help="Verify event log matches graph state")
     cc.add_argument("--db", required=True, help="Docker URI or file path")
     cc.add_argument("--log", required=True, help="Path to events.jsonl")
@@ -3984,28 +6963,55 @@ def main(argv: list[str] | None = None) -> int:
     hs = sp.add_parser("health-server", help="Start standalone /health HTTP server")
     hs.add_argument("--port", type=int, default=9090, help="HTTP port (default: 9090)")
     hs.add_argument("--bind", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
-    # tortoise team <subcommand>
-    team = sp.add_parser("team", help="Team management (Tortoise Cloud)")
-    team_sp = team.add_subparsers(dest="team_cmd")
-    team_info_p = team_sp.add_parser("info", help="Show team info and usage")  # noqa: F841
-    # tortoise team keys {list,create,revoke} (#304)
-    team_keys = team_sp.add_parser("keys", help="Manage API keys")
-    team_keys_sp = team_keys.add_subparsers(dest="team_keys_cmd")
-    team_keys_list_p = team_keys_sp.add_parser("list", help="List API keys")
-    team_keys_list_p.add_argument("--json", action="store_true", help="Machine-readable JSON output")
-    team_keys_create_p = team_keys_sp.add_parser("create", help="Create a new API key (shown once)")
-    team_keys_create_p.add_argument("--json", action="store_true", help="Machine-readable JSON output")
-    team_keys_revoke_p = team_keys_sp.add_parser("revoke", help="Revoke an API key")
-    team_keys_revoke_p.add_argument("key_id", help="Key ID to revoke")
-    team_keys_revoke_p.add_argument("--json", action="store_true", help="Machine-readable JSON output")
-    team_keys_revoke_p.add_argument("--force", "-f", action="store_true", help="Skip the confirmation prompt")
-    # tortoise signup — zero-email free-team mint (issue #663)
+    # tortoise org <subcommand>
+    org = sp.add_parser("team", help="Team management (Tortoise Cloud)")
+    org_sp = org.add_subparsers(dest="team_cmd")
+    org_info_p = org_sp.add_parser("info", help="Show team info and usage")  # noqa: F841
+    # tortoise org keys {list,create,revoke} (#304)
+    org_keys = org_sp.add_parser("keys", help="Manage API keys")
+    org_keys_sp = org_keys.add_subparsers(dest="team_keys_cmd")
+    org_keys_list_p = org_keys_sp.add_parser("list", help="List API keys")
+    org_keys_list_p.add_argument("--json", action="store_true", help="Machine-readable JSON output")
+    org_keys_create_p = org_keys_sp.add_parser("create", help="Create a new API key (shown once)")
+    org_keys_create_p.add_argument("--json", action="store_true", help="Machine-readable JSON output")
+    org_keys_create_p.add_argument("--name", metavar="LABEL", default="",
+                                    help="Optional label (max 64 chars) to remember which key is which")
+    org_keys_revoke_p = org_keys_sp.add_parser("revoke", help="Revoke an API key")
+    org_keys_revoke_p.add_argument("key_id", help="Key ID to revoke")
+    org_keys_revoke_p.add_argument("--json", action="store_true", help="Machine-readable JSON output")
+    org_keys_revoke_p.add_argument("--force", "-f", action="store_true", help="Skip the confirmation prompt")
+    # tortoise signup — zero-email free-org mint (issue #663)
     signup_p = sp.add_parser("signup", help="Mint a free hosted team + API key — no email or dashboard (2 free teams/IP/24h)")
+    signup_p.add_argument(
+        "--force", action="store_true",
+        help="Mint a fresh key even if a stored key exists (#1708)",
+    )
     signup_p.add_argument(
         "--claim", action="store_true",
         help="After minting, print the dashboard claim instructions: sign in "
              "with GitHub/Google on the dashboard and paste this key to attach "
              "a verified identity to the anonymous team (#1082)",
+    )
+    recover_p = sp.add_parser(
+        "recover",
+        help="Keyless team-key recovery with the saved st_ signup token (#1709).",
+    )
+    recover_p.add_argument(
+        "--token", type=str, default=None,
+        help="The st_ signup token (defaults to the stored one).",
+    )
+    token_revoke_p = sp.add_parser(
+        "token-revoke",
+        help="Revoke the saved st_ signup token — it can no longer recover "
+             "keys on the team (#1715).",
+    )
+    token_revoke_p.add_argument(
+        "--token", type=str, default=None,
+        help="The st_ signup token (defaults to the stored one).",
+    )
+    token_revoke_p.add_argument(
+        "--force", "-f", action="store_true",
+        help="Skip the confirmation prompt (revoke is permanent — no undo).",
     )
     # tortoise index github <url>
     idx = sp.add_parser("index", help="Index content into the graph")
@@ -4048,13 +7054,185 @@ def main(argv: list[str] | None = None) -> int:
     session_sp = session.add_subparsers(dest="session_cmd")
     session_capture = session_sp.add_parser("capture", help="Capture a session from a transcript file")
     session_capture.add_argument("--file", required=True, help="Path to transcript file")
+    # #1727 Slice 2 (Task 14, T1-P11): the hook forwards Claude Code's real
+    # session_id (idempotency key — re-capture converges to one Session) and
+    # its harness (per-harness receipts). Both optional — the no-arg form
+    # stays legacy-compatible (SessionRequest defaults).
+    session_capture.add_argument(
+        "--harness", default=None,
+        help="Harness that produced the transcript (claude, codex, pi, ...) — "
+             "per-harness receipts (#1727)")
+    session_capture.add_argument(
+        "--session-id", default=None,
+        help="Idempotency key (Claude Code's real session_id from hook "
+             "metadata) — re-captures converge to one Session (#1727 T1-P11)")
+    # #2681: model is runtime-only — the session-entry initial model when
+    # available (e.g. from the hook), else omitted (server accepts blank).
+    session_capture.add_argument(
+        "--model", default=None,
+        help="Session-entry initial model string (e.g. claude-sonnet-4-20250514) "
+             "— omitted when not provided (#2681)")
+    session_probe = session_sp.add_parser(
+        "probe",
+        help="Fire the install-probe beacon (harness + timestamp, no content) "
+             "— #1727 Task 14")
+    session_probe.add_argument(
+        "--harness", default="claude",
+        help="Harness that installed the hook (default: claude)")
+    # #3963: the replay opportunity. An interrupted/laptop-closed session left
+    # its turns in the local spool; the SessionStart hook calls this to file
+    # them. Best-effort, always exits 0.
+    session_drain = session_sp.add_parser(
+        "drain",
+        help="File every spooled session that has not been filed yet (#3963)")
+    session_drain.add_argument(
+        "--exclude-session-id", default=None,
+        help="Session id to leave alone (the LIVE session — filing it would "
+             "make the server replay it and skip extraction)")
+    # #3963: the CHEAP per-turn capture. The Claude Code `UserPromptSubmit` hook
+    # calls this: spool the transcript locally, no network. Filing is deferred
+    # to the drain (SessionStart) or the final flush (session capture).
+    session_spool = session_sp.add_parser(
+        "spool",
+        help="Spool a transcript locally without filing it (#3963)")
+    session_spool.add_argument("--file", required=True, help="Transcript file path")
+    session_spool.add_argument(
+        "--harness", default="claude",
+        help="Harness that produced the transcript (default: claude)")
+    session_spool.add_argument(
+        "--session-id", default=None,
+        help="Harness session id (the idempotency key when filing)")
+    session_spool.add_argument(
+        "--model", default=None, help="Model label to record with the session")
     session_list = session_sp.add_parser("list", help="List all sessions")  # noqa: F841
     session_view = session_sp.add_parser("view", help="View a specific session")
     session_view.add_argument("id", help="Session ID")
+    # #3809: one-command behavioural install verification — fire the installed
+    # seam and assert installed -> captured -> in-memory, exiting non-zero on
+    # any broken link. Named `verify` to sit in the existing
+    # `session capture|probe|list|view` grammar (a noun-verb subcommand of the
+    # session surface); NOT a new top-level verb, which would duplicate the
+    # session namespace `capture`/`probe` already own.
+    session_verify = session_sp.add_parser(
+        "verify",
+        help="Verify a harness install end-to-end: installed -> captured -> "
+             "in memory (#3809)")
+    session_verify.add_argument(
+        "--harness", required=True, choices=list(HARNESSES),
+        help="Harness to verify (claude | codex | cursor | pi)")
+    session_verify.add_argument(
+        "--dir", default=None,
+        help="Install root to verify (claude: project dir; codex: $CODEX_HOME; "
+             "cursor: ~/.cursor; pi: ~/.pi/agent/extensions) — default: the "
+             "harness's own root")
+    session_verify.add_argument(
+        "--timeout", type=float, default=90.0,
+        help="Seconds to wait for the fired seam's capture (default: 90)")
+    session_verify.add_argument(
+        "--keep", action="store_true",
+        help="Do NOT delete the probe session after asserting (it is "
+             "reported, never silently left behind)")
+    session_verify.add_argument(
+        "--json", action="store_true",
+        help="Emit the machine-readable report (for CI)")
+    # #1727 Slice 2 (Task 15): T2 backfill — `tortoise sessions import`
+    # (plural — the plan's pinned CLI shape) ingests historical transcripts
+    # from harness stores (codex / claude-desktop / cursor / pi).
+    sessions = sp.add_parser(
+        "sessions",
+        help="Backfill agent sessions from historical transcripts (#1727 Task 15)")
+    sessions_sp = sessions.add_subparsers(dest="sessions_cmd")
+    sess_import = sessions_sp.add_parser(
+        "import", help="Import a session transcript from a harness store")
+    sess_import.add_argument("--file", required=True,
+                             help="Path to the session transcript (JSONL or text)")
+    sess_import.add_argument(
+        "--harness", required=True,
+        choices=["codex", "claude-desktop", "desktop", "cursor", "pi"],
+        help="Harness format to parse (each harness has its own record "
+             "shape; 'desktop' is an alias for claude-desktop)")
+    sess_import.add_argument(
+        "--session-id", default=None,
+        help="Explicit idempotency key (default: content-hash derived)")
     # tortoise list-kinds
     lk = sp.add_parser("list-kinds", help="List all pointKinds present in the graph with counts")  # noqa: F841
     # tortoise context — memory digest for agent session-start hooks
     ctx = sp.add_parser("context", help="Print memory digest for agent session-start injection")  # noqa: F841
+    # tortoise install — agent-first harness seam onboarding (epic #2080
+    # #2123/#2124 mandate: install = `tortoise install <harness>`). Writes the
+    # per-harness UserPromptSubmit hook registration for the per-turn
+    # volunteering-memory reflex (volunteer-turn.sh).
+    inst = sp.add_parser(
+        "install",
+        help="Install a harness seam (per-turn memory hook + session capture)")
+    inst.add_argument(
+        "harness", nargs="?",
+        choices=["codex", "claude", "cline", "cursor", "pi"],
+        help="Harness to install (codex | claude | cline | cursor | pi)")
+    inst.add_argument(
+        "--dir", default=".",
+        help="Project directory to install into (default: cwd)")
+    inst.add_argument(
+        "--list", action="store_true",
+        help="List installable seams with their registration targets")
+    inst.add_argument(
+        "--dry-run", action="store_true",
+        help="Print the registration file(s) without writing")
+    inst.add_argument(
+        "--uninstall", action="store_true",
+        help="Remove the per-turn read-hook (volunteer-turn.sh) registration "
+             "for the harness — the capture seam is left in place")
+    # tortoise hooks — capture-hook install drift + in-place upgrade (#3795,
+    # #3801). `status` reports a stale/un-timed install; `upgrade` repairs it
+    # (re-copies the scripts AND merges the settings.json timeout). Also
+    # installs when nothing is present. Layout-driven (tortoise.hook_install),
+    # so Cursor/Codex seams plug in without new CLI surface.
+    hooks_p = sp.add_parser(
+        "hooks",
+        help="Detect and upgrade installed capture hooks (Claude Code)")
+    hooks_sp = hooks_p.add_subparsers(dest="hooks_cmd", required=True)
+    hooks_status = hooks_sp.add_parser(
+        "status", help="Report whether the installed capture hooks are stale")
+    hooks_upgrade = hooks_sp.add_parser(
+        "upgrade",
+        help="Install or upgrade the capture hooks in place (merges settings)")
+    for _hp in (hooks_status, hooks_upgrade):
+        _hp.add_argument(
+            "--harness", default="claude",
+            help="Harness seam to inspect (default: claude)")
+        _hp.add_argument(
+            "--dir", default=None,
+            help="Directory holding the install (default: the harness's own "
+                 "root — cwd for claude, $CODEX_HOME for codex)")
+    hooks_status.add_argument(
+        "--json", action="store_true",
+        help="Emit a machine-readable drift report")
+    hooks_upgrade.add_argument(
+        "--dry-run", action="store_true",
+        help="Print the planned writes without touching anything")
+    # tortoise volunteer — per-turn volunteering-memory reflex (epic #2080
+    # end-state platform seams, #2119/#2123 et al). ONE thin CLI over the
+    # shared canonical pipeline (POST /v1/context hosted / SDK
+    # volunteer_context local — tortoise/volunteer.py); per-harness
+    # UserPromptSubmit hooks (claude/codex/cline/devin/…) shell out to this.
+    vol = sp.add_parser(
+        "volunteer",
+        help="Volunteer memory context for a turn window (per-turn reflex block)")
+    vol.add_argument(
+        "--file", default=None,
+        help="JSON window file (list of {role, content} turns, a bare string "
+             "prompt, or {window, session_id, ...}) — default: read stdin")
+    vol.add_argument("--session-id", default=None,
+                     help="Session continuity id (re-mention suppression)")
+    vol.add_argument("--min-confidence", type=float, default=0.7,
+                     help="Confidence gate (default 0.7)")
+    vol.add_argument("--max-pointers", type=int, default=3,
+                     help="Pointer budget (default 3)")
+    vol.add_argument("--no-why", action="store_true",
+                     help="Skip the why-block assembly (pointers only)")
+    vol.add_argument("--json", action="store_true",
+                     help="Print the full response contract as JSON (default: "
+                          "print only the injected block text, hook-ready)")
     # tortoise list-sources
     ls = sp.add_parser("list-sources", help="List all Sources with point counts")  # noqa: F841
     # tortoise decide --input <json|yaml>
@@ -4077,9 +7255,19 @@ def main(argv: list[str] | None = None) -> int:
         p.print_usage()
         print(f"error: {e}", file=sys.stderr)
         return 2
+    # #2203: terminating signals (SIGTERM/SIGHUP, plus SIGINT when the
+    # process started with it ignored — non-tty stdin) must close the CLI's
+    # embedded redis-server children before the parent dies (killed
+    # daemon/stdio server, `index github` Ctrl-C/kill). The guard's handler
+    # closes every live embedded server then re-raises the signal.
+    # Idempotent; a no-op for commands that never open an embedded server.
+    from tortoise.embedded_lifecycle import install_embedded_signal_cleanup
+    install_embedded_signal_cleanup()
     if args.cmd == "rebuild":
-        _cmd_rebuild(args)
-        return 0
+        # #3947 review (cycle 3): propagate the refusal's exit code — the
+        # handler's documented non-zero exit is worthless if the dispatcher
+        # discards it and returns 0 (the same false PASS, at the CLI edge).
+        return _cmd_rebuild(args)
     elif args.cmd == "demo":
         _cmd_demo(args)
         return 0
@@ -4115,6 +7303,13 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_export(args)
     elif args.cmd == "validate":
         return _cmd_validate(args)
+    elif args.cmd == "pack":
+        if args.pack_cmd == "new":
+            return _cmd_pack_new(args)
+        if args.pack_cmd == "validate":
+            return _cmd_pack_validate(args)
+        print("tortoise pack: unknown subcommand. Try: tortoise pack new --help", file=sys.stderr)
+        return 1
     elif args.cmd == "migrate-db":
         from tortoise.migrate_db import main as _migrate_main
         return _migrate_main(["--force"] if args.force else [])
@@ -4161,24 +7356,33 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     elif args.cmd == "signup":
         return _cmd_signup(args)
+    elif args.cmd == "recover":
+        return _cmd_recover(args)
+    elif args.cmd == "token-revoke":
+        return _cmd_token_revoke(args)
     elif args.cmd == "team":
         if args.team_cmd == "info":
-            return _cmd_team_info(args)
+            return _cmd_org_info(args)
         elif args.team_cmd == "keys":
             if args.team_keys_cmd == "list":
-                return _cmd_team_keys_list(args)
+                return _cmd_org_keys_list(args)
             elif args.team_keys_cmd == "create":
-                return _cmd_team_keys_create(args)
+                return _cmd_org_keys_create(args)
             elif args.team_keys_cmd == "revoke":
-                return _cmd_team_keys_revoke(args)
-            team_keys.print_help()
+                return _cmd_org_keys_revoke(args)
+            org_keys.print_help()
             return 1
-        team.print_help()
+        org.print_help()
         return 1
     elif args.cmd == "create-point":
         return _cmd_create_point(args)
     elif args.cmd == "session":
         return _cmd_session(args)
+    elif args.cmd == "sessions":
+        if args.sessions_cmd == "import":
+            return _cmd_sessions_import(args)
+        print("Unknown sessions command. Try import.", file=sys.stderr)
+        return 1
     elif args.cmd == "index":
         if args.index_cmd == "github":
             return _cmd_index_github(args)
@@ -4192,6 +7396,12 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_list_kinds(args)
     elif args.cmd == "context":
         return _cmd_context(args)
+    elif args.cmd == "install":
+        return _cmd_install_hooks(args)
+    elif args.cmd == "hooks":
+        return _cmd_hooks(args)
+    elif args.cmd == "volunteer":
+        return _cmd_volunteer(args)
     elif args.cmd == "list-sources":
         return _cmd_list_sources(args)
     elif args.cmd == "decide":

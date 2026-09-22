@@ -11,10 +11,40 @@ network/key; the tested surface is `build_request` / `parse_response`.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import urllib.request
 from typing import Protocol, runtime_checkable
+
+
+def _emit_usage_sink(model, usage) -> None:
+    """#2185 seam: optional usage-capture sink fire — strict NO-OP when unset.
+
+    Called at the response-parse site of every real chat transport with the
+    RESPONSE-LOCAL usage block (the per-attempt billed totals, incl.
+    cache-detail fields when the provider sends them). Payload is keyword:
+    ``(provider, model_id, usage, usage_present)`` — the SAME contract on all
+    four seam sites (#2185 A1):
+
+    - ``provider`` — the adapter's own class attribute where it exists
+      (openrouter/venice/deepseek-direct); ``None`` on provider-less classes
+      (OpenAICompatModel, OfficialJudgeModel) — the harness binds provider at
+      registration time, never on the shared product class (Am 9).
+    - ``usage`` — the response usage dict (may be None / {} when the provider
+      sent none).
+    - ``usage_present`` — ``bool(usage)`` (False = non-billing lane / no usage
+      block; the call still counts).
+    """
+    sink = getattr(model, "usage_sink", None)
+    if sink is None:
+        return
+    with contextlib.suppress(Exception):
+        # round-2 code-review P2: a metering observer must NEVER flip a call
+        # outcome — a raising/poisoned sink degrades to a silent no-op at
+        # the fire site (the provider response was already parsed).
+        sink(provider=getattr(model, "provider", None),
+             model_id=model.id, usage=usage, usage_present=bool(usage))
 
 
 @runtime_checkable
@@ -45,6 +75,10 @@ class OpenAICompatModel:
         self.response_format = (
             {"type": "json_object"} if response_format is _UNSET else response_format)
         self.max_tokens = max_tokens
+        # #2185: additive usage-capture seam (no-op unless the harness sets
+        # it). NO last_* mirrors on this class — it is shared with the product
+        # paths (sdk.py/ingest.py/mining.py) and the eval owns its metering.
+        self.usage_sink = None
 
     def build_request(self, system: str, user: str) -> dict:
         req = {
@@ -80,7 +114,11 @@ class OpenAICompatModel:
         req = urllib.request.Request(
             f"{self.base_url}/chat/completions", data=body, headers=self._headers())
         with urllib.request.urlopen(req, timeout=self.timeout) as r:
-            return self.parse_response(json.loads(r.read()))
+            data = json.loads(r.read())
+        # #2185 seam: fire with the response-local usage (provider None here —
+        # bound at registration by the harness; no mirrors on this class).
+        _emit_usage_sink(self, data.get("usage"))
+        return self.parse_response(data)
 
 
 class OllamaModel:

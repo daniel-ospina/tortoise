@@ -1,8 +1,10 @@
 """#1623 billing-page e2e (RUN_DASHBOARD_E2E opt-in).
 
-Harness: same two wrangler servers + prod-domain interception as
-test_session_login_flow.py (tortoise.premiselabs.co → :8788 auth page,
-app.premiselabs.co → :8790 dashboard dist, api.premiselabs.co → mocked).
+Harness: same two wrangler servers as test_session_login_flow.py. #2744: the
+DOCUMENT loads from the local preview (:8790 dashboard, :8788 auth) — never
+``app.premiselabs.co``; the prod hosts stay intercepted for app-emitted
+prod-origin redirects/subresources (:8790 dashboard dist, api.premiselabs.co →
+mocked).
 
 Flows:
 1. Free team → Billing tab renders the current-plan card (plan label, usage
@@ -25,10 +27,20 @@ from tests.e2e.test_session_login_flow import (
     APP_HOST,
     AUTH_HOST,
     DASHBOARD_URL,
+    _goto_local_dashboard,
+    _preflight_local_servers,
+    _seed_local_session_cookie,
     _session_json,
     _submit_api_key,
     _wire_prod_domains,
 )
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _local_preview_servers() -> None:
+    """#2744: fail fast (one clear error) when :8788/:8790 are not serving."""
+    _preflight_local_servers()
+
 
 if not os.environ.get("RUN_DASHBOARD_E2E"):
     pytest.skip("dashboard e2e: opt-in via RUN_DASHBOARD_E2E=1", allow_module_level=True)
@@ -56,9 +68,9 @@ BILLING_ROW = {
 
 def _open_billing(page: Page) -> None:
     _wire_prod_domains(page, exchange_body=_session_json(),
-                       team_row=BILLING_ROW, billing_routes=True)
+                       org_row=BILLING_ROW, billing_routes=True)
     _submit_api_key(page, "tt_loop_key_abcdef0123456789")
-    expect(page).to_have_url(re.compile(r"^https://app\.premiselabs\.co"), timeout=20_000)
+    expect(page).to_have_url(re.compile("^" + re.escape(DASHBOARD_URL)), timeout=20_000)
     expect(page.locator("body")).to_contain_text("Graphs", timeout=20_000)
     page.locator("nav button", has_text="Billing").click()
     expect(page.locator("body")).to_contain_text("Billing", timeout=10_000)
@@ -75,20 +87,20 @@ def test_billing_tab_renders_plan_and_usage(page: Page) -> None:
     expect(page.locator("body")).to_contain_text("42")
     # Plan grid: the four public tiers.
     expect(page.locator("body")).to_contain_text("Solo")
-    expect(page.locator("body")).to_contain_text("Pro")
+    expect(page.locator("body")).to_contain_text("Builder")
     expect(page.locator("body")).to_contain_text("Team")
     # Free card is current → "Current plan" badge, no Upgrade CTA.
     expect(page.locator(".plan-card.current")).to_contain_text("Free")
 
 
 def test_upgrade_posts_checkout_with_tier_price_id(page: Page) -> None:
-    """Clicking Upgrade on the Pro card POSTs /v1/billing/checkout with the
-    Pro monthly price id from the mock checkout_price_ids (the contract — a
-    free team has no active subscription, so checkout is the path)."""
+    """Clicking Upgrade on the Builder card POSTs /v1/billing/checkout with
+    the `pro` tier's monthly price id from the mock checkout_price_ids (the
+    contract — a free team has no active subscription, so checkout is the path)."""
     _open_billing(page)
     with page.expect_request(lambda r: r.url.endswith("/v1/billing/checkout")) as req_info:
-        # The Pro card's Upgrade button (the Pro card contains 'Pro' + 'Upgrade').
-        pro_card = page.locator(".plan-card", has_text="Pro")
+        # The Builder card's Upgrade button (the Builder card contains 'Builder' + 'Upgrade').
+        pro_card = page.locator(".plan-card", has_text="Builder")
         pro_card.locator("button", has_text="Upgrade").click()
     req = req_info.value
     body = json.loads(req.post_data or "{}")
@@ -102,16 +114,16 @@ def test_active_subscriber_manage_subscription_posts_portal(page: Page) -> None:
     /v1/billing/portal (plan changes route through the Stripe portal — the
     checkout endpoint 409s on active subscriptions by design)."""
     _wire_prod_domains(page, exchange_body=_session_json(),
-                       team_row={**BILLING_ROW, "subscription_status": "active",
+                       org_row={**BILLING_ROW, "subscription_status": "active",
                                  "tier": "pro"},
                        billing_routes=True)
     _submit_api_key(page, "tt_loop_key_abcdef0123456789")
-    expect(page).to_have_url(re.compile(r"^https://app\.premiselabs\.co"), timeout=20_000)
+    expect(page).to_have_url(re.compile("^" + re.escape(DASHBOARD_URL)), timeout=20_000)
     expect(page.locator("body")).to_contain_text("Graphs", timeout=20_000)
     # Header manage-subscription button (restored #310 surface) renders.
     expect(page.locator("button.tier-manage")).to_contain_text("Manage subscription")
     page.locator("nav button", has_text="Billing").click()
-    expect(page.locator("body")).to_contain_text("Pro plan", timeout=10_000)
+    expect(page.locator("body")).to_contain_text("Builder plan", timeout=10_000)
     expect(page.locator("body")).to_contain_text("Active")
     with page.expect_request(lambda r: r.url.endswith("/v1/billing/portal")) as req_info:
         # The prominent header Manage button (the billing row has a second
@@ -134,32 +146,33 @@ def _wire_welcome_flow(page: Page) -> None:
     first-timer welcome flow (no teams → in-app provision → reveal → plan
     step → dashboard)."""
     import time as _time
-    import urllib.parse as _up
     sess = {"access_token": "fake-welcome-access-token",
             "refresh_token": "rt", "expires_in": 3600,
             "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
             "user": {"id": "u-welcome", "email": "welcome@premise-labs.dev",
                      "app_metadata": {}, "user_metadata": {}}}
-    page.context.add_cookies([{"name": "sb-tortoise-auth-token",
-                               "value": _up.quote(json.dumps(sess)),
-                               "domain": ".premiselabs.co", "path": "/"}])
+    # #2744: seed the loopback cookie (the local preview's mount gate) plus the
+    # prod parent-domain cookie — the DOCUMENT is loaded from :8790, not prod.
+    _seed_local_session_cookie(page, "u-welcome", sess)
 
     from tests.e2e.test_session_login_flow import AUTH_ORIGIN, _proxy_body
 
     def handle(route):
         url = route.request.url
-        if "supabase.co" in url:
+        # #2744: the local preview resolves tenant-provision to the emulator
+        # origin (127.0.0.1:54321, main.jsx isLocal branch) — match it too.
+        if "supabase.co" in url or "127.0.0.1:54321" in url:
             if "/functions/v1/tenant-provision" in url and route.request.method == "POST":
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"api_key": WELCOME_KEY,
-                                                "team_name": "Welcome Team",
+                                                "org_name": "Welcome Team",
                                                 "graph_name": "main"}))
                 return
-            if "/rest/v1/team_memberships" in url:
+            if "/rest/v1/org_memberships" in url:
                 # maybeSingle() → PostgREST returns the single object.
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps({"team_id": "team_welcome",
-                                                "team_name": "Welcome Team",
+                              body=json.dumps({"org_id": "team_welcome",
+                                                "org_name": "Welcome Team",
                                                 "graph_name": "main",
                                                 "status": "active"}))
                 return
@@ -171,10 +184,17 @@ def _wire_welcome_flow(page: Page) -> None:
             route.fulfill(status=401, content_type="application/json", body="{}")
             return
         if url.startswith(API_HOST):
-            if url.endswith("/v1/teams"):
-                # First-timer: NO teams → the mount provisions in-app.
+            if url.endswith("/v1/organizations"):
+                # First-timer: NO teams → the welcome card + wizard render
+                # (no auto-provision at mount — #2323 Option B).
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps([]))
+                return
+            if url.endswith("/v1/onboarding/state") and route.request.method == "GET":
+                # #1885: the shell calls this FIRST — a 401 catch-all would
+                # show the generic error card before the wizard renders.
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"onboarding": {}}))
                 return
             if url.endswith("/v1/team") or url.endswith("/v1/team/"):
                 route.fulfill(status=200, content_type="application/json",
@@ -200,26 +220,34 @@ def _wire_welcome_flow(page: Page) -> None:
     page.route("**/*", handle)
 
 
-def test_welcome_plan_step_after_reveal_and_start_free(page: Page) -> None:
-    """A first-timer (no teams) is provisioned in-app, the key is revealed,
-    and the non-blocking plan step shows — free default + paid Upgrade CTAs.
-    'Start free' proceeds to the dashboard at /."""
+def test_welcome_reveal_shows_welcome_card_then_dashboard_exit(page: Page) -> None:
+    """A first-timer (no teams) is NOT auto-provisioned at mount (#2323
+    Option B) — the W1 (#1997) wizard renders directly (orientation
+    removed per epic #2534), then the
+    org-create step provisions in-app with the typed name (tenant-provision
+    201). The welcome heading flips to the provisioned org and the header
+    'Open my dashboard →' exit (enabled once an org exists) opens the
+    dashboard at /."""
     _wire_welcome_flow(page)
-    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
-    # Provisioning → reveal → plan step.
-    expect(page.locator("body")).to_contain_text("Your Tortoise is ready!", timeout=25_000)
-    expect(page.locator("body")).to_contain_text("Choose your plan", timeout=15_000)
-    # Free card is the default + Start free is the primary escape.
-    free_card = page.locator(".plan-card", has_text="Free").first
-    expect(free_card).to_contain_text("Default")
-    expect(free_card.locator("button", has_text="Start free")).to_be_visible()
-    # Paid Upgrade → checkout with the tier price id (contract).
-    pro_card = page.locator(".plan-card", has_text="Pro")
-    with page.expect_request(lambda r: r.url.endswith("/v1/billing/checkout")) as req_info:
-        pro_card.locator("button", has_text="Upgrade").click()
-    body = json.loads(req_info.value.post_data or "{}")
-    assert body.get("price_id") == PRO_PRICE_ID, body
-    # Start free → dashboard shell at / (the API Keys tab).
-    free_card.locator("button", has_text="Start free").click()
-    expect(page).to_have_url(re.compile(r"^https://app\.premiselabs\.co/$"), timeout=15_000)
+    _goto_local_dashboard(page)
+    # Teamless first-timer: welcome card (no orientation — removed per epic
+    # #2534). Org-create is step 0.
+    expect(page.locator("body")).to_contain_text("Create your Organization", timeout=25_000)
+    # Org-create step: type the org name → the SUBMIT provisions
+    # (tenant-provision with the typed name; 201 carries the plaintext).
+    expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
+    page.get_by_label("Organization name").fill("acme")
+    page.get_by_role("button", name="Create Organization").click()
+    # Provisioned: the org name becomes the welcome-card eyebrow (#2912 — the
+    # h1 is now the STAGE, so the provisioned org is the eyebrow above it), and
+    # the header exit is enabled once an org exists.
+    expect(page.locator(".welcome-eyebrow")).to_have_text("Welcome Team", timeout=20_000)
+    # Escape hatch: the header 'Open my dashboard →' (enabled once the org
+    # exists) → dashboard shell at /. Scoped to the header — the done-step
+    # wizard carries a same-named button.
+    page.locator("header").get_by_role("button", name="Open my dashboard →").click()
+    # #2744: the exit lands on the local dashboard SHELL root (a hash route is
+    # allowed; any other path/query is not — the pre-migration pin was exact).
+    expect(page).to_have_url(
+        re.compile("^" + re.escape(DASHBOARD_URL) + r"(#.*)?$"), timeout=15_000)
     expect(page.locator("body")).to_contain_text("API Keys", timeout=15_000)

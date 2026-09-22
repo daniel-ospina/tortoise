@@ -2,8 +2,21 @@
 
 Runs released benchmarks per arm with PINNED dataset versions (refuse on
 mismatch — no silent upgrade), and applies the methodology-unchanged check
-(judge rubric id hash + reader prompt hash vs the #1144 baseline record
-persisted by tools/longmem_eval/report.py — the #1414 additive extension).
+vs the #1144 baseline record (persisted by tools/longmem_eval/report.py —
+the #1414 additive extension). Since #2284 Task 6 the check compares THREE
+hashes: judge rubric id hash + reader prompt hash + PROTOCOL hash over
+{seed, model_pin, temperature, event_schema (SCHEMA_VERSION), tool_surface}
+— a decide-loop/protocol change (schema bump, model pin change, temp/seed
+change, tool-surface change) trips the unchanged-check instead of being
+invisible to parity (#1414 hole closed).
+
+#1144 BASELINE-RECORD REQUIREMENT: a baseline record MUST carry all three
+hashes for the protocol leg to be verifiable. Old 2-tuple records (reader
+prompt + rubric only) keep matching on the 2-tuple compare (back-compat)
+but the run is marked ``protocol_unknown`` — consumers (the parity CLI)
+must surface that state and persist it in the parity record so the #1144
+re-record (baseline ingestion with protocol_hash) is forced rather than
+leaving protocol drift invisible.
 
 Also ships the bespoke SUPERSESSION-VS-STALE probe: released ForgetEval-class
 benchmarks test deletion/drift, not Tortoise's supersede semantics — this
@@ -18,11 +31,25 @@ from pathlib import Path  # noqa: F401
 
 #: Pinned dataset versions (locked at implementation — the runner refuses
 #: to run on mismatch; plan E2E-4.1).
+#:
+#: ``memoryagentbench_tortoise`` (#2985/#3005 P1) is the retrieved-context
+#: TORTOISE lane of the ``memoryagentbench`` benchmark: the SAME pinned
+#: dataset/version, registered under its own key so the parity CLI actually
+#: DISPATCHES it. Without the entry the lane's registry entry
+#: (``executors.EXECUTORS["memoryagentbench_tortoise"]``) was unreachable —
+#: the CLI loop iterates THIS mapping — and its capability gate + provenance
+#: were inert outside tests that monkeypatched ``EXECUTORS``. The parity
+#: record therefore carries TWO cells for the benchmark: the full-context
+#: baseline under ``memoryagentbench`` and the retrieved-context arm under
+#: ``memoryagentbench_tortoise`` (the record is keyed by the pinned id, and
+#: each cell carries its own ``lane``); this is deliberate, never a silent
+#: collision.
 PINNED_VERSIONS: dict[str, str] = {
     "longmemeval": "longmemeval-2025.3",
     "locomo": "locomo-v1",
     "memoryarena": "memoryarena-hf-rev-2026.02",
     "memoryagentbench": "memoryagentbench-2025.4",
+    "memoryagentbench_tortoise": "memoryagentbench-2025.4",
 }
 
 class VersionMismatchError(Exception):
@@ -35,12 +62,67 @@ class BaselineMissingError(Exception):
 
 
 def _sha256(text: str) -> str:
+    #: 16-hex = 64-bit collision domain (reader-prompt + rubric hashes —
+    #: #1414 back-compat). Collision policy: a truncated-hash collision on a
+    #: methodology element is indistinguishable from an unchanged methodology
+    #: (the unchanged-check only TRIPS parity — the #1144 baseline re-record
+    #: is the recovery path), and the elements are compared INDEPENDENTLY
+    #: (no concatenation), so a collision on one element never hides drift
+    #: on another.
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _sha256_full(text: str) -> str:
+    #: FULL sha256 (64-hex) for the PROTOCOL leg (round-4 P2 #2284 Task 6
+    #: parity): the protocol element is NEW (no #1414 back-compat domain),
+    #: so full-length is safe and strictly more collision-resistant than
+    #: the 16-hex methodology hashes.
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+#: Tool-surface ids the parity protocol exercises — the schema-v1.1
+#: tool_event verb surface (battery/runner/emit.py _SUBTYPE_OK) the
+#: decide loop records on the product store. Pinned HERE as the parity
+#: single source: a decide-loop tool-surface change (add/rename a verb)
+#: must update this tuple AND trip the protocol hash (that is the point).
+TOOL_SURFACE_IDS: tuple[str, ...] = (
+    "create_point", "create_operator", "file_nand", "register_conflict",
+    "mitigate", "supersede",
+)
+
+
+def protocol_hash(*, seed: int, model: dict[str, str | float],
+                  event_schema: str,
+                  tool_surface: tuple[str, ...]) -> str:
+    """FULL-sha256 protocol hash (round-4 P2 — the round-3 protocol leg
+    reused the 16-hex ``_sha256``; the protocol element is new, so
+    full-length is safe and back-compat-free) over the decide-loop protocol
+    inputs: seed, model pin (``model["model_id"]``) + temperature, the
+    event-log schema version (artifacts.SCHEMA_VERSION) and the tool-surface
+    ids (sorted — order-insensitive, membership-sensitive). Every input is
+    normalized to a canonical line so equivalent floats hash identically
+    (0 == 0.0)."""
+    lines = [
+        f"seed:{seed}",
+        f"model:{model.get('model_id', '')}",
+        f"temperature:{float(model.get('temperature', 0.0))}",
+        f"event_schema:{event_schema}",
+    ]
+    lines += [f"tool_surface:{t}" for t in sorted(tool_surface)]
+    return _sha256_full("\n".join(lines))
 
 
 @dataclass(frozen=True)
 class ParityRun:
-    """One benchmark × one arm parity result."""
+    """One benchmark × one arm parity result.
+
+    ``protocol_hash``: the protocol hash the CURRENT run derived (backfilled
+    onto the record even when the baseline could not verify it — drift is
+    never invisible). ``protocol_unknown``: True when the baseline record
+    has no protocol_hash (old 2-tuple record) or the caller supplied no
+    protocol — the protocol leg was NOT verifiable, so consumers must warn
+    and persist the state (the #1144 re-record is forced).
+    """
 
     benchmark: str
     arm: str
@@ -48,6 +130,39 @@ class ParityRun:
     accuracy: float | None
     methodology_matched: bool
     samples: int
+    protocol_hash: str | None = None
+    protocol_unknown: bool = False
+    #: The dataset identity the runner ACTUALLY loaded (#2800) — set only
+    #: when a benchmark executed; a not-measured cell has no revision.
+    revision: str | None = None
+    #: The lane that produced the number: one of ``executors.LANES``
+    #: ("real"/"mock" for the full-context released-runner lanes, or the
+    #: retrieved-context arm labels "real_tortoise"/"mock_tortoise", #2800),
+    #: or None when no benchmark ran — a mock/Tortoise number must never read
+    #: as a full-context baseline.
+    lane: str | None = None
+
+    def __post_init__(self) -> None:
+        # The invariant is enforced at CONSTRUCTION, not only in run_parity
+        # (#2806 review P2): ParityRun is exported and directly
+        # constructible, so a caller could otherwise represent a number with
+        # no samples behind it — exactly the shape #2797 removes.
+        if self.accuracy is not None and self.samples <= 0:
+            raise ValueError(
+                f"parity {self.benchmark}: accuracy={self.accuracy!r} with "
+                f"samples={self.samples} is not a measurement (#2797)")
+
+    @property
+    def measured(self) -> bool:
+        """True only when a benchmark ACTUALLY RAN (#2797).
+
+        Derived, never settable: an accuracy is a measurement only when
+        samples back it. ``run_parity`` refuses the inconsistent pair
+        (accuracy with samples <= 0), so this property cannot be turned on
+        by a caller-supplied constant. A not-measured cell reads as
+        no-data — never as a score.
+        """
+        return self.accuracy is not None and self.samples > 0
 
 
 def check_pinned_version(benchmark: str, version: str) -> None:
@@ -61,9 +176,19 @@ def check_pinned_version(benchmark: str, version: str) -> None:
             f"refusing to run (no silent upgrade)")
 
 
-def methodology_hashes(reader_prompt: str, judge_rubric_id: str) -> tuple[str, str]:
-    """The two hashes the unchanged-check compares (issue #1414)."""
-    return _sha256(reader_prompt), _sha256(judge_rubric_id)
+def methodology_hashes(reader_prompt: str, judge_rubric_id: str, *,
+                       protocol: str | None = None
+                       ) -> tuple[str, str, str | None]:
+    """The hashes the unchanged-check compares (#1414 + #2284 Task 6).
+
+    Returns a 3-tuple in FIXED element order — (reader_prompt_hash,
+    judge_rubric_id_hash, protocol_hash) — compared independently by
+    run_parity. ``protocol`` is the precomputed protocol_hash(...) string
+    (derived by the CLI from the pinned arm's model_pin/temperature +
+    SCHEMA_VERSION + tool-surface ids); None when the caller has no
+    protocol leg (2-tuple compare + protocol-unknown, see run_parity).
+    """
+    return _sha256(reader_prompt), _sha256(judge_rubric_id), protocol
 
 
 def run_parity(benchmark: str, version: str, arm: str,
@@ -71,20 +196,46 @@ def run_parity(benchmark: str, version: str, arm: str,
                baseline: dict[str, str] | None,
                *,
                accuracy: float | None = None,
-               samples: int = 0) -> ParityRun:
-    """Execute one parity cell. Raises on version/baseline mismatch."""
+               samples: int = 0,
+               protocol: str | None = None,
+               revision: str | None = None,
+               lane: str | None = None) -> ParityRun:
+    """Execute one parity cell. Raises on version/baseline mismatch.
+
+    Compares all THREE methodology hashes when the baseline record carries
+    protocol_hash AND a current ``protocol`` is supplied. Back-compat: a
+    baseline WITHOUT protocol_hash (old 2-tuple record) still matches on the
+    reader-prompt + rubric compare, but the run is marked ``protocol_unknown``
+    (compare-2 + warn — the caller surfaces the warn) so protocol drift can
+    never pass silently. A protocol change on a 3-tuple baseline trips
+    ``methodology_matched=False`` even when the reader prompt and rubric are
+    unchanged (the #1414 invisibility hole closed).
+    """
     check_pinned_version(benchmark, version)
+    if accuracy is not None and samples <= 0:
+        raise ValueError(
+            f"parity {benchmark}: accuracy={accuracy!r} with samples={samples} "
+            f"is not a measurement (#2797) — a number may only be recorded "
+            f"for a benchmark that actually ran; pass accuracy=None (and "
+            f"samples=0) for a not-measured cell")
     if baseline is None:
         raise BaselineMissingError(
             f"baseline record missing for {benchmark} — the #1144 baseline "
             f"ingestion must persist reader_prompt_hash + "
-            f"judge_rubric_id_hash first (report.py additive extension)")
-    rp, jr = methodology_hashes(reader_prompt, judge_rubric_id)
-    matched = (baseline.get("reader_prompt_hash") == rp
-               and baseline.get("judge_rubric_id_hash") == jr)
+            f"judge_rubric_id_hash + protocol_hash first (report.py "
+            f"additive extension)")
+    rp, jr, _ = methodology_hashes(reader_prompt, judge_rubric_id)
+    base_matched = (baseline.get("reader_prompt_hash") == rp
+                    and baseline.get("judge_rubric_id_hash") == jr)
+    bl_proto = baseline.get("protocol_hash")
+    can_verify_protocol = protocol is not None and bl_proto is not None
+    protocol_matched = can_verify_protocol and protocol == bl_proto
+    matched = base_matched and (protocol_matched or not can_verify_protocol)
     return ParityRun(benchmark=benchmark, arm=arm, version=version,
                      accuracy=accuracy, methodology_matched=matched,
-                     samples=samples)
+                     samples=samples, protocol_hash=protocol,
+                     protocol_unknown=not can_verify_protocol,
+                     revision=revision, lane=lane)
 
 
 # ── Bespoke supersession-vs-stale probe ────────────────────────────────

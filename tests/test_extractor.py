@@ -639,6 +639,78 @@ def test_llm_extractor_bad_relation_index():
     print("PASS test_llm_extractor_bad_relation_index")
 
 
+# ── #2207: sentence-splitter token protection ─────────────────────────
+# The extractor's deterministic sentence splitter must NOT break version /
+# identifier tokens (digit.digit) into separate claims — 'BSL 1.1' is one
+# token, not 'BSL 1.' + '1 …' fragments.
+
+def test_utterances_keep_version_token_bsl_1_1():
+    """#2207: a 'BSL 1.1' token survives as ONE utterance, not two claims."""
+    text = "Dan: We adopted BSL 1.1 for the engine because it converts to MPL-2.0 later."
+    utts = list(_utterances(text))
+    assert len(utts) == 1, f"expected a single utterance, got {len(utts)}"
+    body = utts[0][1]
+    assert "BSL 1.1" in body
+    assert "MPL-2.0" in body
+    assert body.startswith("We adopted"), body
+    print("PASS test_utterances_keep_version_token_bsl_1_1")
+
+
+def test_utterances_keep_version_token_multiple_sentences():
+    """#2207: version tokens survive while real sentence boundaries still split."""
+    text = ("Alice: We run v2.5.1 in production. Next week v3.0 lands.\n"
+            "Bob: That costs 3.5 dollars in total. Next we start again.")
+    utts = list(_utterances(text))
+    bodies = [u[1] for u in utts]
+    assert bodies == [
+        "We run v2.5.1 in production.",
+        "Next week v3.0 lands.",
+        "That costs 3.5 dollars in total.",
+        "Next we start again.",
+    ], bodies
+    print("PASS test_utterances_keep_version_token_multiple_sentences")
+
+
+def test_mock_extractor_keeps_bsl_1_1_token_single_point():
+    """#2207: mock extraction creates ONE point for a 'BSL 1.1' claim — the
+    splitter must not turn the sentence into '…BSL 1.' + '1 …' fragments."""
+    api, log = _api()
+    MockExtractor().run(
+        "Dan: We adopted BSL 1.1 for the engine because it converts to MPL-2.0 later.",
+        "licensing.txt", api,
+    )
+    points = [e["point"]["content"] for e in log.read_all()
+              if e["type"] == "PointAdded"]
+    assert len(points) == 1, f"expected one point, got {len(points)}: {points}"
+    assert "BSL 1.1" in points[0]
+    assert not any(p.endswith("BSL 1.") or p.startswith("1 ")
+                   or p.startswith("1 for") for p in points), points
+    print("PASS test_mock_extractor_keeps_bsl_1_1_token_single_point")
+
+
+def test_document_mock_extraction_keeps_bsl_1_1_token():
+    """#2207: document-mode mock extraction keeps a digit.digit token inside
+    one sentence instead of splitting the section body on the token's period."""
+    from tortoise.extractor import extract_from_document
+    api, log = _api()
+    text = (
+        "## License\n"
+        "The engine is released under BSL 1.1 because the conversion to "
+        "MPL-2.0 after four years keeps the project enterprise-safe.\n"
+    )
+    stats = extract_from_document(
+        text, "license.md", api,
+        point_model=MockModel("cheap"),
+        relation_model=MockModel("reason"),
+    )
+    assert stats["points"] >= 1, stats
+    points = [e["point"]["content"] for e in log.read_all()
+              if e["type"] == "PointAdded"]
+    assert any("BSL 1.1" in p for p in points), points
+    assert not any(p.endswith("BSL 1.") or p.startswith("1 ") for p in points), points
+    print("PASS test_document_mock_extraction_keeps_bsl_1_1_token")
+
+
 def _run_all():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

@@ -21,10 +21,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tortoise import hosted_api
-from tortoise.hosted_api import app, get_current_team
+from tortoise.hosted_api import app, get_current_org
 
-TEAM = {"team_id": "test-team-529", "tier": "free", "key_id": "k1"}
-AUTH = {"Authorization": "Bearer tt_test_key_529"}
+TEAM = {"org_id": "test-team-529", "tier": "free", "key_id": "k1"}
 
 
 @pytest.fixture
@@ -39,17 +38,22 @@ def client(tmp_path, monkeypatch):
                         str(tmp_path / "analytics_fallback.jsonl"))
     monkeypatch.delenv("SUPABASE_URL", raising=False)
     monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)
+    # #3820 (cycle-2 P1): the CANONICAL name too. With an ambient production
+    # `SUPABASE_SERVICE_ROLE_KEY` and no URL, `_service_key()` finds it and the
+    # emit is classified `fallback`/`supabase_env_incomplete` — this fixture's
+    # "Supabase env removed" premise would be false.
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
     # DB-free: capture what reaches the state writer (the pop contract).
     captured_kwargs = {}
 
-    def fake_update(team_id, **fields):
+    def fake_update(org_id, **fields):
         captured_kwargs.update(fields)
-        captured_kwargs["__team_id__"] = team_id
+        captured_kwargs["__org_id__"] = org_id
         return dict(hosted_api.DEFAULT_ONBOARDING_STATE)
 
     monkeypatch.setattr(hosted_api, "_update_onboarding_state", fake_update)
-    monkeypatch.setattr(hosted_api, "_team_email", lambda team_id: None)
-    app.dependency_overrides[get_current_team] = lambda: TEAM
+    monkeypatch.setattr(hosted_api, '_org_email', lambda org_id: None)
+    app.dependency_overrides[get_current_org] = lambda: TEAM
     with TestClient(app) as c:
         c._captured_kwargs = captured_kwargs
         c._jsonl = tmp_path / "analytics_fallback.jsonl"
@@ -66,14 +70,14 @@ def _events(client):
 def test_patch_harness_section_emits_event(client):
     """T5: valid pair → exactly one artifact_copied with exactly those props."""
     resp = client.patch("/v1/onboarding/state",
-                        json={"harness": "cursor", "section": "config"}, headers=AUTH)
+                        json={"harness": "cursor", "section": "config"})
     assert resp.status_code == 200
     events = _events(client)
     assert len(events) == 1, f"expected exactly one event, got {events}"
     ev = events[0]
     assert ev["event_name"] == "artifact_copied"
     assert ev["properties"] == {"harness": "cursor", "section": "config"}
-    assert ev["team_id"] == "test-team-529"
+    assert ev["org_id"] == "test-team-529"
     # State pollution guard: harness/section popped before the merge.
     assert "harness" not in client._captured_kwargs
     assert "section" not in client._captured_kwargs
@@ -85,7 +89,7 @@ def test_patch_harness_section_emits_event(client):
 def test_patch_section_both_is_valid(client):
     """T5 (enum member): section 'both' is part of #235's schema."""
     resp = client.patch("/v1/onboarding/state",
-                        json={"harness": "cursor", "section": "both"}, headers=AUTH)
+                        json={"harness": "cursor", "section": "both"})
     assert resp.status_code == 200
     events = _events(client)
     assert len(events) == 1
@@ -95,7 +99,7 @@ def test_patch_section_both_is_valid(client):
 def test_patch_section_setup_is_valid(client):
     """T5 (enum member): welcome page one-click setup prompt attribution."""
     resp = client.patch("/v1/onboarding/state",
-                        json={"harness": "pi", "section": "setup"}, headers=AUTH)
+                        json={"harness": "pi", "section": "setup"})
     assert resp.status_code == 200
     events = _events(client)
     assert len(events) == 1
@@ -109,20 +113,35 @@ def test_patch_section_setup_is_valid(client):
 ])
 def test_patch_invalid_harness_or_section_ignored(client, payload):
     """T6: invalid enum values → 200, no event, no state change."""
-    resp = client.patch("/v1/onboarding/state", json=payload, headers=AUTH)
+    resp = client.patch("/v1/onboarding/state", json=payload)
     assert resp.status_code == 200
     assert _events(client) == []
     # Nothing but the (empty) merge reached the state writer.
     state_kwargs = {k: v for k, v in client._captured_kwargs.items()
-                    if k != "__team_id__"}
+                    if k != "__org_id__"}
+    assert state_kwargs == {}
+
+
+def test_patch_chatgpt_harness_beacon_is_inert(client):
+    """#1701 R2: the wizard's chatgpt tab fires the same copy-attribution
+    PATCH beacon as the other harnesses ({harness:'chatgpt', section:'config'})
+    — the handler accepts it (200) but emits NO artifact_copied event and
+    leaves onboarding state untouched. chatgpt is INTENTIONALLY beacon-less:
+    it has no local skills and never files sessions, so it stays absent from
+    the server analytics vocabulary (_HARNESS_ANALYTICS_VALUES = 6)."""
+    resp = client.patch("/v1/onboarding/state",
+                        json={"harness": "chatgpt", "section": "config"})
+    assert resp.status_code == 200
+    assert _events(client) == []
+    state_kwargs = {k: v for k, v in client._captured_kwargs.items()
+                    if k != "__org_id__"}
     assert state_kwargs == {}
 
 
 def test_patch_legit_state_fields_still_merge_alongside_beacon(client):
     """Beacon fields and real state fields can arrive together without leaking."""
     resp = client.patch("/v1/onboarding/state",
-                        json={"prompt_pasted": True, "harness": "pi", "section": "prompt"},
-                        headers=AUTH)
+                        json={"prompt_pasted": True, "harness": "pi", "section": "prompt"})
     assert resp.status_code == 200
     assert client._captured_kwargs.get("prompt_pasted") is True
     assert "harness" not in client._captured_kwargs
