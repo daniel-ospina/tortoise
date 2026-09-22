@@ -47,7 +47,7 @@ TEAM = "team-abuse-1"
 TOKEN_A = "tt_abuse_aaaa1111"
 TOKEN_B = "tt_abuse_bbbb2222"
 
-# #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
+# #1719 (Task 3): org_memberships.user_id is a uuid column — real JWT
 # subjects are UUIDs, so non-UUID user_id literals are prod-impossible
 # (FakeControlPlane's fidelity check raises HTTP 400 on them). Identity /
 # api_keys.created_by stay TEXT and remain non-UUID.
@@ -58,16 +58,16 @@ _U_STRANGER = "9f2c1a40-0000-4a00-8000-00000000000a"
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
 def _seed_team(fake: FakeControlPlane, *, suspended=None, flagged=None):
-    fake.seed("teams", [{
+    fake.seed("organizations", [{
         "id": TEAM, "name": "abuse-team", "tier": "free",
-        "email": "owner@abuse.test", "graph_name": f"team_{TEAM}",
+        "email": "owner@abuse.test", "graph_name": f"org_{TEAM}",
         "max_users": 1, "max_graphs": 1, "ops_allowance": 10000,
         "graph_size_cap": 100000, "suspended_at": suspended,
         "flagged_at": flagged,
     }])
     for token, kid in ((TOKEN_A, "key-a"), (TOKEN_B, "key-b")):
         fake.seed("api_keys", [{
-            "id": kid, "team_id": TEAM, "lookup_hash": lookup_hash(token),
+            "id": kid, "org_id": TEAM, "lookup_hash": lookup_hash(token),
             "key_prefix": token[:10], "created_via": "provisioned",
             "created_by": "user-1", "created_at": "2026-08-01T00:00:00+00:00",
             "expires_at": None, "revoked_at": None,
@@ -137,7 +137,7 @@ def _auth(token=TOKEN_A):
 
 class TestRestSuspension:
     def test_suspended_team_403_with_appeal(self, env):
-        env["fake"].rpc("abuse_suspend", {"p_team_id": TEAM})
+        env["fake"].rpc("abuse_suspend", {"p_org_id": TEAM})
         with TestClient(env["app"]) as tc:
             r = tc.get("/v1/team", headers=_auth())
         assert r.status_code == 403
@@ -151,29 +151,29 @@ class TestRestSuspension:
         the only local enforcement cell is torn down while the durable
         suspended_at stays stamped (the worst-case window mechanism)."""
         fake = env["fake"]
-        fake.rpc("abuse_suspend", {"p_team_id": TEAM})
+        fake.rpc("abuse_suspend", {"p_org_id": TEAM})
         abuse.mark_suspended(TEAM)
         assert abuse.is_suspended_signal(TEAM)
-        fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
+        fake.missing_columns = {"organizations": {"suspended_at", "flagged_at"}}
         with TestClient(env["app"]) as tc:
             r = tc.get("/v1/team", headers=_auth())
         assert r.status_code == 200  # degraded (accepted-by-scope)
         assert not abuse.is_suspended_signal(TEAM)  # self-heal tore it down
-        assert fake.tables["teams"][0]["suspended_at"] is not None  # durable stays
+        assert fake.tables["organizations"][0]["suspended_at"] is not None  # durable stays
 
     def test_unsuspend_restores_next_request(self, env):
         fake = env["fake"]
-        fake.rpc("abuse_suspend", {"p_team_id": TEAM})
+        fake.rpc("abuse_suspend", {"p_org_id": TEAM})
         with TestClient(env["app"]) as tc:
             assert tc.get("/v1/team/keys", headers=_auth()).status_code == 403
-            fake.rpc("abuse_unsuspend", {"p_team_id": TEAM})
+            fake.rpc("abuse_unsuspend", {"p_org_id": TEAM})
             assert tc.get("/v1/team/keys", headers=_auth()).status_code == 200
 
     def test_suspension_survives_restart(self, env):
         """Bypass failure mode: durable state rejects even with the process
         signal set cleared (simulated restart)."""
         fake = env["fake"]
-        fake.rpc("abuse_suspend", {"p_team_id": TEAM})
+        fake.rpc("abuse_suspend", {"p_org_id": TEAM})
         abuse.mark_suspended(TEAM)
         # simulate a worker restart: signal set + engine wiped
         with abuse._SIGNAL_LOCK:
@@ -200,13 +200,13 @@ class TestPointBurst:
         with TestClient(env["app"]) as tc:
             for i in range(6):
                 self._post_point(tc, i)
-            team_row = fake.tables["teams"][0]
-            assert team_row["flagged_at"] is not None      # stage 1
-            assert team_row["suspended_at"] is None        # never stage 2
+            org_row = fake.tables["organizations"][0]
+            assert org_row["flagged_at"] is not None      # stage 1
+            assert org_row["suspended_at"] is None        # never stage 2
             assert not abuse.is_suspended_signal(TEAM)
             for i in range(3):  # continued in-window writes: still no suspend
                 self._post_point(tc, i)
-            assert fake.tables["teams"][0]["suspended_at"] is None
+            assert fake.tables["organizations"][0]["suspended_at"] is None
             assert tc.get("/v1/team/keys", headers=_auth()).status_code == 200
             # quiet → burst AFTER the window: a new episode re-flags, never
             # suspends on its first evaluation (stale-flag protection)
@@ -217,7 +217,7 @@ class TestPointBurst:
             self._post_point(tc, 50)
             for i in range(5):
                 self._post_point(tc, 51 + i)
-            assert fake.tables["teams"][0]["suspended_at"] is None
+            assert fake.tables["organizations"][0]["suspended_at"] is None
         assert [c[0] for c in env["notified"]].count("abuse_flag") >= 2
 
     def test_boundary_crossing_suspends_and_403(self, env):
@@ -228,7 +228,7 @@ class TestPointBurst:
         with TestClient(env["app"]) as tc:
             for i in range(6):
                 self._post_point(tc, i)
-            assert fake.tables["teams"][0]["flagged_at"] is not None
+            assert fake.tables["organizations"][0]["flagged_at"] is not None
             # Age the flag EPISODE anchor (the flag event row — staging is
             # event-derived) a full window into the past, and move ONE point
             # event into the continuity band (flag, now-window] so the breach
@@ -243,7 +243,7 @@ class TestPointBurst:
                           if e["event_type"] == "point_create"]
             point_rows[0]["created_at"] = band  # continuity evidence
             self._post_point(tc, 99)  # evaluation now crosses the boundary
-            assert fake.tables["teams"][0]["suspended_at"] is not None
+            assert fake.tables["organizations"][0]["suspended_at"] is not None
             # next authed request 403s with the SUSPENDED contract
             r = tc.get("/v1/team/keys", headers=_auth())
             assert r.status_code == 403
@@ -258,7 +258,7 @@ class TestPointBurst:
         source-introspection test below.)"""
         fake = env["fake"]
         fake.seed("api_keys", [{
-            "id": "revoke-me", "team_id": TEAM,
+            "id": "revoke-me", "org_id": TEAM,
             "lookup_hash": "revoke-hash", "key_prefix": "tt_revoke12",
             "created_via": "recovery", "created_by": "user-1",
             "created_at": "2026-08-01T00:00:00+00:00",
@@ -271,7 +271,7 @@ class TestPointBurst:
         events = [e for e in fake.tables.get("abuse_events", [])
                   if e["event_type"] == "point_create"]
         assert events == []  # revokes never record point_create
-        assert env["fake"].tables["teams"][0]["flagged_at"] is None
+        assert env["fake"].tables["organizations"][0]["flagged_at"] is None
 
 
 # ── R2: key-create velocity ─────────────────────────────────────────────────
@@ -280,9 +280,9 @@ class TestKeyVelocity:
     def _provision(self, fake, lookup):
         fake.rpc("provision_team", {
             "p_user_id": None, "p_identity": f"id-{lookup[:8]}",
-            "p_team_id": TEAM, "p_team_name": "abuse-team",
+            "p_org_id": TEAM, "p_org_name": "abuse-team",
             "p_api_key": f"tt_{lookup}", "p_key_hash": "kh",
-            "p_lookup_hash": lookup, "p_graph_name": f"team_{TEAM}",
+            "p_lookup_hash": lookup, "p_graph_name": f"org_{TEAM}",
             "p_email": f"{lookup[:8]}@x.co", "p_key_prefix": TEAM[:8],
         })
 
@@ -300,7 +300,7 @@ class TestKeyVelocity:
                         json={"content": "next hooked request",
                               "kind": "statement"})
             assert r.status_code == 200
-        assert fake.tables["teams"][0]["flagged_at"] is not None
+        assert fake.tables["organizations"][0]["flagged_at"] is not None
         flag_notifies = [c for c in env["notified"] if c[0] == "abuse_flag"]
         assert flag_notifies and flag_notifies[0][2]["rule"] == "key_create"
 
@@ -310,7 +310,7 @@ class TestKeyVelocity:
         fake = env["fake"]
         for i in range(11):
             fake.query("api_keys", method="POST", json_body={
-                "id": f"boot-{i}", "team_id": TEAM,
+                "id": f"boot-{i}", "org_id": TEAM,
                 "lookup_hash": f"boot-hash-{i}", "created_via": "bootstrap"})
         events = [e for e in fake.tables.get("abuse_events", [])
                   if e["event_type"] == "key_create"]
@@ -319,7 +319,7 @@ class TestKeyVelocity:
             r = tc.post("/v1/points", headers=_auth(),
                         json={"content": "hooked", "kind": "statement"})
             assert r.status_code == 200
-        assert fake.tables["teams"][0]["flagged_at"] is None
+        assert fake.tables["organizations"][0]["flagged_at"] is None
 
 
 # ── R3: exfiltration detection ──────────────────────────────────────────────
@@ -395,15 +395,15 @@ class TestGeo:
 class TestSessionLane:
     """#1913: the session-JWT REST lane runs the same post-auth abuse
     evaluation as the key lanes (R3 read velocity + R4 geo). The key lanes
-    call _abuse_post_auth (get_current_team / _get_current_team_supabase);
-    _session_user_team — the session lane — never did: session-driven GETs
+    call _abuse_post_auth (get_current_org / _get_current_team_supabase);
+    _session_user_org — the session lane — never did: session-driven GETs
     from a new country recorded no auth_ip event and didn't count toward R3.
     """
 
     def _seed_membership(self, fake):
-        fake.seed("team_memberships", [{
-            "user_id": _U1, "team_id": TEAM, "role": "owner",
-            "status": "active", "team_name": "abuse-team"}])
+        fake.seed("org_memberships", [{
+            "user_id": _U1, "org_id": TEAM, "role": "owner",
+            "status": "active", "org_name": "abuse-team"}])
 
     def _ip_events(self, fake):
         return [e for e in fake.tables["abuse_events"]
@@ -415,7 +415,7 @@ class TestSessionLane:
         from starlette.datastructures import Headers
         from starlette.requests import Request
 
-        from tortoise.hosted_api import _session_user_team
+        from tortoise.hosted_api import _session_user_org
         fake = env["fake"]
         self._seed_membership(fake)
         # Direct unit call — the exact function the #1913 fix touches. A
@@ -427,14 +427,14 @@ class TestSessionLane:
             "query_string": b"",
             "headers": Headers({"cf-ipcountry": "MX"}).raw,
         })
-        team = asyncio.run(_session_user_team(request, {"user_id": _U1}))
-        assert team["team_id"] == TEAM
+        team = asyncio.run(_session_user_org(request, {"user_id": _U1}))
+        assert team["org_id"] == TEAM
         # R4: the new-country session request recorded auth_ip + notified
         assert {e["country"] for e in self._ip_events(fake)} == {"MX"}
         geo = [c for c in env["notified"] if c[0] == "abuse_new_ip"]
         assert len(geo) == 1 and geo[0][2]["country"] == "MX"
         # R3: the session GET counted toward team read velocity
-        assert len(abuse.READ_TRACKER._by_team[TEAM]) == 1
+        assert len(abuse.READ_TRACKER._by_org[TEAM]) == 1
 
     def test_key_lane_unchanged(self, env):
         """Regression: the key lane still records auth_ip (R4) + R3 reads
@@ -446,7 +446,7 @@ class TestSessionLane:
             assert r.status_code == 200
         assert {e["country"] for e in self._ip_events(fake)} == {"CL"}
         assert [c[0] for c in env["notified"]] == ["abuse_new_ip"]
-        assert len(abuse.READ_TRACKER._by_team[TEAM]) == 1
+        assert len(abuse.READ_TRACKER._by_org[TEAM]) == 1
 
 
 class TestMcp:
@@ -456,18 +456,18 @@ class TestMcp:
         from starlette.applications import Starlette  # noqa: I001
         from starlette.responses import JSONResponse
         from starlette.routing import Route
-        from tortoise.mcp_auth import TeamResolutionMiddleware
+        from tortoise.mcp_auth import OrgResolutionMiddleware
 
         async def echo(request):
             await request.body()
             return JSONResponse({"ok": True})
 
         app = Starlette(routes=[Route("/", echo, methods=["POST"])])
-        app.add_middleware(TeamResolutionMiddleware)
+        app.add_middleware(OrgResolutionMiddleware)
         return TestClient(app)
 
     def test_suspended_team_jsonrpc_error(self, env):
-        env["fake"].rpc("abuse_suspend", {"p_team_id": TEAM})
+        env["fake"].rpc("abuse_suspend", {"p_org_id": TEAM})
         with self._mcp_client() as tc:
             r = tc.post("/", headers=_auth(),
                         json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
@@ -487,14 +487,14 @@ class TestMcp:
                            json={"jsonrpc": "2.0", "id": 1,
                                  "method": "tools/list"}).status_code == 200
             # suspend (engine path: durable RPC + signal)
-            fake.rpc("abuse_suspend", {"p_team_id": TEAM})
+            fake.rpc("abuse_suspend", {"p_org_id": TEAM})
             abuse.mark_suspended(TEAM)
             r = tc.post("/", headers=_auth(),
                         json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
             assert r.status_code == 403
             assert r.json()["error"]["code"] == -32006
             # un-suspend: durable clear + the next fresh resolution evicts
-            fake.rpc("abuse_unsuspend", {"p_team_id": TEAM})
+            fake.rpc("abuse_unsuspend", {"p_org_id": TEAM})
             r = tc.post("/", headers=_auth(),
                         json={"jsonrpc": "2.0", "id": 3, "method": "tools/list"})
             assert r.status_code == 200
@@ -516,16 +516,16 @@ class TestMintGateAndAlerts:
     def test_mint_rejected_while_suspended(self, env):
         from tortoise.hosted_api import get_current_user
         fake = env["fake"]
-        fake.seed("team_memberships", [{
-            "user_id": _U1, "team_id": TEAM, "role": "owner",
-            "status": "active", "team_name": "abuse-team"}])
-        fake.rpc("abuse_suspend", {"p_team_id": TEAM})
+        fake.seed("org_memberships", [{
+            "user_id": _U1, "org_id": TEAM, "role": "owner",
+            "status": "active", "org_name": "abuse-team"}])
+        fake.rpc("abuse_suspend", {"p_org_id": TEAM})
         env["app"].dependency_overrides[get_current_user] = \
             lambda: {"user_id": _U1}
         try:
             with TestClient(env["app"]) as tc:
                 r = tc.post("/v1/session/key",
-                            json={"purpose": "recovery", "team_id": TEAM})
+                            json={"purpose": "recovery", "org_id": TEAM})
             assert r.status_code == 403
             assert r.json()["detail"]["code"] == "SUSPENDED"
         finally:
@@ -537,9 +537,9 @@ class TestMintGateAndAlerts:
         recovery the 403 returns (the fail-open window closes)."""
         from tortoise.hosted_api import get_current_user
         fake = env["fake"]
-        fake.seed("team_memberships", [{
-            "user_id": _U1, "team_id": TEAM, "role": "owner",
-            "status": "active", "team_name": "abuse-team"}])
+        fake.seed("org_memberships", [{
+            "user_id": _U1, "org_id": TEAM, "role": "owner",
+            "status": "active", "org_name": "abuse-team"}])
         # env fixture pre-seeds 2 provisioned keys at the free-tier cap
         # (max_api_keys=2). The DRIFT-phase mint has the suspension gate
         # bypassed (degrade) and would 402 at the cap before creating a
@@ -547,20 +547,20 @@ class TestMintGateAndAlerts:
         # 403s at the suspension gate before any cap check.
         # (precedent: test_auth_flip test_mint_resolves_then_revoked_rejected).
         fake.tables["api_keys"] = []
-        fake.rpc("abuse_suspend", {"p_team_id": TEAM})
-        fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
+        fake.rpc("abuse_suspend", {"p_org_id": TEAM})
+        fake.missing_columns = {"organizations": {"suspended_at", "flagged_at"}}
         env["app"].dependency_overrides[get_current_user] = \
             lambda: {"user_id": _U1}
         try:
             with TestClient(env["app"]) as tc:
                 r = tc.post("/v1/session/key",
-                            json={"purpose": "recovery", "team_id": TEAM})
+                            json={"purpose": "recovery", "org_id": TEAM})
                 assert r.status_code == 200  # fail-open during drift (accepted)
                 assert "key" in r.json()  # the grant actually minted
             fake.missing_columns = None  # drift resolved
             with TestClient(env["app"]) as tc:
                 r = tc.post("/v1/session/key",
-                            json={"purpose": "recovery", "team_id": TEAM})
+                            json={"purpose": "recovery", "org_id": TEAM})
             assert r.status_code == 403
             # Gate identity: the SUSPENDED gate specifically (not another 403).
             assert r.json()["detail"]["code"] == "SUSPENDED"
@@ -570,17 +570,17 @@ class TestMintGateAndAlerts:
     def test_alerts_endpoint_session_authed(self, env):
         from tortoise.hosted_api import get_current_user
         fake = env["fake"]
-        fake.seed("team_memberships", [{
-            "user_id": _U1, "team_id": TEAM, "role": "owner",
-            "status": "active", "team_name": "abuse-team"}])
+        fake.seed("org_memberships", [{
+            "user_id": _U1, "org_id": TEAM, "role": "owner",
+            "status": "active", "org_name": "abuse-team"}])
         store = SupabaseAbuseStore(fake)
-        store.flag_team(TEAM, "point_create", {"count": 6})
+        store.flag_org(TEAM, "point_create", {"count": 6})
         store.record_event(TEAM, "auth_ip", country="US")
         env["app"].dependency_overrides[get_current_user] = \
             lambda: {"user_id": _U1}
         try:
             with TestClient(env["app"]) as tc:
-                r = tc.get(f"/v1/team/alerts?team_id={TEAM}")
+                r = tc.get(f"/v1/team/alerts?org_id={TEAM}")
             assert r.status_code == 200
             types = {a["type"] for a in r.json()["alerts"]}
             assert "flag" in types and "auth_ip" in types
@@ -592,16 +592,16 @@ class TestMintGateAndAlerts:
         (session auth — the API-key routes 403 by design)."""
         from tortoise.hosted_api import get_current_user
         fake = env["fake"]
-        fake.seed("team_memberships", [{
-            "user_id": _U1, "team_id": TEAM, "role": "owner",
-            "status": "active", "team_name": "abuse-team"}])
-        SupabaseAbuseStore(fake).flag_team(TEAM, "point_create", {"count": 6})
-        fake.rpc("abuse_suspend", {"p_team_id": TEAM})
+        fake.seed("org_memberships", [{
+            "user_id": _U1, "org_id": TEAM, "role": "owner",
+            "status": "active", "org_name": "abuse-team"}])
+        SupabaseAbuseStore(fake).flag_org(TEAM, "point_create", {"count": 6})
+        fake.rpc("abuse_suspend", {"p_org_id": TEAM})
         env["app"].dependency_overrides[get_current_user] = \
             lambda: {"user_id": _U1}
         try:
             with TestClient(env["app"]) as tc:
-                r = tc.get(f"/v1/team/alerts?team_id={TEAM}")
+                r = tc.get(f"/v1/team/alerts?org_id={TEAM}")
             assert r.status_code == 200
             assert any(a["type"] == "flag" for a in r.json()["alerts"])
         finally:
@@ -613,14 +613,14 @@ class TestMintGateAndAlerts:
             lambda: {"user_id": _U_STRANGER}
         try:
             with TestClient(env["app"]) as tc:
-                assert tc.get(f"/v1/team/alerts?team_id={TEAM}").status_code == 403
+                assert tc.get(f"/v1/team/alerts?org_id={TEAM}").status_code == 403
         finally:
             env["app"].dependency_overrides.clear()
 
     def test_team_info_status_flagged(self, env):
         """status ∈ {active, flagged} over HTTP — suspension 403s earlier."""
         fake = env["fake"]
-        fake.tables["teams"][0]["flagged_at"] = \
+        fake.tables["organizations"][0]["flagged_at"] = \
             datetime.now(timezone.utc).isoformat()  # noqa: UP017
         with TestClient(env["app"]) as tc:
             r = tc.get("/v1/team", headers=_auth())
@@ -677,122 +677,86 @@ class _Resp:
 
 class TestIntrospection:
     def test_write_tool_names_cover_all_quota_gated(self):
-        from tortoise.mcp_server import WRITE_TOOL_NAMES, _QUOTA_GATED  # noqa: I001
-        assert WRITE_TOOL_NAMES >= _QUOTA_GATED
-        assert "tortoise_ingest" in WRITE_TOOL_NAMES
-        assert "tortoise_onboarding_demo_create" in WRITE_TOOL_NAMES
+        """#4113: the non-SDK (empty-binding) writers are a DECLARED set that is
+        write-classified — not ad-hoc literal assertions that a rename erases."""
+        from tool_surface_capabilities import (  # noqa: I001
+            NON_SDK_WRITER_TOOLS, quota_gated_wrap_sites, registry_entries_by_method,
+        )
+        from tortoise.mcp_server import WRITE_TOOL_NAMES
+        # every _quota_gated wrap site's (HTTP) tool is write-classified
+        by_method = registry_entries_by_method()
+        wrapped = {m for m, _, _ in quota_gated_wrap_sites().sites}
+        assert wrapped, "wrap-site scan is vacuous"
+        for method in sorted(wrapped):
+            for entry in by_method.get(method, []):
+                if entry.http_policy:
+                    assert entry.name in WRITE_TOOL_NAMES, (entry.name, method)
+        # non-SDK (empty-binding) writers are a declared, write-classified set.
+        # Derived from the SERVED set (#3883): a retired empty-binding writer is
+        # still callable by name, so it belongs in the declared set too.
+        from tool_surface_capabilities import served_registry as _served
+        assert NON_SDK_WRITER_TOOLS <= WRITE_TOOL_NAMES
+        empty_writers = {e.name for e in _served()
+                         if not e.sdk_method and e.name in WRITE_TOOL_NAMES}
+        assert empty_writers == set(NON_SDK_WRITER_TOOLS)
 
     def test_point_creating_wrap_sites_have_weights(self):
-        """Dual membership by source: every Point-creating _quota_gated wrap
-        passes abuse_weight; update-family wraps do not (delta 8 drift guard
-        — a future Point-creating tool cannot silently re-open the bypass)."""
-        import re  # noqa: F401, I001
-        import tortoise.mcp_server as ms
-        src = Path(ms.__file__).read_text()
-
-        def _wrap_window(method):
-            # exact wrap-site match (method + comma) — a bare prefix would
-            # let e.g. ingest_corpus masquerade as ingest
-            i = src.find(f"_get_team_sdk().{method},")
-            assert i != -1, f"wrap site for {method} not found"
-            return src[i:i + 260]
-
-        for method in ("create_point", "create_operator", "mitigate_operator",
-                       "file_decision", "file_human_approval", "diary_write",
-                       "ingest", "checkpoint"):
-            window = _wrap_window(method)
-            assert "abuse_weight" in window, f"{method} lacks an R1 weight"
-        for method in ("update_point", "supersede", "invalidate_point",
-                       "retract_point"):
-            window = _wrap_window(method)
-            assert "abuse_weight" not in window, \
-                f"{method} must NOT record point_create"
+        """#4113: per-SITE AST extraction (the old ``str.find`` went -1 the
+        moment a handler merged behind a dispatch table).  The weight family is
+        exactly WEIGHT_BEARING_METHODS; every other wrap site must not weigh."""
+        from tool_surface_capabilities import (  # noqa: I001
+            WEIGHT_BEARING_METHODS, quota_gated_wrap_sites, wrap_site_violations,
+        )
+        sites = quota_gated_wrap_sites()
+        assert sites.unresolved == (), sites.unresolved
+        assert sites.sites, "wrap-site scan is vacuous"
+        assert wrap_site_violations() == []
+        weighted = {m for m, _, w in sites.sites if w}
+        assert weighted == set(WEIGHT_BEARING_METHODS), weighted
 
     def test_no_write_tool_counted_as_read(self):
-        """Drift guard (code-review fix — the old version was a tautology):
-        extract the ACTUAL _quota_gated wrap sites from source and assert
-        every one is classified as a write in WRITE_TOOL_NAMES via the pinned
-        method→tool map. A new wrapped write tool with no map entry fails
-        here; a mapped tool missing from WRITE_TOOL_NAMES fails here too."""
-        import re  # noqa: I001
-        import tortoise.mcp_server as ms
-        src = Path(ms.__file__).read_text()
-        wrapped_methods = set(re.findall(
-            r"_quota_gated\(_get_team_sdk\(\)\.(\w+)", src))
-        # pinned method→tool map (the write surface as designed)
-        method_to_tool = {
-            "create_point": "tortoise_create_point",
-            "update_point": "tortoise_update_point",
-            "create_operator": "tortoise_create_operator",
-            "mitigate_operator": "tortoise_mitigate_operator",
-            "file_decision": "tortoise_file_decision",
-            "file_human_approval": "tortoise_file_human_approval",
-            "invalidate_point": "tortoise_invalidate",
-            "supersede": "tortoise_supersede",
-            "retract_point": "tortoise_retract_point",
-            "checkpoint": "tortoise_checkpoint",
-            "diary_write": "tortoise_diary_write",
-            "create_entity": "tortoise_create_entity",
-            "update": "tortoise_update",
-            "annotate_operator": "tortoise_operator_action",
-            "create_subject": "tortoise_create_subject",
-            "create_object": "tortoise_create_object",
-            "create_event": "tortoise_create_event",
-            "create_document": "tortoise_create_document",
-            "create_source": "tortoise_create_source",
-            "assess_source": "tortoise_assess_source",
-            "update_entity": "tortoise_update_entity",
-            "create_edge": "tortoise_create_edge",
-            "ingest": "tortoise_ingest",
-            "index_directory": "tortoise_index_files",  # #1043 index path (Sources/Documents + edges) — quota-gated write
-        }
-        # every wrap site must be a known write method (new wrap → fail here)
-        unknown = wrapped_methods - set(method_to_tool)
-        assert not unknown, f"unmapped _quota_gated wrap sites: {unknown}"
-        # every wrap site's tool must be classified as a WRITE (never a read)
-        missing = {method_to_tool[m] for m in wrapped_methods} - ms.WRITE_TOOL_NAMES
-        assert not missing, f"write tools missing from WRITE_TOOL_NAMES: {missing}"
+        """#4113: derive the ACTUAL wrap sites from the AST (not a text find),
+        then assert the declared write-surface map is live in BOTH directions:
+        every wrapped method is mapped, AND every mapped method still has a wrap
+        site (the missing inverse — a declared write whose wrap was removed must
+        fail, not silently stop being checked).  Every mapped name must resolve
+        to a live registry entry so a rename fails loudly."""
+        from tool_surface_capabilities import write_surface_map_violations
+        violations = write_surface_map_violations()
+        assert violations == [], "; ".join(violations)
 
     def test_destructive_mutating_tools_never_read_classified(self):
-        """C5 #2114 (code-review P1): the NON-wrapped destructive/mutating
-        tools carry _rw() annotations but bypass _quota_gated — they must
-        still be classified as writes (WRITE_TOOL_NAMES) so the MCP scope
-        gate (graphs:write required) + read-velocity metering treat them as
-        writes. A graphs:read-only key invoking any of these would otherwise
-        be a write-scope bypass (deleting points/entities, mutating
-        operators/sources)."""
-        import tortoise.mcp_server as ms
-        destructive = {
-            "tortoise_delete_point",      # DESTRUCTIVE — cannot be undone
-            "tortoise_delete",            # destructive
-            "tortoise_delete_entity",     # destructive
-            "tortoise_set_point_baseline",  # mutates claims
-            "tortoise_set_source_tier",   # mutates source metadata
-            "tortoise_annotate_operator",  # mutates operator state
-        }
-        missing = destructive - ms.WRITE_TOOL_NAMES
-        assert not missing, (
-            f"destructive/mutating tools missing from WRITE_TOOL_NAMES "
-            f"(a graphs:read-only MCP key could invoke them): {missing}")
+        """#4113: capability-derived — every handler-reached graph mutation must
+        be write-classified (or a self-guarding HTTP-excluded tool).  The old
+        hardcoded destructive set could not fire for a merged/renamed tool, and
+        the annotation-derived set went empty when a merge picked read-only."""
+        from tool_surface_capabilities import (
+            served_registry,
+            write_classification_violations,
+        )
+        violations = write_classification_violations(served_registry())
+        assert violations == [], (
+            "a graphs:read-only MCP key could reach a write: " + "; ".join(violations))
 
     def test_rw_annotated_http_tools_never_read_classified(self):
-        """C5 #2114 (re-review 3 hardening): DERIVE the write set from the
-        registry — every HTTP-allowed tool whose annotation is NOT read-only
-        (readOnlyHint=False: _rw/_idem — writes/mutations) must be in
-        WRITE_TOOL_NAMES, so a graphs:read-only MCP key can never invoke a
-        write-classified tool. Future-proof: a new _rw() HTTP tool missing
-        from WRITE_TOOL_NAMES fails HERE, not in a review round."""
+        """#4113: the ground truth is the wrap sites / the SDK source — NOT the
+        registry annotation.  Every wrap-site operation's bound tool must be
+        write-classified (or a self-guarding HTTP-excluded tool), so a merge
+        that picks the read-only label cannot blind the guard."""
+        from tool_surface_capabilities import (  # noqa: I001
+            handler_self_guards, quota_gated_wrap_sites, registry_entries_by_method,
+        )
         import tortoise.mcp_server as ms
-        from tortoise.tool_registry import TOOL_REGISTRY
-        writers = {
-            d.name for d in TOOL_REGISTRY
-            if d.http_policy and d.annotations is not None
-            and d.annotations.readOnlyHint is False
-        }
-        missing = writers - ms.WRITE_TOOL_NAMES
-        assert not missing, (
-            f"_rw()-annotated HTTP tools missing from WRITE_TOOL_NAMES "
-            f"(a graphs:read-only MCP key could invoke them): {missing}")
+
+        by_method = registry_entries_by_method()
+        wrapped = {m for m, _, _ in quota_gated_wrap_sites().sites}
+        assert wrapped, "wrap-site scan is vacuous"
+        for method in sorted(wrapped):
+            for entry in by_method.get(method, []):
+                assert entry.name in ms.WRITE_TOOL_NAMES or (
+                    entry.http_policy is False and handler_self_guards(entry.name)
+                ), (f"{entry.name} wraps write {method!r} but is neither "
+                    f"write-classified nor a self-guarding HTTP-excluded tool")
 
     def test_mcp_read_hook_classification(self, monkeypatch):
         """maybe_record_mcp_read: writes skipped, reads counted, selfhost and
@@ -801,8 +765,8 @@ class TestIntrospection:
         import tortoise.abuse as abuse_mod
         calls = []
         monkeypatch.setattr(abuse_mod, "record_read",
-                            lambda key_id, team_id, now=None:
-                            calls.append((key_id, team_id)))
+                            lambda key_id, org_id, now=None:
+                            calls.append((key_id, org_id)))
         ms.maybe_record_mcp_read("tortoise_search", "team-x",
                                  {"key_id": "k1"})
         assert calls == [("k1", "team-x")]
@@ -839,9 +803,9 @@ class TestIntrospection:
         # tripwire: a renamed SDK return key fails here, not in production)
         import tortoise.mcp_server as ms
         src = Path(ms.__file__).read_text()
-        i_ingest = src.find("_get_team_sdk().ingest,")
+        i_ingest = src.find("_get_org_sdk().ingest,")
         assert i_ingest != -1 and '.get("points")' in src[i_ingest:i_ingest + 400]
-        i_ckpt = src.find("_get_team_sdk().checkpoint,")
+        i_ckpt = src.find("_get_org_sdk().checkpoint,")
         assert i_ckpt != -1 and '.get("filed")' in src[i_ckpt:i_ckpt + 400]
         # capture_session weight lives in hosted_api (REST seam)
         import tortoise.hosted_api as ha

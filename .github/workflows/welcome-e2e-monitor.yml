@@ -6,11 +6,17 @@
 # ci.yml's welcome-e2e job (secret-free); this job's UNIQUE value is the
 # live-prod browser run.
 #
-# The smoke targets the #801 server-first signup path: the form POSTs to
-# /v1/signup/email (hosted API → GoTrue Admin, email_confirm=true) — NO
-# confirmation email is sent, so the smoke does NOT consume the SMTP email
-# bucket (the pre-#801 "1 email-send per run" rationale is stale; the no-429
-# signal is the signup endpoint's own rate buckets).
+# The smoke targets the #801 server-first signup path AS IT IS SERVED AFTER
+# #4054: the form POSTs SAME-ORIGIN to the app origin's `/auth/signup`, which
+# proxies `POST {API_ORIGIN}/v1/signup/email` (hosted API → GoTrue Admin,
+# email_confirm=true) — NO confirmation email is sent, so the smoke does NOT
+# consume the SMTP email bucket (the pre-#801 "1 email-send per run" rationale
+# is stale; the no-429 signal is the signup endpoint's own rate buckets).
+#
+# The assertion moved to the BFF boundary when the BFF moved to the app origin:
+# the browser no longer calls Supabase for signup, and a Worker's outbound fetch
+# is invisible to `page.on("response")`, so watching for `v1/signup/email`
+# watched a URL the page never requests. See tests/e2e/test_welcome_page.py.
 name: welcome-e2e-monitor
 
 on:
@@ -76,45 +82,29 @@ jobs:
         run: node --experimental-strip-types tests/test_tenant_provision_cors.mjs
       - name: Auto-file issue on failure (monitor signal — never blocks merges)
         if: failure()
-        run: |
-          # Dedupe (#2706): at most ONE open auto-filed issue per monitor
-          # identity — not one per run. The stable title (no run id) is the
-          # dedupe key: search OPEN issues by title prefix and comment on the
-          # oldest match, so consecutive failing runs consolidate onto a single
-          # ticket. Once the monitor goes green and the ticket is closed, the
-          # next failure opens a fresh issue. Pre-#2706 run-id titles start
-          # with the same prefix, so existing duplicates consolidate too.
-          #
-          # Fail-safe: dedupe is best-effort. If the search itself errors we
-          # still CREATE — filing loudly is the monitor's core contract and
-          # must never silently no-op (the #2140 deaf-monitor class).
-          MONITOR_TITLE='live-signup-monitor: welcome-e2e failed'
-          set -eo pipefail
-          EXISTING=''
-          if EXISTING="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
-              --search "\"$MONITOR_TITLE\" in:title" --limit 100 \
-              --json number,createdAt \
-              --jq 'sort_by(.createdAt) | .[0].number // empty' 2>/dev/null)"; then
-            if [ -n "$EXISTING" ]; then
-              echo "dedupe: open ticket #$EXISTING already filed for this monitor identity — commenting instead of creating"
-            else
-              echo "dedupe: no open ticket — creating a fresh issue"
-            fi
-          else
-            echo "::warning::dedupe search failed — falling back to issue create"
-          fi
-          if [ -n "$EXISTING" ]; then
-            # Comment on the open ticket with the new failing run (audit trail)
-            gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" \
-              --body "Monitor still failing — run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
-              || { echo "::error::could not comment dedupe update on #$EXISTING"; exit 1; }
-          else
-            # #2140: --fail-with-body so a failed issue create (403/429/etc.)
-            # fails the step loudly instead of silently skipping the file
-            # (curl -s exits 0 on HTTP errors — the deaf-monitor class).
-            curl --fail-with-body -sS -X POST \
-              -H "Authorization: Bearer $GITHUB_TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/$GITHUB_REPOSITORY/issues" \
-              -d "{\"title\":\"$MONITOR_TITLE\",\"body\":\"Monitor failure — run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. This is the #801 live signup funnel monitor (schedule + on-merge). The smoke asserts POST /v1/signup/email → 200 and the auto sign-in (auth/v1/token?grant_type=password) → 200; failures are typically a real signup-funnel regression, an API 429 (over_email_send_rate_limit / over_request_rate_limit / over_request_rate_limit_ip), or a stale test vs the deployed page. Investigate or re-run; it is NOT a PR regression gate. One open ticket per monitor identity (#2706) — later failing runs comment here.\",\"labels\":[\"bug\"]}"
-          fi
+        # #2706/#2850: ONE issue per failing streak, never one per run. The old
+        # title embedded `run ${{ github.run_id }}`, so every failing run created a
+        # NEW issue — 59 open near-identical duplicates at the 2026-09-11
+        # census (#2231 → present, still accumulating until this lands — see
+        # #3014, which re-measures at cleanup time). The title is now
+        # STABLE and acts as the dedupe key: search for an open issue with it
+        # and COMMENT (with the run link) instead of creating another one.
+        # FORWARD-LOOKING ONLY: the pre-existing duplicates carry the OLD
+        # title and are deliberately NOT adopted by this search (adopting one at
+        # random would be worse than filing one clean tracker). They need a
+        # one-time bulk cleanup — filed as #3014.
+        # A failed search refuses to file (never duplicate) but fails the step
+        # loudly, so the monitor can never go silently deaf.
+        #
+        # The logic lives in .github/scripts/welcome-e2e-monitor.sh so it can be
+        # TESTED (.github/scripts/welcome-e2e-monitor.test.sh, run by the
+        # availability-watchdog CI lane). The #3064 round-2 review found the
+        # inline version deduped on TITLE ALONE — on this PUBLIC repo any
+        # external account could open an issue with our title and be adopted as
+        # the state carrier. The script carries the same author guard the
+        # availability watchdog uses (`author:app/github-actions` + a
+        # `user.type`/`user.login` re-check) and fails safe (a fresh machine
+        # issue) on a non-machine match.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/welcome-e2e-monitor.sh

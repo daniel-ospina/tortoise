@@ -91,6 +91,15 @@ def _parser() -> argparse.ArgumentParser:
     parity.add_argument("--arms", default=None)
     parity.add_argument("--seed", type=int, default=0)
     parity.add_argument("--mock", action="store_true")
+    parity.add_argument("--execute", action="store_true",
+                        help="run the released benchmark runners (#2800) — "
+                             "without this a cell is explicitly not-measured")
+    parity.add_argument("--limit", type=int, default=None,
+                        help="cap benchmark questions per cell (--execute)")
+    parity.add_argument("--allow-spend", action="store_true",
+                        help="required for a REAL (non---mock) benchmark run — "
+                             "the released runners call paid reader/judge "
+                             "models")
     parity.add_argument("--out", default=_DEFAULT_OUT,
                         help="parity record output dir (parity_record.json)")
 
@@ -284,18 +293,108 @@ def _cmd_parity(args: argparse.Namespace) -> ExitCode:
     reader_prompt = _load_reader_prompt(args)
     judge_rubric = args.rubric or "longmemeval-official"
     baseline = _load_baseline(args)
+    if args.limit is not None and not args.execute:
+        print("parity: --limit has no effect without --execute — no benchmark "
+              "will run, so every cell stays not-measured")
+    # A REAL lane calls paid reader/judge models: it needs an explicit
+    # opt-in, so a bare `--execute` cannot spend money by accident. Without
+    # it the cells stay not-measured (fail-closed, no silent cost).
+    real_lane_blocked = bool(args.execute and not args.mock
+                             and not args.allow_spend)
+    if real_lane_blocked:
+        print("parity: --execute without --mock requires --allow-spend (the "
+              "released runners call paid reader/judge models) — no benchmark "
+              "will run; every cell stays not-measured")
     cells: list[ParityRun] = []
+    # #3005 P1: the pinned benchmark id each cell was dispatched under. The
+    # record is keyed by THIS, not by ``ParityRun.benchmark`` — two pinned
+    # ids can share one benchmark (``memoryagentbench`` full-context and
+    # ``memoryagentbench_tortoise`` retrieved-context), and each cell's own
+    # ``lane`` says which arm produced it. Keying by ``c.benchmark`` would
+    # silently collapse the two cells into one.
+    cell_keys: list[str] = []
+    # #2985: the retrieval capability gate per benchmark. Populated from a
+    # measured cell's detail (the REAL lane that proved the vector leg ran)
+    # OR from a gate REFUSAL (``ExecutorUnavailable.capability_gate``) — the
+    # refusal is persisted, never a silent absence.
+    capability_gates: dict[str, dict] = {}
+    # #2919: the ``ExecutedCell.detail`` each executed (or refused) cell
+    # reported, keyed by the pinned benchmark id — persisted into
+    # parity_record.json so a stored number carries what produced it. #3005
+    # opened this channel for the retrieval conditions behind a number
+    # (``retrieval_legs`` = the leg union the lane actually observed via the
+    # product's leg_trace, never an availability guess; ``retrieval_degraded``
+    # = the fail-closed label; ``capability_gate``); #2919 extends the SAME
+    # map to the measured spend and its derivation (``spend_usd`` /
+    # ``cost_basis`` / ``calls`` / ``config``). Without it the cell `detail`
+    # is in-memory only and a recorded run cannot answer "what did this cost,
+    # and was the number provider-reported or estimated" from its own
+    # artifact.
+    cell_details: dict[str, dict] = {}
     for benchmark, version in PINNED_VERSIONS.items():
         try:
+            # #2797: an accuracy is supplied ONLY from a released runner's
+            # own output (#2800). Without --execute (or without a registered
+            # executor for a benchmark) the cell is explicitly NOT MEASURED
+            # and carries no number — the pre-#2797 code passed a literal
+            # accuracy=0.5 here, which read as a measurement.
+            executed = None
+            if args.execute and not real_lane_blocked:
+                from battery.parity.executors import (
+                    EXECUTORS,
+                    ExecutorUnavailable,
+                )
+                executor = EXECUTORS.get(benchmark)
+                if executor is None:
+                    print(f"{benchmark}: no released runner wired — "
+                          f"not measured (#2800)")
+                else:
+                    try:
+                        executed = executor(
+                            mock=bool(args.mock), limit=args.limit,
+                            out_dir=_Path(args.out or _DEFAULT_OUT))
+                        detail = getattr(executed, "detail", None) or {}
+                        cell_details[benchmark] = detail
+                        gate = detail.get("capability_gate")
+                        if gate is not None:
+                            capability_gates[benchmark] = gate
+                    except ExecutorUnavailable as e:
+                        print(f"{benchmark}: executor unavailable — {e}")
+                        # #2985: a capability-gate refusal carries its
+                        # machine-readable record — persist it (the printed
+                        # reason alone is not an artifact), plus the
+                        # fail-closed degraded label the refusal implies.
+                        gate = getattr(e, "capability_gate", None)
+                        if gate is not None:
+                            capability_gates[benchmark] = gate
+                            # A refusal measured nothing: only the observed
+                            # legs and the fail-closed label are recorded. The
+                            # spend keys stay ABSENT (→ null in the record),
+                            # never a 0.0 that would read as a free run.
+                            cell_details[benchmark] = {
+                                "retrieval_legs": list(
+                                    gate.get("legs_seen") or []),
+                                "retrieval_degraded": not bool(
+                                    gate.get("vector_leg")),
+                            }
             res = run_parity(benchmark, version, arm_id,
                              reader_prompt, judge_rubric, baseline,
-                             accuracy=0.5, samples=0, protocol=protocol)
+                             accuracy=(executed.accuracy if executed else None),
+                             samples=(executed.samples if executed else 0),
+                             protocol=protocol,
+                             revision=(executed.revision if executed else None),
+                             lane=(executed.lane if executed else None))
             cells.append(res)
+            cell_keys.append(benchmark)
             unknown = bool(res.protocol_unknown or placeholder_pinned)
             state = f"protocol_unknown={unknown}" if unknown \
                 else "protocol verified"
+            measured = (f"[{res.lane}] accuracy={res.accuracy} n={res.samples} "
+                        f"revision={res.revision}"
+                        if res.measured else
+                        "accuracy NOT MEASURED — no runner wired (#2800)")
             print(f"{benchmark}: v{version} methodology_matched="
-                  f"{res.methodology_matched} ({state})")
+                  f"{res.methodology_matched} ({state}); {measured}")
             if unknown:
                 if placeholder_pinned:
                     print(f"{benchmark}: WARNING arm {arm_id!r} pins "
@@ -331,8 +430,48 @@ def _cmd_parity(args: argparse.Namespace) -> ExitCode:
                 "protocol_unknown": bool(
                     cells[0].protocol_unknown or placeholder_pinned),
                 "benchmarks": {
-                    c.benchmark: {
+                    key: {
                         "version": c.version,
+                        # #2797: the not-measured state is PERSISTED (and the
+                        # accuracy is written as an explicit null, not
+                        # omitted) so no reader can mistake a placeholder
+                        # cell for a score. `measured` is derived from the
+                        # accuracy/samples pair by ParityRun and can only be
+                        # True when a runner actually produced a number.
+                        "measured": c.measured,
+                        "accuracy": c.accuracy,
+                        "samples": c.samples,
+                        "revision": c.revision,
+                        "lane": c.lane,
+                        # #2985: the retrieval capability gate — machine-
+                        # readable, never silent. A refused REAL lane records
+                        # {vector_leg: false, reason: ...}; a real lane that
+                        # ran records {vector_leg: true, ...}. Benchmarks with
+                        # no retrieval lane (or no run) record null.
+                        "capability_gate": capability_gates.get(c.benchmark),
+                        # #2985: the observed retrieval conditions behind the
+                        # number — null for a benchmark with no retrieval lane
+                        # (longmemeval) or no run. A refused real lane records
+                        # its observed legs + retrieval_degraded=true.
+                        "retrieval_legs": cell_details.get(
+                            c.benchmark, {}).get("retrieval_legs"),
+                        "retrieval_degraded": cell_details.get(
+                            c.benchmark, {}).get("retrieval_degraded"),
+                        # #2919: the measured spend behind the number plus how
+                        # it was derived — persisted as the pair the issue
+                        # asks for (a figure is only meaningful with its
+                        # basis: a provider receipt vs a token-basis
+                        # estimate), alongside what produced it. Null (never
+                        # 0.0) when the cell reported no spend — absence is
+                        # not a free run.
+                        "spend_usd": cell_details.get(
+                            c.benchmark, {}).get("spend_usd"),
+                        "cost_basis": cell_details.get(
+                            c.benchmark, {}).get("cost_basis"),
+                        "calls": cell_details.get(
+                            c.benchmark, {}).get("calls"),
+                        "config": cell_details.get(
+                            c.benchmark, {}).get("config"),
                         # Round-4 P2 (consistency): a protocol-UNKNOWN
                         # record must NEVER carry methodology_matched=True —
                         # the two persisted fields would contradict (an
@@ -344,7 +483,7 @@ def _cmd_parity(args: argparse.Namespace) -> ExitCode:
                             False if bool(
                                 c.protocol_unknown or placeholder_pinned)
                             else c.methodology_matched),
-                    } for c in cells},
+                    } for key, c in zip(cell_keys, cells, strict=True)},
             }, indent=2, sort_keys=True), encoding="utf-8")
         print(f"parity record: {record_path}")
     return ExitCode.OK
@@ -669,12 +808,22 @@ def _load_mitigations(args) -> dict:
 
 
 def _load_recall(args) -> dict | None:
-    """Matched-recall record: the LATEST attempt dir's recall.json (per-
-    episode retrieved Memories + EP markers), or the legacy root-level
-    recall.json when no attempt dir exists."""
+    """Matched-recall block: the LATEST attempt dir's recall.json
+    ``matched_recall`` sub-block (#3327; the four §3.2.1 contract fields +
+    the excluded-control annotations), or None when absent.
+
+    recall.json carries the per-episode recall rows AND the pre-pass block;
+    only the block is the matched-recall record. A legacy recall.json
+    without a ``matched_recall`` key (or a crashed dir's ``{}``) yields None
+    — the verdict's INCONCLUSIVE branch is never driven by a missing block.
+    """
     from battery.report.assemble import read_recall_file
     base, _ = _attempt_base(args)
-    return read_recall_file(base)
+    record = read_recall_file(base)
+    if not isinstance(record, dict):
+        return None
+    block = record.get("matched_recall")
+    return block if isinstance(block, dict) and block else None
 
 
 def _cmd_run(args: argparse.Namespace) -> ExitCode:

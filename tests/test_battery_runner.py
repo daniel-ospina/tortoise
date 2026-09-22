@@ -14,6 +14,7 @@ from battery.runner.model_calls import (
     ModelCallFailed,
     OutcomeRecordingCaller,
     RateLimited,
+    UsageRecordingCaller,
     outcome_counts,
 )
 from battery.runner.run import execute_mock_episode
@@ -94,6 +95,77 @@ class TestModelCallOutcomes:
             rec.call(prompt="p")
         counts = outcome_counts(rec.outcomes)
         assert counts["rate_limited"] >= 1 and counts["ok"] == 0
+
+
+class _MeteredCaller:
+    """A ModelCaller carrying the usage contract (#2906). ``cost=None``
+    leaves ``last_cost_usd`` ABSENT, mirroring a caller that has no meter at
+    all; the ``RealModelCaller`` shape (attribute present, value ``None``)
+    is exercised separately."""
+
+    model_id = "deepseek/deepseek-v4-flash"
+    temperature = 0.0
+
+    def __init__(self, *, prompt_tokens=1000, completion_tokens=100,
+                 cost=0.0009):
+        self.last_prompt_tokens = prompt_tokens
+        self.last_completion_tokens = completion_tokens
+        if cost is not None:
+            self.last_cost_usd = cost
+
+    def call(self, *, prompt: str) -> str:
+        return "ok"
+
+
+class TestOutcomeRecordingCallerProxiesUsage:
+    """#2919 — a wrapped caller must still meter.
+
+    ``OutcomeRecordingCaller`` is documented as a valid wrapper, so the usage
+    surface must pass through it; otherwise ``UsageRecordingCaller`` and the
+    probe HARD STOP are silently blinded (the tokens read as 0 and every
+    estimate collapses to a fabricated 0.0).
+    """
+
+    def test_tokens_and_provider_cost_survive_the_wrapper(self):
+        inner = _MeteredCaller(prompt_tokens=1000, completion_tokens=100,
+                               cost=0.0009)
+        rec = OutcomeRecordingCaller(inner, sleep=lambda _: None)
+        assert rec.call(prompt="p") == "ok"
+        # The REPORTED values, not merely that the attributes exist.
+        assert rec.last_prompt_tokens == 1000
+        assert rec.last_completion_tokens == 100
+        assert rec.last_cost_usd == 0.0009
+        # …and the meter downstream sees them — the point of the proxy.
+        meter = UsageRecordingCaller(rec)
+        meter.call(prompt="p")
+        totals = meter.totals()
+        assert totals["prompt_tokens"] == 1000
+        assert totals["completion_tokens"] == 100
+        assert totals["cost_usd"] == pytest.approx(0.0009)
+        assert totals["cost_basis"] == "provider_reported"
+
+    def test_absent_provider_cost_stays_none_not_zero(self):
+        """The value-vs-absence rule (#2906): a caller that reports no
+        charge must leave the wrapper at ``None``. Coercing it to 0.0 would
+        re-price a real free call from a basis known to be wrong."""
+        from battery.config.prices import cost_usd
+
+        inner = _MeteredCaller(cost=None)  # attribute absent
+        assert not hasattr(inner, "last_cost_usd")
+        rec = OutcomeRecordingCaller(inner, sleep=lambda _: None)
+        rec.call(prompt="p")
+        assert rec.last_cost_usd is None
+        # The RealModelCaller shape (attribute present, value None) is
+        # treated identically — never a 0.0.
+        inner.last_cost_usd = None
+        assert rec.last_cost_usd is None
+        # Downstream, the absence is labelled an estimate, not a receipt.
+        meter = UsageRecordingCaller(rec)
+        meter.call(prompt="p")
+        totals = meter.totals()
+        assert totals["cost_basis"] == "estimated"
+        assert meter.rows[0].cost_usd == pytest.approx(cost_usd(1000, 100))
+        assert totals["cost_usd"] == pytest.approx(round(meter.spent_usd, 6))
 
 
 class TestEpisodeClassification:

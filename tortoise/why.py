@@ -53,9 +53,12 @@ import logging
 import os
 import re
 
+from .env_truthy import is_truthy  # #4097: the declared truthy contract
+from .live import is_terminal_status  # #2490: terminal rows override has_ep
 from .search_engine import (  # type: ignore[import-not-found]
     CONTESTED_VARIANCE_THRESHOLD,
     _exclude_status_clause,
+    ep_measured_cypher,  # #3276: has_ep == EP measured (baseline prior != measured)
     fetch_point_epistemic_state,
 )
 
@@ -64,7 +67,7 @@ logger = logging.getLogger(__name__)
 # ── W4 flag ────────────────────────────────────────────────────────────────
 # Default OFF (production exposure gated by the epic's user-exposure gate —
 # both conditions must hold before the flip). Tests / dev / the A11 pilot set
-# it explicitly, mirroring the TORTOISE_ENABLE_ASK gating precedent (#2013).
+# it explicitly, mirroring the flag-gated rollout precedent.
 W4_FLAG_ENV = "TORTOISE_W4_ENRICHMENT"
 
 # ── Budgets (plan §3.1.1 — pinned by the S6 contract test) ────────────────
@@ -92,12 +95,9 @@ def w4_enrichment_enabled() -> bool:
     """Resolve the W4 enrichment flag (honored on ALL enriched surfaces).
 
     Default OFF — production exposure is gated by the epic's user-exposure
-    gate. Truthy values: 1/true/yes/on.
+    gate. Truthy values: the declared contract (1/true/yes/on) — #4097.
     """
-    v = os.environ.get(W4_FLAG_ENV)
-    if v is None:
-        return False
-    return v.strip().lower() in ("1", "true", "yes", "on")
+    return is_truthy(os.environ.get(W4_FLAG_ENV))
 
 
 # ── The shared assembly ────────────────────────────────────────────────────
@@ -301,19 +301,41 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
     EXISTING :Point node (the query is the existence anchor). Unmeasured
     points coalesce to the Beta(1,1) uniform prior: mean 0.5, variance
     1/12, has_ep False — absence of measurement is NOT low support (repo
-    neutral-0.5 convention)."""
+    neutral-0.5 convention).
+
+    #2490: the gate is a PROJECTION-side has_ep OVERRIDE, NOT a WHERE
+    insertion — why() explicitly serves terminal ids in the supersession
+    block, so filtering them out of _EP_CYPHER's WHERE would drop the very
+    rows why must present. Terminal rows (status in the terminal vocab OR
+    the legacy outdated flag) read has_ep=False + contested=False even when
+    EP measured them pre-terminalization (their posterior decayed to vacuity
+    at the write)."""
     for row in rows:
         if not row or not row[0]:
             continue
         pid = row[0]
         a, b = float(row[1]), float(row[2])
         has_ep = bool(row[3])
+        # #2490: terminal rows never surface a decayed posterior as measured
+        # EP — has_ep=False + contested=False (projection-side override).
+        terminal = len(row) > 5 and is_terminal_status(row[4], bool(row[5]))
+        if terminal:
+            has_ep = False
+        # #3276: explicit measurement state — see EpBreakdown. baseline_set
+        # (index 6) marks a LIVE prior-only claim (declared #2199 baseline, no
+        # EP measurement): its confidence_mean is the PRIOR mean, not measured.
+        # A TERMINAL row is neither measured nor prior-only (its 0.5 is the
+        # #2490 decayed posterior) — the terminal gate also clears `baseline`.
+        baseline_set = bool(row[6]) if len(row) > 6 else False
+        measured = bool(has_ep)
         variance = _beta_variance(a, b)
         by_id[pid]["ep"] = {
             "confidence_mean": round(_mean(a, b), 4),
             "variance": round(variance, 6),
-            "contested": has_ep and variance > CONTESTED_VARIANCE_THRESHOLD,
-            "has_ep": has_ep,
+            "contested": measured and variance > CONTESTED_VARIANCE_THRESHOLD,
+            "has_ep": measured,
+            "measured": measured,
+            "baseline": baseline_set and not measured and not terminal,
         }
 
 
@@ -427,7 +449,17 @@ _EP_CYPHER = (
     "RETURN n.id, "
     "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0), "
     "  coalesce(n.posterior_beta, n.ep_beta, 1.0), "
-    "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL)"
+    # #3276: has_ep == EP MEASURED (ep_measured_cypher) — a #2199 baseline
+    # prior alone is prior-only, never a measured confidence.
+    f"  {ep_measured_cypher('n')}, "
+    # #2490: status/outdated ride the RETURN so _assemble_ep_rows can apply
+    # the projection-side has_ep override for terminal rows (why must serve
+    # terminal ids in the supersession block — the exclusion is NOT a WHERE
+    # insertion here).
+    "  n.status, coalesce(n.outdated, false), "
+    # #3276: baseline_set rides LAST (index 6) so the pre-#3276 6-col row
+    # shape keeps its index mapping under the len guard.
+    "  coalesce(n.baseline_set, false)"
 )
 # Tradeoffs (decision points): the point is the operator SOURCE (INPUT idx 0)
 # and the alternatives are the operator's IMPL TARGETS at idx > 0 (the
@@ -696,7 +728,7 @@ def project_item(item: dict, block: dict) -> dict:
 def item_to_why_entry(item: dict) -> dict | None:
     """Project an enriched item back to the canonical §3.1.4 why entry.
 
-    Used by the ask surface (its pool hits flow through the search-path
+    Used by the ask lane (its pool hits flow through the search-path
     enrichment) — zero extra graph reads. Returns None when the item was
     not enriched (no W4 data).
     """
@@ -715,6 +747,11 @@ def item_to_why_entry(item: dict) -> dict | None:
             "variance": ep.get("variance", 0.0),
             "contested": bool(ep.get("contested", False)),
             "has_ep": bool(ep.get("has_ep", False)),
+            # #3276: carry the explicit measurement state through the
+            # projection (a pre-#3276 item with only has_ep stays honest:
+            # measured mirrors has_ep, baseline defaults False).
+            "measured": bool(ep.get("measured", ep.get("has_ep", False))),
+            "baseline": bool(ep.get("baseline", False)),
         }
     if "conflicts" in item:
         entry["conflicts"] = item["conflicts"]

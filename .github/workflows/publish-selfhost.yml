@@ -8,6 +8,40 @@ on:
   push:
     branches: [main]   # publishes :latest for the README quickstart
     tags: ['v*']       # publishes semver tags
+    # #4223: only rebuild when a path that can actually change the image
+    # changes. Without this, every merge — docs-only ones included — rebuilt
+    # and pushed an identical image (~40 runs/day at 6–15 min ≈ 9h of runner
+    # time). This is the exact build-input set of Dockerfile.selfhost
+    # (build context `.`): its COPY directives plus the files that shape the
+    # build context, and nothing else.
+    #   Dockerfile.selfhost            the build recipe itself
+    #   .dockerignore                  mutates the build context (it excludes
+    #                                  e.g. tortoise/*.egg-info from COPY)
+    #   requirements.txt               COPY'd + pip-installed (pinned deps)
+    #   pyproject.toml                 COPY'd; `pip install '.[embeddings]'`
+    #                                  resolves the extras from it
+    #   packs/**                       COPY'd — starter pack catalog
+    #   tortoise/**                    COPY'd — the package sources
+    #   tests/sample_transcript.txt    COPY'd — asserted by packaging-smoke
+    #   .github/workflows/publish-selfhost.yml
+    #                                  self-trigger, so a change to THIS
+    #                                  workflow takes effect without a manual
+    #                                  dispatch (same lesson as #1118)
+    # Deliberately NOT listed: uv.lock (never COPY'd and never read by the
+    # build — requirements.txt is the exported artifact the Dockerfile
+    # installs, so a lock-only change cannot alter the image); Dockerfile.hosted,
+    # docker-compose.yml and fly.toml (different artifacts, not build inputs).
+    # Tag pushes are unaffected: GitHub does not evaluate `paths` for tag
+    # pushes, so every `v*` release still builds and publishes.
+    paths:
+      - 'Dockerfile.selfhost'
+      - '.dockerignore'
+      - 'requirements.txt'
+      - 'pyproject.toml'
+      - 'packs/**'
+      - 'tortoise/**'
+      - 'tests/sample_transcript.txt'
+      - '.github/workflows/publish-selfhost.yml'
   workflow_dispatch:
 
 jobs:

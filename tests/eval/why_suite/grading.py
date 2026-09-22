@@ -65,6 +65,24 @@ def _conflict_surfaced(block: dict) -> bool:
     )
 
 
+def _resolved_presented(block: dict) -> bool:
+    """#2490 resolved-presentation contract: the why-block of a superseded
+    (terminal) claim must present it as RESOLVED — served through the
+    supersession view (status superseded) and never as a live open dispute
+    (ep.contested / conflicts.contested must not be true).  The conflict
+    STRUCTURE (nands + successor pointers) is still graded by dig-deeper
+    navigation — this arm pins the ANTI-GHOST (a decayed terminal must not
+    read as contested on the why surface)."""
+    ep = block.get("ep")
+    if isinstance(ep, dict) and ep.get("contested") is True:
+        return False
+    conflicts = block.get("conflicts")
+    if isinstance(conflicts, dict) and conflicts.get("contested") is True:
+        return False
+    supersession = block.get("supersession") or {}
+    return supersession.get("status") == "superseded"
+
+
 def _clean_invents(block: dict) -> bool:
     """False-positive arm: a clean point's surfaced context must NOT carry
     any contradiction signal — a conflicts block (any NANDs), a contested
@@ -137,7 +155,8 @@ def resolve_expected(gold_entry: dict, role_map_entry: dict) -> dict:
 
         {"expected_conflict": bool, "clean": bool, "family": str,
          "expected_targets": [{"kind": str, "target_id": str}],
-         "expected_tradeoff": bool, "favored_option_id": str | None}
+         "expected_tradeoff": bool, "expected_support": bool,
+         "expected_resolved": bool, "favored_option_id": str | None}
     """
     expected = gold_entry.get("expected") or {}
     targets: list[dict] = []
@@ -169,6 +188,10 @@ def resolve_expected(gold_entry: dict, role_map_entry: dict) -> dict:
         "family": gold_entry.get("family"),
         "expected_targets": targets,
         "expected_tradeoff": bool(expected.get("tradeoff_sufficient")),
+        "expected_support": bool(expected.get("support_chain_sufficient")),
+        # #2490 resolved contract: superseded-family gold marks the claim
+        # RESOLVED — graded by the anti-ghost arm (never a live dispute).
+        "expected_resolved": bool(expected.get("resolved")),
         "favored_option_id": favored_option_id,
     }
 
@@ -200,7 +223,9 @@ def grade_point(block: dict, expected: dict) -> dict:
                     "got": targets[:1],
                 }
             )
-    support_sufficient = _support_sufficient(block)
+    support_sufficient = (
+        _support_sufficient(block) if expected.get("expected_support", True) else None
+    )
     family = expected.get("family")
     tradeoff_sufficient = None
     fabricated_tradeoffs = False
@@ -212,11 +237,17 @@ def grade_point(block: dict, expected: dict) -> dict:
         # Q4 anti-fabrication (closed world): a non-decision point's surfaced
         # context must never carry tradeoffs — the plant never produced them.
         fabricated_tradeoffs = True
+    # #2490 anti-ghost arm: resolved (superseded) claims grade their
+    # resolved presentation; live/clean rows carry None (not applicable).
+    resolved_ok = None
+    if expected.get("expected_resolved"):
+        resolved_ok = _resolved_presented(block)
     return {
         "point_id": block.get("point_id"),
         "family": family,
         "clean": clean,
         "expected_conflict": expected_conflict,
+        "expected_resolved": bool(expected.get("expected_resolved")),
         "conflict_surfaced": conflict_surfaced,
         "nav_correct": nav_correct,
         "nav_total": len(expected.get("expected_targets") or []),
@@ -224,5 +255,6 @@ def grade_point(block: dict, expected: dict) -> dict:
         "support_sufficient": support_sufficient,
         "tradeoff_sufficient": tradeoff_sufficient,
         "fabricated_tradeoffs": fabricated_tradeoffs,
+        "resolved_ok": resolved_ok,
         "false_positive": bool(_clean_invents(block)) if clean else False,
     }

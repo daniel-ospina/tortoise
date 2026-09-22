@@ -401,13 +401,13 @@ Test against at minimum:
 
 | New Endpoint | Method | Purpose | Inputs | Outputs | Auth |
 |-------------|--------|---------|--------|---------|------|
-| `/v1/register` | POST | Self-service key provisioning (creates Supabase user ONLY — key comes from the existing webhook provisioning path) | email, password (or OAuth token) | `{status: "pending"\|"provisioned"\|409, team_id?}` | None (creates account) |
+| `/v1/register` | POST | Self-service key provisioning (creates Supabase user ONLY — key comes from the existing webhook provisioning path) | email, password (or OAuth token) | `{status: "pending"\|"provisioned"\|409, org_id?}` | None (creates account) |
 | `/v1/onboarding/github/connect` | POST | Initiate GitHub OAuth | `{org, redirect_uri}` | `{auth_url}` | Bearer `tt_` |
 | `/v1/onboarding/github/callback` | GET | GitHub OAuth callback | `code`, `state` | redirect to `{BASE_APP_URL}/welcome?github=connected` | None (OAuth state param) |
 | `/v1/onboarding/github/status` | GET | Check GitHub connection status (agent poll) | — | `{connected, repos_count, org, error?}` | Bearer `tt_` |
 | `/v1/index/github` | POST | Start background indexing | `{org, repo?}` | `{job_id, status: "started"}` | Bearer `tt_` |
 | `/v1/index/github/{job_id}` | GET | Poll indexing status | — | `{job_id, status, points_created, progress}` | Bearer `tt_` |
-| `/internal/demo` (existing) | POST | Create/backfill demo graph (sentinel-idempotent) | `{team_id}` | `{status: "created"\|"already_seeded"}` | Internal key |
+| `/internal/demo` (existing) | POST | Create/backfill demo graph (sentinel-idempotent) | `{org_id}` | `{status: "created"\|"already_seeded"}` | Internal key |
 | `/v1/onboarding/state` | GET | Get onboarding state | — | `{onboarding: {...}}` | Bearer `tt_` |
 | `/v1/onboarding/state` | PATCH | Update onboarding state (per-key last-write-wins) | `{step: value}` | `{onboarding: {...}}` | Bearer `tt_` |
 | `/v1/onboarding/state/progress` | GET | Client-safe progress (no tokens/raw internals) | — | `{steps_completed, completed_at, github_connected, ...}` | Bearer `tt_` (page-held key) |
@@ -453,7 +453,7 @@ The current page calls `POST /internal/provision` via Supabase edge function. Fo
 | Event | Fires when | Properties |
 |-------|-----------|------------|
 | `signup_completed` | **Welcome page fires this after successful Supabase auth** (the real signup path is Supabase Auth — NOT only `/v1/register`, which is an API-only path) | `{method: "email"\|"github", timestamp}` |
-| `key_provisioned` | API key generated and displayed | `{team_id, elapsed_from_signup_s}` |
+| `key_provisioned` | API key generated and displayed | `{org_id, elapsed_from_signup_s}` |
 | `artifact_copied` | User clicks "Copy" on welcome page | `{harness: "claude"\|"codex"\|"cursor"\|"pi", section: "config"\|"prompt"\|"both"}` |
 | `agent_connected` | Agent successfully calls `tortoise_health` (MCP) | `{harness, elapsed_from_copy_s}` |
 | `question_answered` | Agent records an answer via `tortoise_onboarding_answer` (yes AND no) | `{question_id, answer: "yes"\|"no"}` |
@@ -531,7 +531,7 @@ The endpoint must:
 2. **Rate limit per-IP and per-email** (e.g., 10/hour) — abuse protection; return 429 with Retry-After. Note in the plan: without this, the public endpoint is an open signup/email-bombing surface.
 3. Call Supabase Admin API to create user (`supabase.auth.admin.createUser`) — **only if `after_user_created` does not already fire for admin-created users** (verify; if it does, createUser alone triggers provisioning)
 4. **Return the key from the existing provisioning path** — poll the Supabase `user_teams` row (or the registry graph) for the APIKey the webhook created; do NOT generate a new key and do NOT re-run `/internal/provision`
-5. Return `{status: "provisioned", api_key, team_id, graph_name}` once provisioned, or `{status: "pending", team_id?}` while the webhook is still running (the welcome page already polls — keep the polling contract; see Task 11 for the "provisioning in progress" state)
+5. Return `{status: "provisioned", api_key, org_id, graph_name}` once provisioned, or `{status: "pending", org_id?}` while the webhook is still running (the welcome page already polls — keep the polling contract; see Task 11 for the "provisioning in progress" state)
 6. If the user already exists: return **409** `{message: "already registered"}` — never re-expose the key (resolves the plan's earlier contradiction between "returns the existing key" and "don't re-expose"; 409 + no key wins)
 
 **Supabase credential + RLS analysis (plan-review P1):** hosted_api.py has ZERO Supabase connectivity today. Adding `/v1/register` introduces a `SUPABASE_SERVICE_ROLE_KEY` (or `SUPABASE_ADMIN_API_KEY`) secret — document it in the env section (`.env.example`) and the security section: service-role key must be Fly-secret-only (never client-side), and the `user_teams` table needs RLS policies reviewed (currently the edge function writes it server-side; if `/v1/register` reads it, reads must be scoped to the authenticated user or internal-only).
@@ -574,13 +574,13 @@ Manual step (document in `docs/epics/2026-08-07-hosted-onboarding-235/`):
 
 ```python
 @app.post("/v1/onboarding/github/connect")
-async def github_connect(body: GitHubConnectRequest, team: dict = Depends(get_current_team)):
+async def github_connect(body: GitHubConnectRequest, team: dict = Depends(get_current_org)):
     """Generate GitHub OAuth URL for the user to authorize."""
     state = secrets.token_urlsafe(32)
-    # Store state → team_id mapping in the SHARED REGISTRY-GRAPH STATE STORE
+    # Store state → org_id mapping in the SHARED REGISTRY-GRAPH STATE STORE
     # (Task 11), NOT in-memory: Fly runs multiple replicas and in-memory
     # state would 401 every callback that lands on a different replica.
-    set_state("github_oauth", {state: team["team_id"]}, ttl_minutes=15)
+    set_state("github_oauth", {state: team["org_id"]}, ttl_minutes=15)
     auth_url = (
         f"https://github.com/login/oauth/authorize"
         f"?client_id={GITHUB_CLIENT_ID}"
@@ -700,7 +700,7 @@ Use asyncio background tasks (no Celery/RQ — keep it simple for v1):
 _INDEX_JOBS: dict[str, dict] = {}  # job_id → {status, progress, result}
 
 @app.post("/v1/index/github")
-async def start_indexing(body: GitHubIndexRequest, team: dict = Depends(get_current_team)):
+async def start_indexing(body: GitHubIndexRequest, team: dict = Depends(get_current_org)):
     job_id = f"idx_{uuid.uuid4().hex[:12]}"
     _INDEX_JOBS[job_id] = {"status": "started", "progress": 0, "points_created": 0}
     asyncio.create_task(_run_indexing(job_id, team, body.org))
@@ -752,9 +752,9 @@ The acceptance requires Operators (supports/contradicts/mitigates). The seed mus
 # On /internal/demo (existing): already sentinel-idempotent — keep.
 # New: the MCP tool / Q4 step verifies, does not recreate:
 @app.get("/v1/onboarding/demo/status")
-async def demo_status(team: dict = Depends(get_current_team)):
+async def demo_status(team: dict = Depends(get_current_org)):
     """Return demo-graph presence + stats. Sentinel check, no writes."""
-    sdk = _make_sdk(namespace=team["team_id"])
+    sdk = _make_sdk(namespace=team["org_id"])
     has_sentinel = sdk._get_proj().g.query(
         "MATCH (p:Point {id: '_demo_sentinel'}) RETURN p.id"
     ).result_set
@@ -777,7 +777,7 @@ Wraps the verify/backfill flow; returns graph stats so the agent can describe wh
 
 ### Task 11: Onboarding State Tracking
 
-**Intent:** Track what onboarding steps a user has completed so the agent prompt and welcome page can show progress. Store state as **properties on the Team node in the registry graph** (NOT Supabase — hosted_api.py has zero Supabase connectivity; `get_current_team` reads Team/APIKey from the FalkorDB registry graph, so state must live there too).
+**Intent:** Track what onboarding steps a user has completed so the agent prompt and welcome page can show progress. Store state as **properties on the Team node in the registry graph** (NOT Supabase — hosted_api.py has zero Supabase connectivity; `get_current_org` reads Team/APIKey from the FalkorDB registry graph, so state must live there too).
 **Acceptance:** `GET /v1/onboarding/state` returns current onboarding state for the team. `PATCH /v1/onboarding/state` updates individual keys with **per-key last-write-wins** semantics. State is a flat JSON object: `{github_connected, github_indexed, session_recording, demo_verified, team_interested, q1..q5, q1a, completed_at}`. A default state exists for teams that have never called the endpoint. The MCP tools update state automatically.
 **Files:**
 - Modify: `tortoise/hosted_api.py` — add state endpoints (registry-graph backed)
@@ -790,7 +790,7 @@ Wraps the verify/backfill flow; returns graph stats so the agent can describe wh
 # Read: MATCH (t:Team {id: $id}) RETURN t.onboarding_state
 # Write: MATCH (t:Team {id: $id}) SET t.onboarding_state = $state
 #   (state serialized as a JSON string property; same registry SDK path
-#    get_current_team already uses — sdk._get_registry())
+#    get_current_org already uses — sdk._get_registry())
 ```
 
 - **Default state:** teams with no `onboarding_state` property get the default `{github_connected: false, github_indexed: false, session_recording: false, demo_verified: false, team_interested: null, q1..q5: null, completed_at: null}` — the GET endpoint returns the default (never 404). Test: `test_default_state_returned`.
@@ -801,11 +801,11 @@ Wraps the verify/backfill flow; returns graph stats so the agent can describe wh
 
 ```python
 @app.get("/v1/onboarding/state")
-async def get_onboarding_state(team: dict = Depends(get_current_team)):
-    return {"onboarding": read_state(team["team_id"])}
+async def get_onboarding_state(team: dict = Depends(get_current_org)):
+    return {"onboarding": read_state(team["org_id"])}
 
 @app.patch("/v1/onboarding/state")
-async def update_onboarding_state(body: OnboardingStateUpdate, team: dict = Depends(get_current_team)):
+async def update_onboarding_state(body: OnboardingStateUpdate, team: dict = Depends(get_current_org)):
     # Single {key: value} pair; merge into Team node property (per-key LWW)
     ...
 ```
@@ -970,7 +970,7 @@ Analytics events are written as `operation = event_name` rows with `properties` 
 
 **Step 2: Instrument hosted API**
 
-Add a helper `_track_event(team_id, event_name, properties)` built on the existing `AuditLogger` (`_async_audit` pattern). Call it at:
+Add a helper `_track_event(org_id, event_name, properties)` built on the existing `AuditLogger` (`_async_audit` pattern). Call it at:
 - `tortoise_onboarding_complete` / state `completed_at` set → `onboarding_complete` (**server-side ONLY — single producer**; see Step 3 — the client never fires this event)
 - `POST /v1/team/keys` (key displayed) → `key_provisioned`
 - `POST /v1/onboarding/github/callback` → `github_connected`
@@ -1001,7 +1001,7 @@ Add client-side event tracking (sent to the rate-limited `/v1/analytics/events` 
 **Intent:** Register all new onboarding MCP tools in the **canonical tool registry** so they're available to the agent when it connects. The current MCP architecture is registry-driven (depends on **#454 canonical tool registry** — the branch base; `tortoise/tool_registry.py` exists at 678f694 with 58 `ToolDefinition` entries, 4 HTTP-excluded, registered programmatically via `FastMCPAdapter`). New tools are ONE `ToolDefinition` entry in `tortoise/tool_registry.py` + a handler function in `tortoise/mcp_server.py` — both MCP and REST surfaces derive from the registry automatically.
 
 **Architecture rules (plan-review P1-1 — corrections to the earlier draft):**
-- Hosted tools run **IN-PROCESS** against the team-scoped SDK (`_get_team_sdk()` — team resolved from the `TeamResolutionMiddleware` ContextVar, transport mode checked). There is **NO HTTP round-trip** from a tool back into the hosted API: no `make_request`, and NO passing `Authorization: Bearer tt_...` headers inside tool handlers — that would create a self-referential HTTP loop (the MCP server IS the hosted API process; the token is already resolved by middleware before the tool runs).
+- Hosted tools run **IN-PROCESS** against the team-scoped SDK (`_get_org_sdk()` — team resolved from the `TeamResolutionMiddleware` ContextVar, transport mode checked). There is **NO HTTP round-trip** from a tool back into the hosted API: no `make_request`, and NO passing `Authorization: Bearer tt_...` headers inside tool handlers — that would create a self-referential HTTP loop (the MCP server IS the hosted API process; the token is already resolved by middleware before the tool runs).
 - Endpoints that are genuinely REST-facing (OAuth callback, status polling, analytics sink) stay in `hosted_api.py`; the tools call the same in-process logic directly.
 
 **Acceptance:** 10 new MCP tools are registered and discoverable: `tortoise_onboarding_github_connect`, `tortoise_onboarding_github_status`, `tortoise_onboarding_github_index`, `tortoise_onboarding_demo_create`, `tortoise_onboarding_session_recording`, `tortoise_onboarding_state`, `tortoise_onboarding_answer`, `tortoise_onboarding_complete`, `tortoise_onboarding_health`, `tortoise_context`. Each has a docstring, typed inputs, and error handling. Tool-count totals: **58 existing registry entries (54 HTTP-visible — `tortoise_ingest_corpus`, `tortoise_team_create`, `tortoise_index_sessions`, `tortoise_backfill_v25` are HTTP-excluded) + 10 new = 68 registry entries / 64 HTTP-visible**. No `tortoise_onboarding_create_team` (Q5 is a teaser; `tortoise_team_create` exists and stays HTTP-excluded for the privilege boundary).
@@ -1012,7 +1012,7 @@ Add client-side event tracking (sent to the rate-limited `/v1/analytics/events` 
 
 **Step 1: Add ToolDefinition entries**
 
-Each new tool is a `ToolDefinition` in `tortoise/tool_registry.py` (name, description, annotations, `http_policy`, `sdk_method` or `handler_override`, optional `rest_spec`). Handlers live in `mcp_server.py` and run in-process via `_get_team_sdk()` — no HTTP:
+Each new tool is a `ToolDefinition` in `tortoise/tool_registry.py` (name, description, annotations, `http_policy`, `sdk_method` or `handler_override`, optional `rest_spec`). Handlers live in `mcp_server.py` and run in-process via `_get_org_sdk()` — no HTTP:
 
 ```python
 def tortoise_onboarding_github_connect(org: str, redirect_uri: str | None = None) -> dict:
@@ -1029,7 +1029,7 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
 
 def tortoise_onboarding_demo_create() -> dict:
     """Verify (or backfill) the seeded demo graph. Never deletes an existing seed."""
-    ...  # in-process: sentinel check via _get_team_sdk()
+    ...  # in-process: sentinel check via _get_org_sdk()
 
 def tortoise_onboarding_session_recording(enabled: bool) -> dict:
     """Enable or disable automatic session recording."""
@@ -1058,7 +1058,7 @@ def tortoise_context() -> dict:
 
 **Step 2: Auth is handled by middleware — do NOT pass Bearer headers inside tools**
 
-In the hosted deployment the request is already authenticated by `TeamResolutionMiddleware` before any tool runs; handlers resolve the team-scoped SDK via `_get_team_sdk()`. Tool handlers must fail closed if the transport mode / team is unset (mirror the existing registered tools' fail-closed pattern). No tool constructs an HTTP call to the same app.
+In the hosted deployment the request is already authenticated by `TeamResolutionMiddleware` before any tool runs; handlers resolve the team-scoped SDK via `_get_org_sdk()`. Tool handlers must fail closed if the transport mode / team is unset (mirror the existing registered tools' fail-closed pattern). No tool constructs an HTTP call to the same app.
 
 **Step 3: Run MCP self-test**
 
@@ -1233,7 +1233,7 @@ Phase 1 design artifacts (Tasks 1–6) inform but do not gate Phase 2. Build tas
 - **P0-B — GitHub OAuth resumption:** Task 4's prompt adds an "await authorization" step after Q1=yes — display auth_url, user authorizes + confirms, agent polls `tortoise_onboarding_github_status` (5s, 3-min timeout; timeout records `github_connected: false, github_error: "oauth not completed"`). E2E-3 journey map includes the poll; integration test `test_index_before_oauth_returns_error` covers indexing-before-OAuth.
 
 **P1 fixes**
-1. **Task 15 registry rewrite:** tools are `ToolDefinition` entries in `tortoise/tool_registry.py` (58 entries, 4 `http_policy=False` → 54 HTTP-visible), registered via `FastMCPAdapter`; hosted tools run IN-PROCESS via `_get_team_sdk()` — no `make_request`, no Bearer headers inside handlers. Declared the #454 dependency (registry at 678f694). All tool counts corrected (56→58 registry / 54 HTTP-visible; +10 new = 68 registry / 64 HTTP-visible; pre-deploy gate and E2E-8 updated; E2E-8 now says "all HTTP-visible tools").
+1. **Task 15 registry rewrite:** tools are `ToolDefinition` entries in `tortoise/tool_registry.py` (58 entries, 4 `http_policy=False` → 54 HTTP-visible), registered via `FastMCPAdapter`; hosted tools run IN-PROCESS via `_get_org_sdk()` — no `make_request`, no Bearer headers inside handlers. Declared the #454 dependency (registry at 678f694). All tool counts corrected (56→58 registry / 54 HTTP-visible; +10 new = 68 registry / 64 HTTP-visible; pre-deploy gate and E2E-8 updated; E2E-8 now says "all HTTP-visible tools").
 2. **Task 11 state store:** onboarding state is properties on the Team node in the registry graph (hosted_api has zero Supabase connectivity); the "FalkorDB OR Supabase" OR in the Integration Surface Map (row 8) resolved to registry-graph-only; per-key last-write-wins PATCH semantics + default-state and concurrent-PATCH tests added.
 3. **Task 10 / Q4 demo reconciliation:** kept signup-time seeding (tenant-provision edge function → `/internal/demo`, sentinel-idempotent); Q4 is now "show me / verify the demo graph" (no delete-and-overwrite); Operator-node creation made explicit (≥3 operators: supports/contradicts/mitigates); added a task step to fix the edge function's `/v1/internal/demo` → `/internal/demo` path mismatch.
 4. **Q3 session recording:** capture contract defined — prompt files conversation end via `POST /v1/sessions` when `session_recording=true`; user-facing wording scoped ("Tortoise will remember this agent's sessions") with a per-harness note in Task 13; E2E-6 acceptance aligned.

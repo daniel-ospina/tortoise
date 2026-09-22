@@ -1,7 +1,7 @@
-"""Pinned why-layer judge — ``judge_why_suite_v1`` (issue #2100, epic #2080).
+"""Pinned why-layer judge — ``judge_why_suite_v2`` (issue #2100, epic #2080).
 
 The zero-dependency first increment of the why-suite (issue Indicator 2):
-the pinned judge prompt is a STATIC FILE (``judge_why_suite_v1.txt``) whose
+the pinned judge prompt is a STATIC FILE (``judge_why_suite_v2.txt``) whose
 sha256 is folded into the protocol pin.  Nothing in this module depends on
 W4-a's assembly — E2E-1's grading arm consumes the pin as a FILE ARTIFACT,
 so the dependency graph stays acyclic (W3-b → judge prompt; W4-a E2E-1 →
@@ -14,7 +14,7 @@ The judge protocol:
   DETERMINISTIC graders in ``grading.py`` — the pinned rubric implemented
   mechanically (that is what makes rates deterministic across runs).
 * ``judge_pin`` (recorded in every published baseline + receipt) =
-  ``judge_why_suite_v1:<sha256>`` where the hash covers the ENTIRE protocol
+  ``judge_why_suite_v2:<sha256>`` where the hash covers the ENTIRE protocol
   SURFACE: the static prompt file + the mechanical rubric code
   (``grading.py``) + the metrics/verdict semantics (``schema.py`` — the
   denominators, floors, and verdict comparisons a grader edit would
@@ -36,7 +36,7 @@ from pathlib import Path
 
 # The static prompt file is the canonical protocol artifact (module-relative
 # — never a hardcoded absolute path).
-JUDGE_PROMPT_PATH = Path(__file__).resolve().parent / "judge_why_suite_v1.txt"
+JUDGE_PROMPT_PATH = Path(__file__).resolve().parent / "judge_why_suite_v2.txt"
 # The rubric that implements the prompt is CODE — a grader edit would change
 # grading semantics under an unchanged prompt, so the code is folded into the
 # same protocol digest (review P1, #2100).
@@ -47,7 +47,7 @@ _SCHEMA_PATH = Path(__file__).resolve().parent / "schema.py"
 
 # Protocol name (shared with E2E-1's grading arm — the single source of
 # truth for the pinned judge version).
-JUDGE_PROTOCOL = "judge_why_suite_v1"
+JUDGE_PROTOCOL = "judge_why_suite_v2"
 
 
 def _sha256_hex(payload: bytes) -> str:
@@ -80,7 +80,7 @@ def protocol_sha256() -> str:
 
 def judge_pin() -> str:
     """The run/baseline pin:
-    ``judge_why_suite_v1:<sha256-over-(prompt+grading+schema)>``."""
+    ``judge_why_suite_v2:<sha256-over-(prompt+grading+schema)>``."""
     return f"{JUDGE_PROTOCOL}:{protocol_sha256()}"
 
 
@@ -94,7 +94,7 @@ def assert_prompt_pinned() -> str:
     success.
 
     NOTE: when the protocol is deliberately revised, bump the protocol name
-    to ``judge_why_suite_v2`` (never silently re-pin v1) and re-bless with
+    to ``judge_why_suite_v3`` (never silently re-pin v2) and re-bless with
     ``--bless-protocol``.
     """
     expected = protocol_sha256()
@@ -104,12 +104,14 @@ def assert_prompt_pinned() -> str:
             f"pinned {PINNED_PROTOCOL_SHA256[:16]}… (prompt/grading.py/"
             "schema.py edit?) — a judge-protocol change requires a NEW "
             "protocol name + --bless-protocol, never a silent edit of "
-            "judge_why_suite_v1"
+            "judge_why_suite_v2"
         )
     return judge_pin()
 
 
 # ── The pinned digest (protocol anchor — do not edit without re-pinning) ───
+# v2 (issue #2490): superseded family graded as RESOLVED — re-pinned via
+# the --bless-protocol ritual with a written justification.
 # Regenerate with: uv run python -c \
 #   "import sys; sys.path.insert(0,'tests'); from eval.why_suite import judge; print(judge.protocol_sha256())"
-PINNED_PROTOCOL_SHA256 = "e71d9ecac022f7cd64ed41c17c07b6f102c7704b66b90e395544e166f8409299"
+PINNED_PROTOCOL_SHA256 = "71a47aa6ca3c2b3157547331e779d5473ef7ff6fbddb6e9c994960242c4f44e1"

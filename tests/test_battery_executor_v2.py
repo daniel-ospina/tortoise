@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -28,15 +27,14 @@ from battery.runner.run import RunConfig, run_battery
 
 @pytest.fixture(autouse=True, scope="module")
 def _force_embedded_lane() -> None:
-    saved = os.environ.pop("TORTOISE_DB_URI", None)
-    saved_path = os.environ.pop("TORTOISE_DB_PATH", None)
-    try:
-        yield
-    finally:
-        if saved is not None:
-            os.environ["TORTOISE_DB_URI"] = saved
-        if saved_path is not None:
-            os.environ["TORTOISE_DB_PATH"] = saved_path
+    # #2062/#2084 pattern (test_battery_seed_ingest precedent): bare
+    # MonkeyPatch auto-restores both vars at module teardown — the guard's
+    # bare-instance check requires the real call in this body.
+    mp = pytest.MonkeyPatch()
+    mp.delenv("TORTOISE_DB_URI", raising=False)
+    mp.delenv("TORTOISE_DB_PATH", raising=False)
+    yield
+    mp.undo()
 
 
 # ── runner-level scripted-caller stream fixtures ────────────────────────

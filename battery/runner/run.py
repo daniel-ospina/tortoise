@@ -11,12 +11,16 @@ Exit code computed AFTER all episode artifacts + summary are written (exit
 
 run_mode honesty (PR #2341 review round 2, P2): the mock|real discriminator
 derives from the EXECUTOR actually used, never from arms.yaml adapter
-presence. Until the real emitting executor is wired (Task 9) the stock
-episode-log seam is a no-op, so hermetic/fixed-model runs are labeled mock;
-real mode requires an explicit ``config.executor == "real"`` request AND an
-active real executor seam (the pre-flight gate refuses the request without
-one). The resolved run-level mode is recorded in summary.json (run.run_mode)
-so the CLI report never re-infers it from artifact presence.
+presence. The mock lane is the seeded mock trajectory + the stock no-op
+``_episode_log`` seam (hermetic/fixed-model runs are labeled mock). Real
+mode requires an explicit ``config.executor == "real"`` request and is
+refused while the real emitting executor is unwired
+(``_REAL_EXECUTOR_WIRED`` — Task 9 wired the live executor, f54f212a6). A
+hermetic real-mode run is real-labeled by construction and supplies its
+event log through the explicit ``RunConfig.emission_seam`` (#2703), which
+stamps ``provenance.emission_seam`` on the episodes it supplies. The resolved
+run-level mode is recorded in summary.json (run.run_mode) so the CLI report
+never re-infers it from artifact presence.
 """
 from __future__ import annotations
 
@@ -41,6 +45,11 @@ from battery.config import (
 )
 from battery.enums import EpOutcome, ExitCode, ModelCallOutcome, Tier
 from battery.exceptions import ConfigError, IsolationBreach  # noqa: F401
+from battery.recall.matcher import TRIGGER_POPULATION, scenario_probes
+from battery.recall.prepass import (
+    build_matched_recall_block,
+    capture_factual_recall,
+)
 from battery.report.assemble import (
     write_family_files,
     write_recall_file,
@@ -58,12 +67,23 @@ from battery.runner.artifacts import (
 from battery.runner.emit import MANDATORY
 from battery.runner.episode import EpisodeResult, EpisodeTracker, TurnRecord  # noqa: F401
 from battery.runner.executor import (
+    SURFACING_INTENTS,
+    control_verdict_event,
+    control_verdict_from_events,
     envelope_events,
     execute_tvde_episode,
     state_events,
     surfacing_event,
 )
-from battery.runner.model_calls import RealModelCaller, UsageRecordingCaller
+from battery.runner.model_calls import (
+    RealModelCaller,
+    UsageRecordingCaller,
+    aggregate_cost_basis,
+)
+from battery.runner.retrieval_preflight import (
+    HybridRetrievalUnavailable,
+    require_hybrid_retrieval,
+)
 from battery.runner.scorers import (
     HARNESS_METRIC_IDS,
     HarnessScorer,
@@ -92,6 +112,8 @@ class RunConfig:
                  scorer_specs: list[str] | None = None, max_episodes: int | None = None,
                  db_path: str | None = None, executor: str = "mock",
                  caller_factory: Callable | None = None,
+                 emission_seam: Callable | None = None,
+                 truth_judge: Callable | None = None,
                  sessions: int = 1):
         self.config_dir = Path(config_dir) if config_dir else DEFAULT_CONFIG_DIR
         self.out_dir = Path(out_dir) if out_dir else DEFAULT_OUT_DIR
@@ -102,10 +124,12 @@ class RunConfig:
         self.max_episodes = max_episodes
         self.db_path = db_path
         #: Executor-mode flag (mock|real, PR #2341 review round 2, P2).
-        #: mock (default) = the seeded mock trajectory + no-op emission seam
-        #: (hermetic/fixed-model runs are labeled mock). real = an explicit
-        #: real-executor request — run_battery refuses it unless the real
-        #: emission seam is active (the real emitting executor is Task 9).
+        #: mock (default) = the seeded mock trajectory + the stock no-op
+        #: emission seam (hermetic/fixed-model runs are labeled mock). real =
+        #: an explicit real-executor request — run_battery refuses it while
+        #: the real emitting executor is unwired (``_REAL_EXECUTOR_WIRED``;
+        #: Task 9 wired it). A supplied ``emission_seam`` swaps the live
+        #: executor for the hermetic path and keeps the real label.
         self.executor = executor
         # --mock sets arms=[mock]; --arms takes precedence when both given.
         self.arms = list(arms) if arms else (["mock"] if mock else ["mock"])  # noqa: RUF034
@@ -114,6 +138,30 @@ class RunConfig:
         #: None => the pinned real caller (RealModelCaller) is built (real
         #: mode is spend-gated + fail-closed without OPENROUTER_API_KEY).
         self.caller_factory = caller_factory
+        #: Hermetic EMISSION seam (#2703, decision A). When set, a real-mode
+        #: run BYPASSES the live executor: the seeded mock trajectory
+        #: supplies outcomes/turns and this callable supplies the episode's
+        #: schema-v1.1 event log — signature (scenario, *, episode_seed,
+        #: arm_id, run_mode) -> list[dict]. The artifact is still labeled
+        #: real (the executor mode is real and the arm is pinned), so the
+        #: two-phase emitter gate (build_run_artifact vs the scorer-seam
+        #: expected set) is exercised end-to-end with ZERO network/spend.
+        #: Instance-scoped ON PURPOSE (never a module-global identity flip):
+        #: a leaked stub must not be able to downgrade ANOTHER test's real
+        #: run. Production never sets it — the wired live executor is the
+        #: only production real path. Episodes whose log the seam supplied
+        #: (real mode only) stamp ``provenance.emission_seam = "hermetic"``
+        #: so a fabricated log is never confusable with a live-spend one.
+        self.emission_seam = emission_seam
+        #: #2740 truth-judge seam: the semantic comparator that turns the
+        #: arm's DECLARED envelope position into R3 `outcomes` / R5
+        #: `update_correct_direction` / R2 `coverage_subscore`. Injectable
+        #: for hermetic tests; ``None`` (default) keeps those fields gapped
+        #: so an unconfigured run honestly reports `insufficient_n` rather
+        #: than fabricating correctness. Production must pass a validated,
+        #: metered judge (battery/judge/) — never the mock judge, whose
+        #: verdicts are for validation only.
+        self.truth_judge = truth_judge
         #: Task 10 stream-mode: sessions > 1 runs each scenario across that
         #: many sequential sessions over the SAME per-scenario graph (no
         #: reset mid-stream; setup happens once per arm at arm-init). Each
@@ -128,12 +176,13 @@ def arm_run_mode(config: RunConfig, arm) -> str:
     """mock|real discriminator (PR #2341 review round 2, P2): the mode
     derives from the EXECUTOR actually used, never from arms.yaml adapter
     presence alone. mock when the adapter is the MockArm (model_id
-    mock-agent) OR the real executor seam is not active — until Task 9 the
-    seeded mock trajectory + no-op emission seam are the ONLY executor, so
-    hermetic/fixed-model runs (model_id="fixed" adapters) are labeled mock;
-    real only when config.executor explicitly requested real mode (the
-    pre-flight gate in run_battery refuses that request without an active
-    real emission seam)."""
+    mock-agent) OR real mode was not explicitly requested (the mock lane's
+    seeded trajectory + stock emission seam). real only when
+    ``config.executor == "real"`` and the pre-flight accepted the request —
+    it refuses while the real emitting executor is unwired
+    (``_REAL_EXECUTOR_WIRED``; Task 9 wired it). Seam presence is NOT a
+    discriminator: a hermetic ``emission_seam`` run is real-labeled and
+    swaps the live executor for the seam (run_battery's episode loop)."""
     if getattr(arm, "model_id", "") == "mock-agent":
         return "mock"
     if config.executor != "real":
@@ -204,7 +253,18 @@ _DEFAULT_PLAN = ({"turn": 1, "tokens": 50, "tool_calls": 0,
                   "re_derivations": 0},)
 
 
-def _run_with_deadline(fn, seconds: float = 240.0):
+#: Per-episode wall-clock cap on the REAL lane (hang protection, not a
+#: performance gate). MEASURED basis at 240.0 (attempt
+#: /tmp/run1416-g/20260909-201340-991151, 77 inter-artifact deltas):
+#: median 135 s, p90 193 s — i.e. the old cap sat AT the ~p90 and killed
+#: legitimately-running long-prompt episodes (5/78, 6.4% of the E2E-1.1
+#: exclusion budget, purely by timing). 480 s clears the measured p90 with
+#: ~2.5x headroom while still bounding a genuinely hung episode (the
+#: 0%-CPU hang this cap exists for) to 8 minutes of one run's wall clock.
+_REAL_EPISODE_DEADLINE_S = 480.0
+
+
+def _run_with_deadline(fn, seconds: float = _REAL_EPISODE_DEADLINE_S):
     """Run ``fn`` under a wall-clock deadline in a worker thread. A hung
     call (0% CPU, no timeout firing — the #1416 real run hit this) must
     become an honest TimeoutError -> FAILED + exclusion, never a silent
@@ -240,9 +300,6 @@ def _run_with_deadline(fn, seconds: float = 240.0):
 
 
 #: #1416: per-episode wall-clock deadline (seconds) for the real executor.
-_REAL_EPISODE_DEADLINE_S = 240.0
-
-
 def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
                           episode_seed: int, tracker: EpisodeTracker,
                           ) -> tuple[list[ModelCallOutcome], int, list[dict],
@@ -331,15 +388,25 @@ def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
     rows = getattr(caller, "rows", [])
     # #1416: token attribution consumes the caller rows a turn actually made
     # (1 call, or 1+ repairs) so rows stay aligned after corrective repairs.
+    # Review #2717 P2: an injected caller_factory may hand back a SHARED
+    # caller whose row list already holds earlier episodes — slice from this
+    # episode's start, never from 0.
+    _rows_start = len(rows) - sum(ep.turn_calls) if ep.turn_calls else 0
+    _rows_start = max(0, _rows_start)
     _row_off = 0
     for i, turn in enumerate(ep.turns):
         n = ep.turn_calls[i] if i < len(ep.turn_calls) else 1
-        seg = rows[_row_off:_row_off + n]
+        seg = rows[_rows_start + _row_off:_rows_start + _row_off + n]
         _row_off += n
         tokens = int(sum(getattr(r, "completion_tokens", 0) or 0
                          for r in seg))
-        tracker.add_turn(role="agent", content=turn["content"],
-                         tokens=tokens, outcome=ModelCallOutcome.OK)
+        tracker.add_turn(
+            role="agent",
+            content=(turn["content"] if not turn.get("repaired")
+                     else f'{turn["content"]}\n\n[[repair]] '
+                          f'{turn.get("repair_content", "")}'),
+            tokens=tokens, outcome=ModelCallOutcome.OK,
+            phase=turn.get("phase", ""), repaired=bool(turn.get("repaired")))
 
     # decide writes: surfacing intents against a closed-set claim; a
     # tool_event is emitted ONLY when the product returned a real ref
@@ -354,7 +421,7 @@ def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
     write_failed = False
     for idx, env in enumerate(ep.envelopes):
         for intent in env.intents:
-            if intent not in ("register_conflict", "file_nand"):
+            if intent not in SURFACING_INTENTS:
                 # Schema-bounded verbs the executor does not route to a
                 # product write this round: declared, so traced as unfiled
                 # (never silently dropped, never a fake ref).
@@ -418,6 +485,25 @@ def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
                                  "reason": "no-op"}})
         if write_failed:
             break
+
+    # #2702: R1 FP-control verdict for a benign-control episode (bct-*).
+    # The control verdict is DERIVED here because the executor is the only
+    # component that knows its OWN tool channel ran: every declare-write
+    # loop iteration above either filed a surfacing (emission-loss-proof
+    # tool_event with a real product ref) or recorded why it did not
+    # (intent_unfiled). For a valid, non-excluded control episode the loop
+    # completed, so a missing surfacing is PROVABLY the arm not surfacing —
+    # never a lost emission and never a fabricated 0.0. A scenario with a
+    # planted ¬A pair (ct-*) is NEVER control-population and never gets a
+    # verdict. The probe's reader (`_control_verdict`) accepts only an
+    # explicit bool, and the expected-set gate only demands the field when
+    # this entry exists, so a verdict-less control keeps the no-data
+    # sentinel (insufficient_n).
+    if not write_failed:
+        from battery.runner.probe_scorer import episode_population
+        if episode_population(scenario) == "control":
+            events.append(control_verdict_event(
+                false_positive=control_verdict_from_events(events)))
 
     # state-terminal: decide_cycles harness-side; ep_outcome + contested
     # from the product terminal table where the arm exposes it (a4), else
@@ -537,19 +623,20 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
 
     # ── real-executor pre-flight (PR #2341 review rounds 2+3, P2) ────────
     #    run_mode derives from the EXECUTOR actually used, never from
-    #    arms.yaml presence: until the real emitting executor is wired
-    #    (Task 9), the stock episode-log seam is a no-op — a real label
-    #    over a mock executor + empty event log would pass the phase-2
-    #    emitter gate by construction. Requesting real mode without an
-    #    active real emission seam fails closed BEFORE the attempt dir (no
-    #    orphaned artifacts). Hermetic tests activate the seam by stubbing
-    #    run._episode_log; the mock lane (the default) never needs it.
+    #    arms.yaml presence: a real label over a mock executor + empty
+    #    event log would pass the phase-2 emitter gate by construction.
+    #    Requesting real mode while the real emitting executor is UNWIRED
+    #    fails closed BEFORE the attempt dir (no orphaned artifacts) — the
+    #    post-Task-9 spelling of "no active real emission seam" is
+    #    ``_REAL_EXECUTOR_WIRED`` (f54f212a6 wired the live executor; the
+    #    pre-Task-9 gate keyed on the stock ``_episode_log`` identity, which
+    #    the explicit ``RunConfig.emission_seam`` superseded — #2703).
     #    ROUND 3 (P2, both reviewers): the gate fails closed on the REQUEST,
     #    never on the requested arm ids. A real request is refused whenever
     #    (a) --mock is set (it forces every arm onto the MockArm), (b) NO
     #    requested arm can resolve to a real-mode slot (default arms are
     #    ["mock"]; an all-mock arm set is the mock lane by construction), or
-    #    (c) the emission seam is still the stock no-op. The round-2 gate
+    #    (c) the real emitting executor is not wired. The round-2 gate
     #    keyed on ``any(a != "mock")`` AND ``not config.mock``, so a real
     #    request with default/all-mock arms (or mock=True) skipped the
     #    ConfigError and silently ran the mock lane rc=0 — a bypass.
@@ -578,10 +665,11 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
         # ── model-pin pre-flight (#2292 Task 5; coordination n10) ──────
         #    A real request must resolve a CONCRETE pinned model for every
         #    requested real arm: the flash-class placeholder sentinel, an
-        #    unresolvable pin, a class-level model_id='fixed' sentinel
-        #    (battery/arms/*.py — the Task-9 parameterization seam), or a
-        #    temperature mismatch across requested real arms each refuse
-        #    BEFORE the attempt dir (zero orphaned artifacts). Additive
+        #    unresolvable pin, or a temperature mismatch across requested
+        #    real arms each refuse BEFORE the attempt dir (zero orphaned
+        #    artifacts). The class-level 'fixed' sentinel is NO LONGER a
+        #    gate: Task 9 parameterizes the arm INSTANCE from arms.yaml
+        #    (see _resolve_arm), so the check was unreachable (#2746). Additive
         #    INSIDE the real-executor gate block — #2284 Task 9 merges
         #    later over the same block and consumes the pinned values
         #    ("sibling B pin").
@@ -623,12 +711,12 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                     f"arm {arm_id!r}: pin factory caps max_tokens="
                     f"{resolved.max_tokens} — decision (a) real runs are "
                     f"UNCAPPED (max_tokens=None); real run refuses")
+            # The resolved INSTANCE is the effective arm here: _resolve_arm
+            # writes the arms.yaml pin onto it (class attrs keep the 'fixed'
+            # sentinel for the mock/hermetic lanes), and the placeholder +
+            # resolvability gates above already refuse every unusable pin —
+            # so a class-level 'fixed' check can never fire (#2746).
             cls = _resolve_arm(arm_id, ac, mock=False)
-            if getattr(cls, "model_id", "") == "fixed":
-                raise ConfigError(
-                    f"arm {arm_id!r} still hardcodes the class-level "
-                    f"model_id='fixed' sentinel (Task 9 parameterizes arms "
-                    f"off it) — real run refuses")
             # ── per-arm VENDOR-KEY pre-flight (#2633) ─────────────
             #    a2/a2b real requests without their vendor credential pass
             #    every pin/temp gate above and would run real-model spend
@@ -687,6 +775,26 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
     run_real_spend = 0.0
     budget_stop = False
     budget_skipped: list[str] = []
+    # #2985: the retrieval conditions of this run — the union of legs the
+    # retrieval-reading arms OBSERVED (their own ``leg_trace``) and whether
+    # any real retrieval arm was refused by the preflight or degraded
+    # mid-run. Persisted at run level in summary.json; an availability
+    # guess is never used when an observed trace exists.
+    run_retrieval_legs: list[str] = []
+    run_retrieval_degraded = False
+
+    # ── matched-recall pre-pass inputs (#3327.3) ───────────────────────
+    #    Probes are SOURCED FROM THE RUN'S SCENARIO CORPUS — never
+    #    ``default_probes()``' generic world facts (no arm's memory contains
+    #    them, so such a trigger could never legitimately fire; decision
+    #    .3). ``scenario_probes`` skips scenarios with no authored question
+    #    or no gold. Each trigger-population arm's factual F1 is captured
+    #    right after its setup — before its own episodes, and since arm
+    #    namespaces are isolated, no arm's episodes can move another arm's
+    #    reading. That is the pre-registered "measured before the battery".
+    recall_probes = scenario_probes(scenarios)
+    recall_capture: dict[str, dict[str, list[str]]] = {}
+    recall_unavailable: dict[str, str] = {}
 
     for arm_id in config.arms:
         arm_config = arm_map.get(arm_id)
@@ -695,12 +803,10 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
         arm = _resolve_arm(arm_id, arm_config, mock=config.mock or arm_id == "mock")
         # run_mode mock|real discriminator (PR #2341 review P2 honesty): the
         # mode derives from the EXECUTOR actually used — mock when the
-        # MockArm adapter (model_id mock-agent) serves the slot OR the real
-        # executor seam is not active (until Task 9 the seeded mock
-        # trajectory + no-op emission seam are the only executor, so
-        # hermetic/fixed-model runs are labeled mock); real only when
-        # config.executor explicitly requested real mode (the pre-flight
-        # gate refused that request without an active seam).
+        # MockArm adapter (model_id mock-agent) serves the slot OR real mode
+        # was not requested; real only when config.executor explicitly
+        # requested it and the pre-flight accepted (it refuses while
+        # _REAL_EXECUTOR_WIRED is False). See arm_run_mode.
         run_mode = arm_run_mode(config, arm)
         if run_mode == "real":
             # #2292 Task 5: the artifact model block records the PINNED
@@ -716,8 +822,36 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                      "model_id": arm.model_id,
                      "temperature": float(getattr(arm, "temperature", 0.0))}
         # ── arm-init (setup_scenarios) — failure → skip arm, summary-only ──
+        # #2985: an arm that reads through the product's HYBRID retrieval
+        # (a4's recall_state) declares ``requires_hybrid_retrieval``. In a
+        # real run, preflight the embedder BEFORE setup/ingest so a
+        # keyword-only environment (plain ``uv sync``) fails closed — the arm
+        # is skipped with a recorded ``init_failure`` naming the preflight,
+        # never an FTS-only number under the a4 label. Mock/hermetic lanes
+        # and arms without retrieval are untouched, and the arm itself stays
+        # callable for equivalence tests (the gate lives here, not in the arm).
+        retrieval_required = bool(
+            getattr(arm, "requires_hybrid_retrieval", False))
         try:
+            if retrieval_required and run_mode == "real":
+                require_hybrid_retrieval()
+                # #3005 P1: the availability preflight cannot see a
+                # query-time leg failure (``encode_failed`` / ``breaker_open``)
+                # — it only proves the embedder CAN load. Arm the arm's
+                # observed-leg refusal so a read whose VECTOR leg never ran
+                # refuses (ArmUnavailable -> excluded episode -> exit 4)
+                # instead of publishing an FTS-only a4 number. Set only for
+                # the real lane, so hermetic/equivalence tests keep driving
+                # the arm in a degraded environment.
+                arm.require_observed_hybrid = True
             arm.setup_scenarios(scenarios)
+        except HybridRetrievalUnavailable as e:
+            run_retrieval_degraded = True
+            arms_out.append(_arm_summary_block(
+                arm_id, arm_present=False, run_mode=run_mode,
+                reason=f"retrieval preflight: {e}"))
+            any_arm_failed = True
+            continue
         except ArmUnavailable:
             arms_out.append(_arm_summary_block(
                 arm_id, arm_present=False, run_mode=run_mode))
@@ -729,6 +863,20 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                 reason=f"init: {e!r}"))
             any_arm_failed = True
             continue
+
+        # ── matched-recall capture (#3327.2) ───────────────────────────
+        #    The arm's factual retrieval over the corpus probes, taken now
+        #    (setup done, no episodes yet). An ``ArmUnavailable`` arm is
+        #    recorded unavailable — NEVER coerced to an empty F1, which
+        #    would read as divergent and fire the trigger by fabrication.
+        #    a0 is not in the trigger population: its row is measured via
+        #    the no-memory stub at block-assembly time instead.
+        if recall_probes and arm_id in TRIGGER_POPULATION:
+            try:
+                recall_capture[arm_id] = capture_factual_recall(
+                    arm, recall_probes, scenarios, run_mode=run_mode)
+            except ArmUnavailable as e:
+                recall_unavailable[arm_id] = f"recall pre-pass: {e}"
 
         arm_episodes: list[EpisodeResult] = []
         arm_artifacts: list[str] = []
@@ -748,7 +896,22 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
         for unit_idx, (scenario, session) in enumerate(stream_units):
             episode_seed = config.seed + unit_idx  # seed = base + unit idx
             tracker = EpisodeTracker()
-            if run_mode == "real":
+            # ── hermetic emission seam (#2703 decision A) ────────────────
+            #    The pre-Task-9 contract: a hermetic emission seam supplies
+            #    a real-mode episode's event log (the seeded mock trajectory
+            #    still drives outcomes/turns) so the emitter-gap gate can be
+            #    exercised without network/spend. Task 9 (f54f212a6) routed
+            #    real mode straight to the live executor and left the old
+            #    stub (a monkeypatched run._episode_log) DEAD: the
+            #    report-writers honesty tests that reached the live executor
+            #    silently made LIVE model calls (OPENROUTER_API_KEY present)
+            #    and read a live log that covers MANDATORY -> emitter_gap []
+            #    (the gate was never bypassed; its hermetic driver was); the
+            #    excluded-episode ones failed on the same dead stub.
+            #    config.emission_seam restores the driver explicitly and
+            #    instance-scoped.
+            seam = config.emission_seam if run_mode == "real" else None
+            if run_mode == "real" and seam is None:
                 if budget_stop:
                     # #2603 CapStopped-style abort (review #2629 P1-1): the
                     # run's executed real spend exceeded
@@ -767,6 +930,9 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                         config=config, arm=arm, scenario=scenario,
                         episode_seed=episode_seed, tracker=tracker)
                 run_real_spend += ep_surface.get("spend_usd", 0.0)
+                # #2603 cap logic UNCHANGED; #2906: the number it enforces is
+                # now the provider-reported charge when the route returns one
+                # (else the declared basis) — same spend_usd the meter records.
                 if run_real_spend > budget.max_estimated_cost_usd:
                     budget_stop = True
                 evlog = ep_events
@@ -774,9 +940,21 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                 outcomes, re_deriv = execute_mock_episode(
                     arm, scenario, episode_seed, tracker)
                 ep_surface = {}
-                evlog = _episode_log(
+                # The hermetic seam is REAL-MODE ONLY (review P2): the mock
+                # lane keeps the stock no-op seam, so a seam-supplied
+                # schema-v1.1 log can never be stamped onto a mock-labeled
+                # episode (mock's empty-log invariant holds).
+                evlog = (seam or _episode_log)(
                     scenario, episode_seed=episode_seed, arm_id=arm_id,
                     run_mode=run_mode)
+            # #2703 (review P2): the hermetic marker is stamped ONLY on the
+            # episodes whose event log the seam ACTUALLY supplied (real mode
+            # + seam set) — a mock-lane episode (stock no-op seam) never
+            # carries it, so the marker identifies seam-fabricated logs, not
+            # seam configuration.
+            art_provenance = provenance
+            if seam is not None:
+                art_provenance = {**provenance, "emission_seam": "hermetic"}
             episode = EpisodeResult(
                 scenario_id=scenario.id, seed=episode_seed, arm=arm_id,
                 turns=tracker.turns, re_derivations=re_deriv,
@@ -833,7 +1011,7 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                 episode=episode, metric_values=metric_values,
                 outcomes=episode.model_call_outcomes,
                 ep_outcome=episode.ep_outcome.value, excluded=excluded,
-                setup_info=setup_info, provenance=provenance,
+                setup_info=setup_info, provenance=art_provenance,
                 python_hash_seed=python_hash_seed, model=model,
                 event_log=episode.event_log,
                 # Phase-2 final coverage validation at artifact assembly over
@@ -860,17 +1038,46 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
             })
 
         agg = aggregate(arm_episodes, HARNESS_METRIC_IDS)
+        # #2985: fold this arm's OBSERVED retrieval legs into the run record
+        # (union across arms). An arm with no retrieval reports nothing.
+        observed_legs = list(
+            getattr(arm, "observed_retrieval_legs", ()) or ())
+        for _leg in observed_legs:
+            if _leg not in run_retrieval_legs:
+                run_retrieval_legs.append(_leg)
+        if getattr(arm, "observed_retrieval_degraded", False):
+            run_retrieval_degraded = True
+        # #3005 P2: a REAL arm that requires hybrid retrieval but OBSERVED
+        # no legs cannot attest it ran hybrid — fail CLOSED (mirrors the
+        # parity lane's ``if lane == LANE_REAL and not retrieval_legs:
+        # retrieval_degraded = True``). Without this, ``retrieval_legs: []``
+        # + ``retrieval_degraded: false`` is indistinguishable from a run
+        # with no retrieval arm at all.
+        if retrieval_required and run_mode == "real" and not observed_legs:
+            run_retrieval_degraded = True
         arms_out.append(_arm_summary_block(
             arm_id, arm_present=True, run_mode=run_mode,
             scenarios=len(scenarios), valid_episodes=agg.valid_episodes,
             excluded=agg.excluded_count, excluded_ids=list(agg.excluded_episode_ids),
             excluded_reason=agg.excluded_reason, artifacts=arm_artifacts,
             spend_usd=sum((e.ep_surface or {}).get("spend_usd", 0.0)
-                          for e in arm_episodes)))
+                          for e in arm_episodes),
+            cost_basis=_arm_cost_basis(arm_episodes)))
         if agg.valid_episodes == 0:
             any_arm_failed = True  # all-failed → exit 4 (after artifacts)
 
     exit_code = ExitCode.ARM_FAILED if any_arm_failed else ExitCode.OK
+    # ── matched-recall outcome (#3327): the pre-pass returns a RESULT
+    #    OBJECT (#1413 indicator 1 — never an exception). INCONCLUSIVE is
+    #    expressed as the persisted outcome + this exit code (3); an arm
+    #    failure (exit 4) outranks it as the more severe operational state.
+    recall_block = build_matched_recall_block(
+        recall_probes, recall_capture,
+        include_a0=("a0" in config.arms),
+        unavailable_arms=recall_unavailable)
+    if (exit_code is ExitCode.OK and recall_block
+            and recall_block.get("outcome") == "inconclusive"):
+        exit_code = ExitCode.INCONCLUSIVE
 
     # ── run-end LIVE writers (family_*.json + recall.json) — the dead
     #    aggregation path dies here: per-scored-family JSONs + the recall
@@ -878,7 +1085,12 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
     family_payloads = _family_payloads(scorer)
     if family_payloads:
         write_family_files(attempt_dir, family_payloads)
-    write_recall_file(attempt_dir, {"episodes": recall_rows})
+    write_recall_file(attempt_dir, {
+        "episodes": recall_rows,
+        # The §3.2.1 control block; {} when no corpus-sourced probe set or
+        # no trigger-population arm was measured (never a vacuous outcome).
+        "matched_recall": recall_block or {},
+    })
 
     # summary.json written LAST (the completion marker). The run-level
     # run_mode is recorded here (mock iff every arm resolved mock) so the
@@ -901,6 +1113,9 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                                   for s in scenarios)),
         budget_stopped=bool(budget_skipped),
         budget_skipped=budget_skipped,
+        # #2985: the retrieval conditions behind every number in this run.
+        retrieval_legs=run_retrieval_legs,
+        retrieval_degraded=run_retrieval_degraded,
         timestamps={"written_utc": datetime.now(timezone.utc).isoformat()})  # noqa: UP017
     validate_summary_keys(summary)
     write_summary(attempt_dir, summary)
@@ -933,7 +1148,9 @@ def _build_scorer(config: RunConfig, thresholds: ThresholdsConfig) -> Scorer:
             scorers.append(resolve_scorer(spec))
         except ConfigError:
             from battery.runner.probe_scorer import resolve_probe_scorer
-            scorers.append(resolve_probe_scorer(spec, thresholds))
+            scorers.append(resolve_probe_scorer(
+                spec, thresholds, truth_judge=getattr(
+                    config, "truth_judge", None)))
     return _CompositeScorer(scorers)
 
 
@@ -967,20 +1184,15 @@ def _family_payloads(scorer: Scorer) -> list[dict[str, Any]]:
 
 def _episode_log(scenario, *, episode_seed: int, arm_id: str,
                  run_mode: str) -> list[dict[str, Any]]:
-    """Executor emission seam (schema v1.1): the per-episode typed event
+    """Mock-lane emission seam (schema v1.1): the per-episode typed event
     log that exists BEFORE scoring (envelope/state/tool entries). The mock
     executor emits NOTHING (mock runs keep an empty event_log — allowed,
-    never claimed real); the real executor (Task 9) emits here; hermetic
-    tests stub this seam to drive the two-phase emitter gate."""
+    never claimed real). The REAL lane emits inside the Task-9 executor and
+    threads its log back as ``ep_events``; hermetic real-mode runs inject a
+    log through ``RunConfig.emission_seam`` (#2703 — an instance-scoped
+    seam, never a monkeypatched module global)."""
     return []
 
-
-#: Stock (no-op) emission-seam identity. The real emitting executor is
-#: Task-9 owned; run_battery's real-executor pre-flight refuses a real-mode
-#: request while the module still carries this stock seam (identity
-#: compare — hermetic tests stub run._episode_log to activate the seam and
-#: drive the two-phase emitter gate).
-_DEFAULT_EPISODE_LOG = _episode_log
 
 #: Task-9 real emitting executor — wired (run.py + executor.py). The gate
 #: refuses real mode while unwired (fail-closed); hermetic stubs may flip
@@ -1098,6 +1310,22 @@ class _CompositeScorer:
         return ScorerResult(metrics=merged, ep_outcome=override)
 
 
+def _arm_cost_basis(arm_episodes: list[EpisodeResult]) -> str:
+    """The arm's aggregate cost basis (#2906) from its episodes' meters.
+
+    Each episode's ``usage.cost_basis`` is itself an aggregate; folding them
+    with ``aggregate_cost_basis`` yields "provider_reported" only when every
+    episode was provider-priced. A caller that does not report a basis (a
+    scripted/injected caller) contributes "estimated" — never silently
+    "provider_reported".
+    """
+    bases = []
+    for e in arm_episodes:
+        usage = (e.ep_surface or {}).get("usage") or {}
+        bases.append(usage.get("cost_basis") or "estimated")
+    return aggregate_cost_basis(bases)
+
+
 def _arm_summary_block(arm_id: str, *, arm_present: bool, scenarios: int = 0,
                        valid_episodes: int = 0, excluded: int = 0,
                        excluded_ids: list[str] | None = None,
@@ -1105,7 +1333,8 @@ def _arm_summary_block(arm_id: str, *, arm_present: bool, scenarios: int = 0,
                        artifacts: list[str] | None = None,
                        run_mode: str = "mock",
                        reason: str | None = None,
-                       spend_usd: float = 0.0) -> dict[str, Any]:
+                       spend_usd: float = 0.0,
+                       cost_basis: str | None = None) -> dict[str, Any]:
     return {
         "arm_id": arm_id,
         "arm_present": arm_present,
@@ -1115,6 +1344,11 @@ def _arm_summary_block(arm_id: str, *, arm_present: bool, scenarios: int = 0,
         "excluded": {"count": excluded, "episode_ids": excluded_ids or [],
                      "reason": excluded_reason},
         "real_spend_usd": round(spend_usd, 6) if run_mode == "real" else None,
+        # #2906: how real_spend_usd was derived — never left to inference.
+        # An arm that never executed (init failure) still declares a real
+        # figure (0.0); label it "estimated" rather than null, so no real
+        # spend figure is ever unlabelled.
+        "cost_basis": (cost_basis or "estimated") if run_mode == "real" else None,
         "artifacts": artifacts or [],
         "init_failure": reason or ("" if arm_present else "arm unavailable"),
     }

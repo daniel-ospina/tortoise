@@ -34,7 +34,7 @@ def _home_isolated(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
 
 CONFIG = (
-    '{"api_key": "tt_testkey", "api_url": "https://api.premiselabs.co", "team_id": "team123"}\n'
+    '{"api_key": "tt_testkey", "api_url": "https://api.premiselabs.co", "org_id": "team123"}\n'
 )
 
 LIST_BODY = json.dumps({
@@ -74,7 +74,7 @@ class TestTeamKeysList:
             rc = main(["team", "keys", "list", "--json"])
         assert rc == 0
         out = json.loads(capsys.readouterr().out)
-        assert out["team_id"] == "team123"  # from .tortoise (API returns keys only)
+        assert out["org_id"] == "team123"  # from .tortoise (API returns keys only)
         assert [k["id"] for k in out["keys"]] == ["k1", "k2"]
         assert out["keys"][1]["revoked_at"]  # revoked key surfaced
         # 20260825000001: labels ride the list payload (nullable)
@@ -199,7 +199,7 @@ class TestTeamKeysCreate:
         assert out["key_prefix"] == "tt_full"
         assert out["id"] == "kid1"
         assert out["created_at"] == "2026-08-11T10:00:00Z"
-        assert out["team_id"] == "team123"
+        assert out["org_id"] == "team123"
         # 20260825000001: the response label is surfaced in JSON output
         assert out["name"] == "staging"
         req = urlopen.call_args.args[0]

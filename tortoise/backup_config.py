@@ -17,6 +17,9 @@ import hashlib
 import os
 from dataclasses import dataclass
 
+from .env_truthy import env_flag  # #4097: the declared truthy contract
+from .retention import RESTORE_WINDOW_DAYS  # #4179 single window authority
+
 _AES_KEY_SIZE = 32
 
 # Secrets that the deploy workflow can sync from GH → Fly (the "syncable" set).
@@ -36,12 +39,13 @@ _SYNCABLE_REQUIRED = (
 # R2 bucket locks (Cloudflare rule API — NOT S3 Object Lock; see
 # docs/ops/registry-backup-dr.md §#2319) are prefix-scoped Age retentions that
 # block delete/overwrite within the window. BACKUP_LOCK_DAYS must stay
-# strictly below the #2304 trash-grace default (7 days — hosted_api
-# _TRASH_GRACE_DAYS) so a purged graph's artifacts (>= grace days old when the
-# purge erases them) are never inside the lock window — the erasure promise
-# stays honest. Default 3 days protects the recovery-critical hourly window.
+# strictly below the restore window (tortoise/retention.py RESTORE_WINDOW_DAYS
+# = 7 days — the #4179 authority; named in docs/retention-and-deletion.md) so a
+# purged graph's artifacts (>= grace days old when the purge erases them) are
+# never inside the lock window — the erasure promise stays honest. Default 3
+# days protects the recovery-critical hourly window.
 LOCK_DAYS_MIN = 1
-LOCK_DAYS_MAX = 6
+LOCK_DAYS_MAX = RESTORE_WINDOW_DAYS - 1  # keep strictly below the purge window
 DEFAULT_LOCK_DAYS = 3
 
 # Mirror-store creds (second-region/second-account copy, env-guarded). When
@@ -94,7 +98,7 @@ class BackupConfig:
     retention_daily: int = 7
     retention_weekly: int = 4
     simulate_enabled: bool = False
-    team_sweep_enabled: bool = False
+    org_sweep_enabled: bool = False
     # #2319: immutability + geo-mirror surface (defaults are the documented
     # production values; drift-bounds enforced in _load_from_env).
     lock_enabled: bool = False
@@ -105,13 +109,6 @@ class BackupConfig:
     mirror_access_key_id: str = ""
     mirror_secret_access_key: str = ""
     mirror_bucket: str = ""
-
-
-def _env_bool(name: str, default: bool = False) -> bool:
-    raw = os.environ.get(name, "").strip().lower()
-    if not raw:
-        return default
-    return raw in ("1", "true", "yes", "on")
 
 
 def _env_int(name: str, default: int) -> int:
@@ -136,7 +133,12 @@ def _parse_backup_key(raw: str, name: str = "TORTOISE_BACKUP_KEY") -> bytes:
     try:
         key = base64.b64decode(raw.strip(), validate=True)
     except Exception as e:
-        raise ConfigError(f"{name} must be base64 (got {raw[:8]!r}...): {e}") from e
+        # #2796 review (R2/R4): a malformed key is still secret material — the
+        # raw prefix must never reach a log or a published incident body. Report
+        # a non-reversible 8-hex identity instead (secret_store.key_fingerprint
+        # contract: fingerprints are the only key identity that may be logged).
+        got = hashlib.sha256(raw.strip().encode()).hexdigest()[:8]
+        raise ConfigError(f"{name} must be base64 (got <{got}>...): {e}") from e
     if len(key) != _AES_KEY_SIZE:
         raise ConfigError(f"{name} must decode to {_AES_KEY_SIZE} bytes (got {len(key)})")
     return key
@@ -183,9 +185,69 @@ def load_config(env: dict[str, str] | None = None) -> BackupConfig:
     return _load_from_env()
 
 
+def load_alert_config(env: dict[str, str] | None = None) -> BackupConfig | None:
+    """The ALERT-channel config, NOT gated on ``BACKUP_SWEEP_ENABLED`` (#3820 D5a).
+
+    ``load_config`` fails closed on the sweep switch: disabled, it returns a
+    config carrying EMPTY alert credentials, so every factory built on it
+    (``hosted_api._alert_store_from``) disappears exactly when a NON-backup
+    path needs to alert. The analytics sink incident (#3820) must be fileable
+    on a deployment whose backups are off — the sweep switch decides whether
+    backups RUN, never whether a degraded sink is VISIBLE — so its credentials
+    are read here ungated. Same env contract (names, precedence, repo default)
+    as the sweep's, so the two channels cannot drift apart.
+
+    Returns ``None`` when there is no issue filer (``DR_ISSUES_PAT`` unset):
+    with no PAT there is no channel at all, and the caller keeps the counter +
+    WARNING log. That NARROWS the documented D6 residual to the CHANNEL's own
+    construction — it is never "the sweep is off". ``TORTOISE_BACKUP_KEY`` and
+    ``REGISTRY_STREAM_KEY`` are deliberately NOT required: this config files a
+    GitHub issue and archives nothing, so their absence cannot silence the
+    channel. **R2 is different and IS effectively required.** The config
+    carries the R2 fields so the built ``AlertStore`` can use the object store
+    for per-(kind, subject) dedup, and that build goes
+    ``_analytics_alert_store`` -> ``_alert_store_from`` -> ``_backup_storage()``
+    -> ``R2Storage()``, whose ``__init__`` RAISES unless ``R2_ACCOUNT_ID`` /
+    ``R2_ACCESS_KEY_ID`` / ``R2_SECRET_ACCESS_KEY`` / ``R2_BUCKET`` are all set
+    (``TORTOISE_BACKUP_STORAGE=memory`` is the selfhost/test seam). The caller
+    swallows that raise and turns the channel into ``None`` -- so a MISSING or
+    TYPOED R2 secret DOES silence the channel. The honest D6 residual is
+    therefore "no PAT **or** an unusable object store", not "no PAT" alone.
+
+    ``env`` is read as the WHOLE environment mapping (default ``os.environ``);
+    unlike ``load_config`` it is not merged over the process env, so a test can
+    supply exactly the alert surface it means to pin.
+    """
+    e = os.environ if env is None else env
+
+    def _get(name: str) -> str:
+        return (e.get(name) or "").strip()
+
+    github_issues_pat = _get("DR_ISSUES_PAT")
+    if not github_issues_pat:
+        return None
+    return BackupConfig(
+        # `enabled` is the SWEEP switch and stays False: this config carries the
+        # alert channel only (`_alert_store_from` reads the alert fields).
+        enabled=False,
+        # Sweep-only key material is absent by design (see the docstring).
+        backup_key=b"",
+        registry_stream_key=b"",
+        r2_account_id=_get("R2_ACCOUNT_ID"),
+        r2_access_key_id=_get("R2_ACCESS_KEY_ID"),
+        r2_secret_access_key=_get("R2_SECRET_ACCESS_KEY"),
+        r2_bucket=_get("R2_BUCKET"),
+        telegram_bot_token=_get("TELEGRAM_BOT_TOKEN"),
+        telegram_chat_id=_get("TELEGRAM_CHAT_ID"),
+        github_issues_pat=github_issues_pat,
+        alert_assignee=_get("BACKUP_ALERT_ASSIGNEE"),
+        gh_repo=_get("GH_REPO") or _DEFAULT_GH_REPO,
+    )
+
+
 def _load_from_env() -> BackupConfig:
-    enabled = _env_bool("BACKUP_SWEEP_ENABLED", default=False)
-    team_sweep_enabled = _env_bool("BACKUP_TEAM_SWEEP_ENABLED", default=False)
+    enabled = env_flag("BACKUP_SWEEP_ENABLED", False)
+    org_sweep_enabled = env_flag("BACKUP_TEAM_SWEEP_ENABLED", False)
     if not enabled:
         # Fail-closed default: build a disabled config with empty keys; the
         # app must not call into the sweep machinery when disabled.
@@ -202,11 +264,11 @@ def _load_from_env() -> BackupConfig:
             github_issues_pat="",
             alert_assignee="",
             gh_repo=_DEFAULT_GH_REPO,
-            team_sweep_enabled=team_sweep_enabled,
+            org_sweep_enabled=org_sweep_enabled,
         )
 
     # ── #2319 immutability contract (validated when the sweep is enabled). ──
-    lock_enabled = _env_bool("BACKUP_LOCK_ENABLED", default=False)
+    lock_enabled = env_flag("BACKUP_LOCK_ENABLED", False)
     lock_days = _env_int("BACKUP_LOCK_DAYS", DEFAULT_LOCK_DAYS)
     if lock_enabled and not (LOCK_DAYS_MIN <= lock_days <= LOCK_DAYS_MAX):
         raise ConfigError(
@@ -221,7 +283,7 @@ def _load_from_env() -> BackupConfig:
     cf_api_token = os.environ.get("CF_API_TOKEN", "").strip()
 
     # ── #2319 geo-mirror (second-store copy) — env-guarded, fail-closed. ──
-    mirror_enabled = _env_bool("BACKUP_MIRROR_ENABLED", default=False)
+    mirror_enabled = env_flag("BACKUP_MIRROR_ENABLED", False)
     mirror_account_id = os.environ.get("R2_MIRROR_ACCOUNT_ID", "").strip()
     mirror_access_key_id = os.environ.get("R2_MIRROR_ACCESS_KEY_ID", "").strip()
     mirror_secret_access_key = os.environ.get("R2_MIRROR_SECRET_ACCESS_KEY", "").strip()
@@ -360,8 +422,8 @@ def _load_from_env() -> BackupConfig:
         retention_hourly=_env_int("BACKUP_RETENTION_HOURLY", 24),
         retention_daily=_env_int("BACKUP_RETENTION_DAILY", 7),
         retention_weekly=_env_int("BACKUP_RETENTION_WEEKLY", 4),
-        simulate_enabled=_env_bool("BACKUP_SIMULATE_ENABLED", default=False),
-        team_sweep_enabled=_env_bool("BACKUP_TEAM_SWEEP_ENABLED", default=False),
+        simulate_enabled=env_flag("BACKUP_SIMULATE_ENABLED", False),
+        org_sweep_enabled=env_flag("BACKUP_TEAM_SWEEP_ENABLED", False),
         lock_enabled=lock_enabled,
         lock_days=lock_days,
         cf_api_token=cf_api_token,

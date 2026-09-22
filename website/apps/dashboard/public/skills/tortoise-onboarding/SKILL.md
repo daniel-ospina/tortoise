@@ -7,7 +7,7 @@ status: live
 tags: [tortoise, onboarding, mcp, harness, install, self-hosted, connect, onboarding-state, decide]
 summary: "The ONE live Tortoise onboarding script — reads onboarding state, self-adjudicates the harness, installs/connects (self-hosted: Docker-first, Compose + FalkorDB; embedded = eval-only fallback), verifies via tortoise_health, checkpoints harness-connected, and runs the generic MCP-tool decide protocol."
 created: 2026-09-02
-updated: 2026-09-04
+updated: 2026-09-12
 allowed-tools: read write bash
 ---
 
@@ -61,7 +61,7 @@ Branch on what you find:
 |---|---|
 | `completed_steps` already contains `harness-connected` | Tell the user their agent is already connected; stop (idempotent). Post-completion re-entry is a no-op — the onboarding tools retire from tools/list once the org completes. |
 | `fork` is `null` (never chosen) | **Do NOT guess or persist a fork** — the fork card is a human decision, once per organization (presentation fork, never a billing gate). Tell the user the fork card is waiting in the dashboard wizard and re-read the state after they choose. |
-| `fork` is `'build'` | Connect as usual; the build fork's completion gate is catalog-based (catalog-presented), not decide-based — no decide nudge required later. |
+| `fork` is `'build'` | Connect as usual; the build fork completes on the two acts the server OBSERVES — `harness-connected` + `first-points-filed` — never on a catalog render, and not decide-based — so no decide nudge is required later. |
 | `fork` is `'self'` | Connect as usual; the decide nudge (section 4) applies later. |
 | First connect on a fresh org | Proceed to section 2. |
 
@@ -75,7 +75,7 @@ harness-chooser UI** — you adjudicate from the table, then follow YOUR row.
 | 1 | **Claude Code** | self-install (config-write) | run shell commands; write project files |
 | 2 | **Cursor** | self-install (config-write) | write project files |
 | 3 | **Codex** | self-install (config-write) | run shell commands; write project files |
-| 4 | **Pi** | self-install (config-write) | write project files |
+| 4 | **Pi** | self-install (config-write) | run shell commands; write project files |
 | 5 | **Claude Desktop** | teach-human | **no local filesystem** — guide the human |
 | 6 | **Claude Web** | teach-human | **no local filesystem, no shell** — guide the human |
 
@@ -175,7 +175,7 @@ config was written (`claude mcp list` shows `tortoise`).
 Create/merge `.cursor/mcp.json` in the project:
 
 ```json
-{ "mcpServers": { "tortoise": { "type": "http", "url": "https://api.premiselabs.co/mcp/", "headers": { "Authorization": "Bearer ${env:TORTOISE_API_KEY}" } } } }
+{ "mcpServers": { "tortoise": { "url": "https://api.premiselabs.co/mcp/", "headers": { "Authorization": "Bearer ${env:TORTOISE_API_KEY}" } } } }
 ```
 
 Set `TORTOISE_API_KEY` in your environment (Cursor settings or shell
@@ -214,29 +214,144 @@ prompt for approval — `tortoise_health` and the read tools are safe to allow.
 
 ### Pi (self-install)
 
-Create/merge `.mcp.json` in the project (MERGE — never replace an existing
-`mcpServers` block):
+Pi is a config-write harness, but the config is only half the story: the key
+comes from the **launching shell's** environment, and the config file is found
+by walking **up from the current directory**. Both have silent failure modes.
+Follow these four steps in order — each one is load-bearing, the first two are
+yours to execute, step 3 is a handoff to the user, and step 4 is the check.
+
+**1. Export the key to your shell profile.** Pi expands `${VAR}` from
+`process.env` **at process start**, so a missing export produces an empty
+bearer token (`Authorization: Bearer`) and a 401 — not a config error:
+
+```bash
+# Idempotent: a bare `>>` stacks a second export on every re-run.
+# Shell profiles are often version-controlled — if yours is, keep the key
+# out of it and use a non-committed include instead.
+grep -q 'export TORTOISE_API_KEY=' ~/.zshrc || echo 'export TORTOISE_API_KEY=<key>' >> ~/.zshrc   # or ~/.bashrc
+```
+
+**2. Create/merge `.mcp.json` in the project** (MERGE — never replace an
+existing `mcpServers` block; if the EFFECTIVE config already has a `tortoise`
+entry — even one that only lives in the home/base config — run the collision
+protocol below BEFORE writing):
 
 ```json
-{ "mcpServers": { "tortoise": { "type": "http", "url": "https://api.premiselabs.co/mcp/", "headers": { "Authorization": "Bearer ${TORTOISE_API_KEY}" } } } }
+{ "mcpServers": { "tortoise": { "url": "https://api.premiselabs.co/mcp/", "headers": { "Authorization": "Bearer ${TORTOISE_API_KEY}" } } } }
 ```
 
 Pi's mcp-client expands plain `${TORTOISE_API_KEY}` (no `env:` prefix).
 
+> **Resolution order — a project `.mcp.json` SHADOWS the home config.** Pi
+> walks up from the current directory (to the git top-level) and takes the
+> FIRST `.mcp.json` it finds, falling back to `~/.pi/agent/.mcp.json`
+> (`resolveMcpJsonPath`, agent-infra #104). Writing only
+> `~/.pi/agent/.mcp.json` is therefore a silent no-op inside any repo that
+> has its own `.mcp.json` — write the PROJECT file.
+>
+> ⛔ **Collision protocol — a `tortoise` entry already exists.** `mcpServers`
+> is a JSON object, so writing the `tortoise` key over an existing `tortoise`
+> key silently REPLACES it. "MERGE" protects the *other* servers, not this
+> one. Developers commonly have several `tortoise` entries declared across
+> more than one backend, and a local or self-hosted one can hold a POPULATED
+> graph — so a blind write is a backend switch with no warning, no data
+> check, and no way back. Work
+> through these five steps before writing — step 1 can stop you early if the
+> entry is already correct:
+>
+> 1. **Detect** — resolve which `.mcp.json` is EFFECTIVE first (the first one
+>    found walking up from cwd, else `~/.pi/agent/.mcp.json` — a project file
+>    shadows the home config), then read that file's `tortoise` entry before
+>    writing. Never write blind. An entry that looks right in a SHADOWED file
+>    does not count: if the effective file has no `tortoise`, the connection
+>    is absent. If the effective entry already matches the intended shape
+>    (same `url` AND `Authorization: Bearer ${TORTOISE_API_KEY}`), report
+>    "already correct — no repoint needed" and STOP: no confirm, no preserve,
+>    no rewrite. Same `url` with a DIFFERENT KEY VARIABLE (e.g.
+>    `${TORTOISE_MCP_API_KEY}`) is a **policy difference, not a defect**: that
+>    variable may be deliberately distinct so a hosted session-capture path
+>    stays off. Report it and ASK; do not rewrite it on your own initiative,
+>    and treat "this profile intentionally defines that variable" as the
+>    human's decision rather than a misconfiguration to repair. Only a
+>    genuinely BROKEN entry (wrong `url`, missing or headerless
+>    `Authorization`) is yours to correct — and only after the confirm gate.
+>    A home/base entry is left untouched and merely shadowed, so nothing is
+>    overwritten and there is no preserve step.
+> 2. **Report** — tell the human the existing entry's backend (its `url`, or
+>    the local stdio `command`) and its graph size when that backend is
+>    reachable (local/self-hosted: query the node count). If it is
+>    unreachable, report the size as unknown — never guess.
+> 3. **Confirm** — get explicit human confirmation before repointing. This is
+>    a data-routing change, and it is the ONE human gate inside the otherwise
+>    one-block universal command: the copy block stays one block, and YOU ask.
+>    Never absorb the switch silently.
+> 4. **Preserve** — only when the existing `tortoise` entry lives in the SAME
+>    file you are about to write into (an overwrite in place). Rename it to a
+>    name that is FREE in that file: the obvious `tortoise-local` may already
+>    be taken — check before writing, and walk to the next free name
+>    (`tortoise-local-2`, `tortoise-local-<backend>`, …).
+>    Never write onto an already-present key. Set `"lazy": true` on the
+>    preserved entry so it is not started eagerly at launch. ⛔ **A preserved
+>    LOCAL STDIO server must not inherit the hosted key.** Pi passes the parent
+>    environment to every stdio child, and a local stdio `tortoise` REFUSES TO
+>    START when `TORTOISE_API_KEY` is set and no `TORTOISE_SECRET_PEPPER` is
+>    configured — the hosted/cloud key is rejected by the local server on
+>    purpose (`tortoise/auth.py`). Because step 1 exports
+>    exactly that variable to the profile, a preserved stdio entry without
+>    `"TORTOISE_API_KEY": ""` in its `env` block will fail at import, so it is
+>    NOT "loadable on demand" — do not promise that. Add the blanking key, or
+>    if you cannot edit the preserved entry, tell the user it will need it.
+>    Then confirm the preserved entry still loads before reporting the switch
+>    complete. When the effective entry lives in a DIFFERENT
+>    file (the home/base config, which your project write only SHADOWS), there
+>    is nothing to preserve — skip this step; Report + Confirm still apply,
+>    and the base entry stays intact and recoverable by deleting the project
+>    entry.
+> 5. **Write** — only now add the hosted `tortoise` entry above. Prefer the
+>    PROJECT `.mcp.json`; write the home/base config only when no project file
+>    is in play, since a project file always shadows it and a home write is
+>    then a silent no-op (see the resolution-order note).
+>
+> Preserving the prior entry does **not** certify it: a preserved local stdio
+> entry can be broken in more than one way — a wrong port or password, and the
+> hosted-key rejection above. agent-infra #639 covers both. Preserve it so the
+> switch stays recoverable in one step — not as an endorsement of it.
+
+**3. Restart Pi from a NEW shell** (hand this to the user — the running Pi
+process cannot restart itself). Not `/reload`, and not a restart of an
+already-open terminal: expansion reads the **launching shell's** env, so a
+reload (or a restart that reuses the old process env) silently keeps the
+stale or absent value. Tell the user: quit Pi, open a new terminal, and start
+Pi again from it.
+
+**4. Verify in that new session** — call `tortoise_health` (§4); it must name
+the organization you expect. The pre-restart session cannot verify: its MCP
+client was built before the export.
+
+> ⛔ **The env var — not the config file — decides which organization you
+> connect to.** A Pi process launched with a stale `TORTOISE_API_KEY` connects
+> to the *previous* org and returns data from the wrong graph with no error.
+> Observed live 2026-09-12: a stale key quietly reached a different, fully
+> populated organization — every tool answered normally, none of it from the
+> graph the user thought they were querying. If `tortoise_health` reports
+> an org you did not expect, the process env is stale — relaunch from a new
+> shell; editing `.mcp.json` will not help.
+
 ### Claude Desktop (teach-human)
 
-You cannot edit local files. Walk the human through:
+You cannot edit local files. Walk the human through the Connectors flow:
 
-1. Open `~/Library/Application Support/Claude/claude_desktop_config.json`
-   (macOS) — or Claude > Settings > Developer in the app.
-2. MERGE the `mcpServers` block below into the existing config (never replace
-   the whole file — the key stays literal here; keep the file private):
+1. Open Claude Desktop → **Settings → Connectors → Add custom connector**.
+2. Name: `Tortoise`
+3. Server URL: `https://api.premiselabs.co/mcp/`
+4. Request headers: `Authorization: Bearer <TORTOISE_API_KEY>`
 
-```json
-{ "mcpServers": { "tortoise": { "type": "http", "url": "https://api.premiselabs.co/mcp/", "headers": { "Authorization": "Bearer <TORTOISE_API_KEY>" } } } }
-```
-
-3. Restart Claude Desktop. The `tortoise` MCP tools appear in this session.
+Restart is not required — the connector's `tortoise_*` MCP tools appear in a
+new chat. The config file at
+`~/Library/Application Support/Claude/claude_desktop_config.json` only accepts
+**local stdio** servers and silently does nothing for this remote HTTP server;
+it can still be edited via **Settings → Developer → Edit Config** for
+advanced/local stdio setups only.
 
 ### Claude Web (teach-human)
 
@@ -244,8 +359,8 @@ Guide the human through:
 
 1. claude.ai > Settings > Connectors > Add custom connector, name it
    "Tortoise".
-2. Server URL: `https://api.premiselabs.co/mcp/`; Request headers
-   (advanced): `Authorization: Bearer <TORTOISE_API_KEY>` (stored by
+2. Server URL: `https://api.premiselabs.co/mcp/`; Request headers:
+   `Authorization: Bearer <TORTOISE_API_KEY>` (stored by
    Anthropic — your key, their cloud).
 3. The connector exposes the `tortoise_*` MCP tools to claude.ai workflows.
 
@@ -254,22 +369,29 @@ Guide the human through:
 1. Call `tortoise_health` (MCP tool, all 6 harnesses once connected). It
    must report the graph reachable + your organization context.
 2. On failure: retry once; then give an honest diagnostic — config write
-   invalid (harness broken)? Offer the teach-human fallback (the config is a
-   manual file for Desktop, or the connector steps for Web) or re-run the
+   invalid (harness broken)? Offer the teach-human fallback (the connector
+   steps for Desktop/Web) or re-run the
    universal command. Never claim connected on a failed `tortoise_health`.
 3. On success — **write the harness-connected checkpoint** (idempotent
-   first-write-wins keyed-MERGE; replay is a no-op, so the dashboard's
-   Continue button and this write can both fire safely):
+   first-write-wins keyed-MERGE; replay is a no-op, so re-running this write
+   is safe):
    - Hosted CLI agents: `curl -s -X POST
      https://api.premiselabs.co/v1/onboarding/state/checkpoint -H
      "Authorization: Bearer $TORTOISE_API_KEY" -H "Content-Type:
      application/json" -d '{"step":"harness-connected"}'`
-   - Claude Desktop / Claude Web: you have no REST/curl surface — the human
-     clicks **"I've set it up — Continue"** in the dashboard connect step;
-     that click writes the same checkpoint (session-authed). Tell them to do
-     that once `tortoise_health` succeeds here.
+   - Claude Desktop / Claude Web: you have no REST/curl surface, and **no
+     dashboard click connects anything** — the server writes this same
+     checkpoint itself on your first successful graph write
+     (`tortoise_create_point` / `tortoise_file_decision` →
+     `_maybe_onboarding_auto_complete()`). File a first memory and the
+     dashboard reflects it on its own: the done step (step 3) shows Connected
+     the moment your agent files. The connect step does NOT advance by itself
+     — the poll runs only on the done step, so the user still clicks
+     Continue/Skip to leave the connect step. Never tell the human a click
+     connects them.
 4. Report to the user: "✅ Tortoise is connected and verified." The Setup
-   guide card on the dashboard advances.
+   guide card on the dashboard advances from the server-observed connection —
+   never from a dashboard click (lane B3, 2026-09-16).
 
 **Failure modes:** config write invalid → teach-human fallback (above);
 connection verify fails → retry with diagnostic + honest error (never a
@@ -354,12 +476,19 @@ Owned here (epic #1976 §3 + §8 timing pin). At the user's FIRST capture —
 the first time a session/conversation is filed to the graph — the agent says
 ONE line, non-blocking:
 
-> "Heads up: I'll remember this session so you can recall it later. View/delete in Settings → Memory sources."
+> "Heads up: I'll remember this session so you can recall it later. View/delete in Settings → Captured sessions."
 
 Contract notes:
 - **Timing:** first capture only, in-conversation, one line, non-blocking.
   Recording is default-ON (ToS-covered); this is disclosure, NOT a consent
   ceremony (no re-gate — the off-switch stays quiet-409, #1927).
+- **Destination (#2002):** `Settings → Captured sessions` — the capture
+  view/delete home (`<h3 id="settings-capture-heading">`). NOT
+  `Settings → Memory sources`, which is the SIBLING home holding the four
+  source toggles: it lists no sessions and offers no delete. The epic design
+  docs (#1976 §W4/W6) describe it as "Memory sources → Agent sessions", but
+  #2180 shipped both homes as siblings, so the announcement names the
+  view/delete home directly. Do not "restore" the older wording.
 - **Checkpoint:** the announcement's completion writes the `capture-disclosed`
   NODE CHECKPOINT (`{"step":"capture-disclosed"}` via the checkpoint
   surface) — it is never a card-counted step (the Setup guide renders it

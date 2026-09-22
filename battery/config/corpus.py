@@ -215,6 +215,42 @@ def _coerce_dict(value: Any, sid: str, label: str) -> dict[str, Any]:
     return dict(value)
 
 
+def _authored_injection_turn(pair: dict, sid: str,
+                             scenario_k: int | None = None) -> int:
+    """The AUTHORED injection turn for one planted contradiction.
+
+    A missing turn is REFUSED, never defaulted (#2759): the old inline
+    ``k or 5`` fabricated the scenario's truth value, and R1's
+    surfaced-within-1-turn rule plus the ``injection_turn`` emission both
+    read it as authored data — a guessed turn scores a real arm against a
+    turn the scenario never specified.
+
+    ``scenario_k`` is the AUTHORED scenario-level ``k`` (the
+    ``planted_contradictions`` path forwards it): falling back to it is
+    legitimate — it is authored, not guessed — while a default constant is
+    not.
+    """
+    raw = pair.get("injection_turn", pair.get("k"))
+    if raw is None:
+        raw = scenario_k
+    if raw is None:
+        raise ConfigError(
+            f"scenario {sid!r}: planted contradiction carries no authored "
+            f"injection turn (neither the pair's 'k'/'injection_turn' nor a "
+            f"scenario-level 'k') — the corpus refuses to guess one")
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        try:
+            raw = int(str(raw))
+        except (TypeError, ValueError) as e:
+            raise ConfigError(
+                f"scenario {sid!r}: planted injection turn {raw!r} is not an "
+                f"integer") from e
+    if raw < 1:
+        raise ConfigError(
+            f"scenario {sid!r}: planted injection turn {raw!r} must be >= 1")
+    return raw
+
+
 def _coerce_scenario(raw: dict[str, Any], gold_base: Path) -> Scenario:
     """Validate (type-only) + coerce one raw scenario dict."""
     try:
@@ -315,13 +351,14 @@ def _coerce_scenario(raw: dict[str, Any], gold_base: Path) -> Scenario:
         if not pairs_raw and raw.get("planted_contradictions"):
             pairs_raw = [
                 {"claim_a": p["claim"], "claim_b": p["counter_claim"],
-                 "injection_turn": p.get("k", k or 5)}
+                 "k": p.get("k", k)}
                 for p in raw["planted_contradictions"]
             ]
         pairs = tuple(
             ContradictionPair(
                 claim_a=str(p["claim_a"]), claim_b=str(p["claim_b"]),
-                injection_turn=int(p.get("injection_turn", k or 5)))
+                injection_turn=_authored_injection_turn(p, sid,
+                                                        scenario_k=k))
             for p in pairs_raw or []
         )
         scripts = tuple(str(s) for s in raw.get("evidence_scripts", []))

@@ -80,7 +80,7 @@ def test_hung_caller_fails_closed_with_spend(tmp_path):
         encoding="utf-8")
     (d / "arms.yaml").write_text(yaml.safe_dump({"arms": [
         {"arm_id": "a0", "adapter": "battery.arms.a0_plain", "config": {},
-         "price_per_1k_usd": 0.0011, "expected_tokens_per_episode": 100,
+         "price_per_1k_usd": 0.000168,  # the declared basis (#2874) "expected_tokens_per_episode": 100,
          "model_pin": "deepseek/deepseek-v4-flash", "temperature": 0.0}]}),
         encoding="utf-8")
     (d / "budget.yaml").write_text(yaml.safe_dump(
@@ -105,3 +105,17 @@ def test_hung_caller_fails_closed_with_spend(tmp_path):
     recall = json.loads((attempt / "recall.json").read_text())
     rows = recall.get("episodes", [])
     assert rows and rows[0]["ep_markers"].get("spend_usd") == 0.003
+
+
+def test_real_deadline_clears_measured_p90():
+    """#1416: the real-lane cap must clear the MEASURED episode duration
+    (median 135 s, p90 193 s over 77 episodes at attempt
+    /tmp/run1416-g/20260909-201340-991151) with real headroom — a cap at
+    the p90 kills legitimately-running episodes (5/78 pure-timing
+    exclusions at the old 240 s). Guard against re-tightening below the
+    measured basis."""
+    assert _REAL_EPISODE_DEADLINE_S >= 2.0 * 193.0, (
+        f"real-lane deadline {_REAL_EPISODE_DEADLINE_S}s is under 2x the "
+        f"measured p90 (193s) — pure-timing exclusions would return")
+    assert _REAL_EPISODE_DEADLINE_S <= 900.0, (
+        "the cap is hang protection; keep it bounded to minutes")

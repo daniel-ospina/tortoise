@@ -8,7 +8,7 @@ Runs the why-layer suite on ONE hermetic throwaway graph:
 2. **assemble** — the W4 why-block assembly (``tortoise.why.
    assemble_why_blocks``) produces the canonical §3.1.4 surfaced context for
    every planted point (A11: this block is ALL the grader sees);
-3. **grade** — the deterministic graders (the ``judge_why_suite_v1`` pinned
+3. **grade** — the deterministic graders (the ``judge_why_suite_v2`` pinned
    rubric) answer the four why-questions from each block ALONE — conflict
    surfacing / dig-deeper navigation (pointer targets resolved against the
    planted role map the harness owns) / support-chain + trade-off
@@ -510,7 +510,9 @@ def build_receipt(report: dict, *, justification: str | None = None) -> dict:
                 "family": r.get("family"),
                 "clean": r.get("clean"),
                 "expected_conflict": r.get("expected_conflict"),
+                "expected_resolved": r.get("expected_resolved"),
                 "conflict_surfaced": r.get("conflict_surfaced"),
+                "resolved_ok": r.get("resolved_ok"),
                 "nav_correct": r.get("nav_correct"),
                 "nav_total": r.get("nav_total"),
                 "nav_errors": r.get("nav_errors"),

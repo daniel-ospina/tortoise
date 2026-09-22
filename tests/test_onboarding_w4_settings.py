@@ -64,7 +64,7 @@ def _registered_client():
     r = tc.post("/v1/register", json={"email": email, "password": "password123"})
     assert r.status_code == 200, r.text
     tc.headers.update({"Authorization": f"Bearer {r.json()['api_key']}"})
-    return tc, r.json()["team_id"]
+    return tc, r.json()["org_id"]
 
 
 class TestToggleRegistration:
@@ -85,7 +85,7 @@ class TestTogglePersistence:
     def test_four_toggles_round_trip_and_persist(self):
         """PATCH each of the four keys, then GET — the written values must
         persist (multi-round writes, readback through the merged projection)."""
-        tc, team_id = _registered_client()
+        tc, org_id = _registered_client()
         try:
             writes = [
                 {"github_connected": True},
@@ -111,7 +111,7 @@ class TestTogglePersistence:
             }.items():
                 assert st.get(k) is v, f"{k} did not persist: {st.get(k)}"
             # raw jsonb store agrees (operational keys live jsonb-side)
-            raw = _get_onboarding_state(team_id)
+            raw = _get_onboarding_state(org_id)
             assert raw.get("github_connected") is True
             assert raw.get("session_recording") is False
         finally:
@@ -120,7 +120,7 @@ class TestTogglePersistence:
     def test_session_recording_defaults_on_and_flips(self):
         """#1927: session_recording is the DEFAULT-ON off-switch (ToS-
         covered, never a consent gate) — flips off and back without a re-ask."""
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             r = tc.get("/v1/onboarding/state")
             assert r.json()["onboarding"].get("session_recording") is not False, (
@@ -137,7 +137,7 @@ class TestTogglePersistence:
         """The four operational keys must never be written to the
         OnboardingState node (store SPLIT, DM-2 — graph holds FLOW state;
         jsonb keeps OPERATIONAL keys)."""
-        tc, team_id = _registered_client()
+        tc, org_id = _registered_client()
         try:
             for w in [
                 {"github_connected": True},
@@ -147,7 +147,7 @@ class TestTogglePersistence:
             ]:
                 assert tc.patch("/v1/onboarding/state", json=w).status_code == 200
             node = onboarding_state.read_onboarding_node(
-                _make_sdk(namespace=team_id)._get_proj(), team_id
+                _make_sdk(namespace=org_id)._get_proj(), org_id
             )
             assert node is not None
             for k in MEMORY_SOURCE_KEYS:
@@ -160,7 +160,7 @@ class TestTogglePersistence:
         compact) is not a route to the memory-source toggles — posting a
         toggle key there must NOT land in jsonb (it is not a checkpoint
         field; the only surface is the state PATCH the Settings panel uses)."""
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             for key in MEMORY_SOURCE_KEYS:
                 r = tc.post("/v1/onboarding/state/checkpoint", json={key: True})

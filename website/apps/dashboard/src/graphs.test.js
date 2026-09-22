@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import {
   GRAPH_KEY_SCOPES,
   canManageGraphKeys,
+  deleteTypedMatches,
   graphCanDelete,
   graphKeyPanelEmptyLine,
   graphKeysSuppressed,
@@ -13,6 +14,7 @@ import {
   sortedGraphRows,
   sortedTrashRows,
   tierCreateLocked,
+  TRASH_GRACE_DAYS,
   trashDaysLeft,
   trashEraseLabel,
 } from './graphs.js'
@@ -137,13 +139,13 @@ const TOMB = (id, deletedAt) => ({ graph_id: id, name: id, kind: 'custom', delet
 
 test('trashDaysLeft: counts whole days from deleted_at to now', () => {
   const now = new Date(T0).toISOString()
-  // Deleted exactly 4 days ago → 3 days left of the 7-day window.
+  // Deleted exactly 4 days ago → the rest of the window.
   const old = new Date(T0 - 4 * 86400000).toISOString()
-  assert.equal(trashDaysLeft(old, now), 3)
-  // Deleted just now → 7 days left.
-  assert.equal(trashDaysLeft(now, now), 7)
-  // Deleted 7+ days ago → 0 (past window; purge clears on cadence).
-  const aged = new Date(T0 - 8 * 86400000).toISOString()
+  assert.equal(trashDaysLeft(old, now), TRASH_GRACE_DAYS - 4)
+  // Deleted just now → the full window.
+  assert.equal(trashDaysLeft(now, now), TRASH_GRACE_DAYS)
+  // Deleted past the window → 0 (past window; purge clears on cadence).
+  const aged = new Date(T0 - (TRASH_GRACE_DAYS + 1) * 86400000).toISOString()
   assert.equal(trashDaysLeft(aged, now), 0)
 })
 
@@ -177,4 +179,19 @@ test('sortedTrashRows: empty + null-safe', () => {
   assert.deepEqual(sortedTrashRows([]), [])
   assert.deepEqual(sortedTrashRows(null), [])
   assert.deepEqual(sortedTrashRows(undefined), [])
+})
+
+// ── #2701 delete-modal type-to-confirm gate ──────────────────────────────
+test('deleteTypedMatches: only the literal word "delete" passes', () => {
+  assert.equal(deleteTypedMatches('delete'), true)
+  assert.equal(deleteTypedMatches(' delete '), true)   // trim tolerated
+  assert.equal(deleteTypedMatches('DELETE'), true)     // case-insensitive
+  assert.equal(deleteTypedMatches('Delete'), true)
+  assert.equal(deleteTypedMatches('delet'), false)
+  assert.equal(deleteTypedMatches('deletee'), false)
+  assert.equal(deleteTypedMatches('delete now'), false) // no extra words
+  assert.equal(deleteTypedMatches(''), false)
+  assert.equal(deleteTypedMatches(null), false)
+  assert.equal(deleteTypedMatches(' x delete'), false)  // prefix fails
+  assert.equal(deleteTypedMatches('delete x'), false)   // suffix fails
 })
