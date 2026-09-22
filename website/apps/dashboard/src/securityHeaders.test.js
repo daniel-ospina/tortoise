@@ -147,9 +147,11 @@ const STRICT_PATHS = ['/', '/team', '/team/', '/index.html']
  * as a stamp, so a file with zero live stamps could pass.
  *
  * KNOWN FALSE POSITIVE (fail-closed): building the header NAME as an expression
- * (`headers.set(HEADER, RELAXED_CSP)`, or a template literal) is no longer
- * counted, so the guard reddens and names the file. It cannot resolve an
- * identifier, and the fix is to name the header at the stamp site. A stamp on a
+ * (`headers.set(HEADER, RELAXED_CSP)`, or an INTERPOLATED template literal
+ * `` `Content-${x}` `` — an interpolation-FREE template key IS read, see
+ * `cspHeaderName`) is not counted, so the guard reddens and names the file. It
+ * cannot resolve an identifier, and the fix is to name the header at the stamp
+ * site. A stamp on a
  * NON-HTML response still counts toward the file total — a source count is not
  * reachability (see the plan doc's `## Residuals`).
  */
@@ -332,14 +334,23 @@ function nameOf(node) {
 }
 
 /**
- * The method name of a `h.set(...)` / `h.append(...)` call in EVERY spelling,
- * including the optional-chained ones (`h?.set(…)`, `h.set?.(…)`), or null.
+ * The method name of a member call on a headers-like object in the DIRECT
+ * member-call spellings, including the optional-chained ones (`h?.set(…)`,
+ * `h.set?.(…)`), or null when the node is not a member call. Callers filter the
+ * result on `set`/`append`; this helper only reads the name.
  *
  * `@babel/parser` gives an optional chain two different node types —
  * `OptionalCallExpression` with an `OptionalMemberExpression` callee — so a scan
  * that checks only `CallExpression`/`MemberExpression` silently drops that
  * spelling. The regex this AST reader replaced matched it, so dropping it is a
  * REGRESSION in coverage, not a tightening.
+ *
+ * NOT read: an indirection that does not spell `<expr>.set(...)` — a computed
+ * template callee (`h[`set`](…)`), a destructured or aliased method
+ * (`const { set } = h`), and `.call`/`.apply`/`.bind` forwarding. Those evade
+ * every scan here and are tracked with the other completeness gaps (see the plan
+ * doc's `## Residuals` and the guard-gaps issue); this helper deliberately does
+ * not claim them.
  */
 function headerCallMethod(node) {
   if (node?.type !== 'CallExpression' && node?.type !== 'OptionalCallExpression') return null
@@ -1511,4 +1522,49 @@ test('the guard scans real files (no accidental empty pass)', () => {
   for (const rel of [DASHBOARD_SESSION_TS, DASHBOARD_CONFIRM_TS, MARKETING_HEADERS_TS]) {
     assert.ok(statSync(join(repoRoot, rel)).isFile(), `${rel} must exist`)
   }
+})
+
+// ── the readers themselves, pinned ───────────────────────────────────────────
+
+test('the header-call readers see every direct member-call spelling', () => {
+  // Pinned directly, for the same reason `commentStrippedSource` is: the scans
+  // above all depend on these two readers, and the optional-chained spellings
+  // are the ones that were LOST in a refactor once already (`headerCallMethod`
+  // exists because of that regression). No file in this repo happens to use
+  // `?.set(` or a template-keyed `.set(`, so without THIS test the regression is
+  // invisible: narrowing `headerCallMethod` back to `CallExpression` only, or
+  // deleting the `TemplateLiteral` branch of `cspHeaderName`, leaves every other
+  // test in this file green while the scans silently narrow again.
+  const read = (src) => {
+    const out = []
+    visitNodes(parseSource(src, 'probe.ts').program, (node) => {
+      const method = headerCallMethod(node)
+      if (method !== null) {
+        out.push([method, cspHeaderName(node.arguments?.[0])])
+      }
+    })
+    return out
+  }
+  const CSP = 'Content-Security-Policy'
+  for (const [src, expected] of [
+    [`h.set("${CSP}", P)`, [['set', 'content-security-policy']]],
+    [`h?.set("${CSP}", P)`, [['set', 'content-security-policy']]],
+    [`h.set?.("${CSP}", P)`, [['set', 'content-security-policy']]],
+    [`h.set(\`${CSP}\`, P)`, [['set', 'content-security-policy']]],
+    ['h.append(`Content-Type`, m)', [['append', 'content-type']]],
+    ['h?.append(`Content-Type`, m)', [['append', 'content-type']]],
+    // A non-CSP header read as a call still proves the CALL is seen; the scans
+    // filter on the name, not on the method.
+    ['h.set("X-Other", v)', [['set', 'x-other']]],
+  ]) {
+    assert.deepEqual(read(src), expected, `not read as a set/append call: ${src}`)
+  }
+  // An INTERPOLATED template key stays UNREADABLE on purpose: the scans fail
+  // closed on a null name, so the call is still seen (method != null) while the
+  // header it stamps is treated as unattributable rather than as "not a CSP".
+  assert.deepEqual(read('h.set(`Content-${x}`, P)'), [['set', null]])
+  // A call that IS a member call is read whatever the method — the callers do
+  // the set/append filtering — so a non-set method is a read, not a null.
+  assert.deepEqual(read('h.get("Content-Type")'), [['get', 'content-type']])
+  assert.deepEqual(read('h.set(SOME_VAR, v)'), [['set', null]])
 })

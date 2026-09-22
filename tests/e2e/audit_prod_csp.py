@@ -113,30 +113,43 @@ def main(argv: list[str]) -> int:
                 )
                 # A bounded settle for post-`load` refusals — but the READ must
                 # not happen here. The beacon sends its RUM payload on
-                # `load`/`visibilitychange` via `navigator.sendBeacon`, and the
-                # `visibilitychange` half fires at teardown; a snapshot taken
-                # before the page is torn down drops every refusal emitted after
-                # the settle and prints OK on it. So: settle, end the lifecycle,
-                # THEN read (see `ctx.close()` below).
+                # `load`/`visibilitychange`, and the `visibilitychange` half fires
+                # at page teardown; a snapshot taken before the page closes drops
+                # every refusal emitted after the settle and prints OK on it. So:
+                # settle, close the PAGE, THEN read (see `page.close()` below).
                 page.wait_for_timeout(3_500)
             except Exception as exc:
                 goto_error = exc
-            # End the page lifecycle BEFORE reading. `close()` fires
-            # `visibilitychange`/`pagehide` and the handlers above keep appending
-            # while it does, so the drained lists include the teardown-time
-            # refusals too.
-            ctx.close()
+            # End the PAGE first — `page.close()`, NOT `ctx.close()`. The
+            # beacon's `navigator.sendBeacon` RUM POST goes out on
+            # `load`/`visibilitychange`, and only `page.close()` fires
+            # `visibilitychange`/`pagehide`/`unload`; `ctx.close()` teardown fires
+            # none of them (measured: a `connect-src` refusal emitted on
+            # `visibilitychange` appears in the drained lists after `page.close()`
+            # and NOT after `ctx.close()`). So the verdict must be read after the
+            # PAGE ends — reading after only the context is closed still drops the
+            # teardown class this script exists to detect.
+            close_error: Exception | None = None
+            try:
+                page.close()
+            except Exception as exc:  # a crashed page must not skip the verdict
+                close_error = exc
             if goto_error is not None:
                 blocked = [f"[goto-failed] {goto_error}"]
                 others = []
             else:
                 blocked = _violations(console, failed)
+                if close_error is not None:
+                    blocked.append(f"[close-failed] {close_error}")
                 # A response with NO policy refuses nothing, so a total CSP loss
                 # would otherwise read as `OK NONE` and exit 0. Absence is a
                 # failure, not a label.
                 if not csp:
                     blocked.append("[no-csp] response carried NO Content-Security-Policy")
                 others = _other_errors(console, failed)
+            # Context cleanup only, AFTER the verdict is computed, so a cleanup
+            # failure can never suppress a surface's verdict.
+            ctx.close()
             status = "OK" if not blocked else f"{len(blocked)} BLOCKED"
             print(f"{status:>10}  {kind:<8} {url}")
             for b in blocked:
