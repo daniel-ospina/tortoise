@@ -167,6 +167,11 @@ def _valid_slug(slug: str) -> bool:
     if slug.count("/") != 1:
         return False
     owner, name = slug.split("/")
+    # `.` and `..` are never GitHub owner/repo components, and they are the one
+    # value in the allowed charset that changes which path `repos/{slug}/pulls`
+    # resolves to — the exact thing this validator exists to prevent.
+    if owner in (".", "..") or name in (".", ".."):
+        return False
     ok = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.+"
     return bool(owner) and bool(name) and all(c in ok for c in owner + name)
 
@@ -474,18 +479,28 @@ def fetch_prs(slug: str, *, max_pages: int, per_page: int) -> dict:
                         f"gh returned a non-object PR record ({type(pr).__name__})")
                 head = _pr_ref(pr, "head")
                 if not head:
-                    continue
+                    # Fail CLOSED. `continue` here would silently drop the PR, and
+                    # an open PR that cannot be attributed to a branch is exactly
+                    # the veto that stops that branch being deleted by ancestry —
+                    # a malformed record must abort the run, not skip the check.
+                    raise Incomplete(
+                        f"gh returned a PR with no head ref (PR {pr.get('number')})")
                 row = {"number": pr.get("number"),
                        "sha": _pr_ref(pr, "head", "sha"),
                        "merged": pr.get("merged_at") is not None}
                 if dest is not None:
                     dest.setdefault(head, []).append(row)
                     base = _pr_ref(pr, "base")
-                    if base:
-                        # An OPEN PR's base is a live integration target: deleting
-                        # that local branch would break the PR (live shape: PR
-                        # #4181's base is the local branch feat/2409-contact-form).
-                        open_bases.add(base)
+                    if not base:
+                        # An OPEN PR always has a base; without it the base veto
+                        # (a live integration target) cannot be applied at all.
+                        raise Incomplete(
+                            f"gh returned an OPEN PR with no base ref "
+                            f"(PR {pr.get('number')})")
+                    # An OPEN PR's base is a live integration target: deleting
+                    # that local branch would break the PR (live shape: PR
+                    # #4181's base is the local branch feat/2409-contact-form).
+                    open_bases.add(base)
                 elif row["merged"]:
                     merged_by_head.setdefault(head, []).append(row)
                 else:
@@ -572,6 +587,19 @@ def _detached_head_ts(repo_root: str, worktrees: list[dict]) -> dict[str, int]:
     return out
 
 
+def _reject_dotdot(path: str) -> None:
+    """Refuse a path containing a ``..`` component.
+
+    ``os.path.abspath`` collapses ``..`` LEXICALLY, but the OS resolves
+    ``symlink/..`` against the symlink's TARGET. So ``repo/docs/../x.md`` (with
+    ``docs -> /outside``) normalizes to ``repo/x.md``, walks clean, and then
+    escapes through the link — an undeclared hole in `_under_repo_symlink`.
+    Rejecting the component is the only way a string-level check can be safe.
+    """
+    if ".." in Path(path).parts:
+        raise Incomplete(f"refusing a path with a '..' component: {path}")
+
+
 def _under_repo_symlink(p: Path, repo_root: str | None) -> Path | None:
     """The first symlinked component of ``p``'s parents that lies INSIDE the repo.
 
@@ -584,6 +612,10 @@ def _under_repo_symlink(p: Path, repo_root: str | None) -> Path | None:
     Both sides compare UNRESOLVED (``abspath``). Resolving them would erase the
     very symlink this is looking for, and ``realpath``-ing the repo would also
     resolve macOS's own ``/var -> /private/var``, breaking the prefix match.
+
+    Callers MUST have rejected a ``..`` component first (``_reject_dotdot``):
+    ``abspath`` collapses ``..`` lexically while the OS resolves ``symlink/..``
+    against the link's target, so a ``..`` walk cannot be made safe here.
 
     KNOWN RESIDUAL (fail-open): the check is a prefix match, so it only fires
     when the caller's path and ``repo_root`` are spelled in the SAME alias. If
@@ -620,6 +652,7 @@ def _write_text_safe(path: str, text: str, repo_root: str | None = None) -> None
     replaces the link itself, never its target.
     """
     p = Path(path)
+    _reject_dotdot(path)
     # The leaf always; and a symlinked PARENT only when the repo itself controls
     # it (see `_under_repo_symlink`) — the naive "any symlinked ancestor" rule
     # refuses `/tmp/report.md` on macOS, where `/tmp` IS a symlink.
@@ -676,6 +709,7 @@ def _make_backup_bundle(repo_root: str, path: str, targets: list[dict]) -> None:
     so the check and the write agree.
     """
     dest = Path(path)
+    _reject_dotdot(path)
     if not dest.is_absolute():
         dest = Path(repo_root) / dest
     if dest.is_symlink():

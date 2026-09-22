@@ -683,6 +683,42 @@ cat "$d/${{state}}_pages.json"
             br._make_backup_bundle(str(self.repo), str(dest), [])
         self.assertEqual(dest.read_text(), "already here")
 
+    def test_a_pr_without_a_head_ref_aborts_instead_of_dropping_the_veto(self):
+        # `continue` here silently drops the PR, and an unattributable OPEN PR is
+        # the veto that stops its branch being deleted by ancestry — a fail-open
+        # that deleted the branch in practice.
+        _git(self.repo, "branch", "victim", self.main_sha)
+        (self.repo / "g.txt").write_text("g\n")
+        _git(self.repo, "add", "g.txt")
+        _git(self.repo, "commit", "-m", "advance")
+        _git(self.repo, "update-ref", "refs/remotes/origin/main",
+             _git_out(self.repo, "rev-parse", "HEAD"))
+        self.write_fixtures(open_pages=[[{"number": 7, "base": {"ref": "main"}}]])
+        rc, out, err = self.run_tool(["--apply", "--no-backup"], repo=self.driver)
+        self.assertEqual(rc, 2, err + out)
+        self.assertIn("victim", self.branches())
+
+    def test_an_open_pr_without_a_base_ref_aborts(self):
+        self.write_fixtures(open_pages=[[{"number": 8, "head": {"ref": "x"}}]])
+        rc, out, err = self.run_tool([], repo=self.driver)
+        self.assertEqual(rc, 2, err + out)
+
+    def test_a_dotdot_write_path_is_refused(self):
+        # abspath collapses `..` LEXICALLY while the OS resolves `symlink/..`
+        # against the link target, so a `..` past a planted link escapes the
+        # repo-planted-symlink guard.
+        br = self._load_tool()
+        with self.assertRaises(br.Incomplete):
+            br._write_text_safe(str(self.repo / "a" / ".." / "b.md"), "x\n", str(self.repo))
+
+    def test_slug_rejects_dot_and_dotdot_components(self):
+        # `.`/`..` are the only allowed-charset values that change which path
+        # `repos/{slug}/pulls` resolves to.
+        br = self._load_tool()
+        for bad in ("../x", "a/.", "a/..", "../.."):
+            self.assertFalse(br._valid_slug(bad), bad)
+        self.assertTrue(br._valid_slug("owner/repo"))
+
     def test_backup_bundle_written_before_deletion(self):
         sha = self.commit_on("merged/branch", "merged work")
         self.add_pr("merged", "merged/branch", sha)
