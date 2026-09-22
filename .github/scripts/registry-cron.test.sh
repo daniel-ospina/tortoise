@@ -36,7 +36,8 @@
 #  26. unquoted/bare secret runs are redacted too (security review)
 #  27. last_sweep (graph_failures[].error) is redacted before publication
 #  28. a 404 (deleted) tracked issue re-files; a 500 blip does not duplicate
-#  29. resolve deletes BOTH global.json and the server-owned _.json (#2844)
+#  29. resolve deletes BOTH spellings of the sentinel: canonical _.json
+#      (the AlertStore's) and the legacy global.json (#2844)
 #  30. a missing .watcher block neither files nor self-heals WATCHER_DOWN
 #  31. degraded is healthy; no_eligible_teams is the no-coverage family
 #  32. lock held with no usable last_sweep + pool data → SWEEP_NO_COVERAGE
@@ -76,6 +77,17 @@
 #      not enter flat classification and blank a measured default archive
 #  62. an unparseable top-level listing is UNKNOWN, never an empty pool
 #  63. the top-level listing stderr is captured (not /dev/null'd)
+#  64. a subject-less incident is written ONCE, under the CANONICAL `_.json`
+#      (the AlertStore's spelling) — never the legacy `global.json` (#2844)
+#  65. a legacy sentinel holding a CLOSED issue still lets the incident re-file
+#      (#2844), so the alias does not swallow a recurrence
+#  66. the driver's OWNERSHIP refusal in `resolve_global` is pinned (#3127): a
+#      watcher-owned kind is refused (no search, no close); a driver-owned
+#      kind resolves normally
+#  67. `alert_key` canonicalizes the EMPTY (subject-less) id ONLY: a real
+#      subject literally named `global`/`_` keeps its own single key and is
+#      never an alias set — the round-7 P2 that otherwise gave one real team
+#      two create-once points across bash and AlertStore (#2844)
 #
 # Fixtures are simulated; the real driver defers nothing.
 
@@ -400,7 +412,7 @@ export GH_ISSUE_WATCHER_DOWN=55
 run_driver
 assert_eq "$RC" 1 "5. enabled-no-coverage exits RED (1)"
 assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "5. enabled-no-coverage files SWEEP_NO_COVERAGE"
-assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/WATCHER_DOWN/global.json" "5. the stale watcher incident is recorded"
+assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/WATCHER_DOWN/_.json" "5. the stale watcher incident is recorded"
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/55" "5. enabled-no-coverage does NOT self-heal WATCHER_DOWN"
 
 # ── 6. enabled, 0 teams, R2 pool also empty (chronic pre-beta) → silent ─────
@@ -482,7 +494,7 @@ export STUB_SWEEP_BODY='{"status":"no_teams","teams_backed_up":0}'
 export GH_ISSUE_R2_DOWN=88
 run_driver
 assert_eq "$RC" 1 "13. R2 down + 0 teams exits RED (1)"
-assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/R2_DOWN/global.json" "13. R2_DOWN is recorded"
+assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/R2_DOWN/_.json" "13. R2_DOWN is recorded"
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/88" "13. a failed R2 probe does NOT self-close the R2_DOWN it filed"
 
 # ── 14. 202 lock held + stale last_sweep → SWEEP_NO_COVERAGE ────────────────
@@ -557,6 +569,9 @@ assert_not_contains "$(cat "$LOG")" "SECRETKEY9" "20. the key prefix is NOT publ
 assert_not_contains "$OUT" "SECRETKEY9" "20. the key prefix is NOT logged either"
 
 # ── 21. 412 + R2 object with an OPEN issue_number → no duplicate ────────────
+# After #2844 this path is reached via the alias pre-check: the stub's r2_get
+# answers for the legacy `global.json` too, so a legacy sentinel holding an OPEN
+# issue is adopted before the driver ever attempts its own create-once.
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
@@ -659,8 +674,9 @@ run_driver
 assert_eq "$RC" 1 "28b. transient 500 exits RED (1)"
 assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "28b. a transient 500 assumes open (no duplicate)"
 
-# ── 29. resolve deletes BOTH global.json and _.json (#2844) ─────────────────
+# ── 29. resolve deletes BOTH spellings: canonical _.json + legacy global.json ─
 reset_case
+# The driver's post-#2844 sentinel is the canonical spelling…
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
 export STUB_STATUS_BODY="$(status_body true null null)"
@@ -668,8 +684,8 @@ export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
 export GH_ISSUE_APP_DOWN=99
 run_driver
 assert_eq "$RC" 0 "29. healthy run exits 0"
-assert_match "$(cat "$LOG")" "AWS delete-object key=ops/alerts/APP_DOWN/global.json" "29. the driver dedup object is deleted on resolve"
-assert_match "$(cat "$LOG")" "AWS delete-object key=ops/alerts/APP_DOWN/_.json" "29. the server-side dedup object is deleted too"
+assert_match "$(cat "$LOG")" "AWS delete-object key=ops/alerts/APP_DOWN/_.json" "29. the driver dedup object is deleted on resolve"
+assert_match "$(cat "$LOG")" "AWS delete-object key=ops/alerts/APP_DOWN/global.json" "29. the legacy spelling is deleted too (#2844)"
 
 # ── 30. missing .watcher block neither files nor self-heals WATCHER_DOWN ────
 reset_case
@@ -827,7 +843,7 @@ export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
 export GH_ISSUE_R2_DOWN=88
 run_driver
 assert_eq "$RC" 1 "41. storage_error while enabled exits RED (1)"
-assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/R2_DOWN/global.json" "41. storage_error while enabled records R2_DOWN"
+assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/R2_DOWN/_.json" "41. storage_error while enabled records R2_DOWN"
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/88" "41. R2_DOWN is NOT closed while storage_error is set"
 
 # ── 42. no_work with graph_totals.backed_up>0 is not a coverage gap ───────
@@ -1117,6 +1133,101 @@ export STUB_SWEEP_BODY='{"status":"no_teams","teams_backed_up":0}'
 run_driver
 assert_eq "$RC" 1 "63. a failed top-level listing exits RED (1)"
 assert_contains "$OUT" "AccessDenied" "63. the top-level CLI stderr is captured, not discarded"
+
+# ── 64. a subject-less incident is written ONCE, under the canonical spelling ─
+# #2844: the driver's pre-fix spelling was `global.json` while the server-side
+# AlertStore writes `_.json`. Two spellings = two create-once points = two issues
+# for one condition, and a resolve that deletes only one strands the other.
+reset_case
+export STUB_R2_DOWN=1
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"no_teams","teams_backed_up":0}'
+run_driver
+assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/R2_DOWN/_.json" "64. the canonical (AlertStore) spelling is written"
+assert_not_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/R2_DOWN/global.json" "64. the legacy spelling is NOT written (one create-once point)"
+
+# ── 65. a legacy sentinel holding a CLOSED issue does not block re-filing ───
+# The other half of #2844: adopting on sight would swallow a recurrence. The
+# alias is adopted only while its issue is still OPEN.
+reset_case
+export STUB_R2_DOWN=1
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"no_teams","teams_backed_up":0}'
+export STUB_412=0
+export STUB_GET_BODY='{"kind":"R2_DOWN","issue_number":91}'
+export GH_ISSUE_STATE=closed
+run_driver
+assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/R2_DOWN/_.json" "65. a closed legacy sentinel still lets the incident re-file"
+
+# ── 66. the driver's ownership refusal is pinned (#3127) ────────────────────
+# `resolve_global` must self-heal ONLY kinds the driver owns (KIND_OWNERS). The
+# refusal had no test: deleting the whole block kept every other assertion
+# green, so a regression could quietly restore driver authority over
+# watcher/app kinds — the false recovery #3127 exists to prevent. The full
+# driver cannot reach this path (every call site is driver-owned BY CONTRACT,
+# pinned by test_kind_owner_contract_with_driver), so the real functions are
+# extracted and driven directly with stubbed I/O. Extract from the SHIPPING
+# script, never a copy, so deleting the block fails this case.
+reset_case
+RESOLVE_EXT="$(mktemp)"
+RESOLVE_LOG="$(mktemp)"
+sed -n '/^kind_owner()/,/^}/p; /^resolve_global()/,/^}/p' "$DRIVER" > "$RESOLVE_EXT"
+run_resolve() { # kind — real kind_owner/resolve_global + stubbed log/gh/r2
+  local kind="$1"
+  : > "$RESOLVE_LOG"
+  (
+    set +e
+    log() { printf 'REFUSE %s\n' "$1" >> "$RESOLVE_LOG"; }
+    gh_find_open() { printf 'FIND %s\n' "$*" >> "$RESOLVE_LOG"; printf '55'; }
+    gh_close() { printf 'CLOSE %s\n' "$*" >> "$RESOLVE_LOG"; }
+    # shellcheck disable=SC1090
+    . "$RESOLVE_EXT"
+    resolve_global "$kind" "Resolved — test."
+  ) >/dev/null 2>&1 || true
+  cat "$RESOLVE_LOG"
+}
+assert_contains "$(run_resolve STALE)" "refusing to close" "66. a watcher-owned kind is refused"
+assert_not_contains "$(run_resolve STALE)" "FIND" "66. the refusal never searches for an issue"
+assert_not_contains "$(run_resolve STALE)" "CLOSE" "66. the refusal never closes one"
+assert_contains "$(run_resolve WATCHER_DOWN)" "FIND" "66. a driver-owned kind searches for the incident"
+assert_contains "$(run_resolve WATCHER_DOWN)" "CLOSE" "66. a driver-owned kind closes the incident"
+assert_not_contains "$(run_resolve WATCHER_DOWN)" "refusing to close" "66. the driver-owned path does not refuse"
+rm -f "$RESOLVE_EXT" "$RESOLVE_LOG"
+
+# ── 67. a REAL subject named `global` is not the platform (subject-less) alias
+# #2844 round-7 P2: `alert_key` canonicalized a NON-EMPTY subject literally
+# named `global` to `_.json`, while AlertStore._keys kept `global.json` for that
+# same subject — so a team actually named `global` got two create-once points
+# (two sentinels, two issues for one condition). Canonicalization is for the
+# EMPTY id only; the legacy `global` spelling stays a READ/DELETE alias of the
+# EMPTY id alone. Extracted from the SHIPPING script, never a copy, so
+# re-widening either function fails here.
+reset_case
+KEY_EXT="$(mktemp)"
+sed -n '/^alert_key()/,/^}/p; /^alert_keys_all()/,/^}/p' "$DRIVER" > "$KEY_EXT"
+run_keys() { # fn id — the real alert_key/alert_keys_all from the shipping driver
+  (
+    # shellcheck disable=SC1090
+    . "$KEY_EXT"
+    "$1" STALE "$2"
+  )
+}
+assert_eq "$(run_keys alert_key "")" "ops/alerts/STALE/_.json" \
+  "67. the EMPTY (platform) id canonicalizes to _.json"
+assert_eq "$(run_keys alert_key global)" "ops/alerts/STALE/global.json" \
+  "67. a REAL subject named global keeps its OWN key, not the platform alias"
+_keys_empty="$(run_keys alert_keys_all "")"
+assert_contains "$_keys_empty" "ops/alerts/STALE/_.json" \
+  "67. the platform id lists the canonical spelling"
+assert_contains "$_keys_empty" "ops/alerts/STALE/global.json" \
+  "67. the platform id still lists the legacy global.json alias (read/delete)"
+assert_eq "$(printf '%s\n' "$_keys_empty" | wc -l | tr -d ' ')" "2" \
+  "67. the platform id has exactly two spellings"
+assert_eq "$(run_keys alert_keys_all global)" "ops/alerts/STALE/global.json" \
+  "67. a REAL subject named global is never an alias set"
+assert_eq "$(run_keys alert_keys_all _)" "ops/alerts/STALE/_.json" \
+  "67. a REAL subject named _ is never an alias set"
+rm -f "$KEY_EXT"
 
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"

@@ -49,6 +49,7 @@ aboutObjects: tortoise
 | Agent-harness landscape — volunteering-memory end-state distribution targets (epic #2080) | `docs/research/2026-09-01-gbrain-learnings/platform-landscape.md` |
 | Embedder selection decision record (ADR-009, #1349) | `docs/adr/ADR-009-embedder-selection.md` |
 | Auth planes — sessions vs machine credentials (ADR-010, #2246) | `docs/adr/ADR-010-auth-planes-session-agent-key.md` |
+| Resolution authority for DR alerts is evidence-gated (ADR-011, #2844/#3127) | `docs/adr/ADR-011-resolution-authority-for-dr-alerts.md` |
 | OAuth 2.1 for remote MCP — discovery, PKCE flow, DCR capacity policy + trusted-CIDR exemption (#524/#2866) | `docs/oauth-mcp.md` |
 | #2246 dashboard session-only scope + verified plan (ADR-010) | `docs/scoping/2026-09-04-2246-dashboard-session-only.md` |
 | #2514 planted-operator (layer-2) corpus + grading scoping | `docs/scoping/2026-09-07-2514-operator-corpus.md` |
@@ -77,5 +78,6 @@ aboutObjects: tortoise
 | #2600 Attribution Phase 1 scoping — resolver human actor; sessions + write-events stamped (epic #2554 v1 gate) | `docs/scoping-2600-attribution-phase1.md` |
 | #2789 one free organization per person — scoping (double diamond, Design 2 = webhook-provisioned org) | `docs/scoping/2026-09-10-2789-one-free-org.md` |
 | #2789 one free organization per person — implementation plan | `docs/plans/2026-09-10-2789-one-free-org.md` |
+| #3525 CSP for the app origin + `no-store` regression guard — scope + plan, with the `Set-Cookie`-stripping / `_headers`-bypass `### Integration Docs` record | `docs/plans/2026-09-22-3525-csp-no-store.md` |
 | Retention and deletion — the one promise (canonical) | `docs/retention-and-deletion.md` |
 | Durability posture — the one authority: mechanism, loss window, and the strongest verification actually performed, per deployment (canonical, #2881) | `docs/durability-posture.md` |
