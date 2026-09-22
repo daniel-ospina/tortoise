@@ -7,7 +7,7 @@ WHY THIS SUITE EXISTS
 First-org provisioning used to be the ONE client data call that did not go
 through the BFF: the dashboard POSTed `{SUPABASE_URL}/functions/v1/
 tenant-provision` from the browser with `Authorization: Bearer <access token>`.
-That is impossible under the BFF — the browser holds only an opaque
+That is impossible under the BFF — for the BFF session the browser holds only an opaque
 `__Host-session` handle — so the route must mint the credential server-side and
 attach it outbound, exactly as `/api/v1` does.
 
