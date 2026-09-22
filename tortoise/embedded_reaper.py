@@ -618,6 +618,57 @@ def _read_redis_config(socket_dir: str) -> dict | None:
     return result
 
 
+def _stdout_text(out) -> str | None:
+    """The captured stdout of a completed subprocess as ``str``, else None.
+
+    Every probe in this module is documented to fail CLOSED — ``None`` or an
+    empty result meaning "undeterminable" — and each one parses captured
+    ``ps``/``lsof``/``pgrep``/``redis-cli`` stdout with ``.strip()``,
+    ``.splitlines()`` or ``re.match``. A subprocess seam that hands back
+    anything other than text therefore used to raise ``TypeError`` from a
+    helper whose contract is "or None". The common real-world source is a
+    monkeypatched ``subprocess.run`` (dozens of tests fake git detection that
+    way), but any wrapper is enough — so the type guard belongs here, at the
+    read, not at each of the callers.
+
+    ``bytes`` is decoded; anything else (including a missing attribute, since
+    the value is genuinely untyped) is ``None``.
+    """
+    raw = getattr(out, "stdout", None)
+    if isinstance(raw, bytes):
+        try:
+            raw = raw.decode("utf-8", "replace")
+        except Exception:  # undecodable is undeterminable — fail closed
+            return None
+    return raw if isinstance(raw, str) else None
+
+
+def _run_text(cmd: list[str], *, timeout: float,
+              env: dict[str, str] | None = None) -> str | None:
+    """Run ``cmd`` and return its stdout as text, or None when unusable.
+
+    Thin wrapper over ``subprocess.run(capture_output=True, text=True)`` that
+    swallows the timeout/OS failures the callers already handled AND applies
+    :func:`_stdout_text`, so a non-text stdout is "undeterminable" rather
+    than a ``TypeError`` escaping a fail-closed probe.
+
+    Why this is load-bearing rather than defensive tidiness (#4496): the
+    raise propagated out of ``_owner_records`` into
+    ``cotenant_holds_server``, whose deliberate fail-closed
+    ``except Exception: return True`` then reported a PHANTOM co-tenant. The
+    last of two clients therefore declined the shutdown and its embedded
+    daemon leaked — uninstrumented, directory present: exactly the
+    ``candidate / path_based=False / unattributed=True / dir_missing=False``
+    shape `test-slow (b)` reports, and the class #3767 refuses to fast-kill.
+    """
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True,
+                             timeout=timeout, env=env)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    return _stdout_text(out)
+
+
 def _uptime_seconds(pid: int) -> float | None:
     """Return process uptime in seconds, or None if the PID is not alive.
 
@@ -629,14 +680,10 @@ def _uptime_seconds(pid: int) -> float | None:
     cached = _PROC_INFO_CACHE.get(pid)
     if cached is not None:
         return cached["etime"]
-    try:
-        out = subprocess.run(
-            ["ps", "-o", "etime=", "-p", str(pid)],
-            capture_output=True, text=True, timeout=2,
-        )
-    except (subprocess.TimeoutExpired, OSError):
+    etime = _run_text(["ps", "-o", "etime=", "-p", str(pid)], timeout=2)
+    if etime is None:
         return None
-    etime = out.stdout.strip()
+    etime = etime.strip()
     if not etime:
         return None
     return _parse_etime(etime)
@@ -730,15 +777,13 @@ def _process_start_time(pid: int) -> float | None:
     cached = _PROC_INFO_CACHE.get(pid)
     if cached is not None and cached.get("start") is not None:
         return cached["start"]
-    try:
-        out = subprocess.run(
-            ["ps", "-o", "lstart=", "-p", str(pid)],
-            capture_output=True, text=True, timeout=2,
-            env={**os.environ, "LC_ALL": "C"},
-        )
-    except (subprocess.TimeoutExpired, OSError):
+    raw = _run_text(
+        ["ps", "-o", "lstart=", "-p", str(pid)],
+        timeout=2, env={**os.environ, "LC_ALL": "C"},
+    )
+    if raw is None:
         return None
-    raw = out.stdout.strip()
+    raw = raw.strip()
     if not raw:
         return None
     return _parse_lstart(raw)
@@ -863,16 +908,13 @@ def _derive_real_pid(socket_path: str, pidfile_pid: int | None = None) -> int | 
 
 def _process_has_socket(pid: int, socket_path: str) -> bool:
     """True if the process has the given unix socket open (lsof)."""
-    try:
-        out = subprocess.run(
-            ["lsof", "-Fp", "-a", "-p", str(pid), "-U"],
-            capture_output=True, text=True, timeout=2,
-        )
-    except (subprocess.TimeoutExpired, OSError):
+    text = _run_text(
+        ["lsof", "-Fp", "-a", "-p", str(pid), "-U"], timeout=2)
+    if text is None:
         return False
     # -Fp prints 'p<pid>' entries; presence means it has unix sockets open.
     # Additionally verify cmdline contains the socket path for certainty.
-    return f"p{pid}" in out.stdout
+    return f"p{pid}" in text
 
 
 def sys_platform() -> str:
@@ -909,7 +951,10 @@ def _derive_real_pid_macos(socket_path: str) -> int | None:
         )
     except (subprocess.TimeoutExpired, OSError):
         return None
-    for line in out.stdout.splitlines():
+    text = _stdout_text(out)
+    if text is None:
+        return None
+    for line in text.splitlines():
         if not line.startswith("p"):
             continue
         try:
@@ -927,14 +972,9 @@ def _cmdline(pid: int) -> str:
     cached = _PROC_INFO_CACHE.get(pid)
     if cached is not None:
         return cached["cmdline"]
-    try:
-        out = subprocess.run(
-            ["ps", "-ww", "-o", "command=", "-p", str(pid)],
-            capture_output=True, text=True, timeout=2,
-        )
-        return out.stdout
-    except (subprocess.TimeoutExpired, OSError):
-        return ""
+    text = _run_text(
+        ["ps", "-ww", "-o", "command=", "-p", str(pid)], timeout=2)
+    return text if text is not None else ""
 
 
 def _probe_socket(socket_path: str, timeout: float = PROBE_TIMEOUT) -> str:
@@ -1021,7 +1061,12 @@ def _client_list(socket_path: str) -> list[dict] | None:
         if out.returncode == 0:
             # rc 0 with empty stdout = zero clients (empty bulk string) —
             # a valid verdict, don't double-probe via the raw fallback.
-            return _parse_client_list(out.stdout if out.stdout else "")
+            # `_stdout_text` keeps a non-text stdout OUT of the parse: rc 0
+            # is redis-cli's own success word, so a mocked/odd stdout must
+            # read as "0 clients" only when it really was empty text.
+            text = _stdout_text(out)
+            if text is not None:
+                return _parse_client_list(text)
     except (subprocess.TimeoutExpired, OSError):
         pass
     return None
@@ -1180,17 +1225,15 @@ def _batch_process_info(pids: list[int]) -> dict[int, dict]:
     """One ps call for all pids: {pid: {cmdline, etime, ppid, start}}."""
     if not pids:
         return {}
-    try:
-        out = subprocess.run(
-            ["ps", "-ww", "-o", "pid=,etime=,ppid=,lstart=,command=",
-             "-p", ",".join(str(p) for p in pids)],
-            capture_output=True, text=True, timeout=10,
-            env={**os.environ, "LC_ALL": "C"},
-        )
-    except (subprocess.TimeoutExpired, OSError):
+    text = _run_text(
+        ["ps", "-ww", "-o", "pid=,etime=,ppid=,lstart=,command=",
+         "-p", ",".join(str(p) for p in pids)],
+        timeout=10, env={**os.environ, "LC_ALL": "C"},
+    )
+    if text is None:
         return {}
     result: dict[int, dict] = {}
-    for line in out.stdout.splitlines():
+    for line in text.splitlines():
         parts = line.strip().split(None, 8)
         if len(parts) < 3:
             continue
@@ -1222,15 +1265,12 @@ def _pgrep_redis_servers() -> list[int]:
     thousands of stale dirs on a leaky machine). Returns [] when pgrep is
     unavailable.
     """
-    try:
-        out = subprocess.run(
-            ["pgrep", "-f", "redislite/bin/redis-server"],
-            capture_output=True, text=True, timeout=5,
-        )
-    except (subprocess.TimeoutExpired, OSError):
+    text = _run_text(
+        ["pgrep", "-f", "redislite/bin/redis-server"], timeout=5)
+    if text is None:
         return []
     pids: list[int] = []
-    for line in out.stdout.splitlines():
+    for line in text.splitlines():
         line = line.strip()
         if line.isdigit():
             pids.append(int(line))
