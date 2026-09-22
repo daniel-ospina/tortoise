@@ -133,8 +133,24 @@ def test_mcp_endpoint_rejects_unauthenticated(page: Page) -> None:
             if attempt < MCP_PROBE_ATTEMPTS:
                 time.sleep(MCP_PROBE_RETRY_S * attempt)
             continue
-        # The host ANSWERED. The contract is the point, so assert it — this is
-        # the ONLY path that may red, and it names the status it actually got.
+        # A 5xx is NOT an answer. This is the repo's OWN recorded rule, not a
+        # convenience: availability-watchdog.yml states it verbatim -- "A 2xx or
+        # a 401 both mean 'the app answered'; a timeout, a 5xx or a connection
+        # error mean it did not" -- and availability-watchdog.sh encodes it as
+        # `000|5??) printf 'DOWN'`. A Fly/Cloudflare ORIGIN outage answers
+        # 502/521/503, so treating a 5xx as a contract verdict would reproduce
+        # exactly the false-401 red this change exists to remove: reported as
+        # "the endpoint stopped rejecting unauthenticated callers" while the
+        # real fault is availability, and fired on every open PR at once while
+        # the watchdog files the actual incident.
+        if resp.status >= 500:
+            transport = f"HTTP {resp.status} from the edge (no answer)"
+            if attempt < MCP_PROBE_ATTEMPTS:
+                time.sleep(MCP_PROBE_RETRY_S * attempt)
+            continue
+        # The host ANSWERED with a real status. The contract is the point, so
+        # assert it — this is the ONLY path that may red, and it names the
+        # status it actually got.
         assert resp.status == 401, (
             f"the MCP endpoint ANSWERED but returned {resp.status}, not 401 — "
             f"the unauthenticated-rejection contract is broken "
