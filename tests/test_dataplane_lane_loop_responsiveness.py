@@ -20,7 +20,8 @@ seam's OWN view of the loop (``asyncio.get_running_loop()`` succeeds only on
 the loop thread — a worker thread has no running loop), which is a mechanism
 assertion rather than a source grep. The AST pin covers all 12 bodies; the
 probe below covers one representative per lane, because that is what can be
-driven without a full backup/R2/drill fixture.
+driven without a full backup/R2/drill fixture — and two cases cover the calls
+NO guard can see (see the next paragraph).
 
 MECHANISM UNDER TEST. Every off-load here is ONE ``asyncio.to_thread`` hand-off
 of the body's synchronous region. Where the region was a single no-``await``
@@ -28,6 +29,34 @@ sequence on the loop (``commit_session``, ``delete_session``), the hand-off is
 deliberately the WHOLE sequence, not one call per query: a per-query hand-off
 would ADD interleaving points between statements the original ran
 uninterleaved. The behavioural test at the bottom is the guard for that.
+
+⚠️ ONE HAND-OFF IS NOT MUTUAL EXCLUSION. The pre-#3718 inline code was
+ACCIDENTALLY atomic: the single-threaded loop serialized every check-then-act
+for free. ``asyncio.to_thread`` submits to the loop's SHARED pool, so two
+concurrent requests run the closure in two threads and the check-then-act is
+genuinely concurrent. Two of the converted bodies had one — ``public_demo``'s
+sentinel read → seed, and ``commit_session``'s record read → write phase →
+record stamp — and each now takes an explicit lock across the hand-off. This
+file carries a two-party-barrier test per body, measuring MAX CONCURRENT
+entries into the region (not a sleep, and not wall-clock time), so a missing
+lock fails here and a busy pool does not.
+
+⚠️ A ``:CommitRecord`` MERGE IS NOT SUFFICIENT FOR THE COMMIT LOCK. It makes
+the WRITE atomic; it does not make the loser WAIT. The winner leaves the record
+``partial`` while it writes, and ``plan_commit`` returns ``duplicate=False`` for
+a ``partial`` record, so the loser would re-plan against pre-winner graph state
+and re-run the write phase. That is what the round-3 review reproduced.
+
+⚠️ HELPER-MEDIATED WORK IS INVISIBLE TO BOTH GUARDS, SO TWO CASES HERE PROVE IT
+DIRECTLY. ``count_data_nodes`` takes a raw ``db`` (not a ``_get_proj()`` seam)
+and lives in a *sync* helper, so the attach probe and the AST scan both miss it
+— the pin's "no inline seam" check passes VACUOUSLY for any body whose graph
+work is helper-mediated. ``_lifespan``'s ``_control_plane_source`` is the same
+shape one level down (``_registry_sdk`` -> eager ``_make_sdk`` + ``_get_proj``,
+plus a probe-retry sleep). Round 3 found both still on the loop despite their
+bodies being declared off-loaded; ``test_backups_rebaseline_counts_on_a_worker``
+and ``test_lifespan_resolves_the_control_plane_off_loop`` pin them
+behaviourally, because no inventory can.
 
 WHY THE PROBE IS WINDOW-SCOPED — ``_get_proj`` is not a request-only seam: the
 boot sweeps and the backup watcher run it on daemon worker threads
@@ -249,8 +278,9 @@ def _public_demo_kwargs():
 
 
 def _commit_session_kwargs():
-    """Unused by ``_CASES`` — kept as the documented payload for the
-    ``commit_session`` case (see the note under ``_CASES``)."""
+    """The ``commit_session`` request for the round-3 serialization test
+    (:func:`test_concurrent_commit_same_payload_applies_once`). Not a
+    ``_CASES`` entry — see the note under ``_CASES``."""
     from tests.test_commit_endpoint import _finalize, _raw_payload
 
     body = _finalize(_raw_payload(
@@ -275,30 +305,42 @@ def _backups_sweep_kwargs():
     }
 
 
-# label, handler, kwargs factory, expected status (None = "not asserted")
+# label, handler, kwargs factory, expected status, expected response-body key
+# (``None`` = "not asserted").
+#
+# ⚠️ The status is asserted for EVERY case. An earlier revision left the two
+# internal DR cases at ``None``, which let a handler that 500s *after* reaching
+# its graph attach satisfy the probe — the seam was reached, so the off-load
+# assertion passed, and nothing looked at what happened next (#3718 round-3
+# review). The body key is the cheap second half: it proves the handler
+# completed its own success path, not merely that it got past the attach.
 _CASES = [
-    ("session-delete", "delete_session", _delete_session_kwargs, 200),
-    ("public-demo", "public_demo", _public_demo_kwargs, 200),
-    ("backups-rebaseline", "backups_rebaseline", _backups_rebaseline_kwargs, None),
-    ("backups-sweep", "backups_sweep", _backups_sweep_kwargs, None),
+    ("session-delete", "delete_session", _delete_session_kwargs, 200, None),
+    ("public-demo", "public_demo", _public_demo_kwargs, 200, None),
+    ("backups-rebaseline", "backups_rebaseline", _backups_rebaseline_kwargs,
+     200, "status"),
+    ("backups-sweep", "backups_sweep", _backups_sweep_kwargs,
+     200, "graph_totals"),
 ]
 
-# NOT driven behaviourally: ``commit_session``. Its whole synchronous block is
-# off-loaded as ONE hand-off (the guard for that is the AST pin — its body
-# declares no inline seam), but a real commit costs ~32 s in this embedded
-# redislite lane (measured), which is past the harness's 10 s transport wait
-# bound and far too expensive to spend inside a responsiveness test. The lane
-# is covered by ``delete_session`` (the session lane's other half, same
-# mechanism) plus the pin.
+# NOT driven behaviourally for its OFF-LOAD: ``commit_session``. Its whole
+# synchronous block is off-loaded as ONE hand-off (the guard for that is the AST
+# pin — its body declares no inline seam), but a real commit costs ~32 s in this
+# embedded redislite lane (measured), which is past the harness's 10 s transport
+# wait bound and far too expensive to spend inside a responsiveness test. The
+# lane's ATTACH is covered by ``delete_session`` (the session lane's other half,
+# same mechanism) plus the pin. Separately, ``commit_session``'s SERIALIZATION is
+# covered behaviourally by ``test_concurrent_commit_same_payload_applies_once``
+# below, which replaces only the write phase so it stays inside the bound.
 
 # The two cases that need the internal-key env + a memory backup store.
 _INTERNAL_CASES = {"backups-rebaseline", "backups-sweep"}
 
 
-@pytest.mark.parametrize("label,handler,request_kwargs,expected", _CASES,
-                         ids=[c[0] for c in _CASES])
+@pytest.mark.parametrize("label,handler,request_kwargs,expected,body_key",
+                         _CASES, ids=[c[0] for c in _CASES])
 def test_dataplane_handler_offloads_graph_io(client, monkeypatch, label, handler,
-                                             request_kwargs, expected):
+                                             request_kwargs, expected, body_key):
     """#3718 residual 3: the handler's sync graph ATTACH must not run on the loop.
 
     ``asyncio.get_running_loop()`` succeeds only when the call executes ON the
@@ -341,6 +383,12 @@ def test_dataplane_handler_offloads_graph_io(client, monkeypatch, label, handler
         assert response.status_code == expected, (
             f"[{label}] the off-loaded handler did not return its real response "
             f"({response.status_code}: {response.text[:200]})")
+    if body_key is not None:
+        assert body_key in response.json(), (
+            f"[{label}] the handler returned {response.status_code} without its "
+            f"own success payload ({body_key!r} missing from "
+            f"{response.text[:200]}) — it failed AFTER reaching the graph "
+            f"attach, which the off-load assertion alone cannot see (#3718)")
 
 
 def test_delete_session_does_not_freeze_the_event_loop(client, monkeypatch):
@@ -493,3 +541,264 @@ def test_public_demo_seed_is_serialized_per_org(client, monkeypatch):
         f"two concurrent POST /v1/demo both ran the seed (max concurrent "
         f"entries={state['max']}) — the per-org lock is gone, so the sentinel "
         f"check is a check-then-act across a thread hand-off (#3718)")
+
+
+def test_concurrent_commit_same_payload_applies_once(client, monkeypatch):
+    """#3718 round 3: one worker hand-off is NOT mutual exclusion for
+    ``commit_session`` — and the ``:CommitRecord`` MERGE does not make the
+    loser wait.
+
+    Pre-#3718 the whole synchronous block was a single no-``await`` sequence on
+    the loop, so two POSTs with the SAME ``client_commit_id`` were serialized
+    for free by the single-threaded loop. ``asyncio.to_thread`` runs the closure
+    on the loop's SHARED pool, so both now run the check-then-act concurrently —
+    and the loser IS reachable: ``store.acquire`` only sets fields ``ON
+    CREATE`` (so the winner's record stays ``partial`` while it writes) and
+    ``plan_commit`` returns ``duplicate=False`` for a ``partial`` record, so the
+    loser re-plans against pre-winner graph state and re-runs the write phase.
+    That applies ``commit_count + 1`` and ``value_nodes_created + $created``
+    twice and bills two write-ops for one logical payload.
+
+    This is the round-3 review's reproduction as a permanent test, in the
+    ``public_demo`` serialization test's shape: a two-party
+    ``threading.Barrier`` (not a sleep) counts MAX CONCURRENT write-phase
+    entries, so it reddens only if the per-``(org, client_commit_id)`` lock is
+    gone — not merely because the pool is busy. The REAL write phase is
+    replaced by the barrier stand-in (a real commit measures ~32 s in this
+    embedded lane, past the harness's 10 s transport wait bound), so this
+    asserts the SERIALIZATION; the off-load itself is pinned by the AST
+    inventory in ``tests/test_read_routes_loop_responsiveness.py``.
+
+    Mutation proof (round 3): with the lock removed, ``max`` is 2 and the
+    metering row reads ``write_ops=2``; with it, ``max`` is 1 and ``write_ops``
+    is 1.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app
+
+    _arm_dependencies(monkeypatch)
+    # Fresh lock maps: an ``asyncio.Lock`` binds to the loop that first contends
+    # for it, and this test drives its own loop (the entry's refcount is dropped
+    # at release, but a lock left behind by an earlier loop would still be
+    # reused by this one).
+    monkeypatch.setattr(ha_mod, "_COMMIT_LOCKS", {})
+    monkeypatch.setattr(ha_mod, "_COMMIT_LOCK_REFS", {})
+
+    gate = threading.Lock()
+    state = {"concurrent": 0, "max": 0}
+    # Releases only when BOTH requests are inside the write phase at once, so
+    # the reading is not a timing guess; the timeout is what makes a LOCKED run
+    # fail fast instead of hanging (the second party never arrives).
+    entered = threading.Barrier(2, timeout=3)
+
+    def _slow_writes(sdk, payload, plan):
+        with gate:
+            state["concurrent"] += 1
+            state["max"] = max(state["max"], state["concurrent"])
+        try:
+            entered.wait()
+        except threading.BrokenBarrierError:
+            pass
+        finally:
+            with gate:
+                state["concurrent"] -= 1
+
+    monkeypatch.setattr(ha_mod, "_execute_commit_writes", _slow_writes)
+    request_kwargs = _commit_session_kwargs()
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            return await asyncio.gather(ac.request(**request_kwargs),
+                                        ac.request(**request_kwargs))
+
+    responses = asyncio.run(_run())
+
+    assert state["max"] >= 1, (
+        "neither concurrent commit reached the write phase, so this run proves "
+        f"nothing (statuses={[r.status_code for r in responses]})")
+    # The CONSEQUENCE first, so a mutation run names the double-apply itself
+    # rather than only the mechanism: one logical payload must be metered once.
+    reg = ha_mod._make_sdk(namespace="registry")._get_registry()
+    rows = reg.query(
+        "MATCH (m:MeteringRecord {org_id:$tid}) "
+        "RETURN m.write_ops, m.nodes_written",
+        params={"tid": TEST_ORG_ID}).result_set
+    assert rows and rows[0][0] == 1, (
+        f"one logical commit metered {rows!r} — the losing request re-ran the "
+        f"write phase and billed a write-op too (the counter double-apply) "
+        f"(#3718)")
+
+    bodies = [r.json() for r in responses]
+    assert sorted(bool(b["duplicate"]) for b in bodies) == [False, True], (
+        "exactly one of the two requests must win (duplicate=False) and the "
+        f"other must replay (duplicate=True); got {bodies}")
+    assert state["max"] == 1, (
+        f"two concurrent commits with the SAME client_commit_id both ran the "
+        f"write phase (max concurrent entries={state['max']}) — the "
+        f"per-(org, client_commit_id) lock is gone, so the Session counters and "
+        f"the write-op meter are applied twice for one logical payload (#3718)")
+
+
+def test_lifespan_resolves_the_control_plane_off_loop(monkeypatch):
+    """#3718 round 3: ``_lifespan``'s control-plane resolve must not run on the
+    loop — the pin could never see it.
+
+    ``_control_plane_source`` is SYNC, and its registry lane is not cheap:
+    ``_registry_sdk()`` constructs the registry SDK and EAGERLY attaches
+    (``_make_sdk`` + ``sdk._get_proj()``), with a possible
+    ``time.sleep(PROBE_RETRY_DELAY)`` retry — a blocking graph round trip AND a
+    sleep, on the loop, at boot. It is INVISIBLE to the AST pin by construction
+    (the scan walks async bodies; this is a sync helper one level down), so
+    ``_lifespan``'s membership in ``_OFFLOADED_ASYNC_BODIES`` proved nothing
+    about it — the vacuous pass the round-3 review named. This is the
+    behavioural half.
+
+    The REAL lifespan is driven with the REAL watcher branch armed (a real
+    ``BackupConfig``), because the resolve sits inside ``if cfg and not
+    _watcher_disabled`` — an un-armed boot would never reach the call and the
+    test would pass for the wrong reason, so ``state['branch']`` is asserted.
+    ``asyncio.get_running_loop()`` succeeds only on the loop thread; a worker
+    thread has no running loop, which is the mechanism assertion the sibling
+    cases use.
+
+    Stubbed, and only stubbed: the two background boot tasks
+    (``_first_contact_prewarm`` — Supabase-land network work, inert in registry
+    mode — and ``_run_boot_sweeps`` — retention churn) and ``WatcherThread``,
+    whose real threads start an initial 60 s poll delay and would outlive this
+    test. The resolve under test is reached before any of them.
+    """
+    import contextlib
+    import os
+    import tempfile
+
+    import tortoise.backup_watcher as backup_watcher
+    import tortoise.hosted_api as ha_mod
+    from tests._http_fixtures import patched_tortoise_sdk
+    from tortoise.hosted_api import app
+
+    state: dict = {}
+
+    class _StubWatcherThread:
+        def __init__(self, watcher, interval_seconds=600):
+            state["branch"] = True
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+    class _StubMcpApp:
+        def lifespan(self, app):
+            @contextlib.asynccontextmanager
+            async def _cm():
+                yield
+            return _cm()
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    real_source = ha_mod._control_plane_source
+
+    def _probe():
+        try:
+            asyncio.get_running_loop()
+            state["on_loop"] = True
+        except RuntimeError:
+            state["on_loop"] = False
+        state["calls"] = state.get("calls", 0) + 1
+        return real_source()
+
+    prior_watcher = ha_mod._WATCHER
+    with (
+        tempfile.TemporaryDirectory() as tmpdir,
+        patched_tortoise_sdk(os.path.join(tmpdir, "test.db")),
+    ):
+        monkeypatch.setenv("TORTOISE_BACKUP_STORAGE", "memory")
+        monkeypatch.delenv("BACKUP_WATCHER_DISABLED", raising=False)
+        monkeypatch.setattr(ha_mod, "_backup_config_safe",
+                            _stub_backup_config)
+        monkeypatch.setattr(ha_mod, "mcp_http_app", _StubMcpApp())
+        monkeypatch.setattr(ha_mod, "_first_contact_prewarm", _noop)
+        monkeypatch.setattr(ha_mod, "_run_boot_sweeps", _noop)
+        monkeypatch.setattr(backup_watcher, "WatcherThread",
+                            _StubWatcherThread)
+        monkeypatch.setattr(ha_mod, "_control_plane_source", _probe)
+        try:
+            async def _boot():
+                async with app.router.lifespan_context(app):
+                    pass
+
+            asyncio.run(_boot())
+        finally:
+            ha_mod._WATCHER = prior_watcher
+
+    assert state.get("calls") == 1, (
+        "_lifespan did not reach its control-plane resolve, so this run proves "
+        f"nothing (watcher branch taken={state.get('branch')!r})")
+    assert state.get("branch") is True, (
+        "the watcher branch was not armed, so the resolve under test was never "
+        "reached (#3718)")
+    assert state.get("on_loop") is False, (
+        "_lifespan resolved the control plane ON the event loop — in registry "
+        "mode that constructs the registry SDK and attaches EAGERLY "
+        "(_make_sdk + _get_proj, plus a probe-retry sleep), so boot holds the "
+        "loop for a blocking graph round trip (#3718)")
+
+
+def test_backups_rebaseline_counts_on_a_worker(client, monkeypatch):
+    """#3718 round 3: ``backups_rebaseline``'s node count must run off-loop.
+
+    ``count_data_nodes(db, graph_name)`` does
+    ``db.select_graph(...).query(...).result_set`` — a blocking round trip in a
+    body DECLARED off-loaded. It was invisible to BOTH guards by construction:
+    it takes a raw ``db`` (not a ``_get_proj()`` seam, so the attach probe and
+    the AST pin's seam callees never see it) and it lives in a *sync* helper
+    (so the scan, which walks async bodies, never walks it). The pin's "no
+    inline seam" check therefore passed VACUOUSLY for this body — the
+    declaration-fidelity gap the round-3 review named.
+
+    The module attribute is patched, not the module-scope name: the handler
+    imports ``count_data_nodes`` INSIDE its body (``from tortoise.hosted_backup
+    import ...``), so the local binding is read from the module at call time.
+    One call, off the loop, and the handler still completes its own success
+    path (200 + ``status``) — a post-attach 500 no longer passes.
+    """
+    import tortoise.hosted_backup as hosted_backup
+    from tortoise.hosted_api import app
+
+    _arm_dependencies(monkeypatch, internal=True)
+    state: dict = {}
+    real_count = hosted_backup.count_data_nodes
+
+    def _probe(db, graph_name):
+        try:
+            asyncio.get_running_loop()
+            state["on_loop"] = True
+        except RuntimeError:
+            state["on_loop"] = False
+        state["calls"] = state.get("calls", 0) + 1
+        return real_count(db, graph_name)
+
+    monkeypatch.setattr(hosted_backup, "count_data_nodes", _probe)
+    request_kwargs = _backups_rebaseline_kwargs()
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            return await ac.request(**request_kwargs)
+
+    response = asyncio.run(_run())
+
+    assert state.get("calls") == 1, (
+        "the re-baseline never counted a graph, so this run proves nothing "
+        f"({response.status_code}: {response.text[:200]})")
+    assert state.get("on_loop") is False, (
+        "backups_rebaseline ran count_data_nodes ON the event loop — a blocking "
+        "select_graph().query().result_set while the body is declared "
+        "off-loaded (#3718)")
+    assert response.status_code == 200, response.text[:200]
+    assert response.json().get("status") == "rebaselined", response.text[:200]

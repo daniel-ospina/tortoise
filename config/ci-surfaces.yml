@@ -1511,8 +1511,10 @@ durations:
   # trusting it (see #3653/#3685 for the embedded-redislite flake that inflates
   # the tail).
   test_read_routes_loop_responsiveness.py: 30.0
-  # #3718 (DATA-plane residual): 6 cases (4 parametrized lane cases + the
-  # /v1/sessions delete freeze case + the demo-seed serialization case). Like
+  # #3718 (DATA-plane residual): 9 cases (4 parametrized lane cases + the
+  # /v1/sessions delete freeze case + the demo-seed serialization case + the
+  # commit-serialization case + the _lifespan control-plane case + the
+  # re-baseline node-count case). Like
   # its two #3718 siblings it blocks a graph call while a 20ms ticker and a
   # concurrent /health probe run, so it is dominated by wall-clock stalls rather
   # than CPU (the AST-inventory cases for
@@ -1521,7 +1523,7 @@ durations:
   # embedded-redislite startup). FIRST ESTIMATE; re-measure
   # from the first post-merge junit artifact (see #3653/#3685 for the flake
   # that inflates the tail).
-  test_dataplane_lane_loop_responsiveness.py: 60.0
+  test_dataplane_lane_loop_responsiveness.py: 90.0
   test_cli_serve.py: 28.1
   test_redirect_seam.py: 27.3
   eval/retrieval/test_gate_1349.py: 26.0

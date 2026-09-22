@@ -1301,7 +1301,16 @@ async def _lifespan(app):
                 # staleness incidents; post-flip verification finding, #669).
                 from tortoise.supabase_control import is_supabase_enabled
 
-                org_source = _control_plane_source()
+                # #3718 round-3 review P2: `_control_plane_source` is SYNC and
+                # its registry lane constructs the registry SDK
+                # (`_registry_sdk` -> `_make_sdk` + an EAGER `_get_proj()`, with
+                # a possible `time.sleep(PROBE_RETRY_DELAY)` retry) — a blocking
+                # graph round trip and a sleep ON the loop at boot. It is
+                # INVISIBLE to the AST pin by construction (the scan walks async
+                # bodies; this is a sync helper one level down), which is
+                # exactly why it went unnoticed — so it is off-loaded at its own
+                # site. Same seam `backups_rebaseline` already uses.
+                org_source = await asyncio.to_thread(_control_plane_source)
 
                 def _sweep_orgs() -> list[str] | None:
                     from tortoise.backup_sweep import enumerate_orgs
@@ -11130,6 +11139,21 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     # points the original did not have) and the exception semantics identical.
     # `_record_write_op` rides along: it is blocking too (#4451) and is
     # strictly downstream of the write it meters.
+    #
+    # ⚠️ ONE HAND-OFF IS NOT MUTUAL EXCLUSION (the same lesson `public_demo`
+    # carries): `asyncio.to_thread` submits to the loop's SHARED pool, so two
+    # concurrent POSTs with the SAME `client_commit_id` run this closure in two
+    # threads. The pre-#3718 inline sequence was accidentally atomic — the
+    # single-threaded loop serialized the record read against the write phase.
+    # The hand-off removes that accident, so the check-then-act takes an
+    # explicit per-`(org, client_commit_id)` lock (`_commit_serialization`,
+    # the `_org_restore_lock` pattern). Round-3 review reproduced the double
+    # apply with a two-party barrier: without the lock BOTH requests enter the
+    # write phase, both return `duplicate:false`, and the Session counters are
+    # written twice (`commit_count +1` twice, `value_nodes_created +$created`
+    # twice) while `_record_write_op` bills 2 write-ops for one payload. The
+    # lock is WHY the loser observes a `fully_written` record at [2] instead of
+    # a `partial` one mid-write.
     def _commit_sync() -> dict:
         proj = sdk._get_proj()
         store = CommitRecordStore(sdk)
@@ -11150,6 +11174,10 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         # :CommitRecord MERGE = the atomic concurrency serialization point (W-3
         # [2], DE2E-7 neg a): the loser of the MERGE sees the winner's record →
         # duplicate (if fully_written) or completes the remainder (held|partial).
+        # The MERGE only makes the WRITE atomic — it does not make the loser
+        # WAIT, and a `partial` record (the winner is mid-write) plans as
+        # `duplicate=False`, so the region needs the `_commit_serialization`
+        # lock held around it (#3718 round-3 review).
         rec, created = store.acquire(
             payload.client_commit_id, session_id=payload.session_id,
             status="partial", write_ops_billed=0)
@@ -11240,7 +11268,8 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
             warn=plan.budget.warn,
             warnings=warnings,
         )
-    return await asyncio.to_thread(_commit_sync)
+    async with _commit_serialization(org["org_id"], payload.client_commit_id):
+        return await asyncio.to_thread(_commit_sync)
 
 
 @app.get("/v1/sessions")
@@ -24297,6 +24326,70 @@ async def _demo_seed_lock(org_id: str) -> asyncio.Lock:
         return _DEMO_SEED_LOCKS.setdefault(org_id, asyncio.Lock())
 
 
+#: Per-(org, client_commit_id) mutual exclusion for `commit_session`'s
+#: check-then-act (#3718 round-3 review, reproduced with a two-party barrier:
+#: `max concurrent write-phase entries=2`, `write_ops=2`, `nodes_written=4`
+#: for ONE logical payload).
+#:
+#: WHY THIS KEY, not per-org. The invariant is per LOGICAL PAYLOAD — the
+#: `:CommitRecord` MERGE only dedupes the same `client_commit_id`. Keying by
+#: org would also serialize *distinct* commits, which do not conflict (their
+#: `coalesce(x, 0) + $n` Session-counter SETs are single atomic Cypher
+#: statements, so two different cids both land), and commits are the hot write
+#: path — an org-wide lock would turn a tenant's commit parallelism into a
+#: queue for no correctness gain. Different orgs never contend either, so a
+#: guessed cid cannot be used to block another tenant.
+#:
+#: WHY REFCOUNTED. A plain `_COMMIT_LOCKS[(org, cid)] = Lock()` grows without
+#: bound (one entry per logical commit, forever). The entry is dropped when its
+#: last holder releases; the increment and the drop both run under the guard,
+#: so a caller that arrives during teardown either extends the live lock or
+#: mints a fresh one — never observes a half-removed entry.
+#:
+#: WHY A LOCK AT ALL (and not the loser re-reading the record). The loser's
+#: correctness depends on the WINNER HAVING FINISHED: after `acquire` returns
+#: `created=False` the record status is `partial` for as long as the winner is
+#: mid-write, and `plan_commit` returns `duplicate=False` for a `partial`
+#: record. So "the loser sees the winner's record" — the W-3 [2] claim — only
+#: holds if the loser WAITS. Returning `duplicate:true` on sight of `partial`
+#: would be worse: it tells the client "already committed" before the data is
+#: written, so a winner that then fails would be a silent data loss.
+_COMMIT_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
+_COMMIT_LOCKS_GUARD = asyncio.Lock()
+_COMMIT_LOCK_REFS: dict[tuple[str, str], int] = {}
+
+
+@asynccontextmanager
+async def _commit_serialization(org_id: str, client_commit_id: str):
+    """Serialize `commit_session`'s record-read → write-phase → record-stamp
+    region for one `(org, client_commit_id)`.
+
+    Needed BECAUSE the region is off-loaded: `asyncio.to_thread` runs it on a
+    thread from the loop's shared pool, so two concurrent POSTs with the same
+    `client_commit_id` (the expected shape when the WaitBoundMiddleware refuses
+    a >10 s commit and the client retries — a real commit measures ~32 s in the
+    embedded lane) execute the closure in parallel. Pre-#3718 the single
+    no-`await` sequence on the loop serialized them for free.
+    """
+    key = (org_id, client_commit_id)
+    async with _COMMIT_LOCKS_GUARD:
+        lock = _COMMIT_LOCKS.get(key)
+        if lock is None:
+            lock = _COMMIT_LOCKS[key] = asyncio.Lock()
+        _COMMIT_LOCK_REFS[key] = _COMMIT_LOCK_REFS.get(key, 0) + 1
+    try:
+        async with lock:
+            yield
+    finally:
+        async with _COMMIT_LOCKS_GUARD:
+            remaining = _COMMIT_LOCK_REFS.get(key, 1) - 1
+            if remaining <= 0:
+                _COMMIT_LOCKS.pop(key, None)
+                _COMMIT_LOCK_REFS.pop(key, None)
+            else:
+                _COMMIT_LOCK_REFS[key] = remaining
+
+
 @app.post("/backups", status_code=201)
 @app.post("/v1/backups", status_code=201)  # #4144 BFF-reachable alias
 async def backups_create(org: dict = Depends(get_current_org_gated)):  # noqa: B008
@@ -25190,7 +25283,15 @@ async def backups_rebaseline(request: Request, body: dict):
         # `Meta {key:'point_fts_v2'}` marker once a projection had been opened
         # on the org graph, so a 3-point graph re-baselined to 4 and flaked the
         # required check on unrelated PRs.
-        count = count_data_nodes(db, row["graph_name"])
+        # #3718 round-3 review P2: this is a BLOCKING graph round trip
+        # (`select_graph(...).query(...).result_set`) in a body declared
+        # off-loaded. It was invisible to BOTH guards by construction — the
+        # helper takes a raw `db`, not a `_get_proj()` seam, and the AST scan
+        # never walks a sync helper — so `_OFFLOADED_ASYNC_BODIES`' "no inline
+        # seam" check passed VACUOUSLY here. Off-loaded, so the declaration is
+        # true.
+        count = await asyncio.to_thread(
+            count_data_nodes, db, row["graph_name"])
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"graph unavailable: {e}")  # noqa: B904
     state = {
@@ -25204,8 +25305,16 @@ async def backups_rebaseline(request: Request, body: dict):
         _write_json(storage, f"ops/teams/{org_id}/state.json", state)
     subject = f"{org_id}:{graph_id}" if graph_id != "default" else org_id
     alerts = _alert_store_from(_backup_config_safe())
-    alerts.resolve_incident("DATA_LOSS_CANDIDATE", subject)
-    alerts.resolve_incident("SIZE_GUARD_ABORT", subject)
+
+    def _resolve_incidents() -> None:
+        # #3718 round-3 review P2: both resolves are blocking NETWORK round
+        # trips — a storage read plus a GitHub issue close / Telegram push — the
+        # same offload `backups_sweep` already gives `alerts.open_incident`.
+        # Grouped in one hand-off so the two stay adjacent, as they were.
+        alerts.resolve_incident("DATA_LOSS_CANDIDATE", subject)
+        alerts.resolve_incident("SIZE_GUARD_ABORT", subject)
+
+    await asyncio.to_thread(_resolve_incidents)
     return {"status": "rebaselined", "org_id": org_id,
             "graph_id": graph_id, "node_count": count}
 
