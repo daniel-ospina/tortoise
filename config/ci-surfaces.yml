@@ -1624,7 +1624,7 @@ durations:
   # earlier reading is superseded and must not be restated as fact. Refresh from
   # the first CI junit run that includes it.
   test_mcp_rename_table.py: 240.0
-  test_sdk_rename_table.py: 60.0  # 43 tests; one subprocess `--check` (fresh ~16s tortoise.sdk import) + 42 in-process; measured 46s-553s wall depending on box load
+  test_sdk_rename_table.py: 60.0  # 49 tests; one subprocess `--check` (fresh ~16s tortoise.sdk import) + 48 in-process; measured 46s-553s wall depending on box load
   test_connector_sources.py: 1.5
   test_e2e9_point_in_time.py: 1.5
   test_file_human_approval.py: 1.5

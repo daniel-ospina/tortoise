@@ -51,6 +51,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -68,6 +69,11 @@ OUT = ROOT / "docs" / "product" / "sdk-rename-table.md"
 
 BETA = "beta-sdk-surface.md"
 CANON = "canonical-sdk-methods.md"
+
+
+def _doc_text(name: str) -> str:
+    """The source text a citation names, read fresh at build time."""
+    return (BETA_DOC if name == BETA else CANON_DOC).read_text(encoding="utf-8")
 
 # The dispositions that are not a target method name. Every one is an OWNER
 # RULING already recorded in an owner-approved doc, transcribed here — none is a
@@ -89,7 +95,12 @@ DISCARDED = "DISCARDED"
 UNBACKED = "UNBACKED"
 DEFERRED = "DEFERRED"
 RELOCATED = "RELOCATED"
-NON_TARGET = (UNCHANGED, DISCARDED, UNBACKED, DEFERRED, RELOCATED)
+# CONTESTED — the doc files the method under "### Removed" but its own rationale cell
+# says the capability is *reachable*, which is a FOLD, not a delete. It is neither a
+# target (no destination is named) nor DISCARDED (DISCARDED is Phase 2's signal to
+# DELETE, and the owner ruled the capability is reachable). It is an open finding.
+CONTESTED = "CONTESTED"
+NON_TARGET = (UNCHANGED, DISCARDED, UNBACKED, DEFERRED, RELOCATED, CONTESTED)
 
 # A disposition is only as strong as the section it is cited from. A row claiming
 # DISCARDED may cite text from beta's "Discarded — and why" → "### Removed" ONLY,
@@ -105,6 +116,33 @@ DISPOSITION_SECTION: dict[str, str] = {
     DISCARDED: "### Removed",
     DEFERRED: "## Named but not solved",
 }
+
+# RETENTION VOCABULARY — the clause test that makes a `DISCARDED` row more than a row
+# that merely SITS under "### Removed".
+#
+# `DISCARDED` is Phase 2's signal to DELETE. beta's "### Removed" table contains one row
+# whose rationale says the opposite of its section — "Lifecycle and confidence wrangling
+# — reachable through the canonical two" — and that is a FOLD, not a delete. Sitting under
+# a heading is a LOCATION, not a clause: `list_drafts` and `quarantine_batch` were
+# rendered `DISCARDED` there while `promote_point`/`set_point_baseline` were flagged
+# contested in C3b, so the same row produced two different readings of the same ruling.
+#
+# The check is a DENYLIST rather than an allowlist because retention is phrased a small
+# closed number of ways in these docs ("reachable", "kept", "live" …) while removal is
+# phrased many ("cut", "dropped", "dead code", "never product surface", "not in the
+# SDK", …). It is a tripwire over the DERIVED region — the primary fix is that these rows
+# carry `CONTESTED`, not `DISCARDED` at all.
+RETENTION_MARKERS = (
+    "reachable", "kept", "relocated", "not discarded", "live", "unlisted",
+    "survives", "retained", "remains", "stays", "continues to serve",
+    "still serves",
+)
+
+
+def _retention_clauses(text: str) -> list[str]:
+    """The retention words a derived region uses — the clause test for DISCARDED."""
+    return [m for m in RETENTION_MARKERS
+            if re.search(rf"(?<![A-Za-z]){re.escape(m)}(?![A-Za-z])", text, re.I)]
 
 
 def _section_bounds(text: str, heading: str) -> tuple[int, int]:
@@ -133,13 +171,14 @@ UNBACKED_REASON = {
 }
 
 # ─────────────────────────────────────────────────────────────────────
-# CITATIONS. A citation is only real if the doc still says it, so each
-# `quote` is verified as a literal substring of the named doc at build time
-# (`_validate`) AND required to be MAXIMAL — not a right-truncation of a longer match
-# (`_maximal`). A row is *stated* when its quote NAMES the method and *derived*
-# otherwise — the basis is COMPUTED from the quote by `_names`, never authored
-# beside it. An authored `named` set was the earlier design and let a row claim
-# `stated` while its quote named a different method; the two can no longer diverge
+# CITATIONS. A citation carries an ANCHOR that LOCATES a REGION of the named doc; the
+# generator EXTRACTS the whole region at build time and renders its text. The anchor is
+# verified to be a **unique** substring of the doc (`_validate`) — a locator that is
+# ambiguous locates nothing — and the derived region is checked by `_maximal` as a
+# secondary tripwire. A row is *stated* when its derived region NAMES the method and
+# *derived* otherwise — the basis is COMPUTED from the region by `_names`, never
+# authored beside it. An authored `named` set was the earlier design and let a row claim
+# `stated` while its evidence named a different method; the two can no longer diverge
 # because there is only one of them.
 # ─────────────────────────────────────────────────────────────────────
 CITES: dict[str, tuple[str, str]] = {
@@ -216,8 +255,11 @@ CITES: dict[str, tuple[str, str]] = {
     "w1_coup": (CANON, "| `create_or_update_point` → `create_point` |"),
     "w1_batch": (BETA, "| `batch_create_points` | 1 | → `write_knowledge_batch`. |"),
     "w2": (CANON, "| W2 | `write_knowledge` | — | `ingest` |"),
-    "w2_rename": (CANON, "`write_knowledge` and `stabilize_beliefs` where the current "
-                         "target says"),
+    # The anchor names the blockquote paragraph's opening line; the region is the whole
+    # paragraph (canonical lines 27–32). The old anchor authored a mid-paragraph wrapped
+    # line, so the sentence it belonged to could be cut.
+    "w2_rename": (CANON, "> ⛔ **The SDK target is `docs/product/beta-sdk-surface.md` "
+                         "(40 methods), not this document.**"),
     "w3": (CANON, "| W3 | `register_source` | #11 | `create_source`, `complete_source` |"),
     "w3_cut": (BETA, "| `complete_source` | 1 | **Cut.** Its entire body populates "
                      "`contentHash`, `version`, `externalId` — fields `register_source` "
@@ -236,14 +278,11 @@ CITES: dict[str, tuple[str, str]] = {
                       "of indexing. |"),
     "w4_index_sessions": (CANON, "| `index_sessions` / `ingest_corpus` → "
                                  "`index_directory` |"),
-    "w5": (BETA, "- **The journal capability** — `checkpoint`, `diary_write`, "
-                 "`diary_read`. They arrived in the\n"
-                 "  **initial codebase commit** (`a02ab48c7`) with no design record, "
-                 "and their `wing` / `room`\n"
-                 "  parameters appear **nowhere in `docs/ONTOLOGY.md`**. They are "
-                 "**live in the MCP server**\n"
-                 "  today. **Filed post-beta** (issue to be created) and **unlisted** "
-                 "until then."),
+    # The anchor names the bullet's OPENING; the extracted region is the WHOLE bullet —
+    # its wrapped continuation lines included. The old citation AUTHORED the bullet's
+    # extent, so a prefix that stopped at the "live in the MCP server" line wrap still
+    # passed while dropping "Filed post-beta … unlisted until then."
+    "w5": (BETA, "- **The journal capability**"),
     "w6": (BETA, "| `capture_session` / `commit_session` | → row 16 "
                  "`mine_knowledge_from_session`, one method. The backend is the target "
                  "graph's configuration. |"),
@@ -292,13 +331,11 @@ CITES: dict[str, tuple[str, str]] = {
                   "annotation. `operator_action(**kwargs)` currently **accepts and "
                   "silently ignores** `credibility` — a bug. |"),
     "w17_ulid": (BETA, "| `ulid` | 1 | A ULID generator. Not a memory operation. |"),
-    "unchanged4": (BETA, "current SDK (`create_entity`, `get_entity`, `approve_merge`, "
-                         "`close`). The MCP column names the *target* tool. None of the "
-                         "26 exists verbatim — every registered MCP tool carries a "
-                         "`tortoise_` prefix — and only **4** (`create_entity`, "
-                         "`get_entity`, `approve_merge`, `graph_set_recording`) have a "
-                         "prefixed equivalent. So it is **26 of 26 by name**, or **22 of "
-                         "26** if you normalise the prefix."),
+    # The anchor names the blockquote's opening line; the extracted region is the WHOLE
+    # paragraph (beta lines 107–111). The old quote stopped at line 108 and so could
+    # never be contradicted by line 109's "The old→new mapping is a Phase 0.3b
+    # deliverable and does not exist yet".
+    "unchanged4": (BETA, "> **Every name here is a target, not a description of today.**"),
     # ── Control plane ───────────────────────────────────────────────
     "n1_console": (BETA, "| `org_update`, `org_delete`, `membership_get`, "
                          "`membership_update_role`, `apikey_verify` | 5 | "
@@ -451,10 +488,18 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     "invalidate_point": ("update_knowledge", "w11_retract"),
     "supersede": ("supersede_knowledge", "w11_supersede"),
     "supersede_point": ("supersede_knowledge", "w11_supersede"),
-    "promote_point": (DISCARDED, "w11_lifecycle"),
-    "set_point_baseline": (DISCARDED, "w11_lifecycle"),
-    "list_drafts": (DISCARDED, "w11_lifecycle"),
-    "quarantine_batch": (DISCARDED, "w11_lifecycle"),
+    # W11 — four rows beta files under "### Removed" while the row's own clause says the
+    # capability is "reachable through the canonical two". That is a FOLD, not a delete,
+    # and `DISCARDED` is Phase 2's signal to DELETE. All four carry `CONTESTED` — an open
+    # finding: not deleted, and no destination stated. The old code rendered all four
+    # `DISCARDED`; the guard that was supposed to stop exactly this was scoped to the
+    # journal bullet alone, so `list_drafts` and `quarantine_batch` went out as bare
+    # DELETE signals. `promote_point`/`set_point_baseline` were only surfaced because the
+    # BRIDGE happens to bind them, not because Part A classified them correctly.
+    "promote_point": (CONTESTED, "w11_lifecycle"),
+    "set_point_baseline": (CONTESTED, "w11_lifecycle"),
+    "list_drafts": (CONTESTED, "w11_lifecycle"),
+    "quarantine_batch": (CONTESTED, "w11_lifecycle"),
     # W12 — two members the beta row omits.
     "delete": ("delete_knowledge", "w12_canon"),
     "delete_entity": ("delete_knowledge", "w12_canon"),
@@ -666,33 +711,154 @@ def _names(quote: str, method: str) -> bool:
                      quote) is not None
 
 
-# A quote is MAXIMAL when it stops at a region boundary rather than mid-clause. The
-# failure this guards against is a quote cut off exactly where the source contradicts
-# it: `… → `manage_source_trust`` keeping the target and dropping `; reads via
-# `list_sources``. `quote in text` cannot see that — a truncated prefix of a real
-# sentence is still a real substring — so the citation check passes while the evidence
-# has been edited to agree with the row.
+# ─────────────────────────────────────────────────────────────────────
+# REGIONS — the citation is EXTRACTED, never authored.
 #
-# "Region" is a CELL, not a sentence. An earlier version accepted a sentence boundary
-# and that left the hole wide open: `**The journal capability** — `checkpoint`,
-# `diary_write`, `diary_read`.` ends at a full stop, while the NEXT sentence ("They are
-# **live in the MCP server** today. **Filed post-beta** … and **unlisted** until then.")
-# contradicted the DISCARDED row it backed. A sentence boundary is exactly where the
-# contradictory clause begins, so it cannot be a safe stopping point.
+# Every prior guard here tried to CHECK an authored quote string: `quote in text`, then
+# a sentence boundary, then a cell boundary, then a line end. Each was a heuristic with
+# a hole, and the adversarial review found truncations still surviving: a quote ending at
+# a source LINE WRAP (the journal bullet dropping "Filed post-beta … unlisted until
+# then.") and a quote ending mid-ROW at an inner cell boundary (w8 dropping
+# "; reads via `list_sources`"). The design was wrong, not the heuristic.
+#
+# The fix inverts it. A citation now carries only an ANCHOR — a small locator — and the
+# generator EXTRACTS the whole named region (the table row the anchor sits in, or the
+# paragraph block the anchor sits in) and renders it verbatim. There is no authored
+# extent left to truncate: an anchor edited to stop at a line wrap, a sentence, or a
+# mid-row cell still derives the SAME whole region, so a truncation cannot drop the
+# clause that contradicts the row. The LEFT edge is constructed too — a row anchor that
+# names only the rationale cell still renders the row from its first `|`.
+#
+# `_maximal` survives only as a cheap SECONDARY tripwire over the derived text: a region
+# that cannot be rendered whole is refused, never shortened.
+# ─────────────────────────────────────────────────────────────────────
+@dataclass(frozen=True)
+class Region:
+    """A named region of the source: a table row, or a paragraph block.
+
+    `anchor` LOCATES the region; it does not define its extent. The region KIND is
+    inferred from the anchor's shape — a region whose anchor ends at a table cell (the
+    anchor ends with `|`) is a row; everything else is a paragraph block. Both are
+    extracted whole, so neither edge of the rendered evidence is authored.
+    """
+
+    anchor: str
+
+    @property
+    def kind(self) -> str:
+        s = self.anchor.strip()
+        if s.endswith("|"):
+            return "row"
+        if s.startswith("- "):
+            return "bullet"
+        return "paragraph"
+
+
+def _line_bounds(text: str, at: int) -> tuple[int, int]:
+    """The `(start, end)` of the line containing offset `at` — newline excluded."""
+    start = text.rfind("\n", 0, at) + 1
+    end = text.find("\n", at)
+    return start, (len(text) if end < 0 else end)
+
+
+def _paragraph_bounds(text: str, at: int) -> tuple[int, int]:
+    """The maximal run of consecutive non-blank lines containing offset `at`.
+
+    A markdown bullet is a paragraph, so this extracts the WHOLE bullet including its
+    wrapped continuation lines — the journal bullet's "Filed post-beta … unlisted until
+    then." is inside the region by construction.
+    """
+    start, _ = _line_bounds(text, at)
+    while start > 0:
+        prev_end = start - 1
+        prev_start = text.rfind("\n", 0, prev_end) + 1
+        if text[prev_start:prev_end].strip() == "":
+            break
+        start = prev_start
+    _, end = _line_bounds(text, at)
+    while end < len(text):
+        nxt_start = end + 1
+        nxt_end = text.find("\n", nxt_start)
+        nxt_end = len(text) if nxt_end < 0 else nxt_end
+        if text[nxt_start:nxt_end].strip() == "":
+            break
+        end = nxt_end
+    return start, end
+
+
+def _bullet_bounds(text: str, at: int) -> tuple[int, int]:
+    """The WHOLE bullet containing offset `at` — its wrapped continuation included.
+
+    Ends at the next blank line, the next top-level bullet, or the next heading. The
+    journal bullet's wrapped "Filed post-beta … unlisted until then." is inside the
+    region by construction.
+    """
+    start, _ = _line_bounds(text, at)
+    if not text[start:].split("\n", 1)[0].startswith("- "):
+        # the anchor is mid-bullet: walk up to the line that opens it
+        while start > 0:
+            prev_end = start - 1
+            prev_start = text.rfind("\n", 0, prev_end) + 1
+            prev = text[prev_start:prev_end]
+            if prev.strip() == "":
+                break
+            start = prev_start
+            if prev.startswith("- "):
+                break
+    _, end = _line_bounds(text, at)
+    while end < len(text):
+        nxt_start = end + 1
+        nxt_end = text.find("\n", nxt_start)
+        nxt_end = len(text) if nxt_end < 0 else nxt_end
+        nxt = text[nxt_start:nxt_end]
+        if nxt.strip() == "" or nxt.startswith("- ") or nxt.startswith("#"):
+            break
+        end = nxt_end
+    return start, end
+
+
+def _derive_region(text: str, region: Region) -> str:
+    """EXTRACT the whole region — the row, bullet, or paragraph. Never a prefix.
+
+    Raises if the anchor is absent (CITATION DRIFT is reported by its own check) or if a
+    row anchor resolves to a non-row line (the anchor is misfiled). Returning the anchor
+    itself is never an option: that is the authored-extent design this replaces.
+    """
+    at = text.find(region.anchor)
+    if at < 0:
+        raise KeyError(f"anchor not found in the source: {region.anchor[:60]!r}")
+    if region.kind == "row":
+        start, end = _line_bounds(text, at)
+        row = text[start:end]
+        if not row.startswith("|"):
+            raise ValueError(
+                f"a row anchor resolved to a line that is not a table row: {row[:60]!r}"
+            )
+        return row
+    if region.kind == "bullet":
+        start, end = _bullet_bounds(text, at)
+        return text[start:end]
+    start, end = _paragraph_bounds(text, at)
+    return text[start:end]
 
 
 def _maximal(quote: str, text: str) -> bool:
-    """Is `quote` a maximal region of `text` — not a right-truncation of one?
+    """Is `quote` a maximal region of `text` — neither edge cut?
 
-    True only when the match ends at a table-cell/row boundary (`|`), a line end, or
-    the end of the document. A quote that stops anywhere else — including at a
-    sentence end, where the next sentence can contradict it — is rejected.
+    True only when the match BEGINS at a line start and ENDS at a table-cell/row
+    boundary (`|`), a line end, or the document end. The left edge is checked too: an
+    earlier version checked only the right, so a quote could begin mid-cell. This is a
+    SECONDARY tripwire over a region that `_derive_region` already built at those
+    boundaries — it catches a derivation that cannot be rendered whole, which is refused
+    rather than silently shortened.
     """
     idx = text.find(quote)
     if idx < 0:
         return True  # absent text is CITATION DRIFT, reported by its own check
+    before_ok = idx == 0 or text[idx - 1] == "\n"
     after = text[idx + len(quote):]
-    return after == "" or after.startswith("\n") or quote.endswith("|")
+    after_ok = after == "" or after.startswith("\n") or quote.endswith("|")
+    return before_ok and after_ok
 
 
 def _rows(methods: dict[str, int], groups: dict[str, list[str]]) -> list[dict]:
@@ -716,7 +882,11 @@ def _rows(methods: dict[str, int], groups: dict[str, list[str]]) -> list[dict]:
             quote = ""
             doc = ""
         else:
-            doc, quote = CITES[key]
+            doc, anchor = CITES[key]
+            # The evidence is the EXTRACTED region, never the authored anchor. This is
+            # the whole point of the design: the anchor only locates, so a truncated
+            # anchor cannot shorten the rendered evidence.
+            quote = _derive_region(_doc_text(doc), Region(anchor))
             basis = "stated" if _names(quote, name) else "derived"
         rows.append({
             "name": name,
@@ -742,6 +912,7 @@ def _findings(rows: list[dict], methods: dict[str, int], targets: list[str],
         "no_def": no_def,
         "no_def_set": set(no_def),
         "unbacked": sorted(r["name"] for r in rows if r["target"] == UNBACKED),
+        "contested": sorted(r["name"] for r in rows if r["target"] == CONTESTED),
         "tensions": TENSIONS,
         "phantoms": PHANTOMS,
         "unfilled": [g for g, m in groups.items() if not m],
@@ -785,26 +956,47 @@ def _validate(methods: dict[str, int], groups: dict[str, list[str]],
         if target not in known:
             errs.append(f"UNRECOGNISED destination for {m}: {target!r}")
 
-    # 4. A citation is only real if the doc still says it.
-    for key, (doc, quote) in cites.items():
-        if not quote.strip():
-            errs.append(f"EMPTY CITATION: {key} carries no quote — an empty string is a "
-                        f"substring of every document, so the citation check passes while "
-                        f"the destination is asserted by nothing")
+    # 4. A citation LOCATES a region of the doc; the generator EXTRACTS it. The anchor
+    #    must be unique (an ambiguous locator locates nothing) and the derived region
+    #    must be renderable whole (`_maximal` is the secondary tripwire).
+    for key, (doc, anchor) in cites.items():
+        if not anchor.strip():
+            errs.append(f"EMPTY CITATION: {key} carries no anchor — an empty string "
+                        f"locates the start of every document, so the citation resolves "
+                        f"while the destination is asserted by nothing")
             continue
-        text = (BETA_DOC if doc == BETA else CANON_DOC).read_text(encoding="utf-8")
-        if quote not in text:
-            errs.append(f"CITATION DRIFT: {key} quotes {doc} but that text is gone: "
-                        f"{quote[:70]!r}")
-        elif not _maximal(quote, text):
-            after = text[text.find(quote) + len(quote):][:60]
-            errs.append(
-                f"CITATION TRUNCATED: {key}'s quote stops mid-clause — the source "
-                f"continues {after!r}, which can contradict the row this quote backs. "
-                f"A quote must end at a cell/row boundary, a line end, or the document "
-                f"end — a SENTENCE end is not enough, because the next sentence is "
-                f"exactly where a contradiction hides."
-            )
+        text = _doc_text(doc)
+        n = text.count(anchor)
+        if n == 0:
+            errs.append(f"CITATION DRIFT: {key} names {doc} but its anchor no longer "
+                        f"locates any region: {anchor[:70]!r}")
+        elif n > 1:
+            errs.append(f"AMBIGUOUS CITATION ANCHOR: {key} locates {n} regions in "
+                        f"{doc}; a locator must be unique — {anchor[:70]!r}")
+        else:
+            region = _derive_region(text, Region(anchor))
+            if not region.strip():
+                errs.append(f"EMPTY CITATION REGION: {key} extracts nothing from {doc}")
+            elif not _maximal(region, text):
+                after = text[text.find(region) + len(region):][:60]
+                errs.append(
+                    f"CITATION REGION NOT MAXIMAL: {key}'s derived region is cut at an "
+                    f"edge — the source continues {after!r}. A region that cannot be "
+                    f"rendered whole is REFUSED, never silently shortened."
+                )
+
+    # 4b. A phantom row's finding IS "the doc uses this name". Evidence that does not
+    #      contain the name does not support that finding, so it is refused here.
+    for name, _referent, key in PHANTOMS:
+        found = cites.get(key)
+        if not found:
+            errs.append(f"PHANTOM EVIDENCE UNRESOLVED: {name} cites unknown key {key!r}")
+            continue
+        doc, anchor = found
+        region = _derive_region(_doc_text(doc), Region(anchor))
+        if not _names(region, name):
+            errs.append(f"PHANTOM EVIDENCE DOES NOT NAME IT: {name}'s cited region does "
+                        f"not contain {name!r} — the evidence does not support the row")
 
     # 5. A phantom must NOT have a def — that is the whole finding.
     for name, _referent, _key in PHANTOMS:
@@ -1030,6 +1222,31 @@ def _validate_rows(rows: list[dict], targets: list[str]) -> list[str]:
                 f"{heading!r} — the cited text does not rule that disposition"
             )
 
+    # 8b. A `DISCARDED` disposition must be supported by the row's CLAUSE, not only by
+    #     its location. Sitting under "### Removed" is where the row IS; the rationale is
+    #     what it SAYS. beta's w11 row sits under "### Removed" while saying the
+    #     capability is "reachable through the canonical two" — a FOLD, not a delete, and
+    #     `DISCARDED` is Phase 2's signal to DELETE. The inverse is checked too, so a
+    #     `CONTESTED` disposition cannot be applied to a region that says nothing about
+    #     retention.
+    for r in rows:
+        if r["target"] not in (DISCARDED, CONTESTED) or r["doc"] != BETA:
+            continue
+        retained = _retention_clauses(r["quote"])
+        if r["target"] == DISCARDED and retained:
+            errs.append(
+                f"DISCARDED BUT RETAINED: {r['name']} renders DISCARDED — Phase 2's "
+                f"signal to DELETE — but its own clause says it is "
+                f"{', '.join(repr(m) for m in retained)}. That is a fold, not a delete; "
+                f"the disposition must be CONTESTED (or a target), not DISCARDED."
+            )
+        elif r["target"] == CONTESTED and not retained:
+            errs.append(
+                f"CONTESTED WITHOUT A RETENTION CLAUSE: {r['name']} renders CONTESTED "
+                f"but its clause does not say the capability is retained — the "
+                f"disposition must be DISCARDED (or a target)."
+            )
+
     # 9. Cross-artifact. Every disagreement with the sibling bridge table carries a
     #    determination, and no determination is stale.
     diverged = {m for m, _t, _d, _tool in _bridge_divergences(rows)}
@@ -1060,7 +1277,8 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
     deferred = sum(1 for r in rows if r["target"] == DEFERRED)
     relocated = sum(1 for r in rows if r["target"] == RELOCATED)
     unbacked = sum(1 for r in rows if r["target"] == UNBACKED)
-    migrated = n - unchanged - discarded - deferred - relocated - unbacked
+    contested = sum(1 for r in rows if r["target"] == CONTESTED)
+    migrated = n - unchanged - discarded - deferred - relocated - unbacked - contested
     no_def = findings["no_def"]
     empty_groups = findings["unfilled"]
 
@@ -1075,9 +1293,11 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
         "`docs/product/beta-sdk-surface.md`** (owner-approved 2026-09-21), and the "
         "R/W/N group partition out of `docs/product/canonical-sdk-methods.md`; every "
         "count below is arithmetic over those, never a typed number. Each row's citation "
-        "quote is **verified to still be in the doc it names** and to be **maximal** — a "
-        "citation that no longer resolves, or that stops mid-clause (where a truncation "
-        "can drop the clause that contradicts the row), fails the build.",
+        "**names a REGION of the doc — a table row, a bullet, or a paragraph — and the "
+        "generator EXTRACTS that whole region verbatim**; the anchor only locates, so an "
+        "anchor truncated at a line wrap or a mid-row cell still renders the region "
+        "whole and cannot drop the clause that contradicts the row. A citation whose "
+        "region cannot be resolved, or cannot be rendered whole, fails the build.",
         "",
         "**This is the SDK half of the rename table.** The MCP half (current tool → "
         "target tool) is `docs/product/bridge-table.md` (Phase 0.1), plus a sibling "
@@ -1086,6 +1306,9 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
         f"**The surface: {n} public methods on `TortoiseSDK` → {len(targets)} target "
         f"methods.** {migrated} of the {n} are renames to a target; **{unchanged}** are "
         f"already targets (unchanged); **{discarded}** are discarded with a rationale; "
+        f"**{contested}** are **contested** (filed under “Removed” but their own "
+        f"clause says the capability is reachable — a fold, not a delete, with no "
+        f"destination stated); "
         f"**{deferred}** are **deferred** (live, filed post-beta and unlisted — NOT "
         f"deleted); **{relocated}** is **relocated** out of the product SDK; and "
         f"**{unbacked}** have no destination anywhere on the target "
@@ -1107,7 +1330,11 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
         "A `Target` that is not a target method is a **disposition**, and each is an "
         "owner ruling transcribed, not a choice made here: **UNCHANGED** — already on "
         "the target surface; **DISCARDED** — retires, cited from beta's \u201cDiscarded "
-        "— and why\u201d; **DEFERRED** — beta's \u201cNamed but not solved\u201d: the "
+        "— and why\u201d and supported by the row's own CLAUSE, not merely its section; "
+        "**CONTESTED** — the doc files it under \u201cRemoved\u201d while its own clause "
+        "says the capability is reachable, so it is a fold, not a delete, and no "
+        "destination is stated: an open finding; "
+        "**DEFERRED** — beta's \u201cNamed but not solved\u201d: the "
         "capability is **live** (in the MCP server today), filed post-beta and unlisted "
         "until then, so it is NOT deleted; **RELOCATED** — beta's \u201cKept and "
         "relocated\u201d: the code must survive but moves OUT of the product SDK (test "
@@ -1212,7 +1439,8 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
         out += ["| Method | Part A carries | The other doc implies | Other doc's grouping |",
                 "|---|---|---|---|"]
         for method, other, key in findings["tensions"]:
-            doc, quote = TENSION_CITES[key]
+            doc, anchor = TENSION_CITES[key]
+            quote = _derive_region(_doc_text(doc), Region(anchor))
             out.append(f"| `{method}` | `{OVERRIDE[method][0]}` | {other} | "
                        f"`{doc}` — “{_cell(quote)}” |")
     else:
@@ -1254,7 +1482,8 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
         "|---|---|---|",
     ]
     for name, referent, key in findings["phantoms"]:
-        doc, quote = PHANTOM_CITES.get(key) or CITES[key]
+        doc, anchor = PHANTOM_CITES.get(key) or CITES[key]
+        quote = _derive_region(_doc_text(doc), Region(anchor))
         ref = f"`{referent}`" if referent else "**none**"
         out.append(f"| `{name}` | {ref} | `{doc}` — “{_cell(quote)}” |")
 
@@ -1269,6 +1498,30 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
             "resolves each method to its family group: "
             + ", ".join(f"`{g}`" for g in empty_groups) + ".",
         ]
+
+    contested_rows = [r for r in rows if r["target"] == CONTESTED]
+    if contested_rows:
+        out += [
+            "",
+            "### C6 — rows filed under “Removed” whose own clause says they are reachable",
+            "",
+            "`DISCARDED` is Phase 2's signal to **delete** a method. beta's `### Removed`",
+            "table is one ruling and the rationale cell is another, and for these rows the",
+            "clause says the capability is *reachable* — a **fold, not a delete** — while",
+            "naming no destination. They carry `CONTESTED`, which is an open finding: the",
+            "capability is not deleted and no target absorbs it, so Phase 2 cannot",
+            "implement them from this document and needs an owner ruling.",
+            "",
+            "| Method | Source | Why the disposition is contested |",
+            "|---|---|---|",
+        ]
+        for r in contested_rows:
+            retained = ", ".join(f"“{m}”" for m in _retention_clauses(r["quote"]))
+            out.append(
+                f"| `{r['name']}` | `sdk.py:{r['line']}` | Its “Removed” row says "
+                f"{retained or 'the capability is retained'} — a fold, not a delete, "
+                f"with no destination named. |"
+            )
 
     out += [
         "",
@@ -1348,6 +1601,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  public methods: {len(rows)}  targets: {len(targets)}")
     print(f"  unchanged: {sum(1 for r in rows if r['target'] == UNCHANGED)}  "
           f"discarded: {sum(1 for r in rows if r['target'] == DISCARDED)}  "
+          f"contested: {sum(1 for r in rows if r['target'] == CONTESTED)}  "
           f"deferred: {sum(1 for r in rows if r['target'] == DEFERRED)}  "
           f"relocated: {sum(1 for r in rows if r['target'] == RELOCATED)}  "
           f"unbacked: {len(findings['unbacked'])}")
