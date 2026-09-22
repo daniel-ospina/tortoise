@@ -8,7 +8,8 @@ verbatim in CI with zero network. Mirrors the backup-seam fake pattern
 
 Filter ops: eq | neq | is (None → IS NULL) | gt | gte | lt | lte (all ordered
 ops NULL-excluding, SQL semantics). PATCH applies json_body to matching
-rows; POST appends a row (return=representation semantics); DELETE
+rows (an EMPTY body makes no updates and returns `[]`, matching PostgREST);
+POST appends a row (return=representation semantics); DELETE
 removes matching rows (mirrors PostgREST service-role deletes, #302).
 
 ``rpc(fn, body)`` simulates PostgREST RPC calls — ``provision_team``
@@ -800,6 +801,15 @@ class FakeControlPlane:
             # return=representation when a select is given → the UPDATED
             # rows ([] when nothing matched), the atomic-claim path used by
             # OAuth single-use codes / rotation (PR #1264 review P2).
+            #
+            # An EMPTY JSON object updates NOTHING, so the representation is
+            # empty even when the filter matched: PostgREST "makes no
+            # updates" for a bodyless PATCH (UpdateSpec.hs, "when patching
+            # with an empty body" — `PATCH /items?select=id` + `{}` → `[]`).
+            # Returning the matched row here was the fake divergence that hid
+            # the #2642 re-review P2 empty-body 404.
+            if not json_body:
+                return []
             updated: list[dict] = []
             for r in self.tables.get(table, []):
                 if _matches(r, filters or []):

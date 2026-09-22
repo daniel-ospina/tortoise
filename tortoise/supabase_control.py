@@ -1952,7 +1952,17 @@ def connector_update(cp, org_id: str, connector_id: str, *,
     matched (foreign or absent id) — the API maps False to 404. Asking for
     ``select=["id"]`` makes PostgREST answer ``return=representation``, which
     is what makes the affected-row count observable; the real client and the
-    test fake both honour it."""
+    test fake both honour it.
+
+    An EMPTY body is not an error and cannot be distinguished from a miss by
+    the representation: PostgREST makes ZERO updates for an empty JSON object
+    and answers ``[]`` under ``return=representation`` regardless of whether
+    the filter matched (``spec/Feature/Query/UpdateSpec.hs``, "when patching
+    with an empty body" — ``PATCH /items?select=id`` + ``{}`` → ``[]``).
+    Inferring existence from that representation 404s the caller's own
+    connector, so existence is read FIRST here, exactly as
+    ``connector_delete`` does; the same org+id filter keeps the 404 for a
+    foreign id."""
     body: dict = {}
     if config is not None:
         body["config"] = config
@@ -1966,6 +1976,12 @@ def connector_update(cp, org_id: str, connector_id: str, *,
         body["last_sync_at"] = last_sync_at
     if last_error is not None:
         body["last_error"] = last_error
+    if not body:
+        return bool(cp.query(
+            "connectors",
+            select=["id"],
+            filters=[("org_id", "eq", org_id), ("id", "eq", connector_id)],
+        ))
     rows = cp.query(
         "connectors",
         select=["id"],
