@@ -1421,13 +1421,16 @@ durations:
 # duration_coverage_issues() floors coverage at 90% (#3400).
 # Regenerate from tools/ci_timing.py / the run's junit artifacts.
 #
-# #4712: PROVENANCE IS NOW TWO RUNS. Everything down to the `#4711/#4712`
-# block below is the original run above (34725816431) and covers the FAST pool;
-# the keys appended at the END of this map come from run 35735193291
-# (head 26207c42) and cover the slow_files / carve_out lanes. The original
-# header line above ("the fast-file pool of that run") therefore describes only
-# the first group — the map is no longer fast-only, and no gate reads a lane key
-# yet (see #4724).
+# #4712: PROVENANCE IS NOW TWO RUNS — and note the map was never STRICTLY
+# fast-only, so the header line above ("the fast-file pool of that run")
+# describes its bulk, not all of it. Everything down to the `#4711/#4712` block
+# below is run 34725816431 (the fast-pool measurement) EXCEPT four lane keys that
+# already sat in that region: eval/retrieval/test_integration.py (855.2 — counted
+# in the fast pool then, moved to slow_files by #4711) and three carve_out
+# entries, test_ops_safety.py (16.8), test_backup_e2e.py (13.1) and
+# test_embedded_lifecycle_fast_close.py (9.1). The 53 keys appended at the END of
+# this map come from run 35735193291 (head 26207c42) and cover the rest of the
+# slow_files / carve_out lanes. No gate READS a lane key yet (see #4724).
 #
 # #4221: the six `test_shared_state_*.py` files (moved out of
 # tortoise/shared_state/tests/, where no CI lane collected them) enter the fast
