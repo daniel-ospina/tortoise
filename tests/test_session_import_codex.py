@@ -12,9 +12,11 @@ non-message noise skipping (tool calls, system prompts never become turns).
 """
 from __future__ import annotations
 
+import io
 import json
 from types import SimpleNamespace
 from unittest import mock
+from urllib.error import HTTPError
 
 import pytest
 
@@ -312,3 +314,130 @@ def test_sessions_import_window_is_a_noop_at_or_below_the_limit(tmp_path, monkey
     assert len(captured["conversation"]) == MAX_TURNS
     assert captured["conversation"][0]["content"] == "turn 0"
     assert "truncat" not in capsys.readouterr().err.lower()
+
+
+# ── #4714: a RETRYABLE import refusal must land in the DURABLE SPOOL ────────
+#
+# The server's capture guard REFUSES rather than enqueues, and it advertises
+# the retry (`Retry-After`) — so a 504 (wait budget exceeded) / 429 (capture
+# capacity saturated) is not a rejection of the CONTENT, it is a deferral. The
+# POST reached the server; there is no server-side copy to fall back on, so the
+# parsed turns must survive in the same durable spool the claude/pi legs write
+# BEFORE their POST. Without this the session is silently lost — the measured
+# defect for codex (504) and cursor (429).
+
+
+def _http_error(code: int, body: str) -> HTTPError:
+    """An HTTPError carrying a REAL body through a file object (``e.fp``).
+
+    ``_cmd_sessions_import`` reads ``e.read()`` for the detail it prints and
+    records, so a body-less error would exercise a branch the server never
+    takes.
+    """
+    return HTTPError(
+        "https://api.tortoise.test/v1/sessions", code, "refused",
+        hdrs=None, fp=io.BytesIO(body.encode("utf-8")),
+    )
+
+
+def _import_env(tmp_path, monkeypatch):
+    """Hermetic import environment: no network, no HOME, a tmp spool+receipts."""
+    from tortoise.capture_spool import spool_dir
+
+    spool = tmp_path / "spool"
+    monkeypatch.setenv("TORTOISE_API_KEY", "tt_test")
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+    monkeypatch.setenv("TORTOISE_IMPORT_RECEIPT_DIR", str(tmp_path / "receipts"))
+    monkeypatch.setenv("TORTOISE_CAPTURE_SPOOL_DIR", str(spool))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    # POSITIVE CONTROL: a broken override would silently target the real spool.
+    assert spool_dir() == spool
+    return spool
+
+
+@pytest.mark.parametrize("code,body", [
+    (429, '{"detail":"capture capacity saturated — too many captures in '
+          'flight; retry shortly"}'),
+    (504, '{"detail":"The server\'s wait budget for this request was '
+          'exceeded"}'),
+])
+def test_retryable_import_failure_is_spooled_for_the_next_drain(
+        tmp_path, monkeypatch, codex_jsonl, code, body):
+    """A retryable HTTP refusal leaves the turns DURABLE, and the existing
+    drain files them later.
+
+    Mutation: drop the spool write from the HTTPError branch — the meta
+    assertion REDs (the session is lost)."""
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import PostOutcome, flush_spool, read_spool_meta, read_spool_turns
+
+    spool = _import_env(tmp_path, monkeypatch)
+    args = SimpleNamespace(file=str(codex_jsonl), harness="codex",
+                           session_id="sid-retry")
+
+    def _raise(req, timeout=None):
+        raise _http_error(code, body)
+
+    with mock.patch("urllib.request.urlopen", _raise):
+        rc = _cmd_sessions_import(args)
+
+    # Still an HONEST failure: exit 1, no receipt — the spool is ADDITIONAL.
+    assert rc == 1
+    assert not list((tmp_path / "receipts").glob("*.json")), (
+        "a failed POST must not write a receipt")
+
+    meta = read_spool_meta(spool, "sid-retry")
+    assert meta is not None, (
+        "a retryable refusal left NO durable copy of the turns")
+    assert meta["harness"] == "codex"
+    assert meta["turns_count"] == len(_EXPECTED_TURNS)
+    assert read_spool_turns(spool, "sid-retry") == _EXPECTED_TURNS
+
+    # The EXISTING drain files it — the deferral is not a dead end, and what it
+    # posts is exactly what the refused import tried to post.
+    filed: list[dict] = []
+
+    def _post(payload):
+        filed.append(payload)
+        return PostOutcome(ok=True, status=200,
+                           body={"session_id": payload["session_id"]})
+
+    summary = flush_spool(spool, _post)
+    assert summary.filed == 1, summary
+    assert not summary.lost
+    assert len(filed) == 1
+    assert filed[0]["conversation"] == _EXPECTED_TURNS
+    assert filed[0]["harness"] == "codex"
+    assert filed[0]["session_id"] == "sid-retry"
+
+
+@pytest.mark.parametrize("code", [400, 403])
+def test_permanent_import_failure_is_not_spooled(
+        tmp_path, monkeypatch, codex_jsonl, code, capsys):
+    """A PERMANENT refusal keeps today's behaviour exactly: honest error, no
+    receipt, and NOT parked on the spool (a malformed payload never becomes
+    valid by waiting).
+
+    Mutation: spool unconditionally — the spool assertions RED; mutation: drop
+    the error line — the stderr assertion REDs."""
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import list_spool_metas, read_spool_meta
+
+    spool = _import_env(tmp_path, monkeypatch)
+    args = SimpleNamespace(file=str(codex_jsonl), harness="codex",
+                           session_id="sid-perm")
+
+    def _raise(req, timeout=None):
+        raise _http_error(code, '{"detail":"malformed payload"}')
+
+    with mock.patch("urllib.request.urlopen", _raise):
+        rc = _cmd_sessions_import(args)
+
+    assert rc == 1
+    assert not list((tmp_path / "receipts").glob("*.json"))
+    err = capsys.readouterr().err
+    assert f"import failed (HTTP {code})" in err, err
+    assert read_spool_meta(spool, "sid-perm") is None
+    metas, _ = list_spool_metas(spool)
+    assert metas == []
