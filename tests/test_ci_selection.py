@@ -1015,6 +1015,14 @@ def test_push_legs_partitions_every_classified_file():
     )
     probe = {**m, "push_extra": [f"{n}.py" for n in probe_names]}
     probe_legs = push_legs(probe)
+    # …and nothing BEYOND the probe entries may appear in the halves: presence
+    # checks alone let a spurious path through whenever push_extra is non-empty.
+    expected_halves = (fast - broken - carve) | set(probe_names)
+    actual_halves = set(probe_legs["half_a"]) | set(probe_legs["half_b"])
+    assert actual_halves == expected_halves, (
+        "probe halves must be the fast pool plus exactly the probe entries — "
+        f"unexpected: {actual_halves ^ expected_halves}"
+    )
     probe_legs_of = {
         n: sorted(leg for leg, files in probe_legs.items() if n in set(files))
         for n in probe_names
