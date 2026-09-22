@@ -38,6 +38,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from tortoise.domain_loader import register_kind
+from tortoise.retrieval import SESSION_TRANSCRIPT_KIND
 from tortoise.sdk import TortoiseSDK
 
 logger = logging.getLogger(__name__)
@@ -50,8 +51,9 @@ DEFAULT_CHUNK_TURNS = 2
 # vocabulary — registration suppresses the SDK warning, mirroring the sdk's
 # own register_kind("diary") pattern). "event" is the episodic turn-point
 # kind used by TortoiseSDK.capture_session (registered here so the pack
-# vocabulary doesn't warn on every turn write).
-SESSION_TRANSCRIPT_KIND = "session-transcript"
+# vocabulary doesn't warn on every turn write). C4 (#2517): the literal is
+# re-exported from the PRODUCT constant (tortoise.retrieval) — the ingest
+# lane no longer owns a second copy.
 register_kind(SESSION_TRANSCRIPT_KIND)
 register_kind("event")
 
@@ -172,12 +174,21 @@ def ingest_haystack(sdk: TortoiseSDK, question: dict, *,
         point_created_at = session_date or UNDATED_SENTINEL
 
         # ── Session node ──
+        # #4106: the session's RECORDED time is the dataset's session date,
+        # and a session the dataset does NOT date records NO time —
+        # `_now_iso()` here would assert a capture time this ingestion never
+        # had, and the ask-path date annotation (which reads `s.created_at`)
+        # would render the RUN DATE as the session's date for the reader to
+        # compute elapsed time from. No `coalesce` (deterministic per session,
+        # so a re-ingest converges and cannot preserve a stale run clock). The
+        # point write above already follows the same rule via
+        # `UNDATED_SENTINEL` (R5, #1544).
         proj.g.query(
             "MERGE (s:Session {id:$id}) "
-            "SET s.created_at=coalesce(s.created_at, $ts), "
+            "SET s.created_at=$ts, "
             "    s.turn_count=$tc, s.is_episodic=true, s.lme_question_id=$qid, "
             "    s.lme_session_index=$si, s.lme_source_session_id=$sid",
-            params={"id": s_node, "ts": session_date or _now_iso(), "tc": len(session),
+            params={"id": s_node, "ts": session_date or None, "tc": len(session),
                     "qid": qid, "si": si, "sid": sid},
         )
 

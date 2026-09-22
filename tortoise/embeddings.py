@@ -20,6 +20,17 @@ import time
 
 import numpy as np
 
+from .env_truthy import env_flag  # #4097: the declared truthy contract
+
+
+def _embedder_warmup_enabled() -> bool:
+    """`TORTOISE_EMBEDDER_WARMUP` — the engine-init warm-up opt-in (default ON).
+
+    #4097: the single resolution point (``EmbeddingModel.start_warm_up`` calls it),
+    through the declared truthy contract; ``0``/``false``/``no``/``off`` opt out.
+    """
+    return env_flag("TORTOISE_EMBEDDER_WARMUP", True)
+
 logger = logging.getLogger(__name__)
 
 # The active embedder — single source of truth for the production model id.
@@ -27,6 +38,17 @@ logger = logging.getLogger(__name__)
 # all-MiniLM-L6-v2 as the default (evidence gate: recall +15.7%, p=0.0005;
 # HNSW spot-check cleared). Rotating the embedder = editing this line.
 EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
+#: #4194: the model's vector width, in ONE place. The Point HNSW index is
+#: created with this width (tortoise/projection/__init__.py) and the vector leg
+#: requires it, so a stored vector of any other length is not a near-miss — it
+#: is a broken leg. The STORE declares this width to the write path
+#: (``FalkorProjection.required_embedding_dim``), which routes through
+#: :func:`encode_for_store` / :func:`encode_batch_for_store` — those degrade a
+#: wrong-width row to ``None`` (fail-soft, LOGGED) rather than handing it to
+#: ``vecf32``. A store with no vector index (the embedded brute-force lane)
+#: declares ``None`` — it has no width to enforce, so the encoder's own width
+#: governs.
+EMBEDDING_DIM = 384
 # Supply-chain pin (VULN-001, security review): resolved HF commit at bake time
 # (2026-08-21). A mutable tag would silently serve tampered weights.
 EMBEDDING_MODEL_REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
@@ -37,6 +59,39 @@ EMBEDDING_MODEL_REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
 # NEAR_DUPLICATE = p5(near-dup band).
 NEAR_DUPLICATE_THRESHOLD = 0.89
 DEFAULT_THRESHOLD = 0.72
+
+# #4028: the OPT-IN retrieval relevance floor (cosine) for the vector leg.
+# NOT a default — see the measured reason below. Set
+# TORTOISE_VECTOR_MIN_SIMILARITY to a value (this constant is the calibrated
+# starting point) to enable it; unset → no floor (the pre-#4028 behaviour).
+#
+# Below this, a nearest-neighbour hit carries no relevance signal. It is
+# distinct from DEFAULT_THRESHOLD above (the symmetric PARAPHRASE band, two
+# short sentences about the same thing); this is the asymmetric
+# QUERY->DOCUMENT noise ceiling, which sits lower.
+#
+# Calibration: bge-small-en-v1.5 (the pinned EMBEDDING_MODEL). On
+# tests/fixtures/labeled_pairs.jsonl the UNRELATED band tops out at 0.580
+# (37/37 below 0.60) while every paraphrase pair is >= 0.653 — a clean
+# separation on that fixture.
+#
+# ⛔ WHY IT IS NOT DEFAULT-ON: that clean separation does NOT survive the
+# query->document retrieval shape, where the bands OVERLAP. Two independent
+# real measurements: the LongMemEval-v2 fixture's gold hits run down to
+# 0.461 (median 0.693) against non-gold hard negatives up to 0.795, and a
+# real relevant pair at 0.536 (query "Which programming language does this
+# person prefer for coding?" -> "I really enjoy building side projects with
+# Elixir these days.") sits BELOW the 0.580 unrelated ceiling. No floor can
+# both drop the #4028 residue (observed up to 0.606) and keep those answers,
+# so defaulting it on turns real reads empty (it fails
+# tests/test_longmem_runner.py::test_vector_strategy_verified_in_eval_path).
+# #4028's own store defect is a DATA defect (test residue), fixed by
+# tools/purge_test_residue.py; this knob is defence-in-depth for an operator
+# who has measured their own corpus.
+#
+# Recalibrate when the embedder is swapped (same rule as the thresholds
+# above).
+VECTOR_RELEVANCE_FLOOR = 0.60
 
 
 class EmbeddingModel:
@@ -61,6 +116,14 @@ class EmbeddingModel:
     # window. Pre-warmed at startup in hosted.
     _FAIL_COOLDOWN_S = 60.0  # negative cache: skip retry for 60s after a failed load
     _last_failed_at: float | None = None
+    # (B) #2952 explicit warm-up state — see warm_up()/start_warm_up()/status().
+    _WARM_UP_LOCK = threading.Lock()
+    _warm_up_thread: threading.Thread | None = None
+    _warm_up_started = False
+    _last_error: str | None = None
+    #: Why the last load attempt failed: "not_installed" (designed absence —
+    #: INFO) vs "load_failed"/"load_timeout" (real degrade — WARNING).
+    _last_failure_kind: str | None = None
 
     @classmethod
     def get(cls, load_timeout: float | None = None) -> "EmbeddingModel | None":  # noqa: UP037
@@ -92,6 +155,17 @@ class EmbeddingModel:
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
+                    # #2952 (B) P1 review fix: re-check the negative cache
+                    # INSIDE the lock. A caller that passed the outer check
+                    # before a concurrent load (engine-init warm-up!) recorded
+                    # its failure would otherwise start a SECOND full load,
+                    # defeating the once-only warm-up and double-blocking the
+                    # first query. The failure timestamp is written under this
+                    # same lock, so the re-check is race-safe.
+                    now_locked = time.monotonic()
+                    if cls._last_failed_at is not None and \
+                            (now_locked - cls._last_failed_at) < cls._FAIL_COOLDOWN_S:
+                        return None
                     cls._instance = cls(load_timeout=timeout)
         model = cls._instance._model if (cls._instance and cls._instance._model) else None
         if model is None and cls._instance is not None:
@@ -103,7 +177,129 @@ class EmbeddingModel:
                 cls._instance = None
                 cls._model = None
                 cls._last_failed_at = time.monotonic()
+        if model is not None:
+            # #2952: a healthy model clears the prior failure state so
+            # status() never reports a stale failure_kind next to
+            # available=True (P2 review fix).
+            cls._last_failure_kind = None
+            cls._last_error = None
         return model
+
+    @classmethod
+    def warm_up(cls, *, load_timeout: float | None = None) -> bool:
+        """(B) #2952 — explicitly probe/load the embedder ONCE at init.
+
+        Best-effort and non-fatal: returns True when the model is available,
+        False when the vector leg cannot run. NEVER raises. The point is to
+        surface a load failure *at init* (one clear WARNING) instead of
+        letting it masquerade as a per-query ``_FAIL_COOLDOWN_S`` gap — the
+        cooldown itself is unchanged (the model is still retried on a later
+        ``get()`` call; this is not sticky-off).
+
+        The failure is declared, not silent: ``status()`` reports the state
+        and ``tortoise.search_engine.declared_degraded_read(leg_trace)`` marks
+        the resulting single-leg reads.
+        """
+        try:
+            model = cls.get(load_timeout=load_timeout)
+        except Exception as exc:  # noqa: BLE001, RUF100 — warm-up is non-fatal
+            cls._last_error = f"{type(exc).__name__}: {exc}"
+            logger.warning(
+                "embedder warm-up raised — the vector leg is unavailable and "
+                "single-leg (keyword-only) reads must be declared (#2952): %s",
+                exc, exc_info=True,
+            )
+            return False
+        if model is None:
+            kind = cls._last_failure_kind or "model_unavailable"
+            cls._last_error = kind
+            if kind == "not_installed":
+                # Designed zero-dependency path (embeddings extra absent) —
+                # INFO, matching the loader's own contract; not a new degrade.
+                logger.info(
+                    "embedder warm-up: sentence-transformers not installed "
+                    "(designed) — vector leg unavailable; keyword-only reads "
+                    "must be declared (#2952)."
+                )
+            else:
+                logger.warning(
+                    "embedder warm-up FAILED (%s) — the vector leg will not "
+                    "run until a later retry succeeds; a keyword-only read is "
+                    "NOT hybrid retrieval and must be declared (#2952).",
+                    kind,
+                )
+            return False
+        cls._last_error = None
+        cls._last_failure_kind = None
+        return True
+
+    @classmethod
+    def start_warm_up(cls, *, load_timeout: float | None = None
+                      ) -> threading.Thread | None:
+        """(B) #2952 — non-blocking, once-per-process warm-up for engine init.
+
+        Spawns a daemon thread that calls :meth:`warm_up` so client/engine
+        init never blocks on the ~57s cold BAAI/bge-small-en-v1.5 load while
+        still surfacing the outcome once (the same posture as the hosted
+        ``_lifespan`` pre-warm, #545). Idempotent: repeated calls after the
+        first return the existing thread (or None when it already finished).
+
+        Opt out with ``TORTOISE_EMBEDDER_WARMUP=0`` (tests disable it — a
+        background load would race explicit embedder stubs). Returns None
+        when disabled or already started.
+        """
+        if not _embedder_warmup_enabled():
+            return None
+        with cls._WARM_UP_LOCK:
+            if cls._warm_up_started:
+                t = cls._warm_up_thread
+                return t if (t is not None and t.is_alive()) else None
+            cls._warm_up_started = True
+            thread = threading.Thread(
+                target=cls._warm_up_worker, args=(load_timeout,),
+                name="tortoise-embedder-warmup", daemon=True,
+            )
+            cls._warm_up_thread = thread
+            thread.start()
+            return thread
+
+    @classmethod
+    def _warm_up_worker(cls, load_timeout: float | None) -> None:
+        """Daemon-thread body — never lets a warm-up failure escape."""
+        try:
+            cls.warm_up(load_timeout=load_timeout)
+        except Exception:  # noqa: BLE001, RUF100 — a daemon thread must not raise
+            logger.debug("embedder warm-up worker failed", exc_info=True)
+
+    @classmethod
+    def status(cls) -> dict:
+        """(C) #2952 — the DECLARED embedder availability state.
+
+        A read surface that could not run its vector leg can report this
+        instead of silently presenting a keyword-only result as hybrid:
+        ``{"model", "available", "state" ∈ ready|cooldown|unavailable,
+        "last_error", "cooldown_remaining_s"}``. Read-only, no side effects.
+        """
+        instance = cls._instance
+        model = instance._model if instance is not None else None
+        remaining = 0.0
+        if cls._last_failed_at is not None:
+            remaining = max(
+                0.0, cls._FAIL_COOLDOWN_S - (time.monotonic() - cls._last_failed_at))
+        if model is not None:
+            state = "ready"
+        elif remaining > 0.0:
+            state = "cooldown"
+        else:
+            state = "unavailable"
+        return {
+            "model": EMBEDDING_MODEL,
+            "available": model is not None,
+            "state": state,
+            "last_error": cls._last_error,
+            "failure_kind": cls._last_failure_kind,
+            "cooldown_remaining_s": round(remaining, 3),
+        }
 
     @classmethod
     def _reset(cls) -> None:
@@ -112,6 +308,11 @@ class EmbeddingModel:
             cls._instance = None
             cls._model = None
             cls._last_failed_at = None
+        with cls._WARM_UP_LOCK:
+            cls._warm_up_thread = None
+            cls._warm_up_started = False
+            cls._last_error = None
+            cls._last_failure_kind = None
 
     def __init__(self, load_timeout: float | None = None):
         timeout = load_timeout if load_timeout is not None else self._LOAD_TIMEOUT_S
@@ -122,9 +323,25 @@ class EmbeddingModel:
                 from sentence_transformers import SentenceTransformer
                 result["model"] = SentenceTransformer(
                     EMBEDDING_MODEL, revision=EMBEDDING_MODEL_REVISION)
-            except ImportError:
-                # Designed zero-dependency path — INFO, no traceback noise.
-                logger.info("sentence-transformers not installed — embeddings degrade")
+            except ImportError as e:
+                # Distinct the DESIGNED absence (package not installed — INFO)
+                # from an import-time failure inside an installed dependency
+                # chain (real degrade — WARNING) (#2952 P2 review fix).
+                import importlib.util
+                try:
+                    spec = importlib.util.find_spec("sentence_transformers")
+                except Exception:  # noqa: BLE001, RUF100 — a probe must never
+                    spec = object()  # raise; treat unknown as a real failure
+                if spec is None:
+                    # Designed zero-dependency path — INFO, no traceback noise.
+                    logger.info("sentence-transformers not installed — embeddings degrade")
+                    type(self)._last_failure_kind = "not_installed"
+                else:
+                    logger.warning(
+                        "sentence-transformers import failed — embeddings "
+                        "degrade: %s", e, exc_info=True,
+                    )
+                    type(self)._last_failure_kind = "load_failed"
                 result["model"] = None
             except Exception as e:  # noqa: BLE001, RUF100
                 # #880: a load failure (e.g. LocalEntryNotFoundError when the
@@ -134,6 +351,7 @@ class EmbeddingModel:
                     "sentence-transformers unavailable — embeddings degrade: %s",
                     e, exc_info=True,
                 )
+                type(self)._last_failure_kind = "load_failed"
                 result["model"] = None
 
         t = threading.Thread(target=_load, daemon=True)
@@ -150,6 +368,7 @@ class EmbeddingModel:
                 "(retries on next get() call).",
                 self._LOAD_TIMEOUT_S,
             )
+            type(self)._last_failure_kind = "load_timeout"
             self._model = None
             return
         self._model = result["model"]
@@ -161,24 +380,165 @@ class EmbeddingModel:
         return self._model.encode(texts, batch_size=batch_size, show_progress_bar=False)
 
 
-def compute_embedding(content: str, max_tokens: int = 512) -> list[float] | None:
-    """Compute embedding for a single text. Returns 384-dim list or None.
+def _truncate_for_embedding(content: str, max_tokens: int) -> str:
+    """The ONE stored-text composition used by every write-side embedder.
 
-    Truncates to max_tokens before encoding to prevent OOM.
-    Returns None if model unavailable or encoding fails.
+    Word-truncation to ``max_tokens`` before encoding prevents OOM. Shared by
+    :func:`compute_embedding` and :func:`compute_embeddings` so the batched
+    and single forms can never compose a different string for the same input
+    (#4194).
     """
+    return " ".join(content.split()[:max_tokens])
+
+
+def compute_embeddings(
+    texts: list[str], max_tokens: int = 512,
+) -> list[list[float] | None]:
+    """Batched form of :func:`compute_embedding` — SAME embedder, per text.
+
+    Returns one entry per input text: a vector of the ENCODER's own width, or
+    ``None`` where the model is unavailable / the encode failed. This exists so
+    a whole capture window can be embedded in ONE model call instead of one per
+    turn (#4194) without forking the embedder: it routes through the same
+    ``EmbeddingModel`` singleton, the same :func:`_truncate_for_embedding`
+    composition and the same un-normalised model output as
+    :func:`compute_embedding`, so a batched vector and a single vector are
+    byte-identical for the same text.
+
+    ⛔ The width a STORE can hold is the INDEX's constraint, and there is no
+    index on the embedded FalkorDBLite lane (brute-force
+    ``vec.euclideanDistance`` is dimension-agnostic), so this generic encoder
+    does not apply one — see :func:`encode_batch_for_store`, which the store's
+    write paths call. Enforcing :data:`EMBEDDING_DIM` here silently NULLed
+    every vector for a non-384 encoder on the index-less lane, and the
+    cross-lens candidate pool filters on ``p.embedding IS NOT NULL`` — the
+    #4280 regression (``tests/test_cross_lens_candidates.py``).
+
+    ⛔ This is a widely-REPLACED seam (``tools/longmem_eval/encode_cache.py``
+    and the longmem eval doubles swap the function itself), so it keeps its
+    narrow ``(texts, max_tokens)`` call shape on purpose: a caller-side width
+    keyword would raise ``TypeError`` inside every replacement and be swallowed
+    by the write paths' ``except Exception`` — the same fail-open in a new
+    place.
+    """
+    if not texts:
+        return []
     model = EmbeddingModel.get()
     if model is None:
-        return None
+        return [None] * len(texts)
     try:
-        words = content.split()[:max_tokens]
-        truncated = " ".join(words)
-        vec = model.encode([truncated])
-        if vec is None or len(vec) == 0:
-            return None
-        return vec[0].tolist()
+        truncated = [_truncate_for_embedding(t, max_tokens) for t in texts]
+        vecs = model.encode(truncated)
+        if vecs is None or len(vecs) != len(texts):
+            return [None] * len(texts)
+        return [vec.tolist() for vec in vecs]
     except Exception:
-        return None
+        return [None] * len(texts)
+
+
+#: #4280: width mismatches already warned about, keyed ``(expected_dim, actual)``.
+#: A width misconfiguration drops EVERY row, so an unlatched warning storms a
+#: bulk write (one line per Point); the signal is the first occurrence of each
+#: distinct mismatch.
+_WIDTH_MISMATCH_WARNED: set[tuple[int | None, int]] = set()
+
+
+def _degrade_to_width(
+    vectors: list[list[float] | None], expected_dim: int | None,
+) -> list[list[float] | None]:
+    """Drop the rows a store of width ``expected_dim`` cannot hold (#4280).
+
+    ``None`` means the caller's store has NO width-fixing vector index, so the
+    encoder's own width governs and nothing is dropped. A dropped row becomes
+    ``None`` (the node is still written; the read path declares the leg
+    impaired) and is LOGGED once per distinct ``(expected_dim, actual)`` — a
+    silent drop is indistinguishable from "the leg ran and found nothing",
+    which is exactly how #4280 hid (fail-open).
+    """
+    if expected_dim is None:
+        return list(vectors)
+    out: list[list[float] | None] = []
+    dropped = 0
+    widths: set[int] = set()
+    for row in vectors:
+        if row is not None and len(row) != expected_dim:
+            dropped += 1
+            widths.add(len(row))
+            out.append(None)
+        else:
+            out.append(row)
+    if dropped:
+        fresh = {(expected_dim, w) for w in widths} - _WIDTH_MISMATCH_WARNED
+        if fresh:
+            _WIDTH_MISMATCH_WARNED.update(fresh)
+            logger.warning(
+                "embedder returned %d/%d row(s) whose width != the store's "
+                "required %d — those vectors are NOT stored (the dense leg "
+                "degrades to keyword-only for them). Rotating the embedder "
+                "requires re-embedding the store. (Warned once per distinct "
+                "mismatch.)",
+                dropped, len(vectors), expected_dim,
+            )
+    return out
+
+
+def encode_for_store(
+    content: str, expected_dim: int | None,
+) -> list[float] | None:
+    """Encode ONE text through the seam, degraded to the STORE's width (#4280).
+
+    The store-scoped wrapper the Point write paths use:
+    ``expected_dim`` is ``FalkorProjection.required_embedding_dim``
+    (:data:`EMBEDDING_DIM` when the store has a Point HNSW index, ``None`` on
+    the index-less embedded brute-force lane). It calls the
+    :func:`compute_embedding` SEAM — the module global, so an installed
+    ``EncodeCache`` still intercepts — and then applies the width the store
+    declared.
+
+    ⛔ The seam is called with the ONE positional argument its replacements
+    declare (``compute_embedding(content)``; the encoder's own 512-word cap) and
+    this helper takes no ``max_tokens``: several in-repo doubles are
+    ``lambda content: ...``, and a second positional argument would raise
+    ``TypeError`` inside them — swallowed by the write paths'
+    ``except Exception`` into the same silent no-vector degrade #4280 is about.
+    """
+    vec = compute_embedding(content)
+    return _degrade_to_width([vec], expected_dim)[0]
+
+
+def encode_batch_for_store(
+    texts: list[str], expected_dim: int | None,
+) -> list[list[float] | None]:
+    """Batched :func:`encode_for_store` — one model call, same width guard.
+
+    The batch length is enforced against the input: the turn writers index the
+    result per windowed turn, so a REPLACEMENT of the seam that returns a short
+    batch would otherwise raise ``IndexError`` inside the capture loop — after
+    the Session write — and leave a partial session. A short batch degrades to
+    no vector per text, which the writers already handle.
+    """
+    vecs = compute_embeddings(texts)
+    if len(vecs) != len(texts):
+        logger.warning(
+            "embedder returned %d row(s) for %d text(s) — no vector is "
+            "stored for this batch (#4280).", len(vecs), len(texts),
+        )
+        return [None] * len(texts)
+    return _degrade_to_width(vecs, expected_dim)
+
+
+def compute_embedding(content: str, max_tokens: int = 512) -> list[float] | None:
+    """Compute embedding for a single text. Returns the model's vector or None.
+
+    Truncates to max_tokens before encoding to prevent OOM.
+    Returns None if model unavailable or encoding fails. The WIDTH is the
+    encoder's own — a store that has a width-fixing vector index applies its
+    own constraint via :func:`encode_for_store` (#4280).
+
+    Delegates to :func:`compute_embeddings` so the single and batched forms
+    share one composition and can never diverge (#4194).
+    """
+    return compute_embeddings([content], max_tokens)[0]
 
 
 def _encode(texts: list[str]) -> tuple[np.ndarray, bool]:

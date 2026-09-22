@@ -13,7 +13,7 @@ produces diverge from live (live != rebuild), and is reclaimable only by the
 opt-in `_sweep_team_strays` pass. (`wipe_server` is fail-closed to
 `test_`/`tortoise_test` prefixes and never touches `team_*`.)
 
-These tests are HERMETIC — no DB, no lane. `team_create` and
+These tests are HERMETIC — no DB, no lane. `org_create` and
 `_eager_provision_org_graph` are driven against fake projections/registries that
 record the exact call order; the product-level journal consumers
 (`_created_since_last_wipe`, `_sweep_drop`) run over a real tmp FILE journal; and
@@ -34,7 +34,7 @@ REPO = Path(__file__).resolve().parent.parent
 # Every product function that mints a `:TeamMeta` graph — the guard fails
 # loudly if this set changes, so a new site must adopt the seam + register here.
 _MINT_SITES = {
-    ("tortoise/sdk.py", "team_create"),
+    ("tortoise/sdk.py", "org_create"),
     ("tortoise/hosted_api.py", "provision_tenant"),
     ("tortoise/hosted_api.py", "register_user"),
     ("tortoise/hosted_api.py", "_eager_provision_org_graph"),
@@ -126,10 +126,10 @@ def test_team_create_journals_before_the_teammeta_create(monkeypatch):
     rec = _Recorder()
     sdk = _fake_sdk(monkeypatch, rec)
 
-    res = sdk.team_create("wa_order")
+    res = sdk.org_create("wa_order")
 
-    assert res["graph_name"] == "team_wa_order"
-    assert rec.index(("journal", "team_wa_order")) < rec.index(("create", "team_wa_order")), (
+    assert res["graph_name"] == "org_wa_order"
+    assert rec.index(("journal", "org_wa_order")) < rec.index(("create", "org_wa_order")), (
         "ownership line must be journaled BEFORE the CREATE (write-ahead)"
     )
 
@@ -142,18 +142,18 @@ def test_crash_between_journal_and_create_leaves_no_orphan(monkeypatch):
     on disk when the process dies, so every journal-driven sweep can see it.
     """
     rec = _Recorder()
-    sdk = _fake_sdk(monkeypatch, rec, crash_name="team_wa_crash")
+    sdk = _fake_sdk(monkeypatch, rec, crash_name="org_wa_crash")
 
     with pytest.raises(_ProcessKilled):
-        sdk.team_create("wa_crash")
+        sdk.org_create("wa_crash")
 
-    assert ("journal", "team_wa_crash") in rec.events, (
+    assert ("journal", "org_wa_crash") in rec.events, (
         "write-ahead: the ownership line must already exist at the crash"
     )
-    assert rec.index(("journal", "team_wa_crash")) < rec.index(
-        ("create_attempt", "team_wa_crash")
-    ), "the journal line must precede the create ATTEMPT (not just its result)"
-    assert ("create", "team_wa_crash") not in rec.events  # effect never landed
+    assert rec.index(("journal", "org_wa_crash")) < rec.index(("create_attempt", "org_wa_crash")), (
+        "the journal line must precede the create ATTEMPT (not just its result)"
+    )
+    assert ("create", "org_wa_crash") not in rec.events  # effect never landed
 
 
 def test_create_landing_then_crash_still_owns_the_graph(monkeypatch):
@@ -172,18 +172,18 @@ def test_create_landing_then_crash_still_owns_the_graph(monkeypatch):
     monkeypatch.setattr(sdk, "_graph_create", _kill)
 
     with pytest.raises(_ProcessKilled):
-        sdk.team_create("wa_after")
+        sdk.org_create("wa_after")
 
-    assert ("journal", "team_wa_after") in rec.events
-    assert ("create", "team_wa_after") in rec.events, (
+    assert ("journal", "org_wa_after") in rec.events
+    assert ("create", "org_wa_after") in rec.events, (
         "the graph landed, and its ownership line was already written"
     )
-    assert rec.index(("journal", "team_wa_after")) < rec.index(("create", "team_wa_after"))
+    assert rec.index(("journal", "org_wa_after")) < rec.index(("create", "org_wa_after"))
 
 
 def test_eager_provision_journals_before_materialization(monkeypatch):
-    """The `_make_sdk(namespace=team_id)._get_proj()` lane MATERIALIZES
-    team_{team_id} (Projection.__init__ -> _ensure_indexes, a query). The seam
+    """The `_make_sdk(namespace=org_id)._get_proj()` lane MATERIALIZES
+    org_{org_id} (Projection.__init__ -> _ensure_indexes, a query). The seam
     must precede BOTH the materialization and the CREATE — journaling only
     ahead of the CREATE would leave a materialization→journal kill window."""
     from tortoise import hosted_api
@@ -211,20 +211,20 @@ def test_eager_provision_journals_before_materialization(monkeypatch):
         "tortoise.projection._journal_append_product",
         lambda n, *a, **k: order.append(("journal", n)),
     )
-    monkeypatch.setattr("tortoise.supabase_control.active_membership_team_ids", lambda cp, uid: [])
+    monkeypatch.setattr("tortoise.supabase_control.active_membership_org_ids", lambda cp, uid: [])
 
-    assert hosted_api._eager_provision_org_graph(object(), "tid1", "N", "u1") == "team_tid1"
-    assert order.index(("journal", "team_tid1")) < order.index("materialize"), (
+    assert hosted_api._eager_provision_org_graph(object(), "tid1", "N", "u1") == "org_tid1"
+    assert order.index(("journal", "org_tid1")) < order.index("materialize"), (
         "journal must precede the projection's _ensure_indexes materialization"
     )
-    assert order.index(("journal", "team_tid1")) < order.index("create")
+    assert order.index(("journal", "org_tid1")) < order.index("create")
 
 
 def test_eager_provision_early_return_still_journals(monkeypatch):
     """The idempotency early-return path journals too.
 
-    `_make_sdk(namespace=team_id)._get_proj()` has ALREADY materialized
-    team_{team_id} by the time the probe runs, so the ownership line must
+    `_make_sdk(namespace=org_id)._get_proj()` has ALREADY materialized
+    org_{org_id} by the time the probe runs, so the ownership line must
     precede it even when no CREATE follows. Documented cost: this session then
     owns (and sweeps) that graph — the write-ahead invariant is what keeps the
     materialized graph attributable (#3406 tracks the sweep-side protection).
@@ -253,10 +253,10 @@ def test_eager_provision_early_return_still_journals(monkeypatch):
         lambda n, *a, **k: order.append(("journal", n)),
     )
 
-    assert hosted_api._eager_provision_org_graph(object(), "tid1", "N", "u1") == "team_tid1"
-    assert ("journal", "team_tid1") in order
+    assert hosted_api._eager_provision_org_graph(object(), "tid1", "N", "u1") == "org_tid1"
+    assert ("journal", "org_tid1") in order
     assert "create" not in order, "early return: no CREATE follows"
-    assert order.index(("journal", "team_tid1")) < order.index("materialize")
+    assert order.index(("journal", "org_tid1")) < order.index("materialize")
 
 
 # ── idempotency / convergence (real product consumers, no DB) ────────────
@@ -274,17 +274,17 @@ def test_duplicate_journal_lines_converge_to_one_owner(monkeypatch, tmp_path):
     rec = _Recorder()
     sdk = _fake_sdk(monkeypatch, rec)
 
-    sdk.team_create("wa_replay")
-    sdk.team_create("wa_replay")  # retry / rebuild replays the same name
+    sdk.org_create("wa_replay")
+    sdk.org_create("wa_replay")  # retry / rebuild replays the same name
 
-    journal_events = [e for e in rec.events if e == ("journal", "team_wa_replay")]
+    journal_events = [e for e in rec.events if e == ("journal", "org_wa_replay")]
     assert len(journal_events) == 2, "retry re-journals the same name"
     assert rec.names("create") <= rec.names("journal"), "orphan: a created graph is not owned"
     # The REAL product consumer collapses the duplicate to one owned name.
     journal = tmp_path / "session.graphs.jsonl"
-    journal.write_text("team_wa_replay\nteam_wa_replay\n")
+    journal.write_text("org_wa_replay\norg_wa_replay\n")
     monkeypatch.setattr(emb, "_JOURNAL_FILE", str(journal))
-    assert emb._created_since_last_wipe() == {"team_wa_replay"}
+    assert emb._created_since_last_wipe() == {"org_wa_replay"}
 
 
 def test_created_since_last_wipe_collapses_duplicate_lines(tmp_path, monkeypatch):

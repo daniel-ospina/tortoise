@@ -20,10 +20,22 @@ data/migrations/
 .env
 .husky/_/
 
-# #1148: dashboard build artifacts (node_modules is huge; dist/ IS committed)
+# #1148: dashboard build artifacts (node_modules is huge — still tracked, #3768)
 website/apps/dashboard/node_modules/
 website/apps/blog-admin/node_modules/
 .venv/
+
+# #3775: the dashboard bundle is GENERATED, not source. Vite builds it from
+# `src/` + `public/` (public/ is the hand-authored source vite copies verbatim;
+# the only dist-only files are the 3 vite outputs — index.html,
+# assets/index-*.js, assets/index-*.css). Tracking it made every dashboard PR
+# rewrite a shared binary-ish hot file: 12 of 21 dashboard PR pairs conflicted
+# on it. Both deploy paths build immediately before upload
+# (website/apps/dashboard/deploy.sh and deploy-pages.yml's deploy-dashboard
+# job), and CI builds it for dashboard-js-tests / dashboard-e2e. Path-anchored
+# to the dashboard app — it does NOT match website/apps/blog-admin/dist/
+# (still tracked) nor any node_modules/**/dist/.
+website/apps/dashboard/dist/
 
 # Issue #316 benchmark outputs (regenerated per run)
 benchmarks/reports/
@@ -33,7 +45,7 @@ dist-client/
 client/build/
 
 # #1929: wheel/sdist build artifacts from `python -m build` (root-anchored —
-# the committed website/apps/dashboard/dist (#1148) must stay tracked).
+# no nested dist/, e.g. website/apps/blog-admin/dist, may match).
 /dist/
 /build/
 
@@ -71,4 +83,12 @@ review-artifacts/
 # files are gitignored; the directory convention (.gitkeep) is committed.
 data/kind_index/*
 !data/kind_index/.gitkeep
+
+# #2943: the durable pre-wipe snapshot sidecar. `rebuild_all` writes it next to
+# the event log it was given, and `tortoise rebuild --dir` defaults to "." — so
+# it can land in a working tree. It holds graph-only Point contents and :Batch
+# markers, which must never reach git history. It is transient (written before
+# the wipe, removed after a completed replay).
+.tortoise-prewipe-snapshot.json
+.tortoise-prewipe-*.tmp
 .venv

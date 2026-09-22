@@ -808,12 +808,22 @@ def _load_mitigations(args) -> dict:
 
 
 def _load_recall(args) -> dict | None:
-    """Matched-recall record: the LATEST attempt dir's recall.json (per-
-    episode retrieved Memories + EP markers), or the legacy root-level
-    recall.json when no attempt dir exists."""
+    """Matched-recall block: the LATEST attempt dir's recall.json
+    ``matched_recall`` sub-block (#3327; the four §3.2.1 contract fields +
+    the excluded-control annotations), or None when absent.
+
+    recall.json carries the per-episode recall rows AND the pre-pass block;
+    only the block is the matched-recall record. A legacy recall.json
+    without a ``matched_recall`` key (or a crashed dir's ``{}``) yields None
+    — the verdict's INCONCLUSIVE branch is never driven by a missing block.
+    """
     from battery.report.assemble import read_recall_file
     base, _ = _attempt_base(args)
-    return read_recall_file(base)
+    record = read_recall_file(base)
+    if not isinstance(record, dict):
+        return None
+    block = record.get("matched_recall")
+    return block if isinstance(block, dict) and block else None
 
 
 def _cmd_run(args: argparse.Namespace) -> ExitCode:

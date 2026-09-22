@@ -10,7 +10,7 @@ the caller must confirm before filing).
 
 Mirrors ``tortoise/onboarding/state.py`` hygiene: importable without
 hosted_api (no circular import), every writer takes a duck-typed handle.
-The required handle surface (hosted team SDK / MCP SDK / W12 self-host SDK):
+The required handle surface (hosted org SDK / MCP SDK / W12 self-host SDK):
 
 - ``create_subject(name, subjectKind=..., **props)`` → node dict (id etc.)
 - ``create_edge(relation, from_id, to_id)`` → {created: bool, ...}

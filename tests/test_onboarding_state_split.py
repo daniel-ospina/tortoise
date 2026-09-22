@@ -40,14 +40,14 @@ from tortoise.onboarding import state as onboarding_state
 from tortoise.sdk import TortoiseSDK
 
 
-def _read_node(team_id: str):
+def _read_node(org_id: str):
     return onboarding_state.read_onboarding_node(
-        _make_sdk(namespace=team_id)._get_proj(), team_id)
+        _make_sdk(namespace=org_id)._get_proj(), org_id)
 
 
-def _completed(team_id: str):
+def _completed(org_id: str):
     return onboarding_state.completed_steps(
-        _make_sdk(namespace=team_id)._get_proj(), team_id)
+        _make_sdk(namespace=org_id)._get_proj(), org_id)
 
 
 @pytest.fixture
@@ -67,29 +67,29 @@ class TestNodeInit:
         r = client.post("/v1/register", json={"email": email,
                                               "password": "password123"})
         assert r.status_code == 200, r.text
-        team_id = r.json()["team_id"]
-        node = _read_node(team_id)
+        org_id = r.json()["org_id"]
+        node = _read_node(org_id)
         assert node is not None
-        assert node["org_id"] == team_id
+        assert node["org_id"] == org_id
         assert node["status"] == "active"
         assert node["version"] == 1
         assert node["compact"] is False
         assert "fork" not in node or node["fork"] is None  # first org → card asked once
-        assert "team-named" in _completed(team_id)
+        assert "team-named" in _completed(org_id)
 
     def test_sdk_team_create_inits_node(self):
-        """SDK lane (CI-visible): sdk.team_create → node exists in team_{name}."""
+        """SDK lane (CI-visible): sdk.team_create → node exists in org_{name}."""
         import uuid
         name = f"w5sdk{uuid.uuid4().hex[:8]}"
         sdk = TortoiseSDK(namespace="registry")
-        team = sdk.team_create(name)
+        team = sdk.org_create(name)
         try:
             node = onboarding_state.read_onboarding_node(
-                sdk._get_proj().db.select_graph(f"team_{name}"), team["id"])
+                sdk._get_proj().db.select_graph(f"org_{name}"), team["id"])
             assert node is not None
             assert node["status"] == "active"
             assert "team-named" in onboarding_state.completed_steps(
-                sdk._get_proj().db.select_graph(f"team_{name}"), team["id"])
+                sdk._get_proj().db.select_graph(f"org_{name}"), team["id"])
         finally:
             sdk.close()
 
@@ -100,10 +100,10 @@ class TestNodeInit:
         import uuid
         sdk = TortoiseSDK(namespace="registry")
         try:
-            first = sdk.team_create(f"w5a{uuid.uuid4().hex[:8]}")
+            first = sdk.org_create(f"w5a{uuid.uuid4().hex[:8]}")
             user_id = f"user-{uuid.uuid4().hex[:8]}"
             sdk.membership_create(first["id"], user_id, "owner")
-            second = sdk.team_create(f"w5b{uuid.uuid4().hex[:8]}",
+            second = sdk.org_create(f"w5b{uuid.uuid4().hex[:8]}",
                                      owner_user_id=user_id)
             node = onboarding_state.read_onboarding_node(
                 sdk._get_proj().db.select_graph(second["graph_name"]),
@@ -119,14 +119,14 @@ class TestNodeInit:
         import uuid
         sdk = TortoiseSDK(namespace="registry")
         try:
-            first = sdk.team_create(f"w5c{uuid.uuid4().hex[:8]}")
+            first = sdk.org_create(f"w5c{uuid.uuid4().hex[:8]}")
             user_id = f"user-{uuid.uuid4().hex[:8]}"
             sdk.membership_create(first["id"], user_id, "owner")
             # creator answers the fork card on the FIRST org → 'build'
             onboarding_state.write_fork(
                 sdk._get_proj().db.select_graph(first["graph_name"]),
                 first["id"], "build")
-            second = sdk.team_create(f"w5d{uuid.uuid4().hex[:8]}",
+            second = sdk.org_create(f"w5d{uuid.uuid4().hex[:8]}",
                                      owner_user_id=user_id)
             node = onboarding_state.read_onboarding_node(
                 sdk._get_proj().db.select_graph(second["graph_name"]),
@@ -140,16 +140,16 @@ class TestNodeInit:
         """/internal/provision (selfhost lane) → node initialized."""
         import uuid
         monkeypatch.setenv("FASTAPI_INTERNAL_KEY", "test-internal-key")
-        team_id = f"tp{uuid.uuid4().hex[:12]}"
+        org_id = f"tp{uuid.uuid4().hex[:12]}"
         r = client.post("/internal/provision",
                         headers={"Authorization": "Bearer test-internal-key"},
-                        json={"team_id": team_id, "team_name": f"TP {team_id[:6]}",
+                        json={"org_id": org_id, "org_name": f"TP {org_id[:6]}",
                               "api_key_hash": "x" * 64, "created_by": "tp-user"})
         assert r.status_code == 200, r.text
-        node = _read_node(team_id)
+        node = _read_node(org_id)
         assert node is not None
         assert node["status"] == "active"
-        assert "team-named" in _completed(team_id)
+        assert "team-named" in _completed(org_id)
 
     def test_concurrent_init_single_node(self):
         """Concurrent keyed-MERGE inits on the SAME org → exactly one node
@@ -157,15 +157,15 @@ class TestNodeInit:
         import uuid
 
         from tortoise.hosted_api import _make_sdk as _ms
-        team_id = f"cc{uuid.uuid4().hex[:12]}"
-        sdk = _ms(namespace=team_id)
+        org_id = f"cc{uuid.uuid4().hex[:12]}"
+        sdk = _ms(namespace=org_id)
         proj = sdk._get_proj()
         errs: list[Exception] = []
 
         def _worker():
             try:
-                onboarding_state.ensure_onboarding_state_node(proj, team_id)
-                onboarding_state.write_completed_step(proj, team_id,
+                onboarding_state.ensure_onboarding_state_node(proj, org_id)
+                onboarding_state.write_completed_step(proj, org_id,
                                                       "harness-connected")
             except Exception as exc:  # pragma: no cover
                 errs.append(exc)
@@ -176,54 +176,54 @@ class TestNodeInit:
         for t in threads:
             t.join()
         assert not errs
-        node = onboarding_state.read_onboarding_node(proj, team_id)
+        node = onboarding_state.read_onboarding_node(proj, org_id)
         assert node is not None
-        steps = onboarding_state.completed_steps(proj, team_id)
+        steps = onboarding_state.completed_steps(proj, org_id)
         assert steps.count("harness-connected") == 1
 
     def test_create_on_write_seam(self):
         """An absent-node org self-heals on the FIRST FLOW write — the write
         path creates the node (never the read path)."""
         import uuid
-        team_id = f"cow{uuid.uuid4().hex[:12]}"
-        proj = _make_sdk(namespace=team_id)._get_proj()
-        assert onboarding_state.read_onboarding_node(proj, team_id) is None
-        res = onboarding_state.write_completed_step(proj, team_id,
+        org_id = f"cow{uuid.uuid4().hex[:12]}"
+        proj = _make_sdk(namespace=org_id)._get_proj()
+        assert onboarding_state.read_onboarding_node(proj, org_id) is None
+        res = onboarding_state.write_completed_step(proj, org_id,
                                                     "harness-connected")
         assert res["created"] is True
-        node = onboarding_state.read_onboarding_node(proj, team_id)
+        node = onboarding_state.read_onboarding_node(proj, org_id)
         assert node is not None
         assert node["status"] == "active"
         assert "harness-connected" in onboarding_state.completed_steps(
-            proj, team_id)
+            proj, org_id)
         # set-once fork on the same node
-        outcome = onboarding_state.write_fork(proj, team_id, "self")
+        outcome = onboarding_state.write_fork(proj, org_id, "self")
         assert outcome == "set"
 
     def test_mirror_status_from_jsonb_one_directional(self):
         """create-on-write mirrors jsonb onboarding_complete → 'complete'
         (one-directional; never jsonb-false → complete; never clobbers)."""
         import uuid
-        team_id = f"mir{uuid.uuid4().hex[:12]}"
-        proj = _make_sdk(namespace=team_id)._get_proj()
+        org_id = f"mir{uuid.uuid4().hex[:12]}"
+        proj = _make_sdk(namespace=org_id)._get_proj()
         onboarding_state.ensure_onboarding_state_node(
-            proj, team_id, status_from_mirror=True)
-        node = onboarding_state.read_onboarding_node(proj, team_id)
+            proj, org_id, status_from_mirror=True)
+        node = onboarding_state.read_onboarding_node(proj, org_id)
         assert node["status"] == "complete"
         # mirror=False on an existing complete node never clobbers
         onboarding_state.ensure_onboarding_state_node(
-            proj, team_id, status_from_mirror=False)
-        assert onboarding_state.read_onboarding_node(proj, team_id)["status"] == "complete"
+            proj, org_id, status_from_mirror=False)
+        assert onboarding_state.read_onboarding_node(proj, org_id)["status"] == "complete"
 
     def test_status_monotonic(self):
         import uuid
-        team_id = f"mon{uuid.uuid4().hex[:12]}"
-        proj = _make_sdk(namespace=team_id)._get_proj()
-        onboarding_state.ensure_onboarding_state_node(proj, team_id)
-        onboarding_state.write_status(proj, team_id, "complete")
+        org_id = f"mon{uuid.uuid4().hex[:12]}"
+        proj = _make_sdk(namespace=org_id)._get_proj()
+        onboarding_state.ensure_onboarding_state_node(proj, org_id)
+        onboarding_state.write_status(proj, org_id, "complete")
         # complete can never regress to active
-        onboarding_state.write_status(proj, team_id, "active")
-        assert onboarding_state.read_onboarding_node(proj, team_id)["status"] == "complete"
+        onboarding_state.write_status(proj, org_id, "active")
+        assert onboarding_state.read_onboarding_node(proj, org_id)["status"] == "complete"
 
     def test_backup_roundtrip_preserves_flow(self):
         """Export → restore round-trip: fork + completed_steps survive; the
@@ -235,25 +235,25 @@ class TestNodeInit:
         # the labels must not be skip-labelled (backup-safe pin)
         assert _is_export_skip_node(["OnboardingState"], {}) is False
         assert _is_export_skip_node(["OnboardingStep"], {}) is False
-        team_id = f"bk{uuid.uuid4().hex[:12]}"
-        sdk = _make_sdk(namespace=team_id)
+        org_id = f"bk{uuid.uuid4().hex[:12]}"
+        sdk = _make_sdk(namespace=org_id)
         proj = sdk._get_proj()
-        g = proj.db.select_graph(f"team_{team_id}")
-        onboarding_state.ensure_onboarding_state_node(g, team_id)
-        onboarding_state.write_fork(g, team_id, "build")
-        onboarding_state.write_completed_step(g, team_id, "harness-connected")
-        onboarding_state.write_completed_step(g, team_id, "first-points-filed")
-        dump = hosted_backup.dump_graph(g, graph_name=f"team_{team_id}")
+        g = proj.db.select_graph(f"org_{org_id}")
+        onboarding_state.ensure_onboarding_state_node(g, org_id)
+        onboarding_state.write_fork(g, org_id, "build")
+        onboarding_state.write_completed_step(g, org_id, "harness-connected")
+        onboarding_state.write_completed_step(g, org_id, "first-points-filed")
+        dump = hosted_backup.dump_graph(g, graph_name=f"org_{org_id}")
         node_labels = {tuple(n["labels"]) for n in dump["nodes"]}
         assert ("OnboardingState",) in node_labels
         assert ("OnboardingStep",) in node_labels
         # wipe + restore
         g.query("MATCH (n) DETACH DELETE n")
         hosted_backup.restore_graph(g, dump)
-        node = onboarding_state.read_onboarding_node(g, team_id)
+        node = onboarding_state.read_onboarding_node(g, org_id)
         assert node is not None
         assert node.get("fork") == "build"
-        steps = set(onboarding_state.completed_steps(g, team_id))
+        steps = set(onboarding_state.completed_steps(g, org_id))
         assert {"harness-connected", "first-points-filed"} <= steps
 
 
@@ -267,7 +267,7 @@ def _registered_client():
                                       "password": "password123"})
     assert r.status_code == 200, r.text
     tc.headers.update({"Authorization": f"Bearer {r.json()['api_key']}"})
-    return tc, r.json()["team_id"]
+    return tc, r.json()["org_id"]
 
 
 class TestWriter:
@@ -276,12 +276,12 @@ class TestWriter:
         (registration-split negative — the jsonb store has no FLOW keys even
         after FLOW writes)."""
         from tortoise.hosted_api import _get_onboarding_state as _raw
-        tc, team_id = _registered_client()
+        tc, org_id = _registered_client()
         try:
             tc.post("/v1/onboarding/state/checkpoint",
                     json={"step": "harness-connected"})
             tc.post("/v1/onboarding/state/checkpoint", json={"fork": "self"})
-            raw = _raw(team_id)
+            raw = _raw(org_id)
             for k in onboarding_state.FLOW_KEYS:
                 assert k not in raw, f"FLOW key {k} leaked into jsonb"
             for step in onboarding_state.STEP_IDS:
@@ -290,7 +290,7 @@ class TestWriter:
             tc.__exit__(None, None, None)
 
     def test_operational_keys_still_round_trip(self):
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             r = tc.patch("/v1/onboarding/state",
                          json={"prompt_pasted": True})
@@ -300,7 +300,7 @@ class TestWriter:
             tc.__exit__(None, None, None)
 
     def test_unknown_key_dropped_fail_closed(self):
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             r = tc.patch("/v1/onboarding/state", json={"bogus_key": 1})
             assert r.status_code == 200  # unknown → dropped, never default-to-FLOW
@@ -311,13 +311,13 @@ class TestWriter:
     def test_write_strips_flow_defensively(self):
         from tortoise.hosted_api import _get_onboarding_state as _raw
         from tortoise.hosted_api import _write_onboarding_state as _w
-        tc, team_id = _registered_client()
+        tc, org_id = _registered_client()
         try:
-            state = dict(_raw(team_id))
+            state = dict(_raw(org_id))
             state["fork"] = "self"
             state["harness-connected"] = True
-            _w(team_id, state)
-            after = _raw(team_id)
+            _w(org_id, state)
+            after = _raw(org_id)
             assert "fork" not in after
             assert "harness-connected" not in after
         finally:
@@ -326,7 +326,7 @@ class TestWriter:
 
 class TestCheckpoint:
     def test_created_and_noop_signals(self):
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             r1 = tc.post("/v1/onboarding/state/checkpoint",
                          json={"step": "harness-connected"})
@@ -341,7 +341,7 @@ class TestCheckpoint:
             tc.__exit__(None, None, None)
 
     def test_unknown_step_422(self):
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             r = tc.post("/v1/onboarding/state/checkpoint",
                         json={"step": "bogus-step"})
@@ -350,7 +350,7 @@ class TestCheckpoint:
             tc.__exit__(None, None, None)
 
     def test_team_named_not_checkpointable(self):
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             r = tc.post("/v1/onboarding/state/checkpoint",
                         json={"step": "team-named"})
@@ -359,7 +359,7 @@ class TestCheckpoint:
             tc.__exit__(None, None, None)
 
     def test_fork_set_once_contract(self):
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             r1 = tc.post("/v1/onboarding/state/checkpoint", json={"fork": "self"})
             assert r1.status_code == 200
@@ -375,7 +375,7 @@ class TestCheckpoint:
         """compact is computed eagerly (prior memberships); a checkpoint
         compact write on an init'd org is set-once: same-value 200, changed
         409. On a PRE-init node (no compact property) the first write sets."""
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             # init'd org: compact=False is already set → changing → 409
             r1 = tc.post("/v1/onboarding/state/checkpoint",
@@ -401,7 +401,7 @@ class TestCheckpoint:
         assert node["compact"] is True
 
     def test_status_server_owned_403(self):
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             r = tc.post("/v1/onboarding/state/checkpoint",
                         json={"status": "complete"})
@@ -415,7 +415,7 @@ class TestCheckpoint:
         is SKIPPED once decide-completed exists (a completed decide never
         re-gains an attempt marker — dismissal alone never completes;
         failed never un-completes; retry reachability is pre-completion)."""
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             tc.post("/v1/onboarding/state/checkpoint",
                     json={"last_decide_attempt": "dismissed"})
@@ -448,7 +448,7 @@ class TestCheckpoint:
     def test_member_progress_key_auth_non_uuid_403(self):
         """Key-authed (no session user) member_progress requires a UUID
         user_id (no cross-user forgery)."""
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             r = tc.post("/v1/onboarding/state/checkpoint",
                         json={"member_progress": {"not-a-uuid": []}})
@@ -459,7 +459,7 @@ class TestCheckpoint:
     def test_last_decide_attempt_invalid_422(self):
         """Invalid last_decide_attempt values are client errors (422), not
         500s — sibling ops validate at the boundary."""
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             for bad in ("postponed", "completed", 42, ""):
                 r = tc.post("/v1/onboarding/state/checkpoint",
@@ -470,7 +470,7 @@ class TestCheckpoint:
 
     def test_member_progress_valid_steps(self):
         import uuid
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             uid = str(uuid.uuid4())
             r = tc.post("/v1/onboarding/state/checkpoint",
@@ -487,7 +487,7 @@ class TestCheckpoint:
         user's entry — a clobbering regression (replacing the whole map)
         must fail this test."""
         import uuid
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             u1 = str(uuid.uuid4())
             u2 = str(uuid.uuid4())
@@ -509,7 +509,7 @@ class TestCheckpoint:
         """Step-value validation: non-canonical step ids and non-list values
         are rejected with 422 invalid_member_progress — no partial write."""
         import uuid
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             uid = str(uuid.uuid4())
             r = tc.post("/v1/onboarding/state/checkpoint",
@@ -524,7 +524,7 @@ class TestCheckpoint:
             tc.__exit__(None, None, None)
 
     def test_two_ops_400(self):
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             r = tc.post("/v1/onboarding/state/checkpoint",
                         json={"step": "capture-disclosed", "fork": "self"})
@@ -533,7 +533,7 @@ class TestCheckpoint:
             tc.__exit__(None, None, None)
 
     def test_extra_forbid(self):
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             r = tc.post("/v1/onboarding/state/checkpoint",
                         json={"step": "capture-disclosed", "bogus": 1})
@@ -544,7 +544,7 @@ class TestCheckpoint:
     def test_self_journey_gate_completes(self):
         """Full self-fork journey → gate eval → status complete + wire true
         (monotonic: complete can never regress)."""
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             tc.post("/v1/onboarding/state/checkpoint", json={"fork": "self"})
             tc.post("/v1/onboarding/state/checkpoint",
@@ -566,19 +566,27 @@ class TestCheckpoint:
         finally:
             tc.__exit__(None, None, None)
 
-    def test_build_journey_uses_catalog(self):
-        tc, _team_id = _registered_client()
+    def test_build_journey_completes_on_the_two_observed_acts(self):
+        tc, _org_id = _registered_client()
         try:
             tc.post("/v1/onboarding/state/checkpoint", json={"fork": "build"})
             tc.post("/v1/onboarding/state/checkpoint",
                     json={"step": "harness-connected"})
-            tc.post("/v1/onboarding/state/checkpoint",
-                    json={"step": "first-points-filed"})
-            # decide does NOT complete a build org
+            # #3913: ONE observed act is not enough (fail-closed)
+            r0 = tc.get("/v1/onboarding/state")
+            assert r0.json()["onboarding"]["status"] == "active"
+            # decide does NOT affect a build org — asserted while the org is
+            # still ACTIVE (a `complete` assert after first-points-filed
+            # completed it is a tautology).
             r = tc.post("/v1/onboarding/state/checkpoint",
                         json={"step": "decide-completed"})
             assert r.json()["onboarding"]["status"] == "active"
-            # catalog-presented completes it
+            # the second observed act completes it — no catalog needed
+            tc.post("/v1/onboarding/state/checkpoint",
+                    json={"step": "first-points-filed"})
+            r = tc.get("/v1/onboarding/state")
+            assert r.json()["onboarding"]["status"] == "complete"
+            # catalog-presented stays accepted (optional record, never a gate)
             r2 = tc.patch("/v1/onboarding/state",
                           json={"catalog_presented": True})
             assert r2.json()["onboarding"]["status"] == "complete"
@@ -605,7 +613,7 @@ class TestCheckpoint:
             assert "harness-connected" not in _proj(team_a)["completed_steps"]
             # AND the step DID land on team B — a silent-drop regression
             # (200 with no write anywhere) must not pass.
-            team_b = r.json()["team_id"]
+            team_b = r.json()["org_id"]
             assert "harness-connected" in _proj(team_b)["completed_steps"]
         finally:
             tc.__exit__(None, None, None)
@@ -624,7 +632,7 @@ class TestForkUnsureAt:
     """
 
     def test_unsure_records_signal_fork_stays_unset(self):
-        tc, team_id = _registered_client()
+        tc, org_id = _registered_client()
         try:
             r = tc.post("/v1/onboarding/state/checkpoint",
                         json={"fork_unsure_at": True})
@@ -633,14 +641,14 @@ class TestForkUnsureAt:
             assert body["fork"] is None  # set-once fork NOT consumed
             at = body["fork_unsure_at"]
             assert isinstance(at, str) and "T" in at  # server-stamped ISO
-            node = _read_node(team_id)
+            node = _read_node(org_id)
             assert node["fork_unsure_at"] == at
             assert "fork" not in node or node["fork"] is None
         finally:
             tc.__exit__(None, None, None)
 
     def test_unsure_repeat_re_stamps_never_409(self):
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             r1 = tc.post("/v1/onboarding/state/checkpoint",
                          json={"fork_unsure_at": True})
@@ -657,13 +665,13 @@ class TestForkUnsureAt:
     def test_later_explicit_fork_no_409_and_clears_marker(self):
         """Indicator-4 pin: an unsure org answers the fork LATER — the pick is
         a fresh set-once write (200, never a 409) and clears the marker."""
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             r0 = tc.post("/v1/onboarding/state/checkpoint",
                          json={"fork_unsure_at": True})
             assert r0.status_code == 200, r0.text
             for fork in ("self", "build"):
-                tc2, team_id2 = _registered_client()
+                tc2, org_id2 = _registered_client()
                 try:
                     tc2.post("/v1/onboarding/state/checkpoint",
                              json={"fork_unsure_at": True})
@@ -673,7 +681,7 @@ class TestForkUnsureAt:
                     body = r.json()["onboarding"]
                     assert body["fork"] == fork
                     assert body["fork_unsure_at"] is None  # cleared on fork-set
-                    node = _read_node(team_id2)
+                    node = _read_node(org_id2)
                     assert "fork_unsure_at" not in node or \
                         node["fork_unsure_at"] is None
                 finally:
@@ -684,7 +692,7 @@ class TestForkUnsureAt:
     def test_fork_unsure_is_never_a_fork_value(self):
         """Model-1 pin: the fork write path rejects 'unsure' (422) — the
         deferral lives in fork_unsure_at, never in the fork value."""
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             r = tc.post("/v1/onboarding/state/checkpoint",
                         json={"fork": "unsure"})
@@ -695,7 +703,7 @@ class TestForkUnsureAt:
     def test_unsure_false_422(self):
         """fork_unsure_at is a MARKER op — only true is meaningful; a false
         body is a client error (422), never a silent no-op."""
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             r = tc.post("/v1/onboarding/state/checkpoint",
                         json={"fork_unsure_at": False})
@@ -704,7 +712,7 @@ class TestForkUnsureAt:
             tc.__exit__(None, None, None)
 
     def test_unsure_with_fork_is_two_ops_400(self):
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             r = tc.post("/v1/onboarding/state/checkpoint",
                         json={"fork_unsure_at": True, "fork": "self"})
@@ -715,7 +723,7 @@ class TestForkUnsureAt:
     def test_unsure_after_fork_set_is_conflict_409(self):
         """An unsure record after the org already answered is contradictory
         (the fork card no longer renders) → 409 fork_already_set."""
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             tc.post("/v1/onboarding/state/checkpoint", json={"fork": "build"})
             r = tc.post("/v1/onboarding/state/checkpoint",
@@ -727,7 +735,7 @@ class TestForkUnsureAt:
     def test_fork_set_once_still_applies_after_unsure(self):
         """Set-once semantics resume once a fork lands: a changed fork after
         an unsure-then-self sequence is still a 409."""
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             tc.post("/v1/onboarding/state/checkpoint",
                     json={"fork_unsure_at": True})
@@ -742,7 +750,7 @@ class TestForkUnsureAt:
         """Indicator-3 pin: an unsure org completing the ENTIRE self
         checklist stays active — onboarding must NOT auto-close it as 'self'
         while the fork question is open (the Setup-guide fork row stays)."""
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             tc.post("/v1/onboarding/state/checkpoint",
                     json={"fork_unsure_at": True})
@@ -760,7 +768,7 @@ class TestForkUnsureAt:
         """Answering the fork LATER (after the self steps already landed)
         unlocks completion — the explicit pick is a fork write (200) that
         clears the marker and evals the (now evaluable) self gate."""
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             tc.post("/v1/onboarding/state/checkpoint",
                     json={"fork_unsure_at": True})
@@ -781,7 +789,7 @@ class TestForkUnsureAt:
     def test_patch_fork_unsure_at_is_server_owned_403(self):
         """fork_unsure_at is a checkpoint-only (server-stamped) FLOW key — a
         stray PATCH is rejected loudly, never silently dropped."""
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             r = tc.patch("/v1/onboarding/state",
                          json={"fork_unsure_at": "2026-01-01T00:00:00+00:00"})
@@ -845,7 +853,7 @@ class TestForkUnsureAt:
 
 class TestPatchRouting:
     def test_server_owned_keys_403(self):
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             for payload in ({"status": "complete"}, {"fork": "self"},
                             {"version": 2}, {"completed_steps": []},
@@ -859,20 +867,20 @@ class TestPatchRouting:
             tc.__exit__(None, None, None)
 
     def test_agent_step_keys_422(self):
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             for payload in ({"decide_completed": True},
                             {"harness_connected": True},
                             {"first_points_filed": True},
                             {"capture_disclosed": True},
-                            {"team_named": True}):
+                            {"org_named": True}):
                 r = tc.patch("/v1/onboarding/state", json=payload)
                 assert r.status_code == 422, payload
         finally:
             tc.__exit__(None, None, None)
 
     def test_catalog_presented_writes_step_edge(self):
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             r = tc.patch("/v1/onboarding/state",
                          json={"catalog_presented": True})
@@ -882,10 +890,12 @@ class TestPatchRouting:
             tc.__exit__(None, None, None)
 
     def test_catalog_presented_false_is_noop(self):
-        """False must NOT mark the catalog-presented step edge (only True
-        does) — a non-None-but-False value flipping the build gate was the
-        review-found bug this pins."""
-        tc, _team_id = _registered_client()
+        """False must NOT mark the catalog-presented step edge (only True does).
+        No gate claim here: since #3913 `_GATE_BUILD` is
+        `{harness-connected, first-points-filed}`, so nothing written under
+        this id can complete any fork — the write still has to be correct; it
+        is simply no longer load-bearing for completion."""
+        tc, _org_id = _registered_client()
         try:
             r = tc.patch("/v1/onboarding/state",
                          json={"catalog_presented": False})
@@ -897,7 +907,7 @@ class TestPatchRouting:
     def test_wire_compat_preserved(self):
         """underscore→hyphen translation still works (session_capture_receipt
         claude_desktop → claude-desktop key)."""
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             r = tc.patch("/v1/onboarding/state",
                          json={"session_capture_receipt_claude_desktop": "r1"})
@@ -907,11 +917,11 @@ class TestPatchRouting:
             tc.__exit__(None, None, None)
 
     def test_team_created_stripped(self):
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
-            r = tc.patch("/v1/onboarding/state", json={"team_created": True})
+            r = tc.patch("/v1/onboarding/state", json={"org_created": True})
             assert r.status_code == 200
-            assert r.json()["onboarding"]["team_created"] is False  # server-authoritative
+            assert r.json()["onboarding"]["org_created"] is False  # server-authoritative
         finally:
             tc.__exit__(None, None, None)
 
@@ -919,7 +929,7 @@ class TestPatchRouting:
         """#1997 (W1): accept-and-drop — a client PATCH onboarding_complete
         on a NODE-PRESENT org is DROPPED (accepted 200; the echo is
         node-governed — the legacy jsonb flag is inert there)."""
-        tc, team_id = _registered_client()
+        tc, org_id = _registered_client()
         try:
             from tortoise.hosted_api import _get_onboarding_state as _raw
             r = tc.patch("/v1/onboarding/state",
@@ -928,7 +938,7 @@ class TestPatchRouting:
             # dropped → node governs (active, zero edges → not complete)
             assert r.json()["onboarding"]["onboarding_complete"] is False
             # the jsonb flag was never written
-            assert _raw(team_id).get("onboarding_complete") is False
+            assert _raw(org_id).get("onboarding_complete") is False
         finally:
             tc.__exit__(None, None, None)
 
@@ -936,7 +946,7 @@ class TestPatchRouting:
         """jsonb-first graph-second: graph failure after jsonb success → 500
         fail-closed, retry-safe (no lost FLOW keys on retry)."""
         import tortoise.hosted_api as _ha
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             orig = _ha._os.write_completed_step
             def _boom(*a, **k):
@@ -965,7 +975,7 @@ class TestPreserved409s:
         router retarget. Dup-name + sub-team re-entry + session-recording-off
         409s are covered by their existing suites (endpoints / teams / demo)
         and enumerated in scope pin 9."""
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             _ = tc.post("/v1/register",
                         json={"email": "dup409@example.com",
@@ -981,49 +991,49 @@ class TestPreserved409s:
 class TestBackfill:
     def test_absent_node_complete_created(self):
         import uuid
-        team_id = f"bf{uuid.uuid4().hex[:10]}"
-        proj = _make_sdk(namespace=team_id)._get_proj()
-        res = onboarding_state.backfill_org(proj, team_id, True, dry_run=False)
+        org_id = f"bf{uuid.uuid4().hex[:10]}"
+        proj = _make_sdk(namespace=org_id)._get_proj()
+        res = onboarding_state.backfill_org(proj, org_id, True, dry_run=False)
         assert res["action"] == "created-complete"
-        node = onboarding_state.read_onboarding_node(proj, team_id)
+        node = onboarding_state.read_onboarding_node(proj, org_id)
         assert node["status"] == "complete"
         assert "fork" not in node or node["fork"] is None  # read-time default
 
     def test_rerun_noop(self):
         import uuid
-        team_id = f"bf2{uuid.uuid4().hex[:10]}"
-        proj = _make_sdk(namespace=team_id)._get_proj()
-        onboarding_state.backfill_org(proj, team_id, True, dry_run=False)
-        res = onboarding_state.backfill_org(proj, team_id, True, dry_run=False)
+        org_id = f"bf2{uuid.uuid4().hex[:10]}"
+        proj = _make_sdk(namespace=org_id)._get_proj()
+        onboarding_state.backfill_org(proj, org_id, True, dry_run=False)
+        res = onboarding_state.backfill_org(proj, org_id, True, dry_run=False)
         assert res["action"] == "skipped-node-present"
 
     def test_never_clobbers_node_present(self):
         import uuid
-        team_id = f"bf3{uuid.uuid4().hex[:10]}"
-        proj = _make_sdk(namespace=team_id)._get_proj()
-        onboarding_state.ensure_onboarding_state_node(proj, team_id)
-        onboarding_state.write_fork(proj, team_id, "build")
-        res = onboarding_state.backfill_org(proj, team_id, True, dry_run=False)
+        org_id = f"bf3{uuid.uuid4().hex[:10]}"
+        proj = _make_sdk(namespace=org_id)._get_proj()
+        onboarding_state.ensure_onboarding_state_node(proj, org_id)
+        onboarding_state.write_fork(proj, org_id, "build")
+        res = onboarding_state.backfill_org(proj, org_id, True, dry_run=False)
         assert res["action"] == "skipped-node-present"
-        node = onboarding_state.read_onboarding_node(proj, team_id)
+        node = onboarding_state.read_onboarding_node(proj, org_id)
         assert node["status"] == "active"  # untouched
         assert node.get("fork") == "build"
 
     def test_never_jsonb_false_to_complete(self):
         import uuid
-        team_id = f"bf4{uuid.uuid4().hex[:10]}"
-        proj = _make_sdk(namespace=team_id)._get_proj()
-        res = onboarding_state.backfill_org(proj, team_id, False, dry_run=False)
+        org_id = f"bf4{uuid.uuid4().hex[:10]}"
+        proj = _make_sdk(namespace=org_id)._get_proj()
+        res = onboarding_state.backfill_org(proj, org_id, False, dry_run=False)
         assert res["action"] == "skipped-not-complete"
-        assert onboarding_state.read_onboarding_node(proj, team_id) is None
+        assert onboarding_state.read_onboarding_node(proj, org_id) is None
 
     def test_dry_run_no_write(self):
         import uuid
-        team_id = f"bf5{uuid.uuid4().hex[:10]}"
-        proj = _make_sdk(namespace=team_id)._get_proj()
-        res = onboarding_state.backfill_org(proj, team_id, True, dry_run=True)
+        org_id = f"bf5{uuid.uuid4().hex[:10]}"
+        proj = _make_sdk(namespace=org_id)._get_proj()
+        res = onboarding_state.backfill_org(proj, org_id, True, dry_run=True)
         assert res["action"] == "would-create-complete"
-        assert onboarding_state.read_onboarding_node(proj, team_id) is None
+        assert onboarding_state.read_onboarding_node(proj, org_id) is None
 
     def test_wrapper_dry_run_and_apply(self):
         """graph-scripts wrapper: DRY-RUN default (no writes), --apply writes,
@@ -1035,12 +1045,12 @@ class TestBackfill:
         # seed a grandfathered org: a Team node with legacy complete state
         from tortoise.sdk import TortoiseSDK
         sdk = TortoiseSDK(namespace="registry")
-        team_id = f"bfwrap{uuid.uuid4().hex[:8]}"
+        org_id = f"bfwrap{uuid.uuid4().hex[:8]}"
         sdk._get_registry().query(
             "CREATE (t:Team {id: $id, name: $name, graph_name: $gn, "
             "onboarding_state: $os})",
-            params={"id": team_id, "name": f"bfw-{team_id[:6]}",
-                    "gn": f"team_{team_id}",
+            params={"id": org_id, "name": f"bfw-{org_id[:6]}",
+                    "gn": f"org_{org_id}",
                     "os": _json.dumps({"onboarding_complete": True,
                                         "github_connected": True})})
         env = dict(os.environ)
@@ -1053,14 +1063,14 @@ class TestBackfill:
                            capture_output=True, text=True, env=env)
         assert r.returncode == 0, r.stderr
         node = onboarding_state.read_onboarding_node(
-            sdk._get_proj().db.select_graph(f"team_{team_id}"), team_id)
+            sdk._get_proj().db.select_graph(f"org_{org_id}"), org_id)
         assert node is None  # dry-run wrote nothing
         # APPLY
         r = subprocess.run([py, script, "--apply"],
                            capture_output=True, text=True, env=env)
         assert r.returncode == 0, r.stderr
         node = onboarding_state.read_onboarding_node(
-            sdk._get_proj().db.select_graph(f"team_{team_id}"), team_id)
+            sdk._get_proj().db.select_graph(f"org_{org_id}"), org_id)
         assert node is not None
         assert node["status"] == "complete"
         # re-run no-op — pin the COUNTED outcome, not the always-present label:
@@ -1074,7 +1084,7 @@ class TestBackfill:
         assert "skipped-node-present" in r.stdout, r.stdout
         # and the node property set is unchanged by the re-run
         node2 = onboarding_state.read_onboarding_node(
-            sdk._get_proj().db.select_graph(f"team_{team_id}"), team_id)
+            sdk._get_proj().db.select_graph(f"org_{org_id}"), org_id)
         assert node2 == node
 
     def test_recompute_grandfathered_first(self):
@@ -1113,13 +1123,13 @@ class TestCompletionWire:
         """A new org's legacy flag is never trusted once the agent flow
         engages (node governs — the poisoned-TRUE the precedence kills).
         The flag is raw-written (post-W1 the PATCH surface accept-and-drops)."""
-        tc, team_id = _registered_client()
+        tc, org_id = _registered_client()
         try:
             from tortoise.hosted_api import _get_onboarding_state as _raw
             from tortoise.hosted_api import _write_onboarding_state as _w
-            st = _raw(team_id)
+            st = _raw(org_id)
             st["onboarding_complete"] = True
-            _w(team_id, st)
+            _w(org_id, st)
             tc.post("/v1/onboarding/state/checkpoint",
                     json={"step": "harness-connected"})
             st = tc.get("/v1/onboarding/state").json()["onboarding"]
@@ -1128,7 +1138,7 @@ class TestCompletionWire:
             tc.__exit__(None, None, None)
 
     def test_node_complete_wire_true(self):
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             for step in ("harness-connected", "first-points-filed",
                          "decide-completed"):
@@ -1145,11 +1155,11 @@ class TestCompletionWire:
         import uuid
 
         from tortoise.hosted_api import _get_onboarding_projection as _proj
-        team_id = f"gfwire{uuid.uuid4().hex[:8]}"
-        proj = _make_sdk(namespace=team_id)._get_proj()
+        org_id = f"gfwire{uuid.uuid4().hex[:8]}"
+        proj = _make_sdk(namespace=org_id)._get_proj()
         # NO node — simulate by not creating it
-        assert onboarding_state.read_onboarding_node(proj, team_id) is None
-        st = _proj(team_id)
+        assert onboarding_state.read_onboarding_node(proj, org_id) is None
+        st = _proj(org_id)
         assert st["onboarding_complete"] is False
         assert st["status"] == "active"
 
@@ -1158,15 +1168,15 @@ class TestCompletionWire:
         active, ZERO agent edges, LEGACY jsonb true (raw-written — the PATCH
         surface accept-and-drops onboarding_complete post-W1) → wire TRUE (a
         legacy-wizard completer is never re-onboarded)."""
-        tc, team_id = _registered_client()
+        tc, org_id = _registered_client()
         try:
             # seed the legacy jsonb flag via the RAW writer (the PATCH
             # surface accept-and-drops it on node-present orgs, #1997)
             from tortoise.hosted_api import _get_onboarding_state as _raw
             from tortoise.hosted_api import _write_onboarding_state as _w
-            st = _raw(team_id)
+            st = _raw(org_id)
             st["onboarding_complete"] = True
-            _w(team_id, st)
+            _w(org_id, st)
             r = tc.get("/v1/onboarding/state")
             st = r.json()["onboarding"]
             assert st["onboarding_complete"] is True
@@ -1180,7 +1190,7 @@ class TestCompletionWire:
         onboarding_complete=true flag seeds the create-on-write node's status
         from the mirror — without it, the node materializes 'active', the
         zero-edge guard disables, and the org is re-onboarded."""
-        tc, team_id = _registered_client()
+        tc, org_id = _registered_client()
         try:
             # make this a grandfathered org: jsonb true (RAW-written — the
             # PATCH surface accept-and-drops onboarding_complete post-W1,
@@ -1188,9 +1198,9 @@ class TestCompletionWire:
             # eager-init node)
             from tortoise.hosted_api import _get_onboarding_state as _raw
             from tortoise.hosted_api import _write_onboarding_state as _w
-            st = _raw(team_id)
+            st = _raw(org_id)
             st["onboarding_complete"] = True
-            _w(team_id, st)
+            _w(org_id, st)
             st = tc.get("/v1/onboarding/state").json()["onboarding"]
             assert st["onboarding_complete"] is True
             assert st["status"] == "active"
@@ -1198,12 +1208,12 @@ class TestCompletionWire:
             # window): drop the node, keep jsonb true, then first FLOW write.
             import tortoise.onboarding.state as _os2
             from tortoise.hosted_api import _make_sdk as _mk
-            proj = _mk(namespace=team_id)._get_proj()
+            proj = _mk(namespace=org_id)._get_proj()
             _os2._run(proj,
                       f"MATCH (n:{_os2.ONBOARDING_NODE_LABEL} "
                       f"{{org_id: $oid}}) DETACH DELETE n",
-                      {"oid": team_id})
-            assert _os2.read_onboarding_node(proj, team_id) is None
+                      {"oid": org_id})
+            assert _os2.read_onboarding_node(proj, org_id) is None
             # FIRST agent FLOW write — the create-on-write seam must seed
             # status from the jsonb mirror (never re-onboard the org).
             r = tc.post("/v1/onboarding/state/checkpoint",
@@ -1219,22 +1229,22 @@ class TestCompletionWire:
         """#1997 (W1): node-ABSENT (grandfathered pre-backfill) orgs keep
         the legacy jsonb writer — a client PATCH onboarding_complete still
         lands in jsonb (their fallback until backfill)."""
-        tc, team_id = _registered_client()
+        tc, org_id = _registered_client()
         try:
             # drop the node → node-absent grandfathered org
             import tortoise.onboarding.state as _os2
             from tortoise.hosted_api import _make_sdk as _mk
-            proj = _mk(namespace=team_id)._get_proj()
+            proj = _mk(namespace=org_id)._get_proj()
             _os2._run(proj,
                       f"MATCH (n:{_os2.ONBOARDING_NODE_LABEL} "
                       f"{{org_id: $oid}}) DETACH DELETE n",
-                      {"oid": team_id})
-            assert _os2.read_onboarding_node(proj, team_id) is None
+                      {"oid": org_id})
+            assert _os2.read_onboarding_node(proj, org_id) is None
             r = tc.patch("/v1/onboarding/state",
                          json={"onboarding_complete": True})
             assert r.status_code == 200, r.text
             from tortoise.hosted_api import _get_onboarding_state as _raw
-            assert _raw(team_id).get("onboarding_complete") is True
+            assert _raw(org_id).get("onboarding_complete") is True
             # wire completes via the grandfathered window (no node, jsonb true)
             assert r.json()["onboarding"]["onboarding_complete"] is True
         finally:
@@ -1243,7 +1253,7 @@ class TestCompletionWire:
 
 class TestProjection:
     def test_merged_get_serves_flow_and_operational(self):
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             tc.post("/v1/onboarding/state/checkpoint",
                     json={"step": "harness-connected"})
@@ -1260,7 +1270,7 @@ class TestProjection:
         """Graph-down merged GET → 200 with FLOW 'unavailable' markers
         (never fabricated defaults); operational keys still served."""
         import tortoise.hosted_api as _ha
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             def _boom(*a, **k):
                 raise RuntimeError("graph down")
@@ -1278,7 +1288,7 @@ class TestProjection:
         """Checkpoint with the graph down → 503 BEFORE any write (fail-loud,
         retry-safe)."""
         import tortoise.hosted_api as _ha
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             def _boom(*a, **k):
                 raise RuntimeError("graph down")
@@ -1295,16 +1305,16 @@ class TestProjection:
         import uuid
 
         from tortoise.hosted_api import _get_onboarding_projection as _proj
-        team_id = f"orphan{uuid.uuid4().hex[:8]}"
+        org_id = f"orphan{uuid.uuid4().hex[:8]}"
         # ensure the team graph exists (register would) but NO node
-        _make_sdk(namespace=team_id)._get_proj().db.list_graphs()
-        st = _proj(team_id)
+        _make_sdk(namespace=org_id)._get_proj().db.list_graphs()
+        st = _proj(org_id)
         assert st["fork"] is None
         assert st["status"] == "active"
         assert st["completed_steps"] == []
         # no node materialized by the read
         assert onboarding_state.read_onboarding_node(
-            _make_sdk(namespace=team_id)._get_proj(), team_id) is None
+            _make_sdk(namespace=org_id)._get_proj(), org_id) is None
 
 
 class TestJourneyLeg:
@@ -1314,29 +1324,29 @@ class TestJourneyLeg:
         Organization Subject is assertable from W5's read surface (W3's
         seed-write contract is #1999's test)."""
         import uuid
-        tc, team_id = _registered_client()
+        tc, org_id = _registered_client()
         try:
-            node = _read_node(team_id)
+            node = _read_node(org_id)
             assert node is not None
             assert node["version"] == 1
             assert node["status"] == "active"
-            steps = set(_completed(team_id))
+            steps = set(_completed(org_id))
             assert "team-named" in steps
-            proj = _make_sdk(namespace=team_id)._get_proj()
+            proj = _make_sdk(namespace=org_id)._get_proj()
             # W3-style seed write (the org Subject + onboards edge) — W5
             # asserts the read surface accepts it
-            org_id = f"org-{uuid.uuid4().hex[:8]}"
+            subject_oid = f"org-{uuid.uuid4().hex[:8]}"
             proj.query(
                 "MATCH (n:OnboardingState {org_id: $oid}) "
                 "MERGE (s:Subject {subjectKind: 'organization', org_id: $oid, "
                 "name: $name}) "
                 "MERGE (n)-[:onboards]->(s)",
-                oid=team_id, name=org_id)
+                oid=org_id, name=subject_oid)
             res = proj.query(
                 "MATCH (n:OnboardingState {org_id: $oid})-[:onboards]->"
                 "(s:Subject {subjectKind: 'organization'}) RETURN s.org_id",
-                oid=team_id)
-            assert res.result_set and res.result_set[0][0] == team_id
+                oid=org_id)
+            assert res.result_set and res.result_set[0][0] == org_id
         finally:
             tc.__exit__(None, None, None)
 
@@ -1347,47 +1357,47 @@ class TestOnboardsEdge:
     itself is created by the seed core first; this writer links).
     Idempotent: replay does not duplicate the edge (created-signal False)."""
 
-    def _make_org_subject(self, team_id: str) -> str:
+    def _make_org_subject(self, org_id: str) -> str:
         import uuid
-        sdk = _make_sdk(namespace=team_id)
+        sdk = _make_sdk(namespace=org_id)
         try:
             node = sdk.create_subject(
                 f"org{uuid.uuid4().hex[:8]}", subjectKind="organization",
-                org_id=team_id)
+                org_id=org_id)
             return node["id"]
         finally:
             sdk.close()
 
     def test_write_sets_org_subject_id_and_edge(self):
-        tc, team_id = _registered_client()
+        tc, org_id = _registered_client()
         try:
-            proj = _make_sdk(namespace=team_id)._get_proj()
-            sid = self._make_org_subject(team_id)
-            res = onboarding_state.write_onboards_edge(proj, team_id, sid)
+            proj = _make_sdk(namespace=org_id)._get_proj()
+            sid = self._make_org_subject(org_id)
+            res = onboarding_state.write_onboards_edge(proj, org_id, sid)
             assert res["created"] is True
-            node = _read_node(team_id)
+            node = _read_node(org_id)
             assert node.get("org_subject_id") == sid
             r = proj.query(
                 "MATCH (n:OnboardingState {org_id: $oid})-[:onboards]->"
-                "(s:Subject) RETURN s.id, n.org_subject_id", oid=team_id)
+                "(s:Subject) RETURN s.id, n.org_subject_id", oid=org_id)
             rows = r.result_set
             assert rows and rows[0][0] == rows[0][1] == sid
         finally:
             tc.__exit__(None, None, None)
 
     def test_replay_noop_same_subject(self):
-        tc, team_id = _registered_client()
+        tc, org_id = _registered_client()
         try:
-            proj = _make_sdk(namespace=team_id)._get_proj()
-            sid = self._make_org_subject(team_id)
-            r1 = onboarding_state.write_onboards_edge(proj, team_id, sid)
-            r2 = onboarding_state.write_onboards_edge(proj, team_id, sid)
+            proj = _make_sdk(namespace=org_id)._get_proj()
+            sid = self._make_org_subject(org_id)
+            r1 = onboarding_state.write_onboards_edge(proj, org_id, sid)
+            r2 = onboarding_state.write_onboards_edge(proj, org_id, sid)
             assert r1["created"] is True
             assert r2["created"] is False
             assert r2["subject_id"] == sid
             r = proj.query(
                 "MATCH (n:OnboardingState {org_id: $oid})-[:onboards]->"
-                "(s:Subject) RETURN count(s)", oid=team_id)
+                "(s:Subject) RETURN count(s)", oid=org_id)
             assert r.result_set[0][0] == 1
         finally:
             tc.__exit__(None, None, None)
@@ -1395,14 +1405,14 @@ class TestOnboardsEdge:
     def test_subject_kind_is_never_object_statement(self):
         """B1 regression: the anchor linked by write_onboards_edge is a
         Subject — never Object/Statement."""
-        tc, team_id = _registered_client()
+        tc, org_id = _registered_client()
         try:
-            proj = _make_sdk(namespace=team_id)._get_proj()
-            sid = self._make_org_subject(team_id)
-            onboarding_state.write_onboards_edge(proj, team_id, sid)
+            proj = _make_sdk(namespace=org_id)._get_proj()
+            sid = self._make_org_subject(org_id)
+            onboarding_state.write_onboards_edge(proj, org_id, sid)
             r = proj.query(
                 "MATCH (n:OnboardingState {org_id: $oid})-[:onboards]->(s) "
-                "RETURN labels(s)", oid=team_id)
+                "RETURN labels(s)", oid=org_id)
             assert r.result_set
             labels = r.result_set[0][0]
             assert "Subject" in labels
@@ -1419,20 +1429,20 @@ class TestPostProvisionHook:
 
         from tests.fake_control_plane import FakeControlPlane
         from tortoise.supabase_control import _ensure_onboarding_node_after_provision
-        team_id = f"hook{uuid.uuid4().hex[:10]}"
+        org_id = f"hook{uuid.uuid4().hex[:10]}"
         user_id = str(uuid.uuid4())
-        fake = FakeControlPlane({"teams": [], "team_memberships": [], "api_keys": []})
-        fake.seed("team_memberships", [
-            {"id": "m1", "team_id": f"prior{uuid.uuid4().hex[:10]}",
+        fake = FakeControlPlane({"organizations": [], "org_memberships": [], "api_keys": []})
+        fake.seed("org_memberships", [
+            {"id": "m1", "org_id": f"prior{uuid.uuid4().hex[:10]}",
              "user_id": user_id, "role": "owner", "status": "active",
              "created_at": "2026-08-01T00:00:00Z"},
-            {"id": "m2", "team_id": team_id, "user_id": user_id,
+            {"id": "m2", "org_id": org_id, "user_id": user_id,
              "role": "owner", "status": "active",
              "created_at": "2026-08-02T00:00:00Z"},
         ])
         _ensure_onboarding_node_after_provision(
-            fake, team_id, {"p_team_id": team_id, "p_user_id": user_id})
-        node = _read_node(team_id)
+            fake, org_id, {"p_org_id": org_id, "p_user_id": user_id})
+        node = _read_node(org_id)
         assert node is not None
         # prior memberships (excluding the new team) = 1 → compact
         assert node["compact"] is True
@@ -1444,16 +1454,16 @@ class TestPostProvisionHook:
 
         from tests.fake_control_plane import FakeControlPlane
         from tortoise.supabase_control import _ensure_onboarding_node_after_provision
-        team_id = f"hook2{uuid.uuid4().hex[:10]}"
+        org_id = f"hook2{uuid.uuid4().hex[:10]}"
         user_id = str(uuid.uuid4())
-        fake = FakeControlPlane({"teams": [], "team_memberships": [], "api_keys": []})
-        fake.seed("team_memberships", [{"id": "m1", "team_id": team_id,
+        fake = FakeControlPlane({"organizations": [], "org_memberships": [], "api_keys": []})
+        fake.seed("org_memberships", [{"id": "m1", "org_id": org_id,
                                         "user_id": user_id, "role": "owner",
                                         "status": "active",
                                         "created_at": "2026-08-01T00:00:00Z"}])
         _ensure_onboarding_node_after_provision(
-            fake, team_id, {"p_team_id": team_id, "p_user_id": user_id})
-        node = _read_node(team_id)
+            fake, org_id, {"p_org_id": org_id, "p_user_id": user_id})
+        node = _read_node(org_id)
         assert node is not None
         assert node["compact"] is False
         assert "fork" not in node or node["fork"] is None

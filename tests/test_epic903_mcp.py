@@ -70,7 +70,7 @@ class TestErrorMapping:
                 raise ValueError("unknown dream mode 'quantum' — expected "
                                  "one of 'local', 'stale-first', 'full'")
 
-        with patch.object(ms, "_get_team_sdk", return_value=FakeSdk()):  # noqa: SIM117
+        with patch.object(ms, "_get_org_sdk", return_value=FakeSdk()):  # noqa: SIM117
             with patch.object(ms, "_transport_mode", type("TM", (), {"get": staticmethod(lambda: "stdio")})):
                 with patch.object(ms, "_is_dev_mode", return_value=True):
                     r = ms.tortoise_dream(mode="quantum")

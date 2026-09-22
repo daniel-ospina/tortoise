@@ -35,7 +35,7 @@ class TestAuditLoggerJSONL:
         content = audit_logger._fallback_path.read_text().strip()
         assert content
         event = json.loads(content)
-        assert event["team_id"] == "team-1"
+        assert event["org_id"] == "team-1"
         assert event["actor_user_id"] == "user-1"
         assert event["operation"] == "test_op"
 
@@ -217,7 +217,7 @@ class TestAuditLoggerMockPostgres:
         from tortoise.audit_events import _SCHEMA_DDL
         assert "CREATE TABLE IF NOT EXISTS audit_events" in _SCHEMA_DDL
         assert "id TEXT PRIMARY KEY" in _SCHEMA_DDL
-        assert "team_id TEXT NOT NULL" in _SCHEMA_DDL
+        assert "org_id TEXT NOT NULL" in _SCHEMA_DDL
 
 
 @pytest.mark.postgres
@@ -256,15 +256,15 @@ class TestAuditLoggerPostgres:
         back to JSONL.
         """
         actor = "service-bootstrap"
-        team_id = "team-e2e9"
-        pg_logger.append(team_id, actor, "e2e9_bootstrap",
-                         resource_type="team", resource_id=team_id)
+        org_id = "team-e2e9"
+        pg_logger.append(org_id, actor, "e2e9_bootstrap",
+                         resource_type="team", resource_id=org_id)
         with pg_logger._conn.cursor() as cur:
             cur.execute(
                 "SELECT actor_user_id FROM audit_events "
-                "WHERE team_id = %s AND operation = 'e2e9_bootstrap' "
+                "WHERE org_id = %s AND operation = 'e2e9_bootstrap' "
                 "ORDER BY created_at DESC LIMIT 1",
-                (team_id,),
+                (org_id,),
             )
             row = cur.fetchone()
         assert row is not None, "audit row did not land in Postgres"
