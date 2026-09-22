@@ -1016,15 +1016,14 @@ def test_watcher_eligibility_degraded_is_reported():
 
 def test_watcher_cp_flicker_on_build_call_does_not_resolve():
     """#3658 review: a graph provider that answers the scan call and returns None on
-    the build call must NOT let the graph's incident be resolved by
+    the build (confirmation) call must NOT let the graph's incident be resolved by
     universe-shrink off an unconfirmed surface (fabricated recovery).
 
-    Merged (#3031 cycle-2 P1): the graph surface is enumerated ONCE per poll and
-    cached, so the build loop never re-reads the provider — the two calls cannot
-    disagree. The graph therefore STAYS on the surface (so the shrink cannot
-    resolve it) instead of dropping out of an unconfirmed ``per_graph``. The
-    safety property is the same; the mechanism is the cache rather than a
-    second read that flips ``graph_surface_confirmed``.
+    Merged (#3031 cycle-2 P1 + #3405 review P2): ``per_graph`` is built from the
+    ONE cached scan enumeration, so the graph STAYS on the surface; the build
+    loop's confirmation read gates the shrink DECISION, and its ``None`` clears
+    ``graph_surface_confirmed``. The safety property is main's; the mechanism is
+    the cache for the surface plus the confirmation read for the shrink.
     """
     ch = _Channels()
     storage = MemoryStorage()
@@ -1039,14 +1038,77 @@ def test_watcher_cp_flicker_on_build_call_does_not_resolve():
 
     def _flicker(t):
         calls["n"] += 1
-        return ["g_x"] if calls["n"] == 1 else None  # scan ok, second call unconfirmed
+        return ["g_x"] if calls["n"] == 1 else None  # scan ok, confirmation unconfirmed
 
     w._graphs_for = _flicker
     status = w.poll()
-    assert calls["n"] == 1, "the graph surface must be enumerated once per poll"
-    # The graph stays on the surface → the universe-shrink cannot resolve it.
+    assert calls["n"] == 2, (
+        "one cached scan read supplies per_graph; a second confirmation read "
+        "gates the shrink decision (#3405 review P2)"
+    )
+    # The graph stays on the surface (cached list) → the shrink cannot resolve it.
     assert "team_a:g_x" in status["per_graph"], status["per_graph"]
     assert any("STALE — team_a:g_x" in t for t in ch.issues.values())  # survives
+
+
+def test_watcher_second_read_disagreement_blocks_shrink_without_dropping_keys():
+    """#3405 review P2: a read that DISAGREES with the cached enumeration must
+    clear ``graph_surface_confirmed`` for the shrink decision while ``per_graph``
+    still comes from the CACHED list.
+
+    The regression this pins: caching the scan read removed main's second read,
+    so on a HEALTHY poll a single silently-TRUNCATED enumeration (the documented
+    PostgREST ``db-max-rows`` fail-open class) dropped a live graph's key out of
+    ``per_graph`` and the universe-shrink resolved its still-active incidents —
+    a fabricated false recovery, re-opened when the full read returned (a
+    ✅/🚨 flap). A complete re-read now blocks that resolve, and the CACHED list
+    keeps the keys so an inconsistent read cannot drop them either. A legitimate
+    vanish is only DEFERRED by one poll, never stranded.
+    """
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 0.5)
+    _seed_state(storage, "team_a")
+    _seed_graph_archive(storage, "team_a", "g_x", 200)  # stale custom graph
+    _seed_graph_state(storage, "team_a", "g_x")
+    _seed_graph_archive(storage, "team_a", "g_y", 200)  # stale custom graph
+    _seed_graph_state(storage, "team_a", "g_y")
+    w = _watcher(storage, ch, graph_provider=lambda t: ["g_x", "g_y"])
+    s1 = w.poll()
+    assert set(s1["per_graph"]) == {"team_a:g_x", "team_a:g_y"}
+    assert any("STALE — team_a:g_x" in t for t in ch.issues.values())
+    assert any("STALE — team_a:g_y" in t for t in ch.issues.values())
+    assert w._last_graph_keys == {"team_a:g_x", "team_a:g_y"}
+
+    # Poll 2: the SCAN (cached) read is silently TRUNCATED to {g_x}; the
+    # CONFIRMATION read is complete ({g_x, g_y}). g_y's archive is still there.
+    calls = {"n": 0}
+
+    def _disagree(t):
+        calls["n"] += 1
+        return ["g_x"] if calls["n"] % 2 == 1 else ["g_x", "g_y"]
+
+    w._graphs_for = _disagree
+    s2 = w.poll()
+    # (a) no keys dropped: per_graph stays on the CACHED list (so the truncated
+    # read's own key is present) and the inconsistent re-read injects no keys.
+    assert "team_a:g_x" in s2["per_graph"], s2["per_graph"]
+    assert "team_a:g_y" not in s2["per_graph"], s2["per_graph"]
+    # (b) no resolve: the disagreement cleared graph_surface_confirmed, so the
+    # universe-shrink did not run and the live graph's incident survives.
+    assert any("STALE — team_a:g_y" in t for t in ch.issues.values()), (
+        "a read DISAGREEMENT must not resolve a live graph's incident"
+    )
+    assert w._last_graph_keys == {"team_a:g_x", "team_a:g_y"}, (
+        "an unconfirmed shrink must not re-baseline the reference off the "
+        "truncated read (that would strand g_y un-resolvable forever)"
+    )
+
+    # Poll 3: both reads AGREE on the complete {g_x} and g_y is genuinely gone →
+    # resolved. The disagreement only deferred it by one poll.
+    w._graphs_for = lambda t: ["g_x"]
+    w.poll()
+    assert not any("team_a:g_y" in t for t in ch.issues.values())
 
 
 def test_watcher_universe_shrink_to_empty_resolves_org_incidents():

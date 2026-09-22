@@ -569,9 +569,15 @@ class BackupWatcher:
         # independently, so a control-plane failure on only the SECOND read left
         # `graph_surface_confirmed` True while `per_graph` was missing that team —
         # a live graph then looked VANISHED, its incidents were closed, and it was
-        # re-opened on the next poll (fabricated false recovery + ✅/🚨 flap). One
-        # read per team per poll, so the resolved surface is exactly the surface
-        # the gate judged.
+        # re-opened on the next poll (fabricated false recovery + ✅/🚨 flap).
+        # `per_graph` is therefore built from THIS cached read, so the resolved
+        # surface is exactly the surface the gate judged. The second read is not
+        # gone, though: it is restored in the build loop as a CONFIRMATION read
+        # that gates the shrink DECISION only (#3405 review P2), so one silently
+        # TRUNCATED enumeration cannot resolve a live graph's incidents — the
+        # confirmation read disagrees with the cache and clears
+        # `graph_surface_confirmed`, while `per_graph` itself stays on the CACHED
+        # list (an inconsistent read never drops keys either).
         gids_by_team: dict[str, list[str] | None] = {}
         try:
             graph_newest: dict[str, datetime] = {}
@@ -664,6 +670,25 @@ class BackupWatcher:
                 # fabricated recovery off an unconfirmed surface.
                 graph_surface_confirmed = False
                 continue
+            if graph_r2_ok:
+                # CONFIRMATION read — main's second read, restored for the SHRINK
+                # DECISION only (#3405 review P2). The cache above is the single
+                # source for `per_graph`, but it also removed the redundancy that
+                # caught a single silently-TRUNCATED enumeration (the documented
+                # PostgREST `db-max-rows` fail-open class): a short scan read would
+                # drop a live graph's key out of `per_graph`, and the
+                # universe-shrink would then resolve its still-active incidents —
+                # a fabricated false recovery, re-opened when the full read returns
+                # (✅/🚨 flap). So re-read here and clear the flag when the re-read
+                # is UNCONFIRMED (None) or DISAGREES with the cached set. `per_graph`
+                # below still uses the CACHED list, so an inconsistent read can
+                # never drop keys: the worst case is a one-poll DEFERRAL of a
+                # legitimate vanish — a deliberate trade, because a deferred
+                # resolve is honest while a fabricated one pages an operator about
+                # a recovery that did not happen.
+                confirm = self._graphs_for(t)
+                if confirm is None or set(confirm) != set(gids):
+                    graph_surface_confirmed = False
             for gid in gids:
                 key = f"{t}:{gid}"
                 newest = graph_newest.get(key)
