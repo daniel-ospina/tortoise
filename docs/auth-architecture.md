@@ -57,22 +57,24 @@ the token regardless of which subdomain presented it.
 
 ## 2. What Tortoise has
 
-> **CURRENT ARCHITECTURE (#4054, 2026-09-18).** For the BFF pages the client-side, JS-readable
-> parent-domain cookie described in the original 2026-08-19 note has been REMOVED; the browser
-> holds only an HttpOnly `__Host-session` opaque handle issued by a server-side BFF on the app
-> origin, and the access/refresh tokens live in D1 (`SESSIONS`) and never reach the browser.
-> **One surface still runs the removed design:** the MCP consent page still issues a JS-readable
-> parent-domain cookie and two surfaces still accept it, so tokens DO reach the browser for a
-> consent-page visitor (§2.1 "Legacy cohort", where the `OVERRIDES` ruling is violated).
-> §2.1–§2.3 and §5.5 below are the current state; §2.4, §3 and §5.1–§5.4 are the historical
-> record of the pre-BFF design and its fixes (each carries a superseded note). §4 is historical
-> for items 2–4 only — **item 1 is open**.
+> **CURRENT ARCHITECTURE (#4054, 2026-09-18).** For the BFF session the client-side, JS-readable
+> parent-domain cookie described in the original 2026-08-19 note has been REMOVED: for that
+> session the browser holds only an HttpOnly `__Host-session` opaque handle issued by a
+> server-side BFF on the app origin, and the access/refresh tokens live in D1 (`SESSIONS`) and
+> never reach the browser. **One surface still runs the removed design:** the MCP consent page
+> still issues a JS-readable parent-domain cookie, and two surfaces still accept it — the
+> blog-admin console (`/admin`, itself an app-origin BFF page) and the marketing-origin blog
+> Functions — so tokens DO reach the browser for a consent-page visitor (§2.1 "Legacy cohort",
+> where the `OVERRIDES` ruling is violated). §2.1–§2.3 and §5.5 below are the current state;
+> §2.4, §3 and §5.1–§5.4 are the historical record of the pre-BFF design and its fixes (each
+> carries a superseded note). §4 is historical for items 2 and 4 only — **item 1 is open** and
+> item 3 still holds.
 
 ### 2.1 The session
 
 - **Provider:** Supabase (GoTrue), JWT access + refresh tokens — held SERVER-side.
-- **Transport (current):** a server-side BFF on the app origin. The browser
-  receives only an opaque `__Host-session` (plus `__Host-authflow`) cookie:
+- **Transport (current) — for the BFF session:** a server-side BFF on the app origin. For that
+  session the browser receives only an opaque `__Host-session` (plus `__Host-authflow`) cookie:
   `HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=…`, with **no `Domain`
   attribute** — the `__Host-` prefix enforces host-only, so a cookie set on one
   subdomain can never authenticate another. Issued and cleared by
@@ -188,9 +190,9 @@ a database outage to the user as "you are signed out".
 > **Historical (#1498/#1506 era, REMOVED by #4054):** the gates below were
 > synchronous client-side head-gate cookie checks (`readValidSession()` +
 > `location.replace`) in each page's `<head>`, and the dashboard's `index.html`
-> carried the same check before the bundle rendered. Under the BFF there is no
-> JS-readable session, so those checks were removed — a synchronous client gate
-> cannot see an HttpOnly host-only cookie, and one that tries reproduces the
+> carried the same check before the bundle rendered. No BFF page loads that session
+> bridge, so those checks were removed — a synchronous client
+> gate cannot see an HttpOnly host-only cookie, and one that tries reproduces the
 > #3485 loop.
 
 ### 2.4 What was wrong (the user report)
@@ -275,8 +277,8 @@ couldn't read), and stale sessions leaked into `/welcome`. What changed:
 > ⚠️ **Mechanically superseded by #4054.** The flows below are described in
 > terms of the pre-BFF client-side cookie (the client storing the session into
 > `sb-tortoise-auth-token`, the head gate reading it). The BFF moved every one
-> of those steps server-side: the browser stores nothing (a `__Host-session`
-> handle only), the API-key exchange runs in `functions/auth/api-key.ts`, and
+> of those steps server-side: for the BFF session the browser stores only a
+> `__Host-session` handle, the API-key exchange runs in `functions/auth/api-key.ts`, and
 > `/welcome` is decided by `functions/welcome.ts` (§2). The product INTENT below
 > (one login surface, strict validity, server-side exchange, welcome never
 > rendering unauthenticated) still holds; the mechanism is §2.1–§2.3.

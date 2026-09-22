@@ -4,11 +4,11 @@
  * WHY THE SERVER DECIDES
  * ----------------------
  * `welcome.html` used to decide this in the browser, via a hard gate that called
- * `readValidSession()`. Under the BFF the session cookie is not JS-readable, so that
- * function returned null on EVERY load and the gate redirected to /auth on every
- * successful login — the #3485 loop, reproduced by construction for every user.
+ * `readValidSession()`. No BFF page loads that session bridge, so the function had
+ * nothing to read and the gate redirected to /auth on every successful login — the
+ * #3485 loop, reproduced by construction.
  *
- * The session cookie is HttpOnly. The server is the only thing that can
+ * The BFF session cookie is HttpOnly. The server is the only thing that can
  * legitimately answer "is this visitor signed in?" — so the answer is a status
  * code here, and the page no longer participates in the decision at all.
  *
