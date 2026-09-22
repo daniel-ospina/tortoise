@@ -62,6 +62,8 @@ aboutObjects: tortoise
 | Kinds classification-later deep research (#1695) | `docs/research/2026-08-26-classification-later.md` |
 | Reaper race scoping/research (#1658) | `docs/scoping/2026-08-24-1658-reaper-race-scoping.md` |
 | Reaper destruction-path threat model on a shared `$TMPDIR` — demonstrated CWE-377 symlink-write + attacker-chosen kill/rmtree, and the escalated provenance-guard decision (#4098) | `docs/scoping/2026-09-18-4098-tmpdir-hardening-scoping.md` |
+| Local-branch reap path — double diamond, why an existing reviewed worktree engine is reused, and the unsafe name-only classification (#4408) | `docs/scoping/2026-09-20-4408-branch-reaper.md` |
+| Worktree/branch reaper dry-run report — measured classification of the current branch + worktree population, with excluded reasons (#4408) | `docs/runbook/4408-branch-reaper.md` |
 | Test (b) lane 403/export-delete scoping (#2090) | `docs/scoping/2026-09-01-2090-test-b-lane-scoping.md` |
 | Test B-wave shared-fixture scoping (#2127) | `docs/scoping/2026-09-02-2127-b-waves-scoping.md` |
 | Ingest contract (`tortoise_ingest` / `sdk.ingest` bundle API) | `docs/INGEST_CONTRACT.md` |

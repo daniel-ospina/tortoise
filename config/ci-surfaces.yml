@@ -550,6 +550,7 @@ surfaces:
   # runs on the PR that edits the gate — pinned by test_ci_selection.py.
   - test_finding_provenance.py
   - test_health_client_effect.py  # #3811: /health client-visible effect over a real port (dual: api)
+  - test_branch_reaper.py   # #4408: local-branch reaper — PR-state classification + safety guards
   - test_health_ready_nonblocking.py  # #2988: /health/ready off-loop + bounded probes
   - test_selfhost_health_probe_executor.py  # #3287: selfhost probes own their pool (dual-registered)
   - test_transport_wait_bound.py  # #3834: transport wait bound + cold-half gate wiring (dual: api)
@@ -1670,6 +1671,7 @@ durations:
   # file holds the margin higher than removing it.
   test_transport_wait_bound.py: 2.0
   test_collision_preflight.py: 3.0
+  test_branch_reaper.py: 2.0  # new file: no main junit measurement yet; flat default
   test_control_plane_offload_3498.py: 2.7  # #3498: control-plane offload seam
   # #4015: new file in this pool with no CI junit measurement yet — entered at
   # the flat 2.0s default under the #3400/#4221 policy above (no DB, no network:
