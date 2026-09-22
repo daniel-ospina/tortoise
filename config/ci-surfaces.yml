@@ -24,6 +24,13 @@ surfaces:
   # when nothing else matched — so a PR that reintroduced the bug in that file
   # alone would otherwise never run the guard.
   - test_boot_regressions.py
+  # #3811: the client-visible effect on /health — HTTP 200 + the body shape the
+  # deploy gate reads, inside the client's OWN eager-startup budget (Pi
+  # mcp-client: 15s, one attempt, no retry) — asserted by EXECUTING the request
+  # over a real port, with the data-plane probe wedged past the budget. Dual
+  # registration (api+core) for the same reason as the guards below: the file
+  # it guards is tortoise/hosted_api.py, which selects the `api` surface.
+  - test_health_client_effect.py
   # #2988: /health/ready must never block the event loop (a synchronous probe
   # froze every route in production — /openapi.json included). Same dual
   # registration as the boot guards above, for the same reason: the file it
@@ -518,6 +525,7 @@ surfaces:
   # the FULL matrix (no SOURCE_PATTERNS entry matches tools/), so this suite
   # runs on the PR that edits the gate — pinned by test_ci_selection.py.
   - test_finding_provenance.py
+  - test_health_client_effect.py  # #3811: /health client-visible effect over a real port (dual: api)
   - test_health_ready_nonblocking.py  # #2988: /health/ready off-loop + bounded probes
   - test_selfhost_health_probe_executor.py  # #3287: selfhost probes own their pool (dual-registered)
   - test_transport_wait_bound.py  # #3834: transport wait bound + cold-half gate wiring (dual: api)
