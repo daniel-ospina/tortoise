@@ -39,6 +39,7 @@ unattributable); 2 = environment error (measurement impossible); 3 = NOT-CLOSING
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import math
@@ -1267,10 +1268,8 @@ def _write_record(rec: dict, out: Path) -> None:
             fh.write("\n")
         os.replace(tmp, out)
     except BaseException:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp)
-        except OSError:
-            pass
         raise
 
 
@@ -1411,10 +1410,8 @@ def _verify_record_landed_outside(out: Path, *measured_roots: Path) -> None:
     for root in measured_roots:
         root_real = Path(os.path.realpath(os.fspath(root)))
         if _inside_tree(landed, root_real):
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(out)
-            except OSError:
-                pass
             raise UsageError(
                 f"--record-out {out} was written inside the measured tree ({root}) "
                 "and has been deleted. The tool's own record must not be part of "
@@ -1546,7 +1543,7 @@ def _build_record(args: argparse.Namespace) -> dict:
             tree_states.append(_porcelain_digest(measured_root))
         # `tree_moved` is per-run: True iff this run's tree state differs from the
         # digest captured before run 1.
-        for r, (digest, _d) in zip(runs, tree_states):
+        for r, (digest, _d) in zip(runs, tree_states, strict=True):
             r["tree_moved"] = digest != base_digest
         # The pin's own cleanliness is the FINAL state, read before the `finally`
         # that removes the worktree. (It used to run after the `finally`, which
