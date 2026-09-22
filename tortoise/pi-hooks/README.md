@@ -86,3 +86,33 @@ install is required, and there is **no `agent-infra` dependency** —
   idempotency and extraction are identical.
 - `tortoise sessions import --harness pi --file <session.jsonl>` — historical
   backfill (separate from live capture).
+
+## Capture reliability: the durable spool (#3963)
+
+Capture is **not** session-end-only. The extension keeps the cadence the field
+converges on — **cheap capture frequently, costly extraction deferred**:
+
+| Pi event | Action |
+|---|---|
+| `session_start` | install probe **and** replay: file any session still in the spool (an interrupted/laptop-closed session is filed here) |
+| `turn_end` | **append** the new turn(s) to the local spool (no network) |
+| `agent_end` | snapshot + retry **other** sessions' pending filings (never the live one) |
+| `session_shutdown` | snapshot the final turns, then the **final flush** |
+
+The spool lives at `~/.tortoise/capture-spool/` (override
+`TORTOISE_CAPTURE_SPOOL_DIR`): per session a small meta file plus an
+**append-only** `*.turns.jsonl`. It is bounded by **count and bytes** — never a
+TTL: #3870 (owner) ruled the spool is kept until the user deletes it, so a
+count/byte ceiling evicts the oldest entry and **records the reason** in
+`discarded.jsonl`.
+
+Idempotency is `session_id` (the server's upsert key) plus a content-addressed
+client key `sha256(session_id \0 sha256(turns))`, so replaying the same spool
+files one session and issues one POST. Transient failures (network / 5xx /
+retryable 4xx / #3713's in-flight 409) back off and retry; a permanent 4xx is
+discarded **with a recorded reason**, never silently.
+
+The Claude Code leg implements the same contract in `tortoise/capture_spool.py`,
+wired through `tortoise session capture` (write-before-upload) and
+`tortoise session drain` (run by `session-start.sh`). See
+`docs/plans/2026-09-17-3963-capture-spool.md`.
