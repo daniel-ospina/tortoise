@@ -938,8 +938,8 @@ def _record_out_pathspec(cwd: Path, exclude: Path | None) -> list[str]:
     """
     if exclude is None:
         return []
-    target = exclude if exclude.is_absolute() else (Path.cwd() / exclude)
     try:
+        target = exclude if exclude.is_absolute() else (Path.cwd() / exclude)
         rel = target.resolve().relative_to(cwd.resolve())
     except (OSError, ValueError):
         return []
