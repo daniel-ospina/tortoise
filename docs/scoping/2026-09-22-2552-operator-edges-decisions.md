@@ -1,69 +1,91 @@
-# #2552 — operator-edges decisions ledger
+# #2552 — owner decisions ledger
 
-Decision index for the two owner decisions attached to **#2552**
+Decision index for the open owner decisions attached to **#2552**
 (`fix(write-path): operator edges are not wired or persisted — measured 0/4 on the planted-operator
 corpus`).
 
-The authoritative decision site is the issue comment:
-<https://github.com/daniel-ospina/tortoise/issues/2552#issuecomment-5783821438>.
-This file is the ledger index — per the standing rule, a marker that lives only in the ledger is
-invisible to the lane holding the vendor page, so **both carry the same `OVERRIDES:` line**.
+The authoritative decision site is the issue:
+<https://github.com/daniel-ospina/tortoise/issues/2552>. This file is the ledger index.
 
-Status: **awaiting owner ruling.** Nothing below is settled; the `OVERRIDES:` lines are written now so
-that the ruling, when made, is already recorded against the common default rather than reading
-afterwards like an accident of history.
+**Status: open — awaiting an owner ruling. No `OVERRIDES:` marker is recorded yet**, because the
+standing rule attaches a marker to a **decision**, and there is not one to mark. *(An earlier revision
+of this file attached `OVERRIDES:` lines to recommendations as though they were rulings. Withdrawn —
+a marker written before the ruling is a claim, not a record.)*
 
----
-
-## D1 — is the real-LLM measurement spend authorised?
-
-**Question.** The recall fix landed (#4651 → `b8ded3646`) and the measurement-power prerequisite is
-discharged — the operator gold now carries **15 planted edges across all seven sessions**
-(SUPPORTS 4 / MITIGATES 8 / NEGATE 2 / SUPERSEDE 1), up from 4 in two sessions. Before it, the graded
-result swung **0, 1, 1, 1, 2 / 4 on identical code**. The real-LLM lane has still never been measured
-on a denominator that can carry a signal, and **nothing has been spent**.
-
-**Options.** (a) authorise the real-LLM measurement against the 15-edge gold; (b) accept dogfooding
-captures as the substrate; (c) defer and record the claim as unmeasured.
-
-**Contradiction test — run first, and it settles (b).** There is a standing finding that **dogfooding
-is not a test substrate**: our captures are one harness (`harness='pi'`) on our own tenant and cannot
-carry a product-level claim. So (b) is **not a candidate for adoption at all** — not "adopt with a
-caveat". Reopening that finding is the route if it is to change, never adopting around it.
-
-**Recommendation: (a).** With the prerequisite discharged this is a cost question, not a validity one.
-(c)'s residual risk is that the beta's core claim ("it remembers this **for you**") ships with no
-product-lane measurement behind it — the exact outcome #2552 exists to prevent.
-
-> **OVERRIDES:** the common practice of using your own product's usage as its test data ("dogfooding as
-> the measurement substrate") — our captures are one harness on our own tenant, so they cannot carry a
-> product-level claim; the measurement must run on a planted gold against the real-LLM path.
+**Correction of record:** an earlier revision of this ledger asserted a "standing finding that
+dogfooding is not a test substrate" and used it to rule an option out. **No such rule exists** — the
+owner's actual position is that dogfooding *can* be a substrate when the case warrants it, is not an
+ideal default, and is judged case by case. Nothing here rests on that claim.
 
 ---
 
-## D2 — which MITIGATES / SUPERSEDE form is canonical?
+## Q1 — should the extraction be measured against the new operator gold with a real LLM?
 
-**Question.** The write path accepts two forms at once:
+**What exists.** `tests/eval/write_path/` replays recorded sessions through the extraction path. The
+real-LLM lane is real and has run: `runner run --session wp06_quarry_rollout --session
+wp07_bluepeak_followup`, `extraction_mode=llm:deepseek-direct`, wp06 `extracted=11`, wp07
+`extracted=14`.
 
-- **F1** — two MITIGATES forms for an operator edge expressing a mitigation.
-- **F2** — a SUPERSEDE expressed as a point-level `CORRECTS`, where the operator vocabulary would say
-  `SUPERSEDE`.
+**What is measured today.** The recall fix's live arms (wp06 + wp07) went **1/4 before → 1/4 after** on
+those two sessions, and the recall fix itself was measured on the **real code path with no LLM** — i.e.
+the operators were supplied and the question was whether they are stored. The corpus has since grown to
+**15 planted operator edges across all seven sessions** (SUPPORTS 4 / MITIGATES 8 / NEGATE 2 /
+SUPERSEDE 1), up from 4 in two sessions.
 
-**Options.** (a) name one canonical form per construct and map the other at the boundary
-(accept-and-normalise, reject only the unmappable); (b) accept both and document the equivalence;
-(c) reject the non-canonical form loudly at write time.
+**What is not measured.** A **product-lane number** — a real model reading real sessions and producing
+operators — over a denominator that can carry a signal. Before the gold grew, the graded result swung
+`0, 1, 1, 1, 2 / 4` on identical code, so no behavioural claim could be separated from model variance.
 
-**Contradiction test — run first.** The two documents that could govern it **predate the mint** (E7
-landed `56d411450`, #1539, 2026-08-22; the mint landed in PR #4651, 2026-09-22) and **neither names
-operator endpoints**, so no recorded rule settles it — which is what makes it a decision rather than
-conformance. ⚠️ **Before adopting (a), check `docs/ONTOLOGY.md`**: if it already names a canonical form,
-it governs and this is not a decision at all.
+**Cost.** The runner reports `cost_usd: 0.0` alongside a "mock/unknown adapter" note — the LLM lane is
+confirmed real, so that zero is an **accounting gap, not a measurement of the cost**. Nobody can quote
+the spend honestly today; making the cost visible is itself part of the work.
 
-**Recommendation: (a).** (b) is the industry default and cheapest, but its cost is permanent — two
-spellings of one intent live in the graph, so every downstream reader handles both forever. (c) is the
-cleanest invariant but breaks existing callers this late.
+**Options.**
+- **(a)** Run the real-LLM lane across all seven sessions against the 15-edge gold.
+- **(b)** Run it on the sessions that carry the planted operators only — cheaper, partial denominator.
+- **(c)** Don't run it; ship on the code-path evidence plus dogfooding captures.
+- **(d)** Use dogfooding captures as the measurement substrate for now, and revisit later.
 
-> **OVERRIDES:** Postel's robustness principle on the write boundary ("be liberal in what you accept",
-> i.e. accept both the alternate MITIGATES form and point-level `CORRECTS` for supersession) — because
-> two accepted spellings of one intent push the ambiguity into every downstream reader permanently,
-> where normalising at the boundary resolves it once.
+**Note on (c)/(d):** the owner's position is that dogfooding **can** be a substrate if needed, that it
+is not an ideal default, and that it should be judged case by case. So (d) is a legitimate candidate,
+not a contradiction — and if it is chosen, saying *why this case* is the thing that keeps it a decision
+rather than a habit.
+
+---
+
+## Q2 — what does `MITIGATES` mean, and which shape is canonical?
+
+**The problem: one name, two shapes, and only one of them documented.**
+
+1. **Documented — a caveat attached to a relationship.** `mitigated_by`
+   (`docs/ONTOLOGY.md:435-456`, §3.9): `(op:Point {is_operator:true})-[:mitigated_by]->(m:Point)`, with
+   `mitigation_strength` in `[0.10, 0.50]` dampening the relationship's weight
+   (`w_eff = w * (1 - strength)`). Backed by a **recorded product decision** (#2315, pinned
+   2026-09-07, *"mitigation is a GRADED DAMPENER, not a refutation"*) and a hard rule that the edge may
+   originate **only** from an `is_operator:true` Point.
+2. **Undocumented — a plain edge between two points.** `sdk.create_operator` accepts
+   `op_type="MITIGATES"` in the same allowlist as `IMPL`/`NAND` (`tortoise/sdk.py:6705`), i.e. as a
+   generic Point → Point operator edge. The ontology's operator table (`:295-338`) defines `IMPL`,
+   `NAND`, `hasPart`, `CORRECTS`, `TAGGED` — and contains **no `MITIGATES` row**.
+
+**How they meet.** The extraction contract's F1 instruction (`tortoise/extractor_v2.py:281`) asks the
+model for `{"op_type":"MITIGATES", "target_edge":{…}, "strength":…}` — the point-to-point payload shape
+used to express meaning 1, with `target_edge` naming the relationship to dampen.
+
+**Options.**
+- **(a)** Reserve `MITIGATES` for meaning 1 (caveat-on-a-relationship); stop the generic writer
+  accepting it as a bare point-to-point edge and route those writes through `mitigate_operator`; add
+  the missing row to the ontology's operator table so the documented vocabulary matches what the code
+  accepts.
+- **(b)** Treat both shapes as legitimate and document both — cheapest, but the ontology table still
+  gains a row, and every reader must handle two spellings of one name.
+- **(c)** Rename one of them so the collision disappears.
+
+---
+
+## Not a decision — F2
+
+An earlier revision of this ledger listed "a SUPERSEDE expressed as a point-level `CORRECTS`" as a
+second question. **It is not one.** `CORRECTS` is already defined at `docs/ONTOLOGY.md:298` with its
+supersession/invalidation semantics (§4.7), and the extraction contract's point-level supersede folds
+into exactly that. Withdrawn.
