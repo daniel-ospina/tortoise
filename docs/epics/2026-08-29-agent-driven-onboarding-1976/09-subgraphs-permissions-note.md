@@ -16,7 +16,7 @@ aboutObjects: tortoise
 
 ## Current design baseline (verified)
 
-- **One FalkorDB graph per org**: `graph_name = f"team_{team_id}"` (hosted_api.py). Org = the single tenant boundary + namespace.
+- **One FalkorDB graph per org**: `graph_name = f"org_{org_id}"` (hosted_api.py). Org = the single tenant boundary + namespace.
 - **No subgraph concept exists.**
 - **Permission management explicitly deferred** (epic W10/RBAC: "who can read/query what, data-access tiers per member").
 - Actors (humans + agents) are Subjects in the graph — uniform actor model (ONTOLOGY: Subject = "any entity that can act").
@@ -52,7 +52,7 @@ Notion (workspace → teamspace → page → row), Confluence (global → space 
 ## Design implications (cheap future-proofing pins — NO scope change)
 
 1. **Treat `graph_name` as a namespace key, not an access domain.** Nothing in the SDK should assume "one graph = one ACL domain." Keep subgraph as an *optional* dimension on reads/writes. (This is the line added to W2 #1998.)
-2. **Cheapest future path = property-based subgraph scoping INSIDE the one org graph**, NOT per-subgraph named graphs (named graphs sever cross-subgraph edges + EP propagation). The existing `MemoryScope.filter(team_id, memory_types)` protocol is already a proto-subgraph axis — `memory_types` is effectively "decisions-only vs sources-only" today. Extending to a `subgraph_id`/scope field (default org-wide) makes per-subgraph ACLs a later policy-map + query filter, not a migration.
+2. **Cheapest future path = property-based subgraph scoping INSIDE the one org graph**, NOT per-subgraph named graphs (named graphs sever cross-subgraph edges + EP propagation). The existing `MemoryScope.filter(org_id, memory_types)` protocol is already a proto-subgraph axis — `memory_types` is effectively "decisions-only vs sources-only" today. Extending to a `subgraph_id`/scope field (default org-wide) makes per-subgraph ACLs a later policy-map + query filter, not a migration.
 3. **Store provenance on every node/edge now; store security scope on GOVERNING CONTAINERS (inheritance down) with node-level overrides only for exceptions** (creator actor, org, memory type, subgraph_id, validity window). Immutable provenance is sufficient for RETROSPECTIVE permission/retention checks — no ACL machinery needed until W10/RBAC. (R1 from ChatGPT comparison: not scope-on-every-node.)
 4. **Don't bake ACLs into the graph** (no node-level ACL edges, no per-property permission predicates). Neo4j's own docs warn property-level ACLs add significant query overhead; Mem0/MemFabric/Dust converge on storage = scoped, enforcement = API layer. Tortoise's MCP/server layer is the right enforcement point.
 5. **Defer but don't foreclose**: whether subgraph access is additive (most-permissive-wins) or deny-override — pick in the RBAC phase; the data model should not presuppose inheritance.

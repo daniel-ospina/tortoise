@@ -1,0 +1,114 @@
+# Expected nodeids for the d14 embedded_only step (#4207).
+#
+# WHY THIS FILE IS CHECKED IN: the step's own manifest is generated from
+# `--collect-only` of the SAME tree, so a gate/flag that removes a test
+# removes it from both sides and the check stays green. This list is the
+# FROZEN known-good set: every one of these must still appear as a junitxml
+# <testcase> (passed OR skipped) or the run reds, naming the one that
+# vanished. Supersets are fine — new marked tests need no edit.
+#
+# WHAT IS IN THE 69 ENTRIES — two kinds, and they assert different things:
+#   * 37 are real test nodeids (`path::test_name`): that test is still COLLECTED.
+#   * 32 are module-level collection-abort markers, spelled `path::dotted.module`
+#     (pytest's synthetic <testcase> with an empty classname). Each pins that the
+#     module STILL ABORTS AT COLLECTION in this lane. THREE gate families produce
+#     them, and the per-family counts are listed here because a marker whose
+#     mechanism is unnamed reads as spurious — the hosted E2E suite is not the only
+#     one, and checking e.g. tests/test_capabilities_endpoint.py against a
+#     hosted-only story invites exactly the cleanup this file exists to prevent:
+#       14  hosted E2E — `tests/e2e/hosted/…`, gated by `skip_unless_hosted_e2e()`
+#       10  opt-in e2e suites — gated on a `RUN_*_E2E` variable, skipped by default
+#        8  docker-lane modules — gated on `TORTOISE_DB_URI` (tier-2 embedded legs skip)
+#     Note the weaker claim: if every test in such a module were deleted, the marker
+#     would remain. Removing the module-level gate makes the module collect instead,
+#     so the marker vanishes and the run reds. Both counts on this line and the
+#     per-family split are pinned by tests/test_ci_expected_manifests.py.
+#
+# allow-skipped: tests/test_fork_safety_3845.py=2
+#   The OUTCOME half of the same check (issue #4215): a nodeid that is still
+#   COLLECTED but only SKIPPED satisfies "every frozen nodeid is present" while the
+#   test never ran — the shape a test-level `if …: pytest.skip(…)` produces, which
+#   no source scan closes. This file's two darwin-gated tests skip by design off
+#   darwin (the registry states the same boundary); a THIRD skip here is a gate
+#   evasion and reds, naming the nodeids. The module-level markers above are exempt
+#   by class (their skip IS their expected state), so only a real test counts
+#   against the budget.
+#
+# PROVENANCE (regenerate, never hand-edit): the 69 entries are the junitxml
+# <testcase> set of CI run 35518962357 (head fd23a4033), job
+# test-d14-hosted-api, artifact junit-d14.xml — reconstructed with
+# tools/skip-guard.py's own `reconstruct_nodeid`, so the spelling cannot diverge
+# from what the guard compares against.
+# Regenerate by re-running the d14 job and extracting its junit, NOT with
+# `--emit-manifest`: that flag runs `--collect-only`, which emits NOTHING for a
+# module that aborts at collection, so it would silently drop all 32 markers and
+# replace this header.
+tests/e2e/hosted/test_01_signup_provision.py::tests.e2e.hosted.test_01_signup_provision
+tests/e2e/hosted/test_02_free_tier_limits.py::tests.e2e.hosted.test_02_free_tier_limits
+tests/e2e/hosted/test_03_billing_upgrade.py::tests.e2e.hosted.test_03_billing_upgrade
+tests/e2e/hosted/test_04_tenant_isolation.py::tests.e2e.hosted.test_04_tenant_isolation
+tests/e2e/hosted/test_05_backup_restore.py::tests.e2e.hosted.test_05_backup_restore
+tests/e2e/hosted/test_06_export_delete.py::tests.e2e.hosted.test_06_export_delete
+tests/e2e/hosted/test_07_security_baseline.py::tests.e2e.hosted.test_07_security_baseline
+tests/e2e/hosted/test_08_multi_team.py::tests.e2e.hosted.test_08_multi_team
+tests/e2e/hosted/test_09_github_integration.py::tests.e2e.hosted.test_09_github_integration
+tests/e2e/hosted/test_10_session_capture.py::tests.e2e.hosted.test_10_session_capture
+tests/e2e/hosted/test_11_mcp_connect.py::tests.e2e.hosted.test_11_mcp_connect
+tests/e2e/hosted/test_12_selfhost_migration.py::tests.e2e.hosted.test_12_selfhost_migration
+tests/e2e/hosted/test_13_claim.py::tests.e2e.hosted.test_13_claim
+tests/e2e/hosted/test_14_onboarding_journey.py::tests.e2e.hosted.test_14_onboarding_journey
+tests/e2e/test_dashboard_billing.py::tests.e2e.test_dashboard_billing
+tests/e2e/test_dashboard_gate.py::tests.e2e.test_dashboard_gate
+tests/e2e/test_dashboard_identity.py::tests.e2e.test_dashboard_identity
+tests/e2e/test_dashboard_onboarding.py::tests.e2e.test_dashboard_onboarding
+tests/e2e/test_graphs_management.py::tests.e2e.test_graphs_management
+tests/e2e/test_keys_table_mixed.py::tests.e2e.test_keys_table_mixed
+tests/e2e/test_legal_pages.py::tests.e2e.test_legal_pages
+tests/e2e/test_session_login_flow.py::tests.e2e.test_session_login_flow
+tests/e2e/test_ship_test_onboarding.py::tests.e2e.test_ship_test_onboarding
+tests/e2e/test_signup_form_safety_e2e.py::tests.e2e.test_signup_form_safety_e2e
+tests/test_audit.py::test_cli_error_paths_clean_one_line[embedded_busy]
+tests/test_capabilities_endpoint.py::tests.test_capabilities_endpoint
+tests/test_eval_ingest_cache.py::tests.test_eval_ingest_cache
+tests/test_export_delete.py::TestDriftCounterWiring::test_drift_counter_classifies_real_eviction
+tests/test_export_delete.py::TestDriftCounterWiring::test_drift_counter_ignores_same_path_pop
+tests/test_fork_safety_3845.py::test_embedded_choke_point_runs_at_the_proven_fork_safe_level
+tests/test_fork_safety_3845.py::test_env_override_is_honoured_and_loud
+tests/test_fork_safety_3845.py::test_fork_child_does_not_hang_with_the_production_config
+tests/test_fork_safety_3845.py::test_without_the_fix_the_same_race_hangs_a_child
+tests/test_fork_slot_wedge_3845.py::TestForkRefusalDetection::test_engine_refusal_is_recognised_through_the_exception_chain
+tests/test_fork_slot_wedge_3845.py::TestForkRefusalDetection::test_unrelated_copy_error_is_not_a_fork_refusal
+tests/test_fork_slot_wedge_3845.py::TestForkSlotRecovery::test_a_snapshot_child_is_never_killed
+tests/test_fork_slot_wedge_3845.py::TestForkSlotRecovery::test_hung_module_fork_child_is_killed_and_the_next_copy_succeeds
+tests/test_fork_slot_wedge_3845.py::TestForkSlotRecovery::test_no_embedded_socket_means_no_recovery_attempt
+tests/test_fork_slot_wedge_3845.py::TestRestoreSurvivesWedge::test_fork_free_promotion_refuses_a_non_empty_destination
+tests/test_fork_slot_wedge_3845.py::TestRestoreSurvivesWedge::test_retry_exhaustion_surfaces_a_wedge_so_the_fallback_engages
+tests/test_fork_slot_wedge_3845.py::TestRestoreSurvivesWedge::test_unrecoverable_wedge_promotes_fork_free_without_lying
+tests/test_fork_slot_wedge_3845.py::TestRestoreSurvivesWedge::test_wedged_slot_is_released_and_reported_distinctly
+tests/test_fork_slot_wedge_3845.py::TestScannerIsWidthIndependent::test_a_long_titled_child_is_visible_at_a_narrow_width
+tests/test_fork_slot_wedge_3845.py::TestTitleWaitIsStillStrict::test_a_command_line_that_only_mentions_the_title_does_not_pass
+tests/test_fork_slot_wedge_3845.py::TestTitleWaitIsStillStrict::test_an_untitled_child_still_fails_the_wait
+tests/test_hosted_api.py::test_make_sdk_concurrent_first_calls_single_anchor
+tests/test_hosted_api.py::test_make_sdk_rebinds_stale_anchor
+tests/test_hosted_api.py::test_make_sdk_reuses_healthy_anchor
+tests/test_hosted_api.py::test_registry_anchor_concurrent_first_calls_single_anchor
+tests/test_hosted_api.py::test_registry_anchor_reuses_healthy_anchor
+tests/test_index_directory.py::test_e2e9_cross_process_embedded_overlap
+tests/test_indexes.py::test_embedded_reopen_false_equality_correct
+tests/test_invite_fusion_docker.py::tests.test_invite_fusion_docker
+tests/test_lme_m6_evidence.py::test_session_id_written_by_sdk_capture_path
+tests/test_onboard_prompt_ref.py::test_init_missing_falkordblite_prints_install_guidance
+tests/test_onboarding_false_completion_repair.py::tests.test_onboarding_false_completion_repair
+tests/test_onboarding_seed_endpoint.py::tests.test_onboarding_seed_endpoint
+tests/test_onboarding_state_split.py::tests.test_onboarding_state_split
+tests/test_onboarding_w4_settings.py::tests.test_onboarding_w4_settings
+tests/test_onboarding_w6_capture_disclosure.py::tests.test_onboarding_w6_capture_disclosure
+tests/test_pack_state.py::TestBackfillScript::test_dry_run_default_makes_no_writes
+tests/test_precision_leak_4028.py::test_default_has_no_floor
+tests/test_precision_leak_4028.py::test_floor_enabled_leg_trace_declares_the_floor
+tests/test_precision_leak_4028.py::test_floor_enabled_relevant_captured_turn_within_limit_10
+tests/test_precision_leak_4028.py::test_floor_enabled_unrelated_query_returns_empty
+tests/test_precision_leak_4028.py::test_floor_env_zero_is_off
+tests/test_precision_leak_4028.py::test_real_relevant_pair_survives_by_default
+tests/test_session_extraction_modes.py::test_default_llm_extracts_points
+tests/test_session_extraction_modes.py::test_hosted_capture_records_deepseek_direct_route

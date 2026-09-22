@@ -90,13 +90,11 @@ on:
   push:
     branches: [main]
   pull_request:
-  schedule:
-    - cron: '0 4 * * *'   # nightly full run — tier-3 backstop (#1021)
 
 # #1008/#1021: the `changes` job runs the tiered selector
 # (tools/ci_selection.py) — always runs, always emits the audit artifact.
-# PRs run tier 1 (curated smoke) + matched-surface tests; push/schedule run
-# the full matrix. The REQUIRED check is `python-ci-gate` (branch
+# PRs run tier 1 (curated smoke) + matched-surface tests; push runs the
+# full matrix. The REQUIRED check is `python-ci-gate` (branch
 # protection), which aggregates the matrix. Job id `python-ci-gate` is
 # load-bearing: do NOT rename it or add a `name:` field. welcome-e2e
 # (#801 live-signup monitor) lives in its own scheduled workflow.
@@ -106,8 +104,11 @@ on:
 # PRs skip both; tier-2 PRs run only their surface's slow files. NOTE:
 # config/* falls through to the core surface, so config-only PRs (the
 # manifest edits) run both legs — conservative and correct.
-# trunk (push) + nightly (schedule) + unknown/shared-module PRs keep the
-# full runs (the coverage backstop is never weakened).
+# trunk (push) + unknown/shared-module PRs keep the full runs.
+# #4367: the nightly schedule was removed — push-to-main is now the ONLY
+# full-matrix trigger (tests run when the functionality they cover changes,
+# not on a timer). The selector still accepts --event schedule for any
+# future caller; nothing in this workflow emits that event.
 
 concurrency:
   # Per-PR cancel only: on `pull_request` github.ref is refs/pull/N/merge so
@@ -151,7 +152,7 @@ jobs:
   changes:
     # #1008/#1021: selection job — always runs, always emits the artifact.
     # Runs the tiered selector (tools/ci_selection.py): tier 1 smoke always;
-    # matched surfaces on code PRs; full on push/schedule/shared/unknown.
+    # matched surfaces on code PRs; full on push/shared/unknown.
     runs-on: ubuntu-latest
     outputs:
       python: ${{ steps.select.outputs.python }}
@@ -178,13 +179,13 @@ jobs:
       - name: Tiered selection
         id: select
         run: |
-          if [ "${{ github.event_name }}" = "push" ] || [ "${{ github.event_name }}" = "schedule" ]; then
+          if [ "${{ github.event_name }}" = "push" ]; then
             SEL=$(python3 tools/ci_selection.py --event "${{ github.event_name }}")
             echo "python=true" >> "$GITHUB_OUTPUT"
           else
             BASE="${{ github.event.pull_request.base.sha }}"
             [ -n "$BASE" ] || BASE="origin/main"
-            CHANGED=$(git diff --name-only "$BASE...HEAD" 2>/dev/null || git diff --name-only "$BASE" HEAD)
+            CHANGED=$(git diff --no-renames --name-only "$BASE...HEAD" 2>/dev/null || git diff --no-renames --name-only "$BASE" HEAD)
             echo "changed files:"
             echo "$CHANGED"
             SEL=$(printf '%s\n' "$CHANGED" | python3 tools/ci_selection.py --changed-files - --event pull_request)
@@ -196,11 +197,11 @@ jobs:
           echo "test_files=$(echo "$SEL" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["test_files"]))')" >> "$GITHUB_OUTPUT"
           # #1371: slow files run ONLY in test-slow — single source of truth is
           # config/ci-surfaces.yml (the selector emits them on every path, so
-          # this echo is safe for push/schedule too).
+          # this echo is safe for push too).
           echo "slow_files=$(echo "$SEL" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["slow_files"]))')" >> "$GITHUB_OUTPUT"
           # #2147/#2148: the selector emits the diff-gate keys on EVERY path
           # (full selections + tier-2 + docs-only) so these echoes are safe for
-          # push/schedule too. slow_selected is space-joined BARE names (the
+          # push too. slow_selected is space-joined BARE names (the
           # test-slow matrix format — no .py suffix) so a leg can case-match it
           # against ${{ matrix.files }} in the tier-2 shape.
           echo "slow_run=$(echo "$SEL" | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["slow_run"]).lower())')" >> "$GITHUB_OUTPUT"
@@ -243,8 +244,8 @@ jobs:
           # toString) — every full-matrix run collected tests/Array.py.
           echo "matrix_a=$(echo "$MATRIX" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["half_a"]))')" >> "$GITHUB_OUTPUT"
           echo "matrix_b=$(echo "$MATRIX" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["half_b"]))')" >> "$GITHUB_OUTPUT"
-          # Epic #1647 Task 9: the 17-file embedded carve-out leg (E2E-4) —
-          # excluded from both docker halves by the selector.
+          # Epic #1647 Task 9: the embedded carve-out leg (E2E-4) — excluded
+          # from both docker halves by the selector.
           echo "carve_out=$(echo "$MATRIX" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["carve_out"]))')" >> "$GITHUB_OUTPUT"
       - name: Tier-2 duration split (#1473)
         # #1473: LPT-pack the tier-2 selected files across halves a/b by
@@ -301,7 +302,7 @@ jobs:
     # Cost: one extra job (~20s: checkout + setup-python + pyyaml), against a
     # 25-minute suite that used to be silently withheld.
     #
-    # Unconditional on every event (push/PR/schedule) — same as before. Needs
+    # Unconditional on every event (push/PR) — same as before. Needs
     # pyyaml only: tools/ci_selection.py imports it locally.
     #
     # timeout-minutes: this job now owns a network install (`pip install
@@ -466,54 +467,33 @@ jobs:
           key: hf-embedding-cache-v2-${{ runner.os }}
           restore-keys: |
             hf-embedding-cache-v2-${{ runner.os }}-
-      - name: Pre-cache embedding model (BAAI/bge-small-en-v1.5)
-        # Best-effort: when the model is already cached (actions/cache
-        # restore) this is a no-op. When the download succeeds, the suite
-        # exercises the real embedding path. When it fails (HF unreachable
-        # from runner — observed: "couldn't connect to huggingface.co"),
-        # the runtime already degrades gracefully to TF-IDF fallback
-        # (embeddings.py catches load failure), so a failed download is a
-        # WARNING, never a job failure.
-        # #964: a hung HF download (stalled TCP, no error raised) would
-        # otherwise stall the step for the full job cap with no output —
-        # step-level timeout bounds it; continue-on-error turns the timeout
-        # into a warning, not a failure. #1211-class: on HF-unreachable
-        # runners, tight retries (3 × 5s backoff) fail fast so the suite
-        # falls back to TF-IDF instead of burning the fast-leg budget.
-        continue-on-error: true
+      - name: Embedding model REQUIRED (BAAI/bge-small-en-v1.5) — dense retrieval leg
+        # #2573: this step OWNS "the embedder is required". It exits non-zero when
+        # the pinned model cannot be obtained, with a named ::warning::/::error::
+        # annotation and a step-summary block — so a runner without the dense leg
+        # fails HERE, by name, instead of silently running the keyword-only TF-IDF
+        # fallback (tortoise/embeddings.py) and reporting a green pass.
+        #
+        # `continue-on-error: true` was deliberately REMOVED. That is safe because
+        # the step is now genuinely able to obtain the model: the old inline probe
+        # set HF_HUB_OFFLINE=1 before importing sentence_transformers, and
+        # huggingface_hub freezes that variable at import, so its download retries
+        # could never reach the network. With the probe scoped to
+        # `local_files_only=True` a cold cache really does download (verified
+        # end-to-end), so a failure here now means the model is genuinely
+        # unobtainable — and the honest outcome is a red, ATTRIBUTED run rather
+        # than the cascade #3760's fail-closed skip-guard would otherwise produce.
+        #
+        # #964: the step-level timeout still bounds a hung download (stalled TCP,
+        # no error raised) that would otherwise stall the step for the full job cap.
         timeout-minutes: 6
         run: |
-          python - <<'EOF'
-          import os, time
-          # #1349 T10: the CI-cached model must match tortoise/embeddings.py
-          # EMBEDDING_MODEL (BAAI/bge-small-en-v1.5) — cache key v2 ensures a
-          # stale all-MiniLM v1 cache can never serve these runs.
-          MODEL = "BAAI/bge-small-en-v1.5"
-          REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"  # P2-2: pinned (VULN-001)
-          os.environ["HF_HUB_OFFLINE"] = "1"
-          from sentence_transformers import SentenceTransformer
-          try:
-              SentenceTransformer(MODEL, revision=REVISION)
-              print("embedding model: cached, no download needed")
-          except Exception:
-              print("embedding model: not cached — downloading (with retries)")
-              del os.environ["HF_HUB_OFFLINE"]
-              for attempt in range(1, 4):
-                  try:
-                      SentenceTransformer(MODEL, revision=REVISION)
-                      print("embedding model: downloaded")
-                      break
-                  except Exception as e:
-                      print(f"download attempt {attempt}/3 failed: {e}")
-                      if attempt == 3:
-                          raise
-                      time.sleep(5 * attempt)
-          EOF
+          python3 tools/embedder_provision.py --attempts 3 --backoff 5
       - name: Compute docker URI (epic #1647 Task 9 — P3 flip)
         # D-3=A (the P2 flip) + Task 9 Step 1 (the P3 flip): BOTH fast
         # halves run on the provisioned passworded falkordb service (above)
         # via a job-level TORTOISE_DB_URI; the embedded lane is retired from
-        # the main test job (the 17 carve-out files moved to the dedicated
+        # the main test job (the carve-out files moved to the dedicated
         # URI-unset carve-out job — E2E-4). The matrix include cannot
         # condition on `full` (plan-review P1-7), so the URI is computed
         # run-step-local: full==true -> URI + EXPECT_URI on BOTH halves (the
@@ -577,11 +557,11 @@ jobs:
         # The D-3=A instrumented streak's producer half: the fast-matrix job
         # runs PER-LEG, so exactly ONE leg must write the producer marker or
         # last-writer-wins clobbers (cycle-5 P1-7 option (b)). Gated on
-        # half==b AND the post-merge trigger (push/schedule — PR runs never
-        # mutate the canary artifact). The marker rides the artifact upload
-        # (below) and is consumed by the canary-streak job (needs: [test],
-        # artifacts-only — cycle-6 P1-7).
-        if: github.event_name == 'push' || github.event_name == 'schedule'
+        # half==b AND the post-merge trigger (push — PR runs never mutate the
+        # canary artifact). The marker rides the artifact upload (below) and
+        # is consumed by the canary-streak job (needs: [test], artifacts-only
+        # — cycle-6 P1-7).
+        if: github.event_name == 'push'
         run: |
           if [ "${{ matrix.half }}" = "b" ]; then
             python3 - <<'EOF'
@@ -670,6 +650,15 @@ jobs:
           wait $HB_PID 2>/dev/null || true
           echo "==================== pytest summary (tail) ===================="
           tail -n 300 /tmp/pytest.log
+          # Emit the FAILED/ERROR nodeids explicitly. Under `-v` the
+          # `short test summary info` block sits far from the end (a ~10.8k
+          # line log puts the FAILED lines ~2.4k lines back), so the tail
+          # above can omit every nodeid. The admin-merge rail
+          # (scripts/ci-failure-set.sh) derives the head's failure SET from
+          # THIS job log, so without the nodeids it sees an unattributable
+          # failure and refuses — a refusal, not a comparison (#4453).
+          echo "==================== pytest failure nodeids ===================="
+          grep -E '^(FAILED|ERROR) ' /tmp/pytest.log || echo "(no FAILED/ERROR nodeids)"
           # #880: 124 = timeout SIGINT kill; 137 = -k 10 SIGKILL after pytest
           # ignored INT mid-test; 2 = pytest's own SIGINT summary — the count
           # banner must print for all three (previously only 124 matched,
@@ -818,7 +807,15 @@ jobs:
             # index_cli/index_restore legitimately spawn redislite servers
             # whose atexit close races the end-sweep). Bound the assert to
             # absorb those known exceptions; a real leak still reds (E2E-7).
-            THRESHOLD=6
+            # #2032: the docker half is not always ~0 — the SAME
+            # embedded-file-contract atexit race leaves strays on the full
+            # matrix too (trunk run 34928488659 measured 7 orphans; pytest
+            # rc 1, with the only failures being the four known test-side
+            # defects — i.e. no leak-class failure at all, so the old 6 red'd
+            # on the leak counter alone). Match the tier-2 shape's 12: same
+            # exception class, same "a per-test leaky file spawns dozens; 12
+            # still catches it" bar.
+            THRESHOLD=12
           else
             # Tier-2 embedded shape (full=false PR runs): the SAME
             # embedded-file-contract files run in the fast-gate halves and
@@ -848,8 +845,8 @@ jobs:
     # #2148 (2026-09-02-ci-audit F2): diff-gated — the full committed slow
     # list used to run on EVERY PR (docs-only PR #2132 paid 29m43 + 29m08
     # runner-min for a 1-file docs change). Runs when the selector says so:
-    # full selections (push to main / nightly schedule / unknown-path or
-    # shared-module PRs — the trunk + nightly backstop, NEVER dropped) or a
+    # full selections (push to main / unknown-path or
+    # shared-module PRs — the trunk backstop, NEVER dropped) or a
     # PR whose matched surfaces own slow-leg files (slow_run). Tier-2 PRs
     # run only their surface's slow files (slow_selected, intersected with
     # each leg's committed list in the manifest/run steps); docs/website/
@@ -971,41 +968,19 @@ jobs:
           key: hf-embedding-cache-v2-${{ runner.os }}
           restore-keys: |
             hf-embedding-cache-v2-${{ runner.os }}-
-      - name: Pre-cache embedding model (BAAI/bge-small-en-v1.5)
-        # Same best-effort contract as the fast job: no mid-suite HF access;
-        # download failure is a warning (TF-IDF fallback), never a failure.
-        # #964: step-level timeout bounds a hung download (stalled TCP with
-        # no error) that would otherwise stall the step for the full 90-min
-        # job cap; continue-on-error makes the timeout a warning.
-        continue-on-error: true
+      - name: Embedding model REQUIRED (BAAI/bge-small-en-v1.5) — dense retrieval leg
+        # #2573: same contract as the fast job — the step OWNS "the embedder is
+        # required" and fails BY NAME when the pinned model cannot be obtained,
+        # with a ::warning::/::error:: annotation. Without this the slow legs
+        # would run the keyword-only TF-IDF fallback and could report green.
+        # continue-on-error was deliberately REMOVED — see the fast job's note.
+        #
+        # #964: the step-level timeout still bounds a hung download (stalled TCP,
+        # no error raised) that would otherwise stall the step for the full 90-min
+        # job cap; a timeout now FAILS the step, which is the honest outcome.
         timeout-minutes: 10
         run: |
-          python - <<'EOF'
-          import os, time
-          # #1349 T10: the CI-cached model must match tortoise/embeddings.py
-          # EMBEDDING_MODEL (BAAI/bge-small-en-v1.5) — cache key v2 ensures a
-          # stale all-MiniLM v1 cache can never serve these runs.
-          MODEL = "BAAI/bge-small-en-v1.5"
-          REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"  # P2-2: pinned (VULN-001)
-          os.environ["HF_HUB_OFFLINE"] = "1"
-          from sentence_transformers import SentenceTransformer
-          try:
-              SentenceTransformer(MODEL, revision=REVISION)
-              print("embedding model: cached, no download needed")
-          except Exception:
-              print("embedding model: not cached — downloading (with retries)")
-              del os.environ["HF_HUB_OFFLINE"]
-              for attempt in range(1, 6):
-                  try:
-                      SentenceTransformer(MODEL, revision=REVISION)
-                      print("embedding model: downloaded")
-                      break
-                  except Exception as e:
-                      print(f"download attempt {attempt}/5 failed: {e}")
-                      if attempt == 5:
-                          raise
-                      time.sleep(10 * attempt)
-          EOF
+          python3 tools/embedder_provision.py --attempts 5 --backoff 10
       - name: Drift guard — legs cover slow_files minus carve-out (#1471)
         # #1471: the committed leg lists MUST stay the full slow-file set — a
         # new slow file added to config/ci-surfaces.yml `slow_files:` that
@@ -1142,6 +1117,15 @@ jobs:
           wait $HB_PID 2>/dev/null || true
           echo "==================== pytest summary (tail) ===================="
           tail -n 300 /tmp/pytest.log
+          # Emit the FAILED/ERROR nodeids explicitly. Under `-v` the
+          # `short test summary info` block sits far from the end (a ~10.8k
+          # line log puts the FAILED lines ~2.4k lines back), so the tail
+          # above can omit every nodeid. The admin-merge rail
+          # (scripts/ci-failure-set.sh) derives the head's failure SET from
+          # THIS job log, so without the nodeids it sees an unattributable
+          # failure and refuses — a refusal, not a comparison (#4453).
+          echo "==================== pytest failure nodeids ===================="
+          grep -E '^(FAILED|ERROR) ' /tmp/pytest.log || echo "(no FAILED/ERROR nodeids)"
           # #880: 124 = timeout SIGINT kill; 137 = -k 10 SIGKILL after pytest
           # ignored INT mid-test; 2 = pytest's own SIGINT summary — the count
           # banner must print for all three (previously only 124 matched,
@@ -1189,9 +1173,11 @@ jobs:
           fi
 
       - name: Assert no redislite orphans (issue #1005 / epic #1647 E2E-7)
-        # The slow legs are docker surfaces at P3 — same lane-aware ~0
-        # threshold as the fast job (full==true -> 0; tier-2 embedded shape
-        # keeps the bounded assert). Kill-aware downgrade per #1371.
+        # The slow legs are docker surfaces at P3 and do NOT share the fast
+        # job's bar: full==true asserts ~0 here, while the fast job's full
+        # branch absorbs the embedded-file-contract atexit race at 12 (see its
+        # assert). This leg runs a narrower surface, so it stays strict.
+        # tier-2 keeps the bounded assert. Kill-aware downgrade per #1371.
         if: always()
         run: |
           set +e
@@ -1306,41 +1292,19 @@ jobs:
           key: hf-embedding-cache-v2-${{ runner.os }}
           restore-keys: |
             hf-embedding-cache-v2-${{ runner.os }}-
-      - name: Pre-cache embedding model (BAAI/bge-small-en-v1.5)
-        # Same best-effort contract as the sibling jobs: no mid-suite HF
-        # access; the live seq test exercises compute_embedding via create_point.
-        # #964 (review): same hung-download guard as test/test-slow — this
-        # job's 15-min cap makes a stalled download strictly worse (it would
-        # burn the whole budget and cancel the run step with NO summary).
-        continue-on-error: true
+      - name: Embedding model REQUIRED (BAAI/bge-small-en-v1.5) — dense retrieval leg
+        # #2573: this job runs its live seq guard through compute_embedding via
+        # create_point, and — unlike the fast/slow legs — carries NO skip-guard,
+        # so a missing model had NO loud signal at all here. This step is it.
+        # continue-on-error was deliberately REMOVED — see the fast job's note.
+        #
+        # #964 (review): same hung-download guard as test/test-slow — this job's
+        # 15-min cap makes a stalled download strictly worse (it would burn the
+        # whole budget and cancel the run step with NO summary), so the timeout
+        # now fails the step outright.
         timeout-minutes: 10
         run: |
-          python - <<'EOF'
-          import os, time
-          # #1349 T10: the CI-cached model must match tortoise/embeddings.py
-          # EMBEDDING_MODEL (BAAI/bge-small-en-v1.5) — cache key v2 ensures a
-          # stale all-MiniLM v1 cache can never serve these runs.
-          MODEL = "BAAI/bge-small-en-v1.5"
-          REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"  # P2-2: pinned (VULN-001)
-          os.environ["HF_HUB_OFFLINE"] = "1"
-          from sentence_transformers import SentenceTransformer
-          try:
-              SentenceTransformer(MODEL, revision=REVISION)
-              print("embedding model: cached, no download needed")
-          except Exception:
-              print("embedding model: not cached — downloading (with retries)")
-              del os.environ["HF_HUB_OFFLINE"]
-              for attempt in range(1, 6):
-                  try:
-                      SentenceTransformer(MODEL, revision=REVISION)
-                      print("embedding model: downloaded")
-                      break
-                  except Exception as e:
-                      print(f"download attempt {attempt}/5 failed: {e}")
-                      if attempt == 5:
-                          raise
-                      time.sleep(10 * attempt)
-          EOF
+          python3 tools/embedder_provision.py --attempts 5 --backoff 10
       - name: Run live concurrency tests (real FalkorDB sidecar)
         env:
           HF_HUB_OFFLINE: "1"
@@ -1354,6 +1318,15 @@ jobs:
           rc=$?
           echo "==================== pytest summary (tail) ===================="
           tail -n 120 /tmp/pytest.log
+          # Emit the FAILED/ERROR nodeids explicitly. Under `-v` the
+          # `short test summary info` block sits far from the end (a ~10.8k
+          # line log puts the FAILED lines ~2.4k lines back), so the tail
+          # above can omit every nodeid. The admin-merge rail
+          # (scripts/ci-failure-set.sh) derives the head's failure SET from
+          # THIS job log, so without the nodeids it sees an unattributable
+          # failure and refuses — a refusal, not a comparison (#4453).
+          echo "==================== pytest failure nodeids ===================="
+          grep -E '^(FAILED|ERROR) ' /tmp/pytest.log || echo "(no FAILED/ERROR nodeids)"
           # Skip-fail guard: live tests must RUN here, never skip (vacuity).
           # Matches BOTH pytest output formats (-v progress: "nodeid SKIPPED";
           # -rs summary: "SKIPPED [N] tests/file.py:line").
@@ -1536,8 +1509,8 @@ jobs:
           if-no-files-found: ignore
 
   test-carve-out:
-    # Epic #1647 E2E-4 (Task 9 Step 5): the 17-file embedded carve-out's CI
-    # home — the 342 tests that run embedded BY DESIGN (recovery auto-rebuild
+    # Epic #1647 E2E-4 (Task 9 Step 5): the embedded carve-out's CI home —
+    # the tests that run embedded BY DESIGN (recovery auto-rebuild
     # D2/D3, busy-error D11, reaper/chaos, backup-restore, migration
     # integration). URI is DELIBERATELY unset (the redirect would fire and
     # flip these files to the server lane); TORTOISE_TEST_CARVE_OUT=1 is the
@@ -1556,13 +1529,13 @@ jobs:
     # diff-unaware — a docs-only PR (#2132) paid 23m31 for the full 23-file
     # embedded set, and the job was the critical path of every main push.
     # Diff-gated on the selector's carve_out_run: full selections (push to
-    # main / nightly schedule / unknown-path or shared-module PRs — the
-    # trunk + nightly backstop, NEVER dropped) or a PR whose matched
+    # main / unknown-path or shared-module PRs — the
+    # trunk backstop, NEVER dropped) or a PR whose matched
     # surfaces own carve-out files (core/api/sdk/eval — the embedded /
     # daemon / registry / guard surfaces; a carve-out TEST file change
     # selects its owning surface, so it re-runs here too). docs/website/
     # config-only PRs (surfaces == [] -> carve_out_run == false) skip. When
-    # it runs it still runs the FULL 23-file carve_out leg (the embedded
+    # it runs it still runs the FULL carve_out leg (the embedded
     # set is one coherent E2E-4 surface — partial runs would weaken the
     # recovery/backup/migration guarantees; tier-2 legs already exclude
     # carve-out files, so this job is their only home on PRs).
@@ -1596,7 +1569,7 @@ jobs:
           echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
           python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b and not live" --output /tmp/expected-nodeids.txt
       - name: Run carve-out suite (embedded, URI unset — E2E-4)
-        # The 17-file embedded carve-out. Deliberately NO TORTOISE_DB_URI:
+        # The embedded carve-out. Deliberately NO TORTOISE_DB_URI:
         # the carve-out's embedded-specific assertions (recovery, busy-error,
         # reaper, backup-restore) must run against FalkorDBLite. junitxml +
         # -r fEs (the manifest's observed-set source); pytest-rc for the
@@ -1626,6 +1599,15 @@ jobs:
           wait $HB_PID 2>/dev/null || true
           echo "==================== pytest summary (tail) ===================="
           tail -n 200 /tmp/pytest.log
+          # Emit the FAILED/ERROR nodeids explicitly. Under `-v` the
+          # `short test summary info` block sits far from the end (a ~10.8k
+          # line log puts the FAILED lines ~2.4k lines back), so the tail
+          # above can omit every nodeid. The admin-merge rail
+          # (scripts/ci-failure-set.sh) derives the head's failure SET from
+          # THIS job log, so without the nodeids it sees an unattributable
+          # failure and refuses — a refusal, not a comparison (#4453).
+          echo "==================== pytest failure nodeids ===================="
+          grep -E '^(FAILED|ERROR) ' /tmp/pytest.log || echo "(no FAILED/ERROR nodeids)"
           if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] || [ "$rc" -eq 2 ]; then
             passed=$(grep -c ' PASSED' /tmp/pytest.log)
             failed=$(grep -c ' FAILED' /tmp/pytest.log)
@@ -1644,11 +1626,31 @@ jobs:
           RC=""
           [ -f "${RUNNER_TEMP:-/tmp}/pytest-rc" ] && RC=$(cat "${RUNNER_TEMP:-/tmp}/pytest-rc")
           if [ "$RC" = "0" ]; then
+            # BOTH guards must be able to red this step. It runs under `set +e`, and a
+            # `run:` block's status is its LAST command's — so an unguarded second
+            # invocation silently masked the first one's failure (the #1647 coverage
+            # guard's non-zero exit was discarded whenever the platform-gated guard
+            # passed). Accumulate the codes and exit non-zero if EITHER failed.
+            guard_rc=0
             if [ -s "${RUNNER_TEMP:-/tmp}/pytest-files" ]; then
-              python3 tools/skip-guard.py /tmp/pytest.log --junitxml=/tmp/junit.xml --manifest /tmp/expected-nodeids.txt
+              python3 tools/skip-guard.py /tmp/pytest.log --junitxml=/tmp/junit.xml --manifest /tmp/expected-nodeids.txt || guard_rc=1
             else
-              python3 tools/skip-guard.py /tmp/pytest.log
+              python3 tools/skip-guard.py /tmp/pytest.log || guard_rc=1
             fi
+            # #4215: the runtime half of the platform-gate guard. The manifest
+            # above is regenerated from THIS tree's --collect-only, so a gate that
+            # removes a test removes it from BOTH sides and the check stays green.
+            # This checked-in set is frozen: the platform-gated file's tests must
+            # still be COLLECTED — skipped counts, because the two darwin-gated
+            # ones legitimately skip on the ubuntu runners, and a skip still
+            # emits a <testcase>. A gate that hides one from collection cannot
+            # spell its way out of the junitxml. --manifest-only: this lane's
+            # skips are the exempt reason family, so the docker-calibrated
+            # matchers must not run here.
+            python3 tools/skip-guard.py /tmp/pytest.log \
+              --junitxml=/tmp/junit.xml \
+              --manifest config/ci-expected-nodeids/platform-gated.txt --manifest-only || guard_rc=1
+            exit $guard_rc
           else
             echo "pytest rc=$RC — skip guard skipped (job already red)"
           fi
@@ -1712,21 +1714,62 @@ jobs:
           python-version: '3.12'
       - name: Install package + test extras
         run: pip install -e '.[test,embeddings]'
-      - name: Run D14 hosted-api keepalive guards (embedded, URI unset — #2188)
-        # Deliberately NO TORTOISE_DB_URI (the D14 skip hook fires when URI
-        # is set); CARVE_OUT=1 permits the URI-less embedded run. Same -k as
-        # the #2172 proof gate.
+      - name: Run the embedded_only marker selection (URI unset — #4164)
+        # Deliberately NO TORTOISE_DB_URI (the autouse D-2 skip hook fires
+        # when a URI is set and would skip every marked test); CARVE_OUT=1 is
+        # the explicit URI-less opt-in.
+        #
+        # #4164: this job used to run `tests/test_hosted_api.py -k
+        # "concurrent_first_calls or …"` — a HAND LIST of the five D14 guards.
+        # A hand list covers only the marks someone remembered, and that is
+        # exactly what happened: of the marked tests in files OUTSIDE the
+        # carve-out set, those five ran here and the rest were collected-and-
+        # skipped on every docker leg and executed NOWHERE (test_audit's
+        # embedded_busy case, TestDriftCounterWiring, test_index_directory,
+        # test_indexes, test_lme_m6_evidence, test_onboard_prompt_ref,
+        # test_pack_state, test_session_extraction_modes). Selecting by the
+        # MARKER cannot drift: a new @pytest.mark.embedded_only test in ANY
+        # file — per-test, class-level, or class-body `pytestmark` — is picked
+        # up by the next run without editing this step. That is also why the
+        # step is pinned by tests/test_markers.py::
+        # test_ci_runs_the_embedded_only_marker_selection (it fails if this
+        # goes back to naming tests).
         run: |
           set -eo pipefail
-          timeout -s INT -k 10 15m python -m pytest tests/test_hosted_api.py \
-            -k "concurrent_first_calls or registry_anchor_reuses or reuses_healthy_anchor or rebinds_stale_anchor" \
+          timeout -s INT -k 10 15m python -m pytest tests/ -m embedded_only \
             -v --timeout=300 -p no:cacheprovider --junitxml=/tmp/junit-d14.xml -o junit_family=xunit1 2>&1 | tee /tmp/pytest-d14.log
-          # #2188 review P3-1: fail-closed on a silent all-skip — a URI leak
-          # or broadened skip hook would skip all 5 embedded_only guards and
-          # exit 0. Assert the 5 PASSED lines are actually present.
+          # Fail-closed on a silent all-skip — the #2188 review P3-1 shape,
+          # widened. The floor is 30 and the number is NOT arbitrary: the four
+          # marked files that are ALREADY carve-out registered (precision_leak
+          # 6 + test_hosted_api 5 + fork_slot_wedge 12 + fork_safety 4 = 27 marked,
+          # of which 25 PASS on the ubuntu runner — the two darwin-gated
+          # fork_safety ones skip) are the always-passing baseline, so a floor at
+          # 25 would still be met by a hook broadened to skip exactly the class
+          # #4164 rescues. 30 sits above that baseline (25) and below the measured
+          # total, so losing the rescued class reds the job while a few legitimate
+          # removals do not.
+          # Measured 2026-09-20 on this tree (run 35518962357, head fd23a4033): 35
+          # passed / 34 skipped (each skip exogenous — the 32 module-level gate
+          # markers, and the two darwin-gated #3845 fork tests; no real test skips
+          # for any other reason). The contract is that the marks RUN; the exact
+          # count is free to grow.
           passed=$(grep -c ' PASSED' /tmp/pytest-d14.log || true)
-          echo "D14 guards passed: $passed"
-          [ "$passed" -ge 5 ] || { echo "::error::expected 5 D14 guards to RUN (got $passed passed — all-skip?)"; exit 1; }
+          echo "embedded_only-marked tests passed: $passed"
+          [ "$passed" -ge 30 ] || { echo "::error::expected >=30 embedded_only-marked tests to RUN (got $passed passed — all-skip, URI leak, a broadened hook, or the non-carve-out class lost?)"; exit 1; }
+          # #4207: the floor above is a COUNT of PASSED lines, so a single
+          # subtracted test leaves 34 and the step stays green — and the pin in
+          # tests/test_markers.py reads this step's TEXT, so a deselecting flag
+          # passed through a shell variable is invisible to it as well. Neither
+          # can see a subtraction. The checked-in manifest is the FROZEN
+          # known-good set: every nodeid must still appear as a junitxml
+          # <testcase> (passed OR skipped) or this reds and NAMES the one that
+          # vanished. Supersets are fine — a new marked test needs no edit here.
+          # --manifest-only: this lane's skips are the expected state (URI unset),
+          # so the docker-calibrated skip matchers would false-red every e2e
+          # module (24, measured); the coverage property is what this lane owes.
+          python3 tools/skip-guard.py /tmp/pytest-d14.log \
+            --junitxml=/tmp/junit-d14.xml \
+            --manifest config/ci-expected-nodeids/embedded-only.txt --manifest-only
       - name: Upload D14 log (measurement artifact, #2188)
         if: always()
         continue-on-error: true
@@ -1742,7 +1785,7 @@ jobs:
     # Epic #1647 Task 9 Step 6 (D-3=A): the instrumented canary-drop streak.
     # Separate job (needs: [test] — the matrix jobs fan in; a step inside the
     # matrix job cannot run after both halves — cycle-5 P1-7). POST-MERGE
-    # ONLY (push/schedule — PR runs never mutate the canary artifact).
+    # ONLY (push — PR runs never mutate the canary artifact).
     # Downloads the half-b artifact set (junitxml + expected-nodeids +
     # step_wall + the canary-producer marker), finds the PREVIOUS streak
     # artifact, runs the deterministic classifier (tools/testdb_canary_classify
@@ -1759,7 +1802,7 @@ jobs:
     # always() + the post-merge gate = the classifier receives red runs too
     # (the half-b artifact upload is if: always() + continue-on-error, so
     # failed runs still ship their junitxml/manifest/step_wall evidence).
-    if: always() && (github.event_name == 'push' || github.event_name == 'schedule')
+    if: always() && github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -1778,8 +1821,8 @@ jobs:
           path: artifacts
       - name: Download previous streak artifact (chain continuity)
         # The streak chains across post-merge runs via the previous run's
-        # `testdb-canary-streak` artifact. Walk the most recent push/schedule
-        # runs and take the FIRST non-current run that actually has the
+        # `testdb-canary-streak` artifact. Walk the most recent push runs
+        # and take the FIRST non-current run that actually has the
         # artifact (a run before the flip has none -> try the next). The gh
         # run-list query FAILS LOUD (review finding #2: a silent query failure
         # would read as "no previous streak" and wrongly reset a real streak
@@ -1795,6 +1838,12 @@ jobs:
           gh run list --workflow python-ci.yml --branch main --event push --limit 5 \
             --json databaseId --jq '.[].databaseId' > /tmp/prev-runs.txt
           set +e
+          # #4367: the nightly schedule trigger was removed, so this query can
+          # only ever return HISTORICAL scheduled runs. It is kept as a
+          # one-time continuity bridge for the streak chain (a missing prev
+          # streak resets consecutive_green to 0 per testdb_canary_classify);
+          # it is `|| true`-guarded and becomes unreachable once the old
+          # nightly runs age out of the run-list window.
           gh run list --workflow python-ci.yml --branch main --event schedule --limit 3 \
             --json databaseId --jq '.[].databaseId' >> /tmp/prev-runs.txt 2>/dev/null || true
           CUR="${{ github.run_id }}"
@@ -1850,9 +1899,33 @@ jobs:
             echo "the Task 9 half-a flip)."
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # The agent-facing surface expansion gate (#3863).
+  #
+  # No `if:`, no `paths:` filter, deliberately: this job must run on EVERY pull
+  # request. A filtered gate is how a surface change slips through a docs-only
+  # path, and a skipped job reports Success, so a conditional guard would
+  # satisfy the required check without guarding anything.
+  surface-guard:
+    runs-on: ubuntu-latest
+    # Sibling `manifest-integrity` documents the same decision for the same reason:
+    # this job owns a network install AND feeds the REQUIRED aggregate, so without a
+    # bound a stalled PyPI would hold python-ci-gate red for hours on every PR.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install
+        run: pip install -e .
+      - name: The surface cannot expand without an explicit human decision
+        run: python3 tools/surface-guard.py
+      - name: The ordering lint (AC13)
+        run: python3 tools/surface_manifest.py check
+
   python-ci-gate:
     if: always()
-    needs: [changes, manifest-integrity, test, test-slow, test-concurrency-falkor, packs-compile, test-track-b, test-carve-out, test-d14-hosted-api, canary-streak]
+    needs: [changes, manifest-integrity, test, test-slow, test-concurrency-falkor, packs-compile, test-track-b, test-carve-out, test-d14-hosted-api, canary-streak, surface-guard]
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate matrix result
@@ -1861,6 +1934,14 @@ jobs:
           echo "matrix results: $RESULTS"
           if echo "$RESULTS" | grep -qE 'failure|cancelled'; then
             echo "❌ matrix leg failed or was cancelled — merge blocked"
+            exit 1
+          fi
+          # The surface guard has no `if:`/`paths:` today, so it cannot skip — but the
+          # aggregate would not notice if it ever did, and an inert guard satisfying a
+          # REQUIRED check is the failure this whole job exists to prevent. Assert it
+          # explicitly rather than relying on the absence of a filter.
+          if [ "${{ needs.surface-guard.result }}" != "success" ]; then
+            echo "❌ surface-guard did not run to success (result=${{ needs.surface-guard.result }}) — merge blocked"
             exit 1
           fi
           echo "✅ matrix green or skipped (docs-only PR)"

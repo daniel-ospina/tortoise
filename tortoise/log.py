@@ -1,4 +1,10 @@
-"""Append-only JSONL event log — the source of truth.
+"""Append-only JSONL domain event log — reconstruction + audit, never durability.
+
+This is a DOMAIN EVENT LOG: it reconstructs a projection under changed fold
+logic, migrates engines, and audits beyond `:GraphEvent`'s 30-day window. It is
+NOT the durability mechanism — for any deployment running a FalkorDB server,
+durability is the store's own persistence plus an off-box copy (see
+docs/durability-posture.md).
 
 M0 implements append + read_all only. Idempotency (the ingest cursor / dedup
 keys) and streaming tail arrive in M1/M4.

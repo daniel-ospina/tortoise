@@ -214,18 +214,58 @@ Run `tortoise doctor` after upgrades.
 
 ### Upgrading an existing hook install
 
-Installed hooks are per-project copies (`.claude/hooks/session-end.sh`). If you
-installed before the index-path migration, re-copy the current script and
-verify:
+Installed hooks are per-project copies (`.claude/hooks/session-start.sh`,
+`.claude/hooks/session-end.sh`, `.claude/hooks/session-turn.sh`) plus a merged
+`.claude/settings.json` fragment. `session-turn.sh` (#3963) is the per-turn
+cheap capture: at every user prompt it spools the conversation locally with no
+network call, so a killed or interrupted session is still filed later by the
+SessionStart drain. It needs a `UserPromptSubmit` entry with `"timeout": 30`.
+The install is **drift-checked**: each shipped script carries a canonical
+`# tortoise-hook-version: N` marker, and the settings entry each script needs
+must carry a per-hook `timeout`. A stale install is silent — the hook is
+fail-open (`2>/dev/null || exit 0`), so a pre-fix copy keeps filing no sessions
+without any error. Check and repair it in place:
 
 ```bash
-cp tortoise/claude-hooks/session-end.sh .claude/hooks/session-end.sh
-grep 'index directory' .claude/hooks/session-end.sh   # must match
+cd /path/to/your/project      # the dir containing .claude/
+tortoise hooks status         # reports drift, exit 1 when the install is stale
+tortoise hooks upgrade        # re-copies both scripts AND merges the settings
 ```
 
-The migrated script carries `# tortoise-hook-version: 2`. An un-upgraded copy
-still invoking the legacy `index sessions` becomes `nohup command-not-found →
-/dev/null` after the legacy CLI is removed — a silent failure.
+`tortoise hooks upgrade` is idempotent and also performs a fresh install when
+nothing is present. The repair has **two halves**, because the two halves of
+the seam live in different files:
+
+- **Scripts** — re-copied from `tortoise/claude-hooks/`; the marker then reads
+the current generation. (The previous copy is backed up to `<name>.bak`
+whenever its bytes differ, before it is restored.) This includes adding the
+`session-turn.sh` entry on an install that predates #3963.
+- **`.claude/settings.json`** — the hook entry's `timeout` is **merged in**, not
+overwritten. #3754 made the `timeout` load-bearing: Claude Code cancels a
+`SessionEnd` hook at its 1.5 s default, and a pre-#3754 settings file has no
+`timeout` at all, so re-copying the script alone repairs nothing. The merge
+preserves every other settings key and foreign hook, and only ever touches the
+entries that invoke these two scripts.
+
+`tortoise doctor` runs the same check and reports `❌ Capture hooks` when the
+install is stale (run it after upgrades, as above). Manual fallback for a
+non-CLI host:
+
+```bash
+cp tortoise/claude-hooks/session-start.sh .claude/hooks/session-start.sh
+cp tortoise/claude-hooks/session-end.sh   .claude/hooks/session-end.sh
+cp tortoise/claude-hooks/session-turn.sh  .claude/hooks/session-turn.sh
+chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh .claude/hooks/session-turn.sh
+grep '^# tortoise-hook-version:' .claude/hooks/session-*.sh   # one marker each
+# and add "timeout": 60 to the SessionStart/SessionEnd entries and
+# "timeout": 30 to the UserPromptSubmit entry in .claude/settings.json
+```
+
+The marker is bumped on every behavioural edit, so a copy without the current
+generation is stale by construction. An un-upgraded copy from before the
+index-path migration still invokes the legacy `index sessions` — which becomes
+`nohup command-not-found → /dev/null` after the legacy CLI is removed, another
+silent failure.
 
 ### How to restore (backup → wipe → rebuild → re-index)
 
@@ -394,7 +434,7 @@ tortoise serve --http --auth tenant # streamable-http on http://127.0.0.1:8000/m
 Point your client at `http://127.0.0.1:8000/mcp` with header `Authorization: Bearer tt_<key>`.
 
 > ℹ️ `serve --http --auth tenant` on an **embedded** DB is single-agent eval only — a durable team deployment uses Docker (Option A/B) or Cloud. (Compose users: the daemon already serves `/mcp` with auth via `TORTOISE_API_KEY`.)
-> ℹ️ HTTP tenant mode uses a fresh `team_{id}` namespace — data you wrote over stdio stays in the `tortoise` graph. They're separate namespaces.
+> ℹ️ HTTP tenant mode uses a fresh `org_{id}` namespace — data you wrote over stdio stays in the `tortoise` graph. They're separate namespaces.
 
 ## 6. Verify and back up
 
@@ -440,7 +480,7 @@ Tortoise ships a first-class migration path: **`tortoise export` → hosted impo
 4. **Import the artifact** into the team graph (owner session auth — the import endpoint is owner-scoped, like export):
 
    ```bash
-   curl -X POST https://api.premiselabs.co/v1/teams/<team_id>/import \
+   curl -X POST https://api.premiselabs.co/v1/organizations/<org_id>/import \
      -H "Authorization: Bearer <owner-session-jwt>" \
      -H "Content-Type: application/vnd.tortoise.export.v1" \
      -H "X-Tortoise-Import-Key: <key_b64>" \

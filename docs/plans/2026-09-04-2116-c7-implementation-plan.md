@@ -21,7 +21,7 @@ Enhance the EXISTING Graphs tab (create/list already render) in
 
 - `main.jsx` Graphs tab (~5935-5980): header + inline create form + table
   (Name/Kind/Graph ID cols only). `createGraph` (~3595): POST /v1/graphs
-  `{team_id, name}`; 402 → tier error; reads status only today (the C2
+  `{org_id, name}`; 402 → tier error; reads status only today (the C2
   envelope change was safe — C7 surfaces it). Rows: `graphs` state
   `{graph_id, name, kind, ...}` + now status/key_count/recording (C2/C6 list
   read-back). Tier card exists at 6081 (`team.max_graphs == null ? '∞' : …`).
@@ -31,7 +31,7 @@ Enhance the EXISTING Graphs tab (create/list already render) in
 - Backend (no changes): POST /v1/graphs session alias → C2 `_provision_graph`
   nested envelope (returns graph + minted key_plaintext + key props —
   indicator "hash-only storage"; key_plaintext ONLY in the create response =
-  the reveal modal's one-time source). DELETE /v1/graphs/{graph_id}?team_id=
+  the reveal modal's one-time source). DELETE /v1/graphs/{graph_id}?org_id=
   (session owner/admin; 403 default). POST /v1/team/keys {graph_id?, scopes?}
   (C3 scoped mint — session; per-graph keys). GET /v1/team/keys (list, rows
   carry graph_id). DELETE /v1/team/keys/{key_id} (revoke).

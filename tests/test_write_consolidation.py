@@ -20,6 +20,7 @@ Runnable with: ../tortoise/.venv/bin/python -m pytest tests/test_write_consolida
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 
@@ -37,6 +38,7 @@ def sdk():
     sdk = TortoiseSDK(db_path)
     yield sdk
     sdk.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 def _make_point(sdk: TortoiseSDK, **kw):
@@ -498,15 +500,15 @@ class TestEventAboutEdgesSemanticProxy:
 def _transport_context():
     """MCP tools require an initialized transport mode (#236 auth gate)."""
     from tortoise.mcp_auth import (  # noqa: I001
-        _current_team_id, _current_team_limits, _transport_mode,
+        _current_org_id, _current_org_limits, _transport_mode,
     )
     _transport_mode.set("stdio")
-    _current_team_id.set(None)
-    _current_team_limits.set(None)
+    _current_org_id.set(None)
+    _current_org_limits.set(None)
     yield
     _transport_mode.set(None)
-    _current_team_id.set(None)
-    _current_team_limits.set(None)
+    _current_org_id.set(None)
+    _current_org_limits.set(None)
 
 
 @pytest.mark.timeout(600)  # Epic #1647 (PR #1684 CI-fix): MCP _get_sdk connect + the reaper kill-wait under CI load exceed the default 300s (2× observed). The handlers themselves run in <2s locally — the timeout is CI-contention headroom.

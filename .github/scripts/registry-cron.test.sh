@@ -36,7 +36,8 @@
 #  26. unquoted/bare secret runs are redacted too (security review)
 #  27. last_sweep (graph_failures[].error) is redacted before publication
 #  28. a 404 (deleted) tracked issue re-files; a 500 blip does not duplicate
-#  29. resolve deletes BOTH global.json and the server-owned _.json (#2844)
+#  29. resolve deletes BOTH spellings of the sentinel: canonical _.json
+#      (the AlertStore's) and the legacy global.json (#2844)
 #  30. a missing .watcher block neither files nor self-heals WATCHER_DOWN
 #  31. degraded is healthy; no_eligible_teams is the no-coverage family
 #  32. lock held with no usable last_sweep + pool data → SWEEP_NO_COVERAGE
@@ -65,6 +66,28 @@
 #  54. an unparseable archive timestamp is never read as fresh
 #  55. a stale watcher AGE alone (running=true, age>30) files WATCHER_DOWN
 #  56. the measurable-empty lock branch is the silent one
+#  57. an empty default prefix is a MEASURED-EMPTY result, not a global
+#      R2_DOWN (#3659 defects 1+3)
+#  58. a failed default listing still consumes the legacy-flat leg (#3659
+#      defect 2)
+#  59. a genuine listing failure surfaces the CLI stderr (#3659 defect 4)
+#  60. an empty top-level pool (JSON `null`, absent CommonPrefixes) is a
+#      measured-EMPTY pool, and a team genuinely named "None" survives
+#  61. an empty legacy-flat prefix (JSON `null`) is measured-empty — it must
+#      not enter flat classification and blank a measured default archive
+#  62. an unparseable top-level listing is UNKNOWN, never an empty pool
+#  63. the top-level listing stderr is captured (not /dev/null'd)
+#  64. a subject-less incident is written ONCE, under the CANONICAL `_.json`
+#      (the AlertStore's spelling) — never the legacy `global.json` (#2844)
+#  65. a legacy sentinel holding a CLOSED issue still lets the incident re-file
+#      (#2844), so the alias does not swallow a recurrence
+#  66. the driver's OWNERSHIP refusal in `resolve_global` is pinned (#3127): a
+#      watcher-owned kind is refused (no search, no close); a driver-owned
+#      kind resolves normally
+#  67. `alert_key` canonicalizes the EMPTY (subject-less) id ONLY: a real
+#      subject literally named `global`/`_` keeps its own single key and is
+#      never an alias set — the round-7 P2 that otherwise gave one real team
+#      two create-once points across bash and AlertStore (#2844)
 #
 # Fixtures are simulated; the real driver defers nothing.
 
@@ -128,22 +151,59 @@ case "$op" in
     p="$(argval --prefix)"
     case "$p" in
       "backups/")
-        [ "${STUB_LIST_FAIL:-0}" = "1" ] && exit 1
-        printf '%s' "${R2_TEAMS:-}" ;;
+        [ "${STUB_LIST_FAIL:-0}" = "1" ] && { echo "An error occurred (AccessDenied) when calling the ListObjectsV2 operation: Access Denied" >&2; exit 1; }
+        # STUB_TOP_NOT_JSON: an exit-0 body the driver's jq cannot decode — the
+        # top-level listing must read as UNKNOWN, never as an empty pool.
+        [ "${STUB_TOP_NOT_JSON:-0}" = "1" ] && { printf 'not json at all'; exit 0; }
+        if [ "$(argval --output)" = "json" ]; then
+          # #3659: model the CLI faithfully — an absent CommonPrefixes renders
+          # as JSON `null`; otherwise the tab-separated fixture prefixes are
+          # rendered as a JSON array.
+          if [ -z "${R2_TEAMS:-}" ]; then printf 'null'; else
+            printf '%s' "$R2_TEAMS" | tr '\t' '\n' | jq -Rsc 'split("\n") | map(select(. != ""))'
+          fi
+        else
+          # `--output text` renders a null JMESPath result as the literal
+          # "None" — mirror it so the pre-fix text path is faithfully modelled
+          # (and case 60 actually discriminates).
+          if [ -z "${R2_TEAMS:-}" ]; then printf 'None'; else printf '%s' "$R2_TEAMS"; fi
+        fi ;;
       */default/)
-        [ "${STUB_LIST_FAIL_TEAM:-0}" = "1" ] && exit 1
+        [ "${STUB_LIST_FAIL_TEAM:-0}" = "1" ] && { echo "An error occurred (AccessDenied) when calling the ListObjectsV2 operation: Access Denied" >&2; exit 1; }
         # Per-team override so a multi-team case can distinguish WHICH team the
         # driver measured (review R1 test-integrity): with one shared listing
         # every prefix returns the same value and the tab-split regression is
         # invisible (the buggy loop measures only the LAST team).
         case "$p" in
-          "backups/teamZ/default/") printf '%s' "${R2_DEFAULT_LIST_Z:-${R2_DEFAULT_LIST:-}}" ;;
-          "backups/teamA/default/") printf '%s' "${R2_DEFAULT_LIST_A:-${R2_DEFAULT_LIST:-}}" ;;
-          *) printf '%s' "${R2_DEFAULT_LIST:-}" ;;
+          "backups/teamZ/default/") dval="${R2_DEFAULT_LIST_Z:-${R2_DEFAULT_LIST:-}}" ;;
+          "backups/teamA/default/") dval="${R2_DEFAULT_LIST_A:-${R2_DEFAULT_LIST:-}}" ;;
+          *) dval="${R2_DEFAULT_LIST:-}" ;;
+        esac
+        # #3659: emulate awscli's JMESPath evaluation faithfully. An empty
+        # prefix means S3 omits `Contents` entirely, so a sort_by()/max_by()
+        # aggregator over it raises JMESPathTypeError and the CLI exits
+        # non-zero (the driver read that as a storage outage). A total query
+        # (plain projection, no aggregator) returns `null`/`[]` instead, and
+        # `--output json` renders the result as JSON. Simplification: the
+        # fixture has no Contents-level detail, so "prefix has objects but no
+        # dump.enc" is not modelled — the empty fixture stands in for an
+        # absent Contents (the production empty-prefix path).
+        if [ -z "$dval" ]; then
+          case "$(argval --query)" in
+            *sort_by*|*max_by*)
+              echo "JMESPathTypeError: In function sort_by(), invalid type for value: None, expected one of: ['array'], received: \"null\"" >&2
+              exit 255 ;;
+          esac
+        fi
+        case "$(argval --output)" in
+          json) if [ -z "$dval" ]; then printf 'null'; else printf '[\"%s\"]' "$dval"; fi ;;
+          *)    printf '%s' "$dval" ;;
         esac ;;
       backups/*/2)
-        [ "${STUB_FLAT_FAIL:-0}" = "1" ] && exit 1
-        printf '%s' "${R2_FLAT_LIST:-[]}" ;;
+        [ "${STUB_FLAT_FAIL:-0}" = "1" ] && { echo "An error occurred (AccessDenied) when calling the ListObjectsV2 operation: Access Denied" >&2; exit 1; }
+        # #3659: an EMPTY flat prefix renders as JSON `null` (absent Contents),
+        # not `[]` — mirror the real CLI so the empty-prefix path is exercised.
+        if [ -n "${R2_FLAT_LIST:-}" ]; then printf '%s' "$R2_FLAT_LIST"; else printf 'null'; fi ;;
       *)            printf '' ;;
     esac
     ;;
@@ -276,6 +336,7 @@ reset_case() {
         STUB_RECONCILE_CODE STUB_412 STUB_APP_DOWN STUB_R2_DOWN STUB_GET_BODY \
         SIMULATE_APP_DOWN \
         STUB_LIST_FAIL STUB_LIST_FAIL_TEAM STUB_FLAT_FAIL STUB_INDEX_FAIL GH_ISSUE_STATE STUB_ISSUE_CODE \
+        STUB_TOP_NOT_JSON \
         GH_SEARCH_JSON GH_NEW_ISSUE R2_TEAMS R2_DEFAULT_LIST R2_FLAT_LIST \
         R2_DEFAULT_LIST_Z R2_DEFAULT_LIST_A \
         GH_ISSUE_SWEEP_CONFIG_ERROR GH_ISSUE_SWEEP_OFF_STALE GH_ISSUE_SWEEP_NO_COVERAGE \
@@ -351,7 +412,7 @@ export GH_ISSUE_WATCHER_DOWN=55
 run_driver
 assert_eq "$RC" 1 "5. enabled-no-coverage exits RED (1)"
 assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "5. enabled-no-coverage files SWEEP_NO_COVERAGE"
-assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/WATCHER_DOWN/global.json" "5. the stale watcher incident is recorded"
+assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/WATCHER_DOWN/_.json" "5. the stale watcher incident is recorded"
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/55" "5. enabled-no-coverage does NOT self-heal WATCHER_DOWN"
 
 # ── 6. enabled, 0 teams, R2 pool also empty (chronic pre-beta) → silent ─────
@@ -433,7 +494,7 @@ export STUB_SWEEP_BODY='{"status":"no_teams","teams_backed_up":0}'
 export GH_ISSUE_R2_DOWN=88
 run_driver
 assert_eq "$RC" 1 "13. R2 down + 0 teams exits RED (1)"
-assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/R2_DOWN/global.json" "13. R2_DOWN is recorded"
+assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/R2_DOWN/_.json" "13. R2_DOWN is recorded"
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/88" "13. a failed R2 probe does NOT self-close the R2_DOWN it filed"
 
 # ── 14. 202 lock held + stale last_sweep → SWEEP_NO_COVERAGE ────────────────
@@ -508,6 +569,9 @@ assert_not_contains "$(cat "$LOG")" "SECRETKEY9" "20. the key prefix is NOT publ
 assert_not_contains "$OUT" "SECRETKEY9" "20. the key prefix is NOT logged either"
 
 # ── 21. 412 + R2 object with an OPEN issue_number → no duplicate ────────────
+# After #2844 this path is reached via the alias pre-check: the stub's r2_get
+# answers for the legacy `global.json` too, so a legacy sentinel holding an OPEN
+# issue is adopted before the driver ever attempts its own create-once.
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
@@ -610,8 +674,9 @@ run_driver
 assert_eq "$RC" 1 "28b. transient 500 exits RED (1)"
 assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "28b. a transient 500 assumes open (no duplicate)"
 
-# ── 29. resolve deletes BOTH global.json and _.json (#2844) ─────────────────
+# ── 29. resolve deletes BOTH spellings: canonical _.json + legacy global.json ─
 reset_case
+# The driver's post-#2844 sentinel is the canonical spelling…
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
 export STUB_STATUS_BODY="$(status_body true null null)"
@@ -619,8 +684,8 @@ export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
 export GH_ISSUE_APP_DOWN=99
 run_driver
 assert_eq "$RC" 0 "29. healthy run exits 0"
-assert_match "$(cat "$LOG")" "AWS delete-object key=ops/alerts/APP_DOWN/global.json" "29. the driver dedup object is deleted on resolve"
-assert_match "$(cat "$LOG")" "AWS delete-object key=ops/alerts/APP_DOWN/_.json" "29. the server-side dedup object is deleted too"
+assert_match "$(cat "$LOG")" "AWS delete-object key=ops/alerts/APP_DOWN/_.json" "29. the driver dedup object is deleted on resolve"
+assert_match "$(cat "$LOG")" "AWS delete-object key=ops/alerts/APP_DOWN/global.json" "29. the legacy spelling is deleted too (#2844)"
 
 # ── 30. missing .watcher block neither files nor self-heals WATCHER_DOWN ────
 reset_case
@@ -778,7 +843,7 @@ export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
 export GH_ISSUE_R2_DOWN=88
 run_driver
 assert_eq "$RC" 1 "41. storage_error while enabled exits RED (1)"
-assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/R2_DOWN/global.json" "41. storage_error while enabled records R2_DOWN"
+assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/R2_DOWN/_.json" "41. storage_error while enabled records R2_DOWN"
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/88" "41. R2_DOWN is NOT closed while storage_error is set"
 
 # ── 42. no_work with graph_totals.backed_up>0 is not a coverage gap ───────
@@ -958,6 +1023,211 @@ run_driver
 assert_eq "$RC" 0 "56. a lock with a measured-empty pool exits 0"
 assert_contains "$OUT" "leaving silent" "56. the measured-empty lock is the silent branch"
 assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*SWEEP_NO_COVERAGE" "56. no incident for a measured-empty lock"
+
+# ── 57. an empty default prefix is measured-empty, not a storage outage ───
+# #3659: S3 omits `Contents` on an empty listing, so `sort_by()` raised and the
+# CLI exited non-zero — an EMPTY prefix set the GLOBAL R2_LIST_OK=0 and filed a
+# platform-wide R2_DOWN while the top-level listing had succeeded. It must be
+# a measured result instead: no R2_DOWN, and the honest "prefix present but no
+# default archive" branch (which exists for exactly this) is reached.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST=""          # prefix exists, zero objects under default/
+export R2_FLAT_LIST="[]"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+run_driver
+assert_eq "$RC" 0 "57. an empty default prefix is a healthy measured pool (exit 0)"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*R2_DOWN" "57. an empty prefix files NO R2_DOWN"
+assert_not_contains "$OUT" "storage is only partially reachable" "57. the pool is not called partially reachable"
+assert_contains "$OUT" "team teamA: team prefix present but no default archive" "57. the measured-empty branch is reached"
+
+# ── 58. a failed default call still consumes the legacy-flat leg ──────────
+# #3659 defect 2: the old `team_measured=0; continue` bailed out BEFORE
+# consuming flat_list, so a pre-#2313 legacy-flat default archive was never
+# measured. A genuine per-org default-listing failure must not swallow the
+# leg that answered.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export STUB_LIST_FAIL_TEAM=1        # the default-archive listing CALL fails
+export R2_FLAT_LIST='[["backups/teamA/2024/dump.enc","2024-01-01T00:00:00Z"]]'
+export STUB_STATUS_BODY="$(status_body false null null)"
+run_driver
+assert_eq "$RC" 1 "58. a failed default call with a measured flat leg while OFF exits RED (1)"
+assert_contains "$OUT" "filing STALE (direct leg)" "58. the legacy-flat archive is measured (direct-leg STALE)"
+assert_filed "$(cat "$LOG")" "STALE — teamA" "58. the legacy-flat archive files the per-team STALE"
+assert_contains "$OUT" "default-archive listing FAILED" "58. the genuine call failure is surfaced"
+
+# ── 59. a genuine listing failure surfaces the CLI stderr ────────────────
+# #3659 defect 4: both listings redirected stderr to /dev/null, so the run log
+# could not distinguish an empty prefix from an AccessDenied. The failure must
+# still be a real R2_DOWN AND its cause must be visible.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export STUB_LIST_FAIL_TEAM=1
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+run_driver
+assert_eq "$RC" 1 "59. a genuine failed listing exits RED (1)"
+assert_filed "$(cat "$LOG")" R2_DOWN "59. a genuine call failure is still a real R2_DOWN"
+assert_contains "$OUT" "AccessDenied" "59. the CLI stderr is captured, not discarded"
+
+# ── 60. an empty top-level pool is measured-EMPTY, not "None" ──────────
+# #3659: an absent CommonPrefixes renders as JSON `null` (under `--output
+# text` it was the literal "None", indistinguishable from a team id).
+reset_case
+export R2_TEAMS=""              # empty pool → CommonPrefixes absent → JSON null
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"no_teams","teams_backed_up":0}'
+run_driver
+assert_eq "$RC" 0 "60. an empty pool (JSON null) is a measured-empty exit 0"
+assert_not_contains "$OUT" "team None" "60. no fabricated 'None' team is ever measured"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*SWEEP_NO_COVERAGE" "60. no false coverage incident on an empty pool"
+# A team genuinely named "None" must survive the JSON decode (it must not be
+# conflated with the null-rendering artifact).
+reset_case
+export R2_TEAMS=$'backups/None/'
+export R2_DEFAULT_LIST="$TS_STALE"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+run_driver
+assert_eq "$RC" 1 "60b. a stale team named 'None' is measured and RED (1)"
+assert_contains "$OUT" "team None: newest archive" "60b. the 'None' team is measured, not dropped"
+
+# ── 61. an empty legacy-flat prefix renders as JSON `null`, not `[]` ─────
+# botocore returns the literal `null` for an absent Contents; the driver must
+# normalize it to the empty list, otherwise it routes into flat classification
+# and an index-read error blanks a MEASURED default archive and files a false
+# R2_DOWN.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"   # default leg MEASURED fresh
+export R2_FLAT_LIST=""                # empty flat prefix → CLI renders `null`
+export STUB_INDEX_FAIL=1              # would fail IF the driver mis-read the null
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+run_driver
+assert_eq "$RC" 0 "61. a null flat listing with a measured default is healthy (exit 0)"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*R2_DOWN" "61. no false R2_DOWN from a null flat listing"
+assert_not_contains "$OUT" "legacy-flat index read FAILED" "61. the null flat listing never enters flat classification"
+
+# ── 62. an unparseable top-level listing is UNKNOWN, not an empty pool ──
+# An exit-0 body the decoder cannot read must not collapse to a measured-empty
+# pool (which would suppress every downstream freshness/coverage signal).
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export STUB_TOP_NOT_JSON=1             # exit-0 body the driver's jq cannot read
+export R2_DEFAULT_LIST="$TS_STALE"     # a stale archive that must not be ignored
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+run_driver
+assert_eq "$RC" 1 "62. an unparseable top-level listing exits RED (1)"
+assert_contains "$OUT" "R2 top-level listing UNPARSEABLE" "62. the unparseable listing is surfaced"
+assert_filed "$(cat "$LOG")" R2_DOWN "62. unknown is never read as a measured-empty pool"
+
+# ── 63. the top-level listing stderr is captured, not discarded ──────────
+reset_case
+export STUB_LIST_FAIL=1
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"no_teams","teams_backed_up":0}'
+run_driver
+assert_eq "$RC" 1 "63. a failed top-level listing exits RED (1)"
+assert_contains "$OUT" "AccessDenied" "63. the top-level CLI stderr is captured, not discarded"
+
+# ── 64. a subject-less incident is written ONCE, under the canonical spelling ─
+# #2844: the driver's pre-fix spelling was `global.json` while the server-side
+# AlertStore writes `_.json`. Two spellings = two create-once points = two issues
+# for one condition, and a resolve that deletes only one strands the other.
+reset_case
+export STUB_R2_DOWN=1
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"no_teams","teams_backed_up":0}'
+run_driver
+assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/R2_DOWN/_.json" "64. the canonical (AlertStore) spelling is written"
+assert_not_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/R2_DOWN/global.json" "64. the legacy spelling is NOT written (one create-once point)"
+
+# ── 65. a legacy sentinel holding a CLOSED issue does not block re-filing ───
+# The other half of #2844: adopting on sight would swallow a recurrence. The
+# alias is adopted only while its issue is still OPEN.
+reset_case
+export STUB_R2_DOWN=1
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"no_teams","teams_backed_up":0}'
+export STUB_412=0
+export STUB_GET_BODY='{"kind":"R2_DOWN","issue_number":91}'
+export GH_ISSUE_STATE=closed
+run_driver
+assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/R2_DOWN/_.json" "65. a closed legacy sentinel still lets the incident re-file"
+
+# ── 66. the driver's ownership refusal is pinned (#3127) ────────────────────
+# `resolve_global` must self-heal ONLY kinds the driver owns (KIND_OWNERS). The
+# refusal had no test: deleting the whole block kept every other assertion
+# green, so a regression could quietly restore driver authority over
+# watcher/app kinds — the false recovery #3127 exists to prevent. The full
+# driver cannot reach this path (every call site is driver-owned BY CONTRACT,
+# pinned by test_kind_owner_contract_with_driver), so the real functions are
+# extracted and driven directly with stubbed I/O. Extract from the SHIPPING
+# script, never a copy, so deleting the block fails this case.
+reset_case
+RESOLVE_EXT="$(mktemp)"
+RESOLVE_LOG="$(mktemp)"
+sed -n '/^kind_owner()/,/^}/p; /^resolve_global()/,/^}/p' "$DRIVER" > "$RESOLVE_EXT"
+run_resolve() { # kind — real kind_owner/resolve_global + stubbed log/gh/r2
+  local kind="$1"
+  : > "$RESOLVE_LOG"
+  (
+    set +e
+    log() { printf 'REFUSE %s\n' "$1" >> "$RESOLVE_LOG"; }
+    gh_find_open() { printf 'FIND %s\n' "$*" >> "$RESOLVE_LOG"; printf '55'; }
+    gh_close() { printf 'CLOSE %s\n' "$*" >> "$RESOLVE_LOG"; }
+    # shellcheck disable=SC1090
+    . "$RESOLVE_EXT"
+    resolve_global "$kind" "Resolved — test."
+  ) >/dev/null 2>&1 || true
+  cat "$RESOLVE_LOG"
+}
+assert_contains "$(run_resolve STALE)" "refusing to close" "66. a watcher-owned kind is refused"
+assert_not_contains "$(run_resolve STALE)" "FIND" "66. the refusal never searches for an issue"
+assert_not_contains "$(run_resolve STALE)" "CLOSE" "66. the refusal never closes one"
+assert_contains "$(run_resolve WATCHER_DOWN)" "FIND" "66. a driver-owned kind searches for the incident"
+assert_contains "$(run_resolve WATCHER_DOWN)" "CLOSE" "66. a driver-owned kind closes the incident"
+assert_not_contains "$(run_resolve WATCHER_DOWN)" "refusing to close" "66. the driver-owned path does not refuse"
+rm -f "$RESOLVE_EXT" "$RESOLVE_LOG"
+
+# ── 67. a REAL subject named `global` is not the platform (subject-less) alias
+# #2844 round-7 P2: `alert_key` canonicalized a NON-EMPTY subject literally
+# named `global` to `_.json`, while AlertStore._keys kept `global.json` for that
+# same subject — so a team actually named `global` got two create-once points
+# (two sentinels, two issues for one condition). Canonicalization is for the
+# EMPTY id only; the legacy `global` spelling stays a READ/DELETE alias of the
+# EMPTY id alone. Extracted from the SHIPPING script, never a copy, so
+# re-widening either function fails here.
+reset_case
+KEY_EXT="$(mktemp)"
+sed -n '/^alert_key()/,/^}/p; /^alert_keys_all()/,/^}/p' "$DRIVER" > "$KEY_EXT"
+run_keys() { # fn id — the real alert_key/alert_keys_all from the shipping driver
+  (
+    # shellcheck disable=SC1090
+    . "$KEY_EXT"
+    "$1" STALE "$2"
+  )
+}
+assert_eq "$(run_keys alert_key "")" "ops/alerts/STALE/_.json" \
+  "67. the EMPTY (platform) id canonicalizes to _.json"
+assert_eq "$(run_keys alert_key global)" "ops/alerts/STALE/global.json" \
+  "67. a REAL subject named global keeps its OWN key, not the platform alias"
+_keys_empty="$(run_keys alert_keys_all "")"
+assert_contains "$_keys_empty" "ops/alerts/STALE/_.json" \
+  "67. the platform id lists the canonical spelling"
+assert_contains "$_keys_empty" "ops/alerts/STALE/global.json" \
+  "67. the platform id still lists the legacy global.json alias (read/delete)"
+assert_eq "$(printf '%s\n' "$_keys_empty" | wc -l | tr -d ' ')" "2" \
+  "67. the platform id has exactly two spellings"
+assert_eq "$(run_keys alert_keys_all global)" "ops/alerts/STALE/global.json" \
+  "67. a REAL subject named global is never an alias set"
+assert_eq "$(run_keys alert_keys_all _)" "ops/alerts/STALE/_.json" \
+  "67. a REAL subject named _ is never an alias set"
+rm -f "$KEY_EXT"
 
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"

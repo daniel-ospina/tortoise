@@ -184,8 +184,8 @@ try {
     { status: 201, acao: FALLBACK, vary: true });
   const okBody = JSON.parse(await okRes.text());
   assert.ok(okBody.api_key && okBody.api_key.startsWith("tt_"), "201 body must include the minted api_key");
-  assert.ok(okBody.team_id, "201 body must include team_id");
-  console.log("      (success body: team_id=" + okBody.team_id + " api_key=" + okBody.api_key.slice(0, 10) + "…)");
+  assert.ok(okBody.org_id, "201 body must include org_id");
+  console.log("      (success body: org_id=" + okBody.org_id + " api_key=" + okBody.api_key.slice(0, 10) + "…)");
 
   // ── Phase 3: user-JWT path (Path 1 — the ONLY live auth path; the auth
   //    hook is inert post-#832, so this is what welcome.html actually hits) ──
@@ -199,7 +199,7 @@ try {
     { status: 201, acao: FALLBACK, vary: true });
   const jwtBody = JSON.parse(await jwtOkRes.text());
   assert.ok(jwtBody.api_key && jwtBody.api_key.startsWith("tt_"), "JWT 201 body must include the minted api_key");
-  assert.equal(jwtBody.team_name, "test", "team name derives from display_name");
+  assert.equal(jwtBody.org_name, "test", "team name derives from display_name");
 
   // Non-string provider metadata display_name must NOT crash the 500 path
   // (issue #1132): team name falls back to the email prefix.
@@ -209,7 +209,7 @@ try {
     dnRes,
     { status: 201, acao: FALLBACK, vary: true });
   const dnBody = JSON.parse(await dnRes.text());
-  assert.equal(dnBody.team_name, "t", "team name falls back to email prefix (t@t.co)");
+  assert.equal(dnBody.org_name, "t", "team name falls back to email prefix (t@t.co)");
   __setJwtUser({ id: USER_ID, email: EMAIL, user_metadata: { display_name: "Test" } });
 
   check("JWT POST, target mismatch (user A mints for user B) → 403 with CORS",
