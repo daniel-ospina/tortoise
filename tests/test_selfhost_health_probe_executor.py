@@ -99,8 +99,12 @@ _LIVENESS_FORBIDDEN_NAMES = {
     "_submit_probe", "_probe_worker", "probe_db", "wrap_future",
     "run_in_executor", "to_thread", "_get_proj",
 }
+#: The same set for an ATTRIBUTE call (``sdk._get_proj()``): ``_names_in`` only
+#: collects ``ast.Name``, so a forbidden callee reached through a receiver would
+#: otherwise be invisible to the pin (the readiness sibling guards ``_get_proj``
+#: this way too).
 _LIVENESS_FORBIDDEN_ATTRS = {"query", "submit", "run_in_executor", "to_thread",
-                             "wrap_future", "snapshot"}
+                             "wrap_future", "snapshot", "_get_proj"}
 
 
 def _module_assign(name: str) -> ast.Assign:
