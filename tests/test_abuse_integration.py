@@ -677,122 +677,86 @@ class _Resp:
 
 class TestIntrospection:
     def test_write_tool_names_cover_all_quota_gated(self):
-        from tortoise.mcp_server import WRITE_TOOL_NAMES, _QUOTA_GATED  # noqa: I001
-        assert WRITE_TOOL_NAMES >= _QUOTA_GATED
-        assert "tortoise_ingest" in WRITE_TOOL_NAMES
-        assert "tortoise_onboarding_demo_create" in WRITE_TOOL_NAMES
+        """#4113: the non-SDK (empty-binding) writers are a DECLARED set that is
+        write-classified — not ad-hoc literal assertions that a rename erases."""
+        from tool_surface_capabilities import (  # noqa: I001
+            NON_SDK_WRITER_TOOLS, quota_gated_wrap_sites, registry_entries_by_method,
+        )
+        from tortoise.mcp_server import WRITE_TOOL_NAMES
+        # every _quota_gated wrap site's (HTTP) tool is write-classified
+        by_method = registry_entries_by_method()
+        wrapped = {m for m, _, _ in quota_gated_wrap_sites().sites}
+        assert wrapped, "wrap-site scan is vacuous"
+        for method in sorted(wrapped):
+            for entry in by_method.get(method, []):
+                if entry.http_policy:
+                    assert entry.name in WRITE_TOOL_NAMES, (entry.name, method)
+        # non-SDK (empty-binding) writers are a declared, write-classified set.
+        # Derived from the SERVED set (#3883): a retired empty-binding writer is
+        # still callable by name, so it belongs in the declared set too.
+        from tool_surface_capabilities import served_registry as _served
+        assert NON_SDK_WRITER_TOOLS <= WRITE_TOOL_NAMES
+        empty_writers = {e.name for e in _served()
+                         if not e.sdk_method and e.name in WRITE_TOOL_NAMES}
+        assert empty_writers == set(NON_SDK_WRITER_TOOLS)
 
     def test_point_creating_wrap_sites_have_weights(self):
-        """Dual membership by source: every Point-creating _quota_gated wrap
-        passes abuse_weight; update-family wraps do not (delta 8 drift guard
-        — a future Point-creating tool cannot silently re-open the bypass)."""
-        import re  # noqa: F401, I001
-        import tortoise.mcp_server as ms
-        src = Path(ms.__file__).read_text()
-
-        def _wrap_window(method):
-            # exact wrap-site match (method + comma) — a bare prefix would
-            # let e.g. ingest_corpus masquerade as ingest
-            i = src.find(f"_get_org_sdk().{method},")
-            assert i != -1, f"wrap site for {method} not found"
-            return src[i:i + 260]
-
-        for method in ("create_point", "create_operator", "mitigate_operator",
-                       "file_decision", "file_human_approval", "diary_write",
-                       "ingest", "checkpoint"):
-            window = _wrap_window(method)
-            assert "abuse_weight" in window, f"{method} lacks an R1 weight"
-        for method in ("update_point", "supersede", "invalidate_point",
-                       "retract_point"):
-            window = _wrap_window(method)
-            assert "abuse_weight" not in window, \
-                f"{method} must NOT record point_create"
+        """#4113: per-SITE AST extraction (the old ``str.find`` went -1 the
+        moment a handler merged behind a dispatch table).  The weight family is
+        exactly WEIGHT_BEARING_METHODS; every other wrap site must not weigh."""
+        from tool_surface_capabilities import (  # noqa: I001
+            WEIGHT_BEARING_METHODS, quota_gated_wrap_sites, wrap_site_violations,
+        )
+        sites = quota_gated_wrap_sites()
+        assert sites.unresolved == (), sites.unresolved
+        assert sites.sites, "wrap-site scan is vacuous"
+        assert wrap_site_violations() == []
+        weighted = {m for m, _, w in sites.sites if w}
+        assert weighted == set(WEIGHT_BEARING_METHODS), weighted
 
     def test_no_write_tool_counted_as_read(self):
-        """Drift guard (code-review fix — the old version was a tautology):
-        extract the ACTUAL _quota_gated wrap sites from source and assert
-        every one is classified as a write in WRITE_TOOL_NAMES via the pinned
-        method→tool map. A new wrapped write tool with no map entry fails
-        here; a mapped tool missing from WRITE_TOOL_NAMES fails here too."""
-        import re  # noqa: I001
-        import tortoise.mcp_server as ms
-        src = Path(ms.__file__).read_text()
-        wrapped_methods = set(re.findall(
-            r"_quota_gated\(_get_org_sdk\(\)\.(\w+)", src))
-        # pinned method→tool map (the write surface as designed)
-        method_to_tool = {
-            "create_point": "tortoise_create_point",
-            "update_point": "tortoise_update_point",
-            "create_operator": "tortoise_create_operator",
-            "mitigate_operator": "tortoise_mitigate_operator",
-            "file_decision": "tortoise_file_decision",
-            "file_human_approval": "tortoise_file_human_approval",
-            "invalidate_point": "tortoise_invalidate",
-            "supersede": "tortoise_supersede",
-            "retract_point": "tortoise_retract_point",
-            "checkpoint": "tortoise_checkpoint",
-            "diary_write": "tortoise_diary_write",
-            "create_entity": "tortoise_create_entity",
-            "update": "tortoise_update",
-            "annotate_operator": "tortoise_operator_action",
-            "create_subject": "tortoise_create_subject",
-            "create_object": "tortoise_create_object",
-            "create_event": "tortoise_create_event",
-            "create_document": "tortoise_create_document",
-            "create_source": "tortoise_create_source",
-            "assess_source": "tortoise_assess_source",
-            "update_entity": "tortoise_update_entity",
-            "create_edge": "tortoise_create_edge",
-            "ingest": "tortoise_ingest",
-            "index_directory": "tortoise_index_files",  # #1043 index path (Sources/Documents + edges) — quota-gated write
-        }
-        # every wrap site must be a known write method (new wrap → fail here)
-        unknown = wrapped_methods - set(method_to_tool)
-        assert not unknown, f"unmapped _quota_gated wrap sites: {unknown}"
-        # every wrap site's tool must be classified as a WRITE (never a read)
-        missing = {method_to_tool[m] for m in wrapped_methods} - ms.WRITE_TOOL_NAMES
-        assert not missing, f"write tools missing from WRITE_TOOL_NAMES: {missing}"
+        """#4113: derive the ACTUAL wrap sites from the AST (not a text find),
+        then assert the declared write-surface map is live in BOTH directions:
+        every wrapped method is mapped, AND every mapped method still has a wrap
+        site (the missing inverse — a declared write whose wrap was removed must
+        fail, not silently stop being checked).  Every mapped name must resolve
+        to a live registry entry so a rename fails loudly."""
+        from tool_surface_capabilities import write_surface_map_violations
+        violations = write_surface_map_violations()
+        assert violations == [], "; ".join(violations)
 
     def test_destructive_mutating_tools_never_read_classified(self):
-        """C5 #2114 (code-review P1): the NON-wrapped destructive/mutating
-        tools carry _rw() annotations but bypass _quota_gated — they must
-        still be classified as writes (WRITE_TOOL_NAMES) so the MCP scope
-        gate (graphs:write required) + read-velocity metering treat them as
-        writes. A graphs:read-only key invoking any of these would otherwise
-        be a write-scope bypass (deleting points/entities, mutating
-        operators/sources)."""
-        import tortoise.mcp_server as ms
-        destructive = {
-            "tortoise_delete_point",      # DESTRUCTIVE — cannot be undone
-            "tortoise_delete",            # destructive
-            "tortoise_delete_entity",     # destructive
-            "tortoise_set_point_baseline",  # mutates claims
-            "tortoise_set_source_tier",   # mutates source metadata
-            "tortoise_annotate_operator",  # mutates operator state
-        }
-        missing = destructive - ms.WRITE_TOOL_NAMES
-        assert not missing, (
-            f"destructive/mutating tools missing from WRITE_TOOL_NAMES "
-            f"(a graphs:read-only MCP key could invoke them): {missing}")
+        """#4113: capability-derived — every handler-reached graph mutation must
+        be write-classified (or a self-guarding HTTP-excluded tool).  The old
+        hardcoded destructive set could not fire for a merged/renamed tool, and
+        the annotation-derived set went empty when a merge picked read-only."""
+        from tool_surface_capabilities import (
+            served_registry,
+            write_classification_violations,
+        )
+        violations = write_classification_violations(served_registry())
+        assert violations == [], (
+            "a graphs:read-only MCP key could reach a write: " + "; ".join(violations))
 
     def test_rw_annotated_http_tools_never_read_classified(self):
-        """C5 #2114 (re-review 3 hardening): DERIVE the write set from the
-        registry — every HTTP-allowed tool whose annotation is NOT read-only
-        (readOnlyHint=False: _rw/_idem — writes/mutations) must be in
-        WRITE_TOOL_NAMES, so a graphs:read-only MCP key can never invoke a
-        write-classified tool. Future-proof: a new _rw() HTTP tool missing
-        from WRITE_TOOL_NAMES fails HERE, not in a review round."""
+        """#4113: the ground truth is the wrap sites / the SDK source — NOT the
+        registry annotation.  Every wrap-site operation's bound tool must be
+        write-classified (or a self-guarding HTTP-excluded tool), so a merge
+        that picks the read-only label cannot blind the guard."""
+        from tool_surface_capabilities import (  # noqa: I001
+            handler_self_guards, quota_gated_wrap_sites, registry_entries_by_method,
+        )
         import tortoise.mcp_server as ms
-        from tortoise.tool_registry import TOOL_REGISTRY
-        writers = {
-            d.name for d in TOOL_REGISTRY
-            if d.http_policy and d.annotations is not None
-            and d.annotations.readOnlyHint is False
-        }
-        missing = writers - ms.WRITE_TOOL_NAMES
-        assert not missing, (
-            f"_rw()-annotated HTTP tools missing from WRITE_TOOL_NAMES "
-            f"(a graphs:read-only MCP key could invoke them): {missing}")
+
+        by_method = registry_entries_by_method()
+        wrapped = {m for m, _, _ in quota_gated_wrap_sites().sites}
+        assert wrapped, "wrap-site scan is vacuous"
+        for method in sorted(wrapped):
+            for entry in by_method.get(method, []):
+                assert entry.name in ms.WRITE_TOOL_NAMES or (
+                    entry.http_policy is False and handler_self_guards(entry.name)
+                ), (f"{entry.name} wraps write {method!r} but is neither "
+                    f"write-classified nor a self-guarding HTTP-excluded tool")
 
     def test_mcp_read_hook_classification(self, monkeypatch):
         """maybe_record_mcp_read: writes skipped, reads counted, selfhost and

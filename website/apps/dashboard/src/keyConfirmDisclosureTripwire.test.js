@@ -50,27 +50,41 @@ test('#2246 (PM-1): the confirms keep the destructive warning copy', () => {
     'rotate must state that applications using the old key stop working')
 })
 
-test('#2735: the rotate reveal clears only after the clipboard write succeeds', () => {
+test('#2735/#4342: the rotate copy clears only after the clipboard write succeeds, and never writes a non-string', () => {
   // The old key is already revoked when the reveal mounts, so a failed
   // clipboard write that still cleared the reveal would destroy the only copy
   // of the live replacement (#2392 class). Mirrors revealKey's fallback.
+  // #4342: the inline handler was extracted to `copyRotatedKey` and gated on a
+  // non-empty string — the old inline `writeText(rotatedKey.plaintext)` could
+  // run with '' (a silent no-op copy that then cleared the reveal).
+  const body = fnBody('copyRotatedKey')
+  assert.match(body, /const plaintext = rotatedKey \? revealablePlaintext\(rotatedKey\.plaintext\) : ''/,
+    'the copy must read the plaintext through the non-blank-string predicate')
+  assert.match(body, /if \(!plaintext\) return/, 'a falsy plaintext must return before the clipboard')
+  assert.match(body, /await navigator\.clipboard\.writeText\(plaintext\)/,
+    'the rotate copy must await the clipboard write with the guarded string')
+  assert.match(body, /catch \{[\s\S]{0,400}selectNodeContents/,
+    'a failed write must keep the plaintext visible and select it for manual copy')
   const start = mainJsx.indexOf('className="new-key"')
   assert.notEqual(start, -1, 'the rotate reveal block must exist')
   const block = mainJsx.slice(start, mainJsx.indexOf('</div>', start) + 6)
-  assert.match(block, /await navigator\.clipboard\.writeText\(rotatedKey\.plaintext\)/,
-    'the rotate Copy & done must await the clipboard write')
-  assert.match(block, /catch \{[\s\S]{0,400}selectNodeContents/,
-    'a failed write must keep the plaintext visible and select it for manual copy')
+  assert.match(block, /onClick=\{copyRotatedKey\}/, 'the reveal Copy must call copyRotatedKey')
+  assert.equal((block.match(/writeText\(/g) || []).length, 0,
+    'no raw writeText may remain inline in the reveal — the guarded function owns it')
 })
 
-test('#2735: rotate renders the one-time replacement reveal (regression guard)', () => {
+test('#2735/#4342: rotate renders the one-time replacement reveal (regression guard)', () => {
   // #2667 deleted the standalone `.new-key` block while regenerateKey kept
   // setting newKey — rotate minted the replacement and never showed it. The
   // reveal now renders from its OWN `rotatedKey` state, so the create modal's
   // dismiss paths (which clear newKey) can never destroy it.
-  assert.match(mainJsx, /\{rotatedKey && \(/,
-    'the rotate reveal must render from rotatedKey')
-  assert.match(mainJsx, /setRotatedKey\(\{ plaintext:/,
+  // #4342: the gate is the DERIVED non-empty string, not the raw object — a
+  // falsy plaintext can no longer render an empty `.key-value` box.
+  assert.match(mainJsx, /const rotatedKeyReveal = \(rotatedKey && revealablePlaintext\(rotatedKey\.plaintext\)\) \|\| ''/,
+    'the rotate reveal must be gated on a non-empty, non-blank plaintext string (#4342)')
+  assert.match(mainJsx, /\{rotatedKeyReveal && \(/,
+    'the rotate reveal must render from the derived non-empty reveal')
+  assert.match(mainJsx, /setRotatedKey\(\{ plaintext: plaintext,/,
     'regenerateKey must set the rotate reveal from the mint response')
   assert.match(mainJsx, /Your new key \(shown once\)/,
     'the reveal must label the key as shown once')

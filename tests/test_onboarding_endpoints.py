@@ -59,8 +59,10 @@ def client(tmp_path):
             "max_teams": 1,
             # #1922: the demo seed is now quota-gated — the team dict must
             # carry max_points (the fail-closed points cap) or the check
-            # 500s.
+            # 500s. #4010: the same contract now applies to max_sessions
+            # (unlimited → explicit None); a missing key is fail-closed.
             "max_points": 10000,
+            "max_sessions": None,
             # #1748: the onboarding sub-team is provisioned on the USER path
             # — the session user becomes the owner member
             # (get_current_org_session attaches session_user_id for session
@@ -142,6 +144,7 @@ class TestPublicDemo:
             "legacy_full_access": True,
             "max_users": 1, "max_graphs": 1, "max_teams": 1,
             "max_points": 0,  # at cap — count(0) >= limit(0)
+            "max_sessions": None,
         }
         r = client.post("/v1/demo")
         assert r.status_code == 402, r.text
@@ -171,6 +174,7 @@ class TestPublicDemo:
             "legacy_full_access": True,
             "max_users": 1, "max_graphs": 1, "max_teams": 1,
             "max_points": 10000,
+            "max_sessions": None,
         }
         r = client.post("/v1/demo")
         assert r.status_code == 200, r.text
@@ -651,12 +655,16 @@ _STATE_KEY_TABLE: dict[str, tuple[str, object]] = {
 
 
 def test_state_keys_registered_parametrized(client):
-    """Task 11 (cycle-3 P1-2 fix, self-verifying): every capture-surface key
-    round-trips through BOTH live default-state dicts, the allowlist, and the
-    PATCH model — a key added to the table without registering it anywhere
-    fails here (the allowlist filter would silently drop it in production)."""
+    """Task 11 (cycle-3 P1-2 fix, self-verifying): every capture-surface key is
+    REGISTERED — present in BOTH live default-state dicts, the allowlist, and
+    the PATCH model — so a key added to the table without registering it
+    anywhere fails here (the allowlist filter would otherwise silently drop it
+    in production). The OPERATIONAL keys then round-trip through PATCH + GET;
+    the server-owned capture/install evidence keys are REFUSED there (403, no
+    write) instead — see ``_CAPTURE_SERVER_OWNED_KEYS`` and the branch below."""
     from tortoise.hosted_api import (
         _ALLOWED_STATE_KEYS,
+        _CAPTURE_SERVER_OWNED_KEYS,
         _ONBOARDING_DEFAULT_STATE,
         DEFAULT_ONBOARDING_STATE,
         OnboardingStatePatchRequest,
@@ -683,6 +691,22 @@ def test_state_keys_registered_parametrized(client):
         # merge (bool keys take True; timestamp keys take an ISO string;
         # scope keys take a small non-empty sample) AND read back via GET
         # (the node is provisioned, so this is a real persisted round-trip).
+        #
+        # #3681: the capture/install EVIDENCE keys (receipts, per-harness
+        # last-errors, install probes) are SERVER-OWNED — registration still
+        # guarantees the key ROUND-TRIPS through the read path, but a client
+        # PATCH must be REFUSED (403) rather than accepted. Asserting the
+        # refusal here keeps the registration table honest about the key (it
+        # exists on both default dicts + the model) while pinning the
+        # server-owned write surface.
+        if state_key in _CAPTURE_SERVER_OWNED_KEYS:
+            r = client.patch("/v1/onboarding/state",
+                             json={patch_field: patch_value})
+            assert r.status_code == 403, (
+                f"server-owned key {state_key} was client-writable: {r.text}")
+            assert r.json()["detail"] == {
+                "message": "server_owned_key", "keys": [state_key]}, r.text
+            continue
         r = client.patch("/v1/onboarding/state",
                          json={patch_field: patch_value})
         assert r.status_code == 200, r.text
@@ -905,10 +929,10 @@ def test_install_probe_round_trip(client):
 
 def test_install_probe_unregistered_harness_422(client):
     """Task 14: a harness with no REGISTERED install_probe_ key (codex /
-    claude-desktop / claude-web / cursor — backfill-only or pending-spike
-    harnesses) → 422 at the model boundary, never a silent drop (an
-    unregistered key would be discarded by the allowlist filter and look
-    like a recorded probe)."""
+    claude-desktop / claude-web / cursor — harnesses with no install-probe
+    beacon; cursor has a capture seam (#3819) but fires no probe) → 422 at the
+    model boundary, never a silent drop (an unregistered key would be
+    discarded by the allowlist filter and look like a recorded probe)."""
     from tortoise.hosted_api import _make_sdk
     _make_sdk(namespace="registry")._get_registry().query(
         "CREATE (t:Team {id:$id, onboarding_state:$st})",

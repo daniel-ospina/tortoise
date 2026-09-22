@@ -3,6 +3,7 @@ recency modulation, compute_reputation."""
 from __future__ import annotations  # noqa: I001
 
 import os
+import shutil
 import sys
 import tempfile
 import time  # noqa: F401
@@ -25,6 +26,7 @@ def sdk():
     s.test_guard = lambda: None  # bypass production guard for test graph
     yield s
     s.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 # ── Part 1: uses/produces edges ──────────────────────────────────────────

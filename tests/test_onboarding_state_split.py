@@ -566,19 +566,27 @@ class TestCheckpoint:
         finally:
             tc.__exit__(None, None, None)
 
-    def test_build_journey_uses_catalog(self):
+    def test_build_journey_completes_on_the_two_observed_acts(self):
         tc, _org_id = _registered_client()
         try:
             tc.post("/v1/onboarding/state/checkpoint", json={"fork": "build"})
             tc.post("/v1/onboarding/state/checkpoint",
                     json={"step": "harness-connected"})
-            tc.post("/v1/onboarding/state/checkpoint",
-                    json={"step": "first-points-filed"})
-            # decide does NOT complete a build org
+            # #3913: ONE observed act is not enough (fail-closed)
+            r0 = tc.get("/v1/onboarding/state")
+            assert r0.json()["onboarding"]["status"] == "active"
+            # decide does NOT affect a build org — asserted while the org is
+            # still ACTIVE (a `complete` assert after first-points-filed
+            # completed it is a tautology).
             r = tc.post("/v1/onboarding/state/checkpoint",
                         json={"step": "decide-completed"})
             assert r.json()["onboarding"]["status"] == "active"
-            # catalog-presented completes it
+            # the second observed act completes it — no catalog needed
+            tc.post("/v1/onboarding/state/checkpoint",
+                    json={"step": "first-points-filed"})
+            r = tc.get("/v1/onboarding/state")
+            assert r.json()["onboarding"]["status"] == "complete"
+            # catalog-presented stays accepted (optional record, never a gate)
             r2 = tc.patch("/v1/onboarding/state",
                           json={"catalog_presented": True})
             assert r2.json()["onboarding"]["status"] == "complete"
@@ -882,9 +890,11 @@ class TestPatchRouting:
             tc.__exit__(None, None, None)
 
     def test_catalog_presented_false_is_noop(self):
-        """False must NOT mark the catalog-presented step edge (only True
-        does) — a non-None-but-False value flipping the build gate was the
-        review-found bug this pins."""
+        """False must NOT mark the catalog-presented step edge (only True does).
+        No gate claim here: since #3913 `_GATE_BUILD` is
+        `{harness-connected, first-points-filed}`, so nothing written under
+        this id can complete any fork — the write still has to be correct; it
+        is simply no longer load-bearing for completion."""
         tc, _org_id = _registered_client()
         try:
             r = tc.patch("/v1/onboarding/state",
@@ -896,13 +906,21 @@ class TestPatchRouting:
 
     def test_wire_compat_preserved(self):
         """underscore→hyphen translation still works (session_capture_receipt
-        claude_desktop → claude-desktop key)."""
+        claude_desktop → claude-desktop key).
+
+        #3681: the receipt key is SERVER-OWNED, so the PATCH is now REFUSED —
+        but the refusal names the HYPHENATED state key (the translated form),
+        which is exactly what proves the translation ran before the ownership
+        check. A test that only asserted 200 would now be asserting the
+        server-owned hole."""
         tc, _org_id = _registered_client()
         try:
             r = tc.patch("/v1/onboarding/state",
                          json={"session_capture_receipt_claude_desktop": "r1"})
-            assert r.status_code == 200
-            assert r.json()["onboarding"]["session_capture_receipt_claude-desktop"] == "r1"
+            assert r.status_code == 403, r.text
+            assert r.json()["detail"] == {
+                "message": "server_owned_key",
+                "keys": ["session_capture_receipt_claude-desktop"]}, r.text
         finally:
             tc.__exit__(None, None, None)
 

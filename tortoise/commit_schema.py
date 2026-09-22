@@ -45,6 +45,7 @@ from typing import Any, Iterable, Literal  # noqa: UP035
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from .file_indexer import provenance_basename
 from .ids import content_hash
 from .pack_registry import (
     CANONICAL_POINT_KINDS,
@@ -203,12 +204,36 @@ def refresh_vocab() -> Vocab:
 
 
 class ProvenanceRef(BaseModel):
-    """Local file provenance — path is BASENAME only (privacy, W-7)."""
+    """Local file provenance — path is BASENAME only (privacy, W-7).
+
+    ``contentHash`` (#4005) is the client-computed sha256 of the RAW's
+    normalized text (``file_indexer.derive_source_content_hash``) — the
+    index entry's integrity anchor. Privacy-safe under W-7: a hash is not the
+    raw and never leaves the machine as content. Optional for back-compat
+    (old clients send none); the server NEVER substitutes ``hash(url)`` —
+    absent stays absent (see the hosted Source bridge).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     path: str = Field(min_length=1)
     spans: list[str] = Field(default_factory=list)
+    contentHash: str | None = None
+
+    @field_validator("path")
+    @classmethod
+    def _basename_required(cls, v: str) -> str:
+        # #4005 review P1/P2: a basename-less path (``/``, ``.``, ``..``,
+        # ``a/.``) used to pass Layer-1 and then either raise mid-write (a
+        # redacted 500 after the Session/Document/Event were already
+        # written) or fall through the writer's basename map and mint a
+        # bare-basename Source. Reject it here, before any write.
+        if not provenance_basename(v):
+            raise ValueError(
+                "path must carry a basename component (W-7: basenames only; "
+                f"got {v!r})"
+            )
+        return v
 
 
 class Source(BaseModel):
@@ -498,6 +523,18 @@ class CommitPayload(BaseModel):
     supersessions: list[SupersessionRecord] = Field(default_factory=list)  # #1350
     telemetry: Telemetry
 
+    @field_validator("session_id")
+    @classmethod
+    def _non_blank_session_id(cls, v: str) -> str:
+        # #4005 review P1: ``session_id=" "`` passed ``min_length=1`` and
+        # then raised inside the write's Source derivation AFTER the Session
+        # counters, Document and Event were written — a redacted 500 with the
+        # CommitRecord stuck ``partial`` and a non-converging retry. The id is
+        # the Source's collision domain, so reject a blank one at Layer-1.
+        if not v.strip():
+            raise ValueError("session_id must be a non-blank string")
+        return v
+
     @field_validator("captured_at")
     @classmethod
     def _iso8601(cls, v: str) -> str:
@@ -715,9 +752,17 @@ def validate_layer1(
     # a slot must match the emitted entity's (name, bare kind), not just the
     # name ("core:plan" ≡ "plan" via _bare_kind)
     entity_keys = {(e.name, _bare_kind(e.kind)) for e in payload.entities}
-    # The session Source identity = provenance path basename (privacy: paths
-    # are basename-only; the server derives the Session Source url from it).
-    session_source_ids = {Path(r.path).name for r in payload.provenance_refs}
+    # The session Source identity is the CANONICAL ``session:<session_id>``
+    # (#4005) — the same url the capture path materializes and delete_session
+    # deletes. Layer-1 therefore accepts a point/event ``source_ref`` when it
+    # names either a provenance basename (the W-7 client spelling) or an
+    # emitted ``sources[]`` url. BOTH sides of this set (and the writer's
+    # ``session_ref_urls`` map) derive the basename through the ONE shared
+    # ``file_indexer.provenance_basename`` primitive — they used to disagree
+    # on ``"."``/``"a/."`` and let a Layer-1-accepted ``source_ref`` fall
+    # through to a bare-basename Source (#4005 review P2).
+    session_source_ids = {provenance_basename(r.path)
+                          for r in payload.provenance_refs}
     source_urls = {s.url for s in payload.sources}
     emitted_operator_keys = {
         (o.src, o.dst, o.op_type) for o in payload.operators

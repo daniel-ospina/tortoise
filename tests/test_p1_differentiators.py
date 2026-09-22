@@ -5,6 +5,7 @@ Runnable with: .venv/bin/python -m pytest tests/test_p1_differentiators.py -v
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 
@@ -26,6 +27,7 @@ def sdk():
     sdk = TortoiseSDK(db_path)
     yield sdk
     sdk.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 def _make_point(sdk, **kw):
@@ -181,7 +183,7 @@ class TestEntityProjection:
 class TestStubs:
     def test_connectors_package_exists(self):
         from tortoise.connectors import __doc__ as _doc
-        assert "P1-5" in _doc or True  # just import check  # noqa: SIM222
+        assert "P1-5" in _doc  # the stub's docstring names the P1-5 phase
 
     def test_auth_stub_exists(self):
         import tortoise.auth  # noqa: F401

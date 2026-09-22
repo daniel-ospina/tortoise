@@ -32,6 +32,15 @@ from fastapi import HTTPException
 REPO = Path(__file__).resolve().parent.parent
 HOSTED_API = REPO / "tortoise" / "hosted_api.py"
 SELFHOST = REPO / "tortoise" / "selfhost.py"
+SUPABASE_CONTROL = REPO / "tortoise" / "supabase_control.py"
+
+
+def _ancestors(node: ast.AST, parents: dict[int, ast.AST]):
+    """Walk from ``node`` up to the root, yielding each ancestor."""
+    current = parents.get(id(node))
+    while current is not None:
+        yield current
+        current = parents.get(id(current))
 
 
 def _handler(name: str, source: Path = HOSTED_API) -> ast.AsyncFunctionDef:
@@ -76,6 +85,451 @@ def test_handler_makes_no_direct_query_call():
         f"health_ready calls .query(...) directly at line(s) {offenders} — "
         "that runs synchronous network I/O on the event loop and freezes every "
         "other request (#2988)"
+    )
+
+
+# ── #3498: NAME-BASED control-plane offload inventory ──────────────────────
+#
+# The #2988 pin above matches ``ast.Attribute`` / ``attr == "query"`` inside
+# ONE handler. It cannot see a bare ``Name`` call (``user_memberships(cp, uid)``),
+# it cannot see a middleware body, and it cannot see any handler but
+# ``health_ready`` — which is exactly how the #3498 auth/REST blockers survived
+# it. This pin is NAME-BASED: every ``AsyncFunctionDef`` body (a Starlette
+# middleware ``dispatch`` is one) is scanned for a direct call to a declared
+# blocking control-plane seam helper. Such a call is allowed only inside an
+# offload boundary — the #3498 ``_cp_offload`` / ``monitoring.run_control_plane_call``
+# seam, or the pre-existing ``run_on_daemon_worker`` / ``asyncio.to_thread``.
+#
+# BOUNDARY, stated rather than implied: the inventory is the DECLARED
+# auth/REST seam of #3498 (§A1 of the design review) plus the session/DI and
+# key-write helpers this change routes — not every blocking call in the file.
+# The data-plane FalkorDB ``.query(...)`` sites are #3086's lane; the remaining
+# on-loop control-plane helper calls in other endpoints (invitations, members,
+# identity linking, agent signup) are #4350; and the in-lock mint calls in
+# ``_session_key_supabase`` cannot await under the synchronous ``_org_mint_lock``.
+# A pin claiming to cover all of them would have to enumerate ~50 call sites and
+# restructure the mint lock — a rewrite, not a guard. What this pin DOES do is
+# fail on the *next* call site that uses one of these seam helpers — the way
+# this defect regrew three times (#2988, #3035, #3086).
+#
+# LIMIT, stated: the scan walks ASYNC bodies, so a blocking call inside a SYNC
+# helper reached from an async body is not visible here (that was the removed
+# ``_session_pinned_org`` lazy-read shape; it is pinned directly by
+# ``test_session_pinned_org_is_a_pure_predicate``). The dynamic
+# ``test_no_new_on_loop_control_plane_helper_calls`` names the residual
+# explicitly so a new on-loop helper call still fails.
+CONTROL_PLANE_OFFLOAD_INVENTORY = frozenset({
+    "resolve_api_key",          # key-auth: 2-3 dependent PostgREST round-trips
+    "update_last_used",         # key-auth: the last_used_at PATCH (best-effort)
+    "user_memberships",         # session lane: membership rows
+    "membership_for_user_org",  # session/DI + login/claim lanes
+    "_orgs_row_fail_soft",      # session/DI lane: the orgs additive ladder
+    "org_by_id",                # session/DI + invite/onboarding lanes
+    "invitation_info_by_token",  # invite-info (hosted): the token lookup
+    "_org_node_sync_limits",    # session/DI lane: org limit props (org_by_id)
+    "api_key_by_id",            # key-write lanes: the key lookup
+    "set_dashboard_key_login",  # dashboard-login + provisioning flag write
+    "set_api_key_enabled",       # key-write lane: the enabled PATCH
+    "set_api_key_name",          # key-write lane: the label PATCH
+    "set_api_key_scopes",        # key-write lane: the scopes PATCH
+    "_resolve_signup_token",    # recovery lane: signup-token resolution
+    "_track_analytics_event",   # analytics lane: fresh httpx.Client per event
+    "_github_repos_count",      # github_status: blocking api.github.com call
+})
+
+#: The §A1-confirmed seam helpers that must never be silently dropped from the
+#: inventory (a subset assertion, so the pin cannot shrink to nothing).
+_A1_CONFIRMED_SEAMS = frozenset({
+    "resolve_api_key", "update_last_used", "user_memberships",
+    "_orgs_row_fail_soft", "_track_analytics_event", "_github_repos_count",
+})
+
+#: Helpers this change ROUTES in addition to §A1 (the session/DI seams
+#: ``_membership_org`` / ``_org_node`` / ``_require_owner_admin`` and the
+#: key-write/login/claim/invite-info lanes). If a name leaves the inventory its
+#: routed sites lose their regression guard, so the pin asserts they stay.
+_ROUTED_SESSION_SEAMS = frozenset({
+    "membership_for_user_org", "org_by_id", "api_key_by_id",
+    "set_dashboard_key_login", "set_api_key_enabled", "set_api_key_name",
+    "set_api_key_scopes", "_org_node_sync_limits", "_resolve_signup_token",
+    "invitation_info_by_token",
+})
+
+#: Blocking ``supabase_control`` helpers that are STILL called directly
+#: (un-offloaded) from an async body. This is the DECLARED residual of #4350
+#: plus the in-lock mint calls in ``_session_key_supabase`` (which cannot await
+#: under the synchronous ``_org_mint_lock``). It is deliberately explicit and
+#: reviewed: a NEW on-loop call to a helper outside this set fails
+#: ``test_no_new_on_loop_control_plane_helper_calls`` — which is the design's
+#: "fail on the next call site" guard, with the residual named rather than
+#: implied. Burn it down in #4350.
+_KNOWN_ON_LOOP_RESIDUAL = frozenset({
+    "active_api_keys", "claim_membership", "consume_link_intent",
+    "consume_unlink_permit", "count_active_free_memberships",
+    "count_graph_keys", "decline_invitation_by_email",
+    "expired_bootstrap_keys", "graph_key_ids", "insert_api_key",
+    "invitation_accept", "invitation_accept_by_id", "invitation_expire",
+    "invitation_mint", "invitation_rescind",
+    "invitation_resend", "invitation_row_by_token", "is_anon_org",
+    "membership_by_identity", "membership_count_since", "membership_role",
+    "mint_target_user_for_key", "org_api_keys", "org_by_email",
+    "org_by_name", "org_members", "org_tier", "owned_free_org_ids",
+    "pending_invitations", "pending_invitations_for_email",
+    "provision_org", "provision_org_with_token", "recover_org_key",
+    "reserve_unlink", "revoke_api_key", "set_graph_name",
+    "set_graph_recording", "set_membership", "set_org_onboarding_email_sent",
+    "signup_token_row", "soft_delete_graph", "store_github_credentials",
+    "store_link_intent", "user_identity_inventory", "webhook_event_marker",
+})
+
+#: Callees that OFFLOAD their argument — a call nested inside one of these is
+#: not on the loop, so the walk does not descend into it. ``_oauth_offload``
+#: (#3669) is the OAuth-lane wrapper over the same seam (it calls ``_cp_offload``
+#: on the dedicated ``oauth`` pool), so it is a boundary for the same reason;
+#: ``_graph_offload`` (#3773) is the DATA-PLANE wrapper over the same seam (the
+#: dedicated ``graph`` pool).
+OFFLOAD_BOUNDARY_CALLEES = frozenset({
+    "_cp_offload", "_oauth_offload", "_graph_offload",
+    "run_control_plane_call", "run_on_daemon_worker", "to_thread",
+})
+
+
+def _callee_name(func: ast.expr) -> str | None:
+    """The bare name of a call target — ``Name.id``, or the attribute for
+    ``asyncio.to_thread`` / ``monitoring.run_control_plane_call``."""
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _module_aliases(tree: ast.AST) -> dict[str, str]:
+    """Module-level ``from ... import X as Y`` aliases (Y → X)."""
+    aliases: dict[str, str] = {}
+    for stmt in getattr(tree, "body", []):
+        if isinstance(stmt, ast.ImportFrom):
+            for alias in stmt.names:
+                if alias.asname:
+                    aliases[alias.asname] = alias.name
+    return aliases
+
+
+def _unoffloaded_calls(node: ast.AST,
+                       module_aliases: dict[str, str] | None = None) -> list[tuple[str, ast.Call]]:
+    """Every ``ast.Call`` in ``node``'s OWN body that is not itself an offload
+    boundary and is not nested inside one, as ``(resolved_callee, call)``.
+
+    The callee name is RESOLVED through ``from ... import X as Y`` aliases
+    (module-level and local to the body), so ``_sb_memberships(...)`` (an alias
+    of ``user_memberships``) is seen for what it is — an alias is exactly how
+    the session lane smuggles one of these calls past a naive name match.
+
+    Nested ``def``/``async def``/``class`` bodies are skipped: a blocking call
+    in a nested function belongs to that function's own inventory entry (and
+    the pre-existing #2988 pin covers the probe case deliberately).
+    """
+    aliases = dict(module_aliases or {})
+    for stmt in getattr(node, "body", []):
+        if isinstance(stmt, ast.ImportFrom):
+            for alias in stmt.names:
+                if alias.asname:
+                    aliases[alias.asname] = alias.name
+
+    def resolved(func: ast.expr) -> str | None:
+        name = _callee_name(func)
+        if name is None:
+            return None
+        return aliases.get(name, name)
+
+    found: list[tuple[str, ast.Call]] = []
+
+    def visit(current: ast.AST) -> None:
+        if isinstance(current, ast.Call):
+            if _callee_name(current.func) in OFFLOAD_BOUNDARY_CALLEES:
+                # The CALLABLE argument runs on the worker — skip it. Every
+                # OTHER argument is evaluated EAGERLY on the loop, so it must
+                # still be scanned (#3498 review): a
+                # ``_cp_offload(user_memberships(cp, uid))`` call (a Call, not
+                # a Lambda/Name) would otherwise hide an on-loop call.
+                for idx, arg in enumerate(current.args):
+                    if idx == 0 and isinstance(arg, (ast.Lambda, ast.Name)):
+                        continue
+                    visit(arg)
+                for kw in current.keywords:
+                    # The callable may be passed by KEYWORD (``fn=``/``func=``)
+                    # — it still runs on the worker, so skip it the same way.
+                    if kw.arg in ("fn", "func") and isinstance(
+                            kw.value, (ast.Lambda, ast.Name)):
+                        continue
+                    visit(kw.value)
+                return
+            name = resolved(current.func)
+            if name is not None:
+                found.append((name, current))
+        for child in ast.iter_child_nodes(current):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            visit(child)
+
+    for stmt in getattr(node, "body", []):
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        visit(stmt)
+    return found
+
+
+def _async_bodies(tree: ast.AST):
+    """Every async function/method — Starlette middleware ``dispatch`` included."""
+    return [n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)]
+
+
+def test_control_plane_seam_calls_are_all_offloaded():
+    """#3498 item 3: a NAME-BASED inventory over EVERY async body.
+
+    This is the pin the #2988 guard should have been: it sees
+    ``user_memberships(cp, uid)`` (a bare ``Name``, invisible to the
+    ``attr == "query"`` match), it sees middleware bodies, and it sees every
+    handler — so the #3498 shape cannot reappear on the next call site.
+    """
+    tree = ast.parse(HOSTED_API.read_text())
+    bodies = _async_bodies(tree)
+    aliases = _module_aliases(tree)
+    assert len(bodies) > 50, (
+        f"only {len(bodies)} async bodies parsed — the scan is not seeing the "
+        "hosted surface it is supposed to guard"
+    )
+    offenders = [
+        (node.name, call.lineno, name)
+        for node in bodies
+        for name, call in _unoffloaded_calls(node, aliases)
+        if name in CONTROL_PLANE_OFFLOAD_INVENTORY
+    ]
+    assert not offenders, (
+        "synchronous control-plane call(s) made directly from an async body "
+        f"(name, line, callee): {offenders} — route them through _cp_offload / "
+        "run_control_plane_call so PostgREST I/O never runs on the event loop "
+        "(#3498)"
+    )
+
+
+def test_no_async_body_builds_a_synchronous_httpx_client():
+    """A DIRECT ``httpx.Client(...)`` construction inside a coroutine.
+
+    This catches only that shape — a client built in a sync helper (as
+    ``_track_analytics_event`` and ``_github_repos_count`` do) is covered by
+    the name inventory above, not here."""
+    tree = ast.parse(HOSTED_API.read_text())
+    aliases = _module_aliases(tree)
+    offenders = [
+        (node.name, call.lineno)
+        for node in _async_bodies(tree)
+        for _name, call in _unoffloaded_calls(node, aliases)
+        if isinstance(call.func, ast.Attribute)
+        and call.func.attr == "Client"
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "httpx"
+    ]
+    assert not offenders, (
+        f"async body constructs a synchronous httpx.Client at {offenders} — "
+        "that runs blocking I/O on the event loop (#3498)"
+    )
+
+
+def test_offload_inventory_names_still_exist():
+    """A rename or deletion must fail HERE, not silently vacate the pin."""
+    defined = {
+        n.name
+        for path in (SUPABASE_CONTROL, HOSTED_API)
+        for n in ast.walk(ast.parse(path.read_text()))
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    missing = CONTROL_PLANE_OFFLOAD_INVENTORY - defined
+    assert not missing, (
+        f"the #3498 offload inventory names {sorted(missing)}, which no longer "
+        "exist — a rename must update the inventory, or the pin silently "
+        "guards nothing"
+    )
+    assert _A1_CONFIRMED_SEAMS <= CONTROL_PLANE_OFFLOAD_INVENTORY, (
+        "a §A1-confirmed seam helper was dropped from the offload inventory"
+    )
+    assert _ROUTED_SESSION_SEAMS <= CONTROL_PLANE_OFFLOAD_INVENTORY, (
+        "a session/DI seam helper this change routed was dropped from the "
+        "offload inventory"
+    )
+
+
+def _supabase_control_blocking_names() -> set[str]:
+    """Module-level ``supabase_control`` functions that transitively reach the
+    synchronous HTTP client (``cp.query`` / ``cp.rpc`` / ``cp.rpc_value``).
+
+    This is the DYNAMIC half of the pin: a new helper enters this set
+    automatically, so a new on-loop call site cannot hide behind a name that
+    was simply never added to a hand-written list.
+    """
+    tree = ast.parse(SUPABASE_CONTROL.read_text())
+    fns = {n.name: n for n in tree.body
+           if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    blocking: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for name, fn in fns.items():
+            if name in blocking:
+                continue
+            calls: set[str | None] = set()
+            for stmt in fn.body:
+                if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    continue
+                calls |= {_callee_name(c.func) for c in ast.walk(stmt)
+                          if isinstance(c, ast.Call)}
+            if (calls & blocking) or (calls & {"query", "rpc", "rpc_value"}):
+                blocking.add(name)
+                changed = True
+    return blocking
+
+
+def test_no_new_on_loop_control_plane_helper_calls():
+    """The design's "fail on the NEXT call site" guard, with an explicit
+    residual rather than an implied one.
+
+    An un-offloaded direct call from an async body to ANY blocking
+    ``supabase_control`` helper must be either (a) covered by the inventory
+    (which fails the test above) or (b) in the reviewed ``_KNOWN_ON_LOOP_RESIDUAL``
+    set (#4350). A NEW call to a helper outside that set fails here.
+    """
+    blocking = _supabase_control_blocking_names()
+    assert len(blocking) > 50, (
+        f"the blocking-helper derivation saw only {len(blocking)} functions — "
+        "it is not seeing supabase_control's HTTP surface"
+    )
+    tree = ast.parse(HOSTED_API.read_text())
+    aliases = _module_aliases(tree)
+    offenders = [
+        (node.name, call.lineno, name)
+        for node in _async_bodies(tree)
+        for name, call in _unoffloaded_calls(node, aliases)
+        if name in blocking
+        and name not in CONTROL_PLANE_OFFLOAD_INVENTORY
+        and name not in _KNOWN_ON_LOOP_RESIDUAL
+    ]
+    assert not offenders, (
+        "NEW on-loop control-plane helper call(s) from an async body "
+        f"(function, line, callee): {offenders} — route them through "
+        "_cp_offload, or add the site to #4350's residual inventory "
+        "(_KNOWN_ON_LOOP_RESIDUAL) with a reason"
+    )
+    # A helper cannot be both routed and allowlisted: if it were, the routed
+    # sites would silently lose the guard above.
+    assert not (CONTROL_PLANE_OFFLOAD_INVENTORY & _KNOWN_ON_LOOP_RESIDUAL), (
+        "the offload inventory and the declared residual overlap: "
+        f"{sorted(CONTROL_PLANE_OFFLOAD_INVENTORY & _KNOWN_ON_LOOP_RESIDUAL)}"
+    )
+
+
+def test_detector_flags_a_bare_name_call_and_ignores_an_offloaded_one():
+    """Self-test of the detector (a pin that can never fail is not a pin).
+
+    The first call is the exact #3498 shape the attribute-based guard missed;
+    the second is the same helper behind the offload seam; the third is the
+    SAME call under a ``from ... import ... as`` alias — the session lane's
+    ``user_memberships as _sb_memberships``.
+    """
+    src = (
+        "from tortoise.supabase_control import user_memberships as _sb\n"
+        "async def handler():\n"
+        "    rows = user_memberships(cp, uid)\n"
+        "    more = await _cp_offload(lambda: user_memberships(cp, uid))\n"
+        "    alias = _sb(cp, uid)\n"
+    )
+    node = ast.parse(src).body[1]
+    aliases = _module_aliases(ast.parse(src))
+    hits = [
+        (call.lineno, name)
+        for name, call in _unoffloaded_calls(node, aliases)
+        if name in CONTROL_PLANE_OFFLOAD_INVENTORY
+    ]
+    assert hits == [(3, "user_memberships"), (5, "user_memberships")], (
+        f"detector must flag the un-offloaded bare-Name AND aliased calls, got {hits}"
+    )
+
+
+def test_detector_scans_a_middleware_dispatch_body():
+    """The inventory must cover a middleware body — the issue's other stated
+    gap in the #2988 pin."""
+    src = (
+        "class M:\n"
+        "    async def dispatch(self, request, call_next):\n"
+        "        _track_analytics_event('', 'x')\n"
+        "        return await call_next(request)\n"
+    )
+    bodies = _async_bodies(ast.parse(src))
+    assert [b.name for b in bodies] == ["dispatch"]
+    hits = [
+        name
+        for name, _call in _unoffloaded_calls(bodies[0])
+        if name in CONTROL_PLANE_OFFLOAD_INVENTORY
+    ]
+    assert hits == ["_track_analytics_event"]
+
+
+def test_detector_flags_an_eagerly_evaluated_boundary_argument():
+    """A boundary call whose callable argument is NOT a lambda/name reference
+    evaluates that argument on the loop — the detector must still see it."""
+    src = (
+        "async def handler():\n"
+        "    rows = await _cp_offload(user_memberships(cp, uid), op='x')\n"
+    )
+    node = ast.parse(src).body[0]
+    hits = [
+        (call.lineno, name)
+        for name, call in _unoffloaded_calls(node)
+        if name in CONTROL_PLANE_OFFLOAD_INVENTORY
+    ]
+    assert hits == [(2, "user_memberships")]
+
+
+def test_detector_ignores_a_keyword_callable_argument():
+    """``fn=lambda: user_memberships(...)`` runs on the worker — the callable
+    slot is skipped whether positional or keyword."""
+    src = (
+        "async def handler():\n"
+        "    await _cp_offload(fn=lambda: user_memberships(cp, uid), op='x')\n"
+    )
+    node = ast.parse(src).body[0]
+    hits = [
+        name
+        for name, _call in _unoffloaded_calls(node)
+        if name in CONTROL_PLANE_OFFLOAD_INVENTORY
+    ]
+    assert hits == []
+
+
+def test_session_pinned_org_is_a_pure_predicate():
+    """The #3498 regression shape was a SYNC helper that read the control
+    plane lazily (``_session_pinned_org``'s old ``user_memberships`` call).
+    The name-based scan walks async bodies, so pin that removed shape
+    directly: the helper must not import or call a control-plane seam."""
+    tree = ast.parse(HOSTED_API.read_text())
+    node = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "_session_pinned_org"
+    )
+    imported = {
+        alias.name
+        for imp in ast.walk(node)
+        if isinstance(imp, ast.ImportFrom)
+        for alias in imp.names
+    }
+    called = {
+        _callee_name(c.func)
+        for c in ast.walk(node)
+        if isinstance(c, ast.Call)
+    }
+    offenders = (imported | called) & CONTROL_PLANE_OFFLOAD_INVENTORY
+    assert not offenders, (
+        f"_session_pinned_org references control-plane helper(s) {sorted(offenders)} "
+        "— it must stay a pure in-memory predicate (the #3498 lazy-read regression)"
     )
 
 
@@ -192,12 +646,14 @@ def _fly_check_budget_proxy_s() -> float | None:
     # as a /health/ready budget proxy would be a different quantity entirely
     # (and smaller than the ready worst case, so it cannot serve as a ceiling).
     # There is consequently NO HTTP-check budget left to compare against here.
-    # The deferred top-level ``[checks.loop_liveness]`` does NOT restore one:
-    # it is a loop-liveness check (fly.toml documents its timeout as 5s, below
-    # the ~11.6s sum), it is a TOP-LEVEL ``[checks]`` entry rather than a
+    # The top-level ``[checks.loop_liveness]`` (shipped #3447) does NOT restore
+    # one: it is a loop-liveness check (fly.toml documents its timeout as 5s,
+    # below the ~11.6s sum), it is a TOP-LEVEL ``[checks]`` entry rather than a
     # ``services[0].http_checks`` one, and this reader does not consume it. The
     # cross-endpoint bound now lives in ``READY_WORST_CASE_BUDGET_S``, and the
-    # caller's else branch fails closed if any top-level ``[checks]`` appears.
+    # caller's else branch MODELS that one entry explicitly (identity, bounds,
+    # and that it does not feed the ceiling) while still failing closed on any
+    # OTHER top-level ``[checks]`` entry.
     if "http_checks" not in svc:
         return None
     try:
@@ -359,9 +815,12 @@ def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
     the only external bound is the TCP replacement — whose 5s timeout is
     documented as headroom, not a latency budget, and cannot serve as a
     ceiling. When no http_check budget exists the test asserts instead that the
-    documented replacement (``[[services.tcp_checks]]``) IS present and that no
-    top-level ``[checks]`` table has appeared — so removing or altering the
-    checks block reds here rather than silently passing.
+    documented replacement (``[[services.tcp_checks]]``) IS present, that the
+    top-level ``[checks.loop_liveness]`` entry this repo now ships IS present
+    and carries its own documented bounds (and is NOT the readiness ceiling),
+    and that no OTHER top-level ``[checks]`` entry has appeared — so removing,
+    altering or shadowing the checks block reds here rather than silently
+    passing.
     """
     import httpx
 
@@ -463,30 +922,108 @@ def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
     else:
         # No HTTP-check budget in fly.toml (the #2850 state). Make that ABSENCE a
         # positive assertion rather than a silent skip: it may only mean the
-        # documented HTTP->TCP migration, so the replacement must be present, and
-        # deleting the whole checks block still reds here.
+        # documented HTTP->TCP migration, so the SERVICES replacement
+        # ([[services.tcp_checks]]) must be present — deleting THAT block reds
+        # immediately below. (The separate top-level [checks] block has its own
+        # fail-closed absence assertion at the end of this branch; this paragraph
+        # covers the services check only, not `[checks]`.)
         #
-        # FAIL CLOSED on a top-level [checks] table. The deferred
-        # [checks.loop_liveness] follow-up is NOT a readiness budget (fly.toml
-        # documents its timeout as 5s — below the sum — and it times loop
-        # liveness, not a request), so it can never restore this ceiling, and
-        # nothing here reads it. If it (or any other top-level check) lands, this
-        # reds so whoever adds it must wire a real deadline in deliberately
-        # instead of silently leaving the sum unbounded.
+        # 2026-09-17 (#3447): the top-level `[checks.loop_liveness]` entry the
+        # old guard failed closed on has LANDED. A flat `"checks" not in _cfg`
+        # would now forbid the shipped config outright; widening it to "any
+        # top-level table is fine" would delete the guard. Instead MODEL the
+        # known entry explicitly: assert its identity and its bounds, and assert
+        # it cannot feed the readiness ceiling — any OTHER top-level check still
+        # reds, so a future unmodelled `[checks]` entry cannot escape this
+        # analysis.
+        #
+        # It is NOT wired into READY_WORST_CASE_BUDGET_S (the message's other
+        # offered resolution) because it is a DIFFERENT quantity: 9090/healthz
+        # is a dedicated listener off the client's request path, and the check's
+        # 5s timeout times loop liveness, not a request — it would TIGHTEN the
+        # 11.6s readiness worst case to a value about a different surface, i.e.
+        # silently disarm the ceiling it is supposed to guard.
         _cfg = tomllib.loads((REPO / "fly.toml").read_text())
         assert _cfg["services"][0].get("tcp_checks"), (
             "fly.toml exposes NEITHER an http_check budget proxy NOR the "
             "tcp_checks that replaced it (#2850) — the services checks block "
             "was removed or altered without the documented migration"
         )
-        assert "checks" not in _cfg, (
-            "fly.toml now defines a top-level [checks] table. The deferred "
-            "[checks.loop_liveness] is a loop-liveness check, NOT a readiness "
-            "budget, so it does not restore the cross-endpoint ceiling and this "
-            "reader does not consume it. Wire its deadline into "
-            "READY_WORST_CASE_BUDGET_S (or assert it here) rather than letting "
-            f"the sum ({ready_worst_case}s) go unbounded."
-        )
+        checks = _cfg.get("checks")
+        if checks is not None:
+            assert isinstance(checks, dict) and set(checks) == {"loop_liveness"}, (
+                "fly.toml carries an unmodelled top-level [checks] entry: "
+                f"{sorted(checks) if isinstance(checks, dict) else checks!r}. Only "
+                "the loop-liveness check (#3447) is modelled here. A new top-level "
+                "check also gates flyctl's deploy wait and may bound the readiness "
+                "surface — add it to this model (identity + bounds + whether it "
+                "feeds READY_WORST_CASE_BUDGET_S) rather than letting it escape "
+                "the cross-endpoint analysis."
+            )
+            ll = checks["loop_liveness"]
+            assert isinstance(ll, dict), (
+                f"[checks.loop_liveness] is not a table ({ll!r}) — its bounds "
+                "cannot be evaluated"
+            )
+            assert ll.get("type") == "http" and ll.get("path") == "/healthz", (
+                "[checks.loop_liveness] must probe the app's dedicated HTTP "
+                f"/healthz listener; got type={ll.get('type')!r} "
+                f"path={ll.get('path')!r}"
+            )
+            assert ll.get("port") == 9090, (
+                "[checks.loop_liveness] must target the dedicated 9090 listener, "
+                "NOT the client-facing 8000 plane — its whole point is to be off "
+                f"the request path; got port={ll.get('port')!r}"
+            )
+            assert ll.get("method", "get") == "get", (
+                "[checks.loop_liveness] must be a GET — the handler 405s anything "
+                "else (monitoring.py _method_not_allowed), and flyctl's deploy "
+                "wait requires every reported check to pass, so a non-GET fails "
+                f"every deploy; got {ll.get('method')!r}"
+            )
+            # Its OWN documented bounds (fly.toml §6.4): pin them so a silent
+            # edit to the interval/timeout/grace cannot pass through the model.
+            interval, timeout, grace = "15s", "5s", "180s"
+            assert (ll.get("interval"), ll.get("timeout"), ll.get("grace_period")) \
+                == (interval, timeout, grace), (
+                    "[checks.loop_liveness] bounds drifted from the documented "
+                    f"{interval}/{timeout}/{grace}: got interval={ll.get('interval')!r} "
+                    f"timeout={ll.get('timeout')!r} grace_period={ll.get('grace_period')!r}"
+                )
+            # NOT a readiness budget. Its 5s timeout sits BELOW /health/ready's
+            # sequential worst case, so borrowing it as a ceiling would be a
+            # silent DISARM; and _fly_check_budget_proxy_s — the only reader —
+            # consumes services[0].http_checks, never a top-level check (which is
+            # exactly why it returned None and put this branch in force).
+            loop_timeout_s = float(timeout[:-1])
+            assert loop_timeout_s < ready_worst_case, (
+                "[checks.loop_liveness] timeout must stay BELOW /health/ready's "
+                f"sequential worst case ({ready_worst_case}s) — it bounds loop "
+                "liveness, not a readiness request, so it cannot serve as the "
+                "cross-endpoint ceiling"
+            )
+            assert loop_timeout_s != READY_WORST_CASE_BUDGET_S, (
+                "[checks.loop_liveness] timeout must not BE the readiness policy "
+                "ceiling (READY_WORST_CASE_BUDGET_S) — the policy constant is "
+                "independent of this check, not borrowed from it"
+            )
+        else:
+            # Failure #3447 exists to catch, stated as the branch's own contract:
+            # an ABSENT top-level [checks] block is not the unmodelled case above
+            # and must not skip the model. In the #2850 state this block is the
+            # only application-level probe in the file — every remaining check is
+            # kernel-served (services.tcp_checks) and therefore blind to a
+            # stalled-but-running event loop. Deleting it is exactly the mistake
+            # that needs a mandatory post-merge `flyctl checks list`, so the
+            # tripwire has to red here rather than delegate that to the operator.
+            raise AssertionError(
+                "fly.toml has NO top-level [checks] block: got "
+                f"{checks!r}. Absence is NOT modelled — in the #2850 state "
+                "[checks.loop_liveness] is the only check that can see a STALLED "
+                "event loop (services.tcp_checks is kernel-served and cannot). "
+                "Restore [checks.loop_liveness] or record its removal AND its "
+                "replacement here deliberately."
+            )
 
 
 def test_db_probe_bound_covers_the_sdk_acquisition_prefix():
@@ -541,7 +1078,17 @@ def test_db_probe_bound_covers_the_sdk_acquisition_prefix():
 def test_selfhost_ready_does_not_probe_on_the_loop():
     """``tortoise/selfhost.py::health_ready`` had the identical bug: it built the
     SDK and touched the DB inline. ``publish-selfhost.yml`` curls this endpoint
-    on every publish, so it is the same outage vector in the other image."""
+    on every publish, so it is the same outage vector in the other image.
+
+    #3287 — the pin FLIPPED. It used to require ``asyncio.to_thread`` here,
+    because that was #2988's fix. ``to_thread`` is no longer acceptable on this
+    endpoint: it always submits to the event loop's SHARED default executor,
+    whose queue is unbounded, so unrelated work can queue the probe past
+    ``_READY_PROBE_TIMEOUT_S`` and make a HEALTHY DB report a false 503 — which
+    fails the publish. The endpoint must dispatch through the module's own
+    pool (``_submit_probe``) instead. Guarding the new shape here is what stops
+    a refactor quietly reintroducing the shared pool.
+    """
     node = _handler("health_ready", SELFHOST)
     offenders = [
         n.lineno
@@ -554,16 +1101,45 @@ def test_selfhost_ready_does_not_probe_on_the_loop():
         f"selfhost health_ready calls DB-touching code directly at line(s) {offenders} — "
         "synchronous DB work on the event loop (#2988)"
     )
-    off_loop = {
-        arg.id
+    shared_pool = [
+        call.lineno
         for call in ast.walk(node)
         if isinstance(call, ast.Call)
         and isinstance(call.func, ast.Attribute)
         and call.func.attr == "to_thread"
-        for arg in call.args
-        if isinstance(arg, ast.Name)
+    ]
+    assert not shared_pool, (
+        f"selfhost health_ready uses asyncio.to_thread at line(s) {shared_pool} — "
+        "to_thread submits to the loop's SHARED default executor, where unrelated "
+        "work starves the probe and a healthy DB reports a false 503 (#3287)"
+    )
+    dedicated = [
+        call
+        for call in ast.walk(node)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "_submit_probe"
+    ]
+    assert dedicated, (
+        "selfhost health_ready dispatches nothing through the module's dedicated "
+        "probe pool (_submit_probe) — #3287"
+    )
+    # Presence alone is not enough: a call whose future is dropped satisfies the
+    # check above while the endpoint answers nothing. The future must be AWAITED,
+    # so the probe's result is what the handler responds with.
+    parents = {
+        id(child): parent for parent in ast.walk(node) for child in ast.iter_child_nodes(parent)
     }
-    assert off_loop, "selfhost health_ready dispatches nothing with asyncio.to_thread"
+    not_awaited = [
+        call.lineno
+        for call in dedicated
+        if not any(a is not None and isinstance(a, ast.Await) for a in _ancestors(call, parents))
+    ]
+    assert not not_awaited, (
+        f"selfhost health_ready calls _submit_probe at line(s) {not_awaited} but never "
+        "awaits its future — the probe's result is discarded, so the endpoint answers "
+        "whatever the fall-through path produces (#3287)"
+    )
 
 
 def test_selfhost_probe_is_bounded():

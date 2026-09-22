@@ -4,7 +4,8 @@ The Graphs tab's render + management behavior (meter, per-graph key panel,
 one-time reveal, delete lifecycle, tier gate) is render/event logic in
 main.jsx that no unit test can reach (main.jsx has no component harness;
 graphs.js holds the pure derivations and IS node --test covered). This
-suite drives the real committed-dist dashboard (same two-server harness as
+suite drives the real built dashboard (`npm run build` first — dist/ is a
+build artifact since #3775; same two-server harness as
 test_keys_table_mixed.py):
 
   `wrangler@4 pages dev . --port 8788` from website/ (auth) +
@@ -57,11 +58,12 @@ import pytest
 from playwright.sync_api import Page, expect
 
 from tests.e2e.test_session_login_flow import (
-    API_HOST,
     APP_HOST,
     AUTH_HOST,
     DASHBOARD_URL,
+    _bff_path,
     _goto_local_dashboard,
+    _is_bff_api,
     _preflight_local_servers,
     _proxy_body,
     _seed_local_session_cookie,
@@ -165,8 +167,8 @@ def _wire_graphs_harness(page: Page, org_row: dict,
 
     def handle(route):
         url = route.request.url
-        if url.startswith(API_HOST):
-            path = urllib.parse.urlsplit(url).path
+        if _is_bff_api(url):
+            path = _bff_path(url)
             query = urllib.parse.urlsplit(url).query
             auth = (route.request.headers.get("authorization") or "")
             if auth.startswith("Bearer tt_"):
@@ -662,8 +664,8 @@ def test_two_team_graphs_panel_revoke_pins_selected_team(page: Page) -> None:
 
     def handle(route):
         url = route.request.url
-        if url.startswith(API_HOST):
-            path = urllib.parse.urlsplit(url).path
+        if _is_bff_api(url):
+            path = _bff_path(url)
             method = route.request.method
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
             tid = (qs.get("org_id") or ["team_a"])[0]  # server memberships[0]
@@ -796,13 +798,28 @@ def test_two_team_graphs_panel_revoke_pins_selected_team(page: Page) -> None:
       try { detail = (await res.json()).detail } catch (e) {}
       return {status: res.status, detail}
     }"""
+    # The probes must address the APP'S OWN API namespace. `API_BASE` in
+    # main.jsx is `/api` — #4054 removed the client-side supabase client, so the
+    # browser holds only the opaque HttpOnly `__Host-session` handle and every
+    # call is same-origin — and the app origin serves `STRICT_CSP` with
+    # `connect-src 'self'`. A cross-origin fetch to `API_HOST` is therefore
+    # refused by the browser BEFORE the request is dispatched:
+    #
+    #   Connecting to 'https://api.premiselabs.co/v1/team/keys/…' violates the
+    #   following Content Security Policy directive: "connect-src 'self'".
+    #   The action has been blocked.  → TypeError: Failed to fetch
+    #
+    # The route handler never sees it (and an unhandled request would reach the
+    # real network). `_bff_path` strips the `/api` prefix, so these hit the SAME
+    # mock branches; the pin behaviour under test is unchanged.
+    _api = DASHBOARD_URL.rstrip("/") + "/api"
     # 1) Bravo's key with NO pin → server resolves memberships[0] = Alpha →
     #    the key is not Alpha's → 403 "Not your API key", nothing mutated.
-    probe1 = page.evaluate(_probe_js, {"url": f"{API_HOST}/v1/team/keys/gk_beta_01"})
+    probe1 = page.evaluate(_probe_js, {"url": f"{_api}/v1/team/keys/gk_beta_01"})
     assert probe1["status"] == 403 and probe1["detail"] == "Not your API key", probe1
     # 2) Alpha's key pinned to the WRONG team (team_b) → 403, nothing mutated.
     probe2 = page.evaluate(_probe_js,
-                           {"url": f"{API_HOST}/v1/team/keys/gk_alpha_01?org_id=team_b"})
+                           {"url": f"{_api}/v1/team/keys/gk_alpha_01?org_id=team_b"})
     assert probe2["status"] == 403 and probe2["detail"] == "Not your API key", probe2
     # Both probes must have mutated nothing — the keys stay ACTIVE in their
     # own buckets (probe 403s never stamp revoked_at).

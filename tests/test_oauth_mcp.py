@@ -22,6 +22,8 @@ import hashlib
 import os
 import secrets
 import tempfile
+import threading
+import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 
@@ -2900,3 +2902,195 @@ class TestCimdClientIdentity:
         assert r.status_code == 400, r.text
         assert r.status_code < 500
         assert r.json()["error"] == "invalid_request"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #3669 — the CIMD fetch must not occupy the event loop, and its bounds must
+#          count ALL FOUR unauthenticated front doors
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# `resolve_client` is the one resolver shared by /oauth/authorize,
+# /oauth/consent, and BOTH /oauth/token grants (via `_verify_client_auth`).
+# `resolve_client_metadata` is the one place every door passes through, so the
+# in-flight cap + wall-clock budget charged there are the occupancy accounting
+# for all four. These tests are the #3669 falsifiers.
+
+
+def _authorize_params(challenge: str) -> dict:
+    return {
+        "client_id": CIMD_CLIENT_ID, "redirect_uri": REDIRECT,
+        "response_type": "code", "code_challenge": challenge,
+        "code_challenge_method": "S256", "state": "st-1",
+        "scope": "mcp", "resource": "",
+    }
+
+
+@pytest.fixture(autouse=True)
+def _clean_cimd_stores():
+    """The CIMD limiter/cache/budget are process-wide module state; reset per
+    test so ordering cannot matter (same pattern as test_cimd_ssrf)."""
+    from tortoise import cimd
+    cimd._rate_limit_reset()
+    cimd._cache_reset()
+    yield
+    cimd._rate_limit_reset()
+    cimd._cache_reset()
+
+
+class TestCimdOccupancy3669:
+    def test_cimd_fetch_runs_on_the_dedicated_oauth_worker(
+            self, api_client, monkeypatch):
+        """FALSIFIER for the offload: the CIMD fetch must run on the dedicated
+        ``oauth`` pool, not on the caller's (event-loop) thread.
+
+        Before #3669 `validate_authorize_params` ran in the coroutine, so the
+        recorded thread was the TestClient portal thread. Now the RESOLUTION is
+        offloaded and every fetch is recorded from a `tortoise-oauth-*` worker.
+        """
+        from tortoise import cimd
+        from tortoise.monitoring import CONTROL_PLANE_OAUTH_WORKER_NAME
+
+        tc, _cp = api_client
+        threads: list[str] = []
+
+        def _refuse(_client_id):
+            threads.append(threading.current_thread().name)
+            raise cimd.CimdError("refused")
+
+        monkeypatch.setattr(cimd, "fetch_client_metadata", _refuse)
+        verifier, challenge = _pkce()  # noqa: RUF059
+        r = tc.get("/oauth/authorize", params=_authorize_params(challenge))
+        assert r.status_code == 400, r.text
+        assert threads, "the CIMD fetch was never attempted"
+        assert all(t.startswith(CONTROL_PLANE_OAUTH_WORKER_NAME) for t in threads), (
+            f"the CIMD fetch ran on {threads} — the OAuth resolution must be "
+            "offloaded to the dedicated oauth pool (#3669)"
+        )
+
+    def test_cimd_fetch_does_not_occupy_the_event_loop(self, monkeypatch):
+        """BEHAVIOURAL OCCUPIED-LOOP PROOF (fails without the fix).
+
+        A heartbeat coroutine ticks every 5 ms on the SAME event loop while a
+        CIMD fetch is parked for 0.4 s. With the fetch on the loop the beat
+        count stalls (~0 ticks); with the offload the loop keeps beating. This
+        drives the REAL ASGI app through an async transport, so it does not
+        depend on a thread NAME (the mutation is reverting the offload).
+        """
+        from tortoise import cimd
+
+        cp = FakeControlPlane({"organizations": [], "oauth_clients": []})
+        monkeypatch.setattr(_ha_mod, "_oauth_control_plane", lambda: (cp, True))
+
+        park_s = 2.0
+        threads: list[str] = []
+
+        def _parked_fetch(_client_id):
+            threads.append(threading.current_thread().name)
+            time.sleep(park_s)
+            raise cimd.CimdError("refused")
+
+        monkeypatch.setattr(cimd, "fetch_client_metadata", _parked_fetch)
+        verifier, challenge = _pkce()  # noqa: RUF059
+        params = _authorize_params(challenge)
+
+        async def _run() -> tuple[int, float]:
+            loop = asyncio.get_running_loop()
+            gaps: list[float] = []
+            last = loop.time()
+
+            async def _heartbeat():
+                nonlocal last
+                while True:
+                    now = loop.time()
+                    gaps.append(now - last)
+                    last = now
+                    await asyncio.sleep(0.005)
+
+            hb = asyncio.ensure_future(_heartbeat())
+            await asyncio.sleep(0.05)          # let the heartbeat settle
+            transport = httpx.ASGITransport(app=_ha_mod.app)
+            async with httpx.AsyncClient(
+                    transport=transport, base_url="http://testserver") as client:
+                r = await client.get("/oauth/authorize", params=params)
+            hb.cancel()
+            with __import__("contextlib").suppress(asyncio.CancelledError):
+                await hb
+            return r.status_code, max(gaps)
+
+        status, max_gap = asyncio.run(_run())
+        assert status == 400
+        # Deterministic half: the fetch ran on a worker, not the loop thread.
+        assert threads and not threads[0].startswith("MainThread"), (
+            f"the CIMD fetch ran on {threads} — the event-loop thread")
+        # Behavioural half: the loop was never stalled for anywhere near the
+        # park. A mutation that reverts the offload stalls it for the full
+        # `park_s`, so the threshold on HALF the park cleanly separates the two
+        # while tolerating the heaviest scheduler blips on a loaded box.
+        assert max_gap < park_s / 2, (
+            f"the event loop stalled {max_gap:.3f}s while a {park_s}s CIMD fetch "
+            "was in flight — the fetch is occupying the loop (#3669)")
+
+    @pytest.mark.parametrize("door", [
+        "authorize", "consent", "token_code", "token_refresh"])
+    def test_every_front_door_charges_the_shared_fetch_bound(
+            self, api_client, monkeypatch, door):
+        """All FOUR unauthenticated front doors reach the shared, bounded
+        resolver — so an occupancy bound charged in `resolve_client_metadata`
+        counts every door, and no door can escape it."""
+        from tortoise import cimd
+
+        tc, _cp = api_client
+        calls: list[str] = []
+
+        def _refuse(client_id):
+            calls.append(client_id)
+            raise cimd.CimdError("refused")
+
+        monkeypatch.setattr(cimd, "fetch_client_metadata", _refuse)
+        verifier, challenge = _pkce()
+        if door == "authorize":
+            r = tc.get("/oauth/authorize", params=_authorize_params(challenge))
+        elif door == "consent":
+            r = _consent(tc, client_id=CIMD_CLIENT_ID, redirect_uri=REDIRECT,
+                         challenge=challenge)
+        elif door == "token_code":
+            r = tc.post("/oauth/token", data={
+                "grant_type": "authorization_code", "code": "bogus",
+                "redirect_uri": REDIRECT, "client_id": CIMD_CLIENT_ID,
+                "code_verifier": verifier})
+        else:
+            r = tc.post("/oauth/token", data={
+                "grant_type": "refresh_token", "refresh_token": "bogus",
+                "client_id": CIMD_CLIENT_ID})
+        assert r.status_code in (400, 401), f"{door}: {r.status_code} {r.text}"
+        assert len(calls) == 1, (
+            f"door {door!r} attempted {len(calls)} CIMD fetches — every door "
+            "must reach the shared fetch accounting exactly once")
+
+    def test_failing_authorize_resolution_fetches_exactly_once(
+            self, api_client, monkeypatch):
+        """#3669 finding 2 — a FAILING /oauth/authorize resolution used to
+        re-resolve in the error handler (a second CIMD fetch + rate-limit
+        charge), halving the effective failure budget. The resolved client is
+        now stamped on the raised OAuthError.
+
+        Without the fix this records two fetch attempts; with it, exactly one.
+        """
+        from tortoise import cimd
+
+        tc, _cp = api_client
+        calls: list[str] = []
+
+        def _refuse(client_id):
+            calls.append(client_id)
+            raise cimd.CimdError("refused")
+
+        monkeypatch.setattr(cimd, "fetch_client_metadata", _refuse)
+        verifier, challenge = _pkce()  # noqa: RUF059
+        r = tc.get("/oauth/authorize", params=_authorize_params(challenge))
+        assert r.status_code == 400, r.text
+        assert r.json()["error"] == "invalid_request"
+        assert len(calls) == 1, (
+            f"a failing authorize resolution cost {len(calls)} fetch attempts "
+            "— the error handler must not re-resolve (#3669 finding 2)")
+

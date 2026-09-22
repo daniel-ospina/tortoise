@@ -15,6 +15,9 @@ aboutObjects: tortoise
 **Branch:** feat/2004-W8-onboarding (base: main @ d4b65da3 — W1/W2/W4/W5 merged)
 **Scope anchor:** issue #2004 body + epic docs/epics/2026-08-29-agent-driven-onboarding-1976/06-plan.md (WF-6, DM-5, I-7, DE2E-9) + 04-test-design.md surface 13.
 
+
+> ⚠️ **Superseded for the build fork — #3913 (owner ruling 2026-09-20):** where this document states the build-fork completion gate as including `catalog-presented`, or states that the dashboard / a catalog render / the fork pick writes the `catalog-presented` step edge, that is the superseded design. The build gate is `{harness-connected, first-points-filed}`; `catalog-presented` is no longer a gate input, and **no dashboard path writes it** — the fork card writes only the fork (or its unsure marker), never a `step`, and the id stays accepted for agent/external callers and for existing orgs' `completed_steps`. The superseded wording is kept verbatim as the historical record.
+
 ---
 
 ## 1. Objective (restated)

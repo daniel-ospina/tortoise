@@ -1,11 +1,11 @@
 /**
  * App — blog admin SPA shell.
  *
- * Auth gate: useAuth checks the session (sb-tortoise-auth-token storage
- * adapter) + is_admin() membership; without a session it redirects to
- * https://tortoise.premiselabs.co/auth. The admin gate Function
- * (website/functions/admin/[[path]].ts) already verified the JWT server-side;
- * RLS is the data authorization boundary.
+ * Auth gate: useAuth checks the session via the same-origin BFF
+ * `/api/session` probe; without a session it redirects to the same-origin
+ * `/auth`. The admin gate Function
+ * (website/apps/dashboard/functions/admin/[[path]].ts) already verified the
+ * admin server-side; RLS is the data authorization boundary.
  *
  * Routes (hash-based): #/ list · #/new editor · #/edit/:id editor · #/audit.
  */
