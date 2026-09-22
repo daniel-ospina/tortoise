@@ -4298,7 +4298,8 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
     `edges_transferred_from_old` is the writer's own old-side count — on any
     graph with no direct IMPL/NAND self-loop at `old` it equals the number the
     writer reports as `edges_transferred`, and a differential test pins the two
-    together there. It is NOT equal when `old` carries a self-loop, and the
+    together there. It is NOT equal when `old` carries a direct IMPL/NAND
+    self-loop, and the
     writer is the one that over-counts: its out-pass repoints
     `(old)-[:IMPL]->(old)` to `(new)->(old)`, then its in-pass matches that
     freshly created edge and delete-onlys it, booking one removed edge twice —
