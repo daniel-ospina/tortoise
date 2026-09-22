@@ -67,15 +67,17 @@ on:
       - 'uv.lock'
   workflow_dispatch:
     inputs:
-      # #1719 (Task 7): DB-health gate bypass for incident-fix deploys.
+      # #1719 (Task 7): DB-health verification bypass for incident-fix deploys.
       # Defaults TRUE during the incident window (RC3 FalkorDB restore is
-      # in flight — db.ok=false is the CURRENT prod state, and a hard gate
-      # would block the very fix that restores it). Flip to false once the
-      # data plane is healthy so the gate guards every deploy again.
+      # in flight — db.ok=false is the CURRENT prod state, and a fail-closed
+      # verification would redden every incident-fix run). Flip to false once
+      # the data plane is healthy so the verification guards every deploy
+      # again. Since #4538 it reports release health in its own job
+      # (`post-deploy-verify`) and does not colour the deploy job.
       # Emits a ::warning:: when bypassed (auditability — never silently
       # skipped).
       skip-db-health-gate:
-        description: 'Skip the post-deploy DB health gate (incident-fix deploys)'
+        description: 'Skip the post-deploy DB health verification (incident-fix deploys)'
         required: false
         default: 'true'
         type: boolean
