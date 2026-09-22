@@ -307,7 +307,7 @@ def test_a_signed_in_non_admin_gets_an_explicit_403(stack):
 def test_blog_api_proxy_forwards_the_server_minted_credential(stack):
     """(item 3) the relative /blog/api/* call works from the app origin.
 
-    The browser holds only the HttpOnly handle; the proxy mints the token and
+    For the BFF session the browser holds only the HttpOnly handle; the proxy mints the token and
     attaches it upstream. The assertion is on the UPSTREAM request the mock
     recorded — a proxy that answered 200 without forwarding would fail.
     """
