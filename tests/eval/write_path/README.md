@@ -166,8 +166,9 @@ Floors (issue targets): ≥ 4 fictional sessions, ≥ 60 planted salient units
 with verbatim anchors — chosen so E2E-2's percentage-based assertions
 (macro ≥ target / strict ≥ target) have stable denominators. Current corpus:
 7 sessions / 90 units.  Issue-#2514 operator floor: all four planted-operator
-kinds (SUPERSEDE/NEGATE/MITIGATES/SUPPORTS) are planted ≥ 1× (4 edges total;
-the corpus-level grades live on every run's `operator_audit` — see below).
+kinds (SUPERSEDE/NEGATE/MITIGATES/SUPPORTS) are planted ≥ 1× — grown by #2552
+to **15 edges** (`generate_corpus.MIN_PLANTED_OPERATOR_EDGES`; the corpus-level
+grades live on every run's `operator_audit` — see below).
 
 All people, companies, and systems are fictional (Peregrine Systems, quarry /
 lumen / ember / aurora, Halcyon Retail, Bluepeak Logistics, and the named

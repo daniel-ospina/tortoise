@@ -3737,8 +3737,11 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         carrying the model's own reference text, and a MITIGATES's declared
         ``target_edge`` IMPL is materialized when the model did not separately
         emit it. So the drop now fires only on a genuinely unresolvable ref
-        (empty, or the degenerate self-edge) — not on the prompt's
-        "CREATE the point first" instruction being skipped by the model.
+        (empty, a ref naming an emitted ENTITY — the prompt forbids entity
+        endpoints, so no claim Point is fabricated for one — or the
+        degenerate self-edge), not on the prompt's "CREATE the point first"
+        instruction being skipped by the model. A minted endpoint no
+        surviving operator references is pruned again.
 
     Returns {"payload", "chain_notes", "link_before_create", "warnings",
              "minted_kinds", "stats"}.
@@ -3851,6 +3854,10 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # entities only)
     emitted_entity_keys = {(e["name"], _norm_kind(e["kind"]))
                            for e in payload_entities}
+    # #2552 mint-before-wire guard: an operator endpoint that names an
+    # EMITTED ENTITY is forbidden by the OPERATOR REFERENCING hard rule, so it
+    # must never be materialized as a claim Point (see `_mint_endpoint`).
+    emitted_entity_names = {_norm(name) for name, _ in emitted_entity_keys}
 
     # ── events (dependency order 2) ───────────────────────────────────────
     payload_events: list[dict] = []
@@ -4131,9 +4138,12 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # invented and no fuzzy binding is attempted — a ref that does not resolve
     # under the existing normalized-equality rule is minted exactly as the
     # model wrote it. It runs BEFORE the operator pass so the ordinary
-    # `_resolve` path then wires the operator unchanged. Known cost: a ref the
-    # model wrote as an ENTITY name (the prompt forbids entity endpoints)
-    # mints a degenerate claim Point — bounded, counted, and warned.
+    # `_resolve` path then wires the operator unchanged. Two guards bound the
+    # pre-pass, both from the #2552 code review: a ref naming an emitted
+    # ENTITY is NOT minted (the prompt forbids entity endpoints — the operator
+    # drops instead of a claim Point being fabricated from a participant
+    # name), and any minted endpoint no surviving operator references is
+    # pruned before payload assembly.
     minted_endpoints: list[str] = []
 
     def _mint_endpoint(ref: str, where: str) -> str:
@@ -4143,6 +4153,19 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         n = _norm(content)
         if n in point_ids:
             return point_ids[n]
+        if n in emitted_entity_names:
+            # The hard rule is explicit — "NEVER use an entity name as an
+            # operator endpoint — entities are wired through
+            # about_entities". Minting one would fabricate a degenerate claim
+            # Point out of a participant name, so the ref is NOT minted and
+            # the operator drops below with its ordinary "did not resolve"
+            # warning (the pre-#2552 behaviour, which is correct HERE).
+            warnings.append(
+                f"operator endpoint NOT minted (#2552 mint-before-wire): "
+                f"{where} named the emitted ENTITY {content[:60]!r} — the "
+                "OPERATOR REFERENCING rule forbids entity endpoints, so no "
+                "claim Point is fabricated for it")
+            return ""
         pid = _content_id("pt", content)
         payload_points.append({
             "id": pid, "content": content, "pointKind": "statement",
@@ -4151,6 +4174,13 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             "search_keys": [], "status": "draft",
         })
         point_ids[n] = pid
+        # `_resolve` probes the UNTRUNCATED ref, so register that key too when
+        # truncation changed it — otherwise a >1000-char ref mints a Point the
+        # operator pass cannot resolve: the edge still drops AND the Point is
+        # orphaned (code-review P2).
+        _full = _norm(ref)
+        if _full != n:
+            point_ids.setdefault(_full, pid)
         minted_endpoints.append(pid)
         warnings.append(
             f"operator endpoint minted (#2552 mint-before-wire): {where} "
@@ -4265,6 +4295,37 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             "src": src, "dst": dst, "op_type": "MITIGATES",
             "target": {"src": t_src, "dst": t_dst, "op_type": "IMPL"},
             "strength": round(strength, 2)})
+
+    # ── minted-endpoint prune (#2552 code-review P2) ──────────────────────
+    # A mint happens BEFORE the operator is known to survive, so an operator
+    # that still drops (a MITIGATES declaring no target edge, a src==dst
+    # self-edge) would otherwise commit a claim Point NOTHING references — an
+    # unsupported assertion in the memory layer, which is worse than the edge
+    # loss this pre-pass exists to fix. Prune every minted endpoint that no
+    # surviving payload operator references.
+    if minted_endpoints:
+        referenced: set[str] = set()
+        for _po in payload_operators:
+            referenced.add(str(_po.get("src") or ""))
+            referenced.add(str(_po.get("dst") or ""))
+            _tgt = _po.get("target")
+            if isinstance(_tgt, dict):
+                referenced.add(str(_tgt.get("src") or ""))
+                referenced.add(str(_tgt.get("dst") or ""))
+        orphans = [pid for pid in minted_endpoints if pid not in referenced]
+        if orphans:
+            orphan_set = set(orphans)
+            payload_points[:] = [p for p in payload_points
+                                 if p.get("id") not in orphan_set]
+            for _k in [k for k, v in point_ids.items() if v in orphan_set]:
+                del point_ids[_k]
+            minted_endpoints[:] = [p for p in minted_endpoints
+                                   if p not in orphan_set]
+            warnings.append(
+                f"minted operator endpoint(s) pruned (#2552 mint-before-wire): "
+                f"{len(orphans)} materialized endpoint(s) are referenced by no "
+                "surviving operator — dropped rather than committing an "
+                "unsupported claim Point")
 
     # ── retractions (D5): explicit withdrawals → DELETE-soft records ──────
     # Never from content alone: only the embed list's additive `retractions`

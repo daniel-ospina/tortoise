@@ -601,7 +601,7 @@ def test_run_carries_operator_edge_audit_dimension(tmp_path, monkeypatch):
     assert audit is not None
     assert audit["planted"] == 15  # #2552: 15 edges, all seven sessions
     assert audit["edge_correct"] < audit["planted"]  # m2 cue-word relations
-    assert 0 <= audit["content_ok"] <= audit["planted"]
+    assert 1 <= audit["content_ok"] <= audit["planted"]
     # #2552: the committed operator topology entered the retrievable layer.
     assert audit["operators_total"] > 0
     assert audit["operators_provenanced"] == audit["operators_total"]
@@ -618,10 +618,13 @@ def test_run_carries_operator_edge_audit_dimension(tmp_path, monkeypatch):
     supersede = owned_by["wp07_bluepeak_followup"][2]
     assert supersede["expected_kind"] == "SUPERSEDE"
     assert supersede["to_session"] == "wp06_quarry_rollout"
-    # The receipt carries the audit (audit trail for the sealed run).
+    # The receipt carries the audit (audit trail for the sealed run). Assert
+    # the SAME contract as the report-level checks above — a hardcoded 4 here
+    # is the denominator bug this PR exists to fix (#2552 code-review P0).
     receipt = runner.build_receipt(report)
     assert runner.validate_receipt(receipt) == []
-    assert receipt["operator_audit"]["planted"] == 4
-    assert receipt["operator_audit"]["edge_correct"] == 0
+    assert receipt["operator_audit"]["planted"] == audit["planted"]
+    assert (receipt["operator_audit"]["edge_correct"]
+            == audit["edge_correct"] < audit["planted"])
     assert (receipt["operator_audit"]["operators_provenanced"]
             == receipt["operator_audit"]["operators_total"] > 0)

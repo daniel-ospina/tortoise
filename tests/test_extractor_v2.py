@@ -1802,6 +1802,69 @@ class TestS5:
         # Two operators, three distinct endpoints, all wired.
         assert [o["op_type"] for o in r["payload"]["operators"]] == ["IMPL", "NAND"]
 
+    def test_entity_named_operator_endpoint_is_never_minted(self):
+        """#2552 code-review (P2): the OPERATOR REFERENCING hard rule is
+        explicit — "NEVER use an entity name as an operator endpoint —
+        entities are wired through about_entities". Minting an entity-named
+        ref would fabricate a degenerate claim Point out of a participant
+        name, so the ref is NOT minted and the operator drops with its
+        ordinary warning (the pre-#2552 behaviour, correct HERE).
+        """
+        embed = json.loads(json.dumps(S2_FIXTURE))
+        embed["operators"] = [
+            {"src": "cleaning-pass tier",          # an EMITTED entity name
+             "dst": "The owner paused the solar cleaning tier",
+             "op_type": "IMPL"}]
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        assert r["payload"]["operators"] == []
+        assert r["stats"]["operator_endpoints_minted"] == 0
+        assert not any(p["content"] == "cleaning-pass tier"
+                       for p in r["payload"]["points"])
+        assert any("NOT minted" in w and "ENTITY" in w for w in r["warnings"])
+        assert any("did not resolve" in w for w in r["warnings"])
+
+    def test_over_long_operator_endpoint_ref_still_resolves(self):
+        """#2552 code-review (P2): `_mint_endpoint` truncates content at 1000
+        chars while `_resolve` probes the UNTRUNCATED ref. Without also
+        registering the full-ref key the mint is invisible to the operator
+        pass — the edge still drops AND the minted Point is orphaned, which is
+        exactly the outcome the pre-pass exists to prevent.
+        """
+        long_ref = "long endpoint claim " + ("x" * 1500)
+        embed = json.loads(json.dumps(S2_FIXTURE))
+        embed["operators"] = [
+            {"src": long_ref,
+             "dst": "The owner paused the solar cleaning tier",
+             "op_type": "IMPL"}]
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        ops = [o for o in r["payload"]["operators"] if o["op_type"] == "IMPL"]
+        assert len(ops) == 1
+        assert not any("did not resolve" in w for w in r["warnings"])
+        assert r["stats"]["operator_endpoints_minted"] == 1
+        minted = [p for p in r["payload"]["points"] if p["id"] == ops[0]["src"]]
+        assert len(minted) == 1
+        assert len(minted[0]["content"]) == 1000
+
+    def test_minted_endpoint_is_pruned_when_its_operator_drops(self):
+        """#2552 code-review (P2): the mint runs BEFORE the operator is known
+        to survive. A MITIGATES that declares no target edge is still dropped
+        loudly — its minted endpoints must go with it, or the payload commits
+        claim Points no operator references (an unsupported assertion in the
+        memory layer, worse than the edge loss the mint exists to fix).
+        """
+        embed = json.loads(json.dumps(S2_FIXTURE))
+        embed["points"] = []
+        embed["events"] = []
+        embed["operators"] = [
+            {"src": "orphan claim alpha", "dst": "orphan claim beta",
+             "op_type": "MITIGATES", "strength": 0.3}]
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        assert r["payload"]["operators"] == []
+        assert r["payload"]["points"] == []
+        assert r["stats"]["operator_endpoints_minted"] == 0
+        assert any("pruned" in w for w in r["warnings"])
+        assert any("target edge not emitted" in w for w in r["warnings"])
+
     def test_planted_supports_lane_no_longer_reports_to_content_missing(self):
         """#2552 measured case (wp06 op_01 SUPPORTS -> `to_content_missing`).
 
