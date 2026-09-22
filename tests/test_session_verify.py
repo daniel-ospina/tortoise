@@ -1039,7 +1039,10 @@ def test_pi_is_honestly_unverifiable(hosted, setup):
         assert phrase not in detail, phrase
     source = inspect.getsource(_sv)
     # Non-vacuity: an empty or truncated read must not pass this pin trivially.
-    assert "Pi's capture seam" in source, "module source not read — pin is vacuous"
+    # Anchor on STABLE identifiers, never on copy this pin does not own — a
+    # legitimate rewording of the reason string must not be reported as a failed
+    # read (#4620 review).
+    assert "def resolve_install_root" in source, "module source not read — pin is vacuous"
     assert "HEADLESS_FIRABLE" in source, "module source truncated — pin is vacuous"
     for phrase in absolutes:
         assert phrase not in source, phrase

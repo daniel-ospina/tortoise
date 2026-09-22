@@ -444,7 +444,6 @@ Objective 1's Pi leg has two halves with different verification statuses:
 - **Manual-only.** That a real `pi` process loads the installed extension and calls
   `turn_end` / `session_shutdown` against the live API. **Canonical: `tortoise/pi-hooks/README.md`
   § Verification** — the procedure, its precondition, its actor, the pass condition and the
-  `#4661`/`#4675`/`#3713` blocker list live THERE and are deliberately not restated here. The one
-  decision a reader of this objective needs: the pass condition is `retrievable` — the specific
-  captured content read back, session-bound — and until `#4661` / `#4675` clear, the live leg yields
-  **no verdict**, so this objective must not be read as verified for Pi.
+  `#4661`/`#4675`/`#3713` blocker list live there, and are not restated here. Until `#4661` /
+  `#4675` clear, the live leg yields **no verdict**, so this objective must not be read as verified
+  for Pi.

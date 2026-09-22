@@ -150,12 +150,10 @@ procedure for objective 1's done-state. C is a real improvement but a separate, 
 ### Recorded decision (issue option 2, for the residual only)
 
 > **Residual (manual-only):** that a real `pi` process loads the installed extension and invokes
-> `turn_end`/`session_shutdown`. **The procedure, its actor, and its pass condition are stated once,
-> canonically, in `tortoise/pi-hooks/README.md` § Verification** — deliberately not restated here,
-> because a restated procedure drifts from its home. What this decision turns on: the pass condition
-> is **retrievable** (the specific captured content read back, session-bound), a read-back 504 is
-> **UNMEASURABLE** — never PASS, never FAIL — and the live leg is blocked by `#4661` (read path) and
-> `#4675` (receipt terminality). Not CI-able (needs a live harness + an LLM call). Automating this
+> `turn_end`/`session_shutdown`. The procedure and its pass condition are canonical in
+> `tortoise/pi-hooks/README.md` § Verification, and are deliberately not restated here. The live leg
+> is blocked by `#4661` (read path) and `#4675` (receipt terminality), so objective 1 must not read as
+> verified for Pi until they clear. Not CI-able (needs a live harness + an LLM call). Automating this
 > probe is `#4710`.
 
 ## `#3713` — recorded call (issue requirement)

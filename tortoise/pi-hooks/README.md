@@ -65,9 +65,8 @@ install guard.
 
 ## Verification — what is executable, what is manual-only
 
-**This section is the canonical statement of the Pi verification status.** The scoping/plan docs and
-the `#1714` record point here for the procedure and the pass condition rather than restating them — a
-restated procedure drifts from its home.
+**This section is the canonical statement of the Pi verification status** — procedure, actor, pass
+condition and blockers. Where another artifact summarizes it, this section governs.
 
 ### Executably verified (hermetic, runs in CI)
 

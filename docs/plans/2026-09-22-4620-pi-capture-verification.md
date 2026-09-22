@@ -87,8 +87,9 @@ source-level pins above still ran); every lane that executes this file provision
    awaits its `.then`.
 3. Add `test_installed_seam_loads_and_fires`:
    - `with tempfile.TemporaryDirectory() as tmp_home:`; `home = Path(tmp_home)`;
-     `install_capture("pi", home=home)` (import from `tortoise.capture_install`);
-     `installed = home / ".pi" / "agent" / "extensions" / "tortoise-capture.ts"`; assert `installed.is_file()`.
+     `result = install_capture("pi", home=home)`; assert `result.ok`, then
+     `installed = capture_install.pi_home(home) / capture_install.PI_EXTENSION_NAME`; assert
+     `installed.is_file()` — never re-type the install path (#4620 review).
    - `spool = home / "spool"`; `probe = home / "probe.mjs"`; `probe.write_text(_installed_probe())`.
    - `proc = subprocess.run([node, NODE_TS_FLAG, "probe.mjs"], cwd=tmp_home, capture_output=True,
      text=True, timeout=120, env={**_scrubbed_env(tmp_home), "PROBE_SEAM": str(installed),
@@ -145,7 +146,8 @@ Cursor's own reason says "no headless entry point".
    # continuation line (the docstring's honesty paragraph) carry an absolute
    # unscanned — the sentence the pin was written for:
    source = inspect.getsource(session_verify)
-   assert "Pi's capture seam" in source, "module source not read — pin is vacuous"
+   assert "def resolve_install_root" in source, "module source not read — pin is vacuous"
+   assert "HEADLESS_FIRABLE" in source, "module source truncated — pin is vacuous"
    for phrase in absolutes:
        assert phrase not in source, phrase
    ```
@@ -188,13 +190,11 @@ executably verified, (b) what is manual-only, (c) the exact procedure **with its
   `node --experimental-strip-types --test tortoise/pi-hooks/tortoise-capture.test.ts` (or note
   "Node ≥ 22.18, else pass the flag"), so the README does not carry two conflicting instructions.
 - **Manual-only:** that a real `pi` process loads the installed extension against the live API.
-  **Canonical: `tortoise/pi-hooks/README.md` § Verification** — the procedure, its actor, its pass
-  condition, the UNMEASURABLE rule and the blocker list live THERE and are deliberately not restated
-  here. The one decision a reader of this plan needs: the pass condition is `retrievable` (the specific
-  captured content read back, session-bound), and until `#4661`/`#4675` clear the live leg yields **no
-  verdict**, so objective 1's done-state must not read as verified. `#3713` is launch-blocking for the
-  Pi *claim* only; its sequencing blocker `#3971` merged as `73acefddf`. Automating the probe is
-  `#4710`; the version-contract route is `#4680`.
+  **Canonical: `tortoise/pi-hooks/README.md` § Verification** — procedure, actor, pass condition,
+  UNMEASURABLE rule and blocker list live there, and are not restated here. Until `#4661`/`#4675`
+  clear the live leg yields **no verdict**, so objective 1's done-state must not read as verified.
+  `#3713` is launch-blocking for the Pi *claim* only; its sequencing blocker `#3971` merged as
+  `73acefddf`. Automating the probe is `#4710`; the version-contract route is `#4680`.
 
 ## Task 4 — docs index
 

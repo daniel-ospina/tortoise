@@ -162,14 +162,14 @@ HEADLESS_FIRABLE: dict[str, bool] = {
 UNVERIFIABLE_REASON: dict[str, str] = {
     "cursor": (
         "Cursor's sessionEnd hook is IDE-only — it fires from a local "
-        "desktop-editor session; there is no headless entry point on this "
+        "desktop-editor session; the hook has no headless path on this "
         "machine."),
     "pi": (
         "Pi's capture seam is a TypeScript extension loaded in-process by Pi "
-        "(~/.pi/agent/extensions/tortoise-capture.ts), not a command this "
-        "verifier can execute; the install leg is therefore not firable by "
-        "this command. The seam's handler logic is exercised hermetically by "
-        "tortoise/pi-hooks/tortoise-capture.test.ts (run by "
+        f"({capture_install.pi_home('~')}/{capture_install.PI_EXTENSION_NAME}), "
+        "not a command this verifier can execute; the install leg is therefore "
+        "not firable by this command. The seam's handler logic is exercised "
+        "hermetically by tortoise/pi-hooks/tortoise-capture.test.ts (run by "
         "tests/test_pi_capture_hooks.py), and the installed artifact is "
         "loaded and fired by that test file's node probe (into a temp HOME); the "
         "residual — a real pi process loading the installed extension "
