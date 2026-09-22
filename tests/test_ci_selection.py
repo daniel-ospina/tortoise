@@ -1589,7 +1589,7 @@ def test_diff_gated_jobs_consume_changes_outputs():
     # here. The assertion below is the STRONG form of the old
     # `startswith("test_")` proxy: every token must name a real file under
     # tests/ AND be a declared slow file, which also catches a dead entry.
-    from tools.ci_selection import TESTS_DIR  # noqa: I001
+    from tools.ci_selection import TESTS_DIR
     _slow = set(load_manifest()["slow_files"])
     for row in rows:
         tokens = row["files"].split()
