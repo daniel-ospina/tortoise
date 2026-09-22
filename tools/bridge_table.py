@@ -367,18 +367,48 @@ def _maximal(quote: str, text: str) -> bool:
     return _REGION_END.search(quote) is not None
 
 
-def _arrow_targets(cell: str) -> list[str]:
-    """Every TARGET named after a `→` in a disposition cell, in document order.
+# A target named after the arrow is a DESTINATION only when it is INTRODUCED as one —
+# directly after the arrow, after a clause separator, or after a destination
+# preposition. Scanning the whole post-arrow segment counted anything in prose: a
+# comparison ("the **batch form of `mine_knowledge_from_session`**") and an aside about a
+# DROPPED sibling ("**`recall_subgraph` is dropped, not folded** — `explore_connections`
+# answers that question") both became "alternative destinations" and made D3 over-report
+# rows that name exactly one. Restricting to the destination clause is the fix.
+_DEST_LEAD = re.compile(r"(?:→|[;,]+\s*|\b(?:on|via|to|into|toward|towards)\s+)\**\s*$")
 
-    Only target names are kept, plus the names `FOLDS` maps into a target — a disposition
-    cell also names fields (`invalid_at`), parameter values (`credibility`) and the
-    methods being folded, and counting those as destinations would make this guard
-    PERMISSIVE, the one direction a guard must never fail.
+
+def _dest_targets(text: str) -> list[str]:
+    """TARGETS in `text` that are introduced as destinations, in document order.
+
+    A name counts only when it sits at the start of a destination clause (directly after the
+    `→`, or after a `;`/`,`/destination preposition). Only target names are kept, plus the
+    names `FOLDS` maps into a target — a disposition cell also names fields (`invalid_at`),
+    parameter values (`credibility`) and the methods being folded, and counting those as
+    destinations would make this guard PERMISSIVE, the one direction a guard must never fail.
     """
     keep = set(TARGET_MCP) | set(FOLDS)
     out: list[str] = []
+    for m in _ARROW_TARGET.finditer(text):
+        name = m.group(1)
+        if name not in keep:
+            continue
+        before = text[: m.start()]
+        # `before.strip()` empty = the name is at the start of the destination clause
+        # (the `→` itself was consumed by the caller's split).
+        if before.strip() == "" or _DEST_LEAD.search(before):
+            out.append(name)
+    return out
+
+
+def _arrow_targets(cell: str) -> list[str]:
+    """Every TARGET introduced as a destination after a `→` in a disposition cell.
+
+    Each segment after an arrow is scanned separately, so the FIRST name in each is
+    anchored by the arrow itself; later names must be anchored by `;`/`,`/a preposition.
+    """
+    out: list[str] = []
     for seg in cell.split("→")[1:]:
-        out += [t for t in _ARROW_TARGET.findall(seg) if t in keep]
+        out += _dest_targets(seg)
     return out
 
 
@@ -395,8 +425,7 @@ def _prefix_targets(cell: str) -> list[str]:
     if not segs:
         return []
     seg = re.split(r"[;.]", segs[0], maxsplit=1)[0]
-    keep = set(TARGET_MCP) | set(FOLDS)
-    return [t for t in _ARROW_TARGET.findall(seg) if t in keep]
+    return _dest_targets(seg)
 
 
 def _doc_citations() -> dict[str, dict]:
@@ -407,10 +436,14 @@ def _doc_citations() -> dict[str, dict]:
     it cannot drift from the doc without the doc changing.
     """
     text = BETA_DOC.read_text(encoding="utf-8")
-    by_method: dict[str, str] = {}
+    # sdk_method -> EVERY tool that declares it. Two registry tools can declare the same
+    # method (`tortoise_get_point` and `tortoise_get_operator` both declare `get_point`),
+    # and a dict keyed by method silently kept only the LAST one — a disposition row
+    # naming `get_point` would then cite one tool and drop the other, invisibly.
+    by_method: dict[str, list[str]] = {}
     for r in _registry_rows():
         if r["sdk_method"]:
-            by_method[r["sdk_method"]] = r["name"]
+            by_method.setdefault(r["sdk_method"], []).append(r["name"])
 
     cites: dict[str, dict] = {}
     for line in text.splitlines():
@@ -423,10 +456,13 @@ def _doc_citations() -> dict[str, dict]:
         names = re.findall(r"`([a-z_][a-z0-9_]*)`", cells[0])
         if not names or "→" not in cells[2]:
             continue
-        quote = line.rstrip()
+        # The citation is the WHOLE region — the entire disposition row — taken by
+        # construction. It is not a prefix or a slice, so a truncated citation cannot be
+        # built: the row IS the quote. `_maximal` (below) is a secondary tripwire for the
+        # authored FOLD hop, not the mechanism that keeps these quotes whole.
+        quote = _citation_region(line)
         for n in names:
-            tool = by_method.get(n)
-            if tool is not None:
+            for tool in by_method.get(n, ()):
                 cites[tool] = {
                     "doc": BETA_DOC.name,
                     "quote": quote,
@@ -436,6 +472,19 @@ def _doc_citations() -> dict[str, dict]:
                     "first_targets": _prefix_targets(cells[2]),
                 }
     return cites
+
+
+def _citation_region(line: str) -> str:
+    """The citation region: the WHOLE table row, taken by construction.
+
+    Deliberately not a prefix or a slice. A quote that *is* the row cannot be a truncation,
+    so a doc-derived citation cannot be edited to agree with its row. The maximality check
+    is therefore a secondary tripwire for the hand-typed FOLD quote, not the guarantee.
+    """
+    row = line.rstrip()
+    if not row.startswith("|") or not row.endswith("|"):
+        raise ValueError(f"citation region is not a whole table row: {row[:60]!r}")
+    return row
 
 
 def _citation_errors(cites: dict[str, dict]) -> list[str]:
@@ -479,7 +528,7 @@ def _citation_findings(cites: dict[str, dict]) -> tuple[list[dict], list[dict], 
 
     `clause_only`: the destination IS named, but only in a clause BEYOND the first `→`.
     A read that stopped at the first clause would drop the row's entire support, so this
-    list is the maximality rule's load-bearing set — computed, not asserted.
+    list is the first-clause split's load-bearing set — computed, not asserted.
 
     `ambiguous`: the citation names more than one target, so it does not by itself
     determine a destination. Which clause applies to which method is a reading, not a
@@ -733,9 +782,10 @@ def render(rows: list[dict], sdk_defs: dict[str, int], cites: dict[str, dict]) -
         "**in full**. The quote is not decoration. A read that stops at the clause agreeing with",
         "the row drops the clause that contradicts it, and because a truncated prefix of a real",
         "sentence is still a real substring, a `quote in text` test passes while the evidence has",
-        "been edited to agree with the row. **Every quote below reaches a region boundary** (a",
-        "cell `|`, a line end, a sentence end), and the generator **fails the build** if one stops",
-        "mid-clause.",
+        "been edited to agree with the row. **Every quote below is the whole disposition ROW, read",
+        "at build time** — a truncation is not merely detected, it is *impossible to construct*,",
+        "because there is no slicing step: the row **is** the quote. (The authored FOLD hop below",
+        "is hand-typed, so the generator additionally rejects it with a maximality check.)",
         "",
         f"**{len(by_quote)} citations cover {n_cited} of the {len(rows)} registry rows.** The other **{len(rows) - n_cited}**",
         "are map decisions with no disposition row in the doc to cite — a net-new target, or a row",
@@ -774,6 +824,13 @@ def render(rows: list[dict], sdk_defs: dict[str, int], cites: dict[str, dict]) -
         "reported here with its evidence and the mapping is left ALONE. Changing an owner-approved",
         "destination is not a build step.",
         "",
+        "**D2 is a LOWER BOUND, and reads that way on purpose.** Its predicate is exhaustive — every",
+        "row whose destination is named *nowhere* in its citation is listed. What it cannot decide",
+        "is clause ATTRIBUTION. `tortoise_assess_source` is the concrete case: its citation names the",
+        "setter's `manage_source_trust` first and the reader's `list_sources` second, and the map",
+        "puts it on the setter's target — a reading of which clause applies, not a computation. Such",
+        "rows are visible in D3, not here, and are not counted as disagreements.",
+        "",
     ]
     if unsupported:
         for f in unsupported:
@@ -787,10 +844,11 @@ def render(rows: list[dict], sdk_defs: dict[str, int], cites: dict[str, dict]) -
         "",
         "#### D2b — rows whose support exists ONLY beyond the first clause",
         "",
-        "These rows are **why the maximality rule is load-bearing, not decorative**. Their",
+        "These rows are **why the first-clause split is load-bearing, not decorative**. Their",
         "destination is named by the citation, but only in a clause after the first `→` — the",
-        "exact point a truncated quote would stop. A `quote in text` test would accept the cut",
-        "prefix and the row's whole support would vanish from its own evidence, silently.",
+        "exact point a truncated read would stop. A read that took only the first clause would",
+        "lose the row's whole support, silently — so the generator computes the first-clause names",
+        "(`_prefix_targets`) and surfaces any discrepancy as this list.",
         "",
     ]
     if clause_only:

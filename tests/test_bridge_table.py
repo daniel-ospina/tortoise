@@ -848,20 +848,26 @@ def test_a_truncated_citation_is_rejected_by_the_build(monkeypatch) -> None:
     assert bt._doc_citations(), "the citation guard resolved no citations at all"
 
 
-def test_part_d_findings_match_an_independent_recomputation() -> None:
-    """D2 / D2b / D3 must list exactly what the citations and the map imply.
+# The destination-anchor rule, re-derived in the test — deliberately NOT imported from
+# `tools.bridge_table`. A target named after the arrow is a destination only when the text
+# before it is the arrow itself, a clause separator, or a destination preposition. A name
+# mid-sentence ("the batch form of `mine_knowledge_from_session`", "— `explore_connections`
+# answers that question") is a comparison or an aside, not an alternative destination.
+_DEST_LEAD = re.compile(r"(?:→|[;,]+\s*|\b(?:on|via|to|into|toward|towards)\s+)\**\s*$")
+_FOLDS_LITERAL = {"list_sources": "list_knowledge"}
 
-    Recomputed here from the RENDERED corpus plus the map — the generator's own
-    `_citation_findings` is not imported — so emptying any of those sections reds this
-    test instead of passing as "nothing to report".
+
+def _recompute_citation_rows() -> dict[str, dict]:
+    """tool -> {dest, named, prefix, quote}, from the RENDERED corpus plus the map.
+
+    The generator's `_citation_findings` is not imported, so a mangled rendered cell or a
+    map edit that erases a finding cannot move both sides of an assertion together.
     """
     sys.path.insert(0, str(ROOT))
     from tools.bridge_table import DESTINATION
 
-    cites = _part_d_citations()
-    # The one documented hop, asserted LITERALLY rather than imported: the beta doc states
-    # `list_sources` folds into `list_knowledge(kind='source')`.
-    folds = {"list_sources": "list_knowledge"}
+    folds = dict(_FOLDS_LITERAL)
+    keep = {d.split(":", 1)[-1] for d in DESTINATION.values()} | set(folds)
 
     def resolve(names: list[str]) -> list[str]:
         out: list[str] = []
@@ -871,40 +877,82 @@ def test_part_d_findings_match_an_independent_recomputation() -> None:
                 out.append(r)
         return out
 
-    def rendered(quote: str, first_clause: bool) -> list[str]:
+    def targets(quote: str, first_clause: bool) -> list[str]:
         segs = quote.split("→")[1:]
         if first_clause:
             segs = [re.split(r"[;.]", segs[0], maxsplit=1)[0]] if segs else []
         names: list[str] = []
         for s in segs:
-            names += re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)\s*(?:\([^`]*\))?`", s)
-        # Keep only names that are destinations in the map, derived from the map's values
-        # rather than from the generator's own TARGET_MCP set — a different derivation of
-        # the same universe, so the two sides of this assertion cannot move together.
-        keep = {d.split(":", 1)[-1] for d in DESTINATION.values()} | set(folds)
-        return [n for n in names if n in keep]
+            for m in re.finditer(r"`([A-Za-z_][A-Za-z0-9_]*)\s*(?:\([^`]*\))?`", s):
+                if m.group(1) not in keep:
+                    continue
+                before = s[: m.start()]
+                if before.strip() == "" or _DEST_LEAD.search(before):
+                    names.append(m.group(1))
+        return names
 
+    out: dict[str, dict] = {}
+    for tool, quote in _part_d_citations().items():
+        out[tool] = {
+            "tool": tool,
+            "quote": quote,
+            "dest": DESTINATION[tool],
+            "named": resolve(targets(quote, first_clause=False)),
+            "prefix": resolve(targets(quote, first_clause=True)),
+        }
+    return out
+
+
+def _recompute_citation_sets(
+    rows: dict[str, dict],
+) -> tuple[set[str], set[str], set[str]]:
     unsupported: set[str] = set()
     clause_only: set[str] = set()
     ambiguous: set[str] = set()
-    for tool, quote in cites.items():
-        dest = DESTINATION[tool]
-        named = resolve(rendered(quote, first_clause=False))
-        prefix = resolve(rendered(quote, first_clause=True))
-        if dest not in named:
+    for tool, r in rows.items():
+        if r["dest"] not in r["named"]:
             unsupported.add(tool)
-        elif dest not in prefix:
+        elif r["dest"] not in r["prefix"]:
             clause_only.add(tool)
-        if len(named) > 1:
+        if len(r["named"]) > 1:
             ambiguous.add(tool)
+    return unsupported, clause_only, ambiguous
 
-    # Non-vacuity, and the finding this rule exists to produce: the named failure mode is
-    # present in the corpus, so a rule that reports "nothing" is a broken rule.
+
+def test_part_d_findings_match_an_independent_recomputation() -> None:
+    """D2 / D2b / D3 must list exactly what the citations and the map imply.
+
+    Recomputed here from the RENDERED corpus plus the map — the generator's own
+    `_citation_findings` is not imported — so emptying any of those sections reds this
+    test instead of passing as "nothing to report".
+
+    The membership sets are pinned as LITERALS (P2-1). A map edit that makes a finding
+    agree with the doc — `tortoise_invalidate` re-pointed at `update_knowledge` — drops D2
+    4->3, and the rendered set and the recomputed set moved TOGETHER, so only a literal pin
+    can see it.
+    """
+    rows = _recompute_citation_rows()
+    unsupported, clause_only, ambiguous = _recompute_citation_sets(rows)
+
+    # Non-vacuity, and the named failure mode this rule exists to produce: the clause-only
+    # row must be present, so a rule that reports "nothing" is a broken rule.
     assert clause_only == {"tortoise_get_source_reliability"}, (
         "expected exactly the `get_source_reliability` row to be supported only beyond its "
         f"citation's first clause; computed {sorted(clause_only)}"
     )
     assert unsupported, "no citation disagrees with its row — the audit found nothing"
+    assert unsupported == {
+        "tortoise_invalidate", "tortoise_paginated_query",
+        "tortoise_query", "tortoise_query_points_by_tag",
+    }, f"D2 membership changed: {sorted(unsupported)}"
+    # The destination-anchor rule removed the three prose false positives; a regression to
+    # scanning the whole post-arrow segment re-adds them here.
+    assert ambiguous == {
+        "tortoise_annotate_operator", "tortoise_assess_source", "tortoise_belief_timeline",
+        "tortoise_get_source_reliability", "tortoise_mitigate_operator",
+        "tortoise_operator_action", "tortoise_provenance", "tortoise_session_context",
+        "tortoise_set_source_tier",
+    }, f"D3 membership changed: {sorted(ambiguous)}"
 
     got = _cited_findings()
     for label, want, have in (
@@ -917,6 +965,171 @@ def test_part_d_findings_match_an_independent_recomputation() -> None:
             f"  listed but not implied: {sorted(have - want)}\n"
             f"  implied but not listed: {sorted(want - have)}"
         )
+
+
+def test_part_d_rendered_cells_are_pinned_to_the_recomputation() -> None:
+    r"""Every Part D cell and every Part D count is compared to a recomputation (P1).
+
+    Pinning only membership left the rendered prose free. Each mutation below changed the
+    document, left `--check` green, and left the suite at 16 passed:
+
+    * D2 could say `map says \`search_knowledge\`` for a row whose map says
+      `supersede_knowledge`, contradicting Part B two screens up (whose Destination IS
+      pinned);
+    * D2b could SWAP "the first clause names X, the full citation names Y", contradicting
+      the D1 quote rendered directly above it;
+    * D3's `Destination (map)` / `Citation names` / `First clause names` columns could be
+      wrong on every row;
+    * the D1 headline count could be typed as `25 citations` while D1 lists 19 groups.
+
+    This compares each rendered cell — and each rendered count — to a value recomputed from
+    the rendered corpus plus the map.
+    """
+    rows = _recompute_citation_rows()
+    unsupported, clause_only, ambiguous = _recompute_citation_sets(rows)
+    cites = _part_d_citations()
+    doc = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
+
+    def name_list(cell: str) -> list[str]:
+        return [f"`{n}`" for n in re.findall(r"`([a-z_][a-z0-9_]*)`", cell)]
+
+    # ── D2 rows: dest + named + the rendered quote ─────────────────
+    d2 = _section(doc, "#### D2 —")
+    parsed_d2: dict[str, dict] = {}
+    for m in re.finditer(
+        r"^- \*\*`([a-z_][a-z0-9_]*)`\*\* — map says `([^`]+)`; citation names ([^\n]+)\n"
+        r"  > ([^\n]+)$",
+        d2, re.M,
+    ):
+        tool = m.group(1)
+        assert tool not in parsed_d2, f"{tool} rendered twice in D2"
+        parsed_d2[tool] = {
+            "dest": m.group(2),
+            "named": name_list(m.group(3)),
+            "quote": m.group(4),
+        }
+    assert "**D2 is a LOWER BOUND" in d2, (
+        "D2's lower-bound caveat is missing — the section then reads EXHAUSTIVE, when its "
+        "predicate cannot decide clause attribution (the `tortoise_assess_source` reading)"
+    )
+    assert set(parsed_d2) == unsupported, (
+        f"D2 rendered {sorted(parsed_d2)} but the recomputation says {sorted(unsupported)}"
+    )
+    for tool, cell in parsed_d2.items():
+        want = rows[tool]
+        assert cell["dest"] == want["dest"], (
+            f"D2 says {tool}'s map destination is {cell['dest']!r}; the map says {want['dest']!r}"
+        )
+        assert cell["named"] == [f"`{n}`" for n in want["named"]], (
+            f"D2 says {tool}'s citation names {cell['named']}; recomputed {want['named']}"
+        )
+        assert cell["quote"] == want["quote"], (
+            f"D2 renders a different quote for {tool} than the corpus recomputation"
+        )
+
+    # ── D2b rows: clause attribution must not be swapped ───────────
+    d2b = _section(doc, "#### D2b —")
+    parsed_d2b: dict[str, dict] = {}
+    for m in re.finditer(
+        r"^- \*\*`([a-z_][a-z0-9_]*)`\*\* — map says `([^`]+)`; the first clause names "
+        r"([^\n]+?), the full citation names ([^\n]+)\n  > ([^\n]+)$",
+        d2b, re.M,
+    ):
+        tool = m.group(1)
+        parsed_d2b[tool] = {
+            "dest": m.group(2),
+            "prefix": name_list(m.group(3)),
+            "named": name_list(m.group(4)),
+            "quote": m.group(5),
+        }
+    assert set(parsed_d2b) == clause_only, (
+        f"D2b rendered {sorted(parsed_d2b)} but the recomputation says {sorted(clause_only)}"
+    )
+    for tool, cell in parsed_d2b.items():
+        want = rows[tool]
+        assert cell["dest"] == want["dest"]
+        # EXACT ORDER: this is precisely the clause-attribution claim, and swapping the two
+        # sides was green while the bullet contradicted the D1 quote directly above it.
+        assert cell["prefix"] == [f"`{n}`" for n in want["prefix"]], (
+            f"D2b says the first clause of {tool} names {cell['prefix']}; recomputed "
+            f"{want['prefix']} (swapped with the full citation?)"
+        )
+        assert cell["named"] == [f"`{n}`" for n in want["named"]], (
+            f"D2b says the full citation of {tool} names {cell['named']}; recomputed "
+            f"{want['named']}"
+        )
+        assert cell["quote"] == want["quote"]
+
+    # ── D3 rows: every column ──────────────────────────────────────
+    d3 = _section(doc, "#### D3 —")
+    parsed_d3: dict[str, dict] = {}
+    for m in re.finditer(
+        r"^\| `([a-z_][a-z0-9_]*)` \| `([^`]+)` \| ([^|]+)\| ([^|]+)\|$", d3, re.M
+    ):
+        parsed_d3[m.group(1)] = {
+            "dest": m.group(2),
+            "named": name_list(m.group(3)),
+            "prefix": name_list(m.group(4)),
+        }
+    assert set(parsed_d3) == ambiguous, (
+        f"D3 rendered {sorted(parsed_d3)} but the recomputation says {sorted(ambiguous)}"
+    )
+    for tool, cell in parsed_d3.items():
+        want = rows[tool]
+        assert cell["dest"] == want["dest"], (
+            f"D3 says {tool}'s map destination is {cell['dest']!r}; the map says {want['dest']!r}"
+        )
+        assert cell["named"] == [f"`{n}`" for n in want["named"]], (
+            f"D3 says {tool}'s citation names {cell['named']}; recomputed {want['named']}"
+        )
+        assert cell["prefix"] == [f"`{n}`" for n in want["prefix"]], (
+            f"D3 says {tool}'s first clause names {cell['prefix']}; recomputed {want['prefix']}"
+        )
+
+    # ── Derived citations are WHOLE rows by construction (P2-2) ────
+    beta = (ROOT / "docs" / "product" / "beta-sdk-surface.md").read_text(encoding="utf-8")
+    sys.path.insert(0, str(ROOT))
+    from tools.bridge_table import _registry_rows
+
+    method_of = {r["name"]: r["sdk_method"] for r in _registry_rows()}
+    for tool, q in cites.items():
+        # The citation ASSIGNED to a tool must name that tool's sdk_method. Without this a
+        # D1 grouping could hand tool A tool B's row (both maximal, both whole rows) and
+        # every maximality/set assertion above would still pass.
+        first_cell = q.strip().strip("|").split("|")[0]
+        cited_names = re.findall(r"`([a-z_][a-z0-9_]*)`", first_cell)
+        assert method_of.get(tool) in cited_names, (
+            f"D1 assigns {tool} a citation that does not name its sdk_method "
+            f"{method_of.get(tool)!r}: {first_cell.strip()[:80]!r}"
+        )
+        assert q.endswith("|"), f"{tool}'s citation does not end at a row boundary: {q[-40:]!r}"
+        assert f"\n{q}\n" in beta, (
+            f"{tool}'s citation is not a WHOLE line of beta-sdk-surface.md — it is a prefix or "
+            "a truncation, which is exactly what 'whole region by construction' must prevent"
+        )
+
+    # ── Every Part D count ─────────────────────────────────────────
+    n_registry = len(_registry_rows())
+    n_cited = len(cites)
+    n_groups = len(set(cites.values()))
+    m = re.search(
+        r"\*\*(\d+) citations cover (\d+) of the (\d+) registry rows\.\*\* The other \*\*(\d+)\*\*",
+        doc,
+    )
+    assert m, "D1's headline counts are missing or changed shape"
+    assert tuple(int(g) for g in m.groups()) == (
+        n_groups, n_cited, n_registry, n_registry - n_cited,
+    ), f"D1 headline is {m.groups()}, recomputed {(n_groups, n_cited, n_registry, n_registry - n_cited)}"
+
+    m = re.search(
+        r"\*\*(\d+) rows disagree with their own citation;\s*(\d+) are supported only\s*"
+        r"beyond the first clause;\s*(\d+) sit under an ambiguous citation\.\*\*",
+        doc,
+    )
+    assert m, "the Part D summary counts are missing or changed shape"
+    assert tuple(int(g) for g in m.groups()) == (
+        len(unsupported), len(clause_only), len(ambiguous),
+    ), f"Part D summary is {m.groups()}"
 
 
 def test_the_named_failure_mode_is_visible_in_the_document() -> None:
@@ -934,4 +1147,35 @@ def test_the_named_failure_mode_is_visible_in_the_document() -> None:
     )
     assert "folds into **row 4 `list_knowledge(kind='source')`**" in doc, (
         "the documented hop from `list_sources` to `list_knowledge` is not rendered"
+    )
+
+
+def test_doc_citations_do_not_drop_a_shared_sdk_method(tmp_path, monkeypatch) -> None:
+    """A method declared by two registry tools must cite BOTH (latent drop, P2-5).
+
+    `tortoise_get_point` and `tortoise_get_operator` both declare `get_point`. Keying the
+    method->tool lookup by a plain dict kept only the LAST tool, so a disposition row naming
+    `get_point` would cite one tool and silently drop the other. No disposition row names
+    `get_point` TODAY, so the defect is latent — which is exactly why a synthetic row is the
+    only way to exercise the fix and keep it from regressing.
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    declared = sorted(r["name"] for r in bt._registry_rows() if r["sdk_method"] == "get_point")
+    assert len(declared) >= 2, f"expected >=2 registry tools declaring `get_point`, got {declared}"
+
+    synthetic = tmp_path / "beta.md"
+    synthetic.write_text(
+        "| names | count | dest |\n"
+        "|---|---|---|\n"
+        "| `get_point` | 1 | → `get_entity`. |\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bt, "BETA_DOC", synthetic)
+    cites = bt._doc_citations()
+    missing = [n for n in declared if n not in cites]
+    assert not missing, (
+        f"the shared `get_point` binding dropped {missing} from the citations — the "
+        "method->tool lookup is last-wins again"
     )

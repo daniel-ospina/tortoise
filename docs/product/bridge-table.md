@@ -246,9 +246,10 @@ The `Destination` column's evidence is the beta doc's own disposition row, quote
 **in full**. The quote is not decoration. A read that stops at the clause agreeing with
 the row drops the clause that contradicts it, and because a truncated prefix of a real
 sentence is still a real substring, a `quote in text` test passes while the evidence has
-been edited to agree with the row. **Every quote below reaches a region boundary** (a
-cell `|`, a line end, a sentence end), and the generator **fails the build** if one stops
-mid-clause.
+been edited to agree with the row. **Every quote below is the whole disposition ROW, read
+at build time** — a truncation is not merely detected, it is *impossible to construct*,
+because there is no slicing step: the row **is** the quote. (The authored FOLD hop below
+is hand-typed, so the generator additionally rejects it with a maximality check.)
 
 **19 citations cover 41 of the 98 registry rows.** The other **57**
 are map decisions with no disposition row in the doc to cite — a net-new target, or a row
@@ -304,7 +305,7 @@ citation of its own — checked by the same rule — rather than assumed. Withou
   > | `list_sources` | **Not discarded.** Present at `tortoise/sdk.py` with an MCP tool and a CLI command (`tortoise/__main__.py`), and it is covered by `tests/test_enumeration_surfaces.py` and `tests/test_connector_sources.py`. It folds into **row 4 `list_knowledge(kind='source')`** — the *question* it asks stays first-class and gains the credibility tier; it no longer needs its own method. |
 
 **4 rows disagree with their own citation; 1 are supported only
-beyond the first clause; 12 sit under an ambiguous citation.** Every count
+beyond the first clause; 9 sit under an ambiguous citation.** Every count
 here is computed from the doc, not typed.
 
 #### D2 — citations that do NOT name their row's destination
@@ -314,6 +315,13 @@ full citation is the `get_source_reliability` failure mode read one level up —
 its evidence disagree. The destination map is owner-approved, so the disagreement is
 reported here with its evidence and the mapping is left ALONE. Changing an owner-approved
 destination is not a build step.
+
+**D2 is a LOWER BOUND, and reads that way on purpose.** Its predicate is exhaustive — every
+row whose destination is named *nowhere* in its citation is listed. What it cannot decide
+is clause ATTRIBUTION. `tortoise_assess_source` is the concrete case: its citation names the
+setter's `manage_source_trust` first and the reader's `list_sources` second, and the map
+puts it on the setter's target — a reading of which clause applies, not a computation. Such
+rows are visible in D3, not here, and are not counted as disagreements.
 
 - **`tortoise_invalidate`** — map says `supersede_knowledge`; citation names `update_knowledge`
   > | `retract_point`, `invalidate_point` | 2 | → fields on `update_knowledge`. **Zep's shape:** retraction is `invalid_at`/`expired_at` on the existing update, not a separate verb. |
@@ -326,10 +334,11 @@ destination is not a build step.
 
 #### D2b — rows whose support exists ONLY beyond the first clause
 
-These rows are **why the maximality rule is load-bearing, not decorative**. Their
+These rows are **why the first-clause split is load-bearing, not decorative**. Their
 destination is named by the citation, but only in a clause after the first `→` — the
-exact point a truncated quote would stop. A `quote in text` test would accept the cut
-prefix and the row's whole support would vanish from its own evidence, silently.
+exact point a truncated read would stop. A read that took only the first clause would
+lose the row's whole support, silently — so the generator computes the first-clause names
+(`_prefix_targets`) and surfaces any discrepancy as this list.
 
 - **`tortoise_get_source_reliability`** — map says `list_knowledge`; the first clause names `manage_source_trust`, the full citation names `manage_source_trust`, `list_knowledge`
   > | `assess_source`, `set_source_tier`, `get_source_reliability` | 3 | → `manage_source_trust` for the setter; reads via `list_sources`. |
@@ -346,13 +355,10 @@ rows in D1, where the clause a truncated read would have dropped is visible.
 | `tortoise_annotate_operator` | `adjust_relationship` | `adjust_relationship`, `update_knowledge` | `adjust_relationship`, `update_knowledge` |
 | `tortoise_assess_source` | `manage_source_trust` | `manage_source_trust`, `list_knowledge` | `manage_source_trust` |
 | `tortoise_belief_timeline` | `check_confidence` | `check_confidence`, `poll_events` | `check_confidence` |
-| `tortoise_calibrate_summary` | `check_confidence` | `check_confidence`, `explore_connections` | `check_confidence` |
 | `tortoise_get_source_reliability` | `list_knowledge` | `manage_source_trust`, `list_knowledge` | `manage_source_trust` |
-| `tortoise_mine_conversations` | `mine_knowledge_from_directory` | `mine_knowledge_from_directory`, `mine_knowledge_from_session` | `mine_knowledge_from_directory` |
 | `tortoise_mitigate_operator` | `adjust_relationship` | `adjust_relationship`, `update_knowledge` | `adjust_relationship`, `update_knowledge` |
 | `tortoise_operator_action` | `adjust_relationship` | `adjust_relationship`, `update_knowledge` | `adjust_relationship`, `update_knowledge` |
 | `tortoise_provenance` | `check_confidence` | `check_confidence`, `poll_events` | `check_confidence` |
-| `tortoise_recall` | `check_confidence` | `check_confidence`, `explore_connections` | `check_confidence` |
 | `tortoise_session_context` | `check_confidence` | `check_confidence`, `poll_events` | `check_confidence` |
 | `tortoise_set_source_tier` | `manage_source_trust` | `manage_source_trust`, `list_knowledge` | `manage_source_trust` |
 
