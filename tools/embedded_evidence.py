@@ -866,9 +866,24 @@ class UsageError(Exception):
     """
 
 
-def _git(*args: str, cwd: Path | None = None) -> str:
+def _git(
+    *args: str, cwd: Path | None = None, env: dict[str, str] | None = None
+) -> str:
+    """Run git and return its stdout.
+
+    `env=None` INHERITS the ambient environment — the production behaviour, and
+    the default so no existing caller changes meaning. The parameter exists so a
+    caller can pin the environment the MEASURED calls see: git reads
+    `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE` and the global/system config
+    (`core.autocrlf`, `core.fsmonitor`, `core.untrackedCache`, `status.*`,
+    `diff.*`) straight from it, so a runner's ambient config would otherwise get
+    to decide what the pin measures. A test that sanitises only the FIXTURE's own
+    git invocations does NOT reach these calls — which is how the first version
+    of the `#4540` tests could have passed vacuously (#4203).
+    """
     proc = subprocess.run(
-        ["git", *args], capture_output=True, text=True, cwd=str(cwd or REPO_ROOT)
+        ["git", *args], capture_output=True, text=True, cwd=str(cwd or REPO_ROOT),
+        env=env,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
@@ -926,29 +941,71 @@ def _record_out_pathspec(cwd: Path, exclude: Path | None) -> list[str]:
     `--record-out` is a command-line argument, so a RELATIVE one names a path under
     the invocation directory (`Path.cwd()`) — NOT under `cwd`, which is the tree
     being measured and, for a `--ref` run, is a detached worktree the receipt is not
-    inside. Git resolves a pathspec relative to the directory git runs in (`cwd`),
-    and (measured against real git, not assumed) a pathspec that escapes the
-    repository is a hard `fatal` (rc 128) — so an exclusion is emitted only when the
-    receipt resolves INSIDE `cwd`. A pathspec list of exclusions ALONE is also an
-    error, so the caller supplies `.` as the include.
+    inside.
 
-    Returns `[]` when there is nothing safe to exclude (no receipt, a path outside
-    the measured tree, or the measured root itself — excluding that would exclude
-    the whole tree, a fail-open in the other direction).
+    The pin's correctness property is ONE-DIRECTIONAL: a genuinely dirty tree must
+    never read clean (`dirty` is derived from the post-exclusion porcelain). So an
+    ambiguous input is REFUSED — `[]` — and never guessed at, because a refusal can
+    only ADD dirt while an over-broad exclusion removes it.
+
+    An exclusion is emitted only for a path that is, lexically, a REGULAR FILE
+    inside `cwd`. Three independent over-matches are closed here, each an exclusion
+    that named a set larger than the receipt:
+
+    * LEXICAL, never `Path.resolve()`. `resolve()` follows symlinks, so with
+      `--record-out docs/out` where `docs/out` is a symlink to a DIRECTORY it
+      resolved to `docs` and emitted `:(exclude)docs` — dropping the whole `docs/`
+      subtree from BOTH legs, so a real edit under `docs/` read clean. A receipt
+      symlinked in from outside the repo (`ln -s <repo>/docs /elsewhere/r.json`)
+      collapsed to the same pathspec. Git resolves a pathspec relative to the
+      directory it runs in, and it matches index paths LEXICALLY, so the lexical
+      `os.path.relpath` of the (unresolved) target is the exact string git needs.
+      Only `cwd` itself is put on a physical basis (`os.path.realpath`) — a prefix
+      difference never changes the relative path, and without it a `cwd` from
+      `tempfile.mkdtemp()` (`/var/…`) would not line up with `Path.cwd()`
+      (`/private/var/…`) on macOS.
+    * `literal` magic. Without it git GLOBS the pathspec: a receipt named
+      `docs/out[12].json` matched `docs/out1.json` and `docs/out2.json` (measured),
+      hiding two genuinely dirty files. `*` and `?` are the same class.
+    * a target that `os.path.isdir` reports as a directory — which it does for a
+      symlink RESOLVED to a directory, since it follows the final component. Git
+      treats a pathspec naming a directory as that whole subtree, so this is the
+      same whole-subtree over-match reached from the other direction.
+
+    `rel == "."` (the target IS the measured root), `rel == ".."` (an ancestor of
+    `cwd`, hence outside the measured tree), anything outside the repo, and a path
+    that does not exist are each refused. Refusing a nonexistent path costs nothing
+    — nothing is there to exclude — and every measurement in `_build_record` is
+    taken BEFORE `_write_record` runs, so a receipt that does not exist yet is a
+    receipt that is not yet dirt.
+
+    Returns `[]` when there is nothing safe to exclude.
     """
     if exclude is None:
         return []
     try:
+        # The JOIN is lexical (`Path.__truediv__`), so a symlink anywhere in
+        # `exclude` — final component or interior — stays a symlink in `rel`.
         target = exclude if exclude.is_absolute() else (Path.cwd() / exclude)
-        rel = target.resolve().relative_to(cwd.resolve())
+        target_abs = os.path.abspath(os.fspath(target))
+        cwd_abs = os.path.realpath(os.fspath(cwd))
+        rel = os.path.relpath(target_abs, cwd_abs)
     except (OSError, ValueError):
         return []
-    if not rel.parts:  # `exclude` IS `cwd`: excluding it would exclude everything
+    if rel == os.curdir or rel == os.pardir or rel.startswith(os.pardir + os.sep):
+        return []  # the measured root itself, or outside it (an ancestor, a sibling)
+    if os.path.isabs(rel):  # a different drive (Windows): not under `cwd`
         return []
-    return [f":(exclude){rel}"]
+    if not os.path.lexists(target_abs):
+        return []  # nothing to exclude yet — never guess at what it might mean
+    if os.path.isdir(target_abs):
+        return []  # a directory, incl. a symlink RESOLVED to one: a whole subtree
+    return [f":(exclude,literal){Path(rel).as_posix()}"]
 
 
-def _porcelain_digest(cwd: Path, exclude: Path | None = None) -> tuple[str, bool]:
+def _porcelain_digest(
+    cwd: Path, exclude: Path | None = None, env: dict[str, str] | None = None
+) -> tuple[str, bool]:
     # The resolved `--record-out` path is excluded from the pin (M5/D6) BY GIT, as a
     # pathspec — never by filtering the porcelain text. The substring filter this
     # replaces held two reproduced defects (#4540), and because #4203 moved `dirty`
@@ -961,11 +1018,17 @@ def _porcelain_digest(cwd: Path, exclude: Path | None = None) -> tuple[str, bool
     #       per-file filter never matched — so `dirty` stayed True on exactly the
     #       documented re-run (the permanent false-FAIL #4203 was raised to close).
     # Both die at the source when git does the exclusion: the pathspec is exact
-    # (measured: `:(exclude)tools/e` keeps `tools/embedded_evidence.py`) and `-uall`
-    # makes the receipt a path git can exclude at all.
+    # (`:(exclude,literal)tools/e` keeps `tools/embedded_evidence.py`, and the
+    # `literal` magic keeps `docs/out[12].json` from matching `docs/out1.json`) and
+    # `-uall` makes the receipt a path git can exclude at all. `.` is the include,
+    # stated explicitly so the scope of the measurement is visible here; an
+    # exclusion-only pathspec is in fact legal (measured rc 0), so `.` is
+    # documentation, not a requirement. `env` pins the environment the measured
+    # calls see — see `_git`.
     pathspec = [".", *_record_out_pathspec(cwd, exclude)]
-    status = _git("status", "--porcelain=v2", "--untracked-files=all", "--", *pathspec, cwd=cwd)
-    diff = _git("diff-index", "HEAD", "--", *pathspec, cwd=cwd)
+    status = _git("status", "--porcelain=v2", "--untracked-files=all", "--", *pathspec,
+                  cwd=cwd, env=env)
+    diff = _git("diff-index", "HEAD", "--", *pathspec, cwd=cwd, env=env)
     blob = (status + "\n" + diff + "\n").encode()
     return "sha256:" + hashlib.sha256(blob).hexdigest(), bool(status.strip())
 
