@@ -1,0 +1,78 @@
+# availability-record (#3810) — RECORD-ONLY rolling availability baseline for
+# the hosted API probe, and NOTHING ELSE.
+#
+# ⛔ THIS IS AN INSTRUMENT, NOT A GATE. It never restarts anything, never
+# pages, and never fails because a figure is low. It measures the PROBE — how
+# often it actually ran and what it saw — not the service, and it defines no
+# SLA, no target and no status page. Publication of any figure is an OWNER
+# decision; the record is evidence for that decision.
+#
+# Why: Objective 8 adopted 99.5%/30 days as a probe threshold, *preceded by a
+# 4-week record-only baseline* so the probe is proven not to lie before it
+# gates. That baseline had no instrument. The measured 2026-09-17 population
+# (452 runs) showed the probe fires ~96x/day, not 288 — 33% of its own cron,
+# so the real resolution is ~15 min, not 5 — and its one incident (#3637) was
+# DEGRADED (the app answered 404), not DOWN (silence). This workflow produces
+# the per-UTC-day record that makes both facts, and the probe's self-healing
+# restart history, visible instead of averaged away.
+#
+# It writes into ONE internal, title-keyed GitHub issue (marker
+# `<!-- availability-record-state -->`) and touches no incident issue. The
+# watchdog and its script are read-only inputs and are NOT modified.
+#
+# Trigger: daily. `paths:` filters do not apply to `schedule` triggers (GitHub
+# ignores them there), so — like the repo's other infra cron workflows
+# (registry-backup-cron, registry-drill-cron) — this carries a schedule plus a
+# manual dispatch; the PR-time path gate for the harness lives in ci.yml
+# (`watchdog_scripts` surface), mirroring the availability-watchdog job.
+#
+# Harness: .github/scripts/availability-record.test.sh (CI job
+# availability-record; stubs `gh`, no network).
+name: availability-record
+
+on:
+  schedule:
+    # Daily at 06:00 UTC. A record, not a probe — cadence is irrelevant here;
+    # the record itself reports the probe's real (not nominal) cadence.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      window_days:
+        description: >-
+          Window in days (default 28). Empty uses the script's own default.
+        required: false
+        default: ''
+        type: string
+
+# Never overlap: two runs would race on the same record issue body.
+concurrency:
+  group: availability-record
+  cancel-in-progress: false
+
+# contents: read for actions/checkout, issues: write for the single record
+# issue, actions: read to enumerate the watchdog's runs. The repo's default
+# token is restricted (#2140), so the scopes are granted explicitly.
+permissions:
+  contents: read
+  issues: write
+  actions: read
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # persist-credentials: false — this job only reads files; the workflow
+      # token carries issues:write and must not be written into .git/config.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build the record-only availability baseline (#3810)
+        env:
+          # Actions does NOT export GITHUB_TOKEN itself, so GH_TOKEN must be
+          # named explicitly or the reader is deaf (#2140 / registry-cron).
+          # STEP-level only: a job-level env is handed to actions/checkout too.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Empty on the scheduled path → the script's single default (28).
+          AVAILABILITY_RECORD_DAYS: ${{ inputs.window_days }}
+        run: bash .github/scripts/availability-record.sh

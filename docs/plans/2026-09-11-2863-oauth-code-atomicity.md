@@ -59,7 +59,7 @@ Scope boundary (from `/tmp/2863-scope.md`): **no schema migration, no new RPC.**
 | S1 | `cp.query(...)` seam, **transport-level** | (a) HTTP ≥300; (b) transport error; (c) unparseable 2xx; (d) commit-then-lost-response | (a)(b)(c): Task 2 Step 6's real-seam handler returns 500 / non-JSON 200 and asserts the mapped typed error, not a raw exception; (d): Task 3's `after_mutation` cases. *The fake injector raises a Python `RuntimeError` for every case, so it cannot itself distinguish (a)-(c) — that is why the real-seam leg is a hard requirement.* |
 | S2 | `oauth_codes.used_at` (claim + CAS restore) | (a) concurrent redemption; (b) CAS miss; (c) expired; (d) restore PATCH fails | Task 2 unit tests; existing `test_oauth_mcp.py` (a) |
 | S3 | mint rows (2 POSTs + claim + prev-access revoke) | (a) partial mint; (b) claim contention; (c) ambiguous claim; (d) rollback fails; (e) observation fails | Task 3 (+ Task 5 for (c) at the endpoint) |
-| S4 | grant-path reads: `oauth_clients` (`_verify_client_auth`), refresh-token SELECT, `teams`, `team_memberships`, `prev_access` | (a) failure **pre-consume** (constructive-clean → 503); (b) failure **post-consume** (→ CAS restore/terminal); (c) failure on the **first** read of the path (`oauth_clients`) — the exact leak a wrap starting at `:728` would miss | Task 4 (b), Task 5 (a)+(c), **parametrized over all five call sites** incl. `team_memberships` |
+| S4 | grant-path reads: `oauth_clients` (`_verify_client_auth`), refresh-token SELECT, `teams`, `org_memberships`, `prev_access` | (a) failure **pre-consume** (constructive-clean → 503); (b) failure **post-consume** (→ CAS restore/terminal); (c) failure on the **first** read of the path (`oauth_clients`) — the exact leak a wrap starting at `:728` would miss | Task 4 (b), Task 5 (a)+(c), **parametrized over all five call sites** incl. `org_memberships` |
 | S5 | `POST /oauth/token` boundary | (a) untyped 500 on a control-plane failure; (b) bare `{"detail":…}` on an unconverted exception; (c) divergence from the existing `_control_plane_unavailable` 503 convention | (a)(b)(c) Task 6. **(d) the pre-existing bare shapes at `:21887`/`:21895` are OUT OF SCOPE — #3026, no test here.** |
 | S6 | Sentry/log observability | (a) swallowed infra failure; (b) **double capture**; (c) `capture_exception` itself raising | Task 3 (b, counts), Task 4/5 (a, per-path), Task 6 (a, c) |
 
@@ -237,9 +237,9 @@ which the test bodies use:
 
 **The base tables are the part three review cycles kept missing.** Every endpoint path calls
 `_verify_client_auth` → `_client_row` (`oauth_clients`) FIRST, then `_assert_team_usable` (`teams`),
-and the refresh path then `membership_for_user_team` (`team_memberships`, `status=eq.active`).
+and the refresh path then `membership_for_user_org` (`org_memberships`, `status=eq.active`).
 An unseeded table yields 401/403 **before** any injected fault is reached — so the fixture seeds all
-three. `team_memberships.user_id` MUST be a UUID (the fake's `UUID_FILTER_COLUMNS` raises
+three. `org_memberships.user_id` MUST be a UUID (the fake's `UUID_FILTER_COLUMNS` raises
 `RuntimeError(...HTTP 400)` for a non-UUID, which the pre-mint wrap would convert to a 503 and hide
 the real assertion). Use `tests/test_oauth_mcp.py`'s `_U1`.
 
@@ -278,7 +278,7 @@ def _no_silent_faults():
 
 def _seed_base_tables(cp) -> None:
     """oauth_clients (id=_CLIENT_ID, token_endpoint_auth_method='none'), teams
-    (id='t1'), team_memberships (user_id=_U1 UUID, team_id='t1', status='active')."""
+    (id='t1'), org_memberships (user_id=_U1 UUID, org_id='t1', status='active')."""
     cp.tables.setdefault("oauth_clients", []).append({
         "id": _CLIENT_ID, "client_name": "test", "redirect_uris": [_REDIRECT],
         "scope": "mcp", "token_endpoint_auth_method": "none",
@@ -286,8 +286,8 @@ def _seed_base_tables(cp) -> None:
     cp.tables.setdefault("teams", []).append({
         "id": "t1", "tier": "Team", "suspended_at": None, "flagged_at": None,
         "email": "t@example.com"})
-    cp.tables.setdefault("team_memberships", []).append({
-        "user_id": _U1, "team_id": "t1", "role": "owner", "status": "active"})
+    cp.tables.setdefault("org_memberships", []).append({
+        "user_id": _U1, "org_id": "t1", "role": "owner", "status": "active"})
 
 
 def _live(cp, table: str) -> list[dict]:
@@ -295,7 +295,7 @@ def _live(cp, table: str) -> list[dict]:
 
 
 def _seed_code(cp, code="code-1", *, verifier=None, client_id=_CLIENT_ID,
-               user_id=_U1, team_id="t1", redirect_uri=_REDIRECT, used_at=None,
+               user_id=_U1, org_id="t1", redirect_uri=_REDIRECT, used_at=None,
                expires_in=600) -> str:
     """Insert an oauth_codes row and RETURN the PKCE verifier (a code seeded without
     its verifier 400s on PKCE before ever reaching the injected fault). Uses the
@@ -303,7 +303,7 @@ def _seed_code(cp, code="code-1", *, verifier=None, client_id=_CLIENT_ID,
     verifier = verifier or _pkce()[0]
     cp.tables.setdefault("oauth_codes", []).append({
         "code_hash": _sha256(code), "client_id": client_id, "user_id": user_id,
-        "team_id": team_id, "redirect_uri": redirect_uri,
+        "org_id": org_id, "redirect_uri": redirect_uri,
         "code_challenge": _s256(verifier), "code_challenge_method": "S256",   # see below
         "scope": "mcp", "resource": None,
         "expires_at": _expires_iso(expires_in), "used_at": used_at,
@@ -323,11 +323,11 @@ def _seed_refresh_token(cp, token="rt-1", **over) -> tuple[str, str]:
     """Insert an oauth_refresh_tokens row. RETURNS (row_id, plaintext_token) — ONE
     VALUE CANNOT BE BOTH: `refresh_grant` looks the row up by `token_hash` but lane 3
     and the claim PATCH address it by `id`. Column defaults: id=secrets.token_urlsafe(16),
-    client_id=_CLIENT_ID, user_id=_U1, team_id='t1', scope='mcp',
+    client_id=_CLIENT_ID, user_id=_U1, org_id='t1', scope='mcp',
     expires_at=_expires_iso(REFRESH_TOKEN_TTL_S), revoked_at=None, rotated_from=None."""
     token = over.pop("token", token)
     row = {"id": over.pop("id", secrets.token_urlsafe(16)), "token_hash": _sha256(token),
-           "client_id": _CLIENT_ID, "user_id": _U1, "team_id": "t1", "scope": "mcp",
+           "client_id": _CLIENT_ID, "user_id": _U1, "org_id": "t1", "scope": "mcp",
            "expires_at": _expires_iso(REFRESH_TOKEN_TTL_S), "revoked_at": None,
            "rotated_from": None, "created_at": _expires_iso(0), **over}
     cp.tables.setdefault("oauth_refresh_tokens", []).append(row)
@@ -340,7 +340,7 @@ def _seed_access_token(cp, *, refresh_id: str) -> str:
     row_id = secrets.token_urlsafe(16)
     cp.tables.setdefault("oauth_access_tokens", []).append({
         "id": row_id, "token_hash": _sha256("at-" + row_id), "client_id": _CLIENT_ID,
-        "user_id": _U1, "team_id": "t1", "scope": "mcp",
+        "user_id": _U1, "org_id": "t1", "scope": "mcp",
         "expires_at": _expires_iso(3600), "revoked_at": None,
         "refresh_token_id": refresh_id, "created_at": _expires_iso(0)})
     return row_id
@@ -701,7 +701,7 @@ response; one abort produces exactly one capture.
 
 ```python
 def _mint(cp, **over):
-    return oauth._issue_tokens(cp, client_id="c1", user_id="u1", team_id="t1",
+    return oauth._issue_tokens(cp, client_id="c1", user_id="u1", org_id="t1",
                                scope="mcp", resource=None, **over)
 
 def test_refresh_insert_failure_rolls_back_and_observes():
@@ -993,7 +993,7 @@ case returns 500 rather than a typed error; the capture test sees 0).
         code_row = _consume_code(cp, body.get("code", ""))              # THE atomic gate
         consumed = True
         <the existing client_id / redirect_uri / PKCE / resource checks, unchanged>
-        _assert_team_usable(cp, code_row["team_id"])
+        _assert_team_usable(cp, code_row["org_id"])
         scope = code_row.get("scope") or " ".join(SCOPES_SUPPORTED)
         out = _issue_tokens(cp, ..., resource=code_row.get("resource"))
     except OAuthError:
@@ -1033,7 +1033,7 @@ Branch order matters: `consumed` → `attempted_consume` → observe. `consumed`
 **Intent:** The refresh path has the same untyped-500 hole and two revokes that swallow a terminal
 `OAuthError`; the worst matrix row (claim OK + prev-access revoke raises) currently locks the client out.
 **Acceptance:** A pre-mint read failure → 503 **parametrized over every read call site including the
-first** (`oauth_clients`) and `team_memberships`; a mint abort maps `recovered` → 503/terminal;
+first** (`oauth_clients`) and `org_memberships`; a mint abort maps `recovered` → 503/terminal;
 a raising `_revoke_team_family` or lapsed-membership revoke still propagates the terminal
 `OAuthError(403)`; row 7 delivers a **usable** rotated pair.
 
@@ -1046,7 +1046,7 @@ a raising `_revoke_team_family` or lapsed-membership revoke still propagates the
     ("oauth_clients", None),        # FIRST read on the path — the :726 leak
     ("oauth_refresh_tokens", None), # the refresh-token SELECT
     ("teams", None),                # _assert_team_usable
-    ("team_memberships", None),     # membership_for_user_team — S4 call site #4
+    ("org_memberships", None),     # membership_for_user_org — S4 call site #4
     ("oauth_access_tokens", ["id"]),# prev_access
 ])
 def test_refresh_pre_mint_read_failure_is_503_not_500(fault_client, table, select):
@@ -1061,7 +1061,7 @@ def test_refresh_pre_mint_read_failure_is_503_not_500(fault_client, table, selec
 def test_refresh_membership_revoke_failure_still_returns_403_invalid_grant(fault_client):
     tc, cp = fault_client
     rid, rt = _seed_refresh_token(cp, "rt-mem")
-    cp.tables["team_memberships"] = []     # `setdefault` would be a NO-OP: the fixture seeded one
+    cp.tables["org_memberships"] = []     # `setdefault` would be a NO-OP: the fixture seeded one
     cp.fail_query(table="oauth_refresh_tokens", method="PATCH",
                   match=lambda t, m, sel, f: m == "PATCH" and not sel, times=1)   # the revoke
     r = _post_refresh(tc, cp, rt)
@@ -1141,16 +1141,16 @@ def test_row7_prev_access_revoke_failure_delivers_a_USABLE_pair(fault_client, ca
         client = _verify_client_auth(cp, body.get("client_id"), body)
         <the existing refresh-token SELECT, revoked/expiry/client checks, resource check>
         try:
-            _assert_team_usable(cp, row["team_id"])
+            _assert_team_usable(cp, row["org_id"])
         except OAuthTemporarilyUnavailable:
             raise        # a transient signal must NEVER trigger family revocation
         except OAuthError:
             try:
-                _revoke_team_family(cp, row["user_id"], row["team_id"])
+                _revoke_team_family(cp, row["user_id"], row["org_id"])
             except Exception as exc:  # noqa: BLE001 — correction #8: the single capture
                 _log_and_capture(exc, where="family revoke")
             raise
-        if membership_for_user_team(cp, row["user_id"], row["team_id"]) is None:
+        if membership_for_user_org(cp, row["user_id"], row["org_id"]) is None:
             try:
                 cp.query("oauth_refresh_tokens", method="PATCH",
                          filters=[("id", "eq", row["id"])],
@@ -1351,10 +1351,10 @@ Known pre-existing failures NOT to chase: `test_ci_selection.py::test_integrity_
 ## Good > Easy — explicit deferral
 
 **Deferred:** keeping `_assert_team_usable` **after** the atomic consume (the compensation must cover
-matrix row 3). **Good alternative:** read `code_row.team_id` with one extra read-only `oauth_codes`
+matrix row 3). **Good alternative:** read `code_row.org_id` with one extra read-only `oauth_codes`
 SELECT, check the team **before** `_consume_code`, then consume atomically — which deletes the
 post-consume `except Exception` branch (and its `_restore_code` call) outright.
-**Cost:** +1 round trip per code exchange, plus a benign TOCTOU on the immutable `team_id` (the atomic
+**Cost:** +1 round trip per code exchange, plus a benign TOCTOU on the immutable `org_id` (the atomic
 `used_at IS NULL` claim still gates redemption).
 **Rationale:** it changes an approved scoping design mid-flight, and `_restore_code` must exist
 regardless for the `except OAuthMintAborted` arm, so the saving is one branch rather than the protocol.

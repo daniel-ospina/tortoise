@@ -72,7 +72,7 @@ def _clean_question(namespace: str, qid: str) -> None:
     sdk = TortoiseSDK(namespace=namespace)
     try:
         proj = sdk._get_proj()
-        graph_name = f"team_{namespace}"
+        graph_name = f"org_{namespace}"
         # #1884: the opt-in-only sweep no longer removes team_* graphs, so
         # each test drops its OWN isolated graph — GRAPH.DELETE while it
         # still holds nodes. Verified on the server: delete() raises

@@ -9,9 +9,13 @@ attached) applies it incrementally, so the store never drifts from the log.
 """
 from __future__ import annotations
 
+import logging
+
 from .idempotency import IngestKey, IngestResult
 from .ids import now_iso, ulid
 from .projection import fold
+
+logger = logging.getLogger(__name__)
 
 
 def provenance(source_id, span, quote, *, speaker=None, extracted_by="mock@0"):
@@ -60,6 +64,24 @@ class EventAPI:
         if self.projection is not None:
             self.projection.apply(event)
         return event
+
+    def emit_belief(self, type_: str, **payload) -> None:
+        """#2884 A6: best-effort journal append for the EP/dream belief write-back.
+
+        The ingest CLI's lazy EP propagation passes its ``EventAPI`` here
+        instead of hand-building a JSONL envelope, so this lane's belief
+        records go through the SAME ``_emit`` shape as every other ingest
+        event (one envelope, not three). ``_emit`` is guarded here because the
+        graph write has already committed by the time EP returns: an
+        ``OSError``/``ENOSPC`` must never propagate out of ``ep.run()`` and
+        crash the public ingest CLI. Mirrors
+        ``TortoiseSDK._emit_event``'s best-effort JSONL branch.
+        """
+        try:
+            self._emit(type_, **payload)
+        except Exception as exc:  # noqa: BLE001, RUF100
+            logger.warning(
+                "failed to append %s event to ingest log: %s", type_, exc)
 
     def _point(self, content, provenance, operator=None) -> dict:
         prov = dict(provenance)

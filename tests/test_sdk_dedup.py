@@ -6,6 +6,7 @@ Runnable with:
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 
@@ -23,6 +24,7 @@ def sdk():
     sdk = TortoiseSDK(db_path)
     yield sdk
     sdk.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 class TestDedupAlwaysPersistsHash:
@@ -39,12 +41,21 @@ class TestDedupAlwaysPersistsHash:
     def test_dedup_with_extra_props(self, sdk):
         """A later dedup call with different props must not overwrite the original."""
         content = "Gold baseline claim"
-        p1 = sdk.create_point("hypothesis", content, dedup=True)
-        # Later dedup attempt with different credibility — must not clobber
+        p1 = sdk.create_point("hypothesis", content, dedup=True,
+                              credibility="gold")
+        # A real baseline landed (gold ⇒ ep_alpha 10) so the dedup hit below has
+        # something to clobber. `credibility` is never stored as a node property;
+        # it lands as this calibrated prior.
+        assert p1.get("ep_alpha") == 10.0
+        assert p1.get("baseline_source") == "set-by-author"
+        # Later dedup attempt with a DIFFERENT credibility (T1 ⇒ ep_alpha 5) —
+        # must not overwrite the existing baseline.
         p2 = sdk.create_point("hypothesis", content, dedup=True,
                               credibility="T1")
         assert p1["id"] == p2["id"]
-        assert p2.get("credibility") != "T1" or True  # baseline preserved
+        assert p2.get("ep_alpha") == p1.get("ep_alpha") == 10.0
+        assert p2.get("ep_beta") == p1.get("ep_beta") == 1.0
+        assert p2.get("baseline_source") == p1.get("baseline_source")
 
 
 class TestCrossContextDedup:

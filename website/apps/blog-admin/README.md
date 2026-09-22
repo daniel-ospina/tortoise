@@ -2,17 +2,22 @@
 
 React + Vite + TypeScript + Tailwind + shadcn-style UI + TipTap admin SPA for the
 Tortoise blog CMS (issue #1798, epic `docs/epics/2026-08-27-tortoise-blog-cms/03-plan.md`).
-Served by the admin gate Function (`website/functions/admin/[[path]].ts`) at `/admin/*`.
+Served by the admin gate Function
+(`website/apps/dashboard/functions/admin/[[path]].ts`) at `/admin/*` on the APP
+origin (`app.premiselabs.co`) — same-origin with the `__Host-session` cookie
+(#4171). The marketing origin 302s `tortoise.premiselabs.co/admin` here — 302 and
+not 301 because a new branch for a moved surface must stay reclaimable
+(`engineering/auth/SCOPE.md` §12 in the `premise-labs` repo; #4409).
 
 ## Dev
 
 ```bash
 cp .env.example .env   # VITE_SUPABASE_URL + VITE_SUPABASE_ANON_KEY
 npm install
-npm run dev            # vite dev server (localhost:5173)
+npm run dev            # vite dev server → http://localhost:5173/admin/
 npm test               # vitest — markdown roundtrip invariant
 npm run typecheck      # tsc --noEmit
-npm run build          # tsc --noEmit && vite build → dist/ (base './', relative assets)
+npm run build          # tsc --noEmit && vite build → dist/ (base '/admin/', absolute assets)
 ```
 
 ## Auth model
