@@ -595,8 +595,8 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     "invalidate_point": ("update_knowledge", "w11_retract"),
     "supersede": ("supersede_knowledge", "w11_supersede"),
     "supersede_point": ("supersede_knowledge", "w11_supersede"),
-    # W11 — the four rows beta filed under "### Removed" as "reachable through the
-    # canonical two", with no destination NAMED. The fold is now named in beta: lifecycle
+    # W11 — the four rows beta filed under "### Removed" as *reachable* without a
+    # destination NAMED. The fold is now named in beta: lifecycle
     # and confidence **state** is a FIELD on `update_knowledge`, selected by a FILTER on
     # `list_knowledge`. `promote_point`/`set_point_baseline` rest on the owner-approved MCP
     # list's own absorption (into `revise_knowledge`, whose beta successor is
