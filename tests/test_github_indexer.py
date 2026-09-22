@@ -855,7 +855,7 @@ def test_resolve_repos_404_raises(sdk):
 
 def test_resolve_repos_falls_back_to_user_repos(sdk):
     """#1845: when orgs/ and users/ repo lookups 404 (unknown org / the
-    legacy team_id-as-org bug), resolve_repos falls back to the token's OWN
+    legacy org_id-as-org bug), resolve_repos falls back to the token's OWN
     repos (/user/repos), BOUNDED to the token login's namespace (review
     P2-1: never widens across the org boundary) — the selector lists what
     the token can see, and org-wide walks still resolve. Only when

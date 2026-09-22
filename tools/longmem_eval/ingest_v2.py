@@ -512,12 +512,23 @@ def _write_v2_phase_a(sdk: TortoiseSDK, *, qid: str, si: int, sid: str,
     cannot double-count the caller's stats."""
     a = {"sessions": 0, "chunks": 0}
     # ── Session node (mirrors the deterministic leg) ──
+    # #4106: the session's RECORDED time is the dataset's session date, and a
+    # session the dataset does NOT date records NO time. `_now_iso()` here
+    # would assert a capture time this ingestion never had, and the ask-path
+    # date annotation (which reads `s.created_at`) would then render the RUN
+    # DATE as the session's date for the reader to compute elapsed time from.
+    # No `coalesce`: the value is deterministic per (question, session index),
+    # so a re-ingest is idempotent — and a store previously written with the
+    # old run-clock fallback CONVERGES to "no time" instead of keeping the
+    # fabricated date forever. This mirrors the rule the point write already
+    # follows (R5: `createdAt` is `session_date or UNDATED_SENTINEL`, never
+    # the server default now).
     sdk._get_proj().g.query(
         "MERGE (s:Session {id:$id}) "
-        "SET s.created_at=coalesce(s.created_at, $ts), "
+        "SET s.created_at=$ts, "
         "    s.turn_count=$tc, s.is_episodic=true, s.lme_question_id=$qid, "
         "    s.lme_session_index=$si, s.lme_source_session_id=$sid",
-        params={"id": s_node, "ts": session_date or _now_iso(), "tc": len(session),
+        params={"id": s_node, "ts": session_date or None, "tc": len(session),
                 "qid": qid, "si": si, "sid": sid},
     )
     a["sessions"] = 1
@@ -993,8 +1004,3 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
             _write_ctx(_ctx, _extract_ctx(_ctx))
 
     return stats
-
-
-def _now_iso() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()  # noqa: UP017

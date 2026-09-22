@@ -199,14 +199,16 @@ def test_validation_enabled_default_off(monkeypatch):
 
 
 def test_validation_enabled_flag_on(monkeypatch):
-    monkeypatch.setenv(TORTOISE_VALIDATE_FRONTMATTER, "1")
-    assert validation_enabled() is True
+    # #4097: the gate resolves through the declared truthy contract, so every truthy
+    # spelling enables it (the pre-#4097 `== "1"` match silently ignored these).
+    for val in ("1", "true", "TRUE", "True", "yes", "on", "ON"):
+        monkeypatch.setenv(TORTOISE_VALIDATE_FRONTMATTER, val)
+        assert validation_enabled() is True, val
 
 
 def test_validation_enabled_flag_off_values(monkeypatch):
-    # Seam mirrors TORTOISE_SESSION_LLM_MOCK: ONLY "1" enables — any other
-    # value (including case variants and "true") is off.
-    for val in ("0", "", "false", "no", "off", "TRUE", "true"):
+    # #4097: the declared contract's OFF set — unset/blank/falsy/garbage.
+    for val in ("0", "", "false", "no", "off", "garbage"):
         monkeypatch.setenv(TORTOISE_VALIDATE_FRONTMATTER, val)
         assert validation_enabled() is False, val
 

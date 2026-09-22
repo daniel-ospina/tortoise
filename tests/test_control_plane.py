@@ -24,10 +24,10 @@ def team(sdk):
     R6 (#221): deletes the created team in teardown so the registry graph
     never accumulates leftover teams across runs.
     """
-    result = sdk.team_create("test-team")
+    result = sdk.org_create("test-team")
     yield result
     try:  # noqa: SIM105
-        sdk.team_delete(result["id"], confirmation="test-team")
+        sdk.org_delete(result["id"], confirmation="test-team")
     except Exception:
         pass  # best-effort cleanup
 
@@ -36,20 +36,20 @@ class TestTeamCRUD:
     """Team create, read, update, delete."""
 
     def test_team_create_writes_to_registry_graph(self, sdk):
-        result = sdk.team_create("acme-corp")
+        result = sdk.org_create("acme-corp")
         assert result["name"] == "acme-corp"
         assert result["api_key"].startswith("tt_")
-        assert result["graph_name"] == "team_acme-corp"
+        assert result["graph_name"] == "org_acme-corp"
         assert result["id"]
 
         # Verify in registry graph
-        team = sdk.team_get(result["id"])
+        team = sdk.org_get(result["id"])
         assert team is not None
         assert team["name"] == "acme-corp"
 
     def test_team_create_is_idempotent_with_key(self, sdk):
-        result1 = sdk.team_create("durable", idempotency_key="key-123")
-        result2 = sdk.team_create("durable", idempotency_key="key-123")
+        result1 = sdk.org_create("durable", idempotency_key="key-123")
+        result2 = sdk.org_create("durable", idempotency_key="key-123")
         assert result2.get("existing") is True
         assert result2["id"] == result1["id"]
 
@@ -61,8 +61,8 @@ class TestTeamCRUD:
         plaintext from the original creation."""
         from tortoise.auth import verify_api_key
 
-        result1 = sdk.team_create("durable-no-key", idempotency_key="key-abc")
-        result2 = sdk.team_create("durable-no-key", idempotency_key="key-abc")
+        result1 = sdk.org_create("durable-no-key", idempotency_key="key-abc")
+        result2 = sdk.org_create("durable-no-key", idempotency_key="key-abc")
 
         assert result2.get("existing") is True
         assert result2["id"] == result1["id"]
@@ -83,63 +83,63 @@ class TestTeamCRUD:
         assert verify_api_key(result1["api_key"], stored_hash) is True
 
     def test_team_create_rejects_duplicate_name(self, sdk):
-        sdk.team_create("unique-name")
+        sdk.org_create("unique-name")
         with pytest.raises(ControlPlaneError, match="already exists"):
-            sdk.team_create("unique-name")
+            sdk.org_create("unique-name")
 
     def test_team_create_rejects_empty_name(self, sdk):
         with pytest.raises(ControlPlaneError, match="must not be empty"):
-            sdk.team_create("")
+            sdk.org_create("")
 
     def test_team_create_accepts_spaces(self, sdk):
         """Spaces in team names are now accepted."""
-        result = sdk.team_create("name with spaces")
+        result = sdk.org_create("name with spaces")
         assert result["name"] == "name with spaces"
         assert result["api_key"].startswith("tt_")
 
     def test_team_get_returns_none_for_missing(self, sdk):
-        assert sdk.team_get("nonexistent-id") is None
+        assert sdk.org_get("nonexistent-id") is None
 
     def test_team_get_returns_team(self, sdk, team):
-        result = sdk.team_get(team["id"])
+        result = sdk.org_get(team["id"])
         assert result is not None
         assert result["name"] == "test-team"
         assert result["tier"] == "free"
 
     def test_team_list_returns_all_teams(self, sdk):
-        sdk.team_create("alpha")
-        sdk.team_create("beta")
-        teams = sdk.team_list()
+        sdk.org_create("alpha")
+        sdk.org_create("beta")
+        teams = sdk.org_list()
         names = {t["name"] for t in teams}
         assert "alpha" in names
         assert "beta" in names
 
     def test_team_update_changes_mutable_fields(self, sdk, team):
-        sdk.team_update(team["id"], tier="pro", max_users=10)
-        updated = sdk.team_get(team["id"])
+        sdk.org_update(team["id"], tier="pro", max_users=10)
+        updated = sdk.org_get(team["id"])
         assert updated["tier"] == "pro"
         assert updated["max_users"] == 10
 
     def test_team_update_rejects_invalid_fields(self, sdk, team):
         with pytest.raises(ControlPlaneError, match="Invalid team fields"):
-            sdk.team_update(team["id"], bogus_field=123)
+            sdk.org_update(team["id"], bogus_field=123)
 
     def test_team_delete_cascades_to_children(self, sdk):
-        t = sdk.team_create("victim")
+        t = sdk.org_create("victim")
         # Add membership, API key, invitation
         sdk.membership_create(t["id"], "user-1", "admin")
         sdk.apikey_create(t["id"], "user-1")
         sdk.invitation_create(t["id"], "invite@test.com", "admin", "user-1")
 
-        result = sdk.team_delete(t["id"], confirmation="victim")
+        result = sdk.org_delete(t["id"], confirmation="victim")
         assert result["deleted"] is True
 
         # Verify cascade — team should be gone
-        assert sdk.team_get(t["id"]) is None
+        assert sdk.org_get(t["id"]) is None
 
     def test_team_delete_requires_name_confirmation(self, sdk, team):
         with pytest.raises(ControlPlaneError, match="must match team name"):
-            sdk.team_delete(team["id"], confirmation="wrong-name")
+            sdk.org_delete(team["id"], confirmation="wrong-name")
 
     def test_migrate_teams_is_idempotent(self, sdk):
         # Create a team directly in the tortoise graph (simulating old data)
@@ -149,9 +149,9 @@ class TestTeamCRUD:
             "api_key:'old-hash', graph_name:'team_legacy-team', "
             "createdAt:'2024-01-01'})"
         )
-        result1 = sdk.migrate_teams_to_registry()
+        result1 = sdk.migrate_orgs_to_registry()
         assert result1["migrated"] >= 1
-        result2 = sdk.migrate_teams_to_registry()
+        result2 = sdk.migrate_orgs_to_registry()
         assert result2["migrated"] == 0  # Idempotent
 
 
@@ -160,7 +160,7 @@ class TestMembershipCRUD:
 
     def test_membership_create_with_valid_role(self, sdk, team):
         m = sdk.membership_create(team["id"], "user-1", "admin")
-        assert m["team_id"] == team["id"]
+        assert m["org_id"] == team["id"]
         assert m["user_id"] == "user-1"
         assert m["role"] == "admin"
 
@@ -173,7 +173,7 @@ class TestMembershipCRUD:
             sdk.membership_create("bad-id", "user-1", "admin")
 
     def test_membership_create_rejects_at_max_users(self, sdk, team):
-        sdk.team_update(team["id"], max_users=1)
+        sdk.org_update(team["id"], max_users=1)
         sdk.membership_create(team["id"], "user-1", "owner")
         with pytest.raises(ControlPlaneError, match="max users"):
             sdk.membership_create(team["id"], "user-2", "admin")
@@ -181,7 +181,7 @@ class TestMembershipCRUD:
     def test_membership_list_returns_members(self, sdk, team):
         # free tier default max_users=1 would reject the 2nd membership —
         # raise the limit so the listing actually has 2 members to return.
-        sdk.team_update(team["id"], max_users=10)
+        sdk.org_update(team["id"], max_users=10)
         sdk.membership_create(team["id"], "user-1", "admin")
         sdk.membership_create(team["id"], "user-2", "owner")
         members = sdk.membership_list(team["id"])
@@ -271,7 +271,7 @@ class TestAPIKeyCRUD:
         # Verify works before revoke
         valid = sdk.apikey_verify(plaintext)
         assert valid is not None
-        assert valid["team_id"] == team["id"]
+        assert valid["org_id"] == team["id"]
         # Revoke
         sdk.apikey_revoke(result["id"])
         # Verify after revoke
@@ -282,7 +282,7 @@ class TestAPIKeyCRUD:
         result = sdk.apikey_create(team["id"], "user-1")
         valid = sdk.apikey_verify(result["api_key"])
         assert valid is not None
-        assert valid["team_id"] == team["id"]
+        assert valid["org_id"] == team["id"]
 
     def test_apikey_verify_bad_key_returns_none(self, sdk):
         assert sdk.apikey_verify("tt_badkey123") is None
@@ -305,7 +305,7 @@ class TestAPIKeyCRUD:
         # Verify the last-created key (would fail a naive early-match scan)
         valid = sdk.apikey_verify(target_key)
         assert valid is not None
-        assert valid["team_id"] == team["id"]
+        assert valid["org_id"] == team["id"]
         # A bad key with a plausible tt_ prefix is still rejected
         assert sdk.apikey_verify("tt_" + "0" * 32) is None
 
@@ -366,7 +366,7 @@ class TestAPIKeyC1Tenancy:
         # Still authenticates (registry parity: hash path unchanged)
         valid = sdk.apikey_verify(result["api_key"])
         assert valid is not None
-        assert valid["team_id"] == team["id"]
+        assert valid["org_id"] == team["id"]
 
 
 class TestGraphC1Status:
@@ -423,7 +423,7 @@ class TestInvitationCRUD:
     def test_invitation_accept_creates_membership(self, sdk, team):
         inv = sdk.invitation_create(team["id"], "join@test.com", "admin", "user-1")
         result = sdk.invitation_accept(inv["id"], "user-2")
-        assert result["team_id"] == team["id"]
+        assert result["org_id"] == team["id"]
         assert result["membership_id"]
         # Verify membership was created
         members = sdk.membership_list(team["id"])

@@ -98,7 +98,13 @@ from .report import (
     print_comparison,
     save_report,
 )
-from .rerank import _TRUTHY, RERANK_MODEL_DEFAULT, _env_int, rerank_enabled
+from .rerank import (
+    _TRUTHY,
+    RERANK_MODEL_DEFAULT,
+    _env_float,
+    _env_int,
+    rerank_enabled,
+)
 from .retrieve import (
     DATA_AVAILABILITY_GATE_REASONS,
     DEFAULT_CONTEXT_ITEM_CAP,
@@ -1326,6 +1332,17 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
     OPENROUTER_API_KEY-only) refuses with CheckpointStaleError — safe
     direction, the env changes what the default path serves.
     """
+    # #2976: resolve the temporal-leg arm state once, up front — it is
+    # env-only from the harness, so the fingerprint must read the env (the
+    # default OFF path leaves every temporal_leg* key below absent →
+    # byte-identical to the pre-#2976 fingerprint).
+    from tortoise.temporal_leg import (
+        DEFAULT_TEMPORAL_LEG_LIMIT,
+        DEFAULT_TEMPORAL_LEG_WEIGHT,
+    )
+    _temporal_leg_on = (
+        (os.environ.get("TORTOISE_LME_TEMPORAL_LEG") or "").strip().lower()
+        in _TRUTHY)
     return {
         "git_sha": git_sha(),
         "python": sys.version.split()[0],
@@ -1385,6 +1402,23 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
             # (absent at the 12 default → pre-feature checkpoints resume
             # byte-identically; a 16-checkpoint resumed at 12 refuses).
             ("tr_top_k", tr_top_k),
+            # #2976: the temporal retrieval-leg arm — conditional presence
+            # ONLY when the env resolves ON, so the default fingerprint
+            # stays byte-identical while an arm-ON checkpoint can never be
+            # resumed with the arm OFF (or vice versa): the key-union in
+            # ``_fingerprint_diffs`` refuses either direction. The budget
+            # and weight are stamped with it because they change WHICH
+            # items are promoted (hence the fused order) — a LIMIT=1
+            # checkpoint must not resume under LIMIT=4.
+            ("temporal_leg", True if _temporal_leg_on else None),
+            ("temporal_leg_limit",
+             _env_int("TORTOISE_LME_TEMPORAL_LEG_LIMIT",
+                      DEFAULT_TEMPORAL_LEG_LIMIT) if _temporal_leg_on
+             else None),
+            ("temporal_leg_weight",
+             _env_float("TORTOISE_LME_TEMPORAL_LEG_WEIGHT",
+                        DEFAULT_TEMPORAL_LEG_WEIGHT) if _temporal_leg_on
+             else None),
         ) if v is not None}),
     }
 
@@ -3213,8 +3247,19 @@ class _ReplayLoadWorkers:
 
     def _worker(self, i: int) -> None:
         import random as _random
+        sdk = None
+        cleanup = None
         try:
-            sdk = self.sdk_factory()
+            # #3599: the factory contract is `(sdk, cleanup)`. Accept a bare
+            # SDK too — a legacy single-value factory would otherwise raise
+            # `TypeError` into the broad handler below and silently no-op
+            # the whole load worker (the failure this contract change is
+            # reviewed against).
+            produced = self.sdk_factory()
+            if isinstance(produced, tuple):
+                sdk, cleanup = produced
+            else:
+                sdk, cleanup = produced, None
             proj = sdk._get_proj()
             qid = f"replay-load-{i}"
             while not self._stop.is_set():
@@ -3227,6 +3272,18 @@ class _ReplayLoadWorkers:
                         params={"id": pid, "q": qid, "si": si})
         except Exception:  # noqa: BLE001, RUF100
             pass
+        finally:
+            # #3599: a load worker's embedded server must not outlive the
+            # worker. Previously the factory returned only the SDK, so the
+            # TemporaryDirectory was dropped on the floor (GC'd while its
+            # server was still live) and the SDK was never closed — one
+            # orphaned redislite server per --load-worker per run.
+            if sdk is not None:
+                with contextlib.suppress(Exception):
+                    sdk.close()
+            if cleanup is not None:
+                with contextlib.suppress(Exception):
+                    cleanup()
 
 
 # ── falsification-trigger predicate (Task 5 consumes; pure) ────────────────
@@ -4229,6 +4286,11 @@ def run_evaluation(
                         # back to the unfiltered pool (never starve the reader).
                         "tr_constraint": ret.get("tr_constraint"),
                         "tr_window_fallback": ret.get("tr_window_fallback", False),
+                        # #2976: the temporal retrieval leg per question (the
+                        # arm marker + recovered anchors + leg depth — the
+                        # ON/OFF A/B surface). Read via .get so pre-feature
+                        # checkpoints resume with None.
+                        "temporal_leg_stats": ret.get("temporal_leg_stats"),
                         # C4 (#1745): the reader-surface evidence metric
                         # (context-level; the metric C1 actually moves).
                         "reader_evidence@k": ret.get("reader_evidence@k"),
@@ -4579,10 +4641,12 @@ def run_evaluation(
     # cycle4-P1-13(d)); the Task 3 load-injection workers run concurrently
     # with the per-session-census replay questions.
     _load_workers = (_ReplayLoadWorkers(
+        # #3599: return (sdk, cleanup) TOGETHER — the worker closes both in a
+        # finally. The old form kept only [0], discarding the
+        # TemporaryDirectory (GC'd while its redislite server was live) and
+        # leaking one embedded server per --load-worker.
         lambda: _make_question_sdk(db_uri=db_uri, namespace=None,
-                                   work_dir=work_dir)[0] if db_uri
-        else _make_question_sdk(db_uri=None, namespace=None,
-                                work_dir=work_dir)[0],
+                                   work_dir=work_dir),
         replay_load_workers)
         if (per_session_census and replay_load_workers > 0) else None)
     if _load_workers is not None:
@@ -4927,6 +4991,15 @@ def outcomes_to_report(
                 # s4_reemit reads them from the published outcomes).
                 "s2_out_tokens", "s4_out_tokens", "s4_merge",
             )} | {"legs": list(o.get("legs") or []),
+                  # #2976: the temporal retrieval-leg arm + per-question
+                  # markers are projected ONLY when the outcome carries them
+                  # (conditional pattern, like rerank_pass/measure_facts — a
+                  # pre-feature outcome never gains a null key and the
+                  # published report stays byte-compatible with existing
+                  # consumers). The arm is env-driven from run.py; the
+                  # per-question markers reconstruct ON vs OFF.
+                  **({"temporal_leg_stats": o["temporal_leg_stats"]}
+                     if o.get("temporal_leg_stats") is not None else {}),
                   # False default: a pre-R5 checkpoint had no TR path — no
                   # filter ran, so the fallback flag is honestly False.
                   "tr_window_fallback": bool(o.get("tr_window_fallback", False)),
@@ -5767,6 +5840,15 @@ def _run_spot_check(args, instances: list[dict], *, ks, top_k, db_uri) -> dict:
 
 def run_main(argv: list[str] | None = None) -> dict[str, Any]:
     _assert_python_version()
+    # #3599: the embedded lane spawns one redislite server per question (and
+    # per --load-worker). atexit covers a clean interpreter exit, but a
+    # DEFAULT-disposition SIGTERM/SIGHUP (external `timeout`, CI cancel, a
+    # watchdog) kills the process without running atexit and orphans every
+    # one of them. The other embedded entry points (__main__, mcp_server,
+    # selfhost) install this guard; the eval lane — the highest-fan-out
+    # embedded spawner in the repo — did not. Idempotent and never raises.
+    from tortoise.embedded_lifecycle import install_embedded_signal_cleanup
+    install_embedded_signal_cleanup()
     parser = _build_parser()
     args = parser.parse_args(argv)
     # M7 #1739 / #1742: session-parallel extraction exists only on the v2

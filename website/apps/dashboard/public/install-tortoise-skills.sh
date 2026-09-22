@@ -1,4 +1,42 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Premise Labs
+#
+# ── Licence: MIT (in-band, not a served sidecar) ───────────────────────────
+# This installer is part of the Tortoise CONSUMER surface and is licensed under
+# MIT — it does NOT inherit the repository's BSL, which governs the engine.
+#
+# The notice is reproduced INSIDE this file on purpose. A `curl … | bash` user
+# receives this script's bytes and nothing else: a licence file served next to
+# the script (or next to the skills) never travels with a piped download, so
+# MIT's "included in all copies" condition can only be met for a single-file
+# script by carrying the notice in the file itself. (Contrast #526's client
+# dist, where client/LICENSE ships INSIDE the wheel — the notice is packaged
+# with the artifact.) The same MIT text is served beside the skills at
+# https://app.premiselabs.co/skills/LICENSE.
+#
+# MIT License
+#
+# Copyright (c) 2026 Premise Labs
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+# ───────────────────────────────────────────────────────────────────────────
 # install-tortoise-skills.sh — install the official Tortoise agent skills.
 #
 # The skills are downloaded from the Tortoise product site
@@ -17,7 +55,10 @@
 #   (or codex | cursor | pi)
 #
 # Idempotent: re-running updates the skills in place and refreshes the version
-# stamp. Prints the verify step.
+# stamp. A destination that already holds a file we did not write is backed up
+# once and then MERGED — our payload becomes the file, foreign frontmatter keys
+# and the foreign banner/trailer blocks are preserved, never silently dropped
+# (#4327). Prints the verify step.
 set -euo pipefail
 
 SKILLS_VERSION="v2"   # bump when the skill set changes
@@ -99,6 +140,141 @@ sha256_of() {
   esac
 }
 
+# ── Foreign-content preservation (#4327) ──────────────────────────────────
+# $DEST is a SHARED, flat namespace. On the measured machine a different
+# owner's tool (agent-infra) had already written three of these basenames,
+# and the 2026-09-20 install replaced them verbatim: no merge, no backup, no
+# message, silently stripping two machine-wide conventions carried by 95-96
+# of 122 installed skills — a `subjects.team:` frontmatter key and the
+# `⛔ … MUST be read in full — not skimmed.` banner + its trailing line.
+#
+# Chosen behaviour (research + precedent in the PR body): a `curl | bash`
+# install must stay non-interactive, so a hard refusal is out; a preserving
+# write is the safe default. Concretely — BACK UP a pre-existing copy once,
+# then MERGE: the payload becomes the file, but every foreign frontmatter KEY
+# (one the payload does not define) and every foreign seam BLOCK (the leading
+# blockquote run after the frontmatter, and a trailing blockquote run after a
+# `---` rule) is kept. The seams are positional on purpose: they are the only
+# places an external tool can annotate a foreign file without its text being
+# read as the skill's own instructions, so preserving them cannot union two
+# whole documents. The positional rule is deliberately CONSERVATIVE: a banner
+# is kept only when it is the blockquote run that OPENS the body (one placed
+# after a `# Title` is not detected), and a trailer only when it is a
+# blockquote run directly after a `---` rule (a plain-paragraph trailer is not
+# detected). Widening either seam would start reading ordinary body content as
+# a foreign annotation; the `.bak` still holds anything the rule misses.
+#
+# The merge is ADDITIVE-PRESERVING: it can retain content that is merely
+# stale (the `.bak` and the printed report make that visible), whereas
+# replacing deletes unrecoverable foreign content. That is the correct
+# direction for a shared namespace.
+#
+# merge_skill_file <incoming-payload> <existing-file> <report-file>
+#   → merged content on stdout; one `preserved-*` line per kept item in the
+#     report file.
+merge_skill_file() {
+  awk -v rpt="$3" '
+    function keyof(s) {
+      if (s ~ /^[A-Za-z0-9_.-]+:/) return substr(s, 1, index(s, ":") - 1)
+      return ""
+    }
+    FNR == 1 { f++ }
+    { if (f == 1) p[++pn] = $0; else e[++en] = $0 }
+    END {
+      printf "" > rpt
+
+      # frontmatter bounds: opening `---` … next `---`
+      if (pn >= 1 && p[1] ~ /^---[ \t]*$/)
+        for (i = 2; i <= pn; i++) if (p[i] ~ /^---[ \t]*$/) { p_end = i; break }
+      if (en >= 1 && e[1] ~ /^---[ \t]*$/)
+        for (i = 2; i <= en; i++) if (e[i] ~ /^---[ \t]*$/) { e_end = i; break }
+
+      # payload + existing frontmatter entries (a key owns its indented
+      # continuation lines, so block lists survive intact)
+      for (i = 2; i < p_end; i++) {
+        k = keyof(p[i])
+        if (k != "") { pfn++; pk[pfn] = k; ptxt[pfn] = p[i]; pset[k] = 1 }
+        else if (pfn > 0) ptxt[pfn] = ptxt[pfn] "\n" p[i]
+      }
+      for (i = 2; i < e_end; i++) {
+        k = keyof(e[i])
+        if (k != "") { efn++; ek[efn] = k; etxt[efn] = e[i] }
+        else if (efn > 0) etxt[efn] = etxt[efn] "\n" e[i]
+      }
+
+      # every payload body line — the "is this already ours?" test
+      pbs = p_end + 1
+      for (i = pbs; i <= pn; i++) pbody[p[i]] = 1
+      ebs = e_end + 1
+
+      # ── frontmatter: payload keys, then foreign keys appended ─────
+      if (p_end > 0) {
+        print p[1]
+        for (i = 1; i <= pfn; i++) print ptxt[i]
+        for (i = 1; i <= efn; i++)
+          if (!(ek[i] in pset)) {
+            print etxt[i]
+            printf "preserved-frontmatter: %s\n", ek[i] > rpt
+          }
+        print p[p_end]
+      }
+
+      # ── foreign banner: leading blockquote run of the existing body ──
+      j = ebs
+      while (j <= en && e[j] ~ /^[ \t]*$/) j++
+      runn = 0
+      while (j <= en && (e[j] ~ /^[ \t]*>/ || e[j] ~ /^[ \t]*$/)) {
+        runn++; run[runn] = e[j]; j++
+      }
+      # keep the blockquote lines not already ours, plus the blank lines that
+      # separated them (a two-paragraph banner stays two paragraphs)
+      lastkept = 0
+      for (i = 1; i <= runn; i++)
+        if (run[i] ~ /^[ \t]*>/ && !(run[i] in pbody)) {
+          if (lastkept > 0) {
+            gap = 0
+            for (jj = lastkept + 1; jj < i; jj++)
+              if (run[jj] ~ /^[ \t]*$/) gap = 1
+            if (gap) { fpre++; fpreline[fpre] = "" }
+          }
+          fpre++; fpreline[fpre] = run[i]
+          lastkept = i
+        }
+      if (fpre > 0) {
+        for (i = 1; i <= fpre; i++) print fpreline[i]
+        print ""
+        printf "preserved-banner: %d line(s)\n", fpre > rpt
+        # the banner now occupies the payload own leading blank, so do not
+        # emit it twice (keeps the merged shape identical across re-runs)
+        while (pbs <= pn && p[pbs] ~ /^[ \t]*$/) pbs++
+      }
+
+      # ── payload body ─────────────────────────────────────────────
+      for (i = pbs; i <= pn; i++) print p[i]
+
+      # ── foreign trailer: trailing blockquote run after a `---` rule ──
+      k = en
+      while (k >= ebs && e[k] ~ /^[ \t]*$/) k--
+      if (k >= ebs && e[k] ~ /^[ \t]*>/) {
+        r2 = 0
+        while (k >= ebs && e[k] ~ /^[ \t]*>/) { r2++; tmp[r2] = e[k]; k-- }
+        kk = k
+        while (kk >= ebs && e[kk] ~ /^[ \t]*$/) kk--
+        if (kk >= ebs && e[kk] ~ /^---[ \t]*$/)
+          for (i = r2; i >= 1; i--)
+            if (!(tmp[i] in pbody)) {
+              fepi++; fepiline[fepi] = tmp[i]
+            }
+      }
+      if (fepi > 0) {
+        print "---"
+        for (i = 1; i <= fepi; i++) print fepiline[i]
+        printf "preserved-trailer: %d line(s)\n", fepi > rpt
+      }
+    }
+  ' "$1" "$2"
+}
+
 for s in "${SKILLS[@]}"; do
   mkdir -p "$DEST/$s"
   # mktemp (unpredictable name) so a planted `SKILL.md.tmp` symlink/hardlink in
@@ -106,6 +282,18 @@ for s in "${SKILLS[@]}"; do
   tmp="$(mktemp "$DEST/$s/SKILL.md.XXXXXX" 2>/dev/null || true)"
   if [ -n "$tmp" ] && curl -fsSL --max-time 20 "$SKILLS_BASE/$s/SKILL.md" -o "$tmp" \
       && [ ! -L "$tmp" ] && grep -q "^name: $s$" "$tmp"; then
+    # mktemp creates 0600; keep the payload readable like the pre-mktemp
+    # `curl -o` temp was (same reason the stamp temp gets chmod 0644 below).
+    # Hoisted above BOTH write paths below: a fresh destination is `mv`d from
+    # this file, so a first install would otherwise land 0600.
+    chmod 0644 "$tmp" 2>/dev/null || true
+    dest="$DEST/$s/SKILL.md"
+    if [ ! -f "$dest" ]; then
+      mv "$tmp" "$dest"
+      echo "  ✓ $s"
+      continue
+    fi
+
     # Drift detection (#3): compare the on-disk copy against the digest the
     # last install recorded — content, not version, so a local edit is caught
     # even across a version bump. With no recorded digest (an older or manual
@@ -122,17 +310,62 @@ for s in "${SKILLS[@]}"; do
         fi
         disk_hash="$(sha256_of "$DEST/$s/SKILL.md" 2>/dev/null || true)"
         if [ -n "$recorded" ] && [ -n "$disk_hash" ] && [ "$disk_hash" != "$recorded" ]; then
-          echo "  ⚠ $s — installed copy was edited locally; overwriting" >&2
+          # `merging over it`, not `overwriting`: the write path below MERGES
+          # preserving foreign content and keeps a first-backup-wins `.bak`.
+          echo "  ⚠ $s — installed copy was edited locally; merging over it" >&2
         elif [ -z "$recorded" ]; then
-          echo "  ⚠ $s — replacing a differing on-disk copy from an older/manual install" >&2
+          echo "  ⚠ $s — merging over a differing on-disk copy from an older/manual install" >&2
         fi
       fi
     fi
-    # mktemp creates 0600; keep the payload readable like the pre-mktemp
-    # `curl -o` temp was (same reason the stamp temp gets chmod 0644 below).
-    chmod 0644 "$tmp" 2>/dev/null || true
-    mv "$tmp" "$DEST/$s/SKILL.md"
-    echo "  ✓ $s"
+
+    # Destination exists. Merge our payload with whatever is there, keeping
+    # foreign content (above), and back the pre-existing copy up ONCE —
+    # first-backup-wins leaves the pre-Tortoise revision recoverable across
+    # re-runs instead of letting a re-run overwrite the only copy of it.
+    merged="$DEST/$s/SKILL.md.merged.$$"
+    report="$DEST/$s/SKILL.md.preserved.$$"
+    if ! merge_skill_file "$tmp" "$dest" "$report" > "$merged"; then
+      rm -f "$tmp" "$merged" "$report"
+      echo "  ✗ $s — could not merge into the existing $dest" >&2
+      exit 1
+    fi
+
+    if cmp -s "$dest" "$merged"; then
+      # Already current — our content plus the preserved foreign content.
+      rm -f "$tmp" "$merged" "$report"
+      echo "  ✓ $s (already current)"
+      continue
+    fi
+
+    backed_up=""
+    if [ ! -e "$dest.bak" ]; then
+      if ! cp -p "$dest" "$dest.bak"; then
+        rm -f "$tmp" "$merged" "$report"
+        echo "  ✗ $s — could not back up $dest to $dest.bak" >&2
+        exit 1
+      fi
+      backed_up="$dest.bak"
+    fi
+    if ! mv "$merged" "$dest"; then
+      rm -f "$tmp" "$merged" "$report"
+      echo "  ✗ $s — could not write the merged skill to $dest" >&2
+      exit 1
+    fi
+    rm -f "$tmp"
+    echo "  ✓ $s (merged)"
+    if [ -n "$backed_up" ]; then
+      echo "      · backed up existing copy → $backed_up"
+    else
+      echo "      · existing backup kept → $dest.bak"
+    fi
+    # Report the foreign content explicitly surfaced by the merge (the same
+    # logic that preserved it), so a destructive-looking install is visibly
+    # not destructive.
+    if [ -s "$report" ]; then
+      while IFS= read -r line; do echo "      · $line"; done < "$report"
+    fi
+    rm -f "$report"
   else
     [ -n "$tmp" ] && rm -f "$tmp"
     echo "  ✗ $s — download failed or payload was not the skill file ($SKILLS_BASE/$s/SKILL.md)" >&2

@@ -110,7 +110,10 @@ def test_m8_installer_ships_tortoise_onboarding():
     installer = (REPO_ROOT / "website" / "apps" / "dashboard" / "public"
                  / "install-tortoise-skills.sh").read_text(encoding="utf-8")
     assert "tortoise-onboarding" in installer
-    assert re.search(r'name: tortoise-onboarding', installer) or True  # name-grep contract
+    # name-grep contract: the installer validates each downloaded SKILL.md's
+    # frontmatter name (not a literal skill name baked into the script).
+    assert 'grep -q "^name: $s$"' in installer, (
+        "installer must validate the downloaded SKILL.md frontmatter name")
     assert "SKILLS_VERSION=" in installer
 
 
