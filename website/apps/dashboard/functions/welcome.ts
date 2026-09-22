@@ -34,6 +34,7 @@ import {
   redirect,
 } from "./_shared/auth/session";
 import { appOrigin } from "./_shared/auth/csrf";
+import { RELAXED_CSP } from "./_shared/security-headers";
 
 export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
   const url = new URL(request.url);
@@ -89,7 +90,14 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
     // and the rewrite then applies. Naming the file is defence in depth (it
     // states the intent, "serve welcome.html", instead of depending on the
     // router resolving the path) and it cannot be relied on alone.
-    return env.ASSETS.fetch(new URL("/welcome.html", url.origin).toString());
+    // The panel is `welcome.html` — a pre-#3501 page (inline scripts + the
+    // consent loader), so it takes the relaxed policy. Stamped explicitly:
+    // the ASSETS response is returned through THIS Function, and `_headers`
+    // does not apply to Function responses (#3525).
+    const panel = await env.ASSETS.fetch(new URL("/welcome.html", url.origin).toString());
+    const panelHeaders = new Headers(panel.headers);
+    panelHeaders.set("Content-Security-Policy", RELAXED_CSP);
+    return new Response(panel.body, { status: panel.status, headers: panelHeaders });
   }
 
   // Otherwise: straight to the app. A claim in flight (the `tt_claim_pending`
