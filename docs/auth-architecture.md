@@ -105,7 +105,7 @@ the token regardless of which subdomain presented it.
   JS-readable Supabase session, not inert scaffolding:
   - **Issued by — the legacy writer, and the UNFIXED EXCEPTION to the ruling above** (tracked, not
     accepted): the MCP consent page in `tortoise/oauth.py`, served live at `/oauth/authorize`
-    (`tortoise/hosted_api.py:26745`) — that legacy cookie's production origin is `api.premiselabs.co`.
+    (`tortoise/hosted_api.py:27035`) — that legacy cookie's production origin is `api.premiselabs.co`.
     Its inline client uses the same name — `COOKIE_NAME = "sb-tortoise-auth-token"` (`:1445`) — and
     writes that **legacy** cookie with `document.cookie` plus a `Domain=.premiselabs.co` attribute
     (`:1498`), i.e. **parent-domain and JS-readable**, after `signInWithPassword` /
@@ -116,7 +116,7 @@ the token regardless of which subdomain presented it.
     is still issuing today.
   - **Accepted by** two live surfaces:
     1. the blog-admin console's **data layer** — `website/apps/blog-admin/src/lib/supabase.ts`
-       (`STORAGE_KEY`) is the supabase-js storage adapter, and with `persistSession: true`
+       (`STORAGE_KEY`, adapter `authStorage`) is the supabase-js storage adapter, and with `persistSession: true`
        supabase-js recovers the session from it on init, so the console's direct Supabase calls
        (11 PostgREST operation entry points over the 5 `.from('blog_posts')` builders —
        `listPosts`, `listQueue`, `getPost`, `createPost`, `updatePost` — plus 2 authenticated

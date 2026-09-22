@@ -4,16 +4,13 @@
  * WHY THE SERVER DECIDES
  * ----------------------
  * `welcome.html` used to decide this in the browser, via a hard gate that called
- * `readValidSession()`. That function reads the legacy parent-domain
- * `sb-tortoise-auth-token` cookie — after first migrating any legacy localStorage
- * session into it — and a BFF login writes only the HttpOnly `__Host-session`, so
- * a browser holding no legacy session read as signed OUT and the gate redirected
- * it to /auth: the #3485 loop, reproduced by construction for that visitor. One
- * whose legacy cookie still held an unexpired session was NOT bounced; one whose
- * cookie had expired was, because `readValidSession()` treats a past `expires_at`
- * as invalid — the consent page's client never refreshes on its own
- * (`autoRefreshToken: false`).
- * Removing the bridge and the gate together is what fixed it.
+ * `readValidSession()`. That resolves the legacy parent-domain
+ * `sb-tortoise-auth-token` cookie — after first copying a valid legacy localStorage
+ * session into it — while a BFF login writes only the HttpOnly `__Host-session`. So
+ * the gate's answer came from the legacy credential rather than from the session
+ * sign-in had just established, and wherever that legacy read resolved nothing the
+ * visitor was sent to /auth: the #3485 loop, reproduced by construction. Removing the
+ * bridge and the gate together is what fixed it.
  *
  * The BFF session cookie is HttpOnly. The server is the only thing that can
  * legitimately answer "is this visitor signed in?" — so the answer is a status
