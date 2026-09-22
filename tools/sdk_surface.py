@@ -438,11 +438,7 @@ def main(argv: list[str] | None = None) -> int:
                     f"{args.declaration} is stale — it does not match the code. "
                     "Run: uv run python tools/sdk_surface.py"
                 )
-            if not args.doc.exists():
-                problems.append(
-                    f"{args.doc} is stale. Run: uv run python tools/sdk_surface.py"
-                )
-            elif _read_text_or_refuse(args.doc, "the doc") != doc_text:
+            if not args.doc.exists() or _read_text_or_refuse(args.doc, "the doc") != doc_text:
                 problems.append(
                     f"{args.doc} is stale. Run: uv run python tools/sdk_surface.py"
                 )
