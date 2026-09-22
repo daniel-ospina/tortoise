@@ -35,6 +35,14 @@ SELFHOST = REPO / "tortoise" / "selfhost.py"
 SUPABASE_CONTROL = REPO / "tortoise" / "supabase_control.py"
 
 
+def _ancestors(node: ast.AST, parents: dict[int, ast.AST]):
+    """Walk from ``node`` up to the root, yielding each ancestor."""
+    current = parents.get(id(node))
+    while current is not None:
+        yield current
+        current = parents.get(id(current))
+
+
 def _handler(name: str, source: Path = HOSTED_API) -> ast.AsyncFunctionDef:
     tree = ast.parse(source.read_text())
     for node in ast.walk(tree):
@@ -117,6 +125,7 @@ CONTROL_PLANE_OFFLOAD_INVENTORY = frozenset({
     "membership_for_user_org",  # session/DI + login/claim lanes
     "_orgs_row_fail_soft",      # session/DI lane: the orgs additive ladder
     "org_by_id",                # session/DI + invite/onboarding lanes
+    "invitation_info_by_token",  # invite-info (hosted): the token lookup
     "_org_node_sync_limits",    # session/DI lane: org limit props (org_by_id)
     "api_key_by_id",            # key-write lanes: the key lookup
     "set_dashboard_key_login",  # dashboard-login + provisioning flag write
@@ -137,12 +146,13 @@ _A1_CONFIRMED_SEAMS = frozenset({
 
 #: Helpers this change ROUTES in addition to §A1 (the session/DI seams
 #: ``_membership_org`` / ``_org_node`` / ``_require_owner_admin`` and the
-#: key-write/login/claim lanes). If a name leaves the inventory its routed
-#: sites lose their regression guard, so the pin asserts they stay.
+#: key-write/login/claim/invite-info lanes). If a name leaves the inventory its
+#: routed sites lose their regression guard, so the pin asserts they stay.
 _ROUTED_SESSION_SEAMS = frozenset({
     "membership_for_user_org", "org_by_id", "api_key_by_id",
     "set_dashboard_key_login", "set_api_key_enabled", "set_api_key_name",
     "set_api_key_scopes", "_org_node_sync_limits", "_resolve_signup_token",
+    "invitation_info_by_token",
 })
 
 #: Blocking ``supabase_control`` helpers that are STILL called directly
@@ -159,7 +169,7 @@ _KNOWN_ON_LOOP_RESIDUAL = frozenset({
     "count_graph_keys", "decline_invitation_by_email",
     "expired_bootstrap_keys", "graph_key_ids", "insert_api_key",
     "invitation_accept", "invitation_accept_by_id", "invitation_expire",
-    "invitation_info_by_token", "invitation_mint", "invitation_rescind",
+    "invitation_mint", "invitation_rescind",
     "invitation_resend", "invitation_row_by_token", "is_anon_org",
     "membership_by_identity", "membership_count_since", "membership_role",
     "mint_target_user_for_key", "org_api_keys", "org_by_email",
@@ -175,10 +185,12 @@ _KNOWN_ON_LOOP_RESIDUAL = frozenset({
 #: Callees that OFFLOAD their argument — a call nested inside one of these is
 #: not on the loop, so the walk does not descend into it. ``_oauth_offload``
 #: (#3669) is the OAuth-lane wrapper over the same seam (it calls ``_cp_offload``
-#: on the dedicated ``oauth`` pool), so it is a boundary for the same reason.
+#: on the dedicated ``oauth`` pool), so it is a boundary for the same reason;
+#: ``_graph_offload`` (#3773) is the DATA-PLANE wrapper over the same seam (the
+#: dedicated ``graph`` pool).
 OFFLOAD_BOUNDARY_CALLEES = frozenset({
-    "_cp_offload", "_oauth_offload", "run_control_plane_call",
-    "run_on_daemon_worker", "to_thread",
+    "_cp_offload", "_oauth_offload", "_graph_offload",
+    "run_control_plane_call", "run_on_daemon_worker", "to_thread",
 })
 
 
@@ -1066,7 +1078,17 @@ def test_db_probe_bound_covers_the_sdk_acquisition_prefix():
 def test_selfhost_ready_does_not_probe_on_the_loop():
     """``tortoise/selfhost.py::health_ready`` had the identical bug: it built the
     SDK and touched the DB inline. ``publish-selfhost.yml`` curls this endpoint
-    on every publish, so it is the same outage vector in the other image."""
+    on every publish, so it is the same outage vector in the other image.
+
+    #3287 — the pin FLIPPED. It used to require ``asyncio.to_thread`` here,
+    because that was #2988's fix. ``to_thread`` is no longer acceptable on this
+    endpoint: it always submits to the event loop's SHARED default executor,
+    whose queue is unbounded, so unrelated work can queue the probe past
+    ``_READY_PROBE_TIMEOUT_S`` and make a HEALTHY DB report a false 503 — which
+    fails the publish. The endpoint must dispatch through the module's own
+    pool (``_submit_probe``) instead. Guarding the new shape here is what stops
+    a refactor quietly reintroducing the shared pool.
+    """
     node = _handler("health_ready", SELFHOST)
     offenders = [
         n.lineno
@@ -1079,16 +1101,45 @@ def test_selfhost_ready_does_not_probe_on_the_loop():
         f"selfhost health_ready calls DB-touching code directly at line(s) {offenders} — "
         "synchronous DB work on the event loop (#2988)"
     )
-    off_loop = {
-        arg.id
+    shared_pool = [
+        call.lineno
         for call in ast.walk(node)
         if isinstance(call, ast.Call)
         and isinstance(call.func, ast.Attribute)
         and call.func.attr == "to_thread"
-        for arg in call.args
-        if isinstance(arg, ast.Name)
+    ]
+    assert not shared_pool, (
+        f"selfhost health_ready uses asyncio.to_thread at line(s) {shared_pool} — "
+        "to_thread submits to the loop's SHARED default executor, where unrelated "
+        "work starves the probe and a healthy DB reports a false 503 (#3287)"
+    )
+    dedicated = [
+        call
+        for call in ast.walk(node)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "_submit_probe"
+    ]
+    assert dedicated, (
+        "selfhost health_ready dispatches nothing through the module's dedicated "
+        "probe pool (_submit_probe) — #3287"
+    )
+    # Presence alone is not enough: a call whose future is dropped satisfies the
+    # check above while the endpoint answers nothing. The future must be AWAITED,
+    # so the probe's result is what the handler responds with.
+    parents = {
+        id(child): parent for parent in ast.walk(node) for child in ast.iter_child_nodes(parent)
     }
-    assert off_loop, "selfhost health_ready dispatches nothing with asyncio.to_thread"
+    not_awaited = [
+        call.lineno
+        for call in dedicated
+        if not any(a is not None and isinstance(a, ast.Await) for a in _ancestors(call, parents))
+    ]
+    assert not not_awaited, (
+        f"selfhost health_ready calls _submit_probe at line(s) {not_awaited} but never "
+        "awaits its future — the probe's result is discarded, so the endpoint answers "
+        "whatever the fall-through path produces (#3287)"
+    )
 
 
 def test_selfhost_probe_is_bounded():

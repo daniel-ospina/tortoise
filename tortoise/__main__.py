@@ -3090,6 +3090,11 @@ def _cmd_hooks(args) -> int:
     # `✅ ... upgraded.` while leaving the real install untouched — the silent
     # no-capture this seam exists to prevent (#3818).
     explicit_dir = getattr(args, "dir", None)
+    # The HOME that `default_root` consumed, when no explicit `--dir` was given.
+    # It is threaded into `upgrade_install` so the `hook-src-dir` record is
+    # written ONLY for a genuinely HOME-scoped root — an explicit `--dir` never
+    # consults HOME (#4110).
+    resolved_home = None
     try:
         # `_P.home()` is INSIDE the boundary because it can RAISE, not merely
         # return a non-absolute path: with `$HOME` set to a literal `~` (or
@@ -3115,8 +3120,11 @@ def _cmd_hooks(args) -> int:
         # irrelevant (`_P(explicit_dir)` never consults it) — evaluating it
         # above the ternary made an unresolvable HOME abort a `--dir` inspect
         # or repair that would otherwise have worked.
-        root = (_P(explicit_dir) if explicit_dir is not None
-                else default_root(layout, _P.home()))
+        if explicit_dir is not None:
+            root = _P(explicit_dir)
+        else:
+            resolved_home = _P.home()
+            root = default_root(layout, resolved_home)
     except MemoryError:
         raise  # resource exhaustion is not a refusal; the handler allocates
     except Exception as e:
@@ -3207,7 +3215,8 @@ def _cmd_hooks(args) -> int:
     # upgrade (also performs a fresh install when nothing is present)
     try:
         result = upgrade_install(root, args.harness,
-                                 dry_run=getattr(args, "dry_run", False))
+                                 dry_run=getattr(args, "dry_run", False),
+                                 home=resolved_home)
     except MemoryError:
         raise  # resource exhaustion is not a refusal; the handler allocates
     except Exception as e:
@@ -3844,15 +3853,24 @@ def _capture_error_file(harness: str) -> Path:
 
 def _record_capture_error(harness: str, detail: str) -> None:
     """Write the local capture-failure breadcrumb. Best-effort only — a
-    breadcrumb write must never break the capture path it observes."""
+    breadcrumb write must never break the capture path it observes.
+
+    The record carries ``kind: capture-failure`` (a DIFFERENT kind from the
+    shipped hook's ``kind: install-inert``) because both writers share the
+    ``capture-errors/<harness>.json`` path: session verify must never read a
+    capture outage as an inert install, and nothing may read an inert install
+    as a failed capture.
+    """
     import json as _json
     import time
     path = _capture_error_file(harness)
     try:
+        from tortoise.hook_install import KIND_CAPTURE_FAILURE
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(_json.dumps({
             "harness": harness,
             "detail": detail,
+            "kind": KIND_CAPTURE_FAILURE,
             "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }, indent=2), encoding="utf-8")
     except OSError:

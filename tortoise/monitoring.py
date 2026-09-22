@@ -720,6 +720,52 @@ CONTROL_PLANE_OAUTH_WORKER_NAME = "tortoise-oauth"
 CONTROL_PLANE_OAUTH_WORKERS = 8
 CONTROL_PLANE_OAUTH_BACKLOG = 64
 
+#: #3773: a FOURTH pool, for the DATA-PLANE (FalkorDB) offload. The write
+#: handlers' per-request graph helpers (``_data_sdk``'s connect / embedded
+#: anchor probe, ``_check_org_limit``'s count query) ran inline on the loop
+#: immediately before an already off-loaded write, so a blocked loop still
+#: stalled every concurrent request for their duration. They reuse this seam's
+#: bounded multi-worker pool, wait bound and fail-closed error, on a pool of
+#: their OWN: a burst of graph writes must never park a single auth slot (the
+#: #3498 review P1 isolation argument, applied to the data plane).
+#:
+#: Occupancy disclosure (the #3669-cycle-2 "not hidden" rule): each WRITE
+#: consumes TWO sequential submissions here (the quota count, then the SDK
+#: open); the REST ``/v1/events`` and ``/v1/dream`` handlers' SDK open also
+#: submits here. The write-triggered ``_dream_worker`` does NOT (it builds
+#: inside the ``_DREAM_EXECUTOR`` item). The graph-bound ``_data_sdk`` path
+#: reaches a blocking CONTROL-plane PostgREST read (``_assert_graph_owned`` ->
+#: ``get_control_plane().query("graphs")``), so a control-plane stall parks a
+#: graph slot here and a bound miss on that read reports ``graph_unavailable``.
+#: Routing the ownership probe through the control-plane pool is a follow-up;
+#: the shared-capacity shape is accepted.
+CONTROL_PLANE_GRAPH_WORKER_NAME = "tortoise-graph"
+CONTROL_PLANE_GRAPH_WORKERS = 8
+CONTROL_PLANE_GRAPH_BACKLOG = 128
+
+#: Margin added to the projection cold-start allowance for the DATA-PLANE graph
+#: lane (#3773). The bound is resolved at CALL time (``graph_offload_timeout_s``)
+#: from ``probe_setup_timeout()``, NOT from the frozen import-time default: an
+#: operator who raises ``TORTOISE_PROBE_SETUP_TIMEOUT`` for a large/cold graph
+#: must not make the graph lane fall BELOW the allowance it is meant to cover
+#: (which would 503-retry a merely-cold first write — the #3143 false-degrade
+#: class). The ordering is pinned by a test against the RESOLVED value.
+CONTROL_PLANE_GRAPH_OFFLOAD_MARGIN_S = 10.0
+
+
+def graph_offload_timeout_s() -> float:
+    """#3773: the DATA-PLANE graph lane's wait bound, resolved at CALL time.
+
+    ``_data_sdk``'s embedded anchor probe and ``_check_org_limit``'s count query
+    can each open a COLD projection (connect + version probe +
+    ``_ensure_indexes()`` — ~28 sequential round trips), which the probe lane
+    already budgets via ``probe_setup_timeout()``. The graph lane's bound is
+    that resolved allowance PLUS a margin, so a cold first write is never
+    abandoned and 503'd. Still bounded and fail-fast for a genuinely wedged
+    graph.
+    """
+    return probe_setup_timeout() + CONTROL_PLANE_GRAPH_OFFLOAD_MARGIN_S
+
 #: Wait bound for ONE offloaded control-plane resolution. Sits ABOVE a normal
 #: round-trip's several phases but below the edge/proxy budget, so a
 #: black-holed PostgREST call fails the ONE request closed instead of holding
@@ -760,13 +806,24 @@ def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
     is a SEPARATE pool for best-effort work, so telemetry can never park the
     auth slots (#3498 review P1); ``pool="oauth"`` (#3669) is a separate pool
     for the attacker-reachable OAuth client-resolution lane, so a CIMD fetch
-    flood cannot park the auth slots either.
+    flood cannot park the auth slots either; ``pool="graph"`` (#3773) is the
+    DATA-PLANE pool for the write handlers' graph helpers, kept off auth
+    capacity for the same isolation reason. The graph pool's callables SET
+    ContextVars (the #2600 actor bind), so it must be reached ONLY through the
+    hosted ``_graph_offload`` wrapper, which runs them under a copy of the
+    caller's context — a bare ``run_control_plane_call(..., pool="graph")``
+    would write into the process-lifetime pool thread's own context and leak
+    that value into the NEXT request the worker serves.
 
     An UNKNOWN selector raises rather than falling back to auth: the pool
     choice is the only thing keeping best-effort or attacker-reachable work
     off the auth-critical capacity, so a typo must fail closed, not silently
     revert the split.
     """
+    if pool == "graph":
+        return daemon_worker(CONTROL_PLANE_GRAPH_WORKER_NAME,
+                             workers=CONTROL_PLANE_GRAPH_WORKERS,
+                             max_backlog=CONTROL_PLANE_GRAPH_BACKLOG)
     if pool == "oauth":
         return daemon_worker(CONTROL_PLANE_OAUTH_WORKER_NAME,
                              workers=CONTROL_PLANE_OAUTH_WORKERS,
@@ -834,7 +891,8 @@ async def run_control_plane_call(fn, *, op: str,
     ``pool`` selects the worker: ``"auth"`` (default) for auth-critical
     resolutions, ``"telemetry"`` for best-effort work that must never consume
     auth capacity, ``"oauth"`` (#3669) for the attacker-reachable OAuth
-    client-resolution lane.
+    client-resolution lane, or ``"graph"`` (#3773) for the DATA-PLANE graph
+    helpers — a separate pool for the same isolation reason.
 
     Fail-closed: a missed bound or a saturated backlog raises
     :class:`ControlPlaneOffloadError`. A builtin ``TimeoutError`` raised by

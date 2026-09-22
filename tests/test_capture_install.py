@@ -1241,7 +1241,14 @@ def test_codex_install_then_status_is_clean_and_upgrade_is_a_no_op(home):
     `get_layout("codex")` raises `unknown harness 'codex'`, so a stale
     installed hook is never flagged or repaired, and this REDs."""
     layout = hook_install.get_layout("codex")
-    assert hook_install.contract_version(layout) == 1, (
+    # The contract must be READABLE, not a particular generation: a literal
+    # here (this asserted ``== 1`` until #4544) goes stale silently on every
+    # deliberate install-contract bump — which is how this branch left two red
+    # assertions behind. Readability still REDs on the mutation the docstring
+    # names, and also if the marker is dropped or the layout's scripts disagree
+    # (`contract_version` -> ``None``). The shipped GENERATIONS are pinned
+    # deliberately, once, by `test_shipped_install_contract_generations`.
+    assert hook_install.contract_version(layout) is not None, (
         "the shipped codex hook carries no readable install contract")
 
     res = install_capture("codex", home=home)
@@ -2072,7 +2079,10 @@ def test_cursor_install_then_status_is_clean_and_upgrade_is_a_no_op(home):
     `get_layout("cursor")` raises `unknown harness 'cursor'`, so a stale
     installed hook is never flagged or repaired, and this REDs."""
     layout = hook_install.get_layout("cursor")
-    assert hook_install.contract_version(layout) == 1, (
+    # Readable, not a literal generation — same reasoning as the codex seam
+    # above (#4544: cursor was bumped 1 -> 2 by #4314). The generations are
+    # pinned deliberately by `test_shipped_install_contract_generations`.
+    assert hook_install.contract_version(layout) is not None, (
         "the shipped cursor hook carries no readable install contract")
 
     res = install_capture("cursor", home=home)
@@ -3210,3 +3220,33 @@ def test_every_capture_artifact_ships_in_the_wheel():
         assert covered(rel), (
             f"{artifact} is not matched by any package-data pattern "
             f"{patterns} — a wheel install would fail resolving it")
+
+
+# The shipped install-contract generations, one per harness that ships SHELL
+# hooks.  The marker is what makes a stale installed hook detectable, so it MUST
+# be bumped when what a hook writes changes, and bumping must be DELIBERATE.
+# Pinning the values here, ONCE, is what makes a revert RED (a silently reverted
+# marker mis-classifies current installs as stale, or stale ones as current) and
+# makes the next bump a deliberate edit of this table.  A literal at each
+# install assertion does neither: it goes stale silently, which is exactly how
+# #4314 left two red assertions behind (#4545).
+_EXPECTED_INSTALL_CONTRACT = {"claude": 4, "codex": 2, "cursor": 2}
+
+
+@pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
+def test_shipped_install_contract_generations(harness):
+    """#4314 changes what an installed hook writes (a capture-error breadcrumb)
+    and what the installer records, so every shipped generation moved — claude
+    3→4, codex 1→2, cursor 1→2.  Those numbers are a reviewed decision, not a
+    detail, so they are pinned once and explicitly.
+
+    `pi` is absent by construction: it ships a TypeScript extension rather than
+    shell hooks, declares no install contract, and has no `HarnessLayout`.
+    """
+    layout = hook_install.get_layout(harness)
+    assert hook_install.contract_version(layout) == (
+        _EXPECTED_INSTALL_CONTRACT[harness]), (
+        f"{harness} ships contract generation "
+        f"{hook_install.contract_version(layout)}, expected "
+        f"{_EXPECTED_INSTALL_CONTRACT[harness]} — if that bump was deliberate, "
+        f"update _EXPECTED_INSTALL_CONTRACT; if not, this is the revert")
