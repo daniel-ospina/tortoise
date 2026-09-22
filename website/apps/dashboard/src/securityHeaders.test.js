@@ -43,8 +43,12 @@
 //     indirection and a template-built `` `set-cookie${""}` `` are all caught;
 //     the files allowed to name it without being writers are the three
 //     hop-by-hop STRIP-LIST proxies, and their exemption is pinned (below);
-//   - the two audited writers additionally have their cookie-WRITE count pinned,
-//     so a new cacheable response helper added to an audited module fails;
+//   - the two audited writers are exempt from the umbrella, and their exemption
+//     is paid for structurally: every top-level function in them that builds a
+//     `Response`, and every export that mentions the token, must pair it with
+//     `no-store` (so a new cacheable helper fails whatever spelling it uses);
+//   - the CSP stamp scan reads a view with template-literal TEXT blanked, so a
+//     stamp-shaped string in a template cannot inflate the count;
 //   - the scan walks BOTH projects' function trees, over every JS/TS extension.
 //
 // SOURCE SCANNING NEEDS A REAL LEXER, NOT A STATE MACHINE
@@ -130,19 +134,20 @@ const STAMP =
   /Content-Security-Policy["']?\s*[,:]\s*(RELAXED_CSP|STRICT_CSP|ADMIN_CSP|strictCspWithNonce)\b/g
 
 /**
- * The two audited cookie writers, each with its exact count of cookie-WRITE
- * statements.
+ * The two audited cookie writers. They are exempt from the file-level umbrella
+ * scan below, so the exemption is paid for STRUCTURALLY rather than with a count.
  *
- * The count is the pin that closes a hole found in review: exempting these
- * modules by path alone meant a NEW cacheable response helper added to one of
- * them (`textCacheable()` in `session.ts`) was never exercised and never
- * flagged. With the count pinned, any added write statement fails here and the
- * author must classify it.
+ * A pinned count of cookie-WRITE statements was tried first and rejected on two
+ * counts, both proven in review: it missed an aliased header name
+ * (`const H = "Set-Cookie"; headers.append(H, …)`), and it reddened CI on a
+ * harmless extraction of the two identical append loops into one shared helper.
+ * The structural rule that replaced it — every top-level function that builds a
+ * `Response`, and every export that mentions the token, must pair it with
+ * `no-store` — catches both the literal and aliased forms (a new cacheable
+ * helper builds a `Response`) while leaving a helper that only appends a cookie
+ * to its caller's headers exempt.
  */
-const AUDITED_COOKIE_WRITERS = new Map([
-  [DASHBOARD_SESSION_TS, 2],
-  [DASHBOARD_CONFIRM_TS, 1],
-])
+const AUDITED_COOKIE_WRITERS = new Set([DASHBOARD_SESSION_TS, DASHBOARD_CONFIRM_TS])
 
 /**
  * The three hop-by-hop proxy files strip an UPSTREAM `set-cookie`; they name the
@@ -188,13 +193,32 @@ const COOKIE_MENTION = /set-cookie/i
 const COOKIE_WRITE =
   /\.(?:append|set)\(\s*["'`]set-cookie["'`]|["'`]set-cookie["'`]\s*:|\[\s*\[\s*["'`]set-cookie["'`]/gi
 
+/** Delete each `[start, end)` range, replacing it with a single space. */
+function withoutRanges(source, ranges) {
+  let out = ''
+  let at = 0
+  for (const [start, end] of [...ranges].sort((a, b) => a[0] - b[0])) {
+    if (start < at || end <= start) continue
+    out += `${source.slice(at, start)} ` // a space keeps token separation
+    at = end
+  }
+  return out + source.slice(at)
+}
+
 /**
- * `commentStrippedSource` for a repo-relative path.
- *
- * The plugin set follows the extension: TypeScript for `.ts`, plus the JSX
- * plugin for `.tsx`/`.jsx` (in a `.ts` file the JSX plugin would make a
+ * Parse with the plugin set the extension needs: TypeScript everywhere, plus the
+ * JSX plugin for `.tsx`/`.jsx` (in a `.ts` file the JSX plugin would make a
  * `<Foo>bar` type assertion ambiguous, so it is not enabled there).
  */
+function parseSource(source, relPath = 'file.ts') {
+  const jsx = /\.[jt]sx$/.test(relPath)
+  return parse(source, {
+    sourceType: 'module',
+    plugins: jsx ? ['typescript', 'jsx'] : ['typescript'],
+  })
+}
+
+/** `commentStrippedSource` for a repo-relative path. */
 function commentStripped(relPath) {
   return commentStrippedSource(readFileSync(join(repoRoot, relPath), 'utf8'), relPath)
 }
@@ -209,22 +233,70 @@ function commentStripped(relPath) {
  * the intended fail-closed direction.
  */
 function commentStrippedSource(source, relPath = 'file.ts') {
-  const jsx = /\.[jt]sx$/.test(relPath)
-  const ast = parse(source, {
-    sourceType: 'module',
-    plugins: jsx ? ['typescript', 'jsx'] : ['typescript'],
-  })
-  const ranges = (ast.comments ?? [])
-    .map((c) => [c.start, c.end])
-    .sort((a, b) => a[0] - b[0])
-  let out = ''
-  let at = 0
-  for (const [start, end] of ranges) {
-    if (start < at) continue
-    out += `${source.slice(at, start)} ` // a space keeps token separation
-    at = end
+  const ast = parseSource(source, relPath)
+  return withoutRanges(source, (ast.comments ?? []).map((c) => [c.start, c.end]))
+}
+
+/**
+ * The view the CSP stamp scan uses: comments removed AND template-literal string
+ * content blanked.
+ *
+ * A stamp-shaped string inside a template literal is text, not a stamp. Review
+ * proved the count could be inflated that way — delete a file's only real stamp,
+ * add `const NOTE = `"Content-Security-Policy": RELAXED_CSP`` — and the file
+ * passed with zero live stamps. Blanking the *quasi* ranges (which exclude the
+ * backticks and the `${…}` expressions) removes template TEXT while keeping code
+ * inside an interpolation. The trade-off is fail-closed: a header name BUILT as a
+ * template literal is no longer counted, and the guard names the file.
+ */
+function stampView(relPath) {
+  const source = readFileSync(join(repoRoot, relPath), 'utf8')
+  const ast = parseSource(source, relPath)
+  const ranges = (ast.comments ?? []).map((c) => [c.start, c.end])
+  const collect = (node) => {
+    if (!node || typeof node !== 'object') return
+    if (Array.isArray(node)) {
+      for (const n of node) collect(n)
+      return
+    }
+    if (node.type === 'TemplateLiteral') {
+      for (const q of node.quasis) ranges.push([q.start, q.end])
+    }
+    for (const key of Object.keys(node)) {
+      if (key === 'loc' || key === 'leadingComments' || key === 'trailingComments') continue
+      collect(node[key])
+    }
   }
-  return out + source.slice(at)
+  collect(ast.program)
+  return withoutRanges(source, ranges)
+}
+
+/**
+ * Every top-level function in a file: `{ name, body, exported }`.
+ *
+ * Used by the audited-module rule, which needs to see non-exported functions
+ * too (a new cacheable helper need not be exported to be reachable). A function
+ * that only appends a cookie to its caller's headers builds no `Response`, so it
+ * is correctly exempt.
+ */
+function topLevelFunctions(relPath) {
+  const source = commentStripped(relPath)
+  const ast = parseSource(source, relPath)
+  const out = []
+  for (const node of ast.program.body) {
+    const exported =
+      node.type === 'ExportNamedDeclaration' || node.type === 'ExportDefaultDeclaration'
+    const decl = exported ? node.declaration : node
+    if (!decl) continue
+    if (decl.type === 'FunctionDeclaration') {
+      out.push({ name: decl.id?.name ?? 'default', body: source.slice(decl.start, decl.end), exported })
+    } else if (decl.type === 'VariableDeclaration') {
+      for (const v of decl.declarations) {
+        out.push({ name: v.id?.name ?? '?', body: source.slice(v.start, v.end), exported })
+      }
+    }
+  }
+  return out
 }
 
 function loadTs(entry) {
@@ -412,19 +484,26 @@ test('json() and redirect() carry no-store on every cookie-bearing response', as
 })
 
 test('the only cookie writers are the two audited files', () => {
-  // Pin the scans against vacuity: each audited file must actually match the
-  // umbrella the offender scan uses, and carry exactly its recorded number of
-  // cookie-WRITE statements. Pinning only the write regex left the umbrella
-  // unprotected (replacing it with a never-matching regex kept every test
-  // green), and pinning the path without a count left a new cookie-emitting
-  // helper in an audited module invisible.
-  for (const [rel, writes] of AUDITED_COOKIE_WRITERS) {
-    const src = commentStripped(rel)
-    assert.match(src, COOKIE_MENTION, `${rel} must be recognised as naming set-cookie`)
-    assert.equal(
-      (src.match(COOKIE_WRITE) ?? []).length,
-      writes,
-      `${rel} must carry exactly ${writes} cookie-WRITE statement(s) — a new one must be classified`,
+  // The two audited modules are exempt from the file-level umbrella below, so
+  // their exemption is paid for STRUCTURALLY rather than with a count: every
+  // top-level function in them that builds a `Response` — and every export that
+  // mentions the token at all — must pair that with `no-store`. A pinned count of
+  // cookie-WRITE statements was tried first and rejected: it missed an aliased
+  // name (`const H = "Set-Cookie"`), and it reddened CI on a harmless extraction
+  // of the two identical append loops into one helper.
+  for (const rel of AUDITED_COOKIE_WRITERS) {
+    assert.match(commentStripped(rel), COOKIE_MENTION, `${rel} must be recognised as naming set-cookie`)
+    const unpinned = topLevelFunctions(rel)
+      .filter(
+        ({ body, exported }) =>
+          (/\bnew Response\b/.test(body) || (exported && COOKIE_MENTION.test(body))) &&
+          !/no-store|NO_STORE/.test(body),
+      )
+      .map(({ name }) => `${rel}:${name}`)
+    assert.deepEqual(
+      unpinned,
+      [],
+      'a function in an audited module that builds a Response (or exports a cookie mention) must pair it with no-store',
     )
   }
 
@@ -552,7 +631,7 @@ test('_headers values are byte-identical to the stamped constants', () => {
 test('every HTML-producing Function stamps the CSP on each HTML-producing path', () => {
   const wrong = []
   for (const [rel, expected] of HTML_SITES) {
-    const found = (commentStripped(rel).match(STAMP) ?? []).length
+    const found = (stampView(rel).match(STAMP) ?? []).length
     if (found !== expected) wrong.push(`${rel}: expected ${expected} stamp(s), found ${found}`)
   }
   assert.deepEqual(
