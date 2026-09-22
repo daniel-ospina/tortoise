@@ -1005,11 +1005,11 @@ def test_push_legs_partitions_every_classified_file():
     # index >= 2 cannot pass), and prefixes that CONFLICT with parity rather
     # than tracking it (a prefix-keyed mutant cannot pass — they did track it
     # while the probe alternated bench/non-bench by index, which an earlier
-    # round measured as a live miss). One name carries an uppercase letter, so
-    # a case-normalising mutant cannot pass either. DECLARED BOUND: this is a
-    # four-entry sample — a mutant whose misbehaviour appears only on a LONGER
-    # (or exactly-two-entry) list is outside the bound, as is one keyed only on
-    # digits or extension case (see #4528).
+    # round measured as a live miss). DECLARED BOUND: this is a four-entry
+    # sample — a mutant whose misbehaviour appears only on a LONGER (or
+    # exactly-two-entry) list is outside the bound, as is one keyed on digits
+    # or the extension (see #4528). The coverage each class has is pinned by
+    # the mutation battery in the commit messages, not by claims here.
     from tools.ci_selection import carve_out_files, fast_pool
     probe_extra = ["bench/Probe_zed.py", "bench/Probe_aaa.py",
                    "zzz/probe_plain.py", "yyy/probe_tail.py"]
