@@ -457,18 +457,21 @@ class TestCliOnboardDbTarget:
             if _gc_was_enabled:
                 gc.enable()
 
-    def test_init_releases_the_probe_when_a_later_import_raises(
-            self, monkeypatch, tmp_path):
-        """#4579: an ImportError raised AFTER the probe binds still releases it.
+    @pytest.mark.parametrize("exc", [ImportError, RuntimeError])
+    def test_init_releases_the_probe_when_a_later_step_raises(
+            self, monkeypatch, tmp_path, exc):
+        """#4579: a failure raised AFTER the probe binds still releases it.
 
-        The `except ImportError` arms are declared BEFORE `except Exception`,
-        so an ImportError from a statement that runs after
-        `_proj = FalkorProjection(db_path)` — `_proj.g.query`, the
-        `_mark_embedded_opened` import, the fallback-notice import — lands in
-        the ImportError arm. Without an explicit close the cyclic probe
-        outlives the call and its daemon is left uninstrumented with its data
-        dir present — exactly the class #3767 refuses to fast-kill. The SDK
-        mark is forced to raise so the test exercises that arm deterministically.
+        Both embedded error arms are pinned. An `ImportError` from a statement
+        that runs after `_proj = FalkorProjection(db_path)` (`_proj.g.query`,
+        the `_mark_embedded_opened` import, the fallback-notice import) lands
+        in the `except ImportError` arm, declared BEFORE `except Exception`;
+        any other exception (`RuntimeError` here) lands in the
+        `except Exception` arm. Either way the probe must be closed, or the
+        cyclic probe outlives the call and its daemon is left uninstrumented
+        with its data dir present — exactly the class #3767 refuses to
+        fast-kill. The SDK mark is forced to raise so both arms are exercised
+        deterministically.
 
         GC is disabled so the release is attributable to the explicit close,
         not to a `weakref.finalize` GC-close.
@@ -483,7 +486,7 @@ class TestCliOnboardDbTarget:
         import tortoise.sdk as _sdk
 
         def _boom(_path):
-            raise ImportError("simulated missing dep after the probe bound")
+            raise exc("simulated failure after the probe bound")
 
         monkeypatch.setattr(_sdk, "_mark_embedded_opened", _boom)
 
@@ -526,6 +529,50 @@ class TestCliOnboardDbTarget:
         finally:
             if _gc_was_enabled:
                 gc.enable()
+
+    @pytest.mark.parametrize("exc", [ImportError, RuntimeError])
+    def test_init_closes_the_uri_probe_on_a_connect_error(self, monkeypatch, exc):
+        """#4579: the URI-mode probe is released on both error returns.
+
+        URI mode has no local daemon, so the pin is the probe's `close()` —
+        dropping either `_close_probe()` call there would leak the client
+        connection. `FalkorProjection.from_uri` is faked so no server is
+        needed and the post-bind query can raise on demand.
+        """
+        monkeypatch.setenv(
+            "TORTOISE_DB_URI", "docker://:pw@localhost:16399/uri_probe")
+        _delenv_falkordb(monkeypatch)
+
+        import tortoise.projection as _proj_mod
+
+        closed = []
+
+        class _FakeProbe:
+            def __init__(self):
+                self.g = mock.Mock()
+
+            def close(self):
+                closed.append(True)
+
+        def _from_uri(_target):
+            probe = _FakeProbe()
+
+            def _raise(*_a, **_kw):
+                raise exc("simulated connect failure")
+
+            probe.g.query = _raise
+            return probe
+
+        monkeypatch.setattr(
+            _proj_mod, "FalkorProjection", mock.Mock(from_uri=_from_uri))
+
+        from tortoise import __main__ as m
+
+        rc = m._cmd_init(mock.Mock(
+            path=None, cmd="init", yes=True, api_key=None, no_index=True))
+        assert rc == 1
+        assert closed == [True], (
+            "the URI probe was not released on the error return (#4579)")
 
     def test_onboard_completion_gates_embedded_default(self, tmp_path, monkeypatch, capsys):
         """#2200: the `tortoise onboard` wizard completion must gate the
