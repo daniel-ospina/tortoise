@@ -1669,7 +1669,7 @@ durations:
   # file holds the margin higher than removing it.
   test_transport_wait_bound.py: 2.0
   test_collision_preflight.py: 3.0
-  test_branch_reaper.py: 3.0
+  test_branch_reaper.py: 2.0  # new file: no main junit measurement yet; flat default
   test_control_plane_offload_3498.py: 2.7  # #3498: control-plane offload seam
   # #4015: new file in this pool with no CI junit measurement yet — entered at
   # the flat 2.0s default under the #3400/#4221 policy above (no DB, no network:

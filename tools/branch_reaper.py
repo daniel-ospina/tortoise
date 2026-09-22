@@ -73,13 +73,18 @@ Safety
   holds is RESTORED by :func:`_reconcile_held_deletions` once the loop ends, so
   the net residual is zero (a branch cannot be checked out by a *new* worktree
   after its ref is gone).
-* **Recovery.** A durable machine-readable recovery record (full tip SHAs) is
-  written BEFORE the delete phase, independent of ``--report``; the report also
-  carries a Recovery record section. ``--backup-bundle`` optionally writes one
-  ``git bundle`` of the deleted tips (via temporary refs — no persistent
+* **Recovery.** A machine-readable recovery record (full tip SHAs) is written
+  BEFORE the delete phase, independent of ``--report``; the report also carries a
+  Recovery record section. Those SHAs are NOT durable by themselves: ``git
+  update-ref -d`` removes the deleted ref's reflog, so a tip survives only until
+  the objects are pruned (``gc.pruneExpire``, 2 weeks by default, immediately
+  under ``gc --prune=now``). ``--backup-bundle`` writes one ``git bundle`` of the
+  deleted tips and is what makes recovery durable; it is written by DEFAULT on
+  ``--apply`` (``--no-backup`` opts out and leaves only the SHAs). A bundle that
+  cannot be produced aborts the whole delete phase rather than deleting
+  unbacked-up. The bundle stages its tips through temporary refs — no persistent
   ``refs/reaped/*`` refs, which would collide with the worktree engine's
-  ``refs/heads/*``-only survival doctrine); a bundle that cannot be produced
-  aborts the whole delete phase rather than deleting unbacked-up.
+  ``refs/heads/*``-only survival doctrine.
 * **Dirty worktrees are reported, never force-removed.** A branch held by ANY
   worktree is preserved; the report marks whether that checkout is dirty.
 * **Guard.** ``--apply`` refuses to run from the MAIN checkout: this tool invokes
@@ -150,6 +155,21 @@ EXIT_INTERNAL = 5
 #: Aborted AFTER >=1 deletion landed — the "nothing was deleted" contract of
 #: EXIT_INCOMPLETE no longer holds, so automation gets a distinct signal.
 EXIT_INCOMPLETE_AFTER_DELETE = 6
+
+
+def _valid_slug(slug: str) -> bool:
+    """True for exactly ``owner/name``.
+
+    ``--slug`` is interpolated into the ``repos/{slug}/pulls`` API path, so a
+    value carrying a space, ``?``, ``#`` or a newline builds a different request
+    than the operator asked for.
+    """
+    if slug.count("/") != 1:
+        return False
+    owner, name = slug.split("/")
+    ok = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.+"
+    return bool(owner) and bool(name) and all(c in ok for c in owner + name)
+
 
 #: Page caps. A list that reaches its cap is TRUNCATED, never "complete but short".
 DEFAULT_MAX_PR_PAGES = 50
@@ -227,6 +247,10 @@ def resolve_repo(target: str | None) -> tuple[str, str | None]:
         return os.path.realpath(root.stdout.strip()), _slug_from_remote(target)
     # Not a directory: treat as owner/name.
     if "/" in target:
+        # The documented `--repo owner/name` form reaches the same `repos/{slug}/pulls`
+        # API path as `--slug`, so it must clear the same validation.
+        if not _valid_slug(target):
+            raise ValueError(f"{target!r} is not a directory or 'owner/name'")
         return os.getcwd(), target
     raise ValueError(f"--repo {target!r} is not a directory or owner/name")
 
@@ -239,8 +263,14 @@ def _slug_from_remote(repo_root: str) -> str | None:
     if url.endswith(".git"):
         url = url[:-4]
     if "github.com" in url:
-        tail = url.split("github.com", 1)[1].lstrip(":/")
-        parts = tail.split("/")
+        tail = url.split("github.com", 1)[1]
+        # A ported URL (``ssh://git@github.com:22/owner/name``) leaves a LEADING
+        # ``:22``; stripping ``:/`` would fold the port into the owner and yield
+        # ``22/owner``. Strip a numeric port first, then the path separator.
+        if tail.startswith(":") and tail[1:2].isdigit() and "/" in tail:
+            # Everything before the first "/" is the port: ":22/o/n" -> "o/n".
+            tail = tail.split("/", 1)[1]
+        parts = [p for p in tail.lstrip(":/").split("/") if p]
         if len(parts) >= 2:
             return f"{parts[0]}/{parts[1]}"
     return None
@@ -282,16 +312,33 @@ def is_main_checkout(repo_root: str) -> bool:
 
 
 def current_branch(repo_root: str) -> str | None:
-    res = _run(["git", "-C", repo_root, "rev-parse", "--abbrev-ref", "HEAD"])
+    """The checked-out branch name, unambiguous.
+
+    ``--abbrev-ref`` applies the same shortest-UNAMBIGUOUS rule as
+    ``%(refname:short)``: with a tag colliding with the branch it returns
+    ``heads/release/1.0``, which then matches no ``enum_branches`` key and
+    protects nothing — defeating the "current branch is PRESERVE" rule.
+    ``--symbolic-full-name HEAD`` has no such ambiguity, so the prefix is
+    stripped deterministically.
+    """
+    res = _run(["git", "-C", repo_root, "rev-parse", "--symbolic-full-name", "HEAD"])
     name = res.stdout.strip()
-    return name if res.returncode == 0 and name and name != "HEAD" else None
+    if res.returncode != 0 or not name.startswith("refs/heads/"):
+        return None
+    return name[len("refs/heads/"):]
 
 
 # ── enumeration ─────────────────────────────────────────────────────────────
 
 def enum_branches(repo_root: str) -> dict[str, dict]:
     """name -> {oid, ts} for every local branch."""
-    fmt = "%(refname:short)%09%(objectname)%09%(committerdate:unix)"
+    # ``lstrip=2``, NOT ``refname:short``: ``:short`` returns the shortest
+    # UNAMBIGUOUS name across ALL refs, so a tag colliding with a branch yields a
+    # prefix-qualified ``heads/release/1.0``. That name matches no PR (the
+    # open-PR veto is skipped) and later builds ``refs/heads/heads/...``, which
+    # resolves to nothing — every affected delete refuses. ``lstrip=2`` strips
+    # exactly ``refs/heads/``.
+    fmt = "%(refname:lstrip=2)%09%(objectname)%09%(committerdate:unix)"
     res = _run(["git", "-C", repo_root, "for-each-ref", f"--format={fmt}", "refs/heads"])
     if res.returncode != 0:
         raise Incomplete(f"git for-each-ref refs/heads failed: {res.stderr.strip()}")
@@ -308,7 +355,7 @@ def enum_branches(repo_root: str) -> dict[str, dict]:
 def enum_ancestors(repo_root: str, ref: str) -> set[str]:
     """Branches whose tip is reachable from ``ref`` (ancestor test, one fork)."""
     res = _run(["git", "-C", repo_root, "for-each-ref", "--merged", ref,
-                "--format=%(refname:short)", "refs/heads"])
+                "--format=%(refname:lstrip=2)", "refs/heads"])
     if res.returncode != 0:
         raise Incomplete(f"git for-each-ref --merged {ref} failed: {res.stderr.strip()}")
     return {ln.strip() for ln in res.stdout.splitlines() if ln.strip()}
@@ -359,6 +406,28 @@ def worktree_dirty(path: str) -> bool:
     return bool(res.stdout.strip())
 
 
+def _pr_ref(pr: dict, key: str, sub: str = "ref") -> str | None:
+    """Read ``pr[key][sub]`` defensively, fail-closed.
+
+    ``head`` and ``base`` are nested objects in the GitHub payload. A malformed
+    response carrying a string there makes ``.get()`` raise AttributeError, which
+    would escape as an internal fault instead of the documented Incomplete — and
+    skipping a PR whose ``head`` cannot be read would silently drop the open-PR
+    veto, which is fail-OPEN. So an unreadable shape is an abort, not a skip.
+    """
+    obj = pr.get(key)
+    if obj is None:
+        return None
+    if not isinstance(obj, dict):
+        raise Incomplete(
+            f"gh returned a non-object '{key}' on PR {pr.get('number')}")
+    value = obj.get(sub)
+    if value is not None and not isinstance(value, str):
+        raise Incomplete(
+            f"gh returned a non-string '{key}.{sub}' on PR {pr.get('number')}")
+    return value
+
+
 def fetch_prs(slug: str, *, max_pages: int, per_page: int) -> dict:
     """Enumerate every PR (open + closed) via REST to completeness.
 
@@ -396,16 +465,22 @@ def fetch_prs(slug: str, *, max_pages: int, per_page: int) -> dict:
     open_bases: set[str] = set()
     for pages, dest in ((open_pages, open_by_head), (closed_pages, None)):
         for page in pages:
+            if not isinstance(page, list):
+                raise Incomplete(
+                    f"gh returned a non-list page ({type(page).__name__})")
             for pr in page:
-                head = (pr.get("head") or {}).get("ref")
+                if not isinstance(pr, dict):
+                    raise Incomplete(
+                        f"gh returned a non-object PR record ({type(pr).__name__})")
+                head = _pr_ref(pr, "head")
                 if not head:
                     continue
                 row = {"number": pr.get("number"),
-                       "sha": (pr.get("head") or {}).get("sha"),
+                       "sha": _pr_ref(pr, "head", "sha"),
                        "merged": pr.get("merged_at") is not None}
                 if dest is not None:
                     dest.setdefault(head, []).append(row)
-                    base = (pr.get("base") or {}).get("ref")
+                    base = _pr_ref(pr, "base")
                     if base:
                         # An OPEN PR's base is a live integration target: deleting
                         # that local branch would break the PR (live shape: PR
@@ -497,7 +572,47 @@ def _detached_head_ts(repo_root: str, worktrees: list[dict]) -> dict[str, int]:
     return out
 
 
-def _write_text_safe(path: str, text: str) -> None:
+def _under_repo_symlink(p: Path, repo_root: str | None) -> Path | None:
+    """The first symlinked component of ``p``'s parents that lies INSIDE the repo.
+
+    A checkout can plant ``docs/runbook -> /etc``, and ``mkstemp(dir=parent)``
+    plus ``os.replace`` would then write through it into the target — so a
+    repo-controlled symlinked component is refused. Components OUTSIDE the repo
+    are not: macOS makes ``/tmp`` itself a symlink to ``/private/tmp``, and
+    refusing every symlinked ancestor would refuse ordinary temp paths.
+
+    Both sides compare UNRESOLVED (``abspath``). Resolving them would erase the
+    very symlink this is looking for, and ``realpath``-ing the repo would also
+    resolve macOS's own ``/var -> /private/var``, breaking the prefix match.
+
+    KNOWN RESIDUAL (fail-open): the check is a prefix match, so it only fires
+    when the caller's path and ``repo_root`` are spelled in the SAME alias. If
+    an operator passes a ``--report`` path under an unresolved alias of the repo
+    (``/var/...`` while ``resolve_repo`` returned ``/private/var/...``) a planted
+    component is not detected. ``repo_root=None`` also allows by construction.
+    Closing this needs an openat/O_NOFOLLOW component walk, not a string prefix.
+    """
+    if repo_root is None:
+        return None
+    # BOTH sides unresolved, deliberately. `realpath`-ing the repo would resolve
+    # macOS's own `/var -> /private/var` (and `/tmp -> /private/tmp`) and the
+    # prefix match against an operator-supplied path would then fail — silently
+    # failing OPEN on exactly the plant this guards.
+    root = Path(os.path.abspath(repo_root))
+    parent = Path(os.path.abspath(str(p.parent)))
+    try:
+        rel = parent.relative_to(root)
+    except ValueError:
+        return None
+    walk = root
+    for part in rel.parts:
+        walk = walk / part
+        if walk.is_symlink():
+            return walk
+    return None
+
+
+def _write_text_safe(path: str, text: str, repo_root: str | None = None) -> None:
     """Write atomically, refusing to follow a symlink at ``path`` (#4098 class).
 
     ``Path.write_text`` follows a symlink; a planted link at a documented report
@@ -505,8 +620,16 @@ def _write_text_safe(path: str, text: str) -> None:
     replaces the link itself, never its target.
     """
     p = Path(path)
+    # The leaf always; and a symlinked PARENT only when the repo itself controls
+    # it (see `_under_repo_symlink`) — the naive "any symlinked ancestor" rule
+    # refuses `/tmp/report.md` on macOS, where `/tmp` IS a symlink.
     if p.is_symlink():
         raise Incomplete(f"refusing to write through a symlink: {path}")
+    planted = _under_repo_symlink(p, repo_root)
+    if planted is not None:
+        raise Incomplete(
+            f"refusing to write through a symlinked directory inside the "
+            f"repository: {planted}")
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=p.name + ".tmp.", dir=str(p.parent))
@@ -530,8 +653,8 @@ def _write_text_safe(path: str, text: str) -> None:
         raise
 
 
-def _write_json_safe(path: str, payload: dict) -> None:
-    _write_text_safe(path, json.dumps(payload, indent=2) + "\n")
+def _write_json_safe(path: str, payload: dict, repo_root: str | None = None) -> None:
+    _write_text_safe(path, json.dumps(payload, indent=2) + "\n", repo_root)
 
 
 def _make_backup_bundle(repo_root: str, path: str, targets: list[dict]) -> None:
@@ -557,6 +680,15 @@ def _make_backup_bundle(repo_root: str, path: str, targets: list[dict]) -> None:
         dest = Path(repo_root) / dest
     if dest.is_symlink():
         raise Incomplete(f"refusing to write a symlinked bundle path: {dest}")
+    planted = _under_repo_symlink(dest, repo_root)
+    if planted is not None:
+        raise Incomplete(
+            f"refusing to write a bundle through a symlinked directory inside "
+            f"the repository: {planted}")
+    if dest.exists():
+        # The bundle is the DURABLE artifact — `os.replace` over an existing one
+        # would discard the only durable copy of a previous run's tips.
+        raise Incomplete(f"refusing to overwrite an existing backup bundle: {dest}")
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -636,6 +768,18 @@ def _fmt_ts(ts: int) -> str:
         return f"(unrepresentable: {ts})"
 
 
+def _md(value) -> str:
+    """Escape an untrusted, git-derived string for a Markdown table cell.
+
+    A refname may legally contain a backtick and ``|`` (``git check-ref-format``
+    accepts both), so a crafted branch name would otherwise break the row's cell
+    boundary and the surrounding code span of a report that gets committed and
+    rendered. HTML-encoding the backtick keeps it visible without closing a span.
+    """
+    s = "" if value is None else str(value)
+    return s.replace("&", "&amp;").replace("|", "\\|").replace("`", "&#96;")
+
+
 def build_report(rows: list[dict], worktrees: list[dict], ancestors: set[str],
                  *, repo_root: str, slug: str | None, main_ref_used: str,
                  include_closed_unmerged: bool, engine_output: str | None = None,
@@ -696,7 +840,7 @@ def build_report(rows: list[dict], worktrees: list[dict], ancestors: set[str],
     out.append("|---|---|---|---|---|---|")
     for r in sorted(deletable, key=lambda r: r["ts"]):
         age = (now - r["ts"]) // 86400
-        out.append(f"| `{r['branch']}` | `{r['oid'][:12]}` | {age} | {r['reason']} | "
+        out.append(f"| `{_md(r['branch'])}` | `{r['oid'][:12]}` | {age} | {r['reason']} | "
                    f"{r['commits_survive']} | {r['pr_number'] or '—'} |")
     out.append("")
 
@@ -708,8 +852,8 @@ def build_report(rows: list[dict], worktrees: list[dict], ancestors: set[str],
         out.append("|---|---|---|---|---|")
         for r in sorted(held_safe, key=lambda r: r["ts"]):
             dirty = "yes" if r.get("dirty") else "no"
-            out.append(f"| `{r['branch']}` | `{r['worktree']}` | {dirty} | {r['reason']} | "
-                       f"{r['pr_number'] or '—'} |")
+            out.append(f"| `{_md(r['branch'])}` | `{_md(r['worktree'])}` | {dirty} | "
+                       f"{r['reason']} | {r['pr_number'] or '—'} |")
         out.append("")
 
     out.append("## Judgement — no PR, not an ancestor (never auto-deleted)\n")
@@ -718,7 +862,7 @@ def build_report(rows: list[dict], worktrees: list[dict], ancestors: set[str],
     out.append("|---|---|---|")
     for r in judgement:
         age = (now - r["ts"]) // 86400
-        out.append(f"| `{r['branch']}` | `{r['oid'][:12]}` | {age} |")
+        out.append(f"| `{_md(r['branch'])}` | `{r['oid'][:12]}` | {age} |")
     out.append("")
 
     if detached:
@@ -730,25 +874,35 @@ def build_report(rows: list[dict], worktrees: list[dict], ancestors: set[str],
         for wt in sorted(detached, key=lambda w: ts_map.get(w.get("head") or "", 1 << 62)):
             ts = ts_map.get(wt.get("head") or "")
             age = "—" if ts is None else str((now - ts) // 86400)
-            out.append(f"| `{wt['path']}` | `{(wt.get('head') or '?')[:12]}` | {age} |")
+            out.append(f"| `{_md(wt['path'])}` | `{(wt.get('head') or '?')[:12]}` | {age} |")
         out.append("")
 
     if recovery is not None:
         out.append("## Recovery record (written before deletion)\n")
-        out.append("Full tip SHAs; `git branch <name> <sha>` restores a branch. Recovery window is "
-                   "the reflog (~30 days) until gc, or the `--backup-bundle` file indefinitely.\n")
+        out.append("Full tip SHAs; `git branch <name> <sha>` restores a branch. These SHAs are "
+                   "**not** durable on their own — `git update-ref -d` removes the deleted ref's "
+                   "reflog, so a SHA restores a branch only until the objects are pruned "
+                   "(`gc.pruneExpire`, 2 weeks by default, immediately under `gc --prune=now`). "
+                   "The backup bundle written by `--apply` is the durable copy; without it "
+                   "(`--no-backup`) these tips can become unrecoverable.\n")
         out.append("| branch | tip | verdict | PR |")
         out.append("|---|---|---|---|")
         for r in recovery:
-            out.append(f"| `{r['branch']}` | `{r['oid']}` | {r.get('verdict', '')} | "
+            out.append(f"| `{_md(r['branch'])}` | `{r['oid']}` | {r.get('verdict', '')} | "
                        f"{r.get('pr_number') or '—'} |")
         out.append("")
 
     if engine_output is not None:
         out.append("## Delegated worktree engine (`pi-reap-worktrees.sh`)\n")
         out.append("```")
-        out.append(engine_output.strip()[-4000:])
-        out.append("```")
+        # The engine's own output is untrusted text; a fence wider than any run of
+        # backticks in it cannot be closed early by the payload. `out[-1]` is the
+        # opening fence just appended.
+        payload = engine_output.strip()[-4000:]
+        fence = "`" * max(3, max((len(m) for m in payload.split("\n")), default=0) + 1)
+        out[-1] = fence
+        out.append(payload)
+        out.append(fence)
         out.append("")
 
     if apply_results is not None:
@@ -775,24 +929,24 @@ def build_report(rows: list[dict], worktrees: list[dict], ancestors: set[str],
         out.append("| branch | tip |")
         out.append("|---|---|")
         for r in deleted:
-            out.append(f"| `{r['branch']}` | `{r['oid']}` |")
+            out.append(f"| `{_md(r['branch'])}` | `{r['oid']}` |")
         out.append("")
         if restored:
             out.append("### Restored — deleted while a worktree created in the window held it\n")
             out.append("The ref was deleted and then restored by the post-delete reconcile; "
                        "the branch is intact.\n")
             for r in restored:
-                out.append(f"- `{r['branch']}` — {r.get('detail', 'restored')}")
+                out.append(f"- `{_md(r['branch'])}` — {r.get('detail', 'restored')}")
             out.append("")
         if refused:
             out.append("### Refused\n")
             for r in refused:
-                out.append(f"- `{r['branch']}` — {r.get('detail', 'refused')}")
+                out.append(f"- `{_md(r['branch'])}` — {r.get('detail', 'refused')}")
             out.append("")
         if unknown:
             out.append("### Aborted / unrestored — deleted-or-unknown\n")
             for r in unknown:
-                out.append(f"- `{r['branch']}` — {r.get('detail', r['result'])}")
+                out.append(f"- `{_md(r['branch'])}` — {r.get('detail', r['result'])}")
             out.append("")
     return "\n".join(out) + "\n"
 
@@ -845,8 +999,14 @@ def _reconcile_held_deletions(repo_root: str, results: list[dict]) -> None:
                           f"refs/heads/{branch}"])
             if probe.returncode == 0 and probe.stdout.strip():
                 continue
+        # The all-zero OID is the create-only sentinel and its WIDTH is
+        # repo-format dependent: a SHA-256 repo rejects a 40-char value ("not a
+        # valid old SHA1"), so the restore would fail and the branch would stay
+        # deleted under a live checkout.
+        fmt_res = _run(["git", "-C", repo_root, "rev-parse", "--show-object-format"])
+        width = 64 if fmt_res.returncode == 0 and fmt_res.stdout.strip() == "sha256" else 40
         res = _run(["git", "-C", repo_root, "update-ref",
-                    f"refs/heads/{branch}", row["oid"], "0" * 40])
+                    f"refs/heads/{branch}", row["oid"], "0" * width])
         if res.returncode == 0:
             row["result"] = "restored"
             row["detail"] = ("deleted while a worktree created during the delete "
@@ -1003,7 +1163,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--report", default=None, help="write a markdown report to this path")
     p.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     p.add_argument("--backup-bundle", default=None,
-                   help="write one git bundle of the deleted tips before deleting")
+                   help="write one git bundle of the deleted tips before deleting "
+                        "(default on --apply: "
+                        "<repo>/branch-reaper-backup-<epoch>-<random>.bundle)")
+    p.add_argument("--no-backup", action="store_true",
+                   help="do NOT write a backup bundle on --apply; the recovery record "
+                        "then holds only SHAs, which do not survive object pruning")
     p.add_argument("--max-pr-pages", type=int, default=DEFAULT_MAX_PR_PAGES)
     p.add_argument("--engine-timeout", type=int, default=900)
     return p
@@ -1035,6 +1200,21 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_INCOMPLETE_AFTER_DELETE
         print(f"branch_reaper: INCOMPLETE — {exc}.", file=sys.stderr)
         return EXIT_INCOMPLETE
+    except (SystemExit, KeyboardInterrupt):
+        # Deliberate exits are not faults — never relabel them.
+        raise
+    except BaseException as exc:
+        # The boundary also owns the UNexpected — a malformed `gh` payload that
+        # trips an AttributeError, or a bug in a helper. Without this the exit
+        # table has no such code and Python's own exit 1 leaks out; after a
+        # deletion that would drop the exit-6 signal entirely.
+        if _LANDED:
+            print(f"branch_reaper: INTERNAL ERROR AFTER DELETION — {exc!r}. At least "
+                  f"one branch was deleted or left in an unknown state.",
+                  file=sys.stderr)
+            return EXIT_INCOMPLETE_AFTER_DELETE
+        print(f"branch_reaper: INTERNAL ERROR — {exc!r}.", file=sys.stderr)
+        return EXIT_INTERNAL
 
 
 def _run_main(args) -> int:
@@ -1044,6 +1224,10 @@ def _run_main(args) -> int:
         print(f"branch_reaper: {exc}", file=sys.stderr)
         return EXIT_USAGE
     if args.slug:
+        if not _valid_slug(args.slug):
+            print(f"branch_reaper: --slug must be exactly 'owner/name', got "
+                  f"{args.slug!r}", file=sys.stderr)
+            return EXIT_USAGE
         slug = args.slug
 
     if args.apply and is_main_checkout(repo_root):
@@ -1130,27 +1314,48 @@ def _run_main(args) -> int:
                 if r["worktree"]:
                     r["dirty"] = worktree_dirty(r["worktree"])
             detached_ts = _detached_head_ts(repo_root, worktrees)
+            # ALL SAFE rows, not just the un-held ones. A worktree holding one of
+            # these can be released in the window between this write and
+            # `delete_branches`' own held re-read (the report write, the bundle
+            # write), and the branch IS then deleted — so excluding held rows can
+            # leave a deleted tip absent from the only durable record. `git
+            # update-ref -d` also removes that ref's reflog, so there is no
+            # second chance.
             recovery = [{"branch": r["branch"], "oid": r["oid"], "verdict": r["reason"],
                          "pr_number": r["pr_number"]}
-                        for r in rows if r["verdict"] == VERDICT_SAFE and not r["worktree"]]
+                        for r in rows if r["verdict"] == VERDICT_SAFE]
             # Durable recovery record BEFORE any deletion (so a crash mid-delete
             # still leaves the tips recoverable), independent of --report.
             recovery_path = (args.report + ".recovery.json") if args.report else \
                 os.path.join(repo_root, "branch-reaper-recovery.json")
             _write_json_safe(recovery_path, {"generated": _now(), "repo": repo_root,
                                              "include_closed_unmerged": args.include_closed_unmerged,
-                                             "branches": recovery})
+                                             "branches": recovery}, repo_root)
             if args.report:
                 _write_text_safe(args.report, build_report(
                     rows, worktrees, ancestors, repo_root=repo_root, slug=slug,
                     main_ref_used=ref, include_closed_unmerged=args.include_closed_unmerged,
-                    engine_output=engine_output, recovery=recovery, detached_ts=detached_ts))
+                    engine_output=engine_output, recovery=recovery, detached_ts=detached_ts),
+                    repo_root)
             free_before = _disk_free_kb(repo_root)
             apply_results = []
             # delete_branches re-reads the checked-out set itself, after the
             # bundle write and again every HELD_RECHECK_BATCH deletes: the caller
             # snapshot above is for the report and the recovery record only.
-            delete_branches(repo_root, rows, backup_bundle=args.backup_bundle,
+            # Default the bundle ON for --apply: the SHAs in the recovery record
+            # are not durable on their own (`update-ref -d` removes the deleted
+            # ref's reflog), so an unbacked-up apply becomes unrecoverable once gc
+            # prunes. `--no-backup` is the explicit opt-out.
+            backup_bundle = args.backup_bundle
+            if args.no_backup:
+                print("branch_reaper: --no-backup — the recovery record holds only SHAs, "
+                      "which do NOT survive object pruning (`gc.pruneExpire`, 2 weeks by "
+                      "default). Once pruned, the deleted tips are unrecoverable.",
+                      file=sys.stderr)
+            if backup_bundle is None and not args.no_backup:
+                backup_bundle = os.path.join(
+                    repo_root, f"branch-reaper-backup-{_now()}-{os.urandom(3).hex()}.bundle")
+            delete_branches(repo_root, rows, backup_bundle=backup_bundle,
                             results=apply_results)
             _mark_landed(apply_results)
             free_after = _disk_free_kb(repo_root)
@@ -1197,7 +1402,7 @@ def _run_main(args) -> int:
                               engine_output=engine_output, apply_results=apply_results, disk=disk,
                               recovery=recovery, detached_ts=detached_ts)
         if args.report:
-            _write_text_safe(args.report, report)
+            _write_text_safe(args.report, report, repo_root)
     except (Incomplete, OSError) as exc:
         # Same token, same after-deletion distinction, same boundary catch as the
         # handler above — this is the POST-delete write, so an OSError here is

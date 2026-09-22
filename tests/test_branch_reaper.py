@@ -564,6 +564,125 @@ cat "$d/${{state}}_pages.json"
         self.assertTrue(rec.exists())
         self.assertIn(sha, [b["oid"] for b in json.loads(rec.read_text())["branches"]])
 
+    def test_a_tag_colliding_with_a_branch_keeps_the_plain_branch_key(self):
+        # `%(refname:short)` is the shortest UNAMBIGUOUS name across ALL refs, so a
+        # tag named like a branch turns the key into `heads/release/1.0`: the PR
+        # match then misses (skipping the open-PR veto) and the delete builds a
+        # nonexistent `refs/heads/heads/...`, refusing every delete.
+        br = self._load_tool()
+        sha = self.commit_on("release/1.0", "release work")
+        _git(self.repo, "tag", "release/1.0", sha)
+        got = br.enum_branches(str(self.repo))
+        self.assertIn("release/1.0", got, sorted(got))
+        self.assertNotIn("heads/release/1.0", got, sorted(got))
+
+    def test_recovery_record_covers_held_safe_branches_too(self):
+        # A worktree holding a SAFE branch can be released between the recovery
+        # write and `delete_branches`' own held re-read — the branch IS then
+        # deleted. Excluding held rows can therefore leave a DELETED tip out of
+        # the only durable record (`update-ref -d` also removes its reflog).
+        sha = self.commit_on("merged/held", "held work")
+        self.add_pr("merged", "merged/held", sha)
+        _git(self.repo, "worktree", "add", str(self.tmp / "held-wt"), "merged/held")
+        self.write_fixtures()
+        rc, out, err = self.run_tool(["--apply"], repo=self.driver)
+        self.assertEqual(rc, 0, err + out)
+        rec = self.driver / "branch-reaper-recovery.json"
+        names = [b["branch"] for b in json.loads(rec.read_text())["branches"]]
+        self.assertIn("merged/held", names, names)
+
+    def test_a_malformed_slug_is_a_usage_error(self):
+        br = self._load_tool()
+        with self._stub_env():
+            rc = br.main(["--repo", str(self.driver), "--slug", "a b/c"])
+        self.assertEqual(rc, 3, rc)
+
+    def test_a_ported_github_remote_still_yields_owner_name(self):
+        br = self._load_tool()
+        _git(self.repo, "remote", "add", "origin", "ssh://git@github.com:22/o/n.git")
+        self.assertEqual(br._slug_from_remote(str(self.repo)), "o/n")
+
+    def test_apply_writes_a_backup_bundle_by_default(self):
+        sha = self.commit_on("merged/b", "work")
+        self.add_pr("merged", "merged/b", sha)
+        self.write_fixtures()
+        rc, out, err = self.run_tool(["--apply"], repo=self.driver)
+        self.assertEqual(rc, 0, err + out)
+        self.assertTrue(list(self.driver.glob("branch-reaper-backup-*.bundle")),
+                        "no backup bundle written by default")
+
+    def test_no_backup_skips_the_bundle(self):
+        sha = self.commit_on("merged/b", "work")
+        self.add_pr("merged", "merged/b", sha)
+        self.write_fixtures()
+        rc, out, err = self.run_tool(["--apply", "--no-backup"], repo=self.driver)
+        self.assertEqual(rc, 0, err + out)
+        self.assertEqual(list(self.driver.glob("branch-reaper-backup-*.bundle")), [])
+
+    def test_markdown_cells_escape_pipes_and_backticks(self):
+        # A refname may legally contain both, so a crafted branch name would break
+        # the report's cell boundary and its surrounding code span.
+        br = self._load_tool()
+        self.assertEqual(br._md("a|b"), "a\\|b")
+        self.assertEqual(br._md("a`b"), "a&#96;b")
+
+    def test_current_branch_is_unambiguous_under_a_tag_collision(self):
+        # `rev-parse --abbrev-ref HEAD` returns `heads/release/1.0` when a tag
+        # collides, which matches no `enum_branches` key — so the "current branch
+        # is PRESERVE" rule would silently protect nothing.
+        br = self._load_tool()
+        sha = self.commit_on("release/1.0", "release work")
+        _git(self.repo, "tag", "release/1.0", sha)
+        _git(self.repo, "checkout", "release/1.0")
+        self.assertEqual(br.current_branch(str(self.repo)), "release/1.0")
+
+    def test_a_report_directly_in_the_system_tmp_is_allowed(self):
+        # macOS makes /tmp a symlink to /private/tmp. Refusing EVERY symlinked
+        # ancestor would refuse an ordinary temp path — and `--apply
+        # --report /tmp/r.md` would abort before deleting anything.
+        br = self._load_tool()
+        target = Path("/tmp") / f"branch-reaper-{os.urandom(4).hex()}.md"
+        br._write_text_safe(str(target), "hello\n", str(self.repo))
+        self.assertTrue(target.read_text().startswith("hello"))
+        target.unlink()
+
+    def test_a_repo_planted_symlinked_directory_is_still_refused(self):
+        br = self._load_tool()
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        os.symlink(str(outside), str(self.repo / "planted"))
+        with self.assertRaises(br.Incomplete):
+            br._write_text_safe(str(self.repo / "planted" / "r.md"), "x\n", str(self.repo))
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_pr_ref_rejects_a_malformed_nested_shape(self):
+        # A string `head` would otherwise raise AttributeError and escape as an
+        # internal fault (exit 5) instead of the documented INCOMPLETE; skipping
+        # it instead would drop the open-PR veto, which is fail-OPEN.
+        br = self._load_tool()
+        with self.assertRaises(br.Incomplete):
+            br._pr_ref({"number": 1, "head": "oops"}, "head")
+        with self.assertRaises(br.Incomplete):
+            br._pr_ref({"number": 1, "head": {"ref": 7}}, "head")
+        self.assertEqual(br._pr_ref({"number": 1, "head": {"ref": "x"}}, "head"), "x")
+        self.assertIsNone(br._pr_ref({"number": 1}, "head"))
+
+    def test_the_repo_owner_name_form_is_slug_validated_too(self):
+        br = self._load_tool()
+        with self._stub_env():
+            rc = br.main(["--repo", "a b/c"])
+        self.assertEqual(rc, 3, rc)
+
+    def test_overwriting_an_existing_backup_bundle_is_refused(self):
+        # The bundle is the DURABLE artifact; `os.replace` over an existing one
+        # would discard the only durable copy of an earlier run's tips.
+        br = self._load_tool()
+        dest = self.tmp / "existing.bundle"
+        dest.write_text("already here")
+        with self.assertRaises(br.Incomplete):
+            br._make_backup_bundle(str(self.repo), str(dest), [])
+        self.assertEqual(dest.read_text(), "already here")
+
     def test_backup_bundle_written_before_deletion(self):
         sha = self.commit_on("merged/branch", "merged work")
         self.add_pr("merged", "merged/branch", sha)

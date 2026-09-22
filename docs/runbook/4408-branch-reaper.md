@@ -11,7 +11,7 @@ aboutObjects: tortoise
 
 # branch-reaper dry-run report — #4408
 
-> **Provenance.** Generated at commit `c98c4fbc0` with the tool as of that
+> **Provenance.** Generated at commit `afc0c9a76` with the tool as of that
 > revision: the dry-run classification below precedes the actual reaping pass
 > whose results appear in the Post-apply section. Round 2 of code review later
 > changed the tool's report format (a `dirty` column on the held table, HEAD-age
@@ -19,6 +19,15 @@ aboutObjects: tortoise
 > H2 before the results), so a fresh `--report` run renders slightly differently.
 > The classification numbers and the deleted count are the historical evidence
 > of the pass and are unchanged.
+>
+> ⚠️ **The recovery rows below carry a claim that is WRONG.** Their recovery
+> column reads `reflog ~30d`, which `git update-ref -d` does not provide — it
+> deletes the deleted ref's reflog, so a tip survives only until the objects are
+> pruned (`gc.pruneExpire`, 2 weeks by default; immediately under
+> `gc --prune=now`). The tool's report text is corrected, and `--apply` now
+> writes a backup bundle by default. The rows are left as generated so the
+> historical pass stays readable: read `reflog ~30d` as evidence of the defect,
+> not as guidance.
 
 Generated: 2026-09-21 · repo `/Users/danielospina/Documents/GitHub/tortoise/.worktrees/4408-branch-reaper` · slug `daniel-ospina/tortoise` · main ref `origin/main`
 
