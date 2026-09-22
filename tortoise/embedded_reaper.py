@@ -1860,14 +1860,15 @@ def _cooldown_check(registry: dict | None,
     # DELIBERATE (pre-existing, not a #4496 regression): an UNMEASURABLE
     # uptime (`None` — a `ps` timeout/OSError, or a non-text stdout read as
     # undeterminable) is NOT treated as protected. The boot cooldown is a
-    # CLOCK guard against reaping a server that is still starting, not a
-    # safety gate: the safety gates are `reap()`'s live-pid / orphan-
-    # confirmation / 0-client / owner-record / held-flock checks, which all
-    # run regardless of classification. Treating a failed probe as protected
-    # would make the whole reaper inert whenever `ps` is slow or absent —
-    # the #3599 failure class — and `_run_text` turning a bad stdout into
-    # `None` widened only WHICH inputs reach this path, not its semantics
-    # (a real `ps` timeout already produced `None` here).
+    # CLOCK guard, and `"candidate"` is only admission to `reap()`'s kill
+    # path — where the live-pid / orphan-confirmation / 0-client /
+    # owner-record / held-flock / provenance gates still decide. Classifying a
+    # failed probe as `protected` instead would skip the record at `reap()`'s
+    # `classification != "candidate"` short-circuit and make the whole reaper
+    # inert whenever `ps` is slow or absent — the #3599 failure class.
+    # `_run_text` turning a bad stdout into `None` widened only WHICH inputs
+    # reach this path, not its semantics (a real `ps` timeout already produced
+    # `None` here).
     uptime = _uptime_seconds(pid) if pid else 0.0
     min_uptime = _parse_min_uptime()
     if uptime is not None and uptime < min_uptime:
