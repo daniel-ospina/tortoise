@@ -150,8 +150,9 @@ procedure for objective 1's done-state. C is a real improvement but a separate, 
 > **Residual (manual-only):** that a real `pi` process loads the installed extension and invokes
 > `turn_end`/`session_shutdown`. Procedure: on a **non-dogfood** install, run
 > `pi --no-extensions -e ~/.pi/agent/extensions/tortoise-capture.ts -p "<trivial prompt>"` and assert
-> the session is **retrievable** — the specific captured content read back (`GET /v1/sessions/{id}`
-> turns + extracted points / `GET /v1/search?q=…`); a row in `GET /v1/sessions` alone proves only
+> the session is **retrievable** — the specific captured content read back. `GET /v1/sessions/{id}` is
+> the authoritative session-scoped read; `GET /v1/search?q=…` is **graph-wide**, so it counts only
+> when a hit's `sessionId` is the probed session's. A row in `GET /v1/sessions` alone proves only
 > `captured`, never `retrievable` (owner ruling, B1 report). A read-back 504 is **UNMEASURABLE**
 > (never PASS/FAIL), and no receipt line while the session is present is the `#4675` post-commit-504
 > false negative (the client's terminality rule), not a seam failure. Run by a maintainer with a live
@@ -201,18 +202,12 @@ executable-verification gap and states the claim's true status.
 ## Known residual of this scope's own test
 
 `_node_supports_ts` **skips** (green) when Node < 22.6, and `tools/skip-guard.py` does not guard
-Node-availability skips — so on such a runner the new check is a silent no-op. This is inherited
-from the existing behavioral test, not introduced here, and CI's `ubuntu-latest` ships Node ≥ 22.6
-(verified), so it runs today. Recorded, not fixed here (changing the skip to a fail is its own
-change against the existing test's contract).
+Node-availability skips — so on such a runner the **pre-existing** behavioral suite is a silent
+no-op. That is inherited from the older test, not introduced here, and its skip contract is
+deliberately left alone (changing it is its own change).
 
-**Amended 2026-09-22 (code-review round 2) — the deferral is scoped to the PRE-EXISTING suite.**
-That deferral stands for `test_extension_behavioral_suite`, whose contract this scope does not touch.
-It does **not** apply to the two installed-artifact checks this scope ADDS: they now **fail closed
-under CI** (`pytest.fail`, not `pytest.skip`, when `os.environ["CI"]` is set), because a fail-open
-guard on the only executable proof that the seam works as installed is precisely the defect this
-scope exists to close — shipping it would reproduce the gap under review. The python-ci `test` lane
-also provisioned Node 22 (`actions/setup-node@v4`) in the same round, so the requirement is owned by
-the lane rather than inherited from the runner image. Both directions verified: stub `node`
-v20.11.0 + `CI=true` → the two checks FAIL by name; real Node 22.23.2 + `CI=true` → 8 passed,
-0 skipped (the behavioral suite still skips, and its `1 skipped` stays visible in the run).
+The two installed-artifact checks this scope ADDS do **not** share that residual: they fail closed
+under CI (`pytest.fail`, not `pytest.skip`, when `os.environ["CI"]` is set and Node is unusable),
+and the lanes that run them provision Node 22 (`actions/setup-node@v4`), so the requirement is owned
+by the lane rather than inherited from the runner image. Both directions are pinned by tests in
+`tests/test_pi_capture_hooks.py`.

@@ -316,6 +316,14 @@ jobs:
         if: needs.dedup-check.outputs.skip != 'true'
         with:
           python-version: '3.12'  # pyproject requires-python >= 3.12 (mirrors python-ci.yml)
+      - uses: actions/setup-node@v4
+        # #4620: this job runs the whole fast suite, which collects
+        # tests/test_pi_capture_hooks.py. Its two installed-artifact checks FAIL
+        # (rather than skip) when node is absent or < 22.6, so provision the
+        # toolchain here instead of inheriting it from the runner image.
+        if: needs.dedup-check.outputs.skip != 'true'
+        with:
+          node-version: '22'  # --experimental-strip-types needs >= 22.6
       - name: Install
         if: needs.dedup-check.outputs.skip != 'true'
         run: |

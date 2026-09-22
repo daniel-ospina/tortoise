@@ -104,7 +104,9 @@ source-level pins above still ran); the python-ci `test` lane provisions Node 22
    beside it), run the probe, assert `proc.returncode != 0` and `"ERR_MODULE_NOT_FOUND"` /
    `"helper.ts"` in `proc.stdout + proc.stderr`.
 5. Guard (both tests): `node = _require_node()` — absent / `not _node_supports_ts(node)` →
-   `pytest.skip` locally, `pytest.fail` under CI (see the code-review amendment at the end).
+   `pytest.skip` locally, `pytest.fail` under CI (pinned by
+   `test_require_node_fails_closed_when_node_is_absent` and
+   `test_require_node_fails_closed_on_a_pre_strip_types_node`).
 
 **Integration surface:** pytest → `node` subprocess over a temp `HOME`; no network (fetch injected), no
 ambient credential (`_scrubbed_env`), no real spool (explicit `spoolDir`).
@@ -130,9 +132,14 @@ reason stops naming the suite / the residual, or if **either** absolute sentence
    assert "installed artifact" in detail
    assert "manual-only" in detail
    assert "not firable by this command" in detail
-   assert "cannot be executed headlessly" not in detail
-   assert "cannot be fired headlessly" not in detail
-   assert "no headless trigger" not in detail
+   absolutes = (
+       "cannot be executed headlessly",
+       "cannot be fired headlessly",
+       "no headless trigger",
+   )
+   for phrase in absolutes:
+       assert phrase not in detail, phrase
+       assert phrase not in (session_verify.__doc__ or ""), phrase
    ```
    RED against the current string.
 2. Reword `UNVERIFIABLE_REASON["pi"]` to (keeping `"extension"`; the string is PLAIN TEXT — no
@@ -222,8 +229,10 @@ executably verified, (b) what is manual-only, (c) the exact procedure **with its
   over-claim; `:248` is a Task-14 `- Test:` bullet, not the verification row). The amendment states:
   the seam logic + installed artifact ARE executably verified (cite `tortoise-capture.test.ts` and
   `tests/test_pi_capture_hooks.py`); the real-`pi`-process leg is **manual-only**, its pass condition
-  is **`retrievable` — the specific captured content read back** (`GET /v1/sessions/{id}` turns +
-  points / `GET /v1/search?q=…`; a list row is not sufficient), and a read-back 504 is UNMEASURABLE
+  is **`retrievable` — the specific captured content read back**. `GET /v1/sessions/{id}` is the
+  authoritative session-scoped read; `GET /v1/search?q=…` is graph-wide, so it counts only when a
+  hit's `sessionId` is the probed session's. A list row is not sufficient, and a read-back 504 is
+  UNMEASURABLE
   (procedure + actor + `#3713`/`#4661`/`#4675`), citing `tortoise/pi-hooks/README.md`.
 - A **Pi/session-capture row is added to `#1714`'s `### Verification Checklist`** (its stated
   done-state; it has no such row today), naming the executable check and the manual residual.
@@ -248,6 +257,9 @@ Order: **1 → 2 → 3 → 4 → 5** (Task 1 is the critical path; Tasks 2–5 a
 4. `printf '%s\n' tests/test_pi_capture_hooks.py tortoise/session_verify.py tortoise/pi-hooks/README.md | python3 tools/ci_selection.py --changed-files -`
    → assert `test_pi_capture_hooks.py` and `test_session_verify.py` are in the emitted `test_files`.
 5. `bash scripts/check-pipeline-compliance.sh` (pre-commit docs/version gate; `scripts` → `$AGENT_INFRA_PATH/scripts`).
+6. Node gate, both directions: `CI=true` with a stub `node` reporting v20.11.0 → the two
+   installed-artifact checks FAIL by name (the behavioral suite still skips); real Node ≥ 22.6 with
+   `CI=true` → 8 passed, 0 skipped.
 
 ## Reviewers
 
@@ -259,36 +271,9 @@ token; P2 `#4680`/`#1714` placement and the miscited objective-1 row, Node strip
 actor resolvability, append-don't-rewrite, done-state location; P4 snippet bindings), and cycle-3
 findings (**P1** the manual procedure measured a receipt `#4675` suppresses and omitted the
 `retrievable` pass condition; P2 the installed-artifact check mis-attributed to the TS suite, false
-`#1714` provenance; P4 README run-command conflict) are all incorporated above.
+`#1714` provenance; P4 README run-command conflict) are all incorporated above. A fourth cycle ran one
+over the Low-Medium cap of 3 and returned a P1 (the `retrievable` pass condition left under-defined),
+which was incorporated too: this is an **incorporation exit, not a clean exit**.
 
-## Code-review amendment (2026-09-22) — implementation fix rounds (PR #4733)
+<!-- plan-review: cycles=4, status=incorporation-exit-over-cap, version=2.3.0 -->
 
-Two fresh-context code-review rounds ran against the implementation. Where a finding changed the
-shipped behaviour, the text above was corrected in place; this section records the deliberate
-**overrides** so a later lane can tell a ruling from an accident.
-
-- **`_require_node()` now fails closed under CI.** Task 1's acceptance and Step 5 above originally
-  specified a skip in every case. That was reversed for the two checks this plan ADDS: they are the
-  only executable proof that the seam works at its install location, so a CI runner that cannot run
-  them must fail by name rather than report green with the check absent. **This deliberately
-  overrides the scoping artifact's "Recorded, not fixed here"**
-  (`docs/scoping/2026-09-22-4620-pi-capture-verification.md`), which deferred a skip→fail change out
-  of respect for the *pre-existing* behavioral suite's contract. The override is scoped to the NEW
-  checks only — `test_extension_behavioral_suite` keeps its skip and its contract is untouched — and
-  it is in scope here because the fail-open guard was introduced by this plan's own gate.
-- The python-ci `test` lane now provisions Node 22 (`actions/setup-node@v4`), so the fail-closed
-  requirement is owned by the lane rather than inherited from the runner image.
-- Task 2's Step 1 spec originally pinned the bare link name as a substring of the detail — an
-  assertion that could never fail, because `_unverifiable_link` prefixes the detail with
-  `"<link> not exercised: "` and the link IS `installed`. The shipped assertion pins a phrase only
-  the reason can supply (`"installed artifact"`), and the absolute pin now applies its full phrase
-  list to BOTH `detail` and the module docstring.
-- Task 2's Step 2 quote is aligned with the shipped REASON string (which is the text that block
-  replaces): the `(run by tests/test_pi_capture_hooks.py)` parenthetical and
-  "that **test** file's node probe". (The module DOCSTRING carries its own wording — "the artifact
-  AS INSTALLED…" — and is a separate copy, not this quote.)
-- The manual read-back names `GET /v1/search?q=…`, which is **graph-wide**: it counts as
-  `retrievable` only when a hit's `sessionId` is the probed session's id.
-- Task 1's Verification section gains the fail-closed direction as a checked behaviour: stub `node`
-  reporting v20.11.0 with `CI=true` → the two checks FAIL by name; real Node 22.23.2 with `CI=true`
-  → 8 passed, 0 skipped.

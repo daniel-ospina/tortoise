@@ -231,9 +231,9 @@ def _require_node() -> str:
     Locally the skip is kept, because the source-level pins above still ran.
 
     The pre-existing ``test_extension_behavioral_suite`` above deliberately
-    keeps its own unconditional skip: this gate is for the checks this PR ADDS,
-    and widening it to the older suite is a separate change against that
-    suite's contract (recorded in the scoping artifact).
+    keeps its own skip (it is not escalated to a CI failure): this gate is for
+    the checks this PR ADDS, and widening it to the older suite is a separate
+    change against that suite's contract (recorded in the scoping artifact).
     """
     in_ci = bool(os.environ.get("CI"))
     node = shutil.which("node")
@@ -277,6 +277,53 @@ def _run_installed_probe(tmp_home: Path, installed: Path, node: str):
             "PROBE_SPOOL": str(tmp_home / "spool"),
         },
     )
+
+
+def _guard_outcome() -> str:
+    """Call `_require_node()` and RETURN what it did.
+
+    The outcome is returned rather than raised on purpose: `pytest.skip` raises
+    a BaseException that pytest turns into a SKIP, so a `pytest.raises`-based pin
+    cannot tell "the gate failed closed" from "the gate skipped" — it would let
+    a mutated skip read as green. Catching both sides makes the difference an
+    assertion.
+    """
+    try:
+        _require_node()
+    except pytest.fail.Exception as exc:  # noqa: PT012 — deliberate
+        return f"fail: {exc}"
+    except pytest.skip.Exception as exc:
+        return f"skip: {exc}"
+    return "no-exception"
+
+
+def test_require_node_fails_closed_when_node_is_absent(monkeypatch):
+    """#4620: the node gate is a FAILURE under CI, a skip locally.
+
+    Without this pin the fail-closed branch had no test at all — reverting both
+    ``pytest.fail`` calls to ``pytest.skip`` left the suite green on any
+    Node-22 host, which is a mutation hole in the exact guarantee this PR
+    installs.
+    """
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+
+    monkeypatch.setenv("CI", "1")
+    assert _guard_outcome().startswith("fail:"), "CI must fail closed, not skip"
+
+    monkeypatch.delenv("CI", raising=False)
+    assert _guard_outcome().startswith("skip:"), "a local run still skips"
+
+
+def test_require_node_fails_closed_on_a_pre_strip_types_node(monkeypatch):
+    """The other half of the gate: node present but older than 22.6."""
+    monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/node")
+    monkeypatch.setitem(_require_node.__globals__, "_node_supports_ts", lambda _n: False)
+
+    monkeypatch.setenv("CI", "1")
+    assert _guard_outcome().startswith("fail:"), "CI must fail closed, not skip"
+
+    monkeypatch.delenv("CI", raising=False)
+    assert _guard_outcome().startswith("skip:"), "a local run still skips"
 
 
 def test_installed_seam_loads_and_fires():

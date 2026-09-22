@@ -424,12 +424,12 @@ jobs:
         with:
           python-version: '3.12'   # pyproject requires-python >= 3.12
       - uses: actions/setup-node@v4
-        # #4620: tests/test_pi_capture_hooks.py loads and fires the installed Pi
-        # capture seam with node (`--experimental-strip-types`, needs >= 22.6),
-        # and now FAILS rather than skips when node is unusable. The lane must
-        # therefore OWN the toolchain it requires instead of inheriting it from
-        # whatever the runner image happens to ship — same ruling as the
-        # embedder step below and ci.yml's wrangler pin (#373).
+        # #4620: the two installed-artifact checks in
+        # tests/test_pi_capture_hooks.py FAIL (rather than skip) when node is
+        # absent or < 22.6, so this lane owns the toolchain they require instead
+        # of inheriting it from the runner image — same ruling as the embedder
+        # step below and the existing setup-node pin in ci.yml (which carries
+        # the identical `--experimental-strip-types needs >= 22.6` comment).
         with:
           node-version: '22'
       - name: Install package + test extras
