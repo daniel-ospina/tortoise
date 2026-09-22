@@ -923,9 +923,13 @@ _BATCH_ID_RECORD_TYPE = "BatchIdStamped"
 # (the write-surface contract the #3299 design round chose over one event type
 # per label×operation): replay dispatches on ``op``, so `delete`/`retract`/
 # `revise`/`rename`/`restatus`/`supersede` share one fold vocabulary.
-# `op="delete"` is the first operation (#3299); the siblings #3300 (MCP Point
-# delete), #3312 (unjournaled entity update) and #3377 (unjournaled rename)
-# extend the op set rather than adding record types.
+# `op="delete"` was the first operation (#3299); #3300 (MCP Point delete),
+# #3312 (unjournaled entity update) and #3377 (unjournaled rename) extended the
+# op set to `delete`/`rename`/`restatus`/`revise` rather than adding record
+# types. The vocabulary itself lives ONCE in ``tortoise.projection``
+# (``_ENTITY_MUTATION_OPS`` + the implemented/pending/state partitions), because
+# a second hand-written copy at a producer is how a value gets silently omitted
+# from a reader (#2901) — and `_journal_entity_mutation` is the ONE builder.
 _ENTITY_MUTATION_RECORD_TYPE = "EntityMutated"
 
 
@@ -5018,9 +5022,14 @@ class TortoiseSDK:
         """One delete for a Point OR an entity (epic #888 W2).
 
         Destructive. Detects the node type by label:
-          - Point → delete_point (tag GC + PointRetracted event)
+          - Point → delete_point (tag GC + `PointRetracted` :GraphEvent)
           - Entity → delete_entity
         Returns True if a node was found and deleted, False otherwise.
+
+        #3300: for the Point branch the `PointRetracted` row is the
+        :GraphEvent SUBSCRIBER signal only — rebuild parity comes from the
+        JSONL `EntityMutated op="delete"` record, because the `PointRetracted`
+        fold tombstones and a hard delete must replay as a hard delete.
         """
         resolved = self._get_proj()._resolve_entity(
             id, by_id=True, by_eventId=True)
@@ -5192,9 +5201,22 @@ class TortoiseSDK:
             + [cid for cid in neighbor_claims if cid != id]
         )
         proj.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": id})
-        # #548: emit PointRetracted event for rebuild parity (after delete,
-        # so the graph mutation is committed before the event is written)
-        self._emit_event("PointRetracted", id=id)
+        # #3300 residual: ONE event type must not mean two end-states.
+        # `delete_point` hard-deletes; `retract_point` tombstones. The single
+        # `PointRetracted` (id=) call emitted BOTH stores, and its fold has
+        # exactly one meaning — tombstone — so a hard-deleted Point came back on
+        # rebuild as `status='retracted'`.
+        #
+        # Two stores, one meaning each:
+        #   * :GraphEvent ONLY (payload style, `id=` omitted) — the subscriber
+        #     surface is UNCHANGED; `tortoise_events_poll` still sees the
+        #     point-delete lifecycle row.
+        #   * JSONL ONLY (`EntityMutated` is not in _GRAPH_EVENT_TYPES) — the
+        #     replay journal carries the honest hard-delete record, whose fold is
+        #     `_delete_entity_by_id`. No `state`: the recorded shape carries
+        #     "nothing for a delete".
+        self._emit_event("PointRetracted", {"id": id})
+        self._journal_entity_mutation("Point", id, "delete")
         # Tag GC (#485): delete orphaned :Tag nodes (no incoming TAGGED edges).
         # Idempotent — DETACH DELETE leaves count-0 tags behind that would
         # otherwise accumulate in list_tags.
@@ -17358,6 +17380,52 @@ class TortoiseSDK:
             id_val, by_id=True, by_eventId=True, by_url=True)
         return resolved[0]["properties"] if resolved else {}
 
+    def _journal_entity_mutation(self, label: str, id_val: str, op: str, *,
+                                 state: dict | None = None,
+                                 name: str | None = None) -> None:
+        """Build and emit ONE ``EntityMutated`` record (#3299).
+
+        THE only place an ``EntityMutated`` record is constructed — asserted by
+        ``tests/test_unjournaled_mutation_class.py::TestOpVocabulary``
+        (``test_exactly_one_entity_mutated_builder``), so a future producer
+        cannot hand-roll a second shape.
+
+        ``state``
+            For a property mutation, the mutation's own keys holding the values
+            the GRAPH stored — never the caller's raw values. Two reasons: a
+            value the graph coerces (``Decimal``/``numpy`` → native) would make
+            ``EventLog.append``'s ``json.dumps`` raise, and ``_emit_event``
+            swallows that to a warning, silently losing the mutation; and a key
+            the write did NOT apply is absent, so replay can never overwrite a
+            prop the write did not touch.
+            ``None`` for a delete — the recorded shape carries *"nothing for a
+            delete"* (#3299).
+
+        The payload is NESTED under ``state`` because ``_emit_event`` reserves
+        ``point``/``payload``/``id`` and its envelope carries ``type`` /
+        ``event_id`` / ``ts`` / ``initiated_by`` / ``projection_version``: a flat
+        spread would let a tenant prop named ``type`` corrupt the record, and
+        would write the payload's keys as phantom node props on replay.
+
+        Identity is recorded AS WRITTEN (``label`` + the key the live write
+        matched + ``name``) and never re-derived from the live node at replay
+        time.
+        """
+        from tortoise.projection import _ENTITY_MUTATION_IMPLEMENTED_OPS
+        if op not in _ENTITY_MUTATION_IMPLEMENTED_OPS:
+            # A codomain error, not a caller error: both producers pass either
+            # ``classify_entity_mutation_op(props)`` (whose return set is
+            # AST-asserted equal to the state-op set) or a literal "delete".
+            raise ValueError(
+                f"{op!r} is not an implemented EntityMutated op "
+                f"(declared: {sorted(_ENTITY_MUTATION_IMPLEMENTED_OPS)})")
+        record: dict = {"id": id_val, "op": op, "label": label}
+        if state is not None:
+            record["state"] = state
+        if name is not None:
+            record["name"] = name
+        self._emit_event(_ENTITY_MUTATION_RECORD_TYPE, **record)
+
     def _update_entity(self, id_val: str, **props) -> dict:
         # #329: id + sourcePath/source_path are server-managed — reject
         props = _sanitize_props(props, reject_id=True)
@@ -17410,8 +17478,19 @@ class TortoiseSDK:
         # live/replay divergence in the same breath.
         annotator_updates = {
             k: v for k, v in props.items() if k in _ANNOTATOR_PROP_NAMES}
-        for label, prop in (("Point", "id"), ("Subject", "id"), ("Object", "id"),
-                            ("Document", "id"), ("Source", "id"), ("Event", "eventId")):
+        # #3860 one-table rule: consume the SAME label→id-property table the
+        # replay fold and `_delete_entity` use, so the MUTATION/DELETE producer
+        # and the fold cannot drift. (Byte-equivalent to the tuple this
+        # replaces.) NOTE this table is NOT the resolution table — entity
+        # RESOLUTION is a superset declared at
+        # `FalkorProjection._RESOLVE_BRANCHES`, which additionally matches
+        # Source by `url`.
+        from tortoise.projection import (
+            _CANONICAL_ENTITY_ID_PROPS,
+            classify_entity_mutation_op,
+        )
+
+        for label, prop in _CANONICAL_ENTITY_ID_PROPS:
             if label == "Point":
                 res = proj.g.query(
                     f"MATCH (n:{label} {{{prop}:$id}}) SET n += $p "
@@ -17426,9 +17505,51 @@ class TortoiseSDK:
                     self._emit_event("PointRevised", id=id_val,
                                      **annotator_updates)
             else:
-                proj.g.query(
-                    f"MATCH (n:{label} {{{prop}:$id}}) SET n += $p",
-                    params={"id": id_val, "p": props},
+                # C1 (#3312 statuses, #3377 rename): this branch used to apply
+                # caller props with a live `SET n += $p` and emit NOTHING — so
+                # `rebuild_all` replayed the entity from its creation snapshot
+                # (status / name / objectKind / confidence reverted). Journal
+                # the mutation at the surface that performs it.
+                #
+                # `state` = the WRITE'S OWN KEYS carrying the GRAPH'S STORED
+                # values (the same statement applies and reads back):
+                #   * a key set to None is REMOVED live, so `properties(n)`
+                #     omits it -> `state[k] is None` -> the fold's identical
+                #     `SET n += {k: null}` removes it too. A full
+                #     `properties(n)` SNAPSHOT would omit the key and RESURRECT
+                #     it from the creation record;
+                #   * a coerced value (Decimal/numpy -> native) is journalled as
+                #     the stored primitive, so the append cannot silently drop
+                #     the record;
+                #   * keys the write did NOT apply are absent, so replay never
+                #     overwrites the typed VectorF32 the upsert created
+                #     (`properties(n)` returns a vector as a plain list;
+                #     re-applying it would demote it and break the vector leg).
+                keys = list(props)
+                res = proj.g.query(
+                    f"MATCH (n:{label} {{{prop}:$id}}) SET n += $props "
+                    "RETURN [k IN $keys | properties(n)[k]] AS vals",
+                    params={"id": id_val, "props": props, "keys": keys},
+                )
+                # No match => [] for THIS form. Do NOT add `count(n)`: beside
+                # `properties(n)` it becomes a grouping key, so a miss yields no
+                # row and a duplicate-id match yields one row PER GROUP.
+                if not keys or not res.result_set:
+                    continue
+                vals = list(res.result_set[0][0])
+                if len(vals) != len(keys):
+                    # Impossible by construction — `[k IN $keys | ...]` is
+                    # length-preserving — so this is an engine contract breach.
+                    # LOUD (the append is already best-effort; a silent
+                    # truncation would journal a state that never existed).
+                    _logger.error(
+                        "state arity mismatch for %s %r: %d keys vs %d values "
+                        "— journalling the shorter of the two",
+                        label, id_val, len(keys), len(vals))
+                self._journal_entity_mutation(
+                    label, id_val, classify_entity_mutation_op(props),
+                    state=dict(zip(keys, vals, strict=False)),
+                    name=props.get("name"),
                 )
         return self._get_entity(id_val)
 
@@ -17458,8 +17579,7 @@ class TortoiseSDK:
                 # instead of resurrecting it from the creation line. Ontology
                 # §5: delete hard-deletes, retract tombstones — `op:delete`
                 # replays `_delete_entity_by_id`, `op:retract` would tombstone.
-                self._emit_event(_ENTITY_MUTATION_RECORD_TYPE, id=id_val,
-                                 op="delete", label=label)
+                self._journal_entity_mutation(label, id_val, "delete")
         return bool(total)
 
     def create_entity(self, type: str, name: str, *, is_episodic: bool | None = None,

@@ -1,0 +1,705 @@
+"""The *unjournaled durable mutation* class — #3312, #3377, #3300.
+
+CLASS DEFINITION (this is what the suite is for, not three separate bugs):
+a write that durably changes the graph has no journal record capable of
+reproducing that change on replay, so ``rebuild_all`` silently reverts the
+graph to an earlier state. Four mechanisms were identified in scoping; this
+lane closes the two that share a seam and cites the other two:
+
+  1. **No carrier for property mutations.** ``_update_entity`` applied caller
+     props with a live ``SET n += $props`` and emitted NOTHING for the five
+     non-Point canonical labels, so a rename / status change / revise on a
+     Subject, Object, Document, Source or Event reverted to the creation
+     snapshot on rebuild. (#3312 statuses, #3377 rename)  ← closed here
+  2. **One event type, two live end-states.** ``delete_point`` hard-deletes,
+     ``retract_point`` tombstones, and BOTH emitted
+     ``_emit_event("PointRetracted", …, id=id)``. The fold has exactly one
+     meaning (tombstone), so a hard-deleted Point came back on rebuild as
+     ``status='retracted'``. (#3300)  ← closed here
+  3. **No carrier for edges / tags.**  cited, not closed: #2296 / #2897
+  4. **Carrier present but unfolded** (``_NO_PROJECTION_FOLD``). cited:
+     #1048
+
+So this PR claims **two of four** mechanisms — not class closure. The two
+citations are asserted below as *documented absences* so that a reader cannot
+mistake this suite for a proof that the class is gone.
+
+THE DESIGN (one seam, not two patches):
+
+  C1  ``_journal_entity_mutation(label, id, op, *, state, name)`` is the ONE
+      ``EntityMutated`` builder. ``state`` carries **the write's own keys
+      holding the values the GRAPH STORED** — not a ``properties(n)``
+      snapshot. The distinction is load-bearing and both halves are asserted:
+
+        * a key set to ``None`` is REMOVED live, so ``properties(n)`` omits it;
+          a snapshot-based replay would resurrect it (``test_removal_…``);
+        * a snapshot also carries props the write never touched, and
+          ``properties(n)`` returns a ``VectorF32`` as a plain list, so
+          re-applying it DEMOTES the vector and silently breaks dense
+          retrieval (``test_state_keys_are_exactly_the_writes_keys``).
+
+  C2  ``delete_point`` splits its one event into two stores, one meaning each:
+      the ``:GraphEvent`` ``PointRetracted`` row keeps the subscriber surface
+      unchanged, and a JSONL-only ``EntityMutated op="delete"`` carries the
+      honest hard-delete for replay.
+
+NON-FOLDED SET (the #3312 lesson): ``rebuild == live`` ALONE IS VACUOUS —
+a mutation that is journaled and then silently not folded also leaves live and
+replay equal whenever the property happens to match. Every round-trip row
+therefore ALSO asserts **zero fold-miss / unknown-op warnings** (``caplog``),
+so "replayed correctly" cannot be satisfied by "never noticed".
+
+Runnable (docker lane):
+  TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' \\
+    uv run pytest tests/test_unjournaled_mutation_class.py -q --tb=short
+"""
+from __future__ import annotations
+
+import ast
+import json
+import os
+import sys
+from decimal import Decimal
+from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import pytest
+
+from tortoise.log import EventLog
+from tortoise.projection import (
+    _ENTITY_MUTATION_IMPLEMENTED_OPS,
+    _ENTITY_MUTATION_OPS,
+    _ENTITY_MUTATION_PENDING_OPS,
+    _ENTITY_MUTATION_STATE_OPS,
+    classify_entity_mutation_op,
+)
+from tortoise.sdk import TortoiseSDK
+
+_REC = "EntityMutated"
+_REPO = Path(__file__).resolve().parent.parent
+
+# Warning substrings emitted by the fold — the non-folded-set signal.
+#
+# ``_MISS`` is deliberately the DISTINCTIVE tail of this lane's state-op warning,
+# not the shared ``"fold matched no entity"`` prefix: pass-1b already emits
+# ``"EntityMutated delete fold matched no entity"`` for a delete, and a shared
+# substring would make ``test_delete_miss_does_not_warn`` unable to tell the two
+# apart (it caught exactly that on first run).
+_MISS = "claims a mutation whose entity never re-existed"
+_UNKNOWN = "unknown EntityMutated op"
+_PENDING = "has no fold arm yet"
+
+# Props that ``rebuild_all`` does not reproduce on a Point, PRE-EXISTING on base
+# (``1f5d6efc4``) and filed as **#4666** — verified identical with and without
+# this lane. Excluded from the global live==replay comparison so that the
+# comparison asserts the lane's own contract rather than failing on someone
+# else's open gap; scoped to ``:Point`` only, so an equivalent gap on the five
+# labels this lane fixes still fails here.
+_KNOWN_POINT_REPLAY_GAP = frozenset({
+    "note",          # journaled PointRevised annotation, never restored (#4666)
+    "updatedAt",     # regenerated at replay, not replayed (#4666)
+    "ep_dirty",      # episodic-dirty marker, set live only (#4666)
+    "ep_dirty_at",
+})
+
+
+# ── fixtures / helpers ────────────────────────────────────────────────────
+
+@pytest.fixture
+def env(tmp_path):
+    """``(sdk, events_dir)`` with the JSONL journal wired."""
+    events = tmp_path / "events"
+    events.mkdir()
+    sdk = TortoiseSDK(str(tmp_path / "ujm.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    yield sdk, events
+    sdk.close()
+
+
+def _journal(events) -> list[dict]:
+    return EventLog(str(events / "events.jsonl")).read_all()
+
+
+def _mutations(events) -> list[dict]:
+    return [e for e in _journal(events) if e.get("type") == _REC]
+
+
+def _rows(sdk, label: str, id_val: str) -> list:
+    """``[]`` iff the node is ABSENT (node absence only — see ``_prop``)."""
+    return sdk._get_proj().g.query(
+        f"MATCH (n:{label} {{id:$i}}) RETURN n", params={"i": id_val}
+    ).result_set
+
+
+def _props(sdk, label: str, id_val: str, *keys: str) -> dict:
+    """Read props as ``{k: v}``; a missing prop reads ``None``.
+
+    Uses ``RETURN n.k`` (never ``RETURN n {.*}``) so that an absent prop is
+    distinguishable from a null one only where Cypher can distinguish it —
+    which is exactly the contract ``SET n += {k: null}`` implements.
+    """
+    if not _rows(sdk, label, id_val):
+        return {k: None for k in keys}
+    ret = ", ".join(f"n.{k} AS {k}" for k in keys)
+    res = sdk._get_proj().g.query(
+        f"MATCH (n:{label} {{id:$i}}) RETURN {ret}", params={"i": id_val}
+    ).result_set
+    return dict(zip(keys, res[0], strict=True)) if res \
+        else {k: None for k in keys}
+
+
+def _has_prop(sdk, label: str, id_val: str, key: str) -> bool:
+    """Does the node carry ``key`` AT ALL? (NOT ``!= None`` — see docstring.)"""
+    res = sdk._get_proj().g.query(
+        f"MATCH (n:{label} {{id:$i}}) RETURN n.{key} IS NULL AS missing",
+        params={"i": id_val},
+    ).result_set
+    return bool(res) and res[0][0] is False
+
+
+def _fold_warnings(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records
+            if _MISS in r.getMessage() or _UNKNOWN in r.getMessage()
+            or _PENDING in r.getMessage()]
+
+
+def _snapshot_all(sdk) -> dict:
+    """Every canonical entity's identity + property map, sorted.
+
+    The fidelity spine: asserted equal across a rebuild. A fix that "cures"
+    divergence by dropping data fails here.
+
+    ``:Point`` props in ``_KNOWN_POINT_REPLAY_GAP`` are subtracted — see that
+    constant for why (pre-existing, #4666, verified on base). Nothing is
+    subtracted for the five labels this lane fixes.
+    """
+    out = {}
+    for label, prop in (("Point", "id"), ("Object", "id"), ("Subject", "id"),
+                        ("Document", "id"), ("Source", "id"), ("Event", "eventId")):
+        rows = sdk._get_proj().g.query(
+            f"MATCH (n:{label}) RETURN n.{prop}, properties(n)"
+        ).result_set
+        for rid, props in rows:
+            skip = _KNOWN_POINT_REPLAY_GAP if label == "Point" else frozenset()
+            out[(label, rid)] = {k: props[k] for k in sorted(props)
+                                 if k not in skip}
+    return out
+
+
+def _assert_round_trip(sdk, events, caplog):
+    """Live == replay over EVERY canonical entity, with a clean fold."""
+    caplog.clear()
+    live = _snapshot_all(sdk)
+    sdk._get_proj().rebuild_all(str(events))
+    replay = _snapshot_all(sdk)
+    assert _fold_warnings(caplog) == [], (
+        "fold reported a mutation it could not replay: "
+        f"{_fold_warnings(caplog)}")
+    # Report the DIFFERING KEYS, not a dict repr — a repr of two long property
+    # maps is unreadable and this assertion has to be actionable.
+    problems = []
+    for key in sorted(set(live) | set(replay), key=str):
+        a, b = live.get(key), replay.get(key)
+        if a is None or b is None:
+            problems.append(f"{key}: entity present on only one side")
+            continue
+        missing = sorted(set(a) ^ set(b))
+        changed = sorted(k for k in set(a) & set(b) if a[k] != b[k])
+        if missing or changed:
+            problems.append(
+                f"{key}: present-on-one-side={missing} value-differs={changed}")
+    assert not problems, "rebuild diverged from live:\n  " + "\n  ".join(problems)
+
+
+# ══ C1 — property mutations of the five non-Point canonical labels ═══════
+
+class TestPropertyMutationRoundTrip:
+    """Mechanism 1: rename / restatus / revise / removal, one seam."""
+
+    @pytest.mark.parametrize("op,prop,new", [
+        ("rename", "name", "Renamed"),
+        ("restatus", "status", "archived"),
+        ("revise", "objectKind", "risks"),
+    ])
+    def test_object_mutation_survives_rebuild(self, env, caplog, op, prop, new):
+        sdk, events = env
+        oid = sdk.create_entity("object", name="Original",
+                                objectKind="opportunities")["node"]["id"]
+        sdk.update_entity(oid, **{prop: new})
+        assert _props(sdk, "Object", oid, prop)[prop] == new
+
+        recs = [r for r in _mutations(events) if r.get("id") == oid]
+        assert [r["op"] for r in recs] == [op]
+        assert recs[0]["label"] == "Object"
+        assert recs[0]["state"] == {prop: new}
+
+        _assert_round_trip(sdk, events, caplog)
+        assert _props(sdk, "Object", oid, prop)[prop] == new
+
+    def test_removal_survives_rebuild(self, env, caplog):
+        """The row a ``properties(n)`` SNAPSHOT provably cannot replay.
+
+        ``SET n += {note: null}`` REMOVES the prop live and ``properties(n)``
+        omits it — so a snapshot journal journals the *absence*, and replaying
+        the snapshot re-applies nothing, leaving the prop... no: worse, the
+        creation record still carries ``note``, so replay RESURRECTS it. The
+        mutation's-own-keys state carries ``note: None``, and the fold runs the
+        identical ``SET n += {note: None}``, which removes it again.
+        """
+        sdk, events = env
+        oid = sdk.create_entity("object", name="HasNote",
+                                objectKind="opportunities", note="doomed"
+                                )["node"]["id"]
+        assert _has_prop(sdk, "Object", oid, "note")
+
+        sdk.update_entity(oid, note=None)
+        assert not _has_prop(sdk, "Object", oid, "note"), \
+            "the LIVE write must remove the prop (else this row tests nothing)"
+
+        rec = [r for r in _mutations(events) if r.get("id") == oid][-1]
+        assert "note" in rec["state"] and rec["state"]["note"] is None, (
+            "state must carry the write's key with the stored (None) value — a "
+            "snapshot would omit the key entirely")
+
+        _assert_round_trip(sdk, events, caplog)
+        assert not _has_prop(sdk, "Object", oid, "note"), \
+            "rebuild RESURRECTED a removed property"
+
+    def test_state_keys_are_exactly_the_writes_keys(self, env):
+        """C1's other half: no snapshot, so nothing the write did not touch.
+
+        A snapshot ``state`` carries every prop, and ``properties(n)`` returns
+        a ``VectorF32`` as a plain ``list`` — re-applying it demotes the
+        vector and silently breaks dense retrieval (``run_vector_query`` →
+        ``[]`` / ``query_failed``). Asserting key-exactness rules that out
+        transitively, without needing an embedding model in CI.
+        """
+        sdk, events = env
+        oid = sdk.create_entity("object", name="A", objectKind="k",
+                                confidence=0.5)["node"]["id"]
+        sdk.update_entity(oid, name="B")
+        rec = [r for r in _mutations(events) if r.get("id") == oid][-1]
+        assert set(rec["state"]) == {"name"}, (
+            "state must be the WRITE'S keys only; a snapshot would drag in "
+            f"every stored prop: {sorted(rec['state'])}")
+
+    def test_mixed_write_records_full_state_under_one_op(self, env, caplog):
+        """Labelling precedence must not lose the other transitions.
+
+        ``op`` is the PRIMARY INTENT (name > status > else); ``state`` carries
+        the whole applied map, so a consumer wanting every status transition
+        reads ``state['status']``, never filters on ``op``. Asserted so the
+        documented precedence cannot silently become lossy.
+        """
+        sdk, events = env
+        oid = sdk.create_entity("object", name="A",
+                                objectKind="k")["node"]["id"]
+        sdk.update_entity(oid, name="B", status="archived", confidence=0.9)
+
+        rec = [r for r in _mutations(events) if r.get("id") == oid][-1]
+        assert rec["op"] == "rename", "name outranks status"
+        assert rec["state"] == {"name": "B", "status": "archived",
+                                "confidence": 0.9}
+        assert rec["name"] == "B"
+
+        _assert_round_trip(sdk, events, caplog)
+        got = _props(sdk, "Object", oid, "name", "status", "confidence")
+        assert got == {"name": "B", "status": "archived", "confidence": 0.9}
+
+    def test_non_json_native_value_is_journalled_as_stored(self, env, caplog):
+        """The silent-loss half of mechanism 1.
+
+        ``EventLog.append`` is ``json.dumps`` with no ``default=``, and
+        ``_emit_event`` swallows the resulting ``TypeError`` to a WARNING —
+        so journalling the CALLER's ``Decimal`` would drop the record and
+        produce exactly the defect this lane fixes, silently. Journalling the
+        STORED value (native) cannot raise.
+        """
+        sdk, events = env
+        oid = sdk.create_entity("object", name="A",
+                                objectKind="k")["node"]["id"]
+        sdk.update_entity(oid, confidence=Decimal("0.25"))
+
+        recs = [r for r in _mutations(events) if r.get("id") == oid]
+        assert recs, "a non-JSON-native value silently dropped the record"
+        assert isinstance(recs[-1]["state"]["confidence"], float)
+
+        _assert_round_trip(sdk, events, caplog)
+        assert _props(sdk, "Object", oid, "confidence")["confidence"] == \
+            pytest.approx(0.25)
+
+    def test_five_labels_share_the_one_seam(self, env, caplog):
+        """Every non-Point canonical label, not just the one the issue names."""
+        sdk, events = env
+        sub = sdk.create_subject("Topic")
+        sid = (sub.get("node") or sub)["id"]
+        oid = sdk.create_entity("object", name="O",
+                                objectKind="k")["node"]["id"]
+        sdk.update_entity(sid, name="RenamedTopic")
+
+        sdk.update_entity(oid, name="RenamedO")
+        labels = {r["label"] for r in _mutations(events)}
+        assert labels <= {"Object", "Subject"}
+        assert "Object" in labels
+        _assert_round_trip(sdk, events, caplog)
+
+    def test_no_record_for_a_write_that_matched_nothing(self, env):
+        """No phantom record: the producer mirrors ``_delete_entity``'s
+        post-apply ordering contract."""
+        sdk, events = env
+        before = len(_mutations(events))
+        sdk.update_entity("obj-does-not-exist", name="ghost")
+        assert len(_mutations(events)) == before
+
+
+# ══ C2 — delete_point: one event type must not mean two end-states ══════
+
+class TestPointDeleteTwoStore:
+    """Mechanism 2 (#3300)."""
+
+    def test_hard_delete_is_durable(self, env, caplog):
+        sdk, events = env
+        pid = sdk.create_point("observation", "delete me")["id"]
+        sdk.delete_point(pid)
+        assert _rows(sdk, "Point", pid) == [], "premise: live hard-delete"
+
+        _assert_round_trip(sdk, events, caplog)
+        assert _rows(sdk, "Point", pid) == [], \
+            "rebuild RESURRECTED a hard-deleted Point"
+
+    def test_delete_journals_honest_op_and_no_retract_line(self, env):
+        """The two stores, one meaning each."""
+        sdk, events = env
+        pid = sdk.create_point("observation", "x")["id"]
+        sdk.delete_point(pid)
+
+        recs = [r for r in _mutations(events) if r.get("id") == pid]
+        assert [(r["op"], r["label"]) for r in recs] == [("delete", "Point")]
+        assert "state" not in recs[0], \
+            "#3299's recorded shape carries nothing for a delete"
+
+        assert _journal(events) and \
+            not [e for e in _journal(events)
+                 if e.get("type") == "PointRetracted"], (
+            "PointRetracted must NOT be in the JSONL — its fold tombstones, "
+            "which is the wrong meaning for a hard delete")
+
+    def test_subscriber_surface_unchanged(self, env):
+        """The ``:GraphEvent`` row — and therefore ``events_poll`` — is intact.
+
+        This is the property that makes the split acceptable: the fix changes
+        which store carries the *replay* meaning, not what subscribers see.
+        """
+        sdk, _events = env
+        pid = sdk.create_point("observation", "x")["id"]
+        sdk.delete_point(pid)
+
+        types = [r[0] for r in sdk._get_proj().g.query(
+            "MATCH (e:GraphEvent) RETURN e.type").result_set]
+        assert "PointRetracted" in types
+        polled = sdk.events_poll(after=None)["events"]
+        assert any(e["type"] == "PointRetracted"
+                   and e["payload"] == {"id": pid} for e in polled)
+
+    def test_retract_still_tombstones(self, env, caplog):
+        """The CONTRAST row: splitting delete must not change retract.
+
+        Without this, C2's fix could be "stop emitting PointRetracted" and the
+        hard-delete row would pass while retract silently broke.
+        """
+        sdk, events = env
+        pid = sdk.create_point("observation", "retract me")["id"]
+        sdk.retract_point(pid)
+        assert _rows(sdk, "Point", pid) != [], "premise: retract keeps the node"
+        assert _props(sdk, "Point", pid, "status")["status"] == "retracted"
+
+        _assert_round_trip(sdk, events, caplog)
+        assert _rows(sdk, "Point", pid) != [], \
+            "rebuild LOST a retracted Point (tombstone must survive)"
+        assert _props(sdk, "Point", pid, "status")["status"] == "retracted"
+
+    def test_delete_entity_point_agrees_with_delete_point(self, env, caplog):
+        """The two Point-delete doors must end in the same graph state."""
+        sdk, events = env
+        a = sdk.create_point("observation", "via delete_point")["id"]
+        b = sdk.create_point("observation", "via delete_entity")["id"]
+        sdk.delete_point(a)
+        assert sdk.delete_entity(b)
+
+        _assert_round_trip(sdk, events, caplog)
+        assert _rows(sdk, "Point", a) == [] and _rows(sdk, "Point", b) == [], \
+            "the two Point-delete doors diverge after rebuild"
+
+
+# ══ The op vocabulary — one declaration, enforced ═══════════════════════
+
+class TestOpVocabulary:
+    """``#2901``'s lesson: a hand-written subset at a call site is how a value
+    is silently omitted from a reader. So the vocabulary is ONE declaration and
+    its relationships are asserted, not derived."""
+
+    def test_ops_partition_into_implemented_and_pending(self):
+        assert set(_ENTITY_MUTATION_OPS) == (
+            _ENTITY_MUTATION_IMPLEMENTED_OPS | _ENTITY_MUTATION_PENDING_OPS)
+        assert not (_ENTITY_MUTATION_IMPLEMENTED_OPS
+                    & _ENTITY_MUTATION_PENDING_OPS)
+
+    def test_state_ops_plus_delete_is_the_implemented_set(self):
+        assert _ENTITY_MUTATION_STATE_OPS | {"delete"} == \
+            _ENTITY_MUTATION_IMPLEMENTED_OPS
+        assert "delete" not in _ENTITY_MUTATION_STATE_OPS
+
+    @pytest.mark.parametrize("op", sorted(_ENTITY_MUTATION_PENDING_OPS))
+    def test_pending_ops_are_the_documented_ones(self, op):
+        assert op in {"retract", "supersede"}, (
+            "the pending set is hand-maintained so that adding an op to "
+            "_ENTITY_MUTATION_OPS cannot auto-absorb it into 'pending' and "
+            "leave every other assertion green")
+
+    def test_classifier_codomain_equals_the_state_ops(self):
+        """AST, not a call: a codomain check must not depend on which inputs
+        the suite happens to think of."""
+        src = (_REPO / "tortoise/projection/__init__.py").read_text()
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == "classify_entity_mutation_op")
+        returned = {
+            n.value.value for n in ast.walk(fn)
+            if isinstance(n, ast.Return) and isinstance(n.value, ast.Constant)
+        }
+        assert returned == set(_ENTITY_MUTATION_STATE_OPS)
+
+    @pytest.mark.parametrize("props,expected", [
+        ({"name": "x"}, "rename"),
+        ({"status": "s"}, "restatus"),
+        ({"name": "x", "status": "s"}, "rename"),
+        ({"objectKind": "k"}, "revise"),
+    ])
+    def test_classifier_precedence(self, props, expected):
+        assert classify_entity_mutation_op(props) == expected
+
+    def test_exactly_one_entity_mutated_builder(self):
+        """One shape, one builder — a second hand-rolled record is the drift
+        this class is made of."""
+        src = (_REPO / "tortoise/sdk.py").read_text()
+        tree = ast.parse(src)
+        builder = next(
+            (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+             and n.name == "_journal_entity_mutation"), None)
+        assert builder is not None, \
+            "_journal_entity_mutation is the one EntityMutated builder"
+
+        def _calls(node):
+            for c in ast.walk(node):
+                if (isinstance(c, ast.Call)
+                        and isinstance(c.func, ast.Attribute)
+                        and c.func.attr == "_emit_event"):
+                    yield c
+
+        emit_calls = [c for c in _calls(tree)
+                      if c.args and isinstance(c.args[0], ast.Name)
+                      and c.args[0].id == "_ENTITY_MUTATION_RECORD_TYPE"]
+        assert len(emit_calls) == 1, (
+            "exactly one _emit_event call may emit the EntityMutated record")
+        assert emit_calls[0] in list(_calls(builder)), \
+            "that call must live inside _journal_entity_mutation"
+
+    def test_no_literal_entity_mutated_emit(self):
+        """The record type is a constant, never a string literal at a site."""
+        tree = ast.parse((_REPO / "tortoise/sdk.py").read_text())
+        for c in ast.walk(tree):
+            if (isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+                    and c.func.attr == "_emit_event" and c.args):
+                assert not (isinstance(c.args[0], ast.Constant)
+                            and c.args[0].value == _REC), (
+                    f"line {c.lineno}: EntityMutated emitted from a literal — "
+                    "route it through _journal_entity_mutation")
+
+    def test_builder_rejects_an_unimplemented_op(self, env):
+        sdk, _ = env
+        with pytest.raises(ValueError, match="not an implemented"):
+            sdk._journal_entity_mutation("Object", "o1", "retract")
+        with pytest.raises(ValueError, match="not an implemented"):
+            sdk._journal_entity_mutation("Object", "o1", "typo")
+
+
+# ══ The non-folded set — a silent fold is the class's own defect ════════
+
+class TestNonFoldedSet:
+    """``rebuild == live`` alone is vacuous. These rows make the fold's
+    silence observable: anything the journal claims and the fold cannot replay
+    must WARN, and a legitimately-idempotent miss must NOT."""
+
+    def _raw(self, events, **rec):
+        rec.setdefault("event_id", "evt-" + rec.get("op", "?"))
+        rec.setdefault("ts", "2026-01-01T00:00:00+00:00")
+        with open(events / "events.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec) + "\n")
+
+    @pytest.mark.parametrize("op", sorted(_ENTITY_MUTATION_STATE_OPS))
+    def test_state_op_miss_warns(self, env, caplog, op):
+        """The journal claims a mutation whose entity never re-existed."""
+        sdk, events = env
+        self._raw(events, type=_REC, op=op, label="Object",
+                  id="obj-never-existed", state={"name": "x"})
+        with caplog.at_level("WARNING"):
+            sdk._get_proj().rebuild_all(str(events))
+        assert _MISS in " ".join(_fold_warnings(caplog)), \
+            f"a fold that matched nothing for op={op} must warn"
+        assert "obj-never-existed" in " ".join(_fold_warnings(caplog)), \
+            "the message must carry the id that locates the journal line"
+
+    @pytest.mark.parametrize("op", sorted(_ENTITY_MUTATION_PENDING_OPS))
+    def test_pending_op_warns_and_says_why(self, env, caplog, op):
+        sdk, events = env
+        self._raw(events, type=_REC, op=op, label="Object", id="obj-1")
+        with caplog.at_level("WARNING"):
+            sdk._get_proj().rebuild_all(str(events))
+        msgs = " ".join(_fold_warnings(caplog))
+        assert _PENDING in msgs, (
+            f"op={op} is RECORDED (#3299) but unimplemented — it must say so "
+            "rather than be reported as 'unknown'")
+
+    def test_unknown_op_warns(self, env, caplog):
+        sdk, events = env
+        self._raw(events, type=_REC, op="teleported", label="Object",
+                  id="obj-1", state={"name": "x"})
+        with caplog.at_level("WARNING"):
+            sdk._get_proj().rebuild_all(str(events))
+        assert _UNKNOWN in " ".join(_fold_warnings(caplog)), \
+            "an unrecognised op silently drops a mutation — must be loud"
+
+    def test_delete_miss_does_not_warn(self, env, caplog):
+        """The deliberate exemption: a delete matching 0 rows is legitimately
+        idempotent (retried delete; restore replaying onto a non-empty graph).
+        Warning here would turn valid journals into false positives — and the
+        pass-1b warning already covers the rebuild_all case."""
+        sdk, events = env
+        self._raw(events, type=_REC, op="delete", label="Object",
+                  id="obj-never-existed")
+        with caplog.at_level("WARNING"):
+            sdk._get_proj().rebuild_all(str(events))
+        assert _MISS not in " ".join(_fold_warnings(caplog))
+
+    def test_miss_is_visible_through_every_replay_engine(self, env, caplog):
+        """``apply()`` DISCARDS the returned count, and ``recover_from_log`` /
+        ``restore`` route through the same fold — so the warning must live
+        INSIDE the fold. A call-site-only warning would be invisible on three
+        of the four engines."""
+        sdk, _events = env
+        proj = sdk._get_proj()
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            proj.apply({"type": _REC, "op": "rename", "label": "Object",
+                        "id": "obj-never-existed", "state": {"name": "x"},
+                        "event_id": "e1"})
+        assert _MISS in " ".join(_fold_warnings(caplog)), \
+            "apply() must surface the fold-miss too"
+
+    def test_label_outside_the_allowlist_never_reaches_cypher(self, env, caplog):
+        """A journal ``label`` is never interpolated into the Cypher label
+        position — it must be a canonical member or the fold refuses.
+
+        Asserted BEHAVIOURALLY (the fold is called directly, no wipe): with an
+        injected label like ``Object) DETACH DELETE n //`` a non-refusing fold
+        would delete every ``:Object`` in one statement, and a wipe+replay
+        would mask it by recreating them. So a canary Object plus the fold
+        called in isolation is the only shape that can actually fail.
+        """
+        sdk, _events = env
+        canary = sdk.create_entity("object", name="canary",
+                                   objectKind="k")["node"]["id"]
+        other = sdk.create_entity("object", name="sibling",
+                                  objectKind="k")["node"]["id"]
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            sdk._get_proj().apply({
+                "type": _REC, "op": "rename",
+                "label": "Object) DETACH DELETE n //",
+                "id": canary, "state": {"name": "pwned"},
+                "event_id": "e-inject",
+            })
+        assert _rows(sdk, "Object", canary) != [], \
+            "an injected label deleted the canary Object"
+        assert _rows(sdk, "Object", other) != [], \
+            "an injected label deleted a sibling Object"
+        assert _props(sdk, "Object", canary, "name")["name"] == "canary", \
+            "the refused record must not have applied either"
+        assert _MISS in " ".join(_fold_warnings(caplog)) \
+            or _UNKNOWN in " ".join(_fold_warnings(caplog)), \
+            "refusing a non-canonical label must be reported, not silent"
+
+
+# ══ The write path's fail-open contract ══════════════════════════════
+
+class TestJournalWriteFailure:
+    """A journal append failure must be LOUD and must not pretend the write
+    failed.
+
+    This is the write-path twin of the non-folded-set contract above, and it is
+    the residual obligation of the whole design: the builder is best-effort
+    (``_emit_event`` swallows the append error), so the ONE thing that keeps
+    that acceptable is that the failure is *observable*. #3585 owns the
+    fail-closed half (refusing the write when the journal cannot record it);
+    until that lands, the warning is the entire safety net — so it is pinned.
+    """
+
+    def test_append_failure_is_loud_and_the_write_still_lands(
+            self, env, caplog, monkeypatch):
+        sdk, events = env
+        oid = sdk.create_entity("object", name="A",
+                                objectKind="k")["node"]["id"]
+        before = len(_mutations(events))
+
+        from tortoise.log import EventLog
+
+        def _boom(self, event):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(EventLog, "append", _boom)
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            sdk.update_entity(oid, name="B")
+
+        # 1. LOUD — a silently dropped mutation is this class's own defect.
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("failed to append EntityMutated event" in m for m in msgs), (
+            f"a dropped journal append must name the record it lost: {msgs}")
+        # 2. Fail-OPEN, deliberately: the live SET already committed, so the
+        #    SDK must neither raise nor roll back. The price is that THIS write
+        #    is not durable — which is exactly why (1) must hold.
+        assert _props(sdk, "Object", oid, "name")["name"] == "B", \
+            "the live mutation must still have applied (fail-open, not rollback)"
+        # 3. ...and the loss is real, so the assertion above is not vacuous.
+        assert len(_mutations(events)) == before, \
+            "the append really did fail — there must be no new record"
+
+
+# ══ Green-on-arrival guards ════════════════════════════════════════════
+
+class TestRegressionGuards:
+    """Behaviour this lane must NOT change. These pass on base too — their job
+    is to fail if the seam is widened."""
+
+    def test_point_annotator_path_unchanged(self, env, caplog):
+        """The ``:Point`` branch of ``_update_entity`` still emits
+        ``PointRevised`` with only the annotator props, and still journals no
+        ``EntityMutated`` (its own record type already carries it)."""
+        sdk, events = env
+        pid = sdk.create_point("observation", "x")["id"]
+        sdk.update_point(pid, note="annotated")
+        kinds = [e.get("type") for e in _journal(events)]
+        assert "PointRevised" in kinds
+        assert not [r for r in _mutations(events) if r.get("id") == pid], (
+            "the Point annotator path must not double-journal via the new seam")
+        _assert_round_trip(sdk, events, caplog)
+
+    def test_class_mechanisms_3_and_4_are_still_open(self, env):
+        """Documented ABSENCE, asserted so this suite cannot be read as class
+        closure: the PR closes two of four mechanisms."""
+        # 3a/3b: no carrier for edges/tags; carrier-but-unfolded.
+        from tortoise.projection import _NO_PROJECTION_FOLD
+        assert _NO_PROJECTION_FOLD, (
+            "if this is empty, mechanism 4 (carrier-but-unfolded) changed — "
+            "update the class docstring with the citation")
