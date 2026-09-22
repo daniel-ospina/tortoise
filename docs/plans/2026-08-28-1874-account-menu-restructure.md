@@ -42,8 +42,8 @@ Standard-tier condensed map (test-design skill — proportional application: the
 ### Failure Modes
 - **Nav Profile button removed but a flow still clicks the nav-tab by name** → expected: tests navigate via the account menu; selectors scoped to `.account-menu` while the nav button still exists (strict-mode double-match) → covered by Task 1/2 ordering.
 - **Session user with empty `display_name`** → expected: email-prefix fallback (existing pattern `main.jsx:1227`) — team name must NOT be shown as personal identity (that's the original bug) → Task 2 fallback.
-- **Anon key-login / no-session rendering** → expected: NOT e2e-tested (no-session redirects to /auth; claim-intent shows the claim-paste screen; key-login anon teams get the Protect screen — the account menu never renders without a session in the current architecture). The `currentTeamName` fallback in the identity block is **defensive dead code** — annotated in Task 2, not asserted.
-- **Harness mismatch** (`_session()` has no `user_metadata`; mocks use `name` not `team_name`) → expected: harness updated first so assertions are real → Task 1.
+- **Anon key-login / no-session rendering** → expected: NOT e2e-tested (no-session redirects to /auth; claim-intent shows the claim-paste screen; key-login anon teams get the Protect screen — the account menu never renders without a session in the current architecture). The `currentOrgName` fallback in the identity block is **defensive dead code** — annotated in Task 2, not asserted.
+- **Harness mismatch** (`_session()` has no `user_metadata`; mocks use `name` not `org_name`) → expected: harness updated first so assertions are real → Task 1.
 - **e2e modules skip silently** (opt-in `RUN_DASHBOARD_E2E`) → expected: env var set on every run; red phase must FAIL, not skip → Task 1/4 commands.
 - **Narrow viewport nav overflow** → expected: fewer nav items now (5 vs 6) → `test_no_horizontal_scroll_narrow_viewport` still passes.
 
@@ -74,7 +74,7 @@ All decisions made interactively with the product owner (2026-08-28) — recorde
 ## Task 1: E2E harness + menu-based navigation tests (red)
 
 **Intent:** Fix the test harness so assertions are real (not vacuous), route existing profile navigation through the account menu, and write the new menu/nav/heading assertions first — driving the restructure.
-**Acceptance:** `RUN_DASHBOARD_E2E=1` runs FAIL (not skip) on the new assertions; harness carries `user_metadata.display_name` and `team_name` mocks.
+**Acceptance:** `RUN_DASHBOARD_E2E=1` runs FAIL (not skip) on the new assertions; harness carries `user_metadata.display_name` and `org_name` mocks.
 
 **Files:**
 - Modify: `tests/e2e/test_dashboard_identity.py`
@@ -82,8 +82,8 @@ All decisions made interactively with the product owner (2026-08-28) — recorde
 
 **Step 1 — Harness fixes:**
 - `_session()` (~lines 47–63): add `"user_metadata": {"display_name": "danielospinabotero"}` (mirror `test_dashboard_gate.py:217` which already uses `user_metadata`).
-- `_wire` `/v1/teams` + `/v1/team` mocks: use `team_name` (main.jsx reads `t.team_name` at :452 — the `name` field renders empty). E.g. `{"team_id": "team_e2e", "team_name": "E2E", "tier": "free"}`.
-- Add a two-team variant for the multi-team test: key team-scoped responses (`/v1/team`, `/v1/session/key`) by the `team_id` query param so switching actually re-hydrates.
+- `_wire` `/v1/organizations` + `/v1/team` mocks: use `org_name` (main.jsx reads `t.org_name` at :452 — the `name` field renders empty). E.g. `{"org_id": "team_e2e", "org_name": "E2E", "tier": "free"}`.
+- Add a two-team variant for the multi-team test: key team-scoped responses (`/v1/team`, `/v1/session/key`) by the `org_id` query param so switching actually re-hydrates.
 
 **Step 2 — Navigation helper (regex match — the blob aria-label is `Account menu — {team}`):**
 ```python
@@ -109,7 +109,7 @@ def test_account_menu_identity_block_single_team(page: Page):
 def test_account_menu_multi_team_switch(page: Page):
     # REGRESSION GUARD — the switch section already renders in committed code, so this
     # goes GREEN in Task 1 (not a red target). Two-team _wire keys team-scoped responses
-    # (/v1/team, /v1/session/key) by the requested team_id; assert both teams render,
+    # (/v1/team, /v1/session/key) by the requested org_id; assert both teams render,
     # aria-current on active, and switching re-hydrates the new team's data.
 
 def test_members_heading_and_nav(page: Page):
@@ -147,15 +147,15 @@ Expected: FAIL on the new menu assertions (Profile not in menu yet).
   <span className="account-avatar" aria-hidden="true">
     {(sessionMetaRef.current?.display_name ||
       (sessionMetaRef.current?.email ? sessionMetaRef.current.email.split('@')[0] : '') ||
-      currentTeamName || 'T').charAt(0).toUpperCase()}
+      currentOrgName || 'T').charAt(0).toUpperCase()}
   </span>
   <div className="account-identity-text">
     <span className="account-identity-name">
       {sessionMetaRef.current?.display_name ||
         (sessionMetaRef.current?.email ? sessionMetaRef.current.email.split('@')[0] : '') ||
-        currentTeamName || 'No team'}
+        currentOrgName || 'No team'}
     </span>
-    {/* currentTeamName fallback: DEFENSIVE — the account menu never renders without a
+    {/* currentOrgName fallback: DEFENSIVE — the account menu never renders without a
         session in the current architecture (no-session → /auth, anon → Protect screen). */}
     {sessionMetaRef.current?.email && (
       <span className="account-identity-email">{sessionMetaRef.current.email}</span>

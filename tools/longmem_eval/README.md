@@ -30,8 +30,11 @@ installed** (the `[embeddings]` extra — `all-MiniLM-L6-v2`, the MemDelta-pinne
 dense-less report is never published silently.
 
 ```bash
-# eval env (repo root): dev tooling + the embeddings extra
-uv sync --group dev --extra embeddings
+# eval env (repo root): dev tooling + the extras the real lanes need.
+# An explicit --extra list is EXACT — it REMOVES every extra you leave out
+# (`--extra embeddings` alone drops parity/pyarrow), so name them all or use
+# --all-extras. Plain `uv sync` = keyword-only product (#2985).
+uv sync --group dev --extra embeddings --extra parity
 
 # pre-download the ~90MB model (first run downloads it on demand; pre-warm
 # avoids a >30s cold-load during the run's first create_point)

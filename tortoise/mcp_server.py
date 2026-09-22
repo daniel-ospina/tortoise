@@ -15,36 +15,26 @@ from typing import Any, Literal
 from fastmcp import FastMCP
 from fastmcp.exceptions import (AuthorizationError, FastMCPError, ToolError,
                                 ValidationError as FastMCPValidationError)
+from fastmcp.tools import ToolResult
 from pydantic import ValidationError as PydanticValidationError
 from tortoise.auth import is_dev_mode as _is_dev_mode
 from tortoise.config import is_db_uri as _is_db_uri
 from tortoise.sdk import (TortoiseSDK, INGEST_GRANULARITIES,
-                          INGEST_PROMOTION_POLICIES, _first_non_draft_status)
-from tortoise.schemas import (  # one vocabulary, no duplicated boundary literals (P2-14)
-    CODE_IN_FLIGHT_LIMIT,
-    CODE_QUOTA_EXCEEDED,
-    CODE_READER_UNAVAILABLE,
-    CODE_RETRIEVAL_UNAVAILABLE,
-    CODE_TIMEOUT,
-)
+                          INGEST_PROMOTION_POLICIES, _first_non_draft_status,
+                          _RESERVED_ACTOR_PROPS)
 from tortoise import monitoring
-from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
+from tortoise.mcp_auth import (_current_org_id, _current_org_limits,
                                _current_scopes, _current_legacy_full_access,
                                _current_graph_id, _transport_mode, _tool_group,
-                               _get_team_sdk, HTTP_ALLOWED, ERR_UNAUTHORIZED,
-                               ERR_EXCLUDED, SELFHOST_TEAM_ID)
-from tortoise.transport import ask_exposure_enabled
+                               _get_org_sdk, HTTP_ALLOWED, ERR_UNAUTHORIZED,
+                               ERR_EXCLUDED, ERR_TIMEOUT, SELFHOST_ORG_ID)
+# #3834: the transport wait-bound vocabulary is read as a MODULE attribute
+# (``tortoise.mcp_auth`` is its single home), so the fast path pays no
+# ``hosted_api`` import — that import is ~1.7 s and builds the whole hosted
+# FastAPI app — and a patch of the canonical constant reaches this surface.
+from tortoise import mcp_auth as _mcp_auth
 
 _log = logging.getLogger(__name__)
-
-# ── #2013 PRODUCT-GATING: the hosted ask EXPOSURE (the MCP tortoise_ask
-# tool) is off by default. The READER ships (the eval's reader — the 500-Q
-# benchmark runs through it); only the customer-facing ask EXPOSURE is
-# gated until the reader-model decision is made. ``tortoise_ask`` lives in
-# its OWN curation group ("ask", see tool_registry.py GROUP_BY_NAME) so the
-# default (ungrouped) hosted /mcp surface can exclude it; an explicit
-# tool_group="ask" server (dev/eval) still serves it.
-_ASK_TOOL_GROUP = "ask"
 
 
 def _load_dotenv(path: str | None = None) -> None:
@@ -120,9 +110,9 @@ mcp = FastMCP("tortoise", instructions=_MCP_INSTRUCTIONS)
 # surface-design epic (#888). Installed at mcp.call_tool, the single dispatch
 # point every transport (stdio, streamable HTTP, programmatic) funnels
 # through, so no per-tool instrumentation is needed. Transport-level auth
-# (TeamResolutionMiddleware) runs BEFORE this point in HTTP mode: latency
+# (OrgResolutionMiddleware) runs BEFORE this point in HTTP mode: latency
 # therefore measures tool execution only, and authenticated requests already
-# carry the team_id ContextVar (empty string for unauthenticated paths).
+# carry the org_id ContextVar (empty string for unauthenticated paths).
 # Fail-safe by construction: every emission path is try/except'd and
 # fire-and-forget, so a telemetry failure can never break a tool call.
 
@@ -184,9 +174,34 @@ def _classify_mcp_call_error(exc: BaseException) -> tuple[str, str | None]:
 _pending_telemetry: set = set()
 
 
-def _emit_mcp_tool_call_telemetry(team_id: str, tool_name: str, status: str,
+def _emit_mcp_tool_call_telemetry(org_id: str, tool_name: str, status: str,
                                   latency_ms: int, error_kind: str | None) -> None:
     """Fire-and-forget, fail-safe analytics write. Never raises, never blocks.
+
+    ``status`` is one of this full set — the vocabulary is stated HERE because
+    this is the single emission point for ``mcp_tool_call``:
+
+    - ``ok`` — the call completed.
+    - ``validation_error`` / ``auth_error`` / ``exec_error`` — mapped by
+      ``_classify_mcp_call_error`` (``error_kind`` = the offending field, the
+      exception class, or the unwrapped cause's class name, respectively);
+      the #236 stdio auth gate is the OTHER ``auth_error`` producer, with
+      ``error_kind = "stdio_auth_gate"`` — it is not an exception class, so it
+      is not produced by that classifier.
+    - ``timeout`` — the transport wait bound fired at this seam
+      (``error_kind = "wait_bound"``).
+    - ``cancelled`` — the caller cancelled the dispatch
+      (``error_kind = "caller_cancelled"``).
+    - ``refused`` — the TRANSPORT had already refused and answered this request
+      before this seam could wait on it; the refusal is recorded once here
+      instead of being duplicated as a false ``timeout``
+      (``error_kind = "transport_wait_bound"``).
+
+    The first four are the #889 set; ``timeout``, ``cancelled`` and ``refused``
+    were added by #3834. The #888 research brief
+    (``docs/epics/2026-08-11-888-surface-design/01-research-brief.md``) still
+    lists only the original four — it is #888's artifact, not this lane's, so it
+    is deliberately not edited here and this docstring is the live vocabulary.
 
     The Supabase write (sync httpx POST, up to 5s timeout in
     _track_analytics_event) runs OFF the tool-call hot path: on the default
@@ -194,13 +209,14 @@ def _emit_mcp_tool_call_telemetry(team_id: str, tool_name: str, status: str,
     daemon thread. Any failure is logged and swallowed — telemetry must never
     break a tool call.
     """
-    props = {"tool_name": tool_name, "status": status,
+    props = {"tool_name": _mcp_auth._sanitize_for_log(tool_name),
+             "status": status,
              "latency_ms": latency_ms, "error_kind": error_kind}
 
     def _write() -> None:
         try:
             from tortoise.hosted_api import _track_analytics_event
-            _track_analytics_event(team_id, "mcp_tool_call", props)
+            _track_analytics_event(org_id, "mcp_tool_call", props)
         except Exception:
             _log.debug("mcp_tool_call telemetry write failed", exc_info=True)
 
@@ -230,10 +246,348 @@ async def _flush_mcp_telemetry() -> None:
         await asyncio.gather(*pending, return_exceptions=True)
 
 
+# ── #3834: the MCP-level wait bound ────────────────────────────────
+# The HTTP transport's WaitBoundMiddleware bounds the REST routes, but it is
+# INERT for MCP tool calls: FastMCP 3.4.6 runs Streamable-HTTP in SSE mode and
+# starts the EventSourceResponse BEFORE dispatching the tool
+# (``mcp/server/streamable_http.py`` — "Start the SSE response (this will send
+# headers immediately)"), so ``http.response.start`` is on the wire within
+# milliseconds and there is no refusal left to substitute. The measured
+# population — the 7,795 ``mcp_tool_call`` events, p99 22.5 s, max 157 s — is
+# exactly this dispatch, so the bound is enforced HERE, at ``mcp.call_tool``:
+# the single seam every transport funnels through. It is applied across the
+# registry rather than per tool (no tool name is referenced), so the 98→25
+# surface rebuild (#4282) cannot throw it away.
+
+#: Tool dispatches abandoned past the bound, held only so their late
+#: result/exception is retrieved (never "exception was never retrieved"), so the
+#: #2850 workload gauge stays non-idle while they run, and so a test can await
+#: them. Entries remove themselves on completion.
+_pending_mcp_wait_bound: set = set()
+
+#: Breach-telemetry SCHEDULING futures (the telemetry pool's submit future),
+#: tracked only so a late exception on it is retrieved. The write's own future
+#: is tracked by the shared writer in ``hosted_api``.
+_pending_mcp_wait_bound_telemetry: set = set()
+
+#: The breach marker on a refused result's ``_meta``. A client can branch on it
+#: without parsing prose; ``_wrapped_call_tool`` reads it to keep the
+#: accompanying ``mcp_tool_call`` telemetry out of ``ok`` — ``timeout`` when this
+#: seam's own deadline fires, or ``refused``/``transport_wait_bound`` when the
+#: transport already refused the request and this seam suppresses its duplicate.
+_WAIT_BOUND_META_KEY = "tortoise_wait_bound"
+
+
+def _hold_mcp_dispatch_after_request(task) -> None:
+    """Keep an abandoned MCP dispatch tracked, and hold the #2850 gauge for it.
+
+    The round-1 fix moved ``InFlightMiddleware`` inside ``WaitBoundMiddleware``
+    so an abandoned REST handler keeps counting until it finishes — else the
+    watchdog's idle predicate reads idle while abandoned work still runs. That
+    ordering does NOT cover this seam: the abandoned MCP dispatch is a task
+    created inside the MCP app, and the HTTP POST (which the gauge wraps) ends
+    as soon as the SSE refusal is written. So this seam holds the gauge itself
+    for the life of the abandoned dispatch.
+
+    Called on the TIMEOUT path only. The cancellation path is the opposite case
+    (the cancellation is propagated into the dispatch); see the ``except
+    asyncio.CancelledError`` branch in ``_await_under_mcp_wait_bound``. The gauge
+    exits in a ``finally`` so a raising abandoned dispatch cannot leak a slot.
+    """
+    monitoring.workload_enter()
+    _pending_mcp_wait_bound.add(task)
+
+    def _done(t) -> None:
+        _pending_mcp_wait_bound.discard(t)
+        try:
+            if not t.cancelled():
+                t.exception()  # retrieve, so it is never un-retrieved
+        finally:
+            monitoring.workload_exit()
+
+    task.add_done_callback(_done)
+
+
+def _emit_mcp_wait_bound_breach_off_loop(org_id: str, latency_ms: int,
+                                         name: str) -> None:
+    """Schedule the shared breach writer OFF the event loop (#3834 G1).
+
+    The writer is ``hosted_api._emit_wait_bound_breach`` — the SAME single emit
+    site the REST arm uses — but ``hosted_api`` imports ``mcp_server`` at module
+    scope, so this module cannot import it back at module scope. Importing it
+    lazily HERE, on the loop and on the BREACH path, built the whole hosted
+    FastAPI app before the refusal could be written: measured in a fresh process
+    against a 0.05 s bound, the refusal came back after ~2–4 s (load-dependent)
+    with the event loop frozen for the same span — the refusal is the product on
+    this path, so a late one defeats the unit. The lazy import therefore lives
+    INSIDE the callable submitted to the telemetry pool
+    (``monitoring.control_plane_worker("telemetry")``, daemon workers, bounded
+    backlog; #3498): the worker thread pays the import, the loop writes the
+    refusal. The single emit site is unchanged — only where its module is
+    imported moved.
+    """
+    # #3834 F-3: sanitize the client-supplied tool name at the analytics sink.
+    # The helper is shared with the REST arm (``mcp_auth``), not a third copy —
+    # ``mcp_server`` already imports that module, so this pays no ``hosted_api``
+    # import. Sanitized on the loop (pure and cheap), so the off-loop closure
+    # carries only the safe value.
+    safe_name = _mcp_auth._sanitize_for_log(name)
+
+    def _emit() -> None:
+        try:
+            from tortoise import hosted_api as _ha
+            _ha._emit_wait_bound_breach(
+                org_id, "/mcp", "POST", latency_ms, tool_name=safe_name)
+        except Exception:  # telemetry must never turn a refusal into an error
+            _log.debug("mcp wait-bound telemetry emit failed", exc_info=True)
+
+    try:
+        fut = monitoring.control_plane_worker("telemetry").submit(_emit)
+    except Exception:  # telemetry must never turn a refusal into an error
+        _log.debug("mcp wait-bound telemetry schedule failed", exc_info=True)
+        return
+    _pending_mcp_wait_bound_telemetry.add(fut)
+
+    def _done(f) -> None:
+        _pending_mcp_wait_bound_telemetry.discard(f)
+        # ``submit`` returns a PRE-FAILED future when the telemetry worker's
+        # bounded backlog is full (``_WorkerBacklogFull``) — the saturation
+        # that also causes breaches. Mirror ``hosted_api._telemetry_done`` so
+        # the outer hop's drop is traceable rather than silent (#3834 H3).
+        if not f.cancelled() and f.exception() is not None:
+            _log.debug(
+                "mcp wait-bound telemetry schedule dropped: %r", f.exception())
+
+    fut.add_done_callback(_done)
+
+
 # Captured before wrapping — the middleware chain re-dispatches
 # call_tool(run_middleware=False) internally; the wrapper passes those
 # through untouched so exactly ONE event is emitted per client tool call.
 _original_call_tool = mcp.call_tool
+
+#: The key ``hosted_api.WaitBoundMiddleware`` writes the transport arrival time
+#: under, on the shared ASGI ``scope["state"]`` dict (the same dict the auth
+#: dependency writes ``org_id`` into).
+_WAIT_BOUND_ARRIVAL_KEY = "_wait_bound_t0"
+
+#: The key the middleware sets when IT has already emitted the breach event and
+#: answered the caller (#3834 F-2). The seam reads it so one request records
+#: exactly one ``transport_wait_bound_exceeded``.
+_WAIT_BOUND_REFUSED_KEY = "_wait_bound_refused"
+
+
+def _wait_bound_state() -> dict | None:
+    """The shared ASGI ``scope["state"]`` dict, or None off-HTTP.
+
+    Both the transport arrival stamp (#3834 F1) and the already-refused flag
+    (#3834 F-2) ride this one dict, which ``hosted_api.WaitBoundMiddleware``
+    writes and Starlette's ``Mount`` forwards to this sub-app as the SAME
+    mapping.
+
+    HTTP-only by construction: on stdio there is no request, so this returns
+    None. It deliberately never raises — a missing dict means "no transport
+    stamp / no refusal", never "fail the tool call". ``get_http_request`` is
+    tried first because it is the public API, but its MCP-SDK ``request_ctx``
+    branch can return a protocol object rather than the Starlette request, so
+    FastMCP's HTTP ContextVar is the reliable fallback.
+    """
+    candidates: list = []
+    try:
+        from fastmcp.server.dependencies import get_http_request
+        candidates.append(get_http_request())
+    except Exception:
+        pass
+    try:
+        from fastmcp.server.http import _current_http_request
+        candidates.append(_current_http_request.get())
+    except Exception:
+        pass
+    for request in candidates:
+        scope = getattr(request, "scope", None)
+        if not isinstance(scope, dict):
+            continue
+        state = scope.get("state")
+        if isinstance(state, dict):
+            return state
+    return None
+
+
+def _wait_bound_arrival() -> float | None:
+    """When the HTTP request arrived at the transport, or None off-HTTP.
+
+    The stamp is written by ``hosted_api.WaitBoundMiddleware`` and is what makes
+    the bound ONE deadline instead of two (#3834 F1). The middleware cannot
+    bound an MCP *tool call* — Streamable-HTTP starts the SSE response BEFORE
+    dispatching the tool — so it hands this seam the SAME arrival time and the
+    seam waits only the REMAINING part of the bound. Without it the
+    caller-visible wait is pre-SSE cost + bound (measured: 0.522 s for an
+    advertised 0.3 s bound) and a slow org resolution can push the total past
+    the 15 s client budget with no legible refusal.
+
+    HTTP-only by construction, so on stdio it returns None and the full bound
+    applies.
+    """
+    state = _wait_bound_state()
+    if state is not None:
+        stamp = state.get(_WAIT_BOUND_ARRIVAL_KEY)
+        if isinstance(stamp, (int, float)):
+            return float(stamp)
+    return None
+
+
+def _wait_bound_refused() -> bool:
+    """True when the transport already refused this request (#3834 F-2).
+
+    ``hosted_api.WaitBoundMiddleware`` sets this on the shared
+    ``scope["state"]`` when IT emits the breach event and answers the caller —
+    the pre-SSE-stall path, where pre-SSE cost >= bound and this seam's own
+    deadline has already collapsed to 0. The seam must then NOT emit a second
+    ``transport_wait_bound_exceeded`` and must NOT record the redundant refusal
+    as an ``mcp_tool_call`` ``timeout``. It still returns the refusal, so the
+    abandoned dispatch still terminates cleanly.
+    """
+    state = _wait_bound_state()
+    return bool(state.get(_WAIT_BOUND_REFUSED_KEY)) if state is not None else False
+
+
+async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
+                                     task_meta):
+    """Await the real tool dispatch under the transport wait bound (#3834).
+
+    On breach the caller gets a legible refusal that REUSES the shipped
+    vocabulary: the message and the advertised delay come from the SINGLE module
+    both surfaces read (``mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE`` /
+    ``mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S``), and ``retry_after`` rides the
+    result.
+
+    ⚠️ Why the refusal is a ``CallToolResult(isError=True)`` and NOT a JSON-RPC
+    ``error`` object: the MCP SDK's ``tools/call`` handler wraps every handler
+    exception except ``UrlElicitationRequiredError`` into exactly that shape
+    (``mcp/server/lowlevel/server.py::_make_error_result``), so a raised
+    ``McpError`` loses its code and ``data`` on this surface. The result channel
+    is the only one the SDK exposes once the SSE stream has started; carrying
+    the same message plus ``error.data.retry_after`` inside the result keeps the
+    retry signal shipped WITH the bound instead of dropping it.
+
+    On the TIMEOUT path the dispatch is ABANDONED, never cancelled: cancelling
+    an ``asyncio`` await runs every ``finally`` the handler owns, and would also
+    release this seam's #2850 gauge hold (``_hold_mcp_dispatch_after_request``)
+    while the dispatched work is still in flight — the exact
+    busy-misread-as-idle the hold exists to prevent. (The SDK-closing
+    ``finally`` that makes an early cancel destructive is a fact about the
+    hosted handlers in ``hosted_api`` — #2988 / #3718 — not about this module.)
+    On the CANCELLATION path the opposite holds — the cancellation is propagated
+    INTO the dispatch, as the direct await this wrapper replaced did, so the
+    tool's own cancellation cleanup runs.
+    """
+    t0 = _time.perf_counter()
+    # #3834 F1: spend the TRANSPORT's REMAINING deadline, not a fresh one. The
+    # caller-visible wait is pre-SSE cost + bound; a fresh bound here makes it a
+    # SUM, and a slow org resolution can push the total past the client budget
+    # with no legible refusal. ``_time.monotonic()`` matches the middleware's
+    # clock (``time.monotonic``), NOT this function's ``perf_counter`` t0.
+    arrival = _wait_bound_arrival()
+    if arrival is None:
+        remaining = float(_mcp_auth._TRANSPORT_WAIT_BOUND_S)  # stdio / no HTTP request
+    else:
+        remaining = max(
+            0.0, _mcp_auth._TRANSPORT_WAIT_BOUND_S - (_time.monotonic() - arrival))
+    task = asyncio.ensure_future(
+        _original_call_tool(name, arguments, version=version,
+                            run_middleware=True, task_meta=task_meta))
+    try:
+        # ``wait_for`` + ``shield`` rather than ``asyncio.wait`` — the same
+        # primitive choice as ``hosted_api.WaitBoundMiddleware.__call__``. The
+        # seam's cost is NOT the waiter: measured, the two are cost-neutral (same
+        # trivial coroutine — ``wait_for(shield)`` 198 µs p50 vs ``asyncio.wait``
+        # 199 µs p50, identical 53.8 µs floor; an inline ``asyncio.timeout`` is
+        # 7.7 µs). It is the per-call ``ensure_future`` task indirection —
+        # ABANDON-don't-cancel requires owning the task — measured as a dispatch
+        # delta of p50 ≈ +0.48 ms, p95 ≈ +1.7 ms vs the unwrapped
+        # ``_original_call_tool``. The ``shield`` is what preserves
+        # ABANDON-don't-cancel: ``wait_for`` alone cancels the awaited future on
+        # timeout, and cancelling here would run the SDK-closing ``finally``
+        # under work still using it (#2988 / #3718).
+        return await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
+    except asyncio.CancelledError:
+        # Outer cancellation (client disconnect, server shutdown, transport
+        # teardown). Propagate it INTO the dispatch and await it, so the tool's
+        # own cancellation path runs — abandoning here would silently keep a
+        # cancelled dispatch alive. Suppress only the child's CANCELLATION; a
+        # genuine error from its cleanup must surface.
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        raise
+    except TimeoutError:
+        if task.done():
+            # The dispatch finished as the deadline expired: surface its own
+            # result/exception. A handler's ``TimeoutError`` is NOT a wait
+            # breach (``asyncio.TimeoutError`` IS builtin ``TimeoutError``).
+            return task.result()
+        # ``shield`` kept the inner dispatch RUNNING; the breach path below
+        # abandons it on purpose.
+        pass
+
+    _hold_mcp_dispatch_after_request(task)
+    # #3834 F-2: the transport already refused AND answered this request (a
+    # pre-SSE stall, where pre-SSE cost >= bound and this seam's remaining
+    # deadline was 0). The middleware's event is then the truthful record;
+    # emitting here would be a second, mutually-inconsistent
+    # ``transport_wait_bound_exceeded`` for the same request.
+    transport_refused = _wait_bound_refused()
+    # #3834 F-1: report the interval the bound actually governs — the
+    # CALLER-VISIBLE wait, the SAME interval the REST arm's breach event reports
+    # (``hosted_api`` uses ``time.monotonic() - transport arrival``). ``t0`` here
+    # is THIS seam's entry, which is AFTER pre-SSE (org resolution, rate limit,
+    # routing); because the seam spends only the transport's REMAINING deadline,
+    # a ``t0``-based interval under-reports by the whole pre-SSE cost. On stdio
+    # there is no transport arrival, so the seam-local ``t0`` stands in.
+    if arrival is None:
+        latency_ms = int((_time.perf_counter() - t0) * 1000)
+    else:
+        latency_ms = int((_time.monotonic() - arrival) * 1000)
+    # #3834 F-3: the tool name is the client-supplied JSON-RPC ``params.name``.
+    # On the SCOPED path ``_enforce_mcp_tool_scope`` has already resolved it
+    # against the registry (and denies an unregistered name), but on the
+    # UNscoped (org-wide / selfhost) path it reaches this seam without any
+    # registry-membership guarantee — and the ``mcp_tool_call`` sink is always on,
+    # so it is untrusted in the same class of sink the REST arm already sanitizes
+    # its route path for. Escape it for the log line (the analytics sink
+    # sanitizes its own copy).
+    safe_name = _mcp_auth._sanitize_for_log(name)
+    if transport_refused:
+        # The transport's warning already covers this request; a second
+        # "refusing legibly" warning would describe a refusal this seam never
+        # delivers (the middleware dropped the SSE response).
+        _log.debug(
+            "MCP tools/call %s already refused at the transport; this seam's "
+            "refusal is redundant", safe_name)
+    else:
+        # The SAME breach writer the REST arm uses — one emit site, one prop
+        # vocabulary — scheduled OFF the loop (see
+        # ``_emit_mcp_wait_bound_breach_off_loop``): the fast path must not pay
+        # a ``hosted_api`` import, and neither must the breach path, where that
+        # import froze the loop and delivered the refusal seconds late.
+        _emit_mcp_wait_bound_breach_off_loop(
+            _current_org_id.get() or "", latency_ms, name)
+        _log.warning(
+            "transport wait bound (%.0fs) exceeded: MCP tools/call %s — "
+            "refusing legibly", _mcp_auth._TRANSPORT_WAIT_BOUND_S, safe_name)
+    retry_after = _mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S
+    return ToolResult(
+        content=_mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE,
+        # The REST JSON-RPC error payload, carried on the channel this surface
+        # has: same code, same message, same `data.retry_after`.
+        structured_content={"error": {
+            "code": ERR_TIMEOUT,
+            "message": _mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE,
+            "data": {"retry_after": retry_after},
+        }},
+        meta={_WAIT_BOUND_META_KEY: True},
+        is_error=True,
+    )
 
 
 def _enforce_mcp_tool_scope(name: str) -> None:
@@ -242,12 +596,17 @@ def _enforce_mcp_tool_scope(name: str) -> None:
 
     - legacy full-access keys (scopes None OR legacy_full_access) and OAuth/
       session resolutions (scopes None) pass — existing flows unchanged.
-    - a SCOPED key is enforced: tools in WRITE_TOOL_NAMES need
-      graphs:write; everything else (read tools) needs graphs:read (write
-      implies read — graphs:write satisfies reads).
+    - a SCOPED key is enforced: the tool's registry entry carries the declared
+      `writes` flag — a `writes=True` tool needs graphs:write, everything else
+      needs graphs:read (write implies read — graphs:write satisfies reads).
+      `WRITE_TOOL_NAMES` is the derived view of that flag (#4170).
+    - an UNRESOLVABLE name is DENIED (`AuthorizationError`), never served as a
+      read. The old else-branch treated any name missing from the parallel
+      write list as a read, so a writer absent from that list was reachable by
+      a graphs:read-only key (#4170).
     - deleg=0 children without a data scope never reach here (the
       middleware rejects them at resolution); deleg=0 children WITH a data
-      scope are routed to their own graph by _get_team_sdk and enforced
+      scope are routed to their own graph by _get_org_sdk and enforced
       here like any scoped key.
 
     Raises AuthorizationError (mapped to an authz error result + classified
@@ -258,7 +617,14 @@ def _enforce_mcp_tool_scope(name: str) -> None:
     if scopes is None or _current_legacy_full_access.get():
         return
     have = set(scopes)
-    if name in WRITE_TOOL_NAMES:
+    entry = get_tool_by_name().get(name)
+    if entry is None:
+        # #4170: an unresolvable name is DENIED, never served as a read. The
+        # default used to be "read", so a write missing from the parallel list
+        # was reachable from a graphs:read-only key.
+        raise AuthorizationError(
+            f"Unknown tool {name} — denied (not present in the registry).")
+    if entry.writes:
         if "graphs:write" not in have:
             raise AuthorizationError(
                 f"Key lacks graphs:write scope for tool {name}.")
@@ -267,13 +633,13 @@ def _enforce_mcp_tool_scope(name: str) -> None:
             f"Key lacks a graph data scope (graphs:read) for tool {name}.")
 
 
-def _reject_graph_bound_mcp_team_surface(surface: str) -> None:
-    """C5 #2114 (re-review 3): MCP tools that write TEAM-level state (the
+def _reject_graph_bound_mcp_org_surface(surface: str) -> None:
+    """C5 #2114 (re-review 3): MCP tools that write ORG-level state (the
     DEFAULT graph's onboarding node / pack installs / session-recording
     toggle — data that lives outside a custom graph) reject graph-bound
-    keys outright, mirroring REST's _reject_graph_bound_team_surface. A
-    per-graph key must never write the team default graph through an MCP
-    team tool (cross-graph write). Team-wide keys / OAuth / selfhost
+    keys outright, mirroring REST's _reject_graph_bound_org_surface. A
+    per-graph key must never write the org default graph through an MCP
+    org tool (cross-graph write). Org-wide keys / OAuth / selfhost
     (graph_id None) pass."""
 
     if _current_graph_id.get():
@@ -286,7 +652,8 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
                              task_meta=None):
     """Telemetry-instrumented single dispatch point (installed as mcp.call_tool).
 
-    Emits one mcp_tool_call analytics event per client tool call, with
+    Emits one mcp_tool_call analytics event per client tool call — the ``status``
+    vocabulary is documented at ``_emit_mcp_tool_call_telemetry`` — with
     latency measured around the tool execution only (transport auth runs
     before this point and is excluded). Background-task dispatches
     (task_meta) are measured at scheduling granularity — our tools never use
@@ -295,14 +662,29 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
     if not run_middleware:
         return await _original_call_tool(name, arguments, version=version,
                                          run_middleware=False, task_meta=task_meta)
-    team_id = _current_team_id.get() or ""
+    org_id = _current_org_id.get() or ""
     _enforce_mcp_tool_scope(name)
-    maybe_record_mcp_read(name, team_id, _current_team_limits.get())
+    maybe_record_mcp_read(name, org_id, _current_org_limits.get())
     status, error_kind = "ok", None
     t0 = _time.perf_counter()
     try:
-        result = await _original_call_tool(name, arguments, version=version,
-                                           run_middleware=True, task_meta=task_meta)
+        result = await _await_under_mcp_wait_bound(
+            name, arguments, version=version, task_meta=task_meta)
+        if getattr(result, "meta", None) and result.meta.get(_WAIT_BOUND_META_KEY):
+            # #3834: the transport wait bound refused this dispatch. Its own
+            # status (not exec_error) so "how often are we breaching 10 s" is
+            # answerable from the SAME mcp_tool_call series the bound was
+            # justified by.
+            if _wait_bound_refused():
+                # #3834 F-2: the TRANSPORT already refused and answered this
+                # request before this seam could wait on it (pre-SSE cost >=
+                # bound, so the remaining deadline was 0). Recording ``timeout``
+                # would be a second, FALSE row in the very series the bound is
+                # measured from. ``refused`` is its own status: the dispatch was
+                # abandoned by an OUTER refusal, not by this seam's deadline.
+                status, error_kind = "refused", "transport_wait_bound"
+            else:
+                status, error_kind = "timeout", "wait_bound"
         # The stdio auth gate (#236) returns an error dict instead of raising
         # (TORTOISE_API_KEY set → every call is rejected). Classify it so
         # unauthenticated stdio calls don't masquerade as ok.
@@ -312,13 +694,29 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
                 and payload["error"].startswith("Authentication required")):
             status, error_kind = "auth_error", "stdio_auth_gate"
         return result
+    except asyncio.CancelledError:
+        # A cancelled dispatch is neither an "ok" nor an exec error — classifying
+        # it as timeout or success would hide the cancellation rate in the same
+        # mcp_tool_call series the bound is measured from. (Pre-existing: the
+        # generic `except Exception` never saw CancelledError, so a cancelled
+        # call emitted status="ok".)
+        status, error_kind = "cancelled", "caller_cancelled"
+        raise
     except Exception as exc:
         status, error_kind = _classify_mcp_call_error(exc)
         raise
     finally:
+        # NOTE (#3834 F-1): this is deliberately the SEAM-LOCAL interval (tool
+        # dispatch, transport cost excluded), NOT the caller-visible interval
+        # the breach event above reports. ``mcp_tool_call`` is an established
+        # dispatch series (#888/#889; the p99 22.5 s population the bound was
+        # justified by), and its contract — documented at ``_wrapped_call_tool``
+        # — excludes transport auth. Redefining it would silently break
+        # comparability with that population. The bound's own telemetry is the
+        # breach event, which measures the caller-visible wait on both arms.
         latency_ms = int((_time.perf_counter() - t0) * 1000)
         try:
-            _emit_mcp_tool_call_telemetry(team_id, name, status, latency_ms,
+            _emit_mcp_tool_call_telemetry(org_id, name, status, latency_ms,
                                           error_kind)
         except Exception:
             # A telemetry bug must never mask or break the tool call itself.
@@ -430,64 +828,44 @@ _QUOTA_GATED: frozenset[str] = frozenset({
 })
 
 
-# #308 (R3, scoping delta 11): the explicit WRITE set for read-velocity
-# classification — tools/call for a tool NOT in this set counts as a read.
-# NOT derived as the complement of _QUOTA_GATED: tortoise_ingest is
-# _quota_gated-wrapped but absent from that frozenset, and the demo-create
-# tool writes Points via _enforce_quota without the wrapper. Membership is
-# asserted by an introspective test (plan Task 11) so a new write tool cannot
-# silently be counted as a read.
-WRITE_TOOL_NAMES: frozenset[str] = _QUOTA_GATED | frozenset({
-    "tortoise_ingest",               # bulk write (wrapped, not in _QUOTA_GATED)
-    "tortoise_onboarding_demo_create",  # seeds the 4-layer demo graph,
-    "tortoise_mine_conversations", "tortoise_approve_merge",
-    "tortoise_promote_point",
-    # C5 #2114 (code-review P1): the destructive/mutating _rw() tools a
-    # graphs:read-only key must NEVER invoke — a read-only key deleting
-    # points/entities or mutating operators/sources is a write-scope
-    # bypass. Membership asserted by test_every_node_creating_tool_* +
-    # test_no_write_tool_counted_as_read (extended in C5).
-    "tortoise_delete_point", "tortoise_delete", "tortoise_delete_entity",
-    "tortoise_set_point_baseline", "tortoise_set_source_tier",
-    "tortoise_annotate_operator",
-    # tortoise_pack_install MERGEs :PackManifest/:PackInstall into the
-    # tenant graph (write) — re-review P2: it was missing (classified read).
-    "tortoise_pack_install",
-    # C5 #2114 (re-review 3): REST/MCP parity + write-cache tools — session
-    # capture writes episodic Points (REST twin requires graphs:write); the
-    # onboarding index/demo/toggle tools write DEFAULT-graph/team state;
-    # get_source_reliability write-through refreshes the Source cache.
-    "tortoise_session_capture",
-    "tortoise_onboarding_github_index",
-    "tortoise_onboarding_session_recording",
-    "tortoise_get_source_reliability",
-    "tortoise_onboarding_github_connect",  # stores credentials + team state
-    # main-side #2156 landed during the C5 rebase — onboarding_seed writes
-    # the two anchor Subjects into the DEFAULT graph (derived write-set test
-    # caught it at the rebased head).
-    "tortoise_onboarding_seed",
-})
+# #4170: the write permission lives on each ToolDefinition entry (`writes`),
+# so WRITE_TOOL_NAMES is DERIVED — a rename or a merge edits the entry and the
+# permission travels with it. It is no longer a hand-maintained parallel list
+# that a new writer could silently be missing from.
+#
+# #308 (R3, scoping delta 11): this is also the read-velocity classification
+# set — tools/call for a tool NOT in it counts as a read. It is NOT the
+# complement of _QUOTA_GATED: tortoise_ingest is _quota_gated-wrapped but
+# absent from that frozenset, and the demo-create tool writes Points via
+# _enforce_quota without the wrapper.
+#
+# The `# noqa: E402` is deliberate: the bottom `tool_registry` import exists
+# for the adapter, and importing the derived helpers here keeps this module's
+# import order unchanged (tool_registry does not import mcp_server — no cycle).
+from tortoise.tool_registry import get_tool_by_name, get_write_tool_names  # noqa: E402
+
+WRITE_TOOL_NAMES: frozenset[str] = get_write_tool_names()
 
 
-# #329: per-team per-minute LLM-call budget for tortoise_analyze (operator LLM
+# #329: per-org per-minute LLM-call budget for tortoise_analyze (operator LLM
 # keys back outbound calls; the rate limiter alone is not the bound).
 _ANALYZE_LLM_BUDGET: dict[str, list[float]] = {}
 
 
 def _analyze_llm_budget_available() -> bool:
-    """True if this team still has analyze LLM budget this minute (HTTP only).
+    """True if this org still has analyze LLM budget this minute (HTTP only).
 
     Beyond budget the tool degrades to keyword-only classification (no paid
-    outbound call). Stdio (no team context) is not budgeted.
+    outbound call). Stdio (no org context) is not budgeted.
     """
     import time as _t  # noqa: I001
-    from tortoise.mcp_auth import _current_team_id
+    from tortoise.mcp_auth import _current_org_id
     from tortoise.quota import MAX_ANALYZE_LLM_PER_MIN
-    team_id = _current_team_id.get()
-    if not team_id:
-        return True  # stdio/operator — no team budget accounting
+    org_id = _current_org_id.get()
+    if not org_id:
+        return True  # stdio/operator — no org budget accounting
     now_ts = _t.time()
-    bucket = _ANALYZE_LLM_BUDGET.setdefault(team_id, [])
+    bucket = _ANALYZE_LLM_BUDGET.setdefault(org_id, [])
     bucket[:] = [ts for ts in bucket if now_ts - ts < 60]
     # prune -> check -> append (never pop between check and append — that
     # orphans the appended timestamp and silently disables the budget)
@@ -498,39 +876,62 @@ def _analyze_llm_budget_available() -> bool:
 
 
 def _enforce_quota(resource: str = "points") -> None:
-    """#329: fail-closed team quota pre-write for MCP write tools.
+    """#329: fail-closed org quota pre-write for MCP write tools.
 
     HTTP mode: limits come from the middleware-resolved ContextVar (same
     limits REST sees); fallback resolves from the registry. Stdio mode
-    (no team context) → skip — operator/trusted (batch caps still apply).
+    (no org context) → skip — operator/trusted (batch caps still apply).
     """
-    from tortoise.mcp_auth import SELFHOST_TEAM_ID, _current_team_id, _current_team_limits
-    from tortoise.quota import enforce_team_limit, resolve_team_limits
-    team_id = _current_team_id.get()
-    if not team_id:
-        return  # stdio/operator — no team context
-    if team_id == SELFHOST_TEAM_ID:
+    from tortoise.mcp_auth import SELFHOST_ORG_ID, _current_org_id, _current_org_limits
+    from tortoise.quota import enforce_org_limit, resolve_org_limits
+    org_id = _current_org_id.get()
+    if not org_id:
+        return  # stdio/operator — no org context
+    if org_id == SELFHOST_ORG_ID:
         # Selfhost transport placeholder (#338): no tenant registry exists —
         # quota is N/A (selfhost has no billing). Batch caps still apply.
         return
-    limits = _current_team_limits.get()
+    limits = _current_org_limits.get()
     if limits is None:
-        limits = resolve_team_limits(team_id)
-    # Count on the SAME team SDK the tool writes to (identical connection),
+        limits = resolve_org_limits(org_id)
+    # Count on the SAME org SDK the tool writes to (identical connection),
     # so the count and the write can never target different databases.
-    enforce_team_limit(limits, resource, sdk=_get_team_sdk())
+    enforce_org_limit(limits, resource, sdk=_get_org_sdk())
+
+
+def _alert_unmetered(lane: str, org_id: str | None,
+                     error: BaseException) -> None:
+    """Emit the #3981 operator alert for a dropped increment, never raising.
+
+    The import is itself guarded: ``tortoise.metering`` may be the thing that
+    failed, and an unguarded import inside an ``except`` would turn a
+    bookkeeping fault into the user-facing failure the owner's ruling forbids.
+    """
+    try:
+        from tortoise.metering import report_unmetered_increment
+    except Exception:  # noqa: BLE001, RUF100 — the alert must never raise
+        logging.getLogger("tortoise.metering").error(
+            "UNMETERED INCREMENT (#3981): lane=%s team=%s error=%s: %s "
+            "(metering module unavailable)", lane, org_id or "<none>",
+            type(error).__name__, error)
+        return
+    report_unmetered_increment(lane=lane, org_id=org_id, error=error)
 
 
 def _quota_gated(fn, resource: str = "points", abuse_weight=None):
     """Wrap a bound SDK method with a pre-write quota check + metering.
 
-    Preserves the bound-callable style (_safe(_get_team_sdk().name, ...)):
+    Preserves the bound-callable style (_safe(_get_org_sdk().name, ...)):
     the quota check runs INSIDE _safe's try so errors surface as structured
     error dicts (see _safe's QuotaExceededError/QuotaCheckError mapping).
 
     #681: after a successful write (fn returns without raising), records a
-    write op for overage metering. Best-effort — metering failures are
-    swallowed and never block the tool.
+    write op for overage metering. Best-effort — the increment never blocks the
+    tool, and the drop is never silent (#3981): when the increment cannot be
+    recorded the operator is alerted (lane=mcp_write_op) and the error is
+    absorbed. The raise from an unresolvable metering window is a SIGNAL, not a
+    refusal; the user-facing refusal here is ``_enforce_quota`` above, which
+    runs BEFORE the write.
 
     #308 (R1, scoping delta 8): ``abuse_weight`` records a WEIGHTED
     point_create event after a successful Point-creating write — int for a
@@ -541,24 +942,33 @@ def _quota_gated(fn, resource: str = "points", abuse_weight=None):
     def _gated(*args, **kwargs):
         _enforce_quota(resource)
         result = fn(*args, **kwargs)
-        # Metering (#681): best-effort, after successful write
         try:
-            from tortoise.mcp_auth import _current_team_id, _current_team_limits
-            team_id = _current_team_id.get()
-            if team_id:
-                limits = _current_team_limits.get() or {}
+            from tortoise.mcp_auth import _current_org_id
+            org_id = _current_org_id.get()
+        except Exception:  # noqa: BLE001, RUF100 — no org context; metering is skipped
+            org_id = None
+        # Metering (#681): best-effort, after successful write
+        if org_id:
+            try:
+                from tortoise.mcp_auth import _current_org_limits
+                limits = _current_org_limits.get() or {}
                 from tortoise.metering import record_write_ops
-                record_write_ops(team_id, tier=limits.get("tier"))
-                # #308 (R1): weighted point_create recording + evaluation.
-                # The engine piggybacks R2 evaluation on the same call.
+                record_write_ops(org_id, tier=limits.get("tier"))
+            except Exception as e:  # noqa: BLE001, RUF100 — never block the tool
+                _alert_unmetered("mcp_write_op", org_id, e)
+            # #308 (R1): weighted point_create recording + evaluation. The
+            # engine piggybacks R2 evaluation on the same call. Its OWN
+            # best-effort block — an abuse-recording failure is not a dropped
+            # increment and must never be reported as one (#3981).
+            try:
                 if abuse_weight is not None and not _abuse_off():
                     n = (int(abuse_weight(result, args, kwargs) or 0)
                          if callable(abuse_weight) else int(abuse_weight))
                     if n > 0:
                         from tortoise import abuse as _abuse
-                        _abuse.get_engine().record_point_create(team_id, n)
-        except Exception:
-            pass  # best-effort — never block the tool
+                        _abuse.get_engine().record_point_create(org_id, n)
+            except Exception:
+                pass  # best-effort — never block the tool
         return result
     return _gated
 
@@ -571,19 +981,19 @@ def _abuse_off() -> bool:
         return True
 
 
-def maybe_record_mcp_read(name: str, team_id: str, limits: dict | None) -> None:
+def maybe_record_mcp_read(name: str, org_id: str, limits: dict | None) -> None:
     """#308 (R3, scoping delta 11): read-velocity counting for non-write
     tools/call. Explicit write set (WRITE_TOOL_NAMES) — writes never count
     as reads. key_id rides the limits ContextVar (Supabase resolutions carry
-    it; registry resolutions may not → per-team counting only there).
+    it; registry resolutions may not → per-org counting only there).
     Best-effort: telemetry never breaks the tool call."""
     try:
-        if not team_id or team_id == SELFHOST_TEAM_ID or _abuse_off():
+        if not org_id or org_id == SELFHOST_ORG_ID or _abuse_off():
             return
         if name in WRITE_TOOL_NAMES:
             return
         from tortoise import abuse as _abuse
-        _abuse.record_read((limits or {}).get("key_id"), team_id)
+        _abuse.record_read((limits or {}).get("key_id"), org_id)
     except Exception:
         pass
 
@@ -596,30 +1006,48 @@ def _scrub_error(msg: str) -> str:
     return msg
 
 
+class _SafeError(dict):
+    """Failure result from :func:`_safe` (transport, auth, quota, exception).
+
+    A ``dict`` *subclass*, deliberately not a plain dict. A successful SDK
+    write returns the created node's own property dict, which may contain a
+    user-supplied key literally named ``"error"`` — so key presence cannot
+    distinguish "the call failed" from "the call succeeded and the user has a
+    prop called error". Gating on ``"error" not in result`` therefore silently
+    dropped the onboarding observation for such writes (#3926). Gate on
+    ``isinstance(result, _SafeError)`` instead.
+
+    As a dict subclass the value still indexes, compares, and serializes
+    exactly as the plain error dict did — the wire shape is unchanged.
+    """
+
+    __slots__ = ()
+
+
 def _safe(fn, *args, **kwargs):
-    """Call fn; return error dict on exception instead of raising.
+    """Call fn; return an _SafeError on exception instead of raising.
 
     #329: QuotaExceededError → {"error", "code": ERR_QUOTA}; QuotaCheckError
     → {"error", "code": ERR_QUOTA_SERVER} (fail-closed counting).
 
     Transport-aware auth gate (#236). Fail-closed: if _transport_mode is None
     (unset/misconfigured) ALL operations reject. HTTP mode trusts transport-level
-    auth (TeamResolutionMiddleware 401'd pre-dispatch). Stdio mode keeps the
+    auth (OrgResolutionMiddleware 401'd pre-dispatch). Stdio mode keeps the
     dev-mode gate. NEVER depends on is_dev_mode() alone — it returns True in
     hosted production (TORTOISE_API_KEY unset), which would silently bypass auth.
     """
     mode = _transport_mode.get()
     if mode is None:
-        return {
+        return _SafeError({
             "error": (
                 "Authentication required. MCP transport mode not initialized."
             )
-        }
+        })
     if mode == "http":
-        pass  # auth enforced at transport (TeamResolutionMiddleware)
+        pass  # auth enforced at transport (OrgResolutionMiddleware)
     elif mode == "stdio":
         if not _is_dev_mode():
-            return {
+            return _SafeError({
                 "error": (
                     "Authentication required. The MCP stdio transport cannot "
                     "carry auth tokens, so TORTOISE_API_KEY disables stdio. "
@@ -630,10 +1058,10 @@ def _safe(fn, *args, **kwargs):
                     "Bearer <tt_key>'; (3) local stdio dev mode — unset "
                     "TORTOISE_API_KEY."
                 )
-            }
+            })
     else:
         # Unknown transport mode — fail-closed (code-review fix)
-        return {"error": f"Unknown MCP transport mode: {mode!r}"}
+        return _SafeError({"error": f"Unknown MCP transport mode: {mode!r}"})
     try:
         result = fn(*args, **kwargs)
         return result
@@ -651,27 +1079,28 @@ def _safe(fn, *args, **kwargs):
             # survives intact.
             scrubbed = [{**v, "message": _scrub_error(v["message"])}
                         for v in e.violations]
-            return {"error": _scrub_error(str(e)), "code": ERR_BUNDLE_INVALID,
-                    "violations": scrubbed}
+            return _SafeError({"error": _scrub_error(str(e)),
+                               "code": ERR_BUNDLE_INVALID,
+                               "violations": scrubbed})
         if isinstance(e, QuotaExceededError):
-            return {"error": str(e), "code": ERR_QUOTA}
+            return _SafeError({"error": str(e), "code": ERR_QUOTA})
         # Epic 903-C11 (#1249): BudgetExceededError (full-mode dream budget
         # unsatisfiable — C6) is quota-class → ERR_QUOTA.
         from tortoise.exceptions import BudgetExceededError
         if isinstance(e, BudgetExceededError):
-            return {"error": str(e), "code": ERR_QUOTA}
+            return _SafeError({"error": str(e), "code": ERR_QUOTA})
         if isinstance(e, QuotaCheckError):
-            return {"error": str(e), "code": ERR_QUOTA_SERVER}
+            return _SafeError({"error": str(e), "code": ERR_QUOTA_SERVER})
         from tortoise.exceptions import Phase2Error
         if isinstance(e, Phase2Error):
             # A2: Phase-2 failure — {error, batch_id} with NO code (distinct
             # from Phase-1's ERR_BUNDLE_INVALID); the batch_id lets the agent
             # audit the partial commit before re-sending (cycle-23/24 pin).
             # REVIEW-FIX P2: message scrubbed (#43).
-            return {"error": _scrub_error(str(e)),
-                    **({"batch_id": e.batch_id} if e.batch_id else {})}
+            return _SafeError({"error": _scrub_error(str(e)),
+                               **({"batch_id": e.batch_id} if e.batch_id else {})})
         msg = _scrub_error(str(e))
-        return {"error": msg}
+        return _SafeError({"error": msg})
 
 
 def _scrub_analyze_answer(answer: str) -> str:
@@ -710,12 +1139,38 @@ ERR_INVALID = -32003
 # denylist. The MCP tools reject these AT THE BOUNDARY (before the `**props`
 # unpack can bind the SDK's explicit server-managed params); the SDK's
 # _sanitize_props reject is the fail-closed backstop.
-_SERVER_MANAGED_PROPS = frozenset({
-    "is_episodic", "sourcePath", "source_path", "id", "_server_id"})
+_SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a tenant prop)
+    "is_episodic", "sourcePath", "source_path", "id", "_server_id", "outdated", "contains_session"})
 
 
-def _reject_server_managed_props(props: dict) -> str | None:
-    """Return an error message if tenant props attempt server-managed fields."""
+# #2600: client-supplied actor claims are STRIP-AND-IGNORE (never a 4xx —
+# the server owns attribution). Imported from tortoise/sdk.py — single
+# source of truth (#2664 code-review P2: no duplicate frozenset drift).
+# authoredBy is deliberately NOT here (pre-existing client author-label
+# residual).
+
+
+def _reject_server_managed_props(props: dict | None) -> str | None:
+    """Strip client-forged actor claims, then reject remaining server-managed
+    fields (#329/#1486). Returns an error message or None."""
+    # #2600: strip + ignore FIRST — never stored, never a 4xx. Runs inside
+    # this single choke point (11 tool call sites) so no per-tool strip is
+    # missed. Guard None (optional props= kwargs on entity tools call with
+    # no props dict).
+    # In-place pop is the contract here: call sites ALWAYS pass a fresh
+    # per-request dict (`props = _parse(props)` above each call — never a
+    # shared/cached object), and the function returns only an error string,
+    # so the stripped dict MUST be the caller's own for the strip to reach
+    # storage. (Unlike sdk._sanitize_props, which copies and returns the
+    # cleaned dict.) A warning is logged when a client-supplied actor key is
+    # stripped, matching the SDK backstop's log evidence.
+    if not props:
+        return None
+    for k in _RESERVED_ACTOR_PROPS:
+        if k in props:
+            _log.warning(
+                "ignoring client-supplied %r at MCP boundary", k)
+            props.pop(k)
     bad = _SERVER_MANAGED_PROPS & set(props or {})
     if not bad:
         return None
@@ -724,17 +1179,13 @@ def _reject_server_managed_props(props: dict) -> str | None:
 
 
 
-def _http_excluded_error(message: str | None = None) -> dict:
-    """#236: JSON-RPC error for tools excluded from the tenant HTTP surface (D4).
-
-    ``message`` overrides the default guidance (used by the #2013 ask gate,
-    where the hosted REST /v1/ask is ALSO gated off — the default text's
-    "hosted REST API" hint would be wrong for that caller)."""
+def _http_excluded_error() -> dict:
+    """#236: JSON-RPC error for tools excluded from the tenant HTTP surface (D4)."""
     return {
         "jsonrpc": "2.0",
         "error": {
             "code": ERR_EXCLUDED,
-            "message": message or (
+            "message": (
                 "This tool is not available over HTTP. "
                 "Use the hosted REST API or stdio MCP."),
         },
@@ -762,6 +1213,12 @@ def tortoise_create_point(kind: str, content: str,
                           props: Any = None,
                           dedup: bool = True) -> dict:
     """Create a Point node (statement, decision, vision, hypothesis, etc.).
+
+    On a successful write from an incomplete org, records the onboarding
+    steps this write is evidence for (`harness-connected`,
+    `first-points-filed`, plus `decide-completed` for a decision-shaped
+    write) and hands completion to the canonical fork-aware gate — no
+    separate ceremony needed, and no step the write did not observe (#3784).
 
     dedup=True (default): idempotent — returns existing Point if content matches.
     dedup=False: force-create even if content is identical.
@@ -799,7 +1256,22 @@ def tortoise_create_point(kind: str, content: str,
             if not isinstance(t, str) or not t.strip() or len(t) > 200:
                 return {"error": f"invalid tag value: {t!r} (must be a non-empty string ≤ 200 chars)"}
     merged["dedup"] = dedup
-    return _safe(_quota_gated(_get_team_sdk().create_point, "points", abuse_weight=1), kind, content, **merged)
+    result = _safe(_quota_gated(_get_org_sdk().create_point, "points", abuse_weight=1), kind, content, **merged)
+    # #3926: gate on the typed failure result, never on key presence — a user
+    # prop named "error" must not suppress the onboarding observation.
+    if not isinstance(result, _SafeError):
+        # #3784: only a decision-shaped write observes the decision step —
+        # `decision` is the pointKind the documented EP decide protocol
+        # files (tortoise/onboarding/SKILL.md §5) and the one file_decision
+        # creates. Read the PERSISTED pointKind when the write returned one
+        # (the server must observe what was recorded, not what was asked
+        # for); any other kind observes no decision.
+        _recorded_kind = (result.get("pointKind") if isinstance(result, dict)
+                          else kind)
+        _maybe_onboarding_auto_complete(
+            decision_observed=(str(_recorded_kind or kind).strip().lower()
+                               == "decision"))
+    return result
 
 
 def tortoise_query(kind: str | None = None,
@@ -855,7 +1327,7 @@ def tortoise_query(kind: str | None = None,
     paginated = offset is not None or page is not None
     eff_limit = limit if limit is not None else (20 if paginated else 100)
     if tag is not None:
-        rows = _safe(_get_team_sdk().query_points_by_tag, tag)
+        rows = _safe(_get_org_sdk().query_points_by_tag, tag)
         if not isinstance(rows, list):
             return rows
         # query_points_by_tag has no retracted exclusion in the SDK — mirror
@@ -874,7 +1346,7 @@ def tortoise_query(kind: str | None = None,
     if text:
         if paginated:
             return {"error": "offset/page not supported with text — use limit only, or tortoise_search"}
-        return _safe(_get_team_sdk().tortoise_fts_query, text, kind=kind,
+        return _safe(_get_org_sdk().tortoise_fts_query, text, kind=kind,
                      entity_type=entity_type, limit=eff_limit,
                      min_confidence=min_confidence or 0.0,
                      order_by=order_by or "relevance")
@@ -882,10 +1354,10 @@ def tortoise_query(kind: str | None = None,
         eff_offset = offset if offset is not None else 0
         if page is not None:
             eff_offset = (page - 1) * eff_limit
-        return _safe(_get_team_sdk().paginated_query, kind, skip=eff_offset,
+        return _safe(_get_org_sdk().paginated_query, kind, skip=eff_offset,
                      limit=eff_limit, include_retracted=include_retracted,
                      **(filters or {}))
-    result = _safe(_get_team_sdk().query, kind,
+    result = _safe(_get_org_sdk().query, kind,
                    include_retracted=include_retracted, **(filters or {}))
     # If empty results and a kind filter was provided, attach suggestion
     if isinstance(result, list) and len(result) == 0 and kind is not None:
@@ -913,7 +1385,7 @@ def tortoise_paginated_query(kind: str | None = None,
 def tortoise_check_structure() -> list[dict]:
     """Check Gate 0→4 chain integrity (orphans, dangling refs).
     Alias → overview(section='structure_check') (epic #888 W3)."""
-    return _safe(_get_team_sdk().check_structure)
+    return _safe(_get_org_sdk().check_structure)
 
 
 def tortoise_validate_domain(domain: str) -> dict:
@@ -924,7 +1396,7 @@ def tortoise_validate_domain(domain: str) -> dict:
     actionable violations ({rule, kind, ref, message, fix}) plus drift
     warnings for manifest chains with no registered validator. Never
     modifies the graph; violations are warnings, not blocks."""
-    return _safe(_get_team_sdk().validate_domain, domain)
+    return _safe(_get_org_sdk().validate_domain, domain)
 
 
 def tortoise_audit(point_kinds: list[str] | None = None) -> dict:
@@ -934,7 +1406,7 @@ def tortoise_audit(point_kinds: list[str] | None = None) -> dict:
     summary + exit_code (0 clean, 1 issues). Same surface as the
     `tortoise audit` CLI — both wrap the shared SDK audit() method.
     """
-    return _safe(_get_team_sdk().audit, point_kinds=point_kinds)
+    return _safe(_get_org_sdk().audit, point_kinds=point_kinds)
 
 
 def tortoise_summarize_structure() -> dict:
@@ -943,56 +1415,56 @@ def tortoise_summarize_structure() -> dict:
     total counts every non-operator kind (statements, observations, decisions,
     ...), not just the product-strategy gates; operators is reported
     separately. Alias → overview(section='structure') (epic #888 W3)."""
-    return _safe(_get_team_sdk().summarize_structure)
+    return _safe(_get_org_sdk().summarize_structure)
 
 
 def tortoise_list_pointkinds() -> list[dict]:
     """List all pointKinds present in the graph with counts. What EXISTS.
     Alias → overview(section='pointkinds') (epic #888 W3)."""
-    return _safe(_get_team_sdk().list_pointkinds)
+    return _safe(_get_org_sdk().list_pointkinds)
 
 
 def tortoise_list_sources() -> list[dict]:
     """List all Sources with point counts. Where data came FROM.
     Alias → overview(section='sources') (epic #888 W3)."""
-    return _safe(_get_team_sdk().list_sources)
+    return _safe(_get_org_sdk().list_sources)
 
 
 def tortoise_list_namespaces() -> list[dict]:
     """List installed pack namespaces.
     Alias → overview(section='namespaces') (epic #888 W3)."""
-    return _safe(_get_team_sdk().list_namespaces)
+    return _safe(_get_org_sdk().list_namespaces)
 
 
 def tortoise_list_batch(batch_id: str) -> dict:
     """Audit one ingest bundle's stamped artifacts (epic #902 A13)."""
-    return _safe(_get_team_sdk().list_batch, batch_id)
+    return _safe(_get_org_sdk().list_batch, batch_id)
 
 
 def tortoise_list_batches(limit: int = 20) -> list[dict]:
     """Batch discovery — recent distinct ingest batch_ids (epic #902 A13)."""
-    return _safe(_get_team_sdk().list_batches, limit=limit)
+    return _safe(_get_org_sdk().list_batches, limit=limit)
 
 
 def tortoise_packs_list() -> list[dict]:
-    """List this team's ACTIVE packs (#318 — multi-tenant pack isolation).
+    """List this org's ACTIVE packs (#318 — multi-tenant pack isolation).
 
     Shared pack catalog + the tenant graph's PackInstall activation records
     (ensure-then-read core shared with REST GET /v1/packs — no REST/MCP
-    divergence). Auth-only scoping via the _current_team_id contextvar seam:
+    divergence). Auth-only scoping via the _current_org_id contextvar seam:
     cross-tenant access is structurally impossible. D6 masking: empty result
     when nothing is installed (never an error); the only error surface is
     auth/transport failure.
     """
-    # Fail-closed (#318): in HTTP/tenant mode a missing team context must
+    # Fail-closed (#318): in HTTP/tenant mode a missing org context must
     # NEVER fall back to the base (default-namespace) SDK for pack
     # introspection — pack state is per-tenant. (stdio/selfhost keeps the
     # base SDK: single-tenant, the base graph IS the tenant.)
-    if _current_team_id.get() is None and _transport_mode.get() == "http":
+    if _current_org_id.get() is None and _transport_mode.get() == "http":
         return {"error": "Authentication required. No team context.",
                 "code": ERR_UNAUTHORIZED}
     from tortoise.pack_state import get_tenant_packs
-    return _safe(lambda: get_tenant_packs(_get_team_sdk()))
+    return _safe(lambda: get_tenant_packs(_get_org_sdk()))
 
 
 def tortoise_pack_install(manifest_yaml: str) -> dict:
@@ -1009,10 +1481,10 @@ def tortoise_pack_install(manifest_yaml: str) -> dict:
     is the serving app: ``tortoise.hosted_api`` is only imported in the
     hosted deployment.
     """
-    # C5 #2114 (final-gate P2): packs are DEFAULT-graph team-level state —
+    # C5 #2114 (final-gate P2): packs are DEFAULT-graph org-level state —
     # graph-bound keys rejected (REST twin upload_pack_manifest parity; a
     # per-graph install would orphan pack state list_packs never sees).
-    _reject_graph_bound_mcp_team_surface("pack install")
+    _reject_graph_bound_mcp_org_surface("pack install")
     import sys as _sys
 
     from tortoise.pack_manifest_store import upsert_tenant_manifest
@@ -1027,7 +1499,7 @@ def tortoise_pack_install(manifest_yaml: str) -> dict:
         return {"installed": False,
                 "error": "pack install requires the HTTP transport."}
     try:
-        record = upsert_tenant_manifest(_get_team_sdk(), manifest_yaml)
+        record = upsert_tenant_manifest(_get_org_sdk(), manifest_yaml)
     except ValueError as e:
         return {"installed": False, "validation_errors": [str(e)]}
     return {"installed": True, **record}
@@ -1036,7 +1508,7 @@ def tortoise_pack_install(manifest_yaml: str) -> dict:
 def tortoise_list_tags() -> list[dict]:
     """List all Tag names with count of tagged Points. Where tags are USED.
     Alias → overview(section='tags') (epic #888 W3)."""
-    return _safe(_get_team_sdk().list_tags)
+    return _safe(_get_org_sdk().list_tags)
 
 
 def tortoise_query_points_by_tag(tag: str) -> list[dict]:
@@ -1055,7 +1527,7 @@ def tortoise_query_points_by_tag(tag: str) -> list[dict]:
 def tortoise_get_point(id: str) -> dict:
     """Get a single Point by ID. Returns all properties, or empty dict.
     Alias → get(id, type='point') (epic #888 W3)."""
-    return _safe(_get_team_sdk().get_point, id)
+    return _safe(_get_org_sdk().get_point, id)
 
 
 # ── Entity Resolution (GAP-01 #6987) ──────────────────────────
@@ -1069,8 +1541,11 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
     Returns [{id, name, kind, confidence}] sorted by confidence DESC.
     """
     try:
-        results = _safe(_get_team_sdk().tortoise_fts_query, query, kind=kind_filter, limit=limit)
-        if isinstance(results, list) and results and "error" not in results[0]:
+        results = _safe(_get_org_sdk().tortoise_fts_query, query, kind=kind_filter, limit=limit)
+        # #3926: a _safe failure is an _SafeError (never a list), so the
+        # list check alone is the failure gate — a row whose props carry a
+        # user key named "error" must still resolve.
+        if isinstance(results, list) and results:
             return [{"id": r["id"], "name": r.get("content", ""),
                      "kind": r.get("point_kind", ""),
                      "confidence": round(
@@ -1079,7 +1554,7 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
                     for r in results]
     except Exception:
         pass
-    return _safe(_get_team_sdk().suggest_entry_points, query, limit=limit, kind_filter=kind_filter)
+    return _safe(_get_org_sdk().suggest_entry_points, query, limit=limit, kind_filter=kind_filter)
 
 
 # ── Semantic Search (#6990) ────────────────────────────────────
@@ -1133,100 +1608,13 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
     Use threshold > 0 to filter out very weak matches; the old 0.3 default would
     reject nearly all RRF results. (#20)
     """
-    return _safe(_get_team_sdk().tortoise_fts_query, query, kind=kind,
+    return _safe(_get_org_sdk().tortoise_fts_query, query, kind=kind,
                  threshold=threshold, limit=limit,
                  entity_type=entity_type,
                  min_confidence=min_confidence, order_by=order_by,
                  relationship_filter=relationship_filter,
                  traversal_path=traversal_path)
 
-
-async def tortoise_ask(question: str, question_type: str | None = None,
-                       question_date: str | None = None) -> dict:
-    """Answer a question about captured memory (#1987 Task 8) — ONE bounded
-    RAG pass (retrieval → annotation → context assembly → ONE LLM reader
-    call) returning an ANSWER (not ranked hits), with the full ask response
-    shape: {answer, abstained, question_type, question_date, evidence,
-    context_tokens, model, provider, route, cost_estimate_usd, duration_ms,
-    retrieval_degraded}.
-
-    COST PROFILE (group="ask" — #2013-gated exposure): unlike tortoise_search
-    (LLM-free), tortoise_ask consumes LLM tokens against the team's
-    per-minute ask budget (60/min) — budget-exhausted calls return the
-    structured error {"error": {"code": "quota_exceeded", "retry_after": …}}
-    and are NEVER an unbounded call. Read-classified (never counted as a
-    write; NOT in _QUOTA_GATED/WRITE_TOOL_NAMES). Budget/in-flight/timeout
-    bounds are the SAME shared structures as the REST surface
-    (tortoise/quota.py run_ask_bounded — Semaphore(8) + 60s + per-team
-    in-flight cap 4); stdio/selfhost contexts are unbudgeted AND unmetered.
-    On the hosted path the MCP handler meters through the SAME single call
-    site as HTTP (``sdk.ask(team_id=_current_team_id.get())``); stdio
-    (team_id=None) and the selfhost transport (the ``_selfhost_transport``
-    flag) record nothing.
-
-    Invalid inputs (empty/oversize/bad type/bad date) surface as a
-    STRUCTURED tool error {"error": {"code": …}} with ZERO LLM calls.
-    """
-    # #2013 PRODUCT-GATING: call-time gate mirroring the listing filter —
-    # FastMCP dispatches tools/call by name without consulting the list
-    # Transform, so a listing-only gate would leak the ask exposure. Served
-    # only on (a) the default surface with TORTOISE_ENABLE_ASK=1 or (b) an
-    # explicit tool_group="ask" server (dev/eval opt-in).
-    if (_transport_mode.get() == "http"
-            and _tool_group.get() != _ASK_TOOL_GROUP
-            and not ask_exposure_enabled()):
-        return _http_excluded_error(
-            message="The ask tool is not served on this server: the hosted ask "
-                    "exposure is gated off (#2013). Use stdio MCP or an "
-                    "explicit tool_group=\"ask\" server.")
-    from tortoise.exceptions import (
-        AskQuotaExceeded,
-        AskReaderUnavailable,
-        AskRetrievalUnavailable,
-        AskValidationError,
-    )
-    from tortoise.quota import (
-        AskBoundedTimeoutError,
-        AskInFlightLimitError,
-        ask_budget_retry_after,
-        ask_in_flight_capacity,
-        ask_llm_budget_available,
-        run_ask_bounded,
-    )
-    team_id = _current_team_id.get()
-    sdk = _get_team_sdk()
-    # Local-lane validation FIRST (structured error, ZERO complete() calls)
-    # — BEFORE the budget gate, so invalid inputs never consume a budget slot
-    # (matching the HTTP path's validate-first semantics).
-    try:
-        sdk._ask_validate(question, question_type, question_date)
-    except AskValidationError as e:
-        return {"error": {"code": e.code}}
-    # Budget gate (the ONE shared bucket helper — stdio/selfhost exempt) —
-    # skip the charge when the in-flight cap is already full (a request that
-    # will 429 ``in_flight_limit`` must not burn a budget slot, P2).
-    if ask_in_flight_capacity(team_id) and not ask_llm_budget_available(team_id):
-        return {"error": {"code": CODE_QUOTA_EXCEEDED,
-                          "retry_after": ask_budget_retry_after(team_id)}}
-    try:
-        return await run_ask_bounded(
-            sdk.ask, team_id, question,
-            question_type=question_type, question_date=question_date,
-            _sdk_team_id=team_id,
-        )
-    except AskValidationError as e:
-        return {"error": {"code": e.code}}
-    except AskQuotaExceeded as e:
-        return {"error": {"code": CODE_QUOTA_EXCEEDED,
-                          "retry_after": e.retry_after}}
-    except AskInFlightLimitError:
-        return {"error": {"code": CODE_IN_FLIGHT_LIMIT}}
-    except AskBoundedTimeoutError:
-        return {"error": {"code": CODE_TIMEOUT}}
-    except AskReaderUnavailable:
-        return {"error": {"code": CODE_READER_UNAVAILABLE}}
-    except AskRetrievalUnavailable:
-        return {"error": {"code": CODE_RETRIEVAL_UNAVAILABLE}}
 
 
 def tortoise_expand_relationships(point_id: str) -> list[dict]:
@@ -1237,7 +1625,7 @@ def tortoise_expand_relationships(point_id: str) -> list[dict]:
     use this to read a single point's complete relationships, including the
     related points' full text, on demand (single-point fan-out is trivially cheap).
     """
-    return _safe(_get_team_sdk().expand_relationships, point_id)
+    return _safe(_get_org_sdk().expand_relationships, point_id)
 
 
 # ── Recall — epistemic intents (epic #898) ─────────────────────
@@ -1316,7 +1704,7 @@ def tortoise_recall(query: str | None = None,
 
     if mode == "gaps":
         results = _safe(
-            _get_team_sdk().recall_gaps, query, kind=kind,
+            _get_org_sdk().recall_gaps, query, kind=kind,
             limit=limit if limit is not None else 20,
             min_load=min_load if min_load is not None else _RECALL_GAPS_DEFAULTS["min_load"],
             max_support=max_support if max_support is not None else _RECALL_GAPS_DEFAULTS["max_support"],
@@ -1324,7 +1712,7 @@ def tortoise_recall(query: str | None = None,
         )
     elif mode == "subgraph":
         results = _safe(
-            _get_team_sdk().recall_subgraph, seed or query,
+            _get_org_sdk().recall_subgraph, seed or query,
             depth=depth if depth is not None else _RECALL_SUBGRAPH_DEFAULTS["depth"],
             completeness=completeness if completeness is not None else _RECALL_SUBGRAPH_DEFAULTS["completeness"],
             max_nodes=max_nodes if max_nodes is not None else 500,
@@ -1332,7 +1720,7 @@ def tortoise_recall(query: str | None = None,
     elif mode == "custom":
         # Raw params, full control — no preset clamping.
         results = _safe(
-            _get_team_sdk().recall_state, query, kind=kind,
+            _get_org_sdk().recall_state, query, kind=kind,
             limit=limit if limit is not None else 10,
             include_superseded=include_superseded,
             min_confidence=min_confidence,
@@ -1343,7 +1731,7 @@ def tortoise_recall(query: str | None = None,
     else:  # state
         defaults = _RECALL_STATE_DEFAULTS
         results = _safe(
-            _get_team_sdk().recall_state, query, kind=kind,
+            _get_org_sdk().recall_state, query, kind=kind,
             limit=limit if limit is not None else 10,
             include_superseded=include_superseded,
             min_confidence=min_confidence,
@@ -1352,9 +1740,9 @@ def tortoise_recall(query: str | None = None,
             centrality_weight=centrality_weight if centrality_weight is not None else defaults["centrality_weight"],
         )
 
-    # _safe returns an error dict on SDK exceptions — surface it at the TOP
-    # level so consumers never mis-parse results.
-    if isinstance(results, dict) and "error" in results:
+    # _safe returns an _SafeError on SDK exceptions — surface it at the TOP
+    # level so consumers never mis-parse results (#3926: never key presence).
+    if isinstance(results, _SafeError):
         return {"mode": mode, **results}
     if mode == "subgraph":
         # recall_subgraph returns {nodes, edges, stats} — spread flat.
@@ -1397,7 +1785,7 @@ def tortoise_compute_confidence(factors: Any = None,
     # request-scoped SDK's persisted dirty roots; the diagnostic only fires
     # when the graph is TRULY clean (no persisted dirty state).
     if _transport_mode.get() == "http" and factors is None and anchors is None:
-        sdk = _get_team_sdk()
+        sdk = _get_org_sdk()
         sdk._hydrate_dirty_roots()
         if not sdk._dirty_roots:
             return {"iterations": 0, "converged": True, "confidences": {},
@@ -1410,7 +1798,7 @@ def tortoise_compute_confidence(factors: Any = None,
     factors = _parse(factors)
     evidence = _parse(evidence)
     anchors = _parse(anchors)
-    return _safe(_get_team_sdk().compute_confidence, factors, evidence,
+    return _safe(_get_org_sdk().compute_confidence, factors, evidence,
                  anchors=anchors,
                  max_hops=max_hops, rel_filter=rel_filter,
                  direction=direction,
@@ -1419,7 +1807,7 @@ def tortoise_compute_confidence(factors: Any = None,
 
 def tortoise_set_point_baseline(claim_id: str, alpha: float, beta: float) -> dict:
     """Set Beta prior evidence for a claim."""
-    return _safe(_get_team_sdk().set_point_baseline, claim_id, alpha, beta)
+    return _safe(_get_org_sdk().set_point_baseline, claim_id, alpha, beta)
 
 
 def tortoise_get_confidence(claim_id: str,
@@ -1432,13 +1820,13 @@ def tortoise_get_confidence(claim_id: str,
     posture TORTOISE_EP_REQUIRE_CALIBRATION (default True, post-#344); pass
     False explicitly to opt out.
     """
-    return _safe(_get_team_sdk().get_confidence, claim_id,
+    return _safe(_get_org_sdk().get_confidence, claim_id,
                  require_calibration=require_calibration)
 
 
 def tortoise_calibrate_summary() -> list[dict]:
     """Audit graph calibration state. Returns per-point guidance."""
-    return _safe(_get_team_sdk().calibrate_summary)
+    return _safe(_get_org_sdk().calibrate_summary)
 
 
 def tortoise_dream(full: bool = False, dirty_only: bool = True,
@@ -1474,7 +1862,7 @@ def tortoise_dream(full: bool = False, dirty_only: bool = True,
         return {"error": (
             f"unknown dream mode {mode!r} — expected one of "
             "'local', 'stale-first', 'full'"), "code": ERR_INVALID}
-    return _safe(_get_team_sdk().dream, dirty_only=dirty_only, full=full,
+    return _safe(_get_org_sdk().dream, dirty_only=dirty_only, full=full,
                  max_hops=max_hops,
                  require_calibration=require_calibration,
                  mode=mode, budget=budget)
@@ -1487,7 +1875,7 @@ def tortoise_dream_health() -> dict:
     (no daemon per #176)."""
     if _transport_mode.get() == "http":
         return _http_excluded_error()
-    return _safe(_get_team_sdk().dream_health_check)
+    return _safe(_get_org_sdk().dream_health_check)
 
 
 def tortoise_update_point(id: str, props: Any) -> dict:
@@ -1496,7 +1884,7 @@ def tortoise_update_point(id: str, props: Any) -> dict:
     _reject = _reject_server_managed_props(props)
     if _reject:
         return {"error": _reject, "code": ERR_INVALID}
-    return _safe(_quota_gated(_get_team_sdk().update_point, "points"), id, **(props or {}))
+    return _safe(_quota_gated(_get_org_sdk().update_point, "points"), id, **(props or {}))
 
 def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
                               direction: str = "bidirectional") -> dict:
@@ -1520,7 +1908,7 @@ def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
     if isinstance(target_ids, list) and len(target_ids) > MAX_OPERATOR_TARGETS:
         return {"error": f"create_operator target_ids exceed the cap ({MAX_OPERATOR_TARGETS})",
                 "code": ERR_QUOTA}
-    return _safe(_quota_gated(_get_team_sdk().create_operator, "points", abuse_weight=1), op_type, source_id, target_ids,
+    return _safe(_quota_gated(_get_org_sdk().create_operator, "points", abuse_weight=1), op_type, source_id, target_ids,
                  direction=direction)
 
 
@@ -1533,14 +1921,14 @@ def tortoise_annotate_operator(id: str, bias: float, precision: float,
     consistency: 0-1 — stability across contexts.
     directness: 0-1 — how directly source bears on target.
     """
-    return _safe(_get_team_sdk().annotate_operator, id, bias, precision, consistency, directness)
+    return _safe(_get_org_sdk().annotate_operator, id, bias, precision, consistency, directness)
 
 
 def tortoise_get_operator(id: str) -> dict:
     """Get an operator Point by ID. Returns all properties including annotation dimensions.
     Raises error if the Point is not an operator.
     Alias → get(id, type='operator') (epic #888 W3)."""
-    point = _safe(_get_team_sdk().get_point, id)
+    point = _safe(_get_org_sdk().get_point, id)
     if isinstance(point, dict) and point and not point.get("is_operator"):
         return {"error": f"Point {id!r} is not an operator"}
     return point
@@ -1569,7 +1957,7 @@ def tortoise_mitigate_operator(id: str, reason: str, strength: float = 0.5,
       mitigation is a calibrated live evidence point (no CalibrationError).
     Idempotent — second call updates existing mitigation.
     """
-    return _safe(_quota_gated(_get_team_sdk().mitigate_operator, "points", abuse_weight=1), id, reason, strength, credibility)
+    return _safe(_quota_gated(_get_org_sdk().mitigate_operator, "points", abuse_weight=1), id, reason, strength, credibility)
 
 
 def tortoise_file_decision(options: Any, evidence: Any,
@@ -1596,8 +1984,13 @@ def tortoise_file_decision(options: Any, evidence: Any,
     if isinstance(evidence, list) and len(evidence) > MAX_FILE_DECISION_EVIDENCE:
         return {"error": f"file_decision evidence exceeds the cap ({MAX_FILE_DECISION_EVIDENCE})",
                 "code": ERR_QUOTA}
-    return _safe(_quota_gated(_get_team_sdk().file_decision, "points",
+    result = _safe(_quota_gated(_get_org_sdk().file_decision, "points",
                           abuse_weight=lambda r, a, k: 1 + len(a[0] or []) + len(a[1] or [])), options, evidence, choice)
+    # #3926: gate on the typed failure result, never on key presence.
+    if not isinstance(result, _SafeError):
+        # #3784: this call IS the observation — a decision was filed.
+        _maybe_onboarding_auto_complete(decision_observed=True)
+    return result
 
 
 def tortoise_file_human_approval(approver_id: str, artifact_id: str,
@@ -1620,13 +2013,13 @@ def tortoise_file_human_approval(approver_id: str, artifact_id: str,
     Returns {event_id, decision_point_id, impl_operator_ids, confidence_delta}.
     """
     point_ids = _parse(point_ids)
-    return _safe(_quota_gated(_get_team_sdk().file_human_approval, "points", abuse_weight=1),
+    return _safe(_quota_gated(_get_org_sdk().file_human_approval, "points", abuse_weight=1),
                  approver_id, artifact_id, point_ids, decision_content)
 
 
 def tortoise_delete_point(id: str) -> dict:
     """Delete a Point. DESTRUCTIVE — requires human confirmation. Cannot be undone."""
-    return _safe(_get_team_sdk().delete_point_wrapped, id)
+    return _safe(_get_org_sdk().delete_point_wrapped, id)
 
 
 def tortoise_invalidate(id: str, corrected_by_id: str) -> dict:
@@ -1635,7 +2028,7 @@ def tortoise_invalidate(id: str, corrected_by_id: str) -> dict:
     The `corrected_by_id` point CORRECTS the invalidated point.
     Returns {invalidated, id, corrected_by}.
     """
-    return _safe(_quota_gated(_get_team_sdk().invalidate_point, "points"), id, corrected_by_id)
+    return _safe(_quota_gated(_get_org_sdk().invalidate_point, "points"), id, corrected_by_id)
 
 
 def tortoise_supersede(old_id: str, new_id: str, transfer_edges: bool = True) -> dict:
@@ -1647,7 +2040,7 @@ def tortoise_supersede(old_id: str, new_id: str, transfer_edges: bool = True) ->
     Returns {invalidated, id, corrected_by} (+ edges_transferred when
     transfer_edges=True).
     """
-    return _safe(_quota_gated(_get_team_sdk().supersede, "points"),
+    return _safe(_quota_gated(_get_org_sdk().supersede, "points"),
                  old_id, new_id, transfer_edges=transfer_edges)
 
 
@@ -1656,10 +2049,11 @@ def tortoise_retract_point(id: str) -> dict:
 
     Terminal state transition; default query/list surfaces exclude retracted
     points (opt-in via include_retracted). Raises ValueError if the point is
-    missing, is an operator, or is already terminal (retracted/superseded/
-    archived).
+    missing, is an operator, or is already terminal (the shared terminal
+    vocabulary: status in live.TERMINAL_EXCLUDED_STATUSES OR the legacy
+    outdated=true flag).
     """
-    return _safe(_quota_gated(_get_team_sdk().retract_point, "points"), id)
+    return _safe(_quota_gated(_get_org_sdk().retract_point, "points"), id)
 
 
 def tortoise_events_poll(after: str | None = None, types: Any = None,
@@ -1669,8 +2063,10 @@ def tortoise_events_poll(after: str | None = None, types: Any = None,
     Returns {events: [...], next_cursor}. after=None → tail (oldest retained).
     Expired cursor → structured error ('cursor expired — replay from tail');
     malformed cursor → 'invalid cursor'. types: comma-free list of event types
-    (PointAdded, OperatorAdded, PointRetracted, PointSuperseded,
-    OperatorAnnotated) or None for all.
+    (11 registered claim types: PointAdded, OperatorAdded, PointRetracted,
+    PointSuperseded, OperatorAnnotated, PointPromoted, OperatorPromoted,
+    DedupeRecorded, DedupeRejected, ObjectSuperseded, PointInvalidated)
+    or None for all.
 
     readOnlyHint covers user-visible state: the poll NEVER mutates user
     content. A rare maintenance purge (retention) may run at most once per
@@ -1681,7 +2077,7 @@ def tortoise_events_poll(after: str | None = None, types: Any = None,
         types = _parse(types)
         if not isinstance(types, list):
             types = [types]
-    return _safe(_get_team_sdk().events_poll, after=after, types=types, limit=limit)
+    return _safe(_get_org_sdk().events_poll, after=after, types=types, limit=limit)
 
 
 
@@ -1697,11 +2093,11 @@ def tortoise_entity_profile(entity_id: str, hops: int = 2,
     Optional filters: pointKind, confidenceMin.
     """
     from tortoise.navigation import entityProfile
-    proj = _get_team_sdk()._get_proj()
-    # #236: HTTP mode ignores user-supplied graph_name — team graph authoritative
+    proj = _get_org_sdk()._get_proj()
+    # #236: HTTP mode ignores user-supplied graph_name — org graph authoritative
     # (cross-tenant injection guard). Stdio mode honors it (operator use).
     if _transport_mode.get() == "http":
-        graph_name = f"team_{_current_team_id.get()}"
+        graph_name = f"org_{_current_org_id.get()}"
     return _safe(entityProfile, proj.db, graph_name, entity_id,
                   hops=hops, pointKind=pointKind, confidenceMin=confidenceMin)
 
@@ -1713,10 +2109,10 @@ def tortoise_traverse(entity_id: str, max_hops: int = 2,
     Returns {entity: {...}, nodes: [{node, relationship, depth}, ...]}.
     """
     from tortoise.navigation import tortoise_traverse as _traverse
-    proj = _get_team_sdk()._get_proj()
+    proj = _get_org_sdk()._get_proj()
     # #236: HTTP mode ignores user-supplied graph_name (cross-tenant guard)
     if _transport_mode.get() == "http":
-        graph_name = f"team_{_current_team_id.get()}"
+        graph_name = f"org_{_current_org_id.get()}"
     return _safe(_traverse, proj.db, graph_name, entity_id, max_hops)
 
 
@@ -1801,7 +2197,7 @@ def tortoise_checkpoint(items: Any,
     if isinstance(items, list) and len(items) > MAX_CHECKPOINT_ITEMS:
         return {"error": f"checkpoint items exceed the batch cap ({MAX_CHECKPOINT_ITEMS})",
                 "code": ERR_QUOTA}
-    return _safe(_quota_gated(_get_team_sdk().checkpoint, "points",
+    return _safe(_quota_gated(_get_org_sdk().checkpoint, "points",
                           abuse_weight=lambda r, a, k: int((r or {}).get("filed") or 0)), items,
                  agent_name=agent_name, threshold=threshold)
 
@@ -1812,28 +2208,33 @@ def tortoise_diary_write(agent_name: str, entry: str,
     """Write an agent diary entry (AAAK format suggested).
     Creates a Point with pointKind=diary, authoredBy=agent.
     """
-    return _safe(_quota_gated(_get_team_sdk().diary_write, "points", abuse_weight=1), agent_name, entry, topic=topic, wing=wing)
+    return _safe(_quota_gated(_get_org_sdk().diary_write, "points", abuse_weight=1), agent_name, entry, topic=topic, wing=wing)
 
 
 def tortoise_diary_read(agent_name: str, last_n: int = 10,
                         wing: str | None = None) -> list[dict]:
     """Read recent diary entries for an agent, newest first."""
-    return _safe(_get_team_sdk().diary_read, agent_name, last_n, wing=wing)
+    return _safe(_get_org_sdk().diary_read, agent_name, last_n, wing=wing)
 
 
 def tortoise_list_graphs() -> list[str]:
-    """List graph names. HTTP: only the calling team's own graphs (exact
-    team_{team_id} equality — no cross-tenant enumeration). Stdio: full list
-    (operator context).
+    """List graph names. HTTP: only the calling org's own graphs (exact
+    `org_{org_id}` / legacy `team_{org_id}` equality — no cross-tenant
+    enumeration). Stdio: full list (operator context).
     Alias → overview(section='graphs') (epic #888 W3)."""
-    graphs = _safe(_get_team_sdk().list_graphs)
+    graphs = _safe(_get_org_sdk().list_graphs)
     if not isinstance(graphs, list):
         return graphs
     if _transport_mode.get() == "http":
-        from tortoise.mcp_auth import _current_team_id
-        team_id = _current_team_id.get()
-        own = f"team_{team_id}" if team_id else None
-        return [g for g in graphs if own is not None and g == own]
+        from tortoise.mcp_auth import _current_org_id
+        org_id = _current_org_id.get()
+        # #3543: the tenant graph is `org_{org_id}` post-rename and
+        # `team_{org_id}` before it; no data migration rewrites the stored
+        # namespace, so both spellings are the calling org's own graph.
+        # Same dual probe as hosted_api._graph_has_org_namespace — the sites
+        # must agree or a legacy org's graphs become invisible here alone.
+        own = {f"org_{org_id}", f"team_{org_id}"} if org_id else set()
+        return [g for g in graphs if g in own]
     return graphs
 
 
@@ -1842,7 +2243,7 @@ def tortoise_status() -> dict:
     Returns {connected, counts: {Point, Event, ...}, total_entities}.
     Alias → overview(section='status') (epic #888 W3).
     """
-    return _safe(_get_team_sdk().status)
+    return _safe(_get_org_sdk().status)
 
 
 def tortoise_health() -> dict:
@@ -1850,26 +2251,57 @@ def tortoise_health() -> dict:
     Alias → overview(section='health') (epic #888 W3).
 
     #2202 (health-truthful): probes the SDK THIS server actually serves —
-    the request-scoped team SDK over HTTP (selfhost daemon: the team_selfhost
-    graph, the SAME namespace /health probes; hosted: the calling team's
-    graph on the SAME FalkorDB server /health deep-checks) and the base SDK
-    over stdio — so tool and /health can never disagree about DB reachability.
+    the request-scoped org SDK over HTTP and the base SDK over stdio — so the
+    report reflects the caller's own graph, never monitoring's module-global
+    handle.
+    #3143 correction: this tool and hosted /health do NOT probe the same
+    graph, so they can disagree about reachability. This tool probes the
+    CALLER'S ORG graph (``_get_org_sdk()``); hosted /health probes the
+    DEFAULT graph (``_make_sdk(namespace=None)`` through
+    ``hosted_api._probe_db()``). They share a FalkorDB SERVER, not a graph,
+    and the probe is not a bare reachability check: ``_probe_once`` runs
+    ``sdk._get_proj()`` (connect + version probe + ``_ensure_indexes()``),
+    whose cost scales with the PROBED graph. So an org graph can time out
+    while the default graph answers ok — #3143 is that case. Their budgets
+    differ by design too: this tool gives the reachability query a fresh
+    ``PROBE_TIMEOUT``, /health spends one shared budget across both phases
+    (its cached-verdict staleness window is #3062).
     The pre-#2202 code probed monitoring's module-global handle, which ONLY
     the stdio entrypoint (main()) registers: on the HTTP daemon/hosted
     surfaces it stayed None and every call reported degraded/no_sdk_registered
     while /health (fresh SDK probe) said ok — the first call every onboarding
     script makes lied. graph_size likewise counts the SERVED graph, never an
-    empty unregistered handle."""
+    empty unregistered handle.
+
+    #3143 (health-truthful): the probe's 1.5s budget was written to bound the
+    sub-millisecond ``RETURN 1`` reachability query, but it also bounded the
+    projection cold-start (``_get_proj()``: connect + ``_ensure_indexes()`` —
+    ~28 round trips, and an index build over the whole graph when one is
+    missing). That cost scales with graph size, so a large, fully-reachable
+    org (9,019 entities) timed out during setup and reported
+    ``degraded``/``graph_size 0`` while ``tortoise_status`` worked. The tool
+    now passes the cold-start allowance it always pays for — it builds a
+    request-scoped SDK per call — while the platform liveness gate keeps the
+    tight fast-degrade bound. The allowance is resolved at CALL time
+    (``monitoring.probe_setup_timeout()``) so ``TORTOISE_PROBE_SETUP_TIMEOUT``
+    set in the repo-root ``.env`` — loaded after this module imports
+    ``tortoise.monitoring`` — is honoured instead of frozen at import."""
     # #236: route through _safe() so every tool is gated (defense-in-depth;
     # reachable only post-auth over HTTP).
-    return _safe(lambda: monitoring.metrics(sdk=_get_team_sdk()))
+    # #3143: pass the cold-start allowance (call-time resolved) so a reachable
+    # graph whose cold-start exceeds /health's shared budget is reported ok
+    # with its real graph_size instead of degraded/0.
+    return _safe(lambda: monitoring.metrics(
+        sdk=_get_org_sdk(),
+        setup_timeout=monitoring.probe_setup_timeout(),
+    ))
 
 
 def tortoise_session_context() -> dict:
     """Return 'what happened last session' — diary entries, recent Points, Events, confidence changes.
     Returns {no_prior_sessions, diary_entries, recent_points, recent_events, confidence_changes}.
     """
-    return _safe(_get_team_sdk().session_context)
+    return _safe(_get_org_sdk().session_context)
 
 
 def tortoise_issue_insight(title: str, body: str | None = None,
@@ -1882,7 +2314,7 @@ def tortoise_issue_insight(title: str, body: str | None = None,
     no_prior_knowledge; populated graph + repo with zero indexed points ->
     repo_not_indexed. Returns {has_prior, data_points, insight, more_in_graph}.
     """
-    return _safe(_get_team_sdk().issue_insight, title, body=body, repo=repo, limit=limit)
+    return _safe(_get_org_sdk().issue_insight, title, body=body, repo=repo, limit=limit)
 
 
 def tortoise_ingest_corpus(directory: str) -> dict:
@@ -1895,20 +2327,20 @@ def tortoise_ingest_corpus(directory: str) -> dict:
     """
     if _transport_mode.get() == "http":
         return _http_excluded_error()
-    return _safe(_get_team_sdk().ingest_corpus, directory)
+    return _safe(_get_org_sdk().ingest_corpus, directory)
 
 # ── Taxonomy ─────────────────────────────────────────────────
 
 def tortoise_taxonomy() -> dict[str, int]:
     """Count entities by node label. Returns {Point: N, Event: N, Subject: N, Object: N, Document: N}.
     Alias → overview(section='taxonomy') (epic #888 W3)."""
-    return _safe(_get_team_sdk().taxonomy)
+    return _safe(_get_org_sdk().taxonomy)
 
 
 def tortoise_list_topics(entity_id: str) -> dict:
     """entityProfile lite for an entity. Returns {id, pointKind, neighbors, neighborCounts}.
     Alias → overview(section='topics', entity_id=...) (epic #888 W3)."""
-    return _safe(_get_team_sdk().list_topics, entity_id)
+    return _safe(_get_org_sdk().list_topics, entity_id)
 
 
 def tortoise_topic_summarize(topic: str,
@@ -1937,7 +2369,7 @@ def tortoise_topic_summarize(topic: str,
         {topic, total_points, significant: [...], contested: [...],
          disputed_pairs: [...], argument_structure: {...}, meta: {...}}
     """
-    return _safe(_get_team_sdk().topic_summarize, topic,
+    return _safe(_get_org_sdk().topic_summarize, topic,
                  max_seeds=max_seeds, max_hops=max_hops,
                  include_relationships=include_relationships)
 
@@ -1974,11 +2406,11 @@ def tortoise_analyze(question: str,
     entity_subgraph_ids = None
     if entityId:
         try:
-            proj = _get_team_sdk()._get_proj()
-            # #236: HTTP mode must use the team graph, NOT the hardcoded
-            # "tortoise" graph — that hardcode bypasses team isolation via
+            proj = _get_org_sdk()._get_proj()
+            # #236: HTTP mode must use the org graph, NOT the hardcoded
+            # "tortoise" graph — that hardcode bypasses org isolation via
             # db.select_graph() (cross-tenant read). Stdio keeps "tortoise".
-            gname = f"team_{_current_team_id.get()}" if _transport_mode.get() == "http" else "tortoise"
+            gname = f"org_{_current_org_id.get()}" if _transport_mode.get() == "http" else "tortoise"
             profile = entityProfile(proj.db, gname, entityId, hops=2)
             ids = {entityId}
             for category in profile.get("connected", {}).values():
@@ -1989,10 +2421,10 @@ def tortoise_analyze(question: str,
         except Exception:
             pass  # fall back to full-graph analysis
 
-    # #329: bound paid outbound LLM calls per team per minute — beyond budget
+    # #329: bound paid outbound LLM calls per org per minute — beyond budget
     # the tool degrades to keyword-only classification.
     use_llm = _analyze_llm_budget_available()
-    result = _safe(analyze, question, _get_team_sdk()._get_proj(),
+    result = _safe(analyze, question, _get_org_sdk()._get_proj(),
                    entity_subgraph_ids=entity_subgraph_ids,
                    anchor_ids=anchor_ids,
                    max_hops=max_hops,
@@ -2014,7 +2446,7 @@ def tortoise_analyze(question: str,
             )
             if not w4_enrichment_enabled():
                 return result
-            _proj = _get_team_sdk()._get_proj()
+            _proj = _get_org_sdk()._get_proj()
             _ids = point_ids_in_raw(result["raw"])[:20]
             if _ids:
                 _blocks = assemble_why_blocks(_proj, _ids)
@@ -2031,7 +2463,7 @@ def tortoise_analyze(question: str,
 def tortoise_stale(days: int = 30, limit: int = 50) -> dict:
     """Find Points not updated in N days. Returns {stale, count, cutoff, limit}.
     Alias → overview(section='stale', days=, limit=) (epic #888 W3)."""
-    return _safe(_get_team_sdk().stale_points, days=days, limit=limit)
+    return _safe(_get_org_sdk().stale_points, days=days, limit=limit)
 
 
 def tortoise_review_connections(mode: str = "both", scope: str | None = None) -> dict:
@@ -2045,11 +2477,20 @@ def tortoise_review_connections(mode: str = "both", scope: str | None = None) ->
         issue in (contradictory, stale, contested) and suggested_action in
         (review, prune, re-point).
     mode=both: run both, return {add: [...], prune: [...]}.
-    scope: optional topic text or Point id — narrows the candidate pool.
+    scope: optional topic text or Point id — narrows the candidate pool to the
+        retrieval-NEAREST points. A focus filter, not an exact-match or
+        relevance gate: near-but-not-exact is intended, and a scope matching
+        nothing normally still returns its nearest neighbours — though a
+        degraded single-leg run can score every hit 0 and return nothing. The
+        result is empty when retrieval returns nothing, when every retrieved id
+        is dropped (RRF score <= 0, e.g. the TF-IDF fallback, or an
+        operator/terminal/outdated / [MITIGATION] row), or — for mode=add —
+        when no candidate pair clears similarity_threshold. mode=prune applies
+        no similarity bar.
 
     Never mutates the graph.
     """
-    return _safe(_get_team_sdk().review_connections, mode=mode, scope=scope)
+    return _safe(_get_org_sdk().review_connections, mode=mode, scope=scope)
 
 
 def tortoise_find_cross_lens_candidates(
@@ -2071,23 +2512,23 @@ def tortoise_find_cross_lens_candidates(
     inflate the per-cycle recall budget. Empty results (not errors) when
     there is nothing to see (D8). Never mutates the graph.
     """
-    return _safe(_get_team_sdk().get_cross_lens_candidates,
+    return _safe(_get_org_sdk().get_cross_lens_candidates,
                  threshold=threshold, max_candidates=max_candidates,
                  routing=routing, top_k=top_k)
 
 
 def tortoise_provenance(point_id: str) -> dict:
     """Provenance chain — "Who decided this?" Follows authoredBy → Subject → delegation."""
-    return _safe(_get_team_sdk().provenance, point_id)
+    return _safe(_get_org_sdk().provenance, point_id)
 
 
 # ── Multi-tenancy (#7001) ────────────────────────────────────
 
-def tortoise_team_create(name: str) -> dict:
-    """Create isolated team graph via FalkorDB select_graph.
-    Generates a per-team API key. Returns {name, graph_name, api_key, id}.
+def tortoise_org_create(name: str) -> dict:
+    """Create isolated org graph via FalkorDB select_graph.
+    Generates a per-org API key. Returns {name, graph_name, api_key, id}.
     destructiveHint=true — creates persistent resources.
-    idempotentHint=false — duplicate team names raise an error.
+    idempotentHint=false — duplicate org names raise an error.
 
     #236: EXCLUDED from tenant HTTP — provisioning belongs to
     /internal/provision behind FASTAPI_INTERNAL_KEY (privilege boundary).
@@ -2095,7 +2536,7 @@ def tortoise_team_create(name: str) -> dict:
     """
     if _transport_mode.get() == "http":
         return _http_excluded_error()
-    return _safe(_get_team_sdk().team_create, name)
+    return _safe(_get_org_sdk().org_create, name)
 
 
 # ── Entity CRUD (ONTOLOGY v2.5) ───────────────────────────────
@@ -2113,7 +2554,7 @@ def tortoise_create_entity(type: str, name: str, props: Any = None) -> dict:
     _reject = _reject_server_managed_props(props)
     if _reject:
         return {"error": _reject, "code": ERR_INVALID}
-    return _safe(_quota_gated(_get_team_sdk().create_entity, "points"),
+    return _safe(_quota_gated(_get_org_sdk().create_entity, "points"),
                  type, name, **(props or {}))
 
 
@@ -2125,14 +2566,14 @@ def tortoise_update(id: str, props: Any = None) -> dict:
     _reject = _reject_server_managed_props(props)
     if _reject:
         return {"error": _reject, "code": ERR_INVALID}
-    return _safe(_quota_gated(_get_team_sdk().update, "points"),
+    return _safe(_quota_gated(_get_org_sdk().update, "points"),
                  id, **(props or {}))
 
 
 def tortoise_delete(id: str) -> dict:
     """Delete a Point or entity by id. DESTRUCTIVE — requires human confirmation."""
-    result = _safe(_get_team_sdk().delete, id)
-    if isinstance(result, dict) and "error" in result:
+    result = _safe(_get_org_sdk().delete, id)
+    if isinstance(result, _SafeError):
         return result
     return {"deleted": bool(result), "id": id}
 
@@ -2152,26 +2593,26 @@ def tortoise_operator_action(action: str, id: str, reason: str | None = None,
     if action == "mitigate":
         if not reason:
             return {"error": "operator_action(action='mitigate') requires 'reason'"}
-        return _safe(_quota_gated(_get_team_sdk().mitigate_operator, "points", abuse_weight=1),
+        return _safe(_quota_gated(_get_org_sdk().mitigate_operator, "points", abuse_weight=1),
                      id, reason, strength)
     if action == "annotate":
         dims = (bias, precision, consistency, directness)
         if any(d is None for d in dims):
             return {"error": "operator_action(action='annotate') requires "
                               "bias, precision, consistency, directness"}
-        return _safe(_quota_gated(_get_team_sdk().annotate_operator, "points"),
+        return _safe(_quota_gated(_get_org_sdk().annotate_operator, "points"),
                      id, *dims)
     return {"error": f"operator_action: unknown action {action!r} — "
                       f"must be 'mitigate' or 'annotate'"}
 
 
 def tortoise_create_subject(name: str, subjectKind: str, props: Any = None) -> dict:
-    """Create a Subject node (team, role, organization, person)."""
+    """Create a Subject node (org, role, organization, person)."""
     props = _parse(props)
     _reject = _reject_server_managed_props(props)
     if _reject:
         return {"error": _reject, "code": ERR_INVALID}
-    return _safe(_quota_gated(_get_team_sdk().create_subject, "points"), name, subjectKind, **(props or {}))
+    return _safe(_quota_gated(_get_org_sdk().create_subject, "points"), name, subjectKind, **(props or {}))
 
 def tortoise_create_object(name: str, objectKind: str, props: Any = None) -> dict:
     """Create an Object node (product, customer, skill, etc.)."""
@@ -2179,7 +2620,7 @@ def tortoise_create_object(name: str, objectKind: str, props: Any = None) -> dic
     _reject = _reject_server_managed_props(props)
     if _reject:
         return {"error": _reject, "code": ERR_INVALID}
-    return _safe(_quota_gated(_get_team_sdk().create_object, "points"), name, objectKind, **(props or {}))
+    return _safe(_quota_gated(_get_org_sdk().create_object, "points"), name, objectKind, **(props or {}))
 
 def tortoise_create_event(name: str, eventKind: str, props: Any = None) -> dict:
     """Create an Event node (meeting, decision, deployment, etc.)."""
@@ -2187,18 +2628,18 @@ def tortoise_create_event(name: str, eventKind: str, props: Any = None) -> dict:
     _reject = _reject_server_managed_props(props)
     if _reject:
         return {"error": _reject, "code": ERR_INVALID}
-    return _safe(_quota_gated(_get_team_sdk().create_event, "points"), name, eventKind, **(props or {}))
+    return _safe(_quota_gated(_get_org_sdk().create_event, "points"), name, eventKind, **(props or {}))
 
 
 def tortoise_get_events(eventKind: str | None = None, limit: int = 20) -> list[dict]:
     """Get recent Events, optionally filtered by eventKind (e.g. 'AgentSession').
     Alias → get(id, type='events', limit=) (epic #888 W3)."""
-    return _safe(_get_team_sdk().get_events, eventKind=eventKind, limit=limit)
+    return _safe(_get_org_sdk().get_events, eventKind=eventKind, limit=limit)
 
 def tortoise_get_session(session_id: str) -> dict:
     """Get a single agent session Event by session_id.
     Alias → get(id, type='session') (epic #888 W3)."""
-    return _safe(_get_team_sdk().get_session, session_id)
+    return _safe(_get_org_sdk().get_session, session_id)
 
 def tortoise_index_sessions(directory: str, extract_metadata: bool = True, llm_model: str | None = None) -> dict:
     """Index session .md files as AgentSession Events. Returns {ingested, updated, skipped, failed, errors}.
@@ -2210,7 +2651,7 @@ def tortoise_index_sessions(directory: str, extract_metadata: bool = True, llm_m
         return _http_excluded_error()
     if not os.path.isdir(directory):
         return {"error": f"Directory not found: {directory!r}. Provide a valid path to a directory containing .md session files."}
-    return _safe(_get_team_sdk().index_sessions, directory, extract_metadata=extract_metadata, llm_model=llm_model)
+    return _safe(_get_org_sdk().index_sessions, directory, extract_metadata=extract_metadata, llm_model=llm_model)
 
 def tortoise_index_files(directory: str, corpus_name: str | None = None,
                         extract_metadata: bool = False) -> dict:
@@ -2230,7 +2671,7 @@ def tortoise_index_files(directory: str, corpus_name: str | None = None,
     if not os.path.isdir(directory):
         return {"error": f"Directory not found: {directory!r}. Provide a valid "
                          f"path to a directory containing .md files."}
-    return _safe(_quota_gated(_get_team_sdk().index_directory, "points"),
+    return _safe(_quota_gated(_get_org_sdk().index_directory, "points"),
                  directory, corpus_name=corpus_name,
                  extract_metadata=extract_metadata)
 
@@ -2252,7 +2693,7 @@ def tortoise_search_sessions(query: str, agent: str | None = None, topics: Any =
         topics_list = topics
     else:
         topics_list = None
-    return _safe(_get_team_sdk().search_sessions, query, agent=agent, topics=topics_list,
+    return _safe(_get_org_sdk().search_sessions, query, agent=agent, topics=topics_list,
                  after=after, before=before, limit=limit, offset=offset)
 
 def tortoise_create_document(title: str, documentKind: str, props: Any = None) -> dict:
@@ -2261,7 +2702,7 @@ def tortoise_create_document(title: str, documentKind: str, props: Any = None) -
     _reject = _reject_server_managed_props(props)
     if _reject:
         return {"error": _reject, "code": ERR_INVALID}
-    return _safe(_quota_gated(_get_team_sdk().create_document, "points"), title, documentKind, **(props or {}))
+    return _safe(_quota_gated(_get_org_sdk().create_document, "points"), title, documentKind, **(props or {}))
 
 def tortoise_create_source(url: str, sourceKind: str, tier: str | None = None,
                            sourceDate: str | None = None, props: Any = None) -> dict:
@@ -2280,7 +2721,7 @@ def tortoise_create_source(url: str, sourceKind: str, tier: str | None = None,
     # caller passed them there (kwarg wins; avoids TypeError on splat).
     props.pop("tier", None)
     props.pop("sourceDate", None)
-    return _safe(_quota_gated(_get_team_sdk().create_source, "points"), url, sourceKind,
+    return _safe(_quota_gated(_get_org_sdk().create_source, "points"), url, sourceKind,
                  tier=tier, sourceDate=sourceDate, **props)
 
 
@@ -2296,7 +2737,7 @@ def tortoise_get_source_reliability(url: str) -> dict:
     unassessed → None. NOTE: refreshes the documented reliability cache on the
     Source node (write-through projection), so this tool is not read-only.
     """
-    return _safe(_get_team_sdk().get_source_reliability, url)
+    return _safe(_get_org_sdk().get_source_reliability, url)
 
 
 # #2204: decorator removed — registry adapter owns registration (see
@@ -2311,7 +2752,7 @@ def tortoise_assess_source(url: str, assessor: str, score: float,
     (compute_reputation at write time). Feeds the source's reliability factor
     (clamped [0.1, 2.0]).
     """
-    return _safe(_quota_gated(_get_team_sdk().assess_source, "points"),
+    return _safe(_quota_gated(_get_org_sdk().assess_source, "points"),
                  url, assessor, score, rationale)
 
 
@@ -2324,12 +2765,22 @@ def tortoise_set_source_tier(url: str, tier: str) -> dict:
     Dirty-marks the inheritance gate + clears the reliability cache so EP and
     reliability reads reflect the new tier promptly.
     """
-    return _safe(_get_team_sdk().set_source_tier, url, tier)
+    return _safe(_get_org_sdk().set_source_tier, url, tier)
 
-def tortoise_get_entity(id: str) -> dict:
+def tortoise_get_entity(id: str | None = None, type: str | None = None,
+                        limit: int = 20) -> Any:
     """Get any entity by ID, eventId, or url.
-    Alias → get(id, type='entity') (epic #888 W3)."""
-    return _safe(_get_team_sdk().get_entity, id)
+
+    This is the BROAD fetch tool (owner decision, `docs/product/canonical-mcp-tools.md`,
+    approval_pr 4120): `type` selects the node kind exactly as `tortoise_get` did, so the
+    retirement pointers that name `tortoise_get_entity(id, type=...)` resolve. With no
+    `type`, it keeps its narrow meaning — the entity addressed by an id|eventId|url —
+    and the SDK method `TortoiseSDK.get_entity` is untouched (the decision separates the
+    tool's broad meaning from the SDK's narrow one).
+    """
+    if type is not None or id is None:
+        return tortoise_get(id, type=type, limit=limit)
+    return _safe(_get_org_sdk().get_entity, id)
 
 def tortoise_update_entity(id: str, props: Any = None) -> dict:
     """Update any entity's properties."""
@@ -2337,11 +2788,11 @@ def tortoise_update_entity(id: str, props: Any = None) -> dict:
     _reject = _reject_server_managed_props(props)
     if _reject:
         return {"error": _reject, "code": ERR_INVALID}
-    return _safe(_quota_gated(_get_team_sdk().update_entity, "points"), id, **(props or {}))
+    return _safe(_quota_gated(_get_org_sdk().update_entity, "points"), id, **(props or {}))
 
 def tortoise_delete_entity(id: str) -> bool:
     """Delete any entity by ID."""
-    return _safe(_get_team_sdk().delete_entity, id)
+    return _safe(_get_org_sdk().delete_entity, id)
 
 def tortoise_create_edge(source_id: str, target_id: str, predicate: str) -> dict:
     """Create a typed structural edge between two entities (reification rule).
@@ -2352,7 +2803,7 @@ def tortoise_create_edge(source_id: str, target_id: str, predicate: str) -> dict
     Returns {edge, created, nudges}. (Param order kept from the legacy surface:
     source_id, target_id, predicate → SDK create_edge(relation, from_id, to_id).)
     """
-    return _safe(_quota_gated(_get_team_sdk().create_edge, "points"),
+    return _safe(_quota_gated(_get_org_sdk().create_edge, "points"),
                  predicate, source_id, target_id)
 
 
@@ -2411,14 +2862,14 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk",
                               f"or keep draft and promote via "
                               f"update_point(status='live')",
                     "code": ERR_INVALID}
-    return _safe(_quota_gated(_get_team_sdk().ingest, "points",
+    return _safe(_quota_gated(_get_org_sdk().ingest, "points",
                           abuse_weight=lambda r, a, k: int(((r or {}).get("created") or {}).get("points") or 0)),
                  bundle, granularity=granularity, promotion_policy=promotion_policy)
 
 def tortoise_get_governance(subject_id: str) -> list:
     """Get all entities owned by a Subject.
     Alias → get(id, type='governance') (epic #888 W3)."""
-    return _safe(_get_team_sdk().get_owned_entities, subject_id)
+    return _safe(_get_org_sdk().get_owned_entities, subject_id)
 
 
 # ── Orient / Direct consolidation (epic #888 W3) ─────────────────────
@@ -2508,7 +2959,7 @@ def _get_auto_detect(id: str) -> dict:
     then AgentSession lookup by session_id/sessionId. Returns {} when the
     id matches nothing (same contract as get_point/get_entity).
     """
-    sdk = _get_team_sdk()
+    sdk = _get_org_sdk()
     try:
         resolved = sdk._get_proj()._resolve_entity(
             id, by_id=True, by_eventId=True, by_url=True)
@@ -2557,7 +3008,7 @@ def tortoise_get(id: str, type: str | None = None,
     if t == "event":
         return tortoise_get_entity(id)  # Event nodes resolve via get_entity
     if t == "session":
-        return _safe(_get_team_sdk().get_session, id)
+        return _safe(_get_org_sdk().get_session, id)
     if t == "governance":
         return tortoise_get_governance(id)
     return {"error": f"get: unknown type {type!r}. "
@@ -2571,7 +3022,7 @@ def tortoise_backfill_v25(dry_run: bool = True) -> dict:
     """
     if _transport_mode.get() == "http":
         return _http_excluded_error()
-    return _safe(_get_team_sdk().backfill_v25, dry_run=dry_run)
+    return _safe(_get_org_sdk().backfill_v25, dry_run=dry_run)
 
 
 # ── Phase-4 mining/promotion/dedup/timeline surface (#787, DE2E-7) ──
@@ -2598,7 +3049,7 @@ def tortoise_mine_conversations(transcript: str | None = None,
     # excluded from tenant HTTP; stdio/CLI only (#1090 review).
     if _transport_mode.get() == "http":
         return _http_excluded_error()
-    sdk = _get_team_sdk()
+    sdk = _get_org_sdk()
     if corpus_dir is not None:
         return _safe(sdk.mine_corpus, corpus_dir,
                      extract_entities=extract_entities)
@@ -2636,7 +3087,7 @@ def tortoise_list_dedup_candidates(candidate_type: str = "content",
     {id, content, pointKind, method/similarity (content) or replacement
     (temporal), target_id, candidate_type, status}.
     """
-    return _safe(_get_team_sdk().list_dedup_candidates,
+    return _safe(_get_org_sdk().list_dedup_candidates,
                  candidate_type=candidate_type, limit=limit)
 
 
@@ -2649,7 +3100,7 @@ def tortoise_approve_merge(candidate_id: str,
     promotion. action='reject' → the candidate stays separate and is no
     longer surfaced. Idempotent for repeated identical reviews.
     """
-    return _safe(_get_team_sdk().approve_merge, candidate_id, action=action)
+    return _safe(_get_org_sdk().approve_merge, candidate_id, action=action)
 
 
 def tortoise_promote_point(point_id: str) -> dict:
@@ -2661,7 +3112,7 @@ def tortoise_promote_point(point_id: str) -> dict:
     operators once all endpoints are live (R16), and wires deferred
     dedup/temporal links (Variant C / W-4).
     """
-    return _safe(_get_team_sdk().promote_point, point_id)
+    return _safe(_get_org_sdk().promote_point, point_id)
 
 
 def tortoise_belief_timeline(topic: str, limit: int = 50) -> dict:
@@ -2671,7 +3122,7 @@ def tortoise_belief_timeline(topic: str, limit: int = 50) -> dict:
     ordered (superseded priors kept visible via the CORRECTS chain), each
     with {content, pointKind, validFrom, status, linked_by, related}.
     """
-    return _safe(_get_team_sdk().belief_timeline, topic, limit=limit)
+    return _safe(_get_org_sdk().belief_timeline, topic, limit=limit)
 
 
 # ── Tool Registry Adapter (#454) ────────────────────────────────
@@ -2684,12 +3135,12 @@ def tortoise_belief_timeline(topic: str, limit: int = 50) -> dict:
 # entry from globals() (#2210: entries defined after this point used to be
 # logged "no handler — skipped" while decorators half-registered them).
 # ── Onboarding MCP tools (#498/#499/#500) ───────────────────────
-# Wrappers for the hosted onboarding flow. These call the team-scoped SDK
+# Wrappers for the hosted onboarding flow. These call the org-scoped SDK
 # directly (same pattern as all tools) — the REST endpoints in hosted_api.py
 # expose the same operations to the welcome page.
 
-# Epic #888 no-regret: once a team's onboarding completes, the seven
-# tortoise_onboarding_* tools retire from that team's steady-state MCP
+# Epic #888 no-regret: once an org's onboarding completes, the seven
+# tortoise_onboarding_* tools retire from that org's steady-state MCP
 # surface (tools/list) — the REST /v1/onboarding/* endpoints remain for the
 # web onboarding flow. Function bodies are untouched; only the listing hides
 # them. #2210: no @mcp.tool decorators here — the module-bottom register_all
@@ -2702,86 +3153,91 @@ _ONBOARDING_TOOL_NAMES: frozenset[str] = frozenset({
     "tortoise_onboarding_seed",  # #1999 (W3)
 })
 
-# 60s per-team TTL cache for the tools/list gate — the onboarding-state read
-# hits the control plane (Supabase teams row / registry Team node); tools/list
-# is called once per session but bounding the read to 1/min/team avoids any
+# 60s per-org TTL cache for the tools/list gate — the onboarding-state read
+# hits the control plane (Supabase orgs row / registry Org node); tools/list
+# is called once per session but bounding the read to 1/min/org avoids any
 # amplification (review fix, Epic #888). Staleness is fine: the gate is
 # surface cosmetics and already fails open.
 _onboarding_state_cache: dict[str, tuple[float, bool]] = {}
 _ONBOARDING_STATE_TTL = 60.0
 
 
-def _team_onboarding_complete() -> bool:
-    """True when the current HTTP team's onboarding is complete.
+def _org_onboarding_complete() -> bool:
+    """True when the current HTTP org's onboarding is complete.
 
-    Fail-open: stdio/selfhost (no tenant Team row) and transient control-plane
+    Fail-open: stdio/selfhost (no tenant Org row) and transient control-plane
     read failures return False — a read hiccup must never hide the tools a
-    team still needs to finish onboarding. Reads the canonical onboarding
-    state via hosted_api._get_onboarding_state (Supabase teams row or registry
-    Team node), cached 60s per team.
+    org still needs to finish onboarding. Reads the canonical onboarding
+    state via hosted_api._get_onboarding_state (Supabase orgs row or registry
+    Org node), cached 60s per org.
     """
-    from tortoise.mcp_auth import SELFHOST_TEAM_ID, _current_team_id
-    team_id = _current_team_id.get()
-    if not team_id or team_id == SELFHOST_TEAM_ID:
+    from tortoise.mcp_auth import SELFHOST_ORG_ID, _current_org_id
+    org_id = _current_org_id.get()
+    if not org_id or org_id == SELFHOST_ORG_ID:
         return False
     now = _time.time()
-    cached = _onboarding_state_cache.get(team_id)
+    cached = _onboarding_state_cache.get(org_id)
     if cached is not None and now - cached[0] < _ONBOARDING_STATE_TTL:
         return cached[1]
     try:
         from tortoise.hosted_api import _get_onboarding_projection
         # #2001 (W5): the gate reads the merged projection — node-aware wire
         # completion; fail-open coercion (non-bool / 'unavailable' → False).
-        complete = _get_onboarding_projection(team_id).get("onboarding_complete")
+        complete = _get_onboarding_projection(org_id).get("onboarding_complete")
         complete = bool(complete) if isinstance(complete, bool) else False
     except Exception:
         return False  # never cache a failed read — retry next list
-    _onboarding_state_cache[team_id] = (now, complete)
+    _onboarding_state_cache[org_id] = (now, complete)
     return complete
 
 
 def _onboarding_state() -> dict:
-    """Read this team's onboarding progress — the merged projection (jsonb
+    """Read this org's onboarding progress — the merged projection (jsonb
     OPERATIONAL keys + graph FLOW keys; graph-down FLOW 'unavailable')."""
     from tortoise.hosted_api import _get_onboarding_projection as _read_state
-    team_id = _current_team_id.get()
-    if team_id is None:
+    org_id = _current_org_id.get()
+    if org_id is None:
         return {"error": "No team context (HTTP mode required)"}
-    return _read_state(team_id)
+    return _read_state(org_id)
 
 
 def tortoise_onboarding_demo_create() -> dict:
-    """Create the demo epistemic graph (4 layers) for this team. Idempotent.
+    """Create the demo epistemic graph (4 layers) for this org. Idempotent.
 
     Q4 — 'Create a demo graph?' — shows what Tortoise memory looks like.
     """
     from tortoise.hosted_api import _seed_demo_graph
-    team_id = _current_team_id.get()
-    if team_id is None:
+    org_id = _current_org_id.get()
+    if org_id is None:
         return {"error": "No team context (HTTP mode required)"}
-    # C5 #2114 (re-review 3): the demo seeds the team's DEFAULT graph —
+    # C5 #2114 (re-review 3): the demo seeds the org's DEFAULT graph —
     # graph-bound keys rejected (REST twin public_demo parity).
-    _reject_graph_bound_mcp_team_surface("demo seed")
+    _reject_graph_bound_mcp_org_surface("demo seed")
     # #329: demo graph creation creates nodes — quota-gate it
     _enforce_quota("points")
-    result = _seed_demo_graph(team_id)
+    result = _seed_demo_graph(org_id)
     # Auto-update onboarding state
     try:
         from tortoise.hosted_api import _update_onboarding_state
-        _update_onboarding_state(team_id, demo_created=True)
+        _update_onboarding_state(org_id, demo_created=True)
     except Exception:
         pass
     return result
 
 
 def tortoise_onboarding_state() -> dict:
-    """Return this team's onboarding progress (Q6 verification step)."""
+    """Return this org's onboarding progress (Q6 verification step)."""
+    # #2300: reads the org's DEFAULT-graph/control-plane onboarding
+    # projection (org-level surface) — graph-bound keys rejected (REST
+    # twin GET /v1/onboarding/state parity, C5 #2114). A per-graph key must
+    # never observe the org's onboarding state outside its graph.
+    _reject_graph_bound_mcp_org_surface("onboarding state")
     return _onboarding_state()
 
 
 def tortoise_onboarding_seed(org_name: str | None = None,
                              person_name: str | None = None) -> dict:
-    """File the two onboarding anchor Subjects for this team (#1999, W3):
+    """File the two onboarding anchor Subjects for this org (#1999, W3):
     Organization (Subject/organization) + User (Subject/naturalPerson)
     linked memberOf — interactive, ontology-precise.
 
@@ -2794,23 +3250,23 @@ def tortoise_onboarding_seed(org_name: str | None = None,
     (collisions[] — ask for a disambiguated name), or 'seeded'
     (two Subjects + memberOf + org_subject_id + first-points-filed).
     Compact orgs seed-lite (org-anchor Subject only, no person ask)."""
-    # C5 #2114: the anchors file into the team DEFAULT graph — graph-bound
+    # C5 #2114: the anchors file into the org DEFAULT graph — graph-bound
     # keys rejected (REST twin onboarding seed parity).
-    _reject_graph_bound_mcp_team_surface("onboarding seed")
-    team_id = _current_team_id.get()
-    if team_id is None:
+    _reject_graph_bound_mcp_org_surface("onboarding seed")
+    org_id = _current_org_id.get()
+    if org_id is None:
         return {"error": "No team context (HTTP mode required)"}
     from tortoise.hosted_api import (
         HTTPException as _HTTPException,
     )
     from tortoise.hosted_api import (
+        _org_email,
         _run_onboarding_seed,
-        _team_email,
     )
     try:
         return _run_onboarding_seed(
-            team_id, org_name=org_name, person_name=person_name,
-            person_email=_team_email(team_id))
+            org_id, org_name=org_name, person_name=person_name,
+            person_email=_org_email(org_id))
     except _HTTPException as exc:
         # 503 graph-down (fail-loud FLOW write) etc. — surfaced honestly,
         # never a silent skip (agent retries when the graph is back).
@@ -2821,7 +3277,7 @@ def tortoise_onboarding_seed(org_name: str | None = None,
 
 
 def tortoise_onboarding_session_recording(enabled: bool) -> dict:
-    """Toggle automatic session recording for this team (Q3 / dashboard
+    """Toggle automatic session recording for this org (Q3 / dashboard
     Memory sources sessions toggle).
 
     #1927: session_recording is the OPTIONAL OFF-SWITCH (default ON,
@@ -2829,22 +3285,27 @@ def tortoise_onboarding_session_recording(enabled: bool) -> dict:
     pipeline checks (409 when off); ``capture_revised`` is written for
     backward-compatibility with the registered state keys (the exactly-once
     re-ask machinery it fed was removed with the gate)."""
-    # C5 #2114 (re-review 3): team-level surface — graph-bound keys rejected
+    # C5 #2114 (re-review 3): org-level surface — graph-bound keys rejected
     # (REST twin set_session_recording parity).
-    _reject_graph_bound_mcp_team_surface("session recording toggle")
-    team_id = _current_team_id.get()
-    if team_id is None:
+    _reject_graph_bound_mcp_org_surface("session recording toggle")
+    org_id = _current_org_id.get()
+    if org_id is None:
         return {"error": "No team context (HTTP mode required)"}
     from tortoise.hosted_api import _update_onboarding_state
-    state = _update_onboarding_state(team_id, session_recording=enabled,
+    state = _update_onboarding_state(org_id, session_recording=enabled,
                                      capture_revised=True)
     return {"onboarding": state}
 
 
 def tortoise_onboarding_github_connect(org: str | None = None) -> dict:
     """Initiate GitHub OAuth — returns the authorize URL + CSRF state (Q1)."""
-    team_id = _current_team_id.get()
-    if team_id is None:
+    # #2300: initiates org-level GitHub OAuth + stores org CSRF/org state
+    # (control-plane) — graph-bound keys rejected (REST twin
+    # POST /v1/onboarding/github/connect parity, #2300 closes the REST
+    # residual). A per-graph key must never start a ORG-wide OAuth.
+    _reject_graph_bound_mcp_org_surface("github connect")
+    org_id = _current_org_id.get()
+    if org_id is None:
         return {"error": "No team context (HTTP mode required)"}
     import secrets  # noqa: I001
     from urllib.parse import urlencode
@@ -2861,7 +3322,7 @@ def tortoise_onboarding_github_connect(org: str | None = None) -> dict:
     # must be visible to the REST callback handler in the same process.
     import time as _time  # noqa: I001
     from tortoise.hosted_api import _GITHUB_STATES
-    _GITHUB_STATES[state] = {"team_id": team_id, "org": org or team_id,
+    _GITHUB_STATES[state] = {"org_id": org_id, "org": org or org_id,
                              "created_at": _time.time()}
     callback = _os.environ.get("GITHUB_CALLBACK_URL",
                                "https://api.premiselabs.co/v1/onboarding/github/callback")
@@ -2872,15 +3333,19 @@ def tortoise_onboarding_github_connect(org: str | None = None) -> dict:
 
 
 def tortoise_onboarding_github_status() -> dict:
-    """Return GitHub connection status for this team (Q1 verify)."""
-    team_id = _current_team_id.get()
-    if team_id is None:
+    """Return GitHub connection status for this org (Q1 verify)."""
+    # #2300: reads org-level GitHub credential state (control-plane) —
+    # graph-bound keys rejected (REST twin GET /v1/onboarding/github/status
+    # parity, #2300 closes the REST residual).
+    _reject_graph_bound_mcp_org_surface("github status")
+    org_id = _current_org_id.get()
+    if org_id is None:
         return {"error": "No team context (HTTP mode required)"}
-    # Follows the hosted seam (plan Task 6): Supabase teams row via the
+    # Follows the hosted seam (plan Task 6): Supabase orgs row via the
     # service-role control plane in Supabase mode, registry for selfhost.
     from tortoise.hosted_api import _github_credentials
     try:
-        enc, org = _github_credentials(team_id)
+        enc, org = _github_credentials(org_id)
     except RuntimeError:
         # Fail-closed: a control-plane outage is an ERROR, not "disconnected"
         # — reporting connected=False would make the user think GitHub got
@@ -2896,19 +3361,141 @@ def tortoise_onboarding_github_status() -> dict:
     return {"connected": True, "org": org, "repos_count": None}
 
 
+# ── Auto-complete onboarding on first real write ────────────────
+# When an agent makes its first successful graph write (create_point or
+# file_decision), the server records the onboarding steps THAT WRITE IS
+# EVIDENCE FOR, then hands the completion decision to the canonical
+# fork-aware gate — no agent-side state machine ceremony needed.
+#
+# #3784: a step edge is a record of something the server OBSERVED. Filing a
+# step the write does not evidence records a fact the user never produced,
+# and the Setup guide then reports complete for work that did not happen.
+
+def _maybe_onboarding_auto_complete(*,
+                                    decision_observed: bool = False) -> None:
+    """After a successful agent write, record the onboarding facts that
+    write is itself evidence for, then let the canonical gate decide
+    completion. Idempotent: steps are FWW edges, replay is a no-op.
+
+    Observed steps (#3784) — the step's own label is the claim, so the
+    server may file it only on the event the label describes:
+    - ``harness-connected`` + ``first-points-filed``: a successful agent
+      tool call IS the observation for both — the harness reached the
+      server, and the two triggering tools file points (label: "Seed your
+      first memory").
+    - ``decide-completed`` (label: "Make your first decision"): filed ONLY
+      when the caller observed a decision — ``tortoise_file_decision``
+      succeeded, or ``tortoise_create_point(kind="decision")`` (the
+      documented EP decide protocol, ``tortoise/onboarding/SKILL.md`` §5).
+      A plain point write observes no decision and must not claim one.
+      (``skills/tortoise-decide/SKILL.md``'s option/criterion/evidence flow
+      is a DELIBERATE false negative — claiming a decision at the refinement
+      step would be the same unobserved fact, inverted. See #3916.)
+    - ``catalog-presented`` (label: "Review the catalog"): NEVER inferred
+      from a write. Its presentation is observed by the agent catalog
+      checkpoint (``hosted_api._CHECKPOINT_STEPS``), or asserted by an
+      external caller through ``PATCH /v1/onboarding/state``
+      (``catalog_presented``). The dashboard used to render-mark it on a
+      build-fork pick, but that writer is deleted; the id stays an accepted,
+      OPTIONAL record either way. #3913 (owner ruling 2026-09-20): it is NO
+      LONGER a build-gate requirement — the build fork completes on the two
+      observed acts above — so it is never a completion input.
+
+    Status is SERVER-OWNED and fork-aware: completion is delegated to
+    ``hosted_api._maybe_apply_completion`` (the canonical
+    ``state.completion_gate_satisfied`` eval, honouring fork=None→self,
+    compact-first and fork_unsure_at), so this function can never flip an
+    org to complete while a required step is missing.
+
+    ``decision_observed`` is keyword-only and defaults to False: a caller
+    that forgets to declare its observation fails CLOSED (claims no
+    decision), never open.
+
+    Caches the ``tools/list`` verdict ``True`` only when ``_maybe_apply_completion``
+    reports a real transition to complete; that helper pops the entry itself,
+    so a completion is visible immediately.
+
+    Only fires in HTTP (hosted) mode with a real org_id — stdio and
+    self-host calls are no-ops."""
+    from tortoise.mcp_auth import SELFHOST_ORG_ID, _current_org_id
+    org_id = _current_org_id.get()
+    if not org_id or org_id == SELFHOST_ORG_ID:
+        return  # stdio / self-host: no hosted onboarding state
+    # Fast check: if the 60s cache says complete, skip.
+    now = _time.time()
+    cached = _onboarding_state_cache.get(org_id)
+    if cached is not None and now - cached[0] < _ONBOARDING_STATE_TTL and cached[1]:
+        return  # already known complete
+    try:
+        from tortoise.hosted_api import (
+            _emit_onboarding_step_events,
+            _get_onboarding_projection,
+            _get_onboarding_state,
+            _maybe_apply_completion,
+            _onboarding_distinct_id,
+            _org_proj,
+        )
+        from tortoise.onboarding.state import (
+            write_completed_step as _os_write_step,
+        )
+        proj = _org_proj(org_id)
+        projection = _get_onboarding_projection(org_id)
+        prog = projection.get("onboarding_complete")
+        if isinstance(prog, bool) and prog:
+            _onboarding_state_cache[org_id] = (now, True)
+            return  # already complete
+        # File ONLY the steps this write observed (#3784). Idempotent FWW
+        # edges — a replay is a no-op.
+        observed = ["harness-connected", "first-points-filed"]
+        if decision_observed:
+            observed.append("decide-completed")
+        legacy_mirror = bool(
+            _get_onboarding_state(org_id).get("onboarding_complete"))
+        # #2006 (W11): emit IMMEDIATELY after each creating write, so a later
+        # step's failure cannot discard an edge creation this call already
+        # observed. Fail-safe (capture never raises, and the helper guards each
+        # emit), so this can never block the agent's write.
+        for step in observed:
+            res = _os_write_step(proj, org_id, step,
+                                 status_from_mirror=legacy_mirror)
+            if res.get("created"):
+                _emit_onboarding_step_events(
+                    [step],
+                    distinct_id=_onboarding_distinct_id(org_id),
+                    org_id=org_id, source="mcp_auto")
+        # Server-owned status → the canonical fork-aware gate decides, never
+        # this function (monotonic; a no-op if already complete).
+        if _maybe_apply_completion(org_id):
+            # The helper returned a real TRANSITION to complete — cache the
+            # tools/list verdict. An already-complete org never reaches here
+            # (the projection short-circuit above cached it), and caching
+            # True for an incomplete org would retire the onboarding tools
+            # from tools/list — a second false "you're all set".
+            _onboarding_state_cache[org_id] = (now, True)
+    except Exception:
+        # Fail-open: a transient graph/control-plane error must NOT block
+        # the agent's write. Next write re-triggers this check.
+        return
+
+
 # ── #1727 Slice 2 (Task 13): tortoise_session_capture — the T3 filing tool ──
 # Claude Web (and every harness with an MCP surface) files sessions through
 # this tool. It calls the SAME capture pipeline as POST /v1/sessions
 # (hosted_api._capture_session_impl) so the two surfaces can never drift on
-# gate order: session_recording opt-out 409 FIRST → empty 422 → provider 503 →
-# quota 402. Stdio/self-host returns an honest "requires hosted mode" error —
+# gate order: admission 429 (#3060) → session_recording opt-out 409 → empty
+# 422 → quota 402. A missing provider key is NOT a gate (#3892): the capture
+# is STORED and only the LLM extraction is skipped, reported as
+# `extraction_mode: "no-provider"`. Stdio/self-host returns an honest "requires
+# hosted mode" error —
 # there is deliberately NO local fallback that bypasses the capture pipeline
 # (a prompt-injection exfiltration surface must not exist).
 
 
 def tortoise_session_capture(conversation: list[dict],
                              harness: str | None = None,
-                             session_id: str | None = None) -> dict:
+                             session_id: str | None = None,
+                             machine_id: str | None = None,
+                             model: str | None = None) -> dict:
     """File an agent session into the graph (T3 workflows prompt surface).
 
     Server-enforced gates (identical to POST /v1/sessions — VERIFIED order,
@@ -2917,20 +3504,21 @@ def tortoise_session_capture(conversation: list[dict],
     (turn cap) -> 422 (empty/blank transcript) -> 402 (quota). Returns the
     capture result (a memory_write_v1 envelope, #2104) on success, or an
     honest error dict on failure (the per-harness last-error state key is
-    recorded on non-2xx, cleared on 2xx — same receipt semantics as the
-    REST path).
+    recorded on non-2xx EXCEPT the #3060 capacity 429 — a server condition —
+    and cleared on 2xx; same receipt semantics as the REST path).
     """
     from tortoise.mcp_auth import (  # noqa: I001
-        SELFHOST_TEAM_ID,
-        _current_team_id,
-        _current_team_limits,
+        SELFHOST_ORG_ID,
+        _current_org_id,
+        _current_org_limits,
         _current_graph_id,
         _current_graph_namespace,
         _current_scopes,
         _current_legacy_full_access,
     )
-    team_id = _current_team_id.get()
-    if not team_id or team_id == SELFHOST_TEAM_ID:
+    from tortoise.sdk import _current_actor_user_id  # #2600
+    org_id = _current_org_id.get()
+    if not org_id or org_id == SELFHOST_ORG_ID:
         # stdio / self-host HTTP: no hosted state plane, no receipts — the
         # honest error (matching the onboarding-tool precedent), never a
         # local fallback that bypasses the 409/402/503 gates.
@@ -2938,42 +3526,201 @@ def tortoise_session_capture(conversation: list[dict],
                           "tortoise_session_capture tool files to Tortoise "
                           "Cloud (server-enforced recording + receipts); "
                           "self-hosted stdio capture is not available."}
-    from tortoise.hosted_api import (
-        SessionRequest,
-        _capture_session_impl,
-        _record_capture_last_error,
+    from tortoise.session_attribution import (
+        derive_machine_id,
+        sanitize_attribution_field,
     )
-    limits = _current_team_limits.get() or {}
-    team = {"team_id": team_id, "tier": limits.get("tier", "free"),
+    # #2681: derive-only fallback when caller does not supply.
+    if machine_id is None:
+        machine_id = derive_machine_id()
+    if machine_id is not None:
+        machine_id = sanitize_attribution_field(machine_id, max_length=256)
+    if model is not None:
+        model = sanitize_attribution_field(model, max_length=128)
+
+    from tortoise.hosted_api import (
+        _CAPTURE_MARKER_EXECUTOR,
+        _CAPTURE_SESSION_IN_FLIGHT_DETAIL,
+        SessionRequest,
+        _capture_abandoned_marker,
+        _capture_lane,
+        _capture_session_impl,
+        _capture_session_key,
+        _record_capture_last_error,
+        _reserve_capture_slot,
+        _submit_off_loop,
+    )
+    limits = _current_org_limits.get() or {}
+    org = {"org_id": org_id, "tier": limits.get("tier", "free"),
             "key_id": None}
+    # #2600: carry the resolved human actor (set by OrgResolutionMiddleware)
+    # into the impl's org dict so the Session MERGE + _data_sdk ContextVar
+    # set see it — never depend on the asyncio.run context bridge.
+    org["actor_user_id"] = _current_actor_user_id.get()
     # C6 #2115 (D-C6-4): a graph-bound key's capture must land in ITS graph
-    # — carry the resolution ContextVars into the impl's team dict so
+    # — carry the resolution ContextVars into the impl's org dict so
     # _data_sdk routes there (and the per-graph recording gate reads the
-    # key's override). Session/OAuth/team-wide resolutions have empty
+    # key's override). Session/OAuth/org-wide resolutions have empty
     # context → no graph fields → default graph (unchanged).
     _gid = _current_graph_id.get()
     if _gid:
-        team["graph_id"] = _gid
-        team["graph_namespace"] = _current_graph_namespace.get()
-        team["scopes"] = _current_scopes.get() or []
-        team["legacy_full_access"] = bool(_current_legacy_full_access.get())
+        org["graph_id"] = _gid
+        org["graph_namespace"] = _current_graph_namespace.get()
+        org["scopes"] = _current_scopes.get() or []
+        org["legacy_full_access"] = bool(_current_legacy_full_access.get())
     if limits.get("max_points") is not None:
-        team["max_points"] = int(limits["max_points"])
+        org["max_points"] = int(limits["max_points"])
+    # #4010: carry the resolved sessions limit through the SAME bridge, but
+    # ONLY when it is actually present. `_check_org_limit(org, "sessions")`
+    # treats an EXPLICIT None as unlimited and a MISSING key as fail-closed
+    # (#310 GAP-B) — so a presence guard is required, not `.get()`: the bridge
+    # must not synthesize a key the resolver never produced (that would be the
+    # same silent leniency the `enforce_org_limit` fallback removal exists to
+    # kill, and it would make MCP capture succeed where REST 500s).
+    if "max_sessions" in limits:
+        org["max_sessions"] = limits["max_sessions"]
     try:
         body = SessionRequest(conversation=conversation, harness=harness,
-                              session_id=session_id)
+                              session_id=session_id,
+                              machine_id=machine_id, model=model)
     except Exception as e:
         # Pydantic 422-equivalent (invalid harness / conversation shape).
         return {"error": f"invalid capture payload: {e}", "status": 422}
     try:
         import asyncio
-        return asyncio.run(_capture_session_impl(body, None, team))
+        # #3060: the SAME admission reservation as the REST endpoint. This
+        # surface shares `_CAPTURE_EXECUTOR`, so without reserving here the cap
+        # would not bind MCP captures at all — they would queue unboundedly
+        # behind a stalled pool, the exact failure mode the cap closes
+        # (reviewer measurement: cap=2, 4 concurrent extractions). #3129:
+        # the session_id goes with it, so a duplicate in-flight capture of the
+        # same session is refused on this surface too (scoped to this tenant).
+        slot = _reserve_capture_slot(_capture_session_key(org, session_id))
+        # #3129: parity with the REST endpoint — a cancellation between the
+        # attempt starting and its outcome being recorded would leave the
+        # Session at `capture_ok=NULL`, which the replay rule reads as
+        # "presumed captured" (see hosted_api._capture_abandoned_marker).
+        _state: dict = {}
+        try:
+            return asyncio.run(_capture_session_impl(body, None, org,
+                                                     slot=slot,
+                                                     state=_state))
+        except asyncio.CancelledError:
+            # #3129: DEFENSIVE — parity with the REST endpoint, but not
+            # reachable under the current dispatch: this tool is a SYNC
+            # FastMCP callable, and fastmcp runs sync callables via
+            # `anyio.to_thread.run_sync` with the default
+            # `abandon_on_cancel=False`, so the inner `asyncio.run` loop is
+            # never cancelled and no CancelledError reaches here (cycle-4
+            # review). Kept because the cost is nil and a future async tool or
+            # a cancellation-capable dispatcher would need it — see the
+            # residual sentinel issue for real MCP abandonment coverage.
+            if _state.get("attempted") and not _state.get("finalized"):
+                # Off-loop, key held until it lands (see the REST endpoint and
+                # hosted_api._CaptureSlot.hold_until).
+                try:
+                    slot.hold_until(_submit_off_loop(
+                        _CAPTURE_MARKER_EXECUTOR, _capture_abandoned_marker,
+                        _state.get("proj"), session_id,
+                        _state.get("lane") or _capture_lane()))
+                except Exception:  # pragma: no cover - pool shut down
+                    _log.exception("abandoned-capture marker submit failed")
+            raise
+        finally:
+            slot.release()
     except Exception as e:
         status = getattr(e, "status_code", 500)
         detail = getattr(e, "detail", str(e))
-        if status >= 400:
+        # #3060: the capacity 429 is a SERVER condition, not an org capture
+        # failure — never paint it on the dashboard (REST does the same).
+        # #3129: likewise the in-flight 409.
+        if (status >= 400 and status != 429
+                and detail != _CAPTURE_SESSION_IN_FLIGHT_DETAIL):
             with contextlib.suppress(Exception):
-                _record_capture_last_error(team_id, harness, str(detail))
+                _record_capture_last_error(org_id, harness, str(detail))
+        # #3665: a 402 from the shared capture impl is ALWAYS a quota refusal
+        # — the points-estimate gate, the cohort cost cap, or the
+        # ``_check_org_limit(org, "sessions")`` limit — so carry the shared
+        # ERR_QUOTA code rather than making the caller interpret a bare status.
+        # One mapping site covers every 402 this impl can raise, so REST and
+        # MCP cannot drift on the class of a refusal.
+        out = {"error": str(detail), "status": status}
+        if status == 402:
+            out["code"] = ERR_QUOTA
+        return out
+
+
+def tortoise_graph_set_recording(recording: bool | None,
+                                 graph_id: str | None = None) -> dict:
+    """Set or clear a graph's session-recording override (#2302) — the MCP
+    twin of PATCH /v1/graphs/{graph_id} (recording), sharing the SAME
+    hosted_api core (``_apply_graph_recording_override``) so the two
+    surfaces can never drift on permission, semantics, or storage.
+
+    recording: true|false sets the per-graph override; null removes it
+    (inherit the org default — a null never flips an org ON, #1927
+    default-ON preserved). Requires hosted mode + the same management
+    permission as the REST PATCH: a team:manage-scoped key (or the legacy
+    full-access class) — graph data scopes alone are NOT enough. A
+    graph-bound owner-minted manager key may set ANY graph in the org
+    (explicit graph_id), incl. the DEFAULT graph ('default').
+
+    graph_id: the graph to change; when omitted, the calling key's OWN
+    bound graph is the target (the override the capture 409 gate reads),
+    else the org DEFAULT graph ('default').
+
+    The capture 409 ("Session recording is disabled for this graph")
+    routes agents here — call this tool to turn recording back on, then
+    retry the capture. Returns {graph_id, recording}; errors return
+    {error, status} (403 missing scope, 404 unknown graph, 422 bad body).
+    """
+    from tortoise.mcp_auth import (
+        SELFHOST_ORG_ID,
+        _current_graph_id,
+        _current_legacy_full_access,
+        _current_org_id,
+        _current_scopes,
+    )
+    org_id = _current_org_id.get()
+    if not org_id or org_id == SELFHOST_ORG_ID:
+        # stdio / self-host HTTP: the per-graph override is control-plane
+        # state with no local registry row to write — honest error, never a
+        # silent local no-op (capture-tool parity).
+        return {"error": "graph recording is a hosted control-plane "
+                           "setting — requires hosted mode"}
+    gid = graph_id or (_current_graph_id.get() or "default")
+    # Permission gate mirrors the REST PATCH key branch: team:manage (or
+    # the legacy full-access class). Graph data scopes alone 403.
+    scopes = _current_scopes.get()
+    legacy = bool(_current_legacy_full_access.get())
+    if not (legacy or scopes is None or "team:manage" in (scopes or [])):
+        return {"error": "Missing team:manage scope — per-graph recording "
+                           "is a team-management setting (mirror of "
+                           "PATCH /v1/graphs/{graph_id})", "status": 403}
+    from tortoise.hosted_api import (
+        GraphRecordingPatch,
+        _apply_graph_recording_override,
+    )
+    key_ctx = {
+        "org_id": org_id,
+        "key_id": "mcp",
+        "scopes": list(scopes) if scopes is not None else None,
+        "legacy_full_access": legacy,
+        "session_user_id": None,
+    }
+    try:
+        # Strict bool/null (no truthy-string coercion) — REST body parity.
+        body = GraphRecordingPatch(recording=recording)
+    except Exception as e:
+        return {"error": f"recording must be true, false or null ({e})",
+                "status": 422}
+    try:
+        import asyncio
+        return asyncio.run(
+            _apply_graph_recording_override(gid, body, org_id, key_ctx))
+    except Exception as e:
+        status = getattr(e, "status_code", 500)
+        detail = getattr(e, "detail", str(e))
         return {"error": str(detail), "status": status}
 
 
@@ -2985,9 +3732,9 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
     """
     # C5 #2114 (re-review 3): indexes into the DEFAULT graph — graph-bound
     # keys rejected (REST twin index_github parity).
-    _reject_graph_bound_mcp_team_surface("github index")
-    team_id = _current_team_id.get()
-    if team_id is None:
+    _reject_graph_bound_mcp_org_surface("github index")
+    org_id = _current_org_id.get()
+    if org_id is None:
         return {"error": "No team context (HTTP mode required)"}
     import asyncio as _asyncio
 
@@ -2998,7 +3745,7 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
         _validate_repo_scope,
     )
     try:
-        encrypted = _github_token_enc(team_id)
+        encrypted = _github_token_enc(org_id)
     except Exception:
         # Name the actual plane (registry vs Supabase) so selfhost operators
         # aren't misled (code-review P2, PR #861).
@@ -3008,9 +3755,9 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
     if not encrypted:
         return {"error": "GitHub not connected. Run tortoise_onboarding_github_connect first."}
     # #1725 + P1-1 (PR #1792): single-flight — an in-flight started job for
-    # the team is reused AND the run is spawned ONLY when the job was
+    # the org is reused AND the run is spawned ONLY when the job was
     # freshly minted (never two concurrent walks on one job).
-    job_id, is_new = _start_index_job(team_id)
+    job_id, is_new = _start_index_job(org_id)
     if is_new:
         try:
             # #1845: _run_indexing now takes a repo LIST (None = all). The
@@ -3019,7 +3766,7 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
             # re-poll — a bare str would be iterated character-by-character
             # by the new list contract (regression caught in review).
             _asyncio.get_event_loop().create_task(
-                _run_indexing(job_id, team_id, org,
+                _run_indexing(job_id, org_id, org,
                               _validate_repo_scope([repo] if repo else None)))
         except RuntimeError:
             return {"error": "No running event loop"}
@@ -3034,8 +3781,16 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
                     _registry_sdk=None,
                     auth_mode: Literal["tenant", "static", "none"] = "tenant",
                     api_key: str | None = None,
-                    tool_group: str | None = None) -> Any:
+                    tool_group: str | None = None,
+                    emit_oauth_challenge: bool = False) -> Any:
     """Configured Streamable HTTP app for the hosted platform (#236).
+
+    IMPORTANT: ``emit_oauth_challenge`` defaults to **False** on purpose. Leave
+    it alone unless this app is served alongside a real authorization server
+    (i.e. ``hosted_api``). A challenge emitted where no
+    ``/.well-known/oauth-protected-resource`` route exists points the client at a
+    404 — strictly worse than the bare 401. Only ``tortoise/hosted_api.py``
+    passes True.
 
     Mounted at /mcp on the existing FastAPI app. Auth + rate limiting +
     security headers + body-size caps live INSIDE this app's middleware
@@ -3043,7 +3798,7 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
     middleware to mounted sub-apps (verified Starlette behavior).
 
     auth_mode (additive, default "tenant" = hosted byte-identical):
-      "tenant" → TeamResolutionMiddleware (registry Bearer tt_ keys)
+      "tenant" → OrgResolutionMiddleware (registry Bearer tt_ keys)
       "static" → StaticKeyMiddleware (single TORTOISE_API_KEY, self-host LAN)
       "none"   → no auth middleware (localhost-bound self-host eval)
 
@@ -3063,7 +3818,7 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
                                    RequestBodySizeMiddleware)
     from fastmcp.server.transforms import Transform
 
-    # auth_mode middleware selection. TeamResolutionMiddleware (tenant mode) is
+    # auth_mode middleware selection. OrgResolutionMiddleware (tenant mode) is
     # imported here but only ever INSTANTIATED in the tenant branch — static/none
     # modes never construct it, and hosted_api is only ever lazily imported when
     # a tenant token is verified (mcp_auth delegates via function-level import).
@@ -3074,8 +3829,13 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         from tortoise.mcp_auth import ToolGroupMiddleware
         group_mw = Middleware(ToolGroupMiddleware, tool_group=tool_group)
     if auth_mode == "tenant":
-        from tortoise.mcp_auth import TeamResolutionMiddleware
-        auth_mw = Middleware(TeamResolutionMiddleware, registry_sdk=_registry_sdk)
+        from tortoise.mcp_auth import OrgResolutionMiddleware
+        # #2864: only the HOSTED app passes emit_oauth_challenge=True. Tenant-mode
+        # self-host (`tortoise serve --http`, this function's default) has no
+        # authorization server and registers no /.well-known/* routes, so a
+        # challenge there would point the client at a 404.
+        auth_mw = Middleware(OrgResolutionMiddleware, registry_sdk=_registry_sdk,
+                             emit_challenge=emit_oauth_challenge)
     elif auth_mode == "static":
         from tortoise.mcp_auth import StaticKeyMiddleware
         auth_mw = Middleware(StaticKeyMiddleware, api_key=api_key)
@@ -3087,19 +3847,13 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
 
     class _HTTPToolFilter(Transform):
         """Hide HTTP-excluded tools from tools/list (D4) + optional curation
-        group scoping (#523) + the #2013 gated ask group.
+        group scoping (#523).
 
-        The excluded tools (team_create/backfill_v25/ingest_corpus) remain
+        The excluded tools (org_create/backfill_v25/ingest_corpus) remain
         registered on the shared module-level mcp instance for stdio, but are
         filtered out of the HTTP tool listing so tenants can't discover them.
         When tool_group is set, only that group's tools are listed — role-
         scoped servers keep the agent's tool-selection surface under ~20.
-
-        #2013 PRODUCT-GATING: the ask tool (group="ask") is absent from the
-        DEFAULT (ungrouped) hosted surface unless TORTOISE_ENABLE_ASK=1 — the
-        reader ships (the eval's reader), the hosted ask EXPOSURE is gated
-        off. An EXPLICIT tool_group="ask" server (dev/eval) serves it
-        regardless — deliberate opt-in.
         """
         async def list_tools(self, tools):
             group = _tool_group.get()
@@ -3108,22 +3862,17 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
             # filter below already excludes the onboarding tools.
             onboarding_done = False
             if not (group and group != "onboarding"):
-                onboarding_done = _team_onboarding_complete()
+                onboarding_done = _org_onboarding_complete()
 
             def _visible(t):
                 if t.name not in HTTP_ALLOWED:
                     return False
                 tgroup = GROUP_BY_NAME.get(t.name)
-                if group:
-                    # explicit curation-group request — serve that group's tools
-                    if tgroup != group:
-                        return False
-                elif tgroup == _ASK_TOOL_GROUP and not ask_exposure_enabled():
-                    # default (ungrouped) hosted surface: the gated ask group
-                    # is excluded unless the exposure flag is on (#2013)
+                # explicit curation-group request — serve that group's tools
+                if group and tgroup != group:
                     return False
                 # Epic #888: onboarding tools retire from the steady-state
-                # surface once this team's onboarding is complete (fail-open
+                # surface once this org's onboarding is complete (fail-open
                 # — state read errors keep them visible).
                 if onboarding_done and t.name in _ONBOARDING_TOOL_NAMES:  # noqa: SIM103
                     return False
@@ -3211,6 +3960,151 @@ _adapter.register_all(TOOL_REGISTRY, {
     for t in TOOL_REGISTRY
     if t.name in globals()
 })
+
+
+# ── Retired names (#3883): a removed name RESOLVES and WARNS ────────────────
+# #3836 (b): when a name is retired, a caller still gets an answer and is TOLD the
+# name is retired, naming the replacement. A silent "tool not found" is not
+# acceptable — which is why this exists BEFORE any name is retired (#3883 is a
+# hard prerequisite for executing the #3863 removals).
+#
+# A retired name is deliberately NOT a registered component, so it is absent from
+# `tools/list` and the advertised surface really does shrink. `_RetiredToolTransform`
+# resolves it on `get_tool`, so `tools/call` still works. The shim reuses the
+# ORIGINAL handler, so the answer is exactly what the live tool returned (same
+# structured content, same inferred output schema); the warning is ADDED, never
+# substituted. The warning rides BOTH the result content (so an agent sees it) and
+# the result `_meta` (so a client can read it).
+
+
+def _retired_warning(spec: Any) -> dict[str, Any]:
+    """The machine-readable warning carried on the result and on the tool itself."""
+    # The declared `sdk_method` is published only when it actually resolves. Five
+    # registry entries declare a binding that does not exist (the #3838 drift), and
+    # the generated doc marks them `~~method~~ (no such method)`; the runtime warning
+    # is a machine-readable payload, so it must not assert as fact what the doc
+    # calls out as a false declaration.
+    from tortoise.sdk import TortoiseSDK
+
+    declared = spec.sdk_method or None
+    resolved = declared if declared and hasattr(TortoiseSDK, declared) else None
+    return {
+        "name": spec.name,
+        "retired": True,
+        "use_instead": spec.retired_use_instead,
+        "sdk_method": resolved,
+        "sdk_method_exists": resolved is not None,
+        "message": (
+            f"RETIRED TOOL: `{spec.name}` has been retired from the Tortoise MCP "
+            f"surface. It still answers, but it is no longer advertised. Call "
+            f"`{spec.retired_use_instead}` instead (#3883)."
+        ),
+    }
+
+
+def _warn_retired_result(base: Any, spec: Any) -> Any:
+    """The result the live tool produced, plus a warning that the name is retired."""
+    from fastmcp.tools.base import ToolResult
+    from mcp.types import TextContent
+
+    if not isinstance(base, ToolResult):
+        return base
+
+    warning = _retired_warning(spec)
+    meta = dict(base.meta or {})
+    tortoise_meta = meta.get("tortoise")
+    meta["tortoise"] = {
+        **(tortoise_meta if isinstance(tortoise_meta, dict) else {}),
+        "retired": warning,
+    }
+    # The warning goes LAST, not first: the payload stays `content[0]` and
+    # `structured_content` is untouched, so a caller that reads the payload — the
+    # normal path — is byte-identical to the live tool. Only a caller of the
+    # RETIRED name sees the extra block, and seeing it is the point (#3883).
+    return ToolResult(
+        content=[*base.content, TextContent(type="text", text=warning["message"])],
+        structured_content=base.structured_content,
+        meta=meta,
+        is_error=base.is_error,
+    )
+
+
+def build_retired_tools(retired_registry: list[Any], handlers: dict[str, Any]) -> dict[str, Any]:
+    """Build the retired-name shims: same schema, same answer, plus a warning."""
+    import functools
+
+    from fastmcp.tools import FunctionTool
+
+    def _make_shim(original: Any, base: Any, spec: Any) -> Any:
+        # A factory, not a loop-local closure: a bare `def` inside the loop would
+        # capture the LOOP variable and every shim would call the last handler.
+        @functools.wraps(original)
+        def retired_fn(*args, **kwargs):
+            return _warn_retired_result(
+                base.convert_result(original(*args, **kwargs)), spec
+            )
+
+        return retired_fn
+
+    shims: dict[str, Any] = {}
+    for spec in retired_registry:
+        original = handlers.get(spec.name)
+        if original is None:
+            continue
+        # `base` is the tool this name WOULD have been, so `convert_result` yields
+        # byte-identical structured output (incl. the `x-fastmcp-wrap-result`
+        # envelope for list-returning handlers).
+        base = FunctionTool.from_function(
+            original, name=spec.name,
+            description=spec.description, annotations=spec.annotations,
+        )
+        retired_fn = _make_shim(original, base, spec)
+        retired_fn.__doc__ = (
+            f"RETIRED — use {spec.retired_use_instead}. {spec.description}"
+        )
+        shims[spec.name] = FunctionTool.from_function(
+            retired_fn, name=spec.name, description=retired_fn.__doc__,
+            annotations=spec.annotations,
+            meta={"tortoise": {"retired": _retired_warning(spec)}},
+        )
+    return shims
+
+
+from fastmcp.server.transforms import Transform  # noqa: E402
+
+
+class _RetiredToolTransform(Transform):
+    """Serve retired names on `get_tool` (with a warning) without advertising them.
+
+    `list_tools` strips them so the advertised surface shrinks; `get_tool` falls
+    back to the shim when no live tool owns the name. Registered unconditionally,
+    even with zero retired names, so the gate reads the transform set from the
+    source and a name can never be retired without the gate noticing.
+    """
+
+    def __init__(self, shims: dict[str, Any]) -> None:
+        self._shims = dict(shims)
+
+    async def list_tools(self, tools: Any) -> Any:
+        return [t for t in tools if getattr(t, "name", None) not in self._shims]
+
+    async def get_tool(self, name: str, call_next: Any, *, version: Any = None) -> Any:
+        tool = await call_next(name, version=version)
+        if tool is not None:
+            return tool
+        return self._shims.get(name)
+
+
+from tortoise.tool_registry import RETIRED_TOOL_REGISTRY  # noqa: E402
+
+_RETIRED_SHIMS = build_retired_tools(RETIRED_TOOL_REGISTRY, {
+    t.name: globals()[t.name]
+    for t in RETIRED_TOOL_REGISTRY
+    if t.name in globals()
+})
+if not getattr(mcp, "_retired_tool_transform_registered", False):
+    mcp.add_transform(_RetiredToolTransform(_RETIRED_SHIMS))
+    mcp._retired_tool_transform_registered = True
 
 if __name__ == "__main__":
     main()

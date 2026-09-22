@@ -2,7 +2,7 @@
 // dashboard-js-tests). The #2167 rule-4 carve-out is closed: every
 // session-mode key-management WRITE (revokeKey DELETE + toggleKeyEnabled /
 // renameKey PATCH on the API Keys tab, revokePanelKey DELETE on the Graphs
-// panel) must append the `?team_id=` pin (variable `q`) built from the
+// panel) must append the `?org_id=` pin (variable `q`) built from the
 // selected team — the server resolves the session team to memberships[0]
 // without it, so a multi-membership user whose selected team ≠ first
 // membership could not revoke/rename/toggle their non-first team's keys.
@@ -32,7 +32,7 @@ function writeFnBody(name) {
   return mainJsx.slice(start, end)
 }
 
-test('#2230: whole-file sentinel — every /v1/team/keys URL in main.jsx keeps its ?team_id= pin', () => {
+test('#2230: whole-file sentinel — every /v1/team/keys URL in main.jsx keeps its ?org_id= pin', () => {
   // Second layer over the per-site checks below: a FUTURE key-management
   // write (revoke/rename/toggle were added after #2167's pins without pins —
   // exactly how #2230 regressed; revokePanelKey joined via #2274's per-graph
@@ -61,7 +61,7 @@ test('#2230: whole-file sentinel — every /v1/team/keys URL in main.jsx keeps i
   }
 })
 
-test('#2230: each key-management write (revoke/rename/toggle/panel-revoke) pins ?team_id= on its URL', () => {
+test('#2230: each key-management write (revoke/rename/toggle/panel-revoke) pins ?org_id= on its URL', () => {
   for (const fn of WRITE_FNS) {
     const body = writeFnBody(fn)
     // The key-write api() URL is `/v1/team/keys/${<id>}` and must be
@@ -70,7 +70,7 @@ test('#2230: each key-management write (revoke/rename/toggle/panel-revoke) pins 
     // mintKey's create-side pin).
     const unpinned = body.match(/\/v1\/team\/keys\/\$\{[^}]+\}(?!\$\{q\})/g) || []
     assert.deepEqual(unpinned, [],
-      `${fn}: key-management URL must append the ?team_id= pin (\${q}): ${unpinned}`)
+      `${fn}: key-management URL must append the ?org_id= pin (\${q}): ${unpinned}`)
     const pinned = body.match(/\/v1\/team\/keys\/\$\{[^}]+\}\$\{q\}/g) || []
     assert.equal(pinned.length, 1,
       `${fn}: expected exactly one pinned key-write URL, got ${pinned.length}`)
@@ -78,13 +78,13 @@ test('#2230: each key-management write (revoke/rename/toggle/panel-revoke) pins 
 })
 
 test('#2230: the pin is session-conditional in every key-write caller (key mode stays unpinned)', () => {
-  // The rule-4 q is `(sessionTokenRef.current && <selected team>) ? '?team_id=…' : ''`.
+  // The rule-4 q is `(sessionTokenRef.current && <selected team>) ? '?org_id=…' : ''`.
   // Each write function must build its OWN session-gated q beside its URL — a
-  // hardcoded/unconditional ?team_id= would break the key-auth/claim surface.
+  // hardcoded/unconditional ?org_id= would break the key-auth/claim surface.
   for (const fn of WRITE_FNS) {
     const body = writeFnBody(fn)
-    assert.match(body, /const q = \(sessionTokenRef\.current && \w+\) \? `\?team_id=/,
-      `${fn}: must construct the pin as (sessionTokenRef.current && <team>) ? \`?team_id=…\` : '' — ` +
-      'a hardcoded ?team_id= would break the key-auth/claim surface')
+    assert.match(body, /const q = \(sessionTokenRef\.current && \w+\) \? `\?org_id=/,
+      `${fn}: must construct the pin as (sessionTokenRef.current && <team>) ? \`?org_id=…\` : '' — ` +
+      'a hardcoded ?org_id= would break the key-auth/claim surface')
   }
 })

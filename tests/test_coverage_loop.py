@@ -93,7 +93,7 @@ def _uri() -> str:
         "docker://:falkordb@localhost:6379/tortoise_test_matrix").rstrip("/")
 
 pytestmark = pytest.mark.skipif(
-    not FALKORDB_AVAILABLE, reason="Live FalkorDB (Docker) not available")
+    not FALKORDB_AVAILABLE, reason="requires TORTOISE_DB_URI (live FalkorDB FTS lane — tier-2 embedded legs skip)")
 
 #: The question tokens (after the shared stopword drop): the sparse OR leg
 #: matches these against content ∪ search_keys.
@@ -178,14 +178,14 @@ def seeded_sdk(monkeypatch):
         sdk.create_point(
             "event",
             "the road bike repairs cost 120 dollars at the shop",
-            id=SEED_ID, session_id=SEED_SESSION,
+            id=SEED_ID, session_id=SEED_SESSION, lme_session_index=0,
             search_keys="road bike repairs bill paid 120 dollars",
             status="draft")
         sdk.create_point(
             "event",
             "on saturday morning the weather was sunny so i went for a "
             "long walk instead",
-            id=JOIN_ID, session_id=JOIN_SESSION,
+            id=JOIN_ID, session_id=JOIN_SESSION, lme_session_index=1,
             search_keys=JOIN_KEYS, status="draft")
         for i in range(12):
             sdk.create_point(
@@ -242,6 +242,22 @@ def test_loop_surfaces_missing_session_evidence_inside_topk(seeded_sdk):
     assert stats["loop_iterations"] == 1
     assert stats["loop_fired_facet"] == f"entity:{ENTITY_ANCHOR}"
     assert stats["loop_merged_added"] >= 1
+    # #2517 driver-level annotation golden: the C3-1 driver's INJECTED hit
+    # must carry the WHOLE annotated key set (17), not a subset —
+    # ``session_date`` is derived from the question's ``haystack_dates``
+    # via ``lme_session_index`` and silently emptied in the pre-review
+    # extraction, which a 4-field golden could not see. The base hit is
+    # the reference shape.
+    base_hit = next(h for h in on["hits"] if h["id"] == SEED_ID)
+    inj_hit = next(h for h in on["hits"] if h["id"] == JOIN_ID)
+    assert set(inj_hit) == set(base_hit)
+    assert len(inj_hit) == 17
+    # session_date is derived from the QUESTION's haystack_dates, indexed by
+    # the point's lme_session_index — a driver that drops ``dates`` (or the
+    # props) leaves it empty. Both sessions are pinned.
+    assert inj_hit["session_date"] == "2026-09-05", inj_hit
+    assert base_hit["session_date"] == "2026-09-01", base_hit
+    assert inj_hit["match_source"] == "fts"
 
 
 # ── (b) default OFF: byte-identical no-op ─────────────────────────────────

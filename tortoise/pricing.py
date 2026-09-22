@@ -6,8 +6,8 @@ included_write_ops_per_month, max_graph_nodes, and overage eligibility. This
 module loads it at import time (cached) and exposes lookup helpers so
 hosted_api.py and sdk.py never hardcode limits.
 
-NOT a tier field: max_teams — multi-team is a user-level capability (per-team
-billing; team creation is rate-limited for abuse, not tier-capped).
+NOT a tier field: max_orgs — multi-org is a user-level capability (per-org
+billing; org creation is rate-limited for abuse, not tier-capped).
 """
 from __future__ import annotations
 
@@ -101,11 +101,14 @@ def all_tiers() -> list[str]:
     return list(data.get("tiers", {}).keys())
 
 
-def daily_backups_enabled(tier: str | None) -> bool:
-    """True when pricing.json features.daily_backups is truthy for *tier*.
+def hourly_backups_enabled(tier: str | None) -> bool:
+    """True when pricing.json features.hourly_backups is truthy for *tier*.
 
     Derives the backup-tiers allowlist from the canonical pricing source
     so the gate can never drift from product/pricing.json again (#656).
+    #2317: the flag is named for the ACTUAL delivered cadence (hourly driver
+    sweep → RPO ≤1h typical / ≤2h worst) — the pre-launch registry-era
+    ``daily_backups`` name understated it.
     Unknown tiers default to False (no backups entitlement).
     """
     if not tier:
@@ -115,4 +118,4 @@ def daily_backups_enabled(tier: str | None) -> bool:
     # Strict boolean check: pricing.json uses the string "planned" to mark
     # features that are not yet live. bool("planned") is True, which would
     # wrongly enable the feature — only a real JSON `true` unlocks it.
-    return t.get("features", {}).get("daily_backups", False) is True
+    return t.get("features", {}).get("hourly_backups", False) is True

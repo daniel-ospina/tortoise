@@ -11,8 +11,9 @@ Planted-conflict gold conventions (the suite's research-original part):
 * **gold (SEALED)**: per-planted-point expectations — ``expected.
   conflict_surfacing`` + ``expected.dig_deeper_targets`` (``{kind,
   target_role}`` pointers) + ``expected.support_chain_sufficient`` /
-  ``tradeoff_sufficient``.  Gold lives in its own dir; ``fixtures_hash``
-  covers manifest AND gold (a gold-only edit changes the hash).
+  ``resolved`` (issue #2490) / ``tradeoff_sufficient``.  Gold lives in its
+  own dir; ``fixtures_hash`` covers manifest AND gold (a gold-only edit
+  changes the hash).
 * **Manifest resolution at contract-validation time**: every gold entry's
   ``point_id`` (topic key) must exist in the manifest's deterministic topic
   list AND its family's plant spec must support every expected pointer kind
@@ -54,9 +55,12 @@ SUITE_VALUES = frozenset({"why_suite"})
 # Directions follow the W2/W3 convention: maximize = higher-better,
 # minimize = lower-better.
 METRIC_DIRECTIONS: dict[str, str] = {
-    # conflict-surfacing: of the planted-conflict points, the fraction whose
-    # SURFACED context identifies the contradiction (conflicts.contested
-    # true + >= 1 NAND + a dig-deeper nand pointer) — E2E-1/E2E-7 >= 0.95.
+    # conflict-surfacing: of the EXPECTED-CONTESTED (live) points — 25
+    # post-#2490 — the fraction whose SURFACED context identifies the
+    # contradiction (conflicts.contested true + >= 1 NAND + a dig-deeper
+    # nand pointer).  The 5 planted-conflict superseded predecessors are
+    # RESOLVED (FAMILY_EXPECTED_CONTESTED false) and graded by the resolved
+    # arm, never this denominator.  E2E-1/E2E-7 >= 0.95.
     "conflict_surfacing_rate": "maximize",
     # dig-deeper navigation: fraction of gold-expected {kind, target}
     # pointers that resolve to the correct planted point from the surfaced
@@ -96,8 +100,23 @@ FAMILY_CONFLICTED: dict[str, bool] = {
     "superseded": True,
     "clean": False,
 }
+# #2490 (terminal-posterior freeze): the gold's conflict-surfacing
+# expectation is NOT identical to the planted-conflict set.  A superseded
+# predecessor is planted with conflict STRUCTURE (the post-mortem nav — nand
+# + successor pointers — is still graded) but is TERMINAL/RESOLVED: its
+# why-block must serve it as superseded, never as a live open dispute
+# (conflicts.contested true).  conflict_surfacing=false for the resolved
+# family; p9/plain/decision (live claims) keep the true expectation.
+FAMILY_EXPECTED_CONTESTED: dict[str, bool] = {
+    "p9": True,
+    "plain": True,
+    "decision": True,
+    "superseded": False,
+    "clean": False,
+}
 FAMILY_DECISION = frozenset({"decision"})
 FAMILY_SUPERSEDED = frozenset({"superseded"})
+FAMILY_RESOLVED = frozenset({"superseded"})  # #2490: resolved-family contract
 
 
 def _require_mapping(doc: object, where: str, issues: list[str]) -> None:
@@ -350,6 +369,7 @@ def _validate_gold_entry(entry: dict, manifest: dict, index: int, issues: list[s
                 "conflict_surfacing",
                 "dig_deeper_targets",
                 "support_chain_sufficient",
+                "resolved",
                 "tradeoff_sufficient",
             }
         ),
@@ -357,8 +377,8 @@ def _validate_gold_entry(entry: dict, manifest: dict, index: int, issues: list[s
         issues,
     )
     conflict_surfacing = _expect_bool(expected, "conflict_surfacing", f"{where}.expected", issues)
-    _expect_bool(expected, "support_chain_sufficient", f"{where}.expected", issues)
     _expect_bool(expected, "tradeoff_sufficient", f"{where}.expected", issues)
+    resolved = _expect_bool(expected, "resolved", f"{where}.expected", issues)
 
     # Manifest resolution: every gold point_id must be a topic the seed
     # plants (jointly-pinned topic list), and the entry's family/clean flags
@@ -385,10 +405,32 @@ def _validate_gold_entry(entry: dict, manifest: dict, index: int, issues: list[s
             issues.append(
                 f"{where}: family {family!r} is planted CLEAN — clean must be true (got {clean!r})"
             )
-        if conflict_surfacing is not None and conflict_surfacing != want_conflicted:
+        want_surfacing = FAMILY_EXPECTED_CONTESTED.get(family)
+        if conflict_surfacing is not None and conflict_surfacing != want_surfacing:
             issues.append(
-                f"{where}.expected.conflict_surfacing: family {family!r} plants "
-                f"conflict_surfacing={want_conflicted}, got {conflict_surfacing!r}"
+                f"{where}.expected.conflict_surfacing: family {family!r} expects "
+                f"conflict_surfacing={want_surfacing}, got {conflict_surfacing!r}"
+            )
+        # #2490 resolved contract: the superseded family is RESOLVED — its
+        # gold must not expect a live measured belief (support_chain_sufficient
+        # false) and must mark the resolved presentation.
+        is_resolved = family in FAMILY_RESOLVED
+        if resolved is not None and resolved != is_resolved:
+            issues.append(
+                f"{where}.expected.resolved: family {family!r} expects "
+                f"resolved={is_resolved}, got {resolved!r}"
+            )
+        support_val = _expect_bool(expected, "support_chain_sufficient", f"{where}.expected", issues)
+        if is_resolved and support_val is not False:
+            issues.append(
+                f"{where}.expected.support_chain_sufficient: resolved family "
+                f"{family!r} must expect False (its belief is not measured — "
+                f"has_ep=false by the terminal gate), got {support_val!r}"
+            )
+        if not is_resolved and support_val is not True:
+            issues.append(
+                f"{where}.expected.support_chain_sufficient: family {family!r} "
+                f"must expect True (live/clean claims are measured), got {support_val!r}"
             )
     # Expected dig_deeper_targets: {kind, target_role} — kind must be legal
     # for the family and the target_role must resolve to a role the family's
@@ -510,17 +552,21 @@ def aggregate_metrics(point_results: list[dict]) -> dict:
     ``runner.grade_point``)::
 
         {"point_id", "family", "clean", "expected_conflict",
-         "conflict_surfaced": bool, "nav_correct": int, "nav_total": int,
-         "support_sufficient": bool, "tradeoff_sufficient": bool|None,
-         "false_positive": bool}
+         "expected_resolved": bool, "conflict_surfaced": bool,
+         "nav_correct": int, "nav_total": int,
+         "support_sufficient": bool|None, "resolved_ok": bool|None,
+         "tradeoff_sufficient": bool|None, "false_positive": bool}
 
     Aggregation is POOLED: conflict_surfacing_rate = correctly-surfaced /
-    expected-conflict points (30); navigation accuracy = correct expected
-    pointer targets / total expected targets; support-chain sufficiency
-    over every point; trade-off sufficiency over decision points; the
-    false-positive rate over clean points.  An empty denominator collapses
-    to the WORST value (minimize rates → 1.0, maximize → 0.0): a missing
-    graded dimension must never read as a clean pass.
+    expected-conflict points (25 live — the 5 superseded predecessors are
+    RESOLVED post-#2490 and carry expected_conflict false); navigation
+    accuracy = correct expected pointer targets / total expected targets;
+    support-chain sufficiency over points graded for support (live/clean —
+    resolved rows grade the resolved arm instead and carry
+    support_sufficient None); trade-off sufficiency over decision points;
+    the false-positive rate over clean points.  An empty denominator
+    collapses to the WORST value (minimize rates → 1.0, maximize → 0.0): a
+    missing graded dimension must never read as a clean pass.
     """
     expected_conflict = [r for r in point_results if r.get("expected_conflict")]
     conflicted_ok = sum(1 for r in expected_conflict if r.get("conflict_surfaced"))

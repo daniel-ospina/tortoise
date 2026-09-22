@@ -107,7 +107,7 @@ def test_committed_gold_valid_and_resolves_against_manifest():
 
 def test_judge_pin_format_and_prestep():
     pin = judge.judge_pin()
-    assert pin.startswith("judge_why_suite_v1:")
+    assert pin.startswith("judge_why_suite_v2:")
     assert len(pin.split(":")[1]) == 64
     assert judge.assert_prompt_pinned() == pin
     # The pre-step fails closed on a drifted prompt (protocol change must be
@@ -248,6 +248,65 @@ def test_gold_partial_coverage_fails():
     assert any("39 entries but the manifest plants 40 topics" in i for i in issues)
 
 
+# ── Resolved-family gold contract (issue #2490) ────────────────────────────
+
+
+def _mutated_gold_entries(entry) -> list:
+    """The committed gold with one entry replaced by a mutated copy."""
+    return [
+        e for e in corpus.gold_doc()["entries"] if e["point_id"] != entry["point_id"]
+    ] + [entry]
+
+
+def test_gold_superseded_entry_must_be_resolved():
+    # A superseded-family entry missing resolved:true violates the contract.
+    entry = _gold_entry("superseded-topic-0")
+    entry["expected"]["resolved"] = False
+    issues = schema.validate_gold(_gold(entries=_mutated_gold_entries(entry)), corpus.load_manifest())
+    assert any("expected.resolved: family 'superseded' expects resolved=True" in i for i in issues)
+
+
+def test_gold_superseded_entry_cannot_expect_conflict_surfacing():
+    # #2490: a superseded (resolved) predecessor must never be gold-expected
+    # to surface as a live open dispute.
+    entry = _gold_entry("superseded-topic-0")
+    entry["expected"]["conflict_surfacing"] = True
+    issues = schema.validate_gold(_gold(entries=_mutated_gold_entries(entry)), corpus.load_manifest())
+    assert any(
+        "expected.conflict_surfacing: family 'superseded' expects conflict_surfacing=False" in i
+        for i in issues
+    )
+
+
+def test_gold_superseded_entry_must_expect_support_false():
+    # The resolved claim's belief is not measured (has_ep=false) — gold must
+    # not expect support-chain sufficiency on it.
+    entry = _gold_entry("superseded-topic-0")
+    entry["expected"]["support_chain_sufficient"] = True
+    issues = schema.validate_gold(_gold(entries=_mutated_gold_entries(entry)), corpus.load_manifest())
+    assert any(
+        "support_chain_sufficient: resolved family 'superseded' must expect False" in i
+        for i in issues
+    )
+
+
+def test_gold_live_entry_cannot_be_resolved():
+    # A live family (p9) may never mark resolved:true.
+    entry = _gold_entry("p9-topic-0")
+    entry["expected"]["resolved"] = True
+    issues = schema.validate_gold(_gold(entries=_mutated_gold_entries(entry)), corpus.load_manifest())
+    assert any("expected.resolved: family 'p9' expects resolved=False" in i for i in issues)
+
+
+def test_gold_live_entry_must_expect_support_true():
+    entry = _gold_entry("clean-topic-0")
+    entry["expected"]["support_chain_sufficient"] = False
+    issues = schema.validate_gold(_gold(entries=_mutated_gold_entries(entry)), corpus.load_manifest())
+    assert any(
+        "support_chain_sufficient: family 'clean' must expect True" in i for i in issues
+    )
+
+
 # ── Metric aggregation ─────────────────────────────────────────────────────
 
 
@@ -298,11 +357,28 @@ def test_aggregate_pools_metrics():
             nav_errors=[{"kind": "supports"}],
             false_positive=True,
         ),
+        # #2490 resolved row: a superseded claim — nav still graded, but it
+        # drops OUT of the conflict + support pools (not a live dispute,
+        # belief not measured) and never trips false-positive.
+        _point(
+            point_id="s1",
+            family="superseded",
+            expected_conflict=False,
+            expected_resolved=True,
+            conflict_surfaced=None,
+            resolved_ok=True,
+            support_sufficient=None,
+            tradeoff_sufficient=None,
+            nav_correct=3,
+            nav_total=3,
+        ),
     ]
     metrics = schema.aggregate_metrics(rows)
+    # conflict pool = 4 expected-conflict rows (s1 excluded) — 3/4 surfaced.
     assert metrics["conflict_surfacing_rate"] == pytest.approx(3 / 4)
-    # nav: c1 2/2 + c2 2/2 + c3 2/2 + d1 2/2 + k1 1/1 + k2 0/1 = 9/10.
-    assert metrics["dig_deeper_navigation_accuracy"] == pytest.approx(9 / 10)
+    # nav: c1 2/2 + c2 2/2 + c3 2/2 + d1 2/2 + k1 1/1 + k2 0/1 + s1 3/3 = 12/13.
+    assert metrics["dig_deeper_navigation_accuracy"] == pytest.approx(12 / 13)
+    # support pool excludes the None resolved row (s1) — 6 graded rows, all True.
     assert metrics["support_chain_sufficiency"] == 1.0
     assert metrics["tradeoff_sufficiency"] == 1.0
     assert metrics["false_positive_rate"] == pytest.approx(1 / 2)
@@ -469,7 +545,7 @@ def test_compare_hash_config_pin_mismatches_are_inconclusive():
             baseline,
             resolved_config=base_config(baseline),
             run_fixtures_hash=HASH_A,
-            run_judge_pin="judge_why_suite_v1:" + "0" * 64,
+            run_judge_pin="judge_why_suite_v2:" + "0" * 64,
         )
         == VERDICT_INCONCLUSIVE
     )
@@ -536,7 +612,7 @@ def test_bless_rejects_pin_change_without_protocol_bless():
     run = {
         "date": "2026-09-06T00:00:00Z",
         "fixtures_hash": HASH_A,
-        "judge_pin": "judge_why_suite_v1:" + "0" * 64,
+        "judge_pin": "judge_why_suite_v2:" + "0" * 64,
         "config": BASE_CONFIG,
         "metrics": {
             "conflict_surfacing_rate": 1.0,

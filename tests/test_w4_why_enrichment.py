@@ -34,7 +34,6 @@ Contract under test (plan §3.1.1/§3.1.3/§3.1.4/§6.1 + issue #2101):
 """
 from __future__ import annotations
 
-import asyncio
 import os
 import sys
 import tempfile
@@ -45,10 +44,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tortoise import search_engine
-from tortoise.sdk import (  # noqa: E402, RUF100
-    TortoiseSDK,
+from tortoise.ask_lane import (  # noqa: E402, RUF100
     _reset_ask_reader_cache_for_tests,
+    run_ask_lane,
 )
+from tortoise.sdk import TortoiseSDK
 from tortoise.why import (
     DIG_DEEPER_KINDS,
     DIG_DEEPER_LABELS,
@@ -69,7 +69,7 @@ W4_KEYS = ("warnings", "why", "conflicts", "supersession", "tradeoffs", "dig_dee
 CANONICAL_ASK_KEYS = frozenset({
     "answer", "abstained", "question_type", "question_date", "evidence",
     "context_tokens", "model", "provider", "route", "cost_estimate_usd",
-    "duration_ms", "retrieval_degraded",
+    "duration_ms", "retrieval_degraded", "retrieved_session_ids",
 })
 
 
@@ -261,13 +261,13 @@ def test_flag_off_emission_byte_identical(monkeypatch):
         for h in rec:
             for k in W4_KEYS:
                 assert k not in h, f"recall flag-off leak: {k}"
-        # ask surface: 12-field response WITHOUT the why key; the reader is
+        # the ask lane: 13-field response WITHOUT the why key; the reader is
         # called EXACTLY once (zero-LLM — enrichment adds no reader calls).
-        import tortoise.sdk as sdk_mod
+        import tortoise.ask_lane as sdk_mod
         fake = _FakeReader()
         monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory", lambda: fake)
         _reset_ask_reader_cache_for_tests()
-        resp = sdk.ask("flag-off-topic belief statement?")
+        resp = run_ask_lane(sdk, "flag-off-topic belief statement?")
         assert set(resp) == CANONICAL_ASK_KEYS
         assert fake.calls == 1, f"flag-off ask made {fake.calls} reader calls — expected 1"
     finally:
@@ -567,24 +567,17 @@ def _mcp_analyze(sdk, question: str) -> dict:
         ms.sdk = None
 
 
-def _mcp_ask(sdk, question: str) -> dict:
-    import tortoise.mcp_server as ms
-    from tortoise.mcp_auth import _transport_mode
-    _token = _transport_mode.set("stdio")
-    ms.sdk = sdk
-    try:
-        return asyncio.run(ms.tortoise_ask(question))
-    finally:
-        _transport_mode.reset(_token)
-        ms.sdk = None
+def _ask_lane(sdk, question: str) -> dict:
+    """The eval-only ask lane (#3849 — the MCP ask tool was removed)."""
+    return run_ask_lane(sdk, question)
 
 
 def test_flag_drift_all_four_surfaces(w4_flag, monkeypatch):
     """E2E-1 flag-drift: a contested point recalled through ALL FOUR enriched
-    surfaces (tortoise_search / tortoise_analyze / tortoise_ask / MCP
-    recall_state) surfaces the additive keys on every surface — a surface
-    that drops them is flag drift."""
-    import tortoise.sdk as sdk_mod
+    surfaces (tortoise_search / tortoise_analyze / MCP recall_state + the
+    eval-only ask lane, #3849) surfaces the additive keys on every surface — a
+    surface that drops them is flag drift."""
+    import tortoise.ask_lane as sdk_mod
     fake = _FakeReader()
     monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory", lambda: fake)
     _reset_ask_reader_cache_for_tests()
@@ -625,19 +618,19 @@ def test_flag_drift_all_four_surfaces(w4_flag, monkeypatch):
         assert entry["conflicts"]["contested"] is True
         assert any(p["kind"] == "nand" for p in entry.get("dig_deeper", []))
 
-        # 4. tortoise_ask (MCP) — the why key rides the response; additivity
-        # is symmetric with the flag-off pin (canonical 12 + why only); the
-        # reader is called EXACTLY once (zero-LLM — enrichment adds zero
-        # reader calls). The ask why entry carries the DISPUTE CONTENT for
+        # 4. the ask lane (eval-only, #3849) — the why key rides the response;
+        # additivity is symmetric with the flag-off pin (canonical 12 + why
+        # only); the reader is called EXACTLY once (zero-LLM — enrichment adds
+        # zero reader calls). The ask why entry carries the DISPUTE CONTENT for
         # the contested point (mirroring the analyze-surface assertions) —
         # not just the point's presence.
-        ask = _mcp_ask(sdk, "what contradicted the drift-topic belief statement?")
+        ask = _ask_lane(sdk, "what contradicted the drift-topic belief statement?")
         assert set(ask) == CANONICAL_ASK_KEYS | {"why"}, \
             "flag-on ask must add only the why key (additive-only)"
         assert fake.calls == 1, \
             f"ask lane made {fake.calls} reader calls — W4 enrichment must add zero (zero-LLM)"
         ask_why = ask.get("why") or []
-        assert ask_why, "ask surface must emit why entries with the flag ON"
+        assert ask_why, "the ask lane must emit why entries with the flag ON"
         ask_entry = next((e for e in ask_why if e.get("point_id") == g["claim"]), None)
         assert ask_entry is not None, "ask why must include the contested point's block"
         assert ask_entry["conflicts"]["contested"] is True, \
@@ -680,16 +673,16 @@ def test_flag_off_mcp_surfaces_byte_identical(monkeypatch):
         ana = _mcp_analyze(sdk, "where is the disagreement?")
         assert "why" not in ana
 
-        # 4. MCP ask — with the flag OFF the why key is absent and the
-        # response stays the canonical 12-field shape (byte-identical). The
+        # 4. the eval-only ask lane — with the flag OFF the why key is absent and the
+        # response stays the canonical 13-field shape (byte-identical). The
         # fake reader keeps the lane local (no provider key required).
-        import tortoise.sdk as sdk_mod
+        import tortoise.ask_lane as sdk_mod
         fake = _FakeReader()
         monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory", lambda: fake)
         _reset_ask_reader_cache_for_tests()
-        ask = _mcp_ask(sdk, "what contradicted the off-mcp-topic belief statement?")
+        ask = _ask_lane(sdk, "what contradicted the off-mcp-topic belief statement?")
         assert set(ask) == CANONICAL_ASK_KEYS, \
-            "flag-off MCP ask must stay byte-identical (12-field response)"
+            "flag-off ask must stay byte-identical (13-field response)"
     finally:
         sdk.close()
 
@@ -757,10 +750,14 @@ def test_e2e1_conflict_surfacing_rate(w4_flag):
     PRE-TEST: all 10 P9-planted points' persisted variance EXCEEDS
     CONTESTED_VARIANCE_THRESHOLD (calibrated, not aspirational).
 
-    THEN: conflict-surfacing rate ≥ 0.95 of the 30 conflicted points (≥29/30
-    surface conflicts.contested:true + ≥1 NAND + a dig-deeper nand pointer);
-    0 clean points carry conflict noise; each of the 5 decision points
-    surfaces ≥2 alternatives with ep_weight + mitigation."""
+    THEN: conflict-surfacing rate ≥ 0.95 of the 25 NON-TERMINAL conflicted
+    points (≥24/25 surface conflicts.contested:true + ≥1 NAND + a dig-deeper
+    nand pointer); the 5 superseded predecessors surface through the
+    terminal-inclusive lens as NOT contested (#2490 — terminal claims decay
+    to vacuity and every contested computation excludes them) while their
+    conflict structure + supersession view stay served; 0 clean points carry
+    conflict noise; each of the 5 decision points surfaces ≥2 alternatives
+    with ep_weight + mitigation."""
     sdk = _fresh_sdk()
     try:
         corpus = _seed_e2e1_corpus(sdk)
@@ -773,12 +770,17 @@ def test_e2e1_conflict_surfacing_rate(w4_flag):
         # When: recall each conflicted point through the search surface.
         surfaced = 0
         all_hits = _recall_all_points(sdk)
-        for pid in corpus["conflicted"]:
+        # #2490: the 5 superseded corpus predecessors are terminal-status —
+        # they decay to vacuity at the terminalizing write and every contested
+        # computation excludes them, so the contested-surfacing denominator is
+        # the 25 NON-terminal conflicted points (E2E-1's conflicted structure
+        # for the superseded subset is retained and asserted separately below).
+        live_conflicted = [pid for pid in corpus["conflicted"]
+                           if pid not in corpus["superseded"]]
+        for pid in live_conflicted:
             # The corpus is recalled through the search surface (full-scan
             # retrieval lens — deterministic; ranking is exercised by the
-            # flag-drift tests). include_terminal=True: the 5 superseded
-            # corpus points are terminal-status predecessors — recalled
-            # through the terminal-inclusive lens (never as current belief).
+            # flag-drift tests).
             claim_hit = _hit_by_id(all_hits, pid)
             assert claim_hit is not None, f"corpus point {pid} not retrieved"
             conflicts = claim_hit.get("conflicts")
@@ -788,9 +790,21 @@ def test_e2e1_conflict_surfacing_rate(w4_flag):
                     and any(p["kind"] == "nand" for p in dd)):
                 surfaced += 1
 
-        rate = surfaced / len(corpus["conflicted"])
-        assert surfaced >= 29, \
-            f"conflict-surfacing rate {rate:.2f} — need ≥ 29/30 (E2E-1 ≥ 0.95)"
+        rate = surfaced / len(live_conflicted)
+        assert surfaced >= 24, \
+            f"conflict-surfacing rate {rate:.2f} — need ≥ 24/25 (E2E-1 ≥ 0.95)"
+
+        # #2490 pin: the superseded predecessors (terminal) are retrieved on
+        # the terminal-inclusive lens with their conflict structure served but
+        # NEVER as contested (a decayed terminal must not read as contested on
+        # any include-terminal surface).
+        for pid in corpus["superseded"]:
+            claim_hit = _hit_by_id(all_hits, pid)
+            assert claim_hit is not None, f"superseded point {pid} not retrieved"
+            conflicts = claim_hit.get("conflicts") or {}
+            assert conflicts.get("contested") is not True, (
+                f"superseded point {pid} must not surface contested (#2490): "
+                f"{claim_hit}")
 
         # 0 clean points carry conflict noise.
         for pid in corpus["clean"]:
@@ -1178,8 +1192,10 @@ def test_assemble_why_blocks_canonical_shape(w4_flag):
         block = blocks[g["claim"]]
         assert block["point_id"] == g["claim"]
         assert isinstance(block["support_chain"], list)
+        # #3276: measured/baseline are the additive explicit measurement state
+        # (has_ep == measured; baseline marks a prior-only declared baseline).
         assert set(block["ep"]) == {"confidence_mean", "variance", "contested",
-                                    "has_ep"}
+                                    "has_ep", "measured", "baseline"}
         assert block["ep"]["contested"] is True
         assert set(block["supersession"]) == {"status", "superseded_by",
                                               "supersedes", "successor_label"}
@@ -1250,7 +1266,7 @@ def test_surface_glue_fail_open_ask_and_analyze(w4_flag, monkeypatch):
         degraded value, never a broken turn).
       - analyze: the assembly raising inside the wrapper ⇒ the analyze
         response is returned intact WITHOUT a ``why`` key."""
-    import tortoise.sdk as sdk_mod
+    import tortoise.ask_lane as sdk_mod
     import tortoise.why as why_mod
     sdk = _fresh_sdk()
     try:
@@ -1269,7 +1285,7 @@ def test_surface_glue_fail_open_ask_and_analyze(w4_flag, monkeypatch):
             raise RuntimeError("forced why-entry failure")
 
         monkeypatch.setattr(why_mod, "item_to_why_entry", _explode_entry)
-        resp = sdk.ask("what contradicted the glue-topic belief statement?")
+        resp = run_ask_lane(sdk, "what contradicted the glue-topic belief statement?")
         assert fired_entries, "the ask why-entry failure must actually fire"
         assert set(resp) == CANONICAL_ASK_KEYS | {"why"}, \
             "flag-on ask keeps the canonical fields + the why key on failure"
@@ -1606,7 +1622,7 @@ def test_ask_why_entry_canonical_posterior_mean(w4_flag, monkeypatch):
     posterior reads 1.0 under the structural ratio (2/2) but 12/13 ≈ 0.923
     under the posterior mean — an agent comparing the same point across the
     ask vs analyze surfaces must not see contradictory belief numbers."""
-    import tortoise.sdk as sdk_mod
+    import tortoise.ask_lane as sdk_mod
     fake = _FakeReader()
     monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory", lambda: fake)
     _reset_ask_reader_cache_for_tests()
@@ -1614,7 +1630,7 @@ def test_ask_why_entry_canonical_posterior_mean(w4_flag, monkeypatch):
     sdk = _fresh_sdk()
     try:
         g = _plant_clean(sdk, "ask-ep-topic")
-        ask = _mcp_ask(sdk, "what is the belief on ask-ep-topic?")
+        ask = _ask_lane(sdk, "what is the belief on ask-ep-topic?")
         assert set(ask) == CANONICAL_ASK_KEYS | {"why"}
         why = ask.get("why") or []
         entry = next((e for e in why if e.get("point_id") == g["claim"]), None)

@@ -50,6 +50,7 @@ import requests
 
 # #2185 seam: the canonical usage-sink fire helper (models.py is dependency-
 # free of model_adapters — this one-way import cannot cycle).
+from tortoise.env_truthy import is_truthy  # #4097: the declared truthy contract
 from tortoise.models import _emit_usage_sink
 
 
@@ -90,6 +91,12 @@ class OpenRouterModel:
         # M3 (#1524, GATE-2): the per-call finish reason — "length" = the
         # generation hit the cap (truncation detected, not silently lost).
         self.last_finish_reason: str | None = None
+        # #2906: the provider's own charge for the LAST call (USD), from
+        # ``usage.cost``. None means the route did not report one — never
+        # 0.0, which would read as a genuinely free call. Consumers MUST
+        # test ``is None``, not truthiness, or a real 0.0 free call is
+        # re-priced from the (possibly wrong) token basis.
+        self.last_cost_usd: float | None = None
         # #2185: additive usage-capture seam (no-op unless the harness sets
         # it — the eval collector binds a sink at registration).
         self.usage_sink = None
@@ -156,6 +163,12 @@ class OpenRouterModel:
         self.last_prompt_tokens = usage.get('prompt_tokens', 0)
         self.last_completion_tokens = usage.get('completion_tokens', 0)
         self.last_cost = data.get('usage', {}).get('total_tokens', 0)  # will be overridden
+        # #2906: surface the provider's own charge (OpenRouter returns it as
+        # ``usage.cost``, USD). Absent on routes that do not report one.
+        # ``is None`` — 0.0 is authoritative, not absent.
+        _provider_cost = usage.get('cost')
+        self.last_cost_usd = (None if _provider_cost is None
+                              else float(_provider_cost))
         # #2185 seam: fire with the response-local usage (provider from the
         # class attr; no-op when no sink is bound).
         _emit_usage_sink(self, usage)
@@ -258,6 +271,11 @@ class DeepSeekDirectModel(OpenRouterModel):
         usage = data.get("usage", {})
         self.last_prompt_tokens = usage.get("prompt_tokens", 0)
         self.last_completion_tokens = usage.get("completion_tokens", 0)
+        # #2906: the direct route does not publish ``usage.cost`` — surface
+        # it if it ever does, else None (never a stale prior figure).
+        _provider_cost = usage.get("cost")
+        self.last_cost_usd = (None if _provider_cost is None
+                              else float(_provider_cost))
         self.last_finish_reason = data["choices"][0].get("finish_reason")
         # #2185 seam (DeepSeekDirectModel has its OWN complete body — the fire
         # must live here too, not just on the OpenRouterModel path).
@@ -714,6 +732,9 @@ class RoutingModel:
         self.model: str = getattr(primary, "id", "")
         self.last_prompt_tokens: int = 0
         self.last_completion_tokens: int = 0
+        # #2906: provider-reported charge for the last call — forwarded from
+        # the serving adapter (None when it did not report one).
+        self.last_cost_usd: float | None = None
         # #2339: the adapter CURRENTLY being called (set in _call before
         # adapter.complete, cleared on success). An external deadline abort
         # kills the worker thread while this is set — note_stall() reads it
@@ -774,6 +795,7 @@ class RoutingModel:
         # #1987 Task 3: per-call usage + resolved-spec forwards.
         self.last_prompt_tokens = getattr(adapter, "last_prompt_tokens", 0)
         self.last_completion_tokens = getattr(adapter, "last_completion_tokens", 0)
+        self.last_cost_usd = getattr(adapter, "last_cost_usd", None)
         self.model = getattr(adapter, "id", self.model)
         if failover:
             self.route = adapter.provider
@@ -861,8 +883,13 @@ def _should_send_json_mode(system: str | None, user: str | None) -> bool:
 
     True only when TORTOISE_JSON_MODE is enabled (default "1", read per
     call — the toggle can flip mid-run) AND the prompt requests JSON
-    (delegated to ``_prompt_requests_json``)."""
-    return (os.environ.get("TORTOISE_JSON_MODE", "1") == "1"
+    (delegated to ``_prompt_requests_json``).
+
+    #4097: the env read goes through the declared truthy contract, so
+    ``TORTOISE_JSON_MODE=true``/``yes``/``on`` now enables it — previously the
+    exact ``== "1"`` match made those spellings silently DISABLE a default-ON
+    mode."""
+    return (is_truthy(os.environ.get("TORTOISE_JSON_MODE", "1"))
             and _prompt_requests_json(system, user))
 
 
@@ -957,6 +984,9 @@ class RotatingModel:
                            if providers else (model or ""))
         self.last_prompt_tokens: int = 0
         self.last_completion_tokens: int = 0
+        # #2906: provider-reported charge for the last call — forwarded from
+        # the serving adapter (None when it did not report one).
+        self.last_cost_usd: float | None = None
         # #2339: the adapter currently being called (set before p.complete in
         # the rotation loop, cleared on success). A deadline abort kills the
         # worker mid-call with this set — note_stall() cools THIS adapter,
@@ -1014,6 +1044,7 @@ class RotatingModel:
                 # #1987 Task 3: per-call usage + resolved-spec forwards.
                 self.last_prompt_tokens = getattr(p, "last_prompt_tokens", 0)
                 self.last_completion_tokens = getattr(p, "last_completion_tokens", 0)
+                self.last_cost_usd = getattr(p, "last_cost_usd", None)
                 self.model = getattr(p, "id", self.model)
                 return out
             except Exception as e:

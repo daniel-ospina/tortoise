@@ -13,7 +13,7 @@
 | Funding raised | ~$500K Seed (Y Combinator W24, March 2024) |
 | Team size | ~5 employees |
 | Markets | Global (enterprise AI/ML teams) |
-| Key milestone | YC W24; S&P Global Market Intelligence coverage April 2026; Graphiti crossed 20K GitHub stars |
+| Key milestone | YC W24; S&P Global Market Intelligence coverage April 2026; Graphiti crossed 20K GitHub stars (now ~31K) |
 
 *Last checked: 2026-07-06*
 
@@ -39,7 +39,7 @@
 
 **Brand voice:** Enterprise infrastructure. Heavy emphasis on governance, compliance, and scale. SOC 2, HIPAA, S&P coverage, and a live demo dashboard (not cartoon illustrations). Tone: "serious infrastructure for production AI teams."
 
-**Alternative/comparison pages** (competitive posture):
+**Alternative/comparison pages** (competitive posture — at least six; not an exhaustive list):
 - Zep vs Mem0 Alternative
 - Zep vs Letta Alternative
 - Zep vs AWS AgentCore Alternative
@@ -87,7 +87,7 @@
 
 **Deployment options:** Managed Cloud (Zep's infra, SOC 2 + HIPAA), BYOK (Zep's cloud + customer KMS keys), BYOC (Zep inside customer VPC).
 
-**Open source:** Zep Community Edition discontinued (code in `legacy/`). Graphiti: Apache-2.0, `pip install graphiti-core`, 20K+ GitHub stars.
+**Open source:** Zep Community Edition discontinued (code in `legacy/`). Graphiti: Apache-2.0, `pip install graphiti-core`, ~31K GitHub stars (crossed 20K; retrieved 2026-09-11).
 
 ⚠️ pricing page returned 404 — data from homepage + docs + web_search. [Source](https://www.getzep.com/) — retrieved 2026-07-06
 
@@ -124,7 +124,7 @@
 Google ADK, Microsoft Agent Framework, AutoGen/AG2, CrewAI, LangGraph, LiveKit, Pydantic AI, Mastra, Vercel AI SDK
 
 ### Graphiti (Open-Source Engine)
-20,000+ GitHub stars, 35+ contributors (including AWS, Microsoft, FalkorDB, Neo4j), ~25,000 weekly PyPI downloads. Backends: Neo4j, FalkorDB, AWS Neptune.
+~31K GitHub stars (crossed 20K), ~62 contributors (including AWS, Microsoft, FalkorDB, Neo4j), ~25,000 weekly PyPI downloads. Backends: Neo4j, FalkorDB, AWS Neptune. *(star contributor figures retrieved 2026-09-11)*
 
 ### Tech Stack
 Python (64.2%), Go (19.3%), TypeScript (13.6%). Graph databases: Neo4j, FalkorDB.
@@ -141,8 +141,8 @@ Python (64.2%), Go (19.3%), TypeScript (13.6%). Graph databases: Neo4j, FalkorDB
 
 | Channel | Activity |
 |---------|----------|
-| **Open-source funnel** | Graphiti (20K+ stars) and zep repo (4.7K stars) → Zep Cloud conversion |
-| **Comparison/alternative pages** | ~9 SEO-optimized pages: "Zep vs Mem0," "Zep vs Letta," "Mem0 Alternative," etc. |
+| **Open-source funnel** | Graphiti (~31K stars, crossed 20K) and zep repo (4.7K stars) → Zep Cloud conversion |
+| **Comparison/alternative pages** | ~6+ SEO-optimized pages (at least six named; see §3): "Zep vs Mem0," "Zep vs Letta," "Mem0 Alternative," etc. |
 | **Content strategy** | Technical blog + benchmark results (LoCoMo 94.7%, LongMemEval 90.2%) + docs |
 | **S&P coverage** | S&P Global Market Intelligence report (April 2026) — enterprise credibility |
 | **YC network** | Y Combinator W24 batch — founder network, demo day exposure |
@@ -158,8 +158,8 @@ Python (64.2%), Go (19.3%), TypeScript (13.6%). Graph databases: Neo4j, FalkorDB
 | Signal | Value |
 |---|---|
 | GitHub stars (zep) | 4.7K |
-| GitHub stars (graphiti) | 20,000+ |
-| GitHub contributors (graphiti) | 35+ (including AWS, Microsoft, Neo4j, FalkorDB) |
+| GitHub stars (graphiti) | ~31K (crossed 20K) |
+| GitHub contributors (graphiti) | ~62 (including AWS, Microsoft, Neo4j, FalkorDB) |
 | Graphiti PyPI downloads | ~25,000/week |
 | Estimated ARR | ~$1M (2024, Tracxn estimate) |
 | Named customers | Torq, AlphaSignal, Flockx, Axtria |
@@ -180,7 +180,7 @@ Python (64.2%), Go (19.3%), TypeScript (13.6%). Graph databases: Neo4j, FalkorDB
 | ⚠️ Estimated monthly traffic | Not in public indices (niche enterprise tool) |
 | ⚠️ Domain Authority | No public data |
 | Top ranking keywords | "agent memory," "AI memory platform," "context graph," "temporal knowledge graph," "[competitor] alternative" |
-| Content strategy | ~9 comparison landing pages + technical blog + docs portal + benchmark pages |
+| Content strategy | ~6+ comparison landing pages (at least six named; see §3) + technical blog + docs portal + benchmark pages |
 
 **Keyword overlaps with El Dato:** None — Zep operates in the AI agent infrastructure space, not local commerce or deals.
 
@@ -196,7 +196,7 @@ Python (64.2%), Go (19.3%), TypeScript (13.6%). Graph databases: Neo4j, FalkorDB
 |---|---|---|
 | LinkedIn | 3,812 | Company page, modest following |
 | X/Twitter (@zep_ai) | 2,363 | 178 following; technical content |
-| GitHub (graphiti) | 20,000+ stars | 35+ contributors — strong OSS community |
+| GitHub (graphiti) | ~31K stars | ~62 contributors — strong OSS community |
 | GitHub (zep) | 4.7K stars | 636 forks, 21 contributors |
 | ⚠️ Discord | No public community found | |
 | ⚠️ Slack | No public community found | |
@@ -223,7 +223,7 @@ Python (64.2%), Go (19.3%), TypeScript (13.6%). Graph databases: Neo4j, FalkorDB
 **What users/businesses complain about:**
 - Community Edition discontinued — some open-source users frustrated by cloud-only shift
 - ⚠️ No public review sites (G2, Capterra, ProductHunt) — enterprise infra tools rarely get public reviews
-- Small team (5 people) supporting managed cloud + 20K-star OSS project = potential scaling risk
+- Small team (5 people) supporting managed cloud + ~31K-star OSS project = potential scaling risk
 
 **Overall sentiment:** Positive but thin. Strong enterprise signals (S&P coverage, named customers, compliance certs) and OSS traction. No significant negative sentiment surfaced. Too early/small for substantial review volume.
 
@@ -237,7 +237,7 @@ Python (64.2%), Go (19.3%), TypeScript (13.6%). Graph databases: Neo4j, FalkorDB
 
 - **Primary:** [getzep.com](https://www.getzep.com/) — homepage, fetched 2026-07-06
 - **Pricing:** ⚠️ help.getzep.com/pricing returned 404. Data from homepage + docs + web_search. Verify against live pricing page when accessible.
-- **Graphiti:** [github.com/getzep/graphiti](https://github.com/getzep/graphiti) — 20K+ stars, Apache-2.0
+- **Graphiti:** [github.com/getzep/graphiti](https://github.com/getzep/graphiti) — ~31K stars (crossed 20K), Apache-2.0 *(retrieved 2026-09-11)*
 - **Tracxn:** Company profile — funding, team size, revenue estimates
 - **LinkedIn:** [linkedin.com/company/getzep](https://linkedin.com/company/getzep) — 3,812 followers
 - **X/Twitter:** [x.com/zep_ai](https://x.com/zep_ai) — 2,363 followers

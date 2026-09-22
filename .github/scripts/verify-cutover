@@ -10,7 +10,7 @@
 #   1. Preconditions (verify-cutover-preconditions.py): the FalkorDB
 #      registry graph (registry_control_plane) has node count == 0, and
 #      Supabase contains ONLY reconcilable placeholders (no teams/api_keys
-#      rows; team_memberships rows are team_id='' / key_hash='pending').
+#      rows; org_memberships rows are org_id='' / key_hash='pending').
 #   2. The E2E suites the flip owns, with the seam fakes (zero network):
 #      E2E-1 writer inventory (test_writer_inventory + the tenant-provision
 #      source guard), E2E-2/3 auth + invitations (test_auth_flip,

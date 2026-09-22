@@ -253,6 +253,20 @@ def _resume_fingerprint() -> dict:
         # run_evaluation fingerprints the RESOLVED bool (always present on
         # the run path), so a hand-written resume checkpoint must carry it.
         aggregative_flag=False,
+        # C3-1 (#2519, #2567): the coverage-completeness loop arm —
+        # run_evaluation fingerprints the RESOLVED bool (always present on
+        # the run path), so a hand-written resume checkpoint must carry it
+        # or the load refuses as stale (main-side carve-out heal).
+        coverage_loop=False,
+        # C4 (#2517/#2568, #2513): the source-session re-injection arm +
+        # guard ablation — run_evaluation fingerprints the RESOLVED bools
+        # (always present on the run path, the sibling-arm convention), so
+        # a hand-written resume checkpoint must carry both or the load
+        # refuses as stale. The guard resolves to TRUE when unset
+        # (None -> True), so the hand-written fixture must match that
+        # resolved value, not the raw CLI default.
+        session_reinjection=False,
+        session_reinjection_guard=True,
         max_chunks_per_session=runner._env_int(
             "TORTOISE_LME_MAX_CHUNKS_PER_SESSION",
             runner.DEFAULT_MAX_CHUNKS_PER_SESSION))

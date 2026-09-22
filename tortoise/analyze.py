@@ -9,7 +9,7 @@ from __future__ import annotations  # noqa: I001
 import json, os, re  # noqa: E401
 from typing import Any
 
-from .live import _live_only
+from .live import _live_only, _terminal_excluded
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -80,9 +80,14 @@ TEMPLATES: dict[str, dict] = {
         "triggers": ["uncertain", "weakest", "least sure", "unknown", "unsure", "low confidence"],
         "description": "Find claims with lowest EP confidence or highest variance",
         "subgraph_vars": ["c"],
-        "cypher": """
+        # #2490: decayed terminals carry var 1/12 > the 0.04 contested bar and
+        # would dominate "most uncertain" on include-terminal surfaces — the
+        # shared live.py terminal predicate excludes them ("uncertain" is for
+        # LIVE claims).
+        "cypher": f"""
             MATCH (c:Point)
             WHERE c.is_operator = false
+              AND {_terminal_excluded('c.status')}
               AND (c.posterior_alpha IS NOT NULL OR c.ep_alpha IS NOT NULL)
             WITH c, coalesce(c.posterior_alpha, c.ep_alpha, 1.0) AS a,
                  coalesce(c.posterior_beta, c.ep_beta, 1.0) AS b
@@ -111,9 +116,12 @@ TEMPLATES: dict[str, dict] = {
         "triggers": ["changed", "trend", "evolved", "over time", "history", "how has"],
         "description": "Show confidence changes by comparing node properties over time",
         "subgraph_vars": ["c"],
-        "cypher": """
+        # #2490: exclude decayed terminals from the confidence timeline (see
+        # most_uncertain — the shared live.py terminal predicate).
+        "cypher": f"""
             MATCH (c:Point)
             WHERE c.content CONTAINS $entity
+              AND {_terminal_excluded('c.status')}
               AND (c.posterior_alpha IS NOT NULL OR c.ep_alpha IS NOT NULL)
             RETURN c.id, c.content, coalesce(c.confidence,0.5) as conf,
                    coalesce(c.posterior_alpha, c.ep_alpha, 1.0) as a,
@@ -436,7 +444,12 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
         rows = proj.g.query(
             "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]-(t:Point) "
             "WHERE op.id IN $ids "
-            "AND (t.is_operator = false AND t.op_type IS NULL) "
+            # #3139/#3154: index-independent form — a bare `= false` is
+            # emptied by a GRAPH.COPY'd boolean index, making every operator
+            # look inert (zero live connections) and silently starving the
+            # dream selector of factors.
+            "AND (t.is_operator IS NULL OR t.is_operator = false) "
+            "AND t.op_type IS NULL "
             f"AND {_live_only('t.status')} "
             "WITH op, count(DISTINCT t) AS live_conn "
             "WHERE live_conn >= 2 "
@@ -516,8 +529,11 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
                 rows = proj.g.query(
                     f"MATCH (a:Point)-[r:{rel}]->(b:Point) "
                     f"WHERE a.id IN $frontier {live_a} {live_b} "
-                    "AND a.is_operator = false AND a.op_type IS NULL "
-                    "AND b.is_operator = false AND b.op_type IS NULL "
+                    # #3139/#3154: index-independent non-operator predicate.
+                    "AND (a.is_operator IS NULL OR a.is_operator = false) "
+                    "AND a.op_type IS NULL "
+                    "AND (b.is_operator IS NULL OR b.is_operator = false) "
+                    "AND b.op_type IS NULL "
                     "RETURN DISTINCT b.id, a.id, type(r)",
                     params={"frontier": frontier_list},
                 ).result_set
@@ -532,8 +548,11 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
                 rows = proj.g.query(
                     f"MATCH (a:Point)-[r:{rel}]->(b:Point) "
                     f"WHERE b.id IN $frontier {live_a} {live_b} "
-                    "AND a.is_operator = false AND a.op_type IS NULL "
-                    "AND b.is_operator = false AND b.op_type IS NULL "
+                    # #3139/#3154: index-independent non-operator predicate.
+                    "AND (a.is_operator IS NULL OR a.is_operator = false) "
+                    "AND a.op_type IS NULL "
+                    "AND (b.is_operator IS NULL OR b.is_operator = false) "
+                    "AND b.op_type IS NULL "
                     "AND (type(r) = 'NAND' "
                     "     OR coalesce(r.direction, 'bidirectional') <> 'unidirectional') "
                     "RETURN DISTINCT a.id, b.id, type(r)",
@@ -608,10 +627,10 @@ def _stale_first_claims(proj, limit: int | None = None) -> list[str]:
     n.lastDreamedAt`` would rank never-dreamed claims FRESHEST, the
     opposite of the contract). This is the plan's explicit-null-scan-union
     alternative: one deterministic query instead of a union scan, at the
-    cost of not sorting on the raw indexed property (the :Point(
-    lastDreamedAt) / :Point(is_operator, lastDreamedAt) indexes still
-    accelerate the property access and the is_operator filter on
-    docker/server).
+    cost of not sorting on the raw indexed property (the plain :Point(
+    lastDreamedAt) index still accelerates the property access; #3154
+    retired the :Point(is_operator, lastDreamedAt) composite — no engine
+    indexes the boolean property).
     """
     base = (
         "MATCH (n:Point) "

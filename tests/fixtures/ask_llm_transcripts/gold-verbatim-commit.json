@@ -21,6 +21,6 @@
       "session_date": "2026-08-18"
     }
   ],
-  "user_message": "Memory context:\nCurrent Date: 2026-08-29\n\n[session ?] (session date 2026-08-15) The new office hours policy is 9am to 5pm, approved at the August meeting.\n\nQuestion: what is the office hours policy?\n\nAnswer:",
-  "user_message_hash": "b5e2275d8448ea53ea4f128c062b8920edaeeaabdd6745c5fd76cdb6658e60a6"
+  "user_message": "Memory context:\nCurrent Date: 2026-08-29\n\n[session sess-1] (session date 2026-08-15) [user] The new office hours policy is 9am to 5pm, approved at the August meeting.\n\nQuestion: what is the office hours policy?\n\nAnswer:",
+  "user_message_hash": "01d5fd4f3a483e57ef09a9d963498365f7d84c23db0159600c935d1bade53c66"
 }

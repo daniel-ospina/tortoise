@@ -34,7 +34,9 @@ from .search_engine import (  # noqa: E402, RUF100
     _beta_variance,
     _exclude_status_clause,
     CONTESTED_VARIANCE_THRESHOLD,
+    ep_measured_cypher,  # #3276: has_ep == EP measured (baseline prior != measured)
 )
+from .live import is_terminal_status  # #2490: terminal rows are never contested
 
 logger = logging.getLogger(__name__)
 
@@ -232,6 +234,7 @@ class GraphRanker:
         recency_weight: float = DEFAULT_RECENCY_WEIGHT,
         recency_half_life_days: float = DEFAULT_HALF_LIFE_DAYS,
         use_degree: bool = True,
+        now=None,
     ):
         total = similarity_weight + graph_boost_weight + recency_weight
         if abs(total - 1.0) > 1e-6:
@@ -247,6 +250,15 @@ class GraphRanker:
         # #1348: use_degree=False isolates the CONFIDENCE contribution (ablation
         # arm — degree term neutralized so the graph_boost is confidence-only).
         self.use_degree = use_degree
+        # #2952: recency decay is INTENTIONAL product behaviour (γ·e^(-λ·age),
+        # 30-day half-life), so the fix is not to delete it but to make the
+        # reference time it measures against EXPLICIT and injectable. A caller
+        # replaying a fixed store (eval lane, reproducibility audit) passes a
+        # pinned ``now`` and gets a ranking that is byte-identical across a
+        # wall-clock jump; the default stays the live UTC clock (unchanged
+        # behaviour for every existing caller).
+        self._now = now if now is not None else (
+            lambda: datetime.now(timezone.utc))  # noqa: UP017
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -363,12 +375,16 @@ class GraphRanker:
         return 0.0
 
     def recency_boost(self, result: dict, signals: dict) -> float:
-        """Exponential recency decay from createdAt/startedAt; missing → 1.0."""
+        """Exponential recency decay from createdAt/startedAt; missing → 1.0.
+
+        The reference time is ``self._now`` (#2952) — the live UTC clock by
+        default, or the caller's pinned anchor for a reproducible replay.
+        """
         ts = signals.get("created") or result.get("createdAt") or result.get("startedAt")
         dt = _parse_iso(ts)
         if dt is None:
             return 1.0  # unknown age — neutral, no demotion
-        age_days = max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 86400.0)  # noqa: UP017
+        age_days = max(0.0, (self._now() - dt).total_seconds() / 86400.0)
         return round(recency_decay(age_days, self.recency_half_life_days), 4)
 
     # ── Graph queries ─────────────────────────────────────────────────────
@@ -409,7 +425,12 @@ class GraphRanker:
             "  / (coalesce(n.posterior_alpha, n.ep_alpha, 1.0) + coalesce(n.posterior_beta, n.ep_beta, 1.0)), "
             "  0.5) AS conf, degree, n.createdAt AS created, "
             "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
-            "  n.ep_alpha IS NOT NULL AS has_ep"
+            # #2490: aligned with StateRanker/GapsRanker — has_ep rides the
+            # status/outdated columns for the Python-side terminal gate.
+            # #3276: has_ep == EP measured (ep_measured_cypher) — a #2199
+            # baseline prior alone is prior-only, NOT measured.
+            f"  {ep_measured_cypher('n')} AS has_ep, "
+            "  n.status, coalesce(n.outdated, false)"
         )
         rows = self.projection.g.query(cypher, params={"ids": ids}).result_set
         out = {}
@@ -417,6 +438,12 @@ class GraphRanker:
             pid = row[0]
             variance = _beta_variance(float(row[4]), float(row[5]))
             has_ep = bool(row[6])
+            # #2490: terminal rows (status in the terminal vocab OR the legacy
+            # outdated flag) never surface as measured/contested EP. The len
+            # guard tolerates test doubles mirroring the pre-#2490 row shape
+            # (the live query always returns the status/outdated columns).
+            if len(row) > 8 and is_terminal_status(row[7], bool(row[8])):
+                has_ep = False
             out[pid] = {
                 "confidence": float(row[1]),
                 "degree": int(row[2]),
@@ -690,14 +717,19 @@ class StateRanker:
             "RETURN n.id, "
             "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, "
             "  coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
-            "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) AS has_ep, "
-            "  ep_degree + about_degree AS degree"
+            f"  {ep_measured_cypher('n')} AS has_ep, "
+            "  ep_degree + about_degree AS degree, "
+            "  n.status, coalesce(n.outdated, false)"
         )
         rows = self.projection.g.query(cypher, params={"ids": ids}).result_set
         out = {}
         for row in rows:
             pid, alpha, beta, has_ep, degree = (
                 row[0], float(row[1]), float(row[2]), bool(row[3]), int(row[4]))
+            # #2490: terminal rows never surface as measured/contested EP (len
+            # guard — see GraphRanker).
+            if len(row) > 6 and is_terminal_status(row[5], bool(row[6])):
+                has_ep = False
             variance = _beta_variance(alpha, beta)
             out[pid] = {
                 "confidence": round(alpha / (alpha + beta), 6) if (alpha + beta) > 0 else NEUTRAL_CONFIDENCE,
@@ -988,12 +1020,17 @@ class GapsRanker:
             "RETURN n.id, "
             "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, "
             "  coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
-            "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) AS has_ep",
+            f"  {ep_measured_cypher('n')} AS has_ep, "
+            "  n.status, coalesce(n.outdated, false)",
             params={"ids": ids},
         ).result_set
         out = {}
         for row in rows:
             pid, alpha, beta, has_ep = row[0], float(row[1]), float(row[2]), bool(row[3])
+            # #2490: terminal rows never surface as measured/contested EP (len
+            # guard — see GraphRanker).
+            if len(row) > 5 and is_terminal_status(row[4], bool(row[5])):
+                has_ep = False
             variance = _beta_variance(alpha, beta)
             out[pid] = {
                 "confidence": round(alpha / (alpha + beta), 6) if (alpha + beta) > 0 else NEUTRAL_CONFIDENCE,

@@ -1,5 +1,5 @@
 """Tests for tortoise.billing (#310) — StripeClient, PriceCatalog,
-effective_tier, apply_limits, reconcile_team, plus (Tasks 5/7/8) the
+effective_tier, apply_limits, reconcile_org, plus (Tasks 5/7/8) the
 checkout/portal endpoints and the webhook handler.
 
 External Stripe calls are NEVER made: StripeClient is monkeypatched at the
@@ -30,7 +30,7 @@ from tortoise.billing import (
     StripeClient,
     apply_limits,
     effective_tier,
-    reconcile_team,
+    reconcile_org,
 )
 
 # ── Shared fixtures (module-level, used across Tasks 2/5/7/8) ───────────────
@@ -259,7 +259,7 @@ class TestStripeClient:
         assert params["mode"] == "subscription"
         assert params["customer"] == "cus_1"
         assert params["client_reference_id"] == "team_1"
-        assert params["metadata[team_id]"] == "team_1"
+        assert params["metadata[org_id]"] == "team_1"
 
     def test_create_portal_session(self, monkeypatch):
         monkeypatch.setattr("httpx.Client", _FakeHttpxClient)
@@ -307,12 +307,20 @@ class TestEffectiveTier:
         assert effective_tier(team) == "solo"
 
 
-# ── apply_limits / reconcile_team (registry mirror) ─────────────────────────
+# ── apply_limits / reconcile_org (registry mirror) ─────────────────────────
 
 class TestApplyLimitsAndReconcile:
     def test_apply_limits_writes_tier_and_limits_atomically(self, monkeypatch, billing_sdk):
         sdk = billing_sdk
-        team = sdk.team_create("limits-team")
+        team = sdk.org_create("limits-team")
+        # #4010: seed a stored cap FIRST so the assertion below distinguishes
+        # "apply_limits DELETES the property" from "the field was never set"
+        # (FalkorDB deletes a property written as NULL).
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.max_sessions = 1000",
+            params={"id": team["id"]},
+        )
+        assert sdk.org_get(team["id"])["max_sessions"] == 1000
         queries: list[str] = []
         orig_query = sdk._get_registry().query
 
@@ -323,17 +331,19 @@ class TestApplyLimitsAndReconcile:
         monkeypatch.setattr(sdk._get_registry(), "query", counting_query)
         apply_limits(sdk, team["id"], "pro")
         assert len(queries) == 1  # single atomic Cypher SET
-        t = sdk.team_get(team["id"])
+        t = sdk.org_get(team["id"])
         assert t["tier"] == "pro"
         assert t["max_points"] == 100000   # == max_graph_nodes (GAP-B mapping)
         assert t["max_api_keys"] == 10
-        assert t["max_sessions"] == 1000
+        # #4010: the stored 1000 is CLEARED by the tier write (NULL → the
+        # property is deleted), so a later reader cannot re-cap the org.
+        assert t.get("max_sessions") is None
         assert t["max_users"] == 2
         assert t.get("max_graphs") is None   # pro = unlimited (None not stored)
 
     def test_reconcile_subscription_repairs_mirror(self, monkeypatch, stripe_env, billing_sdk):
         sdk = billing_sdk
-        team = sdk.team_create("recon-team")
+        team = sdk.org_create("recon-team")
         # Drift: registry says free; Stripe says the team pays for pro.
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_123'",
@@ -341,8 +351,8 @@ class TestApplyLimitsAndReconcile:
         )
         monkeypatch.setattr(billing.StripeClient, "get_subscription",
                             lambda self, sid: dict(FIXTURE_SUB))
-        reconcile_team(sdk, team["id"])
-        t = sdk.team_get(team["id"])
+        reconcile_org(sdk, team["id"])
+        t = sdk.org_get(team["id"])
         assert t["tier"] == "pro"
         assert t["max_points"] == 100000
         assert t["subscription_status"] == "active"
@@ -352,7 +362,7 @@ class TestApplyLimitsAndReconcile:
         """A team with only stripe_customer_id (missed checkout event) is
         repaired via list_subscriptions — first active sub wins."""
         sdk = billing_sdk
-        team = sdk.team_create("customer-only")
+        team = sdk.org_create("customer-only")
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.stripe_customer_id='cus_1'",
             params={"id": team["id"]},
@@ -364,22 +374,22 @@ class TestApplyLimitsAndReconcile:
                   "items": {"data": [{"price": {"id": "price_300teamM"}}]}}
         monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
                             lambda self, cid: [inactive, active])
-        reconcile_team(sdk, team["id"])
-        t = sdk.team_get(team["id"])
+        reconcile_org(sdk, team["id"])
+        t = sdk.org_get(team["id"])
         assert t["tier"] == "team"
         assert t["subscription_status"] == "active"
 
     def test_reconcile_noop_without_identifiers(self, stripe_env, billing_sdk):
         sdk = billing_sdk
-        team = sdk.team_create("noop-team")
-        reconcile_team(sdk, team["id"])  # no subscription_id / customer_id → no-op
-        t = sdk.team_get(team["id"])
+        team = sdk.org_create("noop-team")
+        reconcile_org(sdk, team["id"])  # no subscription_id / customer_id → no-op
+        t = sdk.org_get(team["id"])
         assert t["tier"] == "free"
 
     def test_reconcile_unknown_price_keeps_tier(self, monkeypatch, stripe_env, billing_sdk):
         """Unparseable price → error surfaces to caller; stored tier untouched."""
         sdk = billing_sdk
-        team = sdk.team_create("unknown-price")
+        team = sdk.org_create("unknown-price")
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_1', t.tier='pro', "
             "t.subscription_status='active'",
@@ -390,8 +400,8 @@ class TestApplyLimitsAndReconcile:
         monkeypatch.setattr(billing.StripeClient, "get_subscription",
                             lambda self, sid: sub)
         with pytest.raises(BillingError, match="unknown price"):
-            reconcile_team(sdk, team["id"])
-        t = sdk.team_get(team["id"])
+            reconcile_org(sdk, team["id"])
+        t = sdk.org_get(team["id"])
         assert t["tier"] == "pro"  # preserved — never downgraded on unparseable price
         assert t["subscription_status"] == "active"
 
@@ -431,7 +441,7 @@ def billing_client(monkeypatch, tmp_path):
         yield {
             "client": tc,
             "sdk": sdk,
-            "team_id": body["team_id"],
+            "org_id": body["org_id"],
             "api_key": body["api_key"],
             "headers": {"Authorization": f"Bearer {body['api_key']}"},
         }
@@ -449,11 +459,11 @@ class TestCheckoutPortal:
             order.append("create_customer")
             return "cus_checkout1"
 
-        def fake_checkout(self, team_id, price_id, customer, success_url, cancel_url):
+        def fake_checkout(self, org_id, price_id, customer, success_url, cancel_url):
             order.append("create_checkout_session")
             assert order[0] == "create_customer"  # customer first
             assert customer == "cus_checkout1"    # created id passed through
-            assert team_id == billing_client["team_id"]
+            assert org_id == billing_client["org_id"]
             assert price_id == "price_200proMM"
             return "https://checkout.stripe.com/pay/session1"
 
@@ -468,7 +478,7 @@ class TestCheckoutPortal:
         assert r.status_code == 200, r.text
         assert r.json()["checkout_url"] == "https://checkout.stripe.com/pay/session1"
         # Customer binding persisted on the Team node before the redirect.
-        t = billing_client["sdk"].team_get(billing_client["team_id"])
+        t = billing_client["sdk"].org_get(billing_client["org_id"])
         assert t["stripe_customer_id"] == "cus_checkout1"
         assert t["customer_email"] == "billing-owner@example.com"
 
@@ -479,11 +489,11 @@ class TestCheckoutPortal:
         # Simulate a provision-path team: no Team.email, creator on the key.
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) REMOVE t.email",
-            params={"id": billing_client["team_id"]},
+            params={"id": billing_client["org_id"]},
         )
         sdk._get_registry().query(
-            "MATCH (k:APIKey {team_id:$tid}) SET k.created_by='provision-user@example.com'",
-            params={"tid": billing_client["team_id"]},
+            "MATCH (k:APIKey {org_id:$tid}) SET k.created_by='provision-user@example.com'",
+            params={"tid": billing_client["org_id"]},
         )
         captured: list[str] = []
         monkeypatch.setattr(billing.StripeClient, "create_customer",
@@ -499,12 +509,263 @@ class TestCheckoutPortal:
         assert r.status_code == 200, r.text
         assert captured == ["provision-user@example.com"]  # APIKey.created_by, not 400
 
+    # ── #4504: verified session email fallback ──────────────────────────
+
+    def _strip_org_email_sources(self, billing_client):
+        """Make the registered org email-less: no Team.email, no key
+        created_by — the exact repro shape (OAuth/session org provisioned
+        without an email, keys carrying no creator)."""
+        sdk = billing_client["sdk"]
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) REMOVE t.email",
+            params={"id": billing_client["org_id"]},
+        )
+        sdk._get_registry().query(
+            "MATCH (k:APIKey {org_id:$tid}) REMOVE k.created_by",
+            params={"tid": billing_client["org_id"]},
+        )
+
+    def _stub_checkout(self, monkeypatch, captured: list[str], suffix: str):
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, email: captured.append(email) or f"cus_{suffix}")
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions", lambda self, cid: [])
+        monkeypatch.setattr(
+            billing.StripeClient, "create_checkout_session",
+            lambda self, tid, pid, cid, su, cu: f"https://checkout.stripe.com/pay/{suffix}")
+
+    def test_checkout_session_user_email_fallback(self, monkeypatch, billing_client):
+        """#4504: a session-authenticated user whose org has no Team.email and
+        whose keys carry no created_by reaches Stripe — the VERIFIED session
+        email is the fallback before the 400, and is persisted as
+        customer_email like the rest of the chain."""
+        from tortoise.hosted_api import app, get_current_org
+
+        self._strip_org_email_sources(billing_client)
+        captured: list[str] = []
+        self._stub_checkout(monkeypatch, captured, "sess1")
+        app.dependency_overrides[get_current_org] = lambda: {
+            "org_id": billing_client["org_id"], "key_id": None, "tier": "free",
+            "session_user_id": "11111111-1111-1111-1111-111111111111",
+            "session_user_email": "session-user@example.com",
+        }
+        try:
+            r = billing_client["client"].post(
+                "/v1/billing/checkout", json={"price_id": "price_200proMM"})
+        finally:
+            app.dependency_overrides.pop(get_current_org, None)
+        assert r.status_code == 200, r.text
+        assert r.json()["checkout_url"] == "https://checkout.stripe.com/pay/sess1"
+        assert captured == ["session-user@example.com"]
+        t = billing_client["sdk"].org_get(billing_client["org_id"])
+        assert t["customer_email"] == "session-user@example.com"
+        assert t["stripe_customer_id"] == "cus_sess1"
+
+    def test_checkout_no_email_anywhere_still_400(self, monkeypatch, billing_client):
+        """#4504: the 400 is NOT weakened — with no email on the Team, on any
+        key, and no verified session email, checkout is refused before any
+        Stripe call (anon/registry context)."""
+        from tortoise.hosted_api import app, get_current_org
+
+        self._strip_org_email_sources(billing_client)
+        called: list[str] = []
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, e: called.append("create_customer") or "cus_x")
+        app.dependency_overrides[get_current_org] = lambda: {
+            "org_id": billing_client["org_id"], "key_id": None, "tier": "free",
+        }
+        try:
+            r = billing_client["client"].post(
+                "/v1/billing/checkout", json={"price_id": "price_200proMM"})
+        finally:
+            app.dependency_overrides.pop(get_current_org, None)
+        assert r.status_code == 400, r.text
+        assert "No customer email" in r.json()["detail"]
+        assert called == []  # never reached Stripe
+
+    def test_checkout_team_email_beats_session_email(self, monkeypatch, billing_client):
+        """#4504 precedence: Team.email resolves first — the session fallback
+        is additive and never outranks the existing chain."""
+        from tortoise.hosted_api import app, get_current_org
+
+        captured: list[str] = []
+        self._stub_checkout(monkeypatch, captured, "team1")
+        app.dependency_overrides[get_current_org] = lambda: {
+            "org_id": billing_client["org_id"], "key_id": None, "tier": "free",
+            "session_user_email": "session-user@example.com",
+        }
+        try:
+            r = billing_client["client"].post(
+                "/v1/billing/checkout", json={"price_id": "price_200proMM"})
+        finally:
+            app.dependency_overrides.pop(get_current_org, None)
+        assert r.status_code == 200, r.text
+        # fixture registers with Team.email = billing-owner@example.com
+        assert captured == ["billing-owner@example.com"]
+
+    def test_checkout_key_created_by_beats_session_email(self, monkeypatch, billing_client):
+        """#4504 precedence: APIKey.created_by resolves before the session
+        fallback — provision-path orgs keep their existing billing email."""
+        from tortoise.hosted_api import app, get_current_org
+
+        sdk = billing_client["sdk"]
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) REMOVE t.email",
+            params={"id": billing_client["org_id"]},
+        )
+        sdk._get_registry().query(
+            "MATCH (k:APIKey {org_id:$tid}) SET k.created_by='provision-user@example.com'",
+            params={"tid": billing_client["org_id"]},
+        )
+        captured: list[str] = []
+        self._stub_checkout(monkeypatch, captured, "key1")
+        app.dependency_overrides[get_current_org] = lambda: {
+            "org_id": billing_client["org_id"], "key_id": None, "tier": "free",
+            "session_user_email": "session-user@example.com",
+        }
+        try:
+            r = billing_client["client"].post(
+                "/v1/billing/checkout", json={"price_id": "price_200proMM"})
+        finally:
+            app.dependency_overrides.pop(get_current_org, None)
+        assert r.status_code == 200, r.text
+        assert captured == ["provision-user@example.com"]
+
+    def test_checkout_non_email_created_by_falls_through_to_session_email(
+            self, monkeypatch, billing_client):
+        """#4504: ``APIKey.created_by`` is a creator ID, not always an email
+        (a session-minted key stores the user UUID; key-auth stores "api"). A
+        non-email ``created_by`` must fall through to the verified session
+        email rather than being posted to Stripe as the customer address."""
+        from tortoise.hosted_api import app, get_current_org
+
+        sdk = billing_client["sdk"]
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) REMOVE t.email",
+            params={"id": billing_client["org_id"]},
+        )
+        sdk._get_registry().query(
+            "MATCH (k:APIKey {org_id:$tid}) "
+            "SET k.created_by='11111111-1111-1111-1111-111111111111'",
+            params={"tid": billing_client["org_id"]},
+        )
+        captured: list[str] = []
+        self._stub_checkout(monkeypatch, captured, "uuid1")
+        app.dependency_overrides[get_current_org] = lambda: {
+            "org_id": billing_client["org_id"], "key_id": None, "tier": "free",
+            "session_user_email": "session-user@example.com",
+        }
+        try:
+            r = billing_client["client"].post(
+                "/v1/billing/checkout", json={"price_id": "price_200proMM"})
+        finally:
+            app.dependency_overrides.pop(get_current_org, None)
+        assert r.status_code == 200, r.text
+        # the UUID creator id is NOT a customer email — the session email wins
+        assert captured == ["session-user@example.com"]
+        t = billing_client["sdk"].org_get(billing_client["org_id"])
+        assert t["customer_email"] == "session-user@example.com"
+
+    def test_checkout_api_sentinel_created_by_falls_through_to_session_email(
+            self, monkeypatch, billing_client):
+        """#4504: the literal ``"api"`` creator id (key-auth mint) is not an
+        email either — same fall-through."""
+        from tortoise.hosted_api import app, get_current_org
+
+        sdk = billing_client["sdk"]
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) REMOVE t.email",
+            params={"id": billing_client["org_id"]},
+        )
+        sdk._get_registry().query(
+            "MATCH (k:APIKey {org_id:$tid}) SET k.created_by='api'",
+            params={"tid": billing_client["org_id"]},
+        )
+        captured: list[str] = []
+        self._stub_checkout(monkeypatch, captured, "api1")
+        app.dependency_overrides[get_current_org] = lambda: {
+            "org_id": billing_client["org_id"], "key_id": None, "tier": "free",
+            "session_user_email": "session-user@example.com",
+        }
+        try:
+            r = billing_client["client"].post(
+                "/v1/billing/checkout", json={"price_id": "price_200proMM"})
+        finally:
+            app.dependency_overrides.pop(get_current_org, None)
+        assert r.status_code == 200, r.text
+        assert captured == ["session-user@example.com"]
+
+    def test_checkout_padded_created_by_is_returned_stripped(
+            self, monkeypatch, billing_client):
+        """#4504 review: the shape gate trims before validating, so a padded
+        email-shaped ``created_by`` must be handed to Stripe trimmed — never
+        the raw DB string."""
+        from tortoise.hosted_api import app, get_current_org
+
+        sdk = billing_client["sdk"]
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) REMOVE t.email",
+            params={"id": billing_client["org_id"]},
+        )
+        sdk._get_registry().query(
+            "MATCH (k:APIKey {org_id:$tid}) SET k.created_by=' provision@example.com '",
+            params={"tid": billing_client["org_id"]},
+        )
+        captured: list[str] = []
+        self._stub_checkout(monkeypatch, captured, "pad1")
+        app.dependency_overrides[get_current_org] = lambda: {
+            "org_id": billing_client["org_id"], "key_id": None, "tier": "free",
+            "session_user_email": "session-user@example.com",
+        }
+        try:
+            r = billing_client["client"].post(
+                "/v1/billing/checkout", json={"price_id": "price_200proMM"})
+        finally:
+            app.dependency_overrides.pop(get_current_org, None)
+        assert r.status_code == 200, r.text
+        assert captured == ["provision@example.com"]  # trimmed, not padded
+        t = sdk.org_get(billing_client["org_id"])
+        assert t["customer_email"] == "provision@example.com"
+
+    def test_checkout_reuse_keeps_stored_customer_email(self, monkeypatch, billing_client):
+        """#4504 review: when the Stripe customer is reused, a second member's
+        session must not rewrite the org's stored billing contact — the mirror
+        must keep the address that belongs to the reused customer."""
+        from tortoise.hosted_api import app, get_current_org
+
+        sdk = billing_client["sdk"]
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.stripe_customer_id='cus_existing', "
+            "t.customer_email='first@example.com'",
+            params={"id": billing_client["org_id"]},
+        )
+        created: list[str] = []
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, e: created.append(e) or "cus_new")
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions", lambda self, cid: [])
+        monkeypatch.setattr(
+            billing.StripeClient, "create_checkout_session",
+            lambda self, tid, pid, cid, su, cu: "https://checkout.stripe.com/pay/reuse1")
+        app.dependency_overrides[get_current_org] = lambda: {
+            "org_id": billing_client["org_id"], "key_id": None, "tier": "free",
+            "session_user_email": "second@example.com",
+        }
+        try:
+            r = billing_client["client"].post(
+                "/v1/billing/checkout", json={"price_id": "price_200proMM"})
+        finally:
+            app.dependency_overrides.pop(get_current_org, None)
+        assert r.status_code == 200, r.text
+        assert created == []  # reused the stored customer, not recreated
+        t = sdk.org_get(billing_client["org_id"])
+        assert t["customer_email"] == "first@example.com"  # unchanged
+        assert t["stripe_customer_id"] == "cus_existing"
+
     def test_checkout_active_subscription_409(self, monkeypatch, billing_client):
         """Stored mirror active → 409 BEFORE any Stripe call — no customer
         created, no session minted."""
         billing_client["sdk"]._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.subscription_status='active'",
-            params={"id": billing_client["team_id"]},
+            params={"id": billing_client["org_id"]},
         )
         called: list[str] = []
         monkeypatch.setattr(billing.StripeClient, "create_customer",
@@ -555,7 +816,7 @@ class TestCheckoutPortal:
         monkeypatch.setenv("BILLING_CANCEL_URL", "https://app.example.com/cancel?checkout=cancelled")
         seen: dict[str, str] = {}
 
-        def fake_checkout(self, team_id, price_id, customer, success_url, cancel_url):
+        def fake_checkout(self, org_id, price_id, customer, success_url, cancel_url):
             seen["success_url"] = success_url
             seen["cancel_url"] = cancel_url
             return "https://checkout.stripe.com/pay/e1"
@@ -590,7 +851,7 @@ class TestCheckoutPortal:
         monkeypatch.delenv("BILLING_CANCEL_URL", raising=False)
         seen: dict[str, str] = {}
 
-        def fake_checkout(self, team_id, price_id, customer, success_url, cancel_url):
+        def fake_checkout(self, org_id, price_id, customer, success_url, cancel_url):
             seen["success_url"] = success_url
             seen["cancel_url"] = cancel_url
             return "https://checkout.stripe.com/p/e1"
@@ -610,7 +871,7 @@ class TestCheckoutPortal:
     def test_portal_returns_url(self, monkeypatch, billing_client):
         billing_client["sdk"]._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.stripe_customer_id='cus_portal1'",
-            params={"id": billing_client["team_id"]},
+            params={"id": billing_client["org_id"]},
         )
         monkeypatch.setattr(
             billing.StripeClient, "create_portal_session",
@@ -645,18 +906,18 @@ class TestWebhook:
 
         return fake_verify
 
-    def _bind_customer(self, billing_client, customer_id, team_id=None):
+    def _bind_customer(self, billing_client, customer_id, org_id=None):
         """Persist the stripe_customer_id binding (the checkout endpoint does
         this BEFORE redirect — webhook events are customer-bound, never ref-bound
         (Qwen review P0: client_reference_id is attacker-controlled)."""
-        tid = team_id or billing_client["team_id"]
+        tid = org_id or billing_client["org_id"]
         billing_client["sdk"]._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.stripe_customer_id=$cid",
             params={"id": tid, "cid": customer_id})
 
-    def _mirror(self, billing_client, team_id=None):
+    def _mirror(self, billing_client, org_id=None):
         sdk = billing_client["sdk"]
-        tid = team_id or billing_client["team_id"]
+        tid = org_id or billing_client["org_id"]
         rows = sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) RETURN t.tier, t.subscription_status, "
             "t.stripe_customer_id, t.subscription_id, t.grace_until",
@@ -666,11 +927,11 @@ class TestWebhook:
 
     def test_checkout_completed_activates_team(self, monkeypatch, billing_client):
         from tortoise import billing as bl
-        team_id = billing_client["team_id"]
+        org_id = billing_client["org_id"]
         self._bind_customer(billing_client, "cus_1")
         monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature", self._verify({
             "type": "checkout.session.completed", "id": "evt_c1",
-            "data": {"object": {"client_reference_id": team_id, "customer": "cus_1",
+            "data": {"object": {"client_reference_id": org_id, "customer": "cus_1",
                                 "customer_details": {"email": "o@e.com"},
                                 "subscription": "sub_1"}}}))
         monkeypatch.setattr(bl.StripeClient, "get_subscription",
@@ -680,17 +941,52 @@ class TestWebhook:
         tier, status, cust, sub_id, _ = self._mirror(billing_client)
         assert (tier, status, cust, sub_id) == ("pro", "active", "cus_1", "sub_1")
 
+    def test_webhook_analytics_carries_plan_and_tier(
+            self, monkeypatch, tmp_path, billing_client):
+        """#3821 regression: the billing emit passes plan/tier to
+        `_track_analytics_event`; before #3821 neither was in
+        `_ALLOWED_ANALYTICS_PROPS`, so every billing row was written
+        STRIPPED — the live silent loss since c928b0316 (2026-08-09)."""
+        from tortoise import billing as bl
+        from tortoise import hosted_api as ha
+
+        org_id = billing_client["org_id"]
+        self._bind_customer(billing_client, "cus_3821")
+        fallback = tmp_path / "billing-analytics.jsonl"
+        monkeypatch.setattr(ha, "_ANALYTICS_FALLBACK_PATH", str(fallback))
+        for var in ("SUPABASE_URL", "SUPABASE_SERVICE_KEY",
+                    "SUPABASE_SERVICE_ROLE_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature",
+                            self._verify({
+            "type": "checkout.session.completed", "id": "evt_3821",
+            "data": {"object": {"client_reference_id": org_id,
+                                "customer": "cus_3821",
+                                "customer_details": {"email": "o@e.com"},
+                                "subscription": "sub_3821"}}}))
+        monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                            lambda self, sid: FIXTURE_SUB)
+        r = self._post(billing_client["client"], {})
+        assert r.status_code == 200, r.text
+        rows = [json.loads(line) for line in
+                fallback.read_text().splitlines() if line.strip()]
+        assert rows, "the webhook must emit a billing analytics row"
+        props = rows[-1]["properties"]
+        assert props.get("plan") == "pro"
+        assert props.get("tier") == "pro"
+        assert props.get("status") == "checkout.session.completed"
+
     def test_webhook_replay_dedup_single_processing(self, monkeypatch, billing_client):
         from tortoise import billing as bl
         from tortoise import notify as nt
-        team_id = billing_client["team_id"]
+        org_id = billing_client["org_id"]
         calls = []
         monkeypatch.setattr(nt, "notify_billing_event",
                             lambda *a, **k: calls.append(a))
         self._bind_customer(billing_client, "cus_2")
         monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature", self._verify({
             "type": "checkout.session.completed", "id": "evt_dedup",
-            "data": {"object": {"client_reference_id": team_id, "customer": "cus_2",
+            "data": {"object": {"client_reference_id": org_id, "customer": "cus_2",
                                 "subscription": "sub_2"}}}))
         monkeypatch.setattr(bl.StripeClient, "get_subscription",
                             lambda self, sid: FIXTURE_SUB)
@@ -717,11 +1013,11 @@ class TestWebhook:
 
     def test_webhook_payment_failed_sets_grace(self, monkeypatch, billing_client):
         from tortoise import billing as bl
-        team_id = billing_client["team_id"]
+        org_id = billing_client["org_id"]
         self._bind_customer(billing_client, "cus_1")
         monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature", self._verify({
             "type": "invoice.payment_failed", "id": "evt_pf",
-            "data": {"object": {"client_reference_id": team_id,
+            "data": {"object": {"client_reference_id": org_id,
                                 "customer": "cus_1",
                                 "lines": {"data": [{"period": {"end": 4102444800}}]}}}}))
         r = self._post(billing_client["client"], {})
@@ -731,15 +1027,15 @@ class TestWebhook:
 
     def test_webhook_cancel_at_period_end_keeps_tier(self, monkeypatch, billing_client):
         from tortoise import billing as bl
-        team_id = billing_client["team_id"]
+        org_id = billing_client["org_id"]
         # set the team to pro first (simulate active sub)
         billing_client["sdk"]._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.tier='pro', t.subscription_status='active'",
-            params={"id": team_id})
+            params={"id": org_id})
         self._bind_customer(billing_client, "cus_1")
         monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature", self._verify({
             "type": "customer.subscription.updated", "id": "evt_cae",
-            "data": {"object": {"client_reference_id": team_id, "id": "sub_1",
+            "data": {"object": {"client_reference_id": org_id, "id": "sub_1",
                                 "customer": "cus_1", "status": "active",
                                 "cancel_at_period_end": True}}}))
         r = self._post(billing_client["client"], {})
@@ -750,14 +1046,14 @@ class TestWebhook:
     def test_webhook_subscription_updated_canceled_reverts(self, monkeypatch, billing_client):
         """review fix 11: status='canceled' via .updated (deleted event dropped)."""
         from tortoise import billing as bl
-        team_id = billing_client["team_id"]
+        org_id = billing_client["org_id"]
         billing_client["sdk"]._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.tier='team', t.subscription_status='active'",
-            params={"id": team_id})
+            params={"id": org_id})
         self._bind_customer(billing_client, "cus_1")
         monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature", self._verify({
             "type": "customer.subscription.updated", "id": "evt_canc",
-            "data": {"object": {"client_reference_id": team_id, "id": "sub_1",
+            "data": {"object": {"client_reference_id": org_id, "id": "sub_1",
                                 "customer": "cus_1", "status": "canceled",
                                 "cancel_at_period_end": False}}}))
         r = self._post(billing_client["client"], {})
@@ -769,17 +1065,17 @@ class TestWebhook:
         """review fix 7: price not in STRIPE_PRICE_IDS → keep tier + ops notify."""
         from tortoise import billing as bl
         from tortoise import notify as nt
-        team_id = billing_client["team_id"]
+        org_id = billing_client["org_id"]
         billing_client["sdk"]._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.tier='pro', t.subscription_status='active'",
-            params={"id": team_id})
+            params={"id": org_id})
         notified = []
         monkeypatch.setattr(nt, "notify_billing_event",
                             lambda *a, **k: notified.append(a))
         self._bind_customer(billing_client, "cus_3")
         monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature", self._verify({
             "type": "checkout.session.completed", "id": "evt_unk",
-            "data": {"object": {"client_reference_id": team_id, "customer": "cus_3",
+            "data": {"object": {"client_reference_id": org_id, "customer": "cus_3",
                                 "subscription": "sub_3"}}}))
         monkeypatch.setattr(bl.StripeClient, "get_subscription",
                             lambda self, sid: {"items": [{"price": {"id": "price_UNKNOWN"}}]})
@@ -791,14 +1087,14 @@ class TestWebhook:
 
     def test_webhook_deleted_reverts_free(self, monkeypatch, billing_client):
         from tortoise import billing as bl
-        team_id = billing_client["team_id"]
+        org_id = billing_client["org_id"]
         billing_client["sdk"]._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.tier='team', t.subscription_status='active'",
-            params={"id": team_id})
+            params={"id": org_id})
         self._bind_customer(billing_client, "cus_1")
         monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature", self._verify({
             "type": "customer.subscription.deleted", "id": "evt_del",
-            "data": {"object": {"client_reference_id": team_id, "customer": "cus_1"}}}))
+            "data": {"object": {"client_reference_id": org_id, "customer": "cus_1"}}}))
         r = self._post(billing_client["client"], {})
         assert r.status_code == 200
         tier, status, *_ = self._mirror(billing_client)
@@ -808,7 +1104,7 @@ class TestWebhook:
         from tortoise import billing as bl
         monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature", self._verify({
             "type": "charge.succeeded", "id": "evt_other",
-            "data": {"object": {"client_reference_id": billing_client["team_id"]}}}))
+            "data": {"object": {"client_reference_id": billing_client["org_id"]}}}))
         r = self._post(billing_client["client"], {})
         assert r.status_code == 200
 
@@ -824,7 +1120,7 @@ class TestWebhook:
     def test_webhook_audit_recorded(self, monkeypatch, billing_client):
         import tortoise.hosted_api as ha
         from tortoise import billing as bl
-        team_id = billing_client["team_id"]
+        org_id = billing_client["org_id"]
         audited = []
 
         async def fake_audit(*a, **k):
@@ -834,10 +1130,10 @@ class TestWebhook:
         self._bind_customer(billing_client, "cus_1")
         monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature", self._verify({
             "type": "customer.subscription.deleted", "id": "evt_audit",
-            "data": {"object": {"client_reference_id": team_id, "customer": "cus_1"}}}))
+            "data": {"object": {"client_reference_id": org_id, "customer": "cus_1"}}}))
         r = self._post(billing_client["client"], {})
         assert r.status_code == 200
-        ops = [a[2] for a in audited if len(a) > 2]  # (request, team_id, operation)
+        ops = [a[2] for a in audited if len(a) > 2]  # (request, org_id, operation)
         assert "billing_cancel" in ops, "billing_cancel audit event must be recorded"
 
     def test_webhook_failure_log_redacts_secret(self, monkeypatch, billing_client, caplog):
@@ -860,98 +1156,220 @@ class TestBootReconcile:
     def test_boot_reconcile_repairs_drift(self, monkeypatch, billing_client):
         """Out-of-band Stripe change (e.g. portal downgrade) corrected at boot."""
         from tortoise import billing as bl
-        team_id = billing_client["team_id"]
+        org_id = billing_client["org_id"]
         sdk = billing_client["sdk"]
         # team has an active pro subscription in the mirror
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.tier='pro', t.subscription_status='active', "
             "t.subscription_id='sub_1', t.stripe_customer_id='cus_1'",
-            params={"id": team_id})
+            params={"id": org_id})
         # Stripe truth: subscription downgraded to solo
         monkeypatch.setattr(bl.StripeClient, "get_subscription",
                             lambda self, sid: {"id": "sub_1", "status": "active",
                                                "items": {"data": [{"price": {"id": "price_100soloM"}}]}})
-        summary = bl.reconcile_team(sdk, team_id)
+        summary = bl.reconcile_org(sdk, org_id)
         assert summary["action"] == "mirror_subscription"
         row = sdk._get_registry().query(
-            "MATCH (t:Team {id:$id}) RETURN t.tier", params={"id": team_id}).result_set
+            "MATCH (t:Team {id:$id}) RETURN t.tier", params={"id": org_id}).result_set
         assert row[0][0] == "solo", "mirror must converge to Stripe truth"
+
+    def test_mirror_writes_both_period_bounds_and_never_nulls_a_stored_one(
+            self, monkeypatch, billing_client):
+        """#4216 → mutation: bind ``current_period_end`` UNCONDITIONALLY
+        (``params["period_end"] = sub.get(...)``) — the pre-fix mirror's shape.
+
+        ``mirror_subscription`` is an AUTHORING path for the subscription: the
+        authoritative push must persist the meter window as a PAIR and must
+        never NULL a stored bound just because a payload omits it — a NULL end
+        makes ``metering._current_period`` RAISE, dropping the org's increments
+        and leaving its cohort cap unenforceable. Driven through the REAL
+        ``reconcile_org`` (whose only writer is the mirror) and read through the
+        REAL meter.
+
+        RED pre-fix: the stored ``current_period_end`` is cleared (the
+        unconditional bind writes ``None``) and ``_current_period`` raises.
+        """
+        from datetime import datetime
+
+        from tortoise import billing as bl
+        from tortoise import metering as m
+
+        monkeypatch.setattr(m, "_supabase_mode", lambda: False)  # registry lane
+        org_id = billing_client["org_id"]
+        sdk = billing_client["sdk"]
+        start = int(datetime.fromisoformat(
+            "2026-09-03T00:00:00+00:00").timestamp())
+        end = int(datetime.fromisoformat(
+            "2026-10-03T00:00:00+00:00").timestamp())
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_4216_mirror', "
+            "t.current_period_start=$ps, t.current_period_end=$pe",
+            params={"id": org_id, "ps": start, "pe": end})
+
+        # Stripe truth: this payload OMITS both bounds — it must not clear them.
+        monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                            lambda self, sid: {
+                                "id": "sub_4216_mirror", "status": "active",
+                                "items": {"data": [
+                                    {"price": {"id": "price_200proMM"}}]}})
+        summary = bl.reconcile_org(sdk, org_id)
+        assert summary["action"] == "mirror_subscription"
+
+        row = sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) RETURN t.current_period_start, "
+            "t.current_period_end", params={"id": org_id}).result_set[0]
+        assert row[0] == start and row[1] == end, row
+        assert m._current_period(org_id).end_iso == "2026-10-03T00:00:00+00:00"
+
+        # ...and when the payload DOES carry the bounds, the mirror writes them.
+        # #4216 / Stripe `2025-03-31.basil`: the bounds live on the ITEM here —
+        # the reader must fall back to it (top-level absent).
+        new_start = int(datetime.fromisoformat(
+            "2026-10-03T00:00:00+00:00").timestamp())
+        new_end = int(datetime.fromisoformat(
+            "2026-11-03T00:00:00+00:00").timestamp())
+        monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                            lambda self, sid: {
+                                "id": "sub_4216_mirror", "status": "active",
+                                "items": {"data": [
+                                    {"price": {"id": "price_200proMM"},
+                                     "current_period_start": new_start,
+                                     "current_period_end": new_end}]}})
+        bl.reconcile_org(sdk, org_id)
+        row = sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) RETURN t.current_period_start, "
+            "t.current_period_end", params={"id": org_id}).result_set[0]
+        assert row[0] == new_start and row[1] == new_end, row
+
+    def test_subscription_period_bounds_reads_the_item_fallback(self):
+        """#4216 / Stripe `2025-03-31.basil`: the period fields moved onto the
+        subscription ITEMS. Mutation caught: reading only the top level — a
+        Basil-or-later payload then yields ``(None, None)`` and the meter anchor
+        is never written, leaving the paying org unmeterable.
+
+        Also pins the precedence: a pre-Basil top-level value WINS over an item
+        value.
+        """
+        from tortoise.billing import subscription_period_bounds
+
+        assert subscription_period_bounds({"items": {"data": [{
+            "current_period_start": 100, "current_period_end": 200}]}}) \
+            == (100, 200)
+        assert subscription_period_bounds({
+            "current_period_start": 1, "current_period_end": 2,
+            "items": {"data": [{"current_period_start": 3,
+                                 "current_period_end": 4}]}}) == (1, 2)
+        assert subscription_period_bounds({}) == (None, None)
+        assert subscription_period_bounds({"items": []}) == (None, None)
+        # a truthy NON-list/non-dict `items` must not raise (malformed webhook
+        # payload; the checkout call site is outside a try) — #4216 review.
+        assert subscription_period_bounds({"items": "x"}) == (None, None)
+        assert subscription_period_bounds({"items": 5}) == (None, None)
+        assert subscription_period_bounds({
+            "current_period_start": 7, "current_period_end": 8,
+            "items": "x"}) == (7, 8)
 
     def test_boot_reconcile_repairs_customer_only_team(self, monkeypatch, billing_client):
         """Missed checkout.session.completed: only stripe_customer_id exists."""
         from tortoise import billing as bl
-        team_id = billing_client["team_id"]
+        org_id = billing_client["org_id"]
         sdk = billing_client["sdk"]
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.tier='free', t.subscription_status=NULL, "
             "t.stripe_customer_id='cus_only'",
-            params={"id": team_id})
+            params={"id": org_id})
         monkeypatch.setattr(bl.StripeClient, "list_subscriptions",
                             lambda self, cid: [{"id": "sub_x", "status": "active",
                                                 "items": {"data": [{"price": {"id": "price_200proMM"}}]}}])
-        summary = bl.reconcile_team(sdk, team_id)
+        summary = bl.reconcile_org(sdk, org_id)
         assert summary["action"] == "mirror_customer_first_active"
         row = sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) RETURN t.tier, t.subscription_status",
-            params={"id": team_id}).result_set
+            params={"id": org_id}).result_set
         assert row[0][0] == "pro" and row[0][1] == "active"
 
     def test_boot_reconcile_non_fatal_on_stripe_error(self, monkeypatch, billing_client):
         """A Stripe outage during reconcile must not break anything."""
         from tortoise import billing as bl
-        team_id = billing_client["team_id"]
+        org_id = billing_client["org_id"]
         billing_client["sdk"]._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_1'",
-            params={"id": team_id})
+            params={"id": org_id})
         monkeypatch.setattr(bl.StripeClient, "get_subscription",
                             lambda self, sid: (_ for _ in ()).throw(bl.StripeAPIError("outage")))
         # contract: reconcile RAISES on outage; the BOOT thread (lifespan)
         # catches + logs — non-fatality lives at the boot boundary.
         import pytest
         with pytest.raises(bl.StripeAPIError):
-            bl.reconcile_team(billing_client["sdk"], team_id)
+            bl.reconcile_org(billing_client["sdk"], org_id)
 
-    def test_boot_reconcile_hanging_stripe_never_blocks_boot(self, monkeypatch, billing_client):
-        """review fix 3: the reconcile thread is daemon + budgeted — lifespan
-        yields immediately even if Stripe hangs."""
-        import threading  # noqa: I001
+class TestLifespanStartup:
+    def test_lifespan_startup_returns_without_blocking(self, monkeypatch, tmp_path):
+        """The lifespan's startup half is cheap and synchronous, so it must
+        RETURN well inside the join window — a startup that blocks would hold
+        uvicorn's bind.
+
+        NOTE(#4262): this replaces `test_boot_reconcile_hanging_stripe_never_
+        blocks_boot`, which asserted a boot billing-reconcile daemon thread that
+        no longer exists (nothing creates a `billing-reconcile` thread and
+        `reconcile_org` has no production caller). The old test called
+        `_lifespan(None)`, which crashed immediately in `_start_liveness(None)`,
+        so its assertion could never fail; it then nested a second lifespan
+        inside the shared TestClient's. This runs the lifespan against its own
+        stub app instead, and guards the whole thread body so an in-thread crash
+        cannot read as a successful return.
+        """
+        import asyncio
+        import threading
         import time
-        import tortoise.hosted_api as ha
-        from tortoise import billing as bl
+        from types import SimpleNamespace
 
-        # Simulate a hanging Stripe client inside the real daemon-thread pass.
-        monkeypatch.setattr(bl.StripeClient, "get_subscription",
-                            lambda self, sid: time.sleep(999))
-        monkeypatch.setattr(bl.StripeClient, "list_subscriptions",
-                            lambda self, cid: time.sleep(999))
-        # point _iter_registered_teams at ONE team
-        team_id = billing_client["team_id"]
-        billing_client["sdk"]._get_registry().query(
-            "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_1', "
-            "t.stripe_customer_id='cus_1'", params={"id": team_id})
-        monkeypatch.setattr(ha, "_iter_registered_teams",
-                            lambda: [{"team_id": team_id, "name": "x"}])
+        from tortoise.hosted_api import _lifespan
 
-        started = time.monotonic()
-        threads_before = threading.active_count()  # noqa: F841
-        # invoke the boot-reconcile closure directly (as the lifespan does)
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "lifespan.db"))
+        monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
+
+        app = SimpleNamespace(state=SimpleNamespace())
+        thread_error: list[BaseException] = []
+
         def _run():
-            from tortoise.hosted_api import _lifespan  # noqa: I001
-            import asyncio
-            # simulate lifespan startup: create the thread, don't await it
-            ha_threads = [t for t in threading.enumerate() if t.name == "billing-reconcile"]  # noqa: F841
-            # Call the internal closure via a fresh lifespan run in a thread.
-            async def _lifespan_quick():
-                async with _lifespan(None):
-                    return
-            asyncio.run(_lifespan_quick())
+            # The WHOLE body is guarded: an exception before `asyncio.run`
+            # (e.g. a broken import) would otherwise kill the thread and read
+            # as a successful return.
+            try:
+                async def _quick():
+                    async with _lifespan(app):
+                        return
 
-        t = threading.Thread(target=_run)
+                asyncio.run(_quick())
+            except BaseException as exc:
+                thread_error.append(exc)
+
+        # daemon=True: a regression that BLOCKS startup must fail the assertion
+        # below, not pin interpreter shutdown.
+        started = time.monotonic()
+        t = threading.Thread(target=_run, daemon=True)
         t.start()
-        t.join(timeout=5)
+        t.join(timeout=10)
         elapsed = time.monotonic() - started
-        assert elapsed < 5, "lifespan must not block on a hanging Stripe client"
-        assert not t.is_alive() or True  # lifespan returned
+        try:
+            # `join` only bounds the WAIT — assert the startup half itself is
+            # prompt, not merely "under the timeout".
+            assert elapsed < 5, f"lifespan startup took {elapsed:.1f}s"
+            assert not t.is_alive(), "lifespan startup did not return within 10s"
+            assert not thread_error, f"lifespan raised in its thread: {thread_error!r}"
+        finally:
+            # `_lifespan` arms the process-lifetime /healthz listener and
+            # `_stop_liveness` deliberately does not tear it down — release it so
+            # this test leaves no bound socket (repo convention:
+            # tests/test_monitoring.py::_clean_heartbeat_and_listeners,
+            # tests/test_hosted_api.py::TestBootOrder).
+            import tortoise.monitoring as monitoring
+
+            server = getattr(app.state, "_healthz_server", None)
+            if server is not None:
+                monitoring.stop_health_listener(server)
 
 
 class TestTeamInfoBillingSurface:
@@ -967,7 +1385,7 @@ class TestTeamInfoBillingSurface:
         billing_client["sdk"]._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.subscription_status=$s, "
             "t.customer_email=$e",
-            params={"id": billing_client["team_id"], "s": "active",
+            params={"id": billing_client["org_id"], "s": "active",
                     "e": "billing-owner@example.com"})
         r = billing_client["client"].get("/v1/team",
                                          headers=billing_client["headers"])

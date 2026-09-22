@@ -32,8 +32,8 @@ def _home_isolated(monkeypatch, tmp_path):
 
 SIGNUP_BODY = json.dumps({
     "key": "tt_claimcli_0000000000000000000000000000000000000000",
-    "team_id": "team-claimcli-1",
-    "team_name": "agent-claimcli",
+    "org_id": "team-claimcli-1",
+    "org_name": "agent-claimcli",
     "graph_name": "team_team-claimcli-1",
     "identity": "anon-claimcli",
     "tier": "free",
