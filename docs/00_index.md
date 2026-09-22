@@ -77,5 +77,6 @@ aboutObjects: tortoise
 | #2600 Attribution Phase 1 scoping — resolver human actor; sessions + write-events stamped (epic #2554 v1 gate) | `docs/scoping-2600-attribution-phase1.md` |
 | #2789 one free organization per person — scoping (double diamond, Design 2 = webhook-provisioned org) | `docs/scoping/2026-09-10-2789-one-free-org.md` |
 | #2789 one free organization per person — implementation plan | `docs/plans/2026-09-10-2789-one-free-org.md` |
+| #3525 CSP for the app origin + `no-store` regression guard — scope + plan, with the `Set-Cookie`-stripping / `_headers`-bypass `### Integration Docs` record | `docs/plans/2026-09-22-3525-csp-no-store.md` |
 | Retention and deletion — the one promise (canonical) | `docs/retention-and-deletion.md` |
 | Durability posture — the one authority: mechanism, loss window, and the strongest verification actually performed, per deployment (canonical, #2881) | `docs/durability-posture.md` |
