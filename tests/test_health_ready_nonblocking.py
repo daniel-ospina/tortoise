@@ -125,6 +125,7 @@ CONTROL_PLANE_OFFLOAD_INVENTORY = frozenset({
     "membership_for_user_org",  # session/DI + login/claim lanes
     "_orgs_row_fail_soft",      # session/DI lane: the orgs additive ladder
     "org_by_id",                # session/DI + invite/onboarding lanes
+    "invitation_info_by_token",  # invite-info (hosted): the token lookup
     "_org_node_sync_limits",    # session/DI lane: org limit props (org_by_id)
     "api_key_by_id",            # key-write lanes: the key lookup
     "set_dashboard_key_login",  # dashboard-login + provisioning flag write
@@ -145,12 +146,13 @@ _A1_CONFIRMED_SEAMS = frozenset({
 
 #: Helpers this change ROUTES in addition to §A1 (the session/DI seams
 #: ``_membership_org`` / ``_org_node`` / ``_require_owner_admin`` and the
-#: key-write/login/claim lanes). If a name leaves the inventory its routed
-#: sites lose their regression guard, so the pin asserts they stay.
+#: key-write/login/claim/invite-info lanes). If a name leaves the inventory its
+#: routed sites lose their regression guard, so the pin asserts they stay.
 _ROUTED_SESSION_SEAMS = frozenset({
     "membership_for_user_org", "org_by_id", "api_key_by_id",
     "set_dashboard_key_login", "set_api_key_enabled", "set_api_key_name",
     "set_api_key_scopes", "_org_node_sync_limits", "_resolve_signup_token",
+    "invitation_info_by_token",
 })
 
 #: Blocking ``supabase_control`` helpers that are STILL called directly
@@ -167,7 +169,7 @@ _KNOWN_ON_LOOP_RESIDUAL = frozenset({
     "count_graph_keys", "decline_invitation_by_email",
     "expired_bootstrap_keys", "graph_key_ids", "insert_api_key",
     "invitation_accept", "invitation_accept_by_id", "invitation_expire",
-    "invitation_info_by_token", "invitation_mint", "invitation_rescind",
+    "invitation_mint", "invitation_rescind",
     "invitation_resend", "invitation_row_by_token", "is_anon_org",
     "membership_by_identity", "membership_count_since", "membership_role",
     "mint_target_user_for_key", "org_api_keys", "org_by_email",

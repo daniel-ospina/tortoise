@@ -1077,16 +1077,16 @@ def install_capture(
             f"no capture seam for harness {harness!r} (known: {known})"))
     if harness == "claude":
         try:
-            return _install_claude(Path(root), dry_run=dry_run)
+            result = _install_claude(Path(root), dry_run=dry_run)
         except MemoryError:
             raise  # resource exhaustion is not a refusal; the handler allocates
         except Exception as e:
             return _install_failed(harness, e)
-    if harness in ("codex", "cursor"):
+    elif harness in ("codex", "cursor"):
         # HOME-scoped harnesses share ONE installer; the layout supplies every
         # harness-specific fact (#3818, #3819).
         try:
-            return _install_home_scoped(
+            result = _install_home_scoped(
                 harness,
                 Path(home) if home is not None else Path.home(),
                 dry_run=dry_run)
@@ -1094,13 +1094,46 @@ def install_capture(
             raise  # resource exhaustion is not a refusal; the handler allocates
         except Exception as e:
             return _install_failed(harness, e)
-    try:
-        return _install_pi(Path(home) if home is not None else Path.home(),
-                           dry_run=dry_run)
-    except MemoryError:
-        raise  # resource exhaustion is not a refusal; the handler allocates
-    except Exception as e:
-        return _install_failed(harness, e)
+    else:
+        try:
+            result = _install_pi(
+                Path(home) if home is not None else Path.home(),
+                dry_run=dry_run)
+        except MemoryError:
+            raise  # resource exhaustion is not a refusal; the handler allocates
+        except Exception as e:
+            return _install_failed(harness, e)
+
+    # Record where this install came FROM, so the INSTALLED hook can resolve
+    # its module dir instead of falling through to its own silent no-op — from
+    # `~/.codex/hooks/`, `$(dirname "$0")/../..` is `$HOME`, not a checkout
+    # (#4314). Best-effort and only after a successful real write: a dry run or
+    # a refusal leaves no record to be misread.  The ONE need-based rule
+    # (``record_hook_src_dir_for_install``) writes it only when the installed
+    # hook cannot resolve `../..` on its own — the SAME condition the hook
+    # reads it under — so it fixes the Codex/Cursor HOME installs and a Claude
+    # project install, while a repo-scoped `--dir` whose `../..` IS a checkout
+    # writes nothing (#4110, #4314).
+    if result.ok and not dry_run:
+        resolved_home = Path(home) if home is not None else Path.home()
+        # #4544: a harness with no shell-hook layout (`pi` — a TypeScript
+        # extension, not a `session-end.sh`) has no hooks_dir for the `../..`
+        # fallback to be derived from, so `get_layout` would raise and the
+        # whole install would crash.  Only a layout-bearing harness has a
+        # non-trivial `default_root`; for the others the record is skipped by
+        # `record_hook_src_dir_for_install` itself.
+        _layout = hook_install.get_layout_optional(harness)
+        if _layout is None or harness == "claude":
+            effective_root = Path(root)
+        else:
+            effective_root = hook_install.default_root(_layout, resolved_home)
+        # Best-effort and unable to fail the install: a record-write raise
+        # (``OSError``, ``UnicodeDecodeError``, …) must never turn a landed
+        # install into a traceback (#3999, #4314).
+        hook_install.record_hook_src_dir_for_install(
+            harness, root=effective_root,
+            home=Path(home) if home is not None else None)
+    return result
 
 
 __all__ = [

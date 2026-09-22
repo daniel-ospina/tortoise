@@ -337,6 +337,12 @@ surfaces:
   # `session verify` wiring in tortoise/__main__.py, which selects `api`.
   # Same dual registration as test_capture_install.py.
   - test_session_verify.py
+  # #4314: an inert harness install must not read as health — the shipped
+  # hooks resolve a recorded module dir (never `../..` alone), record a
+  # breadcrumb instead of silent-silence, and `session verify` reports INERT
+  # rather than PROVEN on rc=0 with no downstream effect. Same dual
+  # registration as test_session_verify.py (mechanism = core; CLI = api).
+  - test_4314_inert_hooks.py
   # #3795/#3801: the `tortoise hooks` CLI surface lives in tortoise/__main__.py
   # (api-classified source) — dual-registered so a CLI-wiring regression runs
   # this guard. See the core entry for the mechanism half.
@@ -473,6 +479,7 @@ surfaces:
   - test_capture_cost_measurement.py
   - test_capture_entity_attachment_3664.py
   - test_ci_expected_manifests.py
+  - test_ci_guard_invocation.py
   - test_client_cli_probe.py
   # #3677: dual-registered with `api` for the same reason as test_boot_regressions.py
   # above. `api` is the arm that actually fires on a tortoise/hosted_api.py-only change;
@@ -600,6 +607,12 @@ surfaces:
   # `session verify` wiring in tortoise/__main__.py, which selects `api`.
   # Same dual registration as test_capture_install.py.
   - test_session_verify.py
+  # #4314: an inert harness install must not read as health — the shipped
+  # hooks resolve a recorded module dir (never `../..` alone), record a
+  # breadcrumb instead of silent-silence, and `session verify` reports INERT
+  # rather than PROVEN on rc=0 with no downstream effect. Same dual
+  # registration as test_session_verify.py (mechanism = core; CLI = api).
+  - test_4314_inert_hooks.py
   # #3795/#3801: capture-hook install drift detection + in-place upgrade. Its
   # sources are `tortoise/hook_install.py` and `tortoise/claude-hooks/` — an
   # ENGINE path classified `core` (any unmatched `tortoise/` prefix). Dual-
@@ -1408,6 +1421,11 @@ durations:
   eval/write_path/test_write_path_benchmark.py: 112.3
   test_tortoise_client.py: 110.7
   eval/retrieval/test_run.py: 109.3
+  # #4314: the inert-hooks guard. Measured locally in the carve-out lane
+  # (`uv run pytest tests/test_4314_inert_hooks.py -q`, 169.8s — the round-2
+  # fix adds real-hook guards for the install-inert marker and the CWE-427
+  # pre-path vector); refresh from a CI junit run once it has one.
+  test_4314_inert_hooks.py: 170.0
   test_platform_seams.py: 73.3
   test_2952_degraded_read.py: 70.0   # #2952 (B)+(C): docker-lane warm-up/degraded-read suite
   test_quota.py: 65.3
@@ -1839,6 +1857,18 @@ durations:
   # measurement of the current file, and its direction is not asserted either
   # way. Refresh from the first post-merge main run that includes it.
   test_ci_expected_manifests.py: 0.157
+  # #4494: first cut, and the REASONING is the provenance because this file has
+  # never run in CI. The closest analogue is the entry above: a subprocess-driven
+  # file whose CI wall time was 0.157s (1 `_run_guard` definition + 2 call sites).
+  # This file has 6 test functions and records 8 interpreter invocations in a
+  # fresh run, so 0.4 is that measurement scaled by work done. Local call times
+  # (3.5-6.7s at host load 15-197) are NOT used: they measure this box, not a
+  # runner. Refresh from the first post-merge main run that includes it (#3400).
+  # The entry also matters for COVERAGE HEADROOM, not just balance: registering a
+  # file without one took the fast pool from 0.9022 (583 files, 57 unmeasured) to
+  # 0.9007 (584, 58) against the 0.90 floor, leaving 0.4 files of margin; with
+  # this entry it is 0.9024 (1.4 files). See #4348 for the `--register` gap.
+  test_ci_guard_invocation.py: 0.4
   bench/test_bench_core.py: 0.1
   eval/harness/test_harness_corpus.py: 0.1
   eval/write_path/test_write_path_grading.py: 0.1
