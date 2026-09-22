@@ -57,13 +57,16 @@ the token regardless of which subdomain presented it.
 
 ## 2. What Tortoise has
 
-> **CURRENT ARCHITECTURE (#4054, 2026-09-18).** The client-side, JS-readable
-> parent-domain cookie described in the original 2026-08-19 note has been
-> REMOVED. The browser now holds only an HttpOnly `__Host-session` opaque handle
-> issued by a server-side BFF on the app origin; the access/refresh tokens live
-> in D1 (`SESSIONS`) and never reach the browser. §2.1–§2.3 and §5.5 below are
-> the current state; §2.4, §3, §4 and §5.1–§5.4 are the historical record of the
-> pre-BFF design and its fixes (each carries a superseded note).
+> **CURRENT ARCHITECTURE (#4054, 2026-09-18).** For the BFF pages the client-side, JS-readable
+> parent-domain cookie described in the original 2026-08-19 note has been REMOVED; the browser
+> holds only an HttpOnly `__Host-session` opaque handle issued by a server-side BFF on the app
+> origin, and the access/refresh tokens live in D1 (`SESSIONS`) and never reach the browser.
+> **One surface still runs the removed design:** the MCP consent page still issues a JS-readable
+> parent-domain cookie and two surfaces still accept it, so tokens DO reach the browser for a
+> consent-page visitor (§2.1 "Legacy cohort", where the `OVERRIDES` ruling is violated).
+> §2.1–§2.3 and §5.5 below are the current state; §2.4, §3 and §5.1–§5.4 are the historical
+> record of the pre-BFF design and its fixes (each carries a superseded note). §4 is historical
+> for items 2–4 only — **item 1 is open**.
 
 ### 2.1 The session
 
@@ -89,7 +92,7 @@ the token regardless of which subdomain presented it.
   auth-topology decision on **#3501 / #4054**; the full rationale lives in the private `premise-labs`
   repo (`engineering/auth/SCOPE.md` §3, §4 W6, §13), which this repo's Functions also cite — named
   here because it is outside this repository and cannot be opened from it.
-- **Legacy cohort — a SECOND, LIVE session credential (the ruling below is VIOLATED here).**
+- **Legacy cohort — a SECOND, LIVE session credential (the ruling above is VIOLATED here).**
   The legacy JS-readable parent-domain cookie
   `sb-tortoise-auth-token` is **not** the session backbone for the BFF pages: the bridge that once
   wrote it (`website/assets/supabase-session.js`) is loaded by no BFF page
@@ -104,16 +107,18 @@ the token regardless of which subdomain presented it.
     (`:1498`), i.e. **parent-domain and JS-readable**, after `signInWithPassword` /
     `signInWithOAuth` / `refreshSession`.
     Removing it is **#3524** (`SCOPE.md` §4 W3); `SCOPE.md` §7's ordering guard defers deleting
-    this writer until #3524 ships (`_CONSENT_HTML` — `oauth.py:1445` / `:1467` / `:1498`; §7 states
-    the range as `1335-1360`, the enclosing consent-page block) — so it is still issuing today.
+    this writer until #3524 ships (`_CONSENT_HTML` — `oauth.py:1445` / `:1467` / `:1498`; §7 cites
+    the range `1335-1360`, the head of the `_CONSENT_HTML` block that encloses these lines) — so it
+    is still issuing today.
   - **Accepted by** two live surfaces:
     1. the blog-admin console's **data layer** — `website/apps/blog-admin/src/lib/supabase.ts`
        (`STORAGE_KEY`) is the supabase-js storage adapter, and with `persistSession: true`
        supabase-js recovers the session from it on init, so the console's direct Supabase calls
-       (11 PostgREST operation entry points over 5 `.from()` builder sites,
-       `src/lib/blog-api.ts:42-85`, plus 2 authenticated Storage calls — `upload` `:443`,
-       `remove` `:476`; `getPublicUrl` `:449` builds a URL locally and sends no credential)
-       authenticate off **this** cookie rather than the BFF; and
+       (11 PostgREST operation entry points over the 5 `.from('blog_posts')` builders —
+       `listPosts`, `listQueue`, `getPost`, `createPost`, `updatePost` — plus 2 authenticated
+       Storage calls, `uploadBlogImage` and `deleteBlogImage`; the `getPublicUrl` inside
+       `uploadBlogImage` builds a URL locally and sends no credential) authenticate off **this**
+       cookie rather than the BFF; and
     2. `website/functions/blog/_shared/admin-auth.ts` — `getAccessToken` falls back to this cookie
        when no `Authorization: Bearer` is presented (always, on the marketing origin, which never
        receives the host-only `__Host-session`).

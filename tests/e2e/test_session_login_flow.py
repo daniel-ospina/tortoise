@@ -62,7 +62,7 @@ API_HOST = "https://api.premiselabs.co"
 # The dashboard's session is an OPAQUE handle in the HttpOnly `__Host-session`
 # cookie, validated SERVER-SIDE by `/api/session` against the D1 `sessions`
 # table. The retired JS-readable `sb-tortoise-auth-token` is ignored by the gate
-# (the app no longer reads any client-held token), so seeding it alone made the
+# (the dashboard gate no longer reads any client-held token), so seeding it alone made the
 # app answer 401 and bounce every suite to /auth. These specs therefore seed the
 # row the gate actually reads, in the D1 the `:8790` preview serves.
 SESSION_COOKIE = "__Host-session"

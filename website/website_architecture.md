@@ -53,13 +53,15 @@ Host routing lives in `website/functions/_middleware.ts`:
 ### Auth backbone
 
 - Supabase project `ybetwichurajbfswfeqa.supabase.co` — PKCE OAuth (GitHub + Google) + email/password
-- **Session (current, #4054):** a server-side BFF on the app origin. The browser holds only an opaque
+- **Session (current, #4054):** a server-side BFF on the app origin. **As its BFF session**, the
+  browser holds only an opaque
   **`__Host-session`** cookie — `HttpOnly; Secure; SameSite=Lax; Path=/`, and **no `Domain`
   attribute**, so the `__Host-` prefix makes it host-only by construction and it can never
-  authenticate a second subdomain. The access/refresh tokens live server-side in D1 (the `SESSIONS`
-  binding) and never reach the browser; revoking a session marks its row revoked (`revoked = 1`) —
-  the row is retained, not deleted. Issued by
-  `website/apps/dashboard/functions/_shared/auth/session.ts`.
+  authenticate a second subdomain. The BFF's access/refresh tokens live server-side in D1 (the
+  `SESSIONS` binding) and never reach the browser; revoking a session marks its row revoked
+  (`revoked = 1`) — the row is retained, not deleted. Issued by
+  `website/apps/dashboard/functions/_shared/auth/session.ts`. A **separate legacy** JS-readable
+  parent-domain cookie is still issued and still accepted — see the ruling bullet below.
 - **OVERRIDES:** the standard cross-subdomain session — a `Domain=.premiselabs.co` cookie shared by
   every subdomain — is **rejected**. It is JS-reachable from any subdomain and forfeits the `__Host-`
   prefix; one session-bearing origin is worth the extra 301. The recorded ruling is the auth-topology

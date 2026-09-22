@@ -7,8 +7,9 @@
  * only — `sb-tortoise-auth-token` (JSON, same shape supabase-js persists:
  * { access_token, refresh_token, ... }) carries the credential for the direct
  * PostgREST + Storage calls the console makes itself: 11 PostgREST operation entry points over
- * 5 `.from()` builder sites (`blog-api.ts:42-85`), plus 2 authenticated Storage calls
- * (`upload` `:443`, `remove` `:476`; `getPublicUrl` `:449` builds a URL locally). It is ISSUED by
+ * 5 `.from('blog_posts')` builders (`listPosts`, `listQueue`, `getPost`, `createPost`,
+ * `updatePost`), plus `uploadBlogImage` / `deleteBlogImage`; the `getPublicUrl` inside
+ * `uploadBlogImage` builds a URL locally and sends no credential. It is ISSUED by
  * the MCP consent page in `tortoise/oauth.py`
  * (`/oauth/authorize`, `Domain=.premiselabs.co`, JS-readable), re-written here by `writeCookie`
  * on refresh, and recovered here

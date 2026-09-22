@@ -4,7 +4,7 @@
  * WHY THE SERVER DECIDES
  * ----------------------
  * `welcome.html` used to decide this in the browser, via a hard gate that called
- * `readValidSession()`. Under the BFF there is no JS-readable session, so that
+ * `readValidSession()`. Under the BFF the session cookie is not JS-readable, so that
  * function returned null on EVERY load and the gate redirected to /auth on every
  * successful login — the #3485 loop, reproduced by construction for every user.
  *
