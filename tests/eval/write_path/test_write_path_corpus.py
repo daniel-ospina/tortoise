@@ -1246,36 +1246,83 @@ def test_committed_operator_gold_validates_and_grounds(session_id: str) -> None:
         assert own_turn  # relation_turn in range of the own session
 
 
+def _thinned_gold_ops(gold: dict) -> list[dict]:
+    """Drop the SUPERSEDE(s) and add the same number of MITIGATES back, so the
+    TOTAL is unchanged and only the per-kind check can fire."""
+    ops = list(gold["planted_operators"])
+    dropped = [op for op in ops if op.get("expected_kind") == "SUPERSEDE"]
+    kept = [op for op in ops if op.get("expected_kind") != "SUPERSEDE"]
+    return kept + [{"expected_kind": "MITIGATES", "id": f"synthetic_{i}"}
+                   for i in range(len(dropped))]
+
+
 def test_operator_floor_issues_flags_a_thin_kind() -> None:
     """#2552 code review: the per-kind floor's FIRING path is verified, not
     assumed. A corpus that CLEARS the total floor while starving one kind is
     exactly what a total-only floor accepted — the per-kind check must report
     it, with a message that names the thin kind.
 
-    This also pins the shared helper: ``_assert_operator_floors`` (fresh
-    render, raises) and ``validate_committed`` (on-disk, collects) both call
-    ``_operator_floor_issues``, so they cannot drift on what they count or on
-    how they treat a malformed entry.
+    Because ``REQUIRED_OPERATOR_KINDS`` is DERIVED from
+    ``MIN_PLANTED_OPERATOR_KINDS``, dropping a kind trips BOTH the per-kind
+    check and the missing-kinds check. That redundancy is the derived contract;
+    this test pins it rather than pretending only one check fires.
     """
-    ops = [
+    floor_ops = [
         {"expected_kind": kind}
         for kind, floor in generate_corpus.MIN_PLANTED_OPERATOR_KINDS.items()
         for _ in range(floor)
     ]
-    assert generate_corpus._operator_floor_issues([ops], label="corpus") == []
+    clean = {"g": {"planted_operators": floor_ops}}
+    assert generate_corpus._operator_floor_issues(clean, label="corpus") == []
 
-    # Drop every SUPERSEDE but keep the TOTAL above the floor, so only the
-    # per-kind check can fire.
-    thinned = [op for op in ops if op["expected_kind"] != "SUPERSEDE"]
-    thinned += [{"expected_kind": "MITIGATES"}] * 2
-    issues = generate_corpus._operator_floor_issues([thinned], label="corpus")
+    thinned = _thinned_gold_ops({"planted_operators": floor_ops})
+    issues = generate_corpus._operator_floor_issues(
+        {"g": {"planted_operators": thinned}}, label="corpus")
     assert any("per-kind floor" in i and "SUPERSEDE=0" in i for i in issues), issues
+    assert any("missing kinds ['SUPERSEDE']" in i for i in issues), issues
     assert not any("floor (issue #2514)" in i for i in issues), issues
 
-    # Non-list / non-dict entries are SKIPPED (the shared guard), never an
-    # AttributeError — a malformed corpus is the schema validation's finding.
+    # Non-dict golds, and non-list / non-dict ``planted_operators`` entries, are
+    # SKIPPED by the shared guard — never an ``AttributeError``. A malformed
+    # corpus is the schema validation's finding, not this check's.
     assert generate_corpus._operator_floor_issues(
-        [None, "nope", [1, 2], ops], label="corpus") == []
+        {"a": None, "b": "nope", "c": {"planted_operators": [1, 2]},
+         "d": 7, "e": {"planted_operators": "nope"},
+         "f": {"planted_operators": floor_ops}},
+        label="corpus") == []
+
+
+def test_operator_floor_adapters_actually_fire(tmp_path) -> None:
+    """#2552 code review: the helper being correct is not the contract — BOTH
+    adapters must actually wire it. A helper-only test stays green if
+    ``validate_committed`` stops calling it or ``_assert_operator_floors`` stops
+    raising, so this drives each adapter over a thinned corpus.
+    """
+    sid = next(
+        s for s in COMMITTED_SESSIONS
+        if any(op.get("expected_kind") == "SUPERSEDE"
+               for op in corpus.load_gold(s)["planted_operators"])
+    )
+
+    # Adapter 1 — on the DISK (validate_committed, collects).
+    generate_corpus.write_corpus(root=tmp_path)
+    gold_file = tmp_path / f"gold/{sid}.gold.json"
+    gold = json.loads(gold_file.read_text(encoding="utf-8"))
+    gold["planted_operators"] = _thinned_gold_ops(gold)
+    gold_file.write_text(json.dumps(gold, indent=2) + "\n", encoding="utf-8")
+    on_disk = generate_corpus.validate_committed(root=tmp_path)
+    assert any("per-kind floor" in i and "SUPERSEDE=0" in i for i in on_disk), on_disk
+
+    # Adapter 2 — on the RENDER (assert_operator_floors, raises). Mutate the
+    # rendered bytes of the same session; render_corpus() itself already passed
+    # the real corpus, so the raise here is the adapter's own firing path.
+    outputs = generate_corpus.render_corpus()
+    key = f"gold/{sid}.gold.json"
+    rendered = json.loads(outputs[key])
+    rendered["planted_operators"] = _thinned_gold_ops(rendered)
+    outputs[key] = (json.dumps(rendered, indent=2) + "\n").encode("utf-8")
+    with pytest.raises(AssertionError, match="per-kind floor"):
+        generate_corpus._assert_operator_floors(outputs)
 
 
 def test_operator_gold_schema_rejects_bad_kind_and_self_loop() -> None:

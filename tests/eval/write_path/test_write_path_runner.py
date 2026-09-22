@@ -599,11 +599,14 @@ def test_run_carries_operator_edge_audit_dimension(tmp_path, monkeypatch):
     assert report["run_status"] == "completed", report.get("log")
     audit = report["operator_audit"]
     assert audit is not None
-    # Pinned to the corpus FLOOR with `>=`, never an exact value:
-    # MIN_PLANTED_OPERATOR_EDGES is a LOWER BOUND (generate_corpus fails when
-    # `total < floor`), so an equality here reddens this lane the moment the
-    # corpus GROWS — the denominator-mismatch symptom #2552 set out to remove.
+    # Pinned to the corpus FLOOR (a LOWER BOUND, so `>=`) AND tied to the
+    # gold-derived ACTUAL count. The floor alone cannot catch a silent
+    # per-session shrink that still clears every floor; the equality alone
+    # cannot catch one either (both sides come from the same golds). Together
+    # they do both — and neither is a literal, so a grown corpus reddens
+    # nothing.
     assert audit["planted"] >= generate_corpus.MIN_PLANTED_OPERATOR_EDGES
+    assert audit["planted"] == corpus.planted_operator_count()
     assert audit["edge_correct"] < audit["planted"]  # m2 cue-word relations
     assert 1 <= audit["content_ok"] <= audit["planted"]
     # #2552: the committed operator topology entered the retrievable layer.
@@ -617,21 +620,32 @@ def test_run_carries_operator_edge_audit_dimension(tmp_path, monkeypatch):
     owned_by = {
         r["session_id"]: r.get("planted_operators", []) for r in report["session_results"]
     }
-    assert len(owned_by["wp06_quarry_rollout"]) == 1
-    assert len(owned_by["wp07_bluepeak_followup"]) == 3
-    supersede = owned_by["wp07_bluepeak_followup"][2]
-    assert supersede["expected_kind"] == "SUPERSEDE"
-    assert supersede["to_session"] == "wp06_quarry_rollout"
-    # The receipt must CARRY the audit block (it is the publish artifact) and
-    # the carried denominator must clear the corpus floor. Not an equality
-    # against `audit["planted"]`: `build_receipt` copies the block verbatim, so
-    # such an assertion cannot independently fail — the repeated "guard that
-    # cannot fail" finding (#4261).
+    # Locate the cross-session SUPERSEDE by KIND, never by a positional or
+    # per-session literal: `len(...) == 1` / `== 3` / `[2]` were hardcoded
+    # operator counts that the #2552 gold growth only happened to leave valid
+    # (it added edges to wp01-wp05) — the same hardcoded-denominator class the
+    # rest of this file no longer contains.
+    assert sum(len(v) for v in owned_by.values()) == \
+        corpus.planted_operator_count()
+    supersedes = [
+        op for ops in owned_by.values() for op in ops
+        if op.get("expected_kind") == "SUPERSEDE"
+    ]
+    assert len(supersedes) >= 1
+    assert all(op.get("to_session") == "wp06_quarry_rollout"
+               for op in supersedes)
+    assert any(op.get("expected_kind") == "SUPERSEDE"
+               for op in owned_by.get("wp07_bluepeak_followup", []))
+    # The receipt must CARRY the audit block (it is the publish artifact).
+    # ``build_receipt`` REBUILDS an explicit projection rather than copying the
+    # report's block, so this equality is a real cross-object check — a
+    # projection that drops or substitutes the key fails here. Pinned to the
+    # gold-derived count (an independent source), never to the report's own
+    # field and never to a literal.
     receipt = runner.build_receipt(report)
     assert runner.validate_receipt(receipt) == []
     assert "operator_audit" in receipt
-    assert receipt["operator_audit"]["planted"] >= \
-        generate_corpus.MIN_PLANTED_OPERATOR_EDGES
+    assert receipt["operator_audit"]["planted"] == corpus.planted_operator_count()
     assert (receipt["operator_audit"]["edge_correct"]
             < receipt["operator_audit"]["planted"])
     assert (receipt["operator_audit"]["operators_provenanced"]

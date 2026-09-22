@@ -151,8 +151,10 @@ def _operator(op_id: str, kind: str, from_anchor: str, from_turn: int,
 # #2552 (measurement power): raised 4 -> 15. A 4-edge denominator swung
 # 0, 1, 1, 1, 2 / 4 across runs on IDENTICAL code (recorded on #2552,
 # 2026-09-21), so no behavioural claim could be separated from LLM
-# variance. The floor is set to the corpus's actual count so a silent
-# shrink cannot re-open that hole.
+# variance. The floor is a LOWER BOUND derived from the per-kind map below —
+# NOT a pin of the corpus's actual count. A test/audit DENOMINATOR must come
+# from ``corpus.planted_operator_count()`` (the actual gold-derived count);
+# comparing it to this floor would stop tying the audit to the corpus.
 #
 # #2552 (code review): the TOTAL floor does not guard the PER-KIND denominators
 # the lane README names as the residual variance problem (SUPERSEDE 1,
@@ -168,6 +170,14 @@ MIN_PLANTED_OPERATOR_KINDS = {
 # (the code-review finding this closes).
 MIN_PLANTED_OPERATOR_EDGES = sum(MIN_PLANTED_OPERATOR_KINDS.values())
 REQUIRED_OPERATOR_KINDS = set(MIN_PLANTED_OPERATOR_KINDS)
+# The kind VOCABULARY has one source: ``schema.PLANTED_OPERATOR_KIND_VALUES``
+# is what ``validate_gold`` enforces. Link them at import so a vocabulary
+# change fails loudly here instead of in a distant test (code-review finding).
+if set(MIN_PLANTED_OPERATOR_KINDS) != set(schema.PLANTED_OPERATOR_KIND_VALUES):
+    raise AssertionError(
+        "MIN_PLANTED_OPERATOR_KINDS and schema.PLANTED_OPERATOR_KIND_VALUES "
+        f"disagree: {sorted(set(MIN_PLANTED_OPERATOR_KINDS) ^ set(schema.PLANTED_OPERATOR_KIND_VALUES))}"
+    )
 
 
 # ── Session authoring ───────────────────────────────────────────────────────
@@ -896,24 +906,29 @@ def render_corpus() -> dict[str, bytes]:
     return outputs
 
 
-def _operator_floor_issues(op_lists: list, *, label: str) -> list[str]:
+def _operator_floor_issues(golds: dict, *, label: str) -> list[str]:
     """The SINGLE source of the issue-#2514 operator-floor contract.
 
     Both the render path (``_assert_operator_floors`` — raises) and the
     committed-corpus validation (``validate_committed`` — collects) call this,
-    so the two cannot drift on which entries they count (the code-review
-    finding this closes: one copy guarded non-dict entries and the other did
-    not).
+    so the two cannot drift on which entries they count OR on how they extract
+    the contract's input (the code-review finding: one copy guarded non-dict
+    entries and the other did not).
 
-    ``op_lists`` is a list of ``planted_operators`` lists. Non-list and
-    non-dict entries are SKIPPED rather than raising — a malformed corpus is
-    reported by the schema validation, and this check must not turn it into an
+    ``golds`` maps an identifier to an already-loaded gold dict; the callers' only
+    remaining responsibility is the LOADER (``json.loads`` on rendered bytes vs
+    ``schema.read_json`` on disk). Non-dict golds and non-list / non-dict entries
+    are SKIPPED rather than raising — a malformed corpus is the schema
+    validation's finding, and this check must not turn it into an
     ``AttributeError``.
     """
     kinds: set = set()
     counts: dict = {}
     total = 0
-    for ops in op_lists:
+    for gold in golds.values():
+        if not isinstance(gold, dict):
+            continue
+        ops = gold.get("planted_operators") or []
         if not isinstance(ops, list):
             continue
         for op in ops:
@@ -955,11 +970,11 @@ def _assert_operator_floors(outputs: dict[str, bytes]) -> None:
     Kind coverage and edge count are one contract — ``_operator_floor_issues``.
     """
     issues = _operator_floor_issues(
-        [
-            json.loads(data).get("planted_operators") or []
+        {
+            rel: json.loads(data)
             for rel, data in outputs.items()
             if rel.startswith("gold/") and rel.endswith(".gold.json")
-        ],
+        },
         label="corpus",
     )
     if issues:
@@ -1131,10 +1146,7 @@ def validate_committed(root: Path | None = None) -> list[str]:
     # it counts.
     issues.extend(
         _operator_floor_issues(
-            [
-                schema.read_json(golds[session_id]).get("planted_operators") or []
-                for session_id in sorted(golds)
-            ],
+            {sid: schema.read_json(golds[sid]) for sid in sorted(golds)},
             label="committed corpus",
         )
     )

@@ -73,8 +73,22 @@ the session-capture boundary set (`claude`, `claude-desktop`, `claude-web`,
   wp07 3 · SUPPORTS 4 / MITIGATES 8 / NEGATE 2 / SUPERSEDE 1).  The 4-edge
   denominator swung **0, 1, 1, 1, 2 / 4 on IDENTICAL code** — it could not
   separate a fix from LLM variance, which is why the issue never closed.
-  `generate_corpus.MIN_PLANTED_OPERATOR_EDGES` is pinned to the new count so
-  a silent shrink cannot re-open the hole.  Known limitation: SUPERSEDE and
+  `generate_corpus.MIN_PLANTED_OPERATOR_KINDS` is the authority for the
+  floors — one entry per kind (SUPPORTS 4 / MITIGATES 8 / NEGATE 2 /
+  SUPERSEDE 1), enforced on every fresh render and on the committed corpus
+  (`_operator_floor_issues`, one contract, two adapters).
+  `MIN_PLANTED_OPERATOR_EDGES` and `REQUIRED_OPERATOR_KINDS` are **derived**
+  from it, so the three cannot describe different corpora.
+
+  ⛔ **A test or lane needing a DENOMINATOR must use
+  `corpus.planted_operator_count()`** — the ACTUAL gold-derived count. The
+  floor is a **lower bound** (a sum of minimums), so comparing an audit's
+  `planted` against it stops tying the audit to the corpus and would accept a
+  silent per-session shrink that still clears every floor.  Pinning a literal
+  (the original `== 4`, and a later private `15`) is the same defect class in
+  its other direction: it reddens every lane the moment the gold grows.
+
+  Known limitation: SUPERSEDE and
   NEGATE remain thin (1 and 2 instances), and the corpus plants only the
   kinds the write path already supports — it measures recall, not the F1/F2
   ontology mapping.

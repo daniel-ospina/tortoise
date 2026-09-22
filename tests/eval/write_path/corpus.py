@@ -84,6 +84,25 @@ def load_gold(session_id: str, root: Path = WRITE_PATH_DIR) -> dict:
     return schema.read_json(gold_path(session_id, root))
 
 
+def planted_operator_count(
+    ids: list[str] | None = None, root: Path = WRITE_PATH_DIR
+) -> int:
+    """The ACTUAL number of planted operator edges across ``ids`` (default:
+    every session in the corpus).
+
+    This is the ONE source for an operator-edge DENOMINATOR in tests and
+    lanes. It is deliberately NOT compared against a floor: the audit's
+    ``planted`` is this same gold-derived count, while
+    ``generate_corpus.MIN_PLANTED_OPERATOR_EDGES`` is a SUM OF MINIMUMS — a
+    lower bound. Pinning the audit to the floor would stop tying the audit to
+    the corpus and would accept a silent per-session shrink that still clears
+    every floor (code-review finding).
+    """
+    sel = session_ids(root) if ids is None else ids
+    return sum(len(load_gold(s, root).get("planted_operators") or [])
+               for s in sel)
+
+
 def compute_fixtures_hash(root: Path = WRITE_PATH_DIR) -> str:
     """sha256 over every fixture + gold file (``sha256:<hex>`` of the joined digest).
 

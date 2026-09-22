@@ -50,24 +50,33 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from tests.eval.write_path import corpus, runner  # noqa: E402
+from tests.eval.write_path import corpus, generate_corpus, runner  # noqa: E402
 
 # Every session in the corpus now carries planted operator gold (#2552 grew
 # the gold 4 -> 15 edges and spread it across all seven sessions).  wp06 is
 # captured BEFORE wp07 — the cross-session SUPERSEDE (wp07 op_04) resolves its
 # target against the earlier session's graph.
+# Derived from the corpus, never a hand-maintained list. A literal list here
+# meant a session added with planted operators was never captured — and BOTH
+# sides of this lane's denominator assertion came from that same literal, so
+# the lane stayed green while silently dropping coverage of the new edges
+# (code-review finding). ``session_ids()`` is sorted, so wp06 is still captured
+# before wp07 and the cross-session SUPERSEDE still resolves.
 OPERATOR_SESSIONS = [
-    "wp01_quarry_debug", "wp02_lumen_refactor", "wp03_ember_design",
-    "wp04_aurora_perf", "wp05_retro_writeup", "wp06_quarry_rollout",
-    "wp07_bluepeak_followup",
+    s for s in corpus.session_ids()
+    if corpus.load_gold(s).get("planted_operators")
 ]
-# Derived from the sealed golds, never a literal. A private literal here was
-# the THIRD instance of the hardcoded-denominator defect the #2552 gold growth
-# exposed (the other two were the summary lanes); growing the corpus must not
-# require editing this file.
-PLANTED_OPERATOR_EDGES = sum(
-    len(corpus.load_gold(s).get("planted_operators") or [])
-    for s in OPERATOR_SESSIONS
+# Derived from the sealed golds, never a literal (the THIRD instance of the
+# hardcoded-denominator defect the #2552 gold growth exposed).
+PLANTED_OPERATOR_EDGES = corpus.planted_operator_count(OPERATOR_SESSIONS)
+# A SUPERSEDE is a graph REF, not a foldable edge. Derive the count rather than
+# spelling a magic `1`: ``MIN_PLANTED_OPERATOR_KINDS["SUPERSEDE"]`` is a
+# MINIMUM, so a second planted SUPERSEDE is a legitimate measurement-power
+# extension — and it would have reddened this assertion.
+PLANTED_SUPERSEDES = sum(
+    1 for s in OPERATOR_SESSIONS
+    for op in (corpus.load_gold(s).get("planted_operators") or [])
+    if op.get("expected_kind") == "SUPERSEDE"
 )
 
 pytestmark = pytest.mark.timeout(900)
@@ -249,6 +258,10 @@ def test_deterministic_planted_operator_lane_grades_at_least_three(
     audit = report["operator_audit"]
     assert audit is not None
     assert audit["planted"] == PLANTED_OPERATOR_EDGES
+    # An INDEPENDENT floor alongside the corpus tie above: that equality moves
+    # with the golds, so a committed-corpus shrink would leave BOTH sides
+    # smaller and stay green (this lane never calls validate_committed).
+    assert audit["planted"] >= generate_corpus.MIN_PLANTED_OPERATOR_EDGES
     assert audit["content_ok"] == PLANTED_OPERATOR_EDGES, _failure_detail(audit)
     # The #2552 WIRE target on the deterministic lane.
     assert audit["edge_correct"] >= PLANTED_OPERATOR_EDGES - 1, \
@@ -393,4 +406,4 @@ def test_fold_lane_mints_every_planted_operator_endpoint():
                 assert (op["target"]["src"], op["target"]["dst"], "IMPL") in {
                     (o["src"], o["dst"], o["op_type"]) for o in payload["operators"]
                 }, f"{session_id}: MITIGATES target IMPL missing"
-    assert total_expected == PLANTED_OPERATOR_EDGES - 1  # SUPERSEDE is a ref
+    assert total_expected == PLANTED_OPERATOR_EDGES - PLANTED_SUPERSEDES

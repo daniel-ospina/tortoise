@@ -147,13 +147,15 @@ def test_bpre_lane_full_corpus_replay_emits_and_grades(sdk_factory):
     # only a few match (the audit dimension on the completed run; the operator
     # bar is a product-lane bar, see scoping note).
     #
-    # Pinned to the corpus FLOOR and compared with `>=`, never an exact value:
-    # MIN_PLANTED_OPERATOR_EDGES is a LOWER BOUND (generate_corpus fails when
-    # `total < floor`), so an equality here would redden this lane the moment
-    # the corpus GROWS — the very denominator-mismatch symptom the #2552 fix
-    # set out to eliminate. (A hardcoded 4 was the original form of that bug.)
+    # Pinned to the corpus FLOOR (a LOWER BOUND, so `>=`) AND tied to the
+    # gold-derived ACTUAL count. The floor alone cannot catch a silent
+    # per-session shrink that still clears every floor; the equality alone
+    # cannot catch one either (both sides are computed from the same golds).
+    # Together they do both — and neither is a literal, so growing the corpus
+    # reddens nothing.
     assert report["operator_audit"]["planted"] >= \
         generate_corpus.MIN_PLANTED_OPERATOR_EDGES
+    assert report["operator_audit"]["planted"] == corpus.planted_operator_count()
     assert report["operator_audit"]["edge_correct"] < \
         report["operator_audit"]["planted"]
     assert 1 <= report["operator_audit"]["content_ok"] <= \
@@ -171,14 +173,14 @@ def test_bpre_lane_full_corpus_replay_emits_and_grades(sdk_factory):
     assert runner.validate_receipt(receipt) == []
     assert receipt["judge_pin"] == JUDGE_PIN_MECHANICAL
     assert receipt["corpus_hash"] == corpus.compute_fixtures_hash()
-    # The receipt must CARRY the audit block (it is the publish artifact), and
-    # the carried denominator must clear the corpus floor. NOT an equality
-    # against `report["operator_audit"]["planted"]`: `build_receipt` copies that
-    # field verbatim, so such an assertion cannot independently fail — the
-    # repeated "guard that cannot fail" finding (#4261).
+    # The receipt must CARRY the audit (it is the publish artifact).
+    # ``build_receipt`` REBUILDS an explicit projection rather than copying the
+    # report's block, so this equality is a real cross-object check — a
+    # projection that drops or substitutes the key fails here. Pinned to the
+    # gold-derived count (an independent source), never to the report's own
+    # field and never to a literal.
     assert "operator_audit" in receipt
-    assert receipt["operator_audit"]["planted"] >= \
-        generate_corpus.MIN_PLANTED_OPERATOR_EDGES
+    assert receipt["operator_audit"]["planted"] == corpus.planted_operator_count()
 
 
 def test_bpre_lane_determinism_and_provenance_regression_fails(sdk_factory, tmp_path):
