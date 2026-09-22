@@ -22,6 +22,12 @@ class TurnRecord:
     tool_calls: int = 0
     tokens: int = 0
     model_call_outcome: ModelCallOutcome = ModelCallOutcome.OK
+    # #1416 auditability: which TVDE phase produced the turn and whether the
+    # accepted envelope came from a corrective repair (the content already
+    # carries the repaired response after a [[repair]] marker). Reported,
+    # never scored.
+    phase: str = ""
+    repaired: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -31,6 +37,8 @@ class TurnRecord:
             "tokens": self.tokens,
             "model_call_outcome": self.model_call_outcome.value,
             "content": self.content,
+            "phase": self.phase,
+            "repaired": self.repaired,
         }
 
 
@@ -56,6 +64,9 @@ class EpisodeResult:
     #: keep an EMPTY log (allowed — never claimed real).
     event_log: list[dict] = field(default_factory=list)
     #: run_mode discriminator (mock|real) — mock is never scored as real.
+    #: Task 10: session index within the scenario's stream (0 for the
+    #: single-session default; >0 only when config.sessions > 1).
+    session_index: int = 0
     run_mode: str = "mock"
 
     @property
@@ -105,7 +116,9 @@ class EpisodeTracker:
 
     def add_turn(self, *, role: str, content: str, tool_calls: int = 0,
                  tokens: int = 0,
-                 outcome: ModelCallOutcome = ModelCallOutcome.OK) -> None:
+                 outcome: ModelCallOutcome = ModelCallOutcome.OK,
+                 phase: str = "", repaired: bool = False) -> None:
         self.turns.append(TurnRecord(
             turn=len(self.turns) + 1, role=role, content=content,
-            tool_calls=tool_calls, tokens=tokens, model_call_outcome=outcome))
+            tool_calls=tool_calls, tokens=tokens, model_call_outcome=outcome,
+            phase=phase, repaired=repaired))

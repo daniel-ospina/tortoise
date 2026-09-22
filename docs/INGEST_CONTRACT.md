@@ -29,7 +29,7 @@ not yet visible in the shipped code at the time of writing, this doc says
 Related docs:
 
 - [Hosted quickstart](quickstart-cloud.md) — sign up, API key, MCP registration.
-- [Self-hosted quickstart](quickstart-selfhosted.md) — Docker / embedded, `TORTOISE_DB_URI`, transport modes.
+- [Self-hosted quickstart](quickstart-selfhosted.md) — Docker, `TORTOISE_DB_URI`, transport modes. (Embedded is the eval substrate, not a deployment path.)
 - [Ontology](ONTOLOGY.md) — point kinds, operator semantics, the edge vocabulary.
 - [Tortoise skill — how to use Tortoise](../skills/how-to-use-tortoise/SKILL.md) — agent-facing ingest guidance.
 
@@ -321,7 +321,7 @@ Three recovery tools, in order of preference:
 
 | Situation | Tool | Semantics |
 |---|---|---|
-| A point's **content is wrong** and a corrected version exists | `supersede_point(old_id, new_id)` (SDK) / `tortoise_supersede` | Atomically replaces the old point: `CORRECTS` edge, `outdated:true`, **all edges transferred** to the new point (operator edges both directions, structural edges), preserving type/direction/confidence/weight/label/`batch_id`. The old point keeps only the CORRECTS edge as provenance. *(Current v1 behavior — the #2421 restatement-vs-correction policy will replace the universal transfer with a per-edge carry/drop/pend triage for semantic edges; see ONTOLOGY §3.1.)* |
+| A point's **content is wrong** and a corrected version exists | `supersede_point(old_id, new_id)` (SDK) / `tortoise_supersede` | Atomically replaces the old point: `CORRECTS` edge, `outdated:true`, **all edges transferred** to the new point (operator edges both directions, structural edges), preserving type/direction/confidence/weight/label/`batch_id`. The old point keeps only the CORRECTS edge as provenance. *(Current v1 behavior — the #2421 restatement-vs-correction policy will replace the universal transfer with a per-edge carry/drop/pend triage for semantic edges; see ONTOLOGY §3.1.)* **Rebuild parity (#2489):** the 2b structural-edge transfer (snapshot-derivable rel set — `extractedFrom` + `aboutSubject`/`aboutObject`/`aboutEvent`/`aboutDocument`/`aboutPoint`) is journaled as flat `DirectEdgeRepoint` descriptors and replayed by pass-2b, so `rebuild_all` reproduces the live transfer state (successor keeps the edges, old does not resurrect them). The no-self-edge guard (target node == successor) journals a `delete_only` descriptor instead. Descriptors exist only for post-deploy supersedes — a pre-fix journal rebuild does not repair old resurrections (see ONTOLOGY §3.1). |
 | A point should **not exist** | `retract_point(id)` (SDK) / `tortoise_retract_point` | Terminal `status="retracted"` tombstone; default query surfaces exclude it (`include_retracted=True` to see it). |
 | An **operator / mitigation** was wrongly ingested | see operator disposition below | `supersede_point` rejects operators (supersession is for statement points) — disposition is explicit, never silent. |
 
@@ -431,7 +431,7 @@ the `{error}`-only shape whose retry action is different.
 | **stdio, non-dev** (`TORTOISE_API_KEY` set) | **Fail-closed** — every tool rejects with an auth-required message. stdio cannot carry auth tokens. | — |
 | **stdio, dev mode** (no `TORTOISE_API_KEY`) | Local eval only. | N/A |
 | **Self-host static / none** (`serve --http --auth static` or `none`) | Single-tenant `team_selfhost` namespace. | **Quota N/A** (selfhost has no billing; batch caps still apply). |
-| **Self-host tenant** (`serve --http --auth tenant`) | Per-team `team_{id}` namespaces, `tt_` keys. Registry unavailable → **503 `ERR_REGISTRY` pre-write** (never a silent pass). | Enforced per team. |
+| **Self-host tenant** (`serve --http --auth tenant`) | Per-team `org_{id}` namespaces, `tt_` keys. Registry unavailable → **503 `ERR_REGISTRY` pre-write** (never a silent pass). | Enforced per team. |
 | **Hosted** (`https://api.premiselabs.co/mcp/`) | streamable-http, `Bearer tt_<key>`. | Enforced. |
 
 Additional posture rules:
@@ -440,7 +440,7 @@ Additional posture rules:
   (fail-closed); it never depends on dev-mode alone.
 - **Ingest works offline / degraded:** embeddings degrade to lexical/FTS
   search; structure (edges, `batch_id`, EP) is unaffected.
-- HTTP tenant mode writes to a fresh `team_{id}` namespace — data written over
+- HTTP tenant mode writes to a fresh `org_{id}` namespace — data written over
   stdio stays in the `tortoise` graph; they are separate namespaces.
 - Cross-process embedded contention: **planned** — this release adds the fail-fast
   `EmbeddedStoreBusyError` contract ([§8 row 9](#8-when-your-ingest-fails-error-code--action));
@@ -648,7 +648,7 @@ residue.
 | Direct-edge writer | `tortoise/sdk.py` (`create_direct_edge`, planned) |
 | `tortoise_ingest` MCP tool | `tortoise/mcp_server.py` |
 | Error constants | `tortoise/mcp_auth.py` (`ERR_UNAUTHORIZED`, `ERR_REGISTRY`, `-32099`), `tortoise/mcp_server.py` (`ERR_QUOTA`, `ERR_QUOTA_SERVER`, `ERR_INVALID`; `ERR_BUNDLE_INVALID` planned) |
-| Quota | `tortoise/quota.py` (`enforce_team_limit`, `_count_resource`, `resolve_team_limits`) |
+| Quota | `tortoise/quota.py` (`enforce_org_limit`, `_count_resource`, `resolve_org_limits`) |
 | Lifecycle (draft→live) | `tortoise/sdk.py` (`update_point`, `create_operator` `promote_source`) |
 | Recovery (supersede / retract) | `tortoise/sdk.py` (`supersede_point`, `retract_point`) |
 | Read-back | `tortoise/sdk.py` (`recall_subgraph`, `query`) |

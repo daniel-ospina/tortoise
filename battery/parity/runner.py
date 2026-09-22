@@ -31,11 +31,25 @@ from pathlib import Path  # noqa: F401
 
 #: Pinned dataset versions (locked at implementation — the runner refuses
 #: to run on mismatch; plan E2E-4.1).
+#:
+#: ``memoryagentbench_tortoise`` (#2985/#3005 P1) is the retrieved-context
+#: TORTOISE lane of the ``memoryagentbench`` benchmark: the SAME pinned
+#: dataset/version, registered under its own key so the parity CLI actually
+#: DISPATCHES it. Without the entry the lane's registry entry
+#: (``executors.EXECUTORS["memoryagentbench_tortoise"]``) was unreachable —
+#: the CLI loop iterates THIS mapping — and its capability gate + provenance
+#: were inert outside tests that monkeypatched ``EXECUTORS``. The parity
+#: record therefore carries TWO cells for the benchmark: the full-context
+#: baseline under ``memoryagentbench`` and the retrieved-context arm under
+#: ``memoryagentbench_tortoise`` (the record is keyed by the pinned id, and
+#: each cell carries its own ``lane``); this is deliberate, never a silent
+#: collision.
 PINNED_VERSIONS: dict[str, str] = {
     "longmemeval": "longmemeval-2025.3",
     "locomo": "locomo-v1",
     "memoryarena": "memoryarena-hf-rev-2026.02",
     "memoryagentbench": "memoryagentbench-2025.4",
+    "memoryagentbench_tortoise": "memoryagentbench-2025.4",
 }
 
 class VersionMismatchError(Exception):
@@ -118,6 +132,37 @@ class ParityRun:
     samples: int
     protocol_hash: str | None = None
     protocol_unknown: bool = False
+    #: The dataset identity the runner ACTUALLY loaded (#2800) — set only
+    #: when a benchmark executed; a not-measured cell has no revision.
+    revision: str | None = None
+    #: The lane that produced the number: one of ``executors.LANES``
+    #: ("real"/"mock" for the full-context released-runner lanes, or the
+    #: retrieved-context arm labels "real_tortoise"/"mock_tortoise", #2800),
+    #: or None when no benchmark ran — a mock/Tortoise number must never read
+    #: as a full-context baseline.
+    lane: str | None = None
+
+    def __post_init__(self) -> None:
+        # The invariant is enforced at CONSTRUCTION, not only in run_parity
+        # (#2806 review P2): ParityRun is exported and directly
+        # constructible, so a caller could otherwise represent a number with
+        # no samples behind it — exactly the shape #2797 removes.
+        if self.accuracy is not None and self.samples <= 0:
+            raise ValueError(
+                f"parity {self.benchmark}: accuracy={self.accuracy!r} with "
+                f"samples={self.samples} is not a measurement (#2797)")
+
+    @property
+    def measured(self) -> bool:
+        """True only when a benchmark ACTUALLY RAN (#2797).
+
+        Derived, never settable: an accuracy is a measurement only when
+        samples back it. ``run_parity`` refuses the inconsistent pair
+        (accuracy with samples <= 0), so this property cannot be turned on
+        by a caller-supplied constant. A not-measured cell reads as
+        no-data — never as a score.
+        """
+        return self.accuracy is not None and self.samples > 0
 
 
 def check_pinned_version(benchmark: str, version: str) -> None:
@@ -152,7 +197,9 @@ def run_parity(benchmark: str, version: str, arm: str,
                *,
                accuracy: float | None = None,
                samples: int = 0,
-               protocol: str | None = None) -> ParityRun:
+               protocol: str | None = None,
+               revision: str | None = None,
+               lane: str | None = None) -> ParityRun:
     """Execute one parity cell. Raises on version/baseline mismatch.
 
     Compares all THREE methodology hashes when the baseline record carries
@@ -165,6 +212,12 @@ def run_parity(benchmark: str, version: str, arm: str,
     unchanged (the #1414 invisibility hole closed).
     """
     check_pinned_version(benchmark, version)
+    if accuracy is not None and samples <= 0:
+        raise ValueError(
+            f"parity {benchmark}: accuracy={accuracy!r} with samples={samples} "
+            f"is not a measurement (#2797) — a number may only be recorded "
+            f"for a benchmark that actually ran; pass accuracy=None (and "
+            f"samples=0) for a not-measured cell")
     if baseline is None:
         raise BaselineMissingError(
             f"baseline record missing for {benchmark} — the #1144 baseline "
@@ -181,7 +234,8 @@ def run_parity(benchmark: str, version: str, arm: str,
     return ParityRun(benchmark=benchmark, arm=arm, version=version,
                      accuracy=accuracy, methodology_matched=matched,
                      samples=samples, protocol_hash=protocol,
-                     protocol_unknown=not can_verify_protocol)
+                     protocol_unknown=not can_verify_protocol,
+                     revision=revision, lane=lane)
 
 
 # ── Bespoke supersession-vs-stale probe ────────────────────────────────

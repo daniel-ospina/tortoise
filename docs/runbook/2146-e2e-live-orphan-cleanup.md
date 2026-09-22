@@ -35,14 +35,14 @@ loaded (~15 s/run) and ran #1566 welcome-mode provisioning:
 `apps/dashboard` welcome mode (`website/apps/dashboard/src/main.jsx`
 `provisionInApp`) → Supabase edge fn **`tenant-provision`**
 (`supabase/functions/tenant-provision/index.ts`) → **`provision_team` RPC**
-(migration 0010) → atomic `teams` + `team_memberships` + `api_keys` rows,
-then FastAPI `/internal/demo` seeds the FalkorDB **graph `team_{team_id}`**
-where `team_id = sha256(user_id).hexdigest()[:26]` (deterministic per user),
+(migration 0010) → atomic `teams` + `org_memberships` + `api_keys` rows,
+then FastAPI `/internal/demo` seeds the FalkorDB **graph `org_{org_id}`**
+where `org_id = sha256(user_id).hexdigest()[:26]` (deterministic per user),
 team `name`/`email` = `e2e-live-<8 hex>@premise-labs.dev`, key `tt_<64 hex>`
 (one api_keys row per team; `created_via='provisioned'`).
 
 Monitor teardown (`tests/e2e/supabase_admin.py delete_user_by_email`, GoTrue
-Admin API) deletes only the auth user. FK `team_memberships.user_id →
+Admin API) deletes only the auth user. FK `org_memberships.user_id →
 auth.users` CASCADE removes the membership rows — but **`teams`, `api_keys`
 and the FalkorDB graphs are not cascaded and are never cleaned** (no cleanup
 endpoint in-repo).
@@ -55,7 +55,7 @@ endpoint in-repo).
 | `public.teams` (`email LIKE 'e2e-live-%@premise-labs.dev'`) | **154** | **222** |
 | `auth.users` remaining (`e2e-live-*`) | 1 | **12** |
 | `public.api_keys` (orphan teams) | 154 | 222 |
-| `public.team_memberships` (orphan teams) | 2 | 2 |
+| `public.org_memberships` (orphan teams) | 2 | 2 |
 | `public.invitations` | 0 | 0 |
 | `public.abuse_events` (`key_create`, orphan teams) | 154 | 222 |
 | `public.audit_events` / metering / oauth (FK-cascade or trail) | 0 | 0 |
@@ -119,30 +119,30 @@ ORDER BY u.created_at;
 ```
 
 **Q3 — children per orphan team** (replace `<ids>` with the Q1 id list):
-expect `api_keys` 154, `team_memberships` 2, `invitations` 0, `abuse_events`
+expect `api_keys` 154, `org_memberships` 2, `invitations` 0, `abuse_events`
 154, `analytics_events` (rows minted by real-app-root loads; counted 0 in the
 2026-09-02 inventory but re-check here — check-only: the table is append-only
 via migration 0004's immutability trigger, so the script counts but never
 deletes), `audit_events` 0.
 ```sql
 SELECT 'api_keys' AS kind, count(*) FROM public.api_keys
-  WHERE team_id IN (<ids>)
-UNION ALL SELECT 'team_memberships', count(*) FROM public.team_memberships
-  WHERE team_id IN (<ids>)
+  WHERE org_id IN (<ids>)
+UNION ALL SELECT 'org_memberships', count(*) FROM public.org_memberships
+  WHERE org_id IN (<ids>)
 UNION ALL SELECT 'invitations', count(*) FROM public.invitations
-  WHERE team_id IN (<ids>)
+  WHERE org_id IN (<ids>)
 UNION ALL SELECT 'abuse_events', count(*) FROM public.abuse_events
-  WHERE team_id IN (<ids>)
+  WHERE org_id IN (<ids>)
 UNION ALL SELECT 'analytics_events', count(*) FROM public.analytics_events
-  WHERE team_id IN (<ids>)
+  WHERE org_id IN (<ids>)
 UNION ALL SELECT 'audit_events', count(*) FROM public.audit_events
-  WHERE team_id IN (<ids>);
+  WHERE org_id IN (<ids>);
 ```
 
 **Q4 — FK catalog sanity (delete-semantics evidence):**
 ```sql
 SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint
-WHERE conrelid IN ('public.teams','public.api_keys','public.team_memberships',
+WHERE conrelid IN ('public.teams','public.api_keys','public.org_memberships',
                    'public.invitations','public.abuse_events')::regclass
   AND contype = 'f';
 ```
@@ -167,26 +167,26 @@ Live FK catalog (`pg_constraint`, 2026-09-02):
 
 | Constraint | Def | Effect of deleting the parent |
 |---|---|---|
-| `user_teams_user_id_fkey` (on `team_memberships`) | `user_id → auth.users(id) ON DELETE CASCADE` | Deleting an auth user removes their membership rows (this is the ONLY cascade the monitor teardown relies on) |
-| `api_keys` FK | `team_id → teams(id) ON DELETE CASCADE` | Deleting the teams row removes its api_keys rows |
-| `invitations` FK | `team_id → teams(id) ON DELETE CASCADE` | same |
-| `abuse_events_team_id_fkey` | `team_id → teams(id) ON DELETE CASCADE` | same (the 0015 `key_create` rows minted per provisioned key) |
-| `team_memberships.team_id` | **no FK** | memberships are NOT removed by a teams-row delete — delete explicitly |
+| `user_teams_user_id_fkey` (on `org_memberships`) | `user_id → auth.users(id) ON DELETE CASCADE` | Deleting an auth user removes their membership rows (this is the ONLY cascade the monitor teardown relies on) |
+| `api_keys` FK | `org_id → teams(id) ON DELETE CASCADE` | Deleting the teams row removes its api_keys rows |
+| `invitations` FK | `org_id → teams(id) ON DELETE CASCADE` | same |
+| `abuse_events_org_id_fkey` | `org_id → teams(id) ON DELETE CASCADE` | same (the 0015 `key_create` rows minted per provisioned key) |
+| `org_memberships.org_id` | **no FK** | memberships are NOT removed by a teams-row delete — delete explicitly |
 | `analytics_events` (0004) | **no FK + `analytics_events_immutable` trigger** | append-only (BEFORE UPDATE OR DELETE, statement-level, not role-gated) — survives by design; check-only in the script (a bare DELETE would fire the trigger and strand the purge). Operator decision required if rows are ever deleted |
 | `audit_events` | **no FK + immutable trigger** | the append-only trail — survives by design; never deleted |
-| `metering_records` (0014) / `oauth` (0016) / `agent_signup_tokens` (20260814000001) / `graphs` (20260901000001) | `team_id → teams(id) ON DELETE CASCADE` | die with the teams row — no explicit delete needed |
+| `metering_records` (0014) / `oauth` (0016) / `agent_signup_tokens` (20260814000001) / `graphs` (20260901000001) | `org_id → teams(id) ON DELETE CASCADE` | die with the teams row — no explicit delete needed |
 
 There is **no in-repo hosted-api delete-team path usable for orphans**: `DELETE
-/v1/teams/{team_id}` (`hosted_api.py` — the delete route) is JWT-owner-gated
+/v1/organizations/{org_id}` (`hosted_api.py` — the delete route) is JWT-owner-gated
 (soft delete → 24 h grace → purge) and the orphan users are gone — an
 operator cannot act as an owner. The sanctioned **purge machinery** is
 `purge_team_control_plane` (`supabase_control.py` — deletes
-api_keys → team_memberships → invitations, teams row **last** as retry anchor)
+api_keys → org_memberships → invitations, teams row **last** as retry anchor)
 + the in-repo mint-failure compensation graph calls
 (`select_graph(name).delete()`, `hosted_api.py` — register compensation and
 agent-signup compensation). The cleanup
 scripts below mirror that ordering with direct SQL (api_keys →
-team_memberships → invitations → abuse_events →
+org_memberships → invitations → abuse_events →
 audit_events INSERT → teams LAST), plus an append-only `audit_events` row per
 purged team (`operation='e2e_live_orphan_purged'`, per-run uuid in the id so
 re-runs after a partial failure never collide) written **before** the
@@ -269,7 +269,7 @@ uv run python3 graph-scripts/2146_falkordb_graph_cleanup.py --manifest 2146-e2e-
 ```
 
 Delete order (children first, teams last — retry-anchor semantics of the
-product purge): **auth users** (GoTrue) → **team_memberships** →
+product purge): **auth users** (GoTrue) → **org_memberships** →
 **api_keys** → **invitations** → **abuse_events** → `audit_events` append →
 **teams** (last). FalkorDB graphs may run before or after the teams-row delete
 (manifest-driven; a graph left behind is a benign orphan with no DB row).

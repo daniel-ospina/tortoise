@@ -11,18 +11,31 @@ WHAT IT MEASURES (retrieval only — no reader, no provider keys):
                             retrieval call returns at limit=120 (the pool
                             floor is 120, so this IS the full fused pool).
   * gold-in-context@cap   — the gold id is among the ASSEMBLED context ids
-                            under the historical caps (limit 40, item cap 40,
-                            8k tokens, 32 KiB bytes — the ask lane's default).
+                            under the HISTORICAL caps this bench froze
+                            (limit 40, item cap 40, 8k tokens, 32 KiB bytes
+                            — the ask lane's pre-#4105 default, NOT what
+                            ``resolve_ask_retrieval_caps()`` ships today:
+                            200/200/16000/derived). Kept literal on purpose
+                            so this bench stays the pre-#4105 baseline of
+                            record; the modern lane is measured with
+                            ``tools/ask_shape_rate.py``.
   * gold-in-context@120   — the same assembly under the A6-raised caps
                             (limit 120, item cap 120) — what the cap review
-                            would buy for in-pool gold.
+                            would buy for in-pool gold. NOTE: this arm still
+                            assembles under the frozen 32 KiB byte ceiling,
+                            so it measures a window a raised item/token cap
+                            cannot fully buy — the exact silent no-op #4105
+                            removes from the product lane (filed as a
+                            follow-up; the product lane derives the ceiling
+                            from the token cap instead).
 
 SEEDING PARITY (verifier-fix): ingestion mirrors ``tools/longmem_eval/
 ingest.py`` (search_keys + has_answer + embeddings + session props + the
 deterministic turn→point-id map ``lme:{qid}:s{si}:t{ti}``) — NOT
-``ask_spotcheck._seed_memory``'s bare ``create_point("statement", content)``
-(which writes no search_keys/has_answer/id map → A4/A5 would have zero
-material and gold turns would be unidentifiable).
+``ask_spotcheck._seed_memory`` (which seeds the capture shape but still
+writes no search_keys/has_answer and no EVAL-PARITY id map — its
+deterministic ids are ``{sid}_t{i}``, not ``lme:{qid}:s{si}:t{ti}``, so this
+bench's gold-turn keys would find nothing).
 
 LANES: ``--lane embedded`` (today's degraded reality — no FTS index, TF-IDF
 fallback, vector leg absent unless ``--embedder`` injects a probe) or
@@ -30,10 +43,12 @@ fallback, vector leg absent unless ``--embedder`` injects a probe) or
 installed; ``TORTOISE_DB_URI`` must be set).
 
 LEVERS: ``--levers on`` enables the ask-lane knobs (A1 numeric tokens,
-A4 search_keys PRF, A5 evidence boost) exactly the way ``ask()`` resolves
+A4 search_keys PRF, A5 evidence boost) exactly the way ``run_ask_lane()``
+resolves
 them; ``--levers off`` (default) disables them for the baseline. A3 fusion
 weights/k are threaded from the env (TORTOISE_ASK_FUSION_WEIGHTS/_K) in
-BOTH postures — default None/60 = the shared global, matching ``ask()``.
+BOTH postures — default None/60 = the shared global, matching
+``run_ask_lane()``.
 ``--cap-limit N``/``--cap-item N`` set the A6 measurement caps.
 
 A2 EMBEDDER PROBE: ``--embedder <name>`` injects a same-384-dim probe model
@@ -76,8 +91,10 @@ logger = logging.getLogger("ask_recall_bench")
 #: 1d4e3b97 (thin overlap + stem mismatch on the embedded lane).
 RECORDED_FAILURES = ["ceb54acb", "1de5cff2", "gpt4_d84a3211", "1d4e3b97"]
 
-#: Historical ask-lane caps (the 8k/40/32KiB budget) and the A6-raised
-#: measurement caps.
+#: HISTORICAL ask-lane caps (the pre-#4105 8k/40/32KiB budget) and the
+#: A6-raised measurement caps. Frozen literals: this bench IS the pre-#4105
+#: baseline of record, and the product lane now resolves
+#: 200/200/16000/derived (``resolve_ask_retrieval_caps``, #4105).
 CONTEXT_TOKEN_CAP = 8000
 BYTE_CAP = 32768
 
@@ -290,9 +307,10 @@ def _scan_for_failures(data: list[dict], *, scan_limit: int,
 
 def _levers_env(levers: str) -> None:
     """Set the ask-lane env knobs to the requested lever posture so the bench
-    measures exactly what ``ask()`` would resolve (single source of truth).
+    measures exactly what ``run_ask_lane()`` would resolve (single source of
+    truth).
     A3's fusion weights/k default to the shared global (None/60) in BOTH
-    postures — matching ``ask()``, which passes them through only when the
+    postures — matching ``run_ask_lane()``, which passes them through only when the
     operator sets TORTOISE_ASK_FUSION_* explicitly."""
     if levers == "off":
         os.environ["TORTOISE_ASK_NUMERIC_TOKENS"] = "0"
@@ -305,7 +323,7 @@ def _levers_env(levers: str) -> None:
 
 
 def _resolve_bench_a3() -> tuple[dict | None, int]:
-    """Resolve the A3 fusion knobs exactly as ``ask()`` does (the env is the
+    """Resolve the A3 fusion knobs exactly as ``run_ask_lane()`` does (the env is the
     single source of truth — TORTOISE_ASK_FUSION_WEIGHTS / _K). Default
     None/60 = the shared global resolution, unchanged."""
     from tortoise.retrieval import (

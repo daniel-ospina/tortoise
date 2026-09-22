@@ -406,31 +406,31 @@ class TestSignupVelocity:
         # P1-FIX-2: breach on >= — the success feed fires on the 2nd mint
         # ("IP consumed its entire allowance" = the designed review signal).
         tr = SignupVelocityTracker(threshold=2, window_s=3600)
-        assert tr.record_signup("1.2.3.4", team_id="t1") is None
-        breach = tr.record_signup("1.2.3.4", team_id="t2")  # 2nd mint = breach
+        assert tr.record_signup("1.2.3.4", org_id="t1") is None
+        breach = tr.record_signup("1.2.3.4", org_id="t2")  # 2nd mint = breach
         assert breach == ("ip", "1.2.3.4")
         assert [c[0] for c in notified] == ["abuse_signup_velocity"]
         assert len(notified) == 1
         # dedup: further mints in the same window do NOT re-notify
-        tr.record_signup("1.2.3.4", team_id="t3")
+        tr.record_signup("1.2.3.4", org_id="t3")
         assert len(notified) == 1
 
     def test_window_expiry_rearms(self, monkeypatch, notified):
         tr = SignupVelocityTracker(threshold=2, window_s=60)
         for i in range(2):
-            tr.record_signup("9.9.9.9", team_id=f"t{i}", now=1000.0 + i)
+            tr.record_signup("9.9.9.9", org_id=f"t{i}", now=1000.0 + i)
         assert len(notified) == 1
         # window expires → a fresh burst is a NEW episode (re-notify)
         for i in range(2):
-            tr.record_signup("9.9.9.9", team_id=f"t{i}", now=2000.0 + i)
+            tr.record_signup("9.9.9.9", org_id=f"t{i}", now=2000.0 + i)
         assert len(notified) == 2
 
     def test_block_path_same_episode(self, monkeypatch, notified):
         # P1-FIX-2: success breach (2nd mint) + 429 block dedup to ONE email
         # per (ip, window) — same dedup key, never two.
         tr = SignupVelocityTracker(threshold=2, window_s=3600)
-        tr.record_signup("1.2.3.4", team_id="t1")
-        tr.record_signup("1.2.3.4", team_id="t2")   # success breach → notify
+        tr.record_signup("1.2.3.4", org_id="t1")
+        tr.record_signup("1.2.3.4", org_id="t2")   # success breach → notify
         tr.record_block("1.2.3.4")                    # 429 path → dedup'd
         tr.record_block("1.2.3.4")
         assert len(notified) == 1
@@ -438,7 +438,7 @@ class TestSignupVelocity:
     def test_kill_switch(self, monkeypatch, notified):
         monkeypatch.setenv("TORTOISE_ABUSE_DISABLED", "1")
         tr = SignupVelocityTracker(threshold=1, window_s=3600)
-        assert tr.record_signup("1.2.3.4", team_id="t1") is None
+        assert tr.record_signup("1.2.3.4", org_id="t1") is None
 
     def test_memory_bound(self, monkeypatch, notified):
         # P1-B: the prune drops STALE entries (R3 precedent) — feed 10,100
@@ -448,7 +448,7 @@ class TestSignupVelocity:
         base = 1_000_000.0
         for i in range(10_100):
             now = base - 7200 if i < 200 else base  # first 200 stale (>window)
-            tr.record_signup(f"10.{(i // 250) % 250}.{i % 250}", team_id=f"t{i}", now=now)
+            tr.record_signup(f"10.{(i // 250) % 250}.{i % 250}", org_id=f"t{i}", now=now)
         # 10,100 > 10,000 → prune ran; 200 stale dropped, 9,900 live remain
         assert len(tr._by_ip) == 9_900
 ```
@@ -506,7 +506,7 @@ class SignupVelocityTracker:
             self._by_ip.clear()
             self._notified.clear()
 
-    def record_signup(self, ip: str | None, team_id: str | None = None,
+    def record_signup(self, ip: str | None, org_id: str | None = None,
                       now: float | None = None) -> tuple[str, str] | None:
         """Success-path feed: count minted teams per IP per window.
         Returns ('ip', ip) on breach (len >= threshold), else None. Notify
@@ -533,10 +533,10 @@ class SignupVelocityTracker:
                     return None  # already notified this window
                 self._notified[ip] = now
         if breach is not None:
-            self._notify("velocity", ip, team_id, {"count": len(bucket)})
+            self._notify("velocity", ip, org_id, {"count": len(bucket)})
         return breach
 
-    def record_block(self, ip: str | None, team_id: str | None = None,
+    def record_block(self, ip: str | None, org_id: str | None = None,
                      now: float | None = None) -> None:
         """Block-path feed: the signup limiter 429'd this IP. Same dedup key
         (bare ip) as the success feed — the 429 after a 2-mint allowance is
@@ -551,9 +551,9 @@ class SignupVelocityTracker:
             if last is not None and now - last < self.window_s:
                 return
             self._notified[ip] = now
-        self._notify("blocked", ip, team_id, {})
+        self._notify("blocked", ip, org_id, {})
 
-    def _notify(self, reason: str, ip: str, team_id: str | None,
+    def _notify(self, reason: str, ip: str, org_id: str | None,
                 details: dict) -> None:
         # P4-FIX: payload carries count ALWAYS (block path details={} → count
         # 0 is fine; _alert_dict reads details.get('count')).
@@ -564,9 +564,9 @@ class SignupVelocityTracker:
         try:
             from tortoise.supabase_control import get_abuse_store
             store = get_abuse_store()
-            if team_id:
+            if org_id:
                 store.record_event(
-                    team_id, EVENT_SIGNUP_VELOCITY,
+                    org_id, EVENT_SIGNUP_VELOCITY,
                     details={"ip": ip, "reason": reason, **details})
         except Exception:
             logger.debug("signup-velocity event record failed (%s)", ip)
@@ -574,7 +574,7 @@ class SignupVelocityTracker:
             from tortoise.notify import notify_abuse
             # anon team → no email → BILLING_NOTIFY_TO ops fallback
             notify_abuse("abuse_signup_velocity",
-                         {"team_id": team_id, "email": None},
+                         {"org_id": org_id, "email": None},
                          {"ip": ip, "reason": reason,
                           "count": details.get("count", 0),
                           "threshold": self.threshold,
@@ -587,16 +587,16 @@ class SignupVelocityTracker:
 SIGNUP_TRACKER = SignupVelocityTracker()
 
 
-def record_signup(ip: str | None, team_id: str | None = None,
+def record_signup(ip: str | None, org_id: str | None = None,
                   now: float | None = None) -> tuple[str, str] | None:
     """Module-level seam (monkeypatchable) over the shared tracker."""
-    return SIGNUP_TRACKER.record_signup(ip, team_id, now)
+    return SIGNUP_TRACKER.record_signup(ip, org_id, now)
 
 
-def record_signup_block(ip: str | None, team_id: str | None = None,
+def record_signup_block(ip: str | None, org_id: str | None = None,
                         now: float | None = None) -> None:
     """Module-level seam for the 429 path."""
-    SIGNUP_TRACKER.record_block(ip, team_id, now)
+    SIGNUP_TRACKER.record_block(ip, org_id, now)
 ```
 
 Add the `_alert_dict` message entry (the dict already binds `details = row.get("details") or {}` before `messages`):
@@ -622,11 +622,11 @@ At BOTH success points (after `_async_audit`, before return — hosted_api.py:47
 ```python
 from tortoise import abuse as _abuse  # add to the function-level import block
 ...
-await _async_audit(request, team_id, "agent_signup", resource_type="team", resource_id=team_id)
+await _async_audit(request, org_id, "agent_signup", resource_type="team", resource_id=org_id)
 # P3-D/P3-6: notify_abuse is sync httpx — fire-and-forget so ops email
 # latency never delays the cold-start mint (best-effort telemetry; #310)
 asyncio.create_task(asyncio.to_thread(_abuse.record_signup, getattr(request.state, "client_ip", None)
-                        or (request.client.host if request.client else None), team_id)
+                        or (request.client.host if request.client else None), org_id)
 ```
 
 At the limiter call (4705) — block-path feed:
@@ -657,11 +657,11 @@ def test_signup_feeds_velocity_tracker(self, client, monkeypatch):
     """R8 success-path feed: a successful mint records the IP."""
     calls = []
     monkeypatch.setattr("tortoise.abuse.record_signup",
-                        lambda ip, team_id=None, now=None: calls.append((ip, team_id)))
+                        lambda ip, org_id=None, now=None: calls.append((ip, org_id)))
     r = client.post("/v1/agent/signup", json={})
     assert r.status_code == 200
     assert len(calls) == 1
-    assert calls[0][1] == r.json()["team_id"]
+    assert calls[0][1] == r.json()["org_id"]
 
 
 def test_signup_ip_limit_and_velocity_single_notify(self, client, monkeypatch):
@@ -718,7 +718,7 @@ def test_anon_team_bound_by_free_tier_caps(self, client):
     row = sdk._get_registry().query(
         "MATCH (t:Team {id:$id}) RETURN t.max_users, t.max_graphs, "
         "t.max_api_keys, t.ops_allowance, t.graph_size_cap",
-        params={"id": r.json()["team_id"]},
+        params={"id": r.json()["org_id"]},
     ).result_set[0]
     assert row[0] == lim["max_users_per_team"]
     assert row[1] == lim["max_graphs_per_team"]
@@ -973,7 +973,7 @@ supabase db push --dry-run && supabase db push   # + idempotent re-apply check
 
 **1. R8 on audit_events DB count (Reviewer 1 A — durable gate).** Query audit_events (operation='agent_signup', ip_address, window) per request. Rejected: needs a read API that doesn't exist (AuditLogger is write-only), DSN dependency (JSONL mode has no queryable store — the rule would silently no-op in selfhost), a per-request DB query on the mint path (latency + a new failure surface), and RLS/reader considerations — all for a NOTIFY-ONLY signal whose durability consensus says matters less. Its descendant IS shipped: the deferred sweeper (Decision 1) + idx_audit_ip_time. *Would have been better when:* multi-instance hosting is live or the ops dashboard is in build — the durable count is authoritative across restarts/instances.
 
-**2. abuse_events piggyback (Reviewer 1 C).** Record signup velocity into abuse_events via middleware refactor. Rejected: `abuse_events.team_id NOT NULL REFERENCES teams(id)` (migration 0015) + NO ip_address column + team-scoped indexes make it structurally wrong for IP-scoped rules; the middleware refactor couples the enforcement layer to the signal layer. *Would have been better when:* the rule were team-scoped (e.g. per-minted-team key velocity) — then the existing store + R2 machinery would apply directly. (R8's event ROW does land in abuse_events for the dashboard via `record_event`, anchored on the minted team_id — best-effort, no schema change.)
+**2. abuse_events piggyback (Reviewer 1 C).** Record signup velocity into abuse_events via middleware refactor. Rejected: `abuse_events.org_id NOT NULL REFERENCES teams(id)` (migration 0015) + NO ip_address column + team-scoped indexes make it structurally wrong for IP-scoped rules; the middleware refactor couples the enforcement layer to the signal layer. *Would have been better when:* the rule were team-scoped (e.g. per-minted-team key velocity) — then the existing store + R2 machinery would apply directly. (R8's event ROW does land in abuse_events for the dashboard via `record_event`, anchored on the minted org_id — best-effort, no schema change.)
 
 **3. Per-device/device-ID fallback limiter (issue P2 #9).** Rejected: #741 — client-supplied device IDs are ignored (trivially spoofable); server-side fingerprinting needs a client SDK incompatible with the one-command CLI. *Would have been better when:* a first-party client (SDK/daemon) exists that can carry a trusted device attestation — then the NAT false-positive class (research: corporate VPN/CGNAT) gets its second factor.
 

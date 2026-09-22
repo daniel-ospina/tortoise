@@ -8,9 +8,9 @@ surface (JWKS + PostgREST over the FakeControlPlane row store + GoTrue
   1. POST /v1/agent/signup  → tt_ key + anon team (identity-anchored owner)
   2. Pre-claim: GET /v1/team with the key → 200 (anon team, key auths)
   3. Claim: POST /v1/claim with a fresh provider-verified session JWT + the
-     pasted key → 200, same team_id
-  4. Post-claim session plane: GET /v1/teams (JWT) lists the claimed team,
-     GET /v1/teams/{team_id}/members shows the linked owner — the claimed
+     pasted key → 200, same org_id
+  4. Post-claim session plane: GET /v1/organizations (JWT) lists the claimed team,
+     GET /v1/organizations/{org_id}/members shows the linked owner — the claimed
      user sees graphs+members (indicator 2). Same key still auths (indicator
      1) and reads the same graph (indicator 3).
   5. First-claim-wins: a second user's claim → 409 (indicator 5).
@@ -58,7 +58,7 @@ SECRET_PEPPER = "e2e-claim-pepper-1082"
 INTERNAL_KEY = "e2e-claim-internal-1082"
 
 # #1719 (Task 3): real UUIDs — JWT subjects are uuid in prod; non-UUID
-# literals 22P02 on team_memberships.user_id (the fake enforces it).
+# literals 22P02 on org_memberships.user_id (the fake enforces it).
 _U_CLAIM_A = "9f2c1a40-0000-4a00-8000-0000000000a1"
 _U_CLAIM_B = "9f2c1a40-0000-4a00-8000-0000000000a2"
 _U_PASS = "9f2c1a40-0000-4a00-8000-0000000000a3"
@@ -126,6 +126,13 @@ class _SupabaseMockHandler(BaseHTTPRequestHandler):
             return
         self._send(404, b"{}")
 
+    def do_PATCH(self):  # noqa: N802, RUF100
+        url = urlparse(self.path)
+        if url.path.startswith("/rest/v1/"):
+            self._handle_rest_patch(url)
+            return
+        self._send(404, b"{}")
+
     def _handle_rpc(self, url):
         fn = url.path.rsplit("/", 1)[-1]
         length = int(self.headers.get("Content-Length") or 0)
@@ -173,6 +180,36 @@ class _SupabaseMockHandler(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(length) or b"{}")
         self.cp.query(table, method="POST", json_body=body)
         self._send(201, json.dumps([body]).encode())
+
+    def _handle_rest_patch(self, url):
+        table = url.path[len("/rest/v1/"):].split("?")[0]
+        length = int(self.headers.get("Content-Length") or 0)
+        body = json.loads(self.rfile.read(length) or b"{}")
+        qs = parse_qs(url.query)
+        filters = []
+        for key, vals in qs.items():
+            if key == "select":
+                continue
+            val = vals[0]
+            if val.startswith("eq."):
+                filters.append((key, "eq", val[3:]))
+            elif val.startswith("neq."):
+                filters.append((key, "neq", val[3:]))
+            elif val.startswith("is.null"):
+                filters.append((key, "is", None))
+            elif val.startswith("gt."):
+                filters.append((key, "gt", val[3:]))
+            elif val.startswith("lt."):
+                filters.append((key, "lt", val[3:]))
+            elif val.startswith("lte."):
+                filters.append((key, "lte", val[4:]))
+            else:
+                filters.append((key, "eq", val))
+        try:
+            self.cp.query(table, method="PATCH", filters=filters, json_body=body)
+            self._send(204, b"")
+        except Exception as e:  # noqa: BLE001, RUF100
+            self._send(500, json.dumps({"message": str(e)}).encode())
 
     def _send(self, code: int, body: bytes):
         self.send_response(code)
@@ -310,14 +347,14 @@ class TestClaimE2E:
         status, signup = _post(base, "/v1/agent/signup", body={})
         assert status == 200, signup
         key = signup["key"]
-        team_id = signup["team_id"]
+        org_id = signup["org_id"]
         assert key.startswith("tt_")
 
         # 2. pre-claim: the key auths against the anon team
         status, team = _get(base, "/v1/team",
                             headers={"Authorization": f"Bearer {key}"})
         assert status == 200, team
-        assert team["team_id"] == team_id
+        assert team["org_id"] == org_id
 
         # 3. welcome guard probe: claimable BEFORE the claim
         jwt_a = keys.mint(claim_server["mock_url"], _U_CLAIM_A,
@@ -328,7 +365,7 @@ class TestClaimE2E:
                      "X-Claim-Key": key})
         assert status == 200, probe
         assert probe["claimable"] is True
-        assert probe["team_id"] == team_id
+        assert probe["org_id"] == org_id
 
         # 4. claim: session JWT + pasted key → 200, same team
         status, claim = _post(
@@ -336,18 +373,18 @@ class TestClaimE2E:
             headers={"Authorization": f"Bearer {jwt_a}"},
             body={"api_key": key})
         assert status == 200, claim
-        assert claim["team_id"] == team_id
+        assert claim["org_id"] == org_id
 
-        # 5. post-claim: /v1/teams (JWT) lists the claimed team — the claimed
+        # 5. post-claim: /v1/organizations (JWT) lists the claimed team — the claimed
         #    user sees the team in the session plane (indicator 2)
-        status, teams = _get(base, "/v1/teams",
+        status, teams = _get(base, "/v1/organizations",
                              headers={"Authorization": f"Bearer {jwt_a}"})
         assert status == 200, teams
-        assert any(t["team_id"] == team_id for t in teams), teams
+        assert any(t["org_id"] == org_id for t in teams), teams
 
         # 6. members listing shows the linked owner (indicator 2)
         status, members = _get(
-            base, f"/v1/teams/{team_id}/members",
+            base, f"/v1/organizations/{org_id}/members",
             headers={"Authorization": f"Bearer {jwt_a}"})
         assert status == 200, members
         assert any(m["user_id"] == _U_CLAIM_A and m["role"] == "owner"
@@ -357,7 +394,7 @@ class TestClaimE2E:
         status, team2 = _get(base, "/v1/team",
                              headers={"Authorization": f"Bearer {key}"})
         assert status == 200, team2
-        assert team2["team_id"] == team_id
+        assert team2["org_id"] == org_id
         assert team2["anon"] is False
 
         # 8. welcome guard probe: claimed-by-me AFTER (no stray mint would be
@@ -381,13 +418,13 @@ class TestClaimE2E:
         assert "already" in str(second.get("detail", "")).lower()
 
         # 10. membership rows: exactly one owner, linked, identity cleared
-        mems = [m for m in cp.tables["team_memberships"] if m["team_id"] == team_id]
+        mems = [m for m in cp.tables["org_memberships"] if m["org_id"] == org_id]
         assert len(mems) == 1, mems
         assert mems[0]["user_id"] == _U_CLAIM_A
         assert mems[0]["identity"] is None
-        team_row = next(t for t in cp.tables["teams"] if t["id"] == team_id)
+        org_row = next(t for t in cp.tables["organizations"] if t["id"] == org_id)
         # #1765 demotion: claim never writes teams.email (mint contact only)
-        assert team_row.get("email") is None
+        assert org_row.get("email") is None
 
     def test_claim_requires_session_jwt_and_key(self, claim_server):
         base = claim_server["base_url"]

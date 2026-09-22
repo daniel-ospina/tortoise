@@ -31,7 +31,7 @@
            ▼ welcomeMode = true (first-run heuristic)
            │
            ▼ loadTeams() → [] (no memberships yet)
-           │  currentTeamId = null
+           │  currentOrgId = null
            │  welcomeHasOrg = false
            │
            ▼ Wizard renders at Step 0 (Orientation)
@@ -125,13 +125,13 @@ if (inviteRes.ok) {
 **Contrast with the account-menu accept** (L3578) which DOES:
 
 ```javascript
-if (res?.team_id) {
+if (res?.org_id) {
   await loadTeams()
-  switchTeam(res.team_id)
+  switchTeam(res.org_id)
 }
 ```
 
-**Impact:** The teams list and `currentTeamId` only update when the asynchronous `loadTeams()` effect fires spontaneously — leaving a window where the wizard thinks there's no org.
+**Impact:** The teams list and `currentOrgId` only update when the asynchronous `loadTeams()` effect fires spontaneously — leaving a window where the wizard thinks there's no org.
 
 ### Gap 2: Wizard Step 1 has no "join invited org" affordance
 
@@ -162,7 +162,7 @@ Account menu → Invites section
      │
      ▼ POST /v1/invites/pending/:id/accept
         │
-        ├── 200 OK → loadTeams() → switchTeam(team_id)
+        ├── 200 OK → loadTeams() → switchTeam(org_id)
         │             ˌ ˌ → team data loads for the invited org
         │
         ├── Error (cap reached, expired, etc.)
@@ -183,11 +183,11 @@ This path does everything correctly — loads teams, switches to the invited org
 |----------|--------|---------|
 | `welcomeMode` | URL path `/welcome` or session mount heuristic | Shows wizard vs dashboard |
 | `welcomeTeamReady` | `provisionInApp()` success | Org was just created this session |
-| `teams` array | `loadTeams()` | All memberships (GET /v1/teams) |
+| `teams` array | `loadTeams()` | All memberships (GET /v1/organizations) |
 | `welcomeHasOrg` | Computed: `welcomeTeamReady \|\| teams.length > 0` | Whether Step 1 is input or summary |
 | `stashedInvite` | `sessionStorage.getItem('tortoise.inviteToken')` | In-flight invite from URL param |
 | `pendingInvites` | `loadPendingInvites()` (on account menu open) | Pending invites not yet acted on |
-| `currentTeamId` | `setCurrentTeamId()` in loadTeams fallback | Active team for data loading |
+| `currentOrgId` | `setCurrentOrgId()` in loadTeams fallback | Active team for data loading |
 
 ---
 

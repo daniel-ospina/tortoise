@@ -221,7 +221,7 @@ jobs:
     # Epic #1647 Task 10 Step 1a (P4): the pmv validate job is now a docker
     # lane (same URI mechanics as the fast matrix — job-level URI + the
     # EXPECT_URI tripwire signal). The carve-out exemption is the conftest
-    # TORTOISE_TEST_NO_REDIRECT list (17 stems) — no CARVE_OUT needed (URI
+    # TORTOISE_TEST_NO_REDIRECT stem list — no CARVE_OUT needed (URI
     # is set), and the carve-out files stay embedded by exemption.
     env:
       TORTOISE_DB_URI: "docker://:falkordb@localhost:6379/tortoise_test_matrix"
@@ -237,7 +237,20 @@ jobs:
       falkordb:
         image: falkordb/falkordb-server:latest
         env:
-          REDIS_ARGS: "--requirepass falkordb"
+          # #2216: no periodic RDB snapshot in this lane. Redis refuses a second
+          # fork while any child is active ("Can't fork for module: File exists"
+          # - errno EEXIST, Redis' single-fork-slot rule), and FalkorDB's
+          # GRAPH.COPY forks via RedisModule_Fork with 10 x 5ms retries - a
+          # shorter window than a BGSAVE, so a restore/drill test landing inside
+          # one fails with "GRAPH.COPY failed, could not fork" (main run
+          # 34527934725, test (a): the only failure of 4905). Reproduced locally
+          # 3/3 with the default config and 0/3 with this flag. Automatic
+          # snapshots are worthless in a throwaway test container, and explicit
+          # BGSAVE still works, so the RDB/snapshot tests are unaffected.
+          # (docker-compose.yml spells the same flag --save \"\" for its
+          # persistent dev container; both spellings are verified equivalent
+          # under run.sh's unquoted ${REDIS_ARGS} expansion.)
+          REDIS_ARGS: "--requirepass falkordb --save ''"
         ports:
           - 6379:6379
         options: >-
@@ -247,6 +260,13 @@ jobs:
           --health-retries 10
       falkordb-legacy:
         image: falkordb/falkordb-server:latest
+        env:
+          # #2216: same no-periodic-snapshot rule as the passworded falkordb
+          # service above (see there for the mechanism + the reproduced
+          # evidence). Deliberately NO --requirepass: this is the passwordless
+          # probe lane (tests use docker://:@localhost:16379/) and its
+          # health-cmd is plain `redis-cli ping`.
+          REDIS_ARGS: "--save ''"
         ports:
           - 16379:6379
         options: >-
@@ -343,49 +363,24 @@ jobs:
           key: hf-embedding-cache-v2-${{ runner.os }}
           restore-keys: |
             hf-embedding-cache-v2-${{ runner.os }}-
-      - name: Pre-cache embedding model (BAAI/bge-small-en-v1.5)
+      - name: Embedding model REQUIRED (BAAI/bge-small-en-v1.5) — dense retrieval leg
         if: needs.dedup-check.outputs.skip != 'true'
-        # Best-effort: when the model is already cached (actions/cache
-        # restore) this is a no-op. When the download succeeds, the suite
-        # exercises the real embedding path. When it fails (HF unreachable
-        # from runner — observed: "couldn't connect to huggingface.co"),
-        # the runtime already degrades gracefully to TF-IDF fallback
-        # (embeddings.py catches load failure), so a failed download is a
-        # WARNING, never a job failure.
-        # #964: a hung HF download (stalled TCP, no error raised) would
-        # otherwise stall the step for the full job cap with no output —
-        # step-level timeout bounds it; continue-on-error turns the timeout
-        # into a warning, not a failure. #1211-class: on HF-unreachable
-        # runners, tight retries (3 × 5s backoff) fail fast so the suite
-        # falls back to TF-IDF instead of burning the watchdog budget.
-        # (#1439 parity port from python-ci's test job.)
-        continue-on-error: true
+        # #2573: this step OWNS "the embedder is required" — same contract as
+        # python-ci's three jobs (the heredoc here was the fourth copy of the
+        # block). It fails BY NAME with a ::warning::/::error:: annotation when
+        # the pinned model cannot be obtained, instead of silently running the
+        # keyword-only TF-IDF fallback and reporting a green post-merge pass.
+        # continue-on-error was deliberately REMOVED (it was `true`) — and the
+        # replaced heredoc's `del os.environ["HF_HUB_OFFLINE"]` never actually
+        # re-enabled the network (huggingface_hub latches that var at import),
+        # so its download fallback could never run. See
+        # tools/embedder_provision.py for the full account.
+        #
+        # #964: the step-level timeout still bounds a hung download (stalled TCP,
+        # no error raised) that would otherwise stall the step for the job cap.
         timeout-minutes: 6
         run: |
-          python - <<'EOF'
-          import os, time
-          # #1349 T10: pinned revision (VULN-001) — matches python-ci.
-          MODEL = "BAAI/bge-small-en-v1.5"
-          REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
-          os.environ["HF_HUB_OFFLINE"] = "1"
-          from sentence_transformers import SentenceTransformer
-          try:
-              SentenceTransformer(MODEL, revision=REVISION)
-              print("embedding model: cached, no download needed")
-          except Exception:
-              print("embedding model: not cached — downloading (with retries)")
-              del os.environ["HF_HUB_OFFLINE"]
-              for attempt in range(1, 4):
-                  try:
-                      SentenceTransformer(MODEL, revision=REVISION)
-                      print("embedding model: downloaded")
-                      break
-                  except Exception as e:
-                      print(f"download attempt {attempt}/3 failed: {e}")
-                      if attempt == 3:
-                          raise
-                      time.sleep(5 * attempt)
-          EOF
+          python3 tools/embedder_provision.py --attempts 3 --backoff 5
       - name: Generate coverage manifest (expected nodeids, epic #1647 Task 10 Step 1a)
         # The pmv run's collect-only expected set, generated in its OWN step
         # (off the pytest step's 50m watchdog). Task 10 Step 1a (cycle-2
@@ -401,14 +396,19 @@ jobs:
           # so the run step cannot drift (single source of truth).
           echo "$SLOW_IGNORES" > /tmp/pmv-slow-ignores
           python3 tools/skip-guard.py --emit-manifest "tests/" --marker "not track_b" --ignore tests/e2e $SLOW_IGNORES --output /tmp/pmv-expected-nodeids.txt
-      # #2216: INTERMITTENT GRAPH.COPY "could not fork" — NOT a code regression.
-      # Under full-suite docker memory load on the shared runner, the dr_endpoints /
-      # writer_inventory restore tests (TestDrDrill::*, TestCreateTeam::
-      # test_backup_round_trip_dashboard_created_team) can fail with "Restore swap
-      # failed ... GRAPH.COPY failed, could not fork" — an OS fork/resource
-      # exhaustion, not a product bug. Verified: clears on isolated re-run and
-      # passes locally (docker + embedded) on the identical tree. If a PMV red
-      # shows ONLY this class, re-run instead of investigating as a regression.
+      # #2216: GRAPH.COPY "could not fork" — NOT a code regression.
+      # The dr_endpoints / writer_inventory restore tests (TestDrDrill::*,
+      # TestCreateTeam::test_backup_round_trip_dashboard_created_team) can fail
+      # with "Restore swap failed ... GRAPH.COPY failed, could not fork".
+      # Cause (verified 2026-09-10, reproduced locally — this was previously
+      # recorded here as "OS fork/resource exhaustion", which is wrong): Redis
+      # refuses a second fork while a child is active ("Can't fork for module:
+      # File exists" — EEXIST, its single-fork-slot rule). FalkorDB's GRAPH.COPY
+      # retries 10x5ms, shorter than a BGSAVE, so a restore landing inside a
+      # periodic save window dies. The falkordb service containers now run
+      # --save '' (see the services: block above), which removes the periodic
+      # BGSAVE and with it this class. If a PMV red still shows ONLY this class,
+      # it is still not a regression — re-run.
       - name: Run tests (docker lane, per-test timeout)
         id: tests
         if: needs.dedup-check.outputs.skip != 'true'

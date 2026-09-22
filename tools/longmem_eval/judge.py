@@ -74,7 +74,7 @@ NEAR_MISS_GRADING = "strict"
 # Issue #2071 decision record — spot-check full-semantic grading
 # (owner decision 2026-08-31, docs/planning/2026-08-31-2071-scoping-package.md).
 #
-# The product-lane QA spot-check (tools/ask_spotcheck.py) previously graded
+# The eval-lane ask QA spot-check (tools/ask_spotcheck.py) previously graded
 # with a weaker lexical bar — word-overlap ``max(2, len(gold_words)//2)`` on
 # UNIQUE words — that is STRUCTURALLY UNREACHABLE for rubric-style long-gold
 # SSP questions (d6233ab6 79w / 1d4e3b97 68w / b0479f84 63w: a correct
@@ -228,8 +228,13 @@ def _normalize_answer_text(text: str) -> str:
     #1949): lowercase, strip leading/trailing punctuation and whitespace,
     collapse internal whitespace. Internal punctuation is preserved (e.g.
     "St. Louis", "co-op") so normalization cannot merge distinct answers.
+
+    Coerces non-string inputs (int, float, None) to str so that integer
+    gold answers (e.g. temporal-reasoning Q71017276, gold=4) don't crash
+    with AttributeError("'int' object has no attribute 'strip'") (#2450).
     """
-    text = (text or "").strip().lower()
+    text = str(text) if text is not None else ""
+    text = text.strip().lower()
     return " ".join(text.strip(_TRAILING_PUNCTUATION).split())
 
 

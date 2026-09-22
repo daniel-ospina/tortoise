@@ -158,7 +158,7 @@ if __name__ == "__main__":
 # migration; node-level type/event_id/ts are canonical for v1).
 # NOTE: ClaimStateChanged is deliberately NOT registered — no code path emits
 # it (plan-review P1); challenged is derived from NAND-edge presence, and
-# every claim transition maps to one of the five concrete event types below.
+# every claim transition maps to one of the eleven concrete event types below.
 CLAIM_EVENT_TYPES = (
     "PointAdded",
     "OperatorAdded",
@@ -170,6 +170,7 @@ CLAIM_EVENT_TYPES = (
     "DedupeRecorded",     # #784: content-dedup candidate recorded/merged
     "DedupeRejected",     # #784: content-dedup candidate rejected
     "ObjectSuperseded",   # #1350: Object status fold source (supersession)
+    "PointInvalidated",   # #2488: invalidate_point — outdated flag + CORRECTS (no status)
 )
 
 

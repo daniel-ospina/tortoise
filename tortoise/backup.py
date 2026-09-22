@@ -11,6 +11,8 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tortoise.config import is_db_uri
+
 logger = logging.getLogger(__name__)
 
 
@@ -40,8 +42,12 @@ def backup(db_path: str, events_path: str = "events.jsonl",
     if ev.exists():
         shutil.copy2(ev, target / ev.name)
 
-    # Trigger FalkorDB BGSAVE if available
-    _bgsave()
+    # Trigger FalkorDB BGSAVE if available. Best-effort — a snapshot failure
+    # never aborts the file backup — but the outcome is logged AND recorded in
+    # the manifest so a silent no-op is impossible (#2974). If the CLI target
+    # is itself a URI, snapshot THAT instance; otherwise the configured
+    # TORTOISE_DB_URI is used (never a hardcoded localhost).
+    bgsave = _bgsave(db_path if is_db_uri(db_path) else None)
 
     # Write manifest
     manifest = target / "manifest.json"
@@ -50,6 +56,7 @@ def backup(db_path: str, events_path: str = "events.jsonl",
         "backed_up_at": _timestamp(),
         "db": db.name,
         "events": ev.name,
+        "bgsave": bgsave,
     }, indent=2))
 
     return target
@@ -126,7 +133,10 @@ def restore(backup_dir: str, db_path: str,
 
     # Restore into FalkorDB if requested
     if into_falkor:
-        from tortoise.projection import FalkorProjection  # noqa: I001
+        from tortoise.projection import (  # noqa: I001
+            FalkorProjection,
+            journal_hard_delete_seqs,
+        )
         from tortoise.log import EventLog
         # RDB-first: open the snapshot directly — it holds the full graph
         # incl. SDK-created points that never made it into events.jsonl.
@@ -143,19 +153,100 @@ def restore(backup_dir: str, db_path: str,
         # JSONL replay fallback (no RDB, or RDB was empty)
         proj = FalkorProjection(db_path)
         try:
-            for ev in EventLog(events_path).read_all():
+            # #3664: ``apply()`` is a one-record API, so an ``EntityLinked``
+            # whose endpoint is created LATER in the journal folds to nothing
+            # inline. This is the FOURTH whole-journal replay engine (besides
+            # ``rebuild`` / ``rebuild_all`` / ``recover_from_log``) — buffer
+            # the records and fold them AFTER the pass, the same trailing
+            # sweep the other three give the type. The records carry their
+            # journal seq so the sweep can suppress a link whose endpoint was
+            # HARD-DELETED afterwards (#3722 review P2). A fold failure is
+            # logged, never raised: restore must not abort on one unreplayable
+            # link.
+            records = EventLog(events_path).read_all()
+            hard_delete_seqs = journal_hard_delete_seqs(records)
+            deferred_links: list[tuple[int, dict]] = []
+            for seq, ev in enumerate(records):
+                if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
+                    deferred_links.append((seq, ev))
+                    continue
                 proj.apply(ev)
+            if deferred_links:
+                try:
+                    proj.fold_deferred_entity_links(
+                        deferred_links, hard_delete_seqs)
+                except Exception:
+                    logger.exception(
+                        "restore: deferred EntityLinked fold failed; %d "
+                        "link(s) not replayed", len(deferred_links))
         finally:
             proj.close()
 
     return {"events": count, "status": "ok"}
 
 
-def _bgsave() -> None:
-    """Trigger FalkorDB BGSAVE if connected."""
+def _bgsave(uri: str | None = None) -> str:
+    """Trigger a FalkorDB BGSAVE on the CONFIGURED database (#2974).
+
+    The endpoint is resolved through the same canonical resolver the product
+    uses — ``TORTOISE_DB_URI`` parsed by ``tortoise.projection.
+    resolve_db_endpoint`` (the derivation ``FalkorProjection.from_uri`` also
+    uses). The previous implementation dialed a hardcoded
+    ``localhost:16379`` from the embedded-mode ``FALKORDB_HOST``/``FALKORDB_
+    PORT`` defaults, which hosted production never sets, so the BGSAVE never
+    reached the real instance and the swallowed exception hid it.
+
+    Best-effort semantics are preserved — a snapshot failure must NOT abort
+    the file backup — but it is never silent (#2820): every failure is logged
+    at ERROR and returned so ``backup()`` records it in the manifest.
+
+    Args:
+        uri: explicit database URI (the CLI ``--db`` target when it is a
+            ``docker://``/``redis://``/``rediss://`` URI). When None, the
+            configured ``TORTOISE_DB_URI`` is used.
+
+    Returns:
+        ``"ok"``, ``"skipped: <why>"`` (embedded — no server endpoint to
+        snapshot), or ``"failed: <why>"``.
+    """
+    target = (uri or os.environ.get("TORTOISE_DB_URI", "") or "").strip()
+    if not target:
+        # Embedded mode: redislite owns the on-disk RDB and the file copy in
+        # backup() is the durable artifact — nothing to BGSAVE. Not an error.
+        logger.info(
+            "BGSAVE skipped — no server URI configured (embedded mode); "
+            "the copied DB file is the durable artifact")
+        return "skipped: no server URI configured (embedded mode)"
+    if "://" in target and not is_db_uri(target):
+        # A URI was configured but its scheme is unsupported — the endpoint is
+        # UNRESOLVABLE. This is a misconfiguration, never a silent skip.
+        scheme = target.split("://", 1)[0]
+        reason = (
+            f"unsupported DB URI scheme {scheme!r} (expected docker://, "
+            f"redis://, or rediss://) — snapshot endpoint unresolvable")
+        logger.error("BGSAVE failed — %s", reason)
+        return f"failed: {reason}"
+    if not is_db_uri(target):
+        # TORTOISE_DB_URI is a file path (backward-compat embedded mode).
+        logger.info("BGSAVE skipped — configured DB is an embedded file path")
+        return "skipped: embedded DB path"
+    try:
+        from tortoise.projection import resolve_db_endpoint
+        endpoint = resolve_db_endpoint(target)
+    except Exception as e:
+        reason = f"could not resolve the DB endpoint: {e}"
+        logger.error("BGSAVE failed — %s", reason, exc_info=True)
+        return f"failed: {reason}"
     try:
         from falkordb import FalkorDB
-        db = FalkorDB(host=os.environ.get("FALKORDB_HOST", "localhost"), port=int(os.environ.get("FALKORDB_PORT", "16379")))
+        db = FalkorDB(host=endpoint.host, port=endpoint.port,
+                      username=endpoint.username, password=endpoint.password,
+                      ssl=endpoint.ssl,
+                      socket_connect_timeout=5, socket_timeout=10)
         db.connection.execute_command("BGSAVE")
-    except Exception:
-        pass  # ponytail: embedded/redislite doesn't support BGSAVE, skip
+    except Exception as e:
+        reason = f"BGSAVE against {endpoint.host}:{endpoint.port} failed: {e}"
+        logger.error("%s", reason, exc_info=True)
+        return f"failed: {reason}"
+    logger.info("BGSAVE triggered at %s:%s", endpoint.host, endpoint.port)
+    return "ok"

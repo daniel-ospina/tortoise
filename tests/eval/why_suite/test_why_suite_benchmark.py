@@ -13,7 +13,7 @@ Assertions cover the properties the issue owns:
   arm is 0 (clean points never invent contradictions);
 * A11: graded from the canonical why-block only (the grader row never
   touches the graph);
-* judge pin: the run's pin is the pinned ``judge_why_suite_v1`` (prompt
+* judge pin: the run's pin is the pinned ``judge_why_suite_v2`` (prompt
   hash asserted in the pre-step) and the receipt validates with per-point
   rows;
 * determinism: two full runs produce byte-identical metrics;
@@ -97,16 +97,27 @@ def test_full_corpus_grades_e2e7_bars_from_surfaced_context(m2_env):
     assert {r["topic"] for r in report["point_results"]} == {
         e["point_id"] for e in corpus.gold_doc()["entries"]
     }
-    # Per-row detail: no missing surfaces on the 30 conflicted + clean arm.
+    # Per-row detail: no missing surfaces on the expected-conflict points
+    # (p9/plain/decision — #2490: superseded predecessors are RESOLVED, their
+    # contested flag is expected False, not surfaced) + clean arm.
     assert all(
         r["conflict_surfaced"] is True for r in report["point_results"] if r["expected_conflict"]
     )
     assert all(r["nav_correct"] == r["nav_total"] for r in report["point_results"])
     assert all(r["false_positive"] is False for r in report["point_results"])
-    assert all(r["support_sufficient"] is True for r in report["point_results"])
+    # #2490 resolved contract: superseded rows grade the resolved presentation
+    # (anti-ghost — never read as a live dispute) and are NOT graded for
+    # support sufficiency (their belief is not measured — has_ep=False).
+    resolved_rows = [r for r in report["point_results"] if r["expected_resolved"]]
+    assert len(resolved_rows) == 5  # the superseded family
+    assert all(r["resolved_ok"] is True for r in resolved_rows), [
+        r["point_id"] for r in resolved_rows if r["resolved_ok"] is not True
+    ]
+    assert all(r["support_sufficient"] is None for r in resolved_rows)
+    assert all(r["support_sufficient"] is True for r in report["point_results"] if not r["expected_resolved"])
     # Judge pin: the pinned protocol + the pre-step hash assertion.
     assert report["judge_pin"] == judge.judge_pin()
-    assert "judge_why_suite_v1:" in report["judge_pin"]
+    assert "judge_why_suite_v2:" in report["judge_pin"]
     # A11 note present (graded from surfaced context only).
     assert any("surfaced context ONLY (A11)" in n for n in report["notes"])
     # Receipt validates with per-point rows (evidentiality).
@@ -197,8 +208,8 @@ def test_judge_pin_drift_fails_preflight(m2_env, tmp_path, monkeypatch):
     root = _tmp_corpus(tmp_path)
     # Point the judge module at the corpus copy's prompt (the pre-step must
     # guard the artifact the RUN would grade under, not the installed one).
-    monkeypatch.setattr(judge, "JUDGE_PROMPT_PATH", Path(root) / "judge_why_suite_v1.txt")
-    judge_path = Path(root) / "judge_why_suite_v1.txt"
+    monkeypatch.setattr(judge, "JUDGE_PROMPT_PATH", Path(root) / "judge_why_suite_v2.txt")
+    judge_path = Path(root) / "judge_why_suite_v2.txt"
     judge_path.write_text("DRIFTED PROTOCOL\n", encoding="utf-8")
     report = runner.run_benchmark(root=root)
     assert report["run_status"] == "failed"
