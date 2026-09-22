@@ -447,19 +447,21 @@ function stampCount(relPath) {
   const ast = parseSource(readFileSync(join(repoRoot, relPath), 'utf8'), relPath)
   let count = 0
   visitNodes(ast.program, (node) => {
-    if (node.type === 'ObjectProperty' && nameOf(node.key) === 'Content-Security-Policy') {
-      if (isCspValue(node.value)) count += 1
+    // The same header-name reading as `stampConstants`: case-insensitive, and a
+    // computed object key or an unreadable `.set/append` name FAILS CLOSED (counts
+    // as a stamp) because a second CSP is intersected rather than ignored.
+    if (node.type === 'ObjectProperty') {
+      const name = cspHeaderName(node.key)
+      if (name === 'content-security-policy' && isCspValue(node.value)) count += 1
+      else if (node.computed && name === null) count += 1
       return
     }
     if (node.type === 'CallExpression' && node.callee?.type === 'MemberExpression') {
       const method = nameOf(node.callee.property)
       if (method === 'set' || method === 'append') {
-        if (
-          cspHeaderName(node.arguments?.[0]) === 'content-security-policy' &&
-          isCspValue(node.arguments?.[1])
-        ) {
-          count += 1
-        }
+        const name = cspHeaderName(node.arguments?.[0])
+        if (name === 'content-security-policy' && isCspValue(node.arguments?.[1])) count += 1
+        else if (name === null) count += 1
       }
     }
   })
@@ -591,8 +593,16 @@ function stampConstants(relPath) {
     names.push(node.type === 'CallExpression' ? node.callee.name : node.name)
   }
   visitNodes(ast.program, (node) => {
-    if (node.type === 'ObjectProperty' && String(nameOf(node.key) ?? '').toLowerCase() === 'content-security-policy') {
-      record(node.value)
+    if (node.type === 'ObjectProperty') {
+      const name = cspHeaderName(node.key)
+      if (name === 'content-security-policy') {
+        record(node.value)
+        return
+      }
+      // A COMPUTED key (`{ [CSP_HDR]: … }`) is as unreadable as a variable passed
+      // to `.set`, and the object-property shape is a second way to stamp a header
+      // — so it fails closed the same way rather than being dropped.
+      if (node.computed && name === null) names.push('(unreadable header name)')
       return
     }
     if (node.type === 'CallExpression' && node.callee?.type === 'MemberExpression') {
@@ -847,11 +857,16 @@ function nonLiteralContentTypes(relPath) {
   const src = commentStripped(relPath)
   const out = []
   const re =
-    /(?:\.(?:set|append)\(\s*["'`]Content-Type["'`]\s*,\s*|["'`]Content-Type["'`]\s*:\s*)([^,}\n]+)/g
+    /(?:\.(?:set|append)\(\s*["'`]Content-Type["'`]\s*,\s*|["'`]Content-Type["'`]\s*:\s*)([^,}\n]+)/gi
   let match
   while ((match = re.exec(src))) {
     const value = match[1].trim()
-    if (!/^["'`]/.test(value)) out.push(value.slice(0, 60))
+    // A backtick value WITHOUT an interpolation is a literal; one with `${` is a
+    // runtime value the text scan cannot read. Treating every backtick as a
+    // literal let `` `text/${x}` `` (split so no `html` run appears) pass as a
+    // literal AND escape the `html` mention scan.
+    const literal = /^["']/.test(value) || (value.startsWith('`') && !value.includes('${'))
+    if (!literal) out.push(value.slice(0, 60))
   }
   return out
 }
