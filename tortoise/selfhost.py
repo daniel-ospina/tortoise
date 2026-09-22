@@ -294,12 +294,8 @@ def _probe_sdk():
         _PROBE_SDK_CACHE["sdk"] = sdk
         _PROBE_SDK_CACHE["key"] = key
     if old is not None:
-        # ``old`` was already displaced from the cache under the lock, so no
-        # caller can obtain it again; closing it here only affects a superseded
-        # worker still querying it, whose write ``HealthProbe._run`` discards on
-        # the ``_seq`` check (selfhost probes are single-flight apart from that
-        # supersede window). The alternative — leaking every replaced
-        # connection — is worse.
+        # Closed after the lock is released; a probe worker may still be
+        # querying the displaced handle (see #4608).
         try:  # noqa: SIM105
             old.close()
         except Exception:
@@ -324,10 +320,8 @@ def _probe_db() -> dict:
     try:
         sdk = _probe_sdk()
     except Exception as exc:  # noqa: BLE001, RUF100 — probe_db never raises
-        # Mirror ``hosted_api._probe_db``: a failed construction leaves the
-        # cache untouched, so this only drops a handle whose holder (if any) is
-        # a SUPERSEDED worker — already discarded by the ``_seq`` check, so it
-        # cannot surface as a spurious degraded.
+        # Mirrors ``hosted_api._probe_db``; shares the close/query residual
+        # tracked by #4608.
         _probe_sdk_reset()
         return {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
     return probe_db(sdk, setup_timeout=probe_setup_timeout())
@@ -495,13 +489,11 @@ async def _lifespan(app: FastAPI):
     # the same reason (a stale handle from a previous target/DB). The task is
     # CREATED (not awaited) before the MCP lifespan, so it cannot delay the
     # bind (#2953's discipline; creating a task starts nothing).
-    # Drop the cached connection BEFORE resetting the coordinator. The order is
-    # load-bearing: ``_probe_sdk_reset`` clears the cache and THEN closes, so a
-    # worker that starts in the gap rebuilds a fresh handle instead of being
-    # handed one that is about to be closed — and the ``reset`` immediately
-    # after discards any prior-instance worker's late write (``_seq`` bump).
-    # Reversed, an in-gap worker would get the new generation AND the old handle,
-    # recording a spurious ``degraded`` for a reachable graph.
+    # Drop the cached connection before resetting the coordinator:
+    # ``_probe_sdk_reset`` clears the cache before closing, so a probe starting
+    # in between rebuilds rather than receiving a handle about to be closed.
+    # ``hosted_api._lifespan`` resets its coordinators first; the close/query
+    # residual in this area is #4608.
     _probe_sdk_reset()
     _HEALTH_PROBE.reset()
     refresher = asyncio.get_running_loop().create_task(_health_probe_loop())
