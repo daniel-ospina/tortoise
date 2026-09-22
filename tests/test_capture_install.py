@@ -3230,14 +3230,17 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # makes the next bump a deliberate edit of this table.  A literal at each
 # install assertion does neither: it goes stale silently, which is exactly how
 # #4314 left two red assertions behind (#4545).
-_EXPECTED_INSTALL_CONTRACT = {"claude": 4, "codex": 2, "cursor": 2}
+_EXPECTED_INSTALL_CONTRACT = {"claude": 5, "codex": 2, "cursor": 2}
 
 
 @pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
 def test_shipped_install_contract_generations(harness):
     """#4314 changes what an installed hook writes (a capture-error breadcrumb)
     and what the installer records, so every shipped generation moved — claude
-    3→4, codex 1→2, cursor 1→2.  Those numbers are a reviewed decision, not a
+    3→4, codex 1→2, cursor 1→2.  #3971 then changed the claude hooks'
+    BEHAVIOUR again (the CWE-427 sys.path scrub), so claude moved 4→5: an
+    already-installed copy must be detected as stale, otherwise the security
+    fix never reaches it.  Those numbers are a reviewed decision, not a
     detail, so they are pinned once and explicitly.
 
     `pi` is absent by construction: it ships a TypeScript extension rather than

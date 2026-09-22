@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tortoise-hook-version: 4
+# tortoise-hook-version: 5
 # Tortoise per-turn capture for Claude Code — UserPromptSubmit hook (#3963).
 #
 # The `tortoise-hook-version` marker above is the install-contract generation
@@ -62,7 +62,12 @@ TMP="$(mktemp -t tortoise_session_turn.XXXXXX)"
 trap 'rm -f "$TMP"' EXIT
 CONVERT_RC=0
 python3 - "$TRANSCRIPT_PATH" "$TMP" << 'PYEOF' || CONVERT_RC=$?
-import json, sys
+import sys
+# CWE-427: `python3 -` sets sys.path[0] = '' (the cwd), so a planted ./json.py
+# in the session workspace would execute here at EVERY prompt. `sys` is a
+# builtin and cannot be shadowed, so it is safe to import before the drop.
+sys.path[:] = [p for p in sys.path if p not in ("", ".")]
+import json
 src, dst = sys.argv[1], sys.argv[2]
 out = []
 try:
@@ -111,7 +116,12 @@ if [ "$CONVERT_RC" -eq 2 ]; then
   # (`discarded.jsonl`, one JSON object per line — schema mirrors
   # capture_spool.record_discard). Best-effort: the hook still exits 0.
   python3 - "$SESSION_ID" "$TRANSCRIPT_PATH" << 'PYEOF' 2>/dev/null || true
-import datetime, json, os, sys
+import sys
+# CWE-427: `python3 -` sets sys.path[0] = '' (the cwd), so a planted ./json.py
+# in the session workspace would execute here at EVERY prompt. `sys` is a
+# builtin and cannot be shadowed, so it is safe to import before the drop.
+sys.path[:] = [p for p in sys.path if p not in ("", ".")]
+import datetime, json, os
 sid, path = sys.argv[1], sys.argv[2]
 root = os.environ.get("TORTOISE_CAPTURE_SPOOL_DIR") or os.path.join(
     os.path.expanduser("~"), ".tortoise", "capture-spool")
@@ -149,16 +159,80 @@ if [ -n "$TORTOISE_BIN" ]; then
   # "losing sessions silently" failure #3963 exists to remove.
   "$TORTOISE_BIN" session spool "${SPOOL_ARGS[@]}" >/dev/null || exit 0
 else
-  TORTOISE_MODULE="${TORTOISE_SRC_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-  [ -d "$TORTOISE_MODULE/tortoise" ] || exit 0
+  # ── The local capture-error breadcrumb ──────────────────────────────────
+  # Mirrors `tortoise.__main__._record_capture_error` (same file layout, same
+  # `TORTOISE_IMPORT_RECEIPT_DIR` override) for the one case that helper cannot
+  # cover: the module dir did not resolve, so the Python helper is unreachable.
+  # A hook that captures nothing must leave EVIDENCE, never silence (#4314).
+  # Best-effort: a breadcrumb write can never break the exit-0 contract.
+  _record_breadcrumb() {
+    # PURE SHELL, no python3: this is also the evidence path for the "resolved a
+    # module dir but found no interpreter" branch, which is reached BECAUSE
+    # python3 is missing — a python3-written breadcrumb could never run there.
+    local harness="$1" detail="$2"
+    local receipt_dir crumb_dir stamp
+    receipt_dir="${TORTOISE_IMPORT_RECEIPT_DIR:-${HOME:-/nonexistent}/.tortoise/import-receipts}"
+    # Normalize to pathlib's `.parent` semantics (#4373 review): `Path(x).parent`
+    # DROPS trailing slashes, `${x%/*}` does not — a trailing slash would make
+    # the shell write `…/import-receipts/capture-errors/` while `session verify`
+    # reads `…/capture-errors/`, hiding the breadcrumb and reading an inert
+    # install as PROVEN.
+    while [ "${receipt_dir%/}" != "$receipt_dir" ] && [ "$receipt_dir" != "/" ]; do
+      receipt_dir="${receipt_dir%/}"
+    done
+    case "$receipt_dir" in
+      */*) crumb_dir="${receipt_dir%/*}/capture-errors" ;;
+      *) crumb_dir="capture-errors" ;;
+    esac
+    stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+    mkdir -p "$crumb_dir" 2>/dev/null || true
+    printf '{\n  "harness": "%s",\n  "detail": "%s",\n  "recorded_at": "%s",\n  "kind": "install-inert"\n}\n' \
+      "$harness" "$detail" "$stamp" \
+      > "$crumb_dir/$harness.json" 2>/dev/null || true
+  }
+
+  # Resolve a candidate module dir — accepted ONLY when it actually holds a
+  # `tortoise/` package. Candidate order: $TORTOISE_SRC_DIR, the installer's
+  # recorded module dir, then `../..` — the LAST resort, because from an
+  # installed hook that is `$HOME`, which is not a checkout (#4314).
+  TORTOISE_MODULE=""
+  for CANDIDATE in "${TORTOISE_SRC_DIR:-}" \
+                   "$(cat "${HOME:-/nonexistent}/.tortoise/hook-src-dir" 2>/dev/null || true)" \
+                   "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd || true)"; do
+    if [ -n "$CANDIDATE" ] && [ -d "$CANDIDATE/tortoise" ]; then
+      TORTOISE_MODULE="$CANDIDATE"
+      break
+    fi
+  done
+  if [ -z "$TORTOISE_MODULE" ]; then
+    # A hook that captures nothing must leave EVIDENCE, never silence (#4314):
+    # from a HOME-scoped install `../..` is `$HOME`, so the old expression
+    # silently exited 0 having captured nothing at every single prompt.
+    _record_breadcrumb "claude" \
+      "the installed per-turn hook could not resolve a tortoise module dir (checked TORTOISE_SRC_DIR, \$HOME/.tortoise/hook-src-dir, and ../..), and captured nothing" \
+      || true
+    exit 0
+  fi
   PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 || true)}"
-  [ -n "$PYTHON_BIN" ] || exit 0
-  "$PYTHON_BIN" -c "
+  if [ -z "$PYTHON_BIN" ]; then
+    _record_breadcrumb "claude" \
+      "the installed per-turn hook resolved a tortoise module dir but found no python3 interpreter, and captured nothing" \
+      || true
+    exit 0
+  fi
+  # CWE-427: the `-c` source is SINGLE-QUOTED and the module dir travels as an
+  # argv ELEMENT — never string-interpolated (a quote in the path must not
+  # inject code). `-c` puts the process CWD at sys.path[0], so the cwd is
+  # dropped before any non-builtin import: a planted ./json.py in the agent's
+  # workspace would otherwise execute as the user at EVERY prompt. `sys` is a
+  # builtin and cannot be shadowed, so importing it first is safe.
+  "$PYTHON_BIN" -c '
 import sys
-sys.path.insert(0, '$TORTOISE_MODULE')
+sys.path[:] = [p for p in sys.path if p not in ("", ".")]
+sys.path.insert(0, sys.argv[1])
 from tortoise.__main__ import main
-raise SystemExit(main(['session', 'spool', *sys.argv[1:]]))
-" "${SPOOL_ARGS[@]}" >/dev/null || exit 0
+raise SystemExit(main(["session", "spool", *sys.argv[2:]]))
+' "$TORTOISE_MODULE" "${SPOOL_ARGS[@]}" >/dev/null || exit 0
 fi
 
 exit 0
