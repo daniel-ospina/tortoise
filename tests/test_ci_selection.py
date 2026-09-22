@@ -987,19 +987,28 @@ def test_push_legs_partitions_every_classified_file():
         "slow carve-out files run in the URI-unset carve-out job, never the slow legs"
     assert set(legs["carve_out"]) == carve, "carve_out leg must be exactly the config set"
     # #1485: push_extra rides the halves on index parity (even -> half_a,
-    # odd -> half_b). Asserted CONDITIONALLY, because the manifest's
-    # push_extra is EMPTY today: the bench files are registered as an `eval`
-    # surface, so they ride the duration split like every other classified
-    # file. Pinning "some bench file is in half_b" while push_extra is empty
-    # does not assert that rule — 97% of the pool sits at the 2.0s default
-    # weight, so adding ONE file reshuffles ~290 assignments and the bench
-    # files land wherever the LPT balance puts them. The partition itself is
-    # already pinned by the set-equality assertion above.
+    # odd -> half_b) — pinned below on a synthetic manifest, because the real
+    # one's `push_extra` is EMPTY today: the bench files are registered as an
+    # `eval` surface, so they ride the duration split like every other
+    # classified file. The old assertion here (`any(f.startswith("bench/")
+    # for f in legs["half_b"])`, commented "bench push_extra lands in half
+    # b") therefore pinned no rule at all: one added file moves ~289 of the
+    # 593 assignments (measured), so the bench files land wherever the
+    # duration balance puts them. The partition itself stays pinned by the
+    # set-equality assertion above.
     for i, f in enumerate(m.get("push_extra", [])):
         leg = "half_a" if i % 2 == 0 else "half_b"
         assert f.replace(".py", "") in set(legs[leg]), (
             f"push_extra[{i}] {f} must ride {leg} — the #1485 spread rule"
         )
+    # …and the rule is genuinely exercised while push_extra is empty: prove
+    # the parity spread on a synthetic manifest rather than assume it.
+    probe = {**m, "push_extra": ["bench/probe_even.py", "bench/probe_odd.py"]}
+    probe_legs = push_legs(probe)
+    assert "bench/probe_even" in set(probe_legs["half_a"]), \
+        "#1485: push_extra[0] must ride half_a"
+    assert "bench/probe_odd" in set(probe_legs["half_b"]), \
+        "#1485: push_extra[1] must ride half_b"
 
 
 def test_carve_out_mirrors_test_no_redirect_stems():
