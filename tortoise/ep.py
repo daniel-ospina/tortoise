@@ -50,12 +50,22 @@ class TortoiseEP:
             precision across all w ≤ 100)
         max_iter: hard cap on EP outer iterations
         tol: convergence threshold (max relative change in α,β)
+        emit: OPTIONAL journal emitter (#2884 D3) — called as
+            ``emit("ConfidenceChanged", id=<id>, **props)`` once per belief
+            value actually committed to the graph (never per iteration).
+            ``None`` (the default) means the graph-only lane: no journaling,
+            byte-identical to the pre-#2884 behaviour. The projection is
+            never mutated by this parameter.
     """
 
     def __init__(self, projection, *, damping=0.5, n_quad=8,
-                 max_iter=50, tol=1e-4, evidence=None):
+                 max_iter=50, tol=1e-4, evidence=None, emit=None):
         self.proj = projection
         self.g = projection.g
+        # #2884 D3: the durability-journal seam. A plain callable (the SDK
+        # passes ``_emit_event``) so this module never imports sdk.py; the
+        # `or None` coerces a falsy emitter to the no-journal lane.
+        self._emit = emit or None
         self.damping = damping
         self.n_quad = n_quad
         self.max_iter = max_iter
@@ -185,7 +195,7 @@ class TortoiseEP:
                  "keep_prior": cid in immutable}
                 for cid, (a, b) in self._node_cache.items()
             ]
-            self.g.query(
+            result = self.g.query(
                 "UNWIND $params AS p "
                 "MATCH (n:Point {id: p.id}) "
                 # n.posterior_alpha/beta = the true EP posterior (preferred by
@@ -196,9 +206,26 @@ class TortoiseEP:
                 "SET n.confidence = p.c, "
                 "    n.posterior_alpha = p.a, n.posterior_beta = p.b, "
                 "    n.ep_alpha = CASE WHEN p.keep_prior THEN n.ep_alpha ELSE p.a END, "
-                "    n.ep_beta  = CASE WHEN p.keep_prior THEN n.ep_beta  ELSE p.b END",
+                "    n.ep_beta  = CASE WHEN p.keep_prior THEN n.ep_beta  ELSE p.b END "
+                "RETURN n.id",
                 params={"params": params_list},
             )
+            # #2884 D3: journal EXACTLY what this statement committed — one
+            # ConfidenceChanged per MATCHed node, once per flush (the cache
+            # is the batched accumulator; emitting per EP iteration would
+            # blow up the journal). ``RETURN n.id`` makes the journal set the
+            # committed set: a cache entry whose Point vanished mid-run is
+            # NOT journaled as a write. The stale-run guard above already
+            # returned before any write, so a rejected flush journals nothing.
+            if self._emit is not None:
+                written = {row[0] for row in result.result_set}
+                for p in params_list:
+                    if p["id"] in written:
+                        self._emit(
+                            "ConfidenceChanged", id=p["id"],
+                            confidence=p["c"], posterior_alpha=p["a"],
+                            posterior_beta=p["b"],
+                        )
 
         if getattr(self, "_msg_cache", None):
             for rel in ("IMPL", "NAND"):
@@ -263,15 +290,22 @@ class TortoiseEP:
         mean = round(alpha / (alpha + beta), 4) if (alpha + beta) > 0 else 0.5
         # #852 round-6: mirror _flush_cache — baseline'd claims keep their
         # immutable prior; posterior written separately for observability.
-        self.g.query(
+        result = self.g.query(
             "MATCH (n:Point {id:$id}) "
             "SET n.confidence=$c, n.posterior_alpha=$a, n.posterior_beta=$b, "
             "    n.ep_alpha=CASE WHEN coalesce(n.baseline_set,false) "
             "                    THEN n.ep_alpha ELSE $a END, "
             "    n.ep_beta =CASE WHEN coalesce(n.baseline_set,false) "
-            "                    THEN n.ep_beta  ELSE $b END",
+            "                    THEN n.ep_beta  ELSE $b END "
+            "RETURN n.id",
             params={"id": node_id, "a": alpha, "b": beta, "c": mean},
         )
+        # #2884 D3: the DIRECT (no-cache) path is a committed write — journal
+        # it here; the cached path defers to _flush_cache's batched emit.
+        # Guard on the MATCH: a missing Point committed nothing.
+        if self._emit is not None and result.result_set:
+            self._emit("ConfidenceChanged", id=node_id, confidence=mean,
+                       posterior_alpha=alpha, posterior_beta=beta)
 
     def _read_message(self, op_id: str, claim_id: str,
                       rel_type: str = "IMPL") -> tuple[float, float]:
@@ -1347,6 +1381,32 @@ class TortoiseEP:
                 "                           THEN n.posterior_beta  ELSE null END",
                 params={"params": params_list},
             )
+            # #2884 D3: this pre-write CLEARS the posterior of every
+            # NON-baseline evidence claim (baseline'd claims keep theirs — the
+            # CASE above), and it is a committed write whenever the run then
+            # early-returns (no affected claims → no flush to overwrite it).
+            # Journal the clear, or a rebuild resurrects a posterior the live
+            # graph no longer has. Read the non-baseline MATCHed ids rather
+            # than reshaping the write statement (the write is unconditional
+            # for every matched id). A later flush journals the real
+            # posteriors, so replay order restores the final value.
+            # SCOPE (honest, #2884 A4): the SAME statement also writes
+            # `ep_alpha`/`ep_beta` (conditionally — the CASE keeps an explicit
+            # baseline immutable), and the record carries only the posterior
+            # clear. The prior is therefore not replayed (same residual as
+            # `set_point_baseline`/the inheritance revert — see the note on
+            # `set_point_baseline`): journaling it correctly requires the
+            # statement's OUTCOME, not its input params.
+            if self._emit is not None:
+                rows = self.g.query(
+                    "MATCH (n:Point) WHERE n.id IN $ids "
+                    "AND coalesce(n.baseline_set, false) = false "
+                    "RETURN n.id",
+                    params={"ids": list(run_evidence)},
+                ).result_set
+                for row in rows:
+                    self._emit("ConfidenceChanged", id=row[0],
+                               posterior_alpha=None, posterior_beta=None)
 
         affected = self._affected_claims(operator_ids, max_hops,
                                          include_draft=include_draft)

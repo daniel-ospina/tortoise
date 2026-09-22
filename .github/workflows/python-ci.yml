@@ -650,6 +650,15 @@ jobs:
           wait $HB_PID 2>/dev/null || true
           echo "==================== pytest summary (tail) ===================="
           tail -n 300 /tmp/pytest.log
+          # Emit the FAILED/ERROR nodeids explicitly. Under `-v` the
+          # `short test summary info` block sits far from the end (a ~10.8k
+          # line log puts the FAILED lines ~2.4k lines back), so the tail
+          # above can omit every nodeid. The admin-merge rail
+          # (scripts/ci-failure-set.sh) derives the head's failure SET from
+          # THIS job log, so without the nodeids it sees an unattributable
+          # failure and refuses — a refusal, not a comparison (#4453).
+          echo "==================== pytest failure nodeids ===================="
+          grep -E '^(FAILED|ERROR) ' /tmp/pytest.log || echo "(no FAILED/ERROR nodeids)"
           # #880: 124 = timeout SIGINT kill; 137 = -k 10 SIGKILL after pytest
           # ignored INT mid-test; 2 = pytest's own SIGINT summary — the count
           # banner must print for all three (previously only 124 matched,
@@ -1108,6 +1117,15 @@ jobs:
           wait $HB_PID 2>/dev/null || true
           echo "==================== pytest summary (tail) ===================="
           tail -n 300 /tmp/pytest.log
+          # Emit the FAILED/ERROR nodeids explicitly. Under `-v` the
+          # `short test summary info` block sits far from the end (a ~10.8k
+          # line log puts the FAILED lines ~2.4k lines back), so the tail
+          # above can omit every nodeid. The admin-merge rail
+          # (scripts/ci-failure-set.sh) derives the head's failure SET from
+          # THIS job log, so without the nodeids it sees an unattributable
+          # failure and refuses — a refusal, not a comparison (#4453).
+          echo "==================== pytest failure nodeids ===================="
+          grep -E '^(FAILED|ERROR) ' /tmp/pytest.log || echo "(no FAILED/ERROR nodeids)"
           # #880: 124 = timeout SIGINT kill; 137 = -k 10 SIGKILL after pytest
           # ignored INT mid-test; 2 = pytest's own SIGINT summary — the count
           # banner must print for all three (previously only 124 matched,
@@ -1300,6 +1318,15 @@ jobs:
           rc=$?
           echo "==================== pytest summary (tail) ===================="
           tail -n 120 /tmp/pytest.log
+          # Emit the FAILED/ERROR nodeids explicitly. Under `-v` the
+          # `short test summary info` block sits far from the end (a ~10.8k
+          # line log puts the FAILED lines ~2.4k lines back), so the tail
+          # above can omit every nodeid. The admin-merge rail
+          # (scripts/ci-failure-set.sh) derives the head's failure SET from
+          # THIS job log, so without the nodeids it sees an unattributable
+          # failure and refuses — a refusal, not a comparison (#4453).
+          echo "==================== pytest failure nodeids ===================="
+          grep -E '^(FAILED|ERROR) ' /tmp/pytest.log || echo "(no FAILED/ERROR nodeids)"
           # Skip-fail guard: live tests must RUN here, never skip (vacuity).
           # Matches BOTH pytest output formats (-v progress: "nodeid SKIPPED";
           # -rs summary: "SKIPPED [N] tests/file.py:line").
@@ -1572,6 +1599,15 @@ jobs:
           wait $HB_PID 2>/dev/null || true
           echo "==================== pytest summary (tail) ===================="
           tail -n 200 /tmp/pytest.log
+          # Emit the FAILED/ERROR nodeids explicitly. Under `-v` the
+          # `short test summary info` block sits far from the end (a ~10.8k
+          # line log puts the FAILED lines ~2.4k lines back), so the tail
+          # above can omit every nodeid. The admin-merge rail
+          # (scripts/ci-failure-set.sh) derives the head's failure SET from
+          # THIS job log, so without the nodeids it sees an unattributable
+          # failure and refuses — a refusal, not a comparison (#4453).
+          echo "==================== pytest failure nodeids ===================="
+          grep -E '^(FAILED|ERROR) ' /tmp/pytest.log || echo "(no FAILED/ERROR nodeids)"
           if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] || [ "$rc" -eq 2 ]; then
             passed=$(grep -c ' PASSED' /tmp/pytest.log)
             failed=$(grep -c ' FAILED' /tmp/pytest.log)
