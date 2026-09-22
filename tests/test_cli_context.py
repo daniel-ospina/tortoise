@@ -84,9 +84,12 @@ def _embedded_daemon_alive(db_path: str) -> bool:
     that cannot be read is "undetermined", and undetermined must read as
     alive so the pin reds loudly. Returning False there would let a live leak
     pass the assertion silently — the one direction an oracle may not fail.
-    Likewise a non-positive pid: ``os.kill(0, 0)`` probes the caller's own
-    process GROUP and ``os.kill(-1, 0)`` broadcasts, so a corrupt pid of
-    ``0``/``-1`` would otherwise report a healthy daemon (the same guard
+    Likewise a non-string `pidfile` (a corrupt registry can hold a list or a
+    bare integer, which `os.path.exists` would RAISE on — an `int` is taken as
+    a file descriptor, an oversized one as `OverflowError`). And a
+    non-positive pid: ``os.kill(0, 0)`` probes the caller's own process GROUP
+    and ``os.kill(-1, 0)`` broadcasts, so a corrupt pid of ``0``/``-1`` would
+    otherwise report a healthy daemon (the same guard
     `embedded_reaper._owner_records` carries, for the same reason).
     """
     import json
@@ -97,9 +100,11 @@ def _embedded_daemon_alive(db_path: str) -> bool:
     try:
         with open(settings) as fh:
             reg = json.load(fh)
-        pidfile = reg.get("pidfile")
     except Exception:
         return True  # unreadable registry — undetermined, fail closed
+    pidfile = reg.get("pidfile")
+    if pidfile is not None and not isinstance(pidfile, str):
+        return True  # corrupt field — undetermined, fail closed
     if not pidfile or not os.path.exists(pidfile):
         return False  # Redis unlinks its pidfile on graceful shutdown
     try:
