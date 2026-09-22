@@ -72,8 +72,8 @@
 // counts toward the file total (see the plan doc's `## Residuals`).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readdirSync, readFileSync, statSync } from 'node:fs'
-import { dirname, join, relative } from 'node:path'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildSync } from 'esbuild'
 import { parse } from '@babel/parser'
@@ -358,6 +358,25 @@ function stampCount(relPath) {
  * while every name-based assertion still passes — the exact regression re-ships
  * green. The audited policies must be IMPORTED from the shared module.
  */
+/** The shared policy module a Functions file must import its policy from. */
+function auditedPolicyModule(relPath) {
+  if (relPath.startsWith(`${DASHBOARD_FUNCTIONS}/`)) return DASHBOARD_HEADERS_TS
+  if (relPath.startsWith(`${MARKETING_FUNCTIONS}/`)) return MARKETING_HEADERS_TS
+  return null
+}
+
+/**
+ * Resolve a relative import specifier the way the bundler does, trying the
+ * `.ts`-appended form too: `_middleware.ts` imports
+ * `"./_shared/security-headers.ts"` while `auth/index.ts` imports
+ * `"../_shared/security-headers"` — the same module, two spellings.
+ */
+function resolveImportPath(relPath, specifier) {
+  if (!specifier.startsWith('.')) return null
+  const base = resolve(dirname(join(repoRoot, relPath)), specifier)
+  return [base, `${base}.ts`].find((p) => existsSync(p)) ?? base
+}
+
 function badPolicyBindings(relPath) {
   const ast = parseSource(readFileSync(join(repoRoot, relPath), 'utf8'), relPath)
   const bad = []
@@ -375,13 +394,32 @@ function badPolicyBindings(relPath) {
   visitNodes(ast.program, (node) => {
     if (node.type === 'ImportDeclaration') {
       const src = String(node.source?.value ?? '')
+      const expected = auditedPolicyModule(relPath)
+      const want = expected ? join(repoRoot, expected) : null
       for (const spec of node.specifiers ?? []) {
-        if (spec.type !== 'ImportSpecifier') continue
         const local = spec.local?.name
-        const imported = spec.imported?.name ?? spec.imported?.value
         if (!POLICY_NAMES.has(local)) continue
+        if (spec.type !== 'ImportSpecifier') {
+          // A DEFAULT or NAMESPACE binding can name a policy — and be used as the
+          // stamp value — without importing OUR module: `import ADMIN_CSP from
+          // "../_shared/evil"` binds the name to a foreign, beacon-less value that
+          // `isCspValue` accepts and `stampConstants` records as `ADMIN_CSP`. Only
+          // a named import of a known module can be proven, so anything else is bad
+          // rather than skipped.
+          bad.push(
+            `${local} (${spec.type === 'ImportDefaultSpecifier' ? 'default' : 'namespace'} import)`,
+          )
+          continue
+        }
+        const imported = spec.imported?.name ?? spec.imported?.value
         if (imported !== local) bad.push(`${local} (aliased import of ${imported})`)
-        else if (!/_shared\/security-headers(\.ts)?$/.test(src)) bad.push(`${local} (imported from ${src})`)
+        else if (resolveImportPath(relPath, src) !== want) {
+          // A SUFFIX match on the specifier is not enough:
+          // `../evil/_shared/security-headers` ends in the audited basename but is
+          // a different module. Compare the RESOLVED path, so only the real shared
+          // module satisfies this.
+          bad.push(`${local} (imported from ${src}, not ${expected})`)
+        }
       }
       return
     }
@@ -875,6 +913,28 @@ test('_headers values are byte-identical to the stamped constants', () => {
     'dashboard _headers carries (or detaches) a CSP on a block that is not in the ' +
       'audited set — add it to STRICT_PATHS with its pinned constant, or remove it',
   )
+
+  // ...and WHICH blocks may detach is pinned too. `policyBlocks` above accepts a
+  // block that both detaches and re-adds (the strict paths' required shape), so it
+  // cannot see a `!` added to `/*` — which detaches the inherited policy from the
+  // broadest block and, if no policy is re-added there, ships every marketing
+  // static asset / every app-origin legacy page with NO policy at all.
+  const detachedBlocks = (headers) =>
+    Object.entries(headers)
+      .filter(([, b]) => b.detached.has('content-security-policy'))
+      .map(([path]) => path)
+      .sort()
+  assert.deepEqual(
+    detachedBlocks(parseHeaders('website/_headers')),
+    [],
+    'website/_headers must not detach a CSP — its only CSP-carrying block must set, not detach',
+  )
+  assert.deepEqual(
+    detachedBlocks(appHeaders),
+    [...STRICT_PATHS].sort(),
+    'only the strict paths may detach the inherited policy (and each must re-add STRICT_CSP, ' +
+      'asserted above) — a detach on any other block drops the CSP from that surface',
+  )
 })
 
 // ── 4b. every policy admits the PLATFORM-INJECTED beacon ──────────────────
@@ -936,6 +996,43 @@ test('every policy allows the platform-injected Cloudflare beacon', () => {
 
   const SCRIPT_ORIGIN = 'https://static.cloudflareinsights.com'
   const RUM_ORIGIN = 'https://cloudflareinsights.com'
+
+  // The policies are also PINNED BY VALUE. The per-directive checks below prove the
+  // beacon is present; they say nothing about a token added ALONGSIDE it, and a
+  // weakening written into the constant and its `_headers` copies together is
+  // internally consistent — §4's byte-identity test compares the two copies to each
+  // other, so it stays green (verified: adding `'unsafe-eval'` or `*` to STRICT_CSP
+  // and its four `_headers` blocks passed the whole suite). A pin is the only shape
+  // that makes "a policy changed" a reviewed edit: a legitimate change (a new tag
+  // origin, or #4706 dropping the beacon) updates this table in the same commit,
+  // which is the operational constraint the plan doc already states.
+  const PINNED = {
+    'marketing.RELAXED_CSP':
+      "default-src 'self'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com https://cdnjs.cloudflare.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://connect.facebook.net https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com https://*.supabase.co https://api.premiselabs.co https://us.i.posthog.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://www.google-analytics.com https://region1.google-analytics.com https://connect.facebook.net https://www.facebook.com https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+    'dashboard.RELAXED_CSP':
+      "default-src 'self'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com https://cdnjs.cloudflare.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://connect.facebook.net https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com https://*.supabase.co https://api.premiselabs.co https://us.i.posthog.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://www.google-analytics.com https://region1.google-analytics.com https://connect.facebook.net https://www.facebook.com https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+    'dashboard.STRICT_CSP':
+      "default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+    'dashboard.ADMIN_CSP':
+      "default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com https://*.supabase.co wss://*.supabase.co; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+    'dashboard.strictCspWithNonce':
+      "default-src 'self'; script-src 'nonce-TESTNONCE' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://cloudflareinsights.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+  }
+  assert.deepEqual(
+    Object.keys(PINNED).sort(),
+    Object.keys(policies).sort(),
+    'the PINNED table must cover exactly the policies scanned below',
+  )
+  const changed = Object.entries(PINNED)
+    .filter(([name, expected]) => policies[name]() !== expected)
+    .map(([name]) => name)
+  assert.deepEqual(
+    changed,
+    [],
+    `these policies no longer match their pinned value — if the change is intended, update ` +
+      `PINNED in the SAME commit (never to make a weakening test pass):\n  ${changed.join('\n  ')}`,
+  )
+
   const wrong = []
   for (const [name, getValue] of Object.entries(policies)) {
     const value = getValue()
@@ -1061,6 +1158,34 @@ test('every file that emits or serves HTML is in the guarded site list', () => {
   )
   const unguarded = producers.filter((rel) => !guarded.has(rel))
   assert.deepEqual(unguarded, [], 'these files build or serve HTML but are not in HTML_SITES')
+
+  // The literal scan above is evadable by ASSEMBLING the media type
+  // (`const ct = "text/" + "html"`), so the classification is widened to every
+  // source file that mentions `html` at ALL. A file this guard cannot read is then
+  // NAMED below rather than silently skipped. Keep the exemption map a
+  // hand-audited list: each entry is a claim that the file produces no HTML of its
+  // own, and a stale claim fails the second assertion (an exemption that outlives
+  // its reason is a hole, not housekeeping).
+  const NON_HTML_FILES = new Map([
+    [
+      'website/functions/blog/[[path]].ts',
+      'renders HTML, but stamps no policy itself — every HTML response goes through ' +
+        "`_lib.ts::ok()`, and `_lib.ts` IS in HTML_SITES, so its stamp is governed there",
+    ],
+    ['website/functions/blog/feed.xml.ts', 'RSS/XML feed: `html` appears only in the `escapeHtml` helper'],
+  ])
+  const mentionsHtml = functionFiles().filter((rel) => /html/i.test(commentStripped(rel)))
+  assert.deepEqual(
+    mentionsHtml.filter((rel) => !guarded.has(rel) && !NON_HTML_FILES.has(rel)),
+    [],
+    'these files mention HTML but are neither in HTML_SITES nor named as non-producers — a new ' +
+      'HTML surface that builds its media type dynamically would otherwise ship with no policy',
+  )
+  assert.deepEqual(
+    [...NON_HTML_FILES.keys()].filter((rel) => !mentionsHtml.includes(rel)).sort(),
+    [],
+    'these NON_HTML_FILES entries no longer mention HTML — drop the stale exemption',
+  )
 })
 
 test('the strict path set covers every 200-rewrite that serves the app document', () => {
