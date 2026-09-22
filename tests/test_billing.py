@@ -982,17 +982,21 @@ class TestBillingSupabaseStore:
         assert "no Stripe customer" in r.json()["detail"]
         assert called == []
 
-    def test_checkout_400_when_no_email_anywhere(self, monkeypatch, sb):
-        """Supabase mode with no org email and no session email → the terminal
-        400 (the `sdk=None` fall-through), never an AttributeError 500, and no
-        Stripe customer is created."""
+    def test_checkout_400_when_resolved_org_has_no_email(self, monkeypatch, sb):
+        """Supabase mode with no email link: the resolved org dict carries no
+        email and there is no session email → the terminal 400 (the `sdk=None`
+        fall-through), never an AttributeError 500, and no Stripe call."""
         tc, _fake = sb
         import tortoise.hosted_api as ha
         org = {"org_id": self.ORG_ID, "tier": "solo"}
         ha.app.dependency_overrides[ha.get_current_org_session] = lambda: dict(org)
         called: list = []
         monkeypatch.setattr(billing.StripeClient, "create_customer",
-                            lambda self, e: called.append(e) or "cus_x")
+                            lambda self, e: called.append("create_customer") or "cus_x")
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: called.append("list_subscriptions") or [])
+        monkeypatch.setattr(billing.StripeClient, "create_checkout_session",
+                            lambda self, *a: called.append("create_checkout_session") or "u")
         r = tc.post("/v1/billing/checkout", json={"price_id": "price_100soloM"})
         assert r.status_code == 400, r.text
         assert "No customer email" in r.json()["detail"]
