@@ -134,10 +134,11 @@ def _disposition(method: str, value: str) -> dict:
     (or UNCHANGED when it is the method itself) — the two implicit dispositions, derived
     here rather than declared per row.
     """
-    if value in VOCAB["dispositions"]:
-        key = value
-    else:
-        key = UNCHANGED if value == method else RENAMED
+    key = (
+        value if value in VOCAB["dispositions"]
+        else UNCHANGED if value == method
+        else RENAMED
+    )
     spec = VOCAB["dispositions"][key]
     target = ""
     if spec.get("target") == "self":
@@ -1505,10 +1506,10 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
         "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for i, r in enumerate(rows, 1):
-        if r["basis"] == BASIS_UNBACKED:
-            cite = "\u2014"
-        else:
-            cite = f"`{r['doc']}` — “{_cell(r['quote'])}”"
+        cite = (
+            "—" if r["basis"] == BASIS_UNBACKED
+            else f"`{r['doc']}` — “{_cell(r['quote'])}”"
+        )
         target = f"`{r['target']}`" if r["target"] else "\u2014"
         out.append(
             f"| {i} | `{r['name']}` | `sdk.py:{r['line']}` | {r['group']} | "
