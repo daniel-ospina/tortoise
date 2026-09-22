@@ -342,6 +342,13 @@ def test_from_uri_sites_resolve_test_prefixed():
         m = re.match(r"\w+\.from_uri\(\s*\"([^\"]+)\"", block)
         if m:
             path = urllib.parse.urlparse(m.group(1)).path.lstrip("/")
+            # ⚠️ DIVERGENCE (#7795 review P2): deliberately NARROWER than
+            # tests/_embedded.py's `_SWEEP_OWNED_PREFIXES` (which also owns
+            # `team_`/`org_`). That set's input is the ownership JOURNAL; this
+            # gate accepts a literal URI path as a stand-in for "an isolated
+            # test graph", and a product-namespace path is exactly the
+            # shared/dev graph this census exists to keep tests off. Do not
+            # dedupe the two sets.
             if path.startswith(("test_", "tortoise_test")):
                 continue
         declared = _ROUTED_FROM_URI_SITES.get(fname, [])

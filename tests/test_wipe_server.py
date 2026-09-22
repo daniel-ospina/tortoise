@@ -846,13 +846,24 @@ def test_sweep_partial_delete_failure_keeps_journal(tmp_path):
     assert not journal.exists()
 
 
-def test_sweep_preserves_non_owned_graphs(tmp_path):
+def test_sweep_preserves_non_owned_graphs(monkeypatch, tmp_path):
     """#7795 fail-closed: the sweep may only DETACH+DELETE the name families
-    it owns (``test_``/``tortoise_test``/``team_``). A shared graph name that
-    reached the journal because a test drove PRODUCT code with a shared path
-    (e.g. ``doctor --db docker://…/tortoise`` — the doctor CLI runs
-    in-process, so its ``from_uri`` journals from the test frame) must be
-    PRESERVED: a test run may never wipe the dev/compose graph."""
+    it owns (``test_``/``tortoise_test``/``team_``/``org_``). A shared graph
+    name that reached the journal because a test drove PRODUCT code with a
+    shared path (e.g. ``doctor --db docker://…/tortoise`` — the doctor CLI
+    runs in-process, so its ``from_uri`` journals from the test frame) must
+    be PRESERVED: a test run may never wipe the dev/compose graph.
+
+    ``TORTOISE_DB_URI`` is CLEARED: with it naming a pathless graph (e.g.
+    ``…/tortoise``), ``_uri_default_graph_name()`` returns that name and the
+    URI-default ``continue`` fires BEFORE this gate — ``tortoise`` would
+    then never reach ``preserved`` and this pin would false-fail on an
+    ambient URI (review P1). The sibling
+    ``test_sweep_skips_uri_default_graph`` sets the URI explicitly."""
+    from tests._embedded import _uri_default_graph_name
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    assert _uri_default_graph_name() is None, \
+        "this pin must not depend on an ambient TORTOISE_DB_URI"
     journal = tmp_path / "session.graphs.jsonl"
     journal.write_text("test_ws_ours\nteam_acme\ntortoise\nx\n")
     db = _FakeDb()
@@ -864,6 +875,42 @@ def test_sweep_preserves_non_owned_graphs(tmp_path):
     assert res["journal_removed"] is True
     assert db.deleted == ["test_ws_ours", "team_acme"]
     assert "tortoise" not in db.detached and "x" not in db.detached
+
+
+def test_sweep_owns_org_namespace_by_name(monkeypatch, tmp_path):
+    """#7795 review P1: ``org_`` — the CURRENT product-namespace spelling
+    (#3543 tenancy rename) — must be in the sweep's owned set BY THAT NAME,
+    and a journaled ``org_*`` graph must be DROPPED, not preserved.
+
+    The journal IS the ownership record for a product-side mint
+    (``_journal_append_product`` at the hosted ``org_create`` sites,
+    tortoise/hosted_api.py:97,2328,6167,6258,11684), so a journaled
+    ``org_*`` graph is demonstrably ours. The earlier pins exercised
+    ``team_`` only — the PRE-rename spelling — which is exactly why the
+    missing ``org_`` slipped through: an ``org_`` name took the
+    ``preserved`` branch while the empty ``failed`` list still removed the
+    journal, destroying the only record that could reclaim it."""
+    from tests._embedded import _SWEEP_OWNED_PREFIXES
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    assert "org_" in _SWEEP_OWNED_PREFIXES, \
+        "the product-namespace spelling org_ (#3543) must be owned by name"
+    journal = tmp_path / "session.graphs.jsonl"
+    journal.write_text(
+        "test_something_ours\n"
+        "org_journalled\n"
+        "org_acme\n"
+        "team_ws_journal_drop\n"
+    )
+    db = _FakeDb()
+    res = _sweep_drop(_FakeProj(db), str(journal), drop=True)
+    assert res["dropped"] == [
+        "test_something_ours", "org_journalled", "org_acme",
+        "team_ws_journal_drop"]
+    assert res["preserved"] == [], \
+        "journaled org_* graphs are OWNED — they must never be preserved"
+    assert res["failed"] == []
+    assert res["journal_removed"] is True
+    assert db.deleted == res["dropped"]
 
 
 def test_sweep_skips_uri_default_graph(monkeypatch, tmp_path):
@@ -1018,10 +1065,12 @@ def test_allow_remote_session_teardown_green(tmp_path):
 
 
 def test_session_end_sweep_drops_journaled_team_graph(uri_env, monkeypatch, tmp_path):
-    """#1686: team_* graphs (hosted parity — NEVER test-prefixed) reach the
-    sweep ONLY via the journal: _sweep_drop drops any journaled name except
-    the URI-default, so a journaled team_<name> is deleted at session end
-    (this is the mechanism that stops team_* accumulation on the docker)."""
+    """#1686: product-namespace graphs (hosted parity — NEVER test-prefixed)
+    reach the sweep ONLY via the journal: _sweep_drop drops every journaled
+    name in its owned set (``test_``/``tortoise_test``/``team_``/``org_``),
+    skipping only the URI-default, so a journaled team_<name> is deleted at
+    session end (this is the mechanism that stops product-namespace
+    accumulation on the docker)."""
     from tests._embedded import _session_end_own_sweep
     from tortoise.projection import FalkorProjection, _journal_append_product
 

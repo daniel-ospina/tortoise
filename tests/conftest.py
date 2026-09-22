@@ -618,10 +618,13 @@ def _server_graph_hygiene(_redislite_hygiene):
     dies abnormally so the next session's stale sweep finds the journal
     already drained.
 
-    Failure policy (cycle-8 P2-3/P2-4): log-and-continue; the journal file
-    is removed only when every journaled graph dropped (keep-on-partial —
-    the next session's stale sweep retries). Skip-on-non-loopback (cycle-4
-    P1-8): ALLOW_REMOTE sessions end green.
+    Failure policy (cycle-8 P2-3/P2-4): log-and-continue; the journal file is
+    removed when no OWNED graph FAILED to drop (keep-on-partial — a failed
+    drop keeps the journal so the next session's stale sweep retries it). A
+    PRESERVED non-owned name does NOT keep the journal (#7795): retrying
+    cannot make it ours, so the journal is consumed while those graphs
+    remain. Skip-on-non-loopback (cycle-4 P1-8): ALLOW_REMOTE sessions end
+    green.
     """
     from tortoise.config import is_db_uri as _is_db_uri_srv
     uri = os.environ.get("TORTOISE_DB_URI", "")

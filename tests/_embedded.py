@@ -631,7 +631,26 @@ def _created_since_last_wipe() -> set[str]:
 # DETACH + GRAPH.DELETE. Anything else found in the journal is preserved
 # (#7795): a non-owned name means a test drove product code with a shared
 # path (e.g. `doctor --db docker://…/tortoise`).
-_SWEEP_OWNED_PREFIXES = ("test_", "tortoise_test", "team_")
+#
+# `team_`/`org_` are OWNED here because the JOURNAL is the ownership record
+# for a product-side mint (`_journal_append_product` — the hosted org_create
+# sites, #1686/#3543): a journaled product-namespace graph is demonstrably
+# ours. `org_` is the CURRENT spelling (#3543 rename); `team_` is retained
+# for graphs minted before it. Omitting `org_` is worse than a leak — the
+# name takes the `preserved` branch, `failed` stays empty, so the journal is
+# STILL removed below and the ownership record that could later reclaim it
+# is destroyed (no sweep nor `wipe_server`'s filter can attribute it again).
+#
+# ⚠️ DIVERGENCE (#7795 review P2) — do NOT "dedupe" this set against the
+# journal-BLIND copies: the `wipe_server` prefix literal below,
+# tests/test_derived_names.py:344, tests/test_pre_migration_safety.py:71.
+# Those carry ONLY ("test_", "tortoise_test") BY DESIGN: their input is
+# GRAPH.LIST (the whole server, no ownership attribution), and a shared/dev
+# docker legitimately holds real tenant `team_*`/`org_*` graphs — adding a
+# product prefix there would make the last-suite-standing global sweep wipe
+# every tenant graph on the server. This set is safe ONLY because its input
+# is the journal (an ownership record).
+_SWEEP_OWNED_PREFIXES = ("test_", "tortoise_test", "team_", "org_")
 
 
 def _uri_default_graph_name() -> str | None:
@@ -786,6 +805,13 @@ def wipe_server(proj, scope: set[str] | None = None, drop: bool = False) -> None
         # sweep (scope=None → global) still owns it.
         if scope is not None and g == default_graph:
             continue
+        # ⚠️ DIVERGENCE (#7795 review P2): deliberately NARROWER than
+        # `_SWEEP_OWNED_PREFIXES` — this literal omits the product
+        # namespaces. This loop's input is GRAPH.LIST (the whole server, no
+        # ownership attribution), so on a shared/dev docker `team_*`/`org_*`
+        # may be a real tenant's (or a live peer's) graph; the journal-based
+        # `_sweep_drop` may include them because there the journal IS the
+        # ownership record. Do NOT dedupe the two sets (#7795 review P2).
         if not g.startswith(("test_", "tortoise_test")):
             continue  # fail-closed: never wipe a non-test graph
         # #3074/#3214: re-read the live peers' journals IMMEDIATELY before
@@ -1014,6 +1040,18 @@ def _sweep_drop(proj, journal_file: str, *, drop: bool = True,
             dropped.append(g)
         else:
             failed.append(g)
+    if preserved:
+        # #7795 review P2: `preserved` is the gate's ONE product, and no
+        # caller reads it (conftest discards the return dict; _stale_sweep
+        # only counts journals). Surface it through the logging channel every
+        # caller already honours — a preserved name means a test drove
+        # PRODUCT code onto a shared path, and the journal is consumed below,
+        # so this warning is the operator's only record of it.
+        logging.getLogger(__name__).warning(
+            "session sweep PRESERVED %d non-owned journaled graph(s): %s — "
+            "NOT dropped (#7795 fail-closed); the journal is still consumed "
+            "below, so retrying cannot reclaim them",
+            len(preserved), ", ".join(sorted(preserved)))
     removed = False
     if not failed:
         _remove_journal_file(journal_file)
@@ -1047,8 +1085,10 @@ def _team_sweep_allowed(uri: str) -> bool:
     pre-#1686 design deliberately kept wipes fail-closed to
     test_/tortoise_test_ prefixes. Allowed ONLY via an explicit operator
     opt-in (TORTOISE_TEST_SWEEP_TEAM_STRAYS=1). Journaled product-namespace
-    graphs are always dropped via _sweep_drop (the journal is the ownership
-    record) — this gate protects only the journal-blind residual pass.
+    graphs — `org_*` (current) and `team_*` (pre-rename) — are always dropped
+    via _sweep_drop (both spellings are in _SWEEP_OWNED_PREFIXES; the journal
+    IS the ownership record) — this gate protects only the journal-blind
+    residual pass.
 
     #1884: the URI-path inference ("test" substring in the graph name) is
     RETRACTED. The longmem_eval re-validation runs against the SAME
