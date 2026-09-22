@@ -1240,9 +1240,14 @@ test('_headers values are byte-identical to the stamped constants', () => {
 // it, and only the post-merge `verify-legal` suite (production, real browser,
 // asserting zero console errors) noticed: 8 failures.
 //
-// This test is that check, moved to CI time. It is deliberately about ORIGIN
-// PRESENCE, not about the tag being reachable (a unit test cannot reach the
-// edge): remove the origin and this fails, which is the regression that shipped.
+// This test is NOT that check. It pins ORIGIN PRESENCE across every policy — it
+// is about the policy's CONTENT, never about the tag being reachable (a unit
+// test cannot reach the edge): remove either origin and this fails, which is the
+// regression that shipped. The edge-observing detector is
+// `tests/e2e/audit_prod_csp.py`, a browser audit of the DEPLOYED surfaces run
+// manually (`ALLOW_PROD=1 .venv/bin/python tests/e2e/audit_prod_csp.py`) —
+// nothing runs it in CI yet (#4762), so a NEW platform-injected origin is still
+// caught only by it, or post-merge by `verify-legal`.
 test('every policy allows the platform-injected Cloudflare beacon', () => {
   const dashboard = loadDashboardHeaders()
   const marketing = loadMarketingHeaders()
