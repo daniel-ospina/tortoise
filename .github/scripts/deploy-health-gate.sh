@@ -55,7 +55,10 @@
 
 set -uo pipefail
 
-BASE="${BASE:-https://api.premiselabs.co}"
+#: The service under test. Named GATE_BASE, not BASE, so that a future job- or
+#: workflow-level `BASE` (a generic name) cannot silently retarget the deploy
+#: gate at a non-production host while it still reports "deployed".
+GATE_BASE="${GATE_BASE:-https://api.premiselabs.co}"
 
 #: App-reachability probes — fail fast, no DB wait.
 APP_PROBES="${APP_PROBES:-5}"
@@ -72,14 +75,14 @@ READY_SLEEP="${READY_SLEEP:-10}"
 # ── 1. app reachable (fail fast) ────────────────────────────────────────────
 app_ok=0
 for _ in $(seq 1 "$APP_PROBES"); do
-  if curl -fsS "$BASE/health" >/dev/null 2>&1; then
+  if curl -fsS "$GATE_BASE/health" >/dev/null 2>&1; then
     app_ok=1
     break
   fi
   sleep "$APP_PROBE_SLEEP"
 done
 if [ "$app_ok" != "1" ]; then
-  echo "::error::app unreachable after deploy ($BASE/health)"
+  echo "::error::app unreachable after deploy ($GATE_BASE/health)"
   exit 1
 fi
 echo "app reachable — polling DB data plane"
@@ -87,7 +90,7 @@ echo "app reachable — polling DB data plane"
 # ── 2. data plane: read the db.ok FIELD, never text-match the body ──────────
 db_ok=0
 for _ in $(seq 1 "$DB_TRIES"); do
-  if curl -fsS "$BASE/health" 2>/dev/null \
+  if curl -fsS "$GATE_BASE/health" 2>/dev/null \
     | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get("db") or {}).get("ok") else 1)' 2>/dev/null; then
     db_ok=1
     break
@@ -104,17 +107,31 @@ echo "db.ok true"
 # /health/ready ANDs the Supabase control plane + the FalkorDB data plane.
 # db.ok==true does NOT imply ready (#4545), so this gets its own tolerance
 # rather than being asserted once on the strength of the data plane.
+#
+# The HTTP STATUS is READ, not inferred from curl's exit code. `curl -fsS`
+# succeeds on ANY status < 400, so a redirecting readiness endpoint (a
+# misconfigured route, a CDN rule) would pass this gate AND be logged as
+# "200" — asserting a predicate never observed, which is the very defect
+# #4545 is about. Exactly 200 is what the gate claims, so exactly 200 is what
+# it requires.
 ready_ok=0
+ready_code="000"
 for _ in $(seq 1 "$READY_TRIES"); do
-  if curl -fsS -o /dev/null "$BASE/health/ready" 2>/dev/null; then
+  ready_code=$(curl -sS -o /dev/null -w '%{http_code}' "$GATE_BASE/health/ready" 2>/dev/null) || ready_code="000"
+  if [ "$ready_code" = "200" ]; then
     ready_ok=1
     break
   fi
   sleep "$READY_SLEEP"
 done
 if [ "$ready_ok" != "1" ]; then
-  echo "::error::/health/ready not 200 for $((READY_TRIES * READY_SLEEP))s — control plane or data plane unreachable"
+  # Distinguish a DEAD APP from an UNREADY one: 000 is curl's no-response
+  # sentinel (connection refused/reset/DNS), while a real status means the app
+  # answered and this is a genuine readiness failure. Reporting both as
+  # "unreachable" would be the indistinguishable-failure class this gate exists
+  # to avoid.
+  echo "::error::/health/ready not 200 for $((READY_TRIES * READY_SLEEP))s — last status $ready_code (000 = no response from the app; other = answered but not ready)"
   exit 1
 fi
-echo "health/ready 200"
+echo "health/ready 200 (observed HTTP 200)"
 exit 0
