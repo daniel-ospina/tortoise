@@ -16,7 +16,10 @@ import os
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
 import tempfile  # noqa: F401
+import threading
 import time
+
+import asyncio
 
 import pytest
 
@@ -980,17 +983,22 @@ class TestOnboardingToolGating:
         fix (previously 100% untested)."""
         from tortoise import mcp_server  # noqa: I001
         from tortoise import mcp_auth
-        calls = {"n": 0}
+        # Counted PER ORG: ``_org_onboarding_complete`` now awaits an offloaded
+        # read on a PROCESS-lifetime pool, so a read submitted by an earlier
+        # test can land inside this test's window. Org names are per-test
+        # unique, and the TTL assertion is about THIS org's reads.
+        calls = []
         def _state(org_id):
-            calls["n"] += 1
+            calls.append(org_id)
             return {"onboarding_complete": True}
         monkeypatch.setattr("tortoise.hosted_api._get_onboarding_state", _state)
         mcp_server._onboarding_state_cache.clear()
         tok = mcp_auth._current_org_id.set("cache-team")
         try:
-            assert mcp_server._org_onboarding_complete() is True
-            assert mcp_server._org_onboarding_complete() is True  # cached
-            assert calls["n"] == 1, f"re-fetched within TTL: {calls['n']} reads"
+            assert asyncio.run(mcp_server._org_onboarding_complete()) is True
+            assert asyncio.run(mcp_server._org_onboarding_complete()) is True  # cached
+            assert calls.count("cache-team") == 1, (
+                f"re-fetched within TTL: {calls.count('cache-team')} reads")
         finally:
             mcp_auth._current_org_id.reset(tok)
             mcp_server._onboarding_state_cache.clear()
@@ -1000,18 +1008,19 @@ class TestOnboardingToolGating:
         plane (staleness window is bounded, not sticky-forever)."""
         from tortoise import mcp_server  # noqa: I001
         from tortoise import mcp_auth
-        calls = {"n": 0}
+        calls = []  # per-org; see test_gate_cache_no_refetch_within_ttl
         def _state(org_id):
-            calls["n"] += 1
+            calls.append(org_id)
             return {"onboarding_complete": True}
         monkeypatch.setattr("tortoise.hosted_api._get_onboarding_state", _state)
         monkeypatch.setattr(mcp_server, "_ONBOARDING_STATE_TTL", 0.0)
         mcp_server._onboarding_state_cache.clear()
         tok = mcp_auth._current_org_id.set("ttl-team")
         try:
-            assert mcp_server._org_onboarding_complete() is True
-            assert mcp_server._org_onboarding_complete() is True
-            assert calls["n"] == 2, f"TTL=0 must refetch: {calls['n']} reads"
+            assert asyncio.run(mcp_server._org_onboarding_complete()) is True
+            assert asyncio.run(mcp_server._org_onboarding_complete()) is True
+            assert calls.count("ttl-team") == 2, (
+                f"TTL=0 must refetch: {calls.count('ttl-team')} reads")
         finally:
             mcp_auth._current_org_id.reset(tok)
             mcp_server._onboarding_state_cache.clear()
@@ -1022,25 +1031,102 @@ class TestOnboardingToolGating:
         never gets pinned into the cache (previously untested)."""
         from tortoise import mcp_server  # noqa: I001
         from tortoise import mcp_auth
-        calls = {"n": 0}
+        calls = []  # per-org; see test_gate_cache_no_refetch_within_ttl
         def _state(org_id):
-            calls["n"] += 1
-            if calls["n"] == 1:
+            calls.append(org_id)
+            if calls.count("retry-team") == 1:
                 raise RuntimeError("transient")
             return {"onboarding_complete": False}
         monkeypatch.setattr("tortoise.hosted_api._get_onboarding_state", _state)
         mcp_server._onboarding_state_cache.clear()
         tok = mcp_auth._current_org_id.set("retry-team")
         try:
-            assert mcp_server._org_onboarding_complete() is False  # fail-open
-            assert mcp_server._org_onboarding_complete() is False  # retried read
-            assert calls["n"] == 2, "failed read must not be cached"
+            # fail-open
+            assert asyncio.run(mcp_server._org_onboarding_complete()) is False
+            # retried read
+            assert asyncio.run(mcp_server._org_onboarding_complete()) is False
+            assert calls.count("retry-team") == 2, "failed read must not be cached"
             # and the successful False WAS cached now
-            assert mcp_server._org_onboarding_complete() is False
-            assert calls["n"] == 2, "successful read should now be cached"
+            assert asyncio.run(mcp_server._org_onboarding_complete()) is False
+            assert calls.count("retry-team") == 2, (
+                "successful read should now be cached")
         finally:
             mcp_auth._current_org_id.reset(tok)
             mcp_server._onboarding_state_cache.clear()
+
+    def test_gate_read_runs_off_the_event_loop(self, monkeypatch):
+        """#2924: the gate's MISS read must not run ON the event loop.
+
+        The regression this pins: ``_org_onboarding_complete`` called the
+        SYNCHRONOUS ``_get_onboarding_projection`` inline from ``async def
+        list_tools`` — a PostgREST round trip over ``httpx.Client`` AND a fresh
+        FalkorDB client construction (``ssl.create_default_context`` → TLS →
+        ``Is_Sentinel``) on the single loop. ``py-spy`` caught the loop parked
+        in exactly that chain while ``GET /health`` stalled 1.08 s on
+        production, and the app's own heartbeat recorded ``loop_lag_max_ms`` =
+        2033 ms; loopback ``/health`` answered in ~4 ms across 178 probes while
+        10 of them stalled 0.9–2.2 s.
+
+        Two signals, because they fail for different reasons: the observed
+        thread name is the DIRECT falsifier (a blocking read on ``MainThread``),
+        and the tick count is the INVARIANT a user feels (``/health`` keeps
+        answering while the read is in flight).
+        """
+        from tortoise import mcp_auth, mcp_server
+
+        stall_s = 1.0
+        seen = {}
+
+        def _blocking_projection(org_id):
+            # A plain blocking sleep: ON the loop this freezes everything for
+            # stall_s, which is what the ticker below detects. Handed to a
+            # worker it costs the loop nothing.
+            seen["thread"] = threading.current_thread().name
+            time.sleep(stall_s)
+            return {"onboarding_complete": True}
+
+        monkeypatch.setattr("tortoise.hosted_api._get_onboarding_projection",
+                            _blocking_projection)
+        mcp_server._onboarding_state_cache.clear()
+        tok = mcp_auth._current_org_id.set("loop-team")
+
+        async def _scenario():
+            ticks = 0
+            stop = False
+
+            async def _ticker():
+                nonlocal ticks
+                while not stop:
+                    ticks += 1
+                    await asyncio.sleep(0.02)
+
+            task = asyncio.ensure_future(_ticker())
+            await asyncio.sleep(0)
+            try:
+                verdict = await mcp_server._org_onboarding_complete()
+            finally:
+                stop = True
+                await task
+            return verdict, ticks
+
+        try:
+            verdict, ticks = asyncio.run(_scenario())
+        finally:
+            mcp_auth._current_org_id.reset(tok)
+            mcp_server._onboarding_state_cache.clear()
+
+        assert verdict is True
+        assert seen["thread"] != "MainThread", (
+            "the onboarding gate read ran on the event loop — a blocking "
+            "PostgREST + graph read on the tools/list hot path (#2924): "
+            f"thread={seen['thread']!r}"
+        )
+        expected = int(stall_s / 0.02)
+        assert ticks >= expected // 3, (
+            f"the loop managed only {ticks} ticks during a {stall_s}s gate "
+            f"read (a free loop yields ~{expected}) — the gate is back ON the "
+            "event loop; route it through _graph_offload (#2924)"
+        )
 
 
 # ── #2300: graph-bound keys vs team-level onboarding/GitHub state ────────

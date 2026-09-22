@@ -3162,14 +3162,23 @@ _onboarding_state_cache: dict[str, tuple[float, bool]] = {}
 _ONBOARDING_STATE_TTL = 60.0
 
 
-def _org_onboarding_complete() -> bool:
+async def _org_onboarding_complete() -> bool:
     """True when the current HTTP org's onboarding is complete.
 
     Fail-open: stdio/selfhost (no tenant Org row) and transient control-plane
     read failures return False — a read hiccup must never hide the tools a
     org still needs to finish onboarding. Reads the canonical onboarding
-    state via hosted_api._get_onboarding_state (Supabase orgs row or registry
-    Org node), cached 60s per org.
+    state via hosted_api._get_onboarding_projection (jsonb ``teams`` row + the
+    graph OnboardingState node), cached 60s per org.
+
+    #2924: ``async`` because the read is OFF the event loop —
+    ``_get_onboarding_projection`` is synchronous end to end (blocking PostgREST
+    over ``httpx.Client`` AND a fresh FalkorDB client construction including
+    ``ssl.create_default_context``), and calling it inline from this gate
+    blocked the single loop on the MCP ``tools/list`` hot path. A ``py-spy``
+    MainThread dump taken during a 1.08 s ``/health`` stall caught exactly this
+    call chain; the app's own heartbeat recorded ``loop_lag_max_ms`` of 2033 ms.
+    Only the cache MISS is offloaded, so the steady state stays a memory read.
     """
     from tortoise.mcp_auth import SELFHOST_ORG_ID, _current_org_id
     org_id = _current_org_id.get()
@@ -3180,10 +3189,11 @@ def _org_onboarding_complete() -> bool:
     if cached is not None and now - cached[0] < _ONBOARDING_STATE_TTL:
         return cached[1]
     try:
-        from tortoise.hosted_api import _get_onboarding_projection
+        from tortoise.hosted_api import _get_onboarding_projection_off_loop
         # #2001 (W5): the gate reads the merged projection — node-aware wire
         # completion; fail-open coercion (non-bool / 'unavailable' → False).
-        complete = _get_onboarding_projection(org_id).get("onboarding_complete")
+        projection = await _get_onboarding_projection_off_loop(org_id)
+        complete = projection.get("onboarding_complete")
         complete = bool(complete) if isinstance(complete, bool) else False
     except Exception:
         return False  # never cache a failed read — retry next list
@@ -3862,7 +3872,9 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
             # filter below already excludes the onboarding tools.
             onboarding_done = False
             if not (group and group != "onboarding"):
-                onboarding_done = _org_onboarding_complete()
+                # #2924: awaited — the gate read is off the event loop (the
+                # read is synchronous end to end; see _org_onboarding_complete).
+                onboarding_done = await _org_onboarding_complete()
 
             def _visible(t):
                 if t.name not in HTTP_ALLOWED:
