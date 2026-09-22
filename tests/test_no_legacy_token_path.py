@@ -349,8 +349,8 @@ def test_welcome_page_does_not_load_a_client_auth_library():
     /welcome is gated SERVER-SIDE by functions/welcome.ts. The page must render, not
     authenticate. It called `window.createTortoiseSupabaseClient`, whose session read
     resolves the legacy parent-domain `sb-tortoise-auth-token` cookie — never written by
-    a BFF login (the BFF session is the HttpOnly `__Host-session`) — so a signed-in
-    visitor read as signed out. That is the #3485 loop's sibling.
+    a BFF login (the BFF session is the HttpOnly `__Host-session`) — so a visitor whose
+    browser held no consent-page cookie read as signed out. That is the #3485 loop's sibling.
     """
     # #4054: /welcome moved to the APP origin with the rest of the BFF surfaces
     # (it is served by `functions/welcome.ts` from the dashboard project).

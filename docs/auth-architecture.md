@@ -98,7 +98,8 @@ the token regardless of which subdomain presented it.
   here because it is outside this repository and cannot be opened from it.
 - **Legacy cohort — a SECOND, LIVE session credential (the ruling above is VIOLATED here).**
   The legacy JS-readable parent-domain cookie
-  `sb-tortoise-auth-token` is **not** the session backbone for the BFF pages: the bridge that once
+  `sb-tortoise-auth-token` is **not** the session backbone (the canonical session is the HttpOnly
+  `__Host-session` above): the bridge that once
   wrote it (`website/assets/supabase-session.js`) is loaded by no BFF page
   (`tests/test_cross_subdomain_cookie_sync.py` pins `PAGES = []`), and the canonical session is the
   HttpOnly `__Host-session` above. **But it is still ISSUED and still ACCEPTED** — a real,
@@ -192,8 +193,7 @@ a database outage to the user as "you are signed out".
 > **Historical (#1498/#1506 era, REMOVED by #4054):** the gates below were
 > synchronous client-side head-gate cookie checks (`readValidSession()` +
 > `location.replace`) in each page's `<head>`, and the dashboard's `index.html`
-> carried the same check before the bundle rendered. No BFF page loads that session
-> bridge, so those checks were removed — a synchronous client
+> carried the same check before the bundle rendered. Those checks were removed — a synchronous client
 > gate cannot see an HttpOnly host-only cookie, and one that tries reproduces the
 > #3485 loop.
 

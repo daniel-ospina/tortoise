@@ -11,9 +11,9 @@
   <!-- #3501: the client-side hard gate is REMOVED.
        `readValidSession()` reads the legacy parent-domain `sb-tortoise-auth-token`
        cookie, which a BFF login never writes (the BFF session is the HttpOnly
-       `__Host-session`), so it returned null for a BFF login and the gate bounced on
-       EVERY SUCCESSFUL LOGIN — an unconditional redirect back to /auth. That is
-       precisely the #3485 loop. Removing the bridge and the gate together fixed it.
+       `__Host-session`), so a visitor whose browser held no consent-page cookie read as
+       signed OUT and the gate bounced them — an unconditional redirect back to /auth.
+       That is precisely the #3485 loop. Removing the bridge and the gate together fixed it.
        (The legacy cookie is still live on other surfaces — see
        docs/auth-architecture.md §2.1.)
        /welcome is now decided SERVER-SIDE by functions/welcome.ts, which is the
@@ -302,9 +302,9 @@
   <!-- #3501: the client-side auth bridge is GONE.
        The page's session read resolved the legacy parent-domain
        `sb-tortoise-auth-token` cookie, which a BFF login never writes (the BFF
-       session is the HttpOnly `__Host-session`) — so a signed-in visitor read as
-       signed OUT and was bounced to /auth. That was the #3485 loop's sibling,
-       reproduced here by construction.
+       session is the HttpOnly `__Host-session`) — so a visitor whose browser held no
+       consent-page cookie read as signed OUT and was bounced to /auth. That was the
+       #3485 loop's sibling, reproduced here by construction.
        /welcome is now decided SERVER-SIDE (functions/welcome.ts): signed-in
        visitors are redirected straight to the app, signed-out visitors to /auth,
        and this page is served ONLY for ?reset=1 with a valid session. So the
