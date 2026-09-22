@@ -650,6 +650,15 @@ jobs:
           wait $HB_PID 2>/dev/null || true
           echo "==================== pytest summary (tail) ===================="
           tail -n 300 /tmp/pytest.log
+          # Emit the FAILED/ERROR nodeids explicitly. Under `-v` the
+          # `short test summary info` block sits far from the end (a ~10.8k
+          # line log puts the FAILED lines ~2.4k lines back), so the tail
+          # above can omit every nodeid. The admin-merge rail
+          # (scripts/ci-failure-set.sh) derives the head's failure SET from
+          # THIS job log, so without the nodeids it sees an unattributable
+          # failure and refuses — a refusal, not a comparison (#4453).
+          echo "==================== pytest failure nodeids ===================="
+          grep -E '^(FAILED|ERROR) ' /tmp/pytest.log || echo "(no FAILED/ERROR nodeids)"
           # #880: 124 = timeout SIGINT kill; 137 = -k 10 SIGKILL after pytest
           # ignored INT mid-test; 2 = pytest's own SIGINT summary — the count
           # banner must print for all three (previously only 124 matched,
@@ -1108,6 +1117,15 @@ jobs:
           wait $HB_PID 2>/dev/null || true
           echo "==================== pytest summary (tail) ===================="
           tail -n 300 /tmp/pytest.log
+          # Emit the FAILED/ERROR nodeids explicitly. Under `-v` the
+          # `short test summary info` block sits far from the end (a ~10.8k
+          # line log puts the FAILED lines ~2.4k lines back), so the tail
+          # above can omit every nodeid. The admin-merge rail
+          # (scripts/ci-failure-set.sh) derives the head's failure SET from
+          # THIS job log, so without the nodeids it sees an unattributable
+          # failure and refuses — a refusal, not a comparison (#4453).
+          echo "==================== pytest failure nodeids ===================="
+          grep -E '^(FAILED|ERROR) ' /tmp/pytest.log || echo "(no FAILED/ERROR nodeids)"
           # #880: 124 = timeout SIGINT kill; 137 = -k 10 SIGKILL after pytest
           # ignored INT mid-test; 2 = pytest's own SIGINT summary — the count
           # banner must print for all three (previously only 124 matched,
@@ -1300,6 +1318,15 @@ jobs:
           rc=$?
           echo "==================== pytest summary (tail) ===================="
           tail -n 120 /tmp/pytest.log
+          # Emit the FAILED/ERROR nodeids explicitly. Under `-v` the
+          # `short test summary info` block sits far from the end (a ~10.8k
+          # line log puts the FAILED lines ~2.4k lines back), so the tail
+          # above can omit every nodeid. The admin-merge rail
+          # (scripts/ci-failure-set.sh) derives the head's failure SET from
+          # THIS job log, so without the nodeids it sees an unattributable
+          # failure and refuses — a refusal, not a comparison (#4453).
+          echo "==================== pytest failure nodeids ===================="
+          grep -E '^(FAILED|ERROR) ' /tmp/pytest.log || echo "(no FAILED/ERROR nodeids)"
           # Skip-fail guard: live tests must RUN here, never skip (vacuity).
           # Matches BOTH pytest output formats (-v progress: "nodeid SKIPPED";
           # -rs summary: "SKIPPED [N] tests/file.py:line").
@@ -1572,6 +1599,15 @@ jobs:
           wait $HB_PID 2>/dev/null || true
           echo "==================== pytest summary (tail) ===================="
           tail -n 200 /tmp/pytest.log
+          # Emit the FAILED/ERROR nodeids explicitly. Under `-v` the
+          # `short test summary info` block sits far from the end (a ~10.8k
+          # line log puts the FAILED lines ~2.4k lines back), so the tail
+          # above can omit every nodeid. The admin-merge rail
+          # (scripts/ci-failure-set.sh) derives the head's failure SET from
+          # THIS job log, so without the nodeids it sees an unattributable
+          # failure and refuses — a refusal, not a comparison (#4453).
+          echo "==================== pytest failure nodeids ===================="
+          grep -E '^(FAILED|ERROR) ' /tmp/pytest.log || echo "(no FAILED/ERROR nodeids)"
           if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] || [ "$rc" -eq 2 ]; then
             passed=$(grep -c ' PASSED' /tmp/pytest.log)
             failed=$(grep -c ' FAILED' /tmp/pytest.log)
@@ -1590,11 +1626,31 @@ jobs:
           RC=""
           [ -f "${RUNNER_TEMP:-/tmp}/pytest-rc" ] && RC=$(cat "${RUNNER_TEMP:-/tmp}/pytest-rc")
           if [ "$RC" = "0" ]; then
+            # BOTH guards must be able to red this step. It runs under `set +e`, and a
+            # `run:` block's status is its LAST command's — so an unguarded second
+            # invocation silently masked the first one's failure (the #1647 coverage
+            # guard's non-zero exit was discarded whenever the platform-gated guard
+            # passed). Accumulate the codes and exit non-zero if EITHER failed.
+            guard_rc=0
             if [ -s "${RUNNER_TEMP:-/tmp}/pytest-files" ]; then
-              python3 tools/skip-guard.py /tmp/pytest.log --junitxml=/tmp/junit.xml --manifest /tmp/expected-nodeids.txt
+              python3 tools/skip-guard.py /tmp/pytest.log --junitxml=/tmp/junit.xml --manifest /tmp/expected-nodeids.txt || guard_rc=1
             else
-              python3 tools/skip-guard.py /tmp/pytest.log
+              python3 tools/skip-guard.py /tmp/pytest.log || guard_rc=1
             fi
+            # #4215: the runtime half of the platform-gate guard. The manifest
+            # above is regenerated from THIS tree's --collect-only, so a gate that
+            # removes a test removes it from BOTH sides and the check stays green.
+            # This checked-in set is frozen: the platform-gated file's tests must
+            # still be COLLECTED — skipped counts, because the two darwin-gated
+            # ones legitimately skip on the ubuntu runners, and a skip still
+            # emits a <testcase>. A gate that hides one from collection cannot
+            # spell its way out of the junitxml. --manifest-only: this lane's
+            # skips are the exempt reason family, so the docker-calibrated
+            # matchers must not run here.
+            python3 tools/skip-guard.py /tmp/pytest.log \
+              --junitxml=/tmp/junit.xml \
+              --manifest config/ci-expected-nodeids/platform-gated.txt --manifest-only || guard_rc=1
+            exit $guard_rc
           else
             echo "pytest rc=$RC — skip guard skipped (job already red)"
           fi
@@ -1685,18 +1741,35 @@ jobs:
           # Fail-closed on a silent all-skip — the #2188 review P3-1 shape,
           # widened. The floor is 30 and the number is NOT arbitrary: the four
           # marked files that are ALREADY carve-out registered (precision_leak
-          # 6 + test_hosted_api 5 + fork_slot_wedge 11 + fork_safety 4 = 26)
-          # pass on their own, so a floor at 25 would still be met by a hook
-          # broadened to skip exactly the class #4164 exists for. 30 sits above
-          # that baseline and below the measured total, so losing the rescued
-          # class reds the job while a few legitimate removals do not.
-          # Measured 2026-09-19 on this tree: 36 passed / 35 skipped (each skip
-          # exogenous — docker-lane files that also carry the marker, RUN_*_E2E
-          # suites, an absent optional dep). The contract is that the marks
-          # RUN; the exact count is free to grow.
+          # 6 + test_hosted_api 5 + fork_slot_wedge 12 + fork_safety 4 = 27 marked,
+          # of which 25 PASS on the ubuntu runner — the two darwin-gated
+          # fork_safety ones skip) are the always-passing baseline, so a floor at
+          # 25 would still be met by a hook broadened to skip exactly the class
+          # #4164 rescues. 30 sits above that baseline (25) and below the measured
+          # total, so losing the rescued class reds the job while a few legitimate
+          # removals do not.
+          # Measured 2026-09-20 on this tree (run 35518962357, head fd23a4033): 35
+          # passed / 34 skipped (each skip exogenous — the 32 module-level gate
+          # markers, and the two darwin-gated #3845 fork tests; no real test skips
+          # for any other reason). The contract is that the marks RUN; the exact
+          # count is free to grow.
           passed=$(grep -c ' PASSED' /tmp/pytest-d14.log || true)
           echo "embedded_only-marked tests passed: $passed"
           [ "$passed" -ge 30 ] || { echo "::error::expected >=30 embedded_only-marked tests to RUN (got $passed passed — all-skip, URI leak, a broadened hook, or the non-carve-out class lost?)"; exit 1; }
+          # #4207: the floor above is a COUNT of PASSED lines, so a single
+          # subtracted test leaves 34 and the step stays green — and the pin in
+          # tests/test_markers.py reads this step's TEXT, so a deselecting flag
+          # passed through a shell variable is invisible to it as well. Neither
+          # can see a subtraction. The checked-in manifest is the FROZEN
+          # known-good set: every nodeid must still appear as a junitxml
+          # <testcase> (passed OR skipped) or this reds and NAMES the one that
+          # vanished. Supersets are fine — a new marked test needs no edit here.
+          # --manifest-only: this lane's skips are the expected state (URI unset),
+          # so the docker-calibrated skip matchers would false-red every e2e
+          # module (24, measured); the coverage property is what this lane owes.
+          python3 tools/skip-guard.py /tmp/pytest-d14.log \
+            --junitxml=/tmp/junit-d14.xml \
+            --manifest config/ci-expected-nodeids/embedded-only.txt --manifest-only
       - name: Upload D14 log (measurement artifact, #2188)
         if: always()
         continue-on-error: true

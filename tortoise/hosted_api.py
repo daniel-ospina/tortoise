@@ -15,6 +15,7 @@ extractor/indexer, update the catalog reference.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import functools
 import hmac
@@ -39,6 +40,11 @@ from fastapi.responses import JSONResponse, RedirectResponse  # JSONResponse: bi
 from starlette.middleware.base import BaseHTTPMiddleware
 
 import tortoise
+
+# #3834: the wait-bound vocabulary's single home — read as a module attribute so
+# a monkeypatch/override of the canonical constant reaches BOTH surfaces instead
+# of leaving a stale copy in this module.
+from tortoise import mcp_auth as _mcp_auth
 from tortoise.abuse import _int_env  # #1081 signup limiter env knobs (SignupVelocityTracker)
 from tortoise.alert_store import OpenOutcome, ResolveOutcome  # #3820 resolve/open tri-state
 from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op without key)
@@ -81,6 +87,7 @@ from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     ControlPlaneOffloadError,
     HealthProbe,
     event_retention_interval,
+    graph_offload_timeout_s,
     heartbeat_record,
     loop_heartbeat_info,
     loop_heartbeat_task,
@@ -111,12 +118,11 @@ from tortoise.sdk import (
     _capture_turn_embeddings,  # #4194: batched local-embedder call for stored turn Points
     _capture_turn_texts,  # #4194: the ONE stored-turn text definition (shared with the embed batch)
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
-    _content_hash,
     _emit_capture_observation,  # #2335 WI-1d: observation leg (hosted lane tag)
-    _normalize_turn_role,  # #1532 D2: shared role normalization (None->unknown)
     _session_capture_event_id,  # W5 Phase F (#2104): deterministic sessionCaptured Event id
     _session_extraction_estimate,  # #1532 D4: v2-aware pre-write quota estimate
     _session_llm_transcript,  # P1 #1529: the shared empty/blank conversation gate
+    _write_capture_turns,  # #3086: the ONE batched turn-stream writer (shared with sdk.capture_session)
 )
 from tortoise.security import redact_error  # billing webhook + checkout error logging
 from tortoise.session_auth import get_current_user, verify_session_jwt
@@ -1576,11 +1582,8 @@ _DREAM_QUEUE_TTL_S = 600
 # waiting item holds no live connection: `_data_sdk` returns a fresh
 # `TortoiseSDK` whose projection opens LAZILY on first `_get_proj()` (sdk.py),
 # and on this path that first call now happens INSIDE the pool worker — so a
-# queued dream costs a Future and a dict, not a socket. (The pre-off-load shape
-# never held a set of open SDKs "behind a frozen loop" either: the handler ran
-# `_data_sdk` → `sdk.dream` with no intervening await, so the single loop could
-# not dispatch a second request into that window.) Queueing is therefore a
-# latency cost for the dream surface, not an OOM path. This endpoint is
+# queued dream costs a Future and a dict, not a socket. Queueing is therefore
+# a latency cost for the dream surface, not an OOM path. This endpoint is
 # documented as background maintenance ("Fast-path queries never block on
 # this"), so "your dream waits behind other dreams" is the correct behaviour
 # rather than a new failure mode.
@@ -1604,10 +1607,16 @@ _SCORECARD_EXECUTOR = ThreadPoolExecutor(
     thread_name_prefix="activation-scorecard")
 
 
-async def _run_dream_on_pool(fn, sdk, /, *args, **kwargs):
-    """Run one long dream pass on the dream pool; the helper owns ``sdk.close()``.
+async def _run_dream_on_pool(fn, sdk_factory, /, *args, **kwargs):
+    """Run one long dream pass on the dream pool; the WORK ITEM owns the close.
 
-    #3718 (code review): the pass AND ``sdk.close()`` are ONE worker hand-off.
+    #3773: ``sdk_factory`` builds the SDK INSIDE the worker thread — building
+    it on the loop made its connect / embedded anchor probe on-loop work
+    immediately before the pass. ``fn`` receives the built SDK as its FIRST
+    argument. (The REST ``dream`` handler already holds an SDK it built through
+    the #3773 graph-pool seam, and passes ``lambda: sdk``.)
+
+    #3718 (code review): the pass AND the close are ONE worker hand-off.
     Letting the coroutine's ``finally`` close instead runs the close on the
     LOOP while the worker is still inside the pass whenever the request is
     cancelled — cancelling the await stops the AWAITABLE, not the thread
@@ -1617,34 +1626,30 @@ async def _run_dream_on_pool(fn, sdk, /, *args, **kwargs):
     reading.
 
     The close therefore travels WITH THE WORK ITEM rather than with the
-    future: the submitted closure closes ``sdk`` in its own ``finally``, so
-    whoever ends up running the pass closes the SDK exactly once — on the
-    worker thread, so a cancellation can no longer tear the SDK down mid-pass,
-    and no caller can forget it (``TortoiseSDK.close()`` is idempotent —
-    ``_t_closed``).
+    future: the submitted closure builds and closes the SDK in its own
+    ``finally``, so whoever runs the pass closes it exactly once — on the
+    worker thread, so a cancellation cannot tear the SDK down mid-pass
+    (``TortoiseSDK.close()`` is idempotent — ``_t_closed``).
 
-    Why not ``add_done_callback`` on the future — the first shape of this
-    change, corrected in review: ``ThreadPoolExecutor.submit`` puts the work
-    item on the queue BEFORE ``_adjust_thread_count()`` can raise "can't start
-    new thread", so a submit ``RuntimeError`` does NOT prove the pass never
-    ran. Closing there could tear the SDK down under a pass the pool had
-    already picked up, and the never-attached callback would leak the SDK if
-    the worker re-opened the projection. Attaching the close to the ITEM makes
-    the submit outcome irrelevant; the ``except BaseException`` below covers
-    the other half (item never enqueued), and a duplicate close is a no-op, so
-    both cases are safe.
+    There is deliberately NO loop-side close on a submit failure. A first shape
+    closed the caller-supplied SDK in an ``except BaseException`` around the
+    submit; that was removed (round 3 review) because ``ThreadPoolExecutor.
+    submit`` puts the work item on the queue BEFORE ``_adjust_thread_count()``
+    can raise "can't start new thread" — so a submit ``RuntimeError`` does NOT
+    prove the item never ran, and closing there could tear the SDK down under
+    a pass an existing worker had already picked up (the CPython #87185 class
+    this design removes). A pre-enqueue failure instead strands the pre-built
+    caller's SDK to GC — bounded and transient, and the same lifecycle the
+    sibling write handlers' SDKs already have (they never close explicitly).
     """
     def _pass_and_close():
+        sdk = sdk_factory()
         try:
-            return fn(*args, **kwargs)
+            return fn(sdk, *args, **kwargs)
         finally:
             sdk.close()
 
-    try:
-        cfut = _submit_off_loop(_DREAM_EXECUTOR, _pass_and_close)
-    except BaseException:
-        sdk.close()
-        raise
+    cfut = _submit_off_loop(_DREAM_EXECUTOR, _pass_and_close)
     return await asyncio.wrap_future(cfut)
 
 
@@ -1668,13 +1673,29 @@ def _dream_key(org_id: str, graph_namespace: str | None) -> str:
 # `Dreamer._lock` cannot serve here: it is per-SDK-instance and every request
 # builds its own SDK.
 #
-# NOT covered by this lock, recorded so it is not read as process-wide: the
-# capture path's `_apply_capture_ingest_ep` (sdk.py:1232) still runs
-# `sdk.dream(mode="local", ...)` on the EVENT LOOP, from
-# `_capture_session_impl` (hosted_api.py:9166). It is on the loop, so taking a
-# `threading.Lock` there would freeze the loop for a whole pass — the very
-# thing #3718 removes; moving that pass to the pool is the capture-path
-# residual tracked by #3086, not this change.
+# Threads are expected to wait; the WAIT happens off the loop.
+#
+# ⚠️ One coupling this lock introduces that the pooled sites did not have:
+# since #3086 the capture path's `_apply_capture_ingest_ep` also takes this
+# lock, and it runs on `_CAPTURE_EXECUTOR` (4 workers by default, process-wide).
+# A same-graph long `/v1/dream` full pass can therefore park capture workers
+# while it holds the lock — and because that pool is GLOBAL, it delays captures
+# of ANY org, not only the org whose dream holds the lock. The admission cap
+# does NOT bound this stage: `_CaptureSlot` is released when the EXTRACTION
+# future completes, after which the ep pass still occupies a worker. It is
+# strictly better than the pre-#3086 shape (which froze the event loop for the
+# whole pass) and there is no deadlock (a dream pass never needs the capture
+# pool); recorded here so the coupling is visible rather than discovered.
+#
+# Covered since #3086: the capture path's `_apply_capture_ingest_ep` — which
+# runs `sdk.dream(mode="local", ...)` — is now off the event loop on
+# `_CAPTURE_EXECUTOR` and takes this lock, so a hosted capture and `/v1/dream`
+# can no longer interleave on one graph's `ep_dirty` roots. NOT covered, and
+# recorded so it is not read as process-wide: the SDK lane's own
+# `capture_session` still calls `_apply_capture_ingest_ep` inline on its caller's
+# thread without this lock — it is synchronous and cannot import this module,
+# and every capture on that lane uses its OWN `TortoiseSDK`, so the pool-crossing
+# hazard this lock exists for does not arise there.
 #
 # A `threading.Lock`, NOT an `asyncio.Lock`, is deliberate: it is acquired and
 # released INSIDE the worker thread, and asyncio primitives bind to the first
@@ -1740,10 +1761,19 @@ async def _dream_worker(org_id: str, key: str | None = None) -> None:
         if not roots:
             return
         gns = key.split("::", 1)[1] if "::" in key else None
-        sdk = (_make_sdk(graph_name=gns) if gns is not None
-               else _make_sdk(namespace=org_id))
 
-        def _drain() -> None:
+        def _open_sdk() -> TortoiseSDK:
+            # #3773: built INSIDE the dream-pool item, never on the loop —
+            # `_make_sdk` can run the embedded keepalive anchor's probe query.
+            # Deliberately NOT routed through the fail-closed request-path seam
+            # (`_graph_offload`): this is a background drain with no client to
+            # fail closed to, and its roots are already drained — an offload
+            # failure there would DROP them (until a later sweep) while logging
+            # a capacity signal as a graph failure.
+            return (_make_sdk(graph_name=gns) if gns is not None
+                    else _make_sdk(namespace=org_id))
+
+        def _drain(sdk: TortoiseSDK) -> None:
             # #3718: mark → dream on the DEDICATED dream pool, serialized per
             # graph against a concurrent manual /v1/dream (see `_dream_lock`).
             # `_run_dream_on_pool` owns the SDK's close, so a cancelled request
@@ -1757,7 +1787,7 @@ async def _dream_worker(org_id: str, key: str | None = None) -> None:
                 # /v1/dream with mode="stale-first" explicitly).
                 sdk.dream(dirty_only=True, mode="local")
 
-        await _run_dream_on_pool(_drain, sdk)
+        await _run_dream_on_pool(_drain, _open_sdk)
     except Exception as exc:
         import logging
         _log = logging.getLogger("tortoise.api")
@@ -2030,14 +2060,28 @@ class ForwardedProtoMiddleware(BaseHTTPMiddleware):
 app.add_middleware(ForwardedProtoMiddleware)
 
 
+#: Security headers the response-stamping middleware below add to every
+#: response. Named here because the wait-bound refusal is emitted from OUTSIDE
+#: that middleware stack (the bound is outermost), so it re-applies them itself
+#: — a breach response must not be the one response missing what those
+#: middlewares document as universal.
+_HSTS_HEADERS = (
+    ("Strict-Transport-Security", "max-age=31536000; includeSubDomains"),
+)
+_SECURITY_HEADERS = (
+    ("X-Content-Type-Options", "nosniff"),
+    ("X-Frame-Options", "DENY"),
+    ("X-XSS-Protection", "1; mode=block"),
+)
+
+
 class HSTSMiddleware(BaseHTTPMiddleware):
     """Add Strict-Transport-Security header to every response."""
 
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
-        response.headers["Strict-Transport-Security"] = (
-            "max-age=31536000; includeSubDomains"
-        )
+        for _name, _value in _HSTS_HEADERS:
+            response.headers[_name] = _value
         return response
 
 app.add_middleware(HSTSMiddleware)
@@ -2048,9 +2092,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["X-XSS-Protection"] = "1; mode=block"
+        for _name, _value in _SECURITY_HEADERS:
+            response.headers[_name] = _value
         return response
 
 
@@ -2119,11 +2162,14 @@ class InFlightMiddleware:
     killing the process there would destroy the very request that is making
     progress and turn ordinary provider latency into a restart loop.
 
-    Deliberately pure ASGI and OUTERMOST (registered last):
-      * it must increment BEFORE any middleware can short-circuit (a 429/404 is
-        still work in progress from the loop's point of view);
-      * no request/response wrapping, so it costs a lock acquire + a plain
-        increment on the hot path.
+    Deliberately pure ASGI (no request/response wrapping, so it costs a lock
+    acquire + a plain increment on the hot path). It is NO LONGER the outermost
+    middleware: ``WaitBoundMiddleware`` (#3834) is registered after it and so
+    wraps it from the outside, which is required — a bounded-and-abandoned
+    request must keep counting on the gauge until it genuinely finishes, or the
+    #2850 self-kill predicate reads idle while abandoned work still runs.
+    Being second-outermost, the gauge still increments before every
+    short-circuiting middleware (auth, rate limit) can return.
 
     The decrement is in a ``finally`` so a raised handler cannot leak a slot and
     permanently disarm the watchdog's idle predicate.
@@ -2144,6 +2190,417 @@ class InFlightMiddleware:
 
 
 app.add_middleware(InFlightMiddleware)
+
+
+# ── #3834: ONE transport-level wait bound across the surviving routes ────
+# Owner ruling 2026-09-20 (issue #3834, comment 5752962331): the cold/busy
+# question is re-homed from the removed ask route onto the TRANSPORT, because
+# it is transport-general and 126 routes survive on the hosted API. Cold waits
+# in the edge's ingress queue (an application bound cannot help it — see the
+# cold-half verification in `tests/test_transport_wait_bound.py`); the busy half
+# is bounded here.
+#
+# The bound's VALUE and refusal vocabulary are NOT defined here: they live in
+# ``tortoise/mcp_auth.py`` (``_TRANSPORT_WAIT_BOUND_S`` /
+# ``_TRANSPORT_WAIT_RETRY_AFTER_S`` / ``_TRANSPORT_WAIT_BOUND_MESSAGE``), because
+# the MCP seam (``mcp_server._await_under_mcp_wait_bound``) needs them and
+# ``mcp_auth`` is the only module both surfaces can import without a cycle. This
+# module owns only the REST-only exemption below.
+#
+# OVERRIDES: uniform per-route timeout bounds (the common server practice) — we
+# apply ONE bound at the transport and deliberately EXEMPT `POST /v1/context`,
+# which keeps its recorded 300ms-p95 / 2.4s-ceiling / reduced-answer-on-breach
+# behaviour. Cited by SYMBOL, never by line number (line numbers re-stale — an
+# earlier citation of this exemption had already gone wrong): the exempt handler
+# is ``@app.post("/v1/context")`` in this module, its hard ceiling is the
+# ``asyncio.wait_for(..., timeout=SLO_MS * 8 / 1000.0)`` call inside it, and the
+# p95 budget is ``tortoise.volunteer.SLO_MS``. That fallback-instead-of-error is
+# a RECORDED DECISION, not an oversight, and a uniform bound would silently
+# reverse it. The exemption is intentional — do not "fix" it by making the
+# bounds uniform.
+#
+#: The one deliberate exemption, METHOD-scoped: the ruling exempts
+#: `POST /v1/context` because that handler's fail-open ceiling is a recorded
+#: decision. `GET /v1/context` (`session_context`, a different handler with no
+#: recorded fallback) is NOT exempt — exempting it would widen the ruling past
+#: its record.
+_TRANSPORT_WAIT_BOUND_EXEMPT = frozenset({("POST", "/v1/context")})
+
+#: Analytics event name for a breach. Recorded through the EXISTING writer (no
+#: new table, no new metric endpoint). The `org_id` comes from
+#: ``scope["state"]["org_id"]`` — populated by the auth dependency, which has
+#: normally resolved long before a 10 s deadline, so the REST arm usually
+#: carries the real org and is empty only when the breach precedes resolution.
+#: The MCP arm (`mcp_server._await_under_mcp_wait_bound`) passes the resolved
+#: `_current_org_id`. The `path` (and the MCP `tool_name`) prop is what makes
+#: "which routes breach" answerable.
+_TRANSPORT_WAIT_BOUND_EVENT = "transport_wait_bound_exceeded"
+
+#: Handlers abandoned past the bound, held only so their late exception is
+#: retrieved (never "exception was never retrieved"). Entries remove themselves
+#: on completion — the set self-drains. (This is the BREACH path only; a
+#: cancelled request is drained in the ``except asyncio.CancelledError`` branch,
+#: not
+#: tracked here. No test awaits this set.)
+_pending_wait_bound_requests: set = set()
+_pending_wait_bound_telemetry: set = set()
+
+#: Breach telemetry reuses the EXISTING best-effort control-plane seam,
+#: ``monitoring.control_plane_worker("telemetry")`` (#3498): a process-wide pool
+#: of 4 DAEMON workers with a 256-slot bounded backlog, already carrying
+#: ``_track_analytics_event``. It is the right home because
+#: ``_track_analytics_event`` is a BLOCKING ``httpx`` POST (5 s) and this
+#: module's #3060 doctrine keeps such work off the loop's shared default pool.
+#: A dedicated executor was tried and is a duplication: it adds no isolation
+#: the existing post-auth/telemetry split lacks, and its non-daemon
+#: ``ThreadPoolExecutor`` workers can delay interpreter exit by up to ~85 s.
+#: The seam's own backlog bound is the drop rule — a breach burst happens under
+#: exactly the overload that CAUSES breaches, and telemetry must never become
+#: the latency this unit exists to bound.
+
+
+def _is_jsonrpc_surface(route_path: str) -> bool:
+    """True for the mounted MCP app's route path: `/mcp` and every `/mcp/…`
+    subpath (the app is mounted there). This agrees with the path canonicalizer
+    on excluding the `/mcpfoo` sibling, but is deliberately BROADER than the
+    canonicalizer's exact `/mcp` match — `/mcp/…` is not a path the canonical
+    layer rewrites, it is one the mounted app serves."""
+    return route_path == "/mcp" or route_path.startswith("/mcp/")
+
+
+def _cors_headers_for_scope(scope) -> list[tuple[bytes, bytes]]:
+    """Re-apply the CORS headers a refusal sent from OUTSIDE ``CORSMiddleware``
+    would otherwise lose.
+
+    This middleware is OUTERMOST, so ``CORSMiddleware`` (innermost) never sees
+    the refusal it emits — the same position problem ``#1591`` documents for the
+    unhandled-exception handler, where a browser client reads a header-less
+    response as "CORS blocked" instead of the real error. For THIS unit the
+    consequence would be worse than a 500: the whole point is that a caller can
+    READ why it was made to wait, and without ``Access-Control-Allow-Origin`` a
+    dashboard client cannot read the body at all. ``Retry-After`` is not a
+    CORS-safelisted response header, so ``Access-Control-Expose-Headers`` is the
+    other half — it is what ``CORSMiddleware(expose_headers=...)`` already adds
+    for the session-auth 503 (#3284).
+    """
+    origin = None
+    for name, value in scope.get("headers") or ():
+        if name == b"origin":
+            origin = value.decode("latin-1")
+            break
+    acao = origin if origin in _ALLOWED_ORIGINS else _ALLOWED_ORIGINS[0]
+    return [
+        (b"access-control-allow-origin", acao.encode("latin-1")),
+        (b"access-control-allow-credentials", b"true"),
+        (b"access-control-expose-headers", b"Retry-After"),
+        (b"vary", b"Origin"),
+    ]
+
+
+async def _send_wait_bound_refusal(send, scope, route_path: str) -> None:
+    """Answer a breached request with the transport's OWN 504 refusal.
+
+    No new format: the REST arm is the §6.1 shape the rest of this app already
+    speaks (``JSONResponse`` with ``{"detail"}`` + ``Retry-After`` — see
+    ``RateLimitMiddleware`` and the trash-restore 503), and the MCP arm is
+    ``mcp_auth._jsonrpc_error`` — the primitive #3851 shipped the auth-plane
+    ``Retry-After`` through. Both responses are rendered by those existing
+    builders and only transported here as raw ASGI messages.
+    """
+    retry_after = _mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S
+    if _is_jsonrpc_surface(route_path):
+        # Function-local: mcp_auth reaches back into this module (late, from a
+        # function body), so a module-level edge here would be a needless
+        # import-order coupling.
+        from tortoise.mcp_auth import ERR_TIMEOUT, _jsonrpc_error
+
+        resp = _jsonrpc_error(
+            ERR_TIMEOUT, _mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE,
+            data={"retry_after": retry_after}, status=504,
+            headers={"Retry-After": str(retry_after)})
+    else:
+        resp = JSONResponse(
+            status_code=504,
+            content={"detail": _mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE},
+            headers={"Retry-After": str(retry_after)})
+    headers = [(k.lower().encode("latin-1"), v.encode("latin-1"))
+               for k, v in resp.headers.items()]
+    headers.extend(_cors_headers_for_scope(scope))
+    # This middleware is OUTERMOST, so ``HSTSMiddleware`` /
+    # ``SecurityHeadersMiddleware`` never see the refusal — re-apply what they
+    # document as present on "every response" (code-review round 2: without
+    # this, a breach response is the one response missing them).
+    headers.extend((_n.lower().encode("latin-1"), _v.encode("latin-1"))
+                   for _n, _v in (_HSTS_HEADERS + _SECURITY_HEADERS))
+    await send({"type": "http.response.start", "status": resp.status_code,
+                "headers": headers})
+    await send({"type": "http.response.body", "body": resp.body})
+
+
+def _emit_wait_bound_breach(org_id: str, route_path: str, method: str,
+                            latency_ms: int, *, tool_name: str | None = None) -> None:
+    """Fire-and-forget breach telemetry — OFF the request path.
+
+    ``_track_analytics_event`` does a BLOCKING ``httpx`` POST (5 s timeout), so
+    putting it on the request path would create the very latency this bound
+    exists to cut. Dispatched to the EXISTING best-effort control-plane seam
+    (``monitoring.control_plane_worker("telemetry")`` — daemon, 4 workers, a
+    bounded backlog; #3498), the same seam that already carries this writer.
+    Never raises, never blocks.
+
+    ``tool_name`` is supplied by the MCP-level bound (``tortoise/mcp_server.py``)
+    so a breach on the MCP surface is attributable to the tool, not just to
+    ``/mcp``. Both prop keys are registered in ``_ALLOWED_ANALYTICS_PROPS``.
+    """
+    props = {"path": route_path, "method": method, "latency_ms": latency_ms}
+    if tool_name is not None:
+        props["tool_name"] = tool_name
+
+    def _write() -> None:
+        try:
+            _track_analytics_event(org_id, _TRANSPORT_WAIT_BOUND_EVENT, props)
+        except Exception:
+            _logger.debug("wait-bound telemetry write failed", exc_info=True)
+
+    try:
+        from tortoise.monitoring import control_plane_worker
+        fut = control_plane_worker("telemetry").submit(_write)
+    except Exception:
+        _logger.debug("wait-bound telemetry schedule failed", exc_info=True)
+        return
+    _pending_wait_bound_telemetry.add(fut)
+
+    def _telemetry_done(f) -> None:
+        _pending_wait_bound_telemetry.discard(f)
+        # `submit` returns a PRE-FAILED future when the seam's bounded backlog
+        # is full (`_WorkerBacklogFull`). Observing it turns a silent drop into
+        # a traceable one — a telemetry storm under the overload that causes
+        # breaches is exactly when the drop rate matters.
+        if not f.cancelled() and f.exception() is not None:
+            _logger.debug("wait-bound telemetry dropped: %r", f.exception())
+
+    fut.add_done_callback(_telemetry_done)
+
+
+def _track_wait_bound_request(task) -> None:
+    """Register an abandoned dispatch so its late exception is retrieved.
+
+    Called on the BREACH path only. Deliberately NOT ``task.cancel()`` there:
+    this module's own doctrine (#2988, #3718) is that cancelling the await stops
+    the AWAITABLE, not the worker thread, while running every ``finally`` the
+    handler owns — and 14 handlers here close their SDK in a ``finally``, so a
+    cancel would tear the projection down under work that is still using it
+    (exactly the #3718 P1). Unwinding normally keeps the handler's own
+    bookkeeping (and the ``InFlightMiddleware`` gauge the #2850 self-kill
+    predicate reads) consistent.
+
+    NOT used on the CANCELLATION path, where the opposite is required: see the
+    ``except asyncio.CancelledError`` branch in ``WaitBoundMiddleware.__call__``.
+    """
+    _pending_wait_bound_requests.add(task)
+
+    def _done(t) -> None:
+        _pending_wait_bound_requests.discard(t)
+        if not t.cancelled():
+            t.exception()  # retrieve, so it is never reported as un-retrieved
+
+    task.add_done_callback(_done)
+
+
+class WaitBoundMiddleware:
+    """The transport-level wait bound (#3834) — one bound, every route but the
+    one recorded exemption.
+
+    Pure ASGI and OUTERMOST (registered last): it must see the request before
+    any middleware can short-circuit it. It is deliberately NOT wrapping-free
+    (unlike ``InFlightMiddleware``, whose docstring this class no longer
+    inherits): on every non-exempt request ``__call__`` re-binds ``send`` to a
+    guarded closure and runs the app as a child task. Owning ``send`` is what
+    lets it substitute a refusal for a response that has not started, so that
+    cost is the bound's price, not an accident. ⚠️ Only the SIBLING MCP seam's
+    cost is measured (``tests/test_mcp_telemetry.py::TestOverhead`` drives
+    ``mcp.call_tool`` directly — no ASGI app, no middleware stack); THIS
+    middleware's own re-bind + child-task overhead is not measured by any test.
+
+    ⚠️ What it does NOT bound is MCP *tool calls*, and the earlier claim that
+    it "covers the mounted MCP app by construction" was false: FastMCP's
+    Streamable-HTTP transport runs in SSE mode and starts the
+    ``EventSourceResponse`` BEFORE dispatching the tool
+    (``mcp/server/streamable_http.py`` — "Start the SSE response (this will send
+    headers immediately)"), so ``http.response.start`` is already on the wire
+    when the deadline fires and the middleware's ``response_started`` branch can
+    only let the request finish. A bound that reported success while bounding
+    nothing is why the MCP half lives in ``tortoise/mcp_server.py``'s dispatch
+    (``_await_under_mcp_wait_bound``), where it is enforced across the registry
+    rather than per tool.
+
+    The middleware still owns the ``/mcp`` refusal for a request that stalls
+    BEFORE its SSE response begins (``_is_jsonrpc_surface`` /
+    ``mcp_auth._jsonrpc_error``) — e.g. a slow org resolution that consumes the
+    bound. That arm answers a standard HTTP 504 with a JSON-RPC error body and
+    ``Retry-After``: a client that raises on the status still has the HTTP-level
+    retry signal, while the guaranteed legible-per-tool-call refusal is the
+    post-SSE one from the MCP dispatch.
+
+    On breach the caller gets a readable refusal (what happened, whether to
+    retry, how long) and the handler is left running rather than cancelled. The
+    two cases where a refusal cannot be substituted are handled honestly: a
+    response that has already STARTED streaming is allowed to finish (an ASGI
+    response cannot be replaced mid-flight), and the abandoned handler's late
+    response is DROPPED rather than sent over a reply it no longer owns.
+
+    ⚠️ What this bound CANNOT do: an ``asyncio`` deadline only fires while the
+    loop runs. A handler that blocks the loop synchronously (``time.sleep``, a
+    direct FalkorDB call — a live class in this module, #3060/#3718) finishes
+    before the timer callback can run, so it is NOT converted into a refusal.
+    The bound is strictly additive there, never a cure; removing that class is
+    #3718's direction (move the blocking work off-loop). Pinned so the limit is
+    visible rather than assumed —
+    ``test_synchronous_handler_is_not_bounded_it_is_stated_not_assumed``.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":  # lifespan/websocket are not requests
+            await self.app(scope, receive, send)
+            return
+        from starlette.routing import get_route_path
+
+        route_path = get_route_path(scope)
+        if (scope.get("method", ""), route_path) in _TRANSPORT_WAIT_BOUND_EXEMPT:
+            await self.app(scope, receive, send)
+            return
+
+        response_started = False
+        refused = False
+
+        async def _guarded_send(message):
+            nonlocal response_started
+            if refused:
+                # The caller already has the refusal. An ASGI send after
+                # response.end is a protocol violation, so the abandoned
+                # handler's late response is dropped here.
+                return
+            if message.get("type") == "http.response.start":
+                response_started = True
+            await send(message)
+
+        t0 = time.monotonic()
+        # #3834 F1: stamp the TRANSPORT arrival so the MCP dispatch seam —
+        # ``mcp_server._await_under_mcp_wait_bound``, which is what actually
+        # bounds a tool call because Streamable-HTTP starts the SSE response
+        # BEFORE dispatching the tool — spends the SAME deadline instead of
+        # starting a fresh one. Without this the caller-visible wait is
+        # pre-SSE cost + bound (measured: 0.522 s for an advertised 0.3 s), and
+        # a slow org resolution pushes the total past the 15 s client budget
+        # with NO legible refusal — the exact failure #3834 exists to eliminate.
+        # ``scope["state"]`` is the dict the auth dependency already writes
+        # ``org_id`` into, and Starlette's ``Mount`` passes the same mapping
+        # through to the sub-app, so the MCP seam can read it via
+        # ``fastmcp.server.http._current_http_request``.
+        state = scope.get("state")
+        if not isinstance(state, dict):
+            state = {}
+            scope["state"] = state
+        state["_wait_bound_t0"] = t0
+
+        task = asyncio.ensure_future(self.app(scope, receive, _guarded_send))
+        try:
+            # ``wait_for`` + ``shield``, not ``asyncio.wait``: on 3.12
+            # ``wait_for`` is a single deadline around ``await fut``, and the two
+            # are cost-neutral (measured on the sibling MCP seam: 198 µs vs
+            # 199 µs p50). The cost THIS boundary pays is the per-call
+            # ``ensure_future`` task it must OWN — ABANDON-never-cancel requires
+            # an owned task — measured there as ~+0.48 ms p50 / +1.7 ms p95 over
+            # the unwrapped call. The ``shield`` is REQUIRED: ``wait_for`` alone
+            # CANCELS the awaited future on timeout, and this bound must
+            # ABANDON, never cancel (the SDK-closing ``finally`` doctrine below).
+            return await asyncio.wait_for(
+                asyncio.shield(task),
+                timeout=_mcp_auth._TRANSPORT_WAIT_BOUND_S)
+        except asyncio.CancelledError:
+            # The caller was cancelled (client disconnect, server shutdown).
+            # Propagate the cancellation INTO the handler and await it: the
+            # app's own cancellation path is where its cleanup and abandonment
+            # markers live (#3129 — a capture cancelled after its extraction
+            # must still record the failed attempt), and the direct
+            # ``await self.app(...)`` this middleware replaced ran exactly that
+            # path. ABANDONING here instead would silently keep a disconnected
+            # capture running and leave its marker unset. Cancelling is correct
+            # ONLY on this path; the breach path below abandons on purpose.
+            #
+            # Suppress only the child's CANCELLATION. A genuine error raised by
+            # its cleanup (a raising ``finally``, a send on a dead socket) must
+            # surface, exactly as it did through the old direct await —
+            # ``suppress(BaseException)`` would retrieve and discard it.
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            raise
+        except TimeoutError:
+            if task.done():
+                # The dispatch finished as the deadline expired. Surface its
+                # result/exception exactly as a plain await would — a handler's
+                # OWN ``TimeoutError`` must not be rewritten into a wait-bound
+                # refusal (``asyncio.TimeoutError`` IS builtin ``TimeoutError``).
+                return task.result()
+            # The deadline fired with the dispatch still running: ``shield``
+            # kept the inner task ALIVE and the breach path below abandons it.
+        if response_started:
+            # The response already began; a refusal can no longer be
+            # substituted, so the request is allowed to finish.
+            await task
+            return
+
+        refused = True
+        state = scope.get("state")
+        # #3834 F-2 (exactly-once breach telemetry): the MCP dispatch seam
+        # shares this ``scope["state"]`` dict (Starlette's ``Mount`` forwards
+        # the same mapping) and reads this flag before emitting its own breach
+        # event. Without it a pre-SSE stall (pre-SSE cost >= bound) produced
+        # TWO ``transport_wait_bound_exceeded`` rows for one request — the
+        # middleware's here and the seam's, where the seam's own deadline had
+        # already collapsed to 0. The middleware is the one that ANSWERED the
+        # caller on this path, so its event is the truthful one; the seam's
+        # refusal below is redundant. On the SSE-started path this branch is
+        # never reached (``response_started`` returns above) and the seam's
+        # event is the only one — which is why this is a FLAG and not a
+        # ``remaining <= 0`` guard at the seam.
+        if isinstance(state, dict):
+            state["_wait_bound_refused"] = True
+        org_id = state.get("org_id") if isinstance(state, dict) else None
+        # The ASGI server percent-DECODES the path, so `/v1/x/%0d%0a…` arrives
+        # with embedded CR/LF; logged verbatim that forges log lines. This is
+        # the FULLER form of the CR/LF fix the unhandled-exception handler at
+        # ``_unhandled_exception_handler`` (#1591 class) carries — the C0 range
+        # plus DEL/C1 and the Unicode line separators — and the sanitized form
+        # also reaches the analytics prop, so neither the log nor the sink can
+        # be forged. The helper lives in ``mcp_auth`` (#3834 F-3) so the MCP
+        # arm shares it without importing this module.
+        safe_route_path = _mcp_auth._sanitize_for_log(route_path)
+        _emit_wait_bound_breach(org_id or "", safe_route_path,
+                                scope.get("method", ""),
+                                int((time.monotonic() - t0) * 1000))
+        _logger.warning(
+            "transport wait bound (%.0fs) exceeded: %s %s — refusing legibly",
+            _mcp_auth._TRANSPORT_WAIT_BOUND_S, scope.get("method"), safe_route_path)
+        # The task has already outlived the refusal decision, so register it
+        # BEFORE the send: the send happens 10 s in, where a client that has
+        # already gone makes uvicorn raise (ConnectionResetError /
+        # ClientDisconnected); if that raise skipped this call the still-running
+        # handler would never be drained. The send is then best-effort.
+        _track_wait_bound_request(task)
+        try:
+            await _send_wait_bound_refusal(send, scope, route_path)
+        except Exception:
+            _logger.debug(
+                "wait-bound refusal send failed (client disconnected?)",
+                exc_info=True)
+
+
+app.add_middleware(WaitBoundMiddleware)
 
 
 # Internal auth key for Edge Function → API communication
@@ -3741,14 +4198,39 @@ def _assert_graph_owned(org: dict, graph_id: str,
                     "message": "graph not found for key"})
 
 
-def _data_sdk(org: dict) -> TortoiseSDK:
-    """C5 #2114 (D-C5-2): the data-plane tenancy resolver — the ONE entry
-    every org-data surface uses to open its SDK.
+def _bind_actor_context(org: dict) -> None:
+    """#2600: bind the server-resolved human actor for this request, LOOP-side.
 
-    #2600: the server-resolved human actor ContextVar is set HERE (the single
-    REST set-site) — CONDITIONALLY, only when the dict carries a gated
+    Cheap by construction — one ContextVar write, no I/O — so its LOOP-SIDE
+    invocation must stay on the loop: the value has to be in the LOOP's context
+    for the off-loaded write's own ``asyncio.to_thread`` context copy to carry
+    it (the off-loaded graph work itself runs under a context copy — see
+    ``_graph_offload``). ``_data_sdk``'s graph work is off the loop (#3773) and
+    still calls this for its direct sync callers; that call is deliberately
+    INERT on the offloaded path (it writes into the discarded context copy),
+    and MUST NOT be relied on — ``_data_sdk_offloaded`` makes the loop-side
+    call that matters. A bind executed at a process-lifetime pool thread's top
+    level would otherwise leak into the NEXT request that worker serves.
+    """
+    from tortoise.sdk import _current_actor_user_id
+    _actor = org.get("actor_user_id")
+    if _actor is not None:
+        _current_actor_user_id.set(_actor)
+
+
+def _data_sdk(org: dict) -> TortoiseSDK:
+    """C5 #2114 (D-C5-2): the data-plane tenancy resolver — the sync entry
+    every org-data surface uses to open its SDK. Off-loop callers use its async
+    twin ``_data_sdk_offloaded`` (#3773), which binds the actor on the loop and
+    routes this graph work through the #3498 seam.
+
+    #2600: the server-resolved human actor ContextVar is written by
+    ``_bind_actor_context`` — CONDITIONALLY, only when the dict carries a gated
     actor_user_id, so a hand-built actor-less dict (the MCP capture tool's
-    org dict) never ERASES a value the auth seams set (cycle-2 P0).
+    org dict) never ERASES a value the auth seams set (cycle-2 P0). There are
+    TWO REST call paths (this sync one, and ``_data_sdk_offloaded`` which binds
+    loop-side first); the bind below serves the direct sync callers and is
+    inert on the offloaded path (see ``_bind_actor_context``).
     - graph-bound key (graph_id set): ownership pre-check THEN open the
       resolved FULL graph name (custom org_{tid}_{gid} or a bound default)
       via the explicit graph-name seam — cross-graph denied at the app
@@ -3761,12 +4243,9 @@ def _data_sdk(org: dict) -> TortoiseSDK:
       (sdk.org_create org_{name}, #2023) diverges and flipping would
       silently move those orgs' data access.
     """
-    # #2600: single REST ContextVar set-site — CONDITIONAL (only when the
+    # #2600: bind the actor through the ONE helper — CONDITIONAL (only when the
     # dict carries a gated actor; never erase a value the auth seams set).
-    from tortoise.sdk import _current_actor_user_id
-    _actor = org.get("actor_user_id")
-    if _actor is not None:
-        _current_actor_user_id.set(_actor)
+    _bind_actor_context(org)
     org_id = org["org_id"]
     gid = org.get("graph_id")
     if gid:
@@ -3779,6 +4258,24 @@ def _data_sdk(org: dict) -> TortoiseSDK:
         _assert_graph_owned(org, gid, ns)
         return _make_sdk(graph_name=ns)
     return _make_sdk(namespace=org_id)
+
+
+async def _data_sdk_offloaded(org: dict) -> TortoiseSDK:
+    """#3773: ``_data_sdk`` off the event loop (context-isolated).
+
+    The write handlers built their per-request SDK inline, so in embedded mode
+    the keepalive anchor's probe query (and, for a graph-bound key,
+    ``_assert_graph_owned``'s ownership query) ran ON the loop immediately
+    before the already off-loaded write — the residual #3718 left. Routing it
+    through the #3498 bounded offload seam (``_graph_offload``) removes that
+    on-loop work without changing what ``_data_sdk`` returns or raises.
+
+    The #2600 actor bind runs LOOP-side first: the off-loaded call executes
+    under a context COPY, so its own bind does not reach the loop — and the
+    later off-loaded write's ``asyncio.to_thread`` copies the LOOP's context.
+    """
+    _bind_actor_context(org)
+    return await _graph_offload(lambda: _data_sdk(org), op="data_sdk")
 
 
 def _require_scope(org: dict, scope: str, surface: str) -> None:
@@ -4057,6 +4554,12 @@ def _record_write_op(org: dict, nodes_written: int = 0) -> None:
     value-first commit cost driver, epic #909 §4.4/W-4/PL4 — the commit
     endpoint passes the reconciled net-new delta; hold commits bill 0 and
     skip this entirely).
+
+    ⚠️ CALLER NOTE (#4451): this is SYNCHRONOUS — in registry/embedded mode
+    ``record_write_ops`` runs a blocking ``MERGE (m:MeteringRecord …)`` plus a
+    ``MATCH``, and in Supabase mode a blocking control-plane RPC, on whatever
+    thread calls it. The write handlers call it inline on the event loop (a
+    post-write residual #3773 out-scoped); off-loading it is tracked by #4451.
     """
     org_id = org.get("org_id", "")
     try:
@@ -4706,9 +5209,11 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
     an exception from the helper itself (e.g. the strict-mode
     ``UnregisteredTelemetryKey``) still propagates.
 
-    ``pool`` (#3669) selects the worker pool: ``"auth"`` (default),
-    ``"telemetry"`` for best-effort work, or ``"oauth"`` for the
-    attacker-reachable OAuth client-resolution lane.
+    ``pool`` (#3669, #3773) selects the worker pool: ``"auth"`` (default),
+    ``"telemetry"`` for best-effort work, ``"oauth"`` for the
+    attacker-reachable OAuth client-resolution lane, or ``"graph"`` for the
+    DATA-PLANE graph helpers (kept off auth capacity; see
+    ``_graph_offload``, which passes its own ``unavailable`` factory).
 
     ``unavailable`` (#3669) overrides the fail-closed error FACTORY. The
     auth/REST lane keeps the repo-standard 503 ``control_plane_unavailable``;
@@ -4744,6 +5249,74 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
         if unavailable is not None:
             raise unavailable() from None
         raise _control_plane_unavailable() from None
+
+
+def _graph_unavailable() -> HTTPException:
+    """#3773: fail-closed 503 for a saturated / bound-missed data-plane offload.
+
+    Deliberately NOT ``_control_plane_unavailable``: that body's copy is
+    sign-in specific and would mislead a client retrying a graph write. A
+    graph helper that could not get a worker is a service-capacity failure,
+    and the write did not happen — retryable.
+
+    Deliberately distinct from ``org_graph_unavailable`` (a TENANCY/access
+    failure on the activation scorecard, activation_scorecard.py): this one
+    means only that the offload could not get a worker, so the request is
+    retryable. The code is body-only today — no client maps it yet (the REST
+    write lane is consumed by agents/SDKs, which treat any 5xx as retryable);
+    the dashboard renders a 503 on the auth lane, not this one.
+    """
+    return HTTPException(
+        status_code=503,
+        detail={
+            "error_code": "graph_unavailable",
+            "message": "The graph service is temporarily unavailable — try again in a moment.",
+        },
+    )
+
+
+async def _graph_offload(fn, *, op: str):
+    """#3773: run ONE synchronous DATA-PLANE graph helper off the event loop.
+
+    Thin hosted-side wrapper over the #3498 seam (``_cp_offload`` ->
+    ``monitoring.run_control_plane_call``) on the dedicated ``graph`` pool.
+    The off-loaded unit is a graph helper (``_data_sdk``'s connect / embedded
+    anchor probe, ``_check_org_limit``'s count query) that used to run inline
+    immediately before an already off-loaded write. (The REST ``dream``
+    handler's ``_data_sdk`` is routed here too; the write-triggered
+    ``_dream_worker`` builds its SDK inside the dream-pool item instead — see
+    ``_run_dream_on_pool``.)
+
+    Wait bound: the graph lane's bound is resolved at CALL time as
+    ``graph_offload_timeout_s()`` = ``probe_setup_timeout()`` + a margin,
+    deliberately ABOVE the probe lane's own projection cold-start allowance —
+    a cold projection open is a legitimate ~28-round-trip phase the seam's
+    PostgREST-derived 10 s default would false-degrade into a retryable 503.
+    Resolving it at call time (not from the frozen default) means raising
+    ``TORTOISE_PROBE_SETUP_TIMEOUT`` cannot invert the ordering. A bound miss
+    abandons the worker (CPython #87185), which keeps holding its pool slot
+    until it returns; the bound is therefore set for a genuinely wedged graph,
+    not a cold one.
+
+    Context isolation: the callable runs under a COPY of the caller's context.
+    ``_data_sdk`` sets the #2600 actor ContextVar, and a pool thread is
+    process-lifetime — a var set at that thread's top level would survive into
+    the NEXT request the worker serves. The copy confines any such write to the
+    submission (the same reason ``_submit_off_loop`` copies). Because this is
+    the only place the copy is applied, callers must reach the graph pool
+    THROUGH this wrapper, never ``_cp_offload(pool="graph")`` directly.
+
+    Telemetry: graph ops land in the seam's SHARED offload-record buffer under
+    graph-specific op names (``data_sdk``, ``check_org_limit.points``), so they
+    are identifiable by op — but they share the 512-entry buffer, so a graph
+    burst can evict PostgREST records. Splitting the buffer per pool is a
+    follow-up, not part of #3773.
+    """
+    ctx = contextvars.copy_context()
+    return await _cp_offload(
+        functools.partial(ctx.run, fn), op=op, pool="graph",
+        timeout=graph_offload_timeout_s(),
+        unavailable=_graph_unavailable)
 
 
 async def _oauth_offload(fn, *, op: str, no_wait_bound: bool = False):
@@ -5090,18 +5663,19 @@ async def create_object(body: CreateObjectRequest, request: Request,
     returns the canonical node). objectKind/status/… ride the props.
     """
     _require_scope(org, "graphs:write", "create_object")
-    _check_org_limit(org, "points")
-    sdk = _data_sdk(org)
+    # #3773: the quota count and the SDK open are SYNC FalkorDB work too — they
+    # go through the #3498 offload seam (graph pool) instead of running on the
+    # loop before the off-loaded write below.
+    await _graph_offload(lambda: _check_org_limit(org, "points"),
+                         op="check_org_limit.points")
+    sdk = await _data_sdk_offloaded(org)
     try:
         props = {}
         if body.status:
             props["status"] = body.status
         # #3718: sdk.create_object is SYNC FalkorDB socket I/O — run it in a
         # worker thread so THIS pinned call cannot freeze the single event loop
-        # while it runs. NOT a handler-level guarantee: `_check_org_limit`
-        # (a per-org count query on its own SDK) and `_data_sdk`'s connect still
-        # run on the loop before this point — a tracked residual, see the test
-        # module's SCOPE note. Same asyncio.to_thread pattern as /v1/search;
+        # while it runs. Same asyncio.to_thread pattern as /v1/search;
         # response and error semantics are unchanged.
         node = await asyncio.to_thread(
             sdk.create_object, body.name, objectKind=body.objectKind, **props)
@@ -5141,8 +5715,10 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
     as the first graph entities.
     """
     _require_scope(org, "graphs:write", "create_subject")
-    _check_org_limit(org, "points")
-    sdk = _data_sdk(org)
+    # #3773: same off-load of the quota count + SDK open as create_object above.
+    await _graph_offload(lambda: _check_org_limit(org, "points"),
+                         op="check_org_limit.points")
+    sdk = await _data_sdk_offloaded(org)
     try:
         # #3718: sync FalkorDB I/O — off-loaded off the event loop (see
         # create_object above for the pattern and rationale).
@@ -5167,17 +5743,19 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
 async def create_point(body: CreatePointRequest, request: Request, org: dict = Depends(get_current_org_session_ungated)):  # noqa: B008
     """Create a Point in the org's graph."""
     _require_scope(org, "graphs:write", "create_point")
-    _check_org_limit(org, "points")
-    sdk = _data_sdk(org)
+    # #3773: the quota count and the SDK open are SYNC FalkorDB work too — they
+    # go through the #3498 offload seam (graph pool) instead of running on the
+    # loop before the off-loaded write below.
+    await _graph_offload(lambda: _check_org_limit(org, "points"),
+                         op="check_org_limit.points")
+    sdk = await _data_sdk_offloaded(org)
     try:
         # #3718: sdk.create_point + the about edge are SYNC FalkorDB socket
         # I/O — both run in ONE worker thread (a single hand-off keeps the
         # write-then-edge ordering and the error semantics identical) so this
         # pinned call cannot freeze the event loop while it runs.
         # `_get_proj()` is inside the worker because its FIRST call opens the
-        # projection — though `_check_org_limit` above has already built its
-        # own SDK on the loop, so the handler as a whole is NOT on-loop-free
-        # (tracked residual, see the test module's SCOPE note).
+        # projection.
         def _write_point() -> dict:
             out = sdk.create_point(
                 content=body.content,
@@ -5243,7 +5821,7 @@ async def events_poll(
     namespace — never client input.
     """
     _require_scope(org, "graphs:read", "events_poll")
-    sdk = _data_sdk(org)
+    sdk = await _data_sdk_offloaded(org)
     type_list = [t.strip() for t in (types or "").split(",") if t.strip()]
     try:
         # #3718: sync FalkorDB I/O — off-loaded off the event loop so a slow
@@ -5389,7 +5967,7 @@ async def dream(
             )
         bucket.append(now_ts)
 
-    sdk = _data_sdk(org)
+    sdk = await _data_sdk_offloaded(org)
 
     # The graph key is needed for the per-graph dream lock on EVERY branch.
     _dk = _dream_key(org["org_id"],
@@ -5428,7 +6006,7 @@ async def dream(
         sdk.close()
         raise
 
-    def _run_dream():
+    def _run_dream(sdk):
         # #3718: sdk.dream is a long, CPU-heavy SYNCHRONOUS graph pass — the
         # worst on-loop blocker on this surface (seconds, not the ~35ms of a
         # point write). All three branches run on the DEDICATED dream pool (see
@@ -5444,7 +6022,7 @@ async def dream(
                 sdk._mark_dirty(queued_roots)
             return sdk.dream(dirty_only=True)
 
-    return await _run_dream_on_pool(_run_dream, sdk)
+    return await _run_dream_on_pool(_run_dream, lambda: sdk)
 
 
 @app.get("/v1/dream/health")
@@ -8813,25 +9391,21 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     minted_event = False
     event_id = None
 
-    # NOTE: this per-turn loop (episodic turn Points) is duplicated from
-    # tortoise/sdk.py capture_session — the shared primitives #1532 D1/D2
-    # (_capture_turn_window / _normalize_turn_role) keep the two loops
-    # byte-identical for identical input: same stored-window truncation, same
-    # role normalization (None -> "unknown", truthy non-strings -> str()), and
-    # the same `speaker` property write (delta 5 — hosted previously wrote no
-    # speaker tag). Hosted additionally adds quota/auth bounds + a pre-write
-    # estimate. Keep the two in sync — and note the THIRD copy:
-    # tools/ask_spotcheck.py::seed_capture_turn_store mirrors this same
-    # per-turn store (id, `[role] ` framing, prop set, CONTAINS edge) to seed
-    # the ask fixtures (#3910) — the ONE copy every ask seeder writes through
-    # since #3914. It omits Source/extraction, but since W7A it EMBEDS every
-    # turn BY DEFAULT through the shared store seam (#4194/#4304) and retains
-    # `embed=False` for #4197's un-backfilled backlog.
-    # #3551 tracks collapsing all three onto one shared
-    # primitive. The LLM extraction that follows the
-    # loop is shared via sdk._extract_session_llm/_extract_session_v2 (#822).
+    # #3086: the episodic turn stream is written by the ONE shared writer
+    # (`sdk._write_capture_turns`), also called by `sdk.capture_session` — so
+    # this lane and the SDK lane can no longer drift (the #1532 duplicated-loop
+    # class). Hosted additionally adds quota/auth bounds + a pre-write
+    # estimate. NOTE the THIRD, still-separate copy:
+    # tools/ask_spotcheck.py::seed_capture_turn_store mirrors the same store
+    # shape to seed the ask fixtures (#3910) — the ONE copy every ask seeder
+    # writes through since #3914. It omits Source/extraction, but since W7A it
+    # EMBEDS every turn BY DEFAULT through the shared store seam (#4194/#4304)
+    # and retains `embed=False` for #4197's un-backfilled backlog.
+    # #3551 tracks collapsing it onto the shared primitive too. The LLM
+    # extraction that follows the write is shared via
+    # sdk._extract_session_llm/_extract_session_v2 (#822).
     #
-    # #3892: metering truth. The turn loop below runs for EVERY request, so a
+    # #3892: metering truth. The turn write below runs for EVERY request, so a
     # re-capture of a GROWN transcript writes NEW turn Points even when the
     # branch taken extracts nothing (a keyless re-capture, or a keyless retry
     # on the M2 lane). The write-op/abuse meter keys on the ACTUAL write — the
@@ -8868,109 +9442,24 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # impaired. The write's own MERGE reads the node's pre-write content_hash
     # to decide preserve-vs-clear, so no external probe can fail.
     #
-    # #4194/#3086: the encode runs OFF the event loop on the capture pool. The
-    # turn loop itself is a tracked on-loop residual (#3086); the local-model
-    # encode over a capture window must not add to it. SDK `capture_session`
-    # is synchronous (there is no loop to free) and calls the same helper
-    # inline — the two share the helper, not the scheduling.
+    # #4194/#3086: the encode runs OFF the event loop on the capture pool. SDK
+    # `capture_session` is synchronous (there is no loop to free) and calls
+    # the same helper inline — the two share the helper, not the scheduling.
     _turn_texts = _capture_turn_texts(windowed)
     _turn_embs = await _run_off_loop(
         _CAPTURE_EXECUTOR, _capture_turn_embeddings, _turn_texts,
         proj.required_embedding_dim)
-    for i, turn in enumerate(windowed):
-        role = _normalize_turn_role(turn.get("role"))
-        # P1 #1529 (D10, #721 parity): the stored text (and its isinstance-first
-        # coercion — a non-string content can NEVER crash the loop into a raw
-        # 500 after the Session MERGE) comes from the shared
-        # `_capture_turn_texts`, one definition shared with the embedding batch
-        # above (#4194), so the vector is always computed over the string
-        # actually stored.
-
-        # #490: turn Points are the episodic turn stream OF THIS SESSION —
-        # keyed deterministically by {session_id}_t{i} so re-capturing the
-        # same session is idempotent, but turns from different sessions never
-        # conflate (content-hash dedup would share an empty "[user] " or
-        # repeated "ok" turn org-wide, destroying per-session turn identity
-        # — #490 review P2-2). Node MERGEs run BEFORE the edge MERGE: a full-
-        # path MERGE (s)-[:CONTAINS]->(t) with a missing edge makes FalkorDB
-        # create the whole path from scratch, duplicating the Point node.
-        turn_id = f"{session_id}_t{i}"
-        turn_text = _turn_texts[i]
-        turn_embedding = _turn_embs[i]
-        _turn_rows = proj.g.query(
-            "MERGE (t:Point {id:$id}) "
-            # #4194: capture the node's PRE-write content_hash before the SET
-            # reassigns it (capture-time read, no external probe that can
-            # fail). prior_ch NULL => a new turn, nothing to preserve.
-            "WITH t, t.content_hash AS prior_ch "
-            "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
-            "    t.speaker=$speaker, "
-            "    t.is_episodic=true, "
-            "    t.status=coalesce(t.status, $s), "
-            "    t.createdAt=coalesce(t.createdAt, $now), "
-            "    t.updatedAt=$now, t.content_hash=$ch, "
-            # #4194: three-way guard. New vector if we encoded one; else
-            # PRESERVE the stored vector only when the content is UNCHANGED;
-            # else CLEAR it, because a preserved vector for changed text
-            # would rank the turn by text no longer on the node (the
-            # dense-leg lie).
-            "    t.embedding=CASE WHEN $emb IS NOT NULL THEN vecf32($emb) "
-            "        WHEN prior_ch = $ch THEN t.embedding ELSE NULL END "
-            "RETURN t.createdAt AS createdAt, t.status AS status",
-            params={"id": turn_id, "c": turn_text, "k": "event",
-                    "speaker": role, "s": "draft", "now": now,
-                    "ch": _content_hash(turn_text),
-                    "emb": turn_embedding},
-        ).result_set
-        # #3947 review (F4 + parity): the write's COALESCE owns the stored
-        # timestamp and status — a RE-capture keeps the original createdAt and
-        # any promoted status, so journal what the graph holds. Emitting the
-        # literal `now`/`draft` regresses a promoted turn to draft and drifts
-        # createdAt on every replay (parity with sdk.py's loop, #1532).
-        turn_created_at = (
-            _turn_rows[0][0]
-            if _turn_rows and _turn_rows[0] and _turn_rows[0][0] is not None
-            else now)
-        turn_status = (
-            _turn_rows[0][1]
-            if _turn_rows and _turn_rows[0] and _turn_rows[0][1] is not None
-            else "draft")
-        proj.g.query(
-            "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
-            "MERGE (s)-[:CONTAINS]->(t)",
-            params={"sid": session_id, "tid": turn_id},
-        )
-        # #3947: journal the turn write so a rebuild can recreate it (parity
-        # with sdk.capture_session's loop — the two are kept identical by
-        # design, #1532). The raw Cypher writes above are unchanged; this is
-        # the missing RECORD. `contains_session` rides the event envelope so
-        # the projection's edge fold restores the CONTAINS link without a
-        # node property the live write never sets.
-        #
-        # #3947 review (cycle 2, #3086): gated on a configured journal, exactly
-        # as in sdk.py — on this lane `_make_sdk`/`_data_sdk` pass no
-        # `event_log_path`, so the JSONL half is a no-op and the `:GraphEvent`
-        # half is not a rebuild source (the wipe takes it with the graph). The
-        # per-turn `ensure_event_schema` + `next_seq` + `append_event` cost was
-        # pure overhead on the lane #3086 measures as already blocking the
-        # event loop. The residual — hosted captures have no rebuild-durable
-        # turn record until a journal is wired here — is unchanged by this PR.
-        if sdk._get_event_log() is not None:
-            sdk._emit_event(
-                "PointAdded",
-                {"id": turn_id, "kind": "event",
-                 "content_hash": _content_hash(turn_text)},
-                point={
-                    "id": turn_id,
-                    "content": turn_text,
-                    "pointKind": "event",
-                    "speaker": role,
-                    "is_episodic": True,
-                    "status": turn_status,
-                    "createdAt": turn_created_at,
-                },
-                contains_session=session_id,
-            )
+    # #3086: the turn WRITE runs OFF the event loop on the capture pool, in ONE
+    # batched `UNWIND $turns` transaction, through the SAME shared writer the
+    # SDK lane calls (`_write_capture_turns`). The per-turn loop this replaced
+    # issued two FalkorDB round-trips per turn straight on the loop (~1000 for
+    # a 500-turn capture — the ~4.75 s single-loop freeze #3086 measures).
+    # Node shape, per-row idempotency (`{session_id}_t{i}`), the stale-vector
+    # guard and the rebuild journal all live in that one definition, so this
+    # lane and `sdk.capture_session` can no longer drift (#1532's drift class).
+    await _run_off_loop(
+        _CAPTURE_EXECUTOR, _write_capture_turns, proj, sdk, session_id,
+        windowed, now=now, turn_embs=_turn_embs)
 
     # #1727 Slice 2 (T2-P2c): idempotent re-POST — the Session already
     # existed, so the LLM extraction is SKIPPED (M2/v2-minted points are not
@@ -9071,7 +9560,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             tenant_master = None
             try:
                 from tortoise.extractor_v2 import build_master_list
-                tenant_master = build_master_list(sdk=sdk)
+                # #3086: the tenant vocab compile walks the pack manifests and
+                # is a documented cold-start cost (`extractor_v2` — ~12.2 s
+                # cold on the manifest path). It ran INLINE on the event loop,
+                # stalling every concurrent request; it belongs on the capture
+                # pool with the rest of the capture residual.
+                tenant_master = await _run_off_loop(
+                    _CAPTURE_EXECUTOR, build_master_list, sdk=sdk)
             except Exception as e:  # noqa: BLE001, RUF100
                 _logger.warning(
                     "tenant vocabulary compile failed for %s — capture "
@@ -9654,10 +10149,36 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # FIRST calibration here.
     ep_ids = _capture_ep_target_ids(extracted, proj)
     if ep_ids:
-        _apply_capture_ingest_ep(
-            sdk, ep_ids,
-            warn=extraction_warnings.append,
-        )
+        # #3086: this pass runs `sdk.dream(mode="local", ...)`, which is
+        # KNOWN loop-unsafe — the whole reason `/v1/dream` is async and pooled
+        # (#3718). It ran INLINE here, ON the event loop, freezing every
+        # concurrent request for the whole pass. Two things are required to
+        # move it:
+        #
+        #   1. Off the loop, onto the dedicated capture pool.
+        #   2. UNDER the same per-graph dream lock the two pooled pass sites
+        #      take. Before the off-load the single event loop made both
+        #      bodies atomic (no await before `sdk.dream`); now the pass runs
+        #      in a pool, so two same-graph passes (this one and `/v1/dream`,
+        #      or two HOSTED captures) could otherwise read and clear the SAME
+        #      `ep_dirty` roots and interleave `warm_start` writes — the exact
+        #      exclusion #3718's review made explicit for the pooled sites.
+        #      (The SDK lane's own inline `capture_session` call is unchanged
+        #      and takes no lock — it is synchronous on its caller's thread and
+        #      cannot import this module; that is pre-existing, not widened.)
+        #      The lock is a `threading.Lock` taken INSIDE the worker, never on
+        #      the loop (an `asyncio.Lock` binds to the first loop, which breaks
+        #      across the per-test loops — the `_CAPTURE_IN_FLIGHT` rationale).
+        _dk = _dream_key(org["org_id"],
+                         (org.get("graph_namespace")
+                          if org.get("graph_id") else None))
+
+        def _capture_ep_pass() -> None:
+            with _dream_lock(_dk):
+                _apply_capture_ingest_ep(
+                    sdk, ep_ids, warn=extraction_warnings.append)
+
+        await _run_off_loop(_CAPTURE_EXECUTOR, _capture_ep_pass)
     # W5 (#2104, S12/DM-2): the capture response speaks the frozen write
     # verb (memory_write_v1) — protocol_version REQUIRED, provenance
     # REQUIRED, per-point status/ep_updated/dedup, additive over the legacy
@@ -20606,6 +21127,12 @@ _ALLOWED_ANALYTICS_PROPS = {
     # Registering them here repairs that shipped, silent loss; the structural
     # registration test is what keeps the two sets from drifting again.
     "plan", "tier",
+    # #3834: the transport-level wait bound's breach event. `method` and
+    # `latency_ms` are already registered above; `path` is the one new key.
+    # Without it the refusal would be counted but the ROUTE would be stripped
+    # here — the documented #3359/#3824 silent-loss mode, which would make the
+    # "which routes actually breach 10 s" question unanswerable in production.
+    "path",
 }
 
 # ── #3821: the unregistered-key choke point ─────────────────────────────
@@ -24317,7 +24844,11 @@ async def backups_rebaseline(request: Request, body: dict):
     graph_id = body.get("graph_id", "default")
     if not org_id:
         raise HTTPException(status_code=400, detail="org_id required")
-    from tortoise.hosted_backup import _validate_graph_id, _validate_org_id
+    from tortoise.hosted_backup import (
+        _validate_graph_id,
+        _validate_org_id,
+        count_data_nodes,
+    )
     try:
         # #2377 (defense in depth): org_id/graph_id flow into R2 state keys
         # (_graph_state_key + the legacy org-file write below) — apply the
@@ -24351,8 +24882,13 @@ async def backups_rebaseline(request: Request, body: dict):
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=f"Re-baseline failed: {e}")  # noqa: B904
     try:
-        g = db.select_graph(row["graph_name"])
-        count = int(g.query("MATCH (n) RETURN count(n)").result_set[0][0])
+        # #4233: count the SAME node set every other DR surface counts —
+        # dump_graph's (the sweep manifest, the empty-backup guard, drill
+        # verification). A raw `MATCH (n)` included the projection's internal
+        # `Meta {key:'point_fts_v2'}` marker once a projection had been opened
+        # on the org graph, so a 3-point graph re-baselined to 4 and flaked the
+        # required check on unrelated PRs.
+        count = count_data_nodes(db, row["graph_name"])
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"graph unavailable: {e}")  # noqa: B904
     state = {
@@ -24508,11 +25044,15 @@ def _drill_execute(
         pass
     within_rto = duration_s <= _DRILL_RTO_S
     # #3845: surface a wedge distinctly — "fork slot wedged" must never be
-    # readable as a plain "copy failed". Absent on the clean path, so a healthy
-    # drill record is unchanged.
+    # readable as a plain "copy failed". #4233: surface a copy (either the
+    # pre-restore safety copy or the swap) that outlived the restore's read
+    # bound the same way, so an RTO breach caused by it is attributable from
+    # the PERSISTED record/incident, not only the immediate response. Both
+    # absent on the clean path, so a healthy drill record is unchanged.
     detail = {k: v for k, v in (
         ("restored", result.get("restored")),
         ("fork_slot", result.get("fork_slot")),
+        ("copy_read_bound_overrun", result.get("copy_read_bound_overrun")),
     ) if v is not None}
     record = _drill_record(
         run=run, status="ok" if within_rto else "rto_breach",
@@ -24675,6 +25215,11 @@ async def backups_drill_scheduled(request: Request):
                     "rto_s": result.get("rto_s"),
                     "org_id": (result.get("record") or {}).get("org_id"),
                     "backup_key": (result.get("record") or {}).get("backup_key"),
+                    # #4233: if either GRAPH.COPY (pre-restore safety copy or
+                    # swap) outlived the restore's read bound, name it — that
+                    # is the attributable cause.
+                    "copy_read_bound_overrun": result.get(
+                        "copy_read_bound_overrun"),
                 },
             )
         except Exception:

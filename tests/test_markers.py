@@ -84,6 +84,7 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_tenancy_spine.py": {"registry": "prod-coupled"},   # C5 #2114 — registry seeding in _spine_env
     "test_hosted_volunteer_context.py": {"registry": "prod-coupled"},   # #2103 (W4C) — registry control-plane mint/revoke mirrors test_hosted_auth
     "test_capture_phase_d_dedup.py": {"team-001": "team-identity"},  # #2104 (W5-D) — hosted _make_sdk(namespace="team-001") mirror arm
+    "test_capture_loop_responsiveness.py": {"registry": "prod-coupled"},  # #3086 — the capture-writer loop-affinity proof reaches the graph class via _make_sdk(namespace="registry") to record writer-thread affinity
     "test_import_endpoint.py": {"registry": "import-ledger"},
     "test_issue_4010_sessions_unlimited.py": {"registry": "prod-coupled"},  # #4010: registry seeding (org_create + registry-lane auth) mirrors test_quota/test_commit_endpoint
     "test_index_mcp.py": {"registry": "prod-coupled",
@@ -182,7 +183,7 @@ ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
         # #2823 Supabase-lane sweep seed — the DATA plane stays FalkorDB in
         # both lanes; the endpoint resolves graph_name from organizations.graph_name
         'f"org_{tid}"': "endpoint-constrained",  # Supabase-lane sweep seed write
-        '"org_team_x"': "read-only",                  # post-drill count assert
+        '"org_team_x"': "endpoint-constrained",  # post-drill count assert + #4233 marker write (drill/backup resolve org_{id})
         # #2313 custom-graph drill seeds (per-graph sweep/restore E2E); the
         # server-lane _clean_team_graphs fixture drops team_* graphs per test
         '"team_team_x_g_c1"': "endpoint-constrained",  # custom drill seed write
@@ -200,6 +201,13 @@ ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
         '"org_swap_target"': "test-constructed",   # live target + read-back
         '"org_bound_source"': "test-constructed",  # seeded source (ordinary-bound guard)
         '"org_bound_target"': "test-constructed",  # live target (ordinary-bound guard)
+        # #4233 outcome-settle guards — same direct-helper shape as the #3813
+        # block above: a raw source and a raw destination whose names are
+        # handed straight to `_restore_into_temp_verify_swap` /
+        # `_graph_copy_with_restore_bound` / `_restore_copy_settled` and read
+        # back. Test-constructed, not production-shape.
+        '"org_settle_source"': "test-constructed",  # seeded source
+        '"org_settle_target"': "test-constructed",  # destination + read-back
     },
     "test_eval_ingest_cache.py": {
         'f"org_{namespace}"': "endpoint-constrained",  # #2626 regression — own-graph cleanup delete (namespace=icache-<tag>-<uuid>, docker lane)
