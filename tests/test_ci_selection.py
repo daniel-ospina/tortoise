@@ -987,54 +987,60 @@ def test_push_legs_partitions_every_classified_file():
         "slow carve-out files run in the URI-unset carve-out job, never the slow legs"
     assert set(legs["carve_out"]) == carve, "carve_out leg must be exactly the config set"
     # #1485: push_extra rides the halves on index parity (even -> half_a,
-    # odd -> half_b) — pinned below on a synthetic manifest, because the real
-    # one's `push_extra` is EMPTY today: the bench files are registered as an
-    # `eval` surface, so they ride the duration split like every other
-    # classified file. The old assertion here (`any(f.startswith("bench/")
-    # for f in legs["half_b"])`, commented "bench push_extra lands in half
-    # b") therefore pinned no rule at all: one added file moves ~289 of the
-    # 593 assignments (measured), so the bench files land wherever the
-    # duration balance puts them. The partition itself stays pinned by the
-    # set-equality assertion above.
+    # odd -> half_b). That rule has to be pinned on a synthetic manifest,
+    # because the real one's `push_extra` is EMPTY today: the bench files are
+    # registered as an `eval` surface, so they ride the duration split like
+    # every other classified file, and adding ONE file to the pool moves ~289
+    # of the 593 assignments. The assertion this replaces — `any(f.startswith
+    # ("bench/") for f in legs["half_b"])`, commented "bench push_extra lands
+    # in half b" — pinned no rule at all. The partition itself stays pinned by
+    # the set-equality assertion above.
     for i, f in enumerate(m.get("push_extra", [])):
         leg = "half_a" if i % 2 == 0 else "half_b"
         assert f.replace(".py", "") in set(legs[leg]), (
             f"push_extra[{i}] {f} must ride {leg} — the #1485 spread rule"
         )
-    # …and the rule is genuinely exercised while push_extra is empty: prove
-    # the parity spread on a synthetic manifest rather than assume it. Each
-    # entry must ride its parity leg and EXACTLY ONE leg — a duplicate into the
-    # sibling half (double-run) or a leak into the slow/carve-out legs is a
-    # real defect and must not pass. `classified` (not `fast`) is the collision
-    # guard, so a probe name that is a slow or carve-out file cannot silently
-    # coincide with a real one.
-    probe_names = ("bench/probe_even", "bench/probe_odd")
-    assert not (set(f"{n}.py" for n in probe_names) & classified), (
-        "probe names would collide with a classified file: "
-        f"{set(f'{n}.py' for n in probe_names) & classified}"
+    # …and the rule is exercised for real, on a deliberately hostile probe: an
+    # UNSORTED order (a sort cannot pass), FOUR entries (a mutant keyed on
+    # index >= 2 cannot pass), and a non-`bench/` prefix (a bench-prefix-keyed
+    # mutant cannot pass). DECLARED BOUND: the probe pins a four-entry sample;
+    # a mutant whose misbehaviour only appears on a LONGER synthetic list is
+    # outside this probe's bound (see #4528).
+    from tools.ci_selection import carve_out_files, fast_pool
+    probe_extra = ["bench/probe_zed.py", "zzz/probe_plain.py",
+                   "bench/probe_aaa.py", "yyy/probe_tail.py"]
+    probe_names = tuple(f.replace(".py", "") for f in probe_extra)
+    assert not (set(probe_extra) & classified), (
+        f"probe names would collide with a classified file: {set(probe_extra) & classified}"
     )
-    probe = {**m, "push_extra": [f"{n}.py" for n in probe_names]}
+    probe = {**m, "push_extra": probe_extra}
     probe_legs = push_legs(probe)
-    # …and nothing BEYOND the probe entries may appear in the halves: presence
-    # checks alone let a spurious path through whenever push_extra is non-empty.
-    expected_halves = (fast - broken - carve) | set(probe_names)
+    # The pool comes from THIS manifest (not the real `push_extra`, which the
+    # probe replaces), so the assertion stays correct once the manifest
+    # repopulates push_extra instead of false-RED-ing.
+    probe_pool = {f.replace(".py", "") for f in fast_pool(probe)}
+    expected_halves = probe_pool | set(probe_names)
     actual_halves = set(probe_legs["half_a"]) | set(probe_legs["half_b"])
     assert actual_halves == expected_halves, (
         "probe halves must be the fast pool plus exactly the probe entries — "
         f"unexpected: {actual_halves ^ expected_halves}"
     )
+    assert not (set(probe_legs["half_a"]) & set(probe_legs["half_b"])), \
+        "probe leg overlap"
+    probe_carve = {f.replace(".py", "") for f in carve_out_files(probe)}
+    assert set(probe_legs["slow"]) == \
+        {f.replace(".py", "") for f in m["slow_files"]} - probe_carve, \
+        "probe slow leg must be exactly the slow files minus the carve-out"
     probe_legs_of = {
         n: sorted(leg for leg, files in probe_legs.items() if n in set(files))
         for n in probe_names
     }
-    assert probe_legs_of[probe_names[0]] == ["half_a"], (
-        "#1485: push_extra[0] must ride half_a and exactly one leg — found "
-        f"{probe_legs_of[probe_names[0]]}"
-    )
-    assert probe_legs_of[probe_names[1]] == ["half_b"], (
-        "#1485: push_extra[1] must ride half_b and exactly one leg — found "
-        f"{probe_legs_of[probe_names[1]]}"
-    )
+    for i, n in enumerate(probe_names):
+        want = "half_a" if i % 2 == 0 else "half_b"
+        assert probe_legs_of[n] == [want], (
+            f"#1485: push_extra[{i}] must ride {want} and exactly one leg — "
+            f"found {probe_legs_of[n]}"
+        )
 
 
 def test_carve_out_mirrors_test_no_redirect_stems():
