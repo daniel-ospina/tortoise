@@ -606,10 +606,15 @@ def _stub_mintable_org_graph(monkeypatch, *, listed=()):
         ``_graph_available`` pre-check works through it).
 
     A mint is therefore VISIBLE in ``state``: that is what makes the
-    'no ``org_{org_id}`` created' assertion non-vacuous. Stubbing
+    no-mint assertions non-vacuous — the unlisted case asserts the listing is
+    UNCHANGED, and the legacy case asserts the completion gate's canonical
+    ``org_{org_id}`` DOES appear. ``_maybe_apply_completion`` is left REAL
+    (not stubbed) so the completion gate's own ``_org_proj`` open — and thus
+    its canonical-name materialization — is observable too. Stubbing
     ``_graph_available`` to ``True`` (removing the pre-check's
-    materialization) or handing the helper a fabricated opener would remove
-    exactly this observable, which is why the test must not do either.
+    materialization), stubbing ``_maybe_apply_completion``, or handing the
+    helper a fabricated opener would remove one of these observables, which
+    is why the tests must not do any of them.
 
     An embedded temp DB cannot be used here: under ``TORTOISE_TEST_MODE=1``
     the #1647 class-level URI redirect rewrites an explicit embedded path to
@@ -671,7 +676,6 @@ def _stub_mintable_org_graph(monkeypatch, *, listed=()):
     # deliberately NOT stubbed — the fixed auto-file never calls it, and a
     # regression that restores the pre-check must show up as a mint.
     monkeypatch.setattr(ha, "_get_onboarding_state", lambda oid: {})
-    monkeypatch.setattr(ha, "_maybe_apply_completion", lambda oid: False)
     monkeypatch.setattr(ha, "_enqueue_dream", lambda *a, **k: None)
     monkeypatch.setattr(ha, "_record_write_op", lambda org: None)
 
@@ -781,27 +785,39 @@ class TestAgentRestWriteFilesHarnessConnected:
         assert "org_org-truth" not in state, state
         assert set(state) == before, (before, state)
 
-    def test_legacy_org_graph_gets_the_step_and_no_org_graph_is_minted(
+    def test_legacy_org_graph_gets_the_step_and_completion_opens_canonical(
             self, monkeypatch):
         """For a legacy ``team_{org_id}`` org the auto-file writes through the
         LISTED legacy name — the SAME selection ``_get_onboarding_projection``
-        reads through — and does NOT mint ``org_{org_id}``.
+        reads through — and files the step NOWHERE ELSE.
+
+        It does NOT claim ``org_{org_id}`` is never created: the completion
+        gate that follows (``_maybe_apply_completion`` → ``_org_proj`` →
+        ``_make_sdk(namespace=org_id)``) opens the org-DEFAULT projection BY
+        DESIGN, so its constructor materializes the canonical
+        ``org_{org_id}``. That is a pre-existing, separate behaviour (#3670's
+        legacy-name gap), not a step-write mint, so this test PINS it — the
+        gate is left REAL, not stubbed. Stubbing it would make the mint
+        invisible and let a step-write regression pass for the wrong reason.
 
         RED mutations: (a) restore the ``_graph_available`` pre-check → it
-        mints ``org_org-truth``, which ``_open_org_graph_sdk`` (org_ first)
-        then prefers, so the step lands in the minted graph and the listing
-        gains it; (b) revert the opener to a bare
+        mints ``org_org-truth`` BEFORE the opener, which ``_open_org_graph_sdk``
+        (org_ first) then prefers, so the step lands in the minted graph and
+        not ``team_org-truth``; (b) revert the opener to a bare
         ``_make_sdk(namespace=org_id)`` → the same two failures."""
         steps, written, state, opens = _stub_mintable_org_graph(
             monkeypatch, listed=["team_org-truth"])
         r = _post_point_request(_AGENT)
         assert r.status_code == 200, r.text
-        # the REAL opener selected the LISTED legacy name, not a minted org_
-        assert opens == [(None, "team_org-truth")], opens
+        # the REAL opener selected the LISTED legacy name first; the REAL
+        # completion gate then opened the org DEFAULT projection.
+        assert opens == [(None, "team_org-truth"), ("org-truth", None)], opens
         assert steps == ["harness-connected"]
+        # (a) the step landed in the legacy graph — and nowhere else
         assert written == [("team_org-truth", "harness-connected")], written
-        assert "org_org-truth" not in state, state
-        assert state == {"team_org-truth"}, state
+        # (b) the completion gate's open materialized the canonical name
+        # (pinned, not stubbed away: see the helper docstring).
+        assert state == {"team_org-truth", "org_org-truth"}, state
 
     def test_graph_bound_agent_write_files_no_org_level_step(
             self, monkeypatch):

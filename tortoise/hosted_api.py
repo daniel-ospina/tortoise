@@ -19176,19 +19176,28 @@ def _maybe_file_harness_connected(org_id: str) -> None:
         # point-write path, so it must not add a per-write leak.
         #
         # Open the LISTED org-graph name (the same selection
-        # `_get_onboarding_projection` reads through) and SKIP on None: a
-        # WRITE must never MINT a graph name that was never observed. Do NOT
-        # pre-check existence with `_graph_available` — that helper builds
+        # `_get_onboarding_projection` reads through) and SKIP on None. This
+        # STEP WRITE must never MINT a graph name that was never observed: do
+        # NOT pre-check existence with `_graph_available` — that helper builds
         # `_make_sdk(namespace=org_id)._get_proj()`, whose constructor runs
         # `_ensure_indexes()` (CREATE INDEX) and so MATERIALIZES the very
         # `org_{org_id}` this write must not create; the subsequent
         # `_open_org_graph_sdk` then re-probes the listing it just polluted
         # and files the step into the graph its own guard minted.
-        # `_open_org_graph_sdk` probes through `_registry_existing_graphs`
-        # (`list_graphs` — a read that never constructs a store), so the
-        # probe cannot materialize a name. None means NEITHER name is listed,
-        # or the registry probe failed. Skip, loudly — the caller's point
-        # write is never touched by this function.
+        # `_open_org_graph_sdk` selects from `_registry_existing_graphs`,
+        # which reads `list_graphs()` off the registry projection; it can
+        # therefore materialize only the REGISTRY graph, never an org graph.
+        # None means NEITHER name is listed, or the registry probe failed.
+        # Skip, loudly — the caller's point write is never touched by this
+        # function.
+        #
+        # Scope of the no-mint claim: it covers THIS step write's own graph
+        # selection, which never constructs an org namespace. It does NOT
+        # cover the completion gate below — `_maybe_apply_completion` opens
+        # the org DEFAULT projection via `_org_proj(org_id)` (canonical
+        # `org_{org_id}`), whose constructor materializes that name by design.
+        # That is the pre-existing #3670 legacy-name gap, a separate
+        # behaviour, not a step-write mint, and out of scope here.
         _sdk = _open_org_graph_sdk(org_id)
         if _sdk is None:
             _logger.warning(
