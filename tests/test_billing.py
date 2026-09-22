@@ -893,7 +893,8 @@ class TestBillingSupabaseStore:
     so a just-subscribed org's portal-open 404'd with "no Stripe customer".
 
     The registry-SDK spy is load-bearing: constructing a registry-namespaced
-    SDK here would be the #878 resurrection vector and raises.
+    SDK here would be the #878 resurrection vector and raises. Non-registry
+    constructions are left to the real factory.
     """
 
     ORG_ID = "org_sb_4640"
@@ -901,29 +902,37 @@ class TestBillingSupabaseStore:
     @pytest.fixture
     def sb(self, monkeypatch):
         from fastapi.testclient import TestClient
+
         import tortoise.hosted_api as ha
         import tortoise.supabase_control as sc
         from tests.fake_control_plane import FakeControlPlane
 
         monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
         monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc_role_key_test")
+        # PIN the lane: is_supabase_enabled() would otherwise honour an ambient
+        # TORTOISE_CONTROL_PLANE=registry and flip these tests to selfhost.
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
         monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_123")
+        monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
         monkeypatch.setenv("STRIPE_PRICE_IDS", json.dumps(VALID_CATALOG))
         monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
-        # is_supabase_enabled() derives True from the configured creds — no
-        # TORTOISE_CONTROL_PLANE flip needed.
         fake = FakeControlPlane({"organizations": [{
             "id": self.ORG_ID, "name": "sb", "tier": "solo",
             "email": "owner@example.com",
             "stripe_customer_id": None, "subscription_status": None,
             "customer_email": None,
-        }]})
+        }], "webhook_events": []})
         monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
 
-        def _no_registry_sdk(*a, **kw):
-            raise AssertionError("registry SDK constructed in Supabase mode (#878)")
+        _orig_make_sdk = ha._make_sdk
 
-        monkeypatch.setattr(ha, "_make_sdk", _no_registry_sdk)
+        def _spy_make_sdk(*a, **kw):
+            if kw.get("namespace") == "registry":
+                raise AssertionError(
+                    "registry SDK constructed in Supabase mode (#878)")
+            return _orig_make_sdk(*a, **kw)
+
+        monkeypatch.setattr(ha, "_make_sdk", _spy_make_sdk)
 
         org = {"org_id": self.ORG_ID, "tier": "solo",
                "email": "owner@example.com"}
@@ -934,16 +943,20 @@ class TestBillingSupabaseStore:
             ha.app.dependency_overrides.pop(ha.get_current_org_session, None)
 
     def test_portal_opens_right_after_a_successful_checkout(self, monkeypatch, sb):
-        """The checkout write lands on the orgs row; the portal reads it back."""
+        """The checkout write lands on the orgs row; the portal reads it back
+        and passes the authoritative customer id to Stripe."""
         tc, fake = sb
+        seen: dict = {}
         monkeypatch.setattr(billing.StripeClient, "create_customer",
                             lambda self, email: "cus_sb_1")
         monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
                             lambda self, cid: [])
         monkeypatch.setattr(billing.StripeClient, "create_checkout_session",
                             lambda self, *a: "https://checkout.stripe.com/pay/sb1")
-        monkeypatch.setattr(billing.StripeClient, "create_portal_session",
-                            lambda self, cid, return_url: "https://billing.stripe.com/p/sb1")
+        monkeypatch.setattr(
+            billing.StripeClient, "create_portal_session",
+            lambda self, cid, return_url: seen.update(cid=cid) or
+            "https://billing.stripe.com/p/sb1")
 
         r = tc.post("/v1/billing/checkout", json={"price_id": "price_100soloM"})
         assert r.status_code == 200, r.text
@@ -954,6 +967,7 @@ class TestBillingSupabaseStore:
         r2 = tc.post("/v1/billing/portal")
         assert r2.status_code == 200, r2.text
         assert r2.json()["portal_url"] == "https://billing.stripe.com/p/sb1"
+        assert seen["cid"] == "cus_sb_1"
 
     def test_portal_404_when_genuinely_no_customer(self, sb):
         """No customer binding on the authoritative row → the 404 still fires."""
@@ -961,6 +975,34 @@ class TestBillingSupabaseStore:
         r = tc.post("/v1/billing/portal")
         assert r.status_code == 404, r.text
         assert "no Stripe customer" in r.json()["detail"]
+
+    def test_webhook_written_binding_opens_the_portal(self, monkeypatch, sb):
+        """The exact production path: `checkout.session.completed` writes the
+        binding through the webhook's `update_org_billing` seam, and the
+        portal's `org_billing_state` read finds the same column."""
+        tc, fake = sb
+        org_id = self.ORG_ID
+        monkeypatch.setattr(
+            billing.StripeClient, "verify_webhook_signature",
+            lambda self, raw, sig: {
+                "id": "evt_sb_1", "type": "checkout.session.completed",
+                "data": {"object": {
+                    "client_reference_id": org_id,
+                    "customer": "cus_wh_1",
+                    "customer_details": {"email": "owner@example.com"},
+                    "subscription": None}}})
+        monkeypatch.setattr(
+            billing.StripeClient, "create_portal_session",
+            lambda self, cid, return_url: f"https://billing.stripe.com/p/{cid}")
+
+        r = tc.post("/webhooks/stripe", content=b"{}",
+                    headers={"stripe-signature": "t=1,v1=x"})
+        assert r.status_code == 200, r.text
+        assert fake.tables["organizations"][0]["stripe_customer_id"] == "cus_wh_1"
+
+        r2 = tc.post("/v1/billing/portal")
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["portal_url"] == "https://billing.stripe.com/p/cus_wh_1"
 
     def test_checkout_reuses_the_stored_customer(self, monkeypatch, sb):
         """The stored-mirror guard reads the orgs row: a bound customer is
@@ -983,12 +1025,58 @@ class TestBillingSupabaseStore:
         assert row["stripe_customer_id"] == "cus_existing"
         assert row["customer_email"] == "stored@example.com"
 
-    def test_checkout_409_when_row_already_active(self, sb):
-        """The stored-mirror guard reads subscription_status from the row."""
+    def test_checkout_backfills_a_missing_customer_email(self, monkeypatch, sb):
+        """A row with a bound customer but no stored email is backfilled
+        (the mixed case of the reuse rule)."""
+        tc, fake = sb
+        fake.tables["organizations"][0]["stripe_customer_id"] = "cus_existing"
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, e: "cus_new")
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [])
+        monkeypatch.setattr(billing.StripeClient, "create_checkout_session",
+                            lambda self, *a: "https://checkout.stripe.com/pay/sb3")
+
+        r = tc.post("/v1/billing/checkout", json={"price_id": "price_100soloM"})
+        assert r.status_code == 200, r.text
+        row = fake.tables["organizations"][0]
+        assert row["stripe_customer_id"] == "cus_existing"
+        assert row["customer_email"] == "owner@example.com"
+
+    def test_org_email_beats_the_session_email(self, monkeypatch, sb):
+        """#4508 precedence: the authoritative org row's email wins over the
+        clicking member's session email."""
+        tc, _fake = sb
+        import tortoise.hosted_api as ha
+        org = {"org_id": self.ORG_ID, "tier": "solo",
+               "email": "org@example.com",
+               "session_user_email": "member@example.com"}
+        ha.app.dependency_overrides[ha.get_current_org_session] = lambda: dict(org)
+        created: list = []
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, e: created.append(e) or "cus_p")
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [])
+        monkeypatch.setattr(billing.StripeClient, "create_checkout_session",
+                            lambda self, *a: "https://checkout.stripe.com/pay/sb4")
+
+        r = tc.post("/v1/billing/checkout", json={"price_id": "price_100soloM"})
+        assert r.status_code == 200, r.text
+        assert created == ["org@example.com"]
+
+    def test_checkout_409_when_row_already_active(self, monkeypatch, sb):
+        """The stored-mirror guard reads subscription_status from the row and
+        rejects BEFORE any Stripe call."""
         tc, fake = sb
         fake.tables["organizations"][0]["subscription_status"] = "active"
+        called: list = []
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, e: called.append("create_customer") or "cus_x")
+        monkeypatch.setattr(billing.StripeClient, "create_checkout_session",
+                            lambda self, *a: called.append("create_checkout_session") or "u")
         r = tc.post("/v1/billing/checkout", json={"price_id": "price_100soloM"})
         assert r.status_code == 409, r.text
+        assert called == [], "the active-status guard must reject before any Stripe call"
 
 
 class TestWebhook:

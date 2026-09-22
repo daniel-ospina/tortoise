@@ -3011,8 +3011,10 @@ def org_billing_state(cp, org_id: str) -> dict:
 
     ``stripe_customer_id`` is a 0006 base column; ``subscription_status`` /
     ``customer_email`` are the 0012 additive tier, read through the #1096
-    fail-soft ladder so a pre-0012 schema degrades those to None instead of
-    taking down checkout/portal.
+    fail-soft ladder so a pre-0012 schema degrades THESE READS to None instead
+    of failing the portal. (The checkout WRITE stays fail-closed: on a first
+    bind ``update_org_billing`` still PATCHes 0012 columns, so a pre-0012
+    deployment cannot complete a checkout — deploy drift, not a normal path.)
 
     Used by the two billing routes that must agree on WHERE the
     ``stripe_customer_id`` mirror lives (#4640): the checkout sync-persist and

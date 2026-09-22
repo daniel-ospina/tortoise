@@ -25482,7 +25482,7 @@ def _billing_email_like(value: object) -> bool:
     return bool(local) and bool(domain)
 
 
-def _billing_customer_email(sdk, org: dict) -> str:
+def _billing_customer_email(sdk: TortoiseSDK | None, org: dict) -> str:
     """Resolve the billing email via the fallback chain (review fix 1):
 
     1. ``Org.email`` — set at /v1/register (self-service orgs); the resolved
