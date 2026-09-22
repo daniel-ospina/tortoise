@@ -395,51 +395,67 @@ class TestCliOnboardDbTarget:
         db_path = str(tmp_path / "init-closed.db")
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         _delenv_falkordb(monkeypatch)
+        import gc
+
         from tortoise import __main__ as m
 
-        rc = m._cmd_init(mock.Mock(
-            path=None, cmd="init", yes=True, api_key=None, no_index=True))
-        assert rc == 0
+        # #4579: the leaked daemon (unfixed code) was reclaimed only by a GC
+        # pass, and the projection/sdk wrappers are cyclic
+        # (`_GuardedGraph._proj` back-ref), so a collection landing in this
+        # window could SAVE-close the leak and let the mutation pass. Disable
+        # GC across call+asserts so the explicit close is the ONLY thing that
+        # can shut the daemon down — the pin is deterministic, not GC-timing
+        # dependent.
+        _gc_was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            rc = m._cmd_init(mock.Mock(
+                path=None, cmd="init", yes=True, api_key=None, no_index=True))
+            assert rc == 0
 
-        # POSITIVE: the clean close saved the RDB to the target path (init
-        # does not flush it synchronously; the file appears on the SAVE
-        # shutdown). With no close the file is absent while a live daemon
-        # still holds the store, so this also reds the mutation.
-        assert os.path.exists(db_path), "init did not save the embedded db"
+            # POSITIVE: the clean close saved the RDB to the target path (init
+            # does not flush it synchronously; the file appears on the SAVE
+            # shutdown). With no close the file is absent while a live daemon
+            # still holds the store, so this reds the mutation deterministically.
+            assert os.path.exists(db_path), "init did not save the embedded db"
 
-        # NEGATIVE: no LIVE daemon survives the call. redislite's
-        # `<db>.settings` registry is removed only by the client that STARTED
-        # the daemon, so registry-absence is order-dependent (an attaching
-        # client shuts the daemon down but leaves the registry behind). Pin
-        # the DAEMON instead: if the registry survives, a READABLE pid that
-        # is still alive is the leak. A missing pidfile is itself proof the
-        # daemon exited — Redis removes its own pidfile on graceful shutdown
-        # — so absence of a pid must not be read as failure.
-        settings = db_path + ".settings"
-        if os.path.exists(settings):
-            import json as _json
-            from pathlib import Path as _Path
-            pid = None
-            try:
-                reg = _json.loads(_Path(settings).read_text())
-                pidfile = reg.get("pidfile")
-                if pidfile and os.path.exists(pidfile):
-                    pid = int(_Path(pidfile).read_text().strip())
-            except Exception:
+            # NEGATIVE: no LIVE daemon survives the call. redislite's
+            # `<db>.settings` registry is removed only by the client that
+            # STARTED the daemon, so registry-absence is order-dependent (an
+            # attaching client shuts the daemon down but leaves the registry
+            # behind). Pin the DAEMON instead: if the registry survives, a
+            # READABLE pid that is still alive is the leak. A missing pidfile is
+            # itself proof the daemon exited — Redis removes its own pidfile on
+            # graceful shutdown — so absence of a pid must not be read as
+            # failure.
+            settings = db_path + ".settings"
+            if os.path.exists(settings):
+                import json as _json
+                from pathlib import Path as _Path
                 pid = None
-            if pid is not None:
-                alive = True
                 try:
-                    os.kill(pid, 0)
-                except ProcessLookupError:
-                    alive = False
-                except PermissionError:
+                    reg = _json.loads(_Path(settings).read_text())
+                    pidfile = reg.get("pidfile")
+                    if pidfile and os.path.exists(pidfile):
+                        pid = int(_Path(pidfile).read_text().strip())
+                except Exception:
+                    pid = None
+                if pid is not None:
                     alive = True
-                assert not alive, (
-                    f"init leaked its embedded redis-server (pid {pid}, "
-                    "#4579): once the co-tenant release withdraws the owner "
-                    "record it becomes an uninstrumented, dir-present orphan "
-                    "the #3767 reaper refuses to fast-kill")
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        alive = False
+                    except PermissionError:
+                        alive = True
+                    assert not alive, (
+                        f"init leaked its embedded redis-server (pid {pid}, "
+                        "#4579): once the co-tenant release withdraws the owner "
+                        "record it becomes an uninstrumented, dir-present orphan "
+                        "the #3767 reaper refuses to fast-kill")
+        finally:
+            if _gc_was_enabled:
+                gc.enable()
 
     def test_onboard_completion_gates_embedded_default(self, tmp_path, monkeypatch, capsys):
         """#2200: the `tortoise onboard` wizard completion must gate the
