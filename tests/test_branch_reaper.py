@@ -761,16 +761,29 @@ cat "$d/${{state}}_pages.json"
 
     def test_no_backup_conflicts_with_an_explicit_bundle_path(self):
         # `--no-backup` means "write no bundle"; a contradictory explicit path is
-        # a usage error, not a silent write plus a false warning.
+        # a usage error. The check must fire BEFORE any write: the recovery write
+        # precedes the delete phase by design, so a late check returned 3 having
+        # already overwritten a previous run's recovery record — its only durable
+        # record when that run used `--no-backup`.
         sha = self.commit_on("merged/b", "work")
         self.add_pr("merged", "merged/b", sha)
         self.write_fixtures()
+        report = self.driver / "r.md"
+        report.write_text("ORIGINAL")
+        # With `--report`, the recovery record is written to `<report>.recovery.json`,
+        # so the sentinel must be planted THERE — on the other path the assertion
+        # would be vacuous.
+        rec = self.driver / "r.md.recovery.json"
+        rec.write_text('{"sentinel": true}')
         dest = self.tmp / "b.bundle"
         rc, out, err = self.run_tool(
-            ["--apply", "--no-backup", "--backup-bundle", str(dest)], repo=self.driver)
+            ["--apply", "--no-backup", "--backup-bundle", str(dest),
+             "--report", str(report)], repo=self.driver)
         self.assertEqual(rc, 3, err + out)
         self.assertFalse(dest.exists())
         self.assertIn("merged/b", self.branches())
+        self.assertIn("sentinel", rec.read_text())   # not clobbered
+        self.assertEqual(report.read_text(), "ORIGINAL")
 
     def test_backup_bundle_written_before_deletion(self):
         sha = self.commit_on("merged/branch", "merged work")

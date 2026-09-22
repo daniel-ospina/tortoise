@@ -1290,6 +1290,15 @@ def _run_main(args) -> int:
             return EXIT_USAGE
         slug = args.slug
 
+    # Validate the flag COMBINATION before anything is written. Raised inside the
+    # `--apply` block it fired AFTER the recovery record and the report write, so
+    # an aborted run still clobbered the previous run's recovery record — the only
+    # durable record there is when that run passed `--no-backup`.
+    if args.no_backup and args.backup_bundle:
+        print("branch_reaper: --no-backup and --backup-bundle are mutually exclusive "
+              "— --no-backup means 'write no bundle'.", file=sys.stderr)
+        return EXIT_USAGE
+
     if args.apply and is_main_checkout(repo_root):
         print("branch_reaper: refusing --apply from the MAIN checkout — run from a linked "
               "worktree (this tool invokes `git update-ref -d` as an interpreter file "
@@ -1408,11 +1417,6 @@ def _run_main(args) -> int:
             # prunes. `--no-backup` is the explicit opt-out.
             backup_bundle = args.backup_bundle
             if args.no_backup:
-                if backup_bundle is not None:
-                    print("branch_reaper: --no-backup and --backup-bundle are mutually "
-                          "exclusive — --no-backup means 'write no bundle'.",
-                          file=sys.stderr)
-                    return EXIT_USAGE
                 print("branch_reaper: --no-backup — the recovery record holds only SHAs, "
                       "which do NOT survive object pruning (`gc.pruneExpire`, 2 weeks by "
                       "default). Once pruned, the deleted tips are unrecoverable.",
