@@ -2,9 +2,9 @@
 # ai-review-gate.test.sh — shell harness for the `ai-review-gate` workflow's
 # signed-evidence validation logic (#2982).
 #
-# The gate lives inline in .github/workflows/ai-review-gate.yml (it cannot
-# reference a repo script: it runs under pull_request_target and never checks
-# out PR code). To test its shell logic we EXTRACT the step's `run: |` block
+# The gate lives inline in .github/workflows/ai-review-gate.yml (this workflow
+# has no checkout step, so it cannot reference a repo script). To test its
+# shell logic we EXTRACT the step's `run: |` block
 # verbatim and execute it with a stubbed `gh` and a test HMAC key. Nothing is
 # posted to GitHub and the real key is never read.
 #
@@ -33,11 +33,18 @@
 #       IDENTICAL diff= (the diff-match arm matches on the hash alone, so the
 #       PR anchor is the only thing preventing the replay)
 #   (l) a whitespace-padded GATE_SECRET is normalised
+#   (m) a whitespace-ONLY GATE_SECRET fails closed (it normalizes to the EMPTY
+#       public key — never a pass)
+#   (n) a malformed trailing line cannot hijack the wrong-repo diagnostic and
+#       suppress the accurate stale/diff explanation
 #   plus the static invariants: the required job must never gain
 #   `if:`/`needs:`/`continue-on-error:` (any indentation or quoting), the
-#   trigger must stay `pull_request_target` with no `paths:` filter, the
-#   permissions must still grant `pull-requests: read`, the step must declare
-#   `GH_TOKEN`, and the extracted block must be the real gate step.
+#   trigger must be EXACTLY `pull_request_target` (asserted as a key SET, so
+#   `pull_request: {}` / quoted / activity-type spellings cannot evade), the
+#   job must carry no job-level `permissions:` override, the workflow must
+#   grant `contents: read` + `pull-requests: read` and no `paths:` filter, the
+#   step must declare `GH_TOKEN`, no unexpected `gh` call shape may occur, and
+#   the extracted block must be the real gate step.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -100,26 +107,30 @@ awk '/^permissions:/ { f=1; next } f && /^[^ ]/ { exit } f { print }' \
 #     Either one silently passes the required check without evaluating any
 #     evidence. The pattern covers quoted and space-padded key forms
 #     (`    if :`, `    "if":`) as well as the plain ones.
-if grep -qE '^[[:space:]]*("?)(if|needs|continue-on-error)(")?[[:space:]]*:' "$T/job-block.yml"; then
+if grep -qE '^[[:space:]]*["'\'']?(if|needs|continue-on-error)["'\'']?[[:space:]]*:' "$T/job-block.yml"; then
     bad "gate job gained if:/needs:/continue-on-error: — a skipped or swallowed required check reports Success"
 else
     ok "gate job carries no if:/needs:/continue-on-error: (must always run)"
 fi
 
-# (2) The trigger must stay `pull_request_target`. Under `pull_request`, a
+# (2) The trigger must be EXACTLY `pull_request_target`. Under `pull_request`, a
 #     same-repo PR executes ITS OWN copy of this workflow (it can `exit 0` and
 #     self-certify the required check), and fork PRs stop receiving
-#     AI_REVIEW_GATE_KEY.
-if grep -qE '^  pull_request_target:[[:space:]]*$' "$T/on-block.yml" \
-   && ! grep -qE '^  pull_request:[[:space:]]*$' "$T/on-block.yml"; then
+#     AI_REVIEW_GATE_KEY. Assert the SET of top-level `on:` keys, not one
+#     spelling: `pull_request: {}`, a quoted key, or an activity-type list is
+#     the banned trigger under a different spelling, and matching against one
+#     literal spelling fails open (review finding, #3057).
+on_keys="$(sed -nE 's/^  (["'\'']?[A-Za-z_][A-Za-z0-9_-]*["'\'']?):.*/\1/p' "$T/on-block.yml" \
+  | tr -d "\"'" | sed '/^$/d' | sort -u)"
+if [ "$on_keys" = "pull_request_target" ]; then
     ok "trigger is pull_request_target only (PR code can never run the gate)"
 else
-    bad "trigger is not exactly pull_request_target — a same-repo PR could run its own gate definition"
+    bad "trigger is not exactly pull_request_target (got: $(printf '%s' "$on_keys" | tr '\n' ',') ) — a same-repo PR could run its own gate definition"
 fi
 
 # (3) No path filter may gate the workflow: a path-filtered required check
 #     that does not run is reported as Success.
-if grep -qE '^[[:space:]]*(paths|paths-ignore)[[:space:]]*:' "$T/on-block.yml"; then
+if grep -qE '^[[:space:]]*["'\'']?(paths|paths-ignore)["'\'']?[[:space:]]*:' "$T/on-block.yml"; then
     bad "trigger gained a paths:/paths-ignore: filter — a path-filtered required check reports Success"
 else
     ok "trigger carries no paths:/paths-ignore: filter"
@@ -134,6 +145,14 @@ if grep -qE '^  contents:[[:space:]]*read[[:space:]]*$' "$T/perm-block.yml" \
     ok "permissions grant contents: read + pull-requests: read (gh api can read the diff)"
 else
     bad "permissions do not grant contents: read + pull-requests: read — gh api cannot read the diff, so the diff-match path is dead code"
+fi
+# A JOB-level `permissions:` is valid YAML and OVERRIDES the workflow block for
+# that job, so a job-level grant that drops `pull-requests: read` leaves the
+# assertion above green while making the diff-match path dead in production.
+if grep -qE '^[[:space:]]*["'\'']?permissions["'\'']?[[:space:]]*:' "$T/job-block.yml"; then
+    bad "gate job carries a job-level permissions: override — it can drop pull-requests: read while the workflow-level grant still looks fine"
+else
+    ok "gate job carries no job-level permissions: override (workflow grant is effective)"
 fi
 
 # (5) Structural tripwire (#2982): the STEP must declare GH_TOKEN. `gh`
@@ -199,6 +218,7 @@ if printf '%s' "$*" | grep -qF -- "--jq .body"; then
     exit 0
 fi
 echo "stub gh: unrecognised invocation: $*" >&2
+[ -n "${STUB_UNRECOGNISED:-}" ] && printf '%s\n' "$*" >> "$STUB_UNRECOGNISED"
 exit 97
 STUB
 chmod +x "$T/bin/gh"
@@ -210,7 +230,7 @@ chmod +x "$T/bin/gh"
 # makes the branch selection unobservable.
 run_gate() { # <env-body-file> [<rest-body-file>]
     local envfile="$1" restfile="${2:-$1}" rcfile="$T/gate.rc" outfile="$T/gate.out"
-    : > "$rcfile"; : > "$outfile"; : > "$T/gh.log"
+    : > "$rcfile"; : > "$outfile"; : > "$T/gh.log"; : > "$T/gh-unrecognised"
     (
         export PATH="$T/bin:$PATH"
         export PR_BODY
@@ -218,6 +238,7 @@ run_gate() { # <env-body-file> [<rest-body-file>]
         export HEAD_SHA="$HEAD" PR_NUMBER REPO_NAME
         export GATE_SECRET="${GATE_SECRET_OVERRIDE:-$KEY}"
         export STUB_BODY_FILE="$restfile" STUB_LOG="$T/gh.log"
+        export STUB_UNRECOGNISED="$T/gh-unrecognised"
         rc=0
         bash "$RUN_BLOCK" >"$outfile" 2>&1 || rc=$?
         printf '%s' "$rc" > "$rcfile"
@@ -248,12 +269,20 @@ fi
 # PR. If either ever drifts to a different PR, the diff-match arm would
 # validate a marker against another PR's diff — the whole binding is void. The
 # stub serves whatever it is given, so only the CALL SHAPE can catch this.
-if [ "$(grep -cF -- "repos/${REPO_NAME}/pulls/${PR_NUMBER}" "$T/gh.log")" -ge 2 ]; then
-    ok "(a) both gh calls target repos/${REPO_NAME}/pulls/${PR_NUMBER}"
+if [ "$(grep -cE -- "repos/${REPO_NAME}/pulls/${PR_NUMBER}([^0-9]|$)" "$T/gh.log")" -ge 2 ]; then
+    ok "(a) both gh calls target repos/${REPO_NAME}/pulls/${PR_NUMBER} (number-boundary exact)"
 else
     bad "(a) a gh call is not scoped to repos/${REPO_NAME}/pulls/${PR_NUMBER} (stub log: $(cat "$T/gh.log"))"
 fi
-assert_not_contains "(a) no unrecognised gh invocation" "unrecognised invocation"
+# The stub's diagnostic goes to STDERR, which the gate discards (`2>/dev/null`)
+# on both calls — so grepping GATE_OUT for it can never fail. Assert against the
+# stub's own side-channel file, so an UNEXPECTED gh call shape is detected
+# instead of silently yielding empty output the env-var fallback then hides.
+if [ ! -s "$T/gh-unrecognised" ]; then
+    ok "(a) no unrecognised gh invocation"
+else
+    bad "(a) unrecognised gh invocation(s): $(cat "$T/gh-unrecognised")"
+fi
 
 echo "── (b) sha AND diff= both mismatch → fail ─────────────────────"
 diff_marker "$STALE" "$DH2" > "$T/body-b"
@@ -421,6 +450,40 @@ GATE_SECRET_OVERRIDE=$'\n  '"$KEY"$'  \n'
 STUB_DIFF_FILE="$DIFF_FILE" run_gate "$T/body-l"
 unset GATE_SECRET_OVERRIDE
 assert_rc 0 "(l) a whitespace-padded key is normalised"
+
+echo "── (m) a whitespace-ONLY key fails closed ─────────────────────"
+# A whitespace-only secret passes the raw `-z` guard and then normalizes to the
+# EMPTY string, which is a PUBLIC HMAC key: any PR author could mint a
+# stale-sha marker carrying the live `diff=` and turn the required check green
+# on an unreviewed diff. The gate must re-validate AFTER normalization.
+# Sign the marker with the EMPTY key — the key every attacker knows once the
+# secret normalizes to "". If the gate skips validation of the NORMALIZED key,
+# this marker verifies and the required check passes on an unreviewed diff.
+empty_key_marker() {
+    local m="review recorded: reviews/${PR_NUMBER}.json verdict=clean @ ${HEAD} diff=${DH} (${REPO_NAME})"
+    printf '%s sig=%s\n' "$m" "$(printf '%s' "$m" | openssl dgst -sha256 -hmac "" | awk '{print $NF}')"
+}
+empty_key_marker > "$T/body-m"
+GATE_SECRET_OVERRIDE=$'\n \t \n'
+STUB_DIFF_FILE="$DIFF_FILE" run_gate "$T/body-m"
+unset GATE_SECRET_OVERRIDE
+assert_rc 1 "(m) a whitespace-only key never becomes the empty HMAC key"
+assert_contains "(m) names the normalization failure" "normalises to an empty value"
+
+echo "── (n) a malformed trailing line cannot hijack the repo diagnostic ─"
+# A well-formed but STALE own-repo marker followed by a line that carries a
+# trailing ` (other/repo) sig=<hex>` but no well-formed 40-hex sha must still
+# report the real cause (stale). Naming `other/repo` suppresses the accurate
+# stale/diff diagnostic on a REQUIRED check.
+{
+    diff_marker "$STALE" "$DH2"
+    printf 'review recorded: reviews/%s.json verdict=clean @ not-a-sha (some-other/place) sig=%s\n' \
+        "$PR_NUMBER" "$(printf 'f%.0s' $(seq 1 64))"
+} > "$T/body-n"
+STUB_DIFF_FILE="$DIFF_FILE" run_gate "$T/body-n"
+assert_rc 1 "(n) gate fails"
+assert_contains "(n) reports the real cause" "latest recorded ${STALE} — expected ${HEAD}"
+assert_not_contains "(n) does not misattribute the repo" "was found for some-other/place"
 
 echo ""
 echo "── Summary ───────────────────────────────────────────────────────"

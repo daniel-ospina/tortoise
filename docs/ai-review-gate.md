@@ -63,10 +63,12 @@ so a green PR could never reach a terminal mergeable state. Keying evidence to
 the diff lets the verdict carry forward across a merge-only update. A change
 that actually changes the reviewed diff still invalidates it.
 
-`record-review.sh` also carries a verdict forward itself: when asked to record
-a now-stale sha whose diff is unchanged from what was recorded, it re-records
-against the current head. A stale sha whose diff changed is still refused
-(exit 3).
+The producer half (agent-infra PR #767, **not yet deployed**) also carries a
+verdict forward itself: asked to record a now-stale sha whose diff is unchanged
+from what was recorded, it re-records against the current head, and it refuses
+a stale sha whose diff changed (exit 3). Until it ships, the deployed
+`record-review.sh` still refuses *any* stale sha and emits no `diff=` — see the
+producer-dependency note above.
 
 Both the producer and the gate hash the bytes returned by the REST API
 (`Accept: application/vnd.github.v3.diff`) — never a local `git diff`, whose
@@ -79,11 +81,12 @@ the marker is signed and that the signed `diff=` equals this PR's diff at check
 time. The binding between a recorded sha and the diff actually reviewed is
 enforced by `record-review.sh`'s stale-sha guard, not by the gate.
 
-That matters for the producer's two escape hatches. `--force-stale` (and the
-head-fetch fail-open arm) compute `diff=` from the PR's **current** diff while
-keeping the caller-supplied stale sha, so a marker minted that way is accepted
-here even though the reviewed artifact cannot be shown unchanged. Closing that
-trust gap is producer-side work (agent-infra#784).
+That matters once the producer half lands (agent-infra PR #767). Its
+`--force-stale` (and its head-fetch fail-open arm) will compute `diff=` from the
+PR's **current** diff while keeping the caller-supplied stale sha, so a marker
+minted that way IS accepted here even though the reviewed artifact cannot be
+shown unchanged. Closing that trust gap is producer-side work
+(agent-infra#784).
 
 Do **not** "fix" it here by requiring the recorded sha to be an ancestor of the
 current head: this repo's documented refresh path is `git rebase origin/main` +
@@ -93,8 +96,8 @@ carry-forward case #2982 exists for and re-create the deadlock.
 
 ### Tests
 
-The gate's shell logic runs inline in the workflow (it cannot reference a repo
-script — `pull_request_target` never checks out PR code), so
+The gate's shell logic runs inline in the workflow (this workflow has no
+checkout step, so it cannot reference a repo script), so
 `.github/scripts/ai-review-gate.test.sh` **extracts the `run:` block verbatim**
 and drives it with a stubbed `gh` and a fabricated HMAC key. It also asserts the
 non-runtime invariants — the required job carries no
@@ -136,7 +139,11 @@ moves after a record because of new review-fix commits, re-run the code-review
 skill and re-record at the new head. If it moves only because the branch was
 updated against `main` — whether by a merge commit or by a rebase plus
 `--force-with-lease` — the three-dot diff is unchanged and the recorded
-evidence remains valid.
+evidence remains valid **for this required check**.
+
+> The local `review-enforcer` extension keeps its own, head-bound merge gate, so
+a plain local merge is still blocked after a merge-only update. That is tracked
+as agent-infra#1351, not fixed here.
 
 ## When the gate goes red
 
@@ -148,6 +155,8 @@ is unambiguous:
 | `No AI review evidence found` | no marker in the PR body | run `record-review.sh` |
 | `is UNSIGNED` | marker has no ` sig=<hmac>` segment at all | re-record with a key configured |
 | `was recorded for '<other>', not …` | marker is bound to a different repo | re-record for this repo |
+| `was found for <other>, not for <repo>` | marker is STALE **and** bound to a different repo | re-record for this repo |
+| `normalises to an empty value` | the configured secret is whitespace-only, so the HMAC key would be the empty (public) string | set a real `AI_REVIEW_GATE_KEY` |
 | `HMAC mismatch` | key or signed text differs; prints `sha256` prefixes of the text it checked | compare the prefix with the recording machine, then re-record |
 | `is stale` | marker is for another head sha, and its `diff=` is absent, could not be hashed live, or no longer matches | re-run the review, re-record at the new head |
 | `live diff hash could not be computed` | the REST diff fetch failed; a `diff=` marker fails closed rather than carrying forward | re-run the job once the API is reachable — the evidence may still be valid |

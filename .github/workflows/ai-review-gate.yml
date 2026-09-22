@@ -56,10 +56,11 @@ name: ai-review-gate
 # saw. It verifies only that the marker is signed and that the signed `diff=`
 # equals this PR's diff at check time. The binding between a recorded sha and
 # the diff actually reviewed is enforced by record-review.sh's stale-sha guard,
-# not here. The producer's `--force-stale` override and its head-fetch
-# fail-open arm compute `diff=` from the PR's CURRENT diff while keeping the
-# caller-supplied stale sha, so a marker minted that way is accepted by rule
-# (b) even though the reviewed artifact cannot be shown unchanged. Close that
+# not here. Once the producer half ships (agent-infra PR #767), its
+# `--force-stale` override and its head-fetch fail-open arm will compute `diff=`
+# from the PR's CURRENT diff while keeping the caller-supplied stale sha, so a
+# marker minted that way IS accepted by rule (b) even though the reviewed
+# artifact cannot be shown unchanged. Close that
 # trust gap on the PRODUCER side (agent-infra#784) — do NOT add a
 # "recorded sha is an ancestor of head" bound here: the repo's documented
 # refresh path is `git rebase origin/main` (sha rewritten, three-dot diff
@@ -77,7 +78,9 @@ name: ai-review-gate
 #
 # Provenance: record-review.sh is invoked by the code-review skill only after
 # its review gate converges clean, so a green check means a recorded AI review
-# exists for exactly this head sha OR for exactly this PR diff.
+# exists for exactly this head sha, or for a diff equal to this PR's diff at
+# check time. Rule (b) cannot tell WHICH revision a reviewer saw — that binding
+# is enforced producer-side (see the delegation note above), not here.
 # Stale evidence (head moved AND diff changed after review) is rejected,
 # forcing a re-record on the final artifact.
 #
@@ -118,8 +121,8 @@ jobs:
           REPO_NAME: ${{ github.event.repository.full_name }}
           GATE_SECRET: ${{ secrets.AI_REVIEW_GATE_KEY }}
           # REQUIRED (#2982): `gh` REFUSES to run inside GitHub Actions unless
-          # GH_TOKEN is set — verified: `env -i GITHUB_ACTIONS=true gh api …`
-          # exits with "To use GitHub CLI in a GitHub Actions workflow, set the
+          # GH_TOKEN is set — verified: `env -i PATH="$PATH" GITHUB_ACTIONS=true
+          # gh api …` exits with "To use GitHub CLI in a GitHub Actions workflow, set the
           # GH_TOKEN environment variable". Without this the live diff hash is
           # ALWAYS empty, acceptance rule (b) below is dead code in production,
           # and the #2982 deadlock is not actually removed. Every other
@@ -142,6 +145,17 @@ jobs:
           fi
           # Normalize the key (matches the producer's key-file load).
           GATE_SECRET="$(printf '%s' "$GATE_SECRET" | tr -d '[:space:]')"
+          # ⛔ Re-assert AFTER normalization (#3057 review): a whitespace-only
+          # secret passes the `-z` guard above and then normalizes to the EMPTY
+          # string. An empty HMAC key is public — any PR author could mint a
+          # marker (stale sha + the live `diff=`) and turn the required check
+          # green on an unreviewed diff. The guard above validates the RAW
+          # value; the normalized value is what the HMAC actually uses, so it
+          # must be validated too.
+          if [ -z "$GATE_SECRET" ]; then
+            echo "::error::AI_REVIEW_GATE_KEY normalises to an empty value (whitespace-only secret) — an empty HMAC key is public and would make this gate forgeable."
+            exit 1
+          fi
 
           # Full PR body. The env-var form truncates at ~48KB — fetch via the
           # REST API (pull-requests: read) and fall back to the env var.
@@ -265,8 +279,9 @@ jobs:
           done <<< "$candidates"
 
           if [ -z "$marker" ] && [ -n "$candidates" ]; then
-            # Right shape, right head, right repo, signed — but no HMAC
-            # verifies. Either the recording key is not the repo secret, or
+            # Right shape, right repo, and EITHER head-bound or diff-matched,
+            # signed — but no HMAC verifies. Either the recording key is not
+            # the repo secret, or
             # the signed text differs from the text reconstructed here. Print
             # sha256 prefixes of both candidate reconstructions (hashes only —
             # no secret material) so the operator can tell WHICH, instead of
@@ -383,7 +398,15 @@ jobs:
             # cycle: the marker may be for ANOTHER REPO (reporting that as a
             # stale/diff divergence prints two byte-identical hashes — #3057's
             # k2), or the reviewed diff changed / could not be hashed (#2982).
-            latest_repo="$(printf '%s' "$latest_raw" | sed -nE 's/^.* \(([^)]*)\) sig=[0-9a-f]{64}$/\1/p')"
+            # Extract the repo ONLY from a line that IS a well-formed marker.
+            # A trailing ` (text) sig=<hex>` on an otherwise-malformed line
+            # (`@ not-a-sha`) must not hijack this branch and misattribute the
+            # cause — that would suppress the accurate stale/diff diagnostic on
+            # a REQUIRED check (review finding, #3057).
+            latest_repo=""
+            if [[ "$latest_raw" =~ ^review\ recorded:\ reviews/[0-9]+\.json\ verdict=clean(-micro)?\ @\ [0-9a-f]{40}(\ diff=[0-9a-f]{64})?\ \(([^()]*)\)(\ sig=[0-9a-f]{64})?$ ]]; then
+              latest_repo="${BASH_REMATCH[3]}"
+            fi
             if [ -n "$latest_repo" ] && [ "$latest_repo" != "$REPO_NAME" ]; then
               echo "::error::AI review evidence was found for ${latest_repo}, not for ${REPO_NAME} (this PR's repo) — evidence is bound to the repo it was recorded for and cannot be accepted here."
               echo "::error::Re-record for this repo:"
