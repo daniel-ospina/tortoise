@@ -188,7 +188,7 @@ function fakeDb() {
           } else if (/INSERT INTO sessions/.test(sql)) {
             sessions.push(this._args)
           } else if (/DELETE FROM email_flow_pending/.test(sql)) {
-            pending.delete(this._args[0])
+            if (!pending.delete(this._args[0])) return { meta: { changes: 0 } }
           } else if (/UPDATE sessions SET revoked = 1/.test(sql)) {
             revocations.push(this._args[0])
           }
@@ -316,7 +316,7 @@ test('the CSRF-guarded continue POST mints the session and redirects to the rese
       request: new Request(`${APP}/auth/confirm`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Origin: APP, Cookie: cookie },
-        body: JSON.stringify({}),
+        body: JSON.stringify({ pending: cookie.slice('__Host-authflow='.length) }),
       }),
       env: env(db),
     })
@@ -404,7 +404,7 @@ for (const type of ['email', 'email_change', 'invite']) {
         request: new Request(`${APP}/auth/confirm`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Origin: APP, Cookie: cookie },
-          body: JSON.stringify({}),
+          body: JSON.stringify({ pending: cookie.slice('__Host-authflow='.length) }),
         }),
         env: env(db),
       })
@@ -448,4 +448,65 @@ test('a malformed 2xx from the provider is 503 provider_unavailable, never 500',
       assert.equal((await res.json()).error, 'provider_unavailable')
     }, body)
   }
+})
+
+test('a confirmation cannot mint ANOTHER pending record — the page id binds the consent', async () => {
+  // The `__Host-authflow` cookie is per-BROWSER, not per-tab, and every verified
+  // GET overwrites it. So: open your own link (tab A), then an attacker-issued
+  // link (tab B) in the same browser. Clicking Continue on tab A must not mint
+  // tab B's account — the POST carries the id the PAGE displayed, and a mismatch
+  // is refused rather than coerced (a page naming account A must never mint B).
+  const { onRequestGet, onRequestPost } = await loadTs('functions/auth/confirm.ts')
+  const db = fakeDb()
+  await withVerify(async () => {
+    const a = await onRequestGet({
+      request: new Request(`${APP}/auth/confirm?token_hash=a&type=email`),
+      env: env(db),
+    })
+    const aPending = flowCookie(a).slice('__Host-authflow='.length)
+    const b = await onRequestGet({
+      request: new Request(`${APP}/auth/confirm?token_hash=b&type=email`),
+      env: env(db),
+    })
+
+    const res = await onRequestPost({
+      request: new Request(`${APP}/auth/confirm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: APP, Cookie: flowCookie(b) },
+        body: JSON.stringify({ pending: aPending }),
+      }),
+      env: env(db),
+    })
+    assert.equal(res.status, 400, 'a mismatched pending id must be refused, never coerced')
+    assert.equal(
+      db._sessions.length,
+      0,
+      'SECURITY: no session may be minted for an account the page did not name',
+    )
+  })
+})
+
+test('a replayed continue POST mints nothing the second time', async () => {
+  const { onRequestGet, onRequestPost } = await loadTs('functions/auth/confirm.ts')
+  const db = fakeDb()
+  await withVerify(async () => {
+    const getRes = await onRequestGet({
+      request: new Request(`${APP}/auth/confirm?token_hash=t&type=recovery`),
+      env: env(db),
+    })
+    const cookie = flowCookie(getRes)
+    const post = () =>
+      onRequestPost({
+        request: new Request(`${APP}/auth/confirm`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Origin: APP, Cookie: cookie },
+          body: JSON.stringify({ pending: cookie.slice('__Host-authflow='.length) }),
+        }),
+        env: env(db),
+      })
+
+    assert.equal((await post()).status, 302, 'the first POST completes')
+    assert.equal((await post()).status, 400, 'the replay must be refused')
+    assert.equal(db._sessions.length, 1, 'the pending record is single-use')
+  })
 })

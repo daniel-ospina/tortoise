@@ -221,11 +221,16 @@ function emailInterstitial(email: string | null, pendingId: string, kind: string
         // A JSON POST is required by the BFF's CSRF guard (a form cannot send
         // application/json). Follow the 302 so the Set-Cookie is applied, then
         // land on the reset panel.
+        // The id of the record THIS page is asking the user to authorise. It is
+        // sent back on the POST and must equal the cookie, so a second link
+        // opened in another tab (the cookie is per-browser, not per-tab) cannot
+        // redirect the consent the user gave HERE to a DIFFERENT account. A page
+        // naming account A must never mint B.
         fetch('/auth/confirm', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'same-origin',
-          body: JSON.stringify({})
+          body: JSON.stringify({ pending: '${pendingId}' })
         }).then(function (res) {
           if (res.ok) { window.location.assign('${dest}'); return; }
           throw new Error('HTTP ' + res.status);
@@ -327,13 +332,26 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   if (!env.SESSIONS) return json({ error: "session_store_unavailable" }, { status: 503 });
 
   const pendingId = readCookie(request, FLOW_COOKIE);
-  if (!pendingId) {
+
+  // The id the PAGE displayed. The cookie alone is not enough: it is
+  // per-browser, not per-tab, and every verified GET overwrites it — so without
+  // this a second link opened in another tab would silently redirect the consent
+  // the user gave on THIS page to that other account (a page naming account A
+  // minting B). A missing or mismatched id is refused, never coerced.
+  let requested: string | null = null;
+  try {
+    const body = (await request.json()) as { pending?: unknown };
+    if (typeof body?.pending === "string") requested = body.pending;
+  } catch {
+    // Not JSON (the CSRF guard already rejected a non-JSON media type) or empty.
+  }
+  if (!pendingId || !requested || requested !== pendingId) {
     return json(
       {
         error: "no_email_flow_in_progress",
-        message: "Open the link from your email first.",
+        message: "Open the link from your email again.",
       },
-      { status: 400 },
+      { status: 400, cookies: [clearCookie(FLOW_COOKIE)] },
     );
   }
 

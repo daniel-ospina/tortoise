@@ -45,14 +45,14 @@ which answers with `?code=` (PKCE, needs a verifier held by the requesting brows
 |---|---|---|---|---|
 | Signup confirmation | `email` | Confirm signup | `/auth/resend` → `${APP_ORIGIN}/auth/confirm` | `/auth/confirm` |
 | Magic link | (PKCE, no `type`) | Magic link | `/auth/start?provider=email` → GoTrue `/auth/v1/authorize`, `redirect_to = /auth/callback` | `/auth/callback` (`?code=`), **not** `/auth/confirm` |
+| Password recovery (F15) | `recovery` | Reset password | `/auth/reset` → `${APP_ORIGIN}/auth/confirm` | `/auth/confirm` (then revokes other sessions) |
+| Email change | `email_change` | Change email address | none from this repo — GoTrue uses the template's own `{{ .RedirectTo }}` / the project `SITE_URL` | `/auth/confirm` |
+| Invite | `invite` | Invite user | invite producer | `/auth/confirm` |
 
 > The GoTrue `email` type also serves a magic-link token *when a template is built with `token_hash`* — and
 > `/auth/confirm` handles it. This app's own magic link is not that: it is PKCE via `/auth/start?provider=email`
 > and lands on `/auth/callback`. Do not change the Magic link template without changing `start.ts` in the same
 > change (§5).
-| Password recovery (F15) | `recovery` | Reset password | `/auth/reset` → `${APP_ORIGIN}/auth/confirm` | `/auth/confirm` (then revokes other sessions) |
-| Email change | `email_change` | Change email address | none from this repo — GoTrue uses the template's own `{{ .RedirectTo }}` / the project `SITE_URL` | `/auth/confirm` |
-| Invite | `invite` | Invite user | invite producer | `/auth/confirm` |
 
 ⛔ `signup` and `magiclink` are **deprecated** verify types. Using them fails the exact flows this route exists
 to serve. Canonical set: `email`, `recovery`, `invite`, `email_change`. (`SCOPE.md` §5.2, verified against

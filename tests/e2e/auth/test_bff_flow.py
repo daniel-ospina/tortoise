@@ -417,7 +417,13 @@ def test_email_confirmation_completes_through_the_interstitial(stack):
         "the interstitial must bind the pending confirmation to this browser"
     )
 
-    req = urllib.request.Request(f"{APP}/auth/confirm", method="POST", data=b"{}")
+    # The POST carries the id the PAGE displayed; the cookie alone is
+    # per-browser, not per-tab (see confirm.ts).
+    req = urllib.request.Request(
+        f"{APP}/auth/confirm",
+        method="POST",
+        data=json.dumps({"pending": j.cookie("__Host-authflow")}).encode(),
+    )
     req.add_header("Content-Type", "application/json")
     status, location, _ = _jar_call(j, req)
     assert status == 302, f"the confirm POST must redirect, got {status}"
@@ -459,7 +465,13 @@ def test_recovery_confirm_completes_through_the_interstitial(stack):
     )
 
     # The interstitial's own Continue action: a JSON POST carrying the cookie.
-    req = urllib.request.Request(f"{APP}/auth/confirm", method="POST", data=b"{}")
+    # The POST carries the id the PAGE displayed; the cookie alone is
+    # per-browser, not per-tab (see confirm.ts).
+    req = urllib.request.Request(
+        f"{APP}/auth/confirm",
+        method="POST",
+        data=json.dumps({"pending": j.cookie("__Host-authflow")}).encode(),
+    )
     req.add_header("Content-Type", "application/json")
     # No-redirect opener that still carries the jar: the response to ASSERT is
     # the 302 itself (a redirect-following opener swallows it and returns 200).
@@ -500,7 +512,13 @@ def test_recovery_confirm_replaces_a_stale_flow_cookie(stack):
         "the stale __Host-authflow was not replaced by the pending recovery"
     )
 
-    req = urllib.request.Request(f"{APP}/auth/confirm", method="POST", data=b"{}")
+    # The POST carries the id the PAGE displayed; the cookie alone is
+    # per-browser, not per-tab (see confirm.ts).
+    req = urllib.request.Request(
+        f"{APP}/auth/confirm",
+        method="POST",
+        data=json.dumps({"pending": j.cookie("__Host-authflow")}).encode(),
+    )
     req.add_header("Content-Type", "application/json")
     status, location, _ = _jar_call(j, req)
     assert status == 302, f"the confirm POST must redirect, got {status}"
