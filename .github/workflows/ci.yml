@@ -104,6 +104,22 @@ jobs:
                   # skips dashboard-js-tests, so the behavioural tests for the
                   # very file under review would never run.
                   isfile("website/assets/supabase-session.js"),
+                  # #3525: the dashboard's security-headers guard also pins the
+                  # MARKETING project's CSP. The same policy text has to exist in
+                  # a second `_headers` and a second constant, because a Pages
+                  # project's `functions/` cannot import across project roots, and
+                  # the guard in securityHeaders.test.js is what keeps the two
+                  # copies byte-identical. Without these entries a website-only
+                  # change selects the `website` surface and SKIPS
+                  # dashboard-js-tests, so the marketing policy could drift with
+                  # every gate green. The four names are exactly the marketing
+                  # files that guard reads.
+                  isfile(
+                      "website/_headers",
+                      "website/functions/_shared/security-headers.ts",
+                      "website/functions/_middleware.ts",
+                      "website/functions/blog/_lib.ts",
+                  ),
               ),
               # uv-lock-check
               "uv_lock": any_file(
