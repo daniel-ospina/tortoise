@@ -105,21 +105,24 @@ jobs:
                   # very file under review would never run.
                   isfile("website/assets/supabase-session.js"),
                   # #3525: the dashboard's security-headers guard also pins the
-                  # MARKETING project's CSP. The same policy text has to exist in
-                  # a second `_headers` and a second constant, because a Pages
-                  # project's `functions/` cannot import across project roots, and
-                  # the guard in securityHeaders.test.js is what keeps the two
-                  # copies byte-identical. Without these entries a website-only
-                  # change selects the `website` surface and SKIPS
-                  # dashboard-js-tests, so the marketing policy could drift with
-                  # every gate green. The four names are exactly the marketing
-                  # files that guard reads.
-                  isfile(
-                      "website/_headers",
-                      "website/functions/_shared/security-headers.ts",
-                      "website/functions/_middleware.ts",
-                      "website/functions/blog/_lib.ts",
-                  ),
+                  # MARKETING project's CSP, and it SCANS both projects'
+                  # `functions/` trees (cookie writers, `text/html` producers) —
+                  # the same policy text has to exist in a second `_headers` and
+                  # a second constant because a Pages project's `functions/`
+                  # cannot import across project roots, and
+                  # securityHeaders.test.js is what keeps the copies identical.
+                  # Scope by PREFIX, not by a list of filenames: the guard reads
+                  # the whole tree, so a file it scans but this predicate does
+                  # not name (a new marketing Function, or any file the guard
+                  # gains later) would skip dashboard-js-tests and let the guard
+                  # fail only where it never runs. A literal list is also
+                  # disarmed by a pure add: the new path matches nothing here
+                  # even though the guard scans it. The prefix is a superset of
+                  # the guard's input set by construction, which is the
+                  # fail-closed direction. `website/_headers` is a sibling of
+                  # `functions/`, so it is named explicitly.
+                  startswith("website/functions/"),
+                  isfile("website/_headers"),
               ),
               # uv-lock-check
               "uv_lock": any_file(

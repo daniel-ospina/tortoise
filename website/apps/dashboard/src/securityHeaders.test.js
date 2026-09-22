@@ -23,10 +23,10 @@
 //
 // WHAT EACH ASSERTION IS ANCHORED TO (learned in review)
 // -----------------------------------------------------
-// Every check here is anchored to a FACT THE RUNTIME USES, not to a string that
-// happens to appear in a file, because a string check has two failure modes it
-// cannot see: a commented-out or dead line (it still matches), and a value moved
-// to a path block nobody visits (the value is still in the file). So:
+// Each check is anchored to what the runtime uses, or to a cross-check that keeps
+// a string-level scan non-vacuous — because a string check has failure modes it
+// cannot see: a commented-out line (a per-line prefix filter still matches it), and
+// a value moved to a block nobody visits (the value is still in the file). So:
 //   - the interstitial is checked by CALLING it and reading the real response
 //     headers/body, not by regexing `confirm.ts`;
 //   - each `_headers` value is compared inside the block that actually applies
@@ -35,13 +35,15 @@
 //     the file that decides which request paths serve the app document;
 //   - the guarded-site list is cross-checked against every file that emits
 //     `text/html`, so a new HTML producer cannot be added unguarded;
-//   - the cookie-writer scan matches the WRITE FORMS, case-insensitively — the call
-//     (`headers.append("Set-Cookie"` / `headers.set("set-cookie"`) and the
-//     object-literal key (`"set-cookie":`), not the bare token — so a lowercase writer
-//     is caught while the three hop-by-hop STRIP-LIST entries (`"set-cookie",` array
-//     items in `api/v1/[[path]].ts`, `api/provision.ts`, `blog/api/[[path]].ts`) are
-//     correctly NOT offenders (they are comma-terminated, the key form colon-terminated);
+//   - the cookie-writer scan is an UMBRELLA over any `set-cookie` string literal
+//     (any quote style, any case), so a call shape, an object key, an
+//     array-of-pairs `HeadersInit` and a `const H = "Set-Cookie"` indirection are
+//     all caught; the only files allowed to name the literal without being
+//     writers are the three hop-by-hop STRIP-LIST proxies, exempted BY PATH and
+//     separately asserted to carry no write form;
 //   - the scan walks BOTH projects' function trees.
+// Declared exception: the stamp COUNT is source-level, so a deliberately dead
+// stamp still counts (see `STAMP`, and the plan doc's `## Residuals`).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
@@ -104,18 +106,40 @@ const STAMP =
 const AUDITED_COOKIE_WRITERS = new Set([DASHBOARD_SESSION_TS, DASHBOARD_CONFIRM_TS])
 
 /**
- * The COOKIE-WRITE forms, case-insensitive, covering BOTH spellings the tree
- * uses — the call (`headers.append("Set-Cookie", …)` / `headers.set("set-cookie", …)`)
- * and the object literal (`new Headers({ "Set-Cookie": … })`). Anchoring on the
- * WRITE (call or key) rather than the bare token is what keeps the three
- * hop-by-hop STRIP-LIST entries (`"set-cookie",` array items, comma-terminated)
- * out: a bare token check is case-sensitive, and the key form `"set-cookie":` is
- * colon-terminated, so neither collides with the strip lists. Both forms are
- * required: a call-only regex silently stops catching the object-literal writer
- * the original scan did catch (found in this guard's review).
+ * The three hop-by-hop proxy files strip an UPSTREAM `set-cookie`; they name the
+ * header in a comma-terminated array entry and never write a cookie themselves.
+ * They are the only files allowed to contain the literal without being writers,
+ * and test 2 separately asserts that none of them carries a WRITE form (so the
+ * exemption cannot become a hiding place).
+ */
+const STRIP_LIST_FILES = new Set([
+  'website/apps/dashboard/functions/api/v1/[[path]].ts',
+  'website/apps/dashboard/functions/api/provision.ts',
+  'website/apps/dashboard/functions/blog/api/[[path]].ts',
+])
+
+/**
+ * A `set-cookie` STRING LITERAL — the umbrella the offender scan uses.
+ *
+ * Deliberately NOT anchored to a call or key shape: the scan this replaced
+ * matched the bare token, so it caught an indirection
+ * (`const H = "Set-Cookie"; headers.set(H, v)`) and an array-of-pairs
+ * `HeadersInit` (`new Headers([["Set-Cookie", v]])`). A shape-anchored regex
+ * silently loses both — the regression that was caught in this guard's review.
+ * `['"`]` covers all three quote styles and the backreference requires the
+ * closing quote to match the opening one. No `/g`, so `.test()` is stateless.
+ */
+const COOKIE_LITERAL = /(["'`])set-cookie\1/i
+
+/**
+ * The WRITE forms. Used only to assert the STRIP-LIST proxies are not writers:
+ * the call (`.append(`/`.set(` + literal), the object-literal key
+ * (literal + `:`), and the array-of-pairs element (`[[` + literal). The pair
+ * form's two-bracket anchor is what distinguishes a WRITER from the proxies'
+ * bare comma-terminated `"set-cookie",` array entries.
  */
 const COOKIE_WRITE =
-  /\.(?:append|set)\(\s*["']set-cookie["']|["']set-cookie["']\s*:/i
+  /\.(?:append|set)\(\s*["'`]set-cookie["'`]|["'`]set-cookie["'`]\s*:|\[\s*\[\s*["'`]set-cookie["'`]/i
 
 function loadTs(entry) {
   const out = buildSync({
@@ -193,20 +217,60 @@ function normaliseCsp(value) {
   return value.replace(/\s+/g, ' ').replace(/;\s*$/, '').trim()
 }
 
-/** Remove whole-line `//`, `*` and `/*` comments, so a token in prose is ignored. */
-function stripCommentLines(source) {
-  return source
-    .split('\n')
-    .filter((line) => {
-      const t = line.trim()
-      return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*'))
-    })
-    .join('\n')
+/**
+ * Remove `//` and block comments, quote-aware, so a token in prose cannot be
+ * matched. A real scanner rather than a per-line prefix filter: a prefix filter
+ * leaves a stamp disabled inside a `/* … *​/` block still counted (its body line
+ * does not start with `*`), which would let the stamp count pass while the stamp
+ * is dead.
+ *
+ * Rules: `//` starts a comment only at line start or after whitespace (so
+ * `https://` survives); a `/* … *​/` span is removed wherever it appears; inside
+ * a quoted string `\` escapes the next character and a `//`/`/*` is data.
+ */
+function stripComments(source) {
+  let out = ''
+  let i = 0
+  const n = source.length
+  while (i < n) {
+    const c = source[i]
+    const next = source[i + 1]
+    if (c === '"' || c === "'" || c === '`') {
+      const quote = c
+      out += c
+      i += 1
+      while (i < n) {
+        if (source[i] === '\\') {
+          out += source[i] + (source[i + 1] ?? '')
+          i += 2
+          continue
+        }
+        out += source[i]
+        const done = source[i] === quote
+        i += 1
+        if (done) break
+      }
+      continue
+    }
+    if (c === '/' && next === '*') {
+      const end = source.indexOf('*/', i + 2)
+      i = end === -1 ? n : end + 2
+      continue
+    }
+    if (c === '/' && next === '/' && (i === 0 || /\s/.test(source[i - 1]))) {
+      const nl = source.indexOf('\n', i)
+      i = nl === -1 ? n : nl
+      continue
+    }
+    out += c
+    i += 1
+  }
+  return out
 }
 
 /** The comment-stripped source of a file, relative to the repo root. */
 function commentStripped(relPath) {
-  return stripCommentLines(readFileSync(join(repoRoot, relPath), 'utf8'))
+  return stripComments(readFileSync(join(repoRoot, relPath), 'utf8'))
 }
 
 function walk(dir) {
@@ -254,8 +318,8 @@ test('json() and redirect() carry no-store on every cookie-bearing response', as
 test('the only cookie writers are the two audited files', () => {
   // Pin the tolerance itself: the two audited files must MATCH the writer regex,
   // so the scan below cannot pass vacuously (a regex that matched nothing would
-  // report "no offenders" forever). It also proves the call-form match catches
-  // the real writers rather than relying on the capitalisation.
+  // report "no offenders" forever). It also proves the writer match catches the
+  // real writers rather than relying on the capitalisation.
   for (const rel of AUDITED_COOKIE_WRITERS) {
     assert.match(
       commentStripped(rel),
@@ -264,15 +328,26 @@ test('the only cookie writers are the two audited files', () => {
     )
   }
 
+  // The three strip-list proxies are exempt from the umbrella scan, so pin the
+  // exemption: if one of them ever gains a WRITE form, the exemption must not
+  // hide it — it has to be re-classified as a writer and set `no-store` itself.
+  for (const rel of STRIP_LIST_FILES) {
+    assert.doesNotMatch(
+      commentStripped(rel),
+      COOKIE_WRITE,
+      `${rel} writes a cookie — drop it from STRIP_LIST_FILES and make it no-store`,
+    )
+  }
+
   const offenders = []
   for (const rel of functionTsFiles()) {
-    if (AUDITED_COOKIE_WRITERS.has(rel)) continue
-    if (COOKIE_WRITE.test(commentStripped(rel))) offenders.push(rel)
+    if (AUDITED_COOKIE_WRITERS.has(rel) || STRIP_LIST_FILES.has(rel)) continue
+    if (COOKIE_LITERAL.test(commentStripped(rel))) offenders.push(rel)
   }
   assert.deepEqual(
     offenders,
     [],
-    'a new cookie writer must set Cache-Control: no-store itself (Functions bypass _headers)',
+    'a file that names set-cookie must be an audited writer or a strip-list proxy (Functions bypass _headers)',
   )
 })
 
@@ -299,7 +374,10 @@ test('the /auth/confirm interstitial is nonce-gated and uncacheable', async () =
   )
   assert.match(csp, /style-src [^;]*'unsafe-inline'/, 'styles stay inline (inline <style> block)')
 
-  const nonce = /nonce-([A-Za-z0-9+/]+={0,2})/.exec(csp)?.[1]
+  // Extract without constraining the character class — otherwise the assertion
+  // below re-validates a substring the extraction regex just manufactured and
+  // can never fail.
+  const nonce = /'nonce-([^']+)'/.exec(csp)?.[1]
   assert.ok(nonce, 'the policy must carry a nonce')
   assert.match(nonce, /^[A-Za-z0-9+/]+={0,2}$/, 'the nonce must be base64')
 
