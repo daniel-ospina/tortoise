@@ -1006,8 +1006,26 @@ def _scrub_error(msg: str) -> str:
     return msg
 
 
+class _SafeError(dict):
+    """Failure result from :func:`_safe` (transport, auth, quota, exception).
+
+    A ``dict`` *subclass*, deliberately not a plain dict. A successful SDK
+    write returns the created node's own property dict, which may contain a
+    user-supplied key literally named ``"error"`` — so key presence cannot
+    distinguish "the call failed" from "the call succeeded and the user has a
+    prop called error". Gating on ``"error" not in result`` therefore silently
+    dropped the onboarding observation for such writes (#3926). Gate on
+    ``isinstance(result, _SafeError)`` instead.
+
+    As a dict subclass the value still indexes, compares, and serializes
+    exactly as the plain error dict did — the wire shape is unchanged.
+    """
+
+    __slots__ = ()
+
+
 def _safe(fn, *args, **kwargs):
-    """Call fn; return error dict on exception instead of raising.
+    """Call fn; return an _SafeError on exception instead of raising.
 
     #329: QuotaExceededError → {"error", "code": ERR_QUOTA}; QuotaCheckError
     → {"error", "code": ERR_QUOTA_SERVER} (fail-closed counting).
@@ -1020,16 +1038,16 @@ def _safe(fn, *args, **kwargs):
     """
     mode = _transport_mode.get()
     if mode is None:
-        return {
+        return _SafeError({
             "error": (
                 "Authentication required. MCP transport mode not initialized."
             )
-        }
+        })
     if mode == "http":
         pass  # auth enforced at transport (OrgResolutionMiddleware)
     elif mode == "stdio":
         if not _is_dev_mode():
-            return {
+            return _SafeError({
                 "error": (
                     "Authentication required. The MCP stdio transport cannot "
                     "carry auth tokens, so TORTOISE_API_KEY disables stdio. "
@@ -1040,10 +1058,10 @@ def _safe(fn, *args, **kwargs):
                     "Bearer <tt_key>'; (3) local stdio dev mode — unset "
                     "TORTOISE_API_KEY."
                 )
-            }
+            })
     else:
         # Unknown transport mode — fail-closed (code-review fix)
-        return {"error": f"Unknown MCP transport mode: {mode!r}"}
+        return _SafeError({"error": f"Unknown MCP transport mode: {mode!r}"})
     try:
         result = fn(*args, **kwargs)
         return result
@@ -1061,27 +1079,28 @@ def _safe(fn, *args, **kwargs):
             # survives intact.
             scrubbed = [{**v, "message": _scrub_error(v["message"])}
                         for v in e.violations]
-            return {"error": _scrub_error(str(e)), "code": ERR_BUNDLE_INVALID,
-                    "violations": scrubbed}
+            return _SafeError({"error": _scrub_error(str(e)),
+                               "code": ERR_BUNDLE_INVALID,
+                               "violations": scrubbed})
         if isinstance(e, QuotaExceededError):
-            return {"error": str(e), "code": ERR_QUOTA}
+            return _SafeError({"error": str(e), "code": ERR_QUOTA})
         # Epic 903-C11 (#1249): BudgetExceededError (full-mode dream budget
         # unsatisfiable — C6) is quota-class → ERR_QUOTA.
         from tortoise.exceptions import BudgetExceededError
         if isinstance(e, BudgetExceededError):
-            return {"error": str(e), "code": ERR_QUOTA}
+            return _SafeError({"error": str(e), "code": ERR_QUOTA})
         if isinstance(e, QuotaCheckError):
-            return {"error": str(e), "code": ERR_QUOTA_SERVER}
+            return _SafeError({"error": str(e), "code": ERR_QUOTA_SERVER})
         from tortoise.exceptions import Phase2Error
         if isinstance(e, Phase2Error):
             # A2: Phase-2 failure — {error, batch_id} with NO code (distinct
             # from Phase-1's ERR_BUNDLE_INVALID); the batch_id lets the agent
             # audit the partial commit before re-sending (cycle-23/24 pin).
             # REVIEW-FIX P2: message scrubbed (#43).
-            return {"error": _scrub_error(str(e)),
-                    **({"batch_id": e.batch_id} if e.batch_id else {})}
+            return _SafeError({"error": _scrub_error(str(e)),
+                               **({"batch_id": e.batch_id} if e.batch_id else {})})
         msg = _scrub_error(str(e))
-        return {"error": msg}
+        return _SafeError({"error": msg})
 
 
 def _scrub_analyze_answer(answer: str) -> str:
@@ -1238,7 +1257,9 @@ def tortoise_create_point(kind: str, content: str,
                 return {"error": f"invalid tag value: {t!r} (must be a non-empty string ≤ 200 chars)"}
     merged["dedup"] = dedup
     result = _safe(_quota_gated(_get_org_sdk().create_point, "points", abuse_weight=1), kind, content, **merged)
-    if "error" not in result:
+    # #3926: gate on the typed failure result, never on key presence — a user
+    # prop named "error" must not suppress the onboarding observation.
+    if not isinstance(result, _SafeError):
         # #3784: only a decision-shaped write observes the decision step —
         # `decision` is the pointKind the documented EP decide protocol
         # files (tortoise/onboarding/SKILL.md §5) and the one file_decision
@@ -1521,7 +1542,10 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
     """
     try:
         results = _safe(_get_org_sdk().tortoise_fts_query, query, kind=kind_filter, limit=limit)
-        if isinstance(results, list) and results and "error" not in results[0]:
+        # #3926: a _safe failure is an _SafeError (never a list), so the
+        # list check alone is the failure gate — a row whose props carry a
+        # user key named "error" must still resolve.
+        if isinstance(results, list) and results:
             return [{"id": r["id"], "name": r.get("content", ""),
                      "kind": r.get("point_kind", ""),
                      "confidence": round(
@@ -1716,9 +1740,9 @@ def tortoise_recall(query: str | None = None,
             centrality_weight=centrality_weight if centrality_weight is not None else defaults["centrality_weight"],
         )
 
-    # _safe returns an error dict on SDK exceptions — surface it at the TOP
-    # level so consumers never mis-parse results.
-    if isinstance(results, dict) and "error" in results:
+    # _safe returns an _SafeError on SDK exceptions — surface it at the TOP
+    # level so consumers never mis-parse results (#3926: never key presence).
+    if isinstance(results, _SafeError):
         return {"mode": mode, **results}
     if mode == "subgraph":
         # recall_subgraph returns {nodes, edges, stats} — spread flat.
@@ -1962,7 +1986,8 @@ def tortoise_file_decision(options: Any, evidence: Any,
                 "code": ERR_QUOTA}
     result = _safe(_quota_gated(_get_org_sdk().file_decision, "points",
                           abuse_weight=lambda r, a, k: 1 + len(a[0] or []) + len(a[1] or [])), options, evidence, choice)
-    if "error" not in result:
+    # #3926: gate on the typed failure result, never on key presence.
+    if not isinstance(result, _SafeError):
         # #3784: this call IS the observation — a decision was filed.
         _maybe_onboarding_auto_complete(decision_observed=True)
     return result
@@ -2548,7 +2573,7 @@ def tortoise_update(id: str, props: Any = None) -> dict:
 def tortoise_delete(id: str) -> dict:
     """Delete a Point or entity by id. DESTRUCTIVE — requires human confirmation."""
     result = _safe(_get_org_sdk().delete, id)
-    if isinstance(result, dict) and "error" in result:
+    if isinstance(result, _SafeError):
         return result
     return {"deleted": bool(result), "id": id}
 

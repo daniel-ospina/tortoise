@@ -2,6 +2,7 @@ version: 1
 surfaces:
   api:
   - test_1162_add_operator_local_svbp.py
+  - test_3926_error_prop_guard.py  # #3926: the MCP error-prop success-path guard; same `api` surface as test_bridge_mcp.py / test_mcp_server_auth_modes.py (tortoise/mcp_server.py is a SHARED_MODULE — full matrix)
   - test_abuse.py
   - test_abuse_integration.py
   - test_acl_graph_users.py   # C4 #2113: per-graph FalkorDB ACL layer (docker-lane; skipif no URI)
@@ -1821,6 +1822,10 @@ durations:
   longmem_eval/test_context_assembly_arms.py: 0.1
   longmem_eval/test_gold_evidence_claims.py: 0.1
   mini_beir/test_mini_beir.py: 0.1
+  # #3926/#4173: measured 0.114s — run 35444881400 (head d96b92d20),
+  # `pytest-log-test-a` junit.xml, `time` summed over the file's 3 `testcase`
+  # elements (its shard); 0.1 is that sum at this map's one-decimal convention.
+  test_3926_error_prop_guard.py: 0.1
   test_abuse.py: 0.1
   test_aggregative_intent.py: 0.1
   test_api.py: 0.1
