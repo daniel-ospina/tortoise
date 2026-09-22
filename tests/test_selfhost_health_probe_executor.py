@@ -1,47 +1,50 @@
-"""#3287 — the selfhost health probes must not share a starvable executor.
+"""#3287 / #2988 / #3243 — the selfhost health endpoints must not share fate with work.
 
-#2988 (PR #3009) moved the probes OFF the event loop. It left them on the
-loop's **shared** default ``ThreadPoolExecutor``, whose queue is UNBOUNDED: a
-submission never fails, it just WAITS. So a probe does not have to hang to be
-slow, it only has to queue behind unrelated ``to_thread`` work in the process.
-``asyncio.wait_for`` bounds the ANSWER, not the TRUTH — a starved readiness
-probe reports not_ready while the DB is fine.
+Three properties, one seam, pinned at two layers each:
 
-Measured on ``main`` with both probes stubbed to ~0 ms and one unrelated task
-occupying the default executor's only worker:
+* **#3287 — the readiness probe owns a DAEMON pool.** ``/health/ready`` hands
+  its probe to ``monitoring.daemon_worker``, never the loop's SHARED default
+  ``ThreadPoolExecutor``, whose queue is UNBOUNDED: a submission never fails, it
+  just WAITS. ``asyncio.wait_for`` bounds the ANSWER, not the TRUTH — a starved
+  readiness probe reported not_ready while the DB was fine.
 
-    /health        : NO ANSWER within 8.0s        (probe never ran)
-    /health/ready  : HTTP 503 after 6021ms        (probe never ran)
+  Measured on ``main`` with both probes stubbed to ~0 ms and one unrelated task
+  occupying the default executor's only worker:
 
-``publish-selfhost.yml`` curls ``/health/ready`` and fails the publish on a
-non-200, so that false 503 blocks a release of a perfectly healthy image;
-``/health`` is the 60 s boot-wait in the same workflow.
+      /health        : NO ANSWER within 8.0s        (probe never ran)
+      /health/ready  : HTTP 503 after 6021ms        (probe never ran)
 
-**The pool is ``monitoring.daemon_worker`` (#3498's bounded multi-worker
-form)** — the shared, reviewed primitive #3286 records as the unification
-target, not a second bespoke executor. Two properties come from that choice and
-are pinned here directly, because they are the reason for it:
+  ``publish-selfhost.yml`` curls ``/health/ready`` and fails the publish on a
+  non-200, so that false 503 blocks a release of a perfectly healthy image.
 
-* the workers are DAEMON, so a probe parked in a socket read cannot delay
-  interpreter exit (``concurrent.futures.thread._python_exit`` JOINS a
-  ``ThreadPoolExecutor``'s non-daemon workers; #2203's ``docker stop`` SIGKILLs
-  10 s after SIGTERM and a wedged non-daemon worker eats that budget);
-* the backlog is BOUNDED (``_SingleSlotWorker.MAX_BACKLOG``), so a saturated
-  pool REFUSES a submission instead of buffering without bound — this change's
-  own complaint about the default executor applied to its replacement.
+* **#2988 — ``/health`` answers from IN-MEMORY state.** The pre-#2988 handler
+  AWAITED a probe, so its answer was on the request path; #3287 gave the probe
+  its own pool, which removed the STARVATION but left the answer waiting on a
+  worker. The acceptance bullet is stronger — "returns from in-memory state in
+  <500 ms with the loop's default executor fully saturated" — so ``/health`` now
+  reads ``monitoring.HealthProbe.snapshot()`` (the hosted /health coordinator,
+  #3062) and hands off to NO pool at all. A background task
+  (``_health_probe_loop``) keeps the verdict fresh.
+
+* **#3243 — the cold-start allowance rides the REFRESHER, not the read.**
+  ``PROBE_TIMEOUT`` (1.5 s) covers both probe phases and the projection
+  cold-start scales with graph size, so a reachable large graph used to time out
+  during setup and report ``db.ok=false`` on a liveness surface. The allowance
+  (``probe_setup_timeout()``, the #3143/#3217 knob) is passed by the refresher,
+  where a slow cold start costs nobody a request — the shape #3243's own notes
+  prescribe ("derive a liveness allowance … on a coordinator whose *read* stays
+  in-memory").
 
 The suite is deliberately two-layered, in the style of
 ``test_health_ready_nonblocking.py``:
 
-* **structural pins** — the shape cannot come back through a refactor that
-  keeps the observable response intact. A response is identical whether the
-  probe ran on a private pool or on a shared one; only the AST can see it. The
-  pool-split pin is here for a specific reason: the readiness probe
-  (``sdk._get_proj``) has NO internal bound, so a SHARED pool lets a few
-  concurrent readiness probes park every worker and starve liveness — which is
-  the defect this change exists to remove, one level down.
+* **structural pins** — the shape cannot come back through a refactor that keeps
+  the observable response intact. A response is identical whether the probe ran
+  on a private pool or on a shared one, and identical whether the liveness read
+  was in-memory or merely fast; only the AST can see it.
 * **behavioural tests** — prove the new dispatch actually works (right pool,
-  right thread, probe really ran) and that fail-closed readiness survives.
+  right thread, probe really ran), that the in-memory read really is independent
+  of the executor, and that a slow cold start is rescued.
 """
 
 from __future__ import annotations
@@ -49,6 +52,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import concurrent.futures
+import contextlib
 import contextvars
 import threading
 import time
@@ -56,31 +60,28 @@ from pathlib import Path
 
 import pytest
 
+import tortoise.monitoring as _mon
+
 REPO = Path(__file__).resolve().parent.parent
 SELFHOST = REPO / "tortoise" / "selfhost.py"
 SELFHOST_SRC = SELFHOST.read_text()
 
-#: handler -> the (pool-NAME constant, pool-WIDTH constant) lane it must own.
-#: Two lanes, never one: see ``test_probe_lanes_are_distinct_pools``.
-LANES = {
-    "health": ("_LIVENESS_PROBE_WORKER", "_LIVENESS_PROBE_WORKERS"),
-    "health_ready": ("_READY_PROBE_WORKER", "_READY_PROBE_WORKERS"),
-}
+#: The GENUINE ``monitoring.probe_db``, captured at import time — before any
+#: fixture stubs it. The #3243 end-to-end test must exercise the real budget
+#: arithmetic through the coordinator: a stub that merely records the
+#: ``setup_timeout`` it was handed cannot distinguish the fix from the bug.
+_REAL_PROBE_DB = _mon.probe_db
 
+#: The readiness lane's name + width constants, read from the source under test.
+READY_NAME_CONST = "_READY_PROBE_WORKER"
+READY_WIDTH_CONST = "_READY_PROBE_WORKERS"
 #: name constant -> the production pool name. It is ALSO the daemon thread-name
 #: prefix (``_SingleSlotWorker`` suffixes a multi-worker pool's threads with
-#: ``-<i>``), so these are pinned in the AST test below and asserted against the
+#: ``-<i>``), so it is pinned in the AST test below and asserted against the
 #: threads the probes actually run on — a silent rename must not make the thread
 #: assertions vacuous.
-POOL_NAMES = {
-    "_LIVENESS_PROBE_WORKER": "selfhost-liveness-probe",
-    "_READY_PROBE_WORKER": "selfhost-ready-probe",
-}
-
+READY_POOL_NAME = "selfhost-ready-probe"
 #: width constant -> the FEWEST workers it may carry.
-#:
-#: Liveness 2: its probe is inner-bounded (``monitoring.PROBE_TIMEOUT``), so a
-#: worker always comes back; two absorbs an overlapping poll.
 #:
 #: Readiness 6: this pool must not be NARROWER than the shared default executor
 #: it replaced — ``min(32, cpu+4)`` = 6 on the 2-vCPU hosted box. Isolation is
@@ -90,16 +91,16 @@ POOL_NAMES = {
 #: healthy DB — the defect this change exists to remove, re-entered through
 #: readiness fan-in. Exercised by
 #: ``test_readiness_fan_in_does_not_produce_a_false_503``.
-POOL_MIN_WORKERS = {
-    "_LIVENESS_PROBE_WORKERS": 2,
-    "_READY_PROBE_WORKERS": 6,
-}
+READY_MIN_WORKERS = 6
 
-#: name constant -> its width constant (the two halves of one lane).
-LANE_WIDTH = {
-    "_LIVENESS_PROBE_WORKER": "_LIVENESS_PROBE_WORKERS",
-    "_READY_PROBE_WORKER": "_READY_PROBE_WORKERS",
+#: Names the LIVENESS handler must NOT reference: the coordinator makes every
+#: one of them wrong on the request path (#2988's in-memory bullet).
+_LIVENESS_FORBIDDEN_NAMES = {
+    "_submit_probe", "_probe_worker", "probe_db", "wrap_future",
+    "run_in_executor", "to_thread", "_get_proj",
 }
+_LIVENESS_FORBIDDEN_ATTRS = {"query", "submit", "run_in_executor", "to_thread",
+                             "wrap_future", "snapshot"}
 
 
 def _module_assign(name: str) -> ast.Assign:
@@ -185,29 +186,118 @@ def _names_in(node: ast.AST) -> set[str]:
 # ── structural pins ────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("name_const", sorted(POOL_NAMES))
-def test_probe_lane_is_named_and_sized(name_const):
+def test_ready_probe_lane_is_named_and_sized():
     """A per-call or default pool would reproduce the defect: per-call pools
     churn a thread per request (and cannot be bounded), and the default pool is
-    the shared resource under attack. Each lane must name a pool and pin its
-    width, and the name must be the exact string the thread assertions use."""
-    assert _module_literal(name_const) == POOL_NAMES[name_const], (
-        f"{name_const} is {_module_literal(name_const)!r}, expected "
-        f"{POOL_NAMES[name_const]!r} — the behavioural tests assert probes run on "
-        "that exact daemon-thread name, so a rename must not silently pass"
+    the shared resource under attack. The readiness lane must name a pool and
+    pin its width, and the name must be the exact string the thread assertions
+    use."""
+    assert _module_literal(READY_NAME_CONST) == READY_POOL_NAME, (
+        f"{READY_NAME_CONST} is {_module_literal(READY_NAME_CONST)!r}, expected "
+        f"{READY_POOL_NAME!r} — the behavioural tests assert probes run on that "
+        "exact daemon-thread name, so a rename must not silently pass"
     )
-    width_const = LANE_WIDTH[name_const]
-    width = _prod_workers(width_const)
-    assert width >= POOL_MIN_WORKERS[width_const], (
-        f"{width_const}={width} is below the required {POOL_MIN_WORKERS[width_const]} "
+    width = _prod_workers(READY_WIDTH_CONST)
+    assert width >= READY_MIN_WORKERS, (
+        f"{READY_WIDTH_CONST}={width} is below the required {READY_MIN_WORKERS} "
         "— a lane narrower than the shared default executor it replaced converts "
         "readiness fan-in into a queue-timeout false 503"
     )
 
 
+def test_liveness_lane_constants_are_gone():
+    """#2988: ``/health`` must hand off to NO pool. The ``#3287`` liveness lane
+    (``_LIVENESS_PROBE_WORKER`` / ``_LIVENESS_PROBE_WORKERS``) is therefore
+    dead and must be removed, not left as decoration — a retained pair would
+    read as an active lane and invites reusing it."""
+    tree = ast.parse(SELFHOST_SRC)
+    assigned = {
+        t.id
+        for node in tree.body if isinstance(node, ast.Assign)
+        for t in node.targets if isinstance(t, ast.Name)
+    }
+    leftovers = {n for n in assigned if "LIVENESS_PROBE" in n.upper()}
+    assert not leftovers, (
+        f"selfhost.py still defines {sorted(leftovers)} — the liveness lane was "
+        "replaced by an in-memory coordinator, so a pool constant here is dead "
+        "code that a later refactor will mistake for the live mechanism"
+    )
+
+
+def test_health_reads_the_coordinator_and_does_no_io():
+    """THE structural core of #2988's first bullet.
+
+    The response is identical whether the handler awaited a probe on a private
+    pool or read a snapshot, so only the AST can tell them apart. Assert the
+    in-memory read AND the absence of every I/O seam the old shapes used.
+    """
+    node = _handler("health")
+    snapshots = list(_calls(_walk_own_body(node), attr="snapshot"))
+    assert snapshots, (
+        "selfhost health does not read _HEALTH_PROBE.snapshot() — it must answer "
+        "from in-memory state, not from a probe (#2988)"
+    )
+    receivers = {
+        call.func.value.id
+        for call in snapshots
+        if isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+    }
+    assert receivers == {"_HEALTH_PROBE"}, (
+        f"selfhost health reads {sorted(receivers) or 'nothing'} — the in-memory "
+        "verdict must come from the shared HealthProbe coordinator"
+    )
+    forbidden = _names_in(node) & _LIVENESS_FORBIDDEN_NAMES
+    assert not forbidden, (
+        f"selfhost health references {sorted(forbidden)} — every one of those is "
+        "request-path I/O or a pool hand-off, which is exactly what the in-memory "
+        "read removes (#2988)"
+    )
+    offenders = [
+        n.lineno
+        for n in _walk_own_body(node)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr in _LIVENESS_FORBIDDEN_ATTRS - {"snapshot"}
+    ]
+    assert not offenders, (
+        f"selfhost health calls an I/O seam directly at line(s) {offenders} "
+        "— synchronous work on the request path (#2988)"
+    )
+
+
+def test_lifespan_arms_and_cancels_the_liveness_refresher():
+    """The in-memory verdict is only honest while SOMEBODY refreshes it (#1384):
+    the lifespan must start ``_health_probe_loop`` and cancel it on shutdown (a
+    leaked task survives TestClient reuse and writes into the next app's
+    coordinator)."""
+    node = _handler("_lifespan")
+    body = [n for n in ast.walk(node) if isinstance(n, ast.Call)]
+    created = [
+        call for call in body
+        if isinstance(call.func, ast.Attribute)
+        and call.func.attr == "create_task"
+    ]
+    assert any(
+        (isinstance(arg, ast.Name) and arg.id == "_health_probe_loop")
+        or (isinstance(arg, ast.Call)
+            and isinstance(arg.func, ast.Name)
+            and arg.func.id == "_health_probe_loop")
+        for call in created for arg in call.args
+    ), "selfhost _lifespan never creates the _health_probe_loop task"
+    assert any(
+        isinstance(call.func, ast.Attribute) and call.func.attr == "cancel"
+        for call in body
+    ), "selfhost _lifespan never cancels the refresher on shutdown"
+    assert list(_calls(_walk_own_body(node), attr="reset")), (
+        "selfhost _lifespan does not reset the coordinator, so a wedged probe "
+        "from a previous app instance can survive into this one (#2850)"
+    )
+
+
 def test_probe_worker_resolves_to_the_shared_daemon_primitive():
-    """#3286: the lanes are ``monitoring.daemon_worker`` pools, and the reason
-    is load-bearing, so pin the two properties the choice buys.
+    """#3286: the readiness lane is a ``monitoring.daemon_worker`` pool, and the
+    reason is load-bearing, so pin the two properties the choice buys.
 
     A ``ThreadPoolExecutor`` would satisfy every other pin here while
     (a) joining its NON-daemon workers at interpreter exit — a probe parked in a
@@ -218,40 +308,31 @@ def test_probe_worker_resolves_to_the_shared_daemon_primitive():
     import tortoise.monitoring as mon
     from tortoise import selfhost as sh
 
-    lanes = {
-        name_const: sh._probe_worker(_module_literal(name_const), _prod_workers(LANE_WIDTH[name_const]))
-        for name_const in POOL_NAMES
-    }
-    # distinct RESOURCES, not merely distinct names (the names differ by
-    # construction — see test_probe_lanes_are_distinct_pools).
-    assert lanes["_LIVENESS_PROBE_WORKER"] is not lanes["_READY_PROBE_WORKER"], (
-        "the two lanes resolve to the SAME pool — an unbounded readiness probe "
-        "would then starve liveness, the defect this change removes"
+    worker = sh._probe_worker(_module_literal(READY_NAME_CONST),
+                              _prod_workers(READY_WIDTH_CONST))
+    assert isinstance(worker, mon._SingleSlotWorker), (
+        f"{READY_NAME_CONST} resolved to {type(worker).__name__}, not the "
+        "_SingleSlotWorker daemon primitive — a ThreadPoolExecutor here "
+        "reintroduces the non-daemon interpreter-exit join (#3286)"
     )
-    for name_const, worker in lanes.items():
-        assert isinstance(worker, mon._SingleSlotWorker), (
-            f"{name_const} resolved to {type(worker).__name__}, not the "
-            "_SingleSlotWorker daemon primitive — a ThreadPoolExecutor here "
-            "reintroduces the non-daemon interpreter-exit join (#3286)"
-        )
-        # process-wide: the registry is keyed by name, so a second resolution
-        # must return the SAME pool rather than leaking a new one per request.
-        assert sh._probe_worker(_module_literal(name_const), 1) is worker, (
-            f"{name_const} is not process-wide — resolving it twice built a "
-            "second pool, so its width and backlog would not be the pinned ones"
-        )
-        assert worker.workers >= POOL_MIN_WORKERS[LANE_WIDTH[name_const]], (
-            f"{name_const} has {worker.workers} worker(s) — see POOL_MIN_WORKERS"
-        )
-        assert worker._threads and all(t.daemon for t in worker._threads), (
-            f"{name_const} has non-daemon worker(s) — they are JOINED at "
-            "interpreter exit, so a parked probe blocks shutdown (#3286)"
-        )
-        assert worker._max_backlog == mon._SingleSlotWorker.MAX_BACKLOG, (
-            f"{name_const}'s backlog is {worker._max_backlog!r}, not the primitive's "
-            f"bounded {mon._SingleSlotWorker.MAX_BACKLOG} — an unbounded queue is "
-            "the defect, not its fix"
-        )
+    # process-wide: the registry is keyed by name, so a second resolution must
+    # return the SAME pool rather than leaking a new one per request.
+    assert sh._probe_worker(_module_literal(READY_NAME_CONST), 1) is worker, (
+        f"{READY_NAME_CONST} is not process-wide — resolving it twice built a "
+        "second pool, so its width and backlog would not be the pinned ones"
+    )
+    assert worker.workers >= READY_MIN_WORKERS, (
+        f"{READY_NAME_CONST} has {worker.workers} worker(s) — see READY_MIN_WORKERS"
+    )
+    assert worker._threads and all(t.daemon for t in worker._threads), (
+        f"{READY_NAME_CONST} has non-daemon worker(s) — they are JOINED at "
+        "interpreter exit, so a parked probe blocks shutdown (#3286)"
+    )
+    assert worker._max_backlog == mon._SingleSlotWorker.MAX_BACKLOG, (
+        f"{READY_NAME_CONST}'s backlog is {worker._max_backlog!r}, not the primitive's "
+        f"bounded {mon._SingleSlotWorker.MAX_BACKLOG} — an unbounded queue is "
+        "the defect, not its fix"
+    )
 
 
 def test_probe_worker_starts_no_threads_at_import():
@@ -275,49 +356,32 @@ def test_probe_worker_starts_no_threads_at_import():
     assert "_probe_worker(" in SELFHOST_SRC, "the lazy resolver disappeared"
 
 
-def test_probe_lanes_are_distinct_pools():
-    """The lane split is load-bearing, not tidiness.
-
-    ``/health/ready``'s probe calls ``sdk._get_proj()`` DIRECTLY, so it is
-    bounded only by the FalkorDB client's socket timeouts (5 s connect /
-    10 s read) — NOT by ``monitoring.PROBE_TIMEOUT``. Enough concurrent
-    readiness probes therefore park every worker of the readiness pool. If
-    liveness shared that pool, parking readiness would hang ``/health`` — the
-    same starvation defect, one level down. (Reproduced as a hang with a shared
-    pool of 2 in ``test_liveness_answers_while_readiness_workers_are_parked``;
-    the hosted twin reaches the same conclusion from the other direction, see
-    ``test_health_ready_nonblocking.py``'s outer>inner bound pin.)
-    """
-    names = {name_const: _module_literal(name_const) for name_const in POOL_NAMES}
-    assert len(set(names.values())) == len(names), (
-        f"the two lanes share a pool NAME ({names}) — a single named pool cannot "
-        "be split, and the pin below asserts distinct names on that basis"
+def test_ready_handler_owns_the_readiness_lane_only():
+    """The readiness handler must dispatch exactly one probe, through ITS lane's
+    constants — never hardcoded, never the (now removed) liveness lane's."""
+    node = _handler("health_ready")
+    submits = list(_calls(_walk_own_body(node), func_name="_submit_probe"))
+    assert len(submits) == 1, "selfhost health_ready must dispatch exactly one probe"
+    resolved = {
+        call.args[0].id
+        for call in ast.walk(node)
+        if isinstance(call, ast.Call)
+        and getattr(call.func, "id", None) == "_probe_worker"
+        and call.args
+        and isinstance(call.args[0], ast.Name)
+    }
+    assert resolved == {READY_NAME_CONST}, (
+        f"selfhost health_ready resolves {sorted(resolved) if resolved else 'nothing'}, "
+        f"expected {{{READY_NAME_CONST!r}}} — each handler must own its lane"
     )
-    for handler, (name_const, _width_const) in LANES.items():
-        node = _handler(handler)
-        submits = list(_calls(_walk_own_body(node), func_name="_submit_probe"))
-        assert len(submits) == 1, f"selfhost {handler} must dispatch exactly one probe"
-        # The pool must be resolved from THIS lane's constants — never hardcoded,
-        # never the other lane's.
-        resolved = {
-            call.args[0].id
-            for call in ast.walk(node)
-            if isinstance(call, ast.Call)
-            and getattr(call.func, "id", None) == "_probe_worker"
-            and call.args
-            and isinstance(call.args[0], ast.Name)
-        }
-        assert resolved == {name_const}, (
-            f"selfhost {handler} resolves {sorted(resolved) if resolved else 'nothing'}, "
-            f"expected {{{name_const!r}}} — each handler must own its lane"
-        )
-        other = {n for n in POOL_NAMES if n != name_const} | {
-            w for n, w in LANE_WIDTH.items() if n != name_const
-        }
-        assert not (other & _names_in(node)), (
-            f"selfhost {handler} references {sorted(other & _names_in(node))} — the two "
-            "handlers must not share a pool"
-        )
+    others = {
+        n for n in _names_in(node)
+        if "LIVENESS_PROBE" in n.upper()
+    }
+    assert not others, (
+        f"selfhost health_ready references {sorted(others)} — the liveness lane is "
+        "gone (#2988); readiness must resolve its own pool only"
+    )
 
 
 def test_submit_probe_targets_the_given_pool_only():
@@ -365,11 +429,10 @@ def test_submit_probe_targets_the_given_pool_only():
     )
 
 
-@pytest.mark.parametrize("name", sorted(LANES))
-def test_health_handlers_do_not_touch_db_code_on_the_loop(name):
-    """Both endpoints (not just readiness) — /health is the 60 s boot-wait in
-    publish-selfhost.yml and hung indefinitely when its probe queued."""
-    node = _handler(name)
+def test_ready_handler_does_not_touch_db_code_on_the_loop():
+    """/health/ready is the 60 s publish gate's hard check; its probe must stay
+    off the loop and out of the request-path body."""
+    node = _handler("health_ready")
     offenders = [
         n.lineno
         for n in _walk_own_body(node)
@@ -378,11 +441,11 @@ def test_health_handlers_do_not_touch_db_code_on_the_loop(name):
         and n.func.attr in {"_get_proj", "query"}
     ]
     assert not offenders, (
-        f"selfhost {name} touches DB/projection code directly at line(s) "
+        f"selfhost health_ready touches DB/projection code directly at line(s) "
         f"{offenders} — synchronous I/O on the event loop (#2988)"
     )
     assert not list(_calls(ast.walk(node), attr="to_thread")), (
-        f"selfhost {name} uses asyncio.to_thread — shared default executor (#3035)"
+        "selfhost health_ready uses asyncio.to_thread — shared default executor (#3035)"
     )
 
 
@@ -402,6 +465,45 @@ def test_ready_handler_keeps_its_bound_and_constant():
         "the bound must be the module constant, so it can be reasoned about in one place"
     )
     assert "_READY_PROBE_TIMEOUT_S" in SELFHOST_SRC
+
+
+def test_liveness_probe_carries_the_cold_start_allowance():
+    """#3243's wiring: the refresher's probe must pass the #3143/#3217 allowance
+    to ``monitoring.probe_db``. Without it the shared 1.5 s budget is spent in
+    the projection cold start and a reachable large graph reads degraded."""
+    node = _func("_probe_db")
+    calls = list(_calls(ast.walk(node), func_name="probe_db"))
+    assert calls, "selfhost _probe_db never calls monitoring.probe_db"
+    allowances = [kw for call in calls for kw in call.keywords if kw.arg == "setup_timeout"]
+    assert allowances, (
+        "selfhost _probe_db calls probe_db WITHOUT setup_timeout — the liveness "
+        "verdict then shares the 1.5s budget across both phases and false-degrades "
+        "a reachable cold graph (#3243)"
+    )
+    for kw in allowances:
+        assert (
+            isinstance(kw.value, ast.Call)
+            and getattr(kw.value.func, "id", None) == "probe_setup_timeout"
+        ), (
+            f"the allowance at line {kw.value.lineno} is not the resolved "
+            "monitoring.probe_setup_timeout() — a literal here would ignore "
+            "TORTOISE_PROBE_SETUP_TIMEOUT (#3143)"
+        )
+
+
+def test_liveness_coordinator_bound_sits_above_its_probe_total():
+    """Layered-timeout discipline: the coordinator's ``timeout`` must exceed the
+    explicit-allowance shape's real total (``setup_timeout + PROBE_TIMEOUT``),
+    or the refresher returns before the verdict it is waiting for and strands a
+    worker on every cold start."""
+    import tortoise.monitoring as mon
+    from tortoise import selfhost as sh
+
+    total = mon.probe_setup_timeout() + mon.PROBE_TIMEOUT
+    assert sh._HEALTH_PROBE._timeout > total, (
+        f"_HEALTH_PROBE timeout {sh._HEALTH_PROBE._timeout}s is not above the "
+        f"allowance shape's total {total}s"
+    )
 
 
 # ── behavioural harness ────────────────────────────────────────────────────
@@ -425,14 +527,18 @@ class _StubSDK:
         return None
 
 
+def _ok_probe(sdk=None, setup_timeout=None):
+    return {"ok": True, "latency_ms": 0.1, "error": None}
+
+
 @pytest.fixture
 def selfhost(monkeypatch, tmp_path):
     """The selfhost module with a stubbed SDK/probe.
 
-    The pools are NOT replaced: the probes run on the REAL process-wide
-    ``monitoring.daemon_worker`` pools production resolves, so the thread-name
-    and width assertions validate production's resource rather than a
-    fixture-local stand-in. (Replacing them would let a mis-named or too-narrow
+    The readiness pool is NOT replaced: the probes run on the REAL
+    process-wide ``monitoring.daemon_worker`` pool production resolves, so the
+    thread-name and width assertions validate production's resource rather than
+    a fixture-local stand-in. (Replacing it would let a mis-named or too-narrow
     production pool pass — the failure mode round-1 review found in this suite.)
     The workers are daemons parked on a queue, so they cost the process nothing
     at exit and need no teardown.
@@ -443,6 +549,7 @@ def selfhost(monkeypatch, tmp_path):
     monkeypatch.setenv("TORTOISE_DB_URI", "")
     monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "selfhost.db"))
     monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+    monkeypatch.delenv("TORTOISE_PROBE_SETUP_TIMEOUT", raising=False)
 
     import tortoise.monitoring as mon
     import tortoise.sdk as sdk_mod
@@ -451,9 +558,7 @@ def selfhost(monkeypatch, tmp_path):
     importlib.reload(sh)
 
     monkeypatch.setattr(sdk_mod, "TortoiseSDK", _StubSDK)
-    monkeypatch.setattr(
-        mon, "probe_db", lambda sdk=None: {"ok": True, "latency_ms": 0.1, "error": None}
-    )
+    monkeypatch.setattr(mon, "probe_db", _ok_probe)
     yield sh
 
 
@@ -461,9 +566,9 @@ class _Saturated:
     """Saturate the event loop's DEFAULT executor to its last worker.
 
     ``asyncio.to_thread``/``run_in_executor(None, ...)`` both submit here. A
-    pre-fix probe queues behind ``gate`` and the request hangs; a probe on its
-    own pool is unaffected. Deterministic by construction — no timing
-    assumption about how long the pool stays busy.
+    pre-fix probe queues behind ``gate`` and the request hangs; an in-memory
+    read is unaffected. Deterministic by construction — no timing assumption
+    about how long the pool stays busy.
     """
 
     def __init__(self, workers: int = 1):
@@ -496,54 +601,305 @@ def _client(selfhost_module):
     )
 
 
+def _seed(selfhost, monkeypatch, *, ok=True, error=None):
+    """Resolve the coordinator once, the way the background refresher does, so
+    the request-path read has a real in-memory verdict to serve."""
+    import tortoise.monitoring as mon
+
+    if ok:
+        def _probe(sdk=None, setup_timeout=None):
+            return {"ok": True, "latency_ms": 0.1, "error": None}
+    else:
+        def _probe(sdk=None, setup_timeout=None):
+            raise ConnectionError(error or "NXDOMAIN")
+
+    monkeypatch.setattr(mon, "probe_db", _probe)
+    selfhost._HEALTH_PROBE.reset()
+    return selfhost._HEALTH_PROBE.wait(10.0)
+
+
 # ── behavioural proof ──────────────────────────────────────────────────────
 
 
-def test_health_answers_on_its_own_pool_while_the_default_pool_is_saturated(
+def test_health_answers_instantly_from_memory_with_a_saturated_default_executor(
     selfhost, monkeypatch
 ):
-    """The discriminator for /health.
+    """THE acceptance test for #2988's first bullet (mirrors the hosted
+    ``TestLivenessDecouple::test_health_returns_instantly_with_a_saturated_shared_executor``).
 
-    A fast answer alone proves nothing: an endpoint that short-circuits its
-    probe would also be fast. So this asserts BOTH that the probe RAN and which
-    THREAD it ran on — the liveness pool — not merely that the call returned.
+    A fast answer alone proves nothing — an endpoint that skips its probe would
+    also be fast, and so would one that merely owns a private pool. So this
+    asserts BOTH: the answer stays under the 500 ms acceptance bound AND the
+    probe count does not move, i.e. the read really is in-memory.
     """
     import tortoise.monitoring as mon
 
     seen: list[str] = []
 
-    def _probe(sdk=None):
+    def _probe(sdk=None, setup_timeout=None):
         seen.append(threading.current_thread().name)
         return {"ok": True, "latency_ms": 0.1, "error": None}
 
     monkeypatch.setattr(mon, "probe_db", _probe)
+    # Seed the in-memory verdict the way the background refresher does.
+    selfhost._HEALTH_PROBE.reset()
+    seeded = selfhost._HEALTH_PROBE.wait(10.0)
+    assert seeded["ok"] is True, seeded
+    probes_after_seeding = len(seen)
 
     async def scenario():
         async with _Saturated(), _client(selfhost) as ac:
-            # Warm the process first: the FIRST request in a process pays a
-            # one-time startup cost (measured ~1.6 s here, independent of this
-            # change), which would otherwise be charged to the endpoint and make
-            # a correct implementation look starved.
-            await ac.get("/health")
+            await ac.get("/health")  # warm-up: pay routing/middleware init unmeasured
+            warm = len(seen)
             started = time.perf_counter()
-            r = await asyncio.wait_for(ac.get("/health"), timeout=8.0)
-            return r, time.perf_counter() - started
+            r = await asyncio.wait_for(ac.get("/health"), timeout=3.0)
+            return r, time.perf_counter() - started, warm, len(seen)
 
-    r, elapsed = asyncio.run(scenario())
+    r, elapsed, warm, after = asyncio.run(scenario())
 
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "ok"
-    assert len(seen) == 2, (
-        "the /health DB probe did not run once per request — a short-circuiting "
-        "liveness handler must not be able to pass this test"
+    assert elapsed < 0.5, (
+        f"/health took {elapsed:.3f}s with the default executor saturated — the "
+        "handler is still on the request path or still handing off to a worker, "
+        "not reading in-memory state (#2988)"
     )
-    assert all(t.startswith("selfhost-liveness-probe") for t in seen), (
-        f"probes ran on threads {seen}, not the dedicated liveness lane — "
-        "they are still riding a shared executor (#3035)"
+    assert warm == probes_after_seeding and after == probes_after_seeding, (
+        f"the request path ran the DB probe ({probes_after_seeding} -> {warm} -> "
+        f"{after} calls) — an in-memory read must not probe at all (#2988)"
     )
-    assert elapsed < 8.0, (
-        f"/health took {elapsed:.2f}s while the default executor was saturated — "
-        "the probe is queueing behind unrelated work (#3287)"
+
+
+def test_refresher_keeps_the_verdict_fresh_without_a_request(selfhost, monkeypatch):
+    """The in-memory verdict is only honest while the refresher runs — if it
+    dies or stops, the DB verdict freezes (#1384). Run it for a couple of short
+    cycles and prove it lands a fresh verdict with no request at all."""
+    import tortoise.monitoring as mon
+
+    calls = {"n": 0}
+
+    def _probe(sdk=None, setup_timeout=None):
+        calls["n"] += 1
+        return {"ok": True, "latency_ms": 0.5, "error": None}
+
+    monkeypatch.setattr(mon, "probe_db", _probe)
+    monkeypatch.setattr(selfhost, "health_probe_interval", lambda: 0.05)
+    selfhost._HEALTH_PROBE.reset()
+
+    async def _run():
+        task = asyncio.get_running_loop().create_task(selfhost._health_probe_loop())
+        await asyncio.sleep(0.4)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_run())
+    assert calls["n"] >= 1, "the refresher never probed"
+    view = selfhost._HEALTH_PROBE.snapshot()
+    assert view["ok"] is True, view
+
+
+def test_health_reflects_a_dead_db_from_memory(selfhost, monkeypatch):
+    """#1384's contract, unchanged by the in-memory read: a dead DB degrades
+    /health (200 + db.ok=false) and never 5xxes the process. The verdict comes
+    from the coordinator's snapshot, not from a per-request probe."""
+    seed = _seed(selfhost, monkeypatch, ok=False, error="NXDOMAIN")
+    assert seed["ok"] is False, seed
+
+    async def scenario():
+        async with _client(selfhost) as ac:
+            return await ac.get("/health")
+
+    r = asyncio.run(scenario())
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "degraded"
+    assert body["db"]["ok"] is False
+    assert "NXDOMAIN" in body["db"]["error"]
+
+
+def test_health_reports_an_honest_not_yet_state_before_the_first_probe(selfhost, monkeypatch):
+    """A fresh process has no verdict yet. It must report degraded-with-a-reason
+    (not a 500, and not a fabricated "ok") until the refresher lands one.
+
+    The probe is held in flight deliberately: with an instant stub the probe can
+    complete before the read path takes its view, which would make this assertion
+    a coin flip rather than a pin.
+    """
+    import tortoise.monitoring as mon
+
+    release = threading.Event()
+
+    def _blocking(sdk=None, setup_timeout=None):
+        release.wait(10)
+        return {"ok": True, "latency_ms": 0.1, "error": None}
+
+    monkeypatch.setattr(mon, "probe_db", _blocking)
+    selfhost._HEALTH_PROBE.reset()
+    try:
+        async def scenario():
+            async with _client(selfhost) as ac:
+                return await ac.get("/health")
+
+        r = asyncio.run(scenario())
+    finally:
+        release.set()
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "degraded"
+    assert body["db"]["ok"] is False
+    assert "in flight" in body["db"]["error"] or "not produced" in body["db"]["error"], (
+        f"the not-yet verdict must carry an honest reason, got {body['db']}"
+    )
+
+
+def test_liveness_probe_passes_the_resolved_cold_start_allowance(selfhost, monkeypatch):
+    """#3243's behavioural half: the probe the coordinator runs carries the
+    #3143/#3217 allowance, resolved at CALL time (so ``.env``/env changes are
+    honoured) rather than the shared 1.5 s budget."""
+    import tortoise.monitoring as mon
+
+    seen: dict = {}
+
+    def _probe(sdk=None, setup_timeout=None):
+        seen["setup_timeout"] = setup_timeout
+        return {"ok": True, "latency_ms": 0.1, "error": None}
+
+    monkeypatch.setattr(mon, "probe_db", _probe)
+    monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", "42")
+    selfhost._HEALTH_PROBE.reset()
+    view = selfhost._HEALTH_PROBE.wait(10.0)
+
+    assert view["ok"] is True, view
+    assert seen["setup_timeout"] == 42.0, (
+        f"the liveness probe passed setup_timeout={seen.get('setup_timeout')!r}, not "
+        "the resolved TORTOISE_PROBE_SETUP_TIMEOUT — a reachable cold graph would "
+        "be false-degraded (#3243)"
+    )
+
+
+def test_cold_start_allowance_rescues_a_reachable_large_graph(monkeypatch):
+    """THE #3243 regression, at the mechanism level (no selfhost module needed).
+
+    A reachable graph whose projection cold-start exceeds ``PROBE_TIMEOUT``: the
+    shared-budget shape — what the pre-fix liveness path and the raw
+    ``/health`` contract used — reports ``ok=False`` (the reported lie), while
+    the explicit cold-start allowance reports it reachable. Both phases stay
+    bounded, so the allowance is a ceiling, not an unbounded wait.
+    """
+    import tortoise.monitoring as mon
+
+    monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", "20")
+    setup_s = mon.PROBE_TIMEOUT + 0.4  # reachable, but slower than the shared budget
+
+    class _OkGraph:
+        def query(self, _q):
+            return [[1]]
+
+    class _OkProj:
+        def __init__(self):
+            self.g = _OkGraph()
+
+    class _ColdSDK:
+        """Reachable graph whose *cold start* is slow (the O(graph) index build)."""
+
+        def _get_proj(self):
+            time.sleep(setup_s)
+            return _OkProj()
+
+    shared = mon.probe_db(_ColdSDK(), setup_timeout=None)
+    assert shared["ok"] is False, (
+        f"the shared-budget shape unexpectedly passed ({shared}) — the test's "
+        "setup delay no longer exceeds PROBE_TIMEOUT, so it cannot distinguish "
+        "the bug from the fix"
+    )
+
+    allowed = mon.probe_db(_ColdSDK(), setup_timeout=mon.probe_setup_timeout())
+    assert allowed["ok"] is True, (
+        f"a reachable graph with a {setup_s:.1f}s cold start was reported "
+        f"unreachable under the cold-start allowance (#3243): {allowed}"
+    )
+
+
+def test_health_reports_ok_for_a_reachable_graph_whose_cold_start_exceeds_probe_timeout(
+        selfhost, monkeypatch):
+    """#3243 END-TO-END through the real HTTP surface and the real probe.
+
+    A REACHABLE graph whose projection cold-start overruns the shared
+    ``PROBE_TIMEOUT`` (1.5s) must read ``status: ok`` / ``db.ok: true`` from
+    ``/health``. This drives the genuine ``monitoring.probe_db`` budget
+    arithmetic through the coordinator, so it fails if the refresher stops
+    passing the cold-start allowance (the pre-fix verdict) — the wiring-level
+    test above only records the ``setup_timeout`` value handed in, and cannot
+    see the resulting verdict.
+    """
+    import tortoise.monitoring as mon
+
+    cold_start = mon.PROBE_TIMEOUT + 0.5  # reachable, but slower than the shared budget
+    monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", str(cold_start + 5.0))
+    # Restore the REAL probe so the cold-start budget decision is exercised.
+    monkeypatch.setattr(mon, "probe_db", _REAL_PROBE_DB)
+
+    class _Graph:
+        def query(self, _q):
+            return [[1]]
+
+    class _Proj:
+        def __init__(self):
+            self.g = _Graph()
+
+    def _slow_cold_start(self):
+        time.sleep(cold_start)
+        return _Proj()
+
+    monkeypatch.setattr(_StubSDK, "_get_proj", _slow_cold_start)
+
+    selfhost._HEALTH_PROBE.reset()
+    view = selfhost._HEALTH_PROBE.wait(30.0)
+    assert view["ok"] is True, (
+        f"the liveness coordinator reported a reachable, cold-starting graph as "
+        f"unreachable — db.ok=false / degraded is the #3243 lie: {view}"
+    )
+
+    async def scenario():
+        async with _client(selfhost) as ac:
+            return await ac.get("/health")
+
+    r = asyncio.run(scenario())
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "ok", body
+    assert body["db"]["ok"] is True, body["db"]
+
+
+def test_unreachable_graph_still_fails_fast_under_the_cold_start_allowance(monkeypatch):
+    """#3243's other half: the allowance is a CEILING, not a delay.
+
+    A genuinely unreachable graph (refused / NXDOMAIN) must still be reported
+    degraded inside the #1384 fast-degrade window even when the allowance is
+    set to 20s. Otherwise giving the cold-start phase its own allowance would
+    have traded the false degrade for a slow gate — the trade #3243's own
+    notes forbid.
+    """
+    import tortoise.monitoring as mon
+
+    monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", "20")
+
+    class _RefusedSDK:
+        def _get_proj(self):
+            raise ConnectionError("NXDOMAIN / connection refused")
+
+    started = time.monotonic()
+    result = mon.probe_db(_RefusedSDK(), setup_timeout=mon.probe_setup_timeout())
+    elapsed = time.monotonic() - started
+
+    assert result["ok"] is False, result
+    assert "refused" in (result["error"] or "") or "NXDOMAIN" in (result["error"] or ""), result
+    assert elapsed < mon.PROBE_TIMEOUT, (
+        f"an unreachable graph took {elapsed:.2f}s under a 20s cold-start "
+        f"allowance — the allowance DELAYED the #1384 fast degrade instead of "
+        "bounding a reachable cold start (#3243)"
     )
 
 
@@ -584,24 +940,17 @@ def test_submit_probe_propagates_contextvars(selfhost, monkeypatch):
     ``asyncio.to_thread`` did (that is why #2988's move off-loop did not break
     the SDK/projection layer), and a bare ``run_in_executor(pool, fn)`` does not
     (cpython#78195). Losing them is silent — the probe answers from the wrong
-    tenant/graph scope — so pin the property behaviourally: a ContextVar set in
-    the request's task must be visible inside the probe.
+    tenant/graph scope — so pin the property behaviourally on the readiness
+    lane (the remaining request-path probe; /health no longer dispatches at all).
     """
-    import tortoise.monitoring as mon
-
     probe_var = contextvars.ContextVar("probe-context-var", default="unset")
     seen: list[str] = []
-
-    def _probe(sdk=None):
-        seen.append(probe_var.get())
-        return {"ok": True, "latency_ms": 0.1, "error": None}
-
-    monkeypatch.setattr(mon, "probe_db", _probe)
+    monkeypatch.setattr(_StubSDK, "_get_proj", lambda self: seen.append(probe_var.get()))
 
     async def scenario():
         async with _client(selfhost) as ac:
             probe_var.set("caller-scope")
-            return await ac.get("/health")
+            return await ac.get("/health/ready")
 
     r = asyncio.run(scenario())
     assert r.status_code == 200, r.text
@@ -632,7 +981,7 @@ def test_readiness_fan_in_does_not_produce_a_false_503(selfhost, monkeypatch):
     held = 0.5
     bound = 1.2
     concurrent_requests = 6
-    width = _prod_workers("_READY_PROBE_WORKERS")
+    width = _prod_workers(READY_WIDTH_CONST)
     monkeypatch.setattr(selfhost, "_READY_PROBE_TIMEOUT_S", bound)
     monkeypatch.setattr(_StubSDK, "_get_proj", lambda self: time.sleep(held))
 
@@ -653,24 +1002,21 @@ def test_readiness_fan_in_does_not_produce_a_false_503(selfhost, monkeypatch):
     assert codes == [200] * concurrent_requests, (
         f"{codes.count(503)} of {concurrent_requests} concurrent /health/ready requests "
         f"returned 503 for a HEALTHY database (probe held {held}s, bound {bound}s, "
-        f"_READY_PROBE_WORKERS={width}) — the lane is too narrow: queued requests time "
+        f"{READY_WIDTH_CONST}={width}) — the lane is too narrow: queued requests time "
         "out before a worker ever runs their probe, and publish-selfhost.yml fails the "
         "release on that false 503"
     )
 
 
 def test_liveness_answers_while_readiness_workers_are_parked(selfhost, monkeypatch):
-    """The lane split's regression test (found in review of this change).
+    """/health must be structurally immune to a parked readiness worker.
 
     ``/health/ready``'s probe is ``sdk._get_proj()`` with NO internal bound, so
-    concurrent readiness probes park every worker of the readiness lane. A
-    SHARED pool would then hang ``/health`` — i.e. the unbounded probe would
-    starve the liveness probe, which is the original defect one level down.
-    With two lanes, liveness is structurally immune.
-
-    Both readiness workers are parked by construction (2 concurrent requests is
-    >= the liveness width, and the assertion below is about the readiness LANE
-    being unable to reach liveness at all).
+    concurrent readiness probes park every worker of the readiness lane. Under
+    the pre-#3287 single-pool shape that starved liveness; under #2988 liveness
+    does not touch a pool at all — it reads the coordinator's snapshot — so the
+    immunity is now by construction, and this test proves the observable part:
+    /health answers promptly while readiness is wedged.
     """
     release = threading.Event()
     monkeypatch.setattr(selfhost, "_READY_PROBE_TIMEOUT_S", 0.3)
@@ -696,8 +1042,7 @@ def test_liveness_answers_while_readiness_workers_are_parked(selfhost, monkeypat
         assert r.status_code == 503, r.text
     assert live.status_code == 200, (
         f"/health answered {live.status_code} while two readiness workers were "
-        "parked — the two endpoints share a pool, so an unbounded readiness "
-        "probe can starve liveness (#3287)"
+        "parked — an unbounded readiness probe can starve liveness (#3287)"
     )
     assert live.json()["status"] in {"ok", "degraded"}, live.text
     assert elapsed < 3.0, (
@@ -708,7 +1053,7 @@ def test_liveness_answers_while_readiness_workers_are_parked(selfhost, monkeypat
 
 def test_readiness_lane_actually_has_two_usable_workers(selfhost, monkeypatch):
     """At least two readiness workers must be usable concurrently (the lane is
-    wider — see ``POOL_MIN_WORKERS``). A single-slot lane would serialise the
+    wider — see ``READY_MIN_WORKERS``). A single-slot lane would serialise the
     deploy gate's probe behind any other readiness poll."""
     entered = threading.Event()
     release = threading.Event()
@@ -805,24 +1150,3 @@ def test_hung_db_still_fails_closed_within_the_bound(selfhost, monkeypatch):
         f"the endpoint waited {elapsed:.2f}s for a hung probe — the answer must arrive "
         "promptly, not after the 30 s hang"
     )
-
-
-def test_health_stays_200_degraded_when_the_db_is_down(selfhost, monkeypatch):
-    """#1384's contract, unchanged by the new dispatch: a dead DB degrades
-    /health (200 + db.ok=false) and never 5xxes the process."""
-    import tortoise.monitoring as mon
-
-    def _boom(sdk=None):
-        raise ConnectionError("NXDOMAIN")
-
-    monkeypatch.setattr(mon, "probe_db", _boom)
-
-    async def scenario():
-        async with _client(selfhost) as ac:
-            return await ac.get("/health")
-
-    r = asyncio.run(scenario())
-    assert r.status_code == 200, r.text
-    assert r.json()["status"] == "degraded"
-    assert r.json()["db"]["ok"] is False
-    assert "NXDOMAIN" in r.json()["db"]["error"]

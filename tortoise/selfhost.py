@@ -21,17 +21,23 @@ Environment:
 """
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import logging
 import os
 import sys
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 
 from tortoise.mcp_server import create_http_app
+
+# #2988/#3243: the shared liveness primitive and the shared refresh-period
+# resolver — the same ones the hosted /health uses, so the two surfaces cannot
+# drift on what "fresh" or "how often" means.
+from tortoise.monitoring import HealthProbe, health_probe_interval
 
 _logger = logging.getLogger(__name__)
 
@@ -58,9 +64,9 @@ TOOL_GROUP = os.environ.get("TORTOISE_TOOL_GROUP")
 # bounds; this constant is the self-host path's own independent backstop.
 _READY_PROBE_TIMEOUT_S = 6.0
 
-# ── #3035 / #3287 / #3286: each health probe gets its OWN DAEMON pool ─────────
+# ── #3035 / #3287 / #3286: the READINESS probe gets its OWN DAEMON pool ─────
 #
-# #2988 (PR #3009) moved the probes OFF the event loop. It did not give them a
+# #2988 (PR #3009) moved both probes OFF the event loop. It did not give them a
 # pool of their own: ``asyncio.to_thread`` submits to the loop's DEFAULT
 # ThreadPoolExecutor, whose queue is UNBOUNDED — a submission never fails, it
 # just waits. So the probe does not have to hang to be slow, it only has to
@@ -73,6 +79,12 @@ _READY_PROBE_TIMEOUT_S = 6.0
 # within 8s, and GET /health/ready returned a FALSE 503 after 6021ms with the
 # probe never having run. ``publish-selfhost.yml`` curls /health/ready on every
 # publish (a non-200 fails the publish) and polls /health for up to 60s.
+#
+# ⚠️ The historical ``selfhost-liveness-probe`` pool (#3287) is GONE, and its
+# removal is the point of the liveness coordinator below: #2988's first
+# acceptance bullet requires /health to answer from IN-MEMORY state, so the
+# liveness request no longer hands a probe to ANY pool. Only readiness still
+# does, and it still needs a private one — its probe really does park.
 #
 # The pool itself is ``monitoring.daemon_worker`` — the shared, reviewed
 # primitive (#3498's bounded multi-worker form) — not a second bespoke executor.
@@ -93,43 +105,28 @@ _READY_PROBE_TIMEOUT_S = 6.0
 #     without bound — this change's own complaint about the default executor
 #     ("a submission never fails, it just waits") applied to its replacement.
 #
-# TWO pools, not one — because the two probes are NOT bounded alike, and a
-# liveness probe that shares a pool with an unbounded probe is not a liveness
-# probe (this issue's own premise):
+# /health/ready -> ``_READY_PROBE_WORKER``. Its probe is ``sdk._get_proj()``
+# called DIRECTLY — the engine's real path, deliberately not ``probe_db`` — and
+# that has NO inner bound: it is bounded only by the FalkorDB client's own
+# socket timeouts (5s connect / 10s read on the host lane; the embedded lane's
+# read timeout is the operator-configurable one added for #3350). Concurrent
+# readiness probes can therefore park every worker of this pool until their
+# sockets give up. It is structurally impossible for that to take /health down
+# now: /health does not touch a pool at all (it reads the coordinator's
+# in-memory snapshot), so the separation the two-pool split used to buy is now
+# categorical. Exercised by
+# test_liveness_answers_while_readiness_workers_are_parked.
 #
-#   /health      -> ``_LIVENESS_PROBE_WORKER``. Its probe is ``probe_db``, which
-#                   is hard-bounded INTERNALLY: ``_probe_once`` runs both phases
-#                   on the shared named daemon probe worker
-#                   (``monitoring._probe_worker()``) under ``PROBE_TIMEOUT``
-#                   (1.5s, plus a single 0.1s transient retry). THIS pool's
-#                   worker therefore always comes back, so one would do; two
-#                   costs nothing and absorbs a concurrent poll.
-#
-#   /health/ready -> ``_READY_PROBE_WORKER``. Its probe is ``sdk._get_proj()``
-#                   called DIRECTLY — the engine's real path, deliberately not
-#                   ``probe_db`` — and that has NO inner bound: it is bounded
-#                   only by the FalkorDB client's own socket timeouts (5s
-#                   connect / 10s read on the host lane; the embedded lane's
-#                   read timeout is the operator-configurable one added for
-#                   #3350). Concurrent readiness probes can therefore park every
-#                   worker of this pool until their sockets give up. That must
-#                   not be able to take /health down with it — hence two pools
-#                   rather than one pool of N. A shared pool is reproduced as a
-#                   hang in
-#                   test_liveness_answers_while_readiness_workers_are_parked.
-#
-#                   Because its workers really do park, this pool must NOT be
-#                   NARROWER than the executor it replaced. The point of the
-#                   change is isolation from UNRELATED work, not smallness: a
-#                   2-worker pool narrows the cushion from the default
-#                   executor's ``min(32, cpu+4)`` (6 on the 2-vCPU hosted box),
-#                   and a 3rd concurrent readiness request would then queue,
-#                   spend its whole ``_READY_PROBE_TIMEOUT_S`` waiting, and
-#                   report a FALSE 503 for a healthy DB — the same symptom this
-#                   change exists to remove, reached through readiness fan-in
-#                   instead of through unrelated load. Width is pinned by
-#                   test_probe_pools_are_the_daemon_seam_with_distinct_names and
-#                   exercised by test_readiness_fan_in_does_not_produce_a_false_503.
+# Because its workers really do park, this pool must NOT be NARROWER than the
+# executor it replaced. The point of the change is isolation from UNRELATED
+# work, not smallness: a 2-worker pool narrows the cushion from the default
+# executor's ``min(32, cpu+4)`` (6 on the 2-vCPU hosted box), and a 3rd
+# concurrent readiness request would then queue, spend its whole
+# ``_READY_PROBE_TIMEOUT_S`` waiting, and report a FALSE 503 for a healthy DB —
+# the same symptom this change exists to remove, reached through readiness
+# fan-in instead of through unrelated load. Width is pinned by
+# test_probe_lane_is_named_and_sized and exercised by
+# test_readiness_fan_in_does_not_produce_a_false_503.
 #
 # Residual (pre-existing #2988, NOT introduced here): the client read timeout
 # (10s) exceeds ``_READY_PROBE_TIMEOUT_S`` (6.0s), so for a genuinely
@@ -147,11 +144,7 @@ _READY_PROBE_TIMEOUT_S = 6.0
 # (cpython#78195), and ``to_thread`` did — the SDK/projection layer reads them,
 # so ``_submit_probe`` copies the context in the CALLING thread and runs ``fn``
 # under it in the worker.
-_LIVENESS_PROBE_WORKER = "selfhost-liveness-probe"
 _READY_PROBE_WORKER = "selfhost-ready-probe"
-#: Liveness width: its pool worker always returns (``probe_db`` is inner-bounded),
-#: so this only needs to absorb an overlapping poll.
-_LIVENESS_PROBE_WORKERS = 2
 #: Readiness width: 8 >= the 6 workers the shared default executor provided on
 #: the smallest hosted box (``min(32, cpu+4)``, 2 vCPU). Isolation is the fix;
 #: narrowing the pool is not.
@@ -174,12 +167,133 @@ def _probe_worker(name: str, workers: int):
 def _submit_probe(pool, fn):
     """Submit a health probe to a DEDICATED daemon pool, propagating contextvars.
 
-    ``pool`` is always one of the two lanes above (resolved by ``_probe_worker``)
-    — never the loop's default executor (#3035), and never a pool shared between
-    the liveness and the readiness handler.
+    ``pool`` is always the readiness lane above (resolved by ``_probe_worker``)
+    — never the loop's default executor (#3035). The liveness lane does not use
+    this seam at all any more: ``/health`` reads the coordinator's in-memory
+    snapshot (see ``_HEALTH_PROBE`` below).
     """
     ctx = contextvars.copy_context()
     return pool.submit(lambda: ctx.run(fn))
+
+
+# ── #2988: /health is IN-MEMORY, kept fresh by a background refresher ────────
+#
+# #2988's first acceptance bullet: "/health returns from IN-MEMORY state in
+# <500 ms with the loop's default executor fully saturated."
+#
+# The pre-#2988 handler AWAITED a probe, so its ANSWER was on the request path.
+# #3287 gave the probe its own pool, which removed the STARVATION but left the
+# answer waiting on a worker. "In-memory" is strictly stronger: the read must
+# not depend on a worker AT ALL. That requires somebody else to own freshness —
+# ``monitoring.HealthProbe``, the same single-flight, hard-bounded,
+# daemon-threaded coordinator the hosted /health uses (#3062), refreshed by
+# ``_health_probe_loop``. This is #2988's own proposed fix, and #3286 recorded
+# the residual it closes.
+#
+# Why the read stays HONEST without a per-request probe (#1384): HealthProbe
+# serves the last completed verdict while it is younger than
+# ``PROBE_STALE_AFTER`` (30 s) and reports it stale — hence degraded — after
+# that. A stopped FalkorDB (NXDOMAIN/#1381) fails the probe at connect time, so
+# the next refresh records ok=false within one period; a wedged probe cannot pin
+# an "ok" report past the staleness window. What changed is WHERE the wait
+# lives (the refresher, not the check), not whether a dead DB is reported.
+#
+# ── #3243: the cold-start allowance lives on the REFRESHER, not the read ────
+#
+# #3243: ``PROBE_TIMEOUT`` (1.5 s) covers BOTH probe phases, and the FIRST
+# phase — the projection cold-start: connect + version probe + an O(graph)
+# ``_ensure_indexes()``, ~28 sequential round trips — scales with graph size.
+# A reachable large graph therefore timed out during SETUP and reported
+# ``db.ok=false`` / ``status=degraded`` on a liveness surface: a lie, and (as
+# the issue notes) not fixable by threading ``probe_setup_timeout()`` into the
+# request path, which would trade the false degrade for a slow liveness gate.
+#
+# Decoupling the read is what makes the CORRECT shape available: the refresher
+# passes the #3143/#3217 cold-start allowance
+# (``setup_timeout=probe_setup_timeout()``, default 20 s, accepted range
+# [1.5, 300], resolved at CALL time so ``.env``/env changes are honoured),
+# while ``/health`` itself does no I/O and therefore cannot be slowed by it.
+# Two properties are deliberately preserved:
+#
+#   * the QUERY phase still gets its own fresh ``PROBE_TIMEOUT`` — the
+#     allowance buys setup only, so a graph that cold-starts inside the
+#     allowance but cannot answer ``RETURN 1`` is still reported degraded;
+#   * a genuinely UNREACHABLE graph is not waited out — the allowance is a
+#     CEILING, not a delay: a refused/NXDOMAIN connect fails immediately and a
+#     black-holed socket fails on the client's own connect/read timeout. The
+#     1.5 s cap this replaces only ever bound the reachable-but-cold case this
+#     change exists to fix.
+
+
+def _probe_db() -> dict:
+    """Deep-check the selfhost graph, WITH the #3243 cold-start allowance.
+
+    Builds the SAME ``TortoiseSDK(namespace="selfhost")`` connection the MCP
+    tools resolve (so liveness reports the engine's real DB, not a divergent
+    default path — #2202/#2988) and runs the shared, never-raising
+    ``monitoring.probe_db``.
+
+    The allowance is resolved HERE, at call time, for the same reason
+    ``probe_setup_timeout`` is a function: ``mcp_server._load_dotenv()`` runs
+    after the monitoring module is imported, so an import-time read would
+    silently ignore ``TORTOISE_PROBE_SETUP_TIMEOUT`` set in the repo-root
+    ``.env``.
+    """
+    from tortoise.monitoring import probe_db, probe_setup_timeout  # lazy
+    from tortoise.sdk import TortoiseSDK  # lazy — liveness stays cheap
+
+    sdk = TortoiseSDK(namespace="selfhost")
+    return probe_db(sdk, setup_timeout=probe_setup_timeout())
+
+
+def _liveness_probe_hard_timeout() -> float:
+    """The liveness coordinator's outer bound for the ALLOWANCE probe shape.
+
+    ``_probe_db`` runs ``probe_db`` in its explicit-allowance shape, whose
+    statically-known total is ``probe_setup_timeout() + PROBE_TIMEOUT`` (the
+    #3143 shape). Keeping the coordinator's ``timeout`` ABOVE that total is the
+    same layered-timeout alignment the hosted coordinators follow
+    (``hosted_api.DB_PROBE_HARD_TIMEOUT``): a ``HealthProbe`` bound BELOW its
+    probe's total would return before the verdict it is waiting for and strand
+    its daemon worker on every cold start.
+
+    Resolved once at import, like the hosted bound, and for the same reason —
+    it sizes a refresh SCHEDULE, not a correctness property. The read path is
+    unaffected by it (``snapshot()`` never waits), so an operator who raises
+    ``TORTOISE_PROBE_SETUP_TIMEOUT`` after import cannot make /health slow; the
+    probe's own call-time allowance still governs the verdict.
+    """
+    from tortoise.monitoring import (  # lazy — liveness stays cheap
+        PROBE_DB_BOUND_MARGIN_S,
+        PROBE_TIMEOUT,
+        probe_setup_timeout,
+    )
+
+    return probe_setup_timeout() + PROBE_TIMEOUT + PROBE_DB_BOUND_MARGIN_S
+
+
+_HEALTH_PROBE = HealthProbe(
+    _probe_db,
+    timeout=_liveness_probe_hard_timeout(),
+    refresh_budget=health_probe_interval,
+)
+
+
+async def _health_probe_loop() -> None:
+    """Keep ``_HEALTH_PROBE`` warm, entirely off the request path (#2988).
+
+    Single-flight and hard-bounded (``HealthProbe.run`` returns within
+    ``_HEALTH_PROBE``'s timeout even against a black-holed DB), and it must
+    never die: a raise here would freeze the reported DB verdict forever.
+    """
+    while True:
+        try:
+            await _HEALTH_PROBE.run()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001, RUF100 — a refresher must not die
+            _logger.warning("selfhost health probe refresh failed: %s", exc)
+        await asyncio.sleep(health_probe_interval())
 
 
 def _auth_mode() -> str:
@@ -247,8 +361,27 @@ async def _lifespan(app: FastAPI):
     # Starlette Mount does NOT run the mounted sub-app's lifespan — compose
     # explicitly (hosted_api._lifespan pattern) so the
     # StreamableHTTPSessionManager initializes (T1.2 pin).
-    async with mcp_http_app.lifespan(mcp_http_app):
-        yield
+    #
+    # #2988: arm the liveness refresher here, so /health answers from a
+    # continuously refreshed in-memory verdict from the first millisecond.
+    # Each app instance starts from a CLEAN probe state — a probe worker wedged
+    # during a previous instance (TestClient reuse, in-process reload) must not
+    # survive into this one — and the task is CREATED (not awaited) before the
+    # MCP lifespan, so it cannot delay the bind (#2953's discipline; creating a
+    # task starts nothing).
+    _HEALTH_PROBE.reset()
+    refresher = asyncio.get_running_loop().create_task(_health_probe_loop())
+    try:
+        async with mcp_http_app.lifespan(mcp_http_app):
+            yield
+    finally:
+        # Cancel + await: a bare cancel() leaves the task pending and the loop
+        # prints "Task was destroyed but it is pending!" at teardown.
+        # Cancellation is delivered at the task's next await, so this is prompt
+        # even while a probe is in flight on its own daemon thread.
+        refresher.cancel()
+        with suppress(asyncio.CancelledError):
+            await refresher
 
 
 app = FastAPI(title="Tortoise Self-Host", version="0.1.0", lifespan=_lifespan)
@@ -284,37 +417,35 @@ app.add_middleware(
 
 @app.get("/health")
 async def health():
-    """Liveness — process up (+ deep DB probe, #1384).
+    """Liveness — process up, DB verdict read from IN-MEMORY state.
 
     Never gates on the DB (cold-start discipline): a stopped FalkorDB flips
     status to "degraded" with db.ok=false instead of killing the process or
     500ing — visible immediately, no graph-touching request needed (#1381).
-    Probes TortoiseSDK(namespace="selfhost") — the SAME connection the MCP
-    tools resolve (mirrors /health/ready).
 
-    #3287: the probe runs on its OWN pool, so unrelated ``to_thread`` work can
-    never starve it (a queued probe used to hang this endpoint indefinitely).
+    #2988: this handler performs NO I/O and takes NO thread hand-off. It reads
+    ONE in-memory value from ``_HEALTH_PROBE.snapshot()`` — the same
+    single-flight coordinator the hosted /health uses — and returns. Nothing on
+    the request path submits work to the loop's DEFAULT ThreadPoolExecutor (or
+    to any pool), so a saturated executor, a black-holed DB, or a cold-starting
+    large graph cannot delay this response by a microsecond. Freshness comes
+    from the background ``_health_probe_loop`` refresher.
+
+    #3243: that decoupling is what lets the REFRESHER, which is off the request
+    path, pass the projection cold-start allowance (``_probe_db``), so a
+    reachable large graph is no longer reported degraded for a slow cold start
+    while the gate stays fast.
+
+    The response shape is unchanged for deploy/dashboard consumers:
+    ``{"status", "service", "db"}``. It never 5xxes: a dead DB is "degraded".
     """
-    import asyncio  # noqa: I001
-    from tortoise.monitoring import probe_db  # lazy — liveness stays cheap
-
-    def _probe() -> dict:
-        from tortoise.sdk import TortoiseSDK
-
-        sdk = TortoiseSDK(namespace="selfhost")
-        return probe_db(sdk)
-
     try:
-        # OFF the event loop (#2988) and OFF the shared default executor
-        # (#3287): a hung probe must not stall the loop, and a busy loop must
-        # not starve the probe. Liveness has its OWN pool — see the module
-        # comment on why it must not share one with /health/ready.
-        db = await asyncio.wrap_future(_submit_probe(
-            _probe_worker(_LIVENESS_PROBE_WORKER, _LIVENESS_PROBE_WORKERS), _probe))
-    except Exception as exc:  # noqa: BLE001, RUF100
+        # Pure in-memory view (no await, no submit, no lock held across I/O).
+        db = _HEALTH_PROBE.snapshot()
+    except Exception as exc:  # noqa: BLE001, RUF100 — liveness must answer, always
         db = {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
     return JSONResponse(
-        {"status": "ok" if db["ok"] else "degraded",
+        {"status": "ok" if db.get("ok") else "degraded",
          "service": "tortoise-selfhost",
          "db": db}
     )
@@ -332,20 +463,19 @@ async def health_ready():
     # #2988 — THE PROBE MUST NOT RUN ON THE EVENT LOOP. Building the SDK and
     # touching the DB is synchronous I/O: run inline, one stalled socket froze
     # every route in this process for as long as the socket waited, and
-    # publish-selfhost.yml curls this endpoint on every publish. /health above
-    # already dispatches its probe off-loop for the same reason; this handler
-    # was missed. Off-loop AND bounded, so a black-holed DB is reported (503)
-    # rather than waited out.
+    # publish-selfhost.yml curls this endpoint on every publish. /health sidesteps
+    # this class of hazard by removing its request-path probe outright (#2988);
+    # this handler still probes and so must stay off-loop. Off-loop AND bounded,
+    # so a black-holed DB is reported (503) rather than waited out.
     #
     # #3287 — off-loop is not enough: ``to_thread`` still used the loop's
     # SHARED default executor, so unrelated work could queue the probe past
     # ``_READY_PROBE_TIMEOUT_S`` and turn a healthy DB into a FALSE 503 —
     # blocking the publish that curls this endpoint. The probe now runs on its
     # own pool (_READY_PROBE_WORKER); the bound stays, so a genuinely
-    # black-holed DB is still REPORTED rather than waited out. This pool is
-    # deliberately NOT the liveness pool — see the module comment.
-    import asyncio
-
+    # black-holed DB is still REPORTED rather than waited out. It is now the
+    # ONLY pool this module owns — /health reads the coordinator's in-memory
+    # snapshot (#2988) and hands off to nothing at all.
     def _probe() -> None:
         from tortoise.sdk import TortoiseSDK  # lazy — liveness stays cheap
 
