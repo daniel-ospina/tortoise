@@ -20,7 +20,6 @@ graphs are dropped in a best-effort cleanup.
 """
 from __future__ import annotations
 
-import contextlib
 import importlib.util
 import os
 import sys
@@ -75,9 +74,20 @@ def _drop_graphs() -> None:
         return
     try:
         db = sdk._get_proj().db
+        failed: list[tuple[str, Exception]] = []
         for name in _created:
-            with contextlib.suppress(Exception):  # absent graph is success
+            try:
                 db.select_graph(name).delete()
+            except Exception as e:
+                # An absent graph is success; anything else is a real failure
+                # that must be surfaced, not silently swallowed, or the
+                # run-unique scratch graphs leak forever.
+                if not sdk_mod.is_missing_graph_error(e):
+                    failed.append((name, e))
+        if failed:
+            print(
+                f"w7a-driver: {len(failed)}/{len(_created)} scratch graphs NOT "
+                f"dropped: {[n for n, _ in failed[:3]]}", file=sys.stderr)
     except Exception as e:
         print(f"w7a-driver: graph cleanup incomplete: {e}", file=sys.stderr)
     finally:
