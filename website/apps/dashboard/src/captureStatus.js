@@ -71,11 +71,15 @@ export function captureStatusLabelForHarness(state, harness) {
 // a DIFFERENT predicate from `captureClaimForHarness` (that one asks whether a
 // per-harness capability claim is allowed at all, hence its support gate):
 //   * a per-harness STATE key was observed (`active` / `waiting`) and the row
-//     renders a state word for it — only where capture is SUPPORTED, since an
-//     unsupported row renders the reason and no pill;
+//     renders a state word for it;
 //   * a per-harness FAILURE was recorded (`session_capture_last_error_<h>`),
-//     which renders on EVERY row — including `install-pending` / `off` rows
-//     (first capture failed ⇒ no receipt ⇒ no state word) and unsupported ones.
+//     which renders even on rows the state word never reaches — an
+//     `install-pending` / `off` row after a failed first capture has no receipt
+//     and no probe.
+// Both legs live under the SAME support gate as the render sites in main.jsx
+// (the pill AND the failure line), so the predicate cannot outlive the facts it
+// describes: an unsupported row renders the registry reason and nothing else,
+// and never acquires the disclosure.
 // Returns `HARNESS_ATTRIBUTION` in exactly those cases and null otherwise, so a
 // row that names no harness never acquires the disclosure.
 //
@@ -84,10 +88,9 @@ export function captureStatusLabelForHarness(state, harness) {
 // where a caveat would be announced as part of the failure and could collide
 // with server detail that itself ends in a parenthesis or a full stop.
 export function harnessAttributionForHarness(state, harness) {
-  if (HARNESS_CAPTURE_SUPPORT[harness]) {
-    const status = captureStatusForHarness(state, harness)
-    if (status === 'active' || status === 'waiting') return HARNESS_ATTRIBUTION
-  }
+  if (!HARNESS_CAPTURE_SUPPORT[harness]) return null
+  const status = captureStatusForHarness(state, harness)
+  if (status === 'active' || status === 'waiting') return HARNESS_ATTRIBUTION
   if (lastErrorForHarness(state, harness)) return HARNESS_ATTRIBUTION
   return null
 }
@@ -108,8 +111,8 @@ export function harnessAttributionForHarness(state, harness) {
 //               HARNESS is the caller's declaration (see
 //               `captureStatusForHarness`), so the sentence may claim the
 //               CAPTURE — which the server observed — and never the harness,
-//               which it did not. The rendered capture status carries the
-//               `HARNESS_ATTRIBUTION` for the same reason.
+//               which it did not. The row's `harnessAttributionForHarness`
+//               fragment carries the `HARNESS_ATTRIBUTION` for the same reason.
 //   'future'  — the install PROBE has been observed server-side, so capture is
 //               installed and has not fired yet (probe with no receipt). The
 //               screen states what WILL happen. The PROBE is what makes the
@@ -164,7 +167,9 @@ export function lastErrorForHarness(state, harness) {
 // `HARNESS_CAPTURE_LAST_ATTEMPT` (harnesses.js), so no copy is authored here.
 // The sentence carries NO attribution: it renders inside a `role="alert"` live
 // region (the failure must lead the announcement and stand alone) and the row's
-// `harnessAttributionForHarness` fragment already discloses the harness.
+// `harnessAttributionForHarness` fragment already discloses the harness. Like
+// the pill, this line renders only for a SUPPORTED harness (main.jsx), which is
+// the same gate `harnessAttributionForHarness` applies.
 // Returns null when there is no recorded error, so callers can use it directly
 // as the render guard.
 export function captureErrorForHarness(state, harness) {

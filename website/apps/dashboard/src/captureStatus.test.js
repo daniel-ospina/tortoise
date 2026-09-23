@@ -247,11 +247,14 @@ test('#3428: GIVEN capture capability, the tense follows the RECEIPT', () => {
 // `active` / `waiting` and the state WORDS stay plain; the disclosure is a
 // separate, renderable per-row ATTRIBUTION.
 //
-// This EXECUTES the rendered-path helpers main.jsx calls
-// (`harnessAttributionForHarness` beside the harness name, and
-// `captureErrorForHarness` for the failure line) rather than scanning source: a
-// source-text tripwire could stay green while the rendered row claimed a
-// server-observed harness.
+// This EXECUTES the helpers main.jsx renders from (`harnessAttributionForHarness`
+// beside the harness name, `captureErrorForHarness` for the failure line) rather
+// than scanning source. It pins each helper's DECISION; it cannot pin that
+// main.jsx calls them — deleting a render site would leave this file green —
+// which is the same residual the label table carries (see
+// `captureStatusLabelForHarness`). What the suite does cover for the render side
+// is the raw-table index, which is a CI `no-undef` error now that main.jsx no
+// longer imports it.
 //
 // NAMED MUTATIONS that reinstate the defect — each must RED this test:
 //   RECEIPT_LABEL_CLAIMS_SERVER_OBSERVATION
@@ -287,10 +290,10 @@ test('#3700: the per-harness attribution is disclosed on the row, not baked into
   assert.ok(!captureStatusLabelForHarness(st, 'pi').includes(HARNESS_ATTRIBUTION),
     'the attribution must not be baked into a state word')
 
-  // (3) the renderable ATTRIBUTION is returned for exactly the two states whose
-  //     key embeds a harness, and is null for every state with no per-harness
-  //     signal — so a no-signal row can never acquire a claim about a harness
-  //     the server has no signal for.
+  // (3) the renderable ATTRIBUTION is returned for the two states whose key
+  //     embeds a harness, and for any supported row with a recorded per-harness
+  //     FAILURE (3b); null for a supported row with neither, so a row that
+  //     names no harness never acquires the disclosure.
   assert.equal(HARNESS_ATTRIBUTION, 'harness reported by your agent')
   assert.equal(harnessAttributionForHarness(st, 'claude'), HARNESS_ATTRIBUTION,
     'receipt state names a harness')
@@ -299,34 +302,34 @@ test('#3700: the per-harness attribution is disclosed on the row, not baked into
   // a row with no per-harness signal at all renders no state word and no
   // failure, so there is nothing to disclose.
   assert.equal(harnessAttributionForHarness(st, 'cursor'), null,
-    'install-pending names no harness')
+    'install-pending with no failure names no harness')
   assert.equal(harnessAttributionForHarness({ session_recording: true }, 'claude'), null)
   assert.equal(harnessAttributionForHarness(null, 'claude'), null)
   assert.equal(harnessAttributionForHarness({ session_recording: false }, 'claude'), null)
 
-  // (3b) the FAILURE line renders on rows the STATE WORD never reaches — a
-  //      first capture that failed leaves an `install-pending` row with a
-  //      recorded per-harness error (codex/cursor can never reach `waiting`:
-  //      `install_probe_<h>` is registered for claude/pi only) — and on
-  //      unsupported rows, where the pill does not render at all. Those rows DO
-  //      name a harness, so they must disclose it: the earlier
+  // (3b) the FAILURE line renders on rows the STATE WORD never reaches — a first
+  //      capture that failed leaves an `install-pending` row with a recorded
+  //      per-harness error (codex/cursor can never reach `waiting`:
+  //      `install_probe_<h>` is registered for claude/pi only) — so those
+  //      SUPPORTED rows must disclose the harness too: the earlier
   //      "state ∈ {active, waiting}" predicate left this surface live.
   const failRow = { session_recording: true, session_capture_last_error_codex: 'Upgrade your plan.' }
   assert.equal(captureStatusForHarness(failRow, 'codex'), 'install-pending')
   assert.equal(harnessAttributionForHarness(failRow, 'codex'), HARNESS_ATTRIBUTION,
     'a recorded per-harness failure names a harness even with no receipt or probe')
   assert.equal(harnessAttributionForHarness(
-    { session_recording: false, session_capture_last_error_pi: 'x' }, 'pi'), HARNESS_ATTRIBUTION)
+    { session_recording: false, session_capture_last_error_pi: 'x' }, 'pi'), HARNESS_ATTRIBUTION,
+    'a stale failure on a supported row is still that row naming a harness')
+  // An UNSUPPORTED row renders the registry reason and NOTHING per-harness — no
+  // pill and no failure line (main.jsx) — so the predicate must apply the same
+  // support gate: neither a state key nor a recorded failure for an unsupported
+  // harness may produce a disclosure for a row that names no harness.
   assert.equal(HARNESS_CAPTURE_SUPPORT['claude-web'], false)
   assert.equal(harnessAttributionForHarness(
     { session_recording: true, 'session_capture_last_error_claude-web': 'x' }, 'claude-web'),
-  HARNESS_ATTRIBUTION, 'a recorded failure renders on an unsupported row too')
-  // ...but an unsupported row with NO failure renders only the reason, so the
-  // helper must not disclose a harness the UI never names — even when a
-  // per-harness state key exists for it.
+  null, 'an unsupported row renders no per-harness fact, so the predicate must not fire')
   assert.equal(harnessAttributionForHarness(
-    { session_recording: true, 'session_capture_receipt_claude-web': 't' }, 'claude-web'), null,
-    'an unsupported row renders no state word, so there is nothing to disclose')
+    { session_recording: true, 'session_capture_receipt_claude-web': 't' }, 'claude-web'), null)
 
   // (4) the sibling FAILURE sub-line reads the key the same `stored or claimed`
   //     resolution wrote, so it is the same defect class — but it renders inside

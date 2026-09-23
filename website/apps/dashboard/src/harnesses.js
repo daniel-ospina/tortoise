@@ -482,9 +482,11 @@ export const HARNESS_CAPTURE_REASON = {
 //
 // `install-pending` is the one non-`off` state that is NOT in this group: it is
 // the fall-through when NEITHER per-harness key is present (the dashboard's own
-// no-signal state), embeds no harness, and must therefore carry NO attribution —
-// hedging "not installed yet" as agent-reported would invent a claim about a
-// harness the server has no signal for at all.
+// no-signal state), so its LABEL carries no attribution — hedging "not installed
+// yet" as agent-reported would invent a signal the server does not have. A row
+// in this state can still disclose one: a recorded per-harness FAILURE
+// (`session_capture_last_error_<h>`) is itself a per-harness signal, and
+// `harnessAttributionForHarness` attributes the row for it.
 export const HARNESS_ATTRIBUTION = 'harness reported by your agent'
 export const HARNESS_CAPTURE_STATUS_LABEL = {
   off: 'off',

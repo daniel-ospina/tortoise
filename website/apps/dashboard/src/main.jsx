@@ -10079,12 +10079,16 @@ function MemorySources(props) {
               return (
                 <div key={h} className={`harness-status status-${st}${isCurrent ? ' current' : ''}`}>
                   {/* review P2-5: the polite live region is scoped to the HEAD
-                      — the state word plus the harness disclosure — so it still
-                      does not announce the whole multi-line snippet below.
+                      — the harness name, its disclosure and the state word — so
+                      it still does not announce the whole multi-line snippet
+                      below.
                       review P2-3: unsupported harnesses render the REASON only,
-                      no pill (no install path exists for `claude-web`,
-                      `claude-desktop` or `chatgpt` — a pill would contradict it;
-                      `cursor` gained a seam in #4110).
+                      no pill and no failure line (no install path exists for
+                      `claude-web`, `claude-desktop` or `chatgpt` — a per-harness
+                      claim would contradict the reason; `cursor` gained a seam
+                      in #4110). That guard is what
+                      `harnessAttributionForHarness` mirrors, so an unsupported
+                      row makes no per-harness claim and needs no disclosure.
                       #3700: the row NAMES a harness whose value is a caller
                       declaration, so the disclosure (`harnessAttribution`) sits
                       in the same group as the name — one flex item, so
@@ -10104,7 +10108,7 @@ function MemorySources(props) {
                   {supported && st === 'install-pending' && sessionsOn && (
                     <pre className="snippet">{HARNESS_CAPTURE_INSTALL[h]}</pre>
                   )}
-                  {lastError(h) && <p className="error small" role="alert">{lastError(h)}</p>}
+                  {supported && lastError(h) && <p className="error small" role="alert">{lastError(h)}</p>}
                 </div>
               )
             })}

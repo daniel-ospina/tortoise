@@ -10612,9 +10612,12 @@ def _record_capture_last_error(org_id: str, harness: str | None,
 # records harness + server timestamp. #3700: the `harness` in that key is the
 # CALLER's declaration (`InstallProbeRequest.harness`), not a server
 # observation — no credential→harness binding exists, so the server observed
-# that an install signal arrived, not which harness sent it. The dashboard's
-# rendered probe label carries that attribution
-# (`website/apps/dashboard/src/harnesses.js::HARNESS_ATTRIBUTION`).
+# that an install signal arrived, not which harness sent it. The dashboard
+# discloses that: the row rendering this probe-derived state shows the
+# attribution beside the harness NAME
+# (`website/apps/dashboard/src/captureStatus.js::harnessAttributionForHarness`,
+# using `harnesses.js::HARNESS_ATTRIBUTION`) — the plain `waiting` label
+# itself does not carry it.
 # The dashboard 4-state (off →
 # install-pending → waiting → active, Task 16/17 canonical names) reads it:
 # NO probe yet ⇒ install-pending; probe no receipt ⇒ waiting; receipt ⇒
