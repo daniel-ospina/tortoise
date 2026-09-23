@@ -26,9 +26,21 @@ from typing import Any
 # ── canonical vocabulary ─────────────────────────────────────
 
 # Display order = definition order (the Setup-guide card renders in this
-# order; the completion gate is order-independent).
+# order; the completion gate is order-independent). "connection-written" is
+# canonical but NOT a card row (CARD_STEPS is the counted, completion-
+# relevant subset — like capture-disclosed).
 STEP_IDS: tuple[str, ...] = (
     "team-named",            # satisfied at org-create (name REQUIRED)
+    # #3451: the MCP-config WRITE — the one step no server can verify. A
+    # self-installing harness writes the config onto the user's disk and then
+    # hands off to a restart (§3); the server cannot observe that file. This
+    # id records the CLIENT's act (an agent-credential checkpoint), never a
+    # server observation, and is in NO completion gate — completion is
+    # unchanged (#3913). It exists so "config written, restart pending" is
+    # distinguishable from "the write never happened": see
+    # ``restart_pending`` (the condition is DERIVED from this edge, never a
+    # second stored field).
+    "connection-written",
     "harness-connected",     # W2: agent harness connected
     "first-points-filed",    # W3 seed: org-anchor Subject filed
     "decide-completed",      # W3 decide (real decide protocol)
@@ -126,6 +138,34 @@ _NODE_DEFAULTS: dict[str, Any] = {
 def validate_step_id(step_id: str) -> bool:
     """True iff step_id is a canonical onboarding step."""
     return isinstance(step_id, str) and step_id in ONBOARDING_STEPS
+
+
+def restart_pending(completed_steps: Iterable[str]) -> bool:
+    """#3451: the config was WRITTEN and the harness is not yet verified.
+
+    DERIVED from the recorded step set — deliberately NOT a second stored
+    field (no ``restart_pending`` FLOW key, no jsonb key): the projection the
+    resuming agent already reads carries the condition. Both directions are
+    load-bearing:
+
+    - ``["team-named"]`` — the write never happened → False. An abandoned
+      install is NEVER reported as waiting for a restart.
+    - ``["team-named", "connection-written"]`` → True. The config is in
+      place; only the restart verification is outstanding, so §1 hands the
+      user a relaunch instead of re-walking §2–§3.
+    - ``"harness-connected"`` present → False. Verified; nothing is pending.
+
+    The parameter is a KNOWN step collection. A caller that does not know the
+    set (a graph-down read serves the literal ``'unavailable'``) must not call
+    this and report its ``False`` as fact — the projection serves
+    ``'unavailable'`` there instead.
+    """
+    if not isinstance(completed_steps, (list, tuple, set, frozenset)):
+        # A graph-down 'unavailable' marker is not a step set — fail to
+        # "not pending" only for a real collection, never by string scan.
+        return False
+    done = set(completed_steps)
+    return "connection-written" in done and "harness-connected" not in done
 
 
 def completion_gate_satisfied(completed_steps: Iterable[str],

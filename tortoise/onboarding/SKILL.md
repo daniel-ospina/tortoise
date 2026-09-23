@@ -41,9 +41,11 @@ resume where the flow left off — onboarding is stateful and idempotent:
 - **Hosted, MCP-connected agents:** call `tortoise_onboarding_state` (the MCP
   read tool) when it is listed. It returns the FLOW projection: `fork`
   (`'self' | 'build' | null`), `status` (`'active' | 'complete'`), `compact`,
-  `completed_steps[]` (canonical ids: `team-named`, `harness-connected`,
-  `first-points-filed`, `decide-completed`, `capture-disclosed`,
-  `catalog-presented`).
+  `completed_steps[]` (canonical ids: `team-named`, `connection-written`,
+  `harness-connected`, `first-points-filed`, `decide-completed`,
+  `capture-disclosed`, `catalog-presented`), and the DERIVED `restart_pending`
+  (`true` iff `connection-written` is present and `harness-connected` is not —
+  §3 records the first; §4 records the second).
 - **Hosted, CLI agents (no MCP tool listed yet):** `curl -s
   https://api.premiselabs.co/v1/onboarding/state -H "Authorization: Bearer
   $TORTOISE_API_KEY"` (same projection). If the org is grandfathered (node
@@ -60,6 +62,7 @@ Branch on what you find:
 | State | Action |
 |---|---|
 | `completed_steps` already contains `harness-connected` | Tell the user their agent is already connected; stop (idempotent). Post-completion re-entry is a no-op — the onboarding tools retire from tools/list once the org completes. |
+| `restart_pending` is `true` (`completed_steps` has `connection-written` but not `harness-connected`) | The MCP config is already WRITTEN — the file is on disk; only the restart verification is outstanding. Do **NOT** re-walk §2–§3 (and do not re-litigate the collision protocol against a config that already holds the answer). Confirm the config is intact, tell the user to relaunch from a NEW shell, then proceed to §4. |
 | `fork` is `null` (never chosen) | **Do NOT guess or persist a fork** — the fork card is a human decision, once per organization (presentation fork, never a billing gate). Tell the user the fork card is waiting in the dashboard wizard and re-read the state after they choose. |
 | `fork` is `'build'` | Connect as usual; the build fork completes on the two acts the server OBSERVES — `harness-connected` + `first-points-filed` — never on a catalog render, and not decide-based — so no decide nudge is required later. |
 | `fork` is `'self'` | Connect as usual; the decide nudge (section 4) applies later. |
@@ -150,6 +153,25 @@ or `${TORTOISE_API_KEY}`); Desktop/Web configs stay literal-with-privacy-note
 (private user-machine / cloud-held — no commit surface). The rows below are
 the HOSTED connect — self-hosted agents apply the §3a delta to the same
 rows.
+
+> **After the config WRITE, and before you hand the restart to the user,
+> checkpoint `connection-written`.** The write is the one step no server can
+> verify — the config file is on the user's disk and the server cannot see it
+> — so it is the CLIENT's act to record, with an AGENT credential (a
+> session/browser JWT is refused `403 agent_credential_required`):
+>
+> ```bash
+> curl -s -X POST https://api.premiselabs.co/v1/onboarding/state/checkpoint \
+>   -H "Authorization: Bearer $TORTOISE_API_KEY" \
+>   -H "Content-Type: application/json" -d '{"step":"connection-written"}'
+> ```
+>
+> It is what makes a **restart-pending** install distinguishable from one that
+> never happened (§1's `restart_pending` row). It does NOT claim the harness is
+> connected: `harness-connected` remains §4's job, and only after
+> `tortoise_health` succeeds in the NEW session. **Teach-human harnesses
+> (Claude Desktop / Claude Web) have no config write and no REST surface — they
+> never record this step.**
 
 ### Claude Code (self-install)
 

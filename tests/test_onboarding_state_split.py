@@ -593,6 +593,43 @@ class TestCheckpoint:
         finally:
             tc.__exit__(None, None, None)
 
+    def test_restart_pending_is_served_on_the_wire_both_directions(self):
+        """#3451: the DERIVED restart-pending condition must reach the WIRE.
+
+        The projection is nested under ``onboarding`` behind
+        ``response_model=OnboardingStateResponse``, so a response-model change
+        could silently drop the key while every function-level pin stayed
+        green. This EXECUTES the real GET route end to end.
+
+        Both directions are load-bearing:
+        - a fresh org (no config written) → the wire says ``False``. An
+          abandoned install must never read as waiting for a restart, and a
+          MISSING key is a failure too (``is False``, never truthiness).
+        - after the agent records ``connection-written`` → ``True``.
+        - after ``harness-connected`` is verified → back to ``False``.
+        """
+        tc, _org_id = _registered_client()
+        try:
+            def _wire():
+                r = tc.get("/v1/onboarding/state")
+                assert r.status_code == 200, r.text
+                return r.json()["onboarding"]
+
+            fresh = _wire()
+            assert "restart_pending" in fresh, fresh
+            assert fresh["restart_pending"] is False, fresh
+
+            r = tc.post("/v1/onboarding/state/checkpoint",
+                        json={"step": "connection-written"})
+            assert r.status_code == 200, r.text
+            assert _wire()["restart_pending"] is True
+
+            tc.post("/v1/onboarding/state/checkpoint",
+                    json={"step": "harness-connected"})
+            assert _wire()["restart_pending"] is False
+        finally:
+            tc.__exit__(None, None, None)
+
     def test_checkpoint_cross_org_isolation(self):
         """Cross-org forgery is impossible — the team comes from the auth
         context; a second team's key cannot write the first team's state
@@ -873,6 +910,7 @@ class TestPatchRouting:
                             {"harness_connected": True},
                             {"first_points_filed": True},
                             {"capture_disclosed": True},
+                            {"connection_written": True},
                             {"org_named": True}):
                 r = tc.patch("/v1/onboarding/state", json=payload)
                 assert r.status_code == 422, payload

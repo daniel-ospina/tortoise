@@ -19878,8 +19878,9 @@ def _maybe_file_harness_connected(org_id: str) -> None:
 # re-completion re-emits; see ``analytics.onboarding_decide_complete``.)
 #
 # Deliberately NOT instrumented: ``harness-connected`` (the funnel keys off
-# seed/decide) and ``catalog-presented`` (the build fork's display row has
-# no W11 event).
+# seed/decide), ``catalog-presented`` (the build fork's display row has
+# no W11 event), and ``connection-written`` (#3451 — a client-observed trace
+# of the config WRITE, not a funnel transition).
 _ONBOARDING_STEP_EVENTS = {
     "first-points-filed": onboarding_seed_complete,
     "decide-completed": onboarding_decide_complete,
@@ -20148,6 +20149,10 @@ def _get_onboarding_projection(org_id: str) -> dict:
         state.update(_os.flow_defaults())
         state["onboarding_complete"] = _os.resolve_wire_completion(
             None, bool(raw.get("onboarding_complete")), [])
+        # #3451: no namespace → no steps → not restart-pending (False, never
+        # the bare absence of the key, which a reader could confuse with
+        # 'unknown').
+        state["restart_pending"] = _os.restart_pending([])
         return state
     try:
         # Open the name the guard actually verified. `_make_sdk(namespace=)`
@@ -20168,12 +20173,17 @@ def _get_onboarding_projection(org_id: str) -> dict:
         # legacy jsonb — 'unavailable' keeps the wire honest and the MCP
         # gate fail-open (non-bool → tools stay visible during outages).
         state["onboarding_complete"] = "unavailable"
+        # #3451: a graph-down read does not know the step set, so it must not
+        # claim either direction — 'unavailable', exactly like the FLOW keys
+        # (never a fabricated False that would read as 'not restart-pending').
+        state["restart_pending"] = "unavailable"
         return state
     state = dict(raw)
     if node is None:
         state.update(_os.flow_defaults())
         state["onboarding_complete"] = _os.resolve_wire_completion(
             None, bool(raw.get("onboarding_complete")), [])
+        state["restart_pending"] = _os.restart_pending([])
         return state
     state.update({
         "fork": node.get("fork"),
@@ -20188,6 +20198,9 @@ def _get_onboarding_projection(org_id: str) -> dict:
     })
     state["onboarding_complete"] = _os.resolve_wire_completion(
         node.get("status"), bool(raw.get("onboarding_complete")), steps)
+    # #3451: DERIVED from the step edges — config written, harness not yet
+    # verified. The one definition lives in state.py (no second stored field).
+    state["restart_pending"] = _os.restart_pending(steps)
     return state
 
 
@@ -20323,6 +20336,11 @@ class OnboardingStatePatchRequest(BaseModel):
     decide_completed: bool | None = None
     capture_disclosed: bool | None = None
     org_named: bool | None = None
+    # #3451: ``connection-written`` is agent-only on the checkpoint surface —
+    # declared here so a stray PATCH is REJECTED loudly (422
+    # unknown_step_on_patch via _PATCH_REJECTED_STEP_FIELDS), never silently
+    # dropped+reported like an unknown field.
+    connection_written: bool | None = None
     fork: str | None = None
     compact: bool | None = None
     status: str | None = None
@@ -20399,7 +20417,7 @@ _PATCH_SERVER_OWNED_KEYS = {
 } | _CAPTURE_SERVER_OWNED_KEYS
 _PATCH_REJECTED_STEP_FIELDS = {
     "harness_connected", "first_points_filed", "decide_completed",
-    "capture_disclosed", "org_named",
+    "capture_disclosed", "org_named", "connection_written",
 }
 
 
@@ -20621,6 +20639,8 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
 # nowhere else; the predicate below reads the allowlist, never the reverse).
 _DASHBOARD_WRITABLE_STEPS: frozenset[str] = frozenset()
 _CHECKPOINT_STEPS: frozenset[str] = frozenset({
+    "connection-written",     # #3451: MCP config WRITTEN (client-observed;
+                              # the server cannot see the user's config file)
     "harness-connected",      # W2: harness connected
     "first-points-filed",     # W3: org-anchor Subject filed (seed)
     "decide-completed",       # W3: real decide protocol
@@ -20655,8 +20675,9 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
     comes from the auth context — the body never carries org_id (F2).
 
     Contract (scope pin 8):
-    - step ∈ {harness-connected, first-points-filed, decide-completed,
-      capture-disclosed, catalog-presented} — keyed-MERGE, first-write-wins
+    - step ∈ {connection-written, harness-connected, first-points-filed,
+      decide-completed, capture-disclosed, catalog-presented} — keyed-MERGE,
+      first-write-wins
       (replay → noop), unknown step → 422.
       #3671: EVERY step write requires an AGENT credential — a session-JWT
       step write is refused 403 ``agent_credential_required`` (no dashboard

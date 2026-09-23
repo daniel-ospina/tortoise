@@ -1,9 +1,10 @@
 """Unit tests for the canonical onboarding state module (T1, #2001 W5).
 
 Pins (scope doc §4.1/§4.3, plan T1):
-- canonical step list (6), card subset (3, ⊆ canonical), per-key semantics table
+- canonical step list (7), card subset (3, ⊆ canonical), per-key semantics table
 - fork-aware completion gate (self/build/compact, compact-first, fork=None→'self')
 - validate_step_id
+- #3451 restart_pending derivation (both directions)
 - set-once/LWW/server-owned semantics constants
 - module is importable without hosted_api (no circular import)
 """
@@ -24,15 +25,17 @@ from tortoise.onboarding.state import (
     STATUS_COMPLETE,
     STEP_IDS,
     completion_gate_satisfied,
+    restart_pending,
     validate_step_id,
 )
 
 # ── canonical list / card subset ─────────────────────────────
 
 class TestCanonicalList:
-    def test_six_canonical_steps_in_display_order(self):
+    def test_seven_canonical_steps_in_display_order(self):
         assert tuple(STEP_IDS) == (
             "team-named",
+            "connection-written",
             "harness-connected",
             "first-points-filed",
             "decide-completed",
@@ -59,6 +62,54 @@ class TestCanonicalList:
         # row (#3913 — the build fork renders no extra row).
         assert "decide-completed" in CARD_STEPS
         assert "catalog-presented" not in CARD_STEPS
+
+    def test_connection_written_is_canonical_but_not_a_counted_row(self):
+        # #3451: the config-write trace is canonical (accepted + recorded) but
+        # NOT a completion-relevant card row — the gates are unchanged, so it
+        # must not change any fork's N-of-M.
+        assert "connection-written" in STEP_IDS
+        assert "connection-written" not in CARD_STEPS
+
+
+class TestRestartPending:
+    """#3451: the config-write trace, and the restart-pending condition
+    DERIVED from it — never a second stored field (no FLOW key, no jsonb key).
+
+    Both directions are the point: a restart-pending install must be
+    distinguishable from one whose config write never happened.
+    """
+
+    def test_written_but_not_verified_is_restart_pending(self):
+        assert restart_pending(["team-named", "connection-written"]) is True
+
+    def test_no_config_written_is_never_restart_pending(self):
+        # the abandoned install — the direction that must never be reported
+        # as waiting for a restart
+        assert restart_pending(["team-named"]) is False
+        assert restart_pending([]) is False
+
+    def test_verified_connection_is_not_restart_pending(self):
+        assert restart_pending(
+            ["team-named", "connection-written", "harness-connected"]) is False
+        # a server-observed connection alone is never 'pending'
+        assert restart_pending(["harness-connected"]) is False
+
+    def test_unavailable_marker_is_not_a_step_set(self):
+        # a graph-down read serves the literal 'unavailable' string; the helper
+        # must not string-scan it into a fabricated verdict
+        assert restart_pending("unavailable") is False
+
+    def test_new_step_is_in_no_completion_gate(self):
+        # the #3913 owner ruling stands: completion is unchanged by the new
+        # step — it is never required, and it never completes anything alone
+        full = {"team-named", "harness-connected", "first-points-filed",
+                "decide-completed"}
+        for fork in ("self", "build"):
+            assert completion_gate_satisfied(full, fork, False) is True
+            assert completion_gate_satisfied(
+                full | {"connection-written"}, fork, False) is True
+            assert completion_gate_satisfied(
+                {"connection-written"}, fork, False) is False
 
 
 class TestStepValidation:
