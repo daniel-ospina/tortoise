@@ -1130,12 +1130,13 @@ class _FakeRequester:
 class _FakeBrowser:
     def __init__(self, ctx):
         self._ctx = ctx
+        ctx.events.append("launch")
 
     def new_context(self, **k):
         return self._ctx
 
     def close(self):
-        pass
+        self._ctx.events.append("browser")
 
 
 class _FakePage:
@@ -1220,6 +1221,7 @@ class _FakeCtx:
     def __init__(self, plan, base_url, org_create=False, org_click_raises=False):
         self.request = _FakeRequester(plan)
         self.cookies = []          # the instrument must never read the jar
+        self.events = []           # launch/close order, asserted per run (#4902)
         self._base = base_url
         self._org_create = org_create
         self._org_click_raises = org_click_raises
@@ -1230,7 +1232,7 @@ class _FakeCtx:
         return self.page
 
     def close(self):
-        pass
+        self.events.append("ctx")
 
 
 class _FakeChromium:
@@ -1322,6 +1324,7 @@ def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
     # teardown block in the artifact. A future exit routed past `_finalize`
     # falsifies this for the whole suite instead of for one hand-written case.
     assert obs.teardown, "run_walk exited without recording teardown"
+    _assert_browser_reaped(ctx)
     return obs, ctx, mod
 
 
@@ -1518,6 +1521,13 @@ def _assert_not_the_generic_error_handler(obs, name: str) -> None:
     assert obs.steps[-1].name == name, obs.steps[-1].name
 
 
+def _assert_browser_reaped(ctx) -> None:
+    """A launched browser and its context are each closed exactly once, in that
+    order; a run that never launched one closes neither."""
+    expected = ["launch", "ctx", "browser"] if "launch" in ctx.events else []
+    assert ctx.events == expected, ctx.events
+
+
 def test_walk_that_never_reaches_a_connection_surface_is_incomplete_no_surface(
         monkeypatch, tmp_path):
     """The screen renders no connection surface at all, so the NEGATIVE
@@ -1686,6 +1696,7 @@ def test_main_returns_three_for_a_walk_that_never_authenticated(monkeypatch, tmp
     rc = mod.main(["--base-url", base, "--auth-url", base, "--api-url", base,
                    "--allow-prod", "--out", str(tmp_path / "o")])
     assert rc == mod.EXIT_INSTRUMENT_ERROR == 3
+    _assert_browser_reaped(ctx)
 
 
 # ── the call sites the poll-only tests missed (#4291 review cycle 4) ────────
@@ -1808,6 +1819,7 @@ def test_walk_with_an_explicit_agent_key_still_reads_the_truth_through_the_sessi
     for _method, url, _data in ctx.request.onboarding_state_calls():
         assert url.startswith(base + "/api/v1/onboarding/state"), url
     assert "agent-key" in obs.session["mechanism"]
+    _assert_browser_reaped(ctx)
 
 
 # ── #4319 — the run reaps the org it created ────────────────────────────────
