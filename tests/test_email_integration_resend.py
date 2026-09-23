@@ -1,11 +1,26 @@
-"""Opt-in real-delivery verification for the Resend invite sender (#307).
+"""Resend invite-sender checks (#307): a hermetic contract half and an opt-in live half.
 
-NOT run in CI (network + real Resend key required). Run locally when
-deploying the transactional email env vars (#1221):
+Two halves live in this module — do not conflate them:
+
+- **Hermetic contract half** — ``test_invite_link_contract_is_hermetic``,
+  ``test_hermetic_guard_refuses_unrecorded_requests`` and
+  ``test_live_link_probe_marker_pinned``. This half RUNS IN CI on every PR/push
+  that selects the ``api`` surface. It needs no credentials and makes no
+  network calls.
+- **Opt-in live half** — ``test_invite_email_delivers``,
+  ``test_bounced_address_reports_bounced`` and the ``live``-marked
+  ``test_invite_link_resolves``. This half is NOT run in CI: it requires a real
+  ``RESEND_API_KEY`` + ``RESEND_FROM_EMAIL``, and the deployed-page probe
+  additionally requires ``ALLOW_PROD=1`` (the repo convention for production
+  assertions). Run it locally when deploying the transactional email env vars
+  (#1221):
 
     cd tortoise
     RESEND_API_KEY=re_... RESEND_FROM_EMAIL=noreply@premiselabs.co \\
       .venv/bin/python -m pytest tests/test_email_integration_resend.py -m integration -v
+
+  (that invocation runs the two delivery tests; add ``-m live`` with
+  ``ALLOW_PROD=1`` for the deployed-page probe.)
 
 Design (plan Task 9, docs/scoping/2026-08-13-307-email-notifications-scope.md):
 - resend.dev test addresses are always accepted; last_event converges to
@@ -33,7 +48,6 @@ gated on ``ALLOW_PROD=1`` (the repo convention for production assertions).
 """
 from __future__ import annotations
 
-import inspect
 import json
 import os
 import time
@@ -53,6 +67,21 @@ POLL_TIMEOUT_S = 60
 
 # #4367: the recorded accept-page exchange (status + redirect target +
 # contract headers), captured once from the live deployment.
+#
+# OPEN RISK — CASSETTE ROT IS UNDETECTED BY DESIGN (documented, not automated).
+# This file pins a RECORDED contract, i.e. the exchange as observed at capture
+# time — not the deployed one. Nothing on the required path re-checks it
+# against the live host: the live half below is deselected by default
+# (``-m 'not live'``) and gated on ``ALLOW_PROD=1``, and the nightly live tier
+# was deliberately retired in #4367 (no scheduled job is added on purpose). So
+# if the deployed host/path moves again — it already moved once, the
+# /invite-accept.html -> app.premiselabs.co 301 — CI stays green and the
+# cassette rots silently until someone re-records it against reality:
+#
+#     ALLOW_PROD=1 ... -m live -k invite_link_resolves
+#
+# (Re-recording is therefore a real obligation of the live half, not a
+# formality: it is the only thing that keeps this cassette honest.)
 ACCEPT_CASSETTE = Path(__file__).parent / "fixtures" / "invite_accept_page.json"
 
 
@@ -167,9 +196,12 @@ def test_invite_link_contract_is_hermetic(monkeypatch):
 
     The referrer-policy assertion is a pin on the RECORDED response (the
     contract as last observed) — verifying the DEPLOYED page still honours it
-    is the job of the live-marked ``test_invite_link_resolves`` below. What
-    this test guarantees on every PR/push is the link-construction contract
-    and the recorded page contract, with no network at all.
+    is the job of the live-marked ``test_invite_link_resolves`` below. That
+    probe is deselected on the required path, so the DEPLOYED host/path
+    contract is asserted by NOTHING by default — a deliberate trade of #4367,
+    with the resulting cassette-rot exposure documented on ``ACCEPT_CASSETTE``
+    above. What this test guarantees on every PR/push is the link-construction
+    contract and the recorded page contract, with no network at all.
     """
     monkeypatch.delenv("EMAIL_LINK_BASE_URL", raising=False)  # ambient-env-proof
     cassette = _load_accept_cassette()
@@ -234,10 +266,22 @@ def test_invite_link_resolves():
 
 def test_live_link_probe_marker_pinned():
     """#4367 guard: the deployed-page probe MUST carry @pytest.mark.live so the
-    required path (``-m 'not live'``) never makes the production call. A
-    dropped marker re-reddens CI for unrelated diffs — the exact failure this
-    split exists to prevent (mirrors test_extractor_reliability's pin)."""
+    required path (``-m 'not live'``) never makes the production call, and MUST
+    still gate on ``ALLOW_PROD=1``. A dropped marker — or a dropped ALLOW_PROD
+    gate — re-reddens (or re-opens) CI for unrelated diffs, the exact failure
+    this split exists to prevent (mirrors test_extractor_reliability's pin).
+
+    The ALLOW_PROD pin reads the function's code object CONSTANTS, not its
+    source text: ``"ALLOW_PROD" in inspect.getsource(...)`` is satisfied by a
+    mere comment, so a source-substring pin stays green while the real gate is
+    gone. ``__code__.co_consts`` is the compiled literal pool — comments
+    contribute nothing to it — so this pin can only be satisfied by live code
+    that actually compares the env var against the string "1".
+    """
     marker = getattr(test_invite_link_resolves, "pytestmark", None)
     assert marker and any(getattr(m, "name", None) == "live" for m in marker), \
         "test_invite_link_resolves must carry @pytest.mark.live"
-    assert "ALLOW_PROD" in inspect.getsource(test_invite_link_resolves)
+    consts = test_invite_link_resolves.__code__.co_consts
+    assert "ALLOW_PROD" in consts and "1" in consts, \
+        "test_invite_link_resolves must read ALLOW_PROD against '1' in code " \
+        f"(a comment does not count): co_consts={consts!r}"
