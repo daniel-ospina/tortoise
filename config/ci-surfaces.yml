@@ -939,6 +939,7 @@ surfaces:
   - test_trash_lock.py             # #2470 restore lock timeout (fake CP)
   - test_trash_grace.py            # #2465 trash recovery-window grace (supabase lane, fake CP)
   - test_tripwire.py
+  - test_unjournaled_mutation_class.py
   - test_uri_env_mutations_declared.py
   - test_validity_windows.py
   - test_value_extractor.py
@@ -1548,6 +1549,7 @@ durations:
   test_onboarding_telemetry_w11.py: 2.0
   test_graph_diagnostics.py: 37.3
   eval/write_path/test_write_path_runner.py: 36.0
+  test_unjournaled_mutation_class.py: 100.0  # #4743: locally measured (46 tests, live FalkorDB); refresh from CI junit — the file builds a projection per row.
   test_write_verb.py: 35.7
   test_index_restore.py: 35.2
   test_capture_session.py: 31.2
