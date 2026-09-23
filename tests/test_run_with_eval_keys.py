@@ -1,0 +1,308 @@
+"""Hermetic tests for tools/run-with-eval-keys.sh (#2718, incident #4860).
+
+The defect these tests pin: the repo's `.env` loader (``mcp_server._load_dotenv``)
+only fills keys that are ABSENT, so any ambient LLM provider key in the calling
+shell BEATS the repo `.env`. On 2026-09-23 the sealed #2552 write-path run
+silently billed the ambient fleet OpenRouter key (``limit_remaining=0``) and
+returned HTTP 403 on all 7 sessions while a healthy evals key sat in `.env` —
+and nothing in the run output said which key had been used.
+
+The wrapper makes the key source explicit:
+  * it STRIPS the ambient provider keys it owns,
+  * loads the repo-root `.env` with explicit override for those keys,
+  * emits a source + non-revealing fingerprint line per managed key,
+  * ``exec``s the command.
+
+No network, no Docker, no FalkorDB, no real key material. Every fixture value
+below is a deliberately fake string. The wrapper's own default `.env` path is
+exercised by one test that only reads the path from stderr — it never prints a
+value.
+
+Run standalone:      python3 tests/test_run_with_eval_keys.py
+Run under pytest:    python3 -m pytest tests/test_run_with_eval_keys.py -q
+"""
+from __future__ import annotations
+
+import hashlib
+import os
+import stat
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+WRAPPER = ROOT / "tools" / "run-with-eval-keys.sh"
+
+# The contract: the provider keys the evaluation/measurement paths actually
+# read (tortoise/ingest.py::_PROVIDERS, tortoise/analyze.py::_LLM_PROVIDERS,
+# tortoise/model_adapters.py). ANTHROPIC_API_KEY is deliberately NOT here —
+# no tortoise provider reads it (hosted_api.py::_llm_provider_keys).
+MANAGED = (
+    "OPENROUTER_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "VENICE_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+)
+
+# Obviously-fake fixture key values (never real material).
+FIXTURE_OPENROUTER = "sk-or-v1-FIXTUREevalkey0123456789abcdefghijklmnopqrstuvwxyz"
+FIXTURE_DEEPSEEK = "sk-fixture-deepseek-000111222333444555666777888999"
+SABOTAGE = "sk-or-v1-DEADBEEF" + "0" * 40
+
+ENV_FIXTURE = f"""\
+# a comment line — skipped
+export OPENROUTER_API_KEY="{FIXTURE_OPENROUTER}"
+DEEPSEEK_API_KEY={FIXTURE_DEEPSEEK}
+# VENICE_API_KEY intentionally left unset (fail-closed test)
+TORTOISE_DB_URI=docker://:falkordb@localhost:6379/from-env-file
+EVALTEST_EXPORTED=exported-value
+EVALTEST_QUOTED="quoted value with spaces"
+EVALTEST_SINGLE='single quoted'
+EVALTEST_INLINE=value-with-inline # trailing comment
+EVALTEST_HASH_IN_VALUE=abc#notacomment
+EVALTEST_PADDED = padded-value
+EVALTEST_OK=1
+"""
+
+
+class RunWithEvalKeysTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="eval-keys-test-")
+        self.addCleanup(self._tmp.cleanup)
+        self.env_file = Path(self._tmp.name) / "fixture.env"
+        self.env_file.write_text(ENV_FIXTURE, encoding="utf-8")
+
+    # ── helpers ────────────────────────────────────────────────────────
+
+    def base_env(self, **extra: str) -> dict[str, str]:
+        """A clean env: no managed provider key, no wrapper override."""
+        env = os.environ.copy()
+        for key in (*MANAGED, "EVAL_KEYS_ENV_FILE"):
+            env.pop(key, None)
+        env.update(extra)
+        return env
+
+    def run_wrapper(
+        self,
+        args: list[str],
+        *,
+        env: dict[str, str] | None = None,
+        use_fixture: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
+        env = dict(env if env is not None else self.base_env())
+        if use_fixture:
+            env["EVAL_KEYS_ENV_FILE"] = str(self.env_file)
+        return subprocess.run(
+            [str(WRAPPER), *args],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+            check=False,
+        )
+
+    # ── the wrapper exists and is runnable ─────────────────────────────
+
+    def test_wrapper_exists_and_is_executable(self):
+        self.assertTrue(WRAPPER.is_file(), f"missing {WRAPPER}")
+        mode = WRAPPER.stat().st_mode
+        self.assertTrue(mode & stat.S_IXUSR, "wrapper is not executable")
+
+    def test_usage_error_without_command(self):
+        r = self.run_wrapper([])
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("usage:", r.stderr)
+
+    # ── the core defect: ambient must not beat .env ────────────────────
+
+    def test_env_value_beats_sabotaged_ambient_key(self):
+        env = self.base_env(OPENROUTER_API_KEY=SABOTAGE)
+        r = self.run_wrapper(["sh", "-c", 'printf "%s" "$OPENROUTER_API_KEY"'], env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, FIXTURE_OPENROUTER)
+        # the sabotaged ambient value must not survive anywhere
+        self.assertNotIn("DEADBEEF", r.stdout)
+        self.assertNotIn("DEADBEEF", r.stderr)
+
+    def test_deepseek_env_value_beats_sabotaged_ambient_key(self):
+        env = self.base_env(DEEPSEEK_API_KEY="sk-ambient-DEADBEEF")
+        r = self.run_wrapper(["sh", "-c", 'printf "%s" "$DEEPSEEK_API_KEY"'], env=env)
+        self.assertEqual(r.stdout, FIXTURE_DEEPSEEK)
+
+    def test_managed_key_absent_from_env_is_unset_fail_closed(self):
+        # Ambient VENICE key exists; .env has no VENICE key. Fail closed: the
+        # ambient (wrong) key must NOT be silently used, and the declaration
+        # line must say so.
+        env = self.base_env(VENICE_API_KEY="VENICE-ambient-DEADBEEF")
+        r = self.run_wrapper(
+            ["sh", "-c", "printenv VENICE_API_KEY || echo UNSET"], env=env
+        )
+        self.assertEqual(r.stdout.strip(), "UNSET")
+        self.assertIn("VENICE_API_KEY source=unset fingerprint=none", r.stderr)
+
+    # ── the point of the change: a knowable, non-leaking key source ────
+
+    def test_fingerprint_line_emitted_and_hides_the_key(self):
+        env = self.base_env(OPENROUTER_API_KEY=SABOTAGE)
+        r = self.run_wrapper(["true"], env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+        # the label names the file actually read — with the test seam that is
+        # the fixture path, never a claim of `.env`
+        self.assertIn(f"OPENROUTER_API_KEY source={self.env_file} fingerprint=", r.stderr)
+        self.assertIn(f"DEEPSEEK_API_KEY source={self.env_file} fingerprint=", r.stderr)
+
+        # never the full key — on either stream
+        self.assertNotIn(FIXTURE_OPENROUTER, r.stderr)
+        self.assertNotIn(FIXTURE_OPENROUTER, r.stdout)
+        self.assertNotIn(FIXTURE_DEEPSEEK, r.stderr)
+
+        # the marker carries the length + a stable sha256 prefix, so a run's
+        # key is identifiable across receipts
+        digest = hashlib.sha256(FIXTURE_OPENROUTER.encode()).hexdigest()[:12]
+        self.assertIn(f"sha256={digest}", r.stderr)
+        self.assertIn(f"len={len(FIXTURE_OPENROUTER)}", r.stderr)
+        # only the (non-secret) first 6 characters are shown
+        self.assertIn(FIXTURE_OPENROUTER[:6], r.stderr)
+
+    def test_fingerprint_is_stable_and_distinguishes_keys(self):
+        r1 = self.run_wrapper(["true"])
+        r2 = self.run_wrapper(["true"])
+        line = "OPENROUTER_API_KEY source="
+        first = next(s for s in r1.stderr.splitlines() if line in s)
+        second = next(s for s in r2.stderr.splitlines() if line in s)
+        self.assertEqual(first, second, "fingerprint is not stable across runs")
+        # the two fixture keys must not share a fingerprint
+        ds = next(s for s in r1.stderr.splitlines() if "DEEPSEEK_API_KEY source" in s)
+        self.assertNotEqual(first, ds)
+
+    # ── the deliberate never-override for everything else ──────────────
+
+    def test_non_managed_var_is_not_clobbered(self):
+        env = self.base_env(TORTOISE_DB_URI="docker://from-ambient")
+        r = self.run_wrapper(["sh", "-c", 'printf "%s" "$TORTOISE_DB_URI"'], env=env)
+        self.assertEqual(r.stdout, "docker://from-ambient")
+
+    def test_non_managed_var_is_filled_when_absent(self):
+        r = self.run_wrapper(["sh", "-c", 'printf "%s" "$TORTOISE_DB_URI"'])
+        self.assertEqual(r.stdout, "docker://:falkordb@localhost:6379/from-env-file")
+
+    # ── .env parsing semantics (mirrors _load_dotenv) ──────────────────
+
+    def test_parses_export_quotes_and_comments(self):
+        script = "; ".join(f'printf "%s|" "$EVALTEST_{name}"' for name in (
+            "EXPORTED", "QUOTED", "SINGLE", "INLINE", "HASH_IN_VALUE",
+            "PADDED", "OK",
+        ))
+        r = self.run_wrapper(["sh", "-c", script])
+        self.assertEqual(
+            r.stdout,
+            "|".join([
+                "exported-value",
+                "quoted value with spaces",
+                "single quoted",
+                "value-with-inline",
+                "abc#notacomment",
+                "padded-value",
+                "1",
+            ]) + "|",
+            r.stderr,
+        )
+
+    # ── exec + exit-code fidelity ──────────────────────────────────────
+
+    def test_exec_replaces_the_wrapper_process(self):
+        proc = subprocess.Popen(
+            [str(WRAPPER), "sh", "-c", 'printf "%s" "$$"'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={**self.base_env(), "EVAL_KEYS_ENV_FILE": str(self.env_file)},
+        )
+        out, _ = proc.communicate(timeout=60)
+        self.assertEqual(
+            int(out),
+            proc.pid,
+            "the wrapped command runs in a child, not the exec'd wrapper",
+        )
+
+    def test_exit_code_propagates(self):
+        r = self.run_wrapper(["sh", "-c", "exit 42"])
+        self.assertEqual(r.returncode, 42)
+
+    def test_args_with_spaces_are_preserved(self):
+        r = self.run_wrapper(["sh", "-c", 'printf "%s\\n" "$1" "$2"', "_", "a b", "c  d"])
+        self.assertEqual(r.stdout.splitlines(), ["a b", "c  d"])
+
+    def test_stdout_of_the_command_is_not_interleaved_with_the_declaration(self):
+        r = self.run_wrapper(["sh", "-c", 'printf "DATA"'])
+        self.assertEqual(r.stdout, "DATA")
+        self.assertNotIn("eval-keys", r.stdout)
+
+    # ── never writes .env; missing .env fails closed ───────────────────
+
+    def test_env_file_is_never_written(self):
+        before = self.env_file.read_bytes()
+        mtime_before = self.env_file.stat().st_mtime_ns
+        self.run_wrapper(["true"])
+        self.assertEqual(self.env_file.read_bytes(), before)
+        self.assertEqual(self.env_file.stat().st_mtime_ns, mtime_before)
+
+    def test_missing_env_file_fails_closed(self):
+        env = self.base_env(OPENROUTER_API_KEY=SABOTAGE)
+        env["EVAL_KEYS_ENV_FILE"] = str(Path(self._tmp.name) / "nope.env")
+        r = subprocess.run(
+            [str(WRAPPER), "sh", "-c", "printenv OPENROUTER_API_KEY || echo UNSET"],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+            check=False,
+        )
+        self.assertEqual(r.stdout.strip(), "UNSET")
+        self.assertIn("WARNING", r.stderr)
+        self.assertIn("OPENROUTER_API_KEY source=unset fingerprint=none", r.stderr)
+
+    # ── default path is the repo-root .env ─────────────────────────────
+
+    def test_default_env_file_is_the_repo_root_env(self):
+        env = self.base_env()
+        r = self.run_wrapper(["true"], env=env, use_fixture=False)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(os.path.normpath(str(ROOT / ".env")), r.stderr)
+        # with the default path the per-key label is the honest `.env` (or
+        # `unset` on a host with no .env, e.g. CI) — never a path
+        self.assertRegex(r.stderr, r"OPENROUTER_API_KEY source=(\.env|unset)")
+        self.assertNotIn("OPENROUTER_API_KEY source=/", r.stderr)
+
+    def test_relative_override_is_never_labelled_dot_env(self):
+        # A relative EVAL_KEYS_ENV_FILE from a foreign cwd reads THAT file —
+        # the declaration must not claim the repo-root `.env` (false
+        # provenance in a receipt is the failure class this tool prevents).
+        foreign = Path(self._tmp.name) / "foreign"
+        foreign.mkdir()
+        (foreign / ".env").write_text(
+            "OPENROUTER_API_KEY=sk-or-v1-FOREIGNabcdefghijklmnop\n",
+            encoding="utf-8",
+        )
+        env = self.base_env()
+        env["EVAL_KEYS_ENV_FILE"] = ".env"
+        r = subprocess.run(
+            [str(WRAPPER), "true"],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(foreign),
+            timeout=60,
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("OPENROUTER_API_KEY source=.env ", r.stderr)
+        self.assertRegex(r.stderr, r"OPENROUTER_API_KEY source=/.+[/\\]\.env ")
+
+
+if __name__ == "__main__":
+    sys.exit(unittest.main(verbosity=2))
