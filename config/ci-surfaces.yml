@@ -1456,8 +1456,9 @@ durations:
 #
 # #3400: consumed by split_fast_gate (LPT) for BOTH the tier-2 `--split` path and
 # the full-matrix push halves; duration_coverage_issues() floors coverage at 90%.
-# A weight is a measured CI value wherever one exists — local timings are NOT the
-# input, because the CI wall time is what the split must model.
+# A weight is a measured CI value wherever one exists — except the two rows named
+# below (the pinned equality and the row retained from main) — and local timings
+# are NOT the input, because the CI wall time is what the split must model.
 #
 # ONE row is not a measurement: test_mcp_rename_table.py is held equal to
 # test_bridge_table.py because
@@ -1470,7 +1471,9 @@ durations:
 # middle, a #2517 pin), replaced here by the measurement — or, for the pinned
 # generator row, held equal to its measured sibling. Provisional first cuts (a flat
 # 2.0 default, a single local timing entered pending CI) are not decisions and are
-# not listed. Each is reopened on #3395 for a veto; none was changed silently:
+# not listed — except the #3501/#3718 rows below, which are surfaced because they
+# err high (a floor that errs high is the safe direction to keep in view).
+# Each is reopened on #3395 for a veto; none was changed silently:
 #   test_bridge_table.py 240.0 -> measured. A documented reserve (#4282:
 #     "CI-observed range 34s-537s depending on box load"). Its sibling
 #     test_mcp_rename_table.py 240.0 -> held equal to it (the pin below), not measured.
@@ -1482,8 +1485,9 @@ durations:
 #     test_read_routes_loop_responsiveness.py 30.0,
 #     test_graph_write_loop_responsiveness.py 30.0 -> measured. Local/host samples
 #     (#3501, #3895, #3718 — both halves of the #3718 pair) rather than CI wall time.
-#     Included even though three of the four notes call themselves first estimates:
-#     they err high, so they are surfaced for the veto too.
+#     Included although #3501's note calls itself a SINGLE SAMPLE and both #3718
+#     halves ask to be re-measured: they err high, so they are surfaced for the
+#     veto too.
 #   test_build_cohorts_2517.py, test_session_reinjection.py,
 #     test_session_reinjection_rules.py, test_eval_reinjection_cap_resume.py,
 #     test_guard_measured_revision.py -> measured, from a deliberate 0.0 (#2517: the
@@ -1496,9 +1500,9 @@ durations:
 # keeps main's 28.1 (#4602), whose own note asks for a re-measurement from the first
 # POST-merge junit artifact — all four source runs predate #4602, so they cannot make
 # that measurement, and for a split bounded by a wall-clock watchdog the larger of the
-# two values is the safe side (this sweep measures 3.3 for the file). The block's
-# other 0.0 rows were measured-negligible values from the #3400 sweep, not pins: only
-# the five #2517 rows in the OVERRIDES list above were deliberate. A row's comment is
+# two values is the safe side (this sweep measures 3.3 for the file). The PRE-sweep
+# block's other 0.0 rows were measured-negligible values from the #3400 sweep, not pins:
+# only the five #2517 rows in the OVERRIDES list above were deliberate. A row's comment is
 # kept only while the value it describes is unchanged, so a provisional
 # re-measure-from-junit note is dropped by the sweep: the re-derivation IS that refresh.
 #
