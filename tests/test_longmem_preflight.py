@@ -292,24 +292,30 @@ def test_run_main_preflight_failure_exits_nonzero(monkeypatch, tmp_path):
 
     #4718: the dense leg is pinned AVAILABLE. This is a non-mock run, so it
     requires the leg; on a host with no embedder the dense-leg gate would
-    raise ``SystemExit(1)`` on its own and the test would pass without ever
-    reaching the reader/judge gate it exists to exercise (which is exactly
-    what happened before this was pinned). ``--skip-preflight`` cannot be
-    used instead — it skips that gate.
+    raise ``SystemExit(1)`` on its own. ``--skip-preflight`` cannot be used
+    instead — it skips that gate.
+
+    The ``gate_called`` counter is what makes this test mean what it says:
+    the dense-leg gate raises the SAME ``SystemExit(1)`` with ``executed == 0``,
+    so on the two assertions alone the test cannot tell "the reader/judge gate
+    was exercised" from "the dense gate short-circuited first" (review round 3
+    demonstrated exactly that by swapping the pin for a ``None`` embedder — the
+    assertions still passed).
     """
     _set_all_keys(monkeypatch)
     _pin_embedder_available(monkeypatch)
     import tools.longmem_eval.run as run_mod
 
+    seen = {"gate_called": 0, "n": 0}
+
     def _fatal_gate(**kw):
+        seen["gate_called"] += 1
         raise PreflightError([{
             "what": "extractor-billing-probe", "status": "fatal",
             "detail": "HTTPError: 402 Payment Required"}])
 
-    executed = {"n": 0}
-
     def _must_not_run(*a, **k):  # pragma: no cover — gate must fail first
-        executed["n"] += 1
+        seen["n"] += 1
 
     monkeypatch.setattr(run_mod, "run_preflight", _fatal_gate)
     monkeypatch.setattr(run_mod, "run_evaluation", _must_not_run)
@@ -317,7 +323,8 @@ def test_run_main_preflight_failure_exits_nonzero(monkeypatch, tmp_path):
         run_mod.run_main(["--data", str(MINI), "--limit", "1", "--split", "s",
                           "--output", str(tmp_path / "r.json")])
     assert ei.value.code == 1
-    assert executed["n"] == 0  # nothing in the 500-Q loop started
+    assert seen["gate_called"] == 1  # the subject was actually reached
+    assert seen["n"] == 0  # nothing in the 500-Q loop started
 
 
 # ── Judge key presence (explicit, config-only) ────────────────────────────

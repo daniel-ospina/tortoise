@@ -325,7 +325,11 @@ def test_full_context_cli_dry_run(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "tools.longmem_eval.full_context" in out
     assert "--limit 50" in out
-    assert "--skip-preflight" in out  # #4718: mocked cell = wiring check
+    # #4718: NO dense-leg waiver here, deliberately — full_context.py has no
+    # dense-leg gate and its parser REJECTS --skip-preflight (argparse exit 2).
+    # Asserting the absence pins the regression that round 3 introduced and
+    # then had to revert.
+    assert "--skip-preflight" not in out
     assert "[dry-run]" in out
     # default output is timestamped (two cell runs — pilot + 500 — must not
     # clobber each other's ceiling measurement)

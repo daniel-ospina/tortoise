@@ -865,10 +865,12 @@ def cmd_full_context(state: ProtocolState, args: argparse.Namespace) -> None:
     """Option-5 full-context comparison cell (ceiling / headroom measurement)
     on a question subset — feeds the reader the ENTIRE haystack, no retrieval.
 
-    #4718: the mock form passes ``--skip-preflight`` alongside ``--mock`` — a
-    cell with a mocked reader/judge is a wiring check, not a measurement, and
-    ``--mock`` is not a dense-leg waiver. The real form leaves the dense leg
-    required.
+    #4718 note: this cell does NOT take a dense-leg waiver, and must not. It
+    runs `tools/longmem_eval/full_context.py`, which has no dense-leg gate at
+    all (it never reaches `run.py`'s pre-flight) and whose parser accepts only
+    `--mock` — appending `--skip-preflight` here made the built command die at
+    argparse with exit 2. The waiver belongs to the `smoke` builder, whose
+    target IS `run.py`.
     """
     extra = []
     if args.data:
@@ -878,7 +880,7 @@ def cmd_full_context(state: ProtocolState, args: argparse.Namespace) -> None:
     if args.split:
         extra += ["--split", args.split]
     if args.mock:
-        extra += ["--mock", "--skip-preflight"]
+        extra.append("--mock")
     # Timestamp the default cell report path — the cell "rides on the pilot
     # (step 3) AND the 500 (step 5)" (03-scope note): two cell runs must not
     # clobber each other's ceiling measurement. --output overrides.
