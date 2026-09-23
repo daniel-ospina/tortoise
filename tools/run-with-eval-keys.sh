@@ -58,17 +58,38 @@
 
 set -u
 
+# A caller can export a shell FUNCTION through the environment
+# (`BASH_FUNC_<name>%%`) that shadows a builtin — `unset`, `export`, `set`,
+# `printf`, and `builtin` itself, so there is no in-process repair: the repair
+# would run through the shadow. `bash -p` imports NO shell functions and ignores
+# `SHELLOPTS`/`BASH_ENV`, so the launcher re-execs itself once under it, before
+# any builtin that matters runs. The guard uses only `case` (a reserved word,
+# not shadowable) and parameter expansion; `exec` is the one builtin it needs —
+# a caller who shadows `exec` has already broken the final `exec "$@"`.
+# (This is an auditability guard, not a privilege boundary: the invoking
+# principal already supplies the ambient keys and can read them.)
+case "${_RWEK_SANITIZED:-}" in
+  '')
+    _RWEK_SANITIZED=1
+    export _RWEK_SANITIZED
+    exec "${BASH:-bash}" -p "$0" "$@"
+    ;;
+esac
+
+set -u
+
 # An inherited `SHELLOPTS=xtrace` traces `export "$key=$value"` and writes the
 # FULL key to stderr — the channel this tool exists to keep clean for receipts.
-# Turn tracing off before any secret is read.
+# (`-p` already ignores `SHELLOPTS`; this covers an explicit `bash -x`.) Tracing
+# is turned off, and if it is somehow still on the launcher refuses to run
+# rather than print a key.
 case $- in *x*) set +x ;; esac
-
-# A caller can export a shell FUNCTION (`BASH_FUNC_name%%` in the environment)
-# that shadows a builtin this script relies on — including `declare`, `builtin`
-# and `command`. It is caller-controlled, so it crosses no privilege boundary,
-# but there is no reason to leave the lookup open: drop any such shadow before
-# a builtin is used.
-unset -f command declare builtin 2>/dev/null || true
+case $- in
+  *x*)
+    printf '[eval-keys] FATAL: shell tracing is on and would print a key; refusing to run\n' >&2
+    exit 3
+    ;;
+esac
 
 # The provider keys this wrapper owns — the set the extraction/reader paths
 # actually read:
@@ -195,6 +216,19 @@ sha256_of() {
 # (Or be unset — which is the fail-closed outcome, never a silent fallback to
 # the ambient key.)
 unset "${_RWEK_MANAGED_KEYS[@]}"
+# Prove the strip took. A shadowed `unset` cannot survive the `-p` re-exec
+# above, but the check makes the receipt's honesty local: an ambient key left
+# behind would otherwise be reported with `source=<the .env file>`, which is
+# the exact false-provenance class (#4860) this launcher exists to remove.
+for _rwek_key in "${_RWEK_MANAGED_KEYS[@]}"; do
+  case "${!_rwek_key+x}" in
+    ?*)
+      printf '[eval-keys] FATAL: %s survived the ambient strip; refusing to run\n' \
+        "$_rwek_key" >&2
+      exit 3
+      ;;
+  esac
+done
 
 # ── 2. load `.env` — explicit override for MANAGED keys, fill-if-absent for
 #      everything else (never clobber an explicit TORTOISE_DB_URI). The
@@ -210,12 +244,10 @@ unset "${_RWEK_MANAGED_KEYS[@]}"
 #      this script INHERITED, plus the keys an earlier `.env` line already
 #      filled — never by "is some shell variable set", which would also catch
 #      bash's own non-exported internals (`PS4`, `IFS`, …) and silently drop a
-#      `.env` key naming one. The question is asked with the `declare` BUILTIN
-#      (`builtin declare -p` reveals the `-x` flag), so NO EXTERNAL COMMAND is
-#      consulted — a `printenv` resolved through a caller's PATH (or missing
-#      from it) would have flipped the decision, and an exported
-#      `BASH_FUNC_*` shadow of the builtins is dropped above. "Cannot
-#      determine" therefore has no separate branch to fall into.
+#      `.env` key naming one. The question is asked in-process with the
+#      `declare` BUILTIN (`builtin declare -p` reveals the `-x` flag), so no
+#      external command is consulted and — the launcher having re-exec'd itself
+#      under `bash -p` above — no exported function can shadow it.
 if [ -f "$_RWEK_ENV_FILE" ] && [ -r "$_RWEK_ENV_FILE" ]; then
   while IFS= read -r _rwek_raw || [ -n "${_rwek_raw:-}" ]; do
     _rwek_line=$(trim "${_rwek_raw%$'\r'}")
@@ -268,7 +300,7 @@ if [ -f "$_RWEK_ENV_FILE" ] && [ -r "$_RWEK_ENV_FILE" ]; then
       # set, is never clobbered — `_load_dotenv`'s deliberate semantics. The
       # `declare` builtin reports the `-x` (exported) flag, so this is exactly
       # "is the name in the process environment", with no external command and
-      # no shadowable `command` in the way.
+      # no exported function able to shadow the probe.
       _rwek_decl=$(builtin declare -p "$_rwek_key" 2>/dev/null) || _rwek_decl=
       _rwek_flags=${_rwek_decl#declare -}
       _rwek_flags=${_rwek_flags%% *}

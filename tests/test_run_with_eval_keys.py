@@ -348,22 +348,41 @@ class RunWithEvalKeysTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout, "ambient-wins", r.stderr)
 
-    def test_exported_function_shadowing_a_builtin_cannot_flip_the_decision(self):
-        # A caller can export a FUNCTION that shadows `command`/`declare`. That
-        # is caller-controlled (no privilege boundary), but it must not flip
-        # the fill-if-absent decision: an inherited non-managed var still wins.
-        env_file = Path(self._tmp.name) / "shadow.env"
-        env_file.write_text("EVALTEST_SHADOW=from-dotenv\n", encoding="utf-8")
-        env = self.base_env(EVAL_KEYS_ENV_FILE=str(env_file), EVALTEST_SHADOW="ambient-wins")
-        env["BASH_FUNC_command%%"] = "() { return 0; }"
-        env["BASH_FUNC_declare%%"] = "() { return 0; }"
+    def test_exported_function_shadows_are_neutralized(self):
+        # A caller can export FUNCTIONS that shadow the builtins the strip, the
+        # load and the receipt itself use (`unset`, `export`, `printf`, `set`,
+        # `[`, plus the probe's `command`/`declare`/`builtin`). `bash -p`
+        # imports no shell functions, so the launcher still behaves normally:
+        # the ambient managed key is stripped, the `.env` value is used, and the
+        # receipt is printed.
+        env = self.base_env(
+            EVAL_KEYS_ENV_FILE=str(self.env_file), OPENROUTER_API_KEY=SABOTAGE
+        )
+        for name in (
+            "unset",
+            "export",
+            "printf",
+            "set",
+            "[",
+            "command",
+            "declare",
+            "builtin",
+        ):
+            env[f"BASH_FUNC_{name}%%"] = "() { return 0; }"
         r = self.run_wrapper(
-            ["sh", "-c", 'printf "%s" "${EVALTEST_SHADOW-unset}"'],
+            # `printenv` (not `sh -c printf`) checks the child's key: the
+            # caller's exported `BASH_FUNC_printf%%` is passed through to the
+            # wrapped command, but the LAUNCHER's own receipt must be intact.
+            ["printenv", "OPENROUTER_API_KEY"],
             env=env,
             use_fixture=False,
         )
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(r.stdout, "ambient-wins", r.stderr)
+        # the sabotaged ambient key was stripped and the `.env` value used
+        self.assertEqual(r.stdout.strip(), FIXTURE_OPENROUTER)
+        self.assertNotIn("DEADBEEF", r.stdout)
+        # the receipt still printed (a live shadowed `printf` would silence it)
+        self.assertIn("OPENROUTER_API_KEY source=", r.stderr)
 
     # ── .env parsing semantics (mirrors _load_dotenv) ──────────────────
 
