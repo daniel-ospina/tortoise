@@ -9349,11 +9349,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         params={"sid": session_id},
     ).result_set[0]
     session_existed = bool(session_row[0])
-    # #3681 (server-stamped harness): the capture's harness is resolved from
-    # the SERVER's own record — a session-JWT caller never names one (bare
-    # receipt), and an agent credential can never RELABEL an already-captured
-    # session (the stored harness wins; first-writer-wins). ``body.harness``
-    # only ever introduces a harness on a session the server has not stamped.
+    # #3681 (server-stamped harness): a session-JWT caller never names a
+    # harness (bare receipt), and an agent credential can never RELABEL an
+    # already-captured session — the STORED harness wins (first-writer-wins).
+    # ``body.harness`` only ever introduces a harness on a session the server
+    # has not stamped, and on that fresh-session path it is the CALLER's
+    # declaration, not a server observation (#3700: no credential→harness
+    # binding exists), so ``capture_harness`` is RESOLVED, not OBSERVED.
     stored_harness = session_row[3]
     capture_harness = _observed_capture_harness(org, body.harness,
                                                 stored_harness)

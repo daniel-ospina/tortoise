@@ -489,6 +489,15 @@ export const HARNESS_CAPTURE_STATUS_LABEL = {
   active: `active (${HARNESS_ATTRIBUTION})`,
 }
 
+// #3700: the per-harness FAILURE sub-line's wording — the sibling of the labels
+// above, kept in this module so every word of the card has one home (the
+// derivation reads state and guards the null case; it authors no copy). The
+// caveat TRAILS the server's message because this sentence renders inside a
+// `role="alert"` live region: an assertive announcement must lead with the
+// failure the user has to act on, not with the provenance caveat.
+export const HARNESS_CAPTURE_LAST_ATTEMPT = (detail) =>
+  `Last attempt — ${detail} (${HARNESS_ATTRIBUTION})`
+
 // #1710: bare command with a comment lead-in — paste-safe in a terminal.
 export const HARNESS_PERSIST = (key) =>
   `# Persist the key for future sessions — add this line to your shell profile (~/.zshrc, ~/.bashrc, or equivalent):\nexport TORTOISE_API_KEY=${key}`

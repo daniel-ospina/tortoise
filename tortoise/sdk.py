@@ -3390,8 +3390,12 @@ class TortoiseSDK:
         """Capture an agent session into the graph (#312 delta 4, #822).
 
         Mirrors the hosted POST /v1/sessions logic minus quota/auth. The
-        hosted lane resolves the capture harness from the server's own record
-        (#3681's ``_observed_capture_harness``); this SDK path stores the
+        hosted lane resolves the capture harness through
+        ``_observed_capture_harness`` — on a RE-capture that is the server's own
+        stored record (#3681: first-writer-wins, so a re-POST can never
+        relabel); on a FRESH session it is the caller's ``body.harness``
+        (#3700: no credential→harness binding exists, so the server never
+        OBSERVES which harness captured). This SDK path stores the
         caller-supplied ``harness`` (selfhost/embedded has no server
         credential lane to resolve it from). See the note at the
         ``if harness:`` clause below. Turns become episodic Points keyed
@@ -3518,9 +3522,11 @@ class TortoiseSDK:
         # #1727 Slice 2 (Task 11): harness is set set-only-when-present (None
         # NEVER erases a stored value) — the conditional clause keeps the
         # query valid in both embedded and Docker lanes (no unused binding).
-        # NOT hosted parity (#3681): the hosted lane resolves the harness from
-        # the server's own record (``_observed_capture_harness``) so a re-POST
-        # of an existing session_id cannot RELABEL it; this SDK path still
+        # NOT hosted parity (#3681): the hosted lane resolves the harness
+        # through ``_observed_capture_harness`` — it keeps the STORED harness
+        # on a re-POST of an existing session_id so the harness cannot RELABEL,
+        # and takes the caller's ``body.harness`` on a fresh one (#3700: the
+        # harness is never server-observed either way); this SDK path still
         # writes the caller-supplied value (selfhost/embedded has no server
         # credential lane). Do not read the clause below as a parity pin.
         # Review PR #1827 (parity with hosted_api.py): created_at uses

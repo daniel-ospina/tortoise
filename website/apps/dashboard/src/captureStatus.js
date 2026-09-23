@@ -8,7 +8,7 @@
 // table below. harnesses.js is pure constants (no browser globals, no imports),
 // so this import keeps the module node --test-testable and cannot cycle.
 import {
-  HARNESS_ATTRIBUTION,
+  HARNESS_CAPTURE_LAST_ATTEMPT,
   HARNESS_CAPTURE_STATUS_LABEL,
   HARNESS_CAPTURE_SUPPORT,
 } from './harnesses.js'
@@ -122,17 +122,17 @@ export function lastErrorForHarness(state, harness) {
   return state[`session_capture_last_error_${harness}`] || null
 }
 
-// #3700: the per-harness FAILURE sub-line's rendered sentence — the sibling of
-// the status pill, and the same defect class. `session_capture_last_error_<h>`
-// is written by the same `_observed_capture_harness` resolution as the receipt
-// (`stored or claimed`, see tortoise/capture_receipts.py), so its harness is
-// likewise the CALLER's declaration and must not render as the harness whose
-// attempt failed. Funnelling the sentence through here keeps the attribution on
-// the one shared constant instead of at a call site that can forget it.
-// Returns null when there is no recorded error, so callers can use it directly
-// as the render guard.
+// #3700: the per-harness FAILURE sub-line — the sibling of the status pill,
+// and the same defect class. `session_capture_last_error_<h>` is written by the
+// same `_observed_capture_harness` resolution as the receipt (`stored or
+// claimed`, see tortoise/capture_receipts.py), so its harness is likewise the
+// CALLER's declaration and must not render as the harness whose attempt failed.
+// This owns the state read and the null guard and delegates the WORDING to
+// `HARNESS_CAPTURE_LAST_ATTEMPT` (harnesses.js), so no copy is authored here and
+// the attribution stays on the one shared constant. Returns null when there is
+// no recorded error, so callers can use it directly as the render guard.
 export function captureErrorForHarness(state, harness) {
   const error = lastErrorForHarness(state, harness)
   if (!error) return null
-  return `Last attempt (${HARNESS_ATTRIBUTION}) — ${error}`
+  return HARNESS_CAPTURE_LAST_ATTEMPT(error)
 }

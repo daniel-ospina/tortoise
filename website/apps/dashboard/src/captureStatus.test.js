@@ -287,7 +287,7 @@ test('#3700: caller-declared harness states render as agent-reported, never a se
   //      is no error, since the caller uses it as its own render guard.
   const errState = { ...st, session_capture_last_error_claude: 'timed out' }
   assert.equal(captureErrorForHarness(errState, 'claude'),
-    `Last attempt (${HARNESS_ATTRIBUTION}) — timed out`)
+    `Last attempt — timed out (${HARNESS_ATTRIBUTION})`)
   assert.equal(lastErrorForHarness(errState, 'claude'), 'timed out',
     'the raw accessor keeps returning the bare message')
   assert.equal(captureErrorForHarness(st, 'claude'), null)

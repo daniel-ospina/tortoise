@@ -1435,8 +1435,11 @@ function claimIntentInFlight() {
   // harness, which this repo does not have).
   const harnessCaptureClaim = captureClaimForHarness(onboarding, wizardHarness)
   // #3700: the RENDERED per-harness status word (agent-attributed for the
-  // caller-declared states) — derived here so both done-screen sentences read
-  // the ONE shared label table via the helper, never the raw table.
+  // caller-declared states) — the done screen's `install-pending` sentence is
+  // its single consumer here, and it reads the ONE shared label table through
+  // the helper, never the raw table. (The Settings pill calls the helper
+  // directly; the `present` / `future` sentences are literal prose that names
+  // no harness.)
   const harnessCaptureStatusLabel = captureStatusLabelForHarness(onboarding, wizardHarness)
   const wizardFocusInit = React.useRef(false)
   const lastWizardStepRef = React.useRef(-1)  // #2361 r4: focus only on step change

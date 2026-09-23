@@ -298,14 +298,19 @@ _CONV = [
 ]
 
 
-class TestCaptureReceiptHarnessIsServerResolved:
+class TestCaptureReceiptHarnessResolution:
     """RED mutation: keep ``_capture_receipt_key(body.harness)`` → capture #2
     (a forged ``body.harness='cursor'`` replay of a claude session) writes
     ``session_capture_receipt_cursor`` → the 'no cursor receipt' assertion
     fails. Also: revert ``_observed_capture_harness`` to return ``claimed``
     for a session credential → the bare-receipt assertion fails.
     GREEN: the legitimate forms — a fresh agent capture names its own harness,
-    and a re-capture keeps the server's recorded harness."""
+    and a re-capture keeps the server's recorded harness.
+
+    #3700 — the class is named *Resolution*, not *IsServerResolved*: the
+    harness is RESOLVED (stored-or-claimed), never OBSERVED. Only the
+    RE-capture leg is the server's own record; on the fresh leg it is the
+    caller's declaration."""
 
     @pytest.fixture()
     def env(self, tmp_path, monkeypatch):
