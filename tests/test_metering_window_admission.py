@@ -58,11 +58,14 @@ import tortoise.metering as metering
 import tortoise.supabase_control as sc
 from tortoise import mcp_auth
 from tortoise import mcp_server as mcp
+from tortoise import operator_alert as oa
+from tortoise.alert_store import AlertStore
 from tortoise.ask_lane import (
     _reset_ask_reader_cache_for_tests,
     run_ask_lane,
 )
 from tortoise.hosted_api import app
+from tortoise.hosted_backup import MemoryStorage
 from tortoise.sdk import TortoiseSDK
 
 from tests._http_fixtures import patched_tortoise_sdk
@@ -102,11 +105,17 @@ def _forced_window_error():
 
 
 def _unmetered_lanes(caplog) -> list[str]:
-    """The lane tokens of every operator alert captured at ERROR."""
+    """The lane tokens of every operator alert captured at ERROR.
+
+    Records are matched by MESSAGE, not by logger NAME: a name filter would
+    blind this to ``ask_lane``'s direct log line. A record containing the
+    marker but no ``lane=`` token is skipped rather than sliced — the pre-#3981
+    shape would have raised ``IndexError`` on it.
+    """
     lanes: list[str] = []
     for rec in caplog.records:
         msg = rec.getMessage()
-        if "UNMETERED INCREMENT" not in msg:
+        if "UNMETERED INCREMENT" not in msg or "lane=" not in msg:
             continue
         lanes.append(msg.split("lane=", 1)[1].split(" ", 1)[0])
     return lanes
@@ -223,6 +232,156 @@ def test_alert_import_failure_never_becomes_a_user_facing_error(monkeypatch,
                             nodes_written=1)  # must NOT raise
     assert _unmetered_lanes(caplog) == ["write_op"], (
         [rec.getMessage() for rec in caplog.records])
+
+
+def _op_channels():
+    """A REAL ``AlertStore`` over fake GitHub + Telegram transport."""
+    class _Ch:
+        def __init__(self):
+            self.issues: dict[int, str] = {}
+            self.telegram: list[str] = []
+            self._next = 1
+
+        def file_issue(self, title, body):
+            n = self._next
+            self._next += 1
+            self.issues[n] = title
+            return n
+
+        def close_issue(self, number, comment=None):
+            pass
+
+        def search_open(self, kind, org_id=""):
+            return [n for n, t in self.issues.items() if f"[DR] {kind}" in t]
+
+        def push_telegram(self, text):
+            self.telegram.append(text)
+
+    ch = _Ch()
+    store = AlertStore(
+        MemoryStorage(), file_issue=ch.file_issue, close_issue=ch.close_issue,
+        search_open=ch.search_open, push_telegram=ch.push_telegram,
+        repo="daniel-ospina/tortoise", assignee="daniel-ospina")
+    return store, ch
+
+
+@pytest.mark.parametrize("call,lane", [
+    (ha._alert_unmetered, "write_op"),
+    (mcp._alert_unmetered, "mcp_write_op"),
+])
+def test_the_import_guard_fallbacks_still_alert(monkeypatch, caplog, call, lane):
+    """The fallback that runs when ``tortoise.metering`` itself is unavailable
+    must ALERT, not merely log.
+
+    That branch is the one case where the ledger AND the reporter are both down,
+    so a log line on an ephemeral rootfs is the #3677 silent-loss class. REDs if
+    the fallback is reverted to log-and-return (the incident never files).
+    """
+    from tortoise.quota import QuotaCheckError
+
+    store, ch = _op_channels()
+    monkeypatch.setattr(oa, "alert_store", lambda: store)
+    monkeypatch.setitem(sys.modules, "tortoise.metering", None)
+    with caplog.at_level(logging.ERROR, logger="tortoise.metering"):
+        call(lane, "org-fallback", QuotaCheckError("x"))  # must NOT raise
+    assert _unmetered_lanes(caplog) == [lane], (
+        [rec.getMessage() for rec in caplog.records])
+    assert oa.join_operator_alerts() == 0
+    assert list(ch.issues.values()) == [
+        f"[DR] {oa.UNMETERED_INCREMENT_KIND} — org-fallback"], ch.issues
+    assert ch.telegram, "the fallback incident must also push"
+
+
+def test_the_ask_lane_fallback_still_alerts(tmp_path, monkeypatch, caplog):
+    """The THIRD import-guard fallback (inline in ``run_ask_lane`` step 7).
+
+    A half-broken ``tortoise.metering`` (the cost-rate helpers importable, the
+    writer not) is installed, so the writer import fails exactly as a partial
+    deploy does — without breaking the rest of the ask lane. REDs if that
+    fallback is reverted to log-only. (Embedded-DB lane; see the sibling ask
+    test below for the known redislite interaction.)
+    """
+    import types
+
+    store, ch = _op_channels()
+    monkeypatch.setattr(oa, "alert_store", lambda: store)
+
+    stub = types.ModuleType("tortoise.metering")
+    stub.estimate_ask_cost_usd = metering.estimate_ask_cost_usd
+    stub.select_ask_meter_rates = metering.select_ask_meter_rates
+    monkeypatch.setitem(sys.modules, "tortoise.metering", stub)
+
+    class _Reader:
+        model = "deepseek-v4-flash"
+        route = "deepseek-direct"
+
+        def complete(self, *, system, user):
+            return "served answer"
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(ask_lane_mod, "_default_ask_reader_factory",
+                        lambda: _Reader())
+    sdk = TortoiseSDK(str(tmp_path / "askfallback3981.db"))
+    try:
+        with caplog.at_level(logging.ERROR, logger="tortoise.ask_lane"):
+            result = run_ask_lane(sdk, "what is the plan?", org_id="org-fb")
+    finally:
+        sdk.close()
+    assert result["answer"] == "served answer"
+    assert _unmetered_lanes(caplog) == ["ask_ledger"], (
+        [rec.getMessage() for rec in caplog.records])
+    assert oa.join_operator_alerts() == 0
+    assert list(ch.issues.values()) == [
+        f"[DR] {oa.UNMETERED_INCREMENT_KIND} — org-fb"], ch.issues
+
+
+def test_dropped_increment_files_an_operator_incident(request, monkeypatch):
+    """The mandated end-to-end deliverable: a REAL inverted anchor → the real
+    writer → a real ``AlertStore`` → a filed GitHub issue + Telegram push.
+
+    Asserts the INCIDENT, never merely a log record: the log line was already
+    present before #3981, so a log-only assertion would be satisfied by the
+    defect. REDs if the reporter stops dispatching (OAM1) or the dispatcher
+    becomes a no-op (OAM2).
+    """
+    sdk, tid = request.getfixturevalue("reg_org")
+    _anchor(sdk._get_registry(), tid,
+            "2026-10-03T00:00:00+00:00", "2026-09-03T00:00:00+00:00")
+    store, ch = _op_channels()
+    monkeypatch.setattr(oa, "alert_store", lambda: store)
+
+    ha._record_write_op({"org_id": tid, "tier": "pro"})  # must NOT raise
+    assert oa.join_operator_alerts() == 0
+
+    assert list(ch.issues.values()) == [
+        f"[DR] {oa.UNMETERED_INCREMENT_KIND} — {tid}"], ch.issues
+    assert ch.telegram, "the incident must push, not only file"
+    body = next(iter(ch.issues))
+    assert body  # keep the number for a readable failure
+
+
+def test_ambiguous_org_ids_share_one_incident_and_throttle(monkeypatch):
+    """``None`` and ``""`` collapse onto ONE subject and one throttle key.
+
+    The stdio lanes carry no org context, so every such drop would otherwise
+    look like a distinct incident and a distinct throttle bucket — an alert
+    storm from one broken deployment. The rendered subject is EMPTY (AlertStore
+    never renders a ``_`` placeholder), so the title carries no org suffix.
+    """
+    store, ch = _op_channels()
+    monkeypatch.setattr(oa, "alert_store", lambda: store)
+
+    for org in (None, "", None, ""):
+        oa.alert_operator(oa.UNMETERED_INCREMENT_KIND, org,
+                          {"lane": "mcp_write_op", "error_type": "X"})
+    assert oa.join_operator_alerts() == 0
+
+    assert list(ch.issues.values()) == [f"[DR] {oa.UNMETERED_INCREMENT_KIND}"], (
+        ch.issues)
+    assert oa._ATTEMPT and len(oa._ATTEMPT) == 1
+    assert next(iter(oa._ATTEMPT)) == (oa.UNMETERED_INCREMENT_KIND, "")
 
 
 # ── Site 2: hosted_api capture ledger emit ────────────────────────────────

@@ -914,6 +914,14 @@ def _alert_unmetered(lane: str, org_id: str | None,
             "UNMETERED INCREMENT (#3981): lane=%s team=%s error=%s: %s "
             "(metering module unavailable)", lane, org_id or "<none>",
             type(error).__name__, error)
+        # The fallback still ALERTS — a log line on an ephemeral Fly rootfs is
+        # the #3677 loss class this lane exists to remove, and this is the one
+        # case where the ledger AND the reporter are both down. The kind
+        # constant lives in ``operator_alert``, importable when ``metering`` is not.
+        with contextlib.suppress(Exception):
+            from tortoise.operator_alert import alert_unmetered_increment
+
+            alert_unmetered_increment(lane, org_id, error)
         return
     report_unmetered_increment(lane=lane, org_id=org_id, error=error)
 

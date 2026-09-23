@@ -1138,6 +1138,56 @@ def real_analytics_counts(_analytics_alert_isolation):
     return _REAL_ANALYTICS_COUNTS
 
 
+_REAL_OPERATOR_ALERT_STORE = None
+
+
+@pytest.fixture(autouse=True)
+def _operator_alert_isolation(monkeypatch):
+    """Never let a test build a real #3981 operator incident.
+
+    Patches the operator plane's OWN seam (``operator_alert.alert_store``) so it
+    is isolated INDEPENDENTLY of ``_analytics_alert_isolation`` — notably, a test
+    that restores the real analytics builder (``real_analytics_alert_store``)
+    must not thereby un-isolate this plane. Resets the throttle/latch/bound and
+    asserts the pool drained, so a worker cannot run after the test (and cannot
+    write state into the next test). A test that needs the REAL builder requests
+    ``real_operator_alert_store`` — a test that calls it under the autouse patch
+    would silently get ``None`` and could never satisfy its own assertion.
+    """
+    global _REAL_OPERATOR_ALERT_STORE
+    import tortoise.operator_alert as oa
+
+    if _REAL_OPERATOR_ALERT_STORE is None:
+        _REAL_OPERATOR_ALERT_STORE = oa.alert_store
+    monkeypatch.setattr(oa, "alert_store", lambda: None)
+    oa.reset_operator_alert_state_for_tests()
+    yield
+    # Honest limit: a handle aged past _INFLIGHT_STALE_S is dropped from _HANDLES,
+    # so a genuinely wedged worker is untracked here and this join cannot speak for
+    # it (its reservation is deliberately still held). This asserts the normal
+    # case — nothing an individual test dispatched is still running when it ends.
+    assert oa.join_operator_alerts(timeout=5.0) == 0, (
+        "operator-alert pool did not drain")
+
+
+@pytest.fixture
+def real_operator_alert_store(monkeypatch, _operator_alert_isolation):
+    """OPT OUT of ``_operator_alert_isolation`` for the builder-under-test.
+
+    Restores the captured REAL ``operator_alert.alert_store``. As with
+    ``real_analytics_alert_store``, this does NOT itself patch the object store
+    or the egress callables: a requester that restores the real builder without
+    them can reach real infrastructure, so every requester must install both.
+    """
+    import tortoise.operator_alert as oa
+
+    assert _REAL_OPERATOR_ALERT_STORE is not None, (
+        "real builder not captured — _operator_alert_isolation must run first"
+    )
+    monkeypatch.setattr(oa, "alert_store", _REAL_OPERATOR_ALERT_STORE)
+    return _REAL_OPERATOR_ALERT_STORE
+
+
 @pytest.fixture
 def force_sparse_tfidf(monkeypatch):
     """#2573/#2772: pin the sparse TF-IDF fallback (no embedder) for the test.
