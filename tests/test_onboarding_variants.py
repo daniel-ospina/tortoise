@@ -215,7 +215,29 @@ _ALLOWED_PROMPT_TOKENS = {
 }
 _NEGATION = re.compile(r"\b(no|not|isn'?t|aren'?t|wasn'?t|never|without|nor)\b",
                        re.I)
+# ASCII hyphen and `(` are clause breaks too (#4365 review round 10).
+_CLAUSE_BREAK = re.compile(r"[\u2014;.,:!?()-]")
 _URL_SHAPED = re.compile(r"//\S+|\b[a-z0-9-]+(?:\.[a-z0-9-]+)+/\S*", re.I)
+
+
+def _install_claims(line: str) -> list:
+    r"""Install-family verbs in `line` that are NOT negated in their own clause.
+
+    A negation only counts when it is ADJACENT to the verb: the gap may hold an
+    adverb (`not currently installed`) but no clause break, so the approved
+    sentence's own "not a skill" cannot launder a LATER verb — and
+    `reinstall`/`preinstall` are seen because the verb match is ``\w*install\w*``
+    rather than a word-boundary-anchored `install` (#4365 review round 10).
+    """
+    claims = []
+    for m in re.finditer(r"\w*install\w*", line, re.I):
+        before = line[max(0, m.start() - 30):m.start()]
+        negations = list(_NEGATION.finditer(before))
+        adjacent = bool(negations) and not _CLAUSE_BREAK.search(
+            before[negations[-1].end():])
+        if not adjacent:
+            claims.append(m.group(0))
+    return claims
 
 
 def _scan_rendered_onboarding(label: str, text: str) -> None:
@@ -244,19 +266,14 @@ def _scan_rendered_onboarding(label: str, text: str) -> None:
                 f"document (got {url!r}): {line.strip()!r}")
         if not re.search(r"install|skills?", line, re.I):
             continue
-        # An install-family VERB makes the line a claim unless it is negated.
-        # `\binstall\w*` missed `reinstall`/`preinstall` because the trigger is
-        # an unanchored substring test, and a fixed-width lookbehind made
-        # `isn't installed` / `not currently installed` false REDs while `/i`
-        # turned `NOT install` into a negation (#4365 review round 9).
-        claims = [m for m in re.finditer(r"\w*install\w*", line, re.I)
-                  if not _NEGATION.search(line[max(0, m.start() - 30):m.start()])]
-        exempt = (re.search(r"not a skill", line, re.I)
-                  or re.search(r"onboarding instructions", line, re.I))
-        assert exempt and not claims, (
+        assert not _install_claims(line), (
             f"{label}: onboarding may only be mentioned as the instructions "
             f"document, in the shipped wording — not as an install: "
             f"{line.strip()!r}")
+        assert (re.search(r"not a skill", line, re.I)
+                or re.search(r"onboarding instructions", line, re.I)), (
+            f"{label}: onboarding may only be mentioned as the instructions "
+            f"document, in the shipped wording: {line.strip()!r}")
 
 
 def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
@@ -342,8 +359,34 @@ def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
     # …including the SHARED declaration every prompt interpolates, which lives
     # outside all four `_harness_branch` bodies and so was missed by the loop
     # above entirely (#4365 review round 9).
-    declared = re.search(r"const onboardingInstructions = `([^`]*)`", wizard)
+    #
+    # FAIL CLOSED ON ITS EXTENT. The capture below stops at the first backtick
+    # CHARACTER, so a declaration written as a concatenation
+    # (`` `…` + `. Then install the tortoise-rebuild skill.` ``) or containing a
+    # nested or bare backtick template (`` `${`${''}`} `` / `` ${'`'} ``) would
+    # truncate it — and the appended text, which all four live prompts render,
+    # would never be scanned. Counting the backticks in the STATEMENT catches
+    # every one of those shapes (#4365 review round 10).
+    declared = re.search(r"const onboardingInstructions =\s*`([^`]*)`", wizard)
     assert declared, "the shared onboarding-instructions line must be declared"
+    # FAIL CLOSED ON ITS EXTENT. The capture above stops at the first backtick
+    # CHARACTER, so a declaration written as a concatenation
+    # (`` `…` + `. Then install the tortoise-rebuild skill.` ``) or carrying a
+    # nested / bare-backtick template (`` `${`${''}`} `` / `` ${'`'} ``) would
+    # truncate it — and the appended text, which all four live prompts render,
+    # would never be scanned. The declaration must therefore BE its template:
+    # the very next character after the closing backtick is the `;` (#4365
+    # review round 10).
+    assert wizard[declared.end()] in (";", "\n"), (
+        "the shared onboarding-instructions line must end at its template's "
+        "closing backtick — a same-line concatenation or a nested/"
+        f"backtick-expression template truncates the scan and its extra text "
+        f"is never checked (found {wizard[declared.end():declared.end() + 12]!r} "
+        f"after it)")
+    assert not re.match(r"\s*[+.]", wizard[declared.end():]), (
+        "the shared onboarding-instructions line must not be continued with "
+        "`+` concatenation on a following line — the scan stops at the first "
+        "template and would never check the rest")
     _scan_rendered_onboarding("onboardingInstructions", declared.group(1))
     # …and it must SAY something. Interpolating an empty constant satisfied the
     # per-prompt assertions while the four live prompts lost the whole point of

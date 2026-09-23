@@ -195,7 +195,10 @@ test('#4365: no connect copy claims onboarding as an installed skill, and each n
       // clause break, so a negation in a previous clause cannot launder a
       // following claim.
       const NEGATION = /\b(no|not|isn'?t|aren'?t|wasn'?t|never|without|nor)\b/gi
-      const CLAUSE_BREAK = /[\u2014;.,:!?)]/
+      // ASCII hyphen and `(` belong here too: `NOT a skill - reinstall it` and
+      // `NOT a skill (it is not installed) - reinstall it` both laundered a
+      // later verb when only the em dash was a clause break (#4365 round 10).
+      const CLAUSE_BREAK = /[\u2014;.,:!?()-]/
       const negated = (before) => {
         let last = null
         for (const n of before.matchAll(NEGATION)) last = n
