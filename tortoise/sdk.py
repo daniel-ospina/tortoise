@@ -8,6 +8,22 @@ referenced in the builder capability catalog (onboarding) — catalog module
 'Session recorder' (``TortoiseSDK.capture_session`` is the SDK recorder
 facade) — tortoise/tool_registry.py CAPABILITY_CATALOG. If you add or rename
 an extractor/indexer, update the catalog reference.
+
+⛔ SURFACE APPROVAL MANDATE (#4282, owner ruling)
+    The public methods of ``TortoiseSDK`` — every ``def``/``async def`` in the
+    class body whose name does not begin with ``_`` — ARE the SDK surface. You
+    may NOT add, remove, or rename one without human approval. The surface is the
+    contract every agent and customer integration is built on, so changing it
+    materially affects customer outcomes. GET APPROVAL FROM DANIEL FIRST — repo
+    `AGENTS.md` → "USER QUESTIONS" / "DECISION RELAY" — and record it before the
+    PR. The full procedure is in `CONTRIBUTING.md` ("The MCP tool surface and
+    public SDK methods cannot grow by accident") and
+    `docs/product/sdk-surface-declaration.md`.
+
+    `tools/surface-guard.py` is a DRIFT control, NOT an approval gate: an expansion
+    that updates this class and `config/surface-manifest.yml` consistently PASSES
+    it. It cannot tell an approved addition from an unapproved one — Daniel's
+    review is what carries the approval.
 """
 from __future__ import annotations  # noqa: I001
 
@@ -20702,6 +20718,44 @@ class TortoiseSDK:
             params={"key": self._CALIBRATION_MARKER_KEY},
         ).result_set
         return bool(rows)
+
+    # ── #2814: rebuild config third state ─────────────────────────
+    # PRIVATE on purpose: `tools/sdk_rename_table.py::_validate` fails any
+    # PUBLIC SDK method with no canonical group/disposition row, so a public
+    # name here would expand the advertised SDK surface and require
+    # `docs/product/canonical-sdk-methods.md` + `beta-sdk-surface.md` + a
+    # regenerated rename table — a surface expansion a data-loss fix has no
+    # reason to make. The marker is an internal durability signal; the
+    # operator surface is the CLI (see `tortoise/__main__.py`). Both delegate to
+    # the module-level helpers so the reader/writer contract has ONE driver.
+    #
+    # The imports are FUNCTION-LOCAL, and that is load-bearing: the generated
+    # rename table (`docs/product/sdk-rename-table.md`) cites `sdk.py` LINE
+    # NUMBERS, so a two-line import at the top of this file re-stales every
+    # citation below it (`tests/test_sdk_rename_table.py::test_part_a_*`,
+    # `::test_check_mode_is_clean`) — a documentation-drift failure with no
+    # relation to this fix. These methods sit AFTER the last cited line, so
+    # importing here shifts nothing. (Same reason `_config_classes()` imports
+    # `PACK_INSTALL_LABEL` locally in `projection/__init__.py`.)
+    def _config_reset_state(self) -> dict | None:
+        """The sticky `config_reset` marker's properties, or None if never set.
+
+        None means "no reset recorded" — which is NOT the same as "config is
+        known good": the marker is only written when the restore provably
+        failed, or when a pre-preservation rescue file left the state unknown.
+        """
+        from .projection import read_config_reset
+        return read_config_reset(self._get_proj().g)
+
+    def _clear_config_reset(self) -> bool:
+        """Clear the sticky `config_reset` marker; True when one was present.
+
+        The only way to clear it: `rebuild_all` never does (that is what makes
+        the marker a reliable third state). Call it after re-provisioning the
+        configuration the marker reported missing.
+        """
+        from .projection import clear_config_reset
+        return clear_config_reset(self._get_proj().g)
 
 
 class _V2SessionMock:

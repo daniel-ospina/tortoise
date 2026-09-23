@@ -79,11 +79,15 @@ surfaces:
   # surface, and `core` is only matched when nothing else matched — so `api`
   # is what makes these run on an api-only change to the file they guard.
   - test_onboarding_truth_surface.py
-  # #3287: the selfhost health probes must not ride the loop's SHARED default
-  # executor — a starved readiness probe returned a false 503 for a healthy DB
-  # (measured 6020 ms, probe never ran), which fails publish-selfhost.yml. Dual
-  # registration like test_health_ready_nonblocking.py: the file it guards is
-  # tortoise/selfhost.py, which selects the `api` surface.
+  # #3287/#2988/#3243: the selfhost health endpoints must not share fate with
+  # work — the readiness probe rides its own daemon pool (a starved readiness
+  # probe returned a false 503 for a healthy DB, measured 6020 ms with the probe
+  # never run, which fails publish-selfhost.yml), and /health reads an in-memory
+  # snapshot refreshed by a background coordinator (so a saturated executor
+  # cannot delay it, and the projection cold-start allowance can ride the
+  # refresher instead of the request path). Dual registration like
+  # test_health_ready_nonblocking.py: the file it guards is tortoise/selfhost.py,
+  # which selects the `api` surface.
   - test_selfhost_health_probe_executor.py
   - test_sentry.py
   - test_telemetry_registration.py
@@ -366,6 +370,10 @@ surfaces:
   # registered under `core` because `tortoise/capture_spool.py` and
   # `tortoise/claude-hooks/` match no named surface and fall through to `core`.
   - test_capture_spool.py
+  # #2814: guards tortoise/__main__.py's rebuild reporting (the CLI is the
+  # operator surface for the config third state); a __main__-only PR would
+  # otherwise select `api` and never run it.
+  - test_rebuild_config_preservation.py
   battery:
   - test_battery_arms.py
   # (removed a duplicate test_battery_derive_truth_leg.py entry here on the
@@ -550,8 +558,9 @@ surfaces:
   # runs on the PR that edits the gate — pinned by test_ci_selection.py.
   - test_finding_provenance.py
   - test_health_client_effect.py  # #3811: /health client-visible effect over a real port (dual: api)
+  - test_branch_reaper.py   # #4408: local-branch reaper — PR-state classification + safety guards
   - test_health_ready_nonblocking.py  # #2988: /health/ready off-loop + bounded probes
-  - test_selfhost_health_probe_executor.py  # #3287: selfhost probes own their pool (dual-registered)
+  - test_selfhost_health_probe_executor.py  # #3287/#2988/#3243: selfhost health probes (dual-registered)
   - test_transport_wait_bound.py  # #3834: transport wait bound + cold-half gate wiring (dual: api)
   # #2877: DB-free guards that a dead backup watcher degrades /health (the file
   # it guards, tortoise/hosted_api.py, selects the `api` surface, so it is
@@ -854,6 +863,11 @@ surfaces:
   - test_pre_migration_safety.py
   - test_probe_json_mode.py
   - test_projection.py
+  # #2814: authoritative-config durability across rebuild_all — the config
+  # registry + sidecar section live in tortoise/projection/ (core fallback),
+  # and pack_state/pack_manifest_store are the writer modules whose labels
+  # the registry must agree with.
+  - test_rebuild_config_preservation.py
   - test_projection_embedded_socket_timeout.py  # #3350: embedded lane socket timeout + bounded retry (carve-out)
   - test_projection_lifecycle.py
   - test_projection_maxmemory_message.py  # #2981: a full-but-healthy DB is not corrupt — maxmemory write-refusal gets its own error, never the rebuild advice
@@ -1350,6 +1364,7 @@ slow_files:
 - test_migrate_db.py
 - test_pack_shipping_wheel.py
 - test_projection.py
+- test_rebuild_config_preservation.py  # #2814: drives the real full rebuild_all wipe+replay
 - test_projection_embedded_socket_timeout.py  # #3350: embedded lane socket timeout (carve-out)
 - test_projection_lifecycle.py
 - test_reaper.py
@@ -1402,6 +1417,10 @@ carve_out:
 - test_projection_lifecycle.py
 - test_reaper.py
 - test_reaper_orphan.py
+# #2814: authoritative-config durability across rebuild_all (the embedded
+# carve-out is load-bearing — the pins exercise the real unconditional wipe,
+# which the server-side bulk-wipe guard refuses on a non-test graph).
+- test_rebuild_config_preservation.py
 - test_redis_guard.py
 - bench/test_smoke_embedded.py
 push_extra: []
@@ -1609,11 +1628,11 @@ durations:
   test_signup_token_revoke.py: 8.0
   test_w4_why_enrichment.py: 8.0
   test_capture_loop_responsiveness.py: 7.7
-  # #3287: 17 cases — structural AST pins plus behavioural starvation tests that
-  # park real daemon-pool workers on threading.Event gates. Measured ~7.4s in
-  # the embedded lane. FIRST ESTIMATE; re-measure from the first post-merge
-  # junit artifact rather than trusting it.
-  test_selfhost_health_probe_executor.py: 7.4
+  # #2988/#3243: AST pins plus behavioural tests that park real daemon-pool
+  # workers on threading.Event gates and drive a reachable cold-start through
+  # the real probe. The weight is a measured estimate — re-measure from the
+  # first post-merge junit artifact rather than trusting it.
+  test_selfhost_health_probe_executor.py: 28.1
   test_writer_inventory.py: 7.3
   test_decide.py: 7.2
   test_onboarding_endpoints.py: 7.2
@@ -1670,6 +1689,7 @@ durations:
   # file holds the margin higher than removing it.
   test_transport_wait_bound.py: 2.0
   test_collision_preflight.py: 3.0
+  test_branch_reaper.py: 2.0  # new file: no main junit measurement yet; flat default
   test_control_plane_offload_3498.py: 2.7  # #3498: control-plane offload seam
   # #4015: new file in this pool with no CI junit measurement yet — entered at
   # the flat 2.0s default under the #3400/#4221 policy above (no DB, no network:
