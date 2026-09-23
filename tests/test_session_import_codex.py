@@ -556,7 +556,7 @@ def test_a_spool_write_failure_cannot_mask_the_honest_error(
 def test_an_already_filed_entry_does_not_promise_a_filing(
         tmp_path, monkeypatch, codex_jsonl, capsys):
     """TRUTHFUL OUTPUT: a drain that already filed this exact content SKIPS the
-    entry, so the message must not say "a later drain will file it"."""
+    entry, so the message must not promise a filing it will not perform."""
     from tortoise.__main__ import _cmd_sessions_import
     from tortoise.capture_spool import PostOutcome, flush_spool, spool_dir
 
@@ -573,7 +573,7 @@ def test_an_already_filed_entry_does_not_promise_a_filing(
     with mock.patch("urllib.request.urlopen", boom):
         assert _cmd_sessions_import(args) == 1
         ctx = capsys.readouterr().err
-        assert "a later drain will file it" in ctx, ctx
+        assert "tortoise session drain" in ctx, ctx
 
     # File it, then let the SAME session fail again: the copy is now a no-op.
     assert flush_spool(spool_dir(), _post).filed == 1
@@ -583,12 +583,14 @@ def test_an_already_filed_entry_does_not_promise_a_filing(
 
 
 def test_an_oversized_turn_is_clamped_before_spooling(tmp_path, monkeypatch):
-    """The spool's per-entry bound is sized on the CLAMPED maximum, so an
-    unclamped turn can overflow it — and `write_spool_entry` then DISCARDS the
-    entry, losing the session this path exists to save.
+    """The spool stores the CLAMPED turn, matching `session capture`.
 
-    `session capture` clamps to 5000 chars; the import path must match, or the
-    import leg loses large sessions that the capture leg files.
+    `SPOOL_MAX_ENTRY_BYTES` is sized on the clamped maximum (500 turns x 5000
+    chars), so the import path must clamp identically or it stores a different
+    session than the capture leg would. This case pins the CLAMP ITSELF — that
+    the stored content is truncated — not the (arithmetically impossible)
+    overflow: at 5000 chars x 500 turns the worst-case escaping leaves ~1.7 MB
+    of headroom under the 16 MiB bound.
 
     Mutation: spool the unclamped turns — the length assertion REDs."""
     import json as _json
@@ -624,3 +626,29 @@ def test_an_oversized_turn_is_clamped_before_spooling(tmp_path, monkeypatch):
     assert turns, "the oversized session was discarded instead of spooled"
     assert len(turns[0]["content"]) == 5000, (
         f"unclamped turn of {len(turns[0]['content'])} chars reached the spool")
+
+
+def test_remove_spool_entry_unlinks_and_reports(tmp_path):
+    """`remove_spool_entry` is what lets `session verify` take its synthetic
+    probe back out of the spool. It must remove BOTH files (meta + turn log)
+    and report whether anything was there, so a no-op is distinguishable from
+    a removal."""
+    from tortoise.capture_spool import (
+        Snapshot,
+        read_spool_meta,
+        remove_spool_entry,
+        write_spool_entry,
+    )
+
+    root = tmp_path / "spool"
+    write_spool_entry(root, Snapshot(
+        session_id="probe-1", turns=list(_EXPECTED_TURNS), source="probe",
+        machine_id="m", model=None, harness="codex"))
+    assert read_spool_meta(root, "probe-1") is not None
+
+    assert remove_spool_entry(root, "probe-1") is True
+    assert read_spool_meta(root, "probe-1") is None
+    # Nothing left for a drain to find: the log must be gone, not just the meta.
+    assert not list(root.rglob("*probe-1*")), list(root.rglob("*"))
+    # A second call reports honestly that there was nothing to remove.
+    assert remove_spool_entry(root, "probe-1") is False

@@ -4053,8 +4053,11 @@ def _cmd_sessions_import(args) -> int:
                 print(f"Session {session_id} is already filed; the spooled copy "
                       "is a no-op.", file=_sys.stderr)
             else:
-                print(f"Spooled session: {session_id} — a later drain will file "
-                      "it.", file=_sys.stderr)
+                # Name the command: only the claude/pi SessionStart hook
+                # drains automatically, so for a codex/cursor-only install
+                # nothing would file this without the user being told how.
+                print(f"Spooled session: {session_id} — run 'tortoise session "
+                      "drain' to file it.", file=_sys.stderr)
         except Exception as exc:
             print(f"spool write failed: {exc}", file=_sys.stderr)
 

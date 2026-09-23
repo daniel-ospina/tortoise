@@ -455,6 +455,22 @@ def _remove_entry_files(root: Path, session_id: str) -> None:
             path.unlink()
 
 
+def remove_spool_entry(root: Path, session_id: str) -> bool:
+    """Unlink a session's spool entry, returning whether one was there.
+
+    For callers that must leave NOTHING behind for a session they own. The
+    motivating case is ``session verify``: its probe fires the real seam with a
+    SYNTHETIC transcript, so if the import is refused retryably the seam parks
+    the probe in the durable spool — and verify's own cleanup removed only the
+    import receipt. The next automatic drain would then POST the probe into the
+    tenant graph, extracting points from synthetic content (#4714 review).
+    """
+    present = _meta_path(root, session_id).exists() or \
+        _log_path(root, session_id).exists()
+    _remove_entry_files(root, session_id)
+    return present
+
+
 def _discard_entry(root: Path, meta: dict, reason: str, detail: str = "") -> dict:
     """Record the discard FIRST, then remove the entry files.
 

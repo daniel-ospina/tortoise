@@ -995,6 +995,19 @@ def _cleanup(api_url: str, api_key: str, probe_id: str, *,
             result["local_receipt"] = f"removed {local}"
         except OSError as e:
             result["local_receipt"] = f"could not remove {local}: {e}"
+    # The probe writes a SYNTHETIC transcript and fires the real seam, so a
+    # RETRYABLE import refusal parks it in the durable spool (the #4714 fix).
+    # The next automatic drain would POST that probe into the tenant graph and
+    # extract points from synthetic content — so the entry must go with the
+    # probe. Reported like the receipt: dropped, never fatal on its own (#4714
+    # review).
+    try:
+        from tortoise.capture_spool import remove_spool_entry, spool_dir
+
+        if remove_spool_entry(spool_dir(), probe_id):
+            result["local_spool"] = "removed"
+    except Exception as e:      # pragma: no cover - defensive, mirrors the hook
+        result["local_spool"] = f"could not check the spool: {e}"
     return result
 
 
