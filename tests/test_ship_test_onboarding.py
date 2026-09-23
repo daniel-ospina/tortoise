@@ -1130,8 +1130,9 @@ class _FakeRequester:
 class _FakeBrowser:
     """The real `Browser`: `close()` closes the browser AND everything it owns — a
     context still open is force-closed (`ctx_reaped#<serial>`), not leaked — and a
-    second `close()` is swallowed. Contexts are tracked so the force-close is
-    VISIBLE and distinguishable from the instrument's own `ctx_closed#<serial>`."""
+    second `close()` has no effect (the real one re-sends and swallows the
+    target-closed error). Contexts are tracked so the force-close is VISIBLE and
+    distinguishable from the instrument's own `ctx_closed#<serial>`."""
 
     def __init__(self, ctx, new_context_raises=False):
         self._ctx = ctx
