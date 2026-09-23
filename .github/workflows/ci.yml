@@ -627,7 +627,10 @@ jobs:
     # /health/ready ONCE, but readiness is an AND of the Supabase control plane
     # and the data plane, so db.ok does NOT imply ready. Case 3 fails against
     # the pre-fix single-shot assertion and passes only with the readiness
-    # poll. Mirrors availability-record above.
+    # poll. #4771 extended the same invariant to the DECISION: cases 2 and 11 pin
+    # that db.ok alone no longer fails the run (readiness 200 → pass with a
+    # warning) while db.ok false + readiness never 200 still fails, so the gate
+    # is not weakened. Mirrors availability-record above.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
