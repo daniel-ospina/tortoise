@@ -7,10 +7,10 @@ it IS the opt-in — the #3575 trap was a capture extension that defaulted off),
 and it talks to both hosted capture endpoints.
 
 The behavioral assertions run the extension's own `node --test` suite when the
-local Node supports native TypeScript type stripping AND module-syntax
-detection (Node >= 22.7 — the `.ts` is typeless with no `package.json`); the
-source-level assertions always run, so the surface stays pinned even where
-Node is older or absent.
+local Node enables native TypeScript type stripping AND module-syntax
+detection BY DEFAULT (Node >= 22.18 — the `.ts` is typeless with no
+`package.json`); the source-level assertions always run, so the surface stays
+pinned even where Node is older or absent.
 """
 from __future__ import annotations
 
@@ -106,7 +106,29 @@ def test_extension_posts_both_capture_endpoints():
     assert "postInstallProbe" in src
 
 
+def node_supports_ts_version(major: int, minor: int) -> bool:
+    """Can THIS suite's invocation run the extension: `node --test <file>.ts`?
+
+    22.18, not 22.7 — and the difference is the FLAG, not the feature. Node 22.7
+    added `--experimental-strip-types`; enabling it BY DEFAULT (which is what a
+    bare `node --test <file>.ts` depends on) arrived in 22.18.0. The extension
+    also needs ambient module-syntax DETECTION, which is why 22.6 is not enough
+    even with the flag.
+
+    The parity test in `test_capture_spool.py` keeps a 22.7 floor BY DESIGN: it
+    invokes node as `node --experimental-strip-types <driver>`. The two floors
+    describe two different commands, so they are deliberately NOT in step — the
+    defect this replaces was a floor copied from that file onto an invocation
+    that does not pass the flag, which made 22.7-22.17 RED (the module fails to
+    load) instead of SKIP.
+
+    Pure over its inputs so the boundary is testable without a second Node.
+    """
+    return major > 22 or (major == 22 and minor >= 18)
+
+
 def _node_supports_ts(node: str) -> bool:
+    """`node_supports_ts_version` applied to the node on PATH."""
     try:
         out = subprocess.run(
             [node, "--version"], capture_output=True, text=True, timeout=15
@@ -116,13 +138,7 @@ def _node_supports_ts(node: str) -> bool:
     m = re.match(r"v(\d+)\.(\d+)", out)
     if not m:
         return False
-    major, minor = int(m.group(1)), int(m.group(2))
-    # 22.7, not 22.6: the extension is a TYPELESS .ts and the repo ships no
-    # package.json, so it needs ambient module-syntax DETECTION — type stripping
-    # alone (22.6) strips the annotations and then fails to import the module.
-    # A floor stated too low is worse than a high one: it REDs instead of
-    # skipping. Keep in step with the parity test in test_capture_spool.py.
-    return major > 22 or (major == 22 and minor >= 7)
+    return node_supports_ts_version(int(m.group(1)), int(m.group(2)))
 
 
 def _scrubbed_env(tmpdir: str) -> dict[str, str]:
@@ -146,6 +162,29 @@ def _scrubbed_env(tmpdir: str) -> dict[str, str]:
     return env
 
 
+def test_the_node_floor_matches_the_invocation_the_suite_actually_makes():
+    """The floor must name what THIS file's invocation needs: `node --test
+    <file>.ts`, with NO `--experimental-strip-types` — because the flag may be
+    removed in a future major, the floor tracks its DEFAULT-ON version instead.
+
+    A too-low floor is worse than a high one: on 22.7-22.17 `_node_supports_ts`
+    would return True, the module would fail to load, and
+    `test_extension_behavioral_suite` would RED on a machine that simply cannot
+    run it — instead of skipping. 22.7 is correct for the SIBLING parity test
+    only, because that driver passes the flag.
+
+    Mutation: revert the floor to 22.7 (or 'keep in step' with the parity test)
+    -> the 22.7-22.17 rows RED.
+    """
+    assert node_supports_ts_version(22, 6) is False
+    assert node_supports_ts_version(22, 7) is False, (
+        "22.7 has the flag, not the DEFAULT — this suite passes no flag")
+    assert node_supports_ts_version(22, 17) is False
+    assert node_supports_ts_version(22, 18) is True
+    assert node_supports_ts_version(23, 0) is True
+    assert node_supports_ts_version(24, 0) is True
+
+
 def test_extension_behavioral_suite():
     """Run `node --test tortoise/pi-hooks/tortoise-capture.test.ts` (probe
     payload, turn extraction, capture payload, reload skip) in a SCRUBBED
@@ -155,7 +194,8 @@ def test_extension_behavioral_suite():
     if node is None:
         pytest.skip("node not available — extension source pins above still ran")
     if not _node_supports_ts(node):
-        pytest.skip("node < 22.7 cannot strip AND detect TypeScript types — source pins still ran")
+        pytest.skip("node < 22.18 does not enable TypeScript type stripping by "
+                    "default — source pins still ran")
     with tempfile.TemporaryDirectory() as fake_home:
         proc = subprocess.run(
             [node, "--test", str(EXTENSION_TEST)],

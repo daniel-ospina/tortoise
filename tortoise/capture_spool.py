@@ -331,11 +331,26 @@ def classify_failure(status: int | float | None, detail: str = "") -> str:
     count never becomes valid by waiting.
     """
     # Total over "no status", matching the Pi leg's classifyFailure exactly so
-    # the two cannot disagree: None (never got one) and a non-finite value (an
-    # unparseable status). Without the isfinite arm a NaN returned "permanent"
-    # while the Pi leg returned "retry" for the same input — a divergence the
-    # cross-leg parity test is meant to make impossible.
-    if status is None or not math.isfinite(status):
+    # the two cannot disagree: None (never got one) and a value that is not a
+    # usable finite number (an unparseable status). Without the isfinite arm a
+    # NaN returned "permanent" while the Pi leg returned "retry" for the same
+    # input — a divergence the cross-leg parity test is meant to make
+    # impossible.
+    #
+    # The `math.isfinite` call is WRAPPED, not guarded by an isinstance: an int
+    # too large to convert to a float (`math.isfinite(10**400)`) raises
+    # OverflowError rather than returning inf, and an escaping error here would
+    # DROP the capture — `__main__`'s `_spool_if_retryable` swallows it into
+    # "spool write failed", and `_flush_one` reports `entry_failed`. That is
+    # strictly worse than either verdict this function can return, and it also
+    # made the Python leg diverge from the Pi leg, which pins the same absurd
+    # magnitude to Infinity and answers "retry".
+    if status is None:
+        return "retry"
+    try:
+        if not math.isfinite(status):
+            return "retry"
+    except (TypeError, ValueError, OverflowError):
         return "retry"
     if 300 <= status < 400:
         return "retry"
@@ -828,7 +843,13 @@ def _backoff_ms(meta: dict) -> float:
         value = float(meta.get("next_attempt_at_ms") or 0)
     except (TypeError, ValueError, OverflowError):
         return 0.0
-    return value if math.isfinite(value) else 0.0
+    if not math.isfinite(value) or value <= 0:
+        # `<= 0` as well as non-finite: the Pi leg's `clampWindow` returns 0 for
+        # both, and the two legs share ONE spool directory. A negative window is
+        # inert at every consumer (it is never `> now_ms`), but leaving it to be
+        # written back would put a value on disk that only one leg can produce.
+        return 0.0
+    return value
 
 
 def _carried_window(prior: dict) -> float:
@@ -854,7 +875,19 @@ def _attempts(meta: dict) -> int:
     The backoff is fully saturated long before this bound.
     """
     try:
-        value = int(meta.get("attempts") or 0)
+        raw = meta.get("attempts") or 0
+    except AttributeError:  # a non-dict meta is #4906's class; stay total anyway
+        return 0
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        # A REAL number only, matching the Pi leg's `clampAttempts`
+        # (`typeof value === "number"`). `int("5")` would accept a numeric
+        # STRING and put the entry on attempt 5 — a 16-minute wait — where the
+        # Pi leg computes attempt 1, and the two legs share one spool dir.
+        # Booleans are ints in Python and are refused for the same reason: no
+        # legitimate writer produces one, so it is corrupt input.
+        return 0
+    try:
+        value = int(raw)
     except (TypeError, ValueError, OverflowError):
         return 0
     return min(max(0, value), _MAX_ATTEMPTS)

@@ -518,9 +518,55 @@ def test_failure_classification():
     # Status-only, never prose: the client ships independently of the wording.
     assert classify_failure(402) == "retry"
     assert classify_failure(422) == "permanent"
+    # TOTAL over an unusable status — it must return a verdict, never raise.
+    # `math.isfinite(10**400)` raises OverflowError (an int too large to convert
+    # to a float) rather than returning inf, and at origin/main the same input
+    # returned "retry"; an escaping error is STRICTLY worse than either verdict,
+    # because `_spool_if_retryable` swallows it into "spool write failed" and the
+    # capture is never spooled. The Pi leg pins the same magnitude to Infinity
+    # and answers "retry", so an unguarded isfinite also broke cross-leg parity.
+    assert classify_failure(10 ** 400) == "retry"
+    assert classify_failure(float("nan")) == "retry"
+    assert classify_failure(float("inf")) == "retry"
+    assert classify_failure("500") == "retry"
 
 
 # ── (6) Dedup / consolidation ──────────────────────────────────────────────
+
+
+def test_the_corrupt_input_helpers_agree_with_the_pi_leg(tmp_path):
+    """The two legs share ONE spool directory, so a corrupt on-disk value must
+    produce the SAME retry cadence on both — otherwise a session refused on the
+    Pi leg waits 16 minutes while the Python leg would have tried it now.
+
+    The safe reading of an unusable value is "retry now" (0 attempts, window 0),
+    which is what the Pi leg's `clampAttempts`/`clampWindow` already do; these
+    pins are what the Python leg must match.
+
+    MUTATION THAT REDS THIS: `int(meta.get('attempts') or 0)` without the type
+    check -> a stored "5" yields attempt 5 (16 min) instead of 1; drop the
+    `<= 0` arm in `_backoff_ms` -> a negative window round-trips instead of 0.
+    """
+    from tortoise.capture_spool import _attempts, _backoff_ms
+
+    assert _attempts({}) == 0
+    assert _attempts({"attempts": None}) == 0
+    assert _attempts({"attempts": "5"}) == 0, "a numeric STRING is corrupt input"
+    assert _attempts({"attempts": True}) == 0, "a bool is an int in Python"
+    assert _attempts({"attempts": -3}) == 0
+    assert _attempts({"attempts": 3.7}) == 3, "Math.floor, like the Pi leg"
+    assert _attempts({"attempts": 10 ** 400}) == 64
+    assert _attempts({"attempts": float("nan")}) == 0
+    assert _attempts({"attempts": float("inf")}) == 0
+    assert _attempts({"attempts": 5}) == 5
+
+    assert _backoff_ms({}) == 0.0
+    assert _backoff_ms({"next_attempt_at_ms": -1}) == 0.0, "clampWindow returns 0"
+    assert _backoff_ms({"next_attempt_at_ms": 0}) == 0.0
+    assert _backoff_ms({"next_attempt_at_ms": float("inf")}) == 0.0
+    assert _backoff_ms({"next_attempt_at_ms": float("nan")}) == 0.0
+    assert _backoff_ms({"next_attempt_at_ms": 10 ** 400}) == 0.0
+    assert _backoff_ms({"next_attempt_at_ms": 31_000}) == 31_000.0
 
 
 def test_an_unchanged_snapshot_is_not_rewritten(tmp_path):
