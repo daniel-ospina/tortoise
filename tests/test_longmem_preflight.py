@@ -49,6 +49,30 @@ from tortoise.model_adapters import (  # noqa: E402, RUF100
 MINI = Path(__file__).parent / "fixtures" / "longmemeval_mini.json"
 
 
+def _pin_embedder_available(monkeypatch) -> None:
+    """Pin the DENSE leg AVAILABLE (#4718).
+
+    Since #4718 the dense-leg gate runs FIRST and aborts a run that requires
+    the leg with ``SystemExit(1)`` when the embedder is unusable — so a test
+    whose subject is the reader/judge gate must pin the dense leg out of the
+    way, or it short-circuits on any host without sentence-transformers / the
+    cached model. The double answers ``encode(["probe"])`` with one 384-dim
+    vector, which is all ``_preflight_embedder`` inspects.
+
+    ``--skip-preflight`` is NOT an option here: it waives the reader/judge
+    gate too (``run_main`` records a skipped block when either flag is set),
+    which is precisely the gate under test.
+    """
+    from tortoise.embeddings import EmbeddingModel
+
+    class _FakeEmbedder:
+        def encode(self, texts):
+            return [[0.0] * 384 for _ in texts]
+
+    monkeypatch.setattr(EmbeddingModel, "get",
+                        staticmethod(lambda load_timeout=None: _FakeEmbedder()))
+
+
 def _mini() -> list[dict]:
     return json.loads(MINI.read_text(encoding="utf-8"))
 
@@ -180,6 +204,7 @@ def test_run_main_mock_records_skipped_preflight(tmp_path):
                        "--mock", "--skip-preflight", "--output", str(out)])
     assert report["preflight"]["status"] == "skipped"
     assert report["preflight"]["mock"] is True
+    assert report["preflight"]["reason"] == "mock"  # not "skip-preflight"
 
 
 def test_skip_preflight_flag_bypasses_gate(monkeypatch, tmp_path):
@@ -263,8 +288,17 @@ def test_preflight_fatal_401_402_403_abort(monkeypatch, status):
 
 
 def test_run_main_preflight_failure_exits_nonzero(monkeypatch, tmp_path):
-    """A failed gate → run_main exits non-zero and NO question executes."""
+    """A failed gate → run_main exits non-zero and NO question executes.
+
+    #4718: the dense leg is pinned AVAILABLE. This is a non-mock run, so it
+    requires the leg; on a host with no embedder the dense-leg gate would
+    raise ``SystemExit(1)`` on its own and the test would pass without ever
+    reaching the reader/judge gate it exists to exercise (which is exactly
+    what happened before this was pinned). ``--skip-preflight`` cannot be
+    used instead — it skips that gate.
+    """
     _set_all_keys(monkeypatch)
+    _pin_embedder_available(monkeypatch)
     import tools.longmem_eval.run as run_mod
 
     def _fatal_gate(**kw):

@@ -5644,6 +5644,40 @@ def test_skip_preflight_waives_dense_leg_and_still_runs(monkeypatch, tmp_path):
     assert out.is_file()
 
 
+def test_required_dense_leg_end_to_end_completes_with_leg_enabled(
+        monkeypatch, tmp_path):
+    """#4718: the REQUIRED-leg happy path, end to end through ``run_main``.
+
+    The fail-closed tests above pin the failure side; nothing else exercises
+    ``run_main`` with a dense leg that is required AND available — the
+    unit-level ``test_preflight_embedder_present_probe_ok`` skips on a host
+    without the real embedder, so the wiring from the gate through to
+    ``methodology.vector_strategy`` had no end-to-end coverage.
+
+    No ``--mock`` waiver and no ``--skip-preflight``: the gate must pass on
+    its own, the question loop must run, and the report must record the leg
+    as ENABLED (the mirror image of the two fail-closed tests, which assert
+    no report is written at all).
+    """
+    import tools.longmem_eval.run as run_mod
+    from tortoise.embeddings import EmbeddingModel
+
+    class _FakeEmbedder:
+        def encode(self, texts):
+            return [[0.0] * 384 for _ in texts]
+
+    monkeypatch.setattr(EmbeddingModel, "get",
+                        staticmethod(lambda load_timeout=None: _FakeEmbedder()))
+    out = tmp_path / "report.json"
+    report = run_mod.run_main([
+        "--data", str(MINI), "--limit", "1", "--split", "s",
+        "--mock", "--output", str(out)])
+    m = report["methodology"]
+    assert m["vector_strategy"] == "enabled"
+    assert m["embedder"]["available"] is True
+    assert out.is_file()
+
+
 def test_report_methodology_embedder_keys_always_emitted():
     """D5 (R3): build_report ALWAYS emits methodology.embedder +
     methodology.vector_strategy — without embedder_status the not_checked
