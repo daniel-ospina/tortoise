@@ -859,6 +859,11 @@ surfaces:
   - test_projection_maxmemory_message.py  # #2981: a full-but-healthy DB is not corrupt — maxmemory write-refusal gets its own error, never the rebuild advice
   - test_projection_version_gate.py
   - test_query_suggestions.py
+  # #4299: the launchd schedule installer's guard (install-reaper-schedule.sh).
+  # Registered here because it guards the same subsystem as test_reaper.py;
+  # without this line `test_integrity_covers_all_test_files` fails — every
+  # tests/**/test_*.py must be classified (the scope-v5 drift trap).
+  - test_install_reaper_schedule.py
   - test_reaper.py
   - test_reaper_orphan.py
   - test_redirect_seam.py
@@ -1438,6 +1443,7 @@ durations:
 # 90% floor once this file enters the pool, so a weight is required — the flat
 # default is what the floor exists to reject. Refresh from junit once the file
 # lands on main.
+  test_install_reaper_schedule.py: 7.8   # #4299: newly-declared fast file — measured (14 tests, 7.76s local) rather than the flat 2.0s default, because coverage sits ON the #3400 90% floor (544/605 unmeasured = 89.9% FAIL; 545/605 measured = 90.1%). Supersede from this PR's junit on the next #3400 regeneration.
   test_fly_secret_drift.py: 434.0
   # #3827: new file in this pool — no CI junit measurement exists yet, so it takes
   # the flat 2.0s default under the #3400 policy above rather than the local timings
