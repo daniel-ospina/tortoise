@@ -279,11 +279,36 @@ def classify_failure(status: int | None, detail: str = "") -> str:
 
     TRANSIENT: no status (network / timeout), 5xx, 3xx (a redirect on a stored
     api_url must not delete the capture), the retryable 4xx family
-    (408/425/429), and EVERY 409. On this idempotent upsert a 409 is either
+    (408/425/429), EVERY 409, and 402. On this idempotent upsert a 409 is either
     #3713's in-flight concurrency condition (retry then replays) or a policy
     state (recording disabled) the user can reverse — a capture must not be
     destroyed because recording was briefly off. Matching the server's prose is
     deliberately avoided: the client ships independently.
+
+    402 is TRANSIENT, and calling it permanent destroyed user data (#4714).
+    The hosted quota gate refuses a capture whose *estimated* point cost would
+    cross the org's cap:
+
+        {"detail": "Team points limit reached: 24956 in use + 48 estimated
+                     for this capture exceeds 25000."}
+
+    `est` is computed from the INCOMING capture, so the identical capture
+    succeeds the moment a node is freed or the tier changes — exactly the
+    "becomes valid by waiting" property that defines transient here. Classified
+    permanent, `_flush_one` routed it to `_discard_entry`, which unlinks the
+    turn log and meta: the spool's only copy of the user's session was deleted
+    by the drain, and the hook's own advice ("run `tortoise session drain` to
+    file it") was what triggered the loss. The spool exists to survive a
+    transient refusal and file it later; in a quota-bound deployment 402 is the
+    transient refusal that actually occurs, so the mechanism was inverted for
+    precisely its own use case.
+
+    Not detected by prose: the client ships independently of the server's
+    wording, and a capacity/billing refusal is a category, not a string. Any
+    402 is retried, bounded by `SPOOL_MAX_ENTRIES`/`SPOOL_MAX_TOTAL_BYTES` and
+    `backoff_delay` — so a genuinely unrecoverable 402 costs disk and a capped
+    retry cadence, never a lost capture. Retry is the safe direction here: the
+    asymmetry is a bounded retry versus irreversible data loss.
 
     PERMANENT: every other 4xx — a malformed payload or an out-of-range turn
     count never becomes valid by waiting.
@@ -294,7 +319,7 @@ def classify_failure(status: int | None, detail: str = "") -> str:
         return "retry"
     if status >= 500:
         return "retry"
-    if status in (408, 425, 429):
+    if status in (402, 408, 425, 429):
         return "retry"
     if status == 409:
         return "retry"

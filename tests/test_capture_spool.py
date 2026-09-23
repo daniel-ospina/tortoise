@@ -246,6 +246,45 @@ def test_a_permanent_4xx_discards_with_a_reason_and_is_never_retried(tmp_path):
     assert second.attempted == 0, "a permanent rejection must never be retried"
 
 
+def test_a_quota_refusal_defers_the_capture_instead_of_destroying_it(tmp_path):
+    """#4714. The hosted quota gate refuses a capture whose ESTIMATED point cost
+    would cross the org cap. That estimate is computed from the incoming
+    capture, so the SAME capture lands once a node is freed — the refusal is
+    transient by the definition this module uses.
+
+    Classified permanent, `_flush_one` routed it to `_discard_entry`, which
+    unlinks the turn log and meta: the spool's only copy of the user's session
+    was deleted by the drain, and the shell hooks' own advice ("run `tortoise
+    session drain` to file it") is what triggered the loss.
+
+    MUTATION THAT REDS THIS: drop 402 from the transient set in
+    `classify_failure` -> the entry is discarded, `read_spool_meta` returns
+    None, and the capture is gone.
+    """
+    root = tmp_path
+    write_spool_entry(root, _snapshot("sess-quota"))
+    quota = _Server(PostOutcome(
+        ok=False, status=402,
+        detail='{"detail":"Team points limit reached: 24956 in use + 48 '
+               'estimated for this capture exceeds 25000. Upgrade your plan."}',
+    ))
+
+    summary = flush_spool(root, quota.post, now=1000.0)
+
+    # Deferred, not discarded — and the capture is still on disk.
+    assert summary.deferred == 1, "a quota refusal must be retried, not dropped"
+    assert summary.discarded == [], "a quota refusal must never discard"
+    assert read_spool_meta(root, "sess-quota") is not None, (
+        "the spool's only copy of the session was destroyed"
+    )
+
+    # And it is genuinely retryable: once the quota allows it, the SAME entry
+    # files without a re-capture.
+    now_ok = _Server(PostOutcome(ok=True, status=200))
+    second = flush_spool(root, now_ok.post, now=10**12)
+    assert second.filed == 1, "the deferred capture must file once the quota clears"
+
+
 def test_the_in_flight_409_is_retryable_not_a_lost_write(tmp_path):
     """#3713. MUTATION THAT REDS THIS: treat every 409 as permanent → the entry
     is discarded and the benign in-flight race becomes a lost capture."""
@@ -273,6 +312,18 @@ def test_failure_classification():
     assert classify_failure(409, "already in flight") == "retry"
     assert classify_failure(409, "Session recording is disabled for this team.") == "retry"
     assert classify_failure(409) == "retry"
+    # 402 is TRANSIENT (#4714). The hosted quota gate refuses a capture whose
+    # ESTIMATED cost would cross the org's cap; `est` is computed from the
+    # INCOMING capture, so the identical capture succeeds once a node is freed
+    # or the tier changes. Classified permanent, `_flush_one` routed it to
+    # `_discard_entry`, which unlinked the spool's only copy of the session.
+    assert classify_failure(
+        402,
+        "Team points limit reached: 24956 in use + 48 estimated "
+        "for this capture exceeds 25000.",
+    ) == "retry"
+    # Status-only, never prose: the client ships independently of the wording.
+    assert classify_failure(402) == "retry"
     assert classify_failure(422) == "permanent"
 
 
