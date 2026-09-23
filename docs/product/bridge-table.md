@@ -50,7 +50,7 @@ something derivable from today's code.
 
 | # | Current tool | Source | SDK binding | Read-only | Destination |
 |---|---|---|---|---|---|
-| 1 | `tortoise_analyze` | `tool_registry.py:806` | `analyze` ⚠️ **does not resolve** | yes | `REMOVED` |
+| 1 | `tortoise_analyze` | `tool_registry.py:806` | **none declared** | yes | `REMOVED` |
 | 2 | `tortoise_annotate_operator` | `tool_registry.py:495` | `annotate_operator` | no | `adjust_relationship` |
 | 3 | `tortoise_approve_merge` | `tool_registry.py:367` | `approve_merge` | no | `approve_merge` |
 | 4 | `tortoise_assess_source` | `tool_registry.py:991` | `assess_source` | no | `manage_source_trust` |
@@ -77,7 +77,7 @@ something derivable from today's code.
 | 25 | `tortoise_diary_write` | `tool_registry.py:633` | `diary_write` | no | `REMOVED` |
 | 26 | `tortoise_dream` | `tool_registry.py:446` | `dream` | no | `refresh_confidence` |
 | 27 | `tortoise_dream_health` | `tool_registry.py:462` | `dream_health_check` | yes | `graph_overview` |
-| 28 | `tortoise_entity_profile` | `tool_registry.py:603` | `entity_profile` ⚠️ **does not resolve** | yes | `explore_connections` |
+| 28 | `tortoise_entity_profile` | `tool_registry.py:603` | **none declared** | yes | `explore_connections` |
 | 29 | `tortoise_events_poll` | `tool_registry.py:579` | `events_poll` | yes | `poll_events` |
 | 30 | `tortoise_expand_relationships` | `tool_registry.py:305` | `expand_relationships` | yes | `explore_connections` |
 | 31 | `tortoise_file_decision` | `tool_registry.py:525` | `file_decision` | no | `write_question` |
@@ -121,8 +121,8 @@ something derivable from today's code.
 | 69 | `tortoise_operator_action` | `tool_registry.py:1074` | `operator_action` | no | `adjust_relationship` |
 | 70 | `tortoise_org_create` | `tool_registry.py:870` | `org_create` | no | `tenancy:create_memory_graph` |
 | 71 | `tortoise_overview` | `tool_registry.py:1108` | **none declared** | yes | `graph_overview` |
-| 72 | `tortoise_pack_install` | `tool_registry.py:241` | `upsert_tenant_manifest` ⚠️ **does not resolve** | no | `REMOVED` |
-| 73 | `tortoise_packs_list` | `tool_registry.py:230` | `get_tenant_packs` ⚠️ **does not resolve** | yes | `REMOVED` |
+| 72 | `tortoise_pack_install` | `tool_registry.py:241` | **none declared** | no | `REMOVED` |
+| 73 | `tortoise_packs_list` | `tool_registry.py:230` | **none declared** | yes | `REMOVED` |
 | 74 | `tortoise_paginated_query` | `tool_registry.py:126` | `paginated_query` | yes | `search_knowledge` |
 | 75 | `tortoise_promote_point` | `tool_registry.py:378` | `promote_point` | no | `refresh_confidence` ⚠️ |
 | 76 | `tortoise_provenance` | `tool_registry.py:860` | `provenance` | yes | `check_confidence` |
@@ -236,10 +236,6 @@ plan listed them as if they were renames. This is what Part A exists to catch.
 
 | Registry tool | Declared binding | Source |
 |---|---|---|
-| `tortoise_packs_list` | `get_tenant_packs` | `tool_registry.py:230` |
-| `tortoise_pack_install` | `upsert_tenant_manifest` | `tool_registry.py:241` |
-| `tortoise_entity_profile` | `entity_profile` | `tool_registry.py:603` |
-| `tortoise_analyze` | `analyze` | `tool_registry.py:806` |
 | `tortoise_health` | `health` | `tool_registry.py:668` |
 
 A tool that declares a binding to a method **that is not a `def` on `TortoiseSDK`** is a
