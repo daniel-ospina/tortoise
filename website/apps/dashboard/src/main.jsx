@@ -1434,12 +1434,12 @@ function claimIntentInFlight() {
   // here so the derivation is a plain value (unit-testable without a React
   // harness, which this repo does not have).
   const harnessCaptureClaim = captureClaimForHarness(onboarding, wizardHarness)
-  // #3700: the RENDERED per-harness status word (agent-attributed for the
-  // caller-declared states) — the done screen's `install-pending` sentence is
-  // its single consumer here, and it reads the ONE shared label table through
-  // the helper, never the raw table. (The Settings pill calls the helper
-  // directly; the `present` / `future` sentences are literal prose that names
-  // no harness.)
+  // #3700: the PLAIN per-harness status word (the attribution is rendered
+  // separately by `harnessAttribution` below) — the done screen's
+  // `install-pending` sentence is its single consumer here, and it reads the
+  // ONE shared label table through the helper, never the raw table. (The
+  // Settings pill calls the helper directly; the `present` / `future`
+  // sentences are literal prose that names no harness.)
   const harnessCaptureStatusLabel = captureStatusLabelForHarness(onboarding, wizardHarness)
   const wizardFocusInit = React.useRef(false)
   const lastWizardStepRef = React.useRef(-1)  // #2361 r4: focus only on step change
@@ -9830,8 +9830,9 @@ function MemorySources(props) {
   const status = (h) => captureStatusForHarness(state, h)
   const lastError = (h) => captureErrorForHarness(state, h)
   // #3700: the per-row harness attribution — rendered beside the harness name,
-  // once per row, on exactly the rows whose state embeds a harness. Never
-  // inside the `role="alert"` failure sentence (see captureStatus.js).
+  // once per row, on exactly the rows that NAME a harness (a per-harness state
+  // or a recorded per-harness failure). Never inside the `role="alert"`
+  // failure sentence (see captureStatus.js).
   const harnessAttribution = (h) => harnessAttributionForHarness(state, h)
 
   return (
@@ -10077,30 +10078,27 @@ function MemorySources(props) {
               // source-grep tripwire.
               return (
                 <div key={h} className={`harness-status status-${st}${isCurrent ? ' current' : ''}`}>
-                  <div className="harness-status-head">
-                    <strong>{HARNESS_NAMES[h]}</strong>
-                    {/* #3700: the harness on a row that makes a per-harness
-                        claim is the CALLER's declaration, not something
-                        Tortoise verified — disclosed here, beside the name,
-                        because the self-report is about the HARNESS and not
-                        about the state word. Gated on `supported` so it only
-                        appears where a per-harness claim is actually made.
-                        Non-live (dim) on purpose: it must not be announced as
-                        part of the failure alert below. */}
-                    {supported && harnessAttribution(h) && (
-                      <span className="dim small">· {harnessAttribution(h)}</span>
-                    )}
-                    {/* review P2-5: aria-live lives on the PILL (the state word
-                        only) — the container-level region announced the whole
-                        multi-line snippet. review P2-3: unsupported harnesses
-                        render the REASON only, no pill (no install path exists
-                        for `claude-web`, `claude-desktop` or `chatgpt` — a pill
-                        would contradict it; `cursor` gained a seam in #4110).
-                        #3700: the label comes from captureStatusLabelForHarness
-                        — the ONE shared table — and stays a plain state word;
-                        the row's attribution fragment above is what keeps it
-                        from reading as a server-observed harness. */}
-                    {supported && <span className="capture-state" aria-live="polite">{captureStatusLabelForHarness(state, h)}</span>}
+                  {/* review P2-5: the polite live region is scoped to the HEAD
+                      — the state word plus the harness disclosure — so it still
+                      does not announce the whole multi-line snippet below.
+                      review P2-3: unsupported harnesses render the REASON only,
+                      no pill (no install path exists for `claude-web`,
+                      `claude-desktop` or `chatgpt` — a pill would contradict it;
+                      `cursor` gained a seam in #4110).
+                      #3700: the row NAMES a harness whose value is a caller
+                      declaration, so the disclosure (`harnessAttribution`) sits
+                      in the same group as the name — one flex item, so
+                      `space-between` still puts only the pill on the right —
+                      and the state word stays plain; the attribution is what
+                      keeps the row from reading as a server-observed harness. */}
+                  <div className="harness-status-head" aria-live="polite">
+                    <span className="harness-status-name">
+                      <strong>{HARNESS_NAMES[h]}</strong>
+                      {harnessAttribution(h) && (
+                        <span className="dim small">· {harnessAttribution(h)}</span>
+                      )}
+                    </span>
+                    {supported && <span className="capture-state">{captureStatusLabelForHarness(state, h)}</span>}
                   </div>
                   {!supported && <p className="dim small">{HARNESS_CAPTURE_REASON[h]}</p>}
                   {supported && st === 'install-pending' && sessionsOn && (

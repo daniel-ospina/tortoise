@@ -307,11 +307,11 @@ class TestCaptureReceiptHarnessResolution:
     GREEN: the legitimate forms — a fresh agent capture names its own harness,
     and a re-capture keeps the server's recorded harness.
 
-    #3700 — the class is named *Resolution*, not *IsServerResolved*: the
-    harness is RESOLVED (stored-or-claimed), never OBSERVED. A re-capture keeps
-    the Session's stored harness when it has one, and falls back to the current
-    caller's declaration when it does not; either way the harness is a caller
-    declaration, not something the server observed."""
+    #3700 — the harness is RESOLVED (stored-or-claimed), never OBSERVED, which
+    # is why this class is not named for a server-resolved harness: a
+    # re-capture keeps the Session's stored harness when it has one, and falls
+    # back to the current caller's declaration when it does not; either way the
+    # harness is a caller declaration, not something the server observed."""
 
     @pytest.fixture()
     def env(self, tmp_path, monkeypatch):

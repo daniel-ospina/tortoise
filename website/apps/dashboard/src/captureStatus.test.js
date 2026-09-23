@@ -11,7 +11,7 @@ import {
   harnessAttributionForHarness,
   lastErrorForHarness,
 } from './captureStatus.js'
-import { HARNESS_ATTRIBUTION } from './harnesses.js'
+import { HARNESS_ATTRIBUTION, HARNESS_CAPTURE_SUPPORT } from './harnesses.js'
 
 test('canonical 4-state vocabulary is off → install-pending → waiting → active', () => {
   assert.deepEqual(CAPTURE_STATES, ['off', 'install-pending', 'waiting', 'active'])
@@ -253,12 +253,16 @@ test('#3428: GIVEN capture capability, the tense follows the RECEIPT', () => {
 // source-text tripwire could stay green while the rendered row claimed a
 // server-observed harness.
 //
-// NAMED MUTATION that reinstates the defect — must RED this test:
+// NAMED MUTATIONS that reinstate the defect — each must RED this test:
 //   RECEIPT_LABEL_CLAIMS_SERVER_OBSERVATION
-//   In `captureStatus.js`, make `harnessAttributionForHarness` return null (or
-//   return the constant unconditionally). The attribution assertion below then
-//   fails while the state-vocabulary and plain-label assertions stay green —
-//   which is exactly the split the fix exists to preserve.
+//     In `captureStatus.js`, make `harnessAttributionForHarness` return null, or
+//     return the constant unconditionally.
+//   FAILURE_ROW_NAMES_HARNESS_UNDISCLOSED
+//     Drop the `lastErrorForHarness` leg of the predicate — a failed first
+//     capture (no receipt, no probe ⇒ `install-pending`) then renders
+//     `Last attempt — …` under a harness name with no disclosure.
+// The state-vocabulary and plain-label assertions stay green under both, which
+// is exactly the split the fix exists to preserve.
 test('#3700: the per-harness attribution is disclosed on the row, not baked into a state word', () => {
   const st = {
     session_recording: true,
@@ -288,13 +292,41 @@ test('#3700: the per-harness attribution is disclosed on the row, not baked into
   //     signal — so a no-signal row can never acquire a claim about a harness
   //     the server has no signal for.
   assert.equal(HARNESS_ATTRIBUTION, 'harness reported by your agent')
-  assert.equal(harnessAttributionForHarness(st, 'claude'), HARNESS_ATTRIBUTION)
-  assert.equal(harnessAttributionForHarness(st, 'pi'), HARNESS_ATTRIBUTION)
+  assert.equal(harnessAttributionForHarness(st, 'claude'), HARNESS_ATTRIBUTION,
+    'receipt state names a harness')
+  assert.equal(harnessAttributionForHarness(st, 'pi'), HARNESS_ATTRIBUTION,
+    'probe state names a harness')
+  // a row with no per-harness signal at all renders no state word and no
+  // failure, so there is nothing to disclose.
   assert.equal(harnessAttributionForHarness(st, 'cursor'), null,
-    'install-pending embeds no harness')
+    'install-pending names no harness')
   assert.equal(harnessAttributionForHarness({ session_recording: true }, 'claude'), null)
   assert.equal(harnessAttributionForHarness(null, 'claude'), null)
   assert.equal(harnessAttributionForHarness({ session_recording: false }, 'claude'), null)
+
+  // (3b) the FAILURE line renders on rows the STATE WORD never reaches — a
+  //      first capture that failed leaves an `install-pending` row with a
+  //      recorded per-harness error (codex/cursor can never reach `waiting`:
+  //      `install_probe_<h>` is registered for claude/pi only) — and on
+  //      unsupported rows, where the pill does not render at all. Those rows DO
+  //      name a harness, so they must disclose it: the earlier
+  //      "state ∈ {active, waiting}" predicate left this surface live.
+  const failRow = { session_recording: true, session_capture_last_error_codex: 'Upgrade your plan.' }
+  assert.equal(captureStatusForHarness(failRow, 'codex'), 'install-pending')
+  assert.equal(harnessAttributionForHarness(failRow, 'codex'), HARNESS_ATTRIBUTION,
+    'a recorded per-harness failure names a harness even with no receipt or probe')
+  assert.equal(harnessAttributionForHarness(
+    { session_recording: false, session_capture_last_error_pi: 'x' }, 'pi'), HARNESS_ATTRIBUTION)
+  assert.equal(HARNESS_CAPTURE_SUPPORT['claude-web'], false)
+  assert.equal(harnessAttributionForHarness(
+    { session_recording: true, 'session_capture_last_error_claude-web': 'x' }, 'claude-web'),
+  HARNESS_ATTRIBUTION, 'a recorded failure renders on an unsupported row too')
+  // ...but an unsupported row with NO failure renders only the reason, so the
+  // helper must not disclose a harness the UI never names — even when a
+  // per-harness state key exists for it.
+  assert.equal(harnessAttributionForHarness(
+    { session_recording: true, 'session_capture_receipt_claude-web': 't' }, 'claude-web'), null,
+    'an unsupported row renders no state word, so there is nothing to disclose')
 
   // (4) the sibling FAILURE sub-line reads the key the same `stored or claimed`
   //     resolution wrote, so it is the same defect class — but it renders inside

@@ -64,19 +64,31 @@ export function captureStatusLabelForHarness(state, harness) {
   return HARNESS_CAPTURE_STATUS_LABEL[captureStatusForHarness(state, harness)]
 }
 
-// #3700: the per-row harness ATTRIBUTION — the disclosure that the harness name
-// on a row making a per-harness claim is the caller's own declaration, not
-// something Tortoise verified. Returns `HARNESS_ATTRIBUTION` for exactly the
-// two states whose key embeds a harness (`active` from the receipt, `waiting`
-// from the install probe) and null for every other state, so a row's no-signal
-// states (`off`, `install-pending`) never acquire a claim about a harness the
-// server has no signal for. Call sites render it as a non-live, dim fragment
-// beside the harness name — never inside the `role="alert"` failure sentence,
+// #3700: the per-row harness ATTRIBUTION — the disclosure that the harness a
+// row NAMES is the caller's own declaration, not something Tortoise verified.
+//
+// It answers "does this row render a harness-naming fact?", which is why it is
+// a DIFFERENT predicate from `captureClaimForHarness` (that one asks whether a
+// per-harness capability claim is allowed at all, hence its support gate):
+//   * a per-harness STATE key was observed (`active` / `waiting`) and the row
+//     renders a state word for it — only where capture is SUPPORTED, since an
+//     unsupported row renders the reason and no pill;
+//   * a per-harness FAILURE was recorded (`session_capture_last_error_<h>`),
+//     which renders on EVERY row — including `install-pending` / `off` rows
+//     (first capture failed ⇒ no receipt ⇒ no state word) and unsupported ones.
+// Returns `HARNESS_ATTRIBUTION` in exactly those cases and null otherwise, so a
+// row that names no harness never acquires the disclosure.
+//
+// Call sites render it as a dim fragment beside the harness name, inside the
+// head's polite live region — never inside the `role="alert"` failure sentence,
 // where a caveat would be announced as part of the failure and could collide
 // with server detail that itself ends in a parenthesis or a full stop.
 export function harnessAttributionForHarness(state, harness) {
-  const status = captureStatusForHarness(state, harness)
-  if (status === 'active' || status === 'waiting') return HARNESS_ATTRIBUTION
+  if (HARNESS_CAPTURE_SUPPORT[harness]) {
+    const status = captureStatusForHarness(state, harness)
+    if (status === 'active' || status === 'waiting') return HARNESS_ATTRIBUTION
+  }
+  if (lastErrorForHarness(state, harness)) return HARNESS_ATTRIBUTION
   return null
 }
 
@@ -142,11 +154,12 @@ export function lastErrorForHarness(state, harness) {
   return state[`session_capture_last_error_${harness}`] || null
 }
 
-// #3700: the per-harness FAILURE sub-line — the sibling of the status pill,
-// and the same defect class. `session_capture_last_error_<h>` is written by the
-// same `_observed_capture_harness` resolution as the receipt (`stored or
-// claimed`, see tortoise/capture_receipts.py), so its harness is likewise the
-// CALLER's declaration and must not render as the harness whose attempt failed.
+// #3700: the per-harness FAILURE sub-line — the sibling of the status pill, and
+// the same defect class: the harness in `session_capture_last_error_<h>` is a
+// CALLER declaration on every writer of that key — the REST capture resolves it
+// `stored or claimed` (tortoise/hosted_api.py), and the MCP capture records the
+// request's own `harness` (tortoise/mcp_server.py). It must not render as the
+// harness whose attempt failed.
 // This owns the state read and the null guard and delegates the WORDING to
 // `HARNESS_CAPTURE_LAST_ATTEMPT` (harnesses.js), so no copy is authored here.
 // The sentence carries NO attribution: it renders inside a `role="alert"` live

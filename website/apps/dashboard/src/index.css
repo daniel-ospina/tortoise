@@ -980,6 +980,10 @@ input::placeholder, textarea::placeholder {
 }
 .harness-status.current { border-color: rgba(6, 182, 212, 0.5); }
 .harness-status-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+/* #3700: the harness name and its disclosure are ONE flex item, so the row's
+   `space-between` still separates only {name + disclosure} from the state pill
+   and the disclosure cannot float mid-row as a third column. */
+.harness-status-name { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 .harness-status-head strong { font-size: 13px; }
 .capture-state {
   font-size: 12px;
