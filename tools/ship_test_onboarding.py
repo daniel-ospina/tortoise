@@ -78,7 +78,7 @@ prose. The observation
 directory always holds ``observation.json`` + step screenshots, pass or fail.
 
 **Teardown (#4319).** Every per-deploy run creates a real production org
-(``Ship Test <epoch>``); the run **reaps it by default**, and the outcome is
+(``Ship Test <epoch>-<hex4>``); the run **reaps it by default**, and the outcome is
 recorded in ``observation.json`` as the ``teardown`` block. The org is proven to
 be this run's by a **differential proof of creation** — the walked session's own
 org list is read before the wizard can create anything and again at teardown, so
@@ -707,12 +707,14 @@ SESSION_MECHANISM = "browser cookie jar → app-origin /api/session → /api/v1 
 
 # The product's own org-name rule, kept in sync with the server
 # (`supabase/functions/tenant-provision`: ORG_NAME_RE) and the client
-# (`website/apps/dashboard/src/wizardFlow.js::orgNameError`). Teardown matches
-# the name this run WROTE, so a name the product would rewrite (the server falls
-# back to an email-prefix name) or refuse would silently make the created org
-# unreapable. Reject it up front (exit 2) rather than discovering it later as a
-# `name_mismatch` that looks like an org-list problem.
-ORG_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$")
+# (`website/apps/dashboard/src/wizardFlow.js::orgNameError`). Both sides TRIM
+# first, so this is matched with `fullmatch` against a STRIPPED value — a
+# `$`-anchored `match` accepts `"Foo\n"`, and a raw `"Foo "` would be stored as
+# `"Foo"`, after which teardown would look for a name that cannot exist and
+# leave the created org unreapable. Teardown matches the name this run WROTE, so
+# a name the product would rewrite or refuse is rejected up front (exit 2)
+# instead of surfacing later as a `name_mismatch`.
+ORG_NAME_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}")
 
 
 def bff_session(ctx, base_url: str) -> tuple[str, str]:
@@ -812,7 +814,7 @@ def read_projection(ctx, base_url: str) -> tuple[int, dict | None]:
 
 
 # ── the run's own cleanup (#4319) ───────────────────────────────────────────
-# Every per-deploy run creates a REAL production org (`Ship Test <epoch>`) and,
+# Every per-deploy run creates a REAL production org (`Ship Test <epoch>-<hex4>`) and,
 # before this, nothing removed it. The instrument now reaps the org it created —
 # as its owner, through the SAME walked session and the SAME origin's BFF proxy
 # it already uses — and records the outcome in the observation.
@@ -1768,14 +1770,19 @@ def main(argv: list[str] | None = None) -> int:
         print("ship-test: non-loopback target — pass --allow-prod (or "
               "SHIP_TEST_ALLOW_PROD=1) to observe a live deployment", file=sys.stderr)
         return EXIT_USAGE
-    if args.org_name and not ORG_NAME_RE.match(args.org_name):
-        print("ship-test: invalid --org-name — the product accepts letters, "
-              "numbers, space, dash and underscore, starting with a letter or "
-              "number, at most 64 characters (the rule both the wizard and "
-              "tenant-provision apply). A name outside that rule is rewritten "
-              "or refused server-side, which would make the org this run "
-              "created unreapable.", file=sys.stderr)
-        return EXIT_USAGE
+    if args.org_name is not None:
+        # Validate what the PRODUCT will actually store: both the wizard and
+        # tenant-provision trim first.
+        org_name = args.org_name.strip()
+        if org_name and not ORG_NAME_RE.fullmatch(org_name):
+            print("ship-test: invalid --org-name — the product accepts letters, "
+                  "numbers, space, dash and underscore, starting with a letter or "
+                  "number, at most 64 characters (the rule both the wizard and "
+                  "tenant-provision apply). A name outside that rule is rewritten "
+                  "or refused server-side, which would make the org this run "
+                  "created unreapable.", file=sys.stderr)
+            return EXIT_USAGE
+        args.org_name = org_name or None
     try:
         obs = run_walk(args)
     except Exception as exc:

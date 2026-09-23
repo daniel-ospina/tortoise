@@ -1686,6 +1686,25 @@ def test_a_same_named_pre_existing_org_is_never_a_teardown_candidate(
     assert _delete_calls(ctx) == []
 
 
+def test_a_run_org_appearing_beside_a_pre_existing_one_is_the_one_deleted(
+        monkeypatch, tmp_path):
+    """The INCLUDE half of the differential: a NON-EMPTY baseline must not
+    suppress the run's own org — the shape every run on an existing account has.
+    (Mutation-checked: an implementation that only finds the run's org when the
+    baseline is empty turns this RED.)"""
+    old = {"org_id": "org-old", "org_name": "Something Else"}
+    base = _happy_base()
+    base[("DELETE", _ORG_ROUTE + "/org-1")] = _DELETE_OK
+    obs, ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path,
+        reads=[(200, [old]), (200, [old, _AFTER_ROW]), (200, [old])],
+        base=base)
+    assert obs.teardown["status"] == _mod.TEARDOWN_DELETED
+    assert obs.teardown["org_id"] == "org-1"
+    assert [c[1] for c in _delete_calls(ctx)] == [
+        "https://app.premiselabs.co/api/v1/organizations/org-1"]
+
+
 def test_an_org_that_appeared_without_a_create_attempt_is_not_this_runs_to_delete(
         monkeypatch, tmp_path):
     """A set difference is not an identity proof: an org that joined this
@@ -1896,16 +1915,48 @@ def test_no_exit_from_the_walk_writes_the_artifact_without_teardown():
     """
     src = _inspect.getsource(_mod.run_walk)
     assert "_finish(" not in src
-    assert "_finalize(obs, out_dir, td)" in src
+    # ...and every funnel call passes the teardown state: `_finalize(obs,
+    # out_dir)` (the `td` default is None) would write the artifact with an
+    # EMPTY teardown block and still satisfy a bare "no _finish" assertion.
+    assert src.count("_finalize(") == src.count("_finalize(obs, out_dir, td)")
+    assert src.count("_finalize(obs, out_dir, td)") >= 1
 
 
-def test_an_org_name_the_product_would_rewrite_is_refused_up_front(capsys):
-    """Teardown matches the name this run WROTE, so a name the wizard or
-    tenant-provision would rewrite (or refuse) would make the created org
-    silently unreapable. Exit 2, before any browser."""
-    code = _mod.main(["--allow-prod", "--org-name", "bad.name"])
-    assert code == _mod.EXIT_USAGE
+def test_an_org_name_the_product_would_refuse_is_rejected_before_any_browser(
+        monkeypatch, capsys):
+    """Teardown matches the name this run WROTE, so a name the product would
+    refuse would make the created org silently unreapable. Exit 2, and the walk
+    is never started. HERMETIC: `run_walk` is stubbed, so a guard regression
+    cannot reach the network from the test suite."""
+    started = []
+    monkeypatch.setattr(_mod, "run_walk", lambda args: started.append(args))
+    assert _mod.main(["--allow-prod", "--org-name", "bad.name"]) == _mod.EXIT_USAGE
     assert "invalid --org-name" in capsys.readouterr().err
+    assert _mod.main(["--allow-prod", "--org-name", "Foo\nBar"]) == _mod.EXIT_USAGE
+    assert "invalid --org-name" in capsys.readouterr().err
+    assert _mod.main(["--allow-prod", "--org-name", "x" * 65]) == _mod.EXIT_USAGE
+    assert "invalid --org-name" in capsys.readouterr().err
+    assert started == []
+
+
+def test_a_padded_org_name_is_trimmed_to_what_the_product_stores(monkeypatch):
+    """Both the wizard and tenant-provision TRIM before validating and storing,
+    so the name teardown matches must be the trimmed one. A `$`-anchored match
+    (or no trim) would accept `"Foo "` / `"Foo\n"` and then hunt for a name the
+    product never stored. HERMETIC: `run_walk` is stubbed."""
+    seen = {}
+
+    def _fake(args):
+        seen["org_name"] = args.org_name
+        obs = _mod.Observation(started_at="t", target={})
+        obs.verdict = "passed"
+        obs.teardown = {"status": _mod.TEARDOWN_SKIPPED_NO_ORG}
+        return obs
+
+    monkeypatch.setattr(_mod, "run_walk", _fake)
+    for raw in ("  Foo  ", "Foo\n", "Foo "):
+        assert _mod.main(["--allow-prod", "--org-name", raw]) == _mod.EXIT_PASSED
+        assert seen["org_name"] == "Foo"
 
 
 def test_keep_org_is_cli_only_and_never_ambiently_injected():

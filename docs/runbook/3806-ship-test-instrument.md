@@ -172,8 +172,9 @@ RED). A few *structural* `inspect.getsource` assertions remain for ORDERING that
 the harness does not aim at (that the
 session gate precedes the agent write, that the write-failure check precedes the
 projection check), plus one shape-independent completeness assertion — that no
-`_finish(` call remains inside `run_walk`, so an exit cannot write the artifact
-without teardown; they complement the behavioural tests, they do not replace
+`_finish(` call remains inside `run_walk` AND that every `_finalize(` call in it
+passes the teardown state, so no exit can write the artifact without teardown;
+they complement the behavioural tests, they do not replace
 them. The RED/GREEN property is the core
 requirement: a behaviour-identical reformat must not move the verdict, and a UI
 that lies must go RED.
@@ -229,13 +230,14 @@ and adds no new job).
 default.** The run signs up a fresh disposable identity
 (`ship-test-<ts>-<hex>@premiselabs.co`) and creates the org
 `Ship Test <epoch>-<hex4>` (the random suffix makes a same-named pre-existing
-org impossible for a default run; `--org-name` overrides the label only, and is
+org vanishingly unlikely for a default run; `--org-name` overrides the label
+only, and is
 validated against the product's own rule up front — exit 2 — because the server
 rewrites a name it will not accept, which would make the created org silently
 unreapable). Since **#4319** the run deletes that org
 itself, as its owner, through the walked session's own BFF proxy — see
-*Teardown* above. Two residual classes remain, and both are explicit rather than
-silent:
+*Teardown* above. Three residual classes remain, and all three are explicit
+rather than silent:
   * **`--keep-org`, or any run whose teardown did not confirm**
     (`baseline_unavailable` / `not_listed` / `not_attempted` / `list_unreadable` /
     `http_refused` / `not_confirmed` / …) leaves the org live. The observation
