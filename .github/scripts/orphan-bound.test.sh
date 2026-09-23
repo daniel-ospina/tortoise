@@ -156,6 +156,9 @@ printf '{"sweep":{"reaped":9,"cleared":true,"left":14,"before":20}}' > "$WORK/re
 printf '{"sweep":{"reaped":2,"cleared":true,"left":7,"before":9}}' > "$WORK/report7.json"
 printf '{"sweep":{"reaped":9,"cleared":false,"left":14,"before":23}}' > "$WORK/budget.json"
 printf '{"sweep":{"reaped":0,"cleared":false,"left":5,"before":40}}' > "$WORK/identity_bad_unproven.json"
+printf '{"sweep":{"reaped":0,"cleared":true,"left":0,"before":5}}' > "$WORK/identity_boundary5.json"
+printf '{"sweep":{"reaped":0,"cleared":true,"left":0,"before":1}}' > "$WORK/identity_boundary1.json"
+printf '{"sweep":{"reaped":5,"cleared":false,"left":0,"before":5}}' > "$WORK/cleared_false_left_zero.json"
 printf '{"sweep":{"reaped":12,"cleared":true,"left":14,"before":26}}' > "$WORK/identity_ok.json"
 printf '{"sweep":{"reaped":1,"cleared":true,"left":2,"before":10}}' > "$WORK/identity_bad.json"
 printf '{"sweep":{"reaped":1,"cleared":true,"left":2,"before":null}}' > "$WORK/before_null.json"
@@ -566,6 +569,8 @@ assert_contains "$OUT" "::warning::" "warns that the sweep exhausted its budget"
 assert_contains "$OUT" "cleared=false" "names the exhausted budget"
 assert_contains "$OUT" "diagnostic only" "labels it a diagnostic"
 assert_contains "$OUT" "within the sweep's own measurement" "prints the pass line"
+assert_contains "$OUT" "reaped=9, cleared=false; 14 shut down at interpreter exit after the sweep's teardown reading)" \
+  "the pass line interpolates the sweep's own cleared=false, not another value"
 assert_not_contains "$OUT" "cleared=true" \
   "the pass line reports the sweep's own cleared=false, never a hardcoded true"
 assert_not_contains "$OUT" "::error::" "does not red an empty residue"
@@ -602,10 +607,36 @@ echo "46. the accounting identity is enforced under cleared=false at COUNT==0"
 run_gate 0 0 identity_bad_unproven.json
 assert_eq "$RC" "1" "exits 1 when reaped + left < before at COUNT=0 under cleared=false"
 
+echo "47. the accounting identity guard's lower boundaries RED (cleared=true)"
+# The identity is skipped ONLY when `before` is null or measures zero, so its
+# guard is `before -gt 0`. Widening it — an extra `&& [ "$left" -gt 0 ]`, or
+# `-gt 1` — turns a real should-red report green. These fixtures sit exactly on
+# those boundaries (left=0, before=1 and before=5) so either widening is caught.
+run_gate 0 0 identity_boundary5.json
+assert_eq "$RC" "1" "exits 1 when left=0 and before=5 (identity still enforced)"
+assert_contains "$OUT" "does not account for the servers it started with" \
+  "names the broken sweep accounting, not some other red"
+run_gate 0 0 identity_boundary1.json
+assert_eq "$RC" "1" "exits 1 when left=0 and before=1 (the lower boundary)"
+assert_contains "$OUT" "does not account for the servers it started with" \
+  "names the broken sweep accounting at before=1"
+
+echo "48. the COUNT==left pass line reports the sweep's own cleared=false"
+# The pass line has TWO branches: COUNT < left and COUNT == left. Case 43
+# exercises only the first, so a hardcoded `cleared=true` on the COUNT==left
+# branch was unobserved. left=0 at COUNT=0 reaches that branch with
+# cleared=false (reaped + left == before, so the identity holds).
+run_gate 0 0 cleared_false_left_zero.json
+assert_eq "$RC" "0" "exits 0 — nothing live to bound"
+assert_contains "$OUT" "reaped=5, cleared=false) — within the sweep's own measurement" \
+  "the COUNT==left pass line reports the sweep's own cleared=false, not a hardcoded true"
+assert_not_contains "$OUT" "cleared=true" \
+  "never fabricates cleared=true on the COUNT==left pass line"
+
 echo
 # A LOST case must not be indistinguishable from success: deleting a case
 # leaves FAIL=0 and merely a LOWER count, so the count is pinned too.
-expected_assertions=158
+expected_assertions=166
 if [ "$PASS" -eq "$expected_assertions" ]; then
   PASS=$((PASS + 1))
   echo "  ✅ assertion count pinned at $expected_assertions (a lost case is not a green run)"

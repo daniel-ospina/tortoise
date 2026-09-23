@@ -33,7 +33,7 @@
 #         workflow's later probe may legitimately see fewer. A count BELOW the
 #         sweep's measurement is therefore a PASS with the delta logged, not an
 #         anomaly.
-#       * `cleared == true` — the sweep FINISHED rather than running out of its
+#       * `cleared` — the sweep FINISHED rather than running out of its
 #         time budget. `cleared: false` means the sweep did not prove that its
 #         `left` is an authoritative BOUND, so `left` alone is not trusted — it
 #         is a confidence flag, not a residue of its own. The measured `COUNT`
@@ -99,7 +99,7 @@
 #                               applies at any `cleared`.
 #   {reaped, cleared, left,
 #     before}                  → bound `left`, plus the positive controls above
-#                               (the count/probe agreement, `cleared`, and the
+#                               (the count/probe agreement and the
 #                               `reaped + left >= before` accounting identity).
 #                               A `cleared: false` report does not red by
 #                               itself: at COUNT == 0 it is a `::warning::`
