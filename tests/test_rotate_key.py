@@ -550,7 +550,7 @@ def test_create_leg_failure_leaves_the_old_key_live(client, fake, monkeypatch):
     """T3: if the replacement cannot be created, NOTHING may be revoked."""
     org = _signup_org(client, fake)
 
-    def _boom(_cp, _row):  # noqa: ANN001
+    def _boom(_cp, _row):
         raise RuntimeError("Supabase unreachable (simulated)")
 
     monkeypatch.setattr(sc, "insert_api_key", _boom)
@@ -617,7 +617,7 @@ def test_lost_claim_rolls_back_and_409s(client, fake, monkeypatch):
     org = _signup_org(client, fake)
     real_claim = sc.claim_api_key_revocation
 
-    def _losing_claim(cp, key_id, now=None):  # noqa: ANN001
+    def _losing_claim(cp, key_id, now=None):
         real_claim(cp, key_id, now)   # the row IS revoked…
         return False                  # …but this call did not win the claim
 
@@ -707,7 +707,7 @@ def test_concurrent_rotate_of_one_row_admits_exactly_one(client, fake, monkeypat
     gate = threading.Barrier(2, timeout=60)
     real_query = fake.query
 
-    def _rendezvous_at_claim(table, **kwargs):  # noqa: ANN001
+    def _rendezvous_at_claim(table, **kwargs):
         filters = kwargs.get("filters") or []
         # The claim write — keyed on the TARGET id, which the compensation
         # write (the loser's replacement id) can never match. Under the
@@ -726,7 +726,7 @@ def test_concurrent_rotate_of_one_row_admits_exactly_one(client, fake, monkeypat
     def _worker(i: int) -> None:
         try:
             results[i] = _rotate(client, target, org["headers"])
-        except BaseException as e:  # noqa: BLE001
+        except BaseException as e:
             errors.append(e)
 
     threads = [threading.Thread(target=_worker, args=(i,)) for i in (0, 1)]
@@ -760,7 +760,7 @@ def test_rotate_emits_the_rotate_audit_event(client, fake, monkeypatch):
     org = _signup_org(client, fake)
     events: list[dict] = []
 
-    async def _fake_audit(request, org_id, operation, **kwargs):  # noqa: ANN001
+    async def _fake_audit(request, org_id, operation, **kwargs):
         events.append({"org_id": org_id, "operation": operation, **kwargs})
 
     monkeypatch.setattr(ha_mod, "_async_audit", _fake_audit)
@@ -784,6 +784,6 @@ def test_rotate_stores_only_the_hash_and_reveals_once(client, fake):
     r = _rotate(client, org["key_id"], _auth(org["key"]))
     assert r.status_code == 200, r.text
     new_key = r.json()["key"]
-    row = [x for x in _rows(fake, org["org_id"]) if x["id"] == r.json()["id"]][0]
+    row = next(x for x in _rows(fake, org["org_id"]) if x["id"] == r.json()["id"])
     assert row["lookup_hash"] == lookup_hash(new_key)
     assert new_key not in str(row)

@@ -722,7 +722,7 @@ class TestApiKeySlotParity:
     """
 
     def test_registry_lane_count_equals_accepted_ids(self, reg_sdk):
-        from tortoise.quota import api_key_occupies_slot, _count_resource
+        from tortoise.quota import _count_resource, api_key_occupies_slot
 
         tid = _find_org_id(reg_sdk)
         reg = reg_sdk._get_registry()
@@ -772,9 +772,9 @@ class TestApiKeySlotParity:
         assert api_key_occupies_slot(tid, "", sdk=reg_sdk) is False
 
     def test_supabase_lane_count_equals_accepted_ids(self, monkeypatch):
-        from tortoise.quota import api_key_occupies_slot, _count_resource
         import tortoise.supabase_control as sc
         from tests.fake_control_plane import FakeControlPlane
+        from tortoise.quota import _count_resource, api_key_occupies_slot
 
         monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
         monkeypatch.setenv("SUPABASE_URL", "https://slot-parity.supabase.co")

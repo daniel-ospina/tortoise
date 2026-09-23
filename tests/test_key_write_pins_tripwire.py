@@ -416,7 +416,7 @@ class TestKeyWritePinsTripwireBehavior:
         (The route carries no inline _session_pinned_org — the DI owns it —
         which is exactly why KEY_WRITE_HANDLERS names get_current_org_session
         as its seam.)"""
-        teamA, teamB = self._two_claimed_teams(client, fake, monkeypatch)
+        teamA, _teamB = self._two_claimed_teams(client, fake, monkeypatch)
         _keyC, teamC = _provision_anon(client, fake)
         kid = self._key_id(fake, teamA)
         rows_before = len(fake.query("api_keys", select=["id"]))
