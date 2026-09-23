@@ -306,13 +306,15 @@ def classify_failure(status: int | float | None, detail: str = "") -> str:
 
     Not detected by prose: the client ships independently of the server's
     wording, and a capacity/billing refusal is a category, not a string. Any
-    402 is retried, with `backoff_delay` capping the cadence. That converts
-    immediate loss into a BOUNDED, DEFERRED one: `SPOOL_MAX_ENTRIES` /
-    `SPOOL_MAX_TOTAL_BYTES` still apply, and `prune_spool` evicts oldest-first
-    with a recorded reason, so an org that stays over quota does eventually lose
-    the oldest captures — visibly, on the discard ledger, never silently. Retry
-    is the safe direction here: the asymmetry is a bounded, recorded deferral
-    versus irreversible unlink of the only copy.
+    402 is retried, with the ENTRY's `backoff_delay` capping the cadence —
+    carried across turns, so a growing session is retried on the backoff clock
+    rather than once per turn. That converts immediate loss into a BOUNDED,
+    DEFERRED one: `SPOOL_MAX_ENTRIES` / `SPOOL_MAX_TOTAL_BYTES` still apply, and
+    `prune_spool` evicts oldest-first with a recorded reason, so an org that
+    stays over quota does eventually lose the oldest captures — visibly, on the
+    discard ledger, never silently. Retry is the safe direction here: the
+    asymmetry is a bounded, recorded deferral versus irreversible unlink of the
+    only copy.
 
     PERMANENT: every other 4xx — a malformed payload or an out-of-range turn
     count never becomes valid by waiting.
@@ -715,8 +717,15 @@ def write_spool_entry(
         "turns_count": len(snapshot.turns),
         "content_digest": new_digest,
         "capture_key": capture_key(snapshot.session_id, snapshot.turns),
-        "attempts": 0,
-        "next_attempt_at_ms": 0,
+        # The backoff belongs to the ENTRY, not to one snapshot. A session that
+        # keeps growing writes a new meta on EVERY turn; resetting these here
+        # re-armed the retry window each time, so a deferred 402 was re-POSTed at
+        # turn cadence with no backoff at all (#4714) — the "capped cadence"
+        # this module promises held only for a STATIC entry. A new turn is not a
+        # new upload attempt, so carry them forward. The filing path resets them
+        # (attempts=0) and a genuinely fresh entry starts at zero.
+        "attempts": _attempts(prior or {}),
+        "next_attempt_at_ms": _backoff_ms(prior or {}),
     }
     if snapshot.model:
         meta["model"] = snapshot.model
@@ -801,6 +810,14 @@ def _backoff_ms(meta: dict) -> float:
         return float(meta.get("next_attempt_at_ms") or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _attempts(meta: dict) -> int:
+    """`attempts` as a non-negative int, however corrupt the stored value is."""
+    try:
+        return max(0, int(meta.get("attempts") or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAULT_BOUNDS) -> list[dict]:

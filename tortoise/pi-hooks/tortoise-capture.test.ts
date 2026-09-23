@@ -723,6 +723,49 @@ test("a quota-refused 402 defers the capture instead of destroying it (#4714)", 
   assert.equal(second.filed, 1, "the deferred capture must file once the quota clears");
 });
 
+test("a new turn does not re-arm the retry window (#4714 review)", async () => {
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, snapshot("sess-grow", SPOOL_TURNS.slice(0, 1)));
+  // The backoff belongs to the ENTRY, not to one snapshot. `writeSpoolEntry`
+  // used to hard-code attempts=0 / next_attempt_at_ms=0, so a growing session
+  // re-armed its own window every turn and a deferred 402 was re-POSTed at turn
+  // cadence. The spool is shared with the Python leg, so any other session's
+  // drain fires it too.
+  //
+  // MUTATION THAT REDS THIS: reset attempts/next_attempt_at_ms in
+  // `writeSpoolEntry` → the window collapses and the entry is POSTed again
+  // 1 ms later.
+  const refused = statusFetch(402, "quota");
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: refused.fetchImpl, now: 1_000 });
+  const armed = readSpoolEntry(spool, "sess-grow");
+  assert.equal(armed?.attempts, 1);
+  assert.ok(
+    (armed?.next_attempt_at_ms ?? 0) > 1_000,
+    "the refusal must arm a backoff window",
+  );
+
+  // ONE new turn — the entry grows, and the window must survive it.
+  writeSpoolEntry(spool, snapshot("sess-grow", [...SPOOL_TURNS, SPOOL_TURNS[0]]));
+  const grown = readSpoolEntry(spool, "sess-grow");
+  assert.equal(grown?.attempts, 1, "a new turn reset the attempt counter");
+  assert.equal(
+    grown?.next_attempt_at_ms,
+    armed?.next_attempt_at_ms,
+    "a new turn re-armed the backoff",
+  );
+
+  // A drain 1 ms later must SKIP it, not re-POST.
+  const again = statusFetch(402, "quota");
+  const summary = await flushSpool(TEST_CFG, {
+    dir: spool,
+    fetchImpl: again.fetchImpl,
+    now: 1_001,
+  });
+  assert.equal(summary.attempted, 0, "an entry inside its backoff window was re-POSTed");
+  assert.equal(summary.skipped, 1);
+  assert.equal(again.calls.length, 0);
+});
+
 test("the server's in-flight 409 is retryable, not a lost write (#3713)", async () => {
   const spool = tmpSpool();
   writeSpoolEntry(spool, snapshot("sess-409"));

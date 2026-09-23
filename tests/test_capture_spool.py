@@ -419,6 +419,46 @@ def test_a_quota_refusal_defers_the_capture_instead_of_destroying_it(tmp_path):
     assert second.filed == 1, "the deferred capture must file once the quota clears"
 
 
+def test_a_new_turn_does_not_re_arm_the_retry_window(tmp_path):
+    """#4714 review. The backoff belongs to the ENTRY, not to one snapshot.
+
+    `write_spool_entry` used to hard-code attempts=0 / next_attempt_at_ms=0 into
+    every write, so a session that kept growing re-armed its OWN retry window on
+    every turn: a deferred 402 was re-POSTed at turn cadence with no backoff at
+    all. That matters because the spool is shared by every harness on the box,
+    so any OTHER session's drain fires it too — a retry storm whose rate is set
+    by how fast the user types. The "capped cadence" the module promises held
+    only for a STATIC entry, which is precisely the case a quota-bound org is
+    not in.
+
+    MUTATION THAT REDS THIS: reset attempts/next_attempt_at_ms in
+    `write_spool_entry` -> the window collapses to 0 and the entry is POSTed
+    again 1 ms later.
+    """
+    root = tmp_path
+    write_spool_entry(root, _snapshot("sess-grow", TURNS[:1]))
+    refused = _Server(PostOutcome(ok=False, status=402, detail="quota"))
+    flush_spool(root, refused.post, now=1000.0)
+
+    after_refusal = read_spool_meta(root, "sess-grow")
+    assert after_refusal["attempts"] == 1
+    window = after_refusal["next_attempt_at_ms"]
+    assert window > 1000.0, "the refusal must arm a backoff window"
+
+    # ONE new turn arrives — the entry grows, and the window must survive it.
+    write_spool_entry(root, _snapshot("sess-grow", TURNS + TURNS[:1]))
+    grown = read_spool_meta(root, "sess-grow")
+    assert grown["attempts"] == 1, "a new turn reset the attempt counter"
+    assert grown["next_attempt_at_ms"] == window, "a new turn re-armed the backoff"
+
+    # A drain 1 ms later must SKIP it, not re-POST.
+    again = _Server(PostOutcome(ok=False, status=402, detail="quota"))
+    summary = flush_spool(root, again.post, now=1000.0 + 1)
+    assert summary.attempted == 0, "an entry inside its backoff window was re-POSTed"
+    assert summary.skipped == 1
+    assert again.posts == 0
+
+
 def test_the_in_flight_409_is_retryable_not_a_lost_write(tmp_path):
     """#3713. MUTATION THAT REDS THIS: treat every 409 as permanent → the entry
     is discarded and the benign in-flight race becomes a lost capture."""

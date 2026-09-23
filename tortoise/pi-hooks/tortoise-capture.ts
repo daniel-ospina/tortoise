@@ -789,8 +789,15 @@ export function writeSpoolEntry(
     turns_count: snapshot.turns.length,
     content_digest: contentDigest(snapshot.turns),
     capture_key: captureKey(snapshot.sessionId, snapshot.turns),
-    attempts: 0,
-    next_attempt_at_ms: 0,
+    // The backoff belongs to the ENTRY, not to one snapshot. A session that
+    // keeps growing writes a new meta on EVERY turn; resetting these here
+    // re-armed the retry window each time, so a deferred 402 was re-POSTed at
+    // turn cadence with no backoff at all (#4714) — the "capped cadence" this
+    // module promises held only for a STATIC entry. A new turn is not a new
+    // upload attempt, so carry them forward. The filing path resets them
+    // (attempts=0) and a genuinely fresh entry starts at zero.
+    attempts: prior?.attempts ?? 0,
+    next_attempt_at_ms: prior?.next_attempt_at_ms ?? 0,
     ...(prior?.filed_key && prior.content_digest === contentDigest(snapshot.turns)
       ? { filed_key: prior.filed_key, filed_at: prior.filed_at }
       : {}),
@@ -943,9 +950,11 @@ export function pruneSpool(
  * UNLINKS the meta and the turn log. Both legs share ONE spool directory
  * (`~/.tortoise/capture-spool`), so leaving 402 permanent here re-opens the
  * data loss the Python fix closes: a capture the Python drain correctly defers
- * is destroyed by the next Pi drain. Retry is bounded by the spool's
- * count/byte bound and `backoffDelay`, so an unrecoverable 402 costs disk and
- * a capped cadence rather than a capture.
+ * is destroyed by the next Pi drain. Retry is bounded by the spool's count/byte
+ * bound and the ENTRY's `backoffDelay` — carried across turns, so an
+ * actively-growing session is retried on the backoff clock rather than once per
+ * turn — so an unrecoverable 402 costs disk and a capped cadence rather than a
+ * capture.
  *
  * PERMANENT (discard + record): every other 4xx — a malformed payload or an
  * out-of-range turn count never becomes valid by waiting.
