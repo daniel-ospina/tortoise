@@ -787,10 +787,12 @@ jobs:
       - name: Assert no redislite orphans (issue #1005 / epic #1647 E2E-7)
         # Runs even when pytest failed — the orphan check is independent of
         # test outcomes. The bound is NOT a hand-picked constant: the conftest
-        # session-end sweep reports what it did ({reaped, cleared, left}) and
-        # the gate binds to that report — see .github/scripts/orphan-bound.sh
-        # (#4740). #2032: the docker lane is not always ~0 by construction — the
-        # embedded-file-contract atexit race leaves strays on the full matrix
+        # session-end sweep reports what it did ({reaped, cleared, left, before})
+        # and the gate binds to that report — reading the bound from `left` and
+        # asserting the sweep's own accounting identity `reaped + left >= before`
+        # (see .github/scripts/orphan-bound.sh, #4740). #2032: the docker lane is
+        # not always ~0 by construction — the embedded-file-contract atexit race
+        # leaves strays on the full matrix
         # too (trunk run 34928488659 measured 7), and that residue is what the
         # sweep's own `left` now accounts for; a real leak still reds (E2E-7).
         # #1371 kill-aware: after a WATCHDOG kill (rc 124/137/2) the
@@ -804,7 +806,17 @@ jobs:
           set +e  # pgrep exits 1 on zero matches; pipefail would abort the step
           RC=""
           [ -f "${RUNNER_TEMP:-/tmp}/pytest-rc" ] && RC=$(cat "${RUNNER_TEMP:-/tmp}/pytest-rc")
-          COUNT=$(pgrep -f "redislite/bin/redis-server" | wc -l | tr -d ' ')
+          # #4740: the count and pgrep's OWN status are read separately. A
+          # `${PIPESTATUS[0]}` read after `COUNT=$(pgrep … | wc -l)` reports
+          # the LAST pipeline command (`tr`, always 0), never pgrep — so a
+          # failed probe would read as a measured 0 and pass. On the bare
+          # assignment below `$?` IS pgrep's status: rc 0 = matches, rc 1 = no
+          # matches (both real measurements); anything else is a failed probe
+          # and must RED, never be read as "measured zero" (issue #1005).
+          PIDS=$(pgrep -f "redislite/bin/redis-server")
+          prc=$?
+          [ "$prc" -le 1 ] || { echo "::error::pgrep failed rc=$prc — the orphan count is unmeasured (issue #1005)"; exit 1; }
+          COUNT=$(printf '%s' "$PIDS" | wc -w | tr -d ' ')
           bash .github/scripts/orphan-bound.sh \
             --count "$COUNT" \
             --rc "$RC" \
@@ -1158,7 +1170,15 @@ jobs:
           set +e
           RC=""
           [ -f "${RUNNER_TEMP:-/tmp}/pytest-rc" ] && RC=$(cat "${RUNNER_TEMP:-/tmp}/pytest-rc")
-          COUNT=$(pgrep -f "redislite/bin/redis-server" | wc -l | tr -d ' ')
+          # #4740: read the count and pgrep's OWN status separately — a
+          # `${PIPESTATUS[0]}` after `COUNT=$(pgrep … | wc -l)` is the `tr`
+          # status, never pgrep, so a failed probe would read as 0 and pass.
+          # `$?` on the bare assignment IS pgrep's status (rc 0/1 are real
+          # measurements; anything else must RED). See the fast job's note.
+          PIDS=$(pgrep -f "redislite/bin/redis-server")
+          prc=$?
+          [ "$prc" -le 1 ] || { echo "::error::pgrep failed rc=$prc — the orphan count is unmeasured (issue #1005)"; exit 1; }
+          COUNT=$(printf '%s' "$PIDS" | wc -w | tr -d ' ')
           bash .github/scripts/orphan-bound.sh \
             --count "$COUNT" \
             --rc "$RC" \
@@ -1628,7 +1648,15 @@ jobs:
           set +e
           RC=""
           [ -f "${RUNNER_TEMP:-/tmp}/pytest-rc" ] && RC=$(cat "${RUNNER_TEMP:-/tmp}/pytest-rc")
-          COUNT=$(pgrep -f "redislite/bin/redis-server" | wc -l | tr -d ' ')
+          # #4740: read the count and pgrep's OWN status separately — a
+          # `${PIPESTATUS[0]}` after `COUNT=$(pgrep … | wc -l)` is the `tr`
+          # status, never pgrep, so a failed probe would read as 0 and pass.
+          # `$?` on the bare assignment IS pgrep's status (rc 0/1 are real
+          # measurements; anything else must RED). See the fast job's note.
+          PIDS=$(pgrep -f "redislite/bin/redis-server")
+          prc=$?
+          [ "$prc" -le 1 ] || { echo "::error::pgrep failed rc=$prc — the orphan count is unmeasured (issue #1005)"; exit 1; }
+          COUNT=$(printf '%s' "$PIDS" | wc -w | tr -d ' ')
           bash .github/scripts/orphan-bound.sh \
             --count "$COUNT" \
             --rc "$RC" \

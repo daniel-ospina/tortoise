@@ -32,12 +32,23 @@
 #     17-20), downgraded only by a watchdog kill (cases 18, 20).
 #   * the #1371 rc-unknown red path (case 21) and the fail-loud argument
 #     validation (cases 22-24).
+#   * the accounting identity `reaped + left >= before` → PASS at the boundary
+#     (case 26), RED when violated even though COUNT <= left (case 27), and
+#     only a kill downgrades it (case 28); skipped on `before: null` (case 29)
+#     and `before: 0` (case 30) — while a report OMITTING `before` is unusable
+#     → RED (case 31), so the control cannot be disabled by a shape change.
+#   * magnitude: an 18+ digit `--count` (case 32) and an 18+ digit `left` in
+#     the report (case 33) both exit 2 as usage errors instead of reaching the
+#     PASS line.
 #
 # MUTATION PINS (verified by mutating the script, not the fixture): cases 3, 4,
 # 5, 6, 7, 9, 10, 11, 12, 16, 17, 19, 21 each fail if their branch's verdict
 # flips or its `exit 1` becomes a `return`/fall through, and cases 1/2 fail if
-# the bound stops being read from `left`. A case that merely restates a default
-# would not catch its own removal.
+# the bound stops being read from `left`. Cases 27, 29, 30, 31, 32, 33
+# likewise fail when their new branch is removed or weakened (identity check
+# dropped, `before: null` no longer accepted, `before` no longer required,
+# either magnitude guard removed). A case that merely restates a default would
+# not catch its own removal.
 #
 # The assertion count is PINNED (see the summary): a lost case must not be
 # indistinguishable from a passing one.
@@ -71,9 +82,15 @@ WORK="$(mktemp -d)"
 trap 'find "$WORK" -depth -mindepth 1 -delete 2>/dev/null; rmdir "$WORK" 2>/dev/null' EXIT
 
 # ── report fixtures ─────────────────────────────────────────────────────────
-printf '{"sweep":{"reaped":9,"cleared":true,"left":14}}' > "$WORK/report14.json"
-printf '{"sweep":{"reaped":2,"cleared":true,"left":7}}' > "$WORK/report7.json"
-printf '{"sweep":{"reaped":9,"cleared":false,"left":14}}' > "$WORK/budget.json"
+printf '{"sweep":{"reaped":9,"cleared":true,"left":14,"before":20}}' > "$WORK/report14.json"
+printf '{"sweep":{"reaped":2,"cleared":true,"left":7,"before":9}}' > "$WORK/report7.json"
+printf '{"sweep":{"reaped":9,"cleared":false,"left":14,"before":23}}' > "$WORK/budget.json"
+printf '{"sweep":{"reaped":12,"cleared":true,"left":14,"before":26}}' > "$WORK/identity_ok.json"
+printf '{"sweep":{"reaped":1,"cleared":true,"left":2,"before":10}}' > "$WORK/identity_bad.json"
+printf '{"sweep":{"reaped":1,"cleared":true,"left":2,"before":null}}' > "$WORK/before_null.json"
+printf '{"sweep":{"reaped":0,"cleared":true,"left":2,"before":0}}' > "$WORK/before_zero.json"
+printf '{"sweep":{"reaped":9,"cleared":true,"left":14}}' > "$WORK/nobefore.json"
+printf '{"sweep":{"reaped":1,"cleared":true,"left":99999999999999999999999999,"before":10}}' > "$WORK/overflow_left.json"
 printf '{"sweep":{"error":"probe exploded"}}' > "$WORK/error.json"
 printf '{"sweep":{"skipped":"reaper-lock-held"}}' > "$WORK/skipped.json"
 printf '{"sweep":{"skipped":"no-pytest"}}' > "$WORK/nopytest.json"
@@ -267,10 +284,63 @@ OUT=$(bash "$GATE" --count 1 --rc 2>&1) || bad_rc=$?
 assert_eq "$bad_rc" "2" "exits 2"
 assert_contains "$OUT" "requires a value" "names the missing value"
 
+echo "26. the accounting identity reaped + left >= before holds → PASS"
+# reaped=12, left=14, before=26 — the identity holds at exact equality.
+run_gate 14 0 identity_ok.json
+assert_eq "$RC" "0" "exits 0 when reaped + left == before"
+assert_contains "$OUT" "within the sweep's own measurement" "prints the pass line"
+
+echo "27. an identity violation (reaped + left < before) REDs"
+# The sweep reaped servers its own report no longer accounts for: the SWEEP's
+# measurement, not the count, is broken. COUNT (2) <= left (2) here, so only
+# the identity can produce the red.
+run_gate 2 0 identity_bad.json
+assert_eq "$RC" "1" "exits 1 even though COUNT <= left"
+assert_contains "$OUT" "does not account for" "names the broken accounting"
+assert_not_contains "$OUT" "within the sweep's own measurement" \
+  "does NOT fall through to the pass line (fail-open pin)"
+
+echo "28. an identity violation under a watchdog kill downgrades to a warning"
+run_gate 2 137 identity_bad.json
+assert_eq "$RC" "0" "exits 0 under rc=137"
+assert_contains "$OUT" "::warning::" "emits a warning"
+assert_contains "$OUT" "#1371" "cites the kill-aware rationale"
+
+echo "29. before=null SKIPS the identity (the pre-sweep probe failed) — not a red"
+run_gate 2 0 before_null.json
+assert_eq "$RC" "0" "exits 0"
+assert_contains "$OUT" "within the sweep's own measurement" "prints the pass line"
+assert_not_contains "$OUT" "does not account for" \
+  "the identity is not asserted against a null before"
+
+echo "30. before=0 SKIPS the identity — not a red"
+run_gate 2 0 before_zero.json
+assert_eq "$RC" "0" "exits 0"
+assert_not_contains "$OUT" "does not account for" "the identity is skipped at before=0"
+
+echo "31. a report that OMITS before is unusable → RED (the control cannot be disabled)"
+run_gate 2 0 nobefore.json
+assert_eq "$RC" "1" "exits 1"
+assert_contains "$OUT" "unreadable" "treats the missing identity input as unusable"
+
+echo "32. an oversized --count exits 2 (magnitude, not just characters)"
+# 99999999999999999999999999 is beyond bash's 64-bit integer range: `[` would
+# return 2 and the false branch would reach the PASS line.
+bad_rc=0
+OUT=$(bash "$GATE" --count 99999999999999999999999999 --rc 0 --hygiene "$WORK/report14.json" 2>&1) || bad_rc=$?
+assert_eq "$bad_rc" "2" "exits 2 instead of reaching the pass line"
+assert_contains "$OUT" "too large to compare" "names the magnitude guard"
+
+echo "33. an oversized left in the report exits 2 (never a pass)"
+bad_rc=0
+OUT=$(bash "$GATE" --count 1 --rc 0 --hygiene "$WORK/overflow_left.json" 2>&1) || bad_rc=$?
+assert_eq "$bad_rc" "2" "exits 2"
+assert_contains "$OUT" "too large to compare" "names the magnitude guard"
+
 echo
 # A LOST case must not be indistinguishable from success: deleting a case
 # leaves FAIL=0 and merely a LOWER count, so the count is pinned too.
-expected_assertions=77
+expected_assertions=96
 if [ "$PASS" -eq "$expected_assertions" ]; then
   PASS=$((PASS + 1))
   echo "  ✅ assertion count pinned at $expected_assertions (a lost case is not a green run)"

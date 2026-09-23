@@ -15,10 +15,12 @@
 #   constant is the SAME defect with a bigger number. So the number is not a
 #   constant at all: the sweep reports what it did, and this gate binds to it.
 #
-#   THE POSITIVE CONTROL
-#     A bound of `left` could be satisfied by a leak that inflates its own bound.
-#     A `{reaped, cleared, left}` report is therefore accepted only when BOTH
-#     hold:
+#   THE POSITIVE CONTROLS
+#     A bound of `left` could be satisfied by a leak that inflates its own bound,
+#     and `left` is produced by the very same probe as the workflow's `COUNT`,
+#     one step later — so neither alone can detect a sweep whose own
+#     measurement is broken. A `{reaped, cleared, left, before}` report is
+#     therefore accepted only when ALL hold:
 #       * the workflow's `pgrep` COUNT is at or below the sweep's own `left` —
 #         the two probes run the identical `pgrep -f redislite/bin/redis-server`,
 #         one step apart. COUNT ABOVE `left` means the counter is measuring a
@@ -34,6 +36,14 @@
 #         the real "hygiene is broken" signal, and it reds whatever the count is
 #         — except under a #1371 watchdog kill, where the run is already red and
 #         a second red adds no signal.
+#       * the sweep's own ACCOUNTING IDENTITY holds: `reaped + left >= before`,
+#         where `before` is the sweep's pre-sweep live count. A sweep that
+#         reaped `reaped` and left `left` must account for at least everything
+#         it started with; servers it reaped that its own report no longer
+#         accounts for mean the SWEEP's measurement is broken, not the count.
+#         Skipped only when `before` is `null` (the probe failed — a distinct
+#         state) or `0`; a report that OMITS `before` is unusable → RED, so the
+#         control can never be disabled by a report shape change.
 #
 # VERDICT TABLE
 #   sweep.error               → RED, always: the hygiene path crashed, so the
@@ -54,7 +64,13 @@
 #                               FAILED, so the run produced no `left` to bind
 #                               to — an unmeasured residue, named as such rather
 #                               than read as a plausible 0.
-#   {reaped, cleared, left}   → bound `left`, plus the two positive controls.
+#   {reaped, cleared, left,
+#     before}                  → bound `left`, plus the positive controls above
+#                               (the count/probe agreement, `cleared`, and the
+#                               `reaped + left >= before` accounting identity).
+#                               An uncomparably large number (18+ digits, past
+#                               bash's 64-bit integer range) is a usage error →
+#                               exit 2, never a pass.
 #   missing/unreadable report → RED: the residue is unaccounted for.
 #
 # #1371 KILL-AWARE: after a WATCHDOG kill (pytest rc 124/137/2) the counted
@@ -68,7 +84,11 @@
 #
 # NO LITERAL BOUND. Every number this gate compares against is read from the
 #   hygiene report (`left`) or supplied as `--count`. The only numeric literals
-#   are the process exit codes 0/1/2 and the #1371 pytest-kill rc set.
+#   are the process exit codes 0/1/2 and the #1371 pytest-kill rc set. Because
+#   bash's `[` returns 2 (not false) on a value outside its 64-bit integer
+#   range — and a false branch would then reach the PASS line — both `--count`
+#   and every number read from the report are also bounded in MAGNITUDE; an
+#   oversized value exits 2 as a usage error rather than inverting the verdict.
 #
 # USAGE
 #   orphan-bound.sh --count <n> --rc <pytest-rc> --hygiene <path-to-json>
@@ -104,13 +124,25 @@ done
 
 # A non-numeric count cannot be meaningfully compared; fail loudly rather than
 # fall through to `[`'s "integer expression expected" (which, with `set +e`,
-# would read as an uncaught error and could invert the verdict).
+# would read as an uncaught error and could invert the verdict). MAGNITUDE is
+# guarded too: a value beyond bash's 64-bit integer range makes every `[`
+# comparison itself return 2, and with the false branch taken the run would
+# reach the PASS line — the same inversion by the other route (#4740 review 3).
 case "$COUNT" in
   '' | *[!0-9]*)
     echo "::error::orphan-bound: --count must be a non-negative integer (got '$COUNT')"
     exit 2
     ;;
 esac
+# Strip leading zeros first: they inflate the digit count without changing the
+# value and make bash arithmetic (`$((left - COUNT))`) read the number as octal.
+_count="${COUNT#"${COUNT%%[!0]*}"}"
+[ -n "$_count" ] || _count="0"
+if [ "${#_count}" -ge 18 ]; then
+  echo "::error::orphan-bound: --count is too large to compare safely (got '$COUNT')"
+  exit 2
+fi
+COUNT="$_count"
 
 # ── read the hygiene report ─────────────────────────────────────────────────
 # The report is a JSON document written by the conftest session-end fixture.
@@ -123,6 +155,18 @@ if [ -n "$HYGIENE" ] && [ -f "$HYGIENE" ]; then
   HYGIENE_OUT=$(python3 -c '
 import json
 import sys
+
+# 18+ digits is past bash 64-bit integer range: a `[` comparison on it returns
+# 2 (not false), and the false branch would then reach the PASS line. Bound the
+# magnitude here so an uncomparably large number is a usage error, not a pass
+# (#4740 review 3).
+MAX_COMPARABLE = 10 ** 17
+
+
+def _count(value):
+    """A non-negative integer, excluding bool (JSON true/false are ints)."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
 
 try:
     with open(sys.argv[1], encoding="utf-8") as fh:
@@ -152,12 +196,29 @@ elif (
     print("kind=probe_failed")
 elif (
     isinstance(sweep.get("cleared"), bool)
-    and "left" in sweep
-    and isinstance(sweep["left"], int)
-    and not isinstance(sweep["left"], bool)
+    and _count(sweep.get("left"))
+    and _count(sweep.get("reaped"))
+    and "before" in sweep
+    and (sweep["before"] is None or _count(sweep["before"]))
 ):
-    print("kind=report cleared=%s left=%d"
-          % ("true" if sweep["cleared"] else "false", sweep["left"]))
+    left = sweep["left"]
+    reaped = sweep["reaped"]
+    before = sweep["before"]
+    # `before` is REQUIRED for the accounting identity: a report that dropped
+    # it would silently disable the one control derived from the sweep itself,
+    # so a malformed or older report is `unreadable` -> RED, never a skip.
+    if max(left, reaped, -1 if before is None else before) >= MAX_COMPARABLE:
+        print("kind=oversized")
+    else:
+        print(
+            "kind=report cleared=%s left=%d reaped=%d before=%s"
+            % (
+                "true" if sweep["cleared"] else "false",
+                left,
+                reaped,
+                "null" if before is None else str(before),
+            )
+        )
 else:
     print("kind=unreadable")
 ' "$HYGIENE" 2>/dev/null) || HYGIENE_OUT="kind=unreadable"
@@ -166,11 +227,15 @@ fi
 kind=""
 cleared=""
 left=""
+reaped=""
+before=""
 for _tok in $HYGIENE_OUT; do
   case "$_tok" in
     kind=*) kind="${_tok#kind=}" ;;
     cleared=*) cleared="${_tok#cleared=}" ;;
     left=*) left="${_tok#left=}" ;;
+    reaped=*) reaped="${_tok#reaped=}" ;;
+    before=*) before="${_tok#before=}" ;;
   esac
 done
 
@@ -233,6 +298,13 @@ case "$kind" in
   probe_failed)
     red_or_kill_warning "redislite orphan gate: the hygiene end-sweep's own count probe FAILED (left=null) — the run produced no measurement to bind the bound to, so the $COUNT residue is unaccounted for (issue #1005)"
     ;;
+  oversized)
+    # The report carries a number bash cannot compare. Reading it would make
+    # `[` return 2, and under the false branch the run would reach the PASS
+    # line — so this is a usage error, not a verdict (#4740 review 3).
+    echo "::error::orphan-bound: the hygiene report carries a count too large to compare safely (issue #4740)"
+    exit 2
+    ;;
   report)
     if [ "$cleared" != "true" ]; then
       # A budget-exhausted sweep is the real "hygiene is broken" signal and reds
@@ -246,6 +318,20 @@ case "$kind" in
       fi
       red "redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) — the $COUNT residue is arbitrary, not a bounded outcome (issue #1005)"
     fi
+    # The sweep's own ACCOUNTING IDENTITY: a sweep that reaped `reaped` and
+    # left `left` must account for at least everything it started with. `left`
+    # is produced by the same probe as the workflow's COUNT one step later, so
+    # on its own it cannot detect a sweep whose own measurement is broken; the
+    # identity is the control derived from the sweep's own work (#4740 review
+    # 3). Skipped ONLY when the pre-sweep probe failed (`before` is null) or
+    # measured zero — a report that OMITS `before` is `unreadable`, so the
+    # control cannot be silently disabled. Both operands are canonical decimal
+    # (the parser prints `%d`), so the arithmetic cannot be read as octal.
+    if [ "$before" != "null" ] && [ "$before" -gt 0 ]; then
+      if [ "$((reaped + left))" -lt "$before" ]; then
+        red_or_kill_warning "redislite orphan gate: the sweep does not account for the servers it started with — before=$before, reaped=$reaped, left=$left (reaped + left < before); the sweep's own measurement is broken"
+      fi
+    fi
     if [ "$COUNT" -gt "$left" ]; then
       red_or_kill_warning "redislite orphan gate: $COUNT servers counted but the sweep reported left=$left — the counter observes a population the sweep did not account for"
     fi
@@ -254,9 +340,9 @@ case "$kind" in
     # servers down at interpreter exit, after the sweep's in-teardown reading),
     # so it is a pass — with the delta logged so it stays visible.
     if [ "$COUNT" -lt "$left" ]; then
-      echo "orphaned redislite servers after suite: $COUNT (sweep left=$left, cleared=true; $((left - COUNT)) shut down at interpreter exit after the sweep's teardown reading) — within the sweep's own measurement"
+      echo "orphaned redislite servers after suite: $COUNT (sweep before=$before left=$left reaped=$reaped, cleared=true; $((left - COUNT)) shut down at interpreter exit after the sweep's teardown reading) — within the sweep's own measurement"
     else
-      echo "orphaned redislite servers after suite: $COUNT (sweep left=$left, cleared=true) — within the sweep's own measurement"
+      echo "orphaned redislite servers after suite: $COUNT (sweep before=$before left=$left reaped=$reaped, cleared=true) — within the sweep's own measurement"
     fi
     exit 0
     ;;

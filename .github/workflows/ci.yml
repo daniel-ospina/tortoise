@@ -660,8 +660,11 @@ jobs:
     # bound is READ from the conftest session-end sweep's report (two different
     # `left` values both pass, so no fixed bound can satisfy both), that a
     # disagreement between the workflow's count and the sweep's own measurement
-    # reds, that `cleared: false` reds whatever the count is, and that a red
-    # verdict never falls through to a pass line.
+    # reds, that a violation of the sweep's accounting identity
+    # (`reaped + left < before`) reds, that `cleared: false` reds whatever the
+    # count is, that an 18+ digit number exits 2 as a usage error rather than
+    # reaching the pass line, and that a red verdict never falls through to a
+    # pass line.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

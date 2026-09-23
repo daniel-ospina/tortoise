@@ -459,6 +459,22 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
         except Exception:
             return True  # probe failure: run the sweep (fail-safe direction)
 
+    def _live_count_or_none() -> int | None:
+        """Live `redislite/bin/redis-server` count, or None if the probe failed.
+
+        `_pgrep_redis_servers_or_none` returns None for a probe FAILURE
+        (timeout, missing pgrep, unexpected status) — distinct from a measured
+        zero. The hygiene report must never read an unmeasured residue as 0
+        (#4740), so the sweep records `None` and the gate names it. Never
+        raises.
+        """
+        try:
+            from tortoise.embedded_reaper import _pgrep_redis_servers_or_none
+            probe = _pgrep_redis_servers_or_none()
+            return len(probe) if probe is not None else None
+        except Exception:
+            return None
+
     def _sweep(only_safe: bool) -> dict:
         if not _embedded_servers_running():
             return {"no_embedded_servers": True}
@@ -475,6 +491,13 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
                 prev = os.environ.get("TORTOISE_REAPER_MIN_UPTIME")
                 if not only_safe:
                     os.environ["TORTOISE_REAPER_MIN_UPTIME"] = "0"
+                # #4740: the PRE-sweep live count, read once here (still under
+                # this sweep's own MIN_UPTIME setting) and never raised out.
+                # `left` is produced by this same probe one step later, so on
+                # its own it cannot detect a sweep whose own measurement is
+                # broken; the CI gate pairs the bound with the accounting
+                # identity `reaped + left >= before`.
+                before = _live_count_or_none()
                 try:
                     # #1642 FIX 6: loop discover->reap until the time budget
                     # is exhausted or the backlog is cleared, at a raised
@@ -522,22 +545,16 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
                     # than bounded, which is the signal a bigger constant would
                     # swallow.
                     cleared = not acted
-                    try:
-                        from tortoise.embedded_reaper import (
-                            _pgrep_redis_servers_or_none,
-                        )
-
-                        probe = _pgrep_redis_servers_or_none()
-                        # None (not 0) when the probe itself failed: the gate
-                        # must name an unmeasured residue, not read a
-                        # timeout/missing-pgrep as "nothing left" (#4740).
-                        left = len(probe) if probe is not None else None
-                    except Exception:
-                        # never fail the suite over the hygiene report: an
-                        # unreadable count is reported as null and the gate
-                        # treats it as an unaccounted residue
-                        left = None
-                    return {"reaped": total, "cleared": cleared, "left": left}
+                    # None (not 0) when the probe itself failed: the gate must
+                    # name an unmeasured residue, not read a timeout/missing-
+                    # pgrep as "nothing left" (#4740). Never raises.
+                    left = _live_count_or_none()
+                    return {
+                        "reaped": total,
+                        "cleared": cleared,
+                        "left": left,
+                        "before": before,
+                    }
                 finally:
                     if prev is None:
                         os.environ.pop("TORTOISE_REAPER_MIN_UPTIME", None)
