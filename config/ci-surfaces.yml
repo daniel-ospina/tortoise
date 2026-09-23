@@ -1433,10 +1433,12 @@ durations:
 # #4712: PROVENANCE IS NOW SEVERAL RUNS (each block names its own) — and note
 # the map was never STRICTLY
 # fast-only, so the header line above ("the fast-file pool of that run")
-# describes its bulk, not all of it. Everything down to the `#4711/#4712` block
-# below is run 34725816431 (the fast-pool measurement) EXCEPT four lane keys that
-# already sat in that region: eval/retrieval/test_integration.py (855.2 — counted
-# in the fast pool then, moved to slow_files by #4711) and three carve_out
+# describes its bulk, not all of it. Most of the region down to the
+# `#4711/#4712` block below is run 34725816431 (the fast-pool measurement);
+# entries that came from a different run say so at the entry. Some entries in
+# that region were never part of the fast pool, e.g.
+# eval/retrieval/test_integration.py (855.2 — counted
+# in the fast pool then, moved to slow_files by #4711) and the carve_out
 # entries, test_ops_safety.py (16.8), test_backup_e2e.py (13.1) and
 # test_embedded_lifecycle_fast_close.py (9.1). The keys from run 35735193291
 # (head 26207c42) cover the rest of the slow_files / carve_out lanes. #4724 adds a value consumer for them (a
