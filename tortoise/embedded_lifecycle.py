@@ -2080,11 +2080,12 @@ def _install_dead_socket_guard() -> None:
         # that had nothing to do ("no branch fired" with no way to tell which
         # gate stopped it).
         #
-        # DEBUG, not WARNING: every gate it reports is a NORMAL outcome —
-        # `registry-vanished` and `no-recorded-socket` both mean "no replay,
-        # start fresh", and `recorded-socket-present` means "replay normally".
-        # None of them is anomalous, so WARNING was the wrong severity, and a
-        # WARNING on a healthy path in a shared module pollutes the `caplog`
+        # DEBUG, not WARNING: the gates reported here are this predicate's
+        # ordinary outcomes, while the anomalous ones are logged at WARNING
+        # below — the unproven holder, the holder that would not stop, the
+        # registry changed mid-repair, the unlink failure, and the completed
+        # repair. WARNING was the wrong severity, and a WARNING on a healthy
+        # path in a shared module pollutes the `caplog`
         # of any unrelated test the message happens to match. It did:
         # `tests/test_metering.py::TestThresholdEvents::
         # test_no_threshold_for_free_tier` asserts that no WARNING record
