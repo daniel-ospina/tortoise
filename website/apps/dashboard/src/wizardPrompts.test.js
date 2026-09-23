@@ -22,6 +22,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import {
   ONBOARDING_INSTRUCTIONS,
+  WIZARD_CAPTIONS,
   wizardPromptText,
   wizardWorkflowsText,
 } from './wizardPrompts.js'
@@ -80,6 +81,8 @@ test('#4880: the rendered wizard copy matches the committed snapshot', () => {
     'the rendered universal commands drifted from the snapshot')
   assert.equal(snapshot.onboardingInstructions, ONBOARDING_INSTRUCTIONS,
     'the shared onboarding sentence drifted from the snapshot')
+  assert.deepEqual(snapshot.captions, WIZARD_CAPTIONS,
+    'the rendered wizard captions drifted from the snapshot')
   assert.equal(snapshot.skillSet, SKILLS_LIST, 'the shipped set drifted from the snapshot')
 })
 
@@ -107,49 +110,49 @@ function allRenderedSurfaces() {
     }
   }
   surfaces.push({ id: 'workflows', text: wizardWorkflowsText(KEY, 'included') })
+  // #4880: the live JSX captions and copy labels. They were the last
+  // agent-facing prose NO invariant observed — a caption claiming onboarding
+  // arrives as a skill reached the user with both suites green, because the
+  // only guard that could see it was reading main.jsx as source text.
+  for (const [name, text] of Object.entries(WIZARD_CAPTIONS)) {
+    surfaces.push({ id: `caption.${name}`, text })
+  }
   for (const harness of COMMAND_HARNESSES) {
     surfaces.push({ id: `UNIVERSAL_COMMAND.${harness}`, text: UNIVERSAL_COMMAND[harness](KEY) })
   }
   return surfaces
 }
 
-// Every occurrence of "install the Tortoise skills", with what FOLLOWS the set.
+// Every "install … skills (<parenthetical>)" statement, with what FOLLOWS it.
+// The phrase is GENERALIZED, not the literal "install the Tortoise skills": a
+// reworded claim ("Also install the Tortoise helper skills (agent-memory) from
+// …") reintroduced the #4365 defect class while never matching the literal.
 function setStatements(text) {
   const out = []
-  const re = /install the Tortoise skills/gi
+  const re = /install[^\n]{0,60}?skills\s*\(([^)]*)\)/gi
   let m
   while ((m = re.exec(text)) !== null) {
-    out.push({ at: m.index, tail: text.slice(m.index + m[0].length) })
+    out.push({ at: m.index, inner: m[1], end: m.index + m[0].length })
   }
   return out
 }
 
 const EXPECTED_SET = ` (${SKILLS_LIST})`
+const SKILL_NAMES = SKILLS_LIST.split(', ')
 
-// Parentheticals that are legitimately NOT the shipped set: the Cursor command
-// tells the user to run the installer in a terminal instead of enumerating the
-// skills (its skills ride the steps). Exact-matched rather than pattern-matched,
-// so a new "hint" that is really a skill name still fails.
-const NON_SET_HINTS = new Set(['run in a terminal'])
-
-// What may legitimately follow the set's `)`. ANCHORED, because a bare
+// What may legitimately follow a set statement. ANCHORED, because a bare
 // "any whitespace" probe cannot tell the legitimate ` from <installer URL>.`
-// from a hostile ` plus agent-memory:` — the space-separated variant of the
-// #4365 defect class slipped through an earlier revision of this gate.
+// from a hostile ` plus agent-memory:`.
 const TAIL_FORMS = [':\n', ` from ${SKILLS_INSTALL_URL}.`]
 
-// Install-family verb that is NOT negated in its own clause. Clause-scoped on
-// purpose: "Onboarding is not a skill — install it" carries `not` in an EARLIER
-// clause and must still be caught, while "Onboarding is not installed" must not.
-const INSTALL_VERB = /\b\w*install\w*\b/i
-const NEGATION = /\b(not|never|no|without|isn't|aren't)\b/i
-const CLAUSE_BREAK = /[—;.,:!?()\-]/
-function unnegatedInstall(line) {
-  const m = INSTALL_VERB.exec(line)
-  if (!m) return null
-  const clause = line.slice(0, m.index).split(CLAUSE_BREAK).pop() ?? ''
-  return NEGATION.test(clause) ? null : m[0]
-}
+// Is this parenthetical an ENUMERATION of capabilities? If it is, it must be
+// exactly the shipped set. Exact-matching a hint instead ("(run in a terminal)")
+// FALSE-REDded a legitimate rewording of instructional prose, so the hint is
+// recognised by SHAPE: prose is allowed, an enumeration is not.
+const hasSkillIdShape = (inner) =>
+  /(?:^|[\s,])([a-z][a-z0-9]*(?:-[a-z0-9]+)+)(?=$|[\s,)]|\s)/.test(inner)
+const looksLikeEnumeration = (inner) =>
+  inner.includes(',') || SKILL_NAMES.some((n) => inner.includes(n)) || hasSkillIdShape(inner)
 
 test('#4365: every rendered shipped-set statement is EXACTLY the shipped set', () => {
   // The old guard compared only the text INSIDE the parentheses, so a superset
@@ -159,18 +162,16 @@ test('#4365: every rendered shipped-set statement is EXACTLY the shipped set', (
     const stmts = setStatements(text)
     assert.ok(stmts.length <= 1,
       `${id}: at most one shipped-set statement per surface (found ${stmts.length})`)
-    for (const { tail } of stmts) {
-      const close = tail.indexOf(')')
-      assert.ok(close > -1, `${id}: the set statement has no closing paren: ${JSON.stringify(tail.slice(0, 60))}`)
-      const whole = tail.slice(0, close + 1)
+    for (const { inner, end } of stmts) {
+      const whole = ` (${inner})`
       if (whole === EXPECTED_SET) {
         seen += 1
       } else {
-        assert.ok(NON_SET_HINTS.has(whole.slice(2, -1)),
-          `${id}: the set statement must enumerate exactly "${SKILLS_LIST}" — got `
-          + `${JSON.stringify(tail.slice(0, 60))}`)
+        assert.ok(!looksLikeEnumeration(inner),
+          `${id}: a statement that enumerates capabilities must enumerate exactly `
+          + `"${SKILLS_LIST}" — got ${JSON.stringify(whole)}`)
       }
-      const after = tail.slice(close + 1)
+      const after = text.slice(end)
       assert.ok(TAIL_FORMS.some((form) => after.startsWith(form)),
         `${id}: only ${JSON.stringify(TAIL_FORMS)} may follow the set statement — `
         + `got ${JSON.stringify(after.slice(0, 40))}`)
@@ -181,10 +182,26 @@ test('#4365: every rendered shipped-set statement is EXACTLY the shipped set', (
   for (const harness of ['pi', 'cursor', 'claude', 'codex']) {
     const stmts = setStatements(wizardPromptText(harness, 1, KEY, 'included'))
     assert.equal(stmts.length, 1, `${harness}: the step-1 prompt states the shipped set exactly once`)
-    assert.equal(stmts[0].tail.slice(0, EXPECTED_SET.length), EXPECTED_SET,
+    assert.equal(` (${stmts[0].inner})`, EXPECTED_SET,
       `${harness}: the step-1 prompt enumerates the shipped set`)
   }
 })
+
+// Install-family verb that is NOT negated in its own clause. Clause-scoped on
+// purpose: "Onboarding is not a skill — install it" carries `not` in an EARLIER
+// clause and must still be caught, while "Onboarding is not installed" must not.
+const NEGATION = /\b(not|never|no|without|isn't|aren't)\b/i
+const CLAUSE_BREAK = /[—;.,:!?()\-]/
+function unnegatedInstall(line) {
+  // EVERY install verb, not just the first: returning on the first match let
+  // "Onboarding is not installed; install the tortoise-onboarding skill" pass —
+  // the second, unnegated verb was never examined.
+  for (const m of line.matchAll(/\b\w*install\w*\b/gi)) {
+    const clause = line.slice(0, m.index).split(CLAUSE_BREAK).pop() ?? ''
+    if (!NEGATION.test(clause)) return m[0]
+  }
+  return null
+}
 
 test('#4365: no rendered surface presents onboarding as an installed skill', () => {
   // Cycle 11 found the onboarding declaration was matched AFTER its `${…}`
@@ -259,6 +276,32 @@ test('#4365: every endpoint on every rendered surface is an approved host', () =
     if (mentions > 0) {
       assert.ok(text.includes(ONBOARDING_URL),
         `${id}: an onboarding surface must name the approved instructions URL`)
+    }
+  }
+})
+
+test('#4365: onboarding is only ever named as the document, never as a package', () => {
+  // Two ways to present onboarding as an installable WITHOUT using an install
+  // verb — both were GREEN against the previous revision:
+  //   (a) naming it as something packaged: "A copy is also packaged as the
+  //       tortoise-onboarding skill."  → caught here: the name may appear only
+  //       inside the approved document URL.
+  //   (b) splitting the claim across lines: an install line whose object is not
+  //       the shipped set, immediately above the document URL. Caught here too.
+  for (const { id, text } of allRenderedSurfaces()) {
+    const outsideUrl = text.split(ONBOARDING_URL).join('')
+    assert.ok(!/tortoise-onboarding/i.test(outsideUrl),
+      `${id}: onboarding is named outside the approved document URL — `
+      + `it may only be the instructions document, never a package or skill`)
+    const lines = text.split('\n')
+    for (let n = 0; n + 1 < lines.length; n += 1) {
+      if (!unnegatedInstall(lines[n])) continue
+      const statesSet = setStatements(lines[n]).some((st) => ` (${st.inner})` === EXPECTED_SET)
+      if (statesSet) continue
+      assert.ok(!lines[n + 1].includes(ONBOARDING_URL),
+        `${id}: an un-negated install verb on one line with the onboarding document `
+        + `on the next reads as "install the onboarding skill": `
+        + `${JSON.stringify(lines[n])} / ${JSON.stringify(lines[n + 1])}`)
     }
   }
 })

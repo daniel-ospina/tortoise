@@ -187,14 +187,6 @@ DASHBOARD_SRC = REPO_ROOT / "website" / "apps" / "dashboard" / "src"
 
 SNAPSHOT_PATH = DASHBOARD_SRC / "wizardPrompts.snapshot.json"
 
-# Parentheticals that are legitimately NOT the shipped set: the Cursor command
-# tells the user to run the installer in a terminal instead of enumerating the
-# skills (its skills ride the steps). Mirrors NON_SET_HINTS in
-# website/apps/dashboard/src/wizardPrompts.test.js — the dashboard suite
-# exact-matches these; here they are only skipped.
-_NON_SET_HINTS = {"run in a terminal"}
-
-
 def _rendered_snapshot() -> dict:
     """The committed RENDERED agent-facing copy (#4880 / #4365).
 
@@ -264,17 +256,33 @@ def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
     surfaces["workflows"] = snap["workflows"]
     surfaces["onboardingInstructions"] = sentence
     surfaces.update({f"UNIVERSAL_COMMAND.{k}": v for k, v in snap["commands"].items()})
+    # #4880: the live JSX captions — extracted into wizardPrompts.js as DATA so
+    # they are rendered values like everything else.
+    surfaces.update({f"caption.{k}": v for k, v in snap["captions"].items()})
 
     # Every rendered set statement enumerates EXACTLY what the installer ships.
     # This is the live #4365 defect — a served copy claiming a 4th skill.
     checked = 0
+    skill_names = _installer_skills()
     for label, text in surfaces.items():
-        for inner in re.findall(r"install the Tortoise skills\s*\(([^)]*)\)", text, re.I):
-            if inner in _NON_SET_HINTS:
+        for inner in re.findall(r"install[^\n]{0,60}?skills\s*\(([^)]*)\)", text, re.I):
+            # The phrase is GENERALIZED, not the literal "install the Tortoise
+            # skills": a reworded claim ("Also install the Tortoise helper skills
+            # (agent-memory) from …") reintroduced the defect class while never
+            # matching the literal. A parenthetical that ENUMERATES capabilities
+            # — a comma list, a shipped name, or a skill-id-shaped token — must
+            # be exactly the shipped set; prose hints are allowed by shape, so
+            # rewording one is not a false red.
+            enumerates = (
+                "," in inner
+                or any(n in inner for n in skill_names)
+                or re.search(r"(?:^|[\s,])([a-z][a-z0-9]*(?:-[a-z0-9]+)+)(?=$|[\s,)])", inner)
+            )
+            if not enumerates:
                 continue
-            assert inner.split(", ") == _installer_skills(), (
+            assert inner.split(", ") == skill_names, (
                 f"{label}: the rendered copy enumerates {inner!r}, which is not "
-                f"the set the installer ships ({_installer_skills()})")
+                f"the set the installer ships ({skill_names})")
             checked += 1
     assert checked >= 4, (
         f"expected the four config-writing prompts to state the set (found "

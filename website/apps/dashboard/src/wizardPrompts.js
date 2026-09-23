@@ -97,3 +97,19 @@ function wizardWorkflowsText(key, mode) {
 }
 
 export { wizardWorkflowsText }
+
+// #4880/#4365: the LIVE captions and copy labels rendered beside these prompts.
+// These were the last agent-facing prose no invariant observed: a caption
+// claiming onboarding arrives as a skill reached the user with BOTH suites
+// green, because the only guard able to see it was reading main.jsx as source.
+// They live here, as data, so the same rendered-value rules apply to them.
+export const WIZARD_CAPTIONS = {
+  connect: 'Give this prompt to your agent to connect Tortoise:',
+  verify: 'Then give it this prompt to verify the connection and file your first memory:',
+  workflows: 'Start a new chat and paste this prompt:',
+  keyPrivate: 'Your API key is inside the block below — keep it private.',
+  connectLabel: 'Copy the connect prompt',
+  verifyLabel: 'Copy the verify prompt',
+  promptLabel: 'Copy prompt',
+  workflowsLabel: 'Copy the workflows prompt',
+}

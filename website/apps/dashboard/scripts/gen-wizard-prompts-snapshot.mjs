@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import {
   ONBOARDING_INSTRUCTIONS,
+  WIZARD_CAPTIONS,
   wizardPromptText,
   wizardWorkflowsText,
 } from '../src/wizardPrompts.js'
@@ -54,6 +55,7 @@ const snapshot = {
   onboardingInstructions: ONBOARDING_INSTRUCTIONS,
   prompts,
   workflows: wizardWorkflowsText(KEY, 'included'),
+  captions: WIZARD_CAPTIONS,
   commands,
 }
 

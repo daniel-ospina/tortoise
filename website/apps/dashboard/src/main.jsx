@@ -12,7 +12,7 @@ import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HAR
 // #4880/#4365: the wizard's agent-facing copy is a RENDERED value the guards
 // assert — main.jsx is JSX and cannot be imported by `node --test`, so parsing
 // it as source is the mechanism that produced five false greens.
-import { wizardPromptText, wizardWorkflowsText } from './wizardPrompts.js'
+import { WIZARD_CAPTIONS, wizardPromptText, wizardWorkflowsText } from './wizardPrompts.js'
 // #1728 Slice 3 (Tasks 16-17): the SHARED 4-state capture-status derivation
 // (off → install-pending → waiting → active, probe-driven) — pure, node --test
 // unit-tested (captureStatus.test.js). #1927: the re-ask gate predicate was
@@ -7345,15 +7345,15 @@ function claimIntentInFlight() {
                       if (agentDriven2Step.includes(wizardHarness)) {
                         procedure = (
                           <>
-                            <p className="wizard-caption">Give this prompt to your agent to connect Tortoise:</p>
-                            <WizardPromptCard text={wizardPromptText(wizardHarness, 1, harnessKey, wizardKeyMode)} label="Copy the connect prompt" />
+                            <p className="wizard-caption">{WIZARD_CAPTIONS.connect}</p>
+                            <WizardPromptCard text={wizardPromptText(wizardHarness, 1, harnessKey, wizardKeyMode)} label={WIZARD_CAPTIONS.connectLabel} />
                           </>
                         )
                         procedureTailTitle = `Restart ${HARNESS_NAMES[wizardHarness]} and verify`
                         procedureTail = (
                           <>
-                            <p className="wizard-caption">Then give it this prompt to verify the connection and file your first memory:</p>
-                            <WizardPromptCard text={wizardPromptText(wizardHarness, 2, harnessKey, wizardKeyMode)} label="Copy the verify prompt" />
+                            <p className="wizard-caption">{WIZARD_CAPTIONS.verify}</p>
+                            <WizardPromptCard text={wizardPromptText(wizardHarness, 2, harnessKey, wizardKeyMode)} label={WIZARD_CAPTIONS.verifyLabel} />
                           </>
                         )
                       } else if (agentDriven1Step.includes(wizardHarness)) {
@@ -7367,8 +7367,8 @@ function claimIntentInFlight() {
                           </>
                         ) : (
                           <>
-                            <p className="wizard-caption">Give this prompt to your agent to connect Tortoise:</p>
-                            <WizardPromptCard text={wizardPromptText(wizardConnectHarness, 1, harnessKey, wizardKeyMode)} label="Copy prompt" />
+                            <p className="wizard-caption">{WIZARD_CAPTIONS.connect}</p>
+                            <WizardPromptCard text={wizardPromptText(wizardConnectHarness, 1, harnessKey, wizardKeyMode)} label={WIZARD_CAPTIONS.promptLabel} />
                           </>
                         )
                       } else if (wizardKeyless) {
@@ -7415,10 +7415,10 @@ function claimIntentInFlight() {
                         procedureTailTitle = 'Give Claude the Tortoise workflows'
                         procedureTail = (
                           <>
-                            <p className="wizard-caption">Start a new chat and paste this prompt:</p>
+                            <p className="wizard-caption">{WIZARD_CAPTIONS.workflows}</p>
                             {/* #2865: composed KEY-LESS — a connector surface
                                 never carries a key. */}
-                            <WizardPromptCard text={wizardWorkflowsText('', 'included')} label="Copy the workflows prompt" />
+                            <WizardPromptCard text={wizardWorkflowsText('', 'included')} label={WIZARD_CAPTIONS.workflowsLabel} />
                           </>
                         )
                       }
@@ -7490,7 +7490,7 @@ function claimIntentInFlight() {
                                       the only unrecoverable-key cue this surface
                                       had — nothing else on it says the key is
                                       unrecoverable after you leave. */}
-                                  <p className="wizard-caption">Your API key is inside the block below — keep it private.</p>
+                                  <p className="wizard-caption">{WIZARD_CAPTIONS.keyPrivate}</p>
                                   {/* #3218: same visibility + recovery statement
                                       as the shared key row (this surface has no
                                       row — its key IS the config block). */}

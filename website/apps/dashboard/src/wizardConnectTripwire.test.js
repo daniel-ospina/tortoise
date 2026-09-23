@@ -24,7 +24,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 // #4880/#4365: the wizard's agent-facing copy moved to this JSX-free module so
 // the guards below can assert the RENDERED prompt instead of parsing source.
-import { ONBOARDING_INSTRUCTIONS, wizardPromptText } from './wizardPrompts.js'
+import { ONBOARDING_INSTRUCTIONS, WIZARD_CAPTIONS, wizardPromptText } from './wizardPrompts.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const mainJsx = readFileSync(join(here, 'main.jsx'), 'utf8')
@@ -435,8 +435,13 @@ test('#2912: the Codex Desktop block keeps the "shown once" advisory', () => {
   const desktop = src.slice(i, desktopEnd)
   // the merged block dropped the only unrecoverable-key cue on this surface
   // (HARNESS_INTRO.codexDesktop / UNIVERSAL_COMMAND.codexDesktop never say it)
-  assert.match(desktop, /Your API key is inside the block below — keep it private\./,
+  // #4880: the advisory is now DATA in wizardPrompts.js (it was the last live
+  // caption no invariant could observe), so assert it is the rendered string
+  // the JSX interpolates rather than a literal in the source text.
+  assert.match(desktop, /\{WIZARD_CAPTIONS\.keyPrivate\}/,
     'the Desktop surface must still say the key is private')
+  assert.match(WIZARD_CAPTIONS.keyPrivate, /keep it private/,
+    'the key-private advisory must still say the key is private')
   // #3218: this surface has no key ROW, so the shared visibility + recovery
   // note must render here too (the caption alone says neither).
   assert.match(desktop, /<p className="wizard-note">\{KEY_VISIBILITY_NOTE\}<\/p>/,
@@ -1286,10 +1291,15 @@ test('#3218: the prompt-card labels describe the prompt, never a rival step numb
   const owner = ownerBranch()
   assert.doesNotMatch(owner, /'Copy step \d prompt'/,
     'no card label may carry its own step number once the circles own the order')
-  assert.match(owner, /label="Copy the connect prompt"/, 'the block-2 card names the connect prompt')
-  assert.match(owner, /label="Copy the verify prompt"/, 'the block-3 card names the verify prompt')
-  assert.match(owner, /label="Copy the workflows prompt"/,
+  // #4880: the labels are DATA in wizardPrompts.js — assert both that the JSX
+  // renders them and that they still describe the prompt they sit on.
+  assert.match(owner, /label=\{WIZARD_CAPTIONS\.connectLabel\}/, 'the block-2 card names the connect prompt')
+  assert.match(owner, /label=\{WIZARD_CAPTIONS\.verifyLabel\}/, 'the block-3 card names the verify prompt')
+  assert.match(owner, /label=\{WIZARD_CAPTIONS\.workflowsLabel\}/,
     'the Claude Web/Desktop block-3 card names the workflows prompt')
+  assert.equal(WIZARD_CAPTIONS.connectLabel, 'Copy the connect prompt')
+  assert.equal(WIZARD_CAPTIONS.verifyLabel, 'Copy the verify prompt')
+  assert.equal(WIZARD_CAPTIONS.workflowsLabel, 'Copy the workflows prompt')
 })
 
 // #3218 (item 4): the agent is told to install the skills BEFORE it is told to
@@ -1325,9 +1335,13 @@ test('#3218: the Pi/Cursor step-1 prompts install the skills before the restart 
     // line and nothing else). A note inserted after it ("Then delete ~/.pi")
     // was GREEN against an earlier revision that only rejected the install
     // phrase while its comment claimed this stronger property.
-    assert.equal(
-      p.slice(iRestart),
-      `Tell me when to restart ${h === 'pi' ? 'Pi' : 'Cursor'}.\nDocs: https://tortoise.premiselabs.co/docs`,
+    // Line-based, not byte-exact: a trailing newline renders harmlessly and must
+    // not be a false red, while an inserted actionable note still fails.
+    const tailLines = p.slice(iRestart).split('\n')
+    assert.equal(tailLines[0], `Tell me when to restart ${h === 'pi' ? 'Pi' : 'Cursor'}.`,
+      `${h}: the restart cue names the harness`)
+    assert.deepEqual(tailLines.slice(1).filter((line) => line.trim() !== ''),
+      ['Docs: https://tortoise.premiselabs.co/docs'],
       `${h}: the restart cue must be the last actionable line — only the docs line may follow it`)
     assert.ok(!INSTALL.test(p.slice(iRestart)),
       `${h}: the restart-before-skills order must not come back`)
