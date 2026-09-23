@@ -274,7 +274,16 @@ def _is_bulk_wipe(cypher: str) -> bool:
 # re-point discriminator on the very run that needs them. Re-prepending from
 # the sidecar keeps replay order byte-identical to the uninterrupted case.
 _PREWIPE_SNAPSHOT_FILENAME = ".tortoise-prewipe-snapshot.json"
-_PREWIPE_SNAPSHOT_VERSION = 1
+_PREWIPE_SNAPSHOT_VERSION = 2
+# #2814: v2 adds the `config_snapshot` section. Reading v1 is required
+# (backward compatibility): a rescue file written before this change carries
+# no config record, and the union treats that exactly as the loader does —
+# absent means empty (`data.get(key, [])`). The WRITE side is why the bump is
+# not optional: the version is stamped by the CALLERS' payloads, not by
+# `_write_prewipe_snapshot`, so without a bump a v1 build would accept this
+# file and silently ignore `config_snapshot` while its wipe landed. With the
+# bump that build REFUSES the rebuild instead (its `version != 1` check).
+_PREWIPE_SNAPSHOT_READABLE_VERSIONS = (1, 2)
 # #3947 × #3010: `session_snapshot` / `session_point_links` join the durable
 # sidecar for the same reason the #990 `:Batch` marker did — a `:Session`
 # container and its CONTAINS edges are RAW graph writes on the capture path
@@ -284,7 +293,12 @@ _PREWIPE_SNAPSHOT_VERSION = 1
 # every turn Point but silently destroys every container and link.
 _SNAPSHOT_SECTIONS = ("synthetic_events", "batch_snapshot",
                       "batch_point_links", "session_snapshot",
-                      "session_point_links")
+                      "session_point_links",
+                      # #2814: authoritative configuration. Enrolled here so it
+                      # is validated before the wipe (:447) and so the
+                      # retirement payload and `rebuild_all`'s write payload can
+                      # be DERIVED from this tuple rather than re-listed.
+                      "config_snapshot")
 # The sidecar is read whole into memory before the wipe, so an unbounded file
 # (a planted one especially — the log dir is caller-supplied) would exhaust
 # memory on the recovery path. The cap is now WRITER-ENFORCED
@@ -307,6 +321,340 @@ def _is_snapshot_primitive(value) -> bool:
     if isinstance(value, (list, tuple)):
         return all(isinstance(v, _PRIMITIVE_TYPES) for v in value)
     return False
+
+
+# ── #2814: authoritative-configuration durability ────────────────────────────
+# The rebuild wipe (`MATCH (n) DETACH DELETE n`, :3197) is unconditional and
+# only the journal is replayed. Some node classes are GRAPH-RESIDENT, ride NO
+# journal record, and are not re-derivable — so before this change a rebuild
+# silently reverted a configured graph to defaults, and the self-healing
+# starter-pack read path masked it (`get_tenant_packs` → `ensure_tenant_packs`
+# re-provisions the starter rows, so the graph looked freshly provisioned
+# rather than empty; see `tests/tool_surface_capabilities.py`
+# READ_THROUGH_WRITE_METHODS).
+#
+# The registry below is the DECLARED durability disposition of those classes:
+# what the pre-wipe capture reads, what the post-replay restore writes back,
+# and what `docs/durability-posture.md` must agree with (pinned bidirectionally
+# by tests/test_rebuild_config_preservation.py).
+#
+# It is explicitly NOT a completeness gate: a class nobody ever enrolled still
+# recurs, and closing that class-wide hole is #2296 (dormant — see the plan's
+# §7). What it buys is that the classes this change names cannot silently
+# de-enrol.
+_CONFIG_RESET_KEY = "config_reset"
+_CONFIG_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+class _ConfigClass(NamedTuple):
+    """One authoritative class the config sidecar preserves.
+
+    ``label``         — the node label, taken from the DOMAIN constant (never
+                        re-typed: a rename must not silently de-enrol the
+                        class).
+    ``identity_prop`` — the property identifying an instance within the label.
+    ``keys``          — for a key-scoped ``:Meta`` class, the declared keys;
+                        ``None`` means the label itself is the scope.
+    """
+    label: str
+    identity_prop: str
+    keys: frozenset[str] | None = None
+
+
+# Populated INSIDE `_config_classes()` as a side effect (it starts EMPTY at
+# module scope, deliberately — see the import-cycle note on that function).
+_CONFIG_CLASS_BY_LABEL: dict[str, _ConfigClass] = {}
+_config_classes_cache: tuple[_ConfigClass, ...] | None = None
+
+
+def _assert_config_registry_safe() -> None:
+    """Fail loudly on an unsafe or incoherent DECLARATION.
+
+    Runs on the first `_config_classes()` call — the load/validate path and the
+    capture path, both of which are PRE-wipe. Never at import time (see
+    `_config_classes`).
+
+    Labels and identity-property names are interpolated into Cypher, so both
+    must be safe identifiers. An empty `:Meta` key set would silently turn the
+    capture into a LABEL-WIDE read of `:Meta` — which would sweep the DERIVED
+    `point_fts_v2`/`event_fts_v2` markers into the config section and restore
+    them as if they were authoritative. And a section that is in
+    `_SNAPSHOT_SECTIONS` without an entry check KeyErrors inside validation,
+    which runs before the wipe but after the file was trusted enough to read.
+    """
+    for spec in _CONFIG_CLASS_BY_LABEL.values():
+        if not _CONFIG_IDENTIFIER_RE.match(spec.label):
+            raise RuntimeError(
+                f"config registry declares label {spec.label!r}, which is not "
+                f"a safe Cypher identifier (#2814)"
+            )
+        if not _CONFIG_IDENTIFIER_RE.match(spec.identity_prop):
+            raise RuntimeError(
+                f"config registry declares identity property "
+                f"{spec.identity_prop!r} for {spec.label!r}, which is not a "
+                f"safe Cypher identifier (#2814)"
+            )
+        if spec.keys is not None:
+            if not spec.keys:
+                raise RuntimeError(
+                    f"config registry declares {spec.label!r} with an empty "
+                    f"key set — that would make the capture a label-wide read "
+                    f"of the label, sweeping derived markers into the config "
+                    f"section (#2814)"
+                )
+            for key in spec.keys:
+                if not isinstance(key, str) or not key:
+                    raise RuntimeError(
+                        f"config registry declares Meta key {key!r} for "
+                        f"{spec.label!r}, which is not a non-empty string "
+                        f"(#2814)"
+                    )
+    if set(_SNAPSHOT_SECTIONS) != set(_SNAPSHOT_ENTRY_CHECK):
+        raise RuntimeError(
+            "_SNAPSHOT_SECTIONS and _SNAPSHOT_ENTRY_CHECK disagree "
+            f"({sorted(set(_SNAPSHOT_SECTIONS) ^ set(_SNAPSHOT_ENTRY_CHECK))}) "
+            "— a section with no entry check would KeyError inside pre-wipe "
+            "validation (#2814)"
+        )
+    if "config_snapshot" not in _SNAPSHOT_SECTIONS:
+        raise RuntimeError(
+            "the config registry exists but `config_snapshot` is not in "
+            "_SNAPSHOT_SECTIONS — the capture would never be validated or "
+            "written (#2814)"
+        )
+
+
+def _config_classes() -> tuple[_ConfigClass, ...]:
+    """The declared config registry — the ONLY accessor (memoised).
+
+    ⚠️ FUNCTION-LOCAL imports, and no module-scope binding or call. The three
+    domain constants live behind modules that import THIS one at module level —
+    `sdk.py` does `from .projection import FalkorProjection`, and
+    `pack_state.py` does `from tortoise.sdk import TortoiseSDK` (with
+    `pack_manifest_store.py` importing `pack_state`) — so a module-scope
+    `_config_classes()` call, or a module-scope read of the constants, is the
+    cycle projection → pack_state → sdk → projection. Both forms are
+    ImportError (reproduced: `import tortoise.sdk` and
+    `import tortoise.pack_manifest_store` break; `import tortoise.projection`
+    alone still succeeds, which is why the cycle is easy to miss).
+    `rebuild_all` already uses function-local imports for the same reason.
+
+    `_assert_config_registry_safe()` runs on FIRST call, i.e. on the
+    load/validate path or the capture path — never at import.
+    """
+    global _config_classes_cache
+    if _config_classes_cache is None:
+        from tortoise.pack_manifest_store import PACK_MANIFEST_LABEL
+        from tortoise.pack_state import PACK_INSTALL_LABEL
+        from tortoise.sdk import TortoiseSDK
+
+        classes = (
+            _ConfigClass(PACK_INSTALL_LABEL, "namespace"),
+            _ConfigClass(PACK_MANIFEST_LABEL, "namespace"),
+            # `:Meta` is SHARED with derived markers (the FTS keys), so this
+            # class is key-scoped: a label-wide read would sweep them in.
+            _ConfigClass("Meta", "key", frozenset({
+                TortoiseSDK._CALIBRATION_MARKER_KEY, _CONFIG_RESET_KEY})),
+        )
+        # `_CONFIG_CLASS_BY_LABEL` is a side effect so the validator and the
+        # restore path can resolve a label without repeating the import dance.
+        _CONFIG_CLASS_BY_LABEL.clear()
+        _CONFIG_CLASS_BY_LABEL.update({c.label: c for c in classes})
+        _config_classes_cache = classes
+        _assert_config_registry_safe()
+    return _config_classes_cache
+
+
+def _config_key(entry) -> tuple[str, str]:
+    """The union key for a config entry: ``(label, identity-`` ``value)``.
+
+    NOT the identity value alone. The section is flat, so entries of different
+    labels share one key space — with an identity-only key,
+    `PackInstall{namespace:'x'}` and `Meta{key:'x'}` would collide and
+    `_merge_entry` would keep the left entry's label while merging the other's
+    properties, silently dropping the `:Meta` entry and writing a foreign
+    property onto the pack node.
+    """
+    spec = _CONFIG_CLASS_BY_LABEL.get(entry.get("label"))
+    if spec is None:
+        # Populate before concluding a label is undeclared. The map starts
+        # EMPTY (see `_config_classes`), so without this an unloaded registry
+        # would key every entry of a declared label as `(label, None)` and
+        # collapse them all into one — silently dropping config entries in the
+        # union. Memoised, so this costs nothing once loaded.
+        _config_classes()
+        spec = _CONFIG_CLASS_BY_LABEL.get(entry.get("label"))
+    if spec is None:
+        return (entry.get("label"), None)
+    return (entry.get("label"), entry.get("props", {}).get(spec.identity_prop))
+
+
+def _safe_config_key(entry) -> tuple | None:
+    """`_config_key` for untrusted input — None when it cannot be keyed.
+
+    The union runs on a PLANTED sidecar as well as a captured one, so a
+    non-dict entry must not raise here; it is kept un-deduplicated and the
+    pre-wipe validator is what refuses it.
+    """
+    try:
+        return _config_key(entry)
+    except (AttributeError, TypeError):
+        return None
+
+
+def _validate_config_entry(entry) -> str | None:
+    """Return a complaint about a ``config_snapshot`` entry, else None.
+
+    Called once per entry during pre-wipe validation, so this is also where the
+    registry gets populated (`_config_classes()`, memoised) — meaning an empty
+    section never triggers the function-local imports at all.
+    """
+    _config_classes()
+    if not isinstance(entry, dict):
+        return f"not an object ({type(entry).__name__})"
+    label = entry.get("label")
+    if not isinstance(label, str):
+        return f"label {label!r} is not a string"
+    spec = _CONFIG_CLASS_BY_LABEL.get(label)
+    if spec is None:
+        return (f"label {label!r} is not a declared config class "
+                f"({sorted(_CONFIG_CLASS_BY_LABEL)})")
+    props = entry.get("props")
+    if not isinstance(props, dict):
+        return f"props is {type(props).__name__}, expected object"
+    identity = props.get(spec.identity_prop)
+    if not isinstance(identity, str):
+        return f"{spec.identity_prop} {identity!r} is not a string"
+    if spec.keys is not None and identity not in spec.keys:
+        return (f"{spec.identity_prop} {identity!r} is not one of the declared "
+                f"keys {sorted(spec.keys)}")
+    for key, value in props.items():
+        if not _is_snapshot_primitive(value):
+            return (f"property {key!r} value {value!r} is not a primitive "
+                    f"or an array of primitives")
+    return None
+
+
+def _config_capture_query(spec: _ConfigClass) -> str:
+    """The capture Cypher for one declared class — REGISTRY LITERALS ONLY.
+
+    Assembled from the declaration (whose label and identity property
+    `_assert_config_registry_safe` has already vetted as safe identifiers); an
+    identity value or property map is never spliced in — the restore
+    `$`-binds those. A key-scoped class filters on the declared keys, which is
+    what keeps the derived `:Meta` markers (the FTS keys) out.
+    """
+    if spec.keys is None:
+        return f"MATCH (n:{spec.label}) RETURN properties(n)"
+    return (f"MATCH (n:{spec.label}) WHERE n.{spec.identity_prop} IN $keys "
+            f"RETURN properties(n)")
+
+
+def _config_reset_props(existing: dict | None, reason: str) -> dict:
+    """The marker's property map — sticky and monotonic on ONE node.
+
+    `at` is the first-set time and survives every re-set; `last_at`/`count`
+    advance, so an accumulation of rebuilds is visible as a count on a single
+    marker node rather than as many nodes (which is why `MERGE` is on the key
+    alone, and why `count` is read back rather than assumed to be 1).
+    """
+    now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+    prior = existing or {}
+    count = prior.get("count")
+    return {
+        "key": _CONFIG_RESET_KEY,
+        "at": prior.get("at") or now,
+        "last_at": now,
+        "count": count + 1 if isinstance(count, int) else 1,
+        "reason": reason,
+    }
+
+
+def read_config_reset(g) -> dict | None:
+    """The `config_reset` marker's properties, or None when never set.
+
+    The operator-facing read: `None` means "no reset recorded", which is
+    different from "config is known to have been wiped" (see
+    `reason='legacy_sidecar_no_config_record'` — a state-UNKNOWN signal).
+    """
+    rows = g.query(
+        "MATCH (n:Meta {key:$key}) RETURN properties(n)",
+        params={"key": _CONFIG_RESET_KEY},
+    ).result_set
+    if not rows:
+        return None
+    props = rows[0][0]
+    return props if isinstance(props, dict) and props else None
+
+
+def set_config_reset_marker(g, reason: str) -> dict:
+    """Record the third state — `rebuild_all` never calls this to CLEAR it.
+
+    A keyed `:Meta` node (the repo's existing `:Meta{key:…}` idiom), not an
+    inferred absence: absence is also what a never-configured graph looks
+    like, so the two must be distinguishable. Deliberately NOT called a
+    "tombstone" — that is a controlled `docs/ONTOLOGY.md` term for a retracted
+    Point.
+    """
+    props = _config_reset_props(read_config_reset(g), reason)
+    g.query(
+        "MERGE (n:Meta {key:$key}) SET n += $props",
+        params={"key": _CONFIG_RESET_KEY,
+                "props": {k: v for k, v in props.items() if k != "key"}},
+    )
+    return props
+
+
+def clear_config_reset(g) -> bool:
+    """The operator's explicit clear (wired: `TortoiseSDK._clear_config_reset`).
+
+    Returns whether a marker was there. The marker is sticky by design — only
+    this call clears it — so the CLI and the rebuild runbook both name it.
+    A keyed MATCH+DETACH DELETE: targeted, so `_is_bulk_wipe` (a bare
+    label-less wipe detector) leaves it alone.
+    """
+    existed = read_config_reset(g) is not None
+    if existed:
+        g.query(
+            "MATCH (n:Meta {key:$key}) DETACH DELETE n",
+            params={"key": _CONFIG_RESET_KEY},
+        )
+    return existed
+
+
+def _capture_config_snapshot(g) -> list[dict]:
+    """Read every declared config class into flat section entries.
+
+    Entry shape is ``{"label": str, "props": dict}`` (#2814 decision (a)):
+    one flat section, so adding a class to the registry costs one tuple entry
+    rather than one new section across ten sites.
+
+    Any failure propagates: the caller funnels it into the ``capture_failed``
+    gate, so a graph that cannot answer this read NEVER reaches the wipe (the
+    #2943 discipline — a corrupt/heavy read failing while the light DELETE
+    succeeds would otherwise destroy the config with no durable record).
+    """
+    entries: list[dict] = []
+    seen: set[tuple] = set()
+    for spec in _config_classes():
+        params = {"keys": sorted(spec.keys)} if spec.keys is not None else None
+        rows = g.query(_config_capture_query(spec), params).result_set
+        for row in rows or []:
+            props = row[0] if not isinstance(row, dict) else row
+            if not isinstance(props, dict) or not props:
+                continue
+            identity = props.get(spec.identity_prop)
+            if not isinstance(identity, str):
+                # An identity-less instance cannot be addressed for restore;
+                # keep it out of the section rather than capture something the
+                # restore could not write back (it is not authoritative config).
+                continue
+            key = (spec.label, identity)
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append({"label": spec.label, "props": props})
+    return entries
 
 
 def _validate_point_entry(entry) -> str | None:
@@ -403,6 +751,7 @@ _SNAPSHOT_ENTRY_CHECK = {
     "batch_point_links": _validate_link_entry,
     "session_snapshot": _validate_session_entry,
     "session_point_links": _validate_link_entry,
+    "config_snapshot": _validate_config_entry,
 }
 # Node properties a snapshot Point carries that the replay does not fully
 # reconstruct, restored by the pass-1b tail.
@@ -441,10 +790,11 @@ def _validate_prewipe_snapshot(data: dict, path: str) -> None:
     skipped by every pass, so the sidecar gets cleared with nothing restored).
     """
     version = data.get("version")
-    if version is not None and version != _PREWIPE_SNAPSHOT_VERSION:
+    if version is not None and version not in _PREWIPE_SNAPSHOT_READABLE_VERSIONS:
         raise RuntimeError(
             f"a pre-wipe snapshot at {path} carries unsupported version "
-            f"{version!r} (this build writes {_PREWIPE_SNAPSHOT_VERSION}) — "
+            f"{version!r} (this build reads "
+            f"{list(_PREWIPE_SNAPSHOT_READABLE_VERSIONS)}) — "
             f"refusing to wipe the graph (#2943). Migrate or delete the file."
         )
     for key in _SNAPSHOT_SECTIONS:
@@ -602,15 +952,15 @@ def _clear_prewipe_snapshot(path: str) -> None:
     from the rewrite (``os.replace``); the unlink is then just tidiness.
     """
     try:
+        # #2814: DERIVED from the section tuple, never re-listed. A hand-list
+        # here would go stale silently and leave the retirement artifact
+        # carrying live config — which the next rebuild's union would then
+        # re-merge, resurrecting nodes deleted since.
         _write_prewipe_snapshot(path, {
             "version": _PREWIPE_SNAPSHOT_VERSION,
             "created_at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
             "completed": True,
-            "synthetic_events": [],
-            "batch_snapshot": [],
-            "batch_point_links": [],
-            "session_snapshot": [],
-            "session_point_links": [],
+            **{section: [] for section in _SNAPSHOT_SECTIONS},
         })
     except (OSError, TypeError, ValueError) as e:
         # ERROR, not warning: the pre-wipe payload is still on disk, so the
@@ -771,10 +1121,43 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
         + list(fresh.get("session_point_links") or []),
         _link_key, "session_point_links", merge=False)
         if _link_key(entry) is not None]
+    # #2814: authoritative configuration. This is a PER-KEY union on
+    # `_config_key` — NOT `_merge_entry` and NOT a wholesale section discard:
+    #
+    #  * a colliding key keeps the LEFTOVER entry VERBATIM (field-merging
+    #    would let a self-healed starter default overwrite a real captured
+    #    value — `ensure_tenant_packs` fires on the empty post-wipe graph and
+    #    writes present values with a fresh `installed_at`);
+    #  * a FRESH-ONLY key — config provisioned after an interrupted wipe but
+    #    before the retry — is APPENDED. Dropping it would put it into the
+    #    retry's own wipe with nothing to restore it from.
+    #
+    # `.get` on the fresh side mirrors the session sections (the offline union
+    # tests call this with partial dicts, and absent means empty to the loader
+    # too). The config leg never routes through `_merge_entry`: `_config_key`
+    # includes the label, so a cross-label identity collision stays two
+    # entries instead of merging a `:Meta` property set onto a pack node.
+    config_entries: list[dict] = []
+    config_seen: set = set()
+    for entry in (list(leftover.get("config_snapshot") or [])
+                  + list(fresh.get("config_snapshot") or [])):
+        key = _safe_config_key(entry)
+        if key is None:
+            # Unkeyable — keep it (the pre-wipe validator refuses it).
+            config_entries.append(entry)
+            continue
+        if key in config_seen:
+            # A collision — and, because the leftover leg is iterated first,
+            # that means the LEFTOVER entry is kept verbatim and the colliding
+            # fresh entry is dropped.
+            continue
+        config_seen.add(key)
+        config_entries.append(entry)
     return {"synthetic_events": events, "batch_snapshot": batches,
             "batch_point_links": links,
             "session_snapshot": session_containers,
-            "session_point_links": session_links}
+            "session_point_links": session_links,
+            "config_snapshot": config_entries}
 # ── Destructive-op guard: TWO independent layers (#99 P0, hardened #2944) ──
 #
 # The unconditional graph wipe (``MATCH (n) DETACH DELETE n``) is the most
@@ -3092,6 +3475,27 @@ class FalkorProjection(
             capture_failed.append(
                 f":Batch/#990 snapshot ({type(e).__name__}: {e})")
 
+        # ── Authoritative config snapshot (#2814) ───────────────────
+        # The wipe below is unconditional and only the JOURNAL is replayed,
+        # but `:PackInstall` / `:PackManifest` and the keyed `:Meta` markers
+        # (`calibration_milestone`, `config_reset`) are graph-resident, ride no
+        # journal record and are not re-derivable — so without this capture a
+        # rebuild silently reverted a configured graph to defaults, masked by
+        # the self-healing `get_tenant_packs` → `ensure_tenant_packs` read
+        # path (the graph looked freshly provisioned, not empty). The class
+        # list is DECLARED, not discovered: see `_config_classes()`.
+        #
+        # Best-effort like the two snapshots above, funneled into the SAME
+        # `capture_failed` gate: a failed read must not fall through to the
+        # wipe (a corrupt or merely heavy `properties(n)` read can fail while
+        # the light DELETE succeeds).
+        config_snapshot: list[dict] = []
+        try:
+            config_snapshot = _capture_config_snapshot(self.g)
+        except Exception as e:
+            capture_failed.append(
+                f"config snapshot/#2814 ({type(e).__name__}: {e})")
+
         # ── #2943: a FAILED capture must not fall through to the wipe ───
         # Both capture blocks above are best-effort by design (the graph may
         # be corrupt), but proceeding after a failed capture would wipe the
@@ -3197,7 +3601,8 @@ class FalkorProjection(
             logger.warning(
                 "rebuild: found a leftover pre-wipe snapshot at %s (%d "
                 "graph-only point event(s), %d batch(es), %d batch link(s), "
-                "%d session container(s), %d session link(s)) "
+                "%d session container(s), %d session link(s), "
+                "%d config entry(ies)) "
                 "from an interrupted rebuild — merging it before this "
                 "wipe+replay",
                 snapshot_path,
@@ -3205,13 +3610,15 @@ class FalkorProjection(
                 len(leftover.get("batch_snapshot") or []),
                 len(leftover.get("batch_point_links") or []),
                 len(leftover.get("session_snapshot") or []),
-                len(leftover.get("session_point_links") or []))
+                len(leftover.get("session_point_links") or []),
+                len(leftover.get("config_snapshot") or []))
         merged = _union_prewipe_snapshot(leftover, {
             "synthetic_events": synthetic_events,
             "batch_snapshot": batch_snapshot,
             "batch_point_links": batch_point_links,
             "session_snapshot": session_snapshot,
             "session_point_links": session_point_links,
+            "config_snapshot": config_snapshot,
         })
         synthetic_events = merged["synthetic_events"]
         batch_snapshot = merged["batch_snapshot"]
@@ -3225,6 +3632,73 @@ class FalkorProjection(
         # `covered` set (journal ∪ synthetic snapshot) cannot account for.
         session_snapshot = merged["session_snapshot"]
         session_point_links = merged["session_point_links"]
+        # #2814: same reason as the session sections — on the sidecar-recovery
+        # path the live graph is already empty, so the leftover's config is the
+        # only record of it. Assigned from `merged` (not from the capture
+        # above) so the union's per-key leftover-wins rule is what the write
+        # payload and the restore leg both see.
+        config_snapshot = merged["config_snapshot"]
+        # ── #2814 T2: a pre-preservation rescue file cannot record config ──
+        # A sidecar written by a build that predates this change has no
+        # `config_snapshot` section at all — so on the sidecar-RECOVERY path
+        # (the live graph is already empty) nothing tells us whether the
+        # destroyed graph was configured. Stage the marker into the SECTION
+        # rather than writing it to the graph pre-wipe: the graph is about to
+        # be replaced anyway, and the section is what the restore leg (and the
+        # sidecar) already carry, so a crash before the replay re-derives the
+        # marker on the next attempt instead of leaving a claim with no config
+        # record beside it.
+        #
+        # The reason string is deliberately NOT `reset`: T2 cannot prove a
+        # graph WAS configured (a v1 sidecar is written whenever the old build
+        # captured any graph-only entry — #Batch, :Session, graph-only Points),
+        # so it reports STATE UNKNOWN. T1 below is the proof case.
+        #
+        # The gate keys on the RESCUE FILE's version ONLY — deliberately NOT on
+        # `not config_snapshot`. A pre-preservation wipe can be followed by the
+        # self-heal this issue names (`ensure_tenant_packs` repopulating starter
+        # `:PackInstall` rows before the retry), and then the fresh capture is
+        # NON-empty while the real custom configuration the old build destroyed
+        # is still unknown. Gating on emptiness would report that as a clean
+        # `N of N restored` with no marker — a false "restored" for an unknown
+        # state, which is the fail-open this state exists to prevent. A false
+        # "unknown" is safe and operator-clearable; a false "restored" is not.
+        leftover_version = (leftover or {}).get("version")
+        config_unknown_staged: dict | None = None
+        if (leftover is not None
+                and (not isinstance(leftover_version, int)
+                     or leftover_version < 2)
+                and not any(
+                    isinstance(e, dict) and e.get("label") == "Meta"
+                    and (e.get("props") or {}).get("key") == _CONFIG_RESET_KEY
+                    for e in config_snapshot)):
+            # Assign into `merged` AND the local: the pre-wipe PAYLOAD is
+            # derived from `merged`, while the restore leg reads the local. A
+            # local-only rebind would leave `payload["config_snapshot"] == []`,
+            # so a crash between the sidecar write and the replay would leave a
+            # v2 sidecar with no config section — and the retry's T2 test
+            # (`version < 2`) is then FALSE, so the marker would never be
+            # restored and a state-UNKNOWN graph would report `config_reset
+            # = False`, i.e. "never configured". That is precisely the window
+            # the sidecar exists for.
+            config_unknown_staged = {
+                "label": "Meta",
+                "props": _config_reset_props(
+                    None, "legacy_sidecar_no_config_record"),
+            }
+            merged["config_snapshot"] = [*config_snapshot,
+                                        config_unknown_staged]
+            config_snapshot = merged["config_snapshot"]
+            logger.error(
+                "rebuild: the leftover pre-wipe snapshot at %s predates config "
+                "preservation (version %r) and carries no config record, so "
+                "whether the destroyed graph was configured CANNOT be "
+                "determined. Staging the `config_reset` marker with "
+                "reason='legacy_sidecar_no_config_record' — this is a "
+                "state-UNKNOWN signal, not proof a reset happened. Re-provision "
+                "the pack configuration if this graph had any, and see the "
+                "rebuild runbook (#2814).",
+                snapshot_path, leftover_version)
         events = list(synthetic_events) + journal_events
         # #4042: per-event source-file ordinal, parallel to ``events``.
         # ``None`` marks a synthetic / pre-wipe-snapshot event (it came from
@@ -3259,22 +3733,29 @@ class FalkorProjection(
         # continued into the wipe would silently and permanently destroy those
         # edges — the exact loss class this change exists to stop. Refuse
         # before the wipe, always.
-        snapshot_pending = bool(
-            synthetic_events or batch_snapshot or batch_point_links
-            or session_snapshot or session_point_links)
+        snapshot_pending = any(merged[section] for section in _SNAPSHOT_SECTIONS)
         if snapshot_pending:
             try:
-                _write_prewipe_snapshot(snapshot_path, {
+                payload: dict = {
                     "version": _PREWIPE_SNAPSHOT_VERSION,
                     "created_at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
-                    "synthetic_events": synthetic_events,
-                    "batch_snapshot": batch_snapshot,
-                    "batch_point_links": [list(link) for link in
-                                          batch_point_links],
-                    "session_snapshot": session_snapshot,
-                    "session_point_links": [list(link) for link in
-                                            session_point_links],
-                })
+                }
+                # #2814: DERIVED from the section tuple and read out of
+                # `merged`, so a section dropped from the union's return
+                # literal raises KeyError HERE — pre-wipe — instead of being
+                # written as `[]`. That distinction matters because the loader
+                # reads `[]` and an absent key IDENTICALLY, so an omission
+                # would load as empty and be destroyed by the wipe with no
+                # error anywhere. (`snapshot_pending` above is likewise
+                # derived: an omission there would be worse still — a
+                # config-only graph would take the `elif` branch, write no
+                # sidecar at all, and lose the config silently.)
+                for section in _SNAPSHOT_SECTIONS:
+                    payload[section] = [
+                        list(entry) if isinstance(entry, tuple) else entry
+                        for entry in merged[section]
+                    ]
+                _write_prewipe_snapshot(snapshot_path, payload)
             except (OSError, TypeError, ValueError) as e:
                 raise RuntimeError(
                     f"rebuild aborted BEFORE the graph wipe: could not persist "
@@ -3284,7 +3765,9 @@ class FalkorProjection(
                     f"{len(batch_point_links)} batch link(s), "
                     f"{len(session_snapshot)} :Session container(s) and "
                     f"{len(session_point_links)} session link(s) with no "
-                    f"durable record (#2943, #3947). Fix the cause — write "
+                    f"durable record (#2943, #3947) — and the "
+                    f"{len(config_snapshot)} captured authoritative config "
+                    f"entr(y/ies) with them (#2814). Fix the cause — write "
                     f"permissions/space on the event-log directory, or a "
                     f"non-serializable Point property — and re-run."
                 ) from e
@@ -4377,6 +4860,71 @@ class FalkorProjection(
                 params={"sid": sid, "pid": pid},
             )
 
+        # ── #2814: restore the authoritative configuration ──────────────
+        # After pass-1a (so a `:PackInstall` is not clobbered by a later replay
+        # write) and before pass 2, alongside the other sidecar-borne graph
+        # state. Cypher is assembled from REGISTRY LITERALS only (the label and
+        # the identity property, both vetted by `_assert_config_registry_safe`)
+        # with the identity VALUE and the property map `$`-bound — so a planted
+        # sidecar can never inject Cypher through either.
+        #
+        # `SET n += $props` rather than replacing the node: an unrelated live
+        # property must not be dropped, and the captured properties are the
+        # pre-wipe truth for the fields they carry.
+        #
+        # A failure here runs AFTER the wipe, so — like the derived-restore loop
+        # above (#4305) — it must DEGRADE rather than raise: a post-wipe raise
+        # would leave the store empty (#2943 "No loss without proof"). Every
+        # failure is counted and surfaced once, and the post-restore check below
+        # turns the resulting gap into the marker.
+        config_restore_failures = 0
+        # Populate the label→spec map before either the restore or the T1 check
+        # reads it. The capture path fills it as a side effect, but the T2 path
+        # stages a marker entry WITHOUT a capture, and an empty map would make
+        # both the restore loop and the verification comprehension skip every
+        # entry — a vacuous pass that would also swallow the staged marker.
+        _config_classes()
+        for entry in config_snapshot:
+            spec = (_CONFIG_CLASS_BY_LABEL.get(entry.get("label"))
+                    if isinstance(entry, dict) else None)
+            props = entry.get("props") if isinstance(entry, dict) else None
+            if spec is None or not isinstance(props, dict):
+                continue
+            identity = props.get(spec.identity_prop)
+            if not isinstance(identity, str):
+                continue
+            identity_prop = spec.identity_prop
+            try:
+                self.g.query(
+                    f"MERGE (n:{spec.label} "
+                    f"{{{identity_prop}:$identity}}) SET n += $props",
+                    params={"identity": identity,
+                            "props": {k: v for k, v in props.items()
+                                      if k != identity_prop}},
+                )
+            except Exception as e:
+                config_restore_failures += 1
+                logger.warning(
+                    "rebuild: config restore for %s %s=%r failed (%s: %s) — "
+                    "the pre-wipe value was NOT restored",
+                    spec.label, identity_prop, identity, type(e).__name__, e,
+                )
+                continue
+            # (No `restored_config` bookkeeping: "the write did not raise" is
+            # not the same claim as "the identity is present", and T1 below
+            # verifies against the GRAPH. Tracking both would leave a second,
+            # weaker source of truth that a future change could mistake for
+            # load-bearing.)
+        if config_restore_failures:
+            logger.error(
+                "rebuild: %d config restore(s) FAILED — the pre-wipe "
+                "configuration of those identities was NOT restored. "
+                "Re-provision it (see the rebuild runbook) and check the "
+                "per-entry warnings above; see the config_reset marker for "
+                "what is known missing (#2814)",
+                config_restore_failures,
+            )
+
         # Pass 2: create edges for all operators + provenance/entity wiring
         # (shared _upsert_point_edges — single source of truth with apply, #330).
         # Journal-order maps for the pass-2b re-point (order-faithful
@@ -4809,6 +5357,94 @@ class FalkorProjection(
         # on every subsequent rebuild (never retiring for a permanently
         # unwritable value). The failure is surfaced by the ERROR summary in the
         # tail instead.
+        # ── #2814 T1: verify the restore, then record the third state ────
+        # The pre-wipe proof (above) is "every captured entry is valid and
+        # restorable"; this is the POST-restore check that it actually came
+        # back. Read the graph through the SAME registry query the capture
+        # used, so the comparison cannot drift from the capture's scope
+        # (registry literals only — no sidecar-derived Cypher here either).
+        #
+        # Never raise: this runs after the wipe, and a raise would leave the
+        # store empty (#2943 "No loss without proof"). A mismatch is reported
+        # as ERROR + the sticky marker instead. A FAILED verification read is
+        # treated as a mismatch — "could not confirm" must not read as
+        # "confirmed", which is the whole point of the third state.
+        config_expected_set = {
+            _config_key(entry) for entry in config_snapshot
+            if isinstance(entry, dict)
+            and entry.get("label") in _CONFIG_CLASS_BY_LABEL
+            # The marker T2 STAGED is a statement about unprovability, not
+            # captured configuration: counting it would report `N+1 of N+1`
+            # for a graph whose real config is unknown. It is still part of the
+            # section (so it is persisted and restored) — it just must not
+            # inflate the counts the operator reads.
+            and entry is not config_unknown_staged
+        }
+        # The staged marker is out of the COUNTS above but must stay inside the
+        # VERIFICATION. If its own restore write failed, the graph is
+        # state-UNKNOWN with no marker on it, and `config_reset` (built from
+        # the read below) would say False — a clean "never configured" for an
+        # unknown state, which is the false "restored" this whole state exists
+        # to prevent. Verify it, so the incident is re-recorded with
+        # reason='restore_incomplete' rather than disappearing.
+        config_verify_set = set(config_expected_set)
+        if config_unknown_staged is not None:
+            config_verify_set.add(_config_key(config_unknown_staged))
+        config_verified = True
+        config_missing: set = set()
+        try:
+            live_config = {_config_key(entry)
+                           for entry in _capture_config_snapshot(self.g)}
+            config_missing = config_verify_set - live_config
+        except Exception as e:
+            config_verified = False
+            logger.error(
+                "rebuild: could not VERIFY the restored configuration "
+                "(%s: %s) — treating it as not restored and recording the "
+                "`config_reset` marker; the graph is rebuilt but its config "
+                "state is unproven (#2814)",
+                type(e).__name__, e,
+            )
+        if config_verify_set and (not config_verified or config_missing):
+            logger.error(
+                "rebuild: post-restore verification FAILED — %d of %d "
+                "expected config identit(ies) are ABSENT from the rebuilt "
+                "graph%s (the `config_reset` marker counts here when one was "
+                "staged, but never in the reported counts). This is a TRUE "
+                "POSITIVE, not a silent success: the pre-wipe configuration "
+                "of those identities is gone (the wipe is unconditional and "
+                "only the journal is replayed). Recording the sticky "
+                "`config_reset` marker with reason='restore_incomplete' — "
+                "re-provision the configuration, then clear the marker "
+                "(#2814)",
+                len(config_missing) if config_verified else len(config_verify_set),
+                len(config_verify_set),
+                f" ({sorted(config_missing)})" if config_missing else "",
+            )
+            try:
+                set_config_reset_marker(self.g, "restore_incomplete")
+            except Exception as e:
+                logger.error(
+                    "rebuild: could not write the `config_reset` marker "
+                    "(%s: %s) — the mismatch above is recorded ONLY in the "
+                    "log, so re-run `tortoise rebuild` to re-attempt the "
+                    "restore from the still-pending sidecar (#2814)",
+                    type(e).__name__, e,
+                )
+        config_reset_read_failed = False
+        try:
+            config_reset_marker = read_config_reset(self.g)
+        except Exception as e:
+            logger.warning(
+                "rebuild: could not read the `config_reset` marker (%s: %s)",
+                type(e).__name__, e,
+            )
+            config_reset_marker = None
+            # Fail-SAFE, not fail-open: `None` must not mean both "never set"
+            # and "could not be read". Reporting `config_reset: false` on an
+            # unreadable marker would tell the operator the config is fine on
+            # the one path that cannot check.
+            config_reset_read_failed = True
         if snapshot_pending:
             _clear_prewipe_snapshot(snapshot_path)
         node_count = self.g.query(
@@ -4821,7 +5457,25 @@ class FalkorProjection(
         # store EMPTY (#2943 "No loss without proof"). The pre-wipe proof
         # above is what makes the returned counts trustworthy: reaching this
         # line means every pre-wipe episodic Point was recreatable.
-        return {"events": len(events), "nodes": node_count, "edges": edge_count}
+        return {"events": len(events), "nodes": node_count, "edges": edge_count,
+                # #2814: additive. `config_expected`/`config_restored` are
+                # COUNTS of (label, identity) pairs (the staged marker is in
+                # neither); `config_reset` is a BOOL — named distinctly from
+                # `:Meta{key:'config_reset'}` itself so one string does not
+                # carry two meanings. It is fail-SAFE: an UNREADABLE marker
+                # also reports True, because `None` must not mean both "never
+                # set" and "could not be read". `config_reset_read_failed`
+                # therefore distinguishes the two for callers that must not
+                # assert the marker IS present — the CLI's warning says the
+                # state is unproven rather than naming a marker it could not
+                # see, and `_clear_config_reset()` re-reads unguarded, so
+                # "clear the marker" needs the read to work.
+                "config_expected": len(config_expected_set),
+                "config_restored": len(config_expected_set - config_missing)
+                if config_verified else 0,
+                "config_reset": (config_reset_marker is not None
+                                 or config_reset_read_failed),
+                "config_reset_read_failed": config_reset_read_failed}
 
     def query(self, cypher: str, **params):
         # L2 guard (#99): refuse bulk graph-wipe on non-test graphs. There is
