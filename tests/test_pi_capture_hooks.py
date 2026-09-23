@@ -169,10 +169,12 @@ def _scrubbed_env(tmpdir: str) -> dict[str, str]:
 
 
 def test_extension_behavioral_suite():
-    """Run `node --test tortoise/pi-hooks/tortoise-capture.test.ts` (probe
-    payload, turn extraction, capture payload, reload skip) in a SCRUBBED
-    environment — see `_scrubbed_env`. Skipped only when the local Node cannot
-    run TypeScript — the source pins above still run."""
+    """Run `node --experimental-strip-types --test tortoise/pi-hooks/tortoise-capture.test.ts`
+    (probe payload, turn extraction, capture payload, reload skip) in a SCRUBBED
+    environment — see `_scrubbed_env`. The flag is passed explicitly because type
+    stripping is opt-in on Node 22.6–22.17 (matching the invocation below and
+    `tortoise/pi-hooks/README.md` § Verification). Skipped only when the local
+    Node cannot run TypeScript — the source pins above still run."""
     node = shutil.which("node")
     if node is None:
         pytest.skip("node not available — extension source pins above still ran")
