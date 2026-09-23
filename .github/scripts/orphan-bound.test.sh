@@ -14,7 +14,7 @@
 # Coverage — one case per VERDICT-TABLE row, plus the positive controls that
 # make the row's rule load-bearing:
 #   * `no_embedded_servers` → bound 0, a count above 0 REDs, and a watchdog
-#     kill downgrades that red (cases 12-14).
+#     kill downgrades that red (the `no_embedded_servers` cases 14-16).
 #   * `{reaped, cleared, left}` → bound is READ from the report: two reports
 #     with DIFFERENT `left` both PASS against their own value (cases 1, 2), so a
 #     hardcoded bound cannot satisfy both.
@@ -31,16 +31,17 @@
 #     happened (case 13) — while a genuinely MISSING report still REDs (case 17)
 #     and is distinct (case 11's fixture is a DIFFERENT fixture from case 17's).
 #   * `left: null` (the sweep's probe failed) → RED named as a probe failure
-#     (case 16), downgraded only by a watchdog kill (case 16b) — never read as
-#     a plausible 0. A `COUNT` of 0 PASSES with a warning (case 34) ONLY when
+#     (the `left=null` case 16b), downgraded only by a watchdog kill (case
+#     16c) — never read as a plausible 0. A `COUNT` of 0 PASSES with a warning
+#     (case 34) ONLY when
 #     the sweep also reported `cleared: true`; the same shape with
 #     `cleared: false` still REDs at COUNT == 0 (case 40): an exhausted budget
 #     is not a diagnostic, and reading it as one is the #4740 review-5
 #     fail-open.
 #   * missing / unreadable / structurally-incomplete reports → RED (cases
 #     17-20), downgraded only by a watchdog kill (cases 18, 20).
-#   * the #1371 rc-unknown red path (case 21) and the fail-loud argument
-#     validation (cases 22-24).
+#   * the #1371 rc-unknown red path (the empty-rc case 22) and the fail-loud
+#     argument validation (cases 23-25).
 #   * the accounting identity `reaped + left >= before` → PASS at the boundary
 #     (case 26), RED when violated even though COUNT <= left (case 27), and
 #     only a kill downgrades it (case 28); skipped on `before: null` (case 29)
@@ -102,8 +103,9 @@
 # removed or weakened (the `probe_failed` COUNT==0 carve-out dropped, the
 # `cleared=false` red removed, the deferral warning or its `COUNT <= left`
 # rescue removed, the mixed-population identity made authoritative again, the
-# contract check neutered, a count-branch bound widened past 0, or rc=1 added
-# to the kill set).
+# contract check neutered). The count-branch boundary pins (case 41) and the
+# rc=1 kill-set pin (case 42) likewise fail when a bound is widened past 0 or
+# `1` is added to the kill set.
 # A case that merely restates a default would not catch its own removal.
 #
 # The assertion count is PINNED (see the summary): a lost case must not be

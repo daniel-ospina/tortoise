@@ -5135,13 +5135,20 @@ def test_build_end_sweep_report_threads_the_sweep_outcome():
 
 
 def test_conftest_sweep_returns_build_end_sweep_report():
-    """#4740 review 10: the call site must RETURN the builder call.
+    """#4740 review 10: every `_sweep` return is pinned, builder or not.
 
     The behavioural cases above drive `build_end_sweep_report` in isolation,
     so a `_sweep` that short-circuits it — `return {report} or
     build_end_sweep_report(...)` — leaves them all green while the gate
     consumes a hand-written dict. The deleted case-39 producer sub-checks
     covered this returned-call identity; this is the minimal surviving form.
+
+    Review 10 counted builder `Return`s alone, which a DEAD return satisfies:
+    `if False: return build_end_sweep_report(...)` with the live path
+    returning a helper's report keeps the count at 1 and the gate unpinned.
+    So every `Return` in `_sweep` is now enumerated and must be either the
+    single live builder call or one of the three documented early returns
+    (`no_embedded_servers`, `skipped`, `error`).
     """
     import ast
 
@@ -5155,17 +5162,72 @@ def test_conftest_sweep_returns_build_end_sweep_report():
         n for n in ast.walk(tree)
         if isinstance(n, ast.FunctionDef) and n.name == "_sweep"
     )
+
+    # Parent links so a Return's enclosing control flow is visible; a plain
+    # `ast.walk` cannot tell whether a Return sits under `if False:`.
+    parents: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(sweep):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+
+    def under_constant_false_guard(node: ast.AST) -> bool:
+        """True when `node` is statically unreachable (`if False:`)."""
+        cur = parents.get(node)
+        while cur is not None and cur is not sweep:
+            if (
+                isinstance(cur, ast.If)
+                and isinstance(cur.test, ast.Constant)
+                and not cur.test.value
+            ):
+                return True
+            cur = parents.get(cur)
+        return False
+
+    # The three documented early returns, keyed by the sentinel their dict
+    # literal carries. A report-shaped dict reached through a name is an
+    # `ast.Name`, never an `ast.Dict`, so it cannot masquerade as one of these.
+    early_keys = {"no_embedded_servers", "skipped", "error"}
+
+    def is_documented_early_return(node: ast.Return) -> bool:
+        value = node.value
+        if not isinstance(value, ast.Dict):
+            return False
+        keys = {
+            k.value for k in value.keys
+            if isinstance(k, ast.Constant) and isinstance(k.value, str)
+        }
+        return len(keys) == 1 and keys <= early_keys
+
+    returns = [n for n in ast.walk(sweep) if isinstance(n, ast.Return)]
     builder_returns = [
-        n for n in ast.walk(sweep)
-        if isinstance(n, ast.Return)
-        and isinstance(n.value, ast.Call)
+        n for n in returns
+        if isinstance(n.value, ast.Call)
         and getattr(n.value.func, "id", None) == "build_end_sweep_report"
     ]
     assert len(builder_returns) == 1, (
-        "tests/conftest.py's _sweep must return exactly one "
+        "tests/conftest.py's _sweep must contain exactly one "
         "build_end_sweep_report(...) call; a hand-written report dict, or a "
         "short-circuit around the builder, is not pinned by the behavioural "
         "tests and would be consumed by the gate unpinned (#4740)"
+    )
+    builder_return = builder_returns[0]
+    assert not under_constant_false_guard(builder_return), (
+        "tests/conftest.py's _sweep returns build_end_sweep_report(...) from a "
+        "statically unreachable branch (`if False:`): the count is satisfied "
+        "by a DEAD return while the live path escapes the pin (#4740); dead "
+        f"return at line {builder_return.lineno}"
+    )
+    undocumented = [
+        n for n in returns
+        if n is not builder_return and not is_documented_early_return(n)
+    ]
+    assert undocumented == [], (
+        "tests/conftest.py's _sweep must return only the single "
+        "build_end_sweep_report(...) call or one of the three documented "
+        "early returns (no_embedded_servers / skipped / error); any other "
+        "return is not pinned by the behavioural tests and would be consumed "
+        f"by the gate unpinned (#4740); found at line(s) "
+        f"{[n.lineno for n in undocumented]}"
     )
     fixture = next(
         n for n in ast.walk(tree)
