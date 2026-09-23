@@ -53,7 +53,9 @@ source-level pins above still ran); every lane that executes this file provision
    `NODE_TS_FLAG = "--experimental-strip-types"` and pass it in both this task's probe invocation and
    the existing `test_extension_behavioral_suite` invocation (`[node, NODE_TS_FLAG, "--test", str(EXTENSION_TEST)]`);
    correct the file docstring's "Node >= 22.6" note to say the flag is passed so 22.6+ works.
-2. Add `_installed_probe() -> str` (no parameter — paths travel by env) returning the probe source:
+2. Add the probe SOURCE as a module constant (`_PROBE_SOURCE` as shipped) plus a
+   `_run_installed_probe(tmp_home, installed, node)` that writes it into the temp HOME and runs it.
+   No parameter carries a path — paths travel by ENV:
    ```js
    import { pathToFileURL } from "node:url";
    const mod = await import(pathToFileURL(process.env.PROBE_SEAM).href);
@@ -90,7 +92,8 @@ source-level pins above still ran); every lane that executes this file provision
      `result = install_capture("pi", home=home)`; assert `result.ok`, then
      `installed = capture_install.pi_home(home) / capture_install.PI_EXTENSION_NAME`; assert
      `installed.is_file()` — never re-type the install path (#4620 review).
-   - `spool = home / "spool"`; `probe = home / "probe.mjs"`; `probe.write_text(_installed_probe())`.
+   - `spool = home / "spool"`; the probe file is written into the temp HOME by
+     `_run_installed_probe`, which also runs it and returns the completed process.
    - `proc = subprocess.run([node, NODE_TS_FLAG, "probe.mjs"], cwd=tmp_home, capture_output=True,
      text=True, timeout=120, env={**_scrubbed_env(tmp_home), "PROBE_SEAM": str(installed),
      "PROBE_SPOOL": str(spool)})`.
@@ -145,22 +148,21 @@ harness it can actually fire.
    # the WHOLE module, not a line filter: a line-local scan let a wrapped
    # continuation line (the docstring's honesty paragraph) carry an absolute
    # unscanned — the sentence the pin was written for:
-   source = inspect.getsource(session_verify)
+   # `inspect` is imported at the TOP of the test module; the module under test
+   # is bound INSIDE this test (`from tortoise import session_verify as _sv`) —
+   # `session_verify` is not a module-level name in the shipped file:
+   source = inspect.getsource(_sv)
    assert "def resolve_install_root" in source, "module source not read — pin is vacuous"
    assert "HEADLESS_FIRABLE" in source, "module source truncated — pin is vacuous"
    for phrase in absolutes:
        assert phrase not in source, phrase
    ```
    RED against the current string.
-2. Reword `UNVERIFIABLE_REASON["pi"]` to (keeping `"extension"`; the string is PLAIN TEXT — no
-   markdown emphasis, it is printed verbatim into a report line):
-   > Pi's capture seam is a TypeScript extension loaded in-process by Pi
-   > (`~/.pi/agent/extensions/tortoise-capture.ts`), not a command this verifier can execute; the
-   > install leg is therefore not firable by this command. The seam's handler logic is exercised
-   > hermetically by `tortoise/pi-hooks/tortoise-capture.test.ts` (run by
-   > `tests/test_pi_capture_hooks.py`), and the installed artifact is loaded and fired by that
-   > test file's node probe (into a temp HOME); the residual — a real `pi` process loading the
-   > installed extension against the live API — is manual-only.
+2. Reword `UNVERIFIABLE_REASON["pi"]` to state the scoped truth. The shipped text is the source of
+   truth — see `tortoise/session_verify.py` → `UNVERIFIABLE_REASON["pi"]`. Constraints it must
+   satisfy: it is PLAIN TEXT (printed verbatim into a report line), so it carries **no markdown
+   emphasis**; it keeps `"extension"`; the seam path in it is DERIVED from
+   `capture_install.pi_home` / `PI_EXTENSION_NAME` rather than written out.
    **Attribute correctly:** the TS suite covers the *source* seam; the *installed* artifact is covered
    by the Python file's node probe — never claim the TS suite covers the installed copy.
    **Never** the bare absolute "cannot be executed/fired headlessly" or "no headless trigger" —
@@ -221,8 +223,8 @@ executably verified, (b) what is manual-only, (c) the exact procedure **with its
 - A **Pi/session-capture row is added to `#1714`'s `### Verification Checklist`** (its stated
   done-state; it has no such row today), naming the executable check and the manual residual.
 - A decision comment is posted on `#1714` that (a) cross-links `#4620`, and (b) **names the report
-  path** `~/.pi/agent/state/lane-reports/B1-LIVE-FOUR-HARNESS-2026-09-22.md` — making Task 3's "cited
-  by `#4620` and named in `#1714`" provenance true.
+  path** `~/.pi/agent/state/lane-reports/B1-LIVE-FOUR-HARNESS-2026-09-22.md` — so the report path the
+  objective names is retrievable from `#1714` itself.
 
 **Files:**
 - Modify: `docs/plans/2026-08-25-1714-memory-capture-onboarding.md`

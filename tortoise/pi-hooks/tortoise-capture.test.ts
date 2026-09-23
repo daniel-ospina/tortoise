@@ -1,6 +1,10 @@
 // tortoise-capture.test.ts — behavioral tests for the in-repo Pi capture
-// extension (#3575). Run with: node --test tortoise/pi-hooks/tortoise-capture.test.ts
-// (Node 22+ strips TypeScript types natively — no build step, no deps.)
+// extension (#3575). Run with:
+//   node --experimental-strip-types --test tortoise/pi-hooks/tortoise-capture.test.ts
+// (TypeScript type stripping is opt-in on Node 22.6–22.17 and the default from
+// 22.18, so pass the flag explicitly — it is accepted as a no-op on ≥ 22.18.
+// No build step, no deps. The canonical run command is
+// tortoise/pi-hooks/README.md § Verification.)
 //
 // These tests pin the two claims the dashboard's `HARNESS_CAPTURE_SUPPORT.pi`
 // makes: (1) the extension fires the install-probe on load, and (2) it files
