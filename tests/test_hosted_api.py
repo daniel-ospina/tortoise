@@ -9486,9 +9486,10 @@ class TestFirstContactPrewarm:
 # TLS handshake + `Is_Sentinel`'s INFO + `list_graphs` — executed ON the event
 # loop.
 #
-# `POST /v1/sessions` calls the router TWICE per successful capture (receipt
+# An AGENT capture — the fleet case — calls the router TWICE (the receipt
 # write, then the last-error clear) and discards both returns: four synchronous
-# TLS handshakes per capture. With ~46 lanes capturing per turn that stalls the
+# TLS handshakes per capture. (A no-harness session-JWT capture makes one call,
+# since it has no last-error key.) With ~46 lanes capturing per turn that stalls the
 # loop for seconds at a time, every read in flight blows the 10s transport
 # bound, and the agent's `tools/list` returns 504 with an EMPTY toolbelt.
 # Reproduced live by py-spy: loop thread in `do_handshake (ssl.py:1319)` <-

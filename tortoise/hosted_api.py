@@ -19960,9 +19960,9 @@ def _update_onboarding_state(org_id: str, _echo: bool = True,
     return (#4625): the writes above still happen; only the projection read is
     skipped, so it cannot change what was written. It exists because the
     projection is not free — ``_get_onboarding_projection`` probes the
-    registry UP TO TWICE (one probe when the org graph is ABSENT — the early
-    return in ``_graph_has_org_namespace``; two when present, the per-capture
-    case), and in URI mode each probe builds a fresh registry SDK and
+    registry UP TO TWICE (one probe when the org graph is ABSENT, which
+    returns early in ``_get_onboarding_projection``; two when it is present),
+    and in URI mode each probe builds a fresh registry SDK and
     opens a NEW FalkorDB connection (TCP + TLS handshake + ``INFO`` +
     ``list_graphs``), synchronously, on the event loop. Returns ``{}`` when
     skipped: a caller that discards the value cannot tell the difference.
@@ -20023,15 +20023,17 @@ def _update_onboarding_state(org_id: str, _echo: bool = True,
     #
     # #4625: the echo is NOT free, and callers that DISCARD it must say so.
     # ``_get_onboarding_projection`` reaches ``_registry_existing_graphs()``
-    # UP TO TWICE (one probe when the org graph is absent — the early return in
-    # ``_graph_has_org_namespace``; two when present, the per-capture case),
-    # and in URI mode each probe builds a fresh
+    # UP TO TWICE (one probe when the org graph is absent — it returns early
+    # there; two when present, the per-capture case), and in URI mode each
+    # probe builds a fresh
     # ``_make_sdk(namespace="registry")`` and opens a NEW FalkorDB connection
     # (TCP + TLS handshake + ``Is_Sentinel``'s ``INFO`` + ``list_graphs``).
-    # The capture path calls this router twice per successful
-    # ``POST /v1/sessions`` (receipt write, then the last-error clear) and
-    # discards both returns — so the discarded reads alone open four fresh
-    # connections per capture, synchronously ON the event loop, which stalls
+    # An AGENT capture (the fleet case) calls this router twice — the receipt
+    # write, then the last-error clear — and discards both returns, so the
+    # discarded reads alone open four fresh connections per capture. (A
+    # no-harness capture — a session-JWT/dashboard caller — writes the bare
+    # receipt but has no last-error key, so it makes one call, two
+    # connections.) All of it runs synchronously ON the event loop, which stalls
     # every read in flight and drives the transport-bound 504s. Measured by
     # py-spy on the live machine: the loop thread sitting in
     # ``do_handshake (ssl.py:1319)`` <- ``_registry_existing_graphs`` <-
