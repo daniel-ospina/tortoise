@@ -625,7 +625,7 @@ class TestHealthEndpoints:
         for raw in ("nan", "NaN", "inf", "Infinity", "-inf"):
             caplog.clear()
             monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", raw)
-            with caplog.at_level(logging.ERROR, logger="tortoise.hosted_api"):
+            with caplog.at_level(logging.ERROR, logger="tortoise.monitoring"):
                 period = _REAL_HEALTH_PROBE_INTERVAL()
             assert period == ha_mod.HEALTH_PROBE_REFRESH_S, (raw, period)
             assert any(r.levelno >= logging.ERROR for r in caplog.records), raw
@@ -643,7 +643,7 @@ class TestHealthEndpoints:
         for raw in ("1e-9", "0.001", "0.49"):
             caplog.clear()
             monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", raw)
-            with caplog.at_level(logging.WARNING, logger="tortoise.hosted_api"):
+            with caplog.at_level(logging.WARNING, logger="tortoise.monitoring"):
                 period = _REAL_HEALTH_PROBE_INTERVAL()
             assert period == ha_mod.HEALTH_PROBE_REFRESH_S, (raw, period)
             assert any(r.levelno >= logging.WARNING for r in caplog.records), raw
