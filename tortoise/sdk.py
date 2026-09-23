@@ -932,6 +932,12 @@ _BATCH_ID_RECORD_TYPE = "BatchIdStamped"
 # from a reader (#2901) — and `_journal_entity_mutation` is the ONE builder.
 _ENTITY_MUTATION_RECORD_TYPE = "EntityMutated"
 
+# #3377 DEFERRED (#4769): the rename op is implemented by the fold but is
+# deliberately NOT produced yet — see `_update_entity`'s non-Point branch. The
+# warning there is emitted ONCE per process (the `_deny_drop_warned` shape) so a
+# long-lived server does not flood while the deferral stays loud.
+_UNJOURNALED_RENAME_WARNED: set[str] = set()
+
 
 def _raise_update_point_status_error(proj, id: str) -> None:
     """#432: error path for the update_point draft→live promote guard.
@@ -17525,6 +17531,46 @@ class TortoiseSDK:
                 #     overwrites the typed VectorF32 the upsert created
                 #     (`properties(n)` returns a vector as a plain list;
                 #     re-applying it would demote it and break the vector leg).
+                if "name" in props:
+                    # ── #3377 DEFERRED (#4769) ───────────────────────────────
+                    # A write that changes `name` must NOT be journaled YET.
+                    # This is a VERIFIED regression, not a hypothetical:
+                    # `_fold_object_superseded` falls back to matching by NAME
+                    # for legacy id-less records (#2164 ISSUE-B), and that fold
+                    # is DEFERRED to a sweep that runs AFTER this inline one
+                    # (deliberately — it is an unconditional SET that must follow
+                    # every Object-creation event). Journaling a rename therefore
+                    # renames the node in pass 1b, BEFORE the sweep, so the name
+                    # branch stops matching and a legacy id-less supersede is
+                    # DROPPED: live and `apply()` keep status='superseded' while
+                    # `rebuild_all` returns the object status='live'. Pre-#3377
+                    # the name never changed at replay, so the match held —
+                    # journalling the rename INTRODUCES the regression.
+                    #
+                    # So the rename half of this lane is RETURNED TO OPEN, and
+                    # #4769 lands rename journalling TOGETHER WITH the structural
+                    # sweep-ordering fix rather than before it (three review
+                    # rounds each found a different defect at that same boundary).
+                    #
+                    # The graph write still happens — only the journal record is
+                    # withheld — and the withhold is LOUD, so this is a declared
+                    # deferral, never the silent loss this lane exists to fix.
+                    proj.g.query(
+                        f"MATCH (n:{label} {{{prop}:$id}}) SET n += $props",
+                        params={"id": id_val, "props": props},
+                    )
+                    if not _UNJOURNALED_RENAME_WARNED:
+                        _UNJOURNALED_RENAME_WARNED.add("warned")
+                        _logger.warning(
+                            "update_entity: a `name` change is NOT journaled — "
+                            "#3377's rename journalling is deferred to #4769 "
+                            "(journalling it breaks a legacy name-keyed "
+                            "ObjectSuperseded on replay: the rename moves the "
+                            "node's name before the deferred supersede sweep "
+                            "matches on it). THIS MUTATION WILL BE REVERTED BY "
+                            "`rebuild_all`."
+                        )
+                    continue
                 keys = list(props)
                 res = proj.g.query(
                     f"MATCH (n:{label} {{{prop}:$id}}) SET n += $props "

@@ -1,4 +1,4 @@
-"""The *unjournaled durable mutation* class — #3312, #3377, #3300.
+"""The *unjournaled durable mutation* class — #3312, #3300. (#3377 deferred.)
 
 CLASS DEFINITION (this is what the suite is for, not three separate bugs):
 a write that durably changes the graph has no journal record capable of
@@ -8,9 +8,19 @@ lane closes the two that share a seam and cites the other two:
 
   1. **No carrier for property mutations.** ``_update_entity`` applied caller
      props with a live ``SET n += $props`` and emitted NOTHING for the five
-     non-Point canonical labels, so a rename / status change / revise on a
+     non-Point canonical labels, so a status change or other revise on a
      Subject, Object, Document, Source or Event reverted to the creation
-     snapshot on rebuild. (#3312 statuses, #3377 rename)  ← closed here
+     snapshot on rebuild. (#3312 statuses)  ← closed here
+
+     ⚠️ **A `name` change (a "rename") is NOT journaled** — #3377 is
+     RETURNED TO OPEN and deferred to **#4769**. Journalling it here is a
+     verified regression: `_fold_object_superseded` falls back to matching by
+     NAME for legacy id-less records, and that fold is DEFERRED to a sweep that
+     runs after this inline one, so journalling a rename renames the node before
+     the sweep matches and DROPS the supersede (`rebuild_all` returns the object
+     `live` while live/`apply()` keep `superseded`). The producer withholds the
+     record and WARNS (once per process) — a declared deferral, not a silent
+     loss. Pinned by `test_a_name_change_is_not_journaled_and_says_so`.
 
      ⚠️ The producer covers all five labels; whether the FOLD can match them
      depends on the CREATION door. `Document` creation via
@@ -248,8 +258,11 @@ def _assert_round_trip(sdk, events, caplog):
 class TestPropertyMutationRoundTrip:
     """Mechanism 1: rename / restatus / revise / removal, one seam."""
 
+    # `rename` is NOT here: #3377 is deferred to #4769 (journalling a `name`
+    # change renames the node before the deferred `ObjectSuperseded` sweep
+    # matches on that name, dropping a legacy id-less supersede). See
+    # `test_a_name_change_is_not_journaled_and_says_so`.
     @pytest.mark.parametrize("op,prop,new", [
-        ("rename", "name", "Renamed"),
         ("restatus", "status", "archived"),
         ("revise", "objectKind", "risks"),
     ])
@@ -309,9 +322,9 @@ class TestPropertyMutationRoundTrip:
         sdk, events = env
         oid = sdk.create_entity("object", name="A", objectKind="k",
                                 confidence=0.5)["node"]["id"]
-        sdk.update_entity(oid, name="B")
+        sdk.update_entity(oid, confidence=0.9)
         rec = [r for r in _mutations(events) if r.get("id") == oid][-1]
-        assert set(rec["state"]) == {"name"}, (
+        assert set(rec["state"]) == {"confidence"}, (
             "state must be the WRITE'S keys only; a snapshot would drag in "
             f"every stored prop: {sorted(rec['state'])}")
 
@@ -326,17 +339,18 @@ class TestPropertyMutationRoundTrip:
         sdk, events = env
         oid = sdk.create_entity("object", name="A",
                                 objectKind="k")["node"]["id"]
-        sdk.update_entity(oid, name="B", status="archived", confidence=0.9)
+        sdk.update_entity(oid, status="archived", confidence=0.9,
+                          objectKind="k2")
 
         rec = [r for r in _mutations(events) if r.get("id") == oid][-1]
-        assert rec["op"] == "rename", "name outranks status"
-        assert rec["state"] == {"name": "B", "status": "archived",
-                                "confidence": 0.9}
-        assert rec["name"] == "B"
+        assert rec["op"] == "restatus", "status outranks the generic revise"
+        assert rec["state"] == {"status": "archived", "confidence": 0.9,
+                               "objectKind": "k2"}
 
         _assert_round_trip(sdk, events, caplog)
-        got = _props(sdk, "Object", oid, "name", "status", "confidence")
-        assert got == {"name": "B", "status": "archived", "confidence": 0.9}
+        got = _props(sdk, "Object", oid, "status", "confidence", "objectKind")
+        assert got == {"status": "archived", "confidence": 0.9,
+                       "objectKind": "k2"}
 
     def test_non_json_native_value_is_journalled_as_stored(self, env, caplog):
         """The silent-loss half of mechanism 1.
@@ -378,8 +392,8 @@ class TestPropertyMutationRoundTrip:
         sid = (sub.get("node") or sub)["id"]
         oid = sdk.create_entity("object", name="O",
                                 objectKind="k")["node"]["id"]
-        sdk.update_entity(sid, name="RenamedTopic")
-        sdk.update_entity(oid, name="RenamedO")
+        sdk.update_entity(sid, subjectKind="topic")
+        sdk.update_entity(oid, objectKind="k2")
         labels = {r["label"] for r in _mutations(events)}
         assert labels == {"Object", "Subject"}
         _assert_round_trip(sdk, events, caplog)
@@ -453,14 +467,51 @@ class TestPropertyMutationRoundTrip:
         sdk._emit_event("ObjectSuperseded", id=oid, name="O",
                         supersedes_by="other", session_id="s", evidence="e")
         sdk.update_entity(oid, status="archived")
-        sdk.update_entity(oid, name="NewName")
+        sdk.update_entity(oid, objectKind="k2")
         assert _props(sdk, "Object", oid, "status")["status"] == "archived"
 
         sdk._get_proj().rebuild_all(str(events))
-        got = _props(sdk, "Object", oid, "name", "status")
-        assert got == {"name": "NewName", "status": "archived"}, (
+        got = _props(sdk, "Object", oid, "objectKind", "status")
+        assert got == {"objectKind": "k2", "status": "archived"}, (
             "a post-supersede state op was lost — only the last one was "
             f"replayed: {got}")
+
+    def test_a_name_change_is_not_journaled_and_says_so(
+            self, env, caplog, monkeypatch):
+        """#3377 is DEFERRED (#4769) — and the deferral must be LOUD.
+
+        Journalling a `name` change renames the node in pass 1b, before the
+        deferred `ObjectSuperseded` sweep matches on that name, so a legacy
+        id-less supersede is dropped (`rebuild_all` returns the object
+        status='live' while live and `apply()` keep 'superseded'). Rather than
+        ship that regression, the producer withholds the record — and warns,
+        once per process, so the withhold is a declared deferral and not the
+        silent loss this lane exists to fix.
+
+        This row is the pin for that contract: it asserts the write still
+        applies to the graph, that NO `EntityMutated` record is written, and
+        that a warning naming #4769 is emitted.
+        """
+        # The deferral warning is emitted ONCE per process, so reset the flag
+        # rather than depend on no earlier test having renamed an Object.
+        from tortoise import sdk as _sdk_mod
+        monkeypatch.setattr(_sdk_mod, "_UNJOURNALED_RENAME_WARNED", set())
+
+        sdk, events = env
+        oid = sdk.create_entity("object", name="A",
+                                objectKind="k")["node"]["id"]
+        before = len(_mutations(events))
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            sdk.update_entity(oid, name="B", status="archived")
+
+        assert _props(sdk, "Object", oid, "name")["name"] == "B", \
+            "the live write must still apply — only the JOURNAL is withheld"
+        assert len(_mutations(events)) == before, \
+            "a `name` change must not be journalled while #3377 is deferred"
+        msgs = " ".join(r.getMessage() for r in caplog.records)
+        assert "#4769" in msgs and "NOT journaled" in msgs, (
+            "the deferral must be loud and name its tracking issue: " f"{msgs}")
 
     def test_no_record_for_a_write_that_matched_nothing(self, env):
         """No phantom record: the producer mirrors ``_delete_entity``'s
@@ -782,7 +833,9 @@ class TestJournalWriteFailure:
         monkeypatch.setattr(EventLog, "append", _boom)
         caplog.clear()
         with caplog.at_level("WARNING"):
-            sdk.update_entity(oid, name="B")
+            # A JOURNALED op — a `name` change is deliberately withheld now
+            # (#3377/#4769), so it would never reach the append this row tests.
+            sdk.update_entity(oid, status="archived")
 
         # 1. LOUD — a silently dropped mutation is this class's own defect.
         msgs = [r.getMessage() for r in caplog.records]
@@ -791,7 +844,7 @@ class TestJournalWriteFailure:
         # 2. Fail-OPEN, deliberately: the live SET already committed, so the
         #    SDK must neither raise nor roll back. The price is that THIS write
         #    is not durable — which is exactly why (1) must hold.
-        assert _props(sdk, "Object", oid, "name")["name"] == "B", \
+        assert _props(sdk, "Object", oid, "status")["status"] == "archived", \
             "the live mutation must still have applied (fail-open, not rollback)"
         # 3. ...and the loss is real, so the assertion above is not vacuous.
         assert len(_mutations(events)) == before, \
