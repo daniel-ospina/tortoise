@@ -795,10 +795,10 @@ jobs:
         # runs even when an earlier step failed (`if: always()`) — so a reader
         # never has to infer a pass from the ABSENCE of a bypass block. Each of
         # the job's three bypassable gates is stated as bypassed or not: the
-        # `if`-gate (pack smoke) decides it from the LANE, while the two wrapper
-        # gates (Fly machines / provenance) additionally require that the checker
-        # actually returned exit 1 — a lane armed with no bypass recorded means
-        # the gate ran (exit 2 still blocks).
+        # `if`-gate (pack smoke) from its LANE, the two wrapper gates (Fly
+        # machines / provenance) from the lane plus the marker the report step
+        # writes when it applies the skip. The lines state the BYPASS only —
+        # whether a gate's step executed is the job's colour and its step list.
         if: always()
         env:
           PACK_SMOKE_IN: ${{ inputs.skip-pack-smoke || false }}
