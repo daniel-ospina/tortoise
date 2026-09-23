@@ -179,6 +179,8 @@ out="$(DEPLOY_BYPASS_MARKER="$WORK/empty-marker" bash "$HELPER" audit --job depl
       --state SKIP_FLY_SECRET_PROVENANCE=false/false 2>&1)"
 assert_contains "$out" "Deploy gate audit — deploy-api" "audit: names the job"
 assert_contains "$out" "\`SKIP_PACK_SMOKE\` (pack-catalog smoke) — lane NOT set: **not bypassed**" "audit: names a gate that was not bypassed"
+assert_not_contains "$out" "skipped" "audit: a lane-not-set gate makes no claim that its step EXECUTED (skipped)"
+assert_not_contains "$out" "ran" "audit: a lane-not-set gate makes no claim that its step EXECUTED (ran)"
 assert_contains "$out" "\`SKIP_FLY_MACHINES_GUARD\`" "audit: names every gate in the job"
 assert_contains "$out" "No bypass lane was set for any bypassable deploy gate in this job" "audit: states unambiguously that nothing was bypassed"
 
@@ -199,6 +201,7 @@ out="$(DEPLOY_BYPASS_MARKER="$WORK/empty-marker" bash "$HELPER" audit --job depl
 assert_contains "$out" "lane(s) variable armed but **NOT bypassed**" "audit: a wrapper gate with a lane and no bypass reads as NOT bypassed"
 assert_contains "$out" "the exit-2 class still blocks" "audit: restates that the exit-2 class is never bypassable"
 assert_not_contains "$out" "it ran" "audit: never claims a gate step EXECUTED (a skipped checker would make that false)"
+assert_not_contains "$out" "was not skipped" "audit: never claims a gate step was not skipped (an earlier failure can skip a checker)"
 
 # 16. ...and WITH the bypass recorded by the report step it reads as BYPASSED.
 printf 'SKIP_FLY_MACHINES_GUARD\n' >"$WORK/one-marker"
@@ -314,7 +317,7 @@ assert_eq "$(grep -cE 'check-fly-(machines-guard|secret-drift)\.py|deploy-health
 echo "──────────────────────────────────────────"
 # A LOST case must not be indistinguishable from success: deleting a case
 # leaves FAIL=0 and merely a LOWER count, so the count is pinned too.
-expected_assertions=73
+expected_assertions=76
 if [ "$PASS" -eq "$expected_assertions" ]; then
   PASS=$((PASS + 1))
   echo "  ✅ assertion count pinned at $expected_assertions (a lost case is not a green run)"

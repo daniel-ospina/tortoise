@@ -296,7 +296,7 @@ cmd_audit() {
     [ "$in_fired" = 'true' ] && lanes='input'
     [ "$var_fired" = 'true' ] && lanes="${lanes:+$lanes,}variable"
     if [ -z "$lanes" ]; then
-      emit "- \`${key}\` (${label}) — lane NOT set: **not bypassed** (a bypass requires a lane, so this gate was not skipped)"
+      emit "- \`${key}\` (${label}) — lane NOT set: **not bypassed** (no bypass lane was set)"
       continue
     fi
     any=1
