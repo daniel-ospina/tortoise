@@ -2693,10 +2693,12 @@ def test_midconstruction_replay_is_a_cotenant_the_last_client_must_see(
         tmp_path, monkeypatch):
     """#4879: count a co-tenant that is still MID-REPLAY before it attaches.
 
-    RED before the ordering fix: the collected construction #1 reads a single
-    owner claim as "last client", redislite's ``_cleanup`` unlinks the socket,
-    and construction #2 dies with the ``Error 2 connecting to .../redis.socket.
-    No such file or directory`` above. GREEN: the in-flight claim registered
+    The ORDERING assertion — the in-flight claim exists at attach — runs
+    INSIDE the replay window (the registry has adopted the socket; the ping
+    has not run), so a missing claim is the RED signal. Without the fix the
+    construction instead dies downstream with the ``Error 2 connecting to
+    .../redis.socket. No such file or directory`` above — the SYMPTOM of the
+    missing claim, not the ordering itself. GREEN: the claim registered
     BEFORE ``original(...)`` makes the guard read "shared", so the socket
     survives the collection and construction #2 is served.
     """
@@ -2729,6 +2731,16 @@ def test_midconstruction_replay_is_a_cotenant_the_last_client_must_see(
         seen["inflight"] = getattr(
             _lifecycle, "_in_flight_replays", {}).get(key, 0)
         seen["replayed"] = os.path.abspath(self.socket_file or "")
+        # ── THE ORDERING ASSERTION ─────────────────────────────────────
+        # Evaluated HERE — after the registry adopted the socket, before the
+        # ping and before `gc.collect()` can let anything unlink it — so the
+        # RED signal is the missing ordering claim, NOT the downstream
+        # ConnectionError. (`getattr` keeps the test importable on a tree
+        # WITHOUT the fix; there the assertion is what fails, on the ordering.)
+        assert seen["inflight"] >= 1, (
+            "#4879: inflight claim missing at attach — the construction must "
+            "register its claim BEFORE `original(...)` can block; the "
+            "refcount branch alone cannot see it")
         gc.collect()  # collect the leaked construction #1 HERE, not on luck
         seen["socket_after_gc"] = os.path.exists(sock)
 
@@ -2736,6 +2748,7 @@ def test_midconstruction_replay_is_a_cotenant_the_last_client_must_see(
 
     second = TortoiseSDK(db_path=db_path, namespace=created["id"])
     try:
+        # ── second half: the OUTCOMES (construction succeeds, server live) ──
         proj = second._get_proj()
         client = getattr(proj.db, "client", proj.db)
         assert seen.get("replayed") == key, (
@@ -2743,19 +2756,256 @@ def test_midconstruction_replay_is_a_cotenant_the_last_client_must_see(
         assert seen["refcount"] <= 1, (
             "#4879: test setup — the owner refcount alone sees only the leaked "
             "client's claim, which is exactly why the guard read 'last client'")
-        assert seen["inflight"] >= 1, (
-            "#4879: the in-flight replay claim must be registered BEFORE "
-            "`original(...)` can block; the refcount branch cannot see it")
         assert seen["socket_after_gc"], (
             "#4879: collecting the leaked client removed the socket the "
             "in-flight construction had already adopted (the CI failure)")
         assert client.ping(), "construction #2 must be served by a live server"
         assert _pid_alive(client.pid), "the replayed server must still be live"
         assert os.path.exists(sock), "the replayed socket must still exist"
-        assert not _lifecycle._in_flight_replays.get(key), (
+        assert not getattr(_lifecycle, "_in_flight_replays", {}).get(key), (
             "#4879: the in-flight claim must be RELEASED when the construction "
             "finishes — a stale claim would make every later teardown read "
             "'shared' and pin this server (and its socket dir) forever")
     finally:
         with contextlib.suppress(Exception):
             second.close()
+
+
+# ── #4879 F1: a fork inherits no THREAD, so it must inherit no CLAIM ──────
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX fork only")
+def test_fork_midconstruction_drops_the_inherited_in_flight_claim(
+        tmp_path, monkeypatch):
+    """#4879 F1: a forked child has NO thread to release an inherited claim.
+
+    The claim is registered by a thread inside `RedisMixin.__init__`. Fork
+    copies the map into the child, but that thread does not exist there — so
+    the child could never release the claim, `cotenant_holds_server` would
+    read "co-tenant" forever, and the socket would never be torn down (a
+    leaked server + socket dir). The fork hook must clear it exactly like the
+    inherited refcounts.
+
+    The fork happens INSIDE the replay window (after `_load_setting_registry()`
+    adopted the socket), so the parent's claim is genuinely in flight; the
+    assertion runs in the CHILD, which then `os._exit`s.
+    """
+    import json as _json
+
+    from redislite.client import RedisMixin
+
+    import tortoise.embedded_lifecycle as _lifecycle
+    from tortoise.sdk import TortoiseSDK
+
+    db_path = str(tmp_path / "fork_midconstruction.db")
+    created = TortoiseSDK(db_path=db_path).org_create("ForkCo")
+    sock = _json.loads(Path(db_path + ".settings").read_text())["unixsocket"]
+    key = os.path.abspath(sock)
+
+    real_load = RedisMixin._load_setting_registry
+    outcome: dict = {}
+    state = {"forked": False}
+
+    def _load_then_fork(self):
+        real_load(self)
+        if state["forked"]:
+            return
+        state["forked"] = True
+        outcome["parent_claim"] = dict(_lifecycle._in_flight_replays)
+        read_fd, write_fd = os.pipe()
+        pid = os.fork()
+        if pid == 0:  # child — no thread here can ever release a claim
+            os.close(read_fd)
+            try:
+                child_claims = dict(_lifecycle._in_flight_replays)
+                # THE ASSERTION IS IN THE CHILD.
+                assert child_claims == {}, (
+                    "#4879 F1: forked child inherited in-flight replay claim "
+                    f"{child_claims!r} — no thread exists here to release it, "
+                    "so the socket would never be torn down")
+                os.write(write_fd, b"OK")
+            except BaseException as exc:
+                with contextlib.suppress(Exception):
+                    os.write(write_fd, f"FAIL: {exc!r}".encode())
+            finally:
+                with contextlib.suppress(OSError):
+                    os.close(write_fd)
+                os._exit(0)
+        os.close(write_fd)
+        child_result = os.read(read_fd, 65536).decode()
+        os.close(read_fd)
+        _, status = os.waitpid(pid, 0)
+        outcome["child_result"] = child_result
+        outcome["child_exit"] = os.waitstatus_to_exitcode(status)
+
+    monkeypatch.setattr(RedisMixin, "_load_setting_registry", _load_then_fork)
+
+    second = TortoiseSDK(db_path=db_path, namespace=created["id"])
+    try:
+        second._get_proj()
+        assert outcome.get("parent_claim") == {key: 1}, (
+            "#4879 F1: test setup — the parent must hold exactly one in-flight "
+            f"claim at fork time, got {outcome.get('parent_claim')!r}")
+        assert outcome.get("child_result") == "OK", (
+            "#4879 F1: the forked child must observe NO inherited in-flight "
+            f"claim, got {outcome.get('child_result')!r}")
+        assert outcome.get("child_exit") == 0, (
+            "#4879 F1: the fork child must exit cleanly, got "
+            f"{outcome.get('child_exit')!r}")
+    finally:
+        with contextlib.suppress(Exception):
+            second.close()
+
+
+# ── #4879 F2: the replay WARNING is a CONSTRUCTION claim, not socket_file ──
+
+
+def test_close_path_with_empty_socket_file_emits_no_replay_warning(
+        tmp_path, caplog):
+    """#4879 F2: a close-path call with an empty `socket_file` must not log.
+
+    redislite nulls `socket_file` in `_cleanup` (client.py:146) before
+    `pidfile` (client.py:181), so a mid-teardown `_cleanup` ->
+    `_connection_count` -> `_is_redis_running` also has an empty
+    `socket_file`. The old `socket_file`-empty proxy logged a replay that
+    client was never part of; gating on the live in-flight claim does not.
+    """
+    import json as _json
+
+    import tortoise.embedded_lifecycle as _lifecycle
+    from tortoise.sdk import TortoiseSDK
+
+    db_path = str(tmp_path / "close_path_no_replay_warning.db")
+    sdk = TortoiseSDK(db_path=db_path)
+    try:
+        sdk.org_create("ClosePathCo")
+        proj = sdk._get_proj()
+        client = getattr(proj.db, "client", proj.db)
+        assert client.ping(), "test setup: the server must be live"
+        sock = _json.loads(
+            Path(db_path + ".settings").read_text())["unixsocket"]
+        assert os.path.exists(sock)
+        assert not _lifecycle._in_flight_replays, (
+            "#4879 F2: test setup — no claim may be live before the close path")
+        # The mid-teardown shape: `socket_file` already nulled, `pidfile` not.
+        client.socket_file = None
+        caplog.clear()
+        caplog.set_level("WARNING")
+        client._cleanup()
+        offenders = [
+            record.getMessage() for record in caplog.records
+            if "#4879: replay allowed" in record.getMessage()
+        ]
+        assert offenders == [], (
+            "#4879 F2: a close-path `_cleanup` with an empty `socket_file` "
+            f"must emit ZERO replay warnings, got {offenders!r}")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+# ── #4879 F4: claim registration mirrors redislite's replay shape ─────────
+
+
+def test_replay_socket_for_init_shape_table(tmp_path, monkeypatch):
+    """#4879 F4: only a construction that WILL replay may register a claim.
+
+    Derived by mirroring redislite's own registry-path derivation
+    (client.py:415-449). In particular `Redis(path, dbfilename=None)` must
+    register NOTHING: redislite overrides the positional filename with the
+    `dbfilename` KEYWORD unconditionally (client.py:427-428), so that shape
+    never sets `settingregistryfile` and never replays.
+    """
+    import json as _json
+
+    import tortoise.embedded_lifecycle as _lifecycle
+
+    monkeypatch.chdir(tmp_path)
+    db_name = "shape.db"
+    db_path = tmp_path / db_name
+    sock = "/tmp/shape-4879.socket"
+    (tmp_path / (db_name + ".settings")).write_text(
+        _json.dumps({"unixsocket": sock, "pidfile": "/tmp/shape-4879.pid"}))
+    existing = os.path.abspath(sock)
+    missing = tmp_path / "missing.db"
+
+    cases = [
+        ("positional path, registry present",
+         (str(db_path),), {}, existing),
+        ("dbfilename keyword, registry present",
+         (), {"dbfilename": str(db_path)}, existing),
+        ("dbfilename=None overrides a positional path (client.py:427)",
+         (str(db_path),), {"dbfilename": None}, None),
+        ("host= is server mode (no embedded child)",
+         (), {"host": "localhost"}, None),
+        ("port= is server mode (no embedded child)",
+         (), {"port": 6379}, None),
+        ("explicit unix_socket_path disables the registry-load branch",
+         (str(db_path),), {"unix_socket_path": sock}, None),
+        ("bare basename resolves relative to cwd",
+         (db_name,), {}, existing),
+        ("registry missing -> no socket to replay",
+         (str(missing),), {}, None),
+        ("bytes dbfilename never raises",
+         (), {"dbfilename": os.fsencode(str(db_path))}, None),
+        ("no filename at all",
+         (), {}, None),
+    ]
+    for label, args, kwargs, expected in cases:
+        got = _lifecycle._replay_socket_for_init(args, kwargs)
+        assert got == expected, (
+            f"#4879 F4: shape {label!r} -> {got!r}, expected {expected!r}")
+
+
+# ── #4879 F3: a failed owner hand-off fails CLOSED (claim kept) ───────────
+
+
+def test_owner_handoff_failure_keeps_the_in_flight_claim(
+        tmp_path, monkeypatch):
+    """#4879 F3: a failed owner hand-off must fail CLOSED (claim kept).
+
+    `record_owner` is documented never-raise, so this forces the latent path:
+    the client is LIVE but UNRECORDED, and the last-client decision must not
+    become blind to it. Dropping the claim there would re-open the #3653
+    window the claim exists to close; keeping it only costs a socket dir left
+    for the reaper. The claim is released only when `original(...)` aborted or
+    the owner record was written.
+    """
+    import json as _json
+
+    import tortoise.embedded_lifecycle as _lifecycle
+    from tortoise.sdk import TortoiseSDK
+
+    db_path = str(tmp_path / "owner_handoff_failure.db")
+    first = TortoiseSDK(db_path=db_path)
+    second = None
+    key = None
+    try:
+        first.org_create("HandoffCo")
+        sock = _json.loads(
+            Path(db_path + ".settings").read_text())["unixsocket"]
+        key = os.path.abspath(sock)
+
+        def _explode(_socket_file):
+            raise OSError("forced owner-record failure")
+
+        monkeypatch.setattr(_lifecycle, "record_owner", _explode)
+        second = TortoiseSDK(db_path=db_path, namespace="handoff")
+        proj = second._get_proj()
+        client = getattr(proj.db, "client", proj.db)
+        assert client.ping(), (
+            "#4879 F3: a failed owner hand-off must not break construction")
+        assert _lifecycle._in_flight_replays.get(key, 0) >= 1, (
+            "#4879 F3: the in-flight claim must be KEPT when the owner "
+            "hand-off failed — the client is live but unrecorded")
+    finally:
+        with contextlib.suppress(Exception):
+            if second is not None:
+                second.close()
+        # Drop the deliberately-stuck claim BEFORE closing the last client,
+        # so the server is still reaped at the end of the test (the claim is
+        # exactly what would otherwise pin it forever).
+        if key is not None:
+            _lifecycle._in_flight_replays.pop(key, None)
+        with contextlib.suppress(Exception):
+            first.close()
