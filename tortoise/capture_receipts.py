@@ -7,8 +7,10 @@ state keys (never client state):
   under an authenticated agent credential, ATTRIBUTED to ``<harness>``. The
   attribution is the caller's declaration, not a server observation: on a
   fresh ``session_id`` it is ``body.harness`` (an agent self-report), and on a
-  re-capture it is the Session's stored harness — itself recorded from that
-  first declaration. No credential→harness binding exists (``tt_``/``tk_``
+  re-capture it is the Session's STORED harness when the Session has one (itself
+  recorded from the declaration that first stamped it) or the current caller's
+  ``body.harness`` when it does not (``stored or claimed``) — a caller
+  declaration either way. No credential→harness binding exists (``tt_``/``tk_``
   keys carry no harness, `#3700`), so nothing here proves the server OBSERVED
   which harness captured. The bare ``session_capture_receipt`` is the
   harness-unproven key (legacy no-harness hooks, session-JWT captures).

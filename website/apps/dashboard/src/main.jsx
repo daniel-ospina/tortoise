@@ -13,7 +13,7 @@ import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HAR
 // (off → install-pending → waiting → active, probe-driven) — pure, node --test
 // unit-tested (captureStatus.test.js). #1927: the re-ask gate predicate was
 // removed with the consent gate (default-ON, ToS-covered).
-import { captureStatusForHarness, captureClaimForHarness, captureStatusLabelForHarness, captureErrorForHarness } from './captureStatus.js'
+import { captureStatusForHarness, captureClaimForHarness, captureStatusLabelForHarness, harnessAttributionForHarness, captureErrorForHarness } from './captureStatus.js'
 import { setupGuide } from './setupGuide.js'
 // #2000 (W4): the Overview calm — EXACTLY 3 elements (connection status,
 // memory digest, next action), zero toggles. Pure derivations, node --test
@@ -9829,6 +9829,10 @@ function MemorySources(props) {
 
   const status = (h) => captureStatusForHarness(state, h)
   const lastError = (h) => captureErrorForHarness(state, h)
+  // #3700: the per-row harness attribution — rendered beside the harness name,
+  // once per row, on exactly the rows whose state embeds a harness. Never
+  // inside the `role="alert"` failure sentence (see captureStatus.js).
+  const harnessAttribution = (h) => harnessAttributionForHarness(state, h)
 
   return (
     <div className="memory-sources">
@@ -10075,15 +10079,27 @@ function MemorySources(props) {
                 <div key={h} className={`harness-status status-${st}${isCurrent ? ' current' : ''}`}>
                   <div className="harness-status-head">
                     <strong>{HARNESS_NAMES[h]}</strong>
+                    {/* #3700: the harness on a row that makes a per-harness
+                        claim is the CALLER's declaration, not something
+                        Tortoise verified — disclosed here, beside the name,
+                        because the self-report is about the HARNESS and not
+                        about the state word. Gated on `supported` so it only
+                        appears where a per-harness claim is actually made.
+                        Non-live (dim) on purpose: it must not be announced as
+                        part of the failure alert below. */}
+                    {supported && harnessAttribution(h) && (
+                      <span className="dim small">· {harnessAttribution(h)}</span>
+                    )}
                     {/* review P2-5: aria-live lives on the PILL (the state word
                         only) — the container-level region announced the whole
                         multi-line snippet. review P2-3: unsupported harnesses
                         render the REASON only, no pill (no install path exists
-                        for web/cursor — a pill would contradict it).
+                        for `claude-web`, `claude-desktop` or `chatgpt` — a pill
+                        would contradict it; `cursor` gained a seam in #4110).
                         #3700: the label comes from captureStatusLabelForHarness
-                        — the ONE shared table — so the receipt-derived `active`
-                        state always carries its agent-reported attribution and
-                        never reads as a server-observed harness. */}
+                        — the ONE shared table — and stays a plain state word;
+                        the row's attribution fragment above is what keeps it
+                        from reading as a server-observed harness. */}
                     {supported && <span className="capture-state" aria-live="polite">{captureStatusLabelForHarness(state, h)}</span>}
                   </div>
                   {!supported && <p className="dim small">{HARNESS_CAPTURE_REASON[h]}</p>}

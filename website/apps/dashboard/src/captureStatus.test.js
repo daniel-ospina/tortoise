@@ -8,6 +8,7 @@ import {
   captureErrorForHarness,
   captureStatusForHarness,
   captureStatusLabelForHarness,
+  harnessAttributionForHarness,
   lastErrorForHarness,
 } from './captureStatus.js'
 import { HARNESS_ATTRIBUTION } from './harnesses.js'
@@ -239,25 +240,26 @@ test('#3428: GIVEN capture capability, the tense follows the RECEIPT', () => {
 // AGENT, never to the server. `session_capture_receipt_<harness>` names the
 // harness the CALLER declared (`body.harness` on a fresh session — an
 // authenticated agent self-report — or the Session's stored harness on a
-// re-capture, itself recorded from that declaration), and `install_probe_<h>`
-// names the harness on the probe POST. No credential→harness binding exists for
-// tt_/tk_ keys, so the server OBSERVES the capture / install signal and not the
-// harness. The RENDERED per-harness states must therefore carry the agent
-// attribution; only the state VOCABULARY (the stable API the derivation and
-// its tests read) may stay `active` / `waiting`.
+// re-capture when it has one, and the current caller's declaration when it does
+// not), and `install_probe_<h>` names the harness on the probe POST. No
+// credential→harness binding exists for tt_/tk_ keys, so the server OBSERVES the
+// capture / install signal and not the harness. The state VOCABULARY stays
+// `active` / `waiting` and the state WORDS stay plain; the disclosure is a
+// separate, renderable per-row ATTRIBUTION.
 //
-// This EXECUTES the rendered-path derivation (`captureStatusLabelForHarness`,
-// the function main.jsx's Settings pill and done screen call) rather than
-// scanning source: a source-text tripwire could stay green while the rendered
-// word claimed a server-observed harness.
+// This EXECUTES the rendered-path helpers main.jsx calls
+// (`harnessAttributionForHarness` beside the harness name, and
+// `captureErrorForHarness` for the failure line) rather than scanning source: a
+// source-text tripwire could stay green while the rendered row claimed a
+// server-observed harness.
 //
 // NAMED MUTATION that reinstates the defect — must RED this test:
 //   RECEIPT_LABEL_CLAIMS_SERVER_OBSERVATION
-//   In `harnesses.js`, revert `active: \`active (${HARNESS_ATTRIBUTION})\``
-//   to `active: 'active'` (the pre-#3700 label). The attribution assertion
-//   below then fails while the state-vocabulary assertion stays green — which
-//   is exactly the split the fix exists to preserve.
-test('#3700: caller-declared harness states render as agent-reported, never a server-observed harness', () => {
+//   In `captureStatus.js`, make `harnessAttributionForHarness` return null (or
+//   return the constant unconditionally). The attribution assertion below then
+//   fails while the state-vocabulary and plain-label assertions stay green —
+//   which is exactly the split the fix exists to preserve.
+test('#3700: the per-harness attribution is disclosed on the row, not baked into a state word', () => {
   const st = {
     session_recording: true,
     session_capture_receipt_claude: '2026-09-23T00:00:00Z',
@@ -269,34 +271,54 @@ test('#3700: caller-declared harness states render as agent-reported, never a se
   assert.equal(captureStatusForHarness(st, 'claude'), 'active')
   assert.equal(captureStatusForHarness(st, 'pi'), 'waiting')
 
-  // (2) the RENDERED labels carry the attribution the server can stand
-  //     behind, and never present the bare state as an observed harness.
-  const receiptLabel = captureStatusLabelForHarness(st, 'claude')
-  const probeLabel = captureStatusLabelForHarness(st, 'pi')
-  assert.equal(receiptLabel, `active (${HARNESS_ATTRIBUTION})`)
-  assert.equal(probeLabel, `installed (${HARNESS_ATTRIBUTION}) — waiting for first capture`)
-  assert.equal(HARNESS_ATTRIBUTION, 'harness reported by your agent')
-  assert.notEqual(receiptLabel, 'active', 'the receipt-derived label must not read as a server-observed harness')
-  assert.ok(probeLabel.includes(HARNESS_ATTRIBUTION),
-    'the probe-derived label must carry the same agent attribution as the receipt')
+  // (2) the state WORDS are plain. The attribution is about the HARNESS, not
+  //     the state, so baking it into a state word (the pre-#3700-clean shape
+  //     `active (…)`) is what read as though the STATE were agent-reported —
+  //     and it collided with the row's own server text. Moving it back into a
+  //     label must fail here.
+  assert.equal(captureStatusLabelForHarness(st, 'claude'), 'active')
+  assert.equal(captureStatusLabelForHarness(st, 'pi'), 'installed — waiting for first capture')
+  assert.ok(!captureStatusLabelForHarness(st, 'claude').includes(HARNESS_ATTRIBUTION),
+    'the attribution must not be baked into a state word')
+  assert.ok(!captureStatusLabelForHarness(st, 'pi').includes(HARNESS_ATTRIBUTION),
+    'the attribution must not be baked into a state word')
 
-  // (3b) the sibling FAILURE sub-line is the same defect class: the key it
-  //      reads (`session_capture_last_error_<h>`) carries the harness the same
-  //      `stored or claimed` resolution produced, so the rendered sentence must
-  //      be attributed too — and must be null (not an empty string) when there
-  //      is no error, since the caller uses it as its own render guard.
+  // (3) the renderable ATTRIBUTION is returned for exactly the two states whose
+  //     key embeds a harness, and is null for every state with no per-harness
+  //     signal — so a no-signal row can never acquire a claim about a harness
+  //     the server has no signal for.
+  assert.equal(HARNESS_ATTRIBUTION, 'harness reported by your agent')
+  assert.equal(harnessAttributionForHarness(st, 'claude'), HARNESS_ATTRIBUTION)
+  assert.equal(harnessAttributionForHarness(st, 'pi'), HARNESS_ATTRIBUTION)
+  assert.equal(harnessAttributionForHarness(st, 'cursor'), null,
+    'install-pending embeds no harness')
+  assert.equal(harnessAttributionForHarness({ session_recording: true }, 'claude'), null)
+  assert.equal(harnessAttributionForHarness(null, 'claude'), null)
+  assert.equal(harnessAttributionForHarness({ session_recording: false }, 'claude'), null)
+
+  // (4) the sibling FAILURE sub-line reads the key the same `stored or claimed`
+  //     resolution wrote, so it is the same defect class — but it renders inside
+  //     a `role="alert"` live region, so it carries the failure ALONE and must be
+  //     null (not an empty string) when there is no error, since the caller uses
+  //     it as its own render guard. The row's attribution (3) is what discloses
+  //     the harness; a caveat in here would be announced as part of the failure
+  //     and would collide with server detail ending in `)` or `.`.
   const errState = { ...st, session_capture_last_error_claude: 'timed out' }
-  assert.equal(captureErrorForHarness(errState, 'claude'),
-    `Last attempt — timed out (${HARNESS_ATTRIBUTION})`)
+  assert.equal(captureErrorForHarness(errState, 'claude'), 'Last attempt — timed out')
+  assert.ok(!captureErrorForHarness(errState, 'claude').includes(HARNESS_ATTRIBUTION),
+    'the alert must not carry the attribution')
+  assert.equal(captureErrorForHarness({ ...st, session_capture_last_error_claude: 'Upgrade your plan.' }, 'claude'),
+    'Last attempt — Upgrade your plan.',
+    'server detail ending in a full stop must not be followed by a caveat')
+  assert.equal(captureErrorForHarness({ ...st, session_capture_last_error_claude: 'empty or blank)' }, 'claude'),
+    'Last attempt — empty or blank)',
+    'server detail ending in a parenthesis must not be followed by a caveat')
   assert.equal(lastErrorForHarness(errState, 'claude'), 'timed out',
     'the raw accessor keeps returning the bare message')
   assert.equal(captureErrorForHarness(st, 'claude'), null)
 
-  // (3) an undeclared harness never gets another harness's label — the
-  //     attribution cannot leak onto a state the server has no signal for.
+  // (5) an undeclared harness keeps the honest no-signal label.
   assert.equal(captureStatusLabelForHarness(st, 'cursor'), 'not installed yet')
-
-  // (4) the states with no harness declaration keep their honest labels.
   assert.equal(captureStatusLabelForHarness(null, 'claude'), 'off')
   assert.equal(captureStatusLabelForHarness({ session_recording: false }, 'claude'), 'off')
 })

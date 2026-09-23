@@ -4408,15 +4408,19 @@ def _observed_capture_harness(org: dict, claimed: str | None,
     - A session-JWT caller (dashboard / browser) observes no harness — the
       per-harness claim is refused and the bare ``session_capture_receipt``
       (server-observed: a capture happened, harness unproven) is used.
-    - An agent credential: the server's OWN stored Session harness wins over
+    - An agent credential: the harness already stamped on the Session wins over
       a later claim (``stored or claimed``) — first-writer-wins, so a re-POST
       of an existing session_id can never RELABEL the harness and light
-      another harness's receipt. Only a FRESH session falls back to the
-      caller's claim, which for an agent credential is the agent's own
-      declaration (the agent is present — the connection is observed).
+      another harness's receipt. The caller's claim is used on a FRESH session
+      AND on a re-capture of a Session that has no stored harness (a
+      harness-unproven one, e.g. a session-JWT capture), where it is the
+      agent's own declaration (the agent is present — the connection is
+      observed).
 
     ``body.harness`` is therefore never authoritative on its own: it can only
-    ever introduce a harness on a session the server has not yet stamped."""
+    ever introduce a harness on a session the server has not yet stamped, and
+    either way the value it introduces is a caller declaration, never a harness
+    the server OBSERVED (#3700)."""
     if not _credential_is_agent(org):
         return None
     return stored or claimed
@@ -9023,9 +9027,10 @@ async def capture_session(body: SessionRequest, request: Request, org: dict = De
     as ``capture_harness`` in ``_capture_session_impl``, which writes the
     receipt) — RESOLVED, not OBSERVED. The server observes that an
     authenticated agent credential captured; the harness attribution is the
-    caller's declaration (``body.harness`` on a fresh session, the stored
-    Session harness on a re-capture). No credential→harness binding exists, so
-    no surface may read the per-harness key as proof the server saw that
+    caller's declaration (``body.harness`` on a fresh session, or on a
+    re-capture of a Session with no stored harness; a Session that HAS a stored
+    harness keeps it, first-writer-wins). No credential→harness binding exists,
+    so no surface may read the per-harness key as proof the server saw that
     harness — only the capture itself is observed.
     """
     _require_scope(org, "graphs:write", "capture_session")
@@ -10567,8 +10572,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
 # (never client state): session_capture_receipt_{harness} records a durable
 # hosted 2xx capture under an authenticated agent credential, attributed to
 # the RESOLVED harness — the caller's declaration (`body.harness` on a fresh
-# session, the stored Session harness on a re-capture), NOT a server
-# observation of the harness (#3700; see tortoise/capture_receipts.py).
+# session, or on a re-capture of a Session with no stored harness; a stored
+# harness is kept, first-writer-wins), NOT a server observation of the harness
+# (#3700; see tortoise/capture_receipts.py).
 # session_capture_last_error_{harness} carries the last
 # non-2xx attempt's detail (the per-harness failure sub-line). Both are
 # REGISTERED onboarding state keys (Task 11's registration table) — an

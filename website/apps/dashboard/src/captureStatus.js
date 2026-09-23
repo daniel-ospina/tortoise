@@ -8,6 +8,7 @@
 // table below. harnesses.js is pure constants (no browser globals, no imports),
 // so this import keeps the module node --test-testable and cannot cycle.
 import {
+  HARNESS_ATTRIBUTION,
   HARNESS_CAPTURE_LAST_ATTEMPT,
   HARNESS_CAPTURE_STATUS_LABEL,
   HARNESS_CAPTURE_SUPPORT,
@@ -29,12 +30,13 @@ export const CAPTURE_STATES = Object.freeze(['off', 'install-pending', 'waiting'
 //
 // #3700: neither `active` nor `waiting` means the server observed THIS harness.
 // Both keys embed a harness the CALLER declared — `session_capture_receipt_<h>`
-// (`body.harness` on a fresh session; the stored harness on a re-capture,
-// itself declared on that session's first capture) and `install_probe_<h>`
-// (`body.harness` on the probe POST) — and no credential→harness binding exists.
-// What the server OBSERVES is that a credential reached it; the harness
-// attribution is a self-report. The rendered labels carry that attribution
-// (`HARNESS_ATTRIBUTION` in harnesses.js) — see `captureStatusLabelForHarness`.
+// (`body.harness` on a fresh session; on a re-capture the Session's STORED
+// harness when it has one, and the current caller's declaration when it does
+// not) and `install_probe_<h>` (`body.harness` on the probe POST) — and no
+// credential→harness binding exists. What the server OBSERVES is that a
+// credential reached it; the harness attribution is a self-report. These state
+// words stay plain; the attribution is rendered once per row by
+// `harnessAttributionForHarness` below.
 export function captureStatusForHarness(state, harness) {
   if (!state) return 'off'
   if (!state.session_recording) return 'off'
@@ -45,9 +47,11 @@ export function captureStatusForHarness(state, harness) {
 
 // #3700: the RENDERED per-harness status word — the state vocabulary above
 // (the stable API the derivation and its tests read) mapped through the ONE
-// shared label table in harnesses.js. The caller-declared states (`active`,
-// `waiting`) render with their agent-reported attribution so no product surface
-// presents a declared harness as a server-observed fact.
+// shared label table in harnesses.js. The words are deliberately PLAIN: the
+// attribution belongs to the harness, not to the state, so it is rendered once
+// per row by `harnessAttributionForHarness` beside the harness name rather than
+// baked into a state word (where it reads as though the STATE were
+// agent-reported).
 //
 // Call sites go through this helper, never index HARNESS_CAPTURE_STATUS_LABEL
 // directly: main.jsx no longer imports the raw table, so re-indexing it there
@@ -58,6 +62,22 @@ export function captureStatusForHarness(state, harness) {
 // matters more than a stronger claim the mechanism does not back.
 export function captureStatusLabelForHarness(state, harness) {
   return HARNESS_CAPTURE_STATUS_LABEL[captureStatusForHarness(state, harness)]
+}
+
+// #3700: the per-row harness ATTRIBUTION — the disclosure that the harness name
+// on a row making a per-harness claim is the caller's own declaration, not
+// something Tortoise verified. Returns `HARNESS_ATTRIBUTION` for exactly the
+// two states whose key embeds a harness (`active` from the receipt, `waiting`
+// from the install probe) and null for every other state, so a row's no-signal
+// states (`off`, `install-pending`) never acquire a claim about a harness the
+// server has no signal for. Call sites render it as a non-live, dim fragment
+// beside the harness name — never inside the `role="alert"` failure sentence,
+// where a caveat would be announced as part of the failure and could collide
+// with server detail that itself ends in a parenthesis or a full stop.
+export function harnessAttributionForHarness(state, harness) {
+  const status = captureStatusForHarness(state, harness)
+  if (status === 'active' || status === 'waiting') return HARNESS_ATTRIBUTION
+  return null
 }
 
 // #3428 + #2937 (lane B3, owner-approved 2026-09-16 — option (a)): the
@@ -128,9 +148,12 @@ export function lastErrorForHarness(state, harness) {
 // claimed`, see tortoise/capture_receipts.py), so its harness is likewise the
 // CALLER's declaration and must not render as the harness whose attempt failed.
 // This owns the state read and the null guard and delegates the WORDING to
-// `HARNESS_CAPTURE_LAST_ATTEMPT` (harnesses.js), so no copy is authored here and
-// the attribution stays on the one shared constant. Returns null when there is
-// no recorded error, so callers can use it directly as the render guard.
+// `HARNESS_CAPTURE_LAST_ATTEMPT` (harnesses.js), so no copy is authored here.
+// The sentence carries NO attribution: it renders inside a `role="alert"` live
+// region (the failure must lead the announcement and stand alone) and the row's
+// `harnessAttributionForHarness` fragment already discloses the harness.
+// Returns null when there is no recorded error, so callers can use it directly
+// as the render guard.
 export function captureErrorForHarness(state, harness) {
   const error = lastErrorForHarness(state, harness)
   if (!error) return null

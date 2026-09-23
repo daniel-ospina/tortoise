@@ -308,9 +308,10 @@ class TestCaptureReceiptHarnessResolution:
     and a re-capture keeps the server's recorded harness.
 
     #3700 — the class is named *Resolution*, not *IsServerResolved*: the
-    harness is RESOLVED (stored-or-claimed), never OBSERVED. Only the
-    RE-capture leg is the server's own record; on the fresh leg it is the
-    caller's declaration."""
+    harness is RESOLVED (stored-or-claimed), never OBSERVED. A re-capture keeps
+    the Session's stored harness when it has one, and falls back to the current
+    caller's declaration when it does not; either way the harness is a caller
+    declaration, not something the server observed."""
 
     @pytest.fixture()
     def env(self, tmp_path, monkeypatch):

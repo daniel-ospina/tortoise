@@ -979,7 +979,7 @@ input::placeholder, textarea::placeholder {
   background: var(--bg-soft, #0d1a2d);
 }
 .harness-status.current { border-color: rgba(6, 182, 212, 0.5); }
-.harness-status-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.harness-status-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .harness-status-head strong { font-size: 13px; }
 .capture-state {
   font-size: 12px;
@@ -987,12 +987,7 @@ input::placeholder, textarea::placeholder {
   border-radius: 999px;
   border: 1px solid var(--border, #1e293b);
   color: var(--text-dim, #64748b);
-  /* #3700: the label carries the harness attribution, so it is long enough to
-     overrun the card on a narrow window. Wrap within the card instead of
-     clipping or overrunning it (`flex-wrap` on .harness-status-head drops the
-     pill onto its own line first). */
-  max-width: 100%;
-  white-space: normal;
+  white-space: nowrap;
 }
 .harness-status.status-active .capture-state { color: var(--green, #4ade80); border-color: rgba(74, 222, 128, 0.4); }
 .harness-status.status-waiting .capture-state { color: var(--accent, #06b6d4); border-color: rgba(6, 182, 212, 0.4); }
