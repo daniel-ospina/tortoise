@@ -887,14 +887,16 @@ class TestS3:
 
             def tortoise_fts_query(self, query, *, entity_type, limit=3):
                 self.calls.append((query, entity_type))
+                # the REAL callee row shape: ``SearchResult.to_dict()`` keys
+                # the kind as ``point_kind`` (#4511) — never ``kind``.
                 if entity_type == "object":
                     return [{"id": "obj-1", "content": "single-flash pipeline",
-                             "kind": "core:plan"}]
+                             "point_kind": "core:plan"}]
                 if entity_type == "event":
                     return [{"id": "ev-1", "content": "owner paused solar tier",
-                             "kind": "core:decision"}]
+                             "point_kind": "core:decision"}]
                 return [{"id": "pt-1", "content": "flash is the path",
-                         "kind": "statement"}]
+                         "point_kind": "statement"}]
 
         sdk = MockSDK()
         res = v2.search_graph(sdk, S2_FIXTURE, "The story. First para.")
@@ -906,6 +908,67 @@ class TestS3:
         # both object and event queries were run
         types = {t for _, t in sdk.calls}
         assert "object" in types and "event" in types
+
+    def test_fts_rows_reads_the_callee_point_kind_not_the_fictional_kind(self):
+        """#4511: the callee returns ``SearchResult.to_dict()`` rows, keyed
+        ``point_kind`` — so ``_fts_rows`` must source its OUTPUT ``kind`` from
+        ``point_kind``, on every leg.
+
+        On the real backend every S3 prior used to carry ``kind: ""`` (the read
+        was ``r.get("kind")``, a key the callee never emits), blanking the S4
+        prompt's kind column and hiding the ``pointKind == "event"`` turn
+        marker from any consumer. The mock models the REAL row shape; a revert
+        to ``r.get("kind")`` empties every assertion below, and a reader that
+        keyed on the fictional ``kind`` would never see these values at all.
+        """
+
+        class MockSDK:
+            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                return {
+                    "point": [{"id": "pt-1", "content": "flash is the path",
+                               "point_kind": "statement"}],
+                    "object": [{"id": "obj-1", "content": "single-flash pipeline",
+                                "point_kind": "core:plan"}],
+                    "subject": [{"id": "sub-1", "content": "the team",
+                                 "point_kind": "core:team"}],
+                    "event": [{"id": "ev-1", "content": "owner paused solar tier",
+                               "point_kind": "core:decision"}],
+                }[entity_type]
+
+        sdk = MockSDK()
+        # the point leg keeps the OUTPUT key ``kind``, now sourced from the
+        # callee's ``point_kind``
+        assert v2._fts_rows(sdk, "point", "q") == [
+            {"id": "pt-1", "content": "flash is the path", "kind": "statement"}]
+        # the object/subject legs (named ``name``, kinded the same way)
+        assert v2._fts_rows(sdk, "object", "q") == [
+            {"id": "obj-1", "name": "single-flash pipeline",
+             "kind": "core:plan"}]
+        assert v2._fts_rows(sdk, "subject", "q") == [
+            {"id": "sub-1", "name": "the team", "kind": "core:team"}]
+        assert v2._fts_rows(sdk, "event", "q") == [
+            {"id": "ev-1", "content": "owner paused solar tier",
+             "kind": "core:decision"}]
+
+    def test_s3_render_carries_a_populated_kind_column(self, monkeypatch):
+        """#4511 end-to-end: the S4 prompt's kind column carries the real kind.
+
+        ``_render_search_results`` reads the ``kind`` OUTPUT key (populated from
+        the callee's ``point_kind``), so a prior-kind regression is visible in
+        the text the model actually receives — not merely in the row dicts."""
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+
+        class MockSDK:
+            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                if entity_type == "object":
+                    return [{"id": "obj-1", "content": "single-flash pipeline",
+                             "point_kind": "core:plan"}]
+                return []
+
+        rendered = v2._render_search_results(
+            v2.search_graph(MockSDK(), S2_FIXTURE, "STORY"))
+        assert "EXISTING ENTITIES" in rendered
+        assert "- obj-1 | single-flash pipeline | core:plan" in rendered
 
     def test_turn_echo_is_never_an_s3_prior(self, monkeypatch):
         """#2552: a capture's own turn echoes are transcript, not memory.
@@ -1505,6 +1568,25 @@ class TestS5:
         # _derive_queries (S3) also survives
         queries = v2._derive_queries(embed, "story")
         assert sum(len(q) for q in queries.values()) >= 2
+
+    def test_empty_candidate_kind_is_not_a_name_only_exact_match(self):
+        """#4511 boundary: the candidate rows now carry a REAL kind, so an
+        empty NEW-entity kind no longer "exact"-matches by NAME ALONE.
+
+        Before #4511 every S3 entity row's ``kind`` was ``""``; a new entity
+        with no kind then compared ``"" == ""`` and matched ANY same-named row
+        regardless of namespace. With the kind populated, ``""`` matches only a
+        genuinely kindless row and the bare-form fallback finds nothing here —
+        the correct reading of "exact kind match first" (phase-2 resolution
+        recovers such a name; this predicate must not guess)."""
+        existing = [{"id": "obj-9", "name": "cleaning-pass tier",
+                     "kind": "core:plan"}]
+        # a populated candidate kind matches exactly, as before
+        assert v2._find_existing_entity(existing, "cleaning-pass tier",
+                                        "core:plan")[1] == "exact"
+        # an empty candidate kind is NOT a name-only match against a kinded row
+        assert v2._find_existing_entity(existing, "cleaning-pass tier",
+                                        "") == (None, "none")
 
     def test_bare_kind_link_before_create_matches(self):
         """Review fix: model emits bare 'plan'; backend stores 'core:plan' —
