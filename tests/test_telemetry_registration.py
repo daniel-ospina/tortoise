@@ -62,6 +62,14 @@ def state_seams(monkeypatch):
     """Route the registry legs of `_update_onboarding_state` to a dict."""
     monkeypatch.setattr(ha, "_get_onboarding_state", lambda org_id: {})
     monkeypatch.setattr(ha, "_get_onboarding_projection", lambda org_id: {})
+    # #3553: the OPERATIONAL write is now a compare-and-set whose read is
+    # `_read_onboarding_state_and_version` (state + version from ONE read).
+    # Stub it to the absent-identity shape (version None) so the router keeps
+    # taking the legacy whole-dict path this fixture observes — and so the
+    # fixture does not hit the real registry graph.
+    monkeypatch.setattr(
+        ha, "_read_onboarding_state_and_version",
+        lambda org_id: ({}, None))
     written: dict = {}
 
     def fake_write(org_id, state):
