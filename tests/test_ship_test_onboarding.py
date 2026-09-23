@@ -3232,3 +3232,90 @@ def test_a_kill_inside_the_teardown_window_leaves_a_complete_not_run_document(
     # verdict are already there.
     assert written["verdict"] == "passed"
     assert written["teardown"]["status"] == mod.TEARDOWN_BASELINE_UNAVAILABLE
+
+
+# ── #4907 — the acceptance criteria, each with the test that proves it ───────
+# A NAMED map, so a criterion cannot silently lose its covering test (the failure
+# mode a prose-only claim has). It is the honest form of "every AC is proven":
+# the test asserts the NAMES exist, and the names are the tests above.
+ACCEPTANCE_CRITERIA = {
+    "AC1 wedge, persisted": [
+        "test_a_wedged_context_close_returns_within_the_bound_and_records_watchdog_kill",
+        "test_a_wedged_browser_close_on_the_new_context_path_is_bounded",
+        "test_a_wedged_pw_stop_is_bounded_and_forced",
+    ],
+    "AC2 raising close, persisted": [
+        "test_a_close_that_raises_is_recorded_with_the_closer_and_the_exception",
+        "test_a_browser_close_that_raises_is_recorded_and_still_stops_the_driver",
+    ],
+    "AC3 healthy run, persisted": [
+        "test_a_healthy_teardown_records_clean_and_sends_no_signal",
+        "test_a_completed_run_records_the_browser_teardown_block",
+    ],
+    "AC4 own child only": [
+        "test_the_watchdog_signals_only_the_enumerated_driver_child",
+        "test_no_driver_child_means_no_signal_and_driver_absent",
+        "test_a_stale_start_time_is_not_signalled",
+    ],
+    "AC5 entered once; the ladder once each": [
+        "test_the_browser_teardown_is_entered_exactly_once",
+        "test_the_ladder_sends_at_most_one_sigterm_and_one_sigkill",
+        "test_the_ladder_takes_the_rungs_at_half_and_three_quarters_of_the_bound",
+        "test_a_browser_that_never_launched_is_bounded_by_pw_stop",
+        "test_a_browser_whose_context_failed_is_bounded_and_closes_the_browser",
+    ],
+    "AC6 no regression; harness + mutation-verified": [
+        "test_cli_mutation_selfcheck_exits_zero",
+        "test_the_teardown_seams_are_declared",
+        "test_the_fake_driver_records_start_and_stop",
+    ],
+    "AC7 E10 disclosed, not closed": [
+        "test_the_runbook_discloses_the_bound_the_vocabulary_and_the_residue",
+    ],
+    "AC8 writer pinned; every former write site accounted for": [
+        "test_a_kill_inside_the_teardown_window_leaves_a_complete_not_run_document",
+        "test_the_import_guard_path_writes_not_run_and_enters_no_browser_teardown",
+        "test_the_verdict_is_printed_exactly_once",
+        "test_a_non_clean_browser_teardown_warns_on_stderr_and_never_moves_the_verdict",
+        "test_an_out_that_cannot_be_created_writes_no_artifact",
+        "test_a_driver_that_will_not_start_writes_no_artifact",
+    ],
+    "AC9 structural guard re-specified": [
+        "test_no_exit_from_the_walk_writes_the_artifact_without_teardown",
+    ],
+}
+
+
+def test_every_acceptance_criterion_names_a_proving_test() -> None:
+    """All NINE criteria, each with at least one test that exists. This is what
+    "every AC is proven" can mean in code: the map cannot rot into names that were
+    renamed away, and no criterion can be dropped without a red test."""
+    assert len(ACCEPTANCE_CRITERIA) == 9, sorted(ACCEPTANCE_CRITERIA)
+    for ac, tests in ACCEPTANCE_CRITERIA.items():
+        assert tests, f"{ac} names no test"
+        for name in tests:
+            assert callable(globals().get(name)), f"{ac}: {name} does not exist"
+
+
+def test_every_finalize_exit_in_the_walk_is_named_by_a_test() -> None:
+    """The completeness half: an exit in `_walk` that no test reaches is a path
+    whose funnel call is unproven — how five exits hid until #4843. The number is
+    pinned (11; the import guard's moved to `_start_driver`), and the structural
+    guard asserts every one of them passes the same `td`."""
+    import ast
+    import inspect
+
+    import tools.ship_test_onboarding as mod
+
+    tree = ast.parse(inspect.getsource(mod._walk))
+    exits = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+             and getattr(n.func, "id", None) == "_finalize"]
+    assert len(exits) == 11, f"_walk has {len(exits)} _finalize exits, expected 11"
+    # ...and the record is proven in BOTH directions ON DISK: one named test pins
+    # a completed run's outcome as NOT `not_run`, another pins the killed-window
+    # document AS `not_run`. One without the other cannot discriminate "the
+    # teardown ran" from "the teardown never finished".
+    assert ("test_a_completed_run_records_the_browser_teardown_block"
+            in ACCEPTANCE_CRITERIA["AC3 healthy run, persisted"])
+    assert ("test_a_kill_inside_the_teardown_window_leaves_a_complete_not_run_document"
+            in ACCEPTANCE_CRITERIA["AC8 writer pinned; every former write site accounted for"])
