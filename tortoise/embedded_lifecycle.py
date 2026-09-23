@@ -1939,7 +1939,12 @@ def _install_dead_socket_guard() -> None:
             return True
         # The recorded server is confirmed dead (the RDB is released) and the
         # stale registry is gone: `__init__`'s else branch starts a clean
-        # server over the same dbdir/dbfilename — now the ONLY writer.
+        # server over the same dbdir/dbfilename. What this closes is the
+        # REGISTRY REPLAY — a proven-dead holder's stale record — and nothing
+        # wider. It does NOT make this construction the only writer: redislite
+        # still has no per-<dbdir>/<dbfilename> construction lock, so two
+        # constructions racing between this unlink and the start below can
+        # each bring up a server over one RDB (tortoise#4904).
         logger.warning(
             "#4879: REPAIRED a stale embedded-redis registry %s — stopped the "
             "proven holder pid %s (recorded socket %s was gone) and removed "
