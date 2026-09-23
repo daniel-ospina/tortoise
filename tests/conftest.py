@@ -1156,11 +1156,16 @@ def _operator_alert_isolation(monkeypatch):
     """
     global _REAL_OPERATOR_ALERT_STORE
     import tortoise.operator_alert as oa
+    from tortoise import alert_channel
 
     if _REAL_OPERATOR_ALERT_STORE is None:
         _REAL_OPERATOR_ALERT_STORE = oa.alert_store
     monkeypatch.setattr(oa, "alert_store", lambda: None)
     oa.reset_operator_alert_state_for_tests()
+    # The light leg's MemoryStorage is a PROCESS-wide singleton: a title filed
+    # by one test stays "already filed" for the next, which is a latent DEDUP
+    # collision rather than anything a test asked for. Reset it per test.
+    alert_channel.reset_memory_storage_for_tests()
     yield
     # Honest limit: a handle aged past _INFLIGHT_STALE_S is dropped from _HANDLES,
     # so a genuinely wedged worker is untracked here and this join cannot speak for

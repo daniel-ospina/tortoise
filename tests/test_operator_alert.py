@@ -478,13 +478,16 @@ def test_the_light_leg_never_imports_the_hosted_app():
     assert "LIGHT-OK" in out.stdout
 
 
-def test_both_legs_build_an_identical_channel(monkeypatch,
-                                              real_operator_alert_store):
+def test_both_legs_build_an_identical_channel(monkeypatch):
     """Parity: the light leg and the hosted leg file the SAME incident.
 
     Without this the two legs could drift (the split this PR removes), and the
-    seam-map claim would rest on the diff alone.
+    seam-map claim would rest on the diff alone. The light leg is built
+    EXPLICITLY: ``oa.alert_store()`` cannot stand in for it here, because it
+    prefers the hosted leg whenever ``tortoise.hosted_api`` is imported — as it
+    is in this process.
     """
+    from tortoise import alert_channel
     from tortoise import github_issue as gi
     from tortoise import hosted_api as ha
     from tortoise import telegram_push as tp
@@ -495,6 +498,7 @@ def test_both_legs_build_an_identical_channel(monkeypatch,
     monkeypatch.delenv("BACKUP_SWEEP_ENABLED", raising=False)
     # separate dedup stores, so the two legs cannot dedup against each other
     monkeypatch.setattr(ha, "_backup_storage", lambda: MemoryStorage())
+    alert_channel.reset_memory_storage_for_tests()
     titles: list[str] = []
     monkeypatch.setattr(
         gi, "create_issue",
@@ -503,7 +507,7 @@ def test_both_legs_build_an_identical_channel(monkeypatch,
     monkeypatch.setattr(gi, "search_open_incident", lambda *a, **k: [])
     monkeypatch.setattr(tp, "send_message", lambda *a, **k: None)
 
-    light = oa.alert_store()
+    light = alert_channel.incident_alert_store()
     hosted = ha._incident_alert_store()
     assert light is not None and hosted is not None
     assert type(light) is type(hosted)
@@ -528,6 +532,25 @@ def test_cohort_cost_delegates_to_the_operator_store(monkeypatch):
     sentinel = object()
     monkeypatch.setattr(oa, "alert_store", lambda: sentinel)
     assert cc._alert_store() is sentinel
+
+
+def test_operator_store_prefers_the_hosted_leg_when_it_is_loaded(
+        monkeypatch, real_operator_alert_store):
+    """The hosted leg is the one holding the cached storage (#3968).
+
+    ``cohort_cost._alert_store`` asks this per cap-firing capture, NOT once per
+    window. Resolving it to the light leg would build a fresh ``R2Storage`` — and
+    therefore a fresh boto3 client — on every call, re-creating exactly the
+    #3968 cost the process-wide singleton exists to remove. The light leg stays
+    the answer only where ``tortoise.hosted_api`` was never imported.
+    """
+    from tortoise import hosted_api as ha
+
+    assert "tortoise.hosted_api" in sys.modules, (
+        "precondition: this process has the hosted app loaded")
+    sentinel = object()
+    monkeypatch.setattr(ha, "_incident_alert_store", lambda: sentinel)
+    assert oa.alert_store() is sentinel
 
 
 def test_the_autouse_isolation_is_load_bearing(monkeypatch):

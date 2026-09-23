@@ -35,6 +35,7 @@ import collections
 import concurrent.futures
 import contextlib
 import logging
+import sys
 import threading
 import time
 from typing import Any
@@ -117,19 +118,31 @@ atexit.register(_shutdown_pool)
 def alert_store():
     """The shared UNGATED alert-channel builder, or ``None``.
 
-    Delegates to ``alert_channel.incident_alert_store`` — the one declared seam
-    gated on alert credentials only, never on ``BACKUP_SWEEP_ENABLED`` (#3981,
-    #3820 D5a). Tests patch THIS name (or ``hosted_api._incident_alert_store``)
-    to inject a fake.
+    Gated on the alert credentials only, never on ``BACKUP_SWEEP_ENABLED``
+    (#3981, #3820 D5a). Tests patch THIS name to inject a fake.
 
-    Deliberately does NOT import ``tortoise.hosted_api``: this runs on the MCP
-    stdio path for a dropped increment, and importing the hosted app builds the
-    whole FastAPI tree (~1.7 s, ``tortoise/mcp_server.py:31-35``). Both legs
-    execute the identical policy and constructor in ``tortoise.alert_channel``;
-    the hosted leg only injects its own (test-patched, cache-keyed) storage
-    factory. Parity is pinned by
-    ``tests/test_operator_alert.py::test_both_legs_build_the_same_channel``.
+    PREFERS the hosted leg when ``tortoise.hosted_api`` is ALREADY imported:
+    that leg runs the identical policy and constructor (both live in
+    ``tortoise.alert_channel``) but injects the hosted module's own
+    ``_backup_storage`` — the process-wide R2 singleton (#3968). The light
+    default (:func:`alert_channel.light_storage`) builds a FRESH ``R2Storage``,
+    and therefore a fresh boto3 client, per call: correct for the
+    once-per-window alert this module dispatches, wrong for a caller that asks
+    per request (``cohort_cost._alert_store`` runs on every cap-firing capture).
+    So in a hosted process ``hosted_api._incident_alert_store`` is the single
+    builder behind both callers, and patching THIS function still redirects
+    both.
+
+    It never IMPORTS ``tortoise.hosted_api``: this runs on the MCP stdio path
+    for a dropped increment, and importing the hosted app builds the whole
+    FastAPI tree (~1.7 s, ``tortoise/mcp_server.py:31-35``). That branch is
+    taken only when another importer already paid the cost; otherwise the light
+    leg answers and ``tortoise.hosted_api`` stays out of ``sys.modules``
+    (pinned by ``tests/test_operator_alert.py::test_the_light_leg_never_imports_the_hosted_app``).
     """
+    ha = sys.modules.get("tortoise.hosted_api")
+    if ha is not None:
+        return ha._incident_alert_store()
     from tortoise import alert_channel
 
     return alert_channel.incident_alert_store()
@@ -159,8 +172,8 @@ def file_operator_incident(store, kind: str, org_id: str | None, detail: dict) -
     on record" and re-arm the short window. ``store`` is resolved by the caller.
 
     The on-record rule (``outcome in {FILED, DEDUP}``, i.e. ``is not SUPPRESSED``)
-    is ALSO implemented by ``hosted_api._analytics_open_incident``
-    (``hosted_api.py:22129-22145``) — the two must move together, and
+    is ALSO implemented by ``hosted_api._analytics_open_incident`` — the two must
+    move together, and
     ``tests/test_operator_alert.py::test_on_record_predicate_parity`` pins them
     equal over every :class:`OpenOutcome` member. Extracting one shared helper
     is deferred (filed as a follow-up); until then, changing this rule here
@@ -226,6 +239,14 @@ def _due_locked(key: tuple[str, str], now: float) -> bool:
 
 def _run(store, key, kind, org_id, detail, token) -> None:
     try:
+        # Ownership check BEFORE the store write: a superseded attempt must not
+        # spend a network call filing an incident its successor is already
+        # filing, and must not reach a store that may be tearing down. The
+        # check is REPEATED below because a newer attempt can start while this
+        # one is in flight.
+        with _LOCK:
+            if _INFLIGHT.get(key) != token:
+                return
         try:
             on_record = file_operator_incident(store, kind, org_id, detail)
         except Exception:

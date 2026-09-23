@@ -10,8 +10,11 @@ One policy, one constructor, two legs:
   ``hosted_api``. Building the FastAPI app costs ~1.7 s
   (``tortoise/mcp_server.py:31-35``), and an operator alert fires on the MCP
   stdio path, where that import would be pure cost for a bookkeeping alert.
-  It calls :func:`incident_alert_store` with no factories, so the light
-  defaults here are used and ``tortoise.hosted_api`` is never imported.
+  It therefore takes the hosted leg only when ``tortoise.hosted_api`` is
+  ALREADY in ``sys.modules`` (it never imports it), and otherwise calls
+  :func:`incident_alert_store` with the light defaults here — so the stdio path
+  never pays the import and a hosted process never pays a per-call
+  ``R2Storage`` (#3968).
 
 The policy itself — "build the channel from the ALERT credentials, NEVER from
 the backup-sweep gate (#3820 D5a)" — lives in :func:`incident_alert_store`, so

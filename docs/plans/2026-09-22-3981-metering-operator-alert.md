@@ -936,3 +936,40 @@ mutation**, not by prose.
 `operations/logs/3981-mutation-evidence.log` — the mutation, the exact command and the observed pytest
 failure for each of OAM1–OAM7, per the standing rule that a mutation test never observed RED is not
 evidence.
+
+### Implementation record (round 3 — rebase onto `origin/main`, review round 1 fixes)
+
+The branch was 56 commits behind `origin/main` (`68a947248`) and written against a base that predated
+it. Review round 1 found that the seam had been built against a **stale `_alert_store_from` contract**,
+which is merge-blocking, so the branch was rebased onto main and adapted rather than left to conflict:
+
+* **`_alert_store_from(cfg, writer=None)` keeps main's #3127/#2844 contract.** Main's version carries
+  `writer` (defaulting to `WRITER_APP`) and builds with `issue_open=gi.issue_is_open_checked` /
+  `default_writer=writer`; the pre-rebase seam had none of it, so `_alert_store_from(cfg,
+  writer=WRITER_WATCHER)` (`hosted_api.py:1326`) would have lost the authority check after merge.
+  `alert_channel.alert_store_from` now takes and forwards `writer`, and the delegate is signature-exact.
+* **`operator_alert.alert_store()` PREFERS the hosted leg when `tortoise.hosted_api` is already
+  imported.** The light leg builds a fresh `R2Storage` — and a fresh boto3 client — per call, which is
+  right for the once-per-window alert this module dispatches but wrong for `cohort_cost._alert_store`,
+  which asks on every cap-firing capture; routing it to the light leg re-created the #3968 cost. The
+  light leg is still what answers on the MCP stdio path, where `hosted_api` was never imported (pinned
+  by the subprocess test), and `alert_store` still never imports it.
+* **`light_storage` enforces the Fly durability guard.** It re-implemented the
+  `TORTOISE_BACKUP_STORAGE` seam without `hosted_api`'s `FLY_APP_NAME` refusal, so a Fly process
+  reaching it via the light leg would have quietly accepted in-memory alert-dedup state — the #101
+  loss class. Enforced per call there (stronger than the import-time guard, which the light leg can
+  bypass by never importing `hosted_api`).
+* **`_run` checks dispatch ownership BEFORE filing.** A superseded attempt no longer spends a network
+  call on an incident its successor is already filing, nor reaches a store that may be tearing down;
+  the post-write re-check stays, because a newer attempt can start while this one is in flight.
+* **`alert_channel.reset_memory_storage_for_tests()`** is called by `_operator_alert_isolation`: the
+  light leg's `MemoryStorage` singleton is process-wide, so a title filed by one test stayed
+  "already filed" for the next — a latent DEDUP collision.
+* Cycle-1 parity test de-vacuumed: it built the light leg via `oa.alert_store()`, which now resolves to
+  the hosted leg, so it was comparing hosted-to-hosted. It builds `alert_channel.incident_alert_store()`
+  explicitly. A new test pins the prefer-hosted rule itself.
+* Docstring corrections: the cited test name, the stale `hosted_api.py` line range (replaced by the
+  symbol `hosted_api._analytics_open_incident`, which cannot rot), and the claim that
+  `hosted_api._incident_alert_store` and `operator_alert.alert_store` are interchangeable patch points.
+
+OAM6/OAM7 were **re-verified RED** after the rebase (`operations/logs/3981-mutation-evidence.log`).
