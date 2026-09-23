@@ -894,7 +894,7 @@ jobs:
               test_projection test_sdk_group3 test_source_inheritance_own
           - half: b
             files: >-
-              test_backfill_sources test_cli_context
+              eval/retrieval/test_integration test_backfill_sources test_cli_context
               test_enumeration_surfaces test_event_provenance
               test_graphcopy_boolean_index_3154
               test_index_directory test_ingest test_ingest_validation

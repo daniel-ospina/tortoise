@@ -3161,15 +3161,69 @@ _ONBOARDING_TOOL_NAMES: frozenset[str] = frozenset({
 _onboarding_state_cache: dict[str, tuple[float, bool]] = {}
 _ONBOARDING_STATE_TTL = 60.0
 
+#: In-flight gate resolutions, keyed by org (#2924 review). The gate now AWAITS
+#: between the cache lookup and the fill, so without this N concurrent
+#: ``tools/list`` requests for ONE org all miss and each submits its own
+#: graph-pool offload — a redundant stampede on the pool that also carries
+#: graph WRITES, arriving exactly when the read is slow. Concurrent callers
+#: share one task; the entry is dropped when it settles.
+_onboarding_gate_inflight: dict[str, asyncio.Task[bool]] = {}
 
-def _org_onboarding_complete() -> bool:
+
+def _drop_gate_inflight(org_id: str, task: object) -> None:
+    """Drop ``task`` from the in-flight map — ONLY if it is still the entry.
+
+    #2924 review: a bare ``pop(org_id)`` is a real bug, not a simplification.
+    The failed-read path deliberately leaves no cache entry, so the NEXT caller
+    (same loop batch, same org) can install a replacement while the settled
+    task's done-callbacks are still queued; a bare pop then evicts the LIVE
+    replacement, and a third caller starts a duplicate read — two resolutions in
+    flight for one org, on exactly the control-plane blip the single-flight
+    exists to stop amplifying.
+    """
+    if _onboarding_gate_inflight.get(org_id) is task:
+        _onboarding_gate_inflight.pop(org_id, None)
+
+
+async def _resolve_onboarding_gate(org_id: str) -> bool:
+    """Resolve the gate ONCE, for every concurrent caller (#2924).
+
+    Fills the TTL cache on success; a FAILED read fills nothing, so the next
+    ``list_tools`` retries rather than caching the failure. Never raises — the
+    caller's fail-open contract is preserved by the caller.
+    """
+    from tortoise.hosted_api import _get_onboarding_projection_off_loop
+    try:
+        # #2001 (W5): the gate reads the merged projection — node-aware wire
+        # completion; fail-open coercion (non-bool / 'unavailable' → False).
+        projection = await _get_onboarding_projection_off_loop(org_id)
+        complete = projection.get("onboarding_complete")
+        complete = bool(complete) if isinstance(complete, bool) else False
+    except Exception:
+        return False  # never cache a failed read — retry next list
+    _onboarding_state_cache[org_id] = (_time.time(), complete)
+    return complete
+
+
+async def _org_onboarding_complete() -> bool:
     """True when the current HTTP org's onboarding is complete.
 
     Fail-open: stdio/selfhost (no tenant Org row) and transient control-plane
     read failures return False — a read hiccup must never hide the tools a
     org still needs to finish onboarding. Reads the canonical onboarding
-    state via hosted_api._get_onboarding_state (Supabase orgs row or registry
-    Org node), cached 60s per org.
+    state via hosted_api._get_onboarding_projection (jsonb ``teams`` row + the
+    graph OnboardingState node), cached 60s per org.
+
+    #2924: ``async`` because the read is OFF the event loop —
+    ``_get_onboarding_projection`` is synchronous end to end (blocking PostgREST
+    over ``httpx.Client`` AND a fresh FalkorDB client construction including
+    ``ssl.create_default_context``), and calling it inline from this gate
+    blocked the single loop on the MCP ``tools/list`` hot path. A ``py-spy``
+    MainThread dump taken during a 1.08 s ``/health`` stall caught exactly this
+    call chain; the app's own heartbeat recorded ``loop_lag_max_ms`` of 2033 ms.
+    Only the cache MISS is offloaded, so the steady state stays a memory read;
+    concurrent misses for one org share a single resolution
+    (``_onboarding_gate_inflight``) so the await cannot become a stampede.
     """
     from tortoise.mcp_auth import SELFHOST_ORG_ID, _current_org_id
     org_id = _current_org_id.get()
@@ -3179,16 +3233,18 @@ def _org_onboarding_complete() -> bool:
     cached = _onboarding_state_cache.get(org_id)
     if cached is not None and now - cached[0] < _ONBOARDING_STATE_TTL:
         return cached[1]
+    task = _onboarding_gate_inflight.get(org_id)
+    if task is None or task.done():
+        task = asyncio.ensure_future(_resolve_onboarding_gate(org_id))
+        _onboarding_gate_inflight[org_id] = task
+        task.add_done_callback(
+            lambda _t, _org=org_id: _drop_gate_inflight(_org, _t))
     try:
-        from tortoise.hosted_api import _get_onboarding_projection
-        # #2001 (W5): the gate reads the merged projection — node-aware wire
-        # completion; fail-open coercion (non-bool / 'unavailable' → False).
-        complete = _get_onboarding_projection(org_id).get("onboarding_complete")
-        complete = bool(complete) if isinstance(complete, bool) else False
+        # shield: one caller hanging up must not cancel the shared resolution
+        # out from under the others.
+        return await asyncio.shield(task)
     except Exception:
         return False  # never cache a failed read — retry next list
-    _onboarding_state_cache[org_id] = (now, complete)
-    return complete
 
 
 def _onboarding_state() -> dict:
@@ -3862,7 +3918,9 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
             # filter below already excludes the onboarding tools.
             onboarding_done = False
             if not (group and group != "onboarding"):
-                onboarding_done = _org_onboarding_complete()
+                # #2924: awaited — the gate read is off the event loop (the
+                # read is synchronous end to end; see _org_onboarding_complete).
+                onboarding_done = await _org_onboarding_complete()
 
             def _visible(t):
                 if t.name not in HTTP_ALLOWED:
