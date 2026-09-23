@@ -1,30 +1,25 @@
 // harnessDisclosureTripwire.test.js — #3700 static tripwire
 // (CI-run via dashboard-js-tests).
 //
-// WHY THIS EXISTS, AND WHY IT IS A SOURCE TRIPWIRE. #3700's whole deliverable is
-// a DISCLOSURE the user can see: the harness a per-harness row names is the
-// caller's own declaration (`body.harness`), not something Tortoise verified.
-// The DECISIONS behind it are executed and pinned by captureStatus.test.js
+// #3700's deliverable is a DISCLOSURE the user can see: the harness a per-harness
+// row names is the caller's own declaration (`body.harness`), not something
+// Tortoise verified. captureStatus.test.js executes the DECISIONS behind it
 // (`harnessAttributionForHarness` returns the attribution for the rows that name
-// a harness, null for the rows that do not). What that suite cannot reach is the
-// RENDER: main.jsx has no React runtime test harness in this package, the e2e
-// suite never opens Settings → Memory sources, and deleting the fragment would
-// leave every executed test green. A fix whose only observable effect is a
-// rendered string needs one assertion on the render, so the copy module's
-// single-source rule (harnesses.js owns the words; main.jsx renders the helper's
-// return, never the constant) is not merely conventional.
+// a harness, null for the rows that do not). The RENDER is outside that suite's
+// reach: it imports captureStatus.js and harnesses.js, not main.jsx, and this
+// package's test runtime is `node --test` with no DOM or React renderer. The
+// assertions below therefore read main.jsx as TEXT — which is what makes the copy
+// module's single-source rule (harnesses.js owns the words; main.jsx renders the
+// helper's return, never the constant) worth pinning.
 //
-// WHAT THIS FILE PINS. Reading main.jsx as TEXT: the row's disclosure expression,
-// the two bindings the row reads, the copy constants' absence from main.jsx's
-// code, the row's support gate, and that the failure line sits inside it.
+// WHAT THIS FILE PINS. Reading main.jsx as comment-stripped text: the row's
+// disclosure expression, the two bindings the row reads, the copy constants'
+// absence from main.jsx's code, the row's support gate, and that the failure
+// line sits inside it.
 //
-// WHAT IT IS NOT. A source pin is a tripwire, not a proof. It cannot see CSS or a
-// DOM-level edit, and text can satisfy a pattern without rendering — so a
-// determined evasion of any static pin exists by construction, and the durable
-// answer is a DOM-level test for this package, filed as #4915 rather than chased
-// with more regex here. What these assertions do catch is the regression they were
-// written for: deleting the fragment, rendering something other than the helper's
-// value, hard-coding the support gate, or pointing a binding at the raw accessor.
+// WHAT IT IS NOT. A source pin is a tripwire, not a proof: it cannot see CSS or
+// a DOM-level edit, and text can satisfy a pattern without rendering. The durable
+// fix is a DOM-level test for this package, filed as #4915.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -47,14 +42,12 @@ const headEnd = code.indexOf('</div>', headStart)
 assert.notEqual(headEnd, -1, 'the harness-status card head must be closed')
 const head = code.slice(headStart, headEnd)
 
-// stripComments documents a seam: a `//`-ending regex literal can open a phantom
-// comment whose closer sits elsewhere, and the scans below are vacuous if it
-// swallowed the text they look for. testSupport.js requires callers to pin scan
-// coverage with sentinels SPREAD across the file (a tail sentinel alone does not
-// catch a mid-file swallow, and a sentinel at offset 0 can never fail), so these
-// markers' FIRST occurrences sit near 11%, 24%, 47%, 61%, 87%, 99% and the tail of
-// what is scanned (a repeated token only trips if every one of its copies is eaten,
-// so a marker is pinned by where it FIRST appears).
+// stripComments documents a seam: a regex/char-class literal that exposes a `/*`
+// can open a phantom comment whose closer sits mid-file, shrinking the scanned
+// region — so the scans below are vacuous if it swallowed the text they look for.
+// testSupport.js requires callers to pin scan coverage with sentinels spread
+// across the file (a tail sentinel alone does not catch a mid-file swallow), and
+// the markers below sit at several points across it.
 test('#3700: the comment strip kept the file it is scanning', () => {
   for (const marker of [
     /setWelcomeOrgName/,
@@ -73,7 +66,7 @@ test('#3700: the comment strip kept the file it is scanning', () => {
 test('#3700: the row renders the harness disclosure from the helper', () => {
   // ONE assertion over the whole JSX expression — guard, consequent and close —
   // rather than a guard pattern and a fragment pattern, which leave the guard's
-  // own consequent free (`{x && (false && (<span …/>))}` passed the pair).
+  // own consequent free.
   assert.match(
     head,
     /\{\s*harnessAttribution\(h\)\s*&&\s*\(\s*<span\s+className="dim\s+small"\s*>\s*·\s*(?:\{\s*['"] ['"]\s*\}\s*)?\{\s*harnessAttribution\(h\)\s*\}\s*<\/span>\s*\)\s*\}/,
@@ -83,9 +76,8 @@ test('#3700: the row renders the harness disclosure from the helper', () => {
 })
 
 test('#3700: main.jsx renders the helper, never the copy constant', () => {
-  // The one production definition of the attribution lives in harnesses.js. If
-  // main.jsx ever names it in code, the row can drift from the module that owns
-  // the words (and from the helper that decides WHEN the row discloses).
+  // The one production definition of the attribution lives in harnesses.js.
+  // These assertions fail if main.jsx names either constant in code.
   assert.doesNotMatch(code, /HARNESS_ATTRIBUTION/,
     'main.jsx must not reference HARNESS_ATTRIBUTION directly')
   assert.doesNotMatch(code, /HARNESS_CAPTURE_STATUS_LABEL/,
@@ -93,15 +85,13 @@ test('#3700: main.jsx renders the helper, never the copy constant', () => {
 })
 
 test('#3700 / #4896: the row reads its facts through the module bindings', () => {
-  // The assertions above pin the render's SHAPE; these pin its SOURCE. Without
-  // them the whole disclosure is one edit from silently disabling itself:
-  // `const harnessAttribution = (h) => null` removes it from every row with both
-  // suites green, because the executed test calls the module helper and never
-  // sees main.jsx's binding.
+  // The assertions above pin the render's SHAPE; these pin its SOURCE. The
+  // executed suite calls the module helper and never sees main.jsx's binding.
   //
   // Each binding must END at the helper call — `…(state, h) && null` discards the
-  // value while matching a bare prefix — and must be re-declared neither with the
-  // same shape nor with `let`/`var`, which would shadow it with something else.
+  // value while matching a bare prefix — and must not be re-declared: a second
+  // declaration shadows the pinned binding. Each of these shapes was applied and
+  // turned this file RED.
   for (const [name, call] of [
     ['harnessAttribution', 'harnessAttributionForHarness'],
     ['lastError', 'captureErrorForHarness'],
@@ -124,9 +114,8 @@ test('#3700 / #4896: the failure line renders only on a supported row', () => {
   // (and, since #3700, a disclosure the predicate would not have produced).
   // Pinned here: the support gate the row derives and the failure line's use of
   // it, plus that the alert renders the helper's value unchanged. The sentence
-  // itself is pinned by the binding test above plus the executed assertion on
-  // `HARNESS_CAPTURE_LAST_ATTEMPT`, so a caveat re-added at the call site fails on
-  // `{lastError(h)}` and one re-added in the copy module fails the executed test.
+  // itself is pinned by the binding test above and by the executed assertion on
+  // `HARNESS_CAPTURE_LAST_ATTEMPT`, which fails if a caveat is added to the copy.
   assert.match(code, /const\s+supported\s*=\s*!{1,2}HARNESS_CAPTURE_SUPPORT\[h\]/,
     'the row\'s support gate must be derived from HARNESS_CAPTURE_SUPPORT[h], never hard-coded')
   assert.match(code, /supported\s*&&\s*lastError\(h\)\s*&&/,
