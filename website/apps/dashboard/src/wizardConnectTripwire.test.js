@@ -22,6 +22,9 @@ import assert from 'node:assert/strict'
 import { readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+// #4880/#4365: the wizard's agent-facing copy moved to this JSX-free module so
+// the guards below can assert the RENDERED prompt instead of parsing source.
+import { ONBOARDING_INSTRUCTIONS, wizardPromptText } from './wizardPrompts.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const mainJsx = readFileSync(join(here, 'main.jsx'), 'utf8')
@@ -280,8 +283,10 @@ test('#2711: every shown-once key row can break/shrink its token', () => {
 
 // ── #2755: one explicit copy control, no nested interactive ────────────────
 test('#2755: WizardPromptCard is a plain region with exactly one copy button', () => {
+  // #4880: the end marker was `function wizardPromptText(` — that builder now
+  // lives in wizardPrompts.js, so the slice ends at the next component instead.
   const card = slice('function WizardPromptCard({ text, label })',
-                     'function wizardPromptText(', 'WizardPromptCard')
+                     'function WizardBlock(', 'WizardPromptCard')
   assert.doesNotMatch(card, /role="button"/,
     'the container must NOT be an interactive role (nested-interactive WCAG 4.1.2)')
   // #2912: the CARD container is still not a tab stop — the explicit button is
@@ -1291,28 +1296,33 @@ test('#3218: the prompt-card labels describe the prompt, never a rival step numb
 // restart — the old order (restart, then install) made an agent that acted on
 // the cue load the skills directory before the skills existed.
 test('#3218: the Pi/Cursor step-1 prompts install the skills before the restart note', () => {
-  const fn = slice('function wizardPromptText(', 'function wizardWorkflowsText(', 'wizardPromptText')
-  // #4365: the ordering contract, now positional — the onboarding-instructions
-  // line sits BETWEEN the skills install and the restart cue, because the cue
-  // is a hand-back ("Tell me when to restart") that an agent acting on the
-  // prompt may stop at. Asserting positions rather than literal adjacency keeps
-  // #3218's guard (skills BEFORE restart) intact while forbidding a new
-  // instruction after the cue.
-  for (const h of ['Pi', 'Cursor']) {
-    // #4365: the order is skills install → onboarding instructions → restart
-    // note. The restart cue ("Tell me when to restart X.") is a hand-back
-    // point, so the onboarding document — what the agent follows to finish
-    // setup — must not sit after it. Stated as a plain substring so no regex
-    // escaping stands between the assertion and the source text.
-    const ordered = 'from ${SKILLS_INSTALL_URL}.' + '\\n' +
-      '${onboardingInstructions}' + '\\n' + '${twoStepNote} ' + h + '.'
-    assert.ok(fn.includes(ordered),
-      `${h}: skills install → onboarding instructions → restart note`)
-    assert.ok(fn.indexOf('${SKILLS_INSTALL_URL}') < fn.indexOf('${onboardingInstructions}'),
+  // #4365/#4880: asserted on the RENDERED prompt. The builders moved to
+  // wizardPrompts.js — an importable, JSX-free module — so this now reads what
+  // the agent actually receives. The former source-shape read could not
+  // distinguish a reordered interpolation from a rendered reorder, and that
+  // mechanism is what produced five false greens (#4880).
+  for (const h of ['pi', 'cursor']) {
+    const p = wizardPromptText(h, 1, 'tk_test', 'included')
+    // the rendered body reads "Then install the Tortoise skills (…)" — the
+    // capitalised form belongs to the universal command's claim line.
+    const INSTALL = /install the Tortoise skills/i
+    const iInstall = p.search(INSTALL)
+    const iOnboarding = p.indexOf(ONBOARDING_INSTRUCTIONS)
+    const iRestart = p.indexOf('Tell me when to restart')
+    assert.ok(iInstall > -1, `${h}: the step-1 prompt tells the agent to install the skills`)
+    assert.ok(iOnboarding > iInstall,
       `${h}: the skills install must precede the onboarding instructions`)
+    // #4365: the restart cue is a hand-back an agent may stop at, so the
+    // onboarding document — what it follows to finish setup — must not sit
+    // after it, and nothing actionable may follow it.
+    assert.ok(iRestart > iOnboarding,
+      `${h}: the onboarding instructions must precede the restart cue`)
+    assert.ok(p.slice(iRestart).startsWith(
+      `Tell me when to restart ${h === 'pi' ? 'Pi' : 'Cursor'}.`),
+      `${h}: the restart cue names the harness`)
+    assert.ok(!INSTALL.test(p.slice(iRestart)),
+      `${h}: the restart-before-skills order must not come back`)
   }
-  assert.doesNotMatch(fn, /\$\{twoStepNote\} (Pi|Cursor)\.\\nThen install the Tortoise skills/,
-    'the restart-before-skills order must not come back')
 })
 
 // ── #2865: key-less OAuth on the LIVE Claude Desktop / Claude Web leaves ───

@@ -16,6 +16,7 @@ these outlived the variants they were born with).
 """
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -128,22 +129,6 @@ def _installer_skills() -> list[str]:
     return m.group(1).split()
 
 
-def _harness_branch(wizard: str, harness: str) -> str:
-    """The `if (harness === '<id>') { … }` body inside wizardPromptText.
-
-    Slice-based so a PER-PROMPT guarantee can be asserted: a count over the
-    whole function passed while one prompt's entire skill enumeration had been
-    deleted (mutation-verified, #4365 review).
-    """
-    ids = ("pi", "cursor", "claude", "codex")
-    marks = sorted((wizard.index(f"if (harness === '{h}')"), h) for h in ids)
-    for i, (start, h) in enumerate(marks):
-        if h == harness:
-            end = marks[i + 1][0] if i + 1 < len(marks) else len(wizard)
-            return wizard[start:end]
-    raise AssertionError(f"no `if (harness === '{harness}')` branch found")
-
-
 def test_m8_installer_ships_the_three_capabilities_not_onboarding():
     """#4365: onboarding is DELIVERED AS INSTRUCTIONS, not installed as a
     skill — the installer ships the three reusable capabilities only. The
@@ -200,221 +185,120 @@ def test_m8_installer_still_delivers_the_onboarding_instructions():
 # The served connect surfaces that tell a user/agent what the installer ships.
 DASHBOARD_SRC = REPO_ROOT / "website" / "apps" / "dashboard" / "src"
 
-# ── the content rules a rendered onboarding surface must satisfy ──────────
-#
-# Applied to BOTH the four returned wizard prompts AND the shared
-# `onboardingInstructions` declaration they interpolate. The declaration sits
-# OUTSIDE every `_harness_branch` body (main.jsx:940, the first branch starts at
-# :941), so pinning it with two weaker membership checks left the ONE string
-# every live prompt renders unscanned: a skill name, a hostile URL or an
-# escaped backtick appended to it reached the user with BOTH suites green
-# (#4365 review round 9).
-_ALLOWED_PROMPT_TOKENS = {
-    "tortoise",  # the product name in "Install the Tortoise skills"
-    "tortoise_api_key", "tortoise_create_point", "tortoise_health",  # MCP
-}
-_NEGATION = re.compile(r"\b(no|not|isn'?t|aren'?t|wasn'?t|never|without|nor)\b",
-                       re.I)
-# ASCII hyphen and `(` are clause breaks too (#4365 review round 10).
-_CLAUSE_BREAK = re.compile(r"[\u2014;.,:!?()-]")
-_URL_SHAPED = re.compile(r"//\S+|\b[a-z0-9-]+(?:\.[a-z0-9-]+)+/\S*", re.I)
+SNAPSHOT_PATH = DASHBOARD_SRC / "wizardPrompts.snapshot.json"
+
+# Parentheticals that are legitimately NOT the shipped set: the Cursor command
+# tells the user to run the installer in a terminal instead of enumerating the
+# skills (its skills ride the steps). Mirrors NON_SET_HINTS in
+# website/apps/dashboard/src/wizardPrompts.test.js — the dashboard suite
+# exact-matches these; here they are only skipped.
+_NON_SET_HINTS = {"run in a terminal"}
 
 
-def _install_claims(line: str) -> list:
-    r"""Install-family verbs in `line` that are NOT negated in their own clause.
+def _rendered_snapshot() -> dict:
+    """The committed RENDERED agent-facing copy (#4880 / #4365).
 
-    A negation only counts when it is ADJACENT to the verb: the gap may hold an
-    adverb (`not currently installed`) but no clause break, so the approved
-    sentence's own "not a skill" cannot launder a LATER verb — and
-    `reinstall`/`preinstall` are seen because the verb match is ``\w*install\w*``
-    rather than a word-boundary-anchored `install` (#4365 review round 10).
+    Generated from wizardPrompts.js by
+    `node scripts/gen-wizard-prompts-snapshot.mjs` and pinned by the dashboard
+    suite. Reading it HERE is what makes the cross-language contract checkable
+    without parsing JavaScript source text — the mechanism that produced five
+    distinct false greens (#4365 review, cycle 11): a guard that decides from the
+    SHAPE of the source is defeated by any source of a different shape.
     """
-    claims = []
-    for m in re.finditer(r"\w*install\w*", line, re.I):
-        before = line[max(0, m.start() - 30):m.start()]
-        negations = list(_NEGATION.finditer(before))
-        adjacent = bool(negations) and not _CLAUSE_BREAK.search(
-            before[negations[-1].end():])
-        if not adjacent:
-            claims.append(m.group(0))
-    return claims
-
-
-def _scan_rendered_onboarding(label: str, text: str) -> None:
-    """The three #4365 content rules, applied to a rendered prompt template.
-
-    (1) no skill is named by hand — the set arrives via ``${SKILLS_LIST}``;
-    (2) an onboarding line points only at the approved document;
-    (3) onboarding is never presented as an installable.
-    """
-    found = {t.lower() for t in
-             re.findall(r"[a-z0-9_-]*tortoise[a-z0-9_-]*", text, re.I)}
-    assert found <= _ALLOWED_PROMPT_TOKENS, (
-        f"{label}: must name no skill by hand (the set arrives via "
-        f"${{SKILLS_LIST}}); unexpected tokens: "
-        f"{sorted(found - _ALLOWED_PROMPT_TOKENS)}")
-    for line in text.split("\\n"):
-        if not re.search(r"onboarding", line, re.I):
-            continue
-        # `//evil.example.com` AND the scheme-less `evil.example.com/onboarding`
-        # are both endpoint references; `${...}` interpolations are removed
-        # first, because the approved URL arrives as one.
-        for raw in _URL_SHAPED.findall(re.sub(r"\$\{[^}]*\}", "", line)):
-            url = raw.strip("<>\"'([`").rstrip("<>\"'),]:;.`")
-            assert "app.premiselabs.co" in url, (
-                f"{label}: an onboarding line may only point at the approved "
-                f"document (got {url!r}): {line.strip()!r}")
-        if not re.search(r"install|skills?", line, re.I):
-            continue
-        assert not _install_claims(line), (
-            f"{label}: onboarding may only be mentioned as the instructions "
-            f"document, in the shipped wording — not as an install: "
-            f"{line.strip()!r}")
-        assert (re.search(r"not a skill", line, re.I)
-                or re.search(r"onboarding instructions", line, re.I)), (
-            f"{label}: onboarding may only be mentioned as the instructions "
-            f"document, in the shipped wording: {line.strip()!r}")
+    assert SNAPSHOT_PATH.exists(), (
+        f"{SNAPSHOT_PATH} is missing — regenerate it with "
+        f"`cd website/apps/dashboard && node scripts/gen-wizard-prompts-snapshot.mjs`")
+    return json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
 
 
 def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
-    """#4365: the served connect copy must not claim an install the installer
-    does not perform (the live defect — harnesses.js claimed 4 while the
-    installer shipped 3), and must name the onboarding instruction document so
-    the flow is reachable with NO skill installed."""
+    """#4365: what the dashboard hands the agent must be what the shell
+    installer ships — the live defect was harnesses.js claiming FOUR skills
+    while the installer installed three — and every live surface must name the
+    onboarding instruction document, so the flow is reachable with NO skill
+    installed.
+
+    Everything asserted here reads a RENDERED value (the snapshot) or the shell
+    installer itself. The former source-text guards were DELETED, not fixed:
+    review rounds 4-10 defeated six of them (a name on its own source line, an
+    escaped backtick, a blank line before the template, a same-line
+    concatenation, a nested template, an ASCII-hyphen clause break) and the last
+    three also FALSE-REDded formatting-only edits. The rendered invariants live
+    in website/apps/dashboard/src/wizardPrompts.test.js, mutation-tested.
+    """
     harnesses = (DASHBOARD_SRC / "harnesses.js").read_text(encoding="utf-8")
 
     m = re.search(
         r"^export const ONBOARDING_INSTRUCTIONS_URL =\s*\n?\s*'([^']+)'",
         harnesses, re.M)
     assert m, "ONBOARDING_INSTRUCTIONS_URL must be an exported constant"
-    assert m.group(1) == (
+    url = m.group(1)
+    assert url == (
         "https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md"
     ), "the instruction URL must be the served instruction document"
 
-    # This test owns exactly TWO jobs, both of which need a file Python reads
-    # and the dashboard suite cannot: (1) the cross-file contract that the set
-    # the dashboard claims is the set the SHELL installer ships, and (2) the
-    # JSX wizard prompts.
-    #
-    # Everything else that used to live here has been DELETED, not fixed. Three
-    # review rounds (4-6) defeated three successive source-text guards — a name
-    # on its own source line, an escaped backtick, a blank line between a
-    # declaration and its template — and the last of those also FALSE-REDded a
-    # formatting-only edit. A source-text count of each shipped name was worse
-    # still: it reddened on a comment that merely mentioned one. The rendered
-    # CONTENT of the connect surfaces is asserted in
-    # website/apps/dashboard/src/harnesses.test.js, against the real strings.
-    m = re.search(r"^export const SKILLS_LIST =\s*\n?\s*'([^']+)'",
-                  harnesses, re.M)
+    # Job 1 — the CROSS-FILE contract Python can check and node cannot: the set
+    # the dashboard CLAIMS is the set the SHELL installer ships.
+    m = re.search(r"^export const SKILLS_LIST =\s*\n?\s*'([^']+)'", harnesses, re.M)
     assert m, "SKILLS_LIST must be an exported constant"
     assert m.group(1).split(", ") == _installer_skills(), (
         "SKILLS_LIST must list exactly what the installer ships")
     assert "onboarding" not in m.group(1), (
         "SKILLS_LIST must not include the onboarding skill")
-    main = (DASHBOARD_SRC / "main.jsx").read_text(encoding="utf-8")
-    assert "SKILLS_LIST" in main.split("from './harnesses.js'")[0], (
-        "main.jsx must import SKILLS_LIST — the four LIVE wizard prompts are "
-        "the primary served surface and must not restate the list by hand")
-    wizard = main[main.index("function wizardPromptText("):
-                   main.index("function wizardWorkflowsText(")]
-    assert "tortoise-onboarding" not in wizard, (
-        "wizard prompts must not claim onboarding arrives via the installer — "
-        "it is instructions, not a skill")
-    # FAIL CLOSED on truncation, over the WHOLE wizard region including the
-    # shared declaration. `const onboardingInstructions = `([^`]*)`` stops at the
-    # first backtick CHARACTER, so an ESCAPED backtick anywhere in a template
-    # would silently truncate a capture and everything after it would go
-    # unchecked — a name appended past the truncation point stayed green
-    # (#4365 review rounds 8-9). No template has one today, so the guard is: if
-    # one ever appears, this test must be revisited rather than quietly stop
-    # looking.
-    assert "\\`" not in wizard, (
-        "an escaped backtick in a prompt template would TRUNCATE the `return `"
-        "`([^`]*)`` / `const onboardingInstructions = `([^`]*)`` extractions "
-        "below (re.findall stops at the first backtick char). Make this scan "
-        "template-literal-aware before adding one.")
-    # PER PROMPT — a prompt that loses its claim entirely, or that states a
-    # different set, must fail here (`assert wizard_claims` over a findall
-    # stayed GREEN with one prompt's whole enumeration deleted).
-    for h in ("pi", "cursor", "claude", "codex"):
-        body = _harness_branch(wizard, h)
-        # Assert on the RETURNED TEMPLATE, not the branch slice: a membership
-        # check over the whole body is satisfied by a token parked in a local
-        # that is never interpolated into the returned prompt — all four live
-        # prompts then lose the enumeration with every test still green
-        # (mutation-verified, #4365 review round 3).
-        installs = [t for t in re.findall(r"return `([^`]*)`", body)
-                    if "${SKILLS_INSTALL_URL}" in t]
-        assert len(installs) == 1, (
-            f"{h}: the branch must return exactly one prompt that runs the "
-            f"installer (found {len(installs)})")
-        prompt = installs[0]
-        assert "${SKILLS_LIST}" in prompt, (
-            f"{h}: the RETURNED prompt must state the shipped set via "
-            f"SKILLS_LIST")
-        assert "${onboardingInstructions}" in prompt, (
-            f"{h}: the RETURNED prompt must name the onboarding instructions")
-        # …and the rules in §1 of this module apply to EVERY rendered prompt.
-        _scan_rendered_onboarding(h, prompt)
-    # …including the SHARED declaration every prompt interpolates, which lives
-    # outside all four `_harness_branch` bodies and so was missed by the loop
-    # above entirely (#4365 review round 9).
-    #
-    # FAIL CLOSED ON ITS EXTENT. The capture below stops at the first backtick
-    # CHARACTER, so a declaration written as a concatenation
-    # (`` `…` + `. Then install the tortoise-rebuild skill.` ``) or containing a
-    # nested or bare backtick template (`` `${`${''}`} `` / `` ${'`'} ``) would
-    # truncate it — and the appended text, which all four live prompts render,
-    # would never be scanned. Counting the backticks in the STATEMENT catches
-    # every one of those shapes (#4365 review round 10).
-    declared = re.search(r"const onboardingInstructions =\s*`([^`]*)`", wizard)
-    assert declared, "the shared onboarding-instructions line must be declared"
-    # FAIL CLOSED ON ITS EXTENT. The capture above stops at the first backtick
-    # CHARACTER, so a declaration written as a concatenation
-    # (`` `…` + `. Then install the tortoise-rebuild skill.` ``) or carrying a
-    # nested / bare-backtick template (`` `${`${''}`} `` / `` ${'`'} ``) would
-    # truncate it — and the appended text, which all four live prompts render,
-    # would never be scanned. The declaration must therefore BE its template:
-    # the very next character after the closing backtick is the `;` (#4365
-    # review round 10).
-    assert wizard[declared.end()] in (";", "\n"), (
-        "the shared onboarding-instructions line must end at its template's "
-        "closing backtick — a same-line concatenation or a nested/"
-        f"backtick-expression template truncates the scan and its extra text "
-        f"is never checked (found {wizard[declared.end():declared.end() + 12]!r} "
-        f"after it)")
-    assert not re.match(r"\s*[+.]", wizard[declared.end():]), (
-        "the shared onboarding-instructions line must not be continued with "
-        "`+` concatenation on a following line — the scan stops at the first "
-        "template and would never check the rest")
-    _scan_rendered_onboarding("onboardingInstructions", declared.group(1))
-    # …and it must SAY something. Interpolating an empty constant satisfied the
-    # per-prompt assertions while the four live prompts lost the whole point of
-    # #4365: a bodyless sentence was GREEN.
-    assert "${ONBOARDING_INSTRUCTIONS_URL}" in declared.group(1), (
-        "the shared line must interpolate the served instructions URL")
-    assert "not a skill" in declared.group(1), (
-        "the shared line must say onboarding is not a skill")
-    # NOTE: the step-2 skills primer at main.jsx:~7950 is NOT pinned here and is
-    # deliberately NOT made to interpolate SKILLS_LIST — it lives INSIDE the
-    # `LEGACY_WIZARD_ARCHIVED` block (main.jsx:7845-8122, flag=false), i.e. it is
-    # dead code kept byte-identical for the A0 rollback path. Editing it breaks
-    # the archived-block line-count pin in overview.test.js. A review round
-    # flagged it as a live surface that had drifted from the shared constant;
-    # it is neither live nor reachable.
-    # The prompts are pinned through the template they RETURN (see the
-    # `${onboardingInstructions}` loop above) plus the constant's own body — a
-    # bare whole-file membership check here would be satisfied by the
-    # declaration alone and would overstate what it measures (#4365 round 5).
 
-    # …and the filesystem-less harnesses (Claude Desktop/Web, ChatGPT) never ran
-    # the installer and have no skills directory — the workflows prompt body is
-    # their ONLY delivery surface, so it must name the instructions too.
-    wf_start = main.index("function wizardWorkflowsText(")
-    wf_end = main.index("\nfunction ", wf_start + 1)
-    workflows = main[wf_start:wf_end]
-    assert "${ONBOARDING_INSTRUCTIONS_URL}" in workflows, (
-        "the teach-human workflows prompt must name the onboarding instructions")
+    # Job 2 — the RENDERED copy, from the snapshot both suites share.
+    snap = _rendered_snapshot()
+    assert snap["skillSet"] == m.group(1), (
+        "the committed rendered snapshot is stale — regenerate it with "
+        "`cd website/apps/dashboard && node scripts/gen-wizard-prompts-snapshot.mjs`")
+    sentence = snap["onboardingInstructions"]
+    assert sentence.startswith("Onboarding is instructions, not a skill"), (
+        "the shared onboarding sentence must say onboarding is INSTRUCTIONS, "
+        "not a skill")
+    assert url in sentence, (
+        "the shared onboarding sentence must name the served instructions "
+        "document — that is what makes onboarding reachable with no skill "
+        "installed")
+
+    surfaces = dict(snap["prompts"])
+    surfaces["workflows"] = snap["workflows"]
+    surfaces["onboardingInstructions"] = sentence
+    surfaces.update({f"UNIVERSAL_COMMAND.{k}": v for k, v in snap["commands"].items()})
+
+    # Every rendered set statement enumerates EXACTLY what the installer ships.
+    # This is the live #4365 defect — a served copy claiming a 4th skill.
+    checked = 0
+    for label, text in surfaces.items():
+        for inner in re.findall(r"install the Tortoise skills\s*\(([^)]*)\)", text, re.I):
+            if inner in _NON_SET_HINTS:
+                continue
+            assert inner.split(", ") == _installer_skills(), (
+                f"{label}: the rendered copy enumerates {inner!r}, which is not "
+                f"the set the installer ships ({_installer_skills()})")
+            checked += 1
+    assert checked >= 4, (
+        f"expected the four config-writing prompts to state the set (found "
+        f"{checked} statements) — a prompt that lost its enumeration must fail")
+    # …and nothing is appended to a rendered set statement after its ")".
+    for label, text in surfaces.items():
+        for tail in re.findall(r"install the Tortoise skills\s*\([^)]*\)(.)", text, re.I):
+            assert tail in (" ", ":", "\n"), (
+                f"{label}: text is appended to the shipped set after its "
+                f"closing paren ({tail!r}) — the set must be the whole statement")
+
+    # The reach invariant: the four config-writing prompts carry the
+    # instructions inline; the two connector leaves get them in the workflows
+    # prompt, their ONLY delivery surface.
+    for label in ("pi/1", "cursor/1", "claude/1", "codex/1"):
+        assert sentence in snap["prompts"][label], (
+            f"prompt {label} must carry the onboarding instructions")
+    assert sentence in snap["workflows"], (
+        "the teach-human workflows prompt is the connector leaves' ONLY "
+        "delivery surface and must carry the onboarding instructions")
+    # The step-2 skills primer inside the LEGACY_WIZARD_ARCHIVED block
+    # (main.jsx:7845-8122, flag=false) is deliberately NOT pinned: it is dead
+    # code kept byte-identical for the A0 rollback path, and editing it breaks
+    # the archived-block line-count pin in overview.test.js.
 
 
 def test_m8_no_live_reference_to_old_paths_outside_archive():

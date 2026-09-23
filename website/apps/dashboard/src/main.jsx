@@ -8,7 +8,11 @@ import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
 // #4639: paid-tier suppression for the header and the narrowed upgrade-nudge
 // gate for the error banner — pure, node --test unit-tested (upsellGate.test.js).
 import { errorMessage, headerUpgradeEligible, nudgeRoute, shouldNudgeUpgrade } from './upsellGate.js'
-import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, ONBOARDING_INSTRUCTIONS_URL, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, MCP_URL, SKILLS_INSTALL_URL, SKILLS_LIST, UNIVERSAL_COMMAND, WORKFLOWS_PROMPT, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
+import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
+// #4880/#4365: the wizard's agent-facing copy is a RENDERED value the guards
+// assert — main.jsx is JSX and cannot be imported by `node --test`, so parsing
+// it as source is the mechanism that produced five false greens.
+import { wizardPromptText, wizardWorkflowsText } from './wizardPrompts.js'
 // #1728 Slice 3 (Tasks 16-17): the SHARED 4-state capture-status derivation
 // (off → install-pending → waiting → active, probe-driven) — pure, node --test
 // unit-tested (captureStatus.test.js). #1927: the re-ask gate predicate was
@@ -911,72 +915,6 @@ function WizardBlock({ step, title, children }) {
       <div className="wizard-block-body">{children}</div>
     </section>
   )
-}
-
-function wizardPromptText(harness, step, key, mode) {
-  // #2865: the keyed URL comes from harnesses.js — a third hardcoded copy
-  // here would re-create exactly the drift the MCP_URL/CANONICAL_MCP_URL
-  // split exists to prevent.
-  const url = MCP_URL
-  const docs = 'Docs: https://tortoise.premiselabs.co/docs'
-  const keyLine = mode === 'included' ? `Key: ${key}` : 'I\'ll give you the API key when you need it.'
-  const twoStepNote = 'Tell me when to restart'
-  const step2Text = `Call tortoise_health to verify the connection, then tortoise_create_point to file my first memory.\n${docs}`
-
-  // #2827: every body starts at its first actionable instruction. The step
-  // heading the user reads ("Give this prompt…", "Restart X…") is the JSX
-  // caption above the card — the SINGLE place that sentence may appear.
-  // #4365: onboarding is NOT installed as a skill — it is instructions the
-  // agent READS. Every LIVE connect surface names the served instruction set:
-  // the four config-writing prompts below inline it, and the two Claude
-  // connector leaves (Claude Desktop/Web — which never ran the installer and
-  // have no skills directory) get it in the workflows prompt body
-  // (wizardWorkflowsText). ChatGPT has NO surface in this chooser (#2698 keeps
-  // it out of HARNESS_FAMILIES; a persisted 'chatgpt' is reset to 'pi' above),
-  // so its URL rides the exported UNIVERSAL_COMMAND.chatgpt for roundtrip/
-  // total-loop consumers only — not a live delivery path, and the copy test's
-  // chatgpt arm is vocabulary-level, not render-level. One constant
-  // (harnesses.js) for the URL.
-  const onboardingInstructions = `Onboarding is instructions, not a skill — read and follow them at ${ONBOARDING_INSTRUCTIONS_URL}.`
-  if (harness === 'pi') {
-    // #3218: MCP config → skills install → restart. The restart note used to
-    // sit BEFORE the skills line, so an agent following the prompt in order
-    // would restart Pi (loading the skills directory) and only then install
-    // the skills — requiring a second reload for them to appear.
-    if (step === 1) return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (~/.zshrc).\nThen install the Tortoise skills (${SKILLS_LIST}) from ${SKILLS_INSTALL_URL}.\n${onboardingInstructions}\n${twoStepNote} Pi.\n${docs}`
-    if (step === 2) return step2Text
-  }
-  if (harness === 'cursor') {
-    if (step === 1) return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (export TORTOISE_API_KEY=…) so Cursor can read it from its env.\nThen install the Tortoise skills (${SKILLS_LIST}) from ${SKILLS_INSTALL_URL}.\n${onboardingInstructions}\n${twoStepNote} Cursor.\n${docs}`
-    if (step === 2) return step2Text
-  }
-  if (harness === 'claude') {
-    return `Add Tortoise MCP at ${url}.\n${keyLine}\nThen install the Tortoise skills (${SKILLS_LIST}) from ${SKILLS_INSTALL_URL}.\n${onboardingInstructions}\nThen call tortoise_health and tortoise_create_point to file my first memory.\n${docs}`
-  }
-  if (harness === 'codex') {
-    return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (export TORTOISE_API_KEY=…).\nThen install the Tortoise skills (${SKILLS_LIST}) from ${SKILLS_INSTALL_URL}.\n${onboardingInstructions}\nThen call tortoise_health and tortoise_create_point to file my first memory.\n${docs}`
-  }
-  // #2827: both filesystem-less harnesses (Claude Desktop/Web) need only the
-  // verify/file step in the conversation; the workflows body rides
-  // wizardWorkflowsText below.
-  if (harness === 'claude-desktop' || harness === 'claude-web') {
-    if (step === 2) return step2Text
-  }
-  return ''
-}
-
-// #2827: the skills-as-prompt body a filesystem-less harness needs (Claude
-// Desktop and Claude Web keep no local skills, so the Tortoise workflows have
-// to arrive in the conversation). It ends with the same verify/file step every
-// other tab gets — without it a Claude Desktop/Web user never calls
-// tortoise_health/tortoise_create_point, so onboarding never auto-completes.
-// Rendered via WizardPromptCard so it is COPYABLE (it used to be a bare <pre>
-// with no copy affordance).
-function wizardWorkflowsText(key, mode) {
-  // #4365: the filesystem-less harnesses have no skills directory and never ran
-  // the installer, so the onboarding INSTRUCTIONS must arrive in the
-  // conversation itself — this prompt is their only delivery surface.
-  return `${WORKFLOWS_PROMPT}\n\n${wizardPromptText('claude-web', 2, key, mode)}\n\nOnboarding is instructions, not a skill — read and follow them at ${ONBOARDING_INSTRUCTIONS_URL}.`
 }
 
 // #4330: ONE cap notice, TWO surfaces — the API Keys tab and the create-key

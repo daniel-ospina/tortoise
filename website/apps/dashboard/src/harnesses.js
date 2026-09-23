@@ -387,8 +387,11 @@ export const SKILLS_INSTALL_URL =
 // enumerates it interpolates these — SKILL_INSTALL, the HARNESS_SKILLS block,
 // and the HARNESS_STEPS.cursor label — so the copy cannot drift from the
 // installer's own `SKILLS=(...)` array (pinned by test on both sides). The
-// four LIVE dashboard wizard prompts (main.jsx) interpolate SKILLS_LIST too,
-// and are pinned against the installer by
+// four LIVE dashboard wizard prompts interpolate SKILLS_LIST too — from
+// wizardPrompts.js, since #4880 moved them out of main.jsx so the guards can
+// assert the RENDERED string instead of parsing JSX source. The rendered copy
+// and the installer's array are pinned together by
+// website/apps/dashboard/src/wizardPrompts.test.js and by
 // tests/test_onboarding_variants.py::test_4365_served_connect_copy_names_
 // three_skills_plus_the_instructions — the constant is not its own guard.
 export const SKILLS_LIST =
