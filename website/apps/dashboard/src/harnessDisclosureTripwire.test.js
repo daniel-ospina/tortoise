@@ -27,6 +27,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { stripComments } from './testSupport.js'
 
 const mainJsx = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'main.jsx'), 'utf8')
 
@@ -40,10 +41,16 @@ assert.notEqual(headEnd, -1, 'the harness-status card head must be closed')
 const head = mainJsx.slice(headStart, headEnd)
 
 test('#3700: the row renders the harness disclosure from the helper', () => {
-  assert.match(head, /\{harnessAttribution\(h\)\s*&&\s*\(/,
-    'the card head must guard the disclosure on the helper\'s own return, not on a re-derived literal')
-  assert.match(head, /className="dim small"\s*>\s*·\s*(?:\{" "\}\s*)?\{harnessAttribution\(h\)\}\s*<\/span>/,
-    'the dim `·` fragment must render the helper\'s VALUE alone — any literal here restores the #3700 misreading with every test green')
+  // ONE assertion over the whole JSX expression — guard, consequent and close —
+  // because pinning them separately leaves the guard's own consequent free: a
+  // one-token `{x && (false && (<span …/>))}` disables the row's disclosure with
+  // every separate pattern still matching. Whitespace is tolerated throughout,
+  // and one leading comment inside the parentheses is legal (the repo reformats
+  // and annotates freely).
+  assert.match(
+    head,
+    /\{harnessAttribution\(h\)\s*&&\s*\(\s*(?:(?:\/\/[^\n]*|\/\*[\s\S]*?\*\/)\s*)?<span className="dim small"\s*>\s*·\s*(?:\{" "\}\s*)?\{harnessAttribution\(h\)\}\s*<\/span>\s*\)\}/,
+    'the head must render the helper\'s VALUE as the guarded consequent of its own return, so a literal or an `&& (false && …)` around the fragment fails')
   assert.match(head, /captureStatusLabelForHarness\(\s*state\s*,\s*h\s*,?\s*\)/,
     'the state word must come from the shared label helper')
 })
@@ -52,9 +59,12 @@ test('#3700: main.jsx renders the helper, never the copy constant', () => {
   // The one production definition of the attribution lives in harnesses.js. If
   // main.jsx ever names it directly, the row can drift from the module that owns
   // the words (and from the helper that decides WHEN the row discloses).
-  assert.doesNotMatch(mainJsx, /HARNESS_ATTRIBUTION/,
+  // Comments are stripped first, like the sibling `mintTripwire`: naming the
+  // symbol in explanatory prose stays legal while any CODE reference fails.
+  const mainJsxCode = stripComments(mainJsx)
+  assert.doesNotMatch(mainJsxCode, /HARNESS_ATTRIBUTION/,
     'main.jsx must not reference HARNESS_ATTRIBUTION directly')
-  assert.doesNotMatch(mainJsx, /HARNESS_CAPTURE_STATUS_LABEL/,
+  assert.doesNotMatch(mainJsxCode, /HARNESS_CAPTURE_STATUS_LABEL/,
     'main.jsx must not index the raw label table (the helper is the only path)')
 })
 
