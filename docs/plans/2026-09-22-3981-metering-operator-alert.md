@@ -1079,3 +1079,22 @@ Two mutations observed RED (`operations/logs/3981-mutation-evidence.log`).
 * **P2 — the queued-shape test's preconditions sat outside its `try`.** A precondition failure would
   leave four workers wedged on a 30 s gate, turning one clear assertion into a thread leak plus a
   misleading teardown error. The preconditions are now inside the `try` whose `finally` opens the gate.
+
+### Implementation record (round 8 — review cycle 6 fixes)
+
+Cycle 6 returned **not clean** on three P2s, and two of them were the same lesson this lane keeps
+re-learning — a claim about a guarantee is the thing that re-stales:
+
+* **The false universal survived in a third place.** `alert_operator`'s admission comment still said
+  "a successor that WILL run" 60 lines from where the same sentence had just been corrected. Every
+  instance now reads "a successor that is ADMITTED".
+* **"Never lost without a trace" was itself falsified.** A queued alert is the future most likely to
+  have been REAPED from `_HANDLES` (aged past `_INFLIGHT_STALE_S` behind wedged workers), so
+  `_shutdown_pool`'s pending-handle count cannot see it and `cancel_futures=True` discarded it with no
+  warning at all — the silent drop arriving through the shutdown door. `_forget` now logs the
+  cancellation, which is the only place that can see it.
+* **The cycle-5 P1 was unpinned.** Nothing exercised `_log_shed`, so reverting its sentinel handling was
+  invisible on any host whose `time.monotonic()` exceeds 60 s — exactly the hosts CI uses. The new test
+  passes `now` in, so the small-epoch case is deterministic everywhere.
+
+Both new pins were verified RED (`operations/logs/3981-mutation-evidence.log`). 39 tests pass.

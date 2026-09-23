@@ -337,11 +337,20 @@ def _forget(fut) -> None:
     A future cancelled before starting (pool shutdown, ``cancel_futures``) never
     enters ``_run``, so its reservation would otherwise leak; a started future
     releases in ``_run``'s ``finally``. Mutually exclusive, so exactly one release.
+
+    The cancellation is LOGGED here, and this is the only place that can: a queued
+    alert is the one most likely to have been reaped from ``_HANDLES`` (aged past
+    ``_INFLIGHT_STALE_S`` behind wedged workers), so ``_shutdown_pool``'s
+    pending-handle count cannot see it and the alert would otherwise vanish with no
+    line at all — the silent drop this module exists to remove, arriving through the
+    shutdown door.
     """
     with _LOCK:
         _HANDLES.pop(fut, None)
         if fut.cancelled():
             _release_locked()
+            _logger.warning(
+                "operator alert cancelled before it ran (pool shutdown)")
 
 
 def alert_operator(kind: str, org_id: str | None, detail: dict | None = None):
@@ -361,7 +370,9 @@ def alert_operator(kind: str, org_id: str | None, detail: dict | None = None):
         # latch and install NO successor: that worker then returns at `_run`'s
         # ownership check and the incident is dropped with no log naming it. Deciding
         # the bound first makes the clear and the install atomic (one `_LOCK`), so a
-        # latch is only ever handed to a successor that WILL run.
+        # latch is only ever handed to a successor that is ADMITTED — and if it then
+        # finds no channel or fails to submit, that path logs a WARNING, so the
+        # incident is never lost without a trace.
         if _RESERVED >= _MAX_INFLIGHT:
             # A shed is not an attempt: leave `_ATTEMPT` untouched, or a later
             # `_due_locked` would read the window this call never consumed.

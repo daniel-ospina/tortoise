@@ -15,6 +15,7 @@ mutation, and the command + output is recorded in the PR.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import itertools
 import logging
 import subprocess
@@ -404,6 +405,44 @@ def test_lru_eviction_pins_move_to_end(monkeypatch):
         "the untouched oldest key must be the one evicted")
     gate.set()
     oa.join_operator_alerts()
+
+
+def test_a_cancelled_dispatch_is_never_silent(caplog):
+    """Pin the cancellation warning in ``_forget``.
+
+    A queued alert is the future most likely to have been REAPED from ``_HANDLES``
+    (aged past ``_INFLIGHT_STALE_S`` behind wedged workers), so ``_shutdown_pool``'s
+    pending-handle count cannot see it: without this line, ``cancel_futures=True``
+    discards it with no warning at all — the silent drop this module exists to remove,
+    arriving through the shutdown door.
+    """
+    fut = concurrent.futures.Future()
+    fut.cancel()
+    with caplog.at_level(logging.WARNING, logger="tortoise.operator_alert"):
+        oa._forget(fut)
+    assert any("cancelled" in r.getMessage() for r in caplog.records), (
+        "a cancelled dispatch must leave a line")
+
+
+def test_the_shed_log_is_rate_limited_and_clock_agnostic(caplog):
+    """Pin `_log_shed`: `None` = never logged, then one line per interval.
+
+    The sentinel must not be a value the clock can legitimately report. `now` is
+    passed in, so the small-epoch case (a fresh boot, a per-process monotonic clock)
+    is DETERMINISTIC here — and it is invisible on a CI box whose monotonic clock
+    exceeds the interval, which is why this test must not lean on the wall clock: with
+    a `0.0` sentinel, `_log_shed(5.0)` is suppressed on exactly such a host while every
+    other test stays green.
+    """
+    oa.reset_operator_alert_state_for_tests()
+    with caplog.at_level(logging.WARNING, logger="tortoise.operator_alert"):
+        oa._log_shed(5.0, _KIND)
+        assert len(caplog.records) == 1, (
+            "a small-epoch clock must not suppress the shed warning")
+        oa._log_shed(10.0, _KIND)
+        assert len(caplog.records) == 1, "inside the interval -> suppressed"
+        oa._log_shed(5.0 + oa._SHED_LOG_INTERVAL_S, _KIND)
+        assert len(caplog.records) == 2, "the interval elapsed -> logs again"
 
 
 def test_reset_clears_every_piece_of_state(monkeypatch):
