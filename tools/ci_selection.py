@@ -100,8 +100,8 @@ NL = chr(10)
 # large but consumed by ONE surface is wired into that surface's
 # SOURCE_PATTERNS instead (see `tortoise/projection/edges.py` below).
 SHARED_MODULES = (
-    # The SDK facade: imported by 20 tortoise/ sources (__main__.py, analyze.py,
-    # hosted_api.py, ingest.py, m0.py, …) and ~294 test/tool modules spread over
+    # The SDK facade: imported by many tortoise/ sources (__main__.py, analyze.py,
+    # hosted_api.py, ingest.py, m0.py, …) and by test/tool modules spread over
     # every surface (tests/eval/harness/runner.py, tests/longmem_eval/,
     # battery/arms/a4_tortoise.py, tests/test_ask_sdk.py, test_hosted_api.py,
     # test_projection*.py, test_ep_*.py).
@@ -126,12 +126,12 @@ SHARED_MODULES = (
     "tortoise/env_truthy.py",
     # The MCP tool registry: imported by tortoise/hosted_api.py and
     # tortoise/mcp_auth.py (both api) and tortoise/mcp_server.py (itself shared),
-    # and pinned by 28 modules across api/core/sdk/eval/onboarding
+    # and pinned by modules across api/core/sdk/eval/onboarding
     # (test_tool_registry.py, test_capabilities_endpoint.py, test_epic903_mcp.py,
     # tests/tool_surface_capabilities.py, test_mcp_rename_table.py).
     "tortoise/tool_registry.py",
     # The MCP server entry point: imported by tortoise/__main__.py (api),
-    # hosted_api.py (api), selfhost.py (api) and deployment.py, and pinned by 52
+    # hosted_api.py (api), selfhost.py (api) and deployment.py, and pinned by
     # modules across api/sdk/core/onboarding/eval (test_mcp_server.py,
     # test_cli_serve.py, test_mcp_route_challenge.py, test_abuse_integration.py).
     "tortoise/mcp_server.py",
@@ -153,7 +153,7 @@ SHARED_MODULES = (
     #     tests/test_projection.py and test_capture_entity_attachment_3664.py
     #     (entities). They fall through select()'s `tortoise/` branch to `core`,
     #     the surface that owns the test_projection*.py pins, so an
-    #     `entities.py` change selects 304 files instead of the full matrix.
+    #     `entities.py` change selects that surface instead of the full matrix.
     #     ⚠️ This IS a deliberate coverage REDUCTION and should be read as one:
     #     these modules are composed into this package's `__init__`, which sdk
     #     and api consume, so a submodule regression is caught here only by the
@@ -175,9 +175,9 @@ SHARED_MODULES = (
     # (tests/e2e/hosted/test_01_signup_provision.py …
     # test_10_session_capture.py). Nothing about it is surface-local.
     "tests/conftest.py",
-    # Imported as `tests.fake_control_plane` by ~30 modules across api/core/eval/
+    # Imported as `tests.fake_control_plane` by modules across api/core/eval/
     # onboarding (test_abuse.py, test_action_endpoints_dual_auth.py,
-    # test_agent_signup_idempotency.py, tests/e2e/hosted/test_03_billing_upgrade.py).
+    # test_agent_signup_idempotency.py).
     "tests/fake_control_plane.py",
     # `pyproject.toml` is the dependency source of truth (consumed by every
     # lane's `pip install -e .` / `uv sync` step), so an edit changes what every
@@ -481,7 +481,7 @@ SOURCE_PATTERNS = {
             # #4713: `tortoise/projection/edges.py` is the ONE file inside the
             # projection package with a named consumer outside it — `tortoise/
             # sdk.py` imports DERIVABLE_STRUCTURAL_RELS, STRUCTURAL_REL_LABELS,
-            # stub_key (line ~5737) and _VALID_EDGE_PREDICATES (line ~7834).
+            # stub_key and _VALID_EDGE_PREDICATES.
             # #4713 narrowed SHARED_MODULES from the whole `tortoise/projection/`
             # directory down to its `__init__.py` (the only genuinely
             # cross-cutting member), so without this entry an edges.py-only PR
