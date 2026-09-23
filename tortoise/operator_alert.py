@@ -69,7 +69,12 @@ _INFLIGHT_STALE_S = 120.0
 #: to see it happening; the suppressed count is deliberately not carried, because the
 #: log budget must not grow with the outage either.
 _SHED_LOG_INTERVAL_S = 60.0
-_LAST_SHED_LOG = 0.0
+#: ``None`` = "never logged". NOT ``0.0``: ``time.monotonic()``'s reference point is
+#: explicitly undefined, so a clock reporting < 60 s (a fresh boot, a per-process
+#: monotonic clock) would make ``now - 0.0 < interval`` true and suppress EVERY shed
+#: warning until the clock passed the interval — a fail-open in the one signal this
+#: module exists to surface, and a deterministic failure of the tests that assert it.
+_LAST_SHED_LOG: float | None = None
 #: Global dispatch bound: a sweep-scale outage drops for many orgs at once.
 _MAX_INFLIGHT = 32
 #: Map bounds: keys outside the windows are pruned; a hard cap evicts oldest.
@@ -226,7 +231,9 @@ def _prune_locked(now: float) -> None:
 
     Deliberately does NOT sweep ``_INFLIGHT``: a stale latch is cleared only by
     ``_due_locked``, in the same ``_LOCK`` hold that INSTALLS its successor — so a
-    cleared latch is always handed to a worker that will run. (Sweeping it here let a
+    cleared latch is always handed to a worker that can at least try to file (a
+    successor that then finds no channel or a failed submit logs a WARNING instead
+    of dropping silently). (Sweeping it here let a
     queued worker — admitted before, sat behind saturated workers past
     ``_INFLIGHT_STALE_S`` — start, find its token gone with no successor, and return
     WITHOUT filing: the silent drop this module exists to remove.) ``_INFLIGHT`` needs
@@ -234,9 +241,10 @@ def _prune_locked(now: float) -> None:
     ``_RESERVED``-bounded — with one known exception, a future cancelled before
     ``_run`` starts (``_shutdown_pool``'s ``cancel_futures=True``, and tests): its
     reservation is released by ``_forget`` while its latch waits out
-    ``_INFLIGHT_STALE_S``. That is shutdown/test-only — nothing is mid-life, and no new
-    admission can occur once the pool is shutting down — so the honest bound is
-    ``_RESERVED`` plus those cancelled latches, not ``_MAX_INFLIGHT`` alone.
+    ``_INFLIGHT_STALE_S``. That is shutdown/test-only (its latches are self-healing and
+    bounded by the number of admitted-but-cancelled futures, which cannot grow once the
+    pool is shutting down), so the honest bound is ``_RESERVED`` plus those cancelled
+    latches, not ``_MAX_INFLIGHT`` alone.
     """
     if len(_ATTEMPT) > _PRUNE_ABOVE:
         for k, (ts, window) in list(_ATTEMPT.items()):
@@ -257,7 +265,8 @@ def _log_shed(now: float, kind: str) -> None:
     """
     global _LAST_SHED_LOG
     with _LOCK:
-        if now - _LAST_SHED_LOG < _SHED_LOG_INTERVAL_S:
+        if (_LAST_SHED_LOG is not None
+                and now - _LAST_SHED_LOG < _SHED_LOG_INTERVAL_S):
             return
         _LAST_SHED_LOG = now
     _logger.warning("operator alert shed — dispatch queue full (kind=%s)", kind)
@@ -291,11 +300,14 @@ def _run(store, key, kind, org_id, detail, token) -> None:
         # Ownership check BEFORE the store write: a superseded attempt must not
         # spend a network call filing an incident its successor is already
         # filing, and must not reach a store that may be tearing down. SAFE to
-        # return here because a latch is cleared only by ``_due_locked`` in the
-        # same lock hold that installs its successor (never swept behind our back
-        # by ``_prune_locked``), so a missing token means a successor WILL file.
-        # The check is REPEATED below because a newer attempt can start while
-        # this one is in flight.
+        # return here because a missing token means a successor was ADMITTED in the
+        # same lock hold that cleared ours (never swept behind our back by
+        # ``_prune_locked``). "Admitted" is not "will file": if that successor then
+        # finds no channel or a failed submit, its own path logs a WARNING
+        # (``operator alert not filed`` / ``dispatch failed``) rather than dropping
+        # it silently — so the incident is never lost without a trace. The check is
+        # REPEATED below because a newer attempt can start while this one is in
+        # flight.
         with _LOCK:
             if _INFLIGHT.get(key) != token:
                 return
@@ -449,4 +461,4 @@ def reset_operator_alert_state_for_tests() -> None:
         _SINCE_SWEEP = 0
         # Also the shed-log rate limit, or the first test to shed would silence the
         # warning for every later test inside _SHED_LOG_INTERVAL_S.
-        _LAST_SHED_LOG = 0.0
+        _LAST_SHED_LOG = None

@@ -409,6 +409,7 @@ def test_lru_eviction_pins_move_to_end(monkeypatch):
 def test_reset_clears_every_piece_of_state(monkeypatch):
     monkeypatch.setattr(oa, "_RESERVED", 3)
     monkeypatch.setattr(oa, "_SINCE_SWEEP", 7)
+    monkeypatch.setattr(oa, "_LAST_SHED_LOG", 123.0)
     with oa._LOCK:
         oa._HANDLES[object()] = 1.0
         oa._ATTEMPT[("K", "o")] = (0.0, 1.0)
@@ -419,6 +420,8 @@ def test_reset_clears_every_piece_of_state(monkeypatch):
     assert oa._HANDLES == {}
     assert oa._ATTEMPT == {}
     assert oa._INFLIGHT == {}
+    assert oa._LAST_SHED_LOG is None, (
+        "the shed-log rate limit must reset, or one shedding test silences the rest")
 
 
 # ── the channel seam ────────────────────────────────────────────────────────
@@ -611,13 +614,13 @@ def test_a_shed_never_clears_an_admitted_latch(monkeypatch):
     store = _BlockThenRecord(gate)
     monkeypatch.setattr(oa, "alert_store", lambda: store)
 
-    for i in range(4):
-        assert oa.alert_operator(_KIND, f"org-blk{i}", {}) is not None
-    for _ in range(4):
-        assert store.entered.acquire(timeout=10), (
-            "precondition: all 4 pool threads are inside the store")
-    assert oa.alert_operator(_KIND, "org-q", {}) is not None      # QUEUED behind them
     try:
+        for i in range(4):
+            assert oa.alert_operator(_KIND, f"org-blk{i}", {}) is not None
+        for _ in range(4):
+            assert store.entered.acquire(timeout=10), (
+                "precondition: all 4 pool threads are inside the store")
+        assert oa.alert_operator(_KIND, "org-q", {}) is not None  # QUEUED behind them
         time.sleep(0.05)                      # age org-q's latch past the bound
         with oa._LOCK:
             assert oa._RESERVED == 5, "precondition: the bound is saturated"

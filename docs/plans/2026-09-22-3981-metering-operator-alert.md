@@ -1057,3 +1057,25 @@ Cycle 4 found no P0/P1: the cycle-3 fix held and its pin was load-bearing. Five 
   cancelled latches, and why that is shutdown/test-only.
 
 Two mutations observed RED (`operations/logs/3981-mutation-evidence.log`).
+
+### Implementation record (round 7 — review cycle 5 fix: the monotonic sentinel)
+
+* **P1 — the shed-log rate limit could suppress every shed warning.** `_LAST_SHED_LOG = 0.0` was used as
+  a "never logged" sentinel and compared against `time.monotonic()`, whose reference point is explicitly
+  undefined. On a clock reporting < 60 s (a fresh boot, a per-process monotonic clock) `now - 0.0 <
+  interval` is true, and because the early return does not advance the field, EVERY shed was suppressed
+  until the clock passed the interval — a fail-open in the one signal this module exists to surface, and
+  a deterministic failure of the tests that assert it. The sentinel is now `None` (with the reset
+  matching), which is the shape the three constants around it should be read with in mind: a sentinel
+  must never be a value the measured clock could legitimately report.
+* **P2 — two docstrings asserted a universal the code does not hold.** `_run` and `_prune_locked` both
+  claimed "a missing token means a successor WILL file". A successor is ADMITTED, and can then find no
+  channel or fail to submit — both of which log a WARNING. The claim is now the true one: *admitted, and
+  never lost without a trace*. This matters more than the wording: that sentence is the entire safety
+  argument for returning without filing, so a lane reasoning from it would reason from a false premise.
+* **P2 — the reset line was unpinned.** `test_reset_clears_every_piece_of_state` now sets
+  `_LAST_SHED_LOG` and asserts the reset clears it; without the reset line it is RED
+  (`operations/logs/3981-mutation-evidence.log`).
+* **P2 — the queued-shape test's preconditions sat outside its `try`.** A precondition failure would
+  leave four workers wedged on a 30 s gate, turning one clear assertion into a thread leak plus a
+  misleading teardown error. The preconditions are now inside the `try` whose `finally` opens the gate.
