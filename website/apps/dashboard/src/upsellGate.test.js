@@ -79,7 +79,8 @@ test('#4639: the limit nudge routes to checkout for a buyer, the portal for a su
   // No price and no customer → no route → the nudge is not rendered (never a
   // dead button on a deployment without a Stripe catalog).
   assert.equal(nudgeRoute({ tier: 'free' }), null)
-  assert.equal(nudgeRoute({ tier: 'solo' }), null)
+  assert.equal(nudgeRoute({ tier: 'solo' }), 'portal',
+    'a paid tier with absent status is a payer — portal, never a checkout that 409s')
   assert.equal(nudgeRoute(null), null)
   // The paid-STATUS branch independent of a paid tier: a customer whose tier
   // has not caught up must reach the portal, never the checkout that 409s.

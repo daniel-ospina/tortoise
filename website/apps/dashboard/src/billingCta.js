@@ -5,9 +5,8 @@
 // labelled "Compare plans" link — never the substitute for an Upgrade CTA.
 // Kept as a pure derivation so the decision is executable in node tests (no
 // React renderer in this suite).
-// Out of scope here: the header tier badge (#4331) and the error-banner /
-// Graphs-tab Upgrade buttons (silent no-ops when no price id — tracked
-// separately).
+// Landed since: the header tier badge + error-banner route (#4331 / #4639),
+// which now share nudgeRoute/headerUpgradeEligible in upsellGate.js.
 
 export const CHECKOUT_UNAVAILABLE_REASON =
   'Card checkout is temporarily unavailable — try again shortly'
