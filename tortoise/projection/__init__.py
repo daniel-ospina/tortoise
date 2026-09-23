@@ -4094,6 +4094,20 @@ class FalkorProjection(
                 params={"i": _ujm_id},
             ).result_set
             _nm = _rows[0][0] if _rows else None
+            if not _rows:
+                # The object is GONE by this point in the replay — a journalled
+                # `delete` op, or a supersede-then-delete journal. There is then
+                # nothing for the sweep to have clobbered and nothing to
+                # restore, so re-folding here can only MANUFACTURE a fold-miss
+                # warning for a mutation the INLINE pass-1b fold already applied
+                # correctly (round-6 finding: create -> supersede ->
+                # update(status) -> delete warned "fold matched no entity ...
+                # post-wipe divergence or out-of-order journal", both causes
+                # false). The warning is this lane's non-folded-set EVIDENCE —
+                # `_fold_entity_mutation` exempts `op="delete"` precisely so a
+                # valid journal cannot produce a false positive — so it must not
+                # be emitted for a replay that was in fact correct.
+                continue
             if isinstance(_nm, str):
                 _nseq = _supersede_seq.get(("name", _nm))
                 if _nseq is not None and (_sup is None or _nseq > _sup):

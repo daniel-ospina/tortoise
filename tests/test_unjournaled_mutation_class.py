@@ -476,6 +476,50 @@ class TestPropertyMutationRoundTrip:
             "a post-supersede state op was lost — only the last one was "
             f"replayed: {got}")
 
+    def test_a_post_supersede_op_on_a_deleted_object_does_not_warn(
+            self, env, caplog):
+        """#4743 review round 6 — the re-fold must not cry wolf on a correct replay.
+
+        The post-supersede re-fold undoes the sweep's clobber. When the object is
+        hard-deleted AFTER the mutation there is nothing to undo, so re-folding it
+        matched 0 rows and emitted the non-folded-set warning:
+
+            "... fold matched no entity ... (post-wipe divergence or out-of-order
+             journal)"
+
+        Both stated causes are false — the INLINE fold applied the mutation
+        correctly. This matters because that warning is the lane's EVIDENCE that a
+        replay could not fold a claim: `_fold_entity_mutation` exempts
+        `op="delete"` for exactly this reason. A warning on a valid journal
+        destroys the evidence's meaning.
+        """
+        sdk, events = env
+        oid = sdk.create_entity("object", name="O", objectKind="k")["node"]["id"]
+        sdk._emit_event("ObjectSuperseded", id=oid, name="O",
+                        supersedes_by="other", session_id="s", evidence="e")
+        sdk.update_entity(oid, status="archived")
+        sdk.delete_entity(oid)
+
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            sdk._get_proj().rebuild_all(str(events))
+        misses = _fold_warnings(caplog)
+        assert not misses, (
+            "the replay was CORRECT (the inline fold applied it); a fold-miss "
+            f"warning here is a false positive: {misses}")
+        # ...and the isolation control: the same journal MINUS the delete really
+        # does restore the mutation, so the row above is not passing because the
+        # re-fold never runs at all.
+        sdk2, events2 = env
+        oid2 = sdk2.create_entity("object", name="O",
+                                  objectKind="k")["node"]["id"]
+        sdk2._emit_event("ObjectSuperseded", id=oid2, name="O",
+                         supersedes_by="other", session_id="s", evidence="e")
+        sdk2.update_entity(oid2, status="archived")
+        sdk2._get_proj().rebuild_all(str(events2))
+        assert _props(sdk2, "Object", oid2, "status")["status"] == "archived", (
+            "control: without the delete the post-supersede op IS restored")
+
     def test_a_name_change_is_not_journaled_and_says_so(self, env, caplog):
         """#3377 is DEFERRED (#4769) — and the deferral must be LOUD.
 
