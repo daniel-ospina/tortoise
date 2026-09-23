@@ -1379,9 +1379,9 @@ def test_walk_without_a_session_is_an_instrument_error_and_writes_nothing(monkey
     assert ("POST", "/api/v1/team/keys") not in [(c[0], c[1]) for c in ctx.request.calls]
     assert not any(c[0] == "POST" for c in ctx.request.calls)
     assert obs.session["detail"].startswith("401")
-    # the recorded teardown STATUS, not mere truthiness: this exit precedes the
-    # cleanup baseline, so no org can exist and `not_reached` is the honest
-    # state — and it is deliberately NOT a residue state (#4843).
+    # the recorded teardown STATUS, not mere truthiness. This test runs with
+    # teardown enabled and no `--keep-org`, and this exit precedes the cleanup
+    # baseline, so the recorded status is `not_reached` (#4843).
     assert obs.teardown["status"] == mod.TEARDOWN_NOT_REACHED
 
 
@@ -1479,22 +1479,21 @@ def test_walk_reports_a_200_but_unparseable_projection_as_an_instrument_error(
 # teardown STATUS, not merely that `obs.teardown` is truthy: `not_reached`
 # satisfies truthiness.
 #
-# The last two are PRE-create, so no org can exist yet and the honest status is
+# The last two are PRE-create: no org can exist yet, so with teardown enabled
+# and no `--keep-org` (both are the case in these tests) the recorded status is
 # the clean `TEARDOWN_NOT_REACHED` rather than a residue alarm.
 
 def test_the_teardown_statuses_are_classified_as_residue_or_clean() -> None:
-    """The invariant the per-exit assertions below rest on, asserted ONCE (a
-    membership is a property of the constants, not of any exit): a
-    `baseline_unavailable` teardown WARNS — a live org may remain — while
-    `not_reached` is deliberately NOT a residue state, so it raises no false
-    alarm."""
+    """The classifier the per-exit assertions rest on: a `baseline_unavailable`
+    teardown WARNS — a live org may remain — while `not_reached` is deliberately
+    NOT a residue state, so it raises no false alarm."""
     assert _mod.TEARDOWN_BASELINE_UNAVAILABLE in _mod.TEARDOWN_RESIDUE_STATES
     assert _mod.TEARDOWN_NOT_REACHED not in _mod.TEARDOWN_RESIDUE_STATES
 
 
 def _assert_teardown_recorded_fail_closed(obs, mod) -> None:
     """These harnesses serve no org-list route, so `GET /api/v1/organizations`
-    404s and the honest status is the fail-closed `baseline_unavailable` — a
+    404s and the recorded status is the fail-closed `baseline_unavailable` — a
     residue state. Specific enough that any OTHER state a degraded teardown
     object would record (notably the truthy, non-residue `not_reached`) reds."""
     assert obs.teardown, "every exit must carry the teardown state"
@@ -1602,9 +1601,10 @@ def test_walk_without_a_mintable_key_is_an_instrument_error(monkeypatch, tmp_pat
 def test_walk_reports_a_signup_cta_that_is_not_hittable_as_a_product_finding(
         monkeypatch, tmp_path):
     """A clean browser cannot reach the signup CTA. This runs BEFORE any session
-    is resolved, so it is a PRODUCT finding (exit 1), not an instrument fault —
-    and no org can exist yet, so the honest teardown status is the clean
-    `not_reached` (which is deliberately NOT a residue state)."""
+    is resolved, so it is a PRODUCT finding (exit 1), not an instrument fault.
+    No org can exist yet, and this test runs with teardown enabled and no
+    `--keep-org`, so the recorded status is the clean `not_reached` (which is
+    deliberately NOT a residue state)."""
     obs, _ctx, mod = _run_fake_walk(
         monkeypatch, tmp_path, plan={("GET", "/api/session"): _SESSION_200},
         ui_sequence=[], mcp_tools_call=_MCP_OK, front_door_hittable=False)
@@ -1619,8 +1619,9 @@ def test_walk_without_the_driver_records_a_fail_closed_observation(
         monkeypatch, tmp_path):
     """The playwright import fails: the driver is missing. That must still
     produce a RECORDED, fail-closed observation rather than a traceback — the
-    verdict `failed: playwright unavailable`, an instrument exit code, and the
-    clean `not_reached` teardown (no browser context ever existed)."""
+    verdict `failed: playwright unavailable`, an instrument exit code, and a
+    recorded teardown status of `not_reached` — no browser context ever existed,
+    and this test runs with teardown enabled and no `--keep-org`."""
     obs, _ctx, mod = _run_fake_walk(
         monkeypatch, tmp_path, plan={}, ui_sequence=[], mcp_tools_call=_MCP_OK,
         playwright_available=False)
