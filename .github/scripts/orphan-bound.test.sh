@@ -63,6 +63,9 @@
 #     the accounting identity skipped and only the `COUNT <= left` direction
 #     applied (case 37); a deferred `COUNT` above even the mixed-population
 #     `left` still REDs (case 38).
+#   * a deferred fixture whose `left` DIFFERS from `COUNT` (case 49) so a swap
+#     between those two fields on the deferred warning/pass lines is observable
+#     (case 37's fixture has left == COUNT, which masks exactly that swap).
 #   * the report↔gate contract (case 39, KEPT): the field set declared by
 #     `_HYGIENE_REPORT_FIELDS` in `tortoise/embedded_reaper.py` (read from its
 #     source with `ast` — never imported or run) must be named by the gate's
@@ -120,6 +123,14 @@
 # the kill set.
 # A case that merely restates a default would not catch its own removal.
 #
+# Every emitted line that interpolates a report measurement field ($COUNT,
+# $left, $before, $reaped, $others, $foreign, $cleared) — plus $kind on the
+# missing/unreadable arm — is pinned VERBATIM at the case that reaches it: the
+# two pass lines, both deferred lines, every red message, and the
+# argument-validation echoes. A single field, separator, or word swapped in any
+# of them REDs instead of printing a wrong measurement. Cases: 1, 2, 5, 7, 8,
+# 11-18, 23, 26-29, 32, 36-38, 40, 43-45, 48, 49.
+#
 # The assertion count is PINNED (see the summary): a lost case must not be
 # indistinguishable from a passing one.
 
@@ -168,6 +179,7 @@ printf '{"sweep":{"reaped":1,"cleared":true,"left":99999999999999999999999999,"b
 printf '{"sweep":{"reaped":0,"cleared":false,"left":100,"before":100}}' > "$WORK/aborted.json"
 printf '{"sweep":{"reaped":9,"cleared":true,"left":100,"before":109}}' > "$WORK/healthy100.json"
 printf '{"token":"t","other_suites":["1234-abcdef12"],"foreign_pids":[],"sweep":{"reaped":1,"cleared":true,"left":2,"before":40}}' > "$WORK/deferred.json"
+printf '{"token":"t","other_suites":["1234-abcdef12"],"foreign_pids":["111","222"],"sweep":{"reaped":1,"cleared":true,"left":5,"before":40}}' > "$WORK/deferred5.json"
 printf '{"sweep":{"error":"probe exploded"}}' > "$WORK/error.json"
 printf '{"sweep":{"skipped":"reaper-lock-held"}}' > "$WORK/skipped.json"
 printf '{"sweep":{"skipped":"no-pytest"}}' > "$WORK/nopytest.json"
@@ -225,6 +237,8 @@ echo "5. a COUNT ABOVE left REDs (the positive control)"
 run_gate 15 0 report14.json
 assert_eq "$RC" "1" "exits 1 when COUNT > left on a normal exit"
 assert_contains "$OUT" "did not account for" "names the counter/population disagreement"
+assert_contains "$OUT" "::error::redislite orphan gate: 15 servers counted but the sweep reported left=14 — the counter observes a population the sweep did not account for — pytest rc 0 (issue #1005 / epic #1647 E2E-7)" \
+  "the COUNT>left red is reported VERBATIM at rc=0 (every field and separator)"
 assert_not_contains "$OUT" "within the sweep's own measurement" \
   "does NOT fall through to the pass line (fail-open pin)"
 
@@ -274,11 +288,15 @@ run_gate 0 0 nopytest.json
 assert_eq "$RC" "0" "exits 0"
 assert_contains "$OUT" "no-pytest" "names the never-ran path"
 assert_contains "$OUT" "no redislite server was spawned" "states the basis"
+assert_contains "$OUT" "pytest never ran for this selection (skipped=no-pytest); no redislite server was spawned, 0 remain after suite" \
+  "the no-pytest pass line is VERBATIM at COUNT=0"
 
 echo "12. skipped=no-pytest with COUNT>0 REDs (servers nothing swept)"
 run_gate 3 0 nopytest.json
 assert_eq "$RC" "1" "exits 1"
 assert_contains "$OUT" "nothing swept" "names the unswept population"
+assert_contains "$OUT" "::error::redislite orphan gate: pytest never ran for this selection (skipped=no-pytest) but 3 redislite servers are live and nothing swept them (issue #1005)" \
+  "the no-pytest red is VERBATIM — every field and word"
 assert_not_contains "$OUT" "no redislite server was spawned" \
   "does NOT fall through to the pass line"
 
@@ -291,11 +309,15 @@ echo "14. no_embedded_servers with COUNT=0 PASSES (bound 0)"
 run_gate 0 0 none.json
 assert_eq "$RC" "0" "exits 0"
 assert_contains "$OUT" "no embedded redislite server was running" "states the basis"
+assert_contains "$OUT" "no embedded redislite server was running; 0 remain after suite" \
+  "the no-embedded pass line is VERBATIM at COUNT=0"
 
 echo "15. no_embedded_servers with a count above 0 REDs"
 run_gate 3 0 none.json
 assert_eq "$RC" "1" "exits 1"
 assert_contains "$OUT" "no embedded server was ever running" "names the contradiction"
+assert_contains "$OUT" "::error::redislite server leak: 3 servers after suite but the sweep reports no embedded server was ever running — pytest rc 0 (issue #1005 / epic #1647 E2E-7)" \
+  "the no-embedded leak red is VERBATIM — every field and word"
 assert_not_contains "$OUT" "remain after suite" "does NOT fall through to the pass line"
 
 echo "16. no_embedded_servers above 0 under a kill downgrades to a warning"
@@ -307,6 +329,8 @@ echo "16b. left=null (the sweep's probe failed) REDs as an unmeasured residue"
 run_gate 4 0 leftnull.json
 assert_eq "$RC" "1" "exits 1 instead of reading the null as 0"
 assert_contains "$OUT" "probe FAILED" "names the failed probe"
+assert_contains "$OUT" "::error::redislite orphan gate: the hygiene end-sweep's own count probe FAILED (left=null) — the run produced no measurement to bind the bound to, so the 4 residue is unaccounted for (issue #1005) — pytest rc 0 (issue #1005 / epic #1647 E2E-7)" \
+  "the probe-failure red is VERBATIM at rc=0"
 assert_not_contains "$OUT" "within the sweep's own measurement" "never prints a pass line"
 
 echo "16c. left=null under a kill downgrades to a warning"
@@ -319,12 +343,16 @@ echo "17. a missing report REDs (residue unaccounted, NOT the no-pytest path)"
 run_gate 4 0 does-not-exist.json
 assert_eq "$RC" "1" "exits 1"
 assert_contains "$OUT" "unaccounted" "names the missing accounting"
+assert_contains "$OUT" "::error::redislite orphan gate: no usable redislite-hygiene end-sweep report (missing) — the 4 residue is unaccounted for (issue #1005 / epic #1647 E2E-7)" \
+  "the missing-report red is VERBATIM, naming kind=missing and COUNT=4"
 assert_not_contains "$OUT" "no-pytest" "a real missing report is not excused"
 
 echo "18. a missing report under a kill downgrades to a warning"
 run_gate 4 2 does-not-exist.json
 assert_eq "$RC" "0" "exits 0 under rc=2"
 assert_contains "$OUT" "::warning::" "emits a warning"
+assert_contains "$OUT" "::warning::no redislite-hygiene end-sweep report (missing) — rc=2: a watchdog kill skips the conftest end-sweep, so the count is a kill-path artifact, not a leak (issue #1371)" \
+  "the kill-path missing-report warning is VERBATIM, naming kind=missing"
 
 echo "19. an unreadable report REDs"
 run_gate 4 0 unreadable.json
@@ -351,6 +379,8 @@ bad_rc=0
 OUT=$(bash "$GATE" --count x --rc 0 --hygiene "$WORK/none.json" 2>&1) || bad_rc=$?
 assert_eq "$bad_rc" "2" "exits 2"
 assert_contains "$OUT" "--count must be a non-negative integer" "names the bad count"
+assert_contains "$OUT" "::error::orphan-bound: --count must be a non-negative integer (got 'x')" \
+  "the invalid-count line is VERBATIM, echoing the offending input"
 
 echo "24. an unknown argument exits 2"
 bad_rc=0
@@ -378,6 +408,8 @@ echo "27. an identity violation (reaped + left < before) REDs"
 run_gate 2 0 identity_bad.json
 assert_eq "$RC" "1" "exits 1 even though COUNT <= left"
 assert_contains "$OUT" "does not account for" "names the broken accounting"
+assert_contains "$OUT" "::error::redislite orphan gate: the sweep does not account for the servers it started with — before=10, reaped=1, left=2 (reaped + left < before); the sweep's own measurement is broken — pytest rc 0 (issue #1005 / epic #1647 E2E-7)" \
+  "the accounting-identity red is VERBATIM at rc=0"
 assert_not_contains "$OUT" "within the sweep's own measurement" \
   "does NOT fall through to the pass line (fail-open pin)"
 
@@ -412,6 +444,8 @@ bad_rc=0
 OUT=$(bash "$GATE" --count 99999999999999999999999999 --rc 0 --hygiene "$WORK/report14.json" 2>&1) || bad_rc=$?
 assert_eq "$bad_rc" "2" "exits 2 instead of reaching the pass line"
 assert_contains "$OUT" "too large to compare" "names the magnitude guard"
+assert_contains "$OUT" "::error::orphan-bound: --count is too large to compare safely (got '99999999999999999999999999')" \
+  "the oversized-count line is VERBATIM"
 
 echo "33. an oversized left in the report exits 2 (never a pass)"
 bad_rc=0
@@ -455,12 +489,18 @@ assert_eq "$RC" "0" "exits 0 — left is not an authoritative bound under a defe
 assert_contains "$OUT" "::warning::" "names the deferral"
 assert_contains "$OUT" "non-gating diagnostic" "labels the deferred path a non-gating diagnostic"
 assert_contains "$OUT" "not an authoritative bound" "states why the bound is not authoritative"
+assert_contains "$OUT" "::warning::redislite orphan gate: the hygiene end-sweep deferred to last-suite-standing (other_suites=1 foreign_pids=0) — left=2 counts other suites' live servers, so it is NOT an authoritative bound for this suite's residue and NO bound is enforced on this path; only the COUNT <= left sanity check is applied (non-gating diagnostic, issue #4740)" \
+  "the deferral warning is VERBATIM — every field and word"
+assert_contains "$OUT" "deferred sweep: 2 counted; the end-sweep deferred to last-suite-standing (other_suites=1), so left=2 is not an authoritative bound for this suite's residue" \
+  "the deferred pass line is VERBATIM — every field and word"
 assert_not_contains "$OUT" "does not account for" \
   "the mixed-population identity is not asserted under a deferral"
 
 echo "38. a deferred COUNT above even the mixed-population left still REDs"
 run_gate 3 0 deferred.json
 assert_eq "$RC" "1" "exits 1 when the count exceeds even the deferred measurement"
+assert_contains "$OUT" "::error::redislite orphan gate: 3 servers counted exceed even the deferred sweep's left=2 (other_suites=1 live) — the counter observes a population the sweep did not account for — pytest rc 0 (issue #1005 / epic #1647 E2E-7)" \
+  "the deferred COUNT>left red is VERBATIM at rc=0"
 
 echo "39. the report↔gate contract (single source of truth)"
 # #4740: tortoise/embedded_reaper.py owns the report field set in
@@ -526,6 +566,8 @@ run_gate 1 0 leftnull_aborted.json
 assert_eq "$RC" "1" "exits 1 at COUNT=1 (the residue is unmeasured)"
 assert_contains "$OUT" "cleared=false" "names the exhausted budget"
 assert_contains "$OUT" "probe FAILED" "names the failed sweep-side probe"
+assert_contains "$OUT" "::error::redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) AND its own count probe FAILED (left=null) — the 1 servers that remain are unmeasured, not a bounded outcome (issue #1005) — pytest rc 0 (issue #1005 / epic #1647 E2E-7)" \
+  "the cleared=false probe-failure red is VERBATIM at rc=0"
 assert_not_contains "$OUT" "diagnostic only" "does not excuse the unmeasured residue"
 run_gate 1 124 leftnull_aborted.json
 assert_eq "$RC" "0" "a watchdog kill still downgrades it (rc=124)"
@@ -595,6 +637,8 @@ assert_eq "$RC" "1" "exits 1 at a non-zero count"
 assert_contains "$OUT" "cleared=false" "names the exhausted budget"
 assert_contains "$OUT" "did not prove the backlog clear" "names the unproven sweep"
 assert_contains "$OUT" "3 redislite servers remain" "names the actual COUNT"
+assert_contains "$OUT" "::error::redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) and 3 redislite servers remain — the sweep did not prove the backlog clear, so the residue is unproven (issue #1005) — pytest rc 0 (issue #1005 / epic #1647 E2E-7)" \
+  "the cleared=false residue red is VERBATIM at rc=0"
 assert_not_contains "$OUT" "within the sweep's own measurement" \
   "does NOT fall through to the pass line (fail-open pin)"
 
@@ -646,10 +690,23 @@ assert_contains "$OUT" "orphaned redislite servers after suite: 0 (sweep before=
 assert_not_contains "$OUT" "cleared=true" \
   "never fabricates cleared=true on the COUNT==left pass line"
 
+echo "49. a DEFERRED sweep with left != COUNT pins the deferred lines' own fields"
+# Case 37's fixture has left == COUNT (2 == 2), so a swap between those two
+# fields on the deferred path — `left=$left` -> `left=$COUNT` on the pass line,
+# or the mirror on the warning — prints a wrong measurement and stays green.
+# Here left=5 and COUNT=2, and foreign_pids (2) differs from other_suites (1),
+# so every field on both deferred lines is independently observable.
+run_gate 2 0 deferred5.json
+assert_eq "$RC" "0" "exits 0 — the deferral does not red a count within left"
+assert_contains "$OUT" "::warning::redislite orphan gate: the hygiene end-sweep deferred to last-suite-standing (other_suites=1 foreign_pids=2) — left=5 counts other suites' live servers, so it is NOT an authoritative bound for this suite's residue and NO bound is enforced on this path; only the COUNT <= left sanity check is applied (non-gating diagnostic, issue #4740)" \
+  "the deferral warning is VERBATIM with left=5 != COUNT=2 and foreign=2 != others=1"
+assert_contains "$OUT" "deferred sweep: 2 counted; the end-sweep deferred to last-suite-standing (other_suites=1), so left=5 is not an authoritative bound for this suite's residue" \
+  "the deferred pass line is VERBATIM with left=5 != COUNT=2"
+
 echo
 # A LOST case must not be indistinguishable from success: deleting a case
 # leaves FAIL=0 and merely a LOWER count, so the count is pinned too.
-expected_assertions=167
+expected_assertions=186
 if [ "$PASS" -eq "$expected_assertions" ]; then
   PASS=$((PASS + 1))
   echo "  ✅ assertion count pinned at $expected_assertions (a lost case is not a green run)"
