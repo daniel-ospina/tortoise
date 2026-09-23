@@ -2011,3 +2011,77 @@ def test_partial_init_cleanup_reclaims_the_orphaned_server(tmp_path):
 
     with contextlib.suppress(Exception):
         proj.db._t_close()
+
+
+# ── #4879: a DEAD recorded socket must not be replayed ────────────────────
+#
+# redislite's `RedisMixin._is_redis_running()` validates only three things:
+# the `<db>.settings` registry file exists, the recorded `pidfile` exists, and
+# that pid is a live process. It NEVER validates the recorded `unixsocket`,
+# and `_load_setting_registry()` then assigns
+# `self.socket_file = settings['unixsocket']` unconditionally. So when the
+# registry + pidfile survive but the socket file is gone (with a live pid),
+# the predicate reads True, the DEAD path is replayed, the construction ping
+# connects to it, and the caller dies with
+#     redis.exceptions.ConnectionError: Error 2 connecting to
+#     /tmp/tmpXXXX/redis.socket. No such file or directory.
+# That is the deterministic main-branch failure of
+# `tests/test_pack_state.py::TestBackfillScript::test_apply_writes_to_introspection_read_target`
+# — the recorded socket belonged to a PREVIOUS construction. The #4487
+# `RedisMixin.__init__` patch in `tortoise/embedded_lifecycle.py` is extended
+# to also wrap `_is_redis_running`, so "a redis is running" additionally
+# requires the recorded socket to exist. Returning False routes `__init__`
+# into redislite's existing `else: _create_redis_directory_tree()` branch,
+# which starts a fresh server and socket — no new control flow is needed.
+
+
+def test_dead_recorded_socket_is_not_replayed(tmp_path):
+    """#4879: a registry + LIVE pid whose recorded ``unixsocket`` is GONE must
+    not be replayed — construction must start a fresh embedded server.
+
+    The state is built directly, with no dependence on cross-test ordering:
+    this test writes the registry and pidfile, the pid is this live test
+    process, and the recorded socket path is deliberately never created.
+    RED mutation: drop ``_install_dead_socket_guard`` and construction raises
+    the ``Error 2 connecting to .../redis.socket. No such file or directory``
+    above.
+    """
+    import json as _json
+    import shutil
+    import tempfile
+
+    # The recorded socket path must be SHORT enough for AF_UNIX: macOS rejects
+    # paths over ~104 bytes with ENAMETOOLONG, which would mask the ENOENT this
+    # bug actually produces. pytest's tmp_path is often that long, so the dead
+    # socket lives in its own short temp dir (the same shape as redislite's
+    # own /tmp/tmpXXXX/redis.socket).
+    sock_dir = tempfile.mkdtemp(prefix="t4879_")
+    db_path = tmp_path / "dead_socket_replay.db"
+    dbfilename = db_path.name
+    registry = tmp_path / (dbfilename + ".settings")
+    dead_socket = os.path.join(sock_dir, "redis.socket")  # never created
+    pidfile = tmp_path / "redis.pid"
+    pidfile.write_text(str(os.getpid()))  # a genuinely LIVE pid
+    registry.write_text(_json.dumps({
+        "pidfile": str(pidfile),
+        "unixsocket": dead_socket,
+        "dbdir": str(tmp_path),
+        "dbfilename": dbfilename,
+    }))
+    assert os.path.exists(str(pidfile))
+    assert not os.path.exists(dead_socket), "the recorded socket must be DEAD"
+
+    db = None
+    try:
+        db = FalkorDB(str(db_path))
+        assert db.client.ping(), "a fresh embedded server must answer"
+        sock = db.client.socket_file
+        assert sock and os.path.exists(sock), (
+            "#4879: construction must leave a live socket behind")
+        assert sock != dead_socket, (
+            "#4879: the DEAD recorded socket path was replayed")
+    finally:
+        if db is not None:
+            with contextlib.suppress(Exception):
+                db._t_close()
+        shutil.rmtree(sock_dir, ignore_errors=True)

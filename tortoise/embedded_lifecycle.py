@@ -1598,8 +1598,81 @@ def _install_owner_record_patch() -> None:
     RedisMixin._tortoise_owner_record_patch = True
 
 
+# ── #4879: a DEAD recorded socket must not be replayed ────────────────────
+#
+# redislite's `RedisMixin._is_redis_running()` answers "is a server here?"
+# from THREE checks only (client.py ~305-330): the `<db>.settings` registry
+# exists, the recorded `pidfile` exists, and that pid is live. It never
+# validates the recorded `unixsocket`, and `_load_setting_registry()` (~353-
+# 378) then assigns `self.socket_file = settings['unixsocket']`
+# unconditionally. So a registry + pidfile that SURVIVE a previous
+# construction — with a still-live pid — while the socket FILE is gone makes
+# the predicate True: the dead path is replayed, `_wait_for_server_start()`
+# pings it, and the caller dies with the deterministic main-branch failure
+#     redis.exceptions.ConnectionError: Error 2 connecting to
+#     /tmp/tmpXXXX/redis.socket. No such file or directory.
+# (tests/test_pack_state.py::TestBackfillScript::test_apply_writes_to_introspection_read_target,
+# where the recorded socket belonged to a PREVIOUS construction).
+#
+# Extend the SAME redislite patch seam as #4487 (which wraps
+# `RedisMixin.__init__`) to also wrap `_is_redis_running`, so "a redis is
+# running" additionally requires the recorded socket to exist. Returning
+# False routes `__init__` into redislite's own
+# `else: _create_redis_directory_tree()` branch — a fresh server and socket —
+# so no redislite control flow is added here.
+_ORIGINAL_REDISLITE_IS_RUNNING = None
+
+
+def _install_dead_socket_guard() -> None:
+    """#4879: require the recorded socket to exist before replaying it (once).
+
+    Wraps `RedisMixin._is_redis_running`. The ORIGINAL predicate stays
+    authoritative for "is there a live server"; this adds only the socket-file
+    existence requirement the original omits. FAIL-CLOSED and never raises: an
+    unreadable or unparseable registry reads as False (start fresh) rather than
+    propagating — the patch must never break construction.
+    """
+    global _ORIGINAL_REDISLITE_IS_RUNNING
+    try:
+        from redislite.client import RedisMixin
+    except Exception:  # redislite absent — nothing to patch
+        return
+    if getattr(RedisMixin, "_tortoise_dead_socket_guard", False):
+        return
+    original = RedisMixin._is_redis_running
+    _ORIGINAL_REDISLITE_IS_RUNNING = original
+
+    def _is_redis_running(self):
+        # The original predicate's own `json.load` raises on an unparseable
+        # registry, so the whole read is inside the fail-closed guard. When it
+        # returns True the registry has already been read once; re-reading it
+        # here is the only way to reach the `unixsocket` the original ignores.
+        import json as _json
+        try:
+            if not original(self):
+                return False
+            registry = getattr(self, "settingregistryfile", None)
+            if not registry:
+                return False
+            with open(registry) as file_handle:
+                settings = _json.load(file_handle)
+        except Exception:
+            return False
+        sock = settings.get("unixsocket")
+        if sock:
+            # A recorded socket that is GONE under a live pid proves the
+            # registry is stale (the server is not this construction's) —
+            # never replay it; let `__init__` start a fresh server instead.
+            return os.path.exists(sock)
+        return True
+
+    RedisMixin._is_redis_running = _is_redis_running
+    RedisMixin._tortoise_dead_socket_guard = True
+
+
 # Installed at import, at the END of the module so `record_owner` and
 # `owner_socket_of` are defined first. `tortoise/__init__.py` imports this
 # module before it defines the guarded `FalkorDB`, so the patch is always in
 # place before any tortoise construction.
 _install_owner_record_patch()
+_install_dead_socket_guard()
