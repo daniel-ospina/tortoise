@@ -152,16 +152,13 @@ HEADLESS_FIRABLE: dict[str, bool] = {
 #:
 #: Pi's entry is deliberately SCOPED ("not firable by this command") and
 #: PLAIN TEXT (it is printed verbatim into a report line).  The over-broad
-#: absolutes it replaced — each denying that this seam could be executed or
-#: fired headlessly, or that any headless entry point existed — were false: the
-#: seam's handlers are fired headlessly by its own suite, and `pi -p` is
+#: absolutes — each denying that this seam could be executed or fired
+#: headlessly, or that any headless entry point existed — are false about Pi:
+#: the seam's handlers are fired headlessly by its own suite, and `pi -p` is
 #: non-interactive.  A test pins the absence of those phrases from the PI
 #: RULING's own text — the report string, this ruling, the enum, and the module
 #: docstring — and deliberately NOT from the whole module: one of the phrases is
-#: TRUE of Cursor (this dict's ``cursor`` entry says so), so a module-wide ban
-#: reddened this Pi-honesty gate for an accurate sentence about a different
-#: harness and forced its rewording — the disclosure-accuracy defect #4620
-#: exists to prevent
+#: TRUE of Cursor (this dict's ``cursor`` entry says so)
 #: (`tests/test_session_verify.py::test_pi_is_honestly_unverifiable`).
 UNVERIFIABLE_REASON: dict[str, str] = {
     "cursor": (

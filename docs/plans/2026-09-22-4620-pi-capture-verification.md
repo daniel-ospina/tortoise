@@ -119,45 +119,19 @@ ambient credential (`_scrubbed_env`), no real spool (explicit `spoolDir`).
 
 **Intent:** Remove the absolute over-claim that restates the stale premise; replace it with a **scoped**
 statement that neither over- nor under-claims.
-**Acceptance:** `test_pi_is_honestly_unverifiable` passes with the new assertions; the pin fails if the
-reason stops naming the suite / the residual, or if **any** of the banded absolutes returns **anywhere**
-in `tortoise/session_verify.py` — the reason, the `HEADLESS_FIRABLE` ruling comment, the enum, or the
-module docstring. The phrases are reserved for the Pi ruling, so the module states them about no
-harness it can actually fire.
+**Acceptance:** `test_pi_is_honestly_unverifiable` passes with the new assertions. The pin's exact
+scope — the text it scans and how it joins wrapped comment lines — is defined by the shipped test in
+`tests/test_session_verify.py`, which is the source of truth; it is deliberately not restated here.
 
 **Files:**
 - Modify: `tortoise/session_verify.py` (`UNVERIFIABLE_REASON["pi"]`, the `HEADLESS_FIRABLE` comment, the module-docstring sentence)
 - Modify: `tests/test_session_verify.py` (`test_pi_is_honestly_unverifiable`)
 **Steps (TDD):**
-1. **Red:** in `test_pi_is_honestly_unverifiable` (its final assert already uses
-   `report["links"]["installed"]["detail"]` — bind `detail = report["links"]["installed"]["detail"]`
-   and keep the existing `"extension" in detail`), add:
-   ```python
-   assert "tortoise-capture.test.ts" in detail
-   assert "tests/test_pi_capture_hooks.py" in detail
-   assert "installed artifact" in detail
-   assert "manual-only" in detail
-   assert "not firable by this command" in detail
-   absolutes = (
-       "cannot be executed headlessly",
-       "cannot be fired headlessly",
-       "no headless trigger",
-   )
-   for phrase in absolutes:
-       assert phrase not in detail, phrase
-   # the WHOLE module, not a line filter: a line-local scan let a wrapped
-   # continuation line (the docstring's honesty paragraph) carry an absolute
-   # unscanned — the sentence the pin was written for:
-   # `inspect` is imported at the TOP of the test module; the module under test
-   # is bound INSIDE this test (`from tortoise import session_verify as _sv`) —
-   # `session_verify` is not a module-level name in the shipped file:
-   source = inspect.getsource(_sv)
-   assert "def resolve_install_root" in source, "module source not read — pin is vacuous"
-   assert "HEADLESS_FIRABLE" in source, "module source truncated — pin is vacuous"
-   for phrase in absolutes:
-       assert phrase not in source, phrase
-   ```
-   RED against the current string.
+1. **Red:** in `test_pi_is_honestly_unverifiable`, bind
+   `detail = report["links"]["installed"]["detail"]` (keeping the existing `"extension" in detail`)
+   and add the new assertions — including the extension of the pin to the module-side Pi ruling. The
+   shipped test in `tests/test_session_verify.py` is the definition of that assertion set; it is not
+   restated here. RED against the current string.
 2. Reword `UNVERIFIABLE_REASON["pi"]` to state the scoped truth. The shipped text is the source of
    truth — see `tortoise/session_verify.py` → `UNVERIFIABLE_REASON["pi"]`. Constraints it must
    satisfy: it is PLAIN TEXT (printed verbatim into a report line), so it carries **no markdown

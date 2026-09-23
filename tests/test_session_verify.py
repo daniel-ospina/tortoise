@@ -995,6 +995,20 @@ def test_cursor_is_honestly_unverifiable(hosted, setup):
     assert "IDE-only" in report["links"]["installed"]["detail"]
 
 
+def _names_pi(text: str) -> bool:
+    """True when ``text`` names Pi — bare (``pi`` / ``PI``) or possessive
+    (``Pi's``).  A comment block that refers to the Pi ruling only possessively
+    must still be scanned, or a wrapped line can carry a banned absolute
+    unseen (#4620)."""
+    for word in text.split():
+        token = word.strip("`*_.,;:()<>\"'").lower().replace("\u2019", "'")
+        if token.endswith("'s"):
+            token = token[:-2]
+        if token == "pi":
+            return True
+    return False
+
+
 def test_pi_is_honestly_unverifiable(hosted, setup):
     """Pi's seam is an in-process TypeScript extension — not a command this
     verifier can execute.  Installed is UNVERIFIABLE (present, not fired),
@@ -1022,15 +1036,11 @@ def test_pi_is_honestly_unverifiable(hosted, setup):
     # by its own suite (the source seam) and by the installed-artifact probe.
     # Scan the PI RULING's own text, never the whole module.  The phrases are
     # over-broad ABOUT PI, and one of them — "no headless trigger" — is TRUE of
-    # Cursor (`UNVERIFIABLE_REASON["cursor"]` says exactly that), so a
-    # module-wide ban reddened this Pi-honesty gate for an accurate sentence
-    # about a different harness and forced its rewording: the
-    # disclosure-accuracy defect #4620 exists to prevent (#4620 review).  The
-    # ruling lives in the module docstring, the `UNVERIFIABLE_REASON["pi"]`
-    # value, and the comments that state it; another harness's text is out of
-    # scope.  Comment blocks are JOINED before matching so a phrase wrapped
-    # across two `#` lines is still seen — the line-local filter this replaces
-    # missed exactly that.
+    # Cursor (`UNVERIFIABLE_REASON["cursor"]` says exactly that).  The ruling
+    # lives in the module docstring, the `UNVERIFIABLE_REASON["pi"]` value, and
+    # the comments that state it; another harness's text is out of scope.
+    # Comment blocks are JOINED before matching so a phrase wrapped across two
+    # `#` lines is still seen.
     from tortoise import session_verify as _sv
 
     absolutes = (
@@ -1060,10 +1070,6 @@ def test_pi_is_honestly_unverifiable(hosted, setup):
             blocks.append(" ".join(current))
         return blocks
 
-    def _names_pi(text: str) -> bool:
-        return any(word.strip("`*_.,;:()<>\"'").lower() == "pi"
-                   for word in text.split())
-
     doc = _sv.__doc__ or ""
     # Non-vacuity: an empty or truncated read must not pass this pin trivially.
     # Anchor on STABLE identifiers, never on copy this pin does not own — a
@@ -1076,6 +1082,16 @@ def test_pi_is_honestly_unverifiable(hosted, setup):
     for text in [doc, _sv.UNVERIFIABLE_REASON["pi"], *pi_comments]:
         for phrase in absolutes:
             assert phrase not in text, (phrase, text[:90])
+
+
+def test_pi_ruling_matcher_covers_the_possessive():
+    """A comment block whose only Pi reference is the possessive ``Pi's`` must
+    still count as naming the Pi ruling — otherwise a wrapped line carrying a
+    banned absolute is never scanned (#4620)."""
+    assert _names_pi("Pi's seam cannot be executed headlessly")
+    assert _names_pi("PI's seam cannot be fired headlessly")
+    assert _names_pi("must never restate the over-broad absolute about Pi")
+    assert not _names_pi("Cursor's seam cannot be executed headlessly")
 
 
 # ── hermeticity: root resolution is home-scoped, env only where one exists ──
