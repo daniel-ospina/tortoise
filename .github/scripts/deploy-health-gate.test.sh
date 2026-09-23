@@ -214,7 +214,11 @@ echo "2. db.ok never true + readiness 200 → PASSES with a warning (#4771)"
 run_gate "yes" 0 1
 assert_eq "$RC" "0" "exits 0 — db.ok alone no longer fails the run (#4771)"
 assert_contains "$OUT" "::warning::" "emits a loud annotated warning"
-assert_contains "$OUT" "FalkorDB" "names the data plane as the observation"
+# Discriminating on purpose: the pre-#4771 phase-2 error ALSO contains
+# "FalkorDB" ("… — FalkorDB unreachable"), so a bare `FalkorDB` assert would
+# pass under the very regression this case exists to catch (review cycle 1,
+# P2 — verified by mutation). This string exists only in the new warning path.
+assert_contains "$OUT" "FalkorDB data-plane probe" "names the FalkorDB data plane as the observation"
 assert_contains "$OUT" "health/ready 200" "the strongest predicate decides"
 assert_eq "$HEALTH_POLLS" "4" "phase 2 still polled to exhaustion (positive control — a skipped poll cannot warn)"
 
