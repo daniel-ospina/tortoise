@@ -2779,6 +2779,33 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
     return out
 
 
+# #4740: the field set of the session-end hygiene report the CI orphan gate
+# (`.github/scripts/orphan-bound.sh`) consumes. It lives here, with the report
+# builder, as the single source of truth: `tests/conftest.py` imports both
+# instead of redeclaring, and the orphan-bound harness reads this assignment
+# from this file's source. Order is the order the report is built in.
+_HYGIENE_REPORT_FIELDS = ("reaped", "cleared", "left", "before")
+
+
+def _hygiene_report(reaped, cleared, left, before) -> dict:
+    """Build the session-end hygiene report the CI orphan gate consumes (#4740).
+
+    ``cleared`` is the sweep's OWN outcome (see :func:`sweep_until_cleared`),
+    threaded through verbatim and never synthesised here: the gate reds on
+    ``cleared: false`` whatever the count is, so a builder that hardcoded
+    ``True`` would green a deadline-aborted backlog. Keeping the construction
+    out of ``_sweep`` also leaves no local report literal there for a dead
+    branch or a subscript store to bypass (the round-5 pin's hole).
+    """
+    values = {
+        "reaped": reaped,
+        "cleared": cleared,
+        "left": left,
+        "before": before,
+    }
+    return {f: values[f] for f in _HYGIENE_REPORT_FIELDS}
+
+
 def sweep_until_cleared(run_one, deadline, clock=time.monotonic):
     """Drive discover->reap iterations until the backlog clears or the
     deadline passes; return ``(total_acted, cleared)``.

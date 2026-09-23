@@ -4996,3 +4996,53 @@ def test_sweep_until_cleared_truncated_scan_is_not_cleared():
         lambda: _scan_aware([], complete=False), deadline=1030.0,
         clock=lambda: 1000.0)
     assert (total, cleared) == (0, False)
+
+
+def test_sweep_until_cleared_defaults_to_the_real_monotonic_clock():
+    """#4740 review 6: the `clock` default is load-bearing and must be real.
+
+    All four stop-shape cases above inject `clock=`, and production
+    (`tests/conftest.py`) calls the helper with only two positional args — so
+    the default is what the end-sweep actually runs with. A default of
+    `lambda: 0.0` makes `clock() < deadline` always true, so a
+    deadline-aborted sweep reports `cleared=true`, and the CI gate — which
+    reds on `cleared: false` — greens the very backlog the round-4 fix was
+    for. No clock is injected here on purpose.
+    """
+    import inspect
+    import time
+
+    from tortoise.embedded_reaper import sweep_until_cleared
+
+    default = inspect.signature(sweep_until_cleared).parameters["clock"].default
+    assert default is time.monotonic, (
+        f"sweep_until_cleared's clock default must be the real monotonic "
+        f"clock, got {default!r}"
+    )
+    # A deadline already in the past, with the REAL default: the empty
+    # iteration is an already-expired abort, never a cleared backlog.
+    total, cleared = sweep_until_cleared(
+        lambda: _scan_aware([]), deadline=time.monotonic() - 1)
+    assert (total, cleared) == (0, False)
+
+
+def test_hygiene_report_threads_cleared_verbatim():
+    """#4740 review 6: the report builder must use the declared field set AND
+    thread `cleared` through verbatim.
+
+    The CI orphan gate reds on `cleared: false` whatever the count is, so a
+    builder that hardcoded `True` would green a deadline-aborted backlog.
+    This is behavioural — the real module is imported and called — so the AST
+    shapes that passed the round-5 pin (a subscript store, a dead branch
+    around the literal, a tuple reorder) cannot satisfy it.
+    """
+    from tortoise.embedded_reaper import (
+        _HYGIENE_REPORT_FIELDS,
+        _hygiene_report,
+    )
+
+    assert _hygiene_report(0, False, 1, 5)["cleared"] is False
+    assert _hygiene_report(1, True, 13, 22)["cleared"] is True
+    report = _hygiene_report(0, False, 1, 5)
+    assert set(report) == set(_HYGIENE_REPORT_FIELDS)
+    assert tuple(report) == _HYGIENE_REPORT_FIELDS

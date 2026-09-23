@@ -48,12 +48,10 @@ os.environ.setdefault("TORTOISE_TEST_MODE", "1")
 SWEEP_TIME_BUDGET = 30.0
 SWEEP_BATCH_SIZE = 200
 
-# #4740: the session-end sweep report's field set — a single source of truth
-# the orphan-bound harness reads from THIS file's source and pins against the
-# gate's parser (.github/scripts/orphan-bound.test.sh). A rename here without
-# the gate following must red the harness, not ship a report the gate silently
-# drops. Order is the order the report dict is built in.
-_HYGIENE_REPORT_FIELDS = ("reaped", "cleared", "left", "before")
+# #4740: the session-end sweep report's field set is owned by the report
+# builder in `tortoise/embedded_reaper.py` (`_HYGIENE_REPORT_FIELDS`), which
+# this conftest imports. The orphan-bound harness reads the contract and the
+# builder from that module; there is no second declaration here to drift.
 
 # #1371: opt-in fast interpreter-exit close for ephemeral embedded test
 # servers (tortoise/embedded_lifecycle.py) — kills the ~10-15 min atexit
@@ -415,6 +413,7 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
 
     from tortoise.embedded_reaper import (
         ACTIVE_SUITES_DIR,
+        _hygiene_report,
         _ReaperLock,
         _run_sweep,
         active_suite_markers,
@@ -553,15 +552,12 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
                     # name an unmeasured residue, not read a timeout/missing-
                     # pgrep as "nothing left" (#4740). Never raises.
                     left = _live_count_or_none()
-                    # Build the report from the declared field set so the
-                    # harness's contract pin and this dict cannot drift.
-                    _values = {
-                        "reaped": total,
-                        "cleared": cleared,
-                        "left": left,
-                        "before": before,
-                    }
-                    return {_f: _values[_f] for _f in _HYGIENE_REPORT_FIELDS}
+                    # Build the report with the module-level builder (#4740),
+                    # so there is no local report literal here for a dead
+                    # branch or subscript store to bypass: `cleared` is
+                    # threaded straight from `sweep_until_cleared`, and the
+                    # field set lives with the builder.
+                    return _hygiene_report(total, cleared, left, before)
                 finally:
                     if prev is None:
                         os.environ.pop("TORTOISE_REAPER_MIN_UPTIME", None)

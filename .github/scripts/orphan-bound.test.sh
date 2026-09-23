@@ -51,19 +51,32 @@
 #     the accounting identity skipped and only the `COUNT <= left` direction
 #     applied (case 37); a deferred `COUNT` above even the mixed-population
 #     `left` still REDs (case 38).
-#   * the conftest↔gate report contract (case 39): the field set declared by
-#     `_HYGIENE_REPORT_FIELDS` in `tests/conftest.py` (read from its source
-#     with `ast` — never imported or run) must be named by the gate's parser
-#     and carried by the harness's own canonical fixture, so a conftest rename
+#   * the report↔gate contract (case 39): the field set declared by
+#     `_HYGIENE_REPORT_FIELDS` in `tortoise/embedded_reaper.py` (read from its
+#     source with `ast` — never imported or run) must be named by the gate's
+#     parser and carried by the harness's own canonical fixture, so a rename
 #     cannot leave the harness green while the gate silently drops a field.
-#     The SAME ast pass (case 39) pins the PRODUCER: in `_sweep`'s body the
-#     name `cleared` must have exactly one binding, from
-#     `sweep_until_cleared(...)`, and the report dict must carry that NAME —
-#     so a regression to `cleared = True` (or `= not acted`) after the call
-#     cannot green the gate by discarding the honest value.
+#     The SAME case pins the PRODUCER in `tests/conftest.py`: `_sweep` must
+#     build its report ONLY by calling `_hygiene_report(...)` — there must be
+#     no local dict literal carrying a `"cleared"` key (the round-5 shape a
+#     dead branch or subscript store bypassed), exactly one builder call, and
+#     its `cleared` argument must be the NAME the `sweep_until_cleared(...)`
+#     unpack bound in position 1 (never a literal, never a reordered target).
+#     The BUILDER's own behaviour (that it threads `cleared` verbatim) is
+#     pinned behaviourally in `tests/test_reaper.py`, where the real module is
+#     imported — no AST shape trick can satisfy that.
 #   * magnitude: an 18+ digit `--count` (case 32) and an 18+ digit `left` in
 #     the report (case 33) both exit 2 as usage errors instead of reaching the
 #     PASS line.
+#   * the count-branch boundaries (cases 41): the structural-zero bounds
+#     (`no_embedded_servers`, `skipped=no-pytest`) and the `left=null`
+#     COUNT==0 carve-out are pinned at COUNT=1 — the first count past each
+#     bound — so `-gt 0` cannot slide to `-gt 1`, `-gt 2`, or `-le 3` and
+#     silently tolerate a residue that contradicts the bound's own comment.
+#   * rc=1 is NOT a watchdog kill (case 42): `is_kill_rc` downgrades only
+#     {124,137,2} for #1371, so a leak red on a merely-failing test run stays
+#     RED — `1` in the kill set would silently warn every leak on the most
+#     common non-zero rc.
 #
 # MUTATION PINS (verified by mutating the script, not the fixture): cases 3, 4,
 # 5, 6, 7, 9, 10, 11, 12, 16, 17, 19, 21 each fail if their branch's verdict
@@ -75,7 +88,8 @@
 # removed or weakened (the `probe_failed` COUNT==0 carve-out dropped, the
 # `cleared=false` red removed, the deferral warning or its `COUNT <= left`
 # rescue removed, the mixed-population identity made authoritative again, the
-# contract check neutered, or `_sweep`'s `cleared` rebindable from a literal).
+# contract check neutered, `_sweep`'s report built outside `_hygiene_report`,
+# a count-branch bound widened past 0, or rc=1 added to the kill set).
 # A case that merely restates a default would not catch its own removal.
 #
 # The assertion count is PINNED (see the summary): a lost case must not be
@@ -411,14 +425,15 @@ echo "38. a deferred COUNT above even the mixed-population left still REDs"
 run_gate 3 0 deferred.json
 assert_eq "$RC" "1" "exits 1 when the count exceeds even the deferred measurement"
 
-echo "39. the conftest↔gate report contract (single source of truth)"
-# #4740: tests/conftest.py declares the report field set in
+echo "39. the report↔gate contract (single source of truth) + the _sweep producer"
+# #4740: tortoise/embedded_reaper.py owns the report field set in
 # _HYGIENE_REPORT_FIELDS; the gate's parser must name every field, and this
-# harness's canonical fixture must carry exactly that set. The conftest source
+# harness's canonical fixture must carry exactly that set. The reaper source
 # is PARSED with ast — never imported or run. The orphan_bound_scripts CI
-# trigger lists tests/conftest.py for exactly this case.
+# trigger lists tortoise/embedded_reaper.py for exactly this case.
 CONFTEST="$SCRIPT_DIR/../../tests/conftest.py"
-FIELDS="$(python3 - "$CONFTEST" <<'PY' 2>/dev/null
+REAPER="$SCRIPT_DIR/../../tortoise/embedded_reaper.py"
+FIELDS="$(python3 - "$REAPER" <<'PY' 2>/dev/null
 import ast
 import sys
 
@@ -436,24 +451,26 @@ for node in tree.body:
 PY
 )"
 assert_eq "$FIELDS" "reaped cleared left before" \
-  "reads the report field set from conftest's own source"
+  "reads the report field set from the reaper's own source"
 MISSING=""
 for _field in $FIELDS; do
   grep -q "\"$_field\"" "$GATE" || MISSING="$MISSING $_field"
 done
-assert_eq "$MISSING" "" "the gate's parser names every conftest report field"
+assert_eq "$MISSING" "" "the gate's parser names every declared report field"
 FIXTURE_KEYS="$(python3 -c 'import json,sys; print(" ".join(sorted(json.load(open(sys.argv[1]))["sweep"])))' "$WORK/report14.json")"
 assert_eq "$FIXTURE_KEYS" "$(printf '%s\n' $FIELDS | sort | tr '\n' ' ' | sed 's/ *$//')" \
   "the harness's canonical fixture carries exactly the declared field set"
 
-# The SAME source, pinned for the PRODUCER rather than the field set: `_sweep`
-# must thread the helper's own `cleared` into the report. The gate cases above
-# pin the CONSUMER (`cleared: false` reds) and tests/test_reaper.py pins the
-# helper's stop shapes — but nothing pinned that `_sweep` binds `cleared` FROM
-# the helper, so a regression to `cleared = True` (or `= not acted`) after the
-# call would green a deadline-aborted backlog invisibly (#4740 review 5). Read
-# `_sweep`'s AST: `cleared` must have exactly ONE Store binding and it must be
-# the `sweep_until_cleared(...)` unpack; the report dict must carry that NAME.
+# The PRODUCER: `_sweep` must build its report by CALLING `_hygiene_report`
+# with the helper's own result — not by reintroducing a local dict. Round 5
+# pinned the old local dict's SHAPE (`stores=1 helper=1 report=1`), which M5
+# (a subscript store), M6 (a reordered unpack) and M19 (a dead branch keeping
+# the pinned dict while the live branch hardcodes `cleared`) all passed. The
+# construction now lives in the builder (pinned behaviourally in
+# tests/test_reaper.py), so what this reads is: NO local dict carrying a
+# `"cleared"` key (no dead literal to pin), exactly ONE `_hygiene_report(...)`
+# call, and its `cleared` argument is the NAME the `sweep_until_cleared(...)`
+# unpack bound in position 1.
 PRODUCER="$(python3 - "$CONFTEST" <<'PY' 2>/dev/null
 import ast
 import sys
@@ -473,15 +490,19 @@ if fn is None:
     print("no-sweep-fn")
     raise SystemExit(0)
 
-stores = [
-    n
-    for n in ast.walk(fn)
-    if isinstance(n, ast.Name)
-    and n.id == "cleared"
-    and isinstance(n.ctx, ast.Store)
-]
+# Any dict literal in `_sweep` carrying `"cleared"` is the bypass shape.
+dicts = sum(
+    1
+    for node in ast.walk(fn)
+    if isinstance(node, ast.Dict)
+    and any(
+        isinstance(k, ast.Constant) and k.value == "cleared"
+        for k in node.keys
+    )
+)
 
-helper = 0
+# The NAME bound by the 2nd element of the `sweep_until_cleared(...)` unpack.
+helper_cleared = None
 for node in ast.walk(fn):
     if not isinstance(node, ast.Assign):
         continue
@@ -492,31 +513,38 @@ for node in ast.walk(fn):
     ):
         continue
     for tgt in node.targets:
-        helper += len(
-            [
-                n
-                for n in ast.walk(tgt)
-                if isinstance(n, ast.Name)
-                and n.id == "cleared"
-                and isinstance(n.ctx, ast.Store)
-            ]
-        )
+        if isinstance(tgt, ast.Tuple) and len(tgt.elts) == 2:
+            helper_cleared = tgt.elts[1]
 
-report = any(
-    isinstance(k, ast.Constant)
-    and k.value == "cleared"
-    and isinstance(v, ast.Name)
-    and v.id == "cleared"
-    for node in ast.walk(fn)
-    if isinstance(node, ast.Dict)
-    for k, v in zip(node.keys, node.values)
-)
+calls = [
+    n
+    for n in ast.walk(fn)
+    if isinstance(n, ast.Call)
+    and isinstance(n.func, ast.Name)
+    and n.func.id == "_hygiene_report"
+]
+threads = 0
+if len(calls) == 1:
+    params = ("reaped", "cleared", "left", "before")
+    call = calls[0]
+    cleared_arg = None
+    if len(call.args) > params.index("cleared"):
+        cleared_arg = call.args[params.index("cleared")]
+    else:
+        for kw in call.keywords:
+            if kw.arg == "cleared":
+                cleared_arg = kw.value
+    threads = int(
+        isinstance(cleared_arg, ast.Name)
+        and isinstance(helper_cleared, ast.Name)
+        and cleared_arg.id == helper_cleared.id
+    )
 
-print(f"stores={len(stores)} helper={helper} report={int(report)}")
+print(f"calls={len(calls)} threads={threads} dicts={dicts}")
 PY
 )"
-assert_eq "$PRODUCER" "stores=1 helper=1 report=1" \
-  "_sweep binds cleared only from sweep_until_cleared and reports that NAME"
+assert_eq "$PRODUCER" "calls=1 threads=1 dicts=0" \
+  "_sweep builds its report only via _hygiene_report, threading the unpacked cleared"
 
 echo "40. left=null with cleared=FALSE REDs even at COUNT=0 (an exhausted budget is not a diagnostic)"
 # #4740 review 5: the COUNT==0 carve-out (case 34) exists only for a sweep that
@@ -531,10 +559,41 @@ run_gate 0 124 leftnull_aborted.json
 assert_eq "$RC" "0" "a watchdog kill still downgrades it (rc=124)"
 assert_contains "$OUT" "::warning::" "emits a warning under a kill"
 
+echo "41. the count-branch boundaries are exact (COUNT=1 is the first red past each zero bound)"
+# #4740 review 6: fixtures only used COUNT=0 and COUNT>=3, so `-gt 0` could
+# slide to `-gt 1`/`-gt 2`, and the `left=null` COUNT==0 carve-out to `-le 3`,
+# with the harness still green. COUNT=1 is the first count past each bound.
+run_gate 1 0 none.json
+assert_eq "$RC" "1" "no_embedded_servers: COUNT=1 REDs (the bound is structural zero, not a tolerance)"
+assert_contains "$OUT" "no embedded server was ever running" "names the contradiction"
+run_gate 1 0 nopytest.json
+assert_eq "$RC" "1" "skipped=no-pytest: COUNT=1 REDs (nothing was spawned, so nothing may remain)"
+assert_contains "$OUT" "nothing swept" "names the unswept population"
+run_gate 1 0 leftnull.json
+assert_eq "$RC" "1" "left=null: COUNT=1 REDs (the COUNT==0 carve-out is exact, not widened to 3)"
+assert_contains "$OUT" "probe FAILED" "names the failed sweep-side probe"
+
+echo "42. rc=1 (tests failed) is NOT a watchdog kill — red arms stay RED"
+# #4740 review 6: `1` is the ordinary "tests failed" rc, not a #1371 kill.
+# If it joined the kill set, every leak red on a merely-failing run would print
+# `::warning::` and the step would PASS.
+run_gate 1 1 none.json
+assert_eq "$RC" "1" "no_embedded_servers REDs at rc=1"
+assert_contains "$OUT" "::error::" "emits an error, not a warning"
+assert_not_contains "$OUT" "::warning::" "does not downgrade a leak on a failing run"
+run_gate 14 1 budget.json
+assert_eq "$RC" "1" "cleared=false REDs at rc=1"
+assert_contains "$OUT" "::error::" "emits an error, not a warning"
+assert_not_contains "$OUT" "::warning::" "does not downgrade an exhausted budget on a failing run"
+run_gate 15 1 report14.json
+assert_eq "$RC" "1" "COUNT > left REDs at rc=1"
+assert_contains "$OUT" "::error::" "emits an error, not a warning"
+assert_not_contains "$OUT" "::warning::" "does not downgrade a count mismatch on a failing run"
+
 echo
 # A LOST case must not be indistinguishable from success: deleting a case
 # leaves FAIL=0 and merely a LOWER count, so the count is pinned too.
-expected_assertions=120
+expected_assertions=135
 if [ "$PASS" -eq "$expected_assertions" ]; then
   PASS=$((PASS + 1))
   echo "  ✅ assertion count pinned at $expected_assertions (a lost case is not a green run)"

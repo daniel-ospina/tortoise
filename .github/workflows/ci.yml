@@ -294,8 +294,11 @@ jobs:
                   isfile(".github/workflows/ci.yml"),
                   # #4740: tests/conftest.py defines the JSON contract the gate
                   # parses (the session-end sweep's report) — a conftest-only
-                  # contract change must re-run the harness.
+                  # contract change must re-run the harness. The report field
+                  # set and its builder live in tortoise/embedded_reaper.py
+                  # (conftest imports them), so that module is a trigger too.
                   isfile("tests/conftest.py"),
+                  isfile("tortoise/embedded_reaper.py"),
               ),
               # dashboard-e2e (#2166/#2178): the two-server keys-table suite
               # (mixed fixture — durable-only render regression). Triggers on
