@@ -49,6 +49,34 @@
  * load NEW tag origins at any time — adding a tag means updating this constant
  * in the same change.
  *
+ * THE PLATFORM INJECTS A SCRIPT WE DID NOT WRITE
+ * ----------------------------------------------
+ * Cloudflare Web Analytics is enabled for this zone, so the EDGE injects
+ * `https://static.cloudflareinsights.com/beacon.min.js/<version>` into HTML
+ * responses. The trigger is the REQUEST's `Accept` header, not the User-Agent: a
+ * plain `curl` sends a wildcard `Accept` and gets the un-injected document, while
+ * `curl -H 'Accept: text/html' https://premiselabs.co/` shows the tag. That is
+ * the cheap pre-merge detector for this whole class — a local
+ * `wrangler pages dev` preview never sees it, because the preview is not the
+ * edge. The first version of this change shipped a policy that blocked it, and
+ * only the post-merge `verify-legal` suite (production, real browser, asserting
+ * zero console errors) noticed: 8 failures.
+ *
+ * What the SRI pin does and does NOT buy. The injected tag is SRI-pinned by the
+ * platform (`integrity="sha512-…" crossorigin="anonymous"`) and version-named,
+ * so the platform's OWN tag cannot be silently swapped for a modified build. It
+ * does NOT constrain this CSP entry: `script-src https://static.cloudflareinsights.com`
+ * is an ORIGIN allowance and CSP never consults a hash, so the entry also admits
+ * any OTHER script served from that origin — that widening is the residual
+ * recorded in the #3525 plan doc. Nor is the pin ours to rely on: it is emitted
+ * by the edge, so if Cloudflare's injection format changes, this policy becomes
+ * a blanket third-party-script allowance with no repo change and no failing test.
+ *
+ * The beacon reports to `https://cloudflareinsights.com/cdn-cgi/rum`, hence the
+ * `connect-src` entry — which has no hash mechanism at all. Every policy below
+ * names both, and `securityHeaders.test.js` fails if one does not, because the
+ * failure mode is silent (analytics lost, plus a console error on a live page).
+ *
  * The guard `src/securityHeaders.test.js` asserts each constant is byte-identical
  * to its `_headers` counterpart, so the duplication above cannot drift.
  */
@@ -62,11 +90,11 @@ const csp = (...directives: string[]): string => directives.join("; ");
  */
 export const RELAXED_CSP = csp(
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://connect.facebook.net https://challenges.cloudflare.com",
+  "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com https://cdnjs.cloudflare.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://connect.facebook.net https://challenges.cloudflare.com",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: https:",
   "font-src 'self' data:",
-  "connect-src 'self' https://*.supabase.co https://api.premiselabs.co https://us.i.posthog.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://www.google-analytics.com https://region1.google-analytics.com https://connect.facebook.net https://www.facebook.com https://challenges.cloudflare.com",
+  "connect-src 'self' https://cloudflareinsights.com https://*.supabase.co https://api.premiselabs.co https://us.i.posthog.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://www.google-analytics.com https://region1.google-analytics.com https://connect.facebook.net https://www.facebook.com https://challenges.cloudflare.com",
   "frame-src https://challenges.cloudflare.com",
   "object-src 'none'",
   "base-uri 'none'",
@@ -77,11 +105,11 @@ export const RELAXED_CSP = csp(
 /** The dashboard SPA document (`/`, `/team`, `/team/`, `/index.html`). */
 export const STRICT_CSP = csp(
   "default-src 'self'",
-  "script-src 'self'",
+  "script-src 'self' https://static.cloudflareinsights.com",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "font-src 'self' data:",
-  "connect-src 'self'",
+  "connect-src 'self' https://cloudflareinsights.com",
   "object-src 'none'",
   "base-uri 'none'",
   "frame-ancestors 'none'",
@@ -91,11 +119,11 @@ export const STRICT_CSP = csp(
 /** The `/admin` console shell — `STRICT_CSP` plus the Supabase origins it uses. */
 export const ADMIN_CSP = csp(
   "default-src 'self'",
-  "script-src 'self'",
+  "script-src 'self' https://static.cloudflareinsights.com",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: https:",
   "font-src 'self' data:",
-  "connect-src 'self' https://*.supabase.co wss://*.supabase.co",
+  "connect-src 'self' https://cloudflareinsights.com https://*.supabase.co wss://*.supabase.co",
   "object-src 'none'",
   "base-uri 'none'",
   "frame-ancestors 'none'",
@@ -106,17 +134,20 @@ export const ADMIN_CSP = csp(
  * `STRICT_CSP` with a per-response nonce for the `/auth/confirm` interstitial —
  * the one self-rendered HTML page in the dashboard, and the one that can be
  * nonce-gated because it has no inline event handlers. This is the treatment the
- * MCP consent page already uses (`tortoise/hosted_api.py`), and it is stricter:
- * the consent page also allows a CDN, this page needs no external script.
+ * MCP consent page already uses (`tortoise/hosted_api.py`). It is NOT nonce-only:
+ * like the consent page it carries one extra host beside the nonce, and here that
+ * host is the platform-injected beacon origin (every policy must carry it — see
+ * the header). The page AUTHORS one inline script, and that one still needs the
+ * nonce; any script served from the beacon origin would run here un-nonced.
  */
 export function strictCspWithNonce(nonce: string): string {
   return csp(
     "default-src 'self'",
-    `script-src 'nonce-${nonce}'`,
+    `script-src 'nonce-${nonce}' https://static.cloudflareinsights.com`,
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:",
     "font-src 'self' data:",
-    "connect-src 'self'",
+    "connect-src 'self' https://cloudflareinsights.com",
     "object-src 'none'",
     "base-uri 'none'",
     "frame-ancestors 'none'",
