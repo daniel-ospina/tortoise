@@ -1379,9 +1379,9 @@ def test_walk_without_a_session_is_an_instrument_error_and_writes_nothing(monkey
     assert ("POST", "/api/v1/team/keys") not in [(c[0], c[1]) for c in ctx.request.calls]
     assert not any(c[0] == "POST" for c in ctx.request.calls)
     assert obs.session["detail"].startswith("401")
-    # the recorded teardown STATUS, not mere truthiness. This test runs with
-    # teardown enabled and no `--keep-org`, and this exit precedes the cleanup
-    # baseline, so the recorded status is `not_reached` (#4843).
+    # the recorded teardown STATUS, not mere truthiness: this test passes no
+    # `--keep-org`, so the status recorded for this pre-baseline exit is
+    # `not_reached` (#4843).
     assert obs.teardown["status"] == mod.TEARDOWN_NOT_REACHED
 
 
@@ -1479,9 +1479,9 @@ def test_walk_reports_a_200_but_unparseable_projection_as_an_instrument_error(
 # teardown STATUS, not merely that `obs.teardown` is truthy: `not_reached`
 # satisfies truthiness.
 #
-# The last two are PRE-create: no org can exist yet, so with teardown enabled
-# and no `--keep-org` (both are the case in these tests) the recorded status is
-# the clean `TEARDOWN_NOT_REACHED` rather than a residue alarm.
+# The last two are PRE-create: no org can exist yet, and these tests pass no
+# `--keep-org`, so the recorded status is the clean `TEARDOWN_NOT_REACHED`
+# rather than a residue alarm.
 
 def test_the_teardown_statuses_are_classified_as_residue_or_clean() -> None:
     """The classifier the per-exit assertions rest on: a `baseline_unavailable`
@@ -1506,11 +1506,12 @@ def _assert_not_the_generic_error_handler(obs, name: str) -> None:
     through the walk's generic `except Exception` handler, which appends an
     `error` step and returns immediately (so it is always the LAST step).
 
-    DEFENCE IN DEPTH, not the discriminator. At these exits the verdict/reason
-    assertions already fail on a marker raise, because that handler leaves
-    `obs.reason` at its fail-closed default. This pin exists so the test stays
-    discriminating if the handler is ever made to set `failure_reason` — which
-    would give it a verdict of the same shape as a product finding.
+    DEFENCE IN DEPTH, not the discriminator. Each of these tests already fails
+    on a marker raise without it — through a verdict or reason assertion, or (at
+    the claim-failure exit, which sets its own reason before returning) through
+    the step-identity assertion. It exists so the test stays discriminating if
+    the handler is ever made to set `failure_reason`, which would give it a
+    verdict of the same shape as a product finding.
     """
     assert not [s for s in obs.steps if s.name == "error"], (
         f"exited through the error handler, not the {name!r} step: {obs.steps}")
@@ -1602,9 +1603,9 @@ def test_walk_reports_a_signup_cta_that_is_not_hittable_as_a_product_finding(
         monkeypatch, tmp_path):
     """A clean browser cannot reach the signup CTA. This runs BEFORE any session
     is resolved, so it is a PRODUCT finding (exit 1), not an instrument fault.
-    No org can exist yet, and this test runs with teardown enabled and no
-    `--keep-org`, so the recorded status is the clean `not_reached` (which is
-    deliberately NOT a residue state)."""
+    No org can exist yet and this test passes no `--keep-org`, so the recorded
+    status is the clean `not_reached` (which is deliberately NOT a residue
+    state)."""
     obs, _ctx, mod = _run_fake_walk(
         monkeypatch, tmp_path, plan={("GET", "/api/session"): _SESSION_200},
         ui_sequence=[], mcp_tools_call=_MCP_OK, front_door_hittable=False)
@@ -1621,7 +1622,7 @@ def test_walk_without_the_driver_records_a_fail_closed_observation(
     produce a RECORDED, fail-closed observation rather than a traceback — the
     verdict `failed: playwright unavailable`, an instrument exit code, and a
     recorded teardown status of `not_reached` — no browser context ever existed,
-    and this test runs with teardown enabled and no `--keep-org`."""
+    and this test passes no `--keep-org`."""
     obs, _ctx, mod = _run_fake_walk(
         monkeypatch, tmp_path, plan={}, ui_sequence=[], mcp_tools_call=_MCP_OK,
         playwright_available=False)
