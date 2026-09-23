@@ -156,7 +156,7 @@ product.
 
 | Where | What | Count |
 | --- | --- | --- |
-| `tests/test_ship_test_onboarding.py` | Fast pure-Python: the classifier, the page-wide claim sweep, the DOM reader, the server-observation reader, the MCP write-result reader (JSON **and** SSE framing, both tool-error shapes, notification frames), the per-surface verdict seam, the verdict assembly, the session seam (`/api/session` + BFF), the loud-failure guard (session, write, projection, driver) — plus **the real `run_walk` executed against a fake browser**, which pins the call site (which read it uses, with what credential, in what order) rather than grepping for it — **plus the teardown control set**: each threat class of the destructive surface (pre-existing org, foreign name, ambiguity, unreadable baseline, unreadable confirmation, ambiguous candidate, refused delete, residue-vs-clean, verdict conservation both ways, single-exit funnel, every `_finalize` exit executed and status-asserted) | 138 |
+| `tests/test_ship_test_onboarding.py` | Fast pure-Python: the classifier, the page-wide claim sweep, the DOM reader, the server-observation reader, the MCP write-result reader (JSON **and** SSE framing, both tool-error shapes, notification frames), the per-surface verdict seam, the verdict assembly, the session seam (`/api/session` + BFF), the loud-failure guard (session, write, projection, driver) — plus **the real `run_walk` executed against a fake browser**, which pins the call site (which read it uses, with what credential, in what order) rather than grepping for it — **plus the teardown control set**: each threat class of the destructive surface (pre-existing org, foreign name, ambiguity, unreadable baseline, unreadable confirmation, ambiguous candidate, refused delete, residue-vs-clean, verdict conservation both ways, single-writer funnel, every `_finalize` exit executed and status-asserted) | 159 |
 | `tests/e2e/test_ship_test_onboarding.py` | Real-browser, opt-in (`RUN_DASHBOARD_E2E=1`): the three assertions against the deployment's own built bundle, the wire observation that the client issues no `harness-connected` write, and RED/GREEN evidence against a mutated COPY of the real bundle | 8 |
 
 Both suites execute the instrument's **real decision code** (`judge`, the
@@ -168,29 +168,34 @@ path, `--skip-agent-write`, an explicit `--agent-key`, and the teardown control
 set — so the call site is
 behaviourally fixed, not greped. The teardown control set is mutation-checked
 (dropping the baseline set difference, or the create-attempted gate, turns it
-RED). A few *structural* `inspect.getsource` assertions remain for ORDERING that
-the harness does not aim at (that the
+RED). A few *structural* `inspect.getsource` / AST assertions remain for ORDERING
+that the harness does not aim at (that the
 session gate precedes the agent write, that the write-failure check precedes the
-projection check), plus one completeness assertion over `run_walk`'s call sites.
-It is parsed from `run_walk`'s AST, not text-scanned, so a behaviour-identical
-reformat or a renamed teardown local cannot false-red it, and it checks four
-things: `_finish` is not spelled there (no `Name`, no `Attribute`); there is no
-bare `getattr`/`globals`/`eval`/`exec`/`vars` call; every `_finalize(` call has
-three positional arguments whose third is the LOCAL bound by `Teardown(...)`;
-and that local has exactly one Name-binding (every `ast.Name` in a Store context
-counts — plain assignment, `for`/comprehension target, `with … as`, `+=`, `:=`).
-It covers the call sites spelled out in `run_walk`'s own body and the cheap forms
-only — a helper, an alias, a NON-Name binding (`import … as`, `except … as`,
-`match … case _ as`) or an in-place field assignment gets past it — so it is a
+projection check), plus one completeness assertion over the walk's call sites.
+That assertion parses the ASTs of `run_walk`, `_walk` and `_finalize` — not text —
+so a behaviour-identical reformat or a renamed local cannot false-red it. It pins
+the funnel invariant: the **authoritative** writer (`_finish`) is spelled exactly
+once, in `run_walk`, AFTER the bounded teardown; the browser teardown is a
+statement of the `finally` whose `try` body holds the `_walk` call; `_finalize`
+is not called from `run_walk`; there is no bare
+`getattr`/`globals`/`eval`/`exec`/`vars` call in any of the three; the run's single
+`td` (built once by unpacking `_build_observation`) is handed to `_walk` and to
+the teardown; each of `_walk`'s **11** `_finalize(` calls passes three positional
+arguments whose third is `_walk`'s own `td` parameter; `_walk` spells neither
+`_finish` nor `_write_observation`; and `_finalize` spells `_finish` never and
+`_write_observation` exactly once (the pre-teardown write). It covers the cheap
+forms only — a helper, an alias, a NON-Name binding (`import … as`,
+`except … as`, `match … case _ as`) or an in-place field assignment gets past it —
+so it is a
 refactor guard, not a containment proof. What carries
 the `not_reached`-reports-an-unreaped-org-as-clean class instead is the recorded
 teardown STATUS — every `_finalize` exit is executed by at least one test, and
 at least one of the tests reaching each exit asserts the recorded status,
 including the five that no test reached until #4843 (the absent surface,
 the screen that lies, no agent key, a signup CTA that is not hittable, and the
-missing playwright driver). Two abort paths sit outside `run_walk`'s try/except
-and write no artifact — an `--out` that cannot be created, and a driver that will
-not start — and are covered by no test (#4875);
+missing playwright driver). Two abort paths sit outside `run_walk`'s `try` and
+write no artifact — an `--out` that cannot be created, and a driver that will not
+start — and each has its own test now (#4875);
 they complement the behavioural tests, they do not replace
 them. The RED/GREEN property is the core
 requirement: a behaviour-identical reformat must not move the verdict, and a UI

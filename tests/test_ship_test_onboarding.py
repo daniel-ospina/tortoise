@@ -788,11 +788,11 @@ def test_the_agent_write_is_never_attempted_without_a_proven_session() -> None:
 
     import tools.ship_test_onboarding as mod
 
-    src = inspect.getsource(mod.run_walk)
+    src = inspect.getsource(mod._walk)
     session_return = src.index("if session_state != SESSION_SIGNED_IN:")
     write_call = src.index("observe_agent_write(")
     assert session_return < write_call, (
-        "the session gate must precede the agent write in run_walk")
+        "the session gate must precede the agent write in _walk")
 
 
 # ── the guard covers the OTHER instrument faults too (review findings 2 & 3) ─
@@ -876,13 +876,13 @@ def test_the_real_mcp_response_is_sse_framed_and_must_still_parse() -> None:
 
 
 def test_a_run_walk_write_failure_returns_an_instrument_error_before_judging() -> None:
-    """run_walk must return on a failed write — not fall through to the verdict
+    """`_walk` must return on a failed write — not fall through to the verdict
     assembly that would blame the server."""
     import inspect
 
     import tools.ship_test_onboarding as mod
 
-    src = inspect.getsource(mod.run_walk)
+    src = inspect.getsource(mod._walk)
     assert "if not result.get(\"ok\"):" in src
     assert src.index("if not result.get(\"ok\"):") < src.index(
         "if not saw_readable:"), "the write check must precede the read check"
@@ -908,7 +908,7 @@ def test_an_unreadable_projection_is_an_instrument_fault() -> None:
 
 def test_an_unreadable_instrument_read_is_never_reported_as_a_lying_ui() -> None:
     """The instrument's own read failing cannot license a product finding.
-    `judge()` has a `claim-without-server-read` rule, but run_walk must classify
+    `judge()` has a `claim-without-server-read` rule, but `_walk` must classify
     a failed read as an instrument fault FIRST: a transient 503 on the
     instrument's request would otherwise brand a truthful, connection-showing
     client as a liar."""
@@ -916,7 +916,7 @@ def test_an_unreadable_instrument_read_is_never_reported_as_a_lying_ui() -> None
 
     import tools.ship_test_onboarding as mod
 
-    src = inspect.getsource(mod.run_walk)
+    src = inspect.getsource(mod._walk)
     # three guards: step 5, the poll loop (all-fail), step 7
     assert src.count("if not projection_readable(") == 2
     assert src.count("if not saw_readable:") == 1
@@ -982,7 +982,7 @@ def test_the_default_reason_is_fail_closed() -> None:
 
     import tools.ship_test_onboarding as mod
 
-    src = inspect.getsource(mod.run_walk)
+    src = inspect.getsource(mod._start_driver)
     default_at = src.index("obs.reason = REASON_INSTRUMENT_ERROR")
     assert default_at < src.index("from playwright.sync_api import"), (
         "the fail-closed reason must be set before anything can abort")
@@ -2514,112 +2514,145 @@ def test_keep_org_records_a_deliberate_residue_and_never_deletes(
 
 
 def test_no_exit_from_the_walk_writes_the_artifact_without_teardown():
-    """The single-exit property is the whole reason the artifact can be trusted.
+    """The single-writer / single-teardown property is why the artifact can be
+    trusted.
 
     A REFACTOR GUARD, not an obfuscation proof — say plainly what it checks and
-    what it deliberately does not. It is parsed from `run_walk`'s AST rather than
+    what it deliberately does not. It is parsed from ASTs rather than
     text-scanned, so a behaviour-identical reformat (a wrapped call, `_finish (…)`
-    with a space, a renamed teardown local) cannot false-red it, which is the
-    false-red a literal-text count produces.
+    with a space, a renamed local) cannot false-red it, which is the false-red a
+    literal-text count produces.
 
-    It checks four things about the call sites SPELLED OUT in `run_walk`'s own
-    body:
-      (a) `_finish` appears there as no `Name` and no `Attribute`;
-      (b) no bare `Name` call to `getattr`/`globals`/`eval`/`exec`/`vars`;
-      (c) every `_finalize(` call has three positional arguments whose third is
-          the local bound by `Teardown(...)`, and it is the SAME local at every
-          call site;
-      (d) that local has exactly one Name-binding in `run_walk` — every
-          `ast.Name` in a Store context counts (plain assignment, `for`/
-          comprehension target, `with … as`, `+=`, `:=`).
-    (c) and (d) catch the two cheap forms of the same defect: `_finalize`'s third
-    parameter defaults to None, so `_finalize(obs, out_dir)` and
-    `_finalize(obs, out_dir, None)` write the artifact with an EMPTY teardown
-    block; and `td = Teardown(...)` on the line before an exit re-points the
-    local at an object whose `ctx` is None, so `_run_teardown` records the truthy,
-    deliberately-non-residue `not_reached` for an org this run never reaped (the
-    #4291 conflation).
+    THE INVARIANT (AC9): the AUTHORITATIVE writer is spelled exactly once, in
+    `run_walk`, AFTER the bounded teardown; the ONE teardown is a statement of the
+    `finally` that encloses the `_walk` call; and no `_walk` exit other than
+    `_finalize`'s single PRE-TEARDOWN write serializes anything.
+
+    What it checks:
+      (a) `run_walk` spells `_finish` exactly once, and that call is AFTER the
+          `try`/`finally` holding `_teardown_browser`;
+      (b) `run_walk` spells `_teardown_browser` exactly once, in the `finally`
+          body of the try whose body holds the `_walk(` call;
+      (c) `run_walk` does not spell `_finalize`, and none of the three functions
+          calls a bare `getattr`/`globals`/`eval`/`exec`/`vars` (the
+          string-built-name route to a writer);
+      (d) that ONE `td` — built once, by unpacking `_build_observation` — is
+          passed to `_walk` and to the teardown, and every `_finalize(` call in
+          `_walk` passes three positional args whose third is `_walk`'s `td`
+          PARAMETER, the same name at every site;
+      (e) `_walk` spells neither `_finish` nor `_write_observation`, and
+          `_finalize` spells `_finish` never and `_write_observation` exactly once.
+
+    WHY the arity/identity half matters: `_finalize`'s third parameter defaults to
+    None, so `_finalize(obs, out_dir)` and `_finalize(obs, out_dir, None)` write
+    the artifact with an EMPTY teardown block; and re-pointing the teardown local
+    at a second `Teardown(...)` yields `ctx is None`, so `_run_teardown` records
+    the truthy, deliberately-non-residue `not_reached` for an org this run never
+    reaped (the #4291 conflation).
 
     NOT checked here, by construction — a source assertion cannot be an
-    adversarial proof, and extending it just moves the boundary. (d) sees
-    Name-bindings, so the NON-Name ones escape it: a `match … case _ as td`
-    capture, `import … as td`, `except … as td`. And further forms get past the
-    whole half: an `_finish`/`_finalize` alias, attribute-form `getattr`, and
-    mutating the teardown object's fields in place.
+    adversarial proof, and extending it just moves the boundary. The Store-context
+    count sees Name-bindings, so NON-Name ones escape it: `match … case _ as td`,
+    `import … as td`, `except … as td`. And further forms get past the whole half:
+    an alias of `_finish`/`_finalize`, attribute-form `getattr`, and mutating the
+    teardown object's fields in place.
 
     What covers those forms is the recorded teardown STATUS. Every `_finalize`
-    exit in `run_walk` is executed by at least one test, and at least one of the
+    exit in `_walk` is executed by at least one test, and at least one of the
     tests reaching each exit asserts the status — not merely that `obs.teardown`
     is truthy, since `not_reached` satisfies truthiness and a truthiness-only
     assert cannot see a residue state degrade into a clean one. Five of them were
     reached by no test at all until #4843.
 
     SCOPE: `_finalize` exits only. Two abort paths sit OUTSIDE `run_walk`'s
-    try/except and write no artifact at all — a `--out` that cannot be created,
-    and a driver that will not start — so they are not "exits" in this sense and
-    no test here covers them (#4875).
+    try/except and write no artifact at all — an `--out` that cannot be created,
+    and a driver that will not start — and they are now covered directly
+    (#4875), not by this guard.
     """
-    tree = ast.parse(textwrap.dedent(_inspect.getsource(_mod.run_walk)))
+    walk_tree = ast.parse(textwrap.dedent(_inspect.getsource(_mod.run_walk)))
+    body_tree = ast.parse(textwrap.dedent(_inspect.getsource(_mod._walk)))
+    finalize_tree = ast.parse(textwrap.dedent(_inspect.getsource(_mod._finalize)))
 
-    # (a)+(b) `_finish` must not be SPELLED in `run_walk`, and the obvious
-    # string-built-name route to it must not be open either. Parsed, not
-    # grepped: a `_finish (…)` reformat is invisible to a substring search.
-    # KNOWN GAPS, stated rather than implied — an import alias, an alias of
-    # `_finalize`, and attribute-form `getattr` all get past this; see the
-    # docstring. This half is a refactor guard.
-    reachable = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
-    reachable |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
-    assert "_finish" not in reachable, "_finish must not be spelled in run_walk"
+    def _names(tree):
+        found = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        found |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        return found
+
+    def _calls(tree, name):
+        return [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                and getattr(n.func, "id", None) == name]
+
     dynamic = {"getattr", "globals", "eval", "exec", "vars"}
-    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Call)
-                and getattr(n.func, "id", None) in dynamic], (
-        "run_walk must not call a bare "
-        f"{sorted(dynamic)} — the string-built-name route to _finish")
+    for label, tree in (("run_walk", walk_tree), ("_walk", body_tree),
+                        ("_finalize", finalize_tree)):
+        assert not [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                    and getattr(n.func, "id", None) in dynamic], (
+            f"{label} must not call a bare {sorted(dynamic)} — the "
+            "string-built-name route to a writer")
 
-    # (c) every funnel call passes the teardown state the walk actually built.
-    # `_finalize`'s third parameter defaults to None, so BOTH `_finalize(obs,
-    # out_dir)` and `_finalize(obs, out_dir, None)` write the artifact with an
-    # EMPTY teardown block — an arity check alone would not catch the second.
-    calls = [n for n in ast.walk(tree)
-             if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "_finalize"]
-    assert calls, "no _finalize exit found in run_walk"
-    # Discover the name, do not hardcode it, so renaming the local is free.
-    td_names = {t.id for n in ast.walk(tree)
-                if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
-                and getattr(n.value.func, "id", None) == "Teardown"
-                and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
-                for t in n.targets}
-    assert td_names, "run_walk must build the teardown state it passes"
-    # (d) the teardown local has exactly one Name-binding, so the cheap
-    # re-pointing form (`td = Teardown(...)` on the line before an exit) is
-    # refused. Every `ast.Name` in a Store ctx counts — plain assignment, a
-    # `for`/comprehension target, `with … as`, `+=`, `:=`. Only the NON-Name
-    # bindings (`import … as`, `except … as`, `match … case _ as`) are invisible
-    # here; see the docstring — those are covered behaviourally by the
-    # teardown-STATUS assertions at the exits a test reaches.
-    stores = [n.id for n in ast.walk(tree)
+    # (a) exactly one authoritative writer, which runs after the teardown.
+    finishes = _calls(walk_tree, "_finish")
+    assert len(finishes) == 1, (
+        f"run_walk must spell _finish exactly once; got {len(finishes)}")
+    # (b) exactly one teardown, in the `finally` of the try that holds `_walk`.
+    teardowns = _calls(walk_tree, "_teardown_browser")
+    assert len(teardowns) == 1, (
+        "run_walk must enter the browser teardown exactly once; got "
+        f"{len(teardowns)}")
+    walk_calls = _calls(walk_tree, "_walk")
+    assert len(walk_calls) == 1, (
+        f"run_walk must call _walk exactly once; got {len(walk_calls)}")
+    enclosing = [
+        node for node in ast.walk(walk_tree)
+        if isinstance(node, ast.Try)
+        and any(call in ast.walk(node) for call in walk_calls)
+        and any(expr in ast.walk(node) for expr in teardowns)
+    ]
+    assert len(enclosing) == 1, "the teardown must live in the try around _walk"
+    assert any(teardowns[0] in ast.walk(stmt) for stmt in enclosing[0].finalbody), (
+        "the teardown must be a statement of the `finally` body")
+    assert any(walk_calls[0] in ast.walk(stmt) for stmt in enclosing[0].body), (
+        "the try's body must contain the _walk call")
+    # (c) the pre-teardown writer is `_walk`'s funnel, never `run_walk`'s.
+    assert not _calls(walk_tree, "_finalize"), (
+        "_finalize must not be called from run_walk")
+    assert finishes[0].lineno > teardowns[0].lineno, (
+        "the authoritative write must run after the bounded teardown")
+
+    # (d) the ONE teardown state, built once and passed unchanged.
+    walk_params = list(_inspect.signature(_mod._walk).parameters)
+    assert "td" in walk_params, "_walk must take the teardown state as a parameter"
+    stores = [n.id for n in ast.walk(walk_tree)
               if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)]
-    for name in sorted(td_names):
-        assert stores.count(name) == 1, (
-            f"run_walk binds {name!r} by plain assignment {stores.count(name)} "
-            "times; the teardown state must be built once and passed unchanged")
-    assert {len(c.args) for c in calls} == {3}, (
-        "every _finalize call in run_walk must pass the teardown state; got "
-        f"argument counts {sorted(len(c.args) for c in calls)}")
-    assert all(isinstance(c.args[2], ast.Name) and c.args[2].id in td_names
-               for c in calls), (
-        "every _finalize call in run_walk must pass the teardown state ITSELF "
-        f"(the object built by Teardown(...) -> {sorted(td_names)}), not a "
-        "default, a literal or an unrelated name")
-    # ...and the SAME one at every site: a second `Teardown(...)` binding looks
-    # like the teardown state to the checks above, but its `ctx is None` makes
-    # `_run_teardown` record `not_reached` — truthy, and deliberately not a
-    # residue state, so an org this run created and never reaped would be
-    # reported clean. This is the #4291 conflation the guard exists to prevent.
-    used = {c.args[2].id for c in calls}
-    assert len(used) == 1, (
-        "every _finalize call in run_walk must pass ONE teardown state; got "
-        f"{sorted(used)}")
+    assert stores.count("td") == 1, (
+        f"run_walk binds 'td' {stores.count('td')} times; the teardown state must "
+        "be built once and passed unchanged")
+    assert [a.id for a in walk_calls[0].args if isinstance(a, ast.Name)].count("td") == 1, (
+        "run_walk must pass the teardown state to _walk")
+    assert (len(teardowns[0].args) >= 2 and isinstance(teardowns[0].args[1], ast.Name)
+            and teardowns[0].args[1].id == "td"), (
+        "the teardown must be handed the run's own teardown state")
+    finalize_calls = _calls(body_tree, "_finalize")
+    assert finalize_calls, "no _finalize exit found in _walk"
+    assert len(finalize_calls) == 11, (
+        "_walk must keep its 11 _finalize exits (the import guard's moved to "
+        f"_start_driver); got {len(finalize_calls)}")
+    assert {len(c.args) for c in finalize_calls} == {3}, (
+        "every _finalize call in _walk must pass the teardown state; got "
+        f"argument counts {sorted(len(c.args) for c in finalize_calls)}")
+    assert all(isinstance(c.args[2], ast.Name) and c.args[2].id == "td"
+               for c in finalize_calls), (
+        "every _finalize call in _walk must pass _walk's own `td` parameter, not "
+        "a default, a literal or an unrelated name")
+
+    # (e) no OTHER writer anywhere in the walk, and one pre-teardown write.
+    assert "_finish" not in _names(body_tree), "_walk must not spell _finish"
+    assert "_write_observation" not in _names(body_tree), (
+        "_walk must not spell the writer; its exits go through _finalize")
+    assert not _calls(finalize_tree, "_finish"), (
+        "_finalize must not print through _finish")
+    assert len(_calls(finalize_tree, "_write_observation")) == 1, (
+        "_finalize must write the pre-teardown document exactly once")
 
 
 def test_an_org_name_the_product_would_refuse_is_rejected_before_any_browser(
@@ -2759,3 +2792,82 @@ def test_the_verdict_is_printed_exactly_once(capsys, monkeypatch, tmp_path):
     out = capsys.readouterr().out
     assert obs.verdict == "passed", (obs.verdict, obs.reason)
     assert out.count("[ship-test] passed") == 1, out
+
+
+# ── #4875 — the two aborts that write NO artifact, and the guard that does ───
+# Both aborts raise OUT of `run_walk` before any writer exists, so neither may be
+# folded into the funnel: `_finalize` now WRITES, so routing an abort through it
+# would manufacture an artifact the abort path never had. They were covered by no
+# test at all before #4907.
+
+def test_an_out_that_cannot_be_created_writes_no_artifact(monkeypatch, tmp_path):
+    """#4875 abort (1/2). `shots.mkdir` raising on an uncreatable `--out` is a
+    pre-observation abort: exit 3, and NO `observation.json` anywhere. The
+    module's "the directory always holds one" promise does not extend to a run
+    that never created the observation."""
+    import tools.ship_test_onboarding as mod
+
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory")
+    rc = mod.main(["--base-url", "https://app.premiselabs.co",
+                   "--auth-url", "https://tortoise.premiselabs.co",
+                   "--api-url", "https://api.premiselabs.co", "--allow-prod",
+                   "--out", str(blocker / "ship-test")])
+    assert rc == mod.EXIT_INSTRUMENT_ERROR
+    assert not list(tmp_path.rglob("observation.json"))
+
+
+def test_a_driver_that_will_not_start_writes_no_artifact(monkeypatch, tmp_path):
+    """#4875 abort (2/2). `sync_playwright().start()` raising is NOT the import
+    guard (which records and returns): it propagates before any writer exists, so
+    the run exits 3 with no artifact. The screenshots directory is all that
+    exists — it was created before the driver."""
+    import sys
+    import types
+
+    import tools.ship_test_onboarding as mod
+
+    out = tmp_path / "ship-test"
+    ctx = _FakeCtx({}, "https://app.premiselabs.co")
+    fake_sync = types.ModuleType("playwright.sync_api")
+    fake_sync.sync_playwright = lambda: _FakeSyncPlaywright(ctx, start_raises=True)
+    monkeypatch.setitem(sys.modules, "playwright", types.ModuleType("playwright"))
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_sync)
+
+    rc = mod.main(["--base-url", "https://app.premiselabs.co",
+                   "--auth-url", "https://tortoise.premiselabs.co",
+                   "--api-url", "https://api.premiselabs.co", "--allow-prod",
+                   "--out", str(out)])
+    assert rc == mod.EXIT_INSTRUMENT_ERROR
+    assert not (out / "observation.json").exists()
+    assert (out / "screenshots").is_dir(), "mkdir precedes the driver"
+
+
+def test_the_import_guard_path_writes_not_run_and_enters_no_browser_teardown(
+        monkeypatch, tmp_path):
+    """The THIRD pre-driver path is not an abort. The playwright import guard
+    returns through `_start_driver` with no browser at all: it still writes a
+    complete artifact (the module's promise), records the ORG teardown as
+    `not_reached`, and its `browser_teardown.outcome` is `not_run` while the
+    browser-teardown site was NEVER entered (zero invocations)."""
+    import json
+
+    import tools.ship_test_onboarding as mod
+
+    calls = []
+    original = mod._teardown_browser
+
+    def _counting(*a, **k):
+        calls.append(a)
+        return original(*a, **k)
+
+    monkeypatch.setattr(mod, "_teardown_browser", _counting)
+    obs, _ctx, _mod = _run_fake_walk(
+        monkeypatch, tmp_path, plan={}, ui_sequence=[], mcp_tools_call=_MCP_OK,
+        playwright_available=False)
+    assert obs.verdict.startswith("failed: playwright unavailable"), obs.verdict
+    assert obs.teardown["status"] == mod.TEARDOWN_NOT_REACHED
+    written = json.loads((tmp_path / "ship-test" / "observation.json").read_text())
+    assert written["browser_teardown"]["outcome"] == "not_run"
+    assert written["browser_teardown"]["closes"] == []
+    assert calls == [], "the import-guard path must not enter a browser teardown"

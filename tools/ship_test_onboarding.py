@@ -75,7 +75,24 @@ guard: the
 record's ``reason`` field carries the same split (``instrument_error`` vs
 ``server_did_not_observe``), so a deploy job can branch on it without parsing
 prose. The observation
-directory always holds ``observation.json`` + step screenshots, pass or fail.
+directory always holds ``observation.json`` + step screenshots, pass or fail —
+with one deliberate exception (#4875): an abort that predates the observation
+itself (an ``--out`` that cannot be created, a driver that will not start)
+raises before any writer exists and therefore writes nothing.
+
+**Browser teardown (#4907).** The run owns the Playwright driver's lifecycle
+(``start()`` + an explicit teardown) rather than inheriting it, and the browser
+teardown is BOUNDED (``TEARDOWN_BOUND_S``): a watchdog signals only the run's
+own driver child — enumerated as a direct child with its start time, re-checked
+before signalling, reaped after — which is what releases a close blocked
+against an unresponsive driver. The outcome is recorded in ``observation.json``
+as the ``browser_teardown`` block (``not_run`` / ``clean`` / ``close_error`` /
+``watchdog_kill`` / ``driver_absent``), and the document is written atomically
+twice: a complete pre-teardown copy whose outcome is ``not_run`` (so a run
+killed inside the window still leaves a diagnostic) and the authoritative copy
+after the teardown. A run killed inside the window with the driver unresponsive
+still orphans that driver and its Chromium children — no in-process code runs
+after the kill — which is disclosed as **#4928**, not claimed closed.
 
 **Teardown (#4319).** Every per-deploy run creates a real production org
 (``Ship Test <epoch>-<hex4>``); the run **reaps it by default**, and the outcome is
@@ -587,7 +604,7 @@ class Observation:
     # for the guard's central distinction, recorded rather than narrated.
     session: dict = field(default_factory=dict)
     # The run's own cleanup outcome (#4319): a JSON-only summary whose `status`
-    # is one of the TEARDOWN_* constants. Declared HERE because `_finish`
+    # is one of the TEARDOWN_* constants. Declared HERE because the atomic writer
     # serializes with `dataclasses.asdict`, which emits declared fields only —
     # an undeclared attribute is silently dropped from the artifact.
     teardown: dict = field(default_factory=dict)
@@ -912,6 +929,14 @@ class Teardown:
     base_url: str = ""
     keep: bool = False
     ctx: object = None          # the browser context, once one exists
+    # The Browser object, once one was launched (#4907). `browser` used to be a
+    # `_walk` local; the ONE teardown site now lives in `run_walk`, so it must be
+    # reachable from there. `Teardown` is never serialized (`asdict` is used only
+    # on `Verdict` and `Observation`), so holding a live object here is safe.
+    browser: object = None
+    # The browser teardown's one-shot guard (#4907). Distinct from `done`, which
+    # is the ORG reaper's.
+    browser_done: bool = False
     # True ONLY after a RECOGNIZED baseline read. A fresh account's correct
     # baseline is a readable EMPTY list; "no baseline" is not "empty", it is
     # "unproven", and an unproven identity must never delete anything.
@@ -980,10 +1005,9 @@ def _run_teardown(obs: Observation, td: Teardown) -> None:
     READABLE re-read shows the org gone from the walked session's own list.
     """
     if td.done:
-        # One-shot: `_finalize` can be entered twice (an inner `_finish` that
-        # raised re-enters through the walk's `except`), and a second pass would
-        # find the org already gone and overwrite recorded evidence with a
-        # clean-looking status.
+        # One-shot: the ORG teardown is reached from more than one exit, and a
+        # second pass would find the org already gone and overwrite recorded
+        # evidence with a clean-looking status.
         return
     td.done = True
 
@@ -1252,39 +1276,123 @@ def _monotonic() -> float:
 
 # ── the live walk ───────────────────────────────────────────────────────────
 def run_walk(args) -> Observation:
+    """The run, top to bottom: prep → driver → walk → bounded teardown → write.
+
+    THE PINNED SHAPE. `run_walk` owns the lifecycle and the write; `_walk` owns
+    the browser-scoped body. The teardown is entered exactly ONCE, as a statement
+    of the only `finally` around the `_walk` call, so it runs for every `_walk`
+    return and for an exception out of it. `_finish` is the ONE authoritative
+    write+print site and runs AFTER that teardown, so stdout and the file agree.
+
+    Two aborts deliberately sit OUTSIDE the `try` and write NO artifact (#4875):
+    `shots.mkdir` raising (an `--out` that cannot be created) and
+    `sync_playwright().start()` raising. The playwright IMPORT guard is not one of
+    them — it returns through `_start_driver` and still writes.
+    """
     out_dir = Path(args.out)
     shots = out_dir / "screenshots"
+    # #4875 abort (1/2): raises before any writer exists, so NO artifact is
+    # written. The module's "the directory always holds observation.json"
+    # promise does not extend to an abort that predates the observation.
     shots.mkdir(parents=True, exist_ok=True)
 
+    email, password = _run_credentials(args)
+    obs, td = _build_observation(args, email, password)
+    # #4875 abort (2/2): a driver that will not START raises out of here, before
+    # any writer exists. Distinct from the import guard below.
+    obs, pw = _start_driver(obs, out_dir, td)
+    if pw is not None:
+        try:
+            obs = _walk(pw, args, obs, td, out_dir, shots, email, password)
+        finally:
+            # THE ONE TEARDOWN SITE, entered exactly once. It runs after the
+            # pre-teardown document has been written by `_finalize`, so a run
+            # that dies inside it leaves a complete artifact whose
+            # `browser_teardown.outcome` is `not_run`.
+            _teardown_browser(pw, td, obs)
+    # THE ONE AUTHORITATIVE WRITE+PRINT SITE: after the teardown, for every
+    # returning path. A `_walk` exception propagates past it (the `finally` has
+    # already torn the browser down), which is the killed-inside-the-window case.
+    _finish(obs, out_dir)
+    return obs
+
+
+def _run_credentials(args) -> tuple[str, str]:
+    """The disposable identity this run signs up — computed ONCE, here.
+
+    One computation, so the address the wizard is typed and the address the
+    artifact records cannot drift.
+    """
     email = args.email or f"ship-test-{int(time.time())}-{uuid.uuid4().hex[:6]}@premiselabs.co"
     password = args.password or f"ShipTest-{uuid.uuid4().hex[:10]}-Aa1!"
+    return email, password
 
+
+def _build_observation(args, email, password) -> tuple[Observation, Teardown]:
+    """The record and the run's cleanup state, built BEFORE the driver exists.
+
+    Both are built here because every exit funnels through them, including the
+    ones that predate a browser context. The org NAME is computed once here and
+    is BOTH what the wizard is told and what teardown compares against, so the
+    two cannot drift.
+
+    ``email``/``password`` are the identity `_run_credentials` computed for this
+    run, taken as parameters so the record and the walk share ONE computation;
+    this function does not re-derive them.
+    """
     obs = Observation(started_at=_now(), target={
         "dashboard": args.base_url, "auth": args.auth_url, "api": args.api_url})
-    # FAIL-CLOSED DEFAULT (#4291). Until a path has PROVEN that it measured the
-    # product, a run says nothing about the product. Every product-facing exit
-    # below sets its own reason explicitly; anything that aborts earlier (no
-    # playwright driver, a browser that will not launch, an unexpected
-    # exception) keeps this class — an instrument fault with exit 3, never a
-    # product finding with exit 1.
-    obs.reason = REASON_INSTRUMENT_ERROR
-
-    # The run's cleanup state (#4319). Built HERE — before the playwright import
-    # guard — because every exit below funnels through `_finalize`, including the
-    # ones that predate a context. The org NAME is computed once, here, and is
-    # both what the wizard is told and what teardown compares against, so the two
-    # cannot drift.
     td = Teardown(org_name=args.org_name
                   or f"Ship Test {int(time.time())}-{uuid.uuid4().hex[:4]}",
                   base_url=args.base_url, keep=args.keep_org)
+    return obs, td
 
+
+def _start_driver(obs, out_dir, td) -> tuple[Observation, object | None]:
+    """Import and start the driver, or record the fail-closed import-guard exit.
+
+    FAIL-CLOSED DEFAULT (#4291). Until a path has PROVEN that it measured the
+    product, the run says nothing about the product; the default is set HERE,
+    before the import, so it precedes everything that can abort. Every
+    product-facing exit in `_walk` sets its own reason explicitly.
+
+    A MISSING driver returns `(obs, None)` — it does not raise — after recording
+    the ORG teardown through `_run_teardown_safely` (`not_reached`: no browser
+    context ever existed). The caller's single `_finish` then writes the
+    artifact, so this path costs no second writer.
+
+    `sync_playwright().start()` RAISING is a different thing and is deliberately
+    NOT caught: it propagates out of `run_walk` before any writer exists, so that
+    abort writes no artifact at all (#4875). The import must stay in its own
+    narrow `try` for the two to remain distinguishable.
+    """
+    obs.reason = REASON_INSTRUMENT_ERROR
     try:
         # Lazy so the core (judge/probe/CLI) stays importable without playwright —
         # but GUARDED, so a missing driver still yields a recorded observation.
         from playwright.sync_api import sync_playwright
     except Exception as exc:
         obs.verdict = f"failed: playwright unavailable: {type(exc).__name__}: {exc}"
-        return _finalize(obs, out_dir, td)
+        _run_teardown_safely(obs, td)
+        return obs, None
+    return obs, sync_playwright().start()
+
+
+def _walk(pw, args, obs, td, out_dir, shots, email, password) -> Observation:
+    """The browser-scoped body of the walk: launch → signup → judge.
+
+    Every `return` here exits through `_finalize`, which runs the ORG teardown
+    and writes the PRE-TEARDOWN document (complete, with
+    `browser_teardown.outcome == "not_run"`).
+
+    The browser's own lifecycle is deliberately NOT here: the bounded teardown
+    lives in `run_walk`'s `finally`, the only site that runs for every `_walk`
+    return AND for an exception out of this function. `td.browser` is set at
+    launch so that site can close what this function opened.
+    """
+    browser = None
+    ctx = None
+    page = None
 
     def shot(page, name: str) -> str:
         p = shots / f"{len(obs.steps):02d}-{name}.png"
@@ -1294,316 +1402,342 @@ def run_walk(args) -> Observation:
         except Exception as exc:  # a screenshot must never fail the walk
             return f"[screenshot failed: {exc}]"
 
-    with sync_playwright() as pw:
-        browser = None
-        ctx = None
-        page = None
-        try:
-            # The deploy anchors and the browser launch live INSIDE this guard:
-            # an unreachable target or a launch failure must still write an
-            # observation (the module contract), not abort with a traceback.
-            obs.deploy_sha = deployed_sha(args.api_url)
-            obs.bundle = deployed_bundle(args.base_url)
-            obs.sha = _git_sha()
-            browser = pw.chromium.launch(headless=not args.headed)
-            # CLEAN BROWSER: no storage state, no pre-seeded session, no beta-gate
-            # flag — exactly what a new user arrives with.
-            ctx = browser.new_context(viewport={"width": 1440, "height": 900},
-                                      locale="en-US")
-            td.ctx = ctx
-            page = ctx.new_page()
-            signup_responses: list[dict] = []
+    try:
+        # The deploy anchors and the browser launch live INSIDE this guard:
+        # an unreachable target or a launch failure must still write an
+        # observation (the module contract), not abort with a traceback.
+        obs.deploy_sha = deployed_sha(args.api_url)
+        obs.bundle = deployed_bundle(args.base_url)
+        obs.sha = _git_sha()
+        browser = pw.chromium.launch(headless=not args.headed)
+        td.browser = browser    # for the one teardown site in run_walk
+        # CLEAN BROWSER: no storage state, no pre-seeded session, no beta-gate
+        # flag — exactly what a new user arrives with.
+        ctx = browser.new_context(viewport={"width": 1440, "height": 900},
+                                  locale="en-US")
+        td.ctx = ctx
+        page = ctx.new_page()
+        signup_responses: list[dict] = []
 
-            def _on_response(resp):
-                if "/signup" in resp.url or "auth/v1/signup" in resp.url or "token" in resp.url:
-                    signup_responses.append({"url": resp.url, "status": resp.status})
+        def _on_response(resp):
+            if "/signup" in resp.url or "auth/v1/signup" in resp.url or "token" in resp.url:
+                signup_responses.append({"url": resp.url, "status": resp.status})
 
-            page.on("response", _on_response)
-            # 1 ── the front door
-            page.goto(args.auth_url.rstrip("/") + "/auth",
-                      wait_until="domcontentloaded", timeout=args.timeout)
-            page.wait_for_timeout(args.settle_ms)
-            probe = front_door_probe(page)
-            obs.assertions["front_door_reachable"] = bool(probe.get("hittable"))
-            obs.add(name="front-door", url=page.url,
-                    ok=bool(probe.get("hittable")),
-                    detail=json.dumps(probe),
-                    screenshot=shot(page, "front-door"), extra=probe)
-            if not probe.get("hittable"):
-                # A PRODUCT finding: this ran before any session was resolved,
-                # and the CTA is genuinely unhittable in a clean browser.
-                obs.verdict = "failed: signup CTA not hittable in a clean browser"
-                obs.reason = failure_reason(obs.verdict, session_state="")
-                return _finalize(obs, out_dir, td)
+        page.on("response", _on_response)
+        # 1 ── the front door
+        page.goto(args.auth_url.rstrip("/") + "/auth",
+                  wait_until="domcontentloaded", timeout=args.timeout)
+        page.wait_for_timeout(args.settle_ms)
+        probe = front_door_probe(page)
+        obs.assertions["front_door_reachable"] = bool(probe.get("hittable"))
+        obs.add(name="front-door", url=page.url,
+                ok=bool(probe.get("hittable")),
+                detail=json.dumps(probe),
+                screenshot=shot(page, "front-door"), extra=probe)
+        if not probe.get("hittable"):
+            # A PRODUCT finding: this ran before any session was resolved,
+            # and the CTA is genuinely unhittable in a clean browser.
+            obs.verdict = "failed: signup CTA not hittable in a clean browser"
+            obs.reason = failure_reason(obs.verdict, session_state="")
+            return _finalize(obs, out_dir, td)
 
-            # 2 ── signup
-            page.click("#btn-email", timeout=args.timeout)
-            page.wait_for_timeout(500)
-            page.fill("#email", email)
-            page.fill("#password", password)
-            obs.add(name="signup-form", url=page.url, detail=f"email={email}",
-                    screenshot=shot(page, "signup-form"),
-                    extra={"email": email})
-            page.click('#email-modal button[type="submit"], #btn-submit', timeout=args.timeout)
-            page.wait_for_timeout(3000)
+        # 2 ── signup
+        page.click("#btn-email", timeout=args.timeout)
+        page.wait_for_timeout(500)
+        page.fill("#email", email)
+        page.fill("#password", password)
+        obs.add(name="signup-form", url=page.url, detail=f"email={email}",
+                screenshot=shot(page, "signup-form"),
+                extra={"email": email})
+        page.click('#email-modal button[type="submit"], #btn-submit', timeout=args.timeout)
+        page.wait_for_timeout(3000)
 
-            # 3 ── ride the landing into the product (dashboard or wizard)
-            deadline = time.time() + args.timeout / 1000
-            while time.time() < deadline:
-                if "app." in page.url or args.base_url.rstrip("/") in page.url:
-                    break
-                page.wait_for_timeout(1000)
-            obs.add(name="landing-after-signup", url=page.url,
-                    detail=json.dumps(signup_responses[-3:]),
-                    screenshot=shot(page, "landing"),
-                    extra={"body": recorded_body(page)})
-            # 3b ── the session (#4291). Resolved through the app origin's own
-            # `/api/session` with the BROWSER's cookie jar. The poll is for the
-            # seam's own settle, not for a token: there is no readable token any
-            # more, by design (`__Host-session` is HttpOnly and host-only).
-            session_state, session_detail = "", ""
-            for _ in range(15):
-                session_state, session_detail = bff_session(ctx, args.base_url)
-                if session_state != SESSION_NOT_SIGNED_IN:
-                    break  # signed in — or a fault that polling cannot improve
-                page.wait_for_timeout(1000)
-            obs.session = {
-                "state": session_state, "detail": session_detail,
-                "mechanism": ("browser cookie jar → /api/session → /api/v1 BFF proxy; "
-                              "agent key from the explicit --agent-key flag"
-                              if args.agent_key else SESSION_MECHANISM)}
-            obs.add(name="session", url=page.url,
-                    ok=session_state == SESSION_SIGNED_IN,
-                    detail=f"{session_state}: {session_detail}",
-                    screenshot=shot(page, "session"))
-            if session_state != SESSION_SIGNED_IN:
-                # LOUD and EARLY: a walk that is not signed in is not measuring
-                # the product, so it must not continue and "measure" a negative
-                # on a signed-out page, nor blame the server for an observation
-                # it never got the chance to make (#4291).
-                obs.verdict = instrument_error_verdict(session_state, session_detail)
-                return _finalize(obs, out_dir, td)
+        # 3 ── ride the landing into the product (dashboard or wizard)
+        deadline = time.time() + args.timeout / 1000
+        while time.time() < deadline:
+            if "app." in page.url or args.base_url.rstrip("/") in page.url:
+                break
+            page.wait_for_timeout(1000)
+        obs.add(name="landing-after-signup", url=page.url,
+                detail=json.dumps(signup_responses[-3:]),
+                screenshot=shot(page, "landing"),
+                extra={"body": recorded_body(page)})
+        # 3b ── the session (#4291). Resolved through the app origin's own
+        # `/api/session` with the BROWSER's cookie jar. The poll is for the
+        # seam's own settle, not for a token: there is no readable token any
+        # more, by design (`__Host-session` is HttpOnly and host-only).
+        session_state, session_detail = "", ""
+        for _ in range(15):
+            session_state, session_detail = bff_session(ctx, args.base_url)
+            if session_state != SESSION_NOT_SIGNED_IN:
+                break  # signed in — or a fault that polling cannot improve
+            page.wait_for_timeout(1000)
+        obs.session = {
+            "state": session_state, "detail": session_detail,
+            "mechanism": ("browser cookie jar → /api/session → /api/v1 BFF proxy; "
+                          "agent key from the explicit --agent-key flag"
+                          if args.agent_key else SESSION_MECHANISM)}
+        obs.add(name="session", url=page.url,
+                ok=session_state == SESSION_SIGNED_IN,
+                detail=f"{session_state}: {session_detail}",
+                screenshot=shot(page, "session"))
+        if session_state != SESSION_SIGNED_IN:
+            # LOUD and EARLY: a walk that is not signed in is not measuring
+            # the product, so it must not continue and "measure" a negative
+            # on a signed-out page, nor blame the server for an observation
+            # it never got the chance to make (#4291).
+            obs.verdict = instrument_error_verdict(session_state, session_detail)
+            return _finalize(obs, out_dir, td)
 
-            # 3c ── the cleanup BASELINE (#4319). Read the walked session's own
-            # org list BEFORE the wizard can create anything: this run's orgs are
-            # exactly `after - before`, which is a proof of CREATION, while a
-            # name is not (a fixed --org-name or a reused account could match an
-            # org this run never created). An unreadable baseline leaves teardown
-            # DISABLED — it fails closed (residue) rather than deleting on an
-            # unproven identity.
-            b_status, before_ids, b_upstream = read_org_ids(ctx, args.base_url)
-            td.baseline_attempted = True
-            if before_ids is None:
-                td.reason = (f"baseline GET /api/v1/organizations -> {b_status}"
-                             + (f" (upstream {b_upstream})" if b_upstream else ""))
-            else:
-                td.enabled = True
-                td.before = before_ids
+        # 3c ── the cleanup BASELINE (#4319). Read the walked session's own
+        # org list BEFORE the wizard can create anything: this run's orgs are
+        # exactly `after - before`, which is a proof of CREATION, while a
+        # name is not (a fixed --org-name or a reused account could match an
+        # org this run never created). An unreadable baseline leaves teardown
+        # DISABLED — it fails closed (residue) rather than deleting on an
+        # unproven identity.
+        b_status, before_ids, b_upstream = read_org_ids(ctx, args.base_url)
+        td.baseline_attempted = True
+        if before_ids is None:
+            td.reason = (f"baseline GET /api/v1/organizations -> {b_status}"
+                         + (f" (upstream {b_upstream})" if b_upstream else ""))
+        else:
+            td.enabled = True
+            td.before = before_ids
 
-            # 4 ── open the wizard and walk it to the final screen (best effort)
-            # A first-timer's step 1 is org-create (an input + a button); the
-            # generic label loop below cannot advance it.
-            org_input = page.locator('input[aria-label="Organization name"]')
-            if org_input.count() and org_input.first.is_visible():
-                org_input.first.fill(td.org_name)
-                # Set BEFORE the click: the click dispatches the create, and a
-                # click that raises after dispatching it must still leave this
-                # run's residue visible (an empty candidate set then reads as
-                # SUSPECT, not as "nothing to do").
-                td.create_attempted = True
-                page.locator('button:has-text("Create Organization")').first.click(timeout=args.timeout)
-                page.wait_for_timeout(4000)
-            # Wait for the product shell to settle before clicking: a "walk"
-            # that checks for buttons before React mounts records nothing.
-            labels = ("Continue setup", "Continue →", "For my internal setup",
-                      "I've set it up — Continue →", "Skip for now")
-            for _ in range(20):
-                if (any(page.locator(f'button:has-text("{lbl}")').count() for lbl in labels)
-                        or page.locator("button.setup-header").count()):
-                    break
-                page.wait_for_timeout(1000)
-            for _ in range(10):
-                clicked = False
-                for label in labels:
-                    btn = page.locator(f'button:has-text("{label}")')
-                    if btn.count() and btn.first.is_visible():
-                        try:
-                            btn.first.click(timeout=4000)
-                            clicked = True
-                            page.wait_for_timeout(1500)
-                            break
-                        except Exception:
-                            continue
-                if not clicked:
-                    setup = page.locator("button.setup-header")
-                    if setup.count() and setup.first.is_visible():
-                        try:
-                            setup.first.click(timeout=4000)
-                            page.wait_for_timeout(1500)
-                            clicked = True
-                        except Exception:
-                            pass
-                if not clicked:
-                    break
-            obs.add(name="wizard-final", url=page.url,
-                    detail=f"session {session_state}",
-                    screenshot=shot(page, "wizard-final"), extra={"body": recorded_body(page)})
+        # 4 ── open the wizard and walk it to the final screen (best effort)
+        # A first-timer's step 1 is org-create (an input + a button); the
+        # generic label loop below cannot advance it.
+        org_input = page.locator('input[aria-label="Organization name"]')
+        if org_input.count() and org_input.first.is_visible():
+            org_input.first.fill(td.org_name)
+            # Set BEFORE the click: the click dispatches the create, and a
+            # click that raises after dispatching it must still leave this
+            # run's residue visible (an empty candidate set then reads as
+            # SUSPECT, not as "nothing to do").
+            td.create_attempted = True
+            page.locator('button:has-text("Create Organization")').first.click(timeout=args.timeout)
+            page.wait_for_timeout(4000)
+        # Wait for the product shell to settle before clicking: a "walk"
+        # that checks for buttons before React mounts records nothing.
+        labels = ("Continue setup", "Continue →", "For my internal setup",
+                  "I've set it up — Continue →", "Skip for now")
+        for _ in range(20):
+            if (any(page.locator(f'button:has-text("{lbl}")').count() for lbl in labels)
+                    or page.locator("button.setup-header").count()):
+                break
+            page.wait_for_timeout(1000)
+        for _ in range(10):
+            clicked = False
+            for label in labels:
+                btn = page.locator(f'button:has-text("{label}")')
+                if btn.count() and btn.first.is_visible():
+                    try:
+                        btn.first.click(timeout=4000)
+                        clicked = True
+                        page.wait_for_timeout(1500)
+                        break
+                    except Exception:
+                        continue
+            if not clicked:
+                setup = page.locator("button.setup-header")
+                if setup.count() and setup.first.is_visible():
+                    try:
+                        setup.first.click(timeout=4000)
+                        page.wait_for_timeout(1500)
+                        clicked = True
+                    except Exception:
+                        pass
+            if not clicked:
+                break
+        obs.add(name="wizard-final", url=page.url,
+                detail=f"session {session_state}",
+                screenshot=shot(page, "wizard-final"), extra={"body": recorded_body(page)})
 
-            # 5 ── the NEGATIVE direction: read the screen + the server truth
-            # The negative is only MEASURED if the walk reached a surface that
-            # carries a decidable claim. A page with no connection surface is
-            # not an honest negative — it is an unmeasured one, and must not be
-            # credited as a pass (the vacuous-pin class #3806 exists to prevent).
-            projection_status, projection = read_projection(ctx, args.base_url)
-            if not projection_readable(projection_status, projection):
-                # The instrument's OWN read of the server's truth failed. It
-                # cannot judge a screen it could not check, and it must not
-                # claim a product finding it cannot support (the #4291 class):
-                # a transient 503 here would otherwise be reported as the client
-                # "claiming a connection while the server state was unreadable".
-                obs.add(name="server-read", ok=False, ui="",
-                        detail=f"GET /api/v1/onboarding/state -> {projection_status}",
-                        screenshot=shot(page, "server-read"))
-                obs.verdict = instrument_error_verdict(
-                    "projection_unreadable",
-                    f"GET /api/v1/onboarding/state -> {projection_status}")
-                return _finalize(obs, out_dir, td)
-            ui = read_connection_surface(page)
-            # The UNTRUNCATED body feeds the sweep: scrub()'s cap is for the
-            # recorded artifact only. `connection_verdict` picks the surface's
-            # own vocabulary and applies the all-page smuggle promotion.
-            raw = page_body(page)
-            surface = connection_surface_kind(page)
-            page_claims = claims_connection(raw)
-            obs.assertions["walk_completed"] = ui != ABSENT
-            neg = connection_verdict(ui, surface, projection, raw)
-            ui = neg.ui
-            if ui == ABSENT:
-                obs.add(name="before-observation", url=page.url, ui=ui, ok=False,
-                        observed=neg.observed,
-                        detail="no connection surface reached — the negative direction was not measured",
-                        screenshot=shot(page, "before-observation"),
-                        extra={"projection": projection, "rule": neg.rule, "body": scrub(raw)})
-                obs.verdict = INCOMPLETE_NO_SURFACE
-                obs.reason = failure_reason(obs.verdict,
-                                           session_state=session_state)
-                return _finalize(obs, out_dir, td)
-            obs.add(name="before-observation", url=page.url, ui=ui,
-                    observed=neg.observed, ok=neg.ok, detail=neg.detail,
+        # 5 ── the NEGATIVE direction: read the screen + the server truth
+        # The negative is only MEASURED if the walk reached a surface that
+        # carries a decidable claim. A page with no connection surface is
+        # not an honest negative — it is an unmeasured one, and must not be
+        # credited as a pass (the vacuous-pin class #3806 exists to prevent).
+        projection_status, projection = read_projection(ctx, args.base_url)
+        if not projection_readable(projection_status, projection):
+            # The instrument's OWN read of the server's truth failed. It
+            # cannot judge a screen it could not check, and it must not
+            # claim a product finding it cannot support (the #4291 class):
+            # a transient 503 here would otherwise be reported as the client
+            # "claiming a connection while the server state was unreadable".
+            obs.add(name="server-read", ok=False, ui="",
+                    detail=f"GET /api/v1/onboarding/state -> {projection_status}",
+                    screenshot=shot(page, "server-read"))
+            obs.verdict = instrument_error_verdict(
+                "projection_unreadable",
+                f"GET /api/v1/onboarding/state -> {projection_status}")
+            return _finalize(obs, out_dir, td)
+        ui = read_connection_surface(page)
+        # The UNTRUNCATED body feeds the sweep: scrub()'s cap is for the
+        # recorded artifact only. `connection_verdict` picks the surface's
+        # own vocabulary and applies the all-page smuggle promotion.
+        raw = page_body(page)
+        surface = connection_surface_kind(page)
+        page_claims = claims_connection(raw)
+        obs.assertions["walk_completed"] = ui != ABSENT
+        neg = connection_verdict(ui, surface, projection, raw)
+        ui = neg.ui
+        if ui == ABSENT:
+            obs.add(name="before-observation", url=page.url, ui=ui, ok=False,
+                    observed=neg.observed,
+                    detail="no connection surface reached — the negative direction was not measured",
                     screenshot=shot(page, "before-observation"),
-                    extra={"projection": projection, "rule": neg.rule,
-                           "projection_status": projection_status,
-                           "page_claims_connection": page_claims, "body": scrub(raw)})
-            obs.assertions["no_claim_before_observation"] = neg.ok
-            if not neg.ok:
-                obs.verdict = f"failed: {neg.detail}"
-                obs.reason = failure_reason(obs.verdict, session_state=session_state)
-                return _finalize(obs, out_dir, td)
-
-            # 6 ── the server observes a real agent write (MCP, not a client claim)
-            # The session is PROVEN signed-in by here, so the key is either the
-            # explicitly-supplied one or one minted through the BFF — never a
-            # silent substitution, and never skipped for want of a credential.
-            observed_after = False
-            if not args.skip_agent_write:
-                if args.agent_key:
-                    key, key_detail = args.agent_key, "key from the explicit --agent-key flag"
-                else:
-                    key, key_detail = _mint_or_read_key(page, ctx, args.base_url)
-                if key:
-                    result = observe_agent_write(
-                        args.api_url, key,
-                        content=f"ship-test #3806 observation {uuid.uuid4().hex[:8]}")
-                    obs.add(name="agent-write", ui="", observed=False,
-                            ok=bool(result.get("ok")),
-                            detail=f"MCP tortoise_create_point ({key_detail})",
-                            extra={"mcp": result})
-                    if not result.get("ok"):
-                        # The WRITE failed — a bad / wrong-org / graph-bound key,
-                        # or an MCP outage. That is an instrument fault, and it
-                        # must not be reported as "the server did not observe"
-                        # (the #4291 class, one layer down).
-                        obs.verdict = instrument_error_verdict(
-                            "agent_write_failed", key_detail)
-                        return _finalize(obs, out_dir, td)
-                    # poll the server's projection until it records the edge.
-                    # `saw_200` is tracked SEPARATELY from the LAST read's
-                    # status: a transient 503 on the final poll must not turn a
-                    # demonstrably-never-observed write into an instrument
-                    # fault. The class is decided by whether the server's truth
-                    # was EVER readable, not by which read happened to be last.
-                    saw_readable = False
-                    for _ in range(20):
-                        projection_status, projection = read_projection(ctx, args.base_url)
-                        saw_readable = saw_readable or projection_readable(
-                            projection_status, projection)
-                        if server_observed(projection):
-                            break
-                        page.wait_for_timeout(1000)
-                    if not saw_readable:
-                        # The server's own truth was NEVER readable (a degraded
-                        # session store answers 503 here). Nothing was measured.
-                        obs.verdict = instrument_error_verdict(
-                            "projection_unreadable",
-                            f"GET /api/v1/onboarding/state -> {projection_status}")
-                        return _finalize(obs, out_dir, td)
-                    observed_after = server_observed(projection)
-                    # `ok` stays the WRITE's outcome (that is what the step is
-                    # named for); whether the server observed it is `observed`.
-                    obs.steps[-1].observed = observed_after
-                    obs.steps[-1].extra["projection"] = projection
-                    obs.steps[-1].extra["projection_status"] = projection_status
-                    obs.steps[-1].extra["poll_readable"] = saw_readable
-                else:
-                    obs.add(name="agent-write", ok=False, detail=key_detail)
-                    obs.verdict = instrument_error_verdict("no_agent_key", key_detail)
-                    return _finalize(obs, out_dir, td)
-
-            # 7 ── the POSITIVE direction: reload and read the Overview again
-            page.goto(args.base_url.rstrip("/") + "/",
-                      wait_until="domcontentloaded", timeout=args.timeout)
-            page.wait_for_timeout(args.settle_ms)
-            projection_status, projection = read_projection(ctx, args.base_url)
-            if not projection_readable(projection_status, projection):
-                obs.verdict = instrument_error_verdict(
-                    "projection_unreadable",
-                    f"GET /api/v1/onboarding/state -> {projection_status}")
-                return _finalize(obs, out_dir, td)
-            ui = read_connection_surface(page)
-            pos = connection_verdict(ui, connection_surface_kind(page), projection,
-                                     page_body(page))
-            ui = pos.ui
-            obs.add(name="after-observation", url=page.url, ui=ui,
-                    observed=pos.observed, ok=pos.ok and pos.observed, detail=pos.detail,
-                    screenshot=shot(page, "after-observation"),
-                    extra={"projection": projection, "rule": pos.rule,
-                           "projection_status": projection_status,
-                           "body": recorded_body(page)})
-            # The positive half is only PROVEN when the server observation
-            # happened AND the screen shows it. `verdict_for` encodes exactly
-            # that: `passed` requires pos.observed, never merely pos.ok (a
-            # hidden connection resolves to a judge-OK honest-negative).
-            obs.assertions["shown_when_observed"] = bool(pos.ok and pos.observed)
-            obs.verdict = verdict_for(neg, observed_after, pos,
-                                      session_state=session_state,
-                                      skip_agent_write=args.skip_agent_write)
+                    extra={"projection": projection, "rule": neg.rule, "body": scrub(raw)})
+            obs.verdict = INCOMPLETE_NO_SURFACE
+            obs.reason = failure_reason(obs.verdict,
+                                       session_state=session_state)
+            return _finalize(obs, out_dir, td)
+        obs.add(name="before-observation", url=page.url, ui=ui,
+                observed=neg.observed, ok=neg.ok, detail=neg.detail,
+                screenshot=shot(page, "before-observation"),
+                extra={"projection": projection, "rule": neg.rule,
+                       "projection_status": projection_status,
+                       "page_claims_connection": page_claims, "body": scrub(raw)})
+        obs.assertions["no_claim_before_observation"] = neg.ok
+        if not neg.ok:
+            obs.verdict = f"failed: {neg.detail}"
             obs.reason = failure_reason(obs.verdict, session_state=session_state)
             return _finalize(obs, out_dir, td)
-        except Exception as exc:
-            obs.add(name="error", url=page.url if page else "",
-                    ok=False, detail=f"{type(exc).__name__}: {exc}",
-                    screenshot=shot(page, "error") if page else "")
-            obs.verdict = f"failed: {type(exc).__name__}: {exc}"
+
+        # 6 ── the server observes a real agent write (MCP, not a client claim)
+        # The session is PROVEN signed-in by here, so the key is either the
+        # explicitly-supplied one or one minted through the BFF — never a
+        # silent substitution, and never skipped for want of a credential.
+        observed_after = False
+        if not args.skip_agent_write:
+            if args.agent_key:
+                key, key_detail = args.agent_key, "key from the explicit --agent-key flag"
+            else:
+                key, key_detail = _mint_or_read_key(page, ctx, args.base_url)
+            if key:
+                result = observe_agent_write(
+                    args.api_url, key,
+                    content=f"ship-test #3806 observation {uuid.uuid4().hex[:8]}")
+                obs.add(name="agent-write", ui="", observed=False,
+                        ok=bool(result.get("ok")),
+                        detail=f"MCP tortoise_create_point ({key_detail})",
+                        extra={"mcp": result})
+                if not result.get("ok"):
+                    # The WRITE failed — a bad / wrong-org / graph-bound key,
+                    # or an MCP outage. That is an instrument fault, and it
+                    # must not be reported as "the server did not observe"
+                    # (the #4291 class, one layer down).
+                    obs.verdict = instrument_error_verdict(
+                        "agent_write_failed", key_detail)
+                    return _finalize(obs, out_dir, td)
+                # poll the server's projection until it records the edge.
+                # `saw_200` is tracked SEPARATELY from the LAST read's
+                # status: a transient 503 on the final poll must not turn a
+                # demonstrably-never-observed write into an instrument
+                # fault. The class is decided by whether the server's truth
+                # was EVER readable, not by which read happened to be last.
+                saw_readable = False
+                for _ in range(20):
+                    projection_status, projection = read_projection(ctx, args.base_url)
+                    saw_readable = saw_readable or projection_readable(
+                        projection_status, projection)
+                    if server_observed(projection):
+                        break
+                    page.wait_for_timeout(1000)
+                if not saw_readable:
+                    # The server's own truth was NEVER readable (a degraded
+                    # session store answers 503 here). Nothing was measured.
+                    obs.verdict = instrument_error_verdict(
+                        "projection_unreadable",
+                        f"GET /api/v1/onboarding/state -> {projection_status}")
+                    return _finalize(obs, out_dir, td)
+                observed_after = server_observed(projection)
+                # `ok` stays the WRITE's outcome (that is what the step is
+                # named for); whether the server observed it is `observed`.
+                obs.steps[-1].observed = observed_after
+                obs.steps[-1].extra["projection"] = projection
+                obs.steps[-1].extra["projection_status"] = projection_status
+                obs.steps[-1].extra["poll_readable"] = saw_readable
+            else:
+                obs.add(name="agent-write", ok=False, detail=key_detail)
+                obs.verdict = instrument_error_verdict("no_agent_key", key_detail)
+                return _finalize(obs, out_dir, td)
+
+        # 7 ── the POSITIVE direction: reload and read the Overview again
+        page.goto(args.base_url.rstrip("/") + "/",
+                  wait_until="domcontentloaded", timeout=args.timeout)
+        page.wait_for_timeout(args.settle_ms)
+        projection_status, projection = read_projection(ctx, args.base_url)
+        if not projection_readable(projection_status, projection):
+            obs.verdict = instrument_error_verdict(
+                "projection_unreadable",
+                f"GET /api/v1/onboarding/state -> {projection_status}")
             return _finalize(obs, out_dir, td)
-        finally:
-            # Guarded: a close that raises would otherwise override the exit code
-            # of a run whose verdict and artifact are already final — and the
-            # teardown guarantee (cleanup never changes the outcome) would not be
-            # literally true.
-            for closer in (ctx, browser):
-                if closer is not None:
-                    with contextlib.suppress(Exception):
-                        closer.close()
+        ui = read_connection_surface(page)
+        pos = connection_verdict(ui, connection_surface_kind(page), projection,
+                                 page_body(page))
+        ui = pos.ui
+        obs.add(name="after-observation", url=page.url, ui=ui,
+                observed=pos.observed, ok=pos.ok and pos.observed, detail=pos.detail,
+                screenshot=shot(page, "after-observation"),
+                extra={"projection": projection, "rule": pos.rule,
+                       "projection_status": projection_status,
+                       "body": recorded_body(page)})
+        # The positive half is only PROVEN when the server observation
+        # happened AND the screen shows it. `verdict_for` encodes exactly
+        # that: `passed` requires pos.observed, never merely pos.ok (a
+        # hidden connection resolves to a judge-OK honest-negative).
+        obs.assertions["shown_when_observed"] = bool(pos.ok and pos.observed)
+        obs.verdict = verdict_for(neg, observed_after, pos,
+                                  session_state=session_state,
+                                  skip_agent_write=args.skip_agent_write)
+        obs.reason = failure_reason(obs.verdict, session_state=session_state)
+        return _finalize(obs, out_dir, td)
+    except Exception as exc:
+        obs.add(name="error", url=page.url if page else "",
+                ok=False, detail=f"{type(exc).__name__}: {exc}",
+                screenshot=shot(page, "error") if page else "")
+        obs.verdict = f"failed: {type(exc).__name__}: {exc}"
+        return _finalize(obs, out_dir, td)
+
+
+def _teardown_browser(pw, td, obs) -> None:
+    """Close the browser this run owns. The ONE teardown site's body.
+
+    Close the context → close the browser → `pw.stop()`, recording each step's
+    outcome into `obs.browser_teardown`. Each failure is RECORDED and does not
+    skip the remaining closers, and no failure here can change the verdict or the
+    exit code: cleanup is not the product (#4319's rule, applied to the browser).
+
+    One-shot by construction — `run_walk` spells the call exactly once — plus this
+    guard, so a re-entry cannot close the same objects twice.
+    """
+    if td.browser_done:
+        return
+    td.browser_done = True
+    record = obs.browser_teardown
+    closes = record["closes"]
+    failed = False
+    for name, closer in (("context", td.ctx), ("browser", td.browser)):
+        if closer is None:
+            continue
+        try:
+            closer.close()
+            closes.append({"name": name, "how": "closed", "detail": ""})
+        except BaseException as exc:
+            failed = True
+            closes.append({"name": name, "how": "close_error",
+                           "detail": f"{type(exc).__name__}: {exc}"})
+    try:
+        pw.stop()
+        closes.append({"name": "playwright", "how": "closed", "detail": ""})
+    except BaseException as exc:
+        failed = True
+        closes.append({"name": "playwright", "how": "close_error",
+                       "detail": f"{type(exc).__name__}: {exc}"})
+    record["outcome"] = (BROWSER_TEARDOWN_CLOSE_ERROR if failed
+                         else BROWSER_TEARDOWN_CLEAN)
 
 
 def _mint_or_read_key(page, ctx, base_url: str) -> tuple[str | None, str]:
@@ -1690,24 +1824,39 @@ def _finish(obs: Observation, out_dir: Path) -> Observation:
     return obs
 
 
+def _run_teardown_safely(obs: Observation, td: Teardown | None) -> None:
+    """Run the ORG teardown, never raising.
+
+    Extracted so the import-guard exit in `_start_driver` and `_finalize` share
+    one body: a failed cleanup is residue, never a product finding, and never a
+    reason to lose the artifact (the #4291 conflation, both directions).
+    """
+    if td is None:
+        return
+    try:
+        _run_teardown(obs, td)
+    except Exception as exc:
+        obs.teardown = {"status": TEARDOWN_FAILED,
+                        "detail": f"{type(exc).__name__}: {exc}"}
+
+
 def _finalize(obs: Observation, out_dir: Path,
               td: Teardown | None = None) -> Observation:
-    """The walk's SINGLE exit: teardown, then the artifact.
+    """`_walk`'s SINGLE exit: the ORG teardown, then the PRE-TEARDOWN write.
 
-    Every `return` in `run_walk` funnels through here, so `observation.json`
-    carries the teardown outcome on every path where a browser context existed
-    (i.e. where an org could have been created). Cleanup is wrapped so it can
-    neither raise out of the walk nor touch the product verdict or reason: a
-    failed cleanup is residue, never a product finding, and never a reason to
-    lose the artifact (the #4291 conflation, both directions).
+    Every `return` in `_walk` funnels through here, so the artifact carries the
+    org-teardown outcome on every path where a browser context existed (i.e. where
+    an org could have been created) — and it is COMPLETE and PARSABLE before the
+    bounded browser teardown starts, with `browser_teardown.outcome == "not_run"`.
+    A run killed inside that window therefore still leaves a diagnostic (#4907);
+    the authoritative value replaces it in `run_walk`'s single `_finish`.
+
+    Deliberately does NOT print and does NOT call `_finish`: the authoritative
+    write and the ONE verdict print belong to `run_walk`, after the teardown.
     """
-    if td is not None:
-        try:
-            _run_teardown(obs, td)
-        except Exception as exc:
-            obs.teardown = {"status": TEARDOWN_FAILED,
-                            "detail": f"{type(exc).__name__}: {exc}"}
-    return _finish(obs, out_dir)
+    _run_teardown_safely(obs, td)
+    _write_observation(obs, out_dir)
+    return obs
 
 
 # ── the guard self-check (mutation evidence, no browser needed) ─────────────
