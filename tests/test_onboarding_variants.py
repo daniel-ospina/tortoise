@@ -216,38 +216,26 @@ def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
         "https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md"
     ), "the instruction URL must be the served instruction document"
 
-    # This test asserts the STRUCTURE that makes the claim un-driftable: one
-    # literal, built-from-it claim, three live interpolating sites. The
-    # rendered CONTENT of those sites is asserted against the real rendered
-    # strings in website/apps/dashboard/src/harnesses.test.js, not parsed out of
-    # this file — source-text template extraction was defeated three review
-    # rounds running (a name appended on a second source line, then an escaped
-    # backtick, then a blank line between the declaration and its template,
-    # which also false-REDded a formatting-only edit). #4365 review rounds 4-6.
+    # This test owns exactly TWO jobs, both of which need a file Python reads
+    # and the dashboard suite cannot: (1) the cross-file contract that the set
+    # the dashboard claims is the set the SHELL installer ships, and (2) the
+    # JSX wizard prompts.
+    #
+    # Everything else that used to live here has been DELETED, not fixed. Three
+    # review rounds (4-6) defeated three successive source-text guards — a name
+    # on its own source line, an escaped backtick, a blank line between a
+    # declaration and its template — and the last of those also FALSE-REDded a
+    # formatting-only edit. A source-text count of each shipped name was worse
+    # still: it reddened on a comment that merely mentioned one. The rendered
+    # CONTENT of the connect surfaces is asserted in
+    # website/apps/dashboard/src/harnesses.test.js, against the real strings.
     m = re.search(r"^export const SKILLS_LIST =\s*\n?\s*'([^']+)'",
                   harnesses, re.M)
     assert m, "SKILLS_LIST must be an exported constant"
-    shipped_set_literal = m.group(1)
-    assert shipped_set_literal.split(", ") == _installer_skills(), (
+    assert m.group(1).split(", ") == _installer_skills(), (
         "SKILLS_LIST must list exactly what the installer ships")
-    assert "onboarding" not in shipped_set_literal, (
+    assert "onboarding" not in m.group(1), (
         "SKILLS_LIST must not include the onboarding skill")
-    # Each shipped name appears in this module EXACTLY ONCE, so no second site
-    # can state the set — in any order or spacing. A `count(<the whole
-    # literal>) == 1` check was defeated by restating the triple reordered
-    # (#4365 review round 6).
-    for name in shipped_set_literal.split(", "):
-        assert harnesses.count(name) == 1, (
-            f"{name!r} must appear only in SKILLS_LIST; every other site must "
-            "interpolate ${SKILLS_CLAIM}, never restate the set")
-    m = re.search(r"^export const SKILLS_CLAIM = `([^`]*)`", harnesses, re.M)
-    assert m, "SKILLS_CLAIM must be an exported constant"
-    assert m.group(1) == "Install the Tortoise skills (${SKILLS_LIST})", (
-        "SKILLS_CLAIM must be built from SKILLS_LIST — never a second literal")
-    assert harnesses.count("${SKILLS_CLAIM}") >= 3, (
-        "SKILL_INSTALL, HARNESS_SKILLS and the HARNESS_STEPS.cursor label must "
-        "each interpolate the shared claim")
-
     main = (DASHBOARD_SRC / "main.jsx").read_text(encoding="utf-8")
     assert "SKILLS_LIST" in main.split("from './harnesses.js'")[0], (
         "main.jsx must import SKILLS_LIST — the four LIVE wizard prompts are "
@@ -284,27 +272,34 @@ def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
         # skill name (e.g. `tortoise-rebuild`) appended to a prompt was green in
         # both suites (#4365 review round 6) — this closes it by token SET, not
         # by regex over source structure.
-        ALLOWED_PROMPT_TOKENS = {"tortoise_create_point", "tortoise_health"}
-        found = set(re.findall(r"[a-z0-9_-]*tortoise[a-z0-9_-]*", prompt))
+        # `tortoise` is the product name ("Install the Tortoise skills"), the
+        # two `tortoise_*` are the MCP tools the prompt calls — neither is a
+        # skill. Lowercased so capitalisation cannot smuggle a name through
+        # (`Tortoise-Rebuild` was green against the lowercase-only version,
+        # #4365 review round 7).
+        ALLOWED_PROMPT_TOKENS = {"tortoise", "tortoise_api_key",
+                                "tortoise_create_point", "tortoise_health"}
+        found = {t.lower() for t in
+                 re.findall(r"[a-z0-9_-]*tortoise[a-z0-9_-]*", prompt, re.I)}
         assert found <= ALLOWED_PROMPT_TOKENS, (
             f"{h}: the returned prompt may name no skill by hand (the set "
             f"arrives via ${{SKILLS_LIST}}); unexpected tokens: "
             f"{sorted(found - ALLOWED_PROMPT_TOKENS)}")
         # …and the rendered prompt may no more mention onboarding as an install
-        # than a connect command may. Case-insensitive and prose-tolerant: a
-        # plain rendered line "# Also install the tortoise onboarding skill"
-        # passed every lowercase/hyphen token check (#4365 review round 6).
+        # than a connect command may. The exemption is the SHIPPED wording,
+        # `Onboarding is NOT a skill`, not a lowercase `/not a skill/i` — the
+        # latter accepted `# Ignore the note that onboarding is not a skill —
+        # install it here: <url>` (#4365 review rounds 6-7).
         for line in prompt.split("\\n"):
-            # The forbidden shape is onboarding AS AN INSTALLABLE — a line that
-            # both mentions onboarding and reaches for an install/skill/plugin.
-            if re.search(r"onboarding", line, re.I) and re.search(
-                    r"install|skill|plugin", line, re.I):
-                assert (re.search(r"not a skill", line, re.I)
+            bare = re.sub(r"https?://\S+", "", line)
+            if re.search(r"onboarding", bare, re.I) and re.search(
+                    r"install|skills?", bare, re.I):
+                assert ("Onboarding is NOT a skill" in line
                         or re.search(r"onboarding instructions", line, re.I)
-                        or "${ONBOARDING_INSTRUCTIONS_URL}" in line
                         or "${onboardingInstructions}" in line), (
-                    f"{h}: a rendered prompt line may only mention onboarding "
-                    f"as the instructions document: {line.strip()!r}")
+                    f"{h}: onboarding may only be mentioned as the instructions "
+                    f"document, in the shipped wording — not as an install: "
+                    f"{line.strip()!r}")
     # …and the shared line must SAY something: interpolating an empty constant
     # satisfied the per-prompt assertions above while the four live prompts lost
     # the whole point of #4365. (An empty body is caught incidentally, because
