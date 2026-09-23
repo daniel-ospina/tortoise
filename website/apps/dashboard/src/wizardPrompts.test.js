@@ -27,6 +27,7 @@ import {
   wizardWorkflowsText,
 } from './wizardPrompts.js'
 import {
+  HARNESS_CAPTURE_INSTALL,
   HARNESS_INTRO,
   HARNESS_NAMES,
   HARNESS_STEPS,
@@ -66,6 +67,10 @@ const APPROVED_HOSTS = new Set([
   'tortoise.premiselabs.co',
   'claude.ai',
   'chatgpt.com',
+  // The capture-install snippets point at the source repo
+  // (`github.com/daniel-ospina/tortoise`) — a legitimate reference, surfaced only
+  // once that surface was actually scanned (#4820 review, issue 2).
+  'github.com',
 ])
 
 // ── 1. The rendered snapshot ───────────────────────────────────────────────
@@ -129,12 +134,25 @@ function allRenderedSurfaces() {
   // of these with its OWN list; the two lists were not supersets of the live
   // render, and every remaining false green came from that seam.
   for (const [id, text] of Object.entries(HARNESS_INTRO)) surfaces.push({ id: `HARNESS_INTRO.${id}`, text })
+  // HARNESS_CAPTURE_INSTALL is live as well — main.jsx:10025 renders each entry in
+  // a <pre>. It was on NO list, so a hostile URL pasted into a capture-install
+  // snippet reached the user with both suites green (#4820 review, issue 2).
+  for (const [id, text] of Object.entries(HARNESS_CAPTURE_INSTALL)) {
+    if (typeof text === 'string') surfaces.push({ id: `HARNESS_CAPTURE_INSTALL.${id}`, text })
+  }
   for (const harness of Object.keys(HARNESS_NAMES)) {
     // NOT HARNESS_SKILLS: its only consumers are inside LEGACY_WIZARD_ARCHIVED
     // (main.jsx:7857/7864, flag=false), so it is not a live render and pinning
     // it would red the gate for an edit to dead code.
-    const steps = HARNESS_STEPS(harness, KEY)
-    const list = steps && steps[harness]
+    //
+    // HARNESS_STEPS(harness, key) ALREADY selects the harness — it ends
+    // `})[harness]` (harnesses.js:154) and returns the step ARRAY. Reading
+    // `steps[harness]` off that array is always `undefined`, so this block never
+    // ran and none of the surfaces below were ever scanned, while the comment
+    // above it claimed they were. Found by an independent review of #4820
+    // (issue 1): the dead branch was invisible because the block it guards is
+    // the only consumer, and no assertion counted the surfaces.
+    const list = HARNESS_STEPS(harness, KEY)
     if (Array.isArray(list)) {
       for (const [n, entry] of list.entries()) {
         if (typeof entry === 'string') surfaces.push({ id: `HARNESS_STEPS.${harness}[${n}]`, text: entry })
@@ -172,7 +190,17 @@ const SKILL_NAMES = SKILLS_LIST.split(', ')
 // What may legitimately follow a set statement. ANCHORED, because a bare
 // "any whitespace" probe cannot tell the legitimate ` from <installer URL>.`
 // from a hostile ` plus agent-memory:`.
-const TAIL_FORMS = [':\n', ` from ${SKILLS_INSTALL_URL}.`]
+//
+// `:` is a legitimate terminus ONLY when it ends the line or the surface — a
+// step LABEL (`Install the Tortoise skills (a, b, c):` with the command on the
+// next line, HARNESS_STEPS.cursor) ends there. It is NOT allowed to be followed
+// by more text, or `: plus agent-memory` would slip through.
+const TAIL_OK = [
+  /^$/,                                    // the statement ends the surface
+  /^\n/,                                   // ends the line
+  /^:(?:\n|$)/,                            // a label terminus
+  new RegExp(`^ from ${SKILLS_INSTALL_URL.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.`),
+]
 
 // Is this parenthetical an ENUMERATION of capabilities? If it is, it must be
 // exactly the shipped set. Exact-matching a hint instead ("(run in a terminal)")
@@ -201,9 +229,9 @@ test('#4365: every rendered shipped-set statement is EXACTLY the shipped set', (
           + `"${SKILLS_LIST}" — got ${JSON.stringify(whole)}`)
       }
       const after = text.slice(end)
-      assert.ok(TAIL_FORMS.some((form) => after.startsWith(form)),
-        `${id}: only ${JSON.stringify(TAIL_FORMS)} may follow the set statement — `
-        + `got ${JSON.stringify(after.slice(0, 40))}`)
+      assert.ok(TAIL_OK.some((form) => form.test(after)),
+        `${id}: nothing but a line end, a label colon or " from ${SKILLS_INSTALL_URL}." `
+        + `may follow the set statement — got ${JSON.stringify(after.slice(0, 40))}`)
     }
   }
   assert.ok(seen > 0, 'precondition: the rendered surfaces carry set statements')
@@ -264,8 +292,18 @@ test('#4365: no rendered surface names a tortoise-shaped skill outside the set',
     'install-tortoise-skills',  // the installer script
   ])
   for (const { id, text } of allRenderedSurfaces()) {
-    const tokens = text.match(/\b[a-z0-9_-]*tortoise[a-z0-9_-]*\b/gi) ?? []
-    for (const raw of tokens) {
+    for (const m of text.matchAll(/\b[a-z0-9_-]*tortoise[a-z0-9_-]*\b/gi)) {
+      const raw = m[0]
+      const before = text[m.index - 1] ?? ''
+      const after = text.slice(m.index + raw.length)
+      // A PATH, a <placeholder> or a FILENAME is not a skill NAME. The
+      // capture-install snippets legitimately carry `<path-to-tortoise>/…`,
+      // `extensions/tortoise-capture` and `tortoise-session-end.sh`; flagging
+      // those was a false red the moment this surface was actually scanned
+      // (#4820 review, issue 1/2 — the block that would have scanned it was
+      // dead, so the false red had never been observed).
+      if ('/<.~'.includes(before)) continue
+      if (after.startsWith('/') || /^\.[a-z0-9]+/i.test(after)) continue
       // `tortoise_*` names the MCP tool FAMILY (a wildcard), not a skill — the
       // trailing separator is stripped before the check, so a real name like
       // `tortoise_rebuild` is still caught.
@@ -294,6 +332,12 @@ test('#4365: every endpoint on every rendered surface is an approved host', () =
   // Extensions that would otherwise read as a ccTLD (`install-tortoise-skills.sh`).
   const FILE_EXT = /^(?:md|sh|json|js|mjs|jsx|ts|tsx|py|txt|toml|yml|yaml|html|css|lock|cfg|ini|log|csv|svg|png|jpg)$/i
   const BARE_DOMAIN = /(?<![\w.-])((?:[a-z0-9-]+\.){1,}[a-z]{2,})(?![\w-])/gi
+  // An IP LITERAL is a bare token too, and it has no alphabetic last label — so
+  // every rule above skips it. `https://1.2.3.4/mcp` was caught by URL_HOST, but
+  // a scheme-less `Or connect at 1.2.3.4/mcp` reached the user with both suites
+  // green (#4820 review, issue 3). Octet range is NOT validated: this is an
+  // addressability gate, and over-matching a 4-group decimal is harmless here.
+  const BARE_IPV4 = /(?<![\w.-])((?:\d{1,3}\.){3}\d{1,3})(?![\w-])/g
   for (const { id, text } of allRenderedSurfaces()) {
     for (const m of text.matchAll(URL_HOST)) {
       assert.ok(APPROVED_HOSTS.has(m[1].toLowerCase()),
@@ -306,6 +350,10 @@ test('#4365: every endpoint on every rendered surface is an approved host', () =
       if (!PUBLIC_TLD.test(lastLabel)) continue // a decimal, a nested key, an abbreviation
       assert.ok(APPROVED_HOSTS.has(host),
         `${id}: a bare domain does not match an approved host ${JSON.stringify(host)}`)
+    }
+    for (const m of text.matchAll(BARE_IPV4)) {
+      assert.ok(APPROVED_HOSTS.has(m[1]),
+        `${id}: a bare IP literal is not an approved host ${JSON.stringify(m[1])}`)
     }
   }
   // …and the reach invariant: an onboarding surface names the document itself.
