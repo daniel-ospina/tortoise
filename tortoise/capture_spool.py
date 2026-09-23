@@ -518,9 +518,10 @@ def is_probe_session_id(session_id: str) -> bool:
 
     Matches the full probe shape, not the prefix — see `_PROBE_SESSION_ID_RE`.
     This is the only thing preventing synthetic probe content from being
-    extracted as memory, so it must stay narrow: a false NEGATIVE leaks a probe
-    (recoverable, and verify's cleanup already removes it), while a false
-    POSITIVE destroys a real capture (irreversible).
+    extracted as memory, so it must stay narrow. A false POSITIVE merely holds
+    a real capture back (reversible, and reported); a false NEGATIVE lets a
+    probe reach the graph. The prefix match this replaced was worse than either
+    — it refused AND deleted real data.
 
     ⚠️ This regex and `session_verify._probe_id` describe the SAME format in two
     places, and nothing enforces that they agree. `tests/test_session_import_codex.py::
@@ -872,8 +873,10 @@ def _clear_breadcrumb_for(harness: str | None, session_id: str | None) -> None:
       This is an IDENTITY check; a timestamp check does NOT work, because the
       spool's ``updated_at`` is frozen by the dedup path and so cannot say when
       this session last failed.
-    * a record with no recorded ``session_id`` predates this field and is
-      cleared, preserving the earlier behaviour for old records.
+    * a record with NO recorded ``session_id`` holds no identity to match on —
+      the shipped codex/cursor seams write that shape today (#4799) — so it is
+      KEPT. A stale breadcrumb is a cosmetic wart; wrongly erasing one loses
+      evidence of a session that may still be lost.
 
     Best effort throughout: a breadcrumb is evidence, never a gate on filing.
     """

@@ -3754,8 +3754,8 @@ def _cmd_session_drain(api_key: str, api_url: str,
               file=_sys.stderr)
     # A probe refusal is counted in `held_back` alongside the live-session hold,
     # so without this line an operator cannot tell WHY a spooled session never
-    # lands — the entry is simply held every drain until it ages out (#4714
-    # review).
+    # lands — the entry is retried every drain and only leaves the spool when
+    # the count/byte ceiling evicts it (there is no TTL).
     for r in summary.probe_refusals:
         print(f"spool refusal: {r['session_id']} — {r['detail']}",
               file=_sys.stderr)
@@ -4014,6 +4014,9 @@ def _cmd_sessions_import(args) -> int:
     # "import failed reading the response", sending the user to debug a spool
     # instead of the URL they mistyped (#4714 review). This stays LOUD and
     # writes no spool entry: a malformed URL never becomes valid by retrying.
+    # Only the scheme-less case can be judged here — a malformed URL that still
+    # parses falls through to the response-phase clause, where it is at least
+    # SPOOLED rather than lost (fail-safe, but its message is less precise).
     if not api_url.startswith(("http://", "https://")):
         print(f"Invalid API URL {api_url!r} — set TORTOISE_API_URL to an "
               "absolute http(s) URL.", file=_sys.stderr)
