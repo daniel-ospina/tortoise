@@ -1140,11 +1140,12 @@ def test_duration_integrity():
     from tools.ci_selection import duration_issues, load_manifest
     m = load_manifest()
     assert duration_issues(m) == []
-    # a slow-file key must fail
-    bad = dict(m)
-    bad["durations"] = {"test_about_edges.py": 10.0}  # a slow file
-    assert duration_issues(bad) != []
-    # an unclassified key must fail
+    slow_now_ok = dict(m)
+    slow_now_ok["durations"] = {"test_about_edges.py": 10.0}  # a slow file
+    assert duration_issues(slow_now_ok) == []
+    carve_ok = dict(m)
+    carve_ok["durations"] = {"test_reaper.py": 195.9}
+    assert duration_issues(carve_ok) == []
     bad2 = dict(m)
     bad2["durations"] = {"not_a_real_file.py": 10.0}
     assert duration_issues(bad2) != []
@@ -1256,7 +1257,6 @@ def test_duration_coverage_guard_boundary_and_realistic():
     assert duration_coverage_issues(below) != [], "89% must fire"
     assert duration_coverage_issues(at) == [], "90% is at the floor, not below"
     assert duration_coverage_issues(above) == [], "95% must be silent"
-    # the real map: 502/520 fast files measured (96.5%)
     assert duration_coverage_issues(load_manifest()) == []
 
 
@@ -1584,9 +1584,17 @@ def test_diff_gated_jobs_consume_changes_outputs():
     # committed matrix rows remain literal file lists (drift-guard pinned)
     rows = wf["jobs"]["test-slow"]["strategy"]["matrix"]["include"]
     assert len(rows) == 2
+    from tools.ci_selection import TESTS_DIR
+    _slow = set(load_manifest()["slow_files"])
     for row in rows:
-        assert row["files"].startswith("test_"), \
-            "test-slow leg rows must stay the committed literal lists (#1471)"
+        tokens = row["files"].split()
+        assert tokens, "test-slow leg row must be a literal file list (#1471)"
+        for token in tokens:
+            rel = f"{token}.py"
+            assert (TESTS_DIR / rel).exists(), \
+                f"test-slow leg entry {rel} does not exist under tests/"
+            assert rel in _slow, \
+                f"test-slow leg entry {rel} is not declared in slow_files"
 
 
 def test_slow_selected_echo_transform_roundtrips_into_legs():
