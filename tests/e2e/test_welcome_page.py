@@ -36,8 +36,8 @@ import time
 import uuid
 
 import pytest
-from playwright.sync_api import Page, expect
 from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import Page, expect
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 # Canonical host for the auth surface is tortoise.premiselabs.co (host
