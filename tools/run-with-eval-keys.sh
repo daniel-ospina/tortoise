@@ -63,6 +63,13 @@ set -u
 # Turn tracing off before any secret is read.
 case $- in *x*) set +x ;; esac
 
+# A caller can export a shell FUNCTION (`BASH_FUNC_name%%` in the environment)
+# that shadows a builtin this script relies on — including `declare`, `builtin`
+# and `command`. It is caller-controlled, so it crosses no privilege boundary,
+# but there is no reason to leave the lookup open: drop any such shadow before
+# a builtin is used.
+unset -f command declare builtin 2>/dev/null || true
+
 # The provider keys this wrapper owns — the set the extraction/reader paths
 # actually read:
 #   tortoise/ingest.py::_PROVIDERS          → OPENROUTER / DEEPSEEK / OPENAI / GEMINI
@@ -204,10 +211,11 @@ unset "${_RWEK_MANAGED_KEYS[@]}"
 #      filled — never by "is some shell variable set", which would also catch
 #      bash's own non-exported internals (`PS4`, `IFS`, …) and silently drop a
 #      `.env` key naming one. The question is asked with the `declare` BUILTIN
-#      (`declare -p` reveals the `-x` flag), so the decision cannot be
-#      subverted by an unpinned external command: a `printenv` resolved through
-#      a caller's PATH or shadowed by an exported `BASH_FUNC_printenv%%` would
-#      have flipped it. "Cannot determine" is never read as "absent".
+#      (`builtin declare -p` reveals the `-x` flag), so NO EXTERNAL COMMAND is
+#      consulted — a `printenv` resolved through a caller's PATH (or missing
+#      from it) would have flipped the decision, and an exported
+#      `BASH_FUNC_*` shadow of the builtins is dropped above. "Cannot
+#      determine" therefore has no separate branch to fall into.
 if [ -f "$_RWEK_ENV_FILE" ] && [ -r "$_RWEK_ENV_FILE" ]; then
   while IFS= read -r _rwek_raw || [ -n "${_rwek_raw:-}" ]; do
     _rwek_line=$(trim "${_rwek_raw%$'\r'}")
@@ -259,9 +267,9 @@ if [ -f "$_RWEK_ENV_FILE" ] && [ -r "$_RWEK_ENV_FILE" ]; then
       # fill-if-absent: an inherited key, or one an earlier `.env` line already
       # set, is never clobbered — `_load_dotenv`'s deliberate semantics. The
       # `declare` builtin reports the `-x` (exported) flag, so this is exactly
-      # "is the name in the process environment" without trusting PATH or the
-      # function table.
-      _rwek_decl=$(command declare -p "$_rwek_key" 2>/dev/null) || _rwek_decl=
+      # "is the name in the process environment", with no external command and
+      # no shadowable `command` in the way.
+      _rwek_decl=$(builtin declare -p "$_rwek_key" 2>/dev/null) || _rwek_decl=
       _rwek_flags=${_rwek_decl#declare -}
       _rwek_flags=${_rwek_flags%% *}
       case "$_rwek_flags" in

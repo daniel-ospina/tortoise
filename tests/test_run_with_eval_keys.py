@@ -307,42 +307,58 @@ class RunWithEvalKeysTests(unittest.TestCase):
         self.assertEqual(r.stdout, "first", r.stderr)
 
     def test_malformed_ambient_name_cannot_forge_an_inherited_key(self):
-        # An env entry whose NAME contains a newline (a malformed entry that an
-        # execve can carry even though an ordinary `VAR=...` assignment cannot)
-        # must not make a legitimate `.env` key look inherited and silently
-        # drop it. The `env` binary is used because it hands a bare
-        # `NAME=value` argv string straight to execve.
+        # An env entry whose NAME contains a newline — expressible through
+        # execve, though not by an ordinary `VAR=...` assignment — must not make
+        # a legitimate `.env` key look inherited and silently drop it.
         env_file = Path(self._tmp.name) / "forge.env"
         env_file.write_text("EVALTEST_FORGE=from-dotenv\n", encoding="utf-8")
-        r = subprocess.run(
-            [
-                "/usr/bin/env",
-                "EVALTEST_HEAD\nEVALTEST_FORGE=trap",
-                f"PATH={os.environ.get('PATH', '/usr/bin:/bin')}",
-                f"EVAL_KEYS_ENV_FILE={env_file}",
-                str(WRAPPER),
-                "sh",
-                "-c",
-                'printf "%s" "${EVALTEST_FORGE-unset}"',
-            ],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
+        env = self.base_env(EVAL_KEYS_ENV_FILE=str(env_file))
+        env["EVALTEST_HEAD\nEVALTEST_FORGE"] = "trap"
+        r = self.run_wrapper(
+            ["sh", "-c", 'printf "%s" "${EVALTEST_FORGE-unset}"'],
+            env=env,
+            use_fixture=False,
         )
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout, "from-dotenv", r.stderr)
 
     def test_inherited_value_survives_without_an_external_env_command(self):
         # The fill-if-absent decision must not depend on an external command:
-        # with a PATH lacking the probe binary (which would make it exit 127 ->
-        # "absent"), an inherited non-managed var must still win over `.env`.
+        # with a PATH that cannot resolve the old `printenv` probe, an inherited
+        # non-managed var must still win over `.env`. The temp bin dir carries
+        # only the `bash` symlink the wrapper's `#!/usr/bin/env bash` needs, and
+        # provably no `printenv` — `PATH=/bin` is NOT sufficient, because on
+        # usrmerge Linux (CI's ubuntu-latest) `/bin` IS `/usr/bin`.
+        probe_free_bin = Path(self._tmp.name) / "probe-free-bin"
+        probe_free_bin.mkdir()
+        (probe_free_bin / "bash").symlink_to("/bin/bash")
+        self.assertIsNone(
+            shutil.which("printenv", path=str(probe_free_bin)),
+            "this test's premise (no printenv on the PATH) does not hold",
+        )
         env_file = Path(self._tmp.name) / "keep.env"
         env_file.write_text("EVALTEST_KEEP=from-dotenv\n", encoding="utf-8")
-        env = self.base_env(PATH="/bin", EVALTEST_KEEP="ambient-wins")
+        env = self.base_env(PATH=str(probe_free_bin), EVALTEST_KEEP="ambient-wins")
         env["EVAL_KEYS_ENV_FILE"] = str(env_file)
         r = self.run_wrapper(
             ["/bin/sh", "-c", 'printf "%s" "${EVALTEST_KEEP-unset}"'],
+            env=env,
+            use_fixture=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "ambient-wins", r.stderr)
+
+    def test_exported_function_shadowing_a_builtin_cannot_flip_the_decision(self):
+        # A caller can export a FUNCTION that shadows `command`/`declare`. That
+        # is caller-controlled (no privilege boundary), but it must not flip
+        # the fill-if-absent decision: an inherited non-managed var still wins.
+        env_file = Path(self._tmp.name) / "shadow.env"
+        env_file.write_text("EVALTEST_SHADOW=from-dotenv\n", encoding="utf-8")
+        env = self.base_env(EVAL_KEYS_ENV_FILE=str(env_file), EVALTEST_SHADOW="ambient-wins")
+        env["BASH_FUNC_command%%"] = "() { return 0; }"
+        env["BASH_FUNC_declare%%"] = "() { return 0; }"
+        r = self.run_wrapper(
+            ["sh", "-c", 'printf "%s" "${EVALTEST_SHADOW-unset}"'],
             env=env,
             use_fixture=False,
         )
