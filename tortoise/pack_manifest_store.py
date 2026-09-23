@@ -41,7 +41,12 @@ from threading import Lock
 
 import yaml
 
-from tortoise.pack_state import _pack_install_lock, _resolved_graph_name, _target_graph
+from tortoise.pack_state import (
+    PACK_INSTALL_LABEL,
+    _pack_install_lock,
+    _resolved_graph_name,
+    _target_graph,
+)
 
 log = logging.getLogger(__name__)
 
@@ -221,7 +226,7 @@ def upsert_tenant_manifest(sdk, manifest_yaml: str) -> dict:
         )
         # Activate (PackInstall source='custom') — idempotent additive MERGE.
         g.query(
-            "MERGE (p:PackInstall {namespace: $ns}) "
+            f"MERGE (p:{PACK_INSTALL_LABEL} {{namespace: $ns}}) "
             "SET p.version = $version, p.status = 'active', "
             "    p.source = 'custom', p.installed_at = coalesce(p.installed_at, $now)",
             params={"ns": ns, "version": str(raw.get("version", "0.1.0")), "now": now},
@@ -288,7 +293,8 @@ def delete_tenant_manifest(sdk, namespace: str) -> bool:
     with _pack_install_lock(lock_graph, namespace):
         g.query(f"MATCH (m:{PACK_MANIFEST_LABEL} {{namespace: $ns}}) DELETE m",
                 params={"ns": namespace})
-        g.query("MATCH (p:PackInstall {namespace: $ns, source: 'custom'}) "
+        g.query(f"MATCH (p:{PACK_INSTALL_LABEL} "
+                "{namespace: $ns, source: 'custom'}) "
                 "SET p.status = 'removed'", params={"ns": namespace})
     with _TENANT_VIEWS_GUARD:
         _TENANT_VIEW_DIRTY.add(_graph_identity(sdk))
