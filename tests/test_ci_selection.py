@@ -1140,27 +1140,15 @@ def test_duration_integrity():
     from tools.ci_selection import duration_issues, load_manifest
     m = load_manifest()
     assert duration_issues(m) == []
-    # #4712: a slow-file key is now ACCEPTED — the slow/carve lanes carry their
-    # measured cost in the same map (previously rejected as "must be
-    # fast-gate", #1473). The lane keys still must be classified, so the
-    # contract is pinned from both directions below.
     slow_now_ok = dict(m)
     slow_now_ok["durations"] = {"test_about_edges.py": 10.0}  # a slow file
     assert duration_issues(slow_now_ok) == []
-    # a carve-out key is accepted too (three such keys predate #4712).
     carve_ok = dict(m)
     carve_ok["durations"] = {"test_reaper.py": 195.9}
     assert duration_issues(carve_ok) == []
-    # an unclassified key must still fail
     bad2 = dict(m)
     bad2["durations"] = {"not_a_real_file.py": 10.0}
     assert duration_issues(bad2) != []
-    # NOTE (code-review, PR #4728): do NOT add a case here that lists an
-    # unclassified key in `slow_files` too. `duration_issues` no longer reads
-    # `slow_files` at all, so such a case is byte-identical to `bad2` above and
-    # its assertion cannot fail for the reason its comment would claim. The
-    # lane-membership question is pinned by `slow_file_issues` (which DOES read
-    # `slow_files`), not here.
 
 
 # ── #3400: duration-balanced full-matrix halves + durations coverage ──────
@@ -1269,11 +1257,6 @@ def test_duration_coverage_guard_boundary_and_realistic():
     assert duration_coverage_issues(below) != [], "89% must fire"
     assert duration_coverage_issues(at) == [], "90% is at the floor, not below"
     assert duration_coverage_issues(above) == [], "95% must be silent"
-    # the real map (#4712): it covers the fast pool, so the guard has real
-    # margin. This comment used to quote counts ("502/520 … (96.5%)") and they
-    # went stale — the map had drifted to 90.083%, exactly ON the floor with
-    # zero files of margin, so one new fast file reddened this assertion for
-    # every PR. Counts are deliberately NOT quoted here for that reason.
     assert duration_coverage_issues(load_manifest()) == []
 
 
@@ -1601,14 +1584,6 @@ def test_diff_gated_jobs_consume_changes_outputs():
     # committed matrix rows remain literal file lists (drift-guard pinned)
     rows = wf["jobs"]["test-slow"]["strategy"]["matrix"]["include"]
     assert len(rows) == 2
-    # #4711: the rows must stay LITERAL committed lists, but they are not
-    # required to be FLAT top-level names. A nested `tests/`-relative path is a
-    # legitimate leg entry — the carve-out list already carries eval/, bench/
-    # and longmem_eval/ — and the repo's heaviest file lives at
-    # eval/retrieval/test_integration.py, which is exactly the file #4711 moves
-    # here. The assertion below is the STRONG form of the old
-    # `startswith("test_")` proxy: every token must name a real file under
-    # tests/ AND be a declared slow file, which also catches a dead entry.
     from tools.ci_selection import TESTS_DIR
     _slow = set(load_manifest()["slow_files"])
     for row in rows:

@@ -90,27 +90,8 @@ DURATION_COVERAGE_MIN = 0.90
 NL = chr(10)
 
 # Shared/cross-cutting modules -> full matrix (conservative per scope v5).
-#
-# #4713: an entry should name a LEAF (a file) rather than a directory — a
-# directory entry makes any purely local edit run the full matrix (the one
-# directory entry below is vacuous today; see its own comment) — and each
-# entry states its consumers in the comment above it, so a stale or merely
-# LARGE (rather than genuinely cross-cutting) entry is visible on review. The
-# rule this file follows: an entry belongs here when a change to it can alter
-# behaviour on surfaces the changed path itself does not name. A file that is
-# large but consumed by ONE surface is wired into that surface's
-# SOURCE_PATTERNS instead (see `tortoise/projection/edges.py` below).
 SHARED_MODULES = (
-    # The SDK facade: imported by many tortoise/ sources (__main__.py, analyze.py,
-    # hosted_api.py, ingest.py, m0.py, …) and by test/tool modules spread over
-    # every surface (tests/eval/harness/runner.py, tests/longmem_eval/,
-    # battery/arms/a4_tortoise.py, tests/test_ask_sdk.py, test_hosted_api.py,
-    # test_projection*.py, test_ep_*.py).
     "tortoise/sdk.py",
-    # The EP engine: imported by tortoise/ingest.py (core) AND tortoise/sdk.py
-    # (sdk — itself shared), and pinned by the ep suites (test_ep_directional.py,
-    # test_ep_mitigation.py, test_ep_operatorless.py) plus the sdk ones
-    # (test_sdk.py, test_sdk_ep.py). Multi-surface, so full matrix.
     "tortoise/ep.py",
     # cross-cutting leaf: exception classes consumed by sdk, api, core, AND ep
     # surfaces (test_divergence_conformance, test_epic903_modes,
@@ -125,79 +106,19 @@ SHARED_MODULES = (
     # consumer behaviour on every surface, so it runs the full matrix (same
     # rationale as exceptions.py above).
     "tortoise/env_truthy.py",
-    # The MCP tool registry: imported by tortoise/hosted_api.py and
-    # tortoise/mcp_auth.py (both api) and tortoise/mcp_server.py (itself shared),
-    # and pinned by modules across api/core/sdk/eval/onboarding
-    # (test_tool_registry.py, test_capabilities_endpoint.py, test_epic903_mcp.py,
-    # tests/tool_surface_capabilities.py, test_mcp_rename_table.py).
     "tortoise/tool_registry.py",
-    # The MCP server entry point: imported by tortoise/__main__.py (api),
-    # hosted_api.py (api), selfhost.py (api) and deployment.py, and pinned by
-    # modules across api/sdk/core/onboarding/eval (test_mcp_server.py,
-    # test_cli_serve.py, test_mcp_route_challenge.py, test_abuse_integration.py).
     "tortoise/mcp_server.py",
-    # #4713: the projection PACKAGE'S ENTRY POINT only. This used to be the
-    # directory `tortoise/projection/`, which made every local edit inside the
-    # package (entities.py, grounding.py, propagation.py, edges.py) run the
-    # full matrix. What is genuinely cross-cutting is the package's `__init__`:
-    # consumers outside the package reach it via `from [.]projection import
-    # …`, which resolves here — `tortoise/sdk.py` (sdk), `tortoise/api.py`,
-    # `hosted_api.py` and `__main__.py` (api), and `ingest.py`, `m0.py`,
-    # `consistency.py`, `backup.py`, `migrate_db.py`, `pipeline_cli.py` (core),
-    # plus `mcp_server.py` (itself shared). Those consumers span sdk, api and
-    # core, so a change to the entry point still runs the full matrix.
-    #
-    # The SUBMODULES are deliberately NOT listed here:
-    #   * `entities.py`, `grounding.py`, `propagation.py` — no DIRECT consumer
-    #     outside the package: their only importers are the package's own
-    #     `__init__` (grounding/propagation) plus the core-owned
-    #     tests/test_projection.py and test_capture_entity_attachment_3664.py
-    #     (entities). They fall through select()'s `tortoise/` branch to `core`,
-    #     the surface that owns the test_projection*.py pins, so an
-    #     `entities.py` change selects that surface instead of the full matrix.
-    #     ⚠️ This IS a deliberate coverage REDUCTION and should be read as one:
-    #     these modules are composed into this package's `__init__`, which sdk
-    #     and api consume, so a submodule regression is caught here only by the
-    #     `core` pins — the sdk/api suites (test_sdk.py, test_hosted_api.py) wait
-    #     for the next main push, not the PR. #4713's brief accepted exactly this
-    #     trade, and its acceptance criterion ("a change to entities.py no longer
-    #     selects the full matrix, and the surfaces that genuinely consume
-    #     projection still select test_projection*.py") is met. If the sdk/api
-    #     suites should also run, mirror the `edges.py` treatment below for these
-    #     three — that is a separate decision, not a bug in this one.
-    #   * `edges.py` — has ONE named source consumer,
-    #     `tortoise/sdk.py` (DERIVABLE_STRUCTURAL_RELS, STRUCTURAL_REL_LABELS,
-    #     stub_key, _VALID_EDGE_PREDICATES). It is wired to the `sdk` surface via
-    #     SOURCE_PATTERNS and paired with CORE_ALSO so its core-owned pins
-    #     (test_projection.py) keep running too. See those two blocks.
+    # ⚠️ #4713: naming the package's entry point rather than the whole
+    # `tortoise/projection/` directory is a deliberate coverage REDUCTION. A
+    # submodule edit now runs only the surfaces registered for it below, plus the
+    # `core` pins that exercise it — the sdk/api suites wait for the next main
+    # push. Take the `edges.py` treatment below as the model if that is wrong.
     "tortoise/projection/__init__.py",
-    # pytest auto-loads this for EVERY test module, whatever surface it belongs
-    # to, and the e2e/hosted suite imports it directly
-    # (tests/e2e/hosted/test_01_signup_provision.py …
-    # test_10_session_capture.py). Nothing about it is surface-local.
     "tests/conftest.py",
-    # Imported as `tests.fake_control_plane` by modules across api/core/eval/
-    # onboarding (test_abuse.py, test_action_endpoints_dual_auth.py,
-    # test_agent_signup_idempotency.py).
     "tests/fake_control_plane.py",
-    # `pyproject.toml` is the dependency source of truth (consumed by every
-    # lane's `pip install -e .` / `uv sync` step), so an edit changes what every
-    # surface installs at test time.
     "pyproject.toml",
-    # `requirements.txt` is the pinned mirror of the same dependency set, read by
-    # the same install steps — surface-independent for the same reason.
     "requirements.txt",
-    # CI topology: an edit changes which suites and lanes run at all — no
-    # surface-local change of any file can express that.
     ".github/workflows/python-ci.yml",
-    # #4713: INERT today — `.github/actions/` does not exist in this repo, so
-    # this entry matches nothing and cannot over-select. Deliberately RETAINED
-    # rather than deleted (the #4713 brief: do not remove an entry whose
-    # consumers you cannot establish): it is the fail-closed guard for the
-    # shared composite-action directory if one is ever added, and removing it
-    # buys nothing while a future `actions/` tree would then silently select
-    # nothing. It is an entire-directory entry only in the vacuous sense — the
-    # directory has no files — see the leaf rule in the header above.
     ".github/actions/",
 )
 
@@ -479,18 +400,6 @@ SOURCE_PATTERNS = {
             # shape-rate-only PR into tier-1 smoke and the ask-lane tests
             # would not run where the measurement changed.
             "tools/ask_shape_rate.py",
-            # #4713: `tortoise/projection/edges.py` is the ONE file inside the
-            # projection package with a named consumer outside it — `tortoise/
-            # sdk.py` imports DERIVABLE_STRUCTURAL_RELS, STRUCTURAL_REL_LABELS,
-            # stub_key and _VALID_EDGE_PREDICATES.
-            # #4713 narrowed SHARED_MODULES from the whole `tortoise/projection/`
-            # directory down to its `__init__.py` (the only genuinely
-            # cross-cutting member), so without this entry an edges.py-only PR
-            # would fall through to `core` and never run the sdk suites that pin
-            # those symbols. Listed here in addition to CORE_ALSO, because
-            # tests/test_projection.py (core) also imports
-            # `projection.edges._VALID_EDGE_PREDICATES` — the same
-            # named-surface-plus-core shape as `tortoise/api.py`.
             "tortoise/projection/edges.py"),
     "api": ("tortoise/hosted_api.py", "tortoise/hosted_backup.py",
             "tortoise/acl_graph_users.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",
@@ -601,12 +510,6 @@ SOURCE_PATTERNS = {
 # `--manifest-only` alone selected only tier-1 smoke — the pin for the code being
 # changed would not have run. That is the #1349/#3332/#3616 silent-drop class, on
 # the file this PR modifies.
-# #2938/#4713: paths that ALSO keep `core` when a named surface matches them.
-# Usually the path's pinning tests are split across a named surface and `core`,
-# so the named-surface match must not drop `core`. `tortoise/projection/edges.py`
-# is here for exactly that reason: the `sdk` surface matches it via
-# SOURCE_PATTERNS (tortoise/sdk.py imports its symbols) while its core-owned pins
-# (tests/test_projection.py) would otherwise stop running.
 CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.py",
              "tortoise/projection/edges.py")
 
@@ -1431,8 +1334,8 @@ def _durations_map(manifest: dict) -> dict:
 def duration_issues(manifest: dict) -> list[str]:
     """#1473/#4712: every durations key must be a CLASSIFIED test file.
 
-    #4712 widened this from "classified and non-slow": the slow/carve lanes now
-    carry their measured cost too (see the loop below for the rationale).
+    Slow and carve-out lane keys carry their measured cost here too, so a cost
+    regression in a lane that exists *because* it is expensive is visible.
     Values must additionally be numeric and finite.
     """
     issues = []
@@ -1455,34 +1358,6 @@ def duration_issues(manifest: dict) -> list[str]:
         classified.update(files)
     classified.update(manifest.get("tier1", []))
     for name in durations:
-        # #4712: the map used to be fast-gate-ONLY — a `slow_files` key was
-        # rejected outright ("must be fast-gate", #1473) because the original
-        # consumer was the fast pool's LPT pack. So the two lanes that exist
-        # BECAUSE they are expensive carried no cost data at all, and nothing
-        # could see either of them regressing. #4712 supersedes that restriction:
-        # the map is now the suite's per-file cost table and slow/carve keys are
-        # admitted.
-        #
-        # Scope note (do not over-read this): a FAST file's weight was already
-        # visible before #4712 — including the heaviest file in the repo,
-        # eval/retrieval/test_integration.py, which sat in `fast_pool` with its
-        # own 855.2s entry. #4711's defect was that file's CLASSIFICATION (absent
-        # from `slow_files`), not a missing weight, and #4712 does not by itself
-        # prevent a repeat. #4724 adds a lane-key VALUE consumer (a slow-leg
-        # balance/staleness gate); until then these keys are a declarative cost
-        # table.
-        #
-        # OVERRIDES: #1473's "a durations key must not be a slow file" — the
-        # lanes whose whole reason for existing is cost now carry their
-        # measured cost, so their regression is visible.
-        #
-        # This is a WIDENING of what may appear, never a relaxation of the
-        # checks: every key must still be a CLASSIFIED test file, and every
-        # value numeric and finite (below). A lane key can never be packed into
-        # a fast half — the weight consumers work off the fast pool
-        # (`split_fast_gate` is passed it by `push_legs`;
-        # `duration_coverage_issues` computes it via `fast_pool()`), never off
-        # this whole map.
         if name not in classified:
             issues.append(f"durations key {name} is not classified in the manifest")
         # P2 (#3407 review): validate the VALUE, not just the key. Both guards
