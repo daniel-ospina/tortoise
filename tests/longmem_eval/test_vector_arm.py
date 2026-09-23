@@ -105,10 +105,17 @@ def _reset_breakers():
 
 @pytest.fixture()
 def fake_embeddings(monkeypatch):
-    """Deterministic embedding path: ingest + query encode via _fake_vec."""
+    """Deterministic embedding path: ingest + query encode via _fake_vec.
+
+    #4718: the stand-in must accept the real ``EmbeddingModel.get`` signature
+    — the dense-leg pre-flight calls it with ``load_timeout=…`` and treats a
+    failure to load as fatal for any run that requires the leg. A lambda that
+    rejected the kwarg would make the pre-flight read the fake as ABSENT.
+    """
     monkeypatch.setattr(emb, "compute_embedding",
                         lambda content, max_tokens=512: _fake_vec(content))
-    monkeypatch.setattr(emb.EmbeddingModel, "get", lambda: _FakeModel())
+    monkeypatch.setattr(emb.EmbeddingModel, "get",
+                        lambda load_timeout=None: _FakeModel())
 
 
 # ── nDCG@10 / P@10 / P@5 (hand-computed binary-gain) ────────────────────────
