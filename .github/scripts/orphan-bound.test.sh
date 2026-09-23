@@ -4,8 +4,12 @@
 # Run: bash .github/scripts/orphan-bound.test.sh
 # Exits 0 when ALL assertions pass, 1 on any failure. Self-contained: writes
 # hygiene-report fixtures to a temp dir. No CI, no runner, no network. Case 39
-# reads `tests/conftest.py`'s SOURCE with `ast` to pin the report contract —
-# it never imports or runs conftest.
+# reads `_HYGIENE_REPORT_FIELDS` from `tortoise/embedded_reaper.py`'s SOURCE
+# with `ast` to pin the report↔gate contract — it never imports or runs the
+# reaper. (It no longer reads `tests/conftest.py`: review 9 moved the end-sweep
+# composition into the reaper as `build_end_sweep_report` and pins it
+# behaviourally in `tests/test_reaper.py`, so the AST pin over `_sweep` is
+# gone — see case 39's note below.)
 #
 # Coverage — one case per VERDICT-TABLE row, plus the positive controls that
 # make the row's rule load-bearing:
@@ -51,28 +55,30 @@
 #     the accounting identity skipped and only the `COUNT <= left` direction
 #     applied (case 37); a deferred `COUNT` above even the mixed-population
 #     `left` still REDs (case 38).
-#   * the report↔gate contract (case 39): the field set declared by
+#   * the report↔gate contract (case 39, KEPT): the field set declared by
 #     `_HYGIENE_REPORT_FIELDS` in `tortoise/embedded_reaper.py` (read from its
 #     source with `ast` — never imported or run) must be named by the gate's
 #     parser and carried by the harness's own canonical fixture, so a rename
 #     cannot leave the harness green while the gate silently drops a field.
-#     The SAME case pins the PRODUCER in `tests/conftest.py`: `_sweep`'s
-#     producing statement must BE `return _hygiene_report(total, cleared, left,
-#     before)` — the Return value IS the builder call (same node, never a name
-#     pointing at a variable), the four positional arguments are exactly those
-#     four names in that order, and each name is bound EXACTLY ONCE by its
-#     producer (`total`/`cleared` by the `sweep_until_cleared(...)` unpack at
-#     positions 0/1, `left`/`before` by a BARE `_live_count_or_none()` call —
-#     the live-count probe, with no callee wrapper (`max(...)`, `int(...)`) and
-#     no arguments — `before` read before the sweep and `left` after it; never
-#     a literal, a wrapped call, a rebind, or a swapped position). No
-#     report-shaped constructor carrying a `"cleared"`
-#     key may exist (a dict literal OR a `dict(...)` call — the round-5 dead
-#     branch that a literal-only counter cannot see), and no subscript or
-#     attribute store, or `.update(...)`, may touch a result variable. The
-#     BUILDER's own behaviour (that it threads `cleared` verbatim) is pinned
-#     behaviourally in `tests/test_reaper.py`, where the real module is
-#     imported — no AST shape trick can satisfy that.
+#     That is a producer↔consumer CONTRACT between two files, which is a
+#     different thing from a data-flow property, so it stays here.
+#   * (#4740 review 9) The SAME case USED TO also AST-pin the PRODUCER in
+#     `tests/conftest.py`: `_sweep`'s returned builder call, the argument
+#     order, each name's single binding, the pre/post-sweep order of the two
+#     probe reads, and the absence of report-shaped dicts. Those sub-checks
+#     were REMOVED. They police the COMPOSITION, which now lives in
+#     `tortoise/embedded_reaper.py::build_end_sweep_report` and is pinned
+#     BEHAVIOURALLY in `tests/test_reaper.py`:
+#     `test_build_end_sweep_report_reads_probe_before_and_after_the_sweep`,
+#     `test_build_end_sweep_report_threads_the_sweep_outcome` and
+#     `test_live_embedded_server_count_wraps_the_probe`. Eight review rounds
+#     showed a static shape check cannot prove a data-flow property — each
+#     round closed one syntactic bypass (`left = max(...)`,
+#     `for left in (...)`, `if (left := ...)`, `with ... as left`) while the
+#     next found another. Driving the real function catches every one of those
+#     as a wrong value or a wrong call count, which syntax cannot reach. The
+#     AST read of `_HYGIENE_REPORT_FIELDS` above stays: it is the field-set
+#     half of the contract.
 #   * magnitude: an 18+ digit `--count` (case 32) and an 18+ digit `left` in
 #     the report (case 33) both exit 2 as usage errors instead of reaching the
 #     PASS line.
@@ -438,13 +444,12 @@ echo "38. a deferred COUNT above even the mixed-population left still REDs"
 run_gate 3 0 deferred.json
 assert_eq "$RC" "1" "exits 1 when the count exceeds even the deferred measurement"
 
-echo "39. the report↔gate contract (single source of truth) + the _sweep producer"
+echo "39. the report↔gate contract (single source of truth)"
 # #4740: tortoise/embedded_reaper.py owns the report field set in
 # _HYGIENE_REPORT_FIELDS; the gate's parser must name every field, and this
 # harness's canonical fixture must carry exactly that set. The reaper source
 # is PARSED with ast — never imported or run. The orphan_bound_scripts CI
 # trigger lists tortoise/embedded_reaper.py for exactly this case.
-CONFTEST="$SCRIPT_DIR/../../tests/conftest.py"
 REAPER="$SCRIPT_DIR/../../tortoise/embedded_reaper.py"
 FIELDS="$(python3 - "$REAPER" <<'PY' 2>/dev/null
 import ast
@@ -473,254 +478,22 @@ assert_eq "$MISSING" "" "the gate's parser names every declared report field"
 FIXTURE_KEYS="$(python3 -c 'import json,sys; print(" ".join(sorted(json.load(open(sys.argv[1]))["sweep"])))' "$WORK/report14.json")"
 assert_eq "$FIXTURE_KEYS" "$(printf '%s\n' $FIELDS | sort | tr '\n' ' ' | sed 's/ *$//')" \
   "the harness's canonical fixture carries exactly the declared field set"
-
-# The PRODUCER: `_sweep` must RETURN the `_hygiene_report(...)` call itself,
-# built from the producers. Round 5 pinned presence of AST shapes (`stores=1
-# helper=1 report=1`), which M5 (a subscript store), M6 (a reordered unpack)
-# and M19 (a dead branch keeping the pinned dict while the live branch
-# hardcodes `cleared`) all passed; round 6 pinned the builder call but not what
-# `_sweep` RETURNED, so a hardcoded `cleared`, an inflated `left`, a subscript
-# store on the result, or a `dict(...)` (invisible to a literal-only counter)
-# all stayed green. This binds the returned value AND every binding that feeds
-# it:
-#   returncall — the Return value IS the builder call (same node), so nothing
-#                is done to the result after construction;
-#   args       — the four positional arguments are exactly total, cleared,
-#                left, before, in that order (position matters: a reordered
-#                unpack REDs);
-#   binds      — each of the four names is bound EXACTLY ONCE, by its real
-#                producer (the `sweep_until_cleared` unpack for total/cleared,
-#                a BARE `_live_count_or_none()` call for left/before — the
-#                callee is checked by name, its arguments must be empty, and
-#                `before` must be read before the sweep while `left` is read
-#                after it) — a literal, a wrapped call, a rebind, or a swapped
-#                position REDs;
-#   stores     — no `Subscript`/`Attribute` store or `.update(...)` on a name
-#                the builder's result was assigned to;
-#   dicts      — no report-shaped constructor carrying a `"cleared"` key,
-#                whether a dict literal or a `dict(...)` call (M19's shape).
-PRODUCER="$(python3 - "$CONFTEST" <<'PY' 2>/dev/null
-import ast
-import sys
-
-try:
-    tree = ast.parse(open(sys.argv[1], encoding="utf-8").read())
-except OSError:
-    print("no-source")
-    raise SystemExit(0)
-
-fn = None
-for node in ast.walk(tree):
-    if isinstance(node, ast.FunctionDef) and node.name == "_sweep":
-        fn = node
-        break
-if fn is None:
-    print("no-sweep-fn")
-    raise SystemExit(0)
-
-# Each argument name must be bound exactly once, by its real producer.
-TARGETS = ("total", "cleared", "left", "before")
-EXPECTED = ("total", "cleared", "left", "before")
-
-# Report-shaped constructors carrying a `"cleared"` key. A `dict(...)` CALL
-# counts too: the round-5 M19 dead branch wrote `dict(reaped=...,
-# cleared=..., ...)`, which a literal-only counter could not see.
-dicts = 0
-for node in ast.walk(fn):
-    if isinstance(node, ast.Dict) and any(
-        isinstance(k, ast.Constant) and k.value == "cleared"
-        for k in node.keys
-    ):
-        dicts += 1
-    elif (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "dict"
-        and any(kw.arg == "cleared" for kw in node.keywords)
-    ):
-        dicts += 1
-
-# Every assignment to one of the four names, and the node that binds it.
-binds = {name: [] for name in TARGETS}
-for node in ast.walk(fn):
-    if isinstance(node, ast.Assign):
-        targets = node.targets
-    elif isinstance(node, ast.AnnAssign):
-        targets = [node.target]
-    elif isinstance(node, ast.AugAssign):
-        targets = [node.target]
-    else:
-        continue
-    for tgt in targets:
-        for inner in ast.walk(tgt):
-            if isinstance(inner, ast.Name) and inner.id in binds:
-                binds[inner.id].append(node)
-
-# The `sweep_until_cleared(...)` unpack and the two names it binds.
-unpack_assign = None
-unpack_names = (None, None)
-for node in ast.walk(fn):
-    if not isinstance(node, ast.Assign):
-        continue
-    if not (
-        isinstance(node.value, ast.Call)
-        and isinstance(node.value.func, ast.Name)
-        and node.value.func.id == "sweep_until_cleared"
-    ):
-        continue
-    for tgt in node.targets:
-        if isinstance(tgt, ast.Tuple) and len(tgt.elts) == 2:
-            unpack_assign = node
-            unpack_names = (tgt.elts[0], tgt.elts[1])
-
-calls = [
-    n
-    for n in ast.walk(fn)
-    if isinstance(n, ast.Call)
-    and isinstance(n.func, ast.Name)
-    and n.func.id == "_hygiene_report"
-]
-
-# (a) the Return value IS the builder call — same node, not a name.
-returncall = int(
-    len(calls) == 1
-    and any(
-        isinstance(n, ast.Return) and n.value is calls[0]
-        for n in ast.walk(fn)
-    )
-)
-
-# (b) the four positional arguments are the expected NAMES, in order. Also
-# remember any name the builder result was assigned to, so the store scan
-# below can find a write through it.
-args_ok = 0
-result_name = None
-if len(calls) == 1:
-    call = calls[0]
-    arg_ids = [a.id for a in call.args if isinstance(a, ast.Name)]
-    args_ok = int(
-        len(call.args) == len(EXPECTED)
-        and not call.keywords
-        and arg_ids == list(EXPECTED)
-    )
-    for node in ast.walk(fn):
-        if (
-            isinstance(node, ast.Assign)
-            and node.value is call
-            and len(node.targets) == 1
-            and isinstance(node.targets[0], ast.Name)
-        ):
-            result_name = node.targets[0].id
-
-# (c) exactly one binding per name, from the right producer. total/cleared:
-# the `sweep_until_cleared` unpack, at positions 0/1. left/before: a single
-# assignment whose value is a BARE `_live_count_or_none()` call (no callee
-# wrapper such as `max(...)`/`int(...)`, no positional or keyword argument),
-# positioned before/after the sweep. The producer is pinned by NAME because
-# any call satisfies `isinstance(value, ast.Call)` — `max(_live_count_or_none()
-# or 0, 1000000)` and `int(0)` are calls too, and each neuters a gate control
-# (an inflated `left`, a disabled identity). The two probe assignments sit in
-# nested blocks, so their RELATIVE order is compared structurally (a
-# source-order flatten of `fn.body`, never line numbers): `before` must be
-# read before the `sweep_until_cleared` unpack and `left` after it, so the
-# swap that turns the pre-sweep count into the bound is RED.
-binds_ok = 0
-if unpack_assign is not None and all(isinstance(n, ast.Name) for n in unpack_names):
-    def _unique(name):
-        return binds[name][0] if len(binds[name]) == 1 else None
-
-    order = []
-
-    def _flatten(stmts):
-        for stmt in stmts:
-            order.append(stmt)
-            for attr in ("body", "orelse", "finalbody"):
-                sub = getattr(stmt, attr, None)
-                if isinstance(sub, list):
-                    _flatten(sub)
-            for handler in getattr(stmt, "handlers", []):
-                _flatten(handler.body)
-
-    _flatten(fn.body)
-
-    def _probe_assign(name):
-        """The unique `name = _live_count_or_none()` assignment, or None."""
-        bound = _unique(name)
-        if bound is None:
-            return None
-        call = bound.value
-        if not (
-            isinstance(call, ast.Call)
-            and isinstance(call.func, ast.Name)
-            and call.func.id == "_live_count_or_none"
-            and not call.args
-            and not call.keywords
-        ):
-            return None
-        return bound
-
-    def _order_of(node):
-        for idx, stmt in enumerate(order):
-            if stmt is node:
-                return idx
-        return None
-
-    ok = True
-    for pos, name in ((0, "total"), (1, "cleared")):
-        if _unique(name) is not unpack_assign or unpack_names[pos].id != name:
-            ok = False
-    before_assign = _probe_assign("before")
-    left_assign = _probe_assign("left")
-    if before_assign is None or left_assign is None:
-        ok = False
-    else:
-        before_at = _order_of(before_assign)
-        unpack_at = _order_of(unpack_assign)
-        left_at = _order_of(left_assign)
-        if not (
-            before_at is not None
-            and unpack_at is not None
-            and left_at is not None
-            and before_at < unpack_at < left_at
-        ):
-            ok = False
-    binds_ok = int(ok)
-
-# (d) no Subscript/Attribute STORE and no `.update(...)` on the result.
-stores = 0
-if result_name is not None:
-    for node in ast.walk(fn):
-        if (
-            isinstance(node, ast.Subscript)
-            and isinstance(node.ctx, ast.Store)
-            and isinstance(node.value, ast.Name)
-            and node.value.id == result_name
-        ):
-            stores += 1
-        elif (
-            isinstance(node, ast.Attribute)
-            and isinstance(node.ctx, ast.Store)
-            and isinstance(node.value, ast.Name)
-            and node.value.id == result_name
-        ):
-            stores += 1
-        elif (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr in ("update", "setdefault")
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id == result_name
-        ):
-            stores += 1
-
-print(
-    f"calls={len(calls)} returncall={returncall} args={args_ok} "
-    f"binds={binds_ok} stores={stores} dicts={dicts}"
-)
-PY
-)"
-assert_eq "$PRODUCER" "calls=1 returncall=1 args=1 binds=1 stores=0 dicts=0" \
-  "_sweep RETURNS the _hygiene_report(...) call built from its producers, untampered"
+# (#4740 review 9) The PRODUCER pin that used to live here was REMOVED.
+# It AST-pinned the composition inside `tests/conftest.py`'s `_sweep`
+# (the returned builder call, argument order, each name's single binding,
+# the pre/post-sweep order of the two probe reads, and the absence of
+# report-shaped dicts). That composition now lives in
+# `tortoise/embedded_reaper.py::build_end_sweep_report` and is pinned
+# BEHAVIOURALLY in `tests/test_reaper.py`:
+#   test_build_end_sweep_report_reads_probe_before_and_after_the_sweep
+#   test_build_end_sweep_report_threads_the_sweep_outcome
+#   test_live_embedded_server_count_wraps_the_probe
+# A static shape check cannot prove a data-flow property: eight review
+# rounds each closed one syntactic bypass (`left = max(...)`,
+# `for left in (...)`, `if (left := ...)`, `with ... as left`) while the
+# next found another. Driving the real function catches every one of them
+# as a wrong value or a wrong call count. The field-set half of case 39
+# above is kept — it pins a producer/consumer contract between two files.
 
 echo "40. left=null with cleared=FALSE REDs even at COUNT=0 (an exhausted budget is not a diagnostic)"
 # #4740 review 5: the COUNT==0 carve-out (case 34) exists only for a sweep that
@@ -769,7 +542,7 @@ assert_not_contains "$OUT" "::warning::" "does not downgrade a count mismatch on
 echo
 # A LOST case must not be indistinguishable from success: deleting a case
 # leaves FAIL=0 and merely a LOWER count, so the count is pinned too.
-expected_assertions=135
+expected_assertions=134
 if [ "$PASS" -eq "$expected_assertions" ]; then
   PASS=$((PASS + 1))
   echo "  ✅ assertion count pinned at $expected_assertions (a lost case is not a green run)"

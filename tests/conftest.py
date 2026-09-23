@@ -413,13 +413,13 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
 
     from tortoise.embedded_reaper import (
         ACTIVE_SUITES_DIR,
-        _hygiene_report,
         _ReaperLock,
         _run_sweep,
         active_suite_markers,
         active_suite_tokens,
+        build_end_sweep_report,
+        live_embedded_server_count,
         sweep_stale_index_pid_files,
-        sweep_until_cleared,
     )
 
     marker_dir = ACTIVE_SUITES_DIR
@@ -466,22 +466,6 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
         except Exception:
             return True  # probe failure: run the sweep (fail-safe direction)
 
-    def _live_count_or_none() -> int | None:
-        """Live `redislite/bin/redis-server` count, or None if the probe failed.
-
-        `_pgrep_redis_servers_or_none` returns None for a probe FAILURE
-        (timeout, missing pgrep, unexpected status) — distinct from a measured
-        zero. The hygiene report must never read an unmeasured residue as 0
-        (#4740), so the sweep records `None` and the gate names it. Never
-        raises.
-        """
-        try:
-            from tortoise.embedded_reaper import _pgrep_redis_servers_or_none
-            probe = _pgrep_redis_servers_or_none()
-            return len(probe) if probe is not None else None
-        except Exception:
-            return None
-
     def _sweep(only_safe: bool) -> dict:
         if not _embedded_servers_running():
             return {"no_embedded_servers": True}
@@ -498,13 +482,6 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
                 prev = os.environ.get("TORTOISE_REAPER_MIN_UPTIME")
                 if not only_safe:
                     os.environ["TORTOISE_REAPER_MIN_UPTIME"] = "0"
-                # #4740: the PRE-sweep live count, read once here (still under
-                # this sweep's own MIN_UPTIME setting) and never raised out.
-                # `left` is produced by this same probe one step later, so on
-                # its own it cannot detect a sweep whose own measurement is
-                # broken; the CI gate pairs the bound with the accounting
-                # identity `reaped + left >= before`.
-                before = _live_count_or_none()
                 try:
                     # #1642 FIX 6: loop discover->reap until the time budget
                     # is exhausted or the backlog is cleared, at a raised
@@ -517,7 +494,15 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
                     # of pacing, so a multi-hundred backlog can run past the
                     # 30s soft budget (review P2; it still terminates). The
                     # cron sweeps every 10 min make up the difference.
-                    total, cleared = sweep_until_cleared(
+                    # #4740 review 9: the raw composition — the pre-sweep
+                    # probe (`before`), the sweep, the post-sweep probe
+                    # (`left`) and their arrangement into the report — lives in
+                    # `build_end_sweep_report` (behaviourally pinned in
+                    # tests/test_reaper.py). Both probes run while
+                    # TORTOISE_REAPER_MIN_UPTIME still holds this sweep's own
+                    # setting (the `finally` below restores it); `None` (not 0)
+                    # marks a failed probe.
+                    return build_end_sweep_report(
                         lambda: _run_sweep(
                             dry_run=False, batch_size=SWEEP_BATCH_SIZE,
                             only_safe=only_safe, jobs=8, kill_pacing=0.4,
@@ -536,28 +521,8 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
                             # redding the leg with the reaper in _kill/probe).
                             deadline=deadline),
                         deadline,
+                        live_embedded_server_count,
                     )
-                    # #4740: `cleared` is True only for a COMPLETED, empty
-                    # backlog (see sweep_until_cleared) — a deadline-aborted
-                    # sweep that acted on nothing no longer reports a cleared
-                    # backlog it never examined. The post-sweep live count is
-                    # read with the SAME probe the CI orphan gate runs, while
-                    # TORTOISE_REAPER_MIN_UPTIME still holds this sweep's own
-                    # setting (the `finally` below restores it). The gate binds
-                    # to this measurement instead of a hand-picked constant;
-                    # `cleared: false` marks a residue that is arbitrary rather
-                    # than bounded, which is the signal a bigger constant would
-                    # swallow.
-                    # None (not 0) when the probe itself failed: the gate must
-                    # name an unmeasured residue, not read a timeout/missing-
-                    # pgrep as "nothing left" (#4740). Never raises.
-                    left = _live_count_or_none()
-                    # Build the report with the module-level builder (#4740),
-                    # so there is no local report literal here for a dead
-                    # branch or subscript store to bypass: `cleared` is
-                    # threaded straight from `sweep_until_cleared`, and the
-                    # field set lives with the builder.
-                    return _hygiene_report(total, cleared, left, before)
                 finally:
                     if prev is None:
                         os.environ.pop("TORTOISE_REAPER_MIN_UPTIME", None)

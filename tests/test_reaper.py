@@ -5046,3 +5046,85 @@ def test_hygiene_report_threads_cleared_verbatim():
     report = _hygiene_report(0, False, 1, 5)
     assert set(report) == set(_HYGIENE_REPORT_FIELDS)
     assert tuple(report) == _HYGIENE_REPORT_FIELDS
+
+
+# ── #4740 review 9: the end-sweep COMPOSITION, pinned behaviourally ───────
+# The composition — pre-sweep probe (`before`), the sweep, post-sweep probe
+# (`left`), and the report built from them — used to be pinned by a static AST
+# check over `tests/conftest.py`'s `_sweep` source. Eight review rounds each
+# closed one syntactic bypass while the next found another (`left = max(...)`,
+# then `for left in (...)`, `if (left := ...)`, `with ... as left`) — a static
+# shape check cannot prove a runtime data-flow property, and each bypassed pin
+# fell silent in exactly the way the pin existed to prevent. The composition
+# now lives in the real `build_end_sweep_report`; these tests DRIVE it, so
+# every bypass above is a wrong VALUE or a wrong call count — caught by
+# behaviour, which syntax cannot reach.
+
+
+def test_live_embedded_server_count_wraps_the_probe(monkeypatch):
+    """`live_embedded_server_count` = len(probe), or None for a failed probe.
+
+    The three cases are deliberately different answers: a constant return for
+    either half (`return 0`, or `0` where `None` belongs) cannot satisfy 0, 3
+    and None at once.
+    """
+    import tortoise.embedded_reaper as _R
+
+    monkeypatch.setattr(_R, "_pgrep_redis_servers_or_none", lambda: [])
+    assert _R.live_embedded_server_count() == 0
+    monkeypatch.setattr(
+        _R, "_pgrep_redis_servers_or_none", lambda: [111, 222, 333])
+    assert _R.live_embedded_server_count() == 3
+    monkeypatch.setattr(_R, "_pgrep_redis_servers_or_none", lambda: None)
+    assert _R.live_embedded_server_count() is None
+
+
+def test_build_end_sweep_report_reads_probe_before_and_after_the_sweep():
+    """`before`/`left` are the FIRST and SECOND probe readings, in that order.
+
+    The probe returns 5 then 3, so a swapped arrangement, a probe replaced by
+    a constant, and a post-probe rebind (`left = max(probe() or 0, 1000000)`,
+    or the `for`/`with`/walrus rebinding forms) each produce the wrong dict or
+    the wrong call log.
+    """
+    from tortoise.embedded_reaper import (
+        _HYGIENE_REPORT_FIELDS,
+        build_end_sweep_report,
+    )
+
+    readings = iter([5, 3])
+    calls = []
+
+    def probe():
+        value = next(readings)
+        calls.append(value)
+        return value
+
+    responses = iter([_scan_aware([{"pid": 1}]), _scan_aware([])])
+    report = build_end_sweep_report(
+        responses.__next__, deadline=1030.0, probe=probe,
+        clock=lambda: 1000.0,
+    )
+    assert calls == [5, 3], (
+        "the probe must be called exactly twice — before the sweep, then after"
+    )
+    assert report == {"reaped": 1, "cleared": True, "left": 3, "before": 5}
+    assert tuple(report) == _HYGIENE_REPORT_FIELDS
+
+
+def test_build_end_sweep_report_threads_the_sweep_outcome():
+    """`cleared` is the sweep's own outcome, never hardcoded or recomputed.
+
+    An already-expired deadline makes `sweep_until_cleared` return
+    `cleared=False`; a builder that hardcoded `True` (or re-derived it from
+    the count after the call) greens the deadline-aborted backlog the CI gate
+    exists to catch.
+    """
+    from tortoise.embedded_reaper import build_end_sweep_report
+
+    report = build_end_sweep_report(
+        lambda: _scan_aware([]), deadline=0.0, probe=lambda: 2,
+        clock=lambda: 1000.0,
+    )
+    assert report["reaped"] == 0
+    assert report["cleared"] is False

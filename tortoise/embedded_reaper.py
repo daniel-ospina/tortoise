@@ -2849,6 +2849,36 @@ def sweep_until_cleared(run_one, deadline, clock=time.monotonic):
     return total, cleared
 
 
+def live_embedded_server_count() -> int | None:
+    """Live embedded redis-server count, or None when the probe itself failed.
+
+    #4740: the number the CI orphan gate binds its bound to. `None` (the probe
+    failed) is NOT 0 (measured none) — the gate must name an unmeasured
+    residue rather than read a timeout/missing-pgrep as "nothing left". This
+    is a module-level function, not a closure in `tests/conftest.py`, so it is
+    unit-testable by monkeypatching `_pgrep_redis_servers_or_none`.
+    """
+    probe = _pgrep_redis_servers_or_none()
+    return None if probe is None else len(probe)
+
+
+def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic) -> dict:
+    """Compose the session-end hygiene report the CI orphan gate consumes (#4740).
+
+    Extracted from `tests/conftest.py`'s `_sweep` so the COMPOSITION — the
+    pre-sweep reading, the sweep, the post-sweep reading, and their arrangement
+    into the report — is behaviourally testable (`tests/test_reaper.py` drives
+    this function directly). `probe` is called twice: the first reading is
+    `before`, the second is `left`; `cleared` is threaded verbatim from
+    `sweep_until_cleared`, because the gate reds on `cleared: false` whatever
+    the count.
+    """
+    before = probe()
+    reaped, cleared = sweep_until_cleared(run_one, deadline, clock)
+    left = probe()
+    return _hygiene_report(reaped, cleared, left, before)
+
+
 def _zero_client_state_read() -> dict:
     """Read the persisted zero-client observation state (best-effort).
 
