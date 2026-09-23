@@ -110,6 +110,7 @@ import contextlib
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import urllib.error
@@ -1148,6 +1149,70 @@ def observe_agent_write(api_url: str, key: str, *, content: str) -> dict:
     out["tools_call"] = {"status": status, "body": body[:600]}
     out["ok"] = _mcp_result_ok(status, body)
     return out
+
+
+# ── the teardown seams ──────────────────────────────────────────────────────
+# Module-level indirection points for the teardown's process-facing reads and
+# writes. The production bodies below are the only ones that touch the OS; the
+# bound is exercised by a fake harness that spawns no real Playwright driver, so
+# every one of them is replaceable. A test can then RECORD what the teardown
+# asked for (which pid, which signal, which rung) rather than infer it.
+TEARDOWN_DRIVER_MARKERS = ("run-driver", "playwright")
+
+
+def _driver_pid_and_starttime() -> tuple[int | None, str | None]:
+    """This run's OWN Playwright driver child, as ``(pid, start_time)``.
+
+    Enumerated once, at teardown start, as a direct child of THIS process: the
+    sync API spawns the driver as a direct child, and E8 measured that killing it
+    takes the whole Chromium tree with it. The start time is carried alongside the
+    pid precisely because a bare pid is racy against reuse — the reader below
+    re-reads it immediately before signalling.
+    """
+    me = os.getpid()
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid=,lstart=,command="],
+                             capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        return None, None
+    for line in out.splitlines():
+        parts = line.split(None, 7)
+        if len(parts) < 8:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        if ppid != me:
+            continue
+        if not any(marker in parts[7] for marker in TEARDOWN_DRIVER_MARKERS):
+            continue
+        return pid, " ".join(parts[2:7])
+    return None, None
+
+
+def _send_signal(pid: int, signum: int) -> None:
+    os.kill(pid, signum)
+
+
+def _start_time_of(pid: int) -> str | None:
+    """The process's start time, re-read at signal time (the TOCTOU re-check)."""
+    try:
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        return None
+    return out.strip() or None
+
+
+def _reap(pid: int) -> None:
+    """Reap a signalled child, so the kill leaves no zombie."""
+    with contextlib.suppress(ChildProcessError, OSError):
+        os.waitpid(pid, os.WNOHANG)
+
+
+def _monotonic() -> float:
+    return time.monotonic()
 
 
 # ── the live walk ───────────────────────────────────────────────────────────

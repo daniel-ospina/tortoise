@@ -21,7 +21,10 @@ from __future__ import annotations
 
 import ast
 import inspect as _inspect
+import signal
 import textwrap
+import threading
+import time
 
 import pytest
 
@@ -1127,6 +1130,86 @@ class _FakeRequester:
         return [c for c in self.calls if c[1].endswith("/onboarding/state")]
 
 
+# ── the teardown harness: a driver lifecycle, and the seams it is driven by ─
+# The bounded teardown is a pair of concurrent agents (the owning thread running
+# the closes, a watchdog thread taking the rungs), so the harness that proves it
+# has to be able to WEDGE, RAISE, and BE SIGNALLED — and to say WHY a wedged call
+# was released. The five seams the tool exposes (`_driver_pid_and_starttime`,
+# `_send_signal`, `_start_time_of`, `_reap`, `_monotonic`) are installed from the
+# shared `_DriverHarness` below, which also carries the driver-event sink: an
+# instance-only attribute would have no handle, because the fake playwright is
+# built inside a lambda.
+_WEDGE_TIMEOUT = 10.0
+_SIGNAL_NAMES = {signal.SIGTERM: "sigterm", signal.SIGKILL: "sigkill"}
+
+
+class _Wedge:
+    """A close() that does not return until a signal (or its own bound) releases
+    it — the E7/E11 pair, faked. `released_by` names the releaser, so a mutant
+    that never signals is distinguishable from one that does."""
+
+    def __init__(self, harness, *, release_on=None, timeout=None):
+        self._harness = harness
+        self._event = threading.Event()
+        self.release_on = release_on      # None => ANY signal releases it
+        self.released_by = None
+        self.timeout = _WEDGE_TIMEOUT if timeout is None else timeout
+        harness.wedges.append(self)
+
+    def release(self, signum):
+        if self.release_on is not None and signum not in self.release_on:
+            return
+        self.released_by = _SIGNAL_NAMES.get(signum, str(signum))
+        self._event.set()
+
+    def wait(self):
+        if not self._event.wait(self.timeout):
+            # Self-release, which MUST be distinguishable from a release by a
+            # signal: otherwise a watchdog that never fires passes AC1.
+            self.released_by = "timeout"
+
+
+class _DriverHarness:
+    """One fake run's shared state: the driver-event sink, the seam recorders,
+    and the wedges the signal seam releases."""
+
+    def __init__(self):
+        self.driver_events = []
+        self.signals = []            # (pid, signum), in the order sent
+        self.signal_times = []       # the clock seam's reading at each signal
+        self.wedges = []
+        self.driver = (4242, "fake-lstart")   # (pid, start_time) the enumerator returns
+        self.start_time_override = None       # makes the TOCTOU re-read disagree
+        self.start_time_reads = []
+        self.reaps = []
+        self.clock_reads = []
+        self.teardown_start = None
+
+    def enumerate_driver(self):
+        self.teardown_start = self.clock()
+        return self.driver
+
+    def send_signal(self, pid, signum):
+        self.signals.append((pid, signum))
+        self.signal_times.append(self.clock())
+        for wedge in list(self.wedges):
+            wedge.release(signum)
+
+    def start_time_of(self, pid):
+        self.start_time_reads.append(pid)
+        if self.start_time_override is not None:
+            return self.start_time_override
+        return self.driver[1]
+
+    def reap(self, pid):
+        self.reaps.append(pid)
+
+    def clock(self):
+        now = time.monotonic()
+        self.clock_reads.append(now)
+        return now
+
+
 class _FakeBrowser:
     """The real `Browser`: `close()` closes the browser AND everything it owns — a
     context still open is force-closed (`ctx_reaped#<serial>`), not leaked — and a
@@ -1134,12 +1217,18 @@ class _FakeBrowser:
     target-closed error). Contexts are tracked so the force-close is VISIBLE and
     distinguishable from the instrument's own `ctx_closed#<serial>`."""
 
-    def __init__(self, ctx, new_context_raises=False):
+    def __init__(self, ctx, new_context_raises=False, browser_close_wedges=False,
+                 browser_close_raises=False, wedge_release_on=None,
+                 wedge_timeout=None):
         self._ctx = ctx
         self._owned = []           # only contexts it actually created
         self._used = False
         self._closed = False
         self._new_context_raises = new_context_raises
+        self._browser_close_raises = browser_close_raises
+        self._wedge = (_Wedge(ctx.harness, release_on=wedge_release_on,
+                              timeout=wedge_timeout)
+                       if browser_close_wedges else None)
         ctx.browser = self
         ctx.events.append("launch")
 
@@ -1163,6 +1252,12 @@ class _FakeBrowser:
     def close(self):
         if self._closed:
             return
+        if self._wedge is not None:
+            # E7/E11: `Browser.close()` is a timeout-less `send`, so against a
+            # frozen driver it blocks until the driver is killed.
+            self._wedge.wait()
+        if self._browser_close_raises:
+            raise RuntimeError("browser close failed")
         self._closed = True
         for owned in self._owned:      # force-close, as Browser.close() really does
             owned._reap()
@@ -1251,7 +1346,9 @@ class _FakeCtx:
     _serial = 0
 
     def __init__(self, plan, base_url, org_create=False, org_click_raises=False,
-                 shares=None):
+                 shares=None, harness=None, ctx_close_wedges=False,
+                 ctx_close_raises=False, wedge_release_on=None,
+                 wedge_timeout=None):
         # A sibling context (a second `browser.new_context()`) SHARES the request
         # recorder and the event sink, so it is a distinct object whose missing
         # close is visible, while the test's handle keeps seeing every request.
@@ -1263,9 +1360,13 @@ class _FakeCtx:
         self.request = shares.request if shares else _FakeRequester(plan)
         self.cookies = []          # the instrument must never read the jar
         self.events = shares.events if shares else []
+        self.harness = harness if harness is not None else _DriverHarness()
         self._base = base_url
         self._org_create = org_create
         self._org_click_raises = org_click_raises
+        self._ctx_close_raises = ctx_close_raises
+        self._wedge = (_Wedge(self.harness, release_on=wedge_release_on,
+                              timeout=wedge_timeout) if ctx_close_wedges else None)
         self.page = None
         self.browser = None        # set by the browser that creates it
         self._closed = False
@@ -1279,6 +1380,10 @@ class _FakeCtx:
         # closing or closed, so a second call is a no-op, not a failure.
         if self._closed:
             return
+        if self._wedge is not None:
+            self._wedge.wait()
+        if self._ctx_close_raises:
+            raise RuntimeError("context close failed")
         self._closed = True
         self.events.append(f"ctx_closed#{self.serial}")
 
@@ -1295,25 +1400,59 @@ class _FakeCtx:
 
 
 class _FakeChromium:
-    def __init__(self, ctx, launch_raises=False, new_context_raises=False):
+    def __init__(self, ctx, launch_raises=False, new_context_raises=False,
+                 browser_close_wedges=False, browser_close_raises=False,
+                 wedge_release_on=None, wedge_timeout=None):
         self._ctx = ctx
         self._launch_raises = launch_raises
         self._new_context_raises = new_context_raises
+        self._browser_close_wedges = browser_close_wedges
+        self._browser_close_raises = browser_close_raises
+        self._wedge_release_on = wedge_release_on
+        self._wedge_timeout = wedge_timeout
 
     def launch(self, **k):
         if self._launch_raises:
             raise RuntimeError("browser launch failed")
-        return _FakeBrowser(self._ctx, self._new_context_raises)
+        return _FakeBrowser(self._ctx, self._new_context_raises,
+                            self._browser_close_wedges,
+                            self._browser_close_raises,
+                            self._wedge_release_on, self._wedge_timeout)
 
 
 class _FakeSyncPlaywright:
-    def __init__(self, ctx, launch_raises=False, new_context_raises=False):
-        self.chromium = _FakeChromium(ctx, launch_raises, new_context_raises)
+    """The driver lifecycle, faked. `start()`/`stop()` record on a SEPARATE sink:
+    `ctx.events[-1] == "browser_closed"` is asserted by the reap pin, so a driver
+    event landing there would red it. The `with` form still works."""
 
-    def __enter__(self):
+    def __init__(self, ctx, launch_raises=False, new_context_raises=False,
+                 start_raises=False, browser_close_wedges=False,
+                 browser_close_raises=False, stop_wedges=False,
+                 wedge_release_on=None, wedge_timeout=None):
+        self._ctx = ctx
+        self._start_raises = start_raises
+        self._wedge = (_Wedge(ctx.harness, release_on=wedge_release_on,
+                              timeout=wedge_timeout) if stop_wedges else None)
+        self.chromium = _FakeChromium(ctx, launch_raises, new_context_raises,
+                                      browser_close_wedges, browser_close_raises,
+                                      wedge_release_on, wedge_timeout)
+
+    def start(self):
+        if self._start_raises:
+            raise RuntimeError("driver start failed")
+        self._ctx.harness.driver_events.append("driver_started")
         return self
 
+    def stop(self):
+        if self._wedge is not None:
+            self._wedge.wait()
+        self._ctx.harness.driver_events.append("driver_stopped")
+
+    def __enter__(self):
+        return self.start()
+
     def __exit__(self, *a):
+        self.stop()
         return False
 
 
@@ -1322,14 +1461,20 @@ def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
                    org_create=False, org_click_raises=False, org_name=None,
                    keep_org=False, front_door_hittable=True,
                    playwright_available=True, launch_raises=False,
-                   new_context_raises=False):
+                   new_context_raises=False, start_raises=False,
+                   ctx_close_wedges=False, ctx_close_raises=False,
+                   browser_close_wedges=False, browser_close_raises=False,
+                   stop_wedges=False, driver_absent=False,
+                   start_time_override=None, wedge_release_on=None,
+                   wedge_timeout=None, expect_reaped=True):
     """Execute the real `run_walk` against a fake browser. Returns the record.
 
     `front_door_hittable=False` makes the front-door probe REPORT the signup CTA
     as not hittable, driving the pre-session product finding;
     `playwright_available=False` makes the driver import fail, which is the
     fail-closed default path; `new_context_raises=True` makes the driver start and
-    then refuse a context.
+    then refuse a context. The teardown knobs wedge/raise/withhold the driver so
+    the bounded teardown can be driven from the fake.
     """
     import sys
     import types
@@ -1337,12 +1482,22 @@ def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
     import tools.ship_test_onboarding as mod
 
     base = "https://app.premiselabs.co"
+    harness = _DriverHarness()
+    if driver_absent:
+        harness.driver = (None, None)
+    harness.start_time_override = start_time_override
     ctx = _FakeCtx(plan, base, org_create=org_create,
-                   org_click_raises=org_click_raises)
+                   org_click_raises=org_click_raises, harness=harness,
+                   ctx_close_wedges=ctx_close_wedges,
+                   ctx_close_raises=ctx_close_raises,
+                   wedge_release_on=wedge_release_on,
+                   wedge_timeout=wedge_timeout)
     if playwright_available:
         fake_sync = types.ModuleType("playwright.sync_api")
         fake_sync.sync_playwright = lambda: _FakeSyncPlaywright(
-            ctx, launch_raises, new_context_raises)
+            ctx, launch_raises, new_context_raises, start_raises,
+            browser_close_wedges, browser_close_raises, stop_wedges,
+            wedge_release_on, wedge_timeout)
         monkeypatch.setitem(sys.modules, "playwright", types.ModuleType("playwright"))
         monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_sync)
     else:
@@ -1374,6 +1529,14 @@ def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
 
     monkeypatch.setattr(mod, "mcp_call", _mcp_call)
 
+    # The five teardown seams: recorded here, replaced nowhere else, so the
+    # teardown's process-facing reads/writes are the fake's.
+    monkeypatch.setattr(mod, "_driver_pid_and_starttime", harness.enumerate_driver)
+    monkeypatch.setattr(mod, "_send_signal", harness.send_signal)
+    monkeypatch.setattr(mod, "_start_time_of", harness.start_time_of)
+    monkeypatch.setattr(mod, "_reap", harness.reap)
+    monkeypatch.setattr(mod, "_monotonic", harness.clock)
+
     args = mod.build_parser().parse_args([
         "--base-url", base, "--auth-url", "https://tortoise.premiselabs.co",
         "--api-url", "https://api.premiselabs.co", "--allow-prod",
@@ -1387,8 +1550,35 @@ def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
     # teardown block in the artifact. A future exit routed past `_finalize`
     # falsifies this for the whole suite instead of for one hand-written case.
     assert obs.teardown, "run_walk exited without recording teardown"
-    _assert_browser_reaped(ctx)
+    if expect_reaped:
+        _assert_browser_reaped(ctx)
     return obs, ctx, mod
+
+
+def test_the_fake_driver_records_start_and_stop() -> None:
+    """The driver lifecycle has its OWN sink: `ctx.events[-1] == "browser_closed"`
+    is asserted by the reap pin, so a driver event landing on the browser sink
+    would red it."""
+    ctx = _FakeCtx({}, "https://app.premiselabs.co")
+    pw = _FakeSyncPlaywright(ctx)
+    assert pw.start() is pw
+    pw.stop()
+    assert ctx.harness.driver_events == ["driver_started", "driver_stopped"]
+    assert ctx.events == [], "driver events must not land on the browser sink"
+
+
+def test_the_teardown_seams_are_declared() -> None:
+    """Every process-facing read/write the bounded teardown makes is a
+    module-level indirection point, so the fake harness can RECORD what it asked
+    for without spawning a driver."""
+    import tools.ship_test_onboarding as mod
+
+    for name in ("_driver_pid_and_starttime", "_send_signal", "_start_time_of",
+                 "_reap", "_monotonic"):
+        assert callable(getattr(mod, name)), name
+    assert mod._monotonic() > 0
+    # a fabricated pid must not raise ECHILD out of the reap seam
+    assert mod._reap(2**30) is None
 
 
 _SESSION_200 = [(200, {"user": {"id": "u-1"}})]
