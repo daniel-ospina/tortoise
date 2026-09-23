@@ -11,7 +11,9 @@
 #                                   without reaching the readiness assertion (a
 #                                   dead app is a deploy failure, not a slow
 #                                   database). Probe-count control included.
-#   2. db.ok never true           → exit 1 with the FalkorDB message.
+#   2. db.ok never true + readiness 200 → exit 0 (PASS) with a loud ::warning::
+#      naming the observation. THE #4771 CONTRACT: the WEAKER predicate informs,
+#      the STRONGEST decides. Reverting phase 2 to `exit 1` reddens this case.
 #   3. REGRESSION (#4545): db.ok true on the first DB poll while /health/ready
 #      is still 503, becoming 200 on a LATER probe → exit 0. This is the defect:
 #      the gate used to assert readiness ONCE, 2-3 s after db.ok, and mark a
@@ -19,10 +21,15 @@
 #      passes only with the readiness poll.
 #   4. readiness never 200        → exit 1 with the readiness message (the gate
 #                                   stays FAIL-CLOSED: #3 does not weaken it).
+#                                   The FalkorDB clause is absent here because
+#                                   db.ok WAS observed true — never assert a
+#                                   failure you did not observe.
 #   5. the db.ok read is a JSON FIELD read, not a body text-match: every
 #      non-ready body here carries `backup_watcher.ok = true` beside
 #      `db.ok = false` — the exact shape that made a `grep '"ok": true'`
 #      short-circuit and silently neutralise the 3-minute tolerance (#4470).
+#      Post-#4771 the same shape must still print the phase-2 EXHAUSTION
+#      warning — a text-match would have short-circuited and never warned.
 #   6. the db.ok RETRY is genuinely exercised: db.ok false on the first DB poll
 #      and true on the second → exit 0, with a positive control on the probe
 #      count. (The counter is shared with the app-reachability probe, so the
@@ -47,13 +54,21 @@
 #      behind (otherwise this case could silently stop running and still pass).
 #  10. readiness with NO RESPONSE → exit 1, and the message names the 000
 #      sentinel, so a dead app is not reported as an unready one.
+#  11. db.ok never true + readiness never 200 → exit 1. THE SAFETY HALF of
+#      #4771: readiness ANDs the SAME FalkorDB data plane on its OWN probe, so
+#      a genuinely unreachable DB fails BOTH. #4771 is therefore NOT a
+#      weakening — if readiness had become advisory (or phase 3 been skipped),
+#      this case would exit 0 and the gate would be failing OPEN.
 #
 # The count of assertions is PINNED (see the summary): a case that is lost must
 # not be indistinguishable from a case that passed.
 #
 # POSITIVE CONTROLS: in case 3 readiness is polled MORE THAN ONCE, in case 6
-# /health is polled more than once, and in case 1 the app phase is shown to stop
-# rather than fall through. (A test that cannot fail proves nothing.)
+# /health is polled more than once, in case 1 the app phase is shown to stop
+# rather than fall through, in cases 2/5 the phase-2 poll is shown to run to
+# EXHAUSTION (a skipped poll cannot print the warning), and in case 11 phase 3
+# is shown to be reached and polled to exhaustion. (A test that cannot fail
+# proves nothing.)
 #
 # Case 3 is the one that matters: it is the difference between "the deploy
 # succeeded" and "the deploy was merely early".
@@ -191,10 +206,21 @@ assert_not_contains "$OUT" "db.ok" "never reports a DB wait"
 assert_not_contains "$OUT" "health/ready" "never reaches the readiness assertion"
 assert_eq "$HEALTH_POLLS" "2" "stopped at the app budget, did not fall through (positive control)"
 
-echo "2. db.ok never true → FalkorDB message"
+echo "2. db.ok never true + readiness 200 → PASSES with a warning (#4771)"
+# THE #4771 CONTRACT: the weaker predicate INFORMS, the strongest DECIDES.
+# db.ok never becomes true, but /health/ready — which ANDs the SAME data plane
+# with the control plane — is 200. Pre-#4771 phase 2 exited 1 here and reddened
+# a healthy release. Reverting that `exit 1` is what makes this case go RED.
 run_gate "yes" 0 1
-assert_eq "$RC" "1" "exits 1"
-assert_contains "$OUT" "FalkorDB unreachable" "names the data plane"
+assert_eq "$RC" "0" "exits 0 — db.ok alone no longer fails the run (#4771)"
+assert_contains "$OUT" "::warning::" "emits a loud annotated warning"
+# Discriminating on purpose: the pre-#4771 phase-2 error ALSO contains
+# "FalkorDB" ("… — FalkorDB unreachable"), so a bare `FalkorDB` assert would
+# pass under the very regression this case exists to catch (review cycle 1,
+# P2 — verified by mutation). This string exists only in the new warning path.
+assert_contains "$OUT" "FalkorDB data-plane probe" "names the FalkorDB data plane as the observation"
+assert_contains "$OUT" "health/ready 200" "the strongest predicate decides"
+assert_eq "$HEALTH_POLLS" "4" "phase 2 still polled to exhaustion (positive control — a skipped poll cannot warn)"
 
 echo "3. REGRESSION (#4545): db.ok true but readiness late → SUCCEEDS"
 run_gate "yes" 1 3
@@ -207,14 +233,17 @@ echo "4. readiness never 200 → still FAIL-CLOSED"
 run_gate "yes" 1 0
 assert_eq "$RC" "1" "exits 1"
 assert_contains "$OUT" "/health/ready not 200" "names the readiness plane"
+assert_not_contains "$OUT" "db.ok was ALSO never true" "does NOT claim a data-plane failure it never observed (db.ok was true here)"
 
 echo "5. the db.ok read is a FIELD read, not a body text-match (#4470)"
 # Every body above carries backup_watcher.ok=true while db.ok=false. If the
-# gate text-matched `"ok": true` it would short-circuit on the FIRST probe and
-# case 2 would exit 0 instead of 1.
+# gate text-matched `"ok": true` it would short-circuit on the FIRST probe, the
+# phase-2 exhaustion warning would never print, and this case would fail.
 run_gate "yes" 0 1
-assert_eq "$RC" "1" "a body with backup_watcher.ok=true does NOT satisfy the db.ok poll"
-assert_contains "$OUT" "FalkorDB unreachable" "correctly attributes the failure"
+assert_eq "$RC" "0" "a body with backup_watcher.ok=true does NOT satisfy the db.ok poll"
+assert_contains "$OUT" "db.ok stayed false" "the poll ran to EXHAUSTION (a text-match would have short-circuited)"
+assert_not_contains "$OUT" "db.ok true" "never claims the data plane was observed ok"
+assert_contains "$OUT" "health/ready 200" "and the strongest predicate still decides"
 
 echo "6. the db.ok RETRY is exercised: false, then true"
 # app probe consumes health_n=1; db poll 1 is health_n=2 (db.ok false);
@@ -267,10 +296,22 @@ run_gate "yes" 1 0 503 yes
 assert_eq "$RC" "1" "exits 1"
 assert_contains "$OUT" "last status 000" "distinguishes a dead app from an unready one"
 
+echo "11. db.ok never true + readiness never 200 → FAILS (#4771 is NOT a weakening)"
+# The safety half of the #4771 contract. Readiness ANDs the SAME FalkorDB data
+# plane on its OWN probe, so a genuinely unreachable DB fails BOTH. If the
+# change had made readiness advisory (or if phase 3 were skipped), this case
+# would exit 0 and the gate would be failing OPEN.
+run_gate "yes" 0 0
+assert_eq "$RC" "1" "exits 1 — readiness never 200, so the run FAILS"
+assert_contains "$OUT" "/health/ready not 200" "names the readiness plane"
+assert_contains "$OUT" "db.ok was ALSO never true" "records the db.ok observation in the failure too"
+assert_contains "$OUT" "FalkorDB unreachable" "preserves the specific FalkorDB diagnosis"
+assert_eq "$READY_POLLS" "4" "phase 3 was reached and polled to exhaustion (positive control)"
+
 echo
 # A LOST case must not be indistinguishable from success: deleting a case
 # leaves FAIL=0 and merely a LOWER count, so the count is pinned too.
-expected_assertions=30
+expected_assertions=41
 if [ "$PASS" -eq "$expected_assertions" ]; then
   PASS=$((PASS + 1))
   echo "  ✅ assertion count pinned at $expected_assertions (a lost case is not a green run)"

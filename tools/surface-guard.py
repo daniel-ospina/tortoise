@@ -1,11 +1,23 @@
 #!/usr/bin/env python3
 """The D2 expansion gate for the agent-facing surface (#3863).
 
-WHAT THIS STOPS
-    A new MCP tool, or a new public SDK method, appearing without an explicit
-    human decision. The MCP tool surface and the SDK endpoints are the contract
-    every agent depends on; growing them silently is the defect this gate
-    exists to prevent.
+WHAT THIS CATCHES
+    An UNRECORDED change to the agent-facing surface: a new (or removed, or
+    re-bound, or re-served) MCP tool or public SDK method that the approved
+    baseline in `config/surface-manifest.yml` does not declare. The MCP tool
+    surface and the SDK endpoints are the contract every agent depends on;
+    drifting in a diff nobody reads is the defect this gate exists to prevent.
+
+WHAT THIS DOES NOT DO — READ IT BEFORE TRUSTING A GREEN RUN
+    It does NOT prove that a human approved an expansion. It compares two
+    artifacts, so an expansion that updates the registry AND the baseline
+    consistently PASSES it — the gate cannot tell an approved addition from an
+    unapproved one. The approval itself is carried by the #4282 mandate
+    (approval from Daniel FIRST; see `tortoise/tool_registry.py`,
+    `tortoise/sdk.py` and `CONTRIBUTING.md`) and by Daniel's review. A green run
+    is a consistency result, never consent. Do not add a machine control
+    (repository ruleset, CODEOWNERS, required reviewer) in place of the mandate:
+    the owner REJECTED that direction on #4282 as over-engineering.
 
 HOW IT WORKS
     It EXECUTES the declaration (imports TOOL_REGISTRY, introspects
@@ -16,8 +28,9 @@ HOW IT WORKS
 
     The baseline is FROZEN. This gate deliberately does not regenerate it: if it
     did, a new registry entry would enter the baseline by itself and the gate
-    could never go red. Regenerating is a human act (`tools/surface_manifest.py
-    cut`), reviewed in a PR that carries the owner's approval.
+    could never go red. A re-cut (`tools/surface_manifest.py cut`) is a human act
+    that must follow the #4282 mandate — approval from Daniel FIRST — and it
+    resets every `approval` field, so an old approval cannot be inherited.
 
     RETIRED NAMES (#3883)
     A retired name is removed from `TOOL_REGISTRY` but must still RESOLVE, and must

@@ -15,7 +15,9 @@ import os
 # #67: TORTOISE_SECRET_PEPPER is mandatory for auth module import.
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
+import asyncio
 import tempfile  # noqa: F401
+import threading
 import time
 
 import pytest
@@ -980,17 +982,31 @@ class TestOnboardingToolGating:
         fix (previously 100% untested)."""
         from tortoise import mcp_server  # noqa: I001
         from tortoise import mcp_auth
-        calls = {"n": 0}
+        # Counted PER ORG: ``_org_onboarding_complete`` now awaits an offloaded
+        # read on a PROCESS-lifetime pool, so a read submitted by an earlier
+        # test can land inside this test's window. Org names are per-test
+        # unique, and the TTL assertion is about THIS org's reads.
+        #
+        # Stub the SYNC projection (not ``_get_onboarding_state``): its graph leg
+        # intermittently reports 'unavailable' when the shared embedded DB is
+        # contended, which makes the real return an env-dependent fail-open
+        # ``False`` — a PRE-EXISTING flake (``origin/main``'s own version of this
+        # test asserts ``is True`` off the same stub and the same unchanged
+        # ``_get_onboarding_projection``; measured 1 failure in 5 runs here). The
+        # claim under test is the CACHE, so the offload seam stays in play while
+        # the environment dependency is removed.
+        calls = []
         def _state(org_id):
-            calls["n"] += 1
+            calls.append(org_id)
             return {"onboarding_complete": True}
-        monkeypatch.setattr("tortoise.hosted_api._get_onboarding_state", _state)
+        monkeypatch.setattr("tortoise.hosted_api._get_onboarding_projection", _state)
         mcp_server._onboarding_state_cache.clear()
         tok = mcp_auth._current_org_id.set("cache-team")
         try:
-            assert mcp_server._org_onboarding_complete() is True
-            assert mcp_server._org_onboarding_complete() is True  # cached
-            assert calls["n"] == 1, f"re-fetched within TTL: {calls['n']} reads"
+            assert asyncio.run(mcp_server._org_onboarding_complete()) is True
+            assert asyncio.run(mcp_server._org_onboarding_complete()) is True  # cached
+            assert calls.count("cache-team") == 1, (
+                f"re-fetched within TTL: {calls.count('cache-team')} reads")
         finally:
             mcp_auth._current_org_id.reset(tok)
             mcp_server._onboarding_state_cache.clear()
@@ -1000,18 +1016,22 @@ class TestOnboardingToolGating:
         plane (staleness window is bounded, not sticky-forever)."""
         from tortoise import mcp_server  # noqa: I001
         from tortoise import mcp_auth
-        calls = {"n": 0}
+        calls = []  # per-org; see test_gate_cache_no_refetch_within_ttl
         def _state(org_id):
-            calls["n"] += 1
+            calls.append(org_id)
             return {"onboarding_complete": True}
-        monkeypatch.setattr("tortoise.hosted_api._get_onboarding_state", _state)
+        # Sync projection stubbed, not ``_get_onboarding_state`` — same
+        # pre-existing embedded-DB flake as above; this test asserts the TTL,
+        # not the projection.
+        monkeypatch.setattr("tortoise.hosted_api._get_onboarding_projection", _state)
         monkeypatch.setattr(mcp_server, "_ONBOARDING_STATE_TTL", 0.0)
         mcp_server._onboarding_state_cache.clear()
         tok = mcp_auth._current_org_id.set("ttl-team")
         try:
-            assert mcp_server._org_onboarding_complete() is True
-            assert mcp_server._org_onboarding_complete() is True
-            assert calls["n"] == 2, f"TTL=0 must refetch: {calls['n']} reads"
+            assert asyncio.run(mcp_server._org_onboarding_complete()) is True
+            assert asyncio.run(mcp_server._org_onboarding_complete()) is True
+            assert calls.count("ttl-team") == 2, (
+                f"TTL=0 must refetch: {calls.count('ttl-team')} reads")
         finally:
             mcp_auth._current_org_id.reset(tok)
             mcp_server._onboarding_state_cache.clear()
@@ -1022,25 +1042,269 @@ class TestOnboardingToolGating:
         never gets pinned into the cache (previously untested)."""
         from tortoise import mcp_server  # noqa: I001
         from tortoise import mcp_auth
-        calls = {"n": 0}
+        calls = []  # per-org; see test_gate_cache_no_refetch_within_ttl
         def _state(org_id):
-            calls["n"] += 1
-            if calls["n"] == 1:
+            calls.append(org_id)
+            if calls.count("retry-team") == 1:
                 raise RuntimeError("transient")
             return {"onboarding_complete": False}
         monkeypatch.setattr("tortoise.hosted_api._get_onboarding_state", _state)
         mcp_server._onboarding_state_cache.clear()
         tok = mcp_auth._current_org_id.set("retry-team")
         try:
-            assert mcp_server._org_onboarding_complete() is False  # fail-open
-            assert mcp_server._org_onboarding_complete() is False  # retried read
-            assert calls["n"] == 2, "failed read must not be cached"
+            # fail-open
+            assert asyncio.run(mcp_server._org_onboarding_complete()) is False
+            # retried read
+            assert asyncio.run(mcp_server._org_onboarding_complete()) is False
+            assert calls.count("retry-team") == 2, "failed read must not be cached"
             # and the successful False WAS cached now
-            assert mcp_server._org_onboarding_complete() is False
-            assert calls["n"] == 2, "successful read should now be cached"
+            assert asyncio.run(mcp_server._org_onboarding_complete()) is False
+            assert calls.count("retry-team") == 2, (
+                "successful read should now be cached")
         finally:
             mcp_auth._current_org_id.reset(tok)
             mcp_server._onboarding_state_cache.clear()
+
+    def test_gate_read_runs_off_the_event_loop(self, monkeypatch):
+        """#2924: the gate's MISS read must not run ON the event loop.
+
+        The regression this pins: ``_org_onboarding_complete`` called the
+        SYNCHRONOUS ``_get_onboarding_projection`` inline from ``async def
+        list_tools`` — a PostgREST round trip over ``httpx.Client`` AND a fresh
+        FalkorDB client construction (``ssl.create_default_context`` → TLS →
+        ``Is_Sentinel``) on the single loop. ``py-spy`` caught the loop parked
+        in exactly that chain while ``GET /health`` stalled 1.08 s on
+        production, and the app's own heartbeat recorded ``loop_lag_max_ms`` =
+        2033 ms; loopback ``/health`` answered in ~4 ms across 178 probes while
+        10 of them stalled 0.9–2.2 s.
+
+        Two signals, because they fail for different reasons: the observed
+        thread name is the DIRECT falsifier (a blocking read on ``MainThread``),
+        and the tick count is the INVARIANT a user feels (``/health`` keeps
+        answering while the read is in flight). The tick assertion is kept WEAK
+        on purpose — see its comment.
+        """
+        from tortoise import mcp_auth, mcp_server
+
+        stall_s = 1.0
+        seen = {}
+
+        def _blocking_projection(org_id):
+            # A plain blocking sleep: ON the loop this freezes everything for
+            # stall_s, which is what the ticker below detects. Handed to a
+            # worker it costs the loop nothing.
+            seen["thread"] = threading.current_thread().name
+            time.sleep(stall_s)
+            return {"onboarding_complete": True}
+
+        monkeypatch.setattr("tortoise.hosted_api._get_onboarding_projection",
+                            _blocking_projection)
+        mcp_server._onboarding_state_cache.clear()
+        tok = mcp_auth._current_org_id.set("loop-team")
+
+        async def _scenario():
+            ticks = 0
+            stop = False
+
+            async def _ticker():
+                nonlocal ticks
+                while not stop:
+                    ticks += 1
+                    await asyncio.sleep(0.02)
+
+            task = asyncio.ensure_future(_ticker())
+            await asyncio.sleep(0)
+            # Reset AFTER the ticker has spun once: scheduled-then-yielded means
+            # `ticks` is already 1 before the gate is entered, so counting from
+            # zero here is what makes the assertion below measure the READ (a
+            # faithful simulated revert measured TICKS=1 at this point, and
+            # `assert ticks >= 1` on the un-reset counter therefore passed).
+            ticks = 0
+            try:
+                verdict = await mcp_server._org_onboarding_complete()
+            finally:
+                stop = True
+                await task
+            return verdict, ticks
+
+        try:
+            verdict, ticks = asyncio.run(_scenario())
+        finally:
+            mcp_auth._current_org_id.reset(tok)
+            mcp_server._onboarding_state_cache.clear()
+
+        assert verdict is True
+        assert seen["thread"] != "MainThread", (
+            "the onboarding gate read ran on the event loop — a blocking "
+            "PostgREST + graph read on the tools/list hot path (#2924): "
+            f"thread={seen['thread']!r}"
+        )
+        expected = int(stall_s / 0.02)
+        # Counted DURING the read (reset above): a free loop yields ~expected; a
+        # gate back ON the loop — and therefore every tick here — yields 0, which
+        # is the regression. Floor of 1, not a fraction of `expected`: on this box
+        # at loadavg ~140 the read itself still managed 2 ticks, while
+        # in-process GIL starvation stretched 20 ms wake-ups ~25-fold and a
+        # `expected // 10` floor false-redded a correctly-offloaded gate.
+        assert ticks >= 1, (
+            f"the loop never ticked during a {stall_s}s gate read (a free loop "
+            f"yields ~{expected}) — the gate is back ON the event loop; route "
+            "it through _graph_offload (#2924)"
+        )
+
+    def test_gate_fails_open_when_the_offload_itself_fails(self, monkeypatch):
+        """#2924: an OFFLOAD failure must fail OPEN, not 503 ``tools/list``.
+
+        The new failure surface this change introduces is the seam itself:
+        ``_graph_offload`` maps a saturated pool or a missed wait bound to
+        ``_graph_unavailable()`` (an ``HTTPException(503)``). The gate is
+        surface cosmetics — its documented contract is fail-open, and the
+        onboarding tools must stay listable during a graph-capacity blip. The
+        pre-existing e2e guard raises a ``RuntimeError`` from the helper, which
+        exercises the *propagation* path, not this mapping; without this case a
+        future narrowing of the gate's ``except`` would turn a saturated graph
+        pool into a 503 for the whole ``tools/list`` request.
+        """
+        from fastapi import HTTPException
+
+        import tortoise.hosted_api as ha
+        from tortoise import mcp_auth, mcp_server
+
+        async def _refused(org_id):
+            raise HTTPException(status_code=503, detail="graph_unavailable")
+
+        monkeypatch.setattr(ha, "_get_onboarding_projection_off_loop", _refused)
+        mcp_server._onboarding_state_cache.clear()
+        tok = mcp_auth._current_org_id.set("offload-fail-team")
+        try:
+            assert asyncio.run(mcp_server._org_onboarding_complete()) is False
+        finally:
+            mcp_auth._current_org_id.reset(tok)
+            mcp_server._onboarding_state_cache.clear()
+        assert "offload-fail-team" not in mcp_server._onboarding_state_cache, (
+            "a failed offload must not be cached as False"
+        )
+
+    def test_gate_offload_uses_the_request_bound_not_the_lane_bound(self, monkeypatch):
+        """#2924: the gate buys a SHORT bound, not the graph lane's cold-start one.
+
+        ``_graph_offload``'s default bound is ``probe_setup_timeout()`` + a
+        margin (~30 s) because a cold projection is a legitimate ~28-round-trip
+        phase for a WRITE lane. The gate vetoes nothing when it fails — it only
+        keeps the onboarding tools visible — so parking a graph worker (and the
+        ``tools/list`` response) for that long to avoid a harmless false-open is
+        the wrong trade. Pin the override so it cannot silently revert.
+        """
+        import tortoise.hosted_api as ha
+        from tortoise import monitoring
+
+        # The bound must be resolved at CALL time. Patch it to a value that is
+        # distinguishable from its default: an import-time capture would report
+        # the default, so asserting the default cannot tell the two apart —
+        # which is how the round-2 import-time defect survived this test.
+        SENTINEL_BOUND = 3.75
+        monkeypatch.setattr(monitoring, "CONTROL_PLANE_OFFLOAD_TIMEOUT_S", SENTINEL_BOUND)
+        assert monitoring.graph_offload_timeout_s() > SENTINEL_BOUND
+
+        seen = {}
+
+        async def _fake_graph_offload(fn, *, op, timeout=None):
+            seen["timeout"] = timeout
+            seen["op"] = op
+            return {"onboarding_complete": True}
+
+        original = ha._graph_offload
+        ha._graph_offload = _fake_graph_offload
+        try:
+            result = asyncio.run(ha._get_onboarding_projection_off_loop("bound-team"))
+        finally:
+            ha._graph_offload = original
+
+        assert result == {"onboarding_complete": True}
+        assert seen["op"] == "onboarding_projection"
+        assert seen["timeout"] == SENTINEL_BOUND, (
+            "the gate did not resolve CONTROL_PLANE_OFFLOAD_TIMEOUT_S at call time"
+        )
+        assert seen["timeout"] < monitoring.graph_offload_timeout_s(), (
+            "the gate fell back to the graph lane's cold-projection bound"
+        )
+
+    def test_concurrent_gate_misses_share_one_resolution(self, monkeypatch):
+        """#2924 review: concurrent misses for ONE org must not STAMPEDE.
+
+        Making the gate ``async`` introduced a window that the old synchronous
+        call did not have: the gate now awaits BETWEEN the cache lookup and the
+        cache fill, so N concurrent ``tools/list`` requests (one per MCP client
+        session) all miss and each submit its own graph-pool read. The pool is
+        small and also carries graph WRITES, and the stampede lands exactly when
+        the read is slow — a fail-open cosmetics gate must not be able to
+        occupy it. The in-flight map must make 8 concurrent misses one read.
+        """
+        import tortoise.hosted_api as ha
+        from tortoise import mcp_auth, mcp_server
+
+        calls = []
+        release = threading.Event()
+
+        def _slow_projection(org_id):
+            calls.append(org_id)
+            release.wait(10)
+            return {"onboarding_complete": True}
+
+        monkeypatch.setattr(ha, "_get_onboarding_projection", _slow_projection)
+        mcp_server._onboarding_state_cache.clear()
+        mcp_server._onboarding_gate_inflight.clear()
+        tok = mcp_auth._current_org_id.set("stampede-team")
+
+        async def _scenario():
+            tasks = [
+                asyncio.ensure_future(mcp_server._org_onboarding_complete())
+                for _ in range(8)
+            ]
+            # Let whoever gets there first SUBMIT; the other 7 must join it
+            # rather than submit their own.
+            await asyncio.sleep(0.3)
+            release.set()
+            return await asyncio.gather(*tasks)
+
+        try:
+            results = asyncio.run(_scenario())
+        finally:
+            release.set()
+            mcp_auth._current_org_id.reset(tok)
+            mcp_server._onboarding_state_cache.clear()
+            mcp_server._onboarding_gate_inflight.clear()
+
+        assert results == [True] * 8
+        assert calls == ["stampede-team"], (
+            f"8 concurrent gate misses performed {len(calls)} reads ({calls}) "
+            "— concurrent callers must share ONE resolution (#2924)"
+        )
+
+    def test_inflight_cleanup_does_not_evict_a_live_replacement(self):
+        """#2924 review: evicting a settled task must check IDENTITY.
+
+        The failed-read path leaves no cache entry, so the next caller can
+        install a replacement while the settled task's done-callbacks are still
+        queued. A bare ``pop(org_id, None)`` then removes the LIVE replacement,
+        and the caller after that starts a duplicate read — two resolutions in
+        flight for one org, on the blip the single-flight exists to absorb. This
+        is a direct unit falsifier: it fails against a bare pop and passes
+        against the identity check.
+        """
+        from tortoise import mcp_server
+
+        settled, replacement = object(), object()
+        mcp_server._onboarding_gate_inflight.clear()
+        mcp_server._onboarding_gate_inflight["evict-team"] = replacement
+        try:
+            mcp_server._drop_gate_inflight("evict-team", settled)
+            assert mcp_server._onboarding_gate_inflight.get("evict-team") is replacement, (
+                "a settled task's cleanup evicted the LIVE task registered under "
+                "the same org — the next caller starts a duplicate read (#2924)"
+            )
+        finally:
+            mcp_server._onboarding_gate_inflight.clear()
 
 
 # ── #2300: graph-bound keys vs team-level onboarding/GitHub state ────────
