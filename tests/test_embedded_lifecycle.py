@@ -2426,11 +2426,16 @@ def test_foreign_live_redis_server_is_not_proven_and_not_signalled(
     earlier `_pid_is_redis` gate and never reaches the start-time or
     argv-binding legs — mutating either leg to a constant left the suite
     green. Here the recorded pid IS a live redis-server (a stub whose argv
-    names ``.../redislite/bin/redis-server unixsocket:<other-dir>/redis.socket``),
-    the pidfile is written AFTER it starts, so the start-time leg PASSES, and
-    only the argv-binding leg can refuse the match. If it does not, the stub
-    is signalled and a second writer is started over this RDB — the
-    divergence #4879 exists to prevent.
+    names a ``redis-server`` under a directory of this test's own choosing —
+    deliberately NOT ``redislite/bin/redis-server``, see
+    `_spawn_redis_server_stub`), the pidfile is written AFTER it starts, so the
+    start-time leg PASSES, and only the argv-binding leg can refuse the match.
+
+    What a wrong match would cost is NOT a doubled writer: this RDB has no live
+    writer at all (`_live_rdb_writers(...) == []`, asserted below), so
+    accepting the stub would kill an innocent process and start the FIRST
+    server over this RDB. The two-writer divergence `#4879` exists to prevent is
+    asserted by the tests that DO hold a live holder, not by this one.
     """
     import atexit
     import json as _json
