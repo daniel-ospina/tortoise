@@ -155,14 +155,18 @@ HEADLESS_FIRABLE: dict[str, bool] = {
 #: absolutes it replaced — each denying that this seam could be executed or
 #: fired headlessly, or that any headless entry point existed — were false: the
 #: seam's handlers are fired headlessly by its own suite, and `pi -p` is
-#: non-interactive.  A test pins the absence of those phrases from this ENTIRE
-#: module — the report string, this ruling, the enum, and the module docstring —
-#: so a wrapped continuation line cannot hide one
+#: non-interactive.  A test pins the absence of those phrases from the PI
+#: RULING's own text — the report string, this ruling, the enum, and the module
+#: docstring — and deliberately NOT from the whole module: one of the phrases is
+#: TRUE of Cursor (this dict's ``cursor`` entry says so), so a module-wide ban
+#: reddened this Pi-honesty gate for an accurate sentence about a different
+#: harness and forced its rewording — the disclosure-accuracy defect #4620
+#: exists to prevent
 #: (`tests/test_session_verify.py::test_pi_is_honestly_unverifiable`).
 UNVERIFIABLE_REASON: dict[str, str] = {
     "cursor": (
         "Cursor's sessionEnd hook is IDE-only — it fires from a local "
-        "desktop-editor session; the hook has no headless path on this "
+        "desktop-editor session; there is no headless trigger on this "
         "machine."),
     "pi": (
         "Pi's capture seam is a TypeScript extension loaded in-process by Pi "

@@ -249,10 +249,10 @@ Order: **1 → 2 → 3 → 4 → 5** (Task 1 is the critical path; Tasks 2–5 a
 
 ## Reviewers
 
-Plan review: 2 reviewers per `proportional-gates` §Review Cycles (standard → Low-Medium, cap 3
-cycles). Four cycles ran; the fourth was one over that cap and found that the `retrievable` pass
-condition was under-defined. The findings from all four cycles are incorporated above. Exit:
-incorporation over cap, not clean.
+Plan review: 2 reviewers per `proportional-gates` §Review Cycles (Low-Medium → cap 3). Exit:
+**capped** after 4 cycles — one over that cap. The cycle-4 finding (the `retrievable` pass condition
+was under-defined) is incorporated above, so no finding is carried open; the exit is recorded as
+capped, not clean, because the loop ran past its bound (`plan-review` §Exit & Signature).
 
-<!-- plan-review: cycles=4, status=incorporation-exit-over-cap, version=2.3.0 -->
+<!-- plan-review: cycles=4, status=capped, verdict=incorporation-over-cap, version=2.3.0 -->
 

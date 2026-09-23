@@ -1020,12 +1020,17 @@ def test_pi_is_honestly_unverifiable(hosted, setup):
     assert "not firable by this command" in detail
     # The over-broad absolutes must never return: the seam IS fired headlessly
     # by its own suite (the source seam) and by the installed-artifact probe.
-    # Scan the WHOLE module rather than filtering its lines. A line-local filter
-    # (`if "pi" in line`) let a wrapped continuation line carry the absolute
-    # unscanned — including the docstring's honesty paragraph, the very
-    # sentence this pin was written for (#4620 review). Nothing legitimate is
-    # lost by scanning everything: the phrases are reserved for the Pi ruling,
-    # so the module states them about no harness it can actually fire.
+    # Scan the PI RULING's own text, never the whole module.  The phrases are
+    # over-broad ABOUT PI, and one of them — "no headless trigger" — is TRUE of
+    # Cursor (`UNVERIFIABLE_REASON["cursor"]` says exactly that), so a
+    # module-wide ban reddened this Pi-honesty gate for an accurate sentence
+    # about a different harness and forced its rewording: the
+    # disclosure-accuracy defect #4620 exists to prevent (#4620 review).  The
+    # ruling lives in the module docstring, the `UNVERIFIABLE_REASON["pi"]`
+    # value, and the comments that state it; another harness's text is out of
+    # scope.  Comment blocks are JOINED before matching so a phrase wrapped
+    # across two `#` lines is still seen — the line-local filter this replaces
+    # missed exactly that.
     from tortoise import session_verify as _sv
 
     absolutes = (
@@ -1036,14 +1041,41 @@ def test_pi_is_honestly_unverifiable(hosted, setup):
     for phrase in absolutes:
         assert phrase not in detail, phrase
     source = inspect.getsource(_sv)
+
+    def _comment_blocks(text: str) -> list[str]:
+        blocks: list[str] = []
+        current: list[str] = []
+        for raw in text.splitlines():
+            stripped = raw.lstrip()
+            if stripped.startswith("#"):
+                # Strip the marker INCLUDING Sphinx's ``#:`` colon: leaving it
+                # in injects " : " at every join, so a phrase wrapped across
+                # two ``#:`` lines would match nothing.
+                current.append(stripped.lstrip("#").lstrip(": ").rstrip())
+            else:
+                if current:
+                    blocks.append(" ".join(current))
+                    current = []
+        if current:
+            blocks.append(" ".join(current))
+        return blocks
+
+    def _names_pi(text: str) -> bool:
+        return any(word.strip("`*_.,;:()<>\"'").lower() == "pi"
+                   for word in text.split())
+
+    doc = _sv.__doc__ or ""
     # Non-vacuity: an empty or truncated read must not pass this pin trivially.
     # Anchor on STABLE identifiers, never on copy this pin does not own — a
-    # legitimate rewording of the reason string must not be reported as a failed
-    # read (#4620 review).
+    # legitimate rewording of the ruling must not be reported as a failed read
+    # (#4620 review).
+    assert "HONEST DISCLOSURE" in doc, "module docstring not read — pin is vacuous"
     assert "def resolve_install_root" in source, "module source not read — pin is vacuous"
-    assert "HEADLESS_FIRABLE" in source, "module source truncated — pin is vacuous"
-    for phrase in absolutes:
-        assert phrase not in source, phrase
+    pi_comments = [block for block in _comment_blocks(source) if _names_pi(block)]
+    assert pi_comments, "no Pi ruling comment matched — pin is vacuous"
+    for text in [doc, _sv.UNVERIFIABLE_REASON["pi"], *pi_comments]:
+        for phrase in absolutes:
+            assert phrase not in text, (phrase, text[:90])
 
 
 # ── hermeticity: root resolution is home-scoped, env only where one exists ──

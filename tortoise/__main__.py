@@ -5184,6 +5184,9 @@ def _cmd_setup(args) -> int:
 
     # Interactive mode
     from pathlib import Path
+
+    from tortoise.capture_install import pi_home
+
     home = Path.home()
 
     print("Tortoise Setup — Agent Memory Configuration")
@@ -5192,7 +5195,7 @@ def _cmd_setup(args) -> int:
 
     # ── Harness detection ──────────────────────────────────────
     detections: dict[str, bool] = {}
-    if (home / ".pi" / "agent" / "extensions" / "tortoise-context").exists():
+    if (pi_home(home) / "tortoise-context").exists():
         detections["pi"] = True
     if (home / ".claude").exists() or Path(".claude").exists():
         detections["claude"] = True
@@ -5980,11 +5983,13 @@ def _cmd_doctor(args):
     # tortoise/capture_install.py).  A failed resolution is a WARNING row and
     # leaves `home` None, so the detection block below is skipped rather than
     # run against a substituted root.
+    from tortoise.capture_install import pi_home
+
     home: Path | None = None
     try:
         home = Path.home()
         detections: list[str] = []
-        if (home / ".pi" / "agent" / "extensions" / "tortoise-context").exists():
+        if (pi_home(home) / "tortoise-context").exists():
             detections.append("Pi (extension found)")
         if (home / ".claude").exists() or Path(".claude").exists():
             detections.append("Claude Code")

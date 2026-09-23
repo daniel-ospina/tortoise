@@ -53,7 +53,7 @@ it is recorded (below), never faked.
    `model`, `conversation` — via an injected `fetch`.
 3. **CI-enforced.** `tests/test_ci_selection.py::test_pi_hooks_change_selects_the_capture_guard`
    proves a `tortoise/pi-hooks/` change selects `core` and includes `test_pi_capture_hooks.py`;
-   `config/ci-surfaces.yml:952` (core) and `:1105` (onboarding) register it; a real CI run
+   `config/ci-surfaces.yml:951` (core) and `:1104` (onboarding) register it; a real CI run
    (`docs/evidence/3770-…/ci-run-35588858762-test-b-pytest.log:1682-1687`) shows the whole file
    PASSED including `test_extension_behavioral_suite`.
 4. **The installed artifact loads and fires** — the runnable attempt proving framing (4) is
