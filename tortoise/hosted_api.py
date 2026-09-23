@@ -9544,6 +9544,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # and the LLM extraction is SKIPPED (M2/v2-minted points are not
     # deterministically keyed — not in scope). The receipt still lands on the
     # 2xx (converges to one Session, one receipt — T1-P3/T1-P12).
+    # #1920: a SHORTER payload is NOT the identical re-POST pinned above — the
+    # turn ids past the new window are hard-deleted (and journaled) by
+    # ``sdk._write_capture_turns``, so the Session's episodic CONTAINS members
+    # track the LAST capture's window instead of the longest one ever posted.
     # (session_existed was probed above, before the quota gates.)
     proj.g.query(
         f"MERGE (s:Session {{id:$sid}}) SET {', '.join(_merge_sets)}",
@@ -9626,7 +9630,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # lane and `sdk.capture_session` can no longer drift (#1532's drift class).
     await _run_off_loop(
         _CAPTURE_EXECUTOR, _write_capture_turns, proj, sdk, session_id,
-        windowed, now=now, turn_embs=_turn_embs)
+        windowed, now=now, turn_embs=_turn_embs,
+        session_existed=session_existed)
 
     # #1727 Slice 2 (T2-P2c): idempotent re-POST — the Session already
     # existed, so the LLM extraction is SKIPPED (M2/v2-minted points are not
