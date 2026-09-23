@@ -39,6 +39,9 @@ Usage
     # local/self-host target (loopback) needs no --allow-prod
     python tools/ship_test_onboarding.py --auth-url http://127.0.0.1:8788
 
+    # inspect a FAILED run's org instead of reaping it (explicit residue)
+    python tools/ship_test_onboarding.py --keep-org --auth-url http://127.0.0.1:8788
+
     # guard self-check: prove the connection-claim probe discriminates
     # (RED on a lying UI, GREEN on a behaviour-identical reformat)
     python tools/ship_test_onboarding.py --mutation-selfcheck
@@ -74,6 +77,20 @@ record's ``reason`` field carries the same split (``instrument_error`` vs
 prose. The observation
 directory always holds ``observation.json`` + step screenshots, pass or fail.
 
+**Teardown (#4319).** Every per-deploy run creates a real production org
+(``Ship Test <epoch>-<hex4>``); the run **reaps it by default**, and the outcome is
+recorded in ``observation.json`` as the ``teardown`` block. The org is proven to
+be this run's by a **differential proof of creation** — the walked session's own
+org list is read before the wizard can create anything and again at teardown, so
+this run's orgs are exactly the set difference — never by its name, which a
+fixed ``--org-name`` or a reused account could match on an org this run did not
+create. Deletion goes through the same-origin ``/api/v1`` BFF proxy as the
+session's owner, and ``deleted`` is only recorded after a readable re-read shows
+the org gone (a 2xx is not proof). ``--keep-org`` opts out and leaves an
+explicit, countable residue. **Teardown never changes the verdict or the exit
+code** — a cleanup fault is residue, not a product finding, and it is printed
+loudly on stderr (the ``#4291`` guard, both directions).
+
 The record carries the timestamp, the **deployed SHA** (the deployment's own
 revision, read from the public ``GET /v1/version`` — ``commit_sha`` baked into
 the release env at deploy time), the dashboard-side bundle asset as a second
@@ -89,6 +106,7 @@ what keep the probe itself honest.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -536,6 +554,11 @@ class Observation:
     # How the run authenticated (`state`, `detail`, `mechanism`) — the evidence
     # for the guard's central distinction, recorded rather than narrated.
     session: dict = field(default_factory=dict)
+    # The run's own cleanup outcome (#4319): a JSON-only summary whose `status`
+    # is one of the TEARDOWN_* constants. Declared HERE because `_finish`
+    # serializes with `dataclasses.asdict`, which emits declared fields only —
+    # an undeclared attribute is silently dropped from the artifact.
+    teardown: dict = field(default_factory=dict)
     # The failure CLASS (#4291). Empty iff `verdict == "passed"`. A run whose
     # class is `instrument_error` measured nothing about the product and exits 3.
     reason: str = ""
@@ -682,6 +705,28 @@ UNUSABLE_SESSION_STATES = (SESSION_NOT_SIGNED_IN, SESSION_STORE_UNAVAILABLE,
 
 SESSION_MECHANISM = "browser cookie jar → app-origin /api/session → /api/v1 BFF proxy"
 
+# The product's own org-name rule, kept in sync with the server
+# (`supabase/functions/tenant-provision`: ORG_NAME_RE) and the client
+# (`website/apps/dashboard/src/wizardFlow.js::orgNameError`). Both sides TRIM
+# first, so this is matched with `fullmatch` against a STRIPPED value — a
+# `$`-anchored `match` accepts `"Foo\n"`, and a raw `"Foo "` would be stored as
+# `"Foo"`, after which teardown would look for a name that cannot exist and
+# leave the created org unreapable. Teardown matches the name this run WROTE, so
+# a name the product would rewrite or refuse is rejected up front (exit 2)
+# instead of surfacing later as a `name_mismatch`.
+#
+# DELIBERATELY STRICTER THAN THE PRODUCT AT EXACTLY ONE CODE POINT: Python's
+# `str.strip()` and JS's `String.prototype.trim()` disagree on U+FEFF (JS trims
+# a BOM, Python does not). `"--org-name \ufeffFoo"` is therefore refused here
+# though the product would accept it as `"Foo"`. That is the fail-closed
+# direction — no org is created, so there is no residue and nothing left
+# unreapable — and DROPPING the strictness would be the unsafe direction, so it
+# is recorded rather than papered over with a hand-rolled, drift-prone
+# WhiteSpace set. The other direction ("Foo\x85", "Foo\x1c": Python trims,
+# JS does not) is harmless, because the instrument types the STRIPPED value and
+# the product re-trims what it is given.
+ORG_NAME_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}")
+
 
 def bff_session(ctx, base_url: str) -> tuple[str, str]:
     """Resolve the walk's session on the app origin, as the app itself does.
@@ -714,9 +759,18 @@ def bff_api(ctx, base_url: str, method: str, path: str,
     this is the honest way to read the server's truth for this user.
     """
     url = base_url.rstrip("/") + BFF_API_PREFIX + path
+    verb = method.upper()
+    if verb not in ("GET", "POST", "DELETE"):
+        # Fail closed. This used to send ANY non-GET as a POST, so a caller
+        # asking for DELETE was silently downgraded into a POST against the
+        # same path — a wrong-method request the caller still read as a
+        # DELETE. An unknown verb is a bug, not something to guess at.
+        raise ValueError(f"bff_api: unsupported method {method!r}")
     try:
-        if method.upper() == "GET":
+        if verb == "GET":
             resp = ctx.request.get(url)
+        elif verb == "DELETE":
+            resp = ctx.request.delete(url)
         else:
             resp = ctx.request.post(url, data=body if body is not None else {})
     except Exception:
@@ -768,6 +822,214 @@ def read_projection(ctx, base_url: str) -> tuple[int, dict | None]:
     report `passed` for a lying UI — a false pass. One identity, one read.
     """
     return read_projection_via_bff(ctx, base_url)
+
+
+# ── the run's own cleanup (#4319) ───────────────────────────────────────────
+# Every per-deploy run creates a REAL production org (`Ship Test <epoch>-<hex4>`) and,
+# before this, nothing removed it. The instrument now reaps the org it created —
+# as its owner, through the SAME walked session and the SAME origin's BFF proxy
+# it already uses — and records the outcome in the observation.
+#
+# The identity of "the org this run created" is NOT the name. A name match is
+# evidence of a name: a fixed `--org-name`, a reused account, or the provisioning
+# lane's own upsert could each put this run's name on an org this run never
+# created, and the instrument would delete a third party's org. The proof is
+# DIFFERENTIAL: the walked session's own org list is read once BEFORE the wizard
+# can create anything (`before`) and once at teardown (`after`), so this run's
+# orgs are exactly `after - before`. That set must be exactly one org — the name
+# is then a second, independent check, never the identity itself.
+TEARDOWN_DELETED = "deleted"
+TEARDOWN_SKIPPED_NO_ORG = "skipped_no_org"
+TEARDOWN_NOT_LISTED = "not_listed"
+TEARDOWN_NOT_ATTEMPTED = "not_attempted"
+TEARDOWN_KEPT = "kept_by_flag"
+TEARDOWN_NOT_REACHED = "not_reached"
+TEARDOWN_BASELINE_UNAVAILABLE = "baseline_unavailable"
+TEARDOWN_LIST_UNREADABLE = "list_unreadable"
+TEARDOWN_AMBIGUOUS = "ambiguous"
+TEARDOWN_NAME_MISMATCH = "name_mismatch"
+TEARDOWN_HTTP_REFUSED = "http_refused"
+TEARDOWN_NOT_CONFIRMED = "not_confirmed"
+TEARDOWN_FAILED = "failed"
+
+# The states that mean a live org MAY remain in the target tenant, and so get the
+# loud stderr residue warning. `deleted` / `skipped_no_org` / `not_reached` are
+# clean — warning on those would be a false alarm, and a false residue alarm is
+# the #4291 conflation in reverse.
+TEARDOWN_RESIDUE_STATES = (
+    TEARDOWN_NOT_LISTED, TEARDOWN_NOT_ATTEMPTED, TEARDOWN_KEPT,
+    TEARDOWN_BASELINE_UNAVAILABLE, TEARDOWN_LIST_UNREADABLE, TEARDOWN_AMBIGUOUS,
+    TEARDOWN_NAME_MISMATCH, TEARDOWN_HTTP_REFUSED, TEARDOWN_NOT_CONFIRMED,
+    TEARDOWN_FAILED,
+)
+
+
+@dataclass
+class Teardown:
+    """Cleanup state for one run.
+
+    Deliberately NOT serialized — it holds a live request channel. What lands in
+    the artifact is the JSON-only summary built by `_run_teardown`.
+    """
+
+    org_name: str = ""          # the ONE name this run wrote into the wizard
+    base_url: str = ""
+    keep: bool = False
+    ctx: object = None          # the browser context, once one exists
+    # True ONLY after a RECOGNIZED baseline read. A fresh account's correct
+    # baseline is a readable EMPTY list; "no baseline" is not "empty", it is
+    # "unproven", and an unproven identity must never delete anything.
+    enabled: bool = False
+    # True once the baseline read was ATTEMPTED. Distinguishes "the list was
+    # unreadable" (a real, attributable residue risk) from "the run exited
+    # before it ever looked" (which cannot have created anything and must not
+    # raise a residue alarm).
+    baseline_attempted: bool = False
+    reason: str = ""
+    before: dict = field(default_factory=dict)   # org_id -> org_name
+    # Set immediately BEFORE the create click: a click that raises after
+    # dispatching the create must still leave this run's residue visible here.
+    create_attempted: bool = False
+    done: bool = False
+
+
+def _org_rows(body: object) -> list | None:
+    """The org rows of a GET /api/v1/organizations body, or None if unrecognized.
+
+    The live endpoint answers with a BARE list of rows carrying `org_id`. Any
+    other shape — a dict with an unexpected key, a list of non-dicts, a row with
+    no `org_id` — is NOT recognized. That matters in both directions: a shape
+    drift parsed as "no orgs" would silently switch the identity proof off on
+    the baseline side and silently confirm a deletion on the verify side.
+    Unrecognized ⇒ None ⇒ every caller fails closed.
+    """
+    rows = body.get("organizations") if isinstance(body, dict) else body
+    if not isinstance(rows, list):
+        return None
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("org_id"):
+            return None
+    return rows
+
+
+def _upstream_status(body: object) -> int | None:
+    """The proxy's own `upstream_status` (an upstream 429 arrives as a 503)."""
+    if isinstance(body, dict) and isinstance(body.get("upstream_status"), int):
+        return body["upstream_status"]
+    return None
+
+
+def read_org_ids(ctx, base_url: str) -> tuple[int, dict | None, int | None]:
+    """The walked session's own orgs as ``{org_id: org_name}``.
+
+    Returns ``(status, ids_or_None, upstream_status)``. ``None`` ids means the
+    answer was not a recognizable org list, or the read failed — callers treat
+    both as "not readable" (fail closed), never as "no orgs".
+    """
+    status, body = bff_api(ctx, base_url, "GET", "/organizations")
+    if status != 200:
+        return status, None, _upstream_status(body)
+    rows = _org_rows(body)
+    if rows is None:
+        return status, None, None
+    return status, {str(r["org_id"]): str(r.get("org_name") or "") for r in rows}, None
+
+
+def _run_teardown(obs: Observation, td: Teardown) -> None:
+    """Reap the org THIS run created, and record what happened. Never raises.
+
+    The ordering IS the safety argument: prove the org is this run's
+    (differential), delete it as its owner through the same origin, then VERIFY
+    THE ARTIFACT — a 2xx is not proof, so `deleted` is recorded only after a
+    READABLE re-read shows the org gone from the walked session's own list.
+    """
+    if td.done:
+        # One-shot: `_finalize` can be entered twice (an inner `_finish` that
+        # raised re-enters through the walk's `except`), and a second pass would
+        # find the org already gone and overwrite recorded evidence with a
+        # clean-looking status.
+        return
+    td.done = True
+
+    if td.keep:
+        obs.teardown = {"status": TEARDOWN_KEPT, "org_name": td.org_name,
+                        "detail": "--keep-org: the residue is deliberate and countable"}
+        return
+    if td.ctx is None or not td.baseline_attempted:
+        # No baseline was ever READ. Nothing in this run can be attributed to
+        # it, and the org is only created by the wizard click that comes AFTER
+        # the baseline — so claiming "the org list was unreadable" here would be
+        # a residue alarm for a run that never got far enough to create one.
+        obs.teardown = {
+            "status": TEARDOWN_NOT_REACHED,
+            "detail": ("the walk never reached a browser context" if td.ctx is None
+                       else "the walk exited before the cleanup baseline was read")}
+        return
+    if not td.enabled:
+        obs.teardown = {"status": TEARDOWN_BASELINE_UNAVAILABLE,
+                        "org_name": td.org_name, "detail": td.reason}
+        return
+
+    status, after, upstream = read_org_ids(td.ctx, td.base_url)
+    if after is None:
+        obs.teardown = {"status": TEARDOWN_LIST_UNREADABLE, "org_name": td.org_name,
+                        "http_status": status, "upstream_status": upstream}
+        return
+
+    created = {oid: name for oid, name in after.items() if oid not in td.before}
+    if not created:
+        if td.create_attempted:
+            # An empty candidate set AFTER a recorded create attempt is not
+            # "nothing to do": the create may have landed on a list that has not
+            # caught up yet. Suspect residue, never a clean bill of health.
+            obs.teardown = {"status": TEARDOWN_NOT_LISTED, "org_name": td.org_name,
+                            "before_count": len(td.before), "after_count": len(after)}
+        else:
+            obs.teardown = {"status": TEARDOWN_SKIPPED_NO_ORG,
+                            "org_name": td.org_name}
+        return
+    if len(created) > 1:
+        obs.teardown = {"status": TEARDOWN_AMBIGUOUS, "org_name": td.org_name,
+                        "created_ids": sorted(created)}
+        return
+    if not td.create_attempted:
+        # The set difference alone is NOT an identity proof: an org that joined
+        # this session's own list without this run EVER asking for one is not
+        # this run's to delete. (It appeared after the baseline, so it is in the
+        # same disposable account — but "same account" is not "created by this
+        # run".) Refuse, and say so as residue rather than as a clean bill.
+        obs.teardown = {"status": TEARDOWN_NOT_ATTEMPTED, "org_name": td.org_name,
+                        "created_ids": sorted(created)}
+        return
+
+    org_id, listed_name = next(iter(created.items()))
+    if listed_name != td.org_name:
+        obs.teardown = {"status": TEARDOWN_NAME_MISMATCH, "org_id": org_id,
+                        "listed_name": listed_name, "org_name": td.org_name}
+        return
+
+    status, body = bff_api(td.ctx, td.base_url, "DELETE", f"/organizations/{org_id}")
+    upstream = _upstream_status(body)
+    if status not in (200, 202):
+        obs.teardown = {"status": TEARDOWN_HTTP_REFUSED, "org_id": org_id,
+                        "http_status": status, "upstream_status": upstream,
+                        "detail": scrub(json.dumps(body), 200)}
+        return
+
+    # VERIFY THE ARTIFACT, not the send. The confirm read is authoritative, and
+    # an UNREADABLE confirm is NOT a confirmation.
+    v_status, verify, v_upstream = read_org_ids(td.ctx, td.base_url)
+    if verify is None or org_id in verify:
+        obs.teardown = {"status": TEARDOWN_NOT_CONFIRMED, "org_id": org_id,
+                        "delete_status": status, "verify_status": v_status,
+                        "verify_upstream_status": v_upstream}
+        return
+
+    fields = body if isinstance(body, dict) else {}
+    obs.teardown = {"status": TEARDOWN_DELETED, "org_id": org_id,
+                    "org_name": listed_name, "delete_status": status,
+                    "grace_hours": fields.get("grace_hours"),
+                    "hard_delete_after": fields.get("hard_delete_after")}
 
 
 def mcp_call(api_url: str, key: str, method: str, params: dict | None = None,
@@ -907,13 +1169,22 @@ def run_walk(args) -> Observation:
     # product finding with exit 1.
     obs.reason = REASON_INSTRUMENT_ERROR
 
+    # The run's cleanup state (#4319). Built HERE — before the playwright import
+    # guard — because every exit below funnels through `_finalize`, including the
+    # ones that predate a context. The org NAME is computed once, here, and is
+    # both what the wizard is told and what teardown compares against, so the two
+    # cannot drift.
+    td = Teardown(org_name=args.org_name
+                  or f"Ship Test {int(time.time())}-{uuid.uuid4().hex[:4]}",
+                  base_url=args.base_url, keep=args.keep_org)
+
     try:
         # Lazy so the core (judge/probe/CLI) stays importable without playwright —
         # but GUARDED, so a missing driver still yields a recorded observation.
         from playwright.sync_api import sync_playwright
     except Exception as exc:
         obs.verdict = f"failed: playwright unavailable: {type(exc).__name__}: {exc}"
-        return _finish(obs, out_dir)
+        return _finalize(obs, out_dir, td)
 
     def shot(page, name: str) -> str:
         p = shots / f"{len(obs.steps):02d}-{name}.png"
@@ -939,6 +1210,7 @@ def run_walk(args) -> Observation:
             # flag — exactly what a new user arrives with.
             ctx = browser.new_context(viewport={"width": 1440, "height": 900},
                                       locale="en-US")
+            td.ctx = ctx
             page = ctx.new_page()
             signup_responses: list[dict] = []
 
@@ -962,7 +1234,7 @@ def run_walk(args) -> Observation:
                 # and the CTA is genuinely unhittable in a clean browser.
                 obs.verdict = "failed: signup CTA not hittable in a clean browser"
                 obs.reason = failure_reason(obs.verdict, session_state="")
-                return _finish(obs, out_dir)
+                return _finalize(obs, out_dir, td)
 
             # 2 ── signup
             page.click("#btn-email", timeout=args.timeout)
@@ -1010,14 +1282,35 @@ def run_walk(args) -> Observation:
                 # on a signed-out page, nor blame the server for an observation
                 # it never got the chance to make (#4291).
                 obs.verdict = instrument_error_verdict(session_state, session_detail)
-                return _finish(obs, out_dir)
+                return _finalize(obs, out_dir, td)
+
+            # 3c ── the cleanup BASELINE (#4319). Read the walked session's own
+            # org list BEFORE the wizard can create anything: this run's orgs are
+            # exactly `after - before`, which is a proof of CREATION, while a
+            # name is not (a fixed --org-name or a reused account could match an
+            # org this run never created). An unreadable baseline leaves teardown
+            # DISABLED — it fails closed (residue) rather than deleting on an
+            # unproven identity.
+            b_status, before_ids, b_upstream = read_org_ids(ctx, args.base_url)
+            td.baseline_attempted = True
+            if before_ids is None:
+                td.reason = (f"baseline GET /api/v1/organizations -> {b_status}"
+                             + (f" (upstream {b_upstream})" if b_upstream else ""))
+            else:
+                td.enabled = True
+                td.before = before_ids
 
             # 4 ── open the wizard and walk it to the final screen (best effort)
             # A first-timer's step 1 is org-create (an input + a button); the
             # generic label loop below cannot advance it.
             org_input = page.locator('input[aria-label="Organization name"]')
             if org_input.count() and org_input.first.is_visible():
-                org_input.first.fill(args.org_name or f"Ship Test {int(time.time())}")
+                org_input.first.fill(td.org_name)
+                # Set BEFORE the click: the click dispatches the create, and a
+                # click that raises after dispatching it must still leave this
+                # run's residue visible (an empty candidate set then reads as
+                # SUSPECT, not as "nothing to do").
+                td.create_attempted = True
                 page.locator('button:has-text("Create Organization")').first.click(timeout=args.timeout)
                 page.wait_for_timeout(4000)
             # Wait for the product shell to settle before clicking: a "walk"
@@ -1074,7 +1367,7 @@ def run_walk(args) -> Observation:
                 obs.verdict = instrument_error_verdict(
                     "projection_unreadable",
                     f"GET /api/v1/onboarding/state -> {projection_status}")
-                return _finish(obs, out_dir)
+                return _finalize(obs, out_dir, td)
             ui = read_connection_surface(page)
             # The UNTRUNCATED body feeds the sweep: scrub()'s cap is for the
             # recorded artifact only. `connection_verdict` picks the surface's
@@ -1094,7 +1387,7 @@ def run_walk(args) -> Observation:
                 obs.verdict = INCOMPLETE_NO_SURFACE
                 obs.reason = failure_reason(obs.verdict,
                                            session_state=session_state)
-                return _finish(obs, out_dir)
+                return _finalize(obs, out_dir, td)
             obs.add(name="before-observation", url=page.url, ui=ui,
                     observed=neg.observed, ok=neg.ok, detail=neg.detail,
                     screenshot=shot(page, "before-observation"),
@@ -1105,7 +1398,7 @@ def run_walk(args) -> Observation:
             if not neg.ok:
                 obs.verdict = f"failed: {neg.detail}"
                 obs.reason = failure_reason(obs.verdict, session_state=session_state)
-                return _finish(obs, out_dir)
+                return _finalize(obs, out_dir, td)
 
             # 6 ── the server observes a real agent write (MCP, not a client claim)
             # The session is PROVEN signed-in by here, so the key is either the
@@ -1132,7 +1425,7 @@ def run_walk(args) -> Observation:
                         # (the #4291 class, one layer down).
                         obs.verdict = instrument_error_verdict(
                             "agent_write_failed", key_detail)
-                        return _finish(obs, out_dir)
+                        return _finalize(obs, out_dir, td)
                     # poll the server's projection until it records the edge.
                     # `saw_200` is tracked SEPARATELY from the LAST read's
                     # status: a transient 503 on the final poll must not turn a
@@ -1153,7 +1446,7 @@ def run_walk(args) -> Observation:
                         obs.verdict = instrument_error_verdict(
                             "projection_unreadable",
                             f"GET /api/v1/onboarding/state -> {projection_status}")
-                        return _finish(obs, out_dir)
+                        return _finalize(obs, out_dir, td)
                     observed_after = server_observed(projection)
                     # `ok` stays the WRITE's outcome (that is what the step is
                     # named for); whether the server observed it is `observed`.
@@ -1164,7 +1457,7 @@ def run_walk(args) -> Observation:
                 else:
                     obs.add(name="agent-write", ok=False, detail=key_detail)
                     obs.verdict = instrument_error_verdict("no_agent_key", key_detail)
-                    return _finish(obs, out_dir)
+                    return _finalize(obs, out_dir, td)
 
             # 7 ── the POSITIVE direction: reload and read the Overview again
             page.goto(args.base_url.rstrip("/") + "/",
@@ -1175,7 +1468,7 @@ def run_walk(args) -> Observation:
                 obs.verdict = instrument_error_verdict(
                     "projection_unreadable",
                     f"GET /api/v1/onboarding/state -> {projection_status}")
-                return _finish(obs, out_dir)
+                return _finalize(obs, out_dir, td)
             ui = read_connection_surface(page)
             pos = connection_verdict(ui, connection_surface_kind(page), projection,
                                      page_body(page))
@@ -1195,18 +1488,22 @@ def run_walk(args) -> Observation:
                                       session_state=session_state,
                                       skip_agent_write=args.skip_agent_write)
             obs.reason = failure_reason(obs.verdict, session_state=session_state)
-            return _finish(obs, out_dir)
+            return _finalize(obs, out_dir, td)
         except Exception as exc:
             obs.add(name="error", url=page.url if page else "",
                     ok=False, detail=f"{type(exc).__name__}: {exc}",
                     screenshot=shot(page, "error") if page else "")
             obs.verdict = f"failed: {type(exc).__name__}: {exc}"
-            return _finish(obs, out_dir)
+            return _finalize(obs, out_dir, td)
         finally:
-            if ctx is not None:
-                ctx.close()
-            if browser is not None:
-                browser.close()
+            # Guarded: a close that raises would otherwise override the exit code
+            # of a run whose verdict and artifact are already final — and the
+            # teardown guarantee (cleanup never changes the outcome) would not be
+            # literally true.
+            for closer in (ctx, browser):
+                if closer is not None:
+                    with contextlib.suppress(Exception):
+                        closer.close()
 
 
 def _mint_or_read_key(page, ctx, base_url: str) -> tuple[str | None, str]:
@@ -1253,7 +1550,17 @@ def _finish(obs: Observation, out_dir: Path) -> Observation:
     print(f"[ship-test] session: {obs.session or '(not reached)'}")
     print(f"[ship-test] deployed sha: {obs.deploy_sha or '(unreadable)'}  "
           f"bundle: {obs.bundle or '(unreadable)'}  instrument: {obs.sha or '(unknown)'}")
+    if obs.teardown:
+        print(f"[ship-test] teardown: {obs.teardown}")
     print(f"[ship-test] observation → {path}")
+    if obs.teardown.get("status") in TEARDOWN_RESIDUE_STATES:
+        # LOUD, but NOT verdict-affecting: cleanup is not the product. A run can
+        # pass and still owe the tenant an org, and a reader must never have to
+        # infer that from the code.
+        print(f"[ship-test] RESIDUE — teardown {obs.teardown.get('status')}:"
+              f" this run may have left a live org behind in the target tenant."
+              f" That is a CLEANUP fault: it does not change the verdict"
+              f" ({obs.verdict}) or the exit code.", file=sys.stderr)
     if obs.reason == REASON_INSTRUMENT_ERROR:
         # LOUD, on stderr, with the exit code: a run that could not exercise
         # the product must never be mistaken for a measurement of it.
@@ -1265,6 +1572,26 @@ def _finish(obs: Observation, out_dir: Path) -> Observation:
     elif obs.reason:
         print(f"[ship-test] reason: {obs.reason} (exit {exit_code_for(obs.reason)})")
     return obs
+
+
+def _finalize(obs: Observation, out_dir: Path,
+              td: Teardown | None = None) -> Observation:
+    """The walk's SINGLE exit: teardown, then the artifact.
+
+    Every `return` in `run_walk` funnels through here, so `observation.json`
+    carries the teardown outcome on every path where a browser context existed
+    (i.e. where an org could have been created). Cleanup is wrapped so it can
+    neither raise out of the walk nor touch the product verdict or reason: a
+    failed cleanup is residue, never a product finding, and never a reason to
+    lose the artifact (the #4291 conflation, both directions).
+    """
+    if td is not None:
+        try:
+            _run_teardown(obs, td)
+        except Exception as exc:
+            obs.teardown = {"status": TEARDOWN_FAILED,
+                            "detail": f"{type(exc).__name__}: {exc}"}
+    return _finish(obs, out_dir)
 
 
 # ── the guard self-check (mutation evidence, no browser needed) ─────────────
@@ -1431,6 +1758,16 @@ def build_parser() -> argparse.ArgumentParser:
                         "judged against a different identity's projection.")
     p.add_argument("--allow-prod", action="store_true",
                    default=os.environ.get("SHIP_TEST_ALLOW_PROD") == "1")
+    p.add_argument("--keep-org", action="store_true", default=False,
+                   help="do NOT reap the org this run created. Teardown is ON by "
+                        "default (#4319): the run deletes the org it created "
+                        "through the walked session's own BFF proxy, once its "
+                        "identity is PROVEN by a before/after diff of that "
+                        "session's own org list. Use this only to inspect a "
+                        "FAILED run's org — it leaves an explicit, countable "
+                        "residue. CLI-only, deliberately NOT env-settable: one "
+                        "ambient variable must never be able to turn teardown off "
+                        "for every run.")
     p.add_argument("--mutation-selfcheck", action="store_true")
     return p
 
@@ -1444,6 +1781,19 @@ def main(argv: list[str] | None = None) -> int:
         print("ship-test: non-loopback target — pass --allow-prod (or "
               "SHIP_TEST_ALLOW_PROD=1) to observe a live deployment", file=sys.stderr)
         return EXIT_USAGE
+    if args.org_name is not None:
+        # Validate what the PRODUCT will actually store: both the wizard and
+        # tenant-provision trim first.
+        org_name = args.org_name.strip()
+        if org_name and not ORG_NAME_RE.fullmatch(org_name):
+            print("ship-test: invalid --org-name — the product accepts letters, "
+                  "numbers, space, dash and underscore, starting with a letter or "
+                  "number, at most 64 characters (the rule both the wizard and "
+                  "tenant-provision apply). A name outside that rule is rewritten "
+                  "or refused server-side, which would make the org this run "
+                  "created unreapable.", file=sys.stderr)
+            return EXIT_USAGE
+        args.org_name = org_name or None
     try:
         obs = run_walk(args)
     except Exception as exc:

@@ -41,9 +41,10 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -55,6 +56,7 @@ __all__ = [
     "DISCARD_COUNT_EXCEEDED",
     "DISCARD_ENTRY_TOO_LARGE",
     "DISCARD_TRANSCRIPT_EMPTY",
+    "PROBE_SESSION_ID_PREFIX",
     "Bounds",
     "FlushSummary",
     "PostOutcome",
@@ -65,10 +67,13 @@ __all__ = [
     "content_digest",
     "entry_key",
     "flush_spool",
+    "is_probe_session_id",
+    "is_spooled",
     "list_spool_metas",
     "read_discards",
     "read_spool_meta",
     "read_spool_turns",
+    "remove_spool_entry",
     "spool_dir",
     "write_spool_entry",
 ]
@@ -164,6 +169,11 @@ class FlushSummary:
     # for its own final flush (see ``exclude_session_id``). Counted separately
     # from ``skipped`` so the drain reports WHICH it did.
     held_back: int = 0
+    # `session verify` probes refused filing (they are synthetic by
+    # construction). Separate from `held_back` so a drain can SAY a refusal
+    # happened: a silent refusal would leave an operator wondering why a
+    # spooled session never lands.
+    probe_refusals: list[dict] = field(default_factory=list)
     discarded: list[dict] = field(default_factory=list)
     outcomes: dict[str, PostOutcome] = field(default_factory=dict)
 
@@ -182,22 +192,31 @@ class FlushSummary:
 # ── Paths ──────────────────────────────────────────────────────────────────
 
 
-def spool_dir() -> Path:
+def spool_dir(env: Mapping[str, str] | None = None) -> Path:
     """The local capture spool. ``TORTOISE_CAPTURE_SPOOL_DIR`` overrides it.
+
+    ``env`` is the environment the CALLER means — pass the env a hook was fired
+    under, not this process's. Every lookup below honours it, because a caller
+    that pins ``HOME`` (as `session verify` callers do) would otherwise have
+    the seam write to one spool and the verification look in another, and
+    report a false "nothing to clean up" (#4714 review).
 
     Fail-safe in tests: a test (or a PROCESS a test spawns) must never reach the
     developer machine's real spool (#3721's trap). Under pytest the path is
     derived DETERMINISTICALLY from the test id, so every process of one test
     shares one spool and none of them touches ``~/.tortoise``.
     """
-    override = os.environ.get("TORTOISE_CAPTURE_SPOOL_DIR")
+    source: Mapping[str, str] = os.environ if env is None else env
+    override = source.get("TORTOISE_CAPTURE_SPOOL_DIR")
     if override:
         return Path(override)
-    test_id = os.environ.get("PYTEST_CURRENT_TEST")
+    test_id = source.get("PYTEST_CURRENT_TEST")
     if test_id:
         digest = hashlib.sha256(_utf8(test_id)).hexdigest()[:16]
         return Path(tempfile.gettempdir()) / "tortoise-capture-spool-tests" / digest
-    return Path.home() / ".tortoise" / "capture-spool"
+    home = source.get("HOME")
+    base = Path(home) if home else Path.home()
+    return base / ".tortoise" / "capture-spool"
 
 
 def _entries_dir(root: Path) -> Path:
@@ -453,6 +472,64 @@ def _remove_entry_files(root: Path, session_id: str) -> None:
     for path in (_meta_path(root, session_id), _log_path(root, session_id)):
         with contextlib.suppress(OSError):
             path.unlink()
+
+
+def is_spooled(root: Path, session_id: str) -> bool:
+    """Whether a session currently has a spool entry (meta or turn log)."""
+    return _meta_path(root, session_id).exists() or \
+        _log_path(root, session_id).exists()
+
+
+def remove_spool_entry(root: Path, session_id: str) -> None:
+    """Unlink a session's spool entry (meta + turn log), best effort.
+
+    Deliberately returns nothing: "did something get removed" and "is anything
+    still there" are DIFFERENT questions, and a `bool` that conflates them
+    lets a caller report a removal that silently failed — an unlink can fail on
+    EACCES or a read-only volume (#4714 review). Callers that must know ask
+    `is_spooled` before and after.
+
+    Motivating case: ``session verify`` fires the real seam with a SYNTHETIC
+    transcript, so a retryable refusal parks the probe in the durable spool,
+    where a drain would POST it into the tenant graph. This is the tidy-up; the
+    structural defense is `is_probe_session_id` + the drain's refusal, because
+    the codex/cursor seams write from a DETACHED worker that can outlive this
+    call.
+    """
+    _remove_entry_files(root, session_id)
+
+
+#: A `session verify` probe id, matched STRUCTURALLY — `verify-<harness>-
+#: <stamp>-<hex>` per `session_verify._probe_id`.
+#:
+#: A PREFIX test is not enough, and the difference is destructive: session ids
+#: also come from `_local_session_id` (`<transcript-stem>-<digest>`), so a real
+#: session file named `verify-my-notes.jsonl` derives the id
+#: `verify-my-notes-0e9ebe1a9262`. Under a prefix test that real capture was
+#: both refused AND deleted, with a ledger line calling it a probe — silently
+#: destroying user data (#4714 review).
+PROBE_SESSION_ID_PREFIX = "verify-"
+_PROBE_SESSION_ID_RE = re.compile(
+    r"verify-[a-z][a-z0-9-]*-\d{8}T\d{6}Z-[0-9a-f]{6}\Z")
+
+
+def is_probe_session_id(session_id: str) -> bool:
+    """Whether ``session_id`` is a ``session verify`` probe (never real data).
+
+    Matches the full probe shape, not the prefix — see `_PROBE_SESSION_ID_RE`.
+    This is the only thing preventing synthetic probe content from being
+    extracted as memory, so it must stay narrow. A false POSITIVE merely holds
+    a real capture back (reversible, and reported); a false NEGATIVE lets a
+    probe reach the graph. The prefix match this replaced was worse than either
+    — it refused AND deleted real data.
+
+    ⚠️ This regex and `session_verify._probe_id` describe the SAME format in two
+    places, and nothing enforces that they agree. `tests/test_session_import_codex.py::
+    test_the_probe_match_cannot_drift_from_the_producer` asserts they do, by
+    deriving its samples from `_probe_id` — if you change one, that test is what
+    tells you to change the other (#4714 review).
+    """
+    return _PROBE_SESSION_ID_RE.match(session_id) is not None
 
 
 def _discard_entry(root: Path, meta: dict, reason: str, detail: str = "") -> dict:
@@ -782,6 +859,64 @@ def flush_spool(
     return summary
 
 
+def _clear_breadcrumb_for(harness: str | None, session_id: str | None) -> None:
+    """Drop the capture-failure breadcrumb once THAT session has landed.
+
+    The record is per-HARNESS, so this must be narrow in three directions or it
+    destroys evidence about something else (#4714 review):
+
+    * ``kind`` — the shipped hooks write ``install-inert`` to the SAME path, and
+      ``session verify`` reaches INERT only from that record. Unlinking blindly
+      let a drain firing while verify was mid-flight erase it and report an
+      inert install as PROVEN. Only a ``capture-failure`` record is cleared.
+    * ``session_id`` — a failure recorded for a DIFFERENT session must survive.
+      This is an IDENTITY check; a timestamp check does NOT work, because the
+      spool's ``updated_at`` is frozen by the dedup path and so cannot say when
+      this session last failed.
+    * a record with NO recorded ``session_id`` holds no identity to match on —
+      the shipped codex/cursor seams write that shape today (#4799) — so it is
+      KEPT. A stale breadcrumb is a cosmetic wart; wrongly erasing one loses
+      evidence of a session that may still be lost.
+
+    Best effort throughout: a breadcrumb is evidence, never a gate on filing.
+    """
+    if not harness:
+        return
+    try:
+        import json
+
+        from tortoise.hook_install import KIND_CAPTURE_FAILURE
+
+        receipt_dir = Path(os.environ.get(
+            "TORTOISE_IMPORT_RECEIPT_DIR",
+            str(Path.home() / ".tortoise" / "import-receipts")))
+        path = receipt_dir.parent / "capture-errors" / f"{harness}.json"
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if record.get("kind") != KIND_CAPTURE_FAILURE:
+            return
+        recorded_id = record.get("session_id")
+        if recorded_id and session_id and recorded_id != session_id:
+            # A DIFFERENT session's failure — still current, must survive.
+            return
+        if not recorded_id:
+            # The shipped codex/cursor hooks write a `capture-failure` record
+            # WITHOUT a session id, and are not a legacy shape — so treating it
+            # as clearable lets ANY filing erase a still-current failure for a
+            # different session, which is what this function promises not to do.
+            # Their records also hold no identity to match on, so the safe
+            # direction is to leave them: a stale breadcrumb is a cosmetic
+            # wart, a wrongly-erased one is lost evidence.
+            return
+        with contextlib.suppress(OSError):
+            path.unlink()
+    except Exception:
+        # Never let breadcrumb housekeeping affect a successful filing.
+        return
+
+
 def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: PostFn,
                now_ms: float, only_session_id: str | None,
                exclude_session_id: str | None, bounds: Bounds) -> None:
@@ -790,6 +925,27 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         return
     if exclude_session_id and sid == exclude_session_id:
         summary.held_back += 1
+        return
+    # STRUCTURAL probe guard, not a timing one — but ONLY for an unfiltered
+    # flush. `session verify` fires the real seam, and the seam runs
+    # `session capture`, which files through THIS function: refusing there would
+    # stop the probe landing at all, so `captured` would read FAIL for every
+    # harness and verify could never prove the chain it exists to prove (a real
+    # regression, caught in CI, not by review).
+    #
+    # The leak this guards is a probe LINGERING — a detached codex/cursor worker
+    # spooling one after verify's cleanup has run — and the next thing that
+    # would file it is an automatic `session drain`. So: refuse only when the
+    # caller named no session (`only_session_id is None` == a drain), and always
+    # allow a targeted filing, where the caller knows which session it means.
+    # The refusal is non-destructive: verify's own cleanup removes what it made.
+    if only_session_id is None and is_probe_session_id(sid):
+        summary.held_back += 1
+        summary.probe_refusals.append({
+            "session_id": sid,
+            "detail": "session verify probe — synthetic content is never filed "
+                      "by a drain",
+        })
         return
     if meta.get("filed_key") and meta.get("filed_key") == meta.get("capture_key"):
         summary.skipped += 1
@@ -822,6 +978,13 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
     outcome = post(payload)
     summary.outcomes[sid] = outcome
     if outcome.ok:
+        # The deferred session HAS now landed, so the machine-local "this
+        # harness lost its last capture" breadcrumb is no longer true. It was
+        # only ever cleared on a 2xx inside `sessions import`, which a
+        # spooled-then-drained session never takes — so a recovered capture
+        # left the breadcrumb standing (and `session verify` reading a failure
+        # that had already been resolved) (#4714 review).
+        _clear_breadcrumb_for(meta.get("harness"), sid)
         # COMPARE-AND-SWAP, on the POSTED CONTENT. A concurrent capture (a
         # resumed session, or the SessionStart drain racing a live turn) can
         # grow this entry while the POST is in flight. Stamp `filed_key` only
