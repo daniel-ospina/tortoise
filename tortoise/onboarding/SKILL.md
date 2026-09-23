@@ -526,4 +526,4 @@ Contract notes:
 ---
 > **Archived:** `AGENT_ONBOARDING.md` + variant headers live under
 > `tortoise/onboarding/archive/` (A0 rollback path — do not delete; never
-> re-promote while this skill is live).
+> re-promote while this document is live).
