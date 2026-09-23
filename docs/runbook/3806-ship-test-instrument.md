@@ -156,7 +156,7 @@ product.
 
 | Where | What | Count |
 | --- | --- | --- |
-| `tests/test_ship_test_onboarding.py` | Fast pure-Python: the classifier, the page-wide claim sweep, the DOM reader, the server-observation reader, the MCP write-result reader (JSON **and** SSE framing, both tool-error shapes, notification frames), the per-surface verdict seam, the verdict assembly, the session seam (`/api/session` + BFF), the loud-failure guard (session, write, projection, driver) — plus **the real `run_walk` executed against a fake browser**, which pins the call site (which read it uses, with what credential, in what order) rather than grepping for it — **plus the teardown control set**: each threat class of the destructive surface (pre-existing org, foreign name, ambiguity, unreadable baseline, unreadable confirmation, ambiguous candidate, refused delete, residue-vs-clean, verdict conservation both ways, single-exit funnel, one test per post-create exit) | 135 |
+| `tests/test_ship_test_onboarding.py` | Fast pure-Python: the classifier, the page-wide claim sweep, the DOM reader, the server-observation reader, the MCP write-result reader (JSON **and** SSE framing, both tool-error shapes, notification frames), the per-surface verdict seam, the verdict assembly, the session seam (`/api/session` + BFF), the loud-failure guard (session, write, projection, driver) — plus **the real `run_walk` executed against a fake browser**, which pins the call site (which read it uses, with what credential, in what order) rather than grepping for it — **plus the teardown control set**: each threat class of the destructive surface (pre-existing org, foreign name, ambiguity, unreadable baseline, unreadable confirmation, ambiguous candidate, refused delete, residue-vs-clean, verdict conservation both ways, single-exit funnel, every exit executed and status-asserted) | 138 |
 | `tests/e2e/test_ship_test_onboarding.py` | Real-browser, opt-in (`RUN_DASHBOARD_E2E=1`): the three assertions against the deployment's own built bundle, the wire observation that the client issues no `harness-connected` write, and RED/GREEN evidence against a mutated COPY of the real bundle | 8 |
 
 Both suites execute the instrument's **real decision code** (`judge`, the
@@ -184,10 +184,12 @@ only — a helper, an alias, a NON-Name binding (`import … as`, `except … as
 `match … case _ as`) or an in-place field assignment gets past it — so it is a
 refactor guard, not a containment proof. What carries
 the `not_reached`-reports-an-unreaped-org-as-clean class instead is the recorded
-teardown STATUS, asserted in the test for every post-create exit — including the
-three that no test reached until #4843 (the absent-surface, the lying-screen and
-the no-agent-key exits), each of which now has a test pinned to its own step so
-it cannot pass through the walk's generic error handler instead;
+teardown STATUS — every exit `run_walk` has is executed by at least one test,
+and at least one of the tests reaching each exit asserts the recorded status,
+including the five that no test reached until #4843 (the absent surface, the
+screen that lies, no agent key, a signup CTA that is not hittable, and the
+missing playwright driver); the post-create exits assert the fail-closed residue
+state, the pre-create ones the clean `not_reached`;
 they complement the behavioural tests, they do not replace
 them. The RED/GREEN property is the core
 requirement: a behaviour-identical reformat must not move the verdict, and a UI
