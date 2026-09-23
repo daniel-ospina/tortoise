@@ -191,7 +191,10 @@ test('#4330: any other mint failure returns falsy and surfaces its message as an
   const out = await createKey()
   assert.ok(!out)
   assert.deepEqual(calls.newKey, [], 'a 401 must never write the reveal plaintext')
-  assert.deepEqual(calls.error, ['', 'Unauthorized'], 'the leading empty write is the open-time clear')
+  // #4639: the banner state now carries the STRUCTURED error object (so the
+  // nudge gate can read its HTTP status), so pin the surfaced MESSAGE.
+  assert.deepEqual(calls.error.map((e) => (e instanceof Error ? e.message : e)), ['', 'Unauthorized'],
+    'the leading empty write is the open-time clear')
   assert.deepEqual(calls.capNotice, [''], 'a non-cap failure must not claim a cap')
 })
 

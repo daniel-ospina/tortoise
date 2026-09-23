@@ -1016,18 +1016,34 @@ def test_push_legs_partitions_every_classified_file():
     # pre-#1485 form of this check required a bench file in half_b SPECIFICALLY
     # and re-staled the moment a pool change moved one (#3811: adding a single
     # classified file flipped all three bench files into half_a, reddening an
-    # unrelated PR). Assert the invariant the code actually provides — every
-    # bench file reaches a half (the partition assertion above), and
-    # `push_extra`, when non-empty, reaches BOTH rather than being dumped on
-    # one.
+    # unrelated PR). Assert the invariant the code actually provides HERE: every
+    # bench file reaches a half (the partition assertion above). The push_extra
+    # spread rule is not asserted against this manifest — the shipped
+    # `push_extra` is empty, so it would be vacuous — it is pinned on a
+    # SYNTHETIC manifest by test_push_legs_distributes_push_extra_across_halves
+    # below (#2988/#3243).
     assert any(f.startswith("bench/") for f in legs["half_a"] + legs["half_b"]), \
         "no bench file reached the push legs at all"
-    push_extra = {f.replace(".py", "") for f in m.get("push_extra", [])}
-    if push_extra:
-        assert push_extra & set(legs["half_a"]), \
-            "push_extra lost its even spread (#1485): none in half a"
-        assert push_extra & set(legs["half_b"]), \
-            "push_extra lost its even spread (#1485): none in half b"
+
+
+def test_push_legs_distributes_push_extra_across_halves():
+    """#1485: ``push_extra`` is spread across the halves (even index -> half_a,
+    odd -> half_b), never dumped on one.
+
+    Pinned on a SYNTHETIC manifest: the shipped ``push_extra`` is empty (the
+    bench files are classified under the `eval` surface and packed by LPT), so
+    asserting this against the real manifest is vacuous — and pinning which
+    half a *bench* file lands on was a function of the duration estimates, not
+    a designed invariant (#2988/#3243 corrected the stale
+    test_selfhost_health_probe_executor.py weight, which flipped it).
+    """
+    from tools.ci_selection import push_legs
+
+    m = dict(load_manifest())
+    m["push_extra"] = ["bench/synthetic_a.py", "bench/synthetic_b.py"]
+    legs = push_legs(m)
+    assert "bench/synthetic_a" in legs["half_a"], legs["half_a"]
+    assert "bench/synthetic_b" in legs["half_b"], legs["half_b"]
 
 
 def test_carve_out_mirrors_test_no_redirect_stems():
@@ -1124,11 +1140,12 @@ def test_duration_integrity():
     from tools.ci_selection import duration_issues, load_manifest
     m = load_manifest()
     assert duration_issues(m) == []
-    # a slow-file key must fail
-    bad = dict(m)
-    bad["durations"] = {"test_about_edges.py": 10.0}  # a slow file
-    assert duration_issues(bad) != []
-    # an unclassified key must fail
+    slow_now_ok = dict(m)
+    slow_now_ok["durations"] = {"test_about_edges.py": 10.0}  # a slow file
+    assert duration_issues(slow_now_ok) == []
+    carve_ok = dict(m)
+    carve_ok["durations"] = {"test_reaper.py": 195.9}
+    assert duration_issues(carve_ok) == []
     bad2 = dict(m)
     bad2["durations"] = {"not_a_real_file.py": 10.0}
     assert duration_issues(bad2) != []
@@ -1240,7 +1257,6 @@ def test_duration_coverage_guard_boundary_and_realistic():
     assert duration_coverage_issues(below) != [], "89% must fire"
     assert duration_coverage_issues(at) == [], "90% is at the floor, not below"
     assert duration_coverage_issues(above) == [], "95% must be silent"
-    # the real map: 502/520 fast files measured (96.5%)
     assert duration_coverage_issues(load_manifest()) == []
 
 
@@ -1568,9 +1584,17 @@ def test_diff_gated_jobs_consume_changes_outputs():
     # committed matrix rows remain literal file lists (drift-guard pinned)
     rows = wf["jobs"]["test-slow"]["strategy"]["matrix"]["include"]
     assert len(rows) == 2
+    from tools.ci_selection import TESTS_DIR
+    _slow = set(load_manifest()["slow_files"])
     for row in rows:
-        assert row["files"].startswith("test_"), \
-            "test-slow leg rows must stay the committed literal lists (#1471)"
+        tokens = row["files"].split()
+        assert tokens, "test-slow leg row must be a literal file list (#1471)"
+        for token in tokens:
+            rel = f"{token}.py"
+            assert (TESTS_DIR / rel).exists(), \
+                f"test-slow leg entry {rel} does not exist under tests/"
+            assert rel in _slow, \
+                f"test-slow leg entry {rel} is not declared in slow_files"
 
 
 def test_slow_selected_echo_transform_roundtrips_into_legs():

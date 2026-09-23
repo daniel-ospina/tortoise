@@ -12,12 +12,16 @@ non-message noise skipping (tool calls, system prompts never become turns).
 """
 from __future__ import annotations
 
+import io
 import json
+import ssl
 from types import SimpleNamespace
 from unittest import mock
+from urllib.error import HTTPError
 
 import pytest
 
+from tortoise.capture_spool import PostOutcome as PostOutcome
 from tortoise.session_import import parse_codex, parse_pi, parse_transcript
 
 # A minimal codex-shaped session file exercising every record shape the
@@ -312,3 +316,782 @@ def test_sessions_import_window_is_a_noop_at_or_below_the_limit(tmp_path, monkey
     assert len(captured["conversation"]) == MAX_TURNS
     assert captured["conversation"][0]["content"] == "turn 0"
     assert "truncat" not in capsys.readouterr().err.lower()
+
+
+# ── #4714: a RETRYABLE import refusal must land in the DURABLE SPOOL ────────
+#
+# The server's capture guard REFUSES rather than enqueues, and it advertises
+# the retry (`Retry-After`) — so a 504 (wait budget exceeded) / 429 (capture
+# capacity saturated) is not a rejection of the CONTENT, it is a deferral. The
+# POST reached the server; there is no server-side copy to fall back on, so the
+# parsed turns must survive in the same durable spool the claude/pi legs write
+# BEFORE their POST. Without this the session is silently lost — the measured
+# defect for codex (504) and cursor (429).
+
+
+def _http_error(code: int, body: str) -> HTTPError:
+    """An HTTPError carrying a REAL body through a file object (``e.fp``).
+
+    ``_cmd_sessions_import`` reads ``e.read()`` for the detail it prints and
+    records, so a body-less error would exercise a branch the server never
+    takes.
+    """
+    return HTTPError(
+        "https://api.tortoise.test/v1/sessions", code, "refused",
+        hdrs=None, fp=io.BytesIO(body.encode("utf-8")),
+    )
+
+
+def _import_env(tmp_path, monkeypatch):
+    """Hermetic import environment: no network, no HOME, a tmp spool+receipts."""
+    from tortoise.capture_spool import spool_dir
+
+    spool = tmp_path / "spool"
+    monkeypatch.setenv("TORTOISE_API_KEY", "tt_test")
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+    monkeypatch.setenv("TORTOISE_IMPORT_RECEIPT_DIR", str(tmp_path / "receipts"))
+    monkeypatch.setenv("TORTOISE_CAPTURE_SPOOL_DIR", str(spool))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    # POSITIVE CONTROL: a broken override would silently target the real spool.
+    assert spool_dir() == spool
+    return spool
+
+
+@pytest.mark.parametrize("code,body", [
+    (429, '{"detail":"capture capacity saturated — too many captures in '
+          'flight; retry shortly"}'),
+    (504, '{"detail":"The server\'s wait budget for this request was '
+          'exceeded"}'),
+])
+def test_retryable_import_failure_is_spooled_for_the_next_drain(
+        tmp_path, monkeypatch, codex_jsonl, code, body):
+    """A retryable HTTP refusal leaves the turns DURABLE, and the existing
+    drain files them later.
+
+    Mutation: drop the spool write from the HTTPError branch — the meta
+    assertion REDs (the session is lost)."""
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import PostOutcome, flush_spool, read_spool_meta, read_spool_turns
+
+    spool = _import_env(tmp_path, monkeypatch)
+    args = SimpleNamespace(file=str(codex_jsonl), harness="codex",
+                           session_id="sid-retry")
+
+    def _raise(req, timeout=None):
+        raise _http_error(code, body)
+
+    with mock.patch("urllib.request.urlopen", _raise):
+        rc = _cmd_sessions_import(args)
+
+    # Still an HONEST failure: exit 1, no receipt — the spool is ADDITIONAL.
+    assert rc == 1
+    assert not list((tmp_path / "receipts").glob("*.json")), (
+        "a failed POST must not write a receipt")
+
+    meta = read_spool_meta(spool, "sid-retry")
+    assert meta is not None, (
+        "a retryable refusal left NO durable copy of the turns")
+    assert meta["harness"] == "codex"
+    assert meta["turns_count"] == len(_EXPECTED_TURNS)
+    assert read_spool_turns(spool, "sid-retry") == _EXPECTED_TURNS
+
+    # The EXISTING drain files it — the deferral is not a dead end, and what it
+    # posts is exactly what the refused import tried to post.
+    filed: list[dict] = []
+
+    def _post(payload):
+        filed.append(payload)
+        return PostOutcome(ok=True, status=200,
+                           body={"session_id": payload["session_id"]})
+
+    summary = flush_spool(spool, _post)
+    assert summary.filed == 1, summary
+    assert not summary.lost
+    assert len(filed) == 1
+    assert filed[0]["conversation"] == _EXPECTED_TURNS
+    assert filed[0]["harness"] == "codex"
+    assert filed[0]["session_id"] == "sid-retry"
+
+
+@pytest.mark.parametrize("code", [400, 403])
+def test_permanent_import_failure_is_not_spooled(
+        tmp_path, monkeypatch, codex_jsonl, code, capsys):
+    """A PERMANENT refusal keeps today's behaviour exactly: honest error, no
+    receipt, and NOT parked on the spool (a malformed payload never becomes
+    valid by waiting).
+
+    Mutation: spool unconditionally — the spool assertions RED; mutation: drop
+    the error line — the stderr assertion REDs."""
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import list_spool_metas, read_spool_meta
+
+    spool = _import_env(tmp_path, monkeypatch)
+    args = SimpleNamespace(file=str(codex_jsonl), harness="codex",
+                           session_id="sid-perm")
+
+    def _raise(req, timeout=None):
+        raise _http_error(code, '{"detail":"malformed payload"}')
+
+    with mock.patch("urllib.request.urlopen", _raise):
+        rc = _cmd_sessions_import(args)
+
+    assert rc == 1
+    assert not list((tmp_path / "receipts").glob("*.json"))
+    err = capsys.readouterr().err
+    assert f"import failed (HTTP {code})" in err, err
+    assert read_spool_meta(spool, "sid-perm") is None
+    metas, _ = list_spool_metas(spool)
+    assert metas == []
+
+
+def test_unreachable_api_is_spooled_too(tmp_path, monkeypatch, codex_jsonl):
+    """A NETWORK failure (no HTTP status at all) is the most common transient
+    and `classify_failure(None)` is "retry" — so it must spool as well.
+
+    Before this the `URLError` branch only wrote a breadcrumb, so an offline
+    machine lost every session it imported: the same silent loss as the 504,
+    on the failure most likely to happen.
+
+    Mutation: drop the `_spool_if_retryable(None, ...)` call from the URLError
+    branch — the meta assertion REDs."""
+    from urllib.error import URLError
+
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import (
+        PostOutcome,
+        flush_spool,
+        read_spool_meta,
+        read_spool_turns,
+    )
+
+    spool = _import_env(tmp_path, monkeypatch)
+    args = SimpleNamespace(file=str(codex_jsonl), harness="codex",
+                           session_id="sid-net")
+
+    def _raise(req, timeout=None):
+        raise URLError("Connection refused")
+
+    with mock.patch("urllib.request.urlopen", _raise):
+        rc = _cmd_sessions_import(args)
+
+    assert rc == 1
+    assert not list((tmp_path / "receipts").glob("*.json"))
+    meta = read_spool_meta(spool, "sid-net")
+    assert meta is not None, "an unreachable API lost the session"
+    assert read_spool_turns(spool, "sid-net") == _EXPECTED_TURNS
+
+    filed: list[dict] = []
+
+    def _post(payload):
+        filed.append(payload)
+        return PostOutcome(ok=True, status=200,
+                           body={"session_id": payload["session_id"]})
+
+    assert flush_spool(spool, _post).filed == 1
+
+
+def test_spooled_entry_keeps_source_and_is_a_superset_of_the_post(
+        tmp_path, monkeypatch, codex_jsonl):
+    """The drained payload must carry what the refused POST carried — and the
+    `machine_id` the spool adds is an addition, not a substitution.
+
+    Pins `source` (unpinned before) and records the one field `_flush_one`
+    synthesises that the import POST never sent."""
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import PostOutcome, flush_spool
+
+    spool = _import_env(tmp_path, monkeypatch)
+    args = SimpleNamespace(file=str(codex_jsonl), harness="codex",
+                           session_id="sid-src")
+
+    with mock.patch("urllib.request.urlopen",
+                    lambda req, timeout=None: (_ for _ in ()).throw(
+                        _http_error(429, '{"detail":"saturated"}'))):
+        assert _cmd_sessions_import(args) == 1
+
+    filed: list[dict] = []
+
+    def _post(payload):
+        filed.append(payload)
+        return PostOutcome(ok=True, status=200,
+                           body={"session_id": payload["session_id"]})
+
+    assert flush_spool(spool, _post).filed == 1
+    assert filed[0]["source"] == codex_jsonl.stem
+    # `_flush_one` synthesises machine attribution unconditionally; the import
+    # POST never sent it. So the payload SUPERSETS the refused POST...
+    assert "machine_id" in filed[0], filed[0].keys()
+    # ...but it is not a pure superset: an absent model is OMITTED, not sent as
+    # null (`if meta.get("model"): payload["model"] = ...`).
+    assert "model" not in filed[0], filed[0].keys()
+
+
+def test_a_spool_write_failure_cannot_mask_the_honest_error(
+        tmp_path, monkeypatch, codex_jsonl, capsys):
+    """FAIL-OPEN: if the spool itself raises, the command must still exit 1 with
+    the real error on stderr — no traceback escaping into the hook, and above
+    all no "Spooled session" line that would claim a durability it does not
+    have."""
+    from tortoise.__main__ import _cmd_sessions_import
+
+    _import_env(tmp_path, monkeypatch)   # hermetic env; the value is unused
+    args = SimpleNamespace(file=str(codex_jsonl), harness="codex",
+                           session_id="sid-boom")
+
+    with mock.patch("urllib.request.urlopen",
+                    lambda req, timeout=None: (_ for _ in ()).throw(
+                        _http_error(504, '{"detail":"wait budget exceeded"}'))), \
+            mock.patch("tortoise.capture_spool.write_spool_entry",
+                       side_effect=RuntimeError("disk on fire")):
+        rc = _cmd_sessions_import(args)
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "import failed (HTTP 504)" in err, err
+    assert "disk on fire" in err, err
+    assert "Traceback" not in err, err
+    assert "Spooled session" not in err, (
+        "a failed spool write must not claim the session is durable")
+
+
+def test_an_already_filed_entry_does_not_promise_a_filing(
+        tmp_path, monkeypatch, codex_jsonl, capsys):
+    """TRUTHFUL OUTPUT: a drain that already filed this exact content SKIPS the
+    entry, so the message must not promise a filing it will not perform."""
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import PostOutcome, flush_spool, spool_dir
+
+    _import_env(tmp_path, monkeypatch)
+    args = SimpleNamespace(file=str(codex_jsonl), harness="codex",
+                           session_id="sid-dup")
+    boom = lambda req, timeout=None: (_ for _ in ()).throw(  # noqa: E731
+        _http_error(504, '{"detail":"wait budget exceeded"}'))
+
+    def _post(payload):
+        return PostOutcome(ok=True, status=200,
+                           body={"session_id": payload["session_id"]})
+
+    with mock.patch("urllib.request.urlopen", boom):
+        assert _cmd_sessions_import(args) == 1
+        ctx = capsys.readouterr().err
+        assert "tortoise session drain" in ctx, ctx
+
+    # File it, then let the SAME session fail again: the copy is now a no-op.
+    assert flush_spool(spool_dir(), _post).filed == 1
+    with mock.patch("urllib.request.urlopen", boom):
+        assert _cmd_sessions_import(args) == 1
+        assert "already filed" in capsys.readouterr().err
+
+
+def test_an_oversized_turn_is_clamped_before_spooling(tmp_path, monkeypatch):
+    """The spool stores the CLAMPED turn, matching `session capture`.
+
+    `SPOOL_MAX_ENTRY_BYTES` is sized on the clamped maximum (500 turns x 5000
+    chars), so the import path must clamp identically or it stores a different
+    session than the capture leg would. This case pins the CLAMP ITSELF — that
+    the stored content is truncated — not the (arithmetically impossible)
+    overflow: at 5000 chars x 500 turns the worst-case escaping leaves ~1.7 MB
+    of headroom under the 16 MiB bound.
+
+    Mutation: spool the unclamped turns — the length assertion REDs."""
+    import json as _json
+
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import read_spool_turns
+
+    spool = _import_env(tmp_path, monkeypatch)
+    long_turn = "x" * 20_000
+    # The REAL codex rollout shape (see _CODEX_LINES): a `response_item`
+    # wrapper with the message inside `payload`. A bare message record parses
+    # to ZERO turns, which would make this test assert nothing.
+    transcript = tmp_path / "big.jsonl"
+    transcript.write_text("\n".join(_json.dumps(rec) for rec in [
+        {"type": "response_item",
+         "payload": {"type": "message", "role": "user",
+                     "content": [{"type": "input_text", "text": long_turn}]}},
+        {"type": "response_item",
+         "payload": {"type": "message", "role": "assistant",
+                     "content": [{"type": "output_text",
+                                  "text": "short reply"}]}},
+    ]) + "\n", encoding="utf-8")
+
+    def _raise(req, timeout=None):
+        raise _http_error(429, '{"detail":"saturated"}')
+
+    with mock.patch("urllib.request.urlopen", _raise):
+        assert _cmd_sessions_import(SimpleNamespace(
+            file=str(transcript), harness="codex",
+            session_id="sid-big")) == 1
+
+    turns = read_spool_turns(spool, "sid-big")
+    assert turns, "the oversized session was discarded instead of spooled"
+    assert len(turns[0]["content"]) == 5000, (
+        f"unclamped turn of {len(turns[0]['content'])} chars reached the spool")
+
+
+def test_remove_spool_entry_removes_and_is_spooled_reports_truthfully(tmp_path):
+    """`remove_spool_entry` is intentionally void: "was it removed?" and "is it
+    gone?" are different questions, and conflating them in a bool is how a
+    caller comes to report a removal that failed. The pairing with `is_spooled`
+    is what makes the answer checkable."""
+    from tortoise.capture_spool import (
+        Snapshot,
+        is_spooled,
+        read_spool_meta,
+        remove_spool_entry,
+        write_spool_entry,
+    )
+
+    root = tmp_path / "spool"
+    assert is_spooled(root, "verify-1") is False
+    write_spool_entry(root, Snapshot(
+        session_id="verify-1", turns=list(_EXPECTED_TURNS), source="probe",
+        machine_id="m", model=None, harness="codex"))
+    assert is_spooled(root, "verify-1") is True
+
+    remove_spool_entry(root, "verify-1")
+    assert is_spooled(root, "verify-1") is False
+    assert read_spool_meta(root, "verify-1") is None
+    # Nothing left for a drain to find: the LOG must be gone, not just the meta.
+    assert not list(root.rglob("*verify-1*")), list(root.rglob("*"))
+
+    # Removing again is a harmless no-op, and still reports gone.
+    remove_spool_entry(root, "verify-1")
+    assert is_spooled(root, "verify-1") is False
+
+
+def test_a_verify_probe_is_never_filed_by_a_DRAIN_but_its_own_capture_files(
+        tmp_path):
+    """THE STRUCTURAL GUARD — and the line it must not cross.
+
+    An automatic drain must never file a `session verify` probe: the codex/
+    cursor seams write from a DETACHED worker that can spool one after verify's
+    cleanup has run, and the next drain would POST synthetic content into the
+    tenant graph.
+
+    But `session verify` fires the real seam, and the seam runs
+    `session capture`, which files THROUGH THE SAME CODE — so refusing there
+    stops the probe landing at all, `captured` reads FAIL for every harness, and
+    verify can never prove the chain it exists to prove. That was a real
+    regression (caught in CI). The guard applies to the unfiltered drain only,
+    never to a filing that names its session.
+
+    Just as important: the match must be NARROW. Session ids also come from
+    `_local_session_id` (`<transcript-stem>-<digest>`), so a real transcript
+    named `verify-my-notes.jsonl` derives `verify-my-notes-0e9ebe1a9262`.
+    Under a prefix test that REAL capture was both refused and deleted.
+
+    Mutations that must RED this: (a) drop the guard — the drain files the
+    probe; (b) widen it to a prefix match — the real session is refused;
+    (c) apply it to a targeted filing too — "captured" becomes unfillable."""
+    from tortoise.capture_spool import (
+        PostOutcome,
+        Snapshot,
+        flush_spool,
+        is_probe_session_id,
+        is_spooled,
+        read_spool_meta,
+        write_spool_entry,
+    )
+
+    # The exact shape `session_verify._probe_id` emits.
+    assert is_probe_session_id("verify-codex-20260922T184500Z-a1b2c3") is True
+    assert is_probe_session_id("verify-cursor-20260101T000000Z-ffffff") is True
+    # ...and things that merely LOOK like it must not be treated as probes.
+    assert is_probe_session_id("verify-my-notes-0e9ebe1a9262") is False, (
+        "a real session id derived from a verify-*.jsonl filename")
+    assert is_probe_session_id("verify-abc") is False
+    assert is_probe_session_id("verify") is False
+    assert is_probe_session_id("imp_deadbeef") is False
+    assert is_probe_session_id(
+        "verify-codex-20260922T184500Z-a1b2c3-extra") is False, "not a suffix"
+
+    root = tmp_path / "spool"
+    probe_id = "verify-codex-20260922T184500Z-a1b2c3"
+    write_spool_entry(root, Snapshot(
+        session_id=probe_id, turns=list(_EXPECTED_TURNS), source="probe",
+        machine_id="m", model=None, harness="codex"))
+    # A REAL session alongside it must still be filed, so the guard is not a
+    # blanket-off that would pass this test while breaking capture.
+    write_spool_entry(root, Snapshot(
+        session_id="imp-real", turns=list(_EXPECTED_TURNS), source="real",
+        machine_id="m", model=None, harness="codex"))
+    # ...including the look-alike, which is real user data.
+    write_spool_entry(root, Snapshot(
+        session_id="verify-my-notes-0e9ebe1a9262", turns=list(_EXPECTED_TURNS),
+        source="notes", machine_id="m", model=None, harness="codex"))
+
+    posted: list[dict] = []
+
+    def _post(payload):
+        posted.append(payload)
+        return PostOutcome(ok=True, status=200,
+                           body={"session_id": payload["session_id"]})
+
+    flush_spool(root, _post)
+    drain_ids = [p["session_id"] for p in posted]
+    assert sorted(drain_ids) == ["imp-real", "verify-my-notes-0e9ebe1a9262"], (
+        drain_ids)
+    # The probe is NOT filed by a drain — but it is also NOT destroyed: the
+    # refusal HOLDS the entry, so a false positive costs nothing. verify's own
+    # cleanup removes what it created.
+    assert probe_id not in drain_ids, "a drain filed a verify probe"
+    assert is_spooled(root, probe_id), "the refusal must not destroy the entry"
+
+    # ...but a TARGETED filing — which is exactly what `session capture` does,
+    # and therefore what verify's own seam does — MUST go through. Refusing here
+    # stopped the probe landing at all, so `captured` read FAIL for every
+    # harness and verify could never prove the chain it exists to prove. That
+    # was a real regression, caught in CI and not by review.
+    posted.clear()
+    flush_spool(root, _post, only_session_id=probe_id)
+    assert [p["session_id"] for p in posted] == [probe_id], (
+        "verify's own capture could not file its probe — captured reads FAIL")
+    # A filed entry stays on the spool with `filed_key` stamped (that is the
+    # design — the file is the record); what matters is that it POSTED, and that
+    # the next drain will SKIP it rather than re-file it.
+    meta = read_spool_meta(root, probe_id) or {}
+    assert meta.get("filed_key"), "the probe was filed without stamping filed_key"
+    posted.clear()
+    flush_spool(root, _post)
+    assert probe_id not in [p["session_id"] for p in posted], (
+        "the already-filed probe was re-posted by a drain")
+
+
+@pytest.mark.parametrize("exc", [
+    TimeoutError("timed out reading the response"),
+    ConnectionResetError("connection reset by peer"),
+    json.JSONDecodeError("Expecting value", "<html>proxy</html>", 0),
+])
+def test_a_response_phase_failure_is_spooled_too(
+        tmp_path, monkeypatch, codex_jsonl, exc):
+    """The body read and its parse happen UNDER the `with`, and none of these
+    is a URLError: a read timeout is a bare TimeoutError (an OSError, not a
+    URLError), a truncated body is ConnectionResetError, and a proxy's HTML
+    error page is a JSONDecodeError. Before this they escaped UNHANDLED — no
+    spool and no breadcrumb — which is the same silent-loss class this path
+    exists to close, and a capacity-gated server that accepts the connection
+    then stalls is exactly that shape.
+
+    Mutation: narrow the handler tuple so this clause is dead — this REDs."""
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import flush_spool, read_spool_meta, read_spool_turns
+
+    spool = _import_env(tmp_path, monkeypatch)
+    args = SimpleNamespace(file=str(codex_jsonl), harness="codex",
+                           session_id="sid-resp")
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            raise exc
+
+    with mock.patch("urllib.request.urlopen", lambda req, timeout=None: _Resp()):
+        rc = _cmd_sessions_import(args)
+
+    # An HONEST failure: exit 1, no receipt — the spool is additional.
+    assert rc == 1, f"{type(exc).__name__} escaped instead of exiting 1"
+    assert not list((tmp_path / "receipts").glob("*.json"))
+    # ...and the turns are durable, with a breadcrumb so the harness owner sees it.
+    assert read_spool_meta(spool, "sid-resp") is not None, (
+        f"{type(exc).__name__} lost the session")
+    assert read_spool_turns(spool, "sid-resp") == _EXPECTED_TURNS
+    crumb = tmp_path / "capture-errors" / "codex.json"
+    assert crumb.exists(), "a response-phase failure wrote no breadcrumb"
+
+    filed: list[dict] = []
+
+    def _post(payload):
+        filed.append(payload)
+        return PostOutcome(ok=True, status=200,
+                           body={"session_id": payload["session_id"]})
+
+    assert flush_spool(spool, _post).filed == 1
+
+
+def test_a_drained_session_clears_the_stale_failure_breadcrumb(
+        tmp_path, monkeypatch, codex_jsonl):
+    """A drain-recovered session must not leave the machine-local "this harness
+    lost its last capture" breadcrumb standing.
+
+    `sessions import` clears it only on a 2xx — a path a spooled-then-drained
+    session never takes — so after this PR's recovery flow the breadcrumb still
+    claimed a loss that had already been repaired, and `session verify` read a
+    resolved failure as current.
+
+    Mutation: drop the `_clear_breadcrumb_for` call — this REDs."""
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import PostOutcome, flush_spool, spool_dir
+
+    _import_env(tmp_path, monkeypatch)
+    args = SimpleNamespace(file=str(codex_jsonl), harness="codex",
+                           session_id="sid-recover")
+
+    with mock.patch("urllib.request.urlopen",
+                    lambda req, timeout=None: (_ for _ in ()).throw(
+                        _http_error(504, '{"detail":"wait budget exceeded"}'))):
+        assert _cmd_sessions_import(args) == 1
+
+    crumb = tmp_path / "capture-errors" / "codex.json"
+    assert crumb.exists(), "the failure must be recorded in the first place"
+
+    def _post(payload):
+        return PostOutcome(ok=True, status=200,
+                           body={"session_id": payload["session_id"]})
+
+    assert flush_spool(spool_dir(), _post).filed == 1
+    assert not crumb.exists(), (
+        "a filed session still reports its harness as having lost a capture")
+
+
+def test_a_failure_reading_the_ERROR_body_is_still_spooled(
+        tmp_path, monkeypatch, codex_jsonl):
+    """P1: the error body is read INSIDE `except HTTPError`, and an exception
+    raised in an `except` block is NOT caught by the later clauses of the same
+    `try`. So a server that returns 504/429 and then stalls while sending the
+    body escaped the command entirely — no spool, no receipt — which is the
+    same silent loss this path exists to close, and exactly the shape a
+    capacity-gated server produces.
+
+    Mutation: drop the inner try/except (or `.decode()` without `replace`) —
+    this REDs.
+
+    The body is decoded with errors="replace" for the sibling case: a non-UTF-8
+    error body must not raise UnicodeDecodeError out of the handler either."""
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import flush_spool, read_spool_meta, read_spool_turns
+
+    spool = _import_env(tmp_path, monkeypatch)
+    args = SimpleNamespace(file=str(codex_jsonl), harness="codex",
+                           session_id="sid-errbody")
+
+    class _Fp:
+        def read(self):
+            raise TimeoutError("stalled sending the error body")
+
+    def _raise(req, timeout=None):
+        raise HTTPError("https://api.tortoise.test/v1/sessions", 504,
+                        "wait budget exceeded", hdrs=None, fp=_Fp())
+
+    with mock.patch("urllib.request.urlopen", _raise):
+        rc = _cmd_sessions_import(args)
+
+    assert rc == 1, "the stalled error body escaped the command"
+    assert not list((tmp_path / "receipts").glob("*.json"))
+    assert read_spool_meta(spool, "sid-errbody") is not None, (
+        "a stalled error body lost the session")
+    assert read_spool_turns(spool, "sid-errbody") == _EXPECTED_TURNS
+    # 504 is retryable, so the drain must still be able to file it.
+    assert flush_spool(spool, lambda p: PostOutcome(
+        ok=True, status=200, body={"session_id": p["session_id"]})).filed == 1
+
+
+def test_a_non_utf8_error_body_is_handled_not_raised(
+        tmp_path, monkeypatch, codex_jsonl):
+    """A proxy's garbled body must not raise UnicodeDecodeError out of the
+    handler — an undecodable refusal is still a retryable refusal."""
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import read_spool_meta
+
+    spool = _import_env(tmp_path, monkeypatch)
+
+    def _raise(req, timeout=None):
+        raise HTTPError("https://api.tortoise.test/v1/sessions", 429,
+                        "saturated", hdrs=None,
+                        fp=io.BytesIO(b"\xff\xfe not utf-8 \x80"))
+
+    with mock.patch("urllib.request.urlopen", _raise):
+        rc = _cmd_sessions_import(SimpleNamespace(
+            file=str(codex_jsonl), harness="codex", session_id="sid-badbody"))
+
+    assert rc == 1
+    assert read_spool_meta(spool, "sid-badbody") is not None
+
+
+def test_the_breadcrumb_clear_is_kind_aware_and_identity_aware(
+        tmp_path, monkeypatch, codex_jsonl):
+    """`_clear_breadcrumb_for` must not destroy evidence about something else.
+
+    The breadcrumb path is shared with the shipped hooks' `install-inert`
+    record, which is the ONLY way `session verify` reaches INERT — so a blind
+    unlink let a drain racing verify make an inert install read as PROVEN. And
+    a failure recorded for a DIFFERENT session is still current, however
+    recently it happened.
+
+    The check is by IDENTITY, not timestamp: the spool's `updated_at` is frozen
+    on the dedup path, so it cannot say when a session last failed — the most
+    obvious retry (re-importing identical content) never cleared its own
+    record under a timestamp comparison.
+
+    Mutations that must RED this: (a) drop the `kind` check — case 1 fails;
+    (b) drop the identity check — case 2 fails.
+    """
+    from tortoise.capture_spool import _clear_breadcrumb_for
+    from tortoise.hook_install import KIND_CAPTURE_FAILURE, KIND_INSTALL_INERT
+
+    _import_env(tmp_path, monkeypatch)
+    crumb = tmp_path / "capture-errors" / "codex.json"
+    crumb.parent.mkdir(parents=True, exist_ok=True)
+
+    # (1) An INERT install record is NOT ours to clear.
+    crumb.write_text(json.dumps({
+        "harness": "codex", "kind": KIND_INSTALL_INERT,
+        "detail": "install is inert",
+    }), encoding="utf-8")
+    _clear_breadcrumb_for("codex", "sid-mine")
+    assert crumb.exists(), "an INERT install record was cleared — verify lies"
+
+    # (2) Another session's failure is still current.
+    crumb.write_text(json.dumps({
+        "harness": "codex", "kind": KIND_CAPTURE_FAILURE,
+        "detail": "a different session failed", "session_id": "sid-other",
+    }), encoding="utf-8")
+    _clear_breadcrumb_for("codex", "sid-mine")
+    assert crumb.exists(), "another session's live failure was cleared"
+
+    # (3) OUR record IS cleared...
+    crumb.write_text(json.dumps({
+        "harness": "codex", "kind": KIND_CAPTURE_FAILURE,
+        "detail": "this session failed then recovered",
+        "session_id": "sid-mine",
+    }), encoding="utf-8")
+    _clear_breadcrumb_for("codex", "sid-mine")
+    assert not crumb.exists(), "a recovered session left a stale failure record"
+
+    # (4) A record with NO session id is the shape the shipped codex/cursor
+    # shell hooks write, and it is NOT a legacy one — so it holds no identity to
+    # match and must survive. Clearing it would erase a still-current failure
+    # for a different session, which is what this function promises not to do.
+    crumb.write_text(json.dumps({
+        "harness": "codex", "kind": KIND_CAPTURE_FAILURE,
+        "detail": "written by the shipped hook, no session id",
+    }), encoding="utf-8")
+    _clear_breadcrumb_for("codex", "sid-mine")
+    assert crumb.exists(), (
+        "a record with no identity was cleared — it may describe another "
+        "session that is still lost")
+
+
+@pytest.mark.parametrize("body_bytes,label", [
+    (b"<html>caf\xe9</html>", "a non-UTF-8 proxy page"),
+    (b"\xff\xfe\x00<\x00h", "a UTF-16 body truncated mid-character"),
+])
+def test_a_non_utf8_success_body_does_not_escape(
+        tmp_path, monkeypatch, codex_jsonl, body_bytes, label):
+    """`json.loads(bytes)` raises UnicodeDecodeError for a non-UTF-8 body, which
+    is a ValueError sibling of JSONDecodeError — NOT a JSONDecodeError. Catching
+    only JSONDecodeError therefore let a latin-1 or truncated-multibyte response
+    escape the command entirely: no spool, no receipt, an unhandled traceback.
+    Enumerating exception types is how this kept losing sessions; the handler
+    now takes the SUPERCLASSES.
+
+    Mutation: narrow the tuple back to JSONDecodeError — this REDs."""
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import read_spool_meta
+
+    spool = _import_env(tmp_path, monkeypatch)
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return body_bytes
+
+    with mock.patch("urllib.request.urlopen", lambda req, timeout=None: _Resp()):
+        rc = _cmd_sessions_import(SimpleNamespace(
+            file=str(codex_jsonl), harness="codex", session_id="sid-nonutf8"))
+
+    assert rc == 1, f"{label} escaped the command"
+    assert read_spool_meta(spool, "sid-nonutf8") is not None, (
+        f"{label} lost the session")
+
+
+@pytest.mark.parametrize("exc", [
+    OSError(5, "Input/output error"),
+    ssl.SSLError("handshake stall mid-read"),
+])
+def test_a_bare_oserror_reading_the_response_is_spooled(
+        tmp_path, monkeypatch, codex_jsonl, exc):
+    """`resp.read()` can raise OSError/ssl.SSLError, which are neither
+    TimeoutError nor ConnectionError — enumerating the OSError family instead of
+    naming the base let these escape too. Mutation: narrow the tuple — REDs."""
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import read_spool_meta
+
+    spool = _import_env(tmp_path, monkeypatch)
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            raise exc
+
+    with mock.patch("urllib.request.urlopen", lambda req, timeout=None: _Resp()):
+        rc = _cmd_sessions_import(SimpleNamespace(
+            file=str(codex_jsonl), harness="codex", session_id="sid-oserr"))
+
+    assert rc == 1, f"{type(exc).__name__} escaped the command"
+    assert read_spool_meta(spool, "sid-oserr") is not None
+
+
+def test_the_probe_match_cannot_drift_from_the_producer():
+    """THE load-bearing invariant of the probe guard, asserted against the
+    PRODUCER rather than a copied literal.
+
+    `capture_spool._PROBE_SESSION_ID_RE` and `session_verify._probe_id` describe
+    the same format in two places with nothing enforcing agreement. Pinning
+    hardcoded samples lets the producer drift and the guard silently stop
+    matching every real probe — synthetic content reaching the tenant graph with
+    a green test. Deriving the samples from `_probe_id` is what makes the drift
+    visible.
+
+    Mutation: change `_probe_id` to emit a different suffix width — this REDs.
+    """
+    from tortoise.capture_spool import is_probe_session_id
+    from tortoise.session_verify import _probe_id
+
+    for harness in ("claude", "codex", "cursor", "pi"):
+        produced = _probe_id(harness)
+        assert is_probe_session_id(produced) is True, (
+            f"a REAL {harness} probe id does not match the drain's guard: "
+            f"{produced!r} — the guard is dead and synthetic content can be filed")
+
+
+def test_a_config_url_error_is_loud_and_not_spooled(tmp_path, monkeypatch,
+                                                    codex_jsonl, capsys):
+    """A malformed API URL is a CONFIG error, not a response failure. The
+    response-phase clause takes ValueError now, so without a pre-check a
+    scheme-less URL was reported as \"import failed reading the response\" and
+    spooled — telling the user to fix a spool that is not broken.
+
+    Mutation: drop the pre-check — the message and the spool assertion RED."""
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import is_spooled, spool_dir
+
+    _import_env(tmp_path, monkeypatch)
+    monkeypatch.setenv("TORTOISE_API_URL", "api.premiselabs.co")   # no scheme
+
+    rc = _cmd_sessions_import(SimpleNamespace(
+        file=str(codex_jsonl), harness="codex", session_id="sid-url"))
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "Invalid API URL" in err, err
+    assert "reading the response" not in err, (
+        "a config error was reported as a response failure")
+    assert not is_spooled(spool_dir(), "sid-url"), (
+        "a malformed URL was spooled and will fail identically forever")

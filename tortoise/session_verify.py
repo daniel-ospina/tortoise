@@ -833,7 +833,8 @@ def verify_session_capture(harness: str,
         # fire-failure return gets it.  There is deliberately no other cleanup
         # call to drift from this one.
         report["cleanup"] = _cleanup(
-            api_url, api_key, probe_id, keep=keep, launch=launch)
+            api_url, api_key, probe_id, keep=keep, launch=launch,
+            env=fire_env)
         report["exit_code"] = _exit_code(report)
     return report
 
@@ -930,7 +931,22 @@ def _probe_id(harness: str) -> str:
 
 def _cleanup(api_url: str, api_key: str, probe_id: str, *,
              keep: bool,
-             launch: LaunchOutcome | None) -> dict[str, Any]:
+             launch: LaunchOutcome | None,
+             env: dict[str, str] | None = None) -> dict[str, Any]:
+    """Delete the probe session, then drop its machine-local residue.
+
+    The residue tidy-up is a WRAPPER, not the tail of the DELETE path: it must
+    run on every exit, including `--keep` and the 404 arms — `--keep` is the
+    one path that can otherwise exit 0 with a probe still queued (#4714).
+    """
+    result = _cleanup_probe(api_url, api_key, probe_id, keep=keep, launch=launch)
+    _tidy_local_probe(result, probe_id, env)
+    return result
+
+
+def _cleanup_probe(api_url: str, api_key: str, probe_id: str, *,
+                   keep: bool,
+                   launch: LaunchOutcome | None) -> dict[str, Any]:
     """Delete the probe session (and its local import receipt).
 
     Deletion is keyed on the LAUNCH OUTCOME — whether the registered command
@@ -986,23 +1002,69 @@ def _cleanup(api_url: str, api_key: str, probe_id: str, *,
         else f"DELETE returned {body!r} — the probe session may remain")
     if not result["deleted"]:
         result["error"] = True
-    # Local 2xx receipt written by `sessions import` (Codex/Cursor) — best
-    # effort, reported, never fatal on its own.
-    local = _local_import_receipt(probe_id)
+    # Local 2xx receipt written by `sessions import` (Codex/Cursor).
+    return result
+
+
+def _tidy_local_probe(result: dict[str, Any], probe_id: str,
+                      env: dict[str, str] | None) -> None:
+    """Drop the probe's machine-local residue, and report what remains.
+
+    Called on EVERY `_cleanup` exit, including the early ones. It used to live
+    at the tail of the DELETE path, so `--keep` and both 404 arms returned
+    without ever looking — and `--keep` is the one path that can still exit 0
+    with a probe left queued (#4714 review).
+
+    Two kinds of residue, deliberately treated differently: a leftover receipt
+    is inert, while a leftover SPOOL ENTRY is content queued for the tenant
+    graph — so only the latter is fatal.
+    """
+    from tortoise.capture_spool import is_spooled, remove_spool_entry, spool_dir
+
+    # An inert leftover receipt — reported, but never fatal on its own. Resolved
+    # against the SAME env the seam ran under, for the same reason the spool arm
+    # is: a caller pinning the receipt dir must not have verify look elsewhere
+    # and report "none" (#4714 review).
+    local = _local_import_receipt(probe_id, env)
     if local is not None:
         try:
             local.unlink()
             result["local_receipt"] = f"removed {local}"
         except OSError as e:
             result["local_receipt"] = f"could not remove {local}: {e}"
-    return result
+
+    try:
+        # The seam ran under `env` (see `_fire_env`), and this file's invariant
+        # is that the fire and everything verifying it key on the SAME env — a
+        # caller pinning HOME or the spool root must not have verify look
+        # somewhere else and report a false "removed". `spool_dir(env)` resolves
+        # the override, the pytest guard AND HOME from that env.
+        spool_root = spool_dir(env)
+        # Whether the probe is GONE — not whether an unlink was issued. An
+        # unlink can fail, and a caller reporting "removed" on a failed one
+        # would claim a clean run while synthetic content sat queued.
+        was_present = is_spooled(spool_root, probe_id)
+        remove_spool_entry(spool_root, probe_id)
+        if not is_spooled(spool_root, probe_id):
+            result["local_spool"] = "removed" if was_present else "none"
+        else:
+            result["local_spool"] = (
+                f"the probe is STILL SPOOLED at {spool_root} — a drain may file "
+                "synthetic content")
+    except Exception as e:      # pragma: no cover - defensive, mirrors the hook
+        result["local_spool"] = f"could not check the spool: {e}"
+    # Fail CLOSED on residue that is not provably gone, including an error
+    # while checking (the drain's structural probe refusal is the first line).
+    if result.get("local_spool") not in (None, "none", "removed"):
+        result["error"] = True
 
 
-def _local_import_receipt(probe_id: str) -> Path | None:
-    path = Path(os.environ.get(
-        "TORTOISE_IMPORT_RECEIPT_DIR",
-        str(Path.home() / ".tortoise" / "import-receipts"))) / \
-        f"{probe_id}.json"
+def _local_import_receipt(probe_id: str,
+                          env: dict[str, str] | None = None) -> Path | None:
+    source = os.environ if env is None else env
+    base = source.get("TORTOISE_IMPORT_RECEIPT_DIR") or str(
+        Path(source.get("HOME") or Path.home()) / ".tortoise" / "import-receipts")
+    path = Path(base) / f"{probe_id}.json"
     return path if path.exists() else None
 
 
@@ -1055,6 +1117,13 @@ def render_report(report: dict[str, Any]) -> str:
     cleanup = report.get("cleanup") or {}
     if cleanup.get("detail"):
         lines.append(f"  cleanup: {cleanup['detail']}")
+        # Residue is surfaced, not swallowed: a leftover import receipt or a
+        # leftover SPOOL entry (synthetic content the drain would file) has to
+        # be visible in the default output, not only under --json.
+        if cleanup.get("local_receipt"):
+            lines.append(f"  receipt: {cleanup['local_receipt']}")
+        if cleanup.get("local_spool"):
+            lines.append(f"  spool: {cleanup['local_spool']}")
     code = report.get("exit_code", EXIT_BROKEN)
     verdict = {
         EXIT_OK: "all links PROVEN",
