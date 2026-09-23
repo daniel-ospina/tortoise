@@ -48,20 +48,22 @@ assert.notEqual(headEnd, -1, 'the harness-status card head must be closed')
 const head = code.slice(headStart, headEnd)
 
 // stripComments documents a seam: a `//`-ending regex literal can open a phantom
-// comment whose closer sits elsewhere, and every scan above is vacuous if it
+// comment whose closer sits elsewhere, and the scans below are vacuous if it
 // swallowed the text they look for. testSupport.js requires callers to pin scan
 // coverage with sentinels SPREAD across the file (a tail sentinel alone does not
-// catch a mid-file swallow), so these markers sit at ~0%, 11%, 24%, 47%, 87%,
-// 99% and the tail of what is being scanned.
+// catch a mid-file swallow, and a sentinel at offset 0 can never fail), so these
+// markers' FIRST occurrences sit near 11%, 24%, 47%, 61%, 87%, 99% and the tail of
+// what is scanned (a repeated token only trips if every one of its copies is eaten,
+// so a marker is pinned by where it FIRST appears).
 test('#3700: the comment strip kept the file it is scanning', () => {
   for (const marker of [
-    /^import\b/m,
     /setWelcomeOrgName/,
     /setWizardShowPaste/,
     /revokeKey/,
+    /Connectors/,
     /GraphBackupCell/,
     /harness-status-head/,
-    /createRoot\(\s*document\s*\.\s*getElementById\(\s*['"]root['"]\s*\)/, 
+    /createRoot\(\s*document\s*\.\s*getElementById\(\s*['"]root['"]\s*\)/,
   ]) {
     assert.match(code, marker,
       `stripComments dropped ${marker} — every scan in this file reads its output, so they would be vacuous`)
@@ -109,8 +111,8 @@ test('#3700 / #4896: the row reads its facts through the module bindings', () =>
       new RegExp(`const\\s+${name}\\s*=\\s*\\(h\\)\\s*=>\\s*${call}\\(\\s*state\\s*,\\s*h\\s*,?\\s*\\)\\s*(?:;|\\n|$)`),
       `${name} must come from ${call}(state, h) and nothing else`)
     assert.equal(
-      (code.match(new RegExp(`const\\s+${name}\\s*=\\s*\\(h\\)\\s*=>\\s*`, 'g')) || []).length, 1,
-      `${name} must be declared once — a second declaration shadows the pinned binding`)
+      (code.match(new RegExp(`const\\s+${name}\\s*=`, 'g')) || []).length, 1,
+      `${name} must be declared once — any second declaration shadows the pinned binding`)
     assert.doesNotMatch(code, new RegExp(`\\b(?:let|var)\\s+${name}\\s*=`),
       `${name} must not be redeclared with let/var, which shadows the pinned binding`)
   }
