@@ -510,7 +510,27 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
                         total += len(acted)
                         if not acted or time.monotonic() >= deadline:
                             break
-                    return {"reaped": total}
+                    # #4740: the loop already distinguishes the two outcomes it
+                    # can stop on and used to discard the distinction — `not
+                    # acted` is a CLEARED backlog, the deadline is an EXHAUSTED
+                    # budget. Record which, plus the post-sweep live count read
+                    # with the SAME probe the CI orphan gate runs, while
+                    # TORTOISE_REAPER_MIN_UPTIME still holds this sweep's own
+                    # setting (the `finally` below restores it). The gate binds
+                    # to this measurement instead of a hand-picked constant;
+                    # `cleared: false` marks a residue that is arbitrary rather
+                    # than bounded, which is the signal a bigger constant would
+                    # swallow.
+                    cleared = not acted
+                    try:
+                        from tortoise.embedded_reaper import _pgrep_redis_servers
+                        left = len(_pgrep_redis_servers())
+                    except Exception:
+                        # never fail the suite over the hygiene report: an
+                        # unreadable count is reported as null and the gate
+                        # treats it as an unaccounted residue
+                        left = None
+                    return {"reaped": total, "cleared": cleared, "left": left}
                 finally:
                     if prev is None:
                         os.environ.pop("TORTOISE_REAPER_MIN_UPTIME", None)
