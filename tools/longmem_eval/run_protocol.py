@@ -867,10 +867,11 @@ def cmd_full_context(state: ProtocolState, args: argparse.Namespace) -> None:
 
     #4718 note: this cell does NOT take a dense-leg waiver, and must not. It
     runs `tools/longmem_eval/full_context.py`, which has no dense-leg gate at
-    all (it never reaches `run.py`'s pre-flight) and whose parser accepts only
-    `--mock` — appending `--skip-preflight` here made the built command die at
-    argparse with exit 2. The waiver belongs to the `smoke` builder, whose
-    target IS `run.py`.
+    all (it never reaches `run.py`'s pre-flight) and which accepts NONE of the
+    dense-leg flags — it defines no `--skip-preflight`. Appending that flag made
+    the built command die at argparse with exit 2 (`error: unrecognized
+    arguments`). The waiver belongs to the `smoke` builder, whose target IS
+    `run.py`.
     """
     extra = []
     if args.data:
