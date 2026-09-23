@@ -815,10 +815,15 @@ def test_402_cooldown_skips_provider_on_next_call(monkeypatch):
 
 
 def test_auth_and_config_4xx_still_fatal_no_rotation(monkeypatch):
-    """#1951: auth AND config failures stay fatal — 401/403 (credentials)
-    and config 4xx (400/404/422, request-shape bugs) re-raise immediately;
-    the alternative provider is NEVER tried and no cooldown is written
-    (rotation would retry the same config bug on every lane)."""
+    """#1951, narrowed by #4860: a SIGNATURE-LESS 401/403 (credentials) and
+    config 4xx (400/404/422, request-shape bugs) stay fatal — re-raise
+    immediately; the alternative provider is NEVER tried and no cooldown is
+    written (rotation would retry the same bug on every lane). This stub
+    sends a BODY-LESS 403, which carries no key-limit signature, so it stays
+    fatal. A 403 whose body carries a provider key-limit signature IS
+    rotation-eligible (#4860) — see
+    ``test_rotation_on_403_key_limit_cooldowns_and_uses_alternative``; 402
+    stays rotation-eligible per #1951."""
     import random as _random
 
     from tortoise.model_adapters import RotatingModel

@@ -372,10 +372,12 @@ def _http_status(exc: BaseException) -> int | None:
 #   * "quota exceeded"        — generic quota phrasing
 #   * "credit limit exceeded" — generic credit phrasing
 #   * "limit exceeded"        — generic budget phrasing; OpenRouter's own
-#     message contains "key limit exceeded". A bare rate-limit body would
-#     also match, but rate limiting is already rotation-eligible (429 is
-#     TRANSIENT), so rotating a 403 that says it is acceptable — and no
-#     credential-failure body carries this phrase.
+#     message contains "key limit exceeded". Deliberately BROAD on a 403: it
+#     also matches "rate limit exceeded"/"organization limit exceeded"/
+#     "token limit exceeded". Those are provider-side LIMIT conditions, not
+#     credential bugs — rotation is bounded and re-raises once every leg is
+#     spent, so the worst case is a slower fatal, never a masked bad key (no
+#     credential-failure body carries this phrase).
 _KEY_LIMIT_SIGNATURES = (
     "key limit exceeded",
     "insufficient_quota",
