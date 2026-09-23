@@ -4008,6 +4008,18 @@ def _cmd_sessions_import(args) -> int:
             harness, "no .tortoise config found (run 'tortoise init "
                      "--api-key <key>')")
         return 1
+    # Validate the URL BEFORE the request try. `Request()` raises ValueError for
+    # a scheme-less URL, and the response-phase clause now takes the
+    # superclasses — so without this a typo in TORTOISE_API_URL was reported as
+    # "import failed reading the response", sending the user to debug a spool
+    # instead of the URL they mistyped (#4714 review). This stays LOUD and
+    # writes no spool entry: a malformed URL never becomes valid by retrying.
+    if not api_url.startswith(("http://", "https://")):
+        print(f"Invalid API URL {api_url!r} — set TORTOISE_API_URL to an "
+              "absolute http(s) URL.", file=_sys.stderr)
+        _record_capture_error(harness, f"invalid API URL {api_url!r}",
+                              session_id=session_id)
+        return 1
 
     def _spool_if_retryable(status: int | None, detail: str) -> None:
         """Park the turns in the DURABLE SPOOL when the refusal is RETRYABLE.

@@ -923,7 +923,7 @@ def test_the_breadcrumb_clear_is_kind_aware_and_identity_aware(
     _clear_breadcrumb_for("codex", "sid-mine")
     assert crumb.exists(), "another session's live failure was cleared"
 
-    # (3) OUR record IS cleared — including via an old record with no id.
+    # (3) OUR record IS cleared...
     crumb.write_text(json.dumps({
         "harness": "codex", "kind": KIND_CAPTURE_FAILURE,
         "detail": "this session failed then recovered",
@@ -932,12 +932,18 @@ def test_the_breadcrumb_clear_is_kind_aware_and_identity_aware(
     _clear_breadcrumb_for("codex", "sid-mine")
     assert not crumb.exists(), "a recovered session left a stale failure record"
 
+    # (4) A record with NO session id is the shape the shipped codex/cursor
+    # shell hooks write, and it is NOT a legacy one — so it holds no identity to
+    # match and must survive. Clearing it would erase a still-current failure
+    # for a different session, which is what this function promises not to do.
     crumb.write_text(json.dumps({
         "harness": "codex", "kind": KIND_CAPTURE_FAILURE,
-        "detail": "written by an older build",
+        "detail": "written by the shipped hook, no session id",
     }), encoding="utf-8")
     _clear_breadcrumb_for("codex", "sid-mine")
-    assert not crumb.exists(), "a legacy record must still clear"
+    assert crumb.exists(), (
+        "a record with no identity was cleared — it may describe another "
+        "session that is still lost")
 
 
 @pytest.mark.parametrize("body_bytes,label", [
@@ -1008,3 +1014,52 @@ def test_a_bare_oserror_reading_the_response_is_spooled(
 
     assert rc == 1, f"{type(exc).__name__} escaped the command"
     assert read_spool_meta(spool, "sid-oserr") is not None
+
+
+def test_the_probe_match_cannot_drift_from_the_producer():
+    """THE load-bearing invariant of the probe guard, asserted against the
+    PRODUCER rather than a copied literal.
+
+    `capture_spool._PROBE_SESSION_ID_RE` and `session_verify._probe_id` describe
+    the same format in two places with nothing enforcing agreement. Pinning
+    hardcoded samples lets the producer drift and the guard silently stop
+    matching every real probe — synthetic content reaching the tenant graph with
+    a green test. Deriving the samples from `_probe_id` is what makes the drift
+    visible.
+
+    Mutation: change `_probe_id` to emit a different suffix width — this REDs.
+    """
+    from tortoise.capture_spool import is_probe_session_id
+    from tortoise.session_verify import _probe_id
+
+    for harness in ("claude", "codex", "cursor", "pi"):
+        produced = _probe_id(harness)
+        assert is_probe_session_id(produced) is True, (
+            f"a REAL {harness} probe id does not match the drain's guard: "
+            f"{produced!r} — the guard is dead and synthetic content can be filed")
+
+
+def test_a_config_url_error_is_loud_and_not_spooled(tmp_path, monkeypatch,
+                                                    codex_jsonl, capsys):
+    """A malformed API URL is a CONFIG error, not a response failure. The
+    response-phase clause takes ValueError now, so without a pre-check a
+    scheme-less URL was reported as \"import failed reading the response\" and
+    spooled — telling the user to fix a spool that is not broken.
+
+    Mutation: drop the pre-check — the message and the spool assertion RED."""
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import is_spooled, spool_dir
+
+    _import_env(tmp_path, monkeypatch)
+    monkeypatch.setenv("TORTOISE_API_URL", "api.premiselabs.co")   # no scheme
+
+    rc = _cmd_sessions_import(SimpleNamespace(
+        file=str(codex_jsonl), harness="codex", session_id="sid-url"))
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "Invalid API URL" in err, err
+    assert "reading the response" not in err, (
+        "a config error was reported as a response failure")
+    assert not is_spooled(spool_dir(), "sid-url"), (
+        "a malformed URL was spooled and will fail identically forever")

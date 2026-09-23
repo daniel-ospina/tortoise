@@ -521,6 +521,12 @@ def is_probe_session_id(session_id: str) -> bool:
     extracted as memory, so it must stay narrow: a false NEGATIVE leaks a probe
     (recoverable, and verify's cleanup already removes it), while a false
     POSITIVE destroys a real capture (irreversible).
+
+    ⚠️ This regex and `session_verify._probe_id` describe the SAME format in two
+    places, and nothing enforces that they agree. `tests/test_session_import_codex.py::
+    test_the_probe_match_cannot_drift_from_the_producer` asserts they do, by
+    deriving its samples from `_probe_id` — if you change one, that test is what
+    tells you to change the other (#4714 review).
     """
     return _PROBE_SESSION_ID_RE.match(session_id) is not None
 
@@ -891,6 +897,15 @@ def _clear_breadcrumb_for(harness: str | None, session_id: str | None) -> None:
         recorded_id = record.get("session_id")
         if recorded_id and session_id and recorded_id != session_id:
             # A DIFFERENT session's failure — still current, must survive.
+            return
+        if not recorded_id:
+            # The shipped codex/cursor hooks write a `capture-failure` record
+            # WITHOUT a session id, and are not a legacy shape — so treating it
+            # as clearable lets ANY filing erase a still-current failure for a
+            # different session, which is what this function promises not to do.
+            # Their records also hold no identity to match on, so the safe
+            # direction is to leave them: a stale breadcrumb is a cosmetic
+            # wart, a wrongly-erased one is lost evidence.
             return
         with contextlib.suppress(OSError):
             path.unlink()
