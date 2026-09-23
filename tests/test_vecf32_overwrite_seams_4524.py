@@ -53,7 +53,7 @@ def _vector(i: int) -> list[float]:
     a discarded overwrite leaves the *previous* row in place, so a guard using
     one constant vector could read it back and never fail.
     """
-    raw = hashlib.sha256(f"tortoise-4524-{i}".encode("utf-8")).digest()
+    raw = hashlib.sha256(f"tortoise-4524-{i}".encode()).digest()
     buf = (raw * (EMBEDDING_DIM // len(raw) + 1))[:EMBEDDING_DIM]
     vec = [(byte / 255.0) - 0.5 for byte in buf]
     norm = math.sqrt(sum(x * x for x in vec))
@@ -77,7 +77,7 @@ class _SequenceEncoder:
         self.vectors = [_vector(i) for i in range(count)]
         self.calls = 0
 
-    def __call__(self, content, expected_dim=None):  # noqa: ARG002
+    def __call__(self, content, expected_dim=None):
         assert self.calls < len(self.vectors), (
             "the seam encoded more texts than the guard staged — the write "
             "count drifted from _WRITES")
@@ -123,7 +123,7 @@ def _run_seam(tmp_path, monkeypatch, *, label, read_cypher, read_params,
         for i in range(_WRITES):
             write(proj, i)
             stored.append(_read_vector(proj, read_cypher, read_params))
-    for i, (got, want) in enumerate(zip(stored, enc.vectors)):
+    for i, (got, want) in enumerate(zip(stored, enc.vectors, strict=True)):
         _assert_landed(got, want, label, i)
     return enc.calls
 
@@ -186,7 +186,7 @@ def test_event_plain_merge_embedding_overwrite_lands(tmp_path, monkeypatch):
     vectors = [_vector(i) for i in range(_WRITES)]
     with fresh_embedded_proj(tmp_path) as proj:
         stored = []
-        for i, vec in enumerate(vectors):
+        for vec in vectors:
             proj.apply({
                 "type": "EventRecorded", "eventId": "evt-1",
                 "eventKind": "click", "subject": "alice", "object": "widget",
@@ -195,7 +195,7 @@ def test_event_plain_merge_embedding_overwrite_lands(tmp_path, monkeypatch):
             stored.append(_read_vector(
                 proj, "MATCH (e:Event {eventId:$eid}) RETURN e.embedding",
                 {"eid": "evt-1"}))
-    for i, (got, want) in enumerate(zip(stored, vectors)):
+    for i, (got, want) in enumerate(zip(stored, vectors, strict=True)):
         _assert_landed(got, want, "Event(plain)", i)
 
 
@@ -229,5 +229,5 @@ def test_turn_write_cypher_embedding_overwrite_lands(tmp_path):
             })
             stored.append(_read_vector(
                 proj, "MATCH (t:Point {id:'turn-1'}) RETURN t.embedding", {}))
-    for i, (got, want) in enumerate(zip(stored, vectors)):
+    for i, (got, want) in enumerate(zip(stored, vectors, strict=True)):
         _assert_landed(got, want, "Turn(_TURN_WRITE_CYPHER)", i)
