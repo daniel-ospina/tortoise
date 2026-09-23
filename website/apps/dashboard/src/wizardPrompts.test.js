@@ -196,9 +196,17 @@ const SKILL_NAMES = SKILLS_LIST.split(', ')
 // next line, HARNESS_STEPS.cursor) ends there. It is NOT allowed to be followed
 // by more text, or `: plus agent-memory` would slip through.
 const TAIL_OK = [
-  /^$/,                                    // the statement ends the surface
-  /^\n/,                                   // ends the line
-  /^:(?:\n|$)/,                            // a label terminus
+  // `:` is a legitimate terminus ONLY when it ends the line or the surface — a
+  // step LABEL (HARNESS_STEPS.cursor ends its set statement with `:` and puts
+  // the command on the next line). It may NOT be followed by more text, or
+  // `: plus agent-memory` would slip through.
+  //
+  // NOTE: no bare `^$`/`^\n` form. Every legitimate set statement in the
+  // rendered surfaces ends in a `:` label or the " from <url>." tail, so a
+  // leading newline is NOT a legitimate tail — allowing it re-admitted
+  // `<set>\nplus agent.memory:`, which the previous prefix-list caught (#4820
+  // re-review). The looser form closed a hole and opened this one.
+  /^:(?:\n|$)/,
   new RegExp(`^ from ${SKILLS_INSTALL_URL.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.`),
 ]
 
@@ -294,7 +302,13 @@ test('#4365: no rendered surface names a tortoise-shaped skill outside the set',
   for (const { id, text } of allRenderedSurfaces()) {
     for (const m of text.matchAll(/\b[a-z0-9_-]*tortoise[a-z0-9_-]*\b/gi)) {
       const raw = m[0]
-      const before = text[m.index - 1] ?? ''
+      // `m.index > 0` matters: at index 0 `text[-1]` is `undefined`, and
+      // `''.includes`-style membership tests below are TRUE for the empty
+      // string — so the naive form silently SKIPPED every token at the start of
+      // a surface, letting `tortoise-rebuild\nAdd Tortoise MCP…` through with
+      // both suites green (#4820 re-review). An empty `before` must mean
+      // "no preceding character", never "a skipped one".
+      const before = m.index > 0 ? text[m.index - 1] : ''
       const after = text.slice(m.index + raw.length)
       // A PATH, a <placeholder> or a FILENAME is not a skill NAME. The
       // capture-install snippets legitimately carry `<path-to-tortoise>/…`,
@@ -302,7 +316,7 @@ test('#4365: no rendered surface names a tortoise-shaped skill outside the set',
       // those was a false red the moment this surface was actually scanned
       // (#4820 review, issue 1/2 — the block that would have scanned it was
       // dead, so the false red had never been observed).
-      if ('/<.~'.includes(before)) continue
+      if (before !== '' && '/<.~'.includes(before)) continue
       if (after.startsWith('/') || /^\.[a-z0-9]+/i.test(after)) continue
       // `tortoise_*` names the MCP tool FAMILY (a wildcard), not a skill — the
       // trailing separator is stripped before the check, so a real name like
