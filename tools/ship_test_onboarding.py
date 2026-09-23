@@ -1900,6 +1900,12 @@ def _write_observation(obs: Observation, out_dir: Path) -> Path:
 
 
 def _finish(obs: Observation, out_dir: Path) -> Observation:
+    """The ONE authoritative write+print site.
+
+    The write comes FIRST, so stdout and the file are produced from the same
+    finalized record and cannot disagree; the verdict line is printed exactly
+    once, after the bounded teardown has run.
+    """
     if not obs.reason:
         obs.reason = failure_reason(
             obs.verdict, session_state=(obs.session or {}).get("state", ""))
@@ -1916,6 +1922,18 @@ def _finish(obs: Observation, out_dir: Path) -> Observation:
     if obs.teardown:
         print(f"[ship-test] teardown: {obs.teardown}")
     print(f"[ship-test] observation → {path}")
+    if obs.browser_teardown.get("outcome") not in (BROWSER_TEARDOWN_NOT_RUN,
+                                                   BROWSER_TEARDOWN_CLEAN):
+        # LOUD, and NEVER verdict-affecting: the browser teardown is cleanup too,
+        # so it obeys the same rule as the org reaper (#4319). Printed HERE, the
+        # single print site, so this line and the file's `browser_teardown` block
+        # are written from the same finalized record.
+        print(f"[ship-test] BROWSER TEARDOWN — "
+              f"{obs.browser_teardown.get('outcome')}: the browser this run owned "
+              f"was not released cleanly"
+              f" ({obs.browser_teardown.get('detail') or 'no detail'})."
+              f" That is a CLEANUP fault: it does not change the verdict"
+              f" ({obs.verdict}) or the exit code.", file=sys.stderr)
     if obs.teardown.get("status") in TEARDOWN_RESIDUE_STATES:
         # LOUD, but NOT verdict-affecting: cleanup is not the product. A run can
         # pass and still owe the tenant an org, and a reader must never have to

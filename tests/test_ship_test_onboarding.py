@@ -2789,14 +2789,69 @@ def test_the_teardown_bound_is_pinned() -> None:
 
 
 def test_the_verdict_is_printed_exactly_once(capsys, monkeypatch, tmp_path):
-    """The pre-teardown write is print-free: two writes, ONE verdict line — so
-    stdout and the file cannot disagree about how many runs happened."""
+    """The pre-teardown write is print-free and `_finish` is the single print
+    site, so the verdict appears exactly ONCE on stdout — and it is the SAME
+    verdict the file carries, because both are produced from the finished record
+    after the bounded teardown."""
+    import json
+
+    import tools.ship_test_onboarding as mod
+
     obs, _ctx, _mod = _run_fake_walk(
         monkeypatch, tmp_path, plan=_happy_base(),
         ui_sequence=[NOT_CONNECTED, CONNECTED], mcp_tools_call=_MCP_OK)
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
+    written = json.loads((tmp_path / "ship-test" / "observation.json").read_text())
     assert obs.verdict == "passed", (obs.verdict, obs.reason)
-    assert out.count("[ship-test] passed") == 1, out
+    assert captured.out.count("[ship-test] passed") == 1, captured.out
+    assert written["verdict"] == obs.verdict
+    assert written["browser_teardown"]["outcome"] == mod.BROWSER_TEARDOWN_CLEAN
+    assert "BROWSER TEARDOWN" not in captured.err
+
+
+def test_a_non_clean_browser_teardown_warns_on_stderr_and_never_moves_the_verdict(
+        capsys, monkeypatch, tmp_path):
+    """AC7. A teardown fault is LOUD and never verdict-affecting — the same rule
+    as the org residue warning (#4319), applied to the browser. The line is
+    written by `_finish`, the single print site, from the same finalized record
+    the file carries."""
+    import json
+
+    _obs, _ctx, _mod = _happy_bound_run(monkeypatch, tmp_path, ctx_close_raises=True)
+    captured = capsys.readouterr()
+    written = json.loads((tmp_path / "ship-test" / "observation.json").read_text())
+    assert written["verdict"] == "passed"
+    assert written["reason"] == ""
+    assert written["browser_teardown"]["outcome"] == "close_error"
+    assert "BROWSER TEARDOWN" in captured.err
+    assert "close_error" in captured.err
+    assert "does not change the verdict" in captured.err
+    assert captured.out.count("[ship-test] passed") == 1
+
+
+def test_the_runbook_discloses_the_bound_the_vocabulary_and_the_residue() -> None:
+    """AC7. The residual risk and the record are WRITTEN DOWN, not merely
+    implemented — a doc test, so the runbook cannot silently lose them. The
+    residue is named by issue (#4928), the vocabulary term by term."""
+    from pathlib import Path
+
+    import tools.ship_test_onboarding as mod
+
+    doc = (Path(__file__).resolve().parent.parent
+           / "docs/runbook/3806-ship-test-instrument.md").read_text()
+    # the bound, and its VALUE
+    assert "TEARDOWN_BOUND_S" in doc
+    assert str(mod.TEARDOWN_BOUND_S) in doc, "the runbook does not state the bound's value"
+    # the field, and the closed vocabulary term by term
+    assert "browser_teardown" in doc
+    for term in mod.BROWSER_TEARDOWN_OUTCOMES:
+        assert term in doc, f"the runbook does not name {term!r}"
+    # the E10 residue, named by issue
+    assert "#4928" in doc
+    assert "orphan" in doc.lower()
+    # ...and the window that produces `not_run`
+    assert "not_run" in doc
+    assert "killed" in doc.lower() or "dies" in doc.lower()
 
 
 # ── #4875 — the two aborts that write NO artifact, and the guard that does ───
