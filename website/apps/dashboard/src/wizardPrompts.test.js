@@ -1,10 +1,14 @@
 // wizardPrompts.test.js — the #4365 onboarding-copy gate.
 //
 // WHAT THIS FILE GUARANTEES — exact matches only.
-//   1. The rendered wizard copy (prompts, universal commands, workflows prompt,
-//      captions, the shared onboarding sentence, the shipped set) equals the
-//      committed snapshot, byte for byte. Any change to what the dashboard hands
-//      an agent is therefore a VISIBLE, reviewable, regenerable diff.
+//   1. The rendered wizard copy equals the committed snapshot, byte for byte,
+//      over EVERY live agent-facing surface: both key modes of the prompts, the
+//      universal commands, the workflows prompt (both modes), the captions, the
+//      shared onboarding sentence, the shipped set, HARNESS_INTRO,
+//      HARNESS_STEPS, and the two capture-install blocks. Any change to what the
+//      dashboard hands an agent is therefore a VISIBLE, reviewable, regenerable
+//      diff. A surface absent from the snapshot is a surface that can change
+//      SILENTLY — so a new live surface must be pinned (see #4885).
 //   2. Every hand-pinned required surface still renders, and the snapshot covers
 //      exactly those surfaces — so a deleted prompt FAILS instead of silently
 //      dropping out of the enumeration.
@@ -52,6 +56,11 @@ import {
   wizardWorkflowsText,
 } from './wizardPrompts.js'
 import {
+  HARNESS_CAPTURE_INSTALL,
+  HARNESS_INTRO,
+  HARNESS_NAMES,
+  HARNESS_STEPS,
+  PI_CAPTURE_INSTALL,
   SKILLS_LIST,
   UNIVERSAL_COMMAND,
 } from './harnesses.js'
@@ -79,19 +88,34 @@ const REQUIRED_SURFACES = [
 
 // ── 1. The rendered snapshot ───────────────────────────────────────────────
 // Regenerate with: node scripts/gen-wizard-prompts-snapshot.mjs
+//
+// This covers EVERY live, agent-facing surface the dashboard renders — both key
+// modes, the wizard prompts, the universal commands, the workflows prompt (both
+// modes), the captions, HARNESS_INTRO, HARNESS_STEPS, and the two
+// capture-install blocks. It is the gate's primary guard, so a surface absent
+// from it could be changed with no failing test and no diff; if a new live
+// surface is added, PIN IT HERE (see #4885).
 test('#4880: the rendered wizard copy matches the committed snapshot', () => {
   const rendered = {}
+  const renderedSeparate = {}
   for (const harness of HARNESSES) {
     for (const step of [1, 2]) {
-      const text = wizardPromptText(harness, step, KEY, 'included')
-      if (text) rendered[`${harness}/${step}`] = text
+      // BOTH modes: main.jsx:2906 makes the key mode a live toggle.
+      const included = wizardPromptText(harness, step, KEY, 'included')
+      if (included) rendered[`${harness}/${step}`] = included
+      const separate = wizardPromptText(harness, step, KEY, 'separate')
+      if (separate) renderedSeparate[`${harness}/${step}`] = separate
     }
   }
   assert.deepEqual(rendered, snapshot.prompts,
     'the rendered wizard prompts drifted from src/wizardPrompts.snapshot.json — '
     + 'if the copy change is intended, regenerate the snapshot and have it reviewed')
+  assert.deepEqual(renderedSeparate, snapshot.promptsSeparate,
+    'the rendered SEPARATE-key-mode prompts drifted from the snapshot')
   assert.equal(snapshot.workflows, wizardWorkflowsText(KEY, 'included'),
     'the rendered workflows prompt drifted from the snapshot')
+  assert.equal(snapshot.workflowsSeparate, wizardWorkflowsText(KEY, 'separate'),
+    'the rendered separate-mode workflows prompt drifted from the snapshot')
   const renderedCommands = {}
   for (const harness of COMMAND_HARNESSES) renderedCommands[harness] = UNIVERSAL_COMMAND[harness](KEY)
   assert.deepEqual(snapshot.commands, renderedCommands,
@@ -101,6 +125,21 @@ test('#4880: the rendered wizard copy matches the committed snapshot', () => {
   assert.deepEqual(snapshot.captions, WIZARD_CAPTIONS,
     'the rendered wizard captions drifted from the snapshot')
   assert.equal(snapshot.skillSet, SKILLS_LIST, 'the shipped set drifted from the snapshot')
+  // The remaining live surfaces. Each is rendered by main.jsx, so each must be
+  // pinned or it can change silently (#4820 review, cycle 9).
+  assert.deepEqual(snapshot.harnessIntro, HARNESS_INTRO,
+    'the rendered HARNESS_INTRO copy drifted from the snapshot')
+  const steps = {}
+  for (const harness of Object.keys(HARNESS_NAMES)) {
+    const renderedSteps = HARNESS_STEPS(harness, KEY)
+    if (Array.isArray(renderedSteps)) steps[harness] = renderedSteps
+  }
+  assert.deepEqual(snapshot.harnessSteps, steps,
+    'the rendered HARNESS_STEPS copy drifted from the snapshot')
+  assert.deepEqual(snapshot.captureInstall, HARNESS_CAPTURE_INSTALL,
+    'the rendered capture-install copy drifted from the snapshot')
+  assert.equal(snapshot.piCaptureInstall, PI_CAPTURE_INSTALL,
+    'the rendered Pi capture-install block drifted from the snapshot')
 })
 
 // ── 2. The surface set ─────────────────────────────────────────────────────
