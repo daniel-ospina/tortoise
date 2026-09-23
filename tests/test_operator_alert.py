@@ -418,10 +418,16 @@ def test_a_cancelled_dispatch_is_never_silent(caplog):
     """
     fut = concurrent.futures.Future()
     fut.cancel()
+    ran = concurrent.futures.Future()
+    ran.set_result(None)
     with caplog.at_level(logging.WARNING, logger="tortoise.operator_alert"):
         oa._forget(fut)
-    assert any("cancelled" in r.getMessage() for r in caplog.records), (
-        "a cancelled dispatch must leave a line")
+        after_cancel = len(caplog.records)
+        oa._forget(ran)
+    assert after_cancel == 1, "a cancelled dispatch must leave exactly one line"
+    assert len(caplog.records) == after_cancel, (
+        "a future that RAN must stay silent — logging every settle is not a report")
+    assert "cancelled" in caplog.records[0].getMessage()
 
 
 def test_the_shed_log_is_rate_limited_and_clock_agnostic(caplog):

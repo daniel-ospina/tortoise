@@ -1098,3 +1098,23 @@ re-learning — a claim about a guarantee is the thing that re-stales:
   passes `now` in, so the small-epoch case is deterministic everywhere.
 
 Both new pins were verified RED (`operations/logs/3981-mutation-evidence.log`). 39 tests pass.
+
+### Implementation record (round 9 — review cycle 7 fixes)
+
+Cycle 7 found no P0/P1 and three P2s, the first of which was the same claim failing a third time:
+
+* **"never lost without a trace" was DELETED, not qualified again.** It is false — a kind paused in
+  `ops/suppression.json` returns `SUPPRESSED` with no line at all, by design — and it had already
+  re-staled twice while I reworded it in place and re-deployed it at a new site. A self-referential
+  claim about a guarantee does not improve with better narration; the fix is deletion. Both sites now
+  state only the observable fact: a missing token means a successor was ADMITTED (the successor reports
+  its own outcome).
+* **The cancellation line no longer asserts a cause it cannot know.** `_forget` fires for pool
+  shutdown, a test's cancelling pool, and `cancel_futures` alike, so "(pool shutdown)" was a guess
+  printed as fact. It now states only what is observed, and the docstring says why the cause is
+  unavailable here.
+* **The cancellation pin now pins exclusivity.** It asserted only that some line appeared, so hoisting
+  the warning out of the `cancelled()` guard — logging every settle — left the suite green. It now also
+  asserts that a future which RAN stays silent (RED under exactly that mutation).
+
+Three mutations observed RED (`operations/logs/3981-mutation-evidence.log`).

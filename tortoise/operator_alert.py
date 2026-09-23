@@ -302,10 +302,9 @@ def _run(store, key, kind, org_id, detail, token) -> None:
         # filing, and must not reach a store that may be tearing down. SAFE to
         # return here because a missing token means a successor was ADMITTED in the
         # same lock hold that cleared ours (never swept behind our back by
-        # ``_prune_locked``). "Admitted" is not "will file": if that successor then
-        # finds no channel or a failed submit, its own path logs a WARNING
-        # (``operator alert not filed`` / ``dispatch failed``) rather than dropping
-        # it silently — so the incident is never lost without a trace. The check is
+        # ``_prune_locked``) — not that it succeeded; the successor's own path reports
+        # its own outcome. (No "never lost without a trace" claim: a suppressed kind
+        # returns SUPPRESSED with no line, by design.) The check is
         # REPEATED below because a newer attempt can start while this one is in
         # flight.
         with _LOCK:
@@ -342,15 +341,15 @@ def _forget(fut) -> None:
     alert is the one most likely to have been reaped from ``_HANDLES`` (aged past
     ``_INFLIGHT_STALE_S`` behind wedged workers), so ``_shutdown_pool``'s
     pending-handle count cannot see it and the alert would otherwise vanish with no
-    line at all — the silent drop this module exists to remove, arriving through the
-    shutdown door.
+    line at all. The line states only what is OBSERVED (it was cancelled before
+    running): this callback cannot know WHY — shutdown, a test's cancelling pool and
+    ``cancel_futures`` all land here.
     """
     with _LOCK:
         _HANDLES.pop(fut, None)
         if fut.cancelled():
             _release_locked()
-            _logger.warning(
-                "operator alert cancelled before it ran (pool shutdown)")
+            _logger.warning("operator alert cancelled before it ran")
 
 
 def alert_operator(kind: str, org_id: str | None, detail: dict | None = None):
@@ -370,9 +369,8 @@ def alert_operator(kind: str, org_id: str | None, detail: dict | None = None):
         # latch and install NO successor: that worker then returns at `_run`'s
         # ownership check and the incident is dropped with no log naming it. Deciding
         # the bound first makes the clear and the install atomic (one `_LOCK`), so a
-        # latch is only ever handed to a successor that is ADMITTED — and if it then
-        # finds no channel or fails to submit, that path logs a WARNING, so the
-        # incident is never lost without a trace.
+        # latch is only ever handed to a successor that is ADMITTED (which then runs,
+        # or logs why it could not).
         if _RESERVED >= _MAX_INFLIGHT:
             # A shed is not an attempt: leave `_ATTEMPT` untouched, or a later
             # `_due_locked` would read the window this call never consumed.
