@@ -407,6 +407,7 @@ class TestHealthTruthMCP:
         listing. Pin the guard ORDER: hosted_api imports are BLOCKED here, and
         the gate still returns False (fail-open: onboarding tools stay
         listed)."""
+        import asyncio
         import builtins
 
         from tortoise import mcp_server as _ms
@@ -424,7 +425,10 @@ class TestHealthTruthMCP:
         monkeypatch.setattr(builtins, "__import__", _blocked_import)
         token = _current_org_id.set(SELFHOST_ORG_ID)
         try:
-            assert _ms._org_onboarding_complete() is False
+            # #2924: the gate is ``async`` (its hosted read is offloaded), so it
+            # must be awaited — the SELFHOST early return still happens BEFORE
+            # any ``tortoise.hosted_api`` import, which is what this pins.
+            assert asyncio.run(_ms._org_onboarding_complete()) is False
         finally:
             _current_org_id.reset(token)
 

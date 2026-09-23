@@ -45,6 +45,7 @@ import tortoise
 # a monkeypatch/override of the canonical constant reaches BOTH surfaces instead
 # of leaving a stale copy in this module.
 from tortoise import mcp_auth as _mcp_auth
+from tortoise import monitoring as _monitoring  # #2924: call-time bound read
 from tortoise.abuse import _int_env  # #1081 signup limiter env knobs (SignupVelocityTracker)
 from tortoise.alert_store import OpenOutcome, ResolveOutcome  # #3820 resolve/open tri-state
 from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op without key)
@@ -5364,7 +5365,7 @@ def _graph_unavailable() -> HTTPException:
     )
 
 
-async def _graph_offload(fn, *, op: str):
+async def _graph_offload(fn, *, op: str, timeout: float | None = None):
     """#3773: run ONE synchronous DATA-PLANE graph helper off the event loop.
 
     Thin hosted-side wrapper over the #3498 seam (``_cp_offload`` ->
@@ -5400,11 +5401,18 @@ async def _graph_offload(fn, *, op: str):
     are identifiable by op — but they share the 512-entry buffer, so a graph
     burst can evict PostgREST records. Splitting the buffer per pool is a
     follow-up, not part of #3773.
+
+    ``timeout`` (#2924) overrides the lane bound for a caller whose FAILURE
+    MODE is not a degraded write but a fail-open fallback: the onboarding gate
+    vetoes nothing when it fails, it only keeps the onboarding tools visible, so
+    it is willing to trade a cold-projection false-open for never parking a
+    graph worker for the lane's full cold-start allowance. Callers that write
+    leave it unset.
     """
     ctx = contextvars.copy_context()
     return await _cp_offload(
         functools.partial(ctx.run, fn), op=op, pool="graph",
-        timeout=graph_offload_timeout_s(),
+        timeout=graph_offload_timeout_s() if timeout is None else timeout,
         unavailable=_graph_unavailable)
 
 
@@ -20181,6 +20189,56 @@ def _get_onboarding_projection(org_id: str) -> dict:
     state["onboarding_complete"] = _os.resolve_wire_completion(
         node.get("status"), bool(raw.get("onboarding_complete")), steps)
     return state
+
+
+async def _get_onboarding_projection_off_loop(org_id: str) -> dict:
+    """The onboarding projection read, off the event loop (#2924).
+
+    ``_get_onboarding_projection`` is synchronous END TO END, and both of its
+    legs block:
+
+    * the jsonb leg — ``_get_onboarding_state`` reads
+      ``teams.onboarding_state`` through the blocking ``SupabaseControlPlane``
+      transport (``httpx.Client``, ``supabase_control.py:454``);
+    * the graph leg — ``_graph_has_org_namespace`` / ``_open_org_graph_sdk``
+      reach ``_registry_existing_graphs`` / ``_get_proj()``, which CONSTRUCT a
+      fresh ``FalkorProjection`` per call (``ssl.create_default_context`` →
+      ``load_default_certs`` → TLS handshake → ``Is_Sentinel`` INFO), then
+      issue the query.
+
+    Called inline from a coroutine that is a periodic hot path, it blocks the
+    single event loop for the WHOLE resolution. That is the #2924 stall:
+    ``async def list_tools`` (``mcp_server.py``) calls the synchronous gate
+    ``_org_onboarding_complete()``, and a ``py-spy`` MainThread dump taken while
+    ``GET /health`` was stalled 1.08 s captured the loop parked in exactly
+    these frames (``read`` ← ``httpx`` sync backend ← ``query`` ←
+    ``org_onboarding_state`` ← ``_get_onboarding_state`` ←
+    ``_get_onboarding_projection``; and ``create_default_context`` ←
+    ``_registry_existing_graphs`` ← ``_graph_has_org_namespace`` ← the same
+    function). Loopback ``GET /health`` answered in ~4 ms across 178 probes
+    while the public path stalled 0.9–2.2 s on 10 of them, and the app's own
+    heartbeat recorded ``loop_lag_max_ms`` of 2033 ms — so the stall is the
+    loop, not the transport.
+
+    The unit of offload is the RESOLUTION, not an individual HTTP call (the
+    #3498 design): one hop keeps the projection's internal ordering (the jsonb
+    read feeds the merge) inside one worker. The pool is ``graph`` because the
+    resolution's cold-start-prone leg is the projection open, and the graph
+    lane's wait bound is derived from ``probe_setup_timeout()`` precisely so a
+    cold projection is not false-degraded (#3773). Failures propagate: callers
+    that must fail open (the MCP gate) already coerce to ``False``.
+    """
+    return await _graph_offload(
+        lambda: _get_onboarding_projection(org_id),
+        op="onboarding_projection",
+        # #2924: the gate's contract is fail-open, so a hung or cold graph must
+        # not park a graph worker for the lane's cold-start allowance — the
+        # seam's standard REQUEST bound is the right price here.
+        # #2924 review: read the constant at CALL time, not import time — the
+        # seam's bound tests monkeypatch ``monitoring``, and the lane bound
+        # (``graph_offload_timeout_s()``) resolves at call time for the same
+        # reason.
+        timeout=_monitoring.CONTROL_PLANE_OFFLOAD_TIMEOUT_S)
 
 
 # #1727 (Slice 2, Task 11): PATCH-field → state-key translation for the
