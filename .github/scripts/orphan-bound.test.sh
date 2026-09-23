@@ -244,6 +244,8 @@ run_gate 13 0 report14.json
 assert_eq "$RC" "0" "exits 0 on COUNT < left"
 assert_contains "$OUT" "within the sweep's own measurement" "prints the pass line"
 assert_contains "$OUT" "interpreter exit" "logs the atexit delta"
+assert_contains "$OUT" "reaped=9, cleared=true; 1 shut down at interpreter exit" \
+  "the COUNT<left pass line interpolates the sweep's own cleared=true and delta"
 assert_not_contains "$OUT" "::error::" "no red on the healthy atexit boundary"
 
 echo "8. a kill does NOT turn COUNT < left into a red either"
@@ -636,7 +638,7 @@ assert_not_contains "$OUT" "cleared=true" \
 echo
 # A LOST case must not be indistinguishable from success: deleting a case
 # leaves FAIL=0 and merely a LOWER count, so the count is pinned too.
-expected_assertions=166
+expected_assertions=167
 if [ "$PASS" -eq "$expected_assertions" ]; then
   PASS=$((PASS + 1))
   echo "  ✅ assertion count pinned at $expected_assertions (a lost case is not a green run)"
