@@ -1642,8 +1642,11 @@ def _install_owner_record_patch() -> None:
 # So the repair is ORDERED — prove, stop, drop — and it is the only thing
 # this patch does on that state: the recorded pid is proven to be this
 # registry's own live server, that server is stopped GRACEFULLY, and only
-# then is the stale registry removed so redislite starts clean (the RDB is
-# released, so the new server is the only writer). Both provenance legs
+# then is the stale registry removed so redislite starts clean. That ordering is
+# safe against the holder THIS PATCH PROVED — the RDB is released before the
+# record is dropped — and nothing wider: there is still no per-<dbdir>/
+# <dbfilename> construction lock, so a second construction racing here can also
+# start a server over the same RDB (tortoise#4904). Both provenance legs
 # exist because the recorded pid may be a recycled number pointing at an
 # unrelated process — and signalling THAT, or starting a second server while
 # the real holder lives, are the two ways this predicate can do harm.
