@@ -1,3 +1,33 @@
+> ## ⚠️ AMENDED — `rename` WAS WITHDRAWN FROM THIS PLAN (read before implementing)
+>
+> **This plan's rename rows are SUPERSEDED.** Any step below that journals a
+> `name`-bearing write (a `rename` record), or that asserts a rename round-trips,
+> describes behaviour **this lane deliberately does NOT ship**. Implementing Task 1
+> as originally written **reintroduces a verified regression** — see #4769.
+>
+> **Why.** A journaled `rename` folds inline in pass 1b, but
+> `_fold_object_superseded` falls back to matching **by NAME** for legacy id-less
+> records (#2164 ISSUE-B) and that fold is **DEFERRED** to a sweep that runs
+> *after* pass 1b. The rename therefore moves the node's name before the sweep
+> matches on it, and the supersede is **dropped**: `rebuild_all` returns `live`
+> while live/`apply()` keep `superseded`. Pre-rename-journalling the match held,
+> so this was a regression the lane introduced — caught by review round 3.
+>
+> **What actually ships:** `restatus` / `revise` (**#3312**) and `delete`
+> (**#3300**). The op set partitions cleanly because `classify_entity_mutation_op`
+> returns `rename` iff `name in props`, and no other op touches `name`.
+>
+> **Where rename went:** **#4769**, which lands rename journalling *together with*
+> the structural sweep-ordering fix — three review rounds each found a different
+> defect at that same boundary, because `rebuild_all` does not model journal order
+> **across its deferred sweeps**.
+>
+> **Interim behaviour:** a `name`-bearing write applies live and journals **every
+> other key**, withholding only `name`, and **warns on every occurrence** naming
+> #4769. The `rename` FOLD arm is retained so a raw/legacy record still folds.
+>
+> ---
+
 <!-- research-path: docs/plans/2026-09-22-unjournaled-mutation-class.md (scope: https://github.com/daniel-ospina/tortoise/issues/3312#issuecomment-5779625594) -->
 
 # Unjournaled durable mutation — `EntityMutated` op extension Implementation Plan

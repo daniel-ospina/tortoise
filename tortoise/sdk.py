@@ -933,10 +933,10 @@ _BATCH_ID_RECORD_TYPE = "BatchIdStamped"
 _ENTITY_MUTATION_RECORD_TYPE = "EntityMutated"
 
 # #3377 DEFERRED (#4769): the rename op is implemented by the fold but is
-# deliberately NOT produced yet — see `_update_entity`'s non-Point branch. The
-# warning there is emitted ONCE per process (the `_deny_drop_warned` shape) so a
-# long-lived server does not flood while the deferral stays loud.
-_UNJOURNALED_RENAME_WARNED: set[str] = set()
+# deliberately NOT produced yet — see `_update_entity`'s non-Point branch. That
+# branch emits its warning on EVERY matching occurrence (not once per process):
+# this class recurs, so a one-shot net would leave the second and later reverts
+# silent, which is the failure mode the lane exists to remove.
 
 
 def _raise_update_point_status_error(proj, id: str) -> None:
@@ -17389,6 +17389,13 @@ class TortoiseSDK:
     def _journal_entity_mutation(self, label: str, id_val: str, op: str, *,
                                  state: dict | None = None,
                                  name: str | None = None) -> None:
+        # NOTE ON ``name``: FOLD INPUT ONLY, currently reserved. No producer
+        # passes it any more — the rename op is deferred to #4769 (§ the
+        # ``if "name" in props`` branch in ``_update_entity``), so ``rename``
+        # reaches this builder only from a raw/legacy journal line, which bypasses
+        # the builder entirely. It is kept because the record shape is fixed by
+        # the fold (`_fold_entity_mutation` reads ``record["name"]``) and a
+        # future producer must be able to emit the documented shape.
         """Build and emit ONE ``EntityMutated`` record (#3299).
 
         THE only place an ``EntityMutated`` record is constructed — asserted by
@@ -17555,20 +17562,64 @@ class TortoiseSDK:
                     # The graph write still happens — only the journal record is
                     # withheld — and the withhold is LOUD, so this is a declared
                     # deferral, never the silent loss this lane exists to fix.
-                    proj.g.query(
-                        f"MATCH (n:{label} {{{prop}:$id}}) SET n += $props",
+                    applied = proj.g.query(
+                        f"MATCH (n:{label} {{{prop}:$id}}) SET n += $props "
+                        "RETURN count(n)",
                         params={"id": id_val, "props": props},
                     )
-                    if not _UNJOURNALED_RENAME_WARNED:
-                        _UNJOURNALED_RENAME_WARNED.add("warned")
+                    # A miss mutates nothing, so there is nothing to warn about
+                    # (an `update_entity("no-such-id", name=...)` must not cry
+                    # wolf). `count(n)` is safe HERE because there is no
+                    # `properties(n)` in this RETURN to become a grouping key —
+                    # the hazard the reading query below documents.
+                    matched = bool(applied.result_set and applied.result_set[0][0])
+
+                    # Journal everything the write changed EXCEPT `name`. The
+                    # reason `name` is withheld — it moves the node before the
+                    # deferred name-keyed supersede sweep runs — simply does NOT
+                    # apply to the other keys, so withholding the whole map
+                    # would leave #3312 open for the ordinary call
+                    # `update_entity(id, name=..., status=...)`, silently
+                    # reverting the status on rebuild.
+                    rest = {k: v for k, v in props.items() if k != "name"}
+                    if matched and rest:
+                        keys = list(rest)
+                        res = proj.g.query(
+                            f"MATCH (n:{label} {{{prop}:$id}}) "
+                            "RETURN [k IN $keys | properties(n)[k]] AS vals",
+                            params={"id": id_val, "keys": keys},
+                        )
+                        if res.result_set:
+                            vals = list(res.result_set[0][0])
+                            if len(vals) != len(keys):
+                                _logger.error(
+                                    "state arity mismatch for %s %r: %d keys "
+                                    "vs %d values — journalling the shorter "
+                                    "of the two",
+                                    label, id_val, len(keys), len(vals))
+                            # `rest` carries no `name`, so the classifier can
+                            # never return `rename` here — it is `restatus` or
+                            # `revise`, both implemented.
+                            self._journal_entity_mutation(
+                                label, id_val,
+                                classify_entity_mutation_op(rest),
+                                state=dict(zip(keys, vals, strict=False)),
+                            )
+
+                    if matched:
+                        # Warn on EVERY occurrence, not once per process: this
+                        # class recurs, and a one-shot net would leave the
+                        # second and later reverts silent — the exact failure
+                        # mode this lane exists to remove.
                         _logger.warning(
-                            "update_entity: a `name` change is NOT journaled — "
-                            "#3377's rename journalling is deferred to #4769 "
+                            "update_entity: the `name` change is NOT journaled "
+                            "— #3377's rename journalling is deferred to #4769 "
                             "(journalling it breaks a legacy name-keyed "
                             "ObjectSuperseded on replay: the rename moves the "
                             "node's name before the deferred supersede sweep "
-                            "matches on it). THIS MUTATION WILL BE REVERTED BY "
-                            "`rebuild_all`."
+                            "matches on it). THE `name` WILL BE REVERTED BY "
+                            "`rebuild_all`; every other key in this write IS "
+                            "journaled and survives."
                         )
                     continue
                 keys = list(props)
@@ -17595,7 +17646,6 @@ class TortoiseSDK:
                 self._journal_entity_mutation(
                     label, id_val, classify_entity_mutation_op(props),
                     state=dict(zip(keys, vals, strict=False)),
-                    name=props.get("name"),
                 )
         return self._get_entity(id_val)
 

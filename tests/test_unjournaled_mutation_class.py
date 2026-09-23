@@ -19,8 +19,8 @@ lane closes the two that share a seam and cites the other two:
      runs after this inline one, so journalling a rename renames the node before
      the sweep matches and DROPS the supersede (`rebuild_all` returns the object
      `live` while live/`apply()` keep `superseded`). The producer withholds the
-     record and WARNS (once per process) — a declared deferral, not a silent
-     loss. Pinned by `test_a_name_change_is_not_journaled_and_says_so`.
+     record and WARNS on every matching occurrence — a declared deferral, not a
+     silent loss. Pinned by `test_a_name_change_is_not_journaled_and_says_so`.
 
      ⚠️ The producer covers all five labels; whether the FOLD can match them
      depends on the CREATION door. `Document` creation via
@@ -476,34 +476,30 @@ class TestPropertyMutationRoundTrip:
             "a post-supersede state op was lost — only the last one was "
             f"replayed: {got}")
 
-    def test_a_name_change_is_not_journaled_and_says_so(
-            self, env, caplog, monkeypatch):
+    def test_a_name_change_is_not_journaled_and_says_so(self, env, caplog):
         """#3377 is DEFERRED (#4769) — and the deferral must be LOUD.
 
         Journalling a `name` change renames the node in pass 1b, before the
         deferred `ObjectSuperseded` sweep matches on that name, so a legacy
         id-less supersede is dropped (`rebuild_all` returns the object
         status='live' while live and `apply()` keep 'superseded'). Rather than
-        ship that regression, the producer withholds the record — and warns,
-        once per process, so the withhold is a declared deferral and not the
-        silent loss this lane exists to fix.
+        ship that regression, the producer withholds the record — and warns on
+        every matching occurrence, so the withhold is a declared deferral and not
+        the silent loss this lane exists to fix.
 
         This row is the pin for that contract: it asserts the write still
-        applies to the graph, that NO `EntityMutated` record is written, and
-        that a warning naming #4769 is emitted.
+        applies to the graph, that NO `EntityMutated` record is written for it,
+        and that a warning naming #4769 is emitted.
         """
-        # The deferral warning is emitted ONCE per process, so reset the flag
-        # rather than depend on no earlier test having renamed an Object.
-        from tortoise import sdk as _sdk_mod
-        monkeypatch.setattr(_sdk_mod, "_UNJOURNALED_RENAME_WARNED", set())
-
         sdk, events = env
         oid = sdk.create_entity("object", name="A",
                                 objectKind="k")["node"]["id"]
         before = len(_mutations(events))
         caplog.clear()
         with caplog.at_level("WARNING"):
-            sdk.update_entity(oid, name="B", status="archived")
+            # NAME-ONLY: a write carrying other keys journals THOSE (see
+            # `test_a_name_bearing_write_still_journals_its_other_keys`).
+            sdk.update_entity(oid, name="B")
 
         assert _props(sdk, "Object", oid, "name")["name"] == "B", \
             "the live write must still apply — only the JOURNAL is withheld"
@@ -512,6 +508,60 @@ class TestPropertyMutationRoundTrip:
         msgs = " ".join(r.getMessage() for r in caplog.records)
         assert "#4769" in msgs and "NOT journaled" in msgs, (
             "the deferral must be loud and name its tracking issue: " f"{msgs}")
+
+        # ...and it warns on EVERY occurrence, not once per process: a one-shot
+        # net would leave the second and later reverts silent, which is the
+        # failure mode this whole lane exists to remove.
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            sdk.update_entity(oid, name="C")
+        assert any("#4769" in r.getMessage() for r in caplog.records), \
+            "a repeat `name` change must warn again, not go silent"
+
+    def test_a_name_bearing_write_still_journals_its_other_keys(self, env,
+                                                                caplog):
+        """The withhold must be exactly `name` wide — #3312 for the rest.
+
+        Withholding the WHOLE map (the first cut of this fix) reopened #3312 for
+        the ordinary call `update_entity(id, name=..., status=...)`: the status
+        rode along with the withheld record and was silently reverted by
+        `rebuild_all`. Only `name` moves the node in front of the deferred
+        name-keyed supersede sweep, so only `name` needs withholding.
+        """
+        sdk, events = env
+        oid = sdk.create_entity("object", name="A",
+                                objectKind="k")["node"]["id"]
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            sdk.update_entity(oid, name="B", status="archived",
+                              confidence=0.9)
+        assert _props(sdk, "Object", oid,
+                      "name")["name"] == "B", "live write still applies"
+
+        recs = [r for r in _mutations(events) if r.get("id") == oid]
+        assert recs, "the non-`name` keys must still journal"
+        state = recs[-1]["state"]
+        assert "name" not in state, (
+            "`name` must NOT be journalled while #3377 is deferred: " f"{state}")
+        assert state == {"status": "archived", "confidence": 0.9}, state
+        assert recs[-1]["op"] == "restatus", recs[-1]["op"]
+
+        # The payload of this test: the status SURVIVES a rebuild.
+        sdk._get_proj().rebuild_all(str(events))
+        got = _props(sdk, "Object", oid, "status", "confidence")
+        assert got == {"status": "archived", "confidence": 0.9}, (
+            "#3312 must be closed for a name-BEARING write too: " f"{got}")
+
+    def test_a_name_write_that_matched_nothing_does_not_cry_wolf(self, env,
+                                                                 caplog):
+        """A no-op must not warn that a mutation will be reverted."""
+        sdk, _events = env
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            sdk.update_entity("no-such-id-at-all", name="B")
+        msgs = " ".join(r.getMessage() for r in caplog.records)
+        assert "#4769" not in msgs, (
+            "nothing matched, so nothing will be reverted: " f"{msgs}")
 
     def test_no_record_for_a_write_that_matched_nothing(self, env):
         """No phantom record: the producer mirrors ``_delete_entity``'s
