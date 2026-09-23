@@ -412,12 +412,7 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
     import uuid
 
     # #4740 review 11: the builder and the probe are reached through the
-    # MODULE attribute, never a bare imported name. A bare name can be
-    # shadowed by a local rebinding inside this fixture (a lambda body is not
-    # a `Return`, so the pin's hand-written-report check cannot see it) and a
-    # local rebinding would silently change what the end-sweep runs. The
-    # attribute form closes that rebinding of the imported FUNCTION name; the
-    # module name itself is still an ordinary local binding.
+    # MODULE attribute rather than a bare imported name.
     from tortoise import embedded_reaper
     from tortoise.embedded_reaper import (
         ACTIVE_SUITES_DIR,
