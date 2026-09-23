@@ -32,8 +32,12 @@
 #         sweep's measurement is therefore a PASS with the delta logged, not an
 #         anomaly.
 #       * `cleared == true` — the sweep FINISHED rather than running out of its
-#         time budget. `cleared: false` means the residue is arbitrary, which is
-#         the real "hygiene is broken" signal, and it reds whatever the count is
+#         time budget. `cleared: false` means the sweep did not prove that its
+#         `left` is an authoritative BOUND, so `left` alone is not trusted — it
+#         is a confidence flag, not a residue of its own. The measured `COUNT`
+#         decides: at zero nothing is live, so the run is clean by measurement
+#         and the exhausted budget is a `::warning::` diagnostic; above zero the
+#         sweep did not prove the backlog clear AND servers remain, so it REDs
 #         — except under a #1371 watchdog kill, where the run is already red and
 #         a second red adds no signal.
 #       * the sweep's own ACCOUNTING IDENTITY holds: `reaped + left >= before`,
@@ -77,24 +81,30 @@
 #                               report is still `missing`/`unreadable` → RED.
 #   sweep.no_embedded_servers → bound 0: nothing was spawned, so nothing may
 #                               remain.
-#   sweep.left == null        → RED (kill-downgradable) when COUNT > 0 OR the
-#                               sweep reported `cleared == false`: the sweep's
-#                               own probe FAILED, so the run produced no `left`
-#                               to bind to — an unmeasured residue, named as
-#                               such rather than read as a plausible 0. When
-#                               COUNT == 0 AND `cleared == true` the
-#                               workflow's own identical pgrep measured
-#                               nothing live and the sweep finished, so there
-#                               is no residue to account for: a
+#   sweep.left == null        → the sweep's own probe FAILED, so the run
+#                               produced no `left` to bind to. The measured
+#                               `COUNT` decides: at zero the workflow's own
+#                               identical pgrep measured nothing live, so there
+#                               is no residue to account for — a
 #                               `::warning::` naming the failed sweep-side
 #                               probe, and PASS (an empty residue has nothing
-#                               to bind). `cleared: false` is never a
-#                               diagnostic: it is the sweep's own "hygiene is
-#                               broken" signal and reds whatever the count is.
+#                               to bind). Above zero the residue is unmeasured
+#                               and named as such rather than read as a
+#                               plausible 0 — RED (kill-downgradable).
+#                               `cleared` is a confidence flag about a `left`
+#                               this report does not carry, so it does not
+#                               decide the verdict; the same measured-zero rule
+#                               applies at any `cleared`.
 #   {reaped, cleared, left,
 #     before}                  → bound `left`, plus the positive controls above
 #                               (the count/probe agreement, `cleared`, and the
 #                               `reaped + left >= before` accounting identity).
+#                               A `cleared: false` report does not red by
+#                               itself: at COUNT == 0 it is a `::warning::`
+#                               diagnostic (nothing live to bound), and at
+#                               COUNT > 0 it REDs (kill-downgradable) because
+#                               the sweep did not prove the backlog clear while
+#                               servers remain.
 #                               When the report carries non-empty
 #                               `other_suites` the sweep DEFERRED: that path
 #                               is a NON-GATING DIAGNOSTIC (a `::warning::`
@@ -115,10 +125,12 @@
 #   That class lands in `left`, is reported with `cleared: true`, and PASSES at
 #   `COUNT == left` — this gate is bounded by that measurement and does not
 #   independently red it. What the gate DOES red: a leak that appears AFTER the
-#   sweep (`COUNT > left`), a sweep that aborted or failed (`cleared: false`,
-#   `error`, `skipped`, or a `probe_failed` with a non-zero count or an
-#   exhausted budget), an identity violation (`reaped + left < before`), and an
-#   unaccounted/unreadable report.
+#   sweep (`COUNT > left`), a sweep that aborted or failed with servers
+#   remaining (`cleared: false` at a non-zero count, `error`, `skipped`, or a
+#   `probe_failed` at a non-zero count), an identity violation (`reaped + left <
+#   before`), and an unaccounted/unreadable report. A `cleared: false` or
+#   `probe_failed` report at a measured COUNT of zero is a `::warning::`, not a
+#   red: there is no live residue to bound.
 #   FOLLOW-UP: catching the declined class needs a measurement the sweep does
 #   not yet produce — the count it examined and declined, with reasons — a
 #   separate change, issue #4884. No hand-picked constant is reintroduced for
@@ -131,9 +143,9 @@
 #   conftest end-sweep, so the finalizer that would have produced the report
 #   never ran. A count ABOVE this gate's own bound therefore downgrades to a
 #   `::warning::` (the run is already red and a second red only blinds the
-#   detector), as does a budget-exhausted sweep and a failed probe. `error` and
-#   `skipped` stay RED even under a kill: those are unaccounted no matter why
-#   pytest stopped.
+#   detector), as does a budget-exhausted sweep and a failed probe at a
+#   non-zero count. `error` and `skipped` stay RED even under a kill: those are
+#   unaccounted no matter why pytest stopped.
 #
 # NO LITERAL BOUND. Every number this gate compares against is read from the
 #   hygiene report (`left`) or supplied as `--count`. The only numeric literals
@@ -371,20 +383,21 @@ case "$kind" in
     exit 0
     ;;
   probe_failed)
-    # #4740 review 5: a failed sweep-side probe is only a DIAGNOSTIC when BOTH
-    # the workflow's own identical pgrep measured zero live servers AND the
-    # sweep reported that it FINISHED (`cleared: true`). Review 4 read only
-    # COUNT, so `{"cleared": false, "left": null}` at COUNT == 0 warned and
-    # PASSED — swallowing the sweep's own "hygiene is broken" signal in exactly
-    # the state this gate exists to catch. `cleared: false` is never a
-    # diagnostic: the budget was exhausted, so the residue is arbitrary and it
-    # reds whatever the count is (kill-downgradable, per #1371).
-    if [ "$COUNT" -eq 0 ] && [ "$cleared" = "true" ]; then
-      echo "::warning::redislite orphan gate: the hygiene end-sweep's own count probe FAILED (left=null) while the workflow's probe measured 0 live servers — no residue exists to account for; the failed sweep-side probe is diagnostic only (issue #1005)"
+    # The sweep's own count probe FAILED (`left: null`), so the run produced no
+    # `left` to bind to. The measured COUNT decides the verdict (#4740): at
+    # zero the workflow's own identical pgrep measured nothing live, so there
+    # is no residue to account for and the failed sweep-side probe is a
+    # `::warning::` diagnostic; above zero the residue is unmeasured and
+    # unaccounted for, so this reds (kill-downgradable per #1371). This is the
+    # same measured-zero rule the `{reaped, cleared, left, before}` branch
+    # applies: `cleared` is a confidence flag about a `left` this report does
+    # not carry, so it does not decide the verdict.
+    if [ "$COUNT" -eq 0 ]; then
+      echo "::warning::redislite orphan gate: the hygiene end-sweep's own count probe FAILED (left=null) but the workflow's probe measured 0 live servers — no residue exists to account for; the failed sweep-side probe is diagnostic only (issue #1005)"
       exit 0
     fi
     if [ "$cleared" = "false" ]; then
-      red_or_kill_warning "redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) AND its own count probe FAILED (left=null) — the $COUNT residue is arbitrary and unmeasured, not a bounded outcome (issue #1005)"
+      red_or_kill_warning "redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) AND its own count probe FAILED (left=null) — the $COUNT servers that remain are unmeasured, not a bounded outcome (issue #1005)"
     fi
     red_or_kill_warning "redislite orphan gate: the hygiene end-sweep's own count probe FAILED (left=null) — the run produced no measurement to bind the bound to, so the $COUNT residue is unaccounted for (issue #1005)"
     ;;
@@ -397,16 +410,18 @@ case "$kind" in
     ;;
   report)
     if [ "$cleared" != "true" ]; then
-      # A budget-exhausted sweep is the real "hygiene is broken" signal and reds
-      # whatever the count is. The single exception is a #1371 watchdog kill:
-      # pytest DOES run session teardown on SIGINT, so a killed run can
-      # legitimately exhaust the sweep budget — and the run is already red, so a
-      # second red adds no signal.
-      if is_kill_rc; then
-        echo "::warning::redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) — rc=$RC: a watchdog kill can legitimately exhaust the sweep, so this is a kill-path artifact rather than a hygiene signal (issue #1371 / #1005)"
-        exit 0
+      # `cleared` is the sweep's confidence that its `left` is a trustworthy
+      # BOUND, not a residue of its own. When the workflow's own identical
+      # pgrep measured nothing live (COUNT == 0) there is nothing left to
+      # bound, so the run is clean by measurement and the exhausted budget is a
+      # diagnostic, not a red. Above zero the sweep did not prove the backlog
+      # clear AND servers remain, so the residue is unproven and this reds —
+      # kill-downgradable per #1371, where the run is already red and a second
+      # red adds no signal.
+      if [ "$COUNT" -gt 0 ]; then
+        red_or_kill_warning "redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) and $COUNT redislite servers remain — the sweep did not prove the backlog clear, so the residue is unproven (issue #1005)"
       fi
-      red "redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) — the $COUNT residue is arbitrary, not a bounded outcome (issue #1005)"
+      echo "::warning::redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) but the workflow's probe measured 0 live servers — nothing remains to bound, so the exhausted budget is diagnostic only (issue #1005)"
     fi
     # #4740 review 5: a DEFERRED sweep (other_suites non-empty) ran with
     # only_safe=True, so `left` measures the whole host's embedded servers —
@@ -453,9 +468,9 @@ case "$kind" in
     # servers down at interpreter exit, after the sweep's in-teardown reading),
     # so it is a pass — with the delta logged so it stays visible.
     if [ "$COUNT" -lt "$left" ]; then
-      echo "orphaned redislite servers after suite: $COUNT (sweep before=$before left=$left reaped=$reaped, cleared=true; $((left - COUNT)) shut down at interpreter exit after the sweep's teardown reading) — within the sweep's own measurement"
+      echo "orphaned redislite servers after suite: $COUNT (sweep before=$before left=$left reaped=$reaped, cleared=$cleared; $((left - COUNT)) shut down at interpreter exit after the sweep's teardown reading) — within the sweep's own measurement"
     else
-      echo "orphaned redislite servers after suite: $COUNT (sweep before=$before left=$left reaped=$reaped, cleared=true) — within the sweep's own measurement"
+      echo "orphaned redislite servers after suite: $COUNT (sweep before=$before left=$left reaped=$reaped, cleared=$cleared) — within the sweep's own measurement"
     fi
     exit 0
     ;;

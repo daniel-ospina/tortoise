@@ -18,9 +18,12 @@
 #   * `{reaped, cleared, left}` → bound is READ from the report: two reports
 #     with DIFFERENT `left` both PASS against their own value (cases 1, 2), so a
 #     hardcoded bound cannot satisfy both.
-#   * `cleared: false` → RED whatever the count is on a normal exit (case 3):
-#     the true "hygiene is broken" signal a bigger constant would swallow —
-#     but a watchdog kill downgrades it (case 4).
+#   * `cleared: false` → the verdict is decided by the measured COUNT, not by
+#     `cleared` itself: at COUNT == 0 the run is clean by measurement and the
+#     exhausted budget is a warning (case 43), and at COUNT > 0 it REDs (cases
+#     3, 44) — with a watchdog kill downgrading that red (cases 4, 45). This is
+#     the same shape the `probe_failed` arm applies, so the two arms are
+#     uniform (case 40).
 #   * the positive control: COUNT ABOVE `left` REDs (case 5), downgraded only
 #     by a watchdog kill (case 6); COUNT BELOW `left` is the documented atexit
 #     outcome and PASSES with the delta logged, at rc=0 (case 7) and under a
@@ -31,13 +34,14 @@
 #     happened (case 13) — while a genuinely MISSING report still REDs (case 17)
 #     and is distinct (case 11's fixture is a DIFFERENT fixture from case 17's).
 #   * `left: null` (the sweep's probe failed) → RED named as a probe failure
-#     (the `left=null` case 16b), downgraded only by a watchdog kill (case
-#     16c) — never read as a plausible 0. A `COUNT` of 0 PASSES with a warning
-#     (case 34) ONLY when
-#     the sweep also reported `cleared: true`; the same shape with
-#     `cleared: false` still REDs at COUNT == 0 (case 40): an exhausted budget
-#     is not a diagnostic, and reading it as one is the #4740 review-5
-#     fail-open.
+#     above COUNT == 0 (cases 16b, 40), downgraded only by a watchdog kill
+#     (cases 16c, 40) — never read as a plausible 0. A `COUNT` of 0 PASSES with
+#     a warning at ANY `cleared` (cases 34, 40): there is no live residue to
+#     bind. Case 40 pins that this arm applies the SAME measured-zero rule as
+#     the `{reaped, cleared, left, before}` branch (cases 43-45), so `cleared`
+#     is never itself a verdict. (Before #4740's COUNT==0 fix this arm still
+#     REDded a `cleared: false` probe failure at COUNT == 0 — the asymmetry
+#     that fix removes.)
 #   * missing / unreadable / structurally-incomplete reports → RED (cases
 #     17-21: 17/18 missing, 19/20 unreadable, 21 the report missing `left`),
 #     downgraded only by a watchdog kill (cases 18, 20).
@@ -49,10 +53,10 @@
 #     and `before: 0` (case 30) — while a report OMITTING `before` is unusable
 #     → RED (case 31), so the control cannot be disabled by a shape change.
 #   * the deadline-aborted sweep report (`reaped: 0, cleared: false`, with the
-#     identity trivially satisfied and COUNT == left) → RED (case 35), while
-#     the healthy residue shape (`cleared: true`) PASSES (case 36). Only the
-#     `cleared` field separates them, so a gate that drops the `cleared`
-#     branch greens the exact abort the sweep now reports.
+#     identity trivially satisfied and COUNT == left) → RED at COUNT > 0 (case
+#     35), while the healthy residue shape (`cleared: true`) PASSES (case 36).
+#     At that count only the `cleared` field separates them, so a gate that
+#     drops the `cleared` branch greens the exact abort the sweep now reports.
 #   * a DEFERRED sweep (`other_suites` non-empty) → a warning and PASS with
 #     the accounting identity skipped and only the `COUNT <= left` direction
 #     applied (case 37); a deferred `COUNT` above even the mixed-population
@@ -104,9 +108,13 @@
 # removed or weakened (the `probe_failed` COUNT==0 carve-out dropped, the
 # `cleared=false` red removed, the deferral warning or its `COUNT <= left`
 # rescue removed, the mixed-population identity made authoritative again, the
-# contract check neutered). The count-branch boundary pins (case 41) and the
-# rc=1 kill-set pin (case 42) likewise fail when a bound is widened past 0 or
-# `1` is added to the kill set.
+# contract check neutered). Cases 43-45 fail if the `cleared=false` verdict
+# stops keying on `COUNT` — red restored at COUNT == 0 (case 43), the COUNT > 0
+# red weakened to a pass (case 44), or the kill downgrade dropped (case 45) —
+# and case 40 fails if the `probe_failed` arm goes back to keying on `cleared`
+# at COUNT == 0. The count-branch boundary pins (case 41) and the rc=1 kill-set
+# pin (case 42) likewise fail when a bound is widened past 0 or `1` is added to
+# the kill set.
 # A case that merely restates a default would not catch its own removal.
 #
 # The assertion count is PINNED (see the summary): a lost case must not be
@@ -188,11 +196,12 @@ assert_eq "$RC" "0" "exits 0"
 assert_contains "$OUT" "left=7" "reports the second report's own value"
 assert_not_contains "$OUT" "left=14" "uses the report's value, not case 1's"
 
-echo "3. cleared=false REDs whatever the count is (a normal exit)"
+echo "3. cleared=false at COUNT>0 REDs on a normal exit (servers remain, backlog unproven)"
 run_gate 14 0 budget.json
-assert_eq "$RC" "1" "exits 1 even though COUNT==left"
+assert_eq "$RC" "1" "exits 1 at a non-zero count"
 assert_contains "$OUT" "cleared=false" "names the exhausted budget"
-assert_contains "$OUT" "arbitrary" "states the residue is unbounded"
+assert_contains "$OUT" "did not prove the backlog clear" "names the unproven sweep"
+assert_contains "$OUT" "14 redislite servers remain" "names the actual COUNT"
 assert_not_contains "$OUT" "within the sweep's own measurement" "never prints a pass line"
 
 echo "4. cleared=false under a watchdog kill downgrades to a warning"
@@ -493,16 +502,21 @@ assert_eq "$FIXTURE_KEYS" "$(printf '%s\n' $FIELDS | sort | tr '\n' ' ' | sed 's
 # as a wrong value or a wrong call count. The field-set half of case 39
 # above is kept — it pins a producer/consumer contract between two files.
 
-echo "40. left=null with cleared=FALSE REDs even at COUNT=0 (an exhausted budget is not a diagnostic)"
-# #4740 review 5: the COUNT==0 carve-out (case 34) exists only for a sweep that
-# FINISHED. The same failed probe from an EXHAUSTED budget is the sweep's own
-# "hygiene is broken" signal and must red whatever the count is.
+echo "40. left=null is verdict-uniform with the report branch: COUNT decides, not cleared"
+# The two arms are now consistent: an unproven sweep is acceptable only at a
+# measured zero. A `cleared: false` probe failure at COUNT == 0 is the same
+# empty residue as a `cleared: true` one (case 34) — nothing live to bind — and
+# above zero it REDs whatever `cleared` says.
 run_gate 0 0 leftnull_aborted.json
-assert_eq "$RC" "1" "exits 1 at COUNT=0 when the sweep reported cleared=false"
+assert_eq "$RC" "0" "exits 0 at COUNT=0 even with cleared=false"
+assert_contains "$OUT" "::warning::" "warns that the sweep-side probe failed"
+assert_not_contains "$OUT" "unaccounted for" "does not red an empty residue"
+run_gate 1 0 leftnull_aborted.json
+assert_eq "$RC" "1" "exits 1 at COUNT=1 (the residue is unmeasured)"
 assert_contains "$OUT" "cleared=false" "names the exhausted budget"
 assert_contains "$OUT" "probe FAILED" "names the failed sweep-side probe"
-assert_not_contains "$OUT" "diagnostic only" "does not excuse the aborted sweep"
-run_gate 0 124 leftnull_aborted.json
+assert_not_contains "$OUT" "diagnostic only" "does not excuse the unmeasured residue"
+run_gate 1 124 leftnull_aborted.json
 assert_eq "$RC" "0" "a watchdog kill still downgrades it (rc=124)"
 assert_contains "$OUT" "::warning::" "emits a warning under a kill"
 
@@ -537,10 +551,46 @@ assert_eq "$RC" "1" "COUNT > left REDs at rc=1"
 assert_contains "$OUT" "::error::" "emits an error, not a warning"
 assert_not_contains "$OUT" "::warning::" "does not downgrade a count mismatch on a failing run"
 
+echo "43. cleared=false with COUNT==0 PASSES with a warning (nothing live to bound)"
+# The CI false red (#4740, run 35893361130): reaped=9, cleared=false, left=5,
+# before=14, and the workflow measured COUNT=0 — redislite's atexit had already
+# shut the 5 servers down. A budget-exhausted sweep is only unproven, so at a
+# measured zero there is nothing to bound and the run is clean by measurement.
+run_gate 0 0 budget.json
+assert_eq "$RC" "0" "exits 0 when the workflow's own probe measured zero"
+assert_contains "$OUT" "::warning::" "warns that the sweep exhausted its budget"
+assert_contains "$OUT" "cleared=false" "names the exhausted budget"
+assert_contains "$OUT" "diagnostic only" "labels it a diagnostic"
+assert_contains "$OUT" "within the sweep's own measurement" "prints the pass line"
+assert_not_contains "$OUT" "::error::" "does not red an empty residue"
+
+echo "44. cleared=false with COUNT>0 REDs and names the actual count"
+# COUNT (3) is below left (14), so only the cleared=false branch can red here:
+# the sweep did not prove the backlog clear AND servers remain.
+run_gate 3 0 budget.json
+assert_eq "$RC" "1" "exits 1 at a non-zero count"
+assert_contains "$OUT" "cleared=false" "names the exhausted budget"
+assert_contains "$OUT" "did not prove the backlog clear" "names the unproven sweep"
+assert_contains "$OUT" "3 redislite servers remain" "names the actual COUNT"
+assert_not_contains "$OUT" "within the sweep's own measurement" \
+  "does NOT fall through to the pass line (fail-open pin)"
+
+echo "45. the cleared=false pair under a kill rc: zero warns, non-zero downgrades"
+run_gate 0 124 budget.json
+assert_eq "$RC" "0" "exits 0 at COUNT=0 under rc=124"
+assert_contains "$OUT" "::warning::" "still warns at a measured zero under a kill"
+assert_contains "$OUT" "within the sweep's own measurement" "prints the pass line"
+run_gate 3 124 budget.json
+assert_eq "$RC" "0" "exits 0 at COUNT>0 under rc=124 (downgraded)"
+assert_contains "$OUT" "::warning::" "emits a warning instead of a red"
+assert_contains "$OUT" "#1371" "cites the kill-aware rationale"
+assert_not_contains "$OUT" "within the sweep's own measurement" \
+  "the warning path does not print a pass line either"
+
 echo
 # A LOST case must not be indistinguishable from success: deleting a case
 # leaves FAIL=0 and merely a LOWER count, so the count is pinned too.
-expected_assertions=134
+expected_assertions=156
 if [ "$PASS" -eq "$expected_assertions" ]; then
   PASS=$((PASS + 1))
   echo "  ✅ assertion count pinned at $expected_assertions (a lost case is not a green run)"

@@ -796,10 +796,12 @@ jobs:
         # too (trunk run 34928488659 measured 7), and that residue is what the
         # sweep's own `left` now accounts for. What this gate reds: a leak
         # that appears AFTER the sweep (COUNT > left), a sweep that aborted or
-        # failed (cleared=false, error, skipped, or a probe_failed with a
-        # non-zero count or an exhausted budget), an identity
+        # failed with servers remaining (cleared=false at a non-zero count,
+        # error, skipped, or a probe_failed at a non-zero count), an identity
         # violation (reaped + left < before), and an unaccounted/unreadable
-        # report. It does NOT independently red a residue the sweep itself
+        # report. A `cleared: false` or `probe_failed` report at a measured
+        # COUNT of zero is a warning, not a red: there is no live residue to
+        # bound. It does NOT independently red a residue the sweep itself
         # measures and declines to act on (a server with a live client, an
         # unconfirmed path-based server): that lands in `left` and passes at
         # COUNT == left, bounded by the sweep's own measurement (#4884).
@@ -1172,7 +1174,9 @@ jobs:
         # (.github/scripts/orphan-bound.sh), never a hand-picked constant. On a
         # docker leg the sweep reports no embedded server was ever running, so
         # the bound is structurally 0; on a tier-2 embedded leg it is the
-        # sweep's own `left`. Kill-aware downgrade per #1371.
+        # sweep's own `left`. A `cleared: false` sweep is keyed on the measured
+        # COUNT: zero passes with a warning, non-zero reds. Kill-aware
+        # downgrade per #1371.
         if: always()
         run: |
           set +e
@@ -1651,9 +1655,11 @@ jobs:
         # (.github/scripts/orphan-bound.sh), never a hand-picked constant. The
         # carve-out runs embedded, so the sweep reports its own `left`. The
         # gate reds a leak that appears AFTER the sweep, a sweep that aborted
-        # or failed, an identity violation, and an unaccounted/unreadable
-        # report; a residue the sweep itself measures and declines to act on
-        # is bounded by that measurement, not independently red (#4884).
+        # or failed with servers remaining, an identity violation, and an
+        # unaccounted/unreadable report; a residue the sweep itself measures
+        # and declines to act on is bounded by that measurement, not
+        # independently red (#4884). A `cleared: false` sweep is keyed on the
+        # measured COUNT: zero passes with a warning, non-zero reds.
         # Kill-aware downgrade per #1371.
         if: always()
         run: |
