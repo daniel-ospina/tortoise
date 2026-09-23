@@ -1164,8 +1164,16 @@ def _operator_alert_isolation(monkeypatch):
     oa.reset_operator_alert_state_for_tests()
     # The light leg's MemoryStorage is a PROCESS-wide singleton: a title filed
     # by one test stays "already filed" for the next, which is a latent DEDUP
-    # collision rather than anything a test asked for. Reset it per test.
+    # collision rather than anything a test asked for. Reset it per test — and
+    # the HOSTED leg's own singleton too: under TORTOISE_BACKUP_STORAGE=memory
+    # `hosted_api._backup_storage` returns it, so the same collision is reachable
+    # through the hosted builder (e.g. a cap-firing test), and resetting only one
+    # leg leaves the suite order-dependent. Only touched when that module is
+    # already loaded — this fixture must not import the hosted app for every test.
     alert_channel.reset_memory_storage_for_tests()
+    _ha = sys.modules.get("tortoise.hosted_api")
+    if _ha is not None:
+        _ha._MEMORY_BACKUP_STORE = None
     yield
     # Honest limit: a handle aged past _INFLIGHT_STALE_S is dropped from _HANDLES,
     # so a genuinely wedged worker is untracked here and this join cannot speak for

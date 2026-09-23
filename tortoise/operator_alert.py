@@ -214,16 +214,23 @@ def _release_locked() -> None:
 
 
 def _prune_locked(now: float) -> None:
-    """Amortised map housekeeping — never the admission decision (see _RESERVED)."""
+    """Amortised map housekeeping — never the admission decision (see _RESERVED).
+
+    Deliberately does NOT sweep ``_INFLIGHT``: a stale latch may ONLY be cleared
+    by a successor (``_due_locked``, which admits one atomically) or by a test
+    reset. Sweeping it here would let a queued worker — admitted before, sat
+    behind saturated workers past ``_INFLIGHT_STALE_S`` — start, find its token
+    gone with no successor, and return WITHOUT filing: the silent drop this
+    module exists to remove. ``_INFLIGHT`` needs no sweep for its own bound —
+    every insert is paired with a reservation, so it is already bounded by
+    ``_MAX_INFLIGHT``.
+    """
     if len(_ATTEMPT) > _PRUNE_ABOVE:
         for k, (ts, window) in list(_ATTEMPT.items()):
             if now - ts >= window:
                 _ATTEMPT.pop(k, None)
         while len(_ATTEMPT) > _MAX_KEYS:
             _ATTEMPT.popitem(last=False)          # least-recently-attempted
-    for k, started in list(_INFLIGHT.items()):
-        if now - started > _INFLIGHT_STALE_S:
-            _INFLIGHT.pop(k, None)
     _reap_locked(now)
 
 
@@ -241,9 +248,12 @@ def _run(store, key, kind, org_id, detail, token) -> None:
     try:
         # Ownership check BEFORE the store write: a superseded attempt must not
         # spend a network call filing an incident its successor is already
-        # filing, and must not reach a store that may be tearing down. The
-        # check is REPEATED below because a newer attempt can start while this
-        # one is in flight.
+        # filing, and must not reach a store that may be tearing down. SAFE to
+        # return here because a latch is only ever cleared by a SUCCESSOR
+        # (``_due_locked``) or a test reset — never swept behind our back (see
+        # ``_prune_locked``), so a missing token means someone else will file.
+        # The check is REPEATED below because a newer attempt can start while
+        # this one is in flight.
         with _LOCK:
             if _INFLIGHT.get(key) != token:
                 return

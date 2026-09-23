@@ -553,6 +553,75 @@ def test_operator_store_prefers_the_hosted_leg_when_it_is_loaded(
     assert oa.alert_store() is sentinel
 
 
+def test_prune_never_sweeps_an_unsettled_latch(monkeypatch):
+    """Pin: ``_prune_locked`` must NOT clear ``_INFLIGHT``.
+
+    A latch swept with no successor lets a queued worker — admitted before, sat
+    behind saturated workers past ``_INFLIGHT_STALE_S`` — start, find its token
+    gone with nobody to replace it, and return WITHOUT filing: the silent drop
+    this module exists to remove. ``_run``'s pre-check is only safe while a
+    latch can be cleared by a successor (``_due_locked``) alone.
+    """
+    monkeypatch.setattr(oa, "_INFLIGHT_STALE_S", 0.02)
+    gate = threading.Event()
+    monkeypatch.setattr(oa, "alert_store", lambda: _GatedStore(gate))
+    assert oa.alert_operator(_KIND, "org-latch", {}) is not None
+    time.sleep(0.05)
+    with oa._LOCK:
+        oa._prune_locked(time.monotonic())
+        assert oa._INFLIGHT.get((_KIND, "org-latch")) is not None, (
+            "the sweep must leave the latch to the successor")
+    gate.set()
+    oa.join_operator_alerts()
+
+
+def test_reset_clears_the_light_leg_dedup_store(monkeypatch):
+    """Pin: the autouse reset must actually drop the singleton.
+
+    Without it a title filed by one test stays "already filed" for the next — a
+    latent DEDUP collision, and an order-dependent suite.
+    """
+    from tortoise import alert_channel
+
+    monkeypatch.setenv("TORTOISE_BACKUP_STORAGE", "memory")
+    monkeypatch.delenv("FLY_APP_NAME", raising=False)
+    first = alert_channel.light_storage()
+    assert alert_channel.light_storage() is first, (
+        "precondition: it is a process-wide singleton")
+    alert_channel.reset_memory_storage_for_tests()
+    assert alert_channel.light_storage() is not first, (
+        "the reset must drop the singleton, or dedup state leaks across tests")
+
+
+def test_alert_store_from_forwards_the_writer(monkeypatch):
+    """Pin main's #3127/#2844 authority contract across the delegate.
+
+    ``hosted_api.py:1326`` builds the watcher's store with
+    ``_alert_store_from(cfg, writer=WRITER_WATCHER)``. If the delegate drops
+    ``writer`` the whole watcher path acts as the app, the KIND_OWNERS check
+    goes inert, and NOTHING else in the suite notices — hence this pin.
+    """
+    import types
+
+    from tortoise import alert_channel
+    from tortoise import hosted_api as ha
+    from tortoise.alert_store import WRITER_APP, WRITER_WATCHER
+
+    monkeypatch.setattr(ha, "_backup_storage", lambda: MemoryStorage())
+    cfg = types.SimpleNamespace(
+        gh_repo="daniel-ospina/tortoise", github_issues_pat="p",
+        alert_assignee=None, telegram_bot_token="t", telegram_chat_id="c")
+
+    assert ha._alert_store_from(cfg)._writer == WRITER_APP
+    assert ha._alert_store_from(
+        cfg, writer=WRITER_WATCHER)._writer == WRITER_WATCHER
+    assert alert_channel.alert_store_from(
+        cfg, storage_factory=lambda: MemoryStorage())._writer == WRITER_APP
+    assert alert_channel.alert_store_from(
+        cfg, storage_factory=lambda: MemoryStorage(),
+        writer=WRITER_WATCHER)._writer == WRITER_WATCHER
+
+
 def test_the_autouse_isolation_is_load_bearing(monkeypatch):
     """T18 shape: the second assertion is what REDs if the fixture is deleted.
 

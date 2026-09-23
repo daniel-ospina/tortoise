@@ -69,11 +69,16 @@ def light_storage():
     when the four ``R2_*`` vars are missing — the caller turns that into
     ``None`` plus a WARNING, which is the documented D6 residual.
 
-    The memory seam REFUSES on Fly (#101 incident class): memory alert-dedup
+    The memory seam is REFUSED on Fly (#101 incident class): memory alert-dedup
     state vanishes on restart, which is the silent-data-loss mode the #101
     postmortem documents. ``hosted_api`` enforces the same rule at import
     time; it is enforced here PER CALL as well, because this leg can be
     reached in a process that never imported ``hosted_api`` at all.
+
+    The raise does not escape to the caller: :func:`incident_alert_store`
+    catches it, so the EFFECT on Fly is "no alert channel, plus a WARNING naming
+    this reason" — never a silently-accepted in-memory dedup store, and never a
+    raise on the alert path (whose whole contract is that it cannot raise).
     """
     global _MEMORY_STORAGE
     mode = os.environ.get("TORTOISE_BACKUP_STORAGE", "").strip().lower()

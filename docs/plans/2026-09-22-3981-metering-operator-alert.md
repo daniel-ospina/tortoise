@@ -973,3 +973,32 @@ which is merge-blocking, so the branch was rebased onto main and adapted rather 
   `hosted_api._incident_alert_store` and `operator_alert.alert_store` are interchangeable patch points.
 
 OAM6/OAM7 were **re-verified RED** after the rebase (`operations/logs/3981-mutation-evidence.log`).
+
+### Implementation record (round 4 — review cycle 2 fixes)
+
+Cycle 2 found one regression the cycle-1 fix itself introduced, plus three coverage gaps:
+
+* **P1 — the pre-check could silently drop an admitted alert.** `_prune_locked` swept
+  `_INFLIGHT` unconditionally, with no successor required. A worker admitted before saturating the
+  pool, queued past `_INFLIGHT_STALE_S` (120 s), then started, found its token gone with nobody to
+  replace it, and returned *before* filing — no incident, no log. That is the exact silent-drop class
+  this module exists to remove, reached under the storm it exists for. `_prune_locked` no longer
+  touches `_INFLIGHT`: a latch is cleared only by a successor (`_due_locked`, which admits one
+  atomically) or a test reset, which is what makes the pre-check safe. No bound is lost — every insert
+  is paired with a reservation, so `_INFLIGHT` is already bounded by `_MAX_INFLIGHT`.
+* **P2 — the writer forwarding was unpinned.** Forcing `alert_store_from` to ignore `writer` passed
+  179 tests, so the merge-blocking #3127/#2844 authority contract could be dropped again with green
+  CI. `test_alert_store_from_forwards_the_writer` now pins both legs (default `WRITER_APP`, explicit
+  `WRITER_WATCHER`).
+* **P2 — the isolation reset covered only the light leg.** `hosted_api._MEMORY_BACKUP_STORE` is the
+  singleton `_backup_storage` returns under `TORTOISE_BACKUP_STORAGE=memory`, so the DEDUP collision
+  the fixture prevents was still reachable through the hosted builder. The fixture resets it too, but
+  only when that module is already loaded (the fixture must not import the hosted app for every test),
+  and `test_reset_clears_the_light_leg_dedup_store` pins that the reset is not a no-op.
+* **P2 — the Fly refusal's effect was described wrongly.** `light_storage` raises, and
+  `incident_alert_store` catches it, so on Fly the effect is "no channel plus a WARNING naming the
+  reason" — not a surfaced failure. The docstring now says that, since claiming a refusal that the
+  caller never sees is precisely the self-referential prose that re-stales. A follow-up covers the
+  hosted branch's import-time-only check.
+
+Four mutations observed RED (`operations/logs/3981-mutation-evidence.log`).
