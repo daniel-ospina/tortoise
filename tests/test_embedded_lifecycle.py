@@ -25,6 +25,41 @@ import tortoise  # noqa: F401
 from tortoise import FalkorDB
 
 
+# ── #4879: no test here may inherit or leave an ARMED exit budget ─────────
+#
+# `tortoise.embedded_lifecycle._atexit_deadline` is a PROCESS-WIDE clock: the
+# first `atexit_fast_close(..., at_exit=True)` call in the process anchors it
+# (default 30 s) and it is NEVER re-armed. Several tests in this module call
+# the exit seam MID-RUN (`_atexit_close()`) to exercise it without exiting,
+# which arms that clock for the rest of the process. A later module's own
+# seam test then reads the clock as SPENT and takes the budget
+# short-circuit — which returns "handled" while deliberately leaving the
+# server RUNNING — instead of the close it is asserting. That is exactly how
+# `test_embedded_lifecycle_fast_close.py::test_atexit_seams_registered` went
+# red once this module grew: the clock armed at
+# `test_fast_atexit_never_shuts_down_a_live_cotenant`, and 51 s later (budget
+# 30 s) the sibling module's assertion read it as spent. The mechanism is the
+# clock, not a leaked server/socket/pid — with `TORTOISE_ATEXIT_BUDGET=0`
+# (never expires) the same pair is green.
+#
+# `test_exit_cascade_still_reclaims_the_socket_dir` in the sibling module
+# already works around this hazard per-test ("The process budget is global
+# and may already be spent by an earlier test's direct seam call"). This is
+# that same reset applied to EVERY test in this module, in both directions,
+# so neither an inherited nor a left-behind clock can reach a test that
+# asserts a close happened. Resetting to None (never to a captured value)
+# is the documented mid-run contract — "Mid-run calls are unbounded" — and
+# is safe in the only direction that matters: an unspent budget can only
+# make the seam do more work, never skip a close it should have done.
+@pytest.fixture(autouse=True)
+def _isolate_atexit_budget():
+    from tortoise import embedded_lifecycle
+
+    embedded_lifecycle._atexit_deadline = None  # no cascade is running
+    yield
+    embedded_lifecycle._atexit_deadline = None
+
+
 def _count_redis_servers() -> int:
     """Count live redislite redis-server processes (pgrep)."""
     import subprocess
@@ -2379,7 +2414,8 @@ def _spawn_redis_server_stub(stub_dir, socket_arg):
     return stub_pid
 
 
-def test_foreign_live_redis_server_is_not_proven_and_not_signalled(tmp_path):
+def test_foreign_live_redis_server_is_not_proven_and_not_signalled(
+        tmp_path, monkeypatch):
     """#4879 review: the two PROVENANCE legs must reject a live foreign server.
 
     `test_unproven_recorded_pid_is_not_signalled_and_nothing_is_started`
@@ -2405,8 +2441,11 @@ def test_foreign_live_redis_server_is_not_proven_and_not_signalled(tmp_path):
 
     # A fresh cache: a stale discover() sweep entry for this pid would answer
     # `_pid_is_redis`/`_process_start_time` for a different process and make
-    # this test vacuous.
-    _reaper._PROC_INFO_CACHE = {}
+    # this test vacuous. Via monkeypatch so the module-global rebind is undone
+    # at teardown (restoring the ORIGINAL dict, and dropping this test's
+    # entries with it) — a bare assignment would hand a rebound cache to every
+    # later test in the process.
+    monkeypatch.setattr(_reaper, "_PROC_INFO_CACHE", {})
 
     # Both paths must be short enough for AF_UNIX: macOS rejects >~104 bytes
     # with ENAMETOOLONG, masking the ENOENT this state actually produces.
@@ -2467,7 +2506,8 @@ def test_foreign_live_redis_server_is_not_proven_and_not_signalled(tmp_path):
         shutil.rmtree(stub_dir, ignore_errors=True)
 
 
-def test_recycled_pid_started_after_the_pidfile_is_not_signalled(tmp_path):
+def test_recycled_pid_started_after_the_pidfile_is_not_signalled(
+        tmp_path, monkeypatch):
     """#4879 review: the START-TIME leg must refuse a recycled pid.
 
     The sibling foreign-argv test pins the argv-binding leg; this pins the
@@ -2488,7 +2528,9 @@ def test_recycled_pid_started_after_the_pidfile_is_not_signalled(tmp_path):
 
     from tortoise import embedded_reaper as _reaper
 
-    _reaper._PROC_INFO_CACHE = {}
+    # monkeypatch (not a bare rebind) so the module-global cache is restored at
+    # teardown — see the sibling foreign-argv test.
+    monkeypatch.setattr(_reaper, "_PROC_INFO_CACHE", {})
 
     sock_dir = tempfile.mkdtemp(prefix="t4879_recycled_")
     stub_dir = tempfile.mkdtemp(prefix="t4879_stub_")
