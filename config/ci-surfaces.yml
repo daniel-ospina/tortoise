@@ -484,6 +484,7 @@ surfaces:
   # counts. Editing any of those selected NO surface, so the drift gate never ran
   # on precisely the PRs that can break it. `core` is the docs/default surface.
   - test_bridge_table.py
+  - test_env_isolation.py
   # #4282: dual-registered with `api` for the same reason as test_bridge_table.py
   # above — `tools/mcp_rename_table.py` is named in SOURCE_PATTERNS["api"], so a
   # GENERATOR-only edit selects `api` and runs this drift gate.
@@ -2071,6 +2072,14 @@ durations:
   test_deployment.py: 0.0
   test_embedder_probe.py: 0.0
   test_entity_stage.py: 0.0
+  # #4883: new file (the per-test env-isolation pin — two tests, milliseconds).
+  # Entered at 0.0 rather than the flat 2.0 default, per the #2517 precedent for a
+  # newly-added file: at 2.0 == DEFAULT_FAST_WEIGHT the entry re-packs the greedy
+  # parity of the ~480-file 2.0 tie group for ZERO balance benefit, and this map
+  # itself records that a re-pack "was observed to expose order-dependent
+  # test-isolation failures in unrelated tests" — precisely the failure class this
+  # PR is about. Coverage stays satisfied by the key's presence.
+  test_env_isolation.py: 0.0
   test_ep_nary_falsification.py: 0.0
   test_epic903_mcp.py: 0.0
   test_event_log.py: 0.0

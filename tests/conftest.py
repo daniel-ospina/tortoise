@@ -167,6 +167,54 @@ def _p4_uri_required():
     _assert_p4_uri_required()
 
 
+# ── #4883: per-test isolation for the process-shared routing env vars ──────
+# pytest runs one process, so a test that writes one of these keys with a plain
+# `os.environ[...] = ...` (no monkeypatch, no restore) leaks it into everything after
+# it. `tests/test_uri_env_mutations_declared.py` (#2084) already guards this CLASS, but
+# for `TORTOISE_DB_URI` only, so the leak survived for every other routing key.
+#
+# SCOPE — this closes the leak class. It is NOT the fix for the
+# `test_pack_state.py::TestBackfillScript::test_apply_writes_to_introspection_read_target`
+# flake that #4883 was opened for. That flake's root cause is redislite replaying a
+# `.settings` registry whose recorded socket is gone — a recycled live pid satisfies
+# every check in `_is_redis_running()`, which never validates the socket — so the client
+# is handed a dead path and dies with `ConnectionError: Error 2 connecting to
+# ...redis.socket. No such file or directory`. Tracked as #4879, fix in #4892. The victim
+# passes `db_path` explicitly, so per-test env restoration cannot influence it. Do not
+# read this fixture as evidence that flake is fixed.
+#
+# Function-scoped autouse, and ORDER-INSENSITIVE by construction: this fixture snapshots
+# the pre-test values and `monkeypatch` restores the SAME pre-test values, so the end
+# state is identical whichever teardown runs first. (pytest orders same-scope autouse
+# fixtures by NAME, not declaration order — see the redislite-lane note further down — so
+# nothing here may depend on setup order.) It is therefore a no-op for a correctly
+# isolated test and repairs only a genuine un-restored write.
+_ENV_ISOLATION_PREFIXES = ("TORTOISE_", "SUPABASE_", "PACK_STATE_")
+
+
+def _isolated_env_keys():
+    return [k for k in os.environ if k.startswith(_ENV_ISOLATION_PREFIXES)]
+
+
+@pytest.fixture(autouse=True)
+def _isolate_process_env():
+    """#4883: restore TORTOISE_*/SUPABASE_*/PACK_STATE_* env after every test.
+
+    A test may legitimately CHANGE these (via ``monkeypatch``, which undoes
+    itself) — it may not legitimately LEAK them. Restoring the pre-test value
+    per test makes each test hermetic for the keys the suite routes on, so
+    order-dependent state cannot decide a result.
+    """
+    before = {k: os.environ[k] for k in _isolated_env_keys()}
+    yield
+    for k in _isolated_env_keys():
+        if k not in before:
+            os.environ.pop(k, None)
+    for k, v in before.items():
+        if os.environ.get(k) != v:
+            os.environ[k] = v
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _fresh_capture_spool():
     """#3963: start every pytest SESSION with a fresh capture spool.
