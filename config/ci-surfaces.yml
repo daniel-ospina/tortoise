@@ -1468,8 +1468,8 @@ durations:
 # test_bridge_table.py's measurement because
 # tests/test_mcp_rename_table.py::test_duration_weight_matches_the_sibling_generator_suite
 # requires the two generator suites to carry one weight — the pin constrains
-# equality, not the number. (Only the RETAINED row below shares the property that its
-# value is not this sweep's measurement of the file, as are the two rows marked
+# equality, not the number. (The RETAINED row below shares the property that its value
+# is not this sweep's measurement of the file, as do the two rows marked
 # `# unmeasured` below; see there.)
 #
 # OVERRIDES: rows whose previous value was a recorded decision or a deliberate
