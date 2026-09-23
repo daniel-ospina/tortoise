@@ -203,9 +203,11 @@ unset "${_RWEK_MANAGED_KEYS[@]}"
 #      this script INHERITED, plus the keys an earlier `.env` line already
 #      filled — never by "is some shell variable set", which would also catch
 #      bash's own non-exported internals (`PS4`, `IFS`, …) and silently drop a
-#      `.env` key naming one. `printenv` answers exactly "is KEY in the
-#      environment", with no haystack to forge (a malformed env entry whose
-#      NAME contains a newline cannot fake a boundary hit).
+#      `.env` key naming one. The question is asked with the `declare` BUILTIN
+#      (`declare -p` reveals the `-x` flag), so the decision cannot be
+#      subverted by an unpinned external command: a `printenv` resolved through
+#      a caller's PATH or shadowed by an exported `BASH_FUNC_printenv%%` would
+#      have flipped it. "Cannot determine" is never read as "absent".
 if [ -f "$_RWEK_ENV_FILE" ] && [ -r "$_RWEK_ENV_FILE" ]; then
   while IFS= read -r _rwek_raw || [ -n "${_rwek_raw:-}" ]; do
     _rwek_line=$(trim "${_rwek_raw%$'\r'}")
@@ -253,10 +255,19 @@ if [ -f "$_RWEK_ENV_FILE" ] && [ -r "$_RWEK_ENV_FILE" ]; then
 
     if is_managed_key "$_rwek_key"; then
       export "$_rwek_key=$_rwek_value"
-    elif ! printenv "$_rwek_key" >/dev/null 2>&1; then
+    else
       # fill-if-absent: an inherited key, or one an earlier `.env` line already
-      # set, is never clobbered — `_load_dotenv`'s deliberate semantics
-      export "$_rwek_key=$_rwek_value"
+      # set, is never clobbered — `_load_dotenv`'s deliberate semantics. The
+      # `declare` builtin reports the `-x` (exported) flag, so this is exactly
+      # "is the name in the process environment" without trusting PATH or the
+      # function table.
+      _rwek_decl=$(command declare -p "$_rwek_key" 2>/dev/null) || _rwek_decl=
+      _rwek_flags=${_rwek_decl#declare -}
+      _rwek_flags=${_rwek_flags%% *}
+      case "$_rwek_flags" in
+        *x*) ;;                                 # exported — keep the value
+        *) export "$_rwek_key=$_rwek_value" ;;
+      esac
     fi
   done <"$_RWEK_ENV_FILE"
 else

@@ -307,11 +307,11 @@ class RunWithEvalKeysTests(unittest.TestCase):
         self.assertEqual(r.stdout, "first", r.stderr)
 
     def test_malformed_ambient_name_cannot_forge_an_inherited_key(self):
-        # An env entry whose NAME contains a newline (reachable only through a
-        # raw execve, never a normal shell) must not make a legitimate `.env`
-        # key look inherited and silently drop it. `subprocess`'s `env=`
-        # mapping rejects such a name, so the entry is injected via the `env`
-        # binary's argv.
+        # An env entry whose NAME contains a newline (a malformed entry that an
+        # execve can carry even though an ordinary `VAR=...` assignment cannot)
+        # must not make a legitimate `.env` key look inherited and silently
+        # drop it. The `env` binary is used because it hands a bare
+        # `NAME=value` argv string straight to execve.
         env_file = Path(self._tmp.name) / "forge.env"
         env_file.write_text("EVALTEST_FORGE=from-dotenv\n", encoding="utf-8")
         r = subprocess.run(
@@ -332,6 +332,22 @@ class RunWithEvalKeysTests(unittest.TestCase):
         )
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout, "from-dotenv", r.stderr)
+
+    def test_inherited_value_survives_without_an_external_env_command(self):
+        # The fill-if-absent decision must not depend on an external command:
+        # with a PATH lacking the probe binary (which would make it exit 127 ->
+        # "absent"), an inherited non-managed var must still win over `.env`.
+        env_file = Path(self._tmp.name) / "keep.env"
+        env_file.write_text("EVALTEST_KEEP=from-dotenv\n", encoding="utf-8")
+        env = self.base_env(PATH="/bin", EVALTEST_KEEP="ambient-wins")
+        env["EVAL_KEYS_ENV_FILE"] = str(env_file)
+        r = self.run_wrapper(
+            ["/bin/sh", "-c", 'printf "%s" "${EVALTEST_KEEP-unset}"'],
+            env=env,
+            use_fixture=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "ambient-wins", r.stderr)
 
     # ── .env parsing semantics (mirrors _load_dotenv) ──────────────────
 
