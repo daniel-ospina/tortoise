@@ -1465,9 +1465,12 @@ durations:
 # requires the two generator suites to carry one weight — the pin constrains
 # equality, not the number.
 #
-# OVERRIDES — rows whose previous value was a recorded decision (or a deliberate
-# load-range / local-sample estimate rather than a measurement), replaced here by
-# the measurement. Each is reopened on #3395 for a veto; none was changed silently:
+# OVERRIDES — rows whose previous value was a recorded decision or a deliberately
+# conservative estimate (a #4282 reserve, a load-range value, a #3895/#3718 loose
+# middle, a #2517 pin), replaced here by the measurement — or, for the pinned
+# generator row, held equal to its measured sibling. Provisional first cuts (a flat
+# 2.0 default, a single local timing entered pending CI) are not decisions and are
+# not listed. Each is reopened on #3395 for a veto; none was changed silently:
 #   test_bridge_table.py 240.0 -> measured. A documented reserve (#4282:
 #     "CI-observed range 34s-537s depending on box load"). Its sibling
 #     test_mcp_rename_table.py 240.0 -> held equal to it (the pin below), not measured.
@@ -1479,6 +1482,8 @@ durations:
 #     test_read_routes_loop_responsiveness.py 30.0,
 #     test_graph_write_loop_responsiveness.py 30.0 -> measured. Local/host samples
 #     (#3501, #3895, #3718 — both halves of the #3718 pair) rather than CI wall time.
+#     Included even though three of the four notes call themselves first estimates:
+#     they err high, so they are surfaced for the veto too.
 #   test_build_cohorts_2517.py, test_session_reinjection.py,
 #     test_session_reinjection_rules.py, test_eval_reinjection_cap_resume.py,
 #     test_guard_measured_revision.py -> measured, from a deliberate 0.0 (#2517: the
