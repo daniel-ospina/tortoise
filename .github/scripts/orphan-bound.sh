@@ -116,8 +116,9 @@
 #   `COUNT == left` — this gate is bounded by that measurement and does not
 #   independently red it. What the gate DOES red: a leak that appears AFTER the
 #   sweep (`COUNT > left`), a sweep that aborted or failed (`cleared: false`,
-#   `error`, `skipped`, `probe_failed`), an identity violation
-#   (`reaped + left < before`), and an unaccounted/unreadable report.
+#   `error`, `skipped`, or a `probe_failed` with a non-zero count or an
+#   exhausted budget), an identity violation (`reaped + left < before`), and an
+#   unaccounted/unreadable report.
 #   FOLLOW-UP: catching the declined class needs a measurement the sweep does
 #   not yet produce — the count it examined and declined, with reasons — a
 #   separate change, issue #4884. No hand-picked constant is reintroduced for

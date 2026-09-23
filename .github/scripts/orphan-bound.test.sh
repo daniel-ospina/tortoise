@@ -62,8 +62,11 @@
 #     pointing at a variable), the four positional arguments are exactly those
 #     four names in that order, and each name is bound EXACTLY ONCE by its
 #     producer (`total`/`cleared` by the `sweep_until_cleared(...)` unpack at
-#     positions 0/1, `left`/`before` by a call — the live-count probe — never a
-#     literal or a rebind). No report-shaped constructor carrying a `"cleared"`
+#     positions 0/1, `left`/`before` by a BARE `_live_count_or_none()` call —
+#     the live-count probe, with no callee wrapper (`max(...)`, `int(...)`) and
+#     no arguments — `before` read before the sweep and `left` after it; never
+#     a literal, a wrapped call, a rebind, or a swapped position). No
+#     report-shaped constructor carrying a `"cleared"`
 #     key may exist (a dict literal OR a `dict(...)` call — the round-5 dead
 #     branch that a literal-only counter cannot see), and no subscript or
 #     attribute store, or `.update(...)`, may touch a result variable. The
@@ -95,7 +98,9 @@
 # rescue removed, the mixed-population identity made authoritative again, the
 # contract check neutered, `_sweep`'s report built outside its four real
 # producers — the returned value no longer the builder call, an argument not
-# one of those four names, a reordered unpack, a rebind or a report-shaped
+# one of those four names, a reordered unpack, a rebind, a `left`/`before`
+# probe call that is wrapped (`max(...)`/`int(...)`) or takes arguments, or a
+# swapped before/left position, or a report-shaped
 # `dict(...)`, or a subscript/attribute write on the result — a count-branch
 # bound widened past 0, or rc=1 added to the kill set).
 # A case that merely restates a default would not catch its own removal.
@@ -485,7 +490,11 @@ assert_eq "$FIXTURE_KEYS" "$(printf '%s\n' $FIELDS | sort | tr '\n' ' ' | sed 's
 #                unpack REDs);
 #   binds      — each of the four names is bound EXACTLY ONCE, by its real
 #                producer (the `sweep_until_cleared` unpack for total/cleared,
-#                a call for left/before) — a literal or a rebind REDs;
+#                a BARE `_live_count_or_none()` call for left/before — the
+#                callee is checked by name, its arguments must be empty, and
+#                `before` must be read before the sweep while `left` is read
+#                after it) — a literal, a wrapped call, a rebind, or a swapped
+#                position REDs;
 #   stores     — no `Subscript`/`Attribute` store or `.update(...)` on a name
 #                the builder's result was assigned to;
 #   dicts      — no report-shaped constructor carrying a `"cleared"` key,
@@ -605,19 +614,75 @@ if len(calls) == 1:
 
 # (c) exactly one binding per name, from the right producer. total/cleared:
 # the `sweep_until_cleared` unpack, at positions 0/1. left/before: a single
-# assignment whose value is a CALL (the live-count probe), never a literal.
+# assignment whose value is a BARE `_live_count_or_none()` call (no callee
+# wrapper such as `max(...)`/`int(...)`, no positional or keyword argument),
+# positioned before/after the sweep. The producer is pinned by NAME because
+# any call satisfies `isinstance(value, ast.Call)` — `max(_live_count_or_none()
+# or 0, 1000000)` and `int(0)` are calls too, and each neuters a gate control
+# (an inflated `left`, a disabled identity). The two probe assignments sit in
+# nested blocks, so their RELATIVE order is compared structurally (a
+# source-order flatten of `fn.body`, never line numbers): `before` must be
+# read before the `sweep_until_cleared` unpack and `left` after it, so the
+# swap that turns the pre-sweep count into the bound is RED.
 binds_ok = 0
 if unpack_assign is not None and all(isinstance(n, ast.Name) for n in unpack_names):
     def _unique(name):
         return binds[name][0] if len(binds[name]) == 1 else None
 
+    order = []
+
+    def _flatten(stmts):
+        for stmt in stmts:
+            order.append(stmt)
+            for attr in ("body", "orelse", "finalbody"):
+                sub = getattr(stmt, attr, None)
+                if isinstance(sub, list):
+                    _flatten(sub)
+            for handler in getattr(stmt, "handlers", []):
+                _flatten(handler.body)
+
+    _flatten(fn.body)
+
+    def _probe_assign(name):
+        """The unique `name = _live_count_or_none()` assignment, or None."""
+        bound = _unique(name)
+        if bound is None:
+            return None
+        call = bound.value
+        if not (
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name)
+            and call.func.id == "_live_count_or_none"
+            and not call.args
+            and not call.keywords
+        ):
+            return None
+        return bound
+
+    def _order_of(node):
+        for idx, stmt in enumerate(order):
+            if stmt is node:
+                return idx
+        return None
+
     ok = True
     for pos, name in ((0, "total"), (1, "cleared")):
         if _unique(name) is not unpack_assign or unpack_names[pos].id != name:
             ok = False
-    for name in ("left", "before"):
-        bound = _unique(name)
-        if bound is None or not isinstance(bound.value, ast.Call):
+    before_assign = _probe_assign("before")
+    left_assign = _probe_assign("left")
+    if before_assign is None or left_assign is None:
+        ok = False
+    else:
+        before_at = _order_of(before_assign)
+        unpack_at = _order_of(unpack_assign)
+        left_at = _order_of(left_assign)
+        if not (
+            before_at is not None
+            and unpack_at is not None
+            and left_at is not None
+            and before_at < unpack_at < left_at
+        ):
             ok = False
     binds_ok = int(ok)
 

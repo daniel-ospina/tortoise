@@ -796,7 +796,8 @@ jobs:
         # too (trunk run 34928488659 measured 7), and that residue is what the
         # sweep's own `left` now accounts for. What this gate reds: a leak
         # that appears AFTER the sweep (COUNT > left), a sweep that aborted or
-        # failed (cleared=false, error, skipped, probe_failed), an identity
+        # failed (cleared=false, error, skipped, or a probe_failed with a
+        # non-zero count or an exhausted budget), an identity
         # violation (reaped + left < before), and an unaccounted/unreadable
         # report. It does NOT independently red a residue the sweep itself
         # measures and declines to act on (a server with a live client, an
