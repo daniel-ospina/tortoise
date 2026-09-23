@@ -351,18 +351,6 @@ jobs:
           TMPD=$(python3 -c "import tempfile;print(tempfile.gettempdir())")
           find "$TMPD" -maxdepth 1 -type d -name "tmp*" -mmin +30 -exec rm -rf {} + 2>/dev/null || true
           echo "tempdir cleaned"
-      - name: Cache HF embedding model (BAAI/bge-small-en-v1.5)
-        if: needs.dedup-check.outputs.skip != 'true'
-        # ~130MB; persisted so the pre-cache step below is a no-op on
-        # subsequent runs and CI never re-downloads from huggingface.co.
-        # Same repo-wide key as python-ci (#1349 T10 — v2 holds bge-small;
-        # the v1 cache holds all-MiniLM-L6-v2 and must never serve bge runs).
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/huggingface
-          key: hf-embedding-cache-v2-${{ runner.os }}
-          restore-keys: |
-            hf-embedding-cache-v2-${{ runner.os }}-
       - name: Embedding model REQUIRED (BAAI/bge-small-en-v1.5) — dense retrieval leg
         if: needs.dedup-check.outputs.skip != 'true'
         # #2573: this step OWNS "the embedder is required" — same contract as
@@ -373,7 +361,11 @@ jobs:
         # continue-on-error was deliberately REMOVED (it was `true`) — and the
         # replaced heredoc's `del os.environ["HF_HUB_OFFLINE"]` never actually
         # re-enabled the network (huggingface_hub latches that var at import),
-        # so its download fallback could never run. See
+        # so its download fallback could never run.
+        #
+        # #2898: the `actions/cache` step above it is GONE — the pinned model now
+        # comes from this repo's own SHA-256-verified release asset, so a cold
+        # runner and an offline runner both recover the same way. See
         # tools/embedder_provision.py for the full account.
         #
         # #964: the step-level timeout still bounds a hung download (stalled TCP,

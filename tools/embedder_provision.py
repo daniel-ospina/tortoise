@@ -2,12 +2,17 @@
 """embedder_provision.py — obtain the pinned embedding model, LOUDLY (#2573).
 
 Tortoise's core retrieval is HYBRID (dense + keyword). On a CI runner the dense
-leg needs ``BAAI/bge-small-en-v1.5`` at the pinned revision, restored from the
-``hf-embedding-cache-v*`` actions/cache entry or downloaded from
-``huggingface.co``. When neither works, ``tortoise/embeddings.py`` degrades to
-the documented keyword-only TF-IDF fallback and the suite reports GREEN — so a
-run that never exercised the dense leg was indistinguishable from one that did,
-and every "retrieval passes" claim made on that run was unproven.
+leg needs ``BAAI/bge-small-en-v1.5`` at the pinned revision. **Since #2898 it is
+served from this repository's own GitHub Release** (a pinned, SHA-256-verified
+artifact — see ``tools/publish_embedder_weights.py``), not from
+``huggingface.co``. Before #2898 it came from an ``hf-embedding-cache-v*``
+``actions/cache`` entry, falling back to a hub download; both were outside this
+repo's control — a cache is write-once and evictable (so it can never be a
+durability guarantee), and a hub download needs ``huggingface.co`` **plus** its
+CDN hosts. When the model cannot be obtained, ``tortoise/embeddings.py``
+degrades to the documented keyword-only TF-IDF fallback and the suite reports
+GREEN — so a run that never exercised the dense leg was indistinguishable from
+one that did, and every "retrieval passes" claim made on that run was unproven.
 
 This script is the single step that owns "the embedder is required", replacing
 four near-identical inline heredocs in ``.github/workflows/``:
@@ -62,9 +67,14 @@ lockstep with ``tortoise/embeddings.py`` is testable (see
 from __future__ import annotations
 
 import argparse
+import hashlib
+import io
 import os
 import sys
+import tarfile
 import time
+import urllib.request
+from pathlib import Path
 
 # Keep in lockstep with tortoise/embeddings.py (EMBEDDING_MODEL /
 # EMBEDDING_MODEL_REVISION). tests/test_embedder_provision.py pins the lockstep:
@@ -76,6 +86,30 @@ REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"  # pinned (VULN-001)
 CACHED_MARKER = "embedding model: cached, no download needed"
 DOWNLOADED_MARKER = "embedding model: downloaded"
 PROBE_FAILED_MARKER = "embedding model: not cached — downloading (with retries)"
+
+# ── The artifact (#2898) ────────────────────────────────────────────────
+# Served from THIS repo's release, so acquisition depends on no third party
+# beyond the GitHub hosts every Actions job already reaches. The tag and asset
+# name are DERIVED from REVISION — a hand-maintained tag could keep pointing at
+# the previous model's bytes after a revision bump. Keep in lockstep with
+# tools/publish_embedder_weights.py (pinned by
+# tests/test_publish_embedder_weights.py).
+REPO = "daniel-ospina/tortoise"
+MODEL_SLUG = "bge-small-en-v1.5"
+RELEASE_TAG = f"embedder-weights-{MODEL_SLUG}-{REVISION[:8]}"
+ASSET_NAME = f"{MODEL_SLUG}-{REVISION[:8]}-hf-cache.tar.gz"
+ASSET_URL = f"https://github.com/{REPO}/releases/download/{RELEASE_TAG}/{ASSET_NAME}"
+#: SHA-256 of ASSET_NAME. Integrity is verified BEFORE anything is extracted, so
+#: a wrong or tampered artifact never reaches the cache.
+ARTIFACT_SHA256 = "86142396bcd346637f4ac10d8f143439bd86f05ca10934eca82279675ac1bb5e"
+#: Test seam. The behaviour tests run this script as a SUBPROCESS, so a module
+#: constant cannot be monkeypatched across that boundary — without this they
+#: would hit the real release (a ~77 MB fetch into the developer's real cache).
+#: It cannot weaken integrity: the bytes are checked against ARTIFACT_SHA256
+#: whichever URL served them.
+ASSET_URL_ENV = "TORTOISE_EMBEDDER_ASSET_URL"
+#: Bounds a stalled TCP connection that would otherwise hold the step open.
+FETCH_TIMEOUT_S = 120
 
 
 def _annotation(level: str, message: str) -> None:
@@ -117,8 +151,81 @@ def _step_summary(detail: str) -> None:
         pass  # a summary write failure must not mask the real failure below
 
 
+def _cache_root() -> Path:
+    """The directory holding ``models--BAAI--bge-small-en-v1.5``.
+
+    Sentence-Transformers uses ``SENTENCE_TRANSFORMERS_HOME`` **directly** as its
+    cache dir when that is set; otherwise the Hugging Face hub cache applies.
+    The difference is not cosmetic — ``Dockerfile.hosted`` records a shipped bug
+    where the image booted with a missing cache because only one of the two was
+    pointed at the bake (#160-followup).
+    """
+    st_home = os.environ.get("SENTENCE_TRANSFORMERS_HOME")
+    if st_home:
+        return Path(st_home)
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE  # type: ignore
+
+        return Path(HF_HUB_CACHE)
+    except Exception:  # mirrors the library rather than inventing a rule
+        hf_home = os.environ.get("HF_HOME")
+        if not hf_home:
+            xdg = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+            hf_home = str(Path(xdg) / "huggingface")
+        return Path(hf_home) / "hub"
+
+
+def _asset_url() -> str:
+    """The artifact URL, with the subprocess-safe test seam (ASSET_URL_ENV)."""
+    return os.environ.get(ASSET_URL_ENV) or ASSET_URL
+
+
+def _fetch_artifact(*, attempts: int, backoff: float) -> tuple[bool, str]:
+    """Download the pinned artifact, verify its SHA-256, extract it.
+
+    Returns ``(ok, detail)``. Three properties matter here and each has a test:
+
+    * **Nothing is extracted before the digest is verified** — a mismatch returns
+      immediately and never retries (the bytes are wrong; a retry would only
+      re-fetch the same wrong bytes).
+    * **Transport failures do retry**, with the same ``download attempt N/M
+      failed:`` wording the previous transport used (pinned by a test).
+    * **Extraction is confined to the cache root** — ``filter="data"`` rejects
+      absolute paths and ``..`` traversal, so the archive cannot escape it.
+    """
+    detail = "(no exception captured)"
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(_asset_url(), timeout=FETCH_TIMEOUT_S) as resp:
+                blob = resp.read()
+        except Exception as exc:  # transport — retryable
+            detail = f"{type(exc).__name__}: {exc}"
+            print(f"download attempt {attempt}/{attempts} failed: {detail}", flush=True)
+            if attempt < attempts:
+                time.sleep(backoff * attempt)
+            continue
+
+        got = hashlib.sha256(blob).hexdigest()
+        if got != ARTIFACT_SHA256:
+            return False, (
+                f"artifact checksum mismatch: expected {ARTIFACT_SHA256}, got {got} "
+                f"({len(blob)} bytes from {_asset_url()})"
+            )
+
+        try:
+            root = _cache_root()
+            root.mkdir(parents=True, exist_ok=True)
+            with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tf:
+                tf.extractall(root, filter="data")
+        except Exception as exc:  # extraction — retrying cannot help
+            return False, f"artifact extraction failed: {type(exc).__name__}: {exc}"
+        return True, ""
+
+    return False, detail
+
+
 def provision(*, attempts: int, backoff: float) -> tuple[bool, str]:
-    """Load the pinned revision, preferring the actions-cache copy.
+    """Load the pinned revision from the local cache, else from our release asset.
 
     Returns ``(ok, detail)``; ``detail`` carries the last error text when ``ok``
     is False. Never raises for an unavailable model — the caller decides the exit
@@ -131,29 +238,36 @@ def provision(*, attempts: int, backoff: float) -> tuple[bool, str]:
         return False, f"could not import sentence_transformers: {exc!r}"
 
     # Cache probe first, via `local_files_only` — NOT `HF_HUB_OFFLINE`. Setting
-    # the env var here would latch offline mode for the whole process (see the
-    # module docstring): huggingface_hub freezes it at import, so the download
-    # loop below would fail forever without attempting a request.
+    # that env var here would latch offline mode for the whole process (see the
+    # module docstring): huggingface_hub freezes it at import, so every later
+    # fetch would fail without attempting a request.
+    probe_error = "(no exception captured)"
     try:
         SentenceTransformer(MODEL, revision=REVISION, local_files_only=True)
         print(CACHED_MARKER, flush=True)
         return True, ""
-    except Exception:
-        pass
+    except Exception as exc:
+        probe_error = f"{type(exc).__name__}: {exc}"
 
     print(PROBE_FAILED_MARKER, flush=True)
-    detail = "(no exception captured)"
-    for attempt in range(1, attempts + 1):
-        try:
-            SentenceTransformer(MODEL, revision=REVISION)
-            print(DOWNLOADED_MARKER, flush=True)
-            return True, ""
-        except Exception as exc:
-            detail = f"{type(exc).__name__}: {exc}"
-            print(f"download attempt {attempt}/{attempts} failed: {detail}", flush=True)
-            if attempt < attempts:
-                time.sleep(backoff * attempt)
-    return False, detail
+    ok, fetch_detail = _fetch_artifact(attempts=attempts, backoff=backoff)
+    if not ok:
+        # ERROR PRECEDENCE, deliberately: the PROBE error leads (it is the real
+        # library failure — the multi-line transformers/huggingface_hub message a
+        # human reads), and the fetch error is appended, never substituted.
+        # `test_annotations_are_two_complete_single_lines` pins that the
+        # annotation keeps naming the real cause.
+        return False, f"{probe_error} | {fetch_detail}"
+
+    try:
+        SentenceTransformer(MODEL, revision=REVISION, local_files_only=True)
+        print(DOWNLOADED_MARKER, flush=True)
+        return True, ""
+    except Exception as exc:
+        return False, (
+            f"artifact extracted to {_cache_root()} but the model still does not "
+            f"load from it: {type(exc).__name__}: {exc}"
+        )
 
 
 def main(argv: list[str] | None = None) -> int:

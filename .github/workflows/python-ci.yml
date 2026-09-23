@@ -455,18 +455,6 @@ jobs:
           TMPD=$(python3 -c "import tempfile;print(tempfile.gettempdir())")
           find "$TMPD" -maxdepth 1 -type d -name "tmp*" -mmin +30 -exec rm -rf {} + 2>/dev/null || true
           echo "tempdir cleaned"
-      - name: Cache HF embedding model (BAAI/bge-small-en-v1.5)
-        # ~130MB; persisted so the pre-cache step below is a no-op on
-        # subsequent runs and CI never re-downloads from huggingface.co.
-        # Cache key v2 (#1349 T10): the v1 cache holds all-MiniLM-L6-v2 and
-        # must never serve bge-small runs — a v1 restore would silently
-        # exercise the WRONG embedder.
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/huggingface
-          key: hf-embedding-cache-v2-${{ runner.os }}
-          restore-keys: |
-            hf-embedding-cache-v2-${{ runner.os }}-
       - name: Embedding model REQUIRED (BAAI/bge-small-en-v1.5) — dense retrieval leg
         # #2573: this step OWNS "the embedder is required". It exits non-zero when
         # the pinned model cannot be obtained, with a named ::warning::/::error::
@@ -478,13 +466,22 @@ jobs:
         # the step is now genuinely able to obtain the model: the old inline probe
         # set HF_HUB_OFFLINE=1 before importing sentence_transformers, and
         # huggingface_hub freezes that variable at import, so its download retries
-        # could never reach the network. With the probe scoped to
-        # `local_files_only=True` a cold cache really does download (verified
-        # end-to-end), so a failure here now means the model is genuinely
-        # unobtainable — and the honest outcome is a red, ATTRIBUTED run rather
-        # than the cascade #3760's fail-closed skip-guard would otherwise produce.
+        # could never reach the network.
         #
-        # #964: the step-level timeout still bounds a hung download (stalled TCP,
+        # #2898: the model now comes from THIS repo's own release asset, and the
+        # `actions/cache` step that used to sit above this one is GONE. The cache
+        # was the wrong shape of guarantee — write-once and evictable, so it could
+        # never make a cold runner recover — and a hub download needed
+        # huggingface.co plus its CDN hosts, which runners do not reach. The asset
+        # is SHA-256-verified and fetched over the one host every job already
+        # depends on. tools/publish_embedder_weights.py builds it deterministically;
+        # tools/embedder_provision.py owns the contract.
+        #
+        # Nothing depends on ~/.cache/huggingface existing beforehand: the deleted
+        # cache step was the only reference to that path (grep-verified), and
+        # provisioning creates the resolved cache root itself.
+        #
+        # #964: the step-level timeout still bounds a hung fetch (stalled TCP,
         # no error raised) that would otherwise stall the step for the full job cap.
         timeout-minutes: 6
         run: |
@@ -958,16 +955,6 @@ jobs:
           TMPD=$(python3 -c "import tempfile;print(tempfile.gettempdir())")
           find "$TMPD" -maxdepth 1 -type d -name "tmp*" -mmin +30 -exec rm -rf {} + 2>/dev/null || true
           echo "tempdir cleaned"
-      - name: Cache HF embedding model (BAAI/bge-small-en-v1.5)
-        # Cache key v2 (#1349 T10): the v1 cache holds all-MiniLM-L6-v2 and
-        # must never serve bge-small runs — a v1 restore would silently
-        # exercise the WRONG embedder.
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/huggingface
-          key: hf-embedding-cache-v2-${{ runner.os }}
-          restore-keys: |
-            hf-embedding-cache-v2-${{ runner.os }}-
       - name: Embedding model REQUIRED (BAAI/bge-small-en-v1.5) — dense retrieval leg
         # #2573: same contract as the fast job — the step OWNS "the embedder is
         # required" and fails BY NAME when the pinned model cannot be obtained,
@@ -1280,18 +1267,6 @@ jobs:
           TMPD=$(python3 -c "import tempfile;print(tempfile.gettempdir())")
           find "$TMPD" -maxdepth 1 -type d -name "tmp*" -mmin +30 -exec rm -rf {} + 2>/dev/null || true
           echo "tempdir cleaned"
-      - name: Cache HF embedding model (BAAI/bge-small-en-v1.5)
-        # Sibling parity (test/test-slow both cache BEFORE pre-caching) —
-        # without the restore step every run downloads ~130MB. Cache key v2
-        # (#1349 T10): the v1 cache holds all-MiniLM-L6-v2 and must never
-        # serve bge-small runs — a v1 restore would silently exercise the
-        # WRONG embedder.
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/huggingface
-          key: hf-embedding-cache-v2-${{ runner.os }}
-          restore-keys: |
-            hf-embedding-cache-v2-${{ runner.os }}-
       - name: Embedding model REQUIRED (BAAI/bge-small-en-v1.5) — dense retrieval leg
         # #2573: this job runs its live seq guard through compute_embedding via
         # create_point, and — unlike the fast/slow legs — carries NO skip-guard,

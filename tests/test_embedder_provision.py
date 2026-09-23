@@ -42,6 +42,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tools import embedder_provision as ep
+from tools import publish_embedder_weights as pub
 
 _ROOT = Path(__file__).resolve().parent.parent
 _SCRIPT = _ROOT / "tools" / "embedder_provision.py"
@@ -64,13 +65,22 @@ _LATCH_PREAMBLE = (
     "\n"
 )
 
-# Cache probe raises; the download succeeds — UNLESS offline mode latched at
-# import, which is the pre-fix behaviour this test exists to keep dead.
-_FAITHFUL_DOWNLOAD = _LATCH_PREAMBLE + (
+# Probe raises while the cache is cold; the ASSET fetch populates it (#2898).
+# `_OFFLINE_AT_IMPORT` still latches, exactly like the real library — and it must
+# NOT matter: `local_files_only` needs no network, and the artifact is fetched by
+# urllib, which never consults it. That is the whole point of this transport.
+_FAITHFUL_ASSET = _LATCH_PREAMBLE + (
+    "from pathlib import Path\n"
+    "\n"
     "class SentenceTransformer:\n"
     "    def __init__(self, *a, **k):\n"
+    "        root = Path(os.environ['SENTENCE_TRANSFORMERS_HOME'])\n"
+    "        d = root / ('models--' + a[0].replace('/', '--'))\n"
+    "        hit = (d / 'blobs' / 'weights.bin').is_file()\n"
     "        if k.get('local_files_only'):\n"
-    "            raise OSError('not in the local cache')\n"
+    "            if not hit:\n"
+    "                raise OSError('not in the local cache')\n"
+    "            return\n"
     "        if _OFFLINE_AT_IMPORT:\n"
     "            raise OSError(\"offline mode is enabled (latched at import) — \"\n"
     "                          \"cannot reach https://huggingface.co\")\n"
@@ -99,12 +109,41 @@ _ALWAYS_RAISES = (
 )
 
 
+# ── The artifact seam ────────────────────────────────────────────────────
+#: Refused instantly, so a test that does not intend to fetch never hits the
+#: network (and never extracts into a developer's real cache).
+_UNROUTABLE = "http://127.0.0.1:1/asset.tar.gz"
+
+#: Runs the script in a fresh interpreter WITH module-level overrides applied.
+#: A test needs this to substitute ARTIFACT_SHA256 for an archive it built itself;
+#: the env seam alone cannot carry a digest.
+_BOOTSTRAP = r"""
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("ep_under_test", __SCRIPT__)
+mod = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = mod
+spec.loader.exec_module(mod)
+for _k, _v in __OVERRIDES__.items():
+    setattr(mod, _k, _v)
+sys.exit(mod.main(__ARGV__))
+"""
+
+
 def _base_env(tmp_path: Path, *, summary: bool = False) -> dict:
-    """A clean env for the subprocess: no HF_* leak, optional summary file."""
+    """A clean env for the subprocess: no HF_* leak, no real network, no summary leak."""
     env = dict(os.environ)
     # The parent's own env must not pre-latch offline mode for the fake.
     env.pop("HF_HUB_OFFLINE", None)
     env.pop("TRANSFORMERS_OFFLINE", None)
+    # THE SEAM. Refused instantly (port 1), so a test that does not intend to
+    # fetch never reaches github.com and never extracts a ~77 MB archive into a
+    # developer's real ~/.cache/huggingface. Tests that DO want a fetch override
+    # this with a file:// URL to an archive they built themselves.
+    env[ep.ASSET_URL_ENV] = _UNROUTABLE
+    # The cache root the fetch extracts into, and the one the fake reads. Set
+    # explicitly: without it the fake would consult the developer's real cache,
+    # the probe would HIT, and the path under test would be skipped entirely.
+    env["SENTENCE_TRANSFORMERS_HOME"] = str(tmp_path / "hf-cache")
     if summary:
         env["GITHUB_STEP_SUMMARY"] = str(tmp_path / "summary.md")
     else:
@@ -114,20 +153,59 @@ def _base_env(tmp_path: Path, *, summary: bool = False) -> dict:
     return env
 
 
-def _run(tmp_path: Path, module_source: str, *, attempts: int = 1, summary: bool = False):
-    """Run the script against a fake sentence_transformers; return CompletedProcess."""
+def _run(
+    tmp_path: Path,
+    module_source: str,
+    *,
+    attempts: int = 1,
+    summary: bool = False,
+    overrides: dict | None = None,
+    env_extra: dict | None = None,
+):
+    """Run the script against a fake sentence_transformers; return CompletedProcess.
+
+    Runs under a small bootstrap instead of invoking the script directly, so a
+    test can substitute module constants (the artifact digest) that a subprocess
+    cannot monkeypatch. Isolation is unchanged — still a fresh interpreter with
+    its own env and PYTHONPATH.
+    """
     fake = tmp_path / "fake"
     fake.mkdir(parents=True, exist_ok=True)
     (fake / "sentence_transformers.py").write_text(module_source, encoding="utf-8")
     env = _base_env(tmp_path, summary=summary)
+    env.update(env_extra or {})
     env["PYTHONPATH"] = str(fake) + os.pathsep + env.get("PYTHONPATH", "")
+    bootstrap = (
+        _BOOTSTRAP.replace("__SCRIPT__", repr(str(_SCRIPT)))
+        .replace("__OVERRIDES__", repr(overrides or {}))
+        .replace("__ARGV__", repr(["--attempts", str(attempts), "--backoff", "0"]))
+    )
     return subprocess.run(
-        [sys.executable, str(_SCRIPT), "--attempts", str(attempts), "--backoff", "0"],
+        [sys.executable, "-c", bootstrap],
         capture_output=True,
         text=True,
         env=env,
-        timeout=120,
+        timeout=180,
     )
+
+
+def _synthetic_asset(tmp_path: Path) -> tuple[str, str]:
+    """Build a REAL archive with the real packager; return (file:// url, sha256).
+
+    Uses the packager rather than a hand-rolled tar so the producer/consumer
+    shape is exercised end to end: if `build_archive` ever stops emitting the
+    top-level cache directory (or starts emitting absolute members), this fails
+    here rather than on a runner with a cold cache.
+    """
+    cache = tmp_path / "build-cache" / "models--BAAI--bge-small-en-v1.5"
+    (cache / "blobs").mkdir(parents=True)
+    (cache / "refs").mkdir()
+    (cache / "blobs" / "weights.bin").write_bytes(b"weights")
+    (cache / "refs" / ep.REVISION).write_text(ep.REVISION, encoding="utf-8")
+    (cache / "stale.incomplete").write_text("partial", encoding="utf-8")
+    pkg = tmp_path / "asset.tar.gz"
+    pub.build_archive(cache, pkg)
+    return f"file://{pkg}", pub.sha256_of(pkg)
 
 
 # ── Behaviour: the two paths, executed ───────────────────────────────────
@@ -192,24 +270,78 @@ def test_cached_model_succeeds_without_download(tmp_path):
 
 
 def test_download_path_survives_the_offline_env_latch(tmp_path):
-    """REGRESSION (the defect this change also fixes): the replaced heredocs set
-    `HF_HUB_OFFLINE=1` BEFORE importing, and huggingface_hub freezes that into a
-    module constant at import — so `del os.environ[...]` could not re-enable the
-    network and EVERY retry failed without a packet leaving the process. A cache
-    miss was therefore unrecoverable by construction.
+    """REGRESSION, twice over. (1) The replaced heredocs set `HF_HUB_OFFLINE=1`
+    BEFORE importing, and huggingface_hub freezes that into a module constant at
+    import — so the old hub download could never re-enable the network and a cold
+    cache was unrecoverable by construction. (2) The `actions/cache` transport
+    made a real cache MISS depend on a third party's CDN reachability.
 
-    The fake latches at import, exactly like the real library: against the old
-    implementation this test sees `_OFFLINE_AT_IMPORT is True` and fails.
+    The runner this reproduces has NO egress to huggingface.co at all and the
+    latch is set at import — exactly the environment #2898 describes. Provisioning
+    must still succeed, from this repo's own asset.
     """
-    proc = _run(tmp_path, _FAITHFUL_DOWNLOAD)
+    url, digest = _synthetic_asset(tmp_path)
+    proc = _run(
+        tmp_path,
+        _FAITHFUL_ASSET,
+        overrides={"ARTIFACT_SHA256": digest},
+        env_extra={ep.ASSET_URL_ENV: url, "HF_HUB_OFFLINE": "1"},
+    )
 
     assert proc.returncode == 0, (
-        "the download path must actually run — an import-time offline latch would "
-        f"make it dead code:\n{proc.stdout}"
+        "a cold cache must be recoverable from our own asset even with the offline "
+        f"latch set and no hub egress:\n{proc.stdout}"
     )
     assert ep.PROBE_FAILED_MARKER in proc.stdout
     assert ep.DOWNLOADED_MARKER in proc.stdout
+    assert ep.CACHED_MARKER not in proc.stdout
     assert "::error::" not in proc.stdout
+    # The `.incomplete` member must NOT have come along: shipping a partial blob
+    # would let the cache report a hit for an unusable revision.
+    stale = tmp_path / "hf-cache" / "models--BAAI--bge-small-en-v1.5" / "stale.incomplete"
+    assert not stale.exists(), "a partial download must never ship"
+
+
+def test_tampered_artifact_is_rejected_before_extraction(tmp_path):
+    """Integrity is not advisory: wrong bytes must not reach the cache, and a
+    digest mismatch must NOT be retried (a retry re-fetches the same wrong bytes).
+    """
+    url, _ = _synthetic_asset(tmp_path)
+    proc = _run(
+        tmp_path,
+        _FAITHFUL_ASSET,
+        attempts=3,
+        overrides={"ARTIFACT_SHA256": "0" * 64},
+        env_extra={ep.ASSET_URL_ENV: url},
+    )
+
+    assert proc.returncode == 1, proc.stdout
+    assert "checksum mismatch" in proc.stdout
+    assert "download attempt 2/3 failed" not in proc.stdout, "a mismatch must not retry"
+    assert not (tmp_path / "hf-cache" / "models--BAAI--bge-small-en-v1.5").exists(), (
+        "nothing may be extracted when the digest does not match"
+    )
+
+
+def test_provisioning_constants_match_the_packager():
+    """Lockstep with tools/publish_embedder_weights.py (#2898).
+
+    The tag and asset name are DERIVED from REVISION in both tools. If someone
+    hand-edits a tag, or bumps the revision in only one of them, the fetch 404s on
+    every runner — and that degrades SILENTLY, which is the failure mode this
+    whole issue exists to remove.
+    """
+    tag = pub.release_tag()
+    name = pub.asset_name()
+    url = pub.asset_url()
+    repo = pub.REPO
+    assert tag == ep.RELEASE_TAG
+    assert name == ep.ASSET_NAME
+    assert url == ep.ASSET_URL
+    assert repo == ep.REPO
+    assert re.fullmatch(r"[0-9a-f]{64}", ep.ARTIFACT_SHA256), (
+        "ARTIFACT_SHA256 must be a real digest, not a placeholder"
+    )
 
 
 def test_exhausted_retries_report_attempt_count(tmp_path):

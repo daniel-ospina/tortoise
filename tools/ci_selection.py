@@ -541,6 +541,13 @@ TOOL_CARVEOUTS = (
     "tools/longmem_eval/",
     "tools/mini_beir/",
     "tools/embedder_probe.py",
+    # #2898: the packed artifact's digest is a CONSTANT in
+    # tools/embedder_provision.py, so the packager that must reproduce those
+    # bytes byte-for-byte owns a test that has to run on its own PR — without
+    # this entry a tools-only change classifies as docs-only and the
+    # reproducibility pin never executes (the #1349/#2573/#2938 silent-drop
+    # class).
+    "tools/publish_embedder_weights.py",
     "tools/calibrate_thresholds.py",
     "tools/pair_label_runner.py",
     # #2071: the eval-lane ask QA spot-check tools (ask_spotcheck + the

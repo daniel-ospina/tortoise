@@ -525,6 +525,10 @@ surfaces:
   - test_client_status_vocabulary.py
   - test_cmux_dispatch.py
   - test_embedder_provision.py
+  # #2898: the artifact packager whose SHA-256 the provisioning tool pins. The
+  # packager's only real contract is byte-reproducibility, so its test must run
+  # on a tools-only PR (see tool_carveouts / TOOL_CARVEOUTS).
+  - test_publish_embedder_weights.py
   - test_embedded_evidence.py
   - test_installer_preserves_foreign_skill_content.py
   - test_lifecycle_guards.py        # #2498: shared lifecycle guard — also runs on a tortoise/live.py-only change (terminal vocabulary pin)
@@ -1924,6 +1928,8 @@ durations:
   test_bfs_audit.py: 0.2
   test_calibration_tools.py: 0.2
   test_embeddings.py: 0.2
+  # #2898: fake-driven (no torch), a miniature cache tree — ~0.2s.
+  test_publish_embedder_weights.py: 0.2
   test_extractor.py: 0.2
   test_extractor_doc.py: 0.2
   test_file_indexer.py: 0.2
