@@ -82,8 +82,8 @@ from tortoise.hosted_backup import (
 )
 from tortoise.mcp_server import create_http_app
 from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
+    HEALTH_PROBE_REFRESH_S,  # noqa: F401 — re-exported (tests import it here)
     PROBE_HARD_TIMEOUT,
-    PROBE_STALE_AFTER,
     ControlPlaneOffloadError,
     HealthProbe,
     event_retention_interval,
@@ -98,6 +98,9 @@ from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     start_stall_watchdog,
     workload_enter,
     workload_exit,
+)
+from tortoise.monitoring import (
+    health_probe_interval as _health_probe_interval,  # #2988: shared with selfhost
 )
 from tortoise.onboarding import state as _os  # #2001 (W5) canonical FLOW-state module
 from tortoise.projection import (
@@ -754,68 +757,17 @@ def _iter_registered_orgs() -> list[dict]:
 # ═══════════════════════════════════════════════════════════════════════════
 
 #: How often the background refresher re-probes the DB. Keeps ``/health``'s
-#: ``db`` field fresh WITHOUT the request path doing any I/O. Must stay below
-#: monitoring.PROBE_STALE_AFTER (30s) or a healthy DB would read as degraded.
-HEALTH_PROBE_REFRESH_S = 10.0
-#: Lower bound on a configured probe period (round-3 review P2). ``1e-9`` is
-#: finite but turns the refresher into a ~50 Hz loop, each iteration spawning a
-#: probe daemon thread and issuing a DB round trip — the same busy-loop the
-#: ``nan`` rejection exists to prevent. The upper clamp was one-sided.
-HEALTH_PROBE_MIN_INTERVAL_S = 0.5
-
-
-def _health_probe_interval() -> float:
-    """Probe refresh period (``TORTOISE_HEALTH_PROBE_INTERVAL``, seconds).
-
-    Clamped to half the probe staleness window (review P2): a period longer
-    than ``PROBE_STALE_AFTER`` makes a HEALTHY DB read as ``degraded`` between
-    refreshes, which then fails the deploy gate and gets misdiagnosed as a DB
-    outage. Half the window leaves a full refresh of margin.
-
-    NON-FINITE values are rejected and fall back to the default (round-2
-    review P2): ``float()`` accepts ``nan``/``inf`` and neither is caught by
-    the ``v <= 0`` guard (``nan <= 0`` is False) nor by the ``v > cap`` clamp
-    (``nan > cap`` is False). ``nan`` flows into ``asyncio.sleep(nan)``, which
-    returns almost immediately — a busy loop hammering the DB probe and the
-    event loop. ``inf`` means the probe never refreshes, so a healthy DB reads
-    stale forever. Both DISABLE (fall back to ``HEALTH_PROBE_REFRESH_S``).
-
-    A finite but SUB-FLOOR period is rejected the same way (round-3 review
-    P2): ``1e-9`` busy-loops the probe exactly as ``nan`` did.
-    """
-    try:
-        v = float(os.environ.get("TORTOISE_HEALTH_PROBE_INTERVAL") or HEALTH_PROBE_REFRESH_S)
-    except (TypeError, ValueError):
-        return HEALTH_PROBE_REFRESH_S
-    if not math.isfinite(v):
-        _logger.error(
-            "TORTOISE_HEALTH_PROBE_INTERVAL=%s is not finite — falling back "
-            "to the default %.0fs; a nan period busy-loops the probe and an "
-            "infinite one leaves a healthy DB reading stale forever",
-            v, HEALTH_PROBE_REFRESH_S)
-        return HEALTH_PROBE_REFRESH_S
-    if v <= 0:
-        return HEALTH_PROBE_REFRESH_S
-    # Round-3 review P2: a finite but tiny period busy-loops the probe just
-    # like ``nan`` did — ``1e-9`` yields ~50 generations/s, each spawning a
-    # daemon thread and issuing a DB round trip. The clamp below is
-    # one-sided, so a floor is required too.
-    if v < HEALTH_PROBE_MIN_INTERVAL_S:
-        _logger.warning(
-            "TORTOISE_HEALTH_PROBE_INTERVAL=%s is below the %.2fs floor — "
-            "falling back to the default %.0fs; a sub-floor period "
-            "busy-loops the probe and duplicates the DB round trip",
-            v, HEALTH_PROBE_MIN_INTERVAL_S, HEALTH_PROBE_REFRESH_S)
-        return HEALTH_PROBE_REFRESH_S
-    cap = PROBE_STALE_AFTER / 2.0
-    if v > cap:
-        _logger.warning(
-            "TORTOISE_HEALTH_PROBE_INTERVAL=%s exceeds half the probe "
-            "staleness window (%.0fs) — clamping to %.0fs; a longer period "
-            "would report a healthy DB as degraded and fail the deploy gate",
-            v, PROBE_STALE_AFTER, cap)
-        return cap
-    return v
+#: ``db`` field fresh WITHOUT the request path doing any I/O. The resolver and
+#: ``HEALTH_PROBE_REFRESH_S`` are the SHARED ``monitoring`` spelling (#2988 moved
+#: them there when the selfhost liveness coordinator landed), re-exported here so
+#: existing importers/tests keep resolving them on this module (the resolver
+#: arrives as ``_health_probe_interval``). ``monitoring.HEALTH_PROBE_MIN_INTERVAL_S``
+#: is the resolver's own lower clamp and stays on ``monitoring`` — nothing
+#: imported it from this module, so it is not re-exported.
+#:
+#: NOTE the log lines for a rejected ``TORTOISE_HEALTH_PROBE_INTERVAL`` now
+#: come from ``tortoise.monitoring`` — the resolver lives there, and its
+#: warnings must not be attributed to a caller that did not compute them.
 
 
 async def _first_contact_prewarm() -> None:
