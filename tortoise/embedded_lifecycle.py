@@ -1600,37 +1600,184 @@ def _install_owner_record_patch() -> None:
 
 # ── #4879: a DEAD recorded socket must not be replayed ────────────────────
 #
-# redislite's `RedisMixin._is_redis_running()` answers "is a server here?"
-# from THREE checks only (client.py ~305-330): the `<db>.settings` registry
-# exists, the recorded `pidfile` exists, and that pid is live. It never
-# validates the recorded `unixsocket`, and `_load_setting_registry()` (~353-
-# 378) then assigns `self.socket_file = settings['unixsocket']`
-# unconditionally. So a registry + pidfile that SURVIVE a previous
-# construction — with a still-live pid — while the socket FILE is gone makes
-# the predicate True: the dead path is replayed, `_wait_for_server_start()`
-# pings it, and the caller dies with the deterministic main-branch failure
+# redislite's `RedisMixin._is_redis_running()` (client.py:305-332) answers
+# "is a server here?" from THREE checks only: the `<db>.settings` registry
+# exists, the recorded `pidfile` exists, and that pid is live. It NEVER
+# validates the recorded `unixsocket`, and `_load_setting_registry()`
+# (client.py:351-378) then assigns `self.socket_file = settings['unixsocket']`
+# UNCONDITIONALLY (client.py:376). So a registry + pidfile that SURVIVE a
+# previous construction — with a still-live pid — while the socket FILE is
+# gone makes the predicate True: the dead path is replayed, `__init__`
+# (client.py:449-450) loads it, `_wait_for_server_start()` pings it, and the
+# caller dies with the deterministic main-branch failure
 #     redis.exceptions.ConnectionError: Error 2 connecting to
 #     /tmp/tmpXXXX/redis.socket. No such file or directory.
-# (tests/test_pack_state.py::TestBackfillScript::test_apply_writes_to_introspection_read_target,
-# where the recorded socket belonged to a PREVIOUS construction).
+# (tests/test_pack_state.py::TestBackfillScript::test_apply_writes_to_introspection_read_target).
 #
-# Extend the SAME redislite patch seam as #4487 (which wraps
-# `RedisMixin.__init__`) to also wrap `_is_redis_running`, so "a redis is
-# running" additionally requires the recorded socket to exist. Returning
-# False routes `__init__` into redislite's own
-# `else: _create_redis_directory_tree()` branch — a fresh server and socket —
-# so no redislite control flow is added here.
+# WHY "THE RECORDED SOCKET IS GONE" ALONE MUST NOT ANSWER False — the
+# #4879-review hole: answering False routes `__init__` into its `else:`
+# branch (client.py:454-462), which calls `_create_redis_directory_tree()`
+# (client.py:203-216 — a NEW mkdtemp, pidfile, logfile and socket, but the
+# SAME dbdir) and then `_start_redis()` (client.py:218-236), whose kwargs
+# pass `'dbdir': self.dbdir, 'dbfilename': self.dbfilename`
+# (client.py:234-235) straight through. That is THE SAME RDB FILE, and
+# nothing in redislite guards "a server is already live on this dbdir". The
+# registry file lives at `<dbdir>/<dbfilename>.settings`, so a registry that
+# exists belongs to THIS dbdir — and it can be left behind by a server that
+# is STILL ALIVE holding that RDB. Answering False there starts a SECOND
+# redis-server against the same dbfilename: two writers on one RDB,
+# last-writer-wins on SAVE, one server's in-memory writes clobbering the
+# other's — a SILENT divergence, strictly worse than the loud
+# ConnectionError it removes.
+#
+# So the repair is ORDERED — prove, stop, drop — and it is the only thing
+# this patch does on that state: the recorded pid is proven to be this
+# registry's own live server, that server is stopped GRACEFULLY, and only
+# then is the stale registry removed so redislite starts clean (the RDB is
+# released, so the new server is the only writer). Both provenance legs
+# exist because the recorded pid may be a recycled number pointing at an
+# unrelated process — and signalling THAT, or starting a second server while
+# the real holder lives, are the two ways this predicate can do harm.
 _ORIGINAL_REDISLITE_IS_RUNNING = None
+
+#: Bounded graceful-stop budget: SIGTERM, then wait this long before
+#: `embedded_reaper._kill` escalates to SIGKILL.
+_STALE_HOLDER_SIGTERM_TIMEOUT = 5.0
+#: `_kill` fires its SIGKILL and returns WITHOUT waiting for the death
+#: (#1383's primitive is fire-and-forget there), so the exit is awaited here
+#: with its own bound before this patch may conclude the pid is gone.
+_STALE_HOLDER_DEATH_TIMEOUT = 5.0
+#: Start-time slack for the pidfile-mtime provenance leg — the same 2 s
+#: tolerance `embedded_reaper._pid_identity_matches` uses.
+_STALE_HOLDER_START_SLACK = 2.0
+
+
+def _registry_settings(registry_path: str | None) -> dict | None:
+    """Parse a redislite `.settings` registry; None when unreadable.
+
+    None (not {}) for every failure — a missing file, an OSError, unparseable
+    JSON, or a JSON value that is not an object — because the caller must be
+    able to tell "nothing was proven" from "proven empty". Never raises.
+    """
+    import json as _json
+    if not registry_path:
+        return None
+    try:
+        with open(registry_path) as file_handle:
+            settings = _json.load(file_handle)
+    except Exception:  # the patch must never raise
+        return None
+    return settings if isinstance(settings, dict) else None
+
+
+def _proven_stale_holder_pid(settings: dict) -> int | None:
+    """The registry's recorded server pid, ONLY when provenance proves it.
+
+    Two independent legs, BOTH required — either alone can name an innocent
+    process, and the caller SIGTERMs whatever this returns:
+
+    1. **Start time.** The registry records no start time, so the derivable
+       anchor is the pidfile's own mtime: redis-server writes that file at
+       startup, so a live pid whose process STARTED after it was written
+       cannot be the process that wrote it — the number was recycled (the
+       #1642 FIX 5 pid-reuse class). Reuses `embedded_reaper.
+       _process_start_time` (embedded_reaper.py:663, via `_parse_lstart`
+       :638) — the repo's existing portable start-time helper — with the same
+       2 s tolerance `_pid_identity_matches` (:711) uses. A start time we
+       cannot derive fails closed.
+
+    2. **argv binding.** The live process must be a redis-server
+       (`_pid_is_redis`, embedded_reaper.py:688) whose own argv — or the
+       config file that argv names — names the RECORDED SOCKET's directory,
+       via `_pid_cmdline_names_dir` (embedded_reaper.py:298), the unforgeable
+       provenance binding #4136 built for exactly this socket-less kill arm.
+       NOTE the directory compared is the recorded socket's, NOT
+       `settings['dbdir']`: redislite starts the server as
+       `redis-server unixsocket:<socket_dir>/redis.socket` (or
+       `<socket_dir>/redis.config`), so the argv carries the SOCKET tempdir
+       and never the RDB dir — `_pid_cmdline_names_dir(pid, dbdir)` is False
+       for every genuine server (verified against a live one). The recorded
+       socket is the tighter binding in any case: the registry records that
+       exact socket, so it ties the process to THIS registry.
+       `_pid_cmdline_names_dir` never resolves its own dbdir argument (by
+       design, #4136), so the recorded side is canonicalised here first.
+
+    Returns None — never raises — whenever either leg is unproven or anything
+    is unreadable; the caller must then refuse to signal.
+    """
+    from tortoise.embedded_reaper import (
+        _pid_alive,
+        _pid_cmdline_names_dir,
+        _pid_is_redis,
+        _process_start_time,
+    )
+    pidfile = settings.get("pidfile")
+    recorded_socket = settings.get("unixsocket")
+    if not pidfile or not recorded_socket:
+        return None
+    try:
+        with open(pidfile) as file_handle:
+            pid = int(file_handle.read().strip())
+        pidfile_written = os.path.getmtime(pidfile)
+        socket_dir = os.path.dirname(os.path.realpath(recorded_socket))
+    except Exception:  # unreadable/unparseable evidence
+        return None
+    if pid <= 0 or not _pid_alive(pid) or not _pid_is_redis(pid):
+        return None
+    started = _process_start_time(pid)
+    if started is None or started > pidfile_written + _STALE_HOLDER_START_SLACK:
+        return None  # recycled pid (or undeterminable start) — not ours
+    if not socket_dir or not _pid_cmdline_names_dir(pid, socket_dir):
+        return None  # a live redis-server, but not THIS registry's
+    return pid
+
+
+def _stop_proven_holder(pid: int) -> bool:
+    """Stop a provenance-proven recorded server; True once the pid is gone.
+
+    GRACEFUL by default: `embedded_reaper._kill` (embedded_reaper.py:2257) is
+    the repo's one bounded stop primitive — SIGTERM, poll for a bounded
+    budget, escalate to SIGKILL only if that budget expires — and it is what
+    the reaper uses on every live orphan, so this inherits its semantics
+    (including redis's own SIGTERM shutdown, which SAVES when save points are
+    configured).
+
+    The SIGKILL escalation is a DELIBERATE choice with a known cost: it
+    abandons the server's own save, so whatever it held only in memory since
+    its last save point is lost. The alternative — leaving a PROVEN holder of
+    this RDB alive — is the two-writer divergence the caller exists to
+    prevent, and the process is unreachable by path (its socket is gone), so
+    the graceful SHUTDOWN-over-socket path (#1371) is not available here.
+
+    `_kill` does not wait out its own SIGKILL, so the death is awaited here
+    under its own bound: reporting a false "still alive" would send the
+    caller to the loud-failure branch with the server already dying. Never
+    raises.
+    """
+    from tortoise.embedded_reaper import _kill, _pid_alive
+    try:
+        _kill(pid, _STALE_HOLDER_SIGTERM_TIMEOUT)
+    except Exception:
+        return False
+    deadline = time.monotonic() + _STALE_HOLDER_DEATH_TIMEOUT
+    while time.monotonic() < deadline:
+        if not _pid_alive(pid):
+            return True
+        time.sleep(0.1)
+    return not _pid_alive(pid)
 
 
 def _install_dead_socket_guard() -> None:
-    """#4879: require the recorded socket to exist before replaying it (once).
+    """#4879: never replay a DEAD recorded socket; repair instead (once).
 
-    Wraps `RedisMixin._is_redis_running`. The ORIGINAL predicate stays
-    authoritative for "is there a live server"; this adds only the socket-file
-    existence requirement the original omits. FAIL-CLOSED and never raises: an
-    unreadable or unparseable registry reads as False (start fresh) rather than
-    propagating — the patch must never break construction.
+    Wraps `RedisMixin._is_redis_running` (client.py:305-332) on the same
+    patch seam as #4487's `RedisMixin.__init__` wrapper. The ORIGINAL
+    predicate stays authoritative for "is there a live server"; this adds the
+    socket-file check the original omits AND, for a recorded socket that is
+    GONE under a live pid, the ordered repair (prove -> stop -> drop the
+    stale registry) that keeps redislite from starting a SECOND writer on the
+    same RDB. Idempotent, and never raises: a patch that broke construction
+    would be worse than the bug.
     """
     global _ORIGINAL_REDISLITE_IS_RUNNING
     try:
@@ -1643,28 +1790,85 @@ def _install_dead_socket_guard() -> None:
     _ORIGINAL_REDISLITE_IS_RUNNING = original
 
     def _is_redis_running(self):
-        # The original predicate's own `json.load` raises on an unparseable
-        # registry, so the whole read is inside the fail-closed guard. When it
-        # returns True the registry has already been read once; re-reading it
-        # here is the only way to reach the `unixsocket` the original ignores.
-        import json as _json
+        registry = getattr(self, "settingregistryfile", None)
+        if registry and os.path.exists(registry):
+            # Shape guard, BEFORE the original: a registry that parses but
+            # carries NO `pidfile` can be neither assessed nor REPLAYED —
+            # `_load_setting_registry` returns early (client.py:369-374) and
+            # leaves `socket_file` at None, which would hand the construction
+            # to redis-py's TCP defaults: a SILENT cross-connection to whatever
+            # listens on localhost:6379. There is no replay here to repair (and
+            # no holder record to protect): start clean. (Not a shape redislite
+            # writes; it is the first cut's behaviour for a corrupt/hand-made
+            # registry.)
+            pre = _registry_settings(registry)
+            if pre is not None and not pre.get("pidfile"):
+                return False
+        # The ORIGINAL is otherwise authoritative and is consulted next: it is
+        # the one that reports "there is no registry here at all" (the
+        # overwhelmingly common construction, short-circuited at
+        # client.py:310/333 before any registry read) and it owns the pid
+        # liveness verdict.
         try:
-            if not original(self):
-                return False
-            registry = getattr(self, "settingregistryfile", None)
-            if not registry:
-                return False
-            with open(registry) as file_handle:
-                settings = _json.load(file_handle)
+            running = original(self)
         except Exception:
+            # The registry exists but the original could not read it as a
+            # holder record (client.py:314-315/317/320-322): unparseable
+            # (possibly a registry a live server is MID-WRITE — `json.dump` is
+            # not atomic), a mangled pid, an unreadable pidfile, or a psutil
+            # AccessDenied. Answer True, NEVER False: False would START a
+            # server over an RDB whose holder we could not rule out
+            # (client.py:454-462), while True lets the replay re-raise the same
+            # error (client.py:356/363-366) — the UNPATCHED loud failure, with
+            # no server started.
+            return True
+        if not running:
             return False
-        sock = settings.get("unixsocket")
-        if sock:
-            # A recorded socket that is GONE under a live pid proves the
-            # registry is stale (the server is not this construction's) —
-            # never replay it; let `__init__` start a fresh server instead.
-            return os.path.exists(sock)
-        return True
+        # The original returned True, so the registry exists, parses, carries a
+        # pidfile whose file exists, and that pid is live (client.py:313-332).
+        settings = _registry_settings(registry)
+        if settings is None:
+            return True  # vanished/mutated between the two reads -> unproven
+        recorded_socket = settings.get("unixsocket")
+        if not recorded_socket or os.path.exists(recorded_socket):
+            return True  # nothing recorded to assess, or the socket is there
+        if getattr(self, "socket_file", None):
+            # This client already has a socket, so `__init__` (client.py:449:
+            # `... and not self.socket_file`) can NEVER take the registry-load
+            # branch: there is no replay here to repair. Keep the original
+            # answer — `_cleanup` asks this predicate through
+            # `_connection_count` (client.py:190), and a predicate must not
+            # kill a live server on a path that is not about to start one
+            # (the #3653 fail-open class).
+            return True
+        # Registry present + recorded socket GONE + pid LIVE (the original
+        # said so). Repair only a PROVEN holder; otherwise fail loud.
+        pid = _proven_stale_holder_pid(settings)
+        if pid is None:
+            # DELIBERATE, not a fall-through. The evidence cannot prove the
+            # live pid is this registry's server, and THIS is the branch that
+            # could double-start: a second redis-server on the same
+            # dbfilename while an unproven live process may still hold it.
+            # Answering True keeps TODAY's behaviour — redislite replays the
+            # registry and the ping fails LOUDLY with the ConnectionError
+            # above, with no server started and nothing signalled. An
+            # unrepaired loud failure is recoverable; a silent two-writer
+            # divergence is not. (The failed construction leaves a
+            # partially-built client whose own atexit `_cleanup` also meets
+            # the dead socket — today's behaviour, unchanged.)
+            return True
+        if not _stop_proven_holder(pid):
+            return True  # proven ours but not stopped -> never double-start
+        try:
+            os.remove(registry)
+        except OSError:
+            # Still there -> it would replay the dead socket, so do not let a
+            # server be started yet.
+            return True
+        # The recorded server is confirmed dead (the RDB is released) and the
+        # stale registry is gone: `__init__`'s else branch starts a clean
+        # server over the same dbdir/dbfilename — now the ONLY writer.
+        return False
 
     RedisMixin._is_redis_running = _is_redis_running
     RedisMixin._tortoise_dead_socket_guard = True

@@ -2015,73 +2015,319 @@ def test_partial_init_cleanup_reclaims_the_orphaned_server(tmp_path):
 
 # ── #4879: a DEAD recorded socket must not be replayed ────────────────────
 #
-# redislite's `RedisMixin._is_redis_running()` validates only three things:
-# the `<db>.settings` registry file exists, the recorded `pidfile` exists, and
-# that pid is a live process. It NEVER validates the recorded `unixsocket`,
-# and `_load_setting_registry()` then assigns
-# `self.socket_file = settings['unixsocket']` unconditionally. So when the
-# registry + pidfile survive but the socket file is gone (with a live pid),
-# the predicate reads True, the DEAD path is replayed, the construction ping
-# connects to it, and the caller dies with
+# redislite's `RedisMixin._is_redis_running()` (client.py:305-332) validates
+# only three things: the `<db>.settings` registry file exists, the recorded
+# `pidfile` exists, and that pid is a live process. It NEVER validates the
+# recorded `unixsocket`, and `_load_setting_registry()` (client.py:351-378)
+# then assigns `self.socket_file = settings['unixsocket']` unconditionally
+# (client.py:376). So when the registry + pidfile survive but the socket file
+# is gone (with a live pid), the predicate reads True, the DEAD path is
+# replayed, and the construction ping dies with
 #     redis.exceptions.ConnectionError: Error 2 connecting to
 #     /tmp/tmpXXXX/redis.socket. No such file or directory.
 # That is the deterministic main-branch failure of
-# `tests/test_pack_state.py::TestBackfillScript::test_apply_writes_to_introspection_read_target`
-# — the recorded socket belonged to a PREVIOUS construction. The #4487
-# `RedisMixin.__init__` patch in `tortoise/embedded_lifecycle.py` is extended
-# to also wrap `_is_redis_running`, so "a redis is running" additionally
-# requires the recorded socket to exist. Returning False routes `__init__`
-# into redislite's existing `else: _create_redis_directory_tree()` branch,
-# which starts a fresh server and socket — no new control flow is needed.
+# `tests/test_pack_state.py::TestBackfillScript::test_apply_writes_to_introspection_read_target`.
+#
+# The #4879-REVIEW hole: answering False is NOT a repair. `__init__` takes
+# its `else:` branch (client.py:454-462) and runs
+# `_create_redis_directory_tree()` (client.py:203-216, a new mkdtemp) +
+# `_start_redis()` (client.py:218-236), which passes
+# `'dbdir': self.dbdir, 'dbfilename': self.dbfilename` (client.py:234-235)
+# straight through — THE SAME RDB FILE. So the state built below (registry
+# present, recorded socket GONE, recorded pid LIVE) is exactly the state in
+# which answering False starts a SECOND writer on one RDB. The repair in
+# `tortoise/embedded_lifecycle.py` therefore PROVES the live pid is this
+# registry's own server, stops it gracefully, and only then drops the stale
+# registry. These tests pin the END STATE, not "construction succeeded".
 
 
-def test_dead_recorded_socket_is_not_replayed(tmp_path):
-    """#4879: a registry + LIVE pid whose recorded ``unixsocket`` is GONE must
-    not be replayed — construction must start a fresh embedded server.
+def _live_rdb_writers(db_dir, dbfilename):
+    """Live redis-server pids whose OWN redis.config declares this RDB.
 
-    The state is built directly, with no dependence on cross-test ordering:
-    this test writes the registry and pidfile, the pid is this live test
-    process, and the recorded socket path is deliberately never created.
-    RED mutation: drop ``_install_dead_socket_guard`` and construction raises
-    the ``Error 2 connecting to .../redis.socket. No such file or directory``
-    above.
+    The RDB's identity is (dir, dbfilename) in the server's config — NOT in
+    its argv: redislite starts `redis-server unixsocket:<socket_dir>/redis.socket`,
+    so the argv names the SOCKET tempdir while the RDB lives at
+    `<db_dir>/<dbfilename>`. Counting by argv dir would MISS a second server
+    started against the SAME RDB — the hazard under test. Reuses the reaper's
+    own pass-1 helpers (pgrep enumeration + argv/config parsing).
+    """
+    from tortoise.embedded_reaper import (
+        _pgrep_redis_servers,
+        _read_redis_config,
+        _socket_dir_from_cmdline,
+    )
+    want = os.path.realpath(str(db_dir))
+    writers = []
+    for pid in _pgrep_redis_servers():
+        socket_dir = _socket_dir_from_cmdline(pid)
+        if not socket_dir:
+            continue
+        config = _read_redis_config(socket_dir) or {}
+        if config.get("dbfilename") != dbfilename:
+            continue
+        if os.path.realpath(config.get("dir", "")) == want:
+            writers.append(pid)
+    return sorted(writers)
+
+
+def test_live_recorded_server_with_dead_socket_is_stopped_not_doubled(tmp_path):
+    """#4879: registry + LIVE server + recorded socket GONE (the hole's state).
+
+    The recorded server is genuinely alive and holding this RDB — the only
+    state in which answering False arms a SECOND writer on the same
+    dbfilename. RED on the first cut (`77ce56763`): construction succeeds but
+    this RDB ends up with TWO live writers. RED on unmodified redislite: the
+    construction raises the ``ConnectionError`` above. GREEN: the proven
+    holder is stopped, its in-memory write is persisted by that graceful
+    stop, the stale registry is dropped, and EXACTLY ONE live writer remains.
+    """
+    import json as _json
+
+    db_path = tmp_path / "replayed_registry.db"
+    first = FalkorDB(str(db_path))
+    registry = Path(str(db_path) + ".settings")
+    recorded = _json.loads(registry.read_text())
+    holder_pid = int(Path(recorded["pidfile"]).read_text().strip())
+    dead_socket = recorded["unixsocket"]
+    second = None
+    try:
+        assert _pid_alive(holder_pid), "the recorded server must be live"
+        assert _live_rdb_writers(tmp_path, db_path.name) == [holder_pid], (
+            "#4879 baseline: exactly the recorded server writes this RDB")
+        # A write that exists ONLY in the holder's memory -> the repair must
+        # stop it GRACEFULLY (redis saves on SIGTERM); a SIGKILL would lose it.
+        assert first.client.set("4879-graceful-stop", "persisted")
+
+        # The hole's trigger: the socket FILE vanishes while dir + pidfile +
+        # registry survive and the server keeps running, still holding the RDB.
+        os.remove(dead_socket)
+        assert not os.path.exists(dead_socket)
+        assert _pid_alive(holder_pid)
+
+        second = FalkorDB(str(db_path))
+        assert second.client.ping(), "a fresh embedded server must answer"
+
+        # (1) the recorded holder was STOPPED, not left running.
+        assert not _pid_alive(holder_pid), (
+            "#4879: the recorded server must have been stopped")
+        # (2) ...gracefully: its in-memory write survived into the RDB.
+        assert second.client.get("4879-graceful-stop") == "persisted", (
+            "#4879: the stop must be graceful (redis saves on SIGTERM)")
+        # (3) THE BAR — exactly ONE live writer on this RDB: not zero, not two.
+        writers = _live_rdb_writers(tmp_path, db_path.name)
+        replacement = _json.loads(registry.read_text())
+        new_pid = int(Path(replacement["pidfile"]).read_text().strip())
+        assert writers == [new_pid], (
+            f"#4879: expected exactly one live writer for {db_path} "
+            f"(pid {new_pid}); found {writers} "
+            f"(recorded holder {holder_pid})")
+        # (4) ...and the registry was rebuilt onto a LIVE socket, not replayed.
+        assert replacement["unixsocket"] != dead_socket, (
+            "#4879: the DEAD recorded socket path was replayed")
+        assert os.path.exists(replacement["unixsocket"])
+    finally:
+        for client in (second, first):
+            if client is not None:
+                with contextlib.suppress(Exception):
+                    client._t_close()
+
+
+def test_bound_client_predicate_does_not_signal_a_live_server(tmp_path):
+    """#4879 review, scope: the repair fires only where a start is imminent.
+
+    `_is_redis_running` is ALSO reached from redislite's close path
+    (`_cleanup` -> `_connection_count`, client.py:190). A client that already
+    holds a socket can never take `__init__`'s registry-load branch
+    (client.py:449 requires `not self.socket_file`), so this state is not a
+    replay waiting to be repaired: the predicate must keep the ORIGINAL
+    answer and signal nothing — otherwise a close would kill a live server
+    and drop its registry, the #3653 tear-a-live-co-tenant-down fail-open.
     """
     import json as _json
     import shutil
+
+    db_path = tmp_path / "bound_predicate.db"
+    client = None
+    holder_pid = None
+    socket_dir = None
+    try:
+        client = FalkorDB(str(db_path))
+        registry = Path(str(db_path) + ".settings")
+        recorded = _json.loads(registry.read_text())
+        holder_pid = int(Path(recorded["pidfile"]).read_text().strip())
+        socket_dir = os.path.dirname(recorded["unixsocket"])
+        assert _pid_alive(holder_pid)
+
+        os.remove(recorded["unixsocket"])
+        assert not os.path.exists(recorded["unixsocket"])
+
+        assert client.client._is_redis_running() is True, (
+            "#4879: a bound client keeps the original predicate answer")
+        assert _pid_alive(holder_pid), (
+            "#4879: the predicate must not signal a live server")
+        assert registry.exists(), (
+            "#4879: ...nor drop the registry of a live server")
+    finally:
+        # The predicate deliberately did NOT stop the holder (that IS the
+        # assertion above), so the TEST stops it and reclaims its dir.
+        if holder_pid:
+            with contextlib.suppress(OSError):
+                os.kill(holder_pid, _signal.SIGTERM)
+            _wait_server_dead(holder_pid)
+        if client is not None:
+            with contextlib.suppress(Exception):
+                client._t_close()
+        if socket_dir:
+            shutil.rmtree(socket_dir, ignore_errors=True)
+
+
+def test_unproven_recorded_pid_is_not_signalled_and_nothing_is_started(tmp_path):
+    """#4879 review: provenance unverified -> LOUD failure, never a second writer.
+
+    The recorded pid is LIVE but is not this registry's redis-server (here:
+    this very test process), and the recorded socket is gone. The documented,
+    DELIBERATE behaviour is today's loud ``ConnectionError``: nothing is
+    signalled, nothing is started, and the registry is left alone. Answering
+    False here would arm a second writer while an unproven live process may
+    still hold the RDB.
+    """
+    import atexit
+    import json as _json
+    import shutil
     import tempfile
+
+    import redis
+    from redislite.client import RedisMixin
 
     # The recorded socket path must be SHORT enough for AF_UNIX: macOS rejects
     # paths over ~104 bytes with ENAMETOOLONG, which would mask the ENOENT this
     # bug actually produces. pytest's tmp_path is often that long, so the dead
     # socket lives in its own short temp dir (the same shape as redislite's
     # own /tmp/tmpXXXX/redis.socket).
-    sock_dir = tempfile.mkdtemp(prefix="t4879_")
-    db_path = tmp_path / "dead_socket_replay.db"
-    dbfilename = db_path.name
-    registry = tmp_path / (dbfilename + ".settings")
+    sock_dir = tempfile.mkdtemp(prefix="t4879_unproven_")
+    db_path = tmp_path / "unproven_registry.db"
+    registry = Path(str(db_path) + ".settings")
     dead_socket = os.path.join(sock_dir, "redis.socket")  # never created
     pidfile = tmp_path / "redis.pid"
-    pidfile.write_text(str(os.getpid()))  # a genuinely LIVE pid
+    pidfile.write_text(str(os.getpid()))  # genuinely LIVE, but not ours
     registry.write_text(_json.dumps({
         "pidfile": str(pidfile),
         "unixsocket": dead_socket,
         "dbdir": str(tmp_path),
-        "dbfilename": dbfilename,
+        "dbfilename": db_path.name,
     }))
-    assert os.path.exists(str(pidfile))
     assert not os.path.exists(dead_socket), "the recorded socket must be DEAD"
+
+    leaked = None
+    try:
+        with pytest.raises(redis.exceptions.ConnectionError) as excinfo:
+            FalkorDB(str(db_path))
+        # The loud branch is the REGISTRY REPLAY, not some other failure.
+        assert dead_socket in str(excinfo.value)
+        assert _pid_alive(os.getpid()), (
+            "#4879: an unproven live pid must never be signalled")
+        assert _live_rdb_writers(tmp_path, db_path.name) == [], (
+            "#4879: the unproven branch must not start a second server")
+        assert registry.exists(), "#4879: the registry is left untouched"
+
+        # The failed construction leaves a partially-built client whose own
+        # atexit `_cleanup` (registered at client.py:448, before the raise)
+        # would re-enter the dead socket at interpreter shutdown. Find it in
+        # the raising traceback and neutralise it exactly as redislite's own
+        # `_cleanup` does: a None pidfile makes that teardown a no-op
+        # (client.py:94-97).
+        for entry in excinfo.traceback:
+            candidate = entry.frame.f_locals.get("self")
+            if isinstance(candidate, RedisMixin):
+                leaked = candidate
+                break
+        assert leaked is not None, "no partially-built client to neutralise"
+    finally:
+        if leaked is not None:
+            atexit.unregister(leaked._cleanup)
+            leaked.pidfile = None
+        shutil.rmtree(sock_dir, ignore_errors=True)
+
+
+def test_registry_without_a_holder_record_starts_clean(tmp_path):
+    """#4879 review: a registry with NO ``pidfile`` is not a replay at all.
+
+    ``_load_setting_registry`` returns early when the registry carries no
+    ``pidfile`` (client.py:369-374), so answering True for this shape would
+    leave ``socket_file`` at None and hand the construction to redis-py's TCP
+    defaults — a SILENT cross-connection to whatever listens on
+    localhost:6379 (the lane's docker FalkorDB here, a plain redis in most
+    dev setups). It must start an EMBEDDED server instead.
+    """
+    import json as _json
+    import shutil
+    import tempfile
+
+    sock_dir = tempfile.mkdtemp(prefix="t4879_noholder_")
+    db_path = tmp_path / "no_holder_record.db"
+    registry = Path(str(db_path) + ".settings")
+    registry.write_text(_json.dumps({
+        "unixsocket": os.path.join(sock_dir, "redis.socket"),
+        "dbdir": str(tmp_path),
+        "dbfilename": db_path.name,
+    }))
 
     db = None
     try:
         db = FalkorDB(str(db_path))
-        assert db.client.ping(), "a fresh embedded server must answer"
+        assert db.client.ping()
         sock = db.client.socket_file
         assert sock and os.path.exists(sock), (
-            "#4879: construction must leave a live socket behind")
-        assert sock != dead_socket, (
-            "#4879: the DEAD recorded socket path was replayed")
+            "#4879: must be an EMBEDDED unix socket, never a TCP default")
     finally:
         if db is not None:
             with contextlib.suppress(Exception):
                 db._t_close()
         shutil.rmtree(sock_dir, ignore_errors=True)
+
+
+def test_stop_proven_holder_escalates_only_after_its_budget(monkeypatch):
+    """#4879 review: the stop is SIGTERM-first, and SIGKILL is the last resort.
+
+    `_stop_proven_holder` may report a proven holder gone ONLY once it is
+    actually gone. A holder that IGNORES SIGTERM is the case the escalation
+    exists for: the helper must still return True (SIGKILL after the bounded
+    budget), because a False there sends the caller to the loud branch — safe
+    — while a True-while-alive would drop the registry and start a SECOND
+    writer. The budget is shrunk so the escalation is exercised quickly.
+
+    The holder is double-forked (orphaned to launchd/init) on purpose: a
+    direct child would stay a ZOMBIE after SIGKILL and `_pid_alive` reads a
+    zombie as alive on macOS (its /proc zombie check is Linux-only), which
+    would make this assert the wrong thing.
+    """
+    import tortoise.embedded_lifecycle as _lifecycle
+
+    monkeypatch.setattr(_lifecycle, "_STALE_HOLDER_SIGTERM_TIMEOUT", 0.5)
+    spawner = _subprocess.Popen(
+        [sys.executable, "-c", (
+            "import os, signal, time\n"
+            "pid = os.fork()\n"
+            "if pid:\n"
+            "    print(pid, flush=True)\n"
+            "    os._exit(0)\n"
+            "os.setsid()\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "time.sleep(60)\n"
+        )],
+        stdout=_subprocess.PIPE, text=True,
+    )
+    holder_pid = None
+    try:
+        holder_pid = int(spawner.stdout.readline().strip())
+        spawner.wait(timeout=10)
+        assert _pid_alive(holder_pid), "the stubborn holder must be live"
+        assert _lifecycle._stop_proven_holder(holder_pid) is True, (
+            "#4879: a SIGTERM-ignoring holder must be escalated, not left")
+        assert not _pid_alive(holder_pid)
+    finally:
+        if holder_pid:
+            with contextlib.suppress(OSError):
+                os.kill(holder_pid, _signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            spawner.kill()
