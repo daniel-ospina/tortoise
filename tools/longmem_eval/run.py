@@ -16,14 +16,21 @@ failed questions after every question; re-running with the same file resumes
 (skips completed/failed, continues the rest).
 
 Run modes:
-    --mock        fully offline (MockReader + MockJudge; CI smoke, no keys)
+    --mock        offline reader/judge (MockReader + MockJudge; CI smoke, no
+                  provider keys). The dense leg is still REQUIRED (#4718);
+                  --skip-preflight is the explicit waiver.
     default       real LLM reader + judge via provider keys (env-driven)
 
 Full run needs: the dataset (~tens of MB, auto-downloaded to
 ``~/.cache/tortoise-longmemeval`` or ``TORTOISE_LME_CACHE_DIR``) and provider
 keys (OPENROUTER_API_KEY / OPENAI_API_KEY / …) — never committed, never
 hardcoded. The committed MINI fixture + ``--mock`` exercises the whole
-pipeline in CI.
+pipeline offline; the pinned embedder is still REQUIRED (#4718), so a CI
+lane that runs these paths provisions it up front (the main test job's
+``tools/embedder_provision.py`` step, #2573) and the harness invocations
+whose subject is not the dense leg carry ``--skip-preflight`` — a cold or
+absent embedder therefore never downloads mid-suite and never turns an
+unrelated assertion red.
 """
 from __future__ import annotations
 
@@ -510,23 +517,42 @@ def _embedder_status(*, available: bool, reason: str | None,
     }
 
 
-def _preflight_embedder(*, mock: bool) -> dict:
+# #4718: the dense-leg load budget is chosen by the same predicate as the
+# gate — what the run NEEDS, not which reader/judge it uses. A required leg
+# gets the real cold-load window (600s): #1349 already raised the product
+# default from 30s to 90s because "30s caused silent TF-IDF degrade on cold
+# caches" (tortoise/embeddings.py), and the old 30s `--mock` budget
+# re-introduced exactly that for the sealed retrieval-measurement command. A
+# leg the operator explicitly waived gets the short probe, so a debugging run
+# does not stall ten minutes before continuing.
+_DENSE_LEG_LOAD_TIMEOUT_S = 600.0
+_WAIVED_DENSE_LEG_LOAD_TIMEOUT_S = 30.0
+
+
+def _dense_leg_load_timeout(*, dense_leg_required: bool) -> float:
+    """The dense-leg probe budget — follows `dense_leg_required` (#4718)."""
+    return (_DENSE_LEG_LOAD_TIMEOUT_S if dense_leg_required
+            else _WAIVED_DENSE_LEG_LOAD_TIMEOUT_S)
+
+
+def _preflight_embedder(*, dense_leg_required: bool) -> dict:
     """R3 (#1542) D2: pre-flight the dense leg — never a silent None.
 
     Verifies USABILITY, not just loadability: after ``EmbeddingModel.get()``
-    succeeds, runs one probe encode and asserts the 384-dim output. A real
-    (non-mock) run refuses to start when the embedder is missing or broken
-    (SystemExit naming the remediation commands); ``--mock`` warns and
-    continues (the status is still recorded in the report methodology).
+    succeeds, runs one probe encode and asserts the 384-dim output.
 
-    Timeouts are mode-aware: real runs probe with ``load_timeout=600`` (the
-    cold-download window for the first-ever model fetch); ``--mock`` probes
-    with ``load_timeout=30`` so an offline env without a cached model warns
-    and continues in ~30s instead of stalling 10 minutes.
+    The gate keys on whether the run REQUIRES the dense leg, never on
+    ``--mock`` (#4718). ``--mock`` selects the reader/judge; it is not an
+    authorisation to publish a degraded number — ``--retrieval-only --mock``
+    is the sealed measurement command (real retriever, real graph, only
+    reader/judge mocked out), so a failed dense leg there is a fabricated
+    result. Every run requires the dense leg except an explicit
+    ``--skip-preflight`` waiver (the documented debugging/offline escape
+    hatch).
     """
     from tortoise.embeddings import EmbeddingModel
 
-    timeout = 30.0 if mock else 600.0
+    timeout = _dense_leg_load_timeout(dense_leg_required=dense_leg_required)
     try:
         model = EmbeddingModel.get(load_timeout=timeout)
     except Exception:  # noqa: BLE001, RUF100
@@ -535,7 +561,8 @@ def _preflight_embedder(*, mock: bool) -> dict:
     if model is None:
         status = _embedder_status(available=False, reason="no_embedder",
                                   st_version=st_version)
-        return _finalize_embedder_preflight(status, mock=mock)
+        return _finalize_embedder_preflight(
+            status, dense_leg_required=dense_leg_required)
     # #1349: the loaded model id — EmbeddingModel has no model_id attr, so
     # fall back to the probe state (the ACTUAL injected candidate for
     # --model runs) before the pinned default. Without the probe check an
@@ -557,12 +584,14 @@ def _preflight_embedder(*, mock: bool) -> dict:
             status = _embedder_status(
                 available=False, reason="dim_mismatch",
                 model=model_id, st_version=st_version)
-            return _finalize_embedder_preflight(status, mock=mock)
+            return _finalize_embedder_preflight(
+                status, dense_leg_required=dense_leg_required)
     except Exception:  # noqa: BLE001, RUF100
         status = _embedder_status(
             available=False, reason="encode_failed",
             model=model_id, st_version=st_version)
-        return _finalize_embedder_preflight(status, mock=mock)
+        return _finalize_embedder_preflight(
+            status, dense_leg_required=dense_leg_required)
     status = _embedder_status(available=True, reason=None,
                               model=model_id, st_version=st_version)
     print(f"[longmem_eval] embedder pre-flight OK: {model_id} "
@@ -570,23 +599,33 @@ def _preflight_embedder(*, mock: bool) -> dict:
     return status
 
 
-def _finalize_embedder_preflight(status: dict, *, mock: bool) -> dict:
-    """R3 (#1542) D2 gate: real runs refuse to start with a degraded dense
-    leg (SystemExit with the exact remediation); ``--mock`` warns and
-    continues (CI smoke stays runnable offline)."""
+def _finalize_embedder_preflight(status: dict, *,
+                                 dense_leg_required: bool) -> dict:
+    """The dense-leg gate (#4718).
+
+    Required (the default for every run that has not explicitly waived the
+    leg) → ``SystemExit(1)`` naming the reason, the load budget used, and the
+    fact that no measurement was produced.
+
+    Waived (``--skip-preflight``, documented as debugging/offline only) →
+    record the status and continue. The message uses WAIVED vocabulary so
+    the line can never be mistaken for a measurement's warning, and the
+    report records ``vector_strategy: "unavailable"``.
+    """
     reason = status.get("reason")
-    if mock:
-        # Reachable under --mock (warn + continue) AND under --skip-preflight
-        # (the gate is lifted for debugging; #1626). Distinguish the two so an
-        # operator isn't told a real run was "mock".
-        print("[longmem_eval] WARNING: embedder unavailable "
-              f"(reason={reason}) — the vector/dense leg is DISABLED for "
-              "this run; install with: uv sync --group dev "
-              "--extra embeddings", file=sys.stderr)
+    if not dense_leg_required:
+        print("[longmem_eval] WARNING: dense leg WAIVED by --skip-preflight "
+              f"(embedder unavailable: reason={reason}) — this run is NOT a "
+              "measurement and its report records "
+              "vector_strategy='unavailable'. Install with: uv sync "
+              "--group dev --extra embeddings", file=sys.stderr)
         return status
+    timeout = _dense_leg_load_timeout(dense_leg_required=True)
     print("[longmem_eval] EMBEDDER PRE-FLIGHT FAILED — the dense (vector) "
-          f"leg cannot run (reason={reason}). Refusing to start: publishing "
-          "a dense-less report is worse than no report.", file=sys.stderr)
+          f"leg cannot run (reason={reason}; load_timeout={timeout:g}s) and "
+          "this run REQUIRES it, so NO measurement was produced. Refusing "
+          "to start: publishing a dense-less report is worse than no "
+          "report.", file=sys.stderr)
     print("The eval env must install the pinned embedder (R3 #1542):",
           file=sys.stderr)
     print("  uv sync --group dev --extra embeddings", file=sys.stderr)
@@ -5735,7 +5774,9 @@ def _build_parser() -> argparse.ArgumentParser:
                         "(env TORTOISE_LME_EVIDENCE_BOOST_SOURCE; default "
                         f"{DEFAULT_EVIDENCE_BOOST_SOURCE})")
     p.add_argument("--mock", action="store_true",
-                   help="offline mode: MockReader + MockJudge, no API keys (CI)")
+                   help="offline mode: MockReader + MockJudge, no API keys "
+                        "(CI). Does NOT waive the dense-leg gate (#4718) — "
+                        "use --skip-preflight for that")
     p.add_argument("--skip-preflight", action="store_true",
                    help="bypass the pre-flight API gate AND the dense-leg "
                         "(embedder) gate (debugging/offline only — the "
@@ -6343,14 +6384,14 @@ def _run_main(parser: argparse.ArgumentParser, args,
                      load_timeout=args.load_timeout)
 
     # R3 (#1542) D2: embedder pre-flight — before dataset load (fail before
-    # the ~tens-of-MB download). Real runs refuse to start when the dense
-    # leg can't run; --mock warns and continues. The status flows into the
-    # report methodology (D5: embedder + vector_strategy always emitted).
-    # R3 (#1542) D2: the embedder gate. `--skip-preflight` must ALSO skip
-    # this gate — it's the "skip all gates" debugging flag; a real (non-mock)
-    # run without it still refuses to start dense-less (#1626).
+    # the ~tens-of-MB download). EVERY run refuses to start when the dense
+    # leg cannot run; the only waiver is an explicit --skip-preflight (#1626).
+    # `--mock` selects the reader/judge and is NOT a dense-leg authorisation
+    # (#4718: `--retrieval-only --mock` is a measurement, and a loaded host
+    # used to turn it keyword-only). The status flows into the report
+    # methodology (D5: embedder + vector_strategy always emitted).
     embedder_status = _preflight_embedder(
-        mock=args.mock or args.skip_preflight)
+        dense_leg_required=not args.skip_preflight)
 
     instances = ds.load_dataset(
         args.split, limit=args.limit, data_path=args.data,
