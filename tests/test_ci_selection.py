@@ -41,6 +41,29 @@ def test_docs_only_runs_tier1():
     assert set(r["test_files"]) == _tier1()
 
 
+def test_docs_scanning_gates_stay_in_tier1():
+    # #4309: a docs-only PR runs *only* tier1.
+    #
+    # A gate whose whole job is to stop a claim being re-scattered across the
+    # doc tree is silent on the exact change it exists to catch unless it is
+    # registered in `tier1` — every other surface needs a Python path to be
+    # selected. #4283 registered the durability gate in `tier1` + `core` for
+    # exactly this reason; the older #4179 retention gate stayed out of `tier1`
+    # and so ran no part of its scan on a docs-only edit (e.g. to
+    # docs/retention-and-deletion.md), letting a new unlinked retention claim
+    # merge green. Pin both: dropping either from `tier1` re-opens that hole.
+    tier1 = _tier1()
+    assert "test_retention_promise.py" in tier1, (
+        "#4179 retention/deletion anti-scatter gate must stay in tier1 — a "
+        "docs-only PR runs only tier1, so without it a new unlinked retention "
+        "claim in docs/ merges green (#4309)"
+    )
+    assert "test_durability_posture.py" in tier1, (
+        "#2881 durability gate must stay in tier1 — same docs-only silent-drop "
+        "class (#4309)"
+    )
+
+
 def test_public_site_surface_change_selects_onboarding_and_skips_slow():
     """#3332: a public *site surface* change selects `onboarding`.
 
@@ -993,18 +1016,34 @@ def test_push_legs_partitions_every_classified_file():
     # pre-#1485 form of this check required a bench file in half_b SPECIFICALLY
     # and re-staled the moment a pool change moved one (#3811: adding a single
     # classified file flipped all three bench files into half_a, reddening an
-    # unrelated PR). Assert the invariant the code actually provides — every
-    # bench file reaches a half (the partition assertion above), and
-    # `push_extra`, when non-empty, reaches BOTH rather than being dumped on
-    # one.
+    # unrelated PR). Assert the invariant the code actually provides HERE: every
+    # bench file reaches a half (the partition assertion above). The push_extra
+    # spread rule is not asserted against this manifest — the shipped
+    # `push_extra` is empty, so it would be vacuous — it is pinned on a
+    # SYNTHETIC manifest by test_push_legs_distributes_push_extra_across_halves
+    # below (#2988/#3243).
     assert any(f.startswith("bench/") for f in legs["half_a"] + legs["half_b"]), \
         "no bench file reached the push legs at all"
-    push_extra = {f.replace(".py", "") for f in m.get("push_extra", [])}
-    if push_extra:
-        assert push_extra & set(legs["half_a"]), \
-            "push_extra lost its even spread (#1485): none in half a"
-        assert push_extra & set(legs["half_b"]), \
-            "push_extra lost its even spread (#1485): none in half b"
+
+
+def test_push_legs_distributes_push_extra_across_halves():
+    """#1485: ``push_extra`` is spread across the halves (even index -> half_a,
+    odd -> half_b), never dumped on one.
+
+    Pinned on a SYNTHETIC manifest: the shipped ``push_extra`` is empty (the
+    bench files are classified under the `eval` surface and packed by LPT), so
+    asserting this against the real manifest is vacuous — and pinning which
+    half a *bench* file lands on was a function of the duration estimates, not
+    a designed invariant (#2988/#3243 corrected the stale
+    test_selfhost_health_probe_executor.py weight, which flipped it).
+    """
+    from tools.ci_selection import push_legs
+
+    m = dict(load_manifest())
+    m["push_extra"] = ["bench/synthetic_a.py", "bench/synthetic_b.py"]
+    legs = push_legs(m)
+    assert "bench/synthetic_a" in legs["half_a"], legs["half_a"]
+    assert "bench/synthetic_b" in legs["half_b"], legs["half_b"]
 
 
 def test_carve_out_mirrors_test_no_redirect_stems():

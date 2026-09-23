@@ -131,7 +131,11 @@ export function recoveryInterstitial(email: string | null, pendingId: string): R
   const shown = email ? escapeHtml(email) : "your account";
   // #3525: this is the one self-rendered HTML page in the dashboard AND the one
   // with no inline event handlers, so it can be nonce-gated — the treatment the
-  // MCP consent page already uses, and stricter (no external script is needed).
+  // MCP consent page already uses. The policy is NOT nonce-ONLY: it carries the
+  // platform-injected Cloudflare beacon origin beside the nonce (every policy
+  // must — see `_shared/security-headers.ts`), so any script served from that
+  // origin would run here un-nonced. What this page authors is a single inline
+  // script, and that one still needs the nonce.
   const nonce = cspNonce();
   const html = `<!DOCTYPE html>
 <html lang="en">
