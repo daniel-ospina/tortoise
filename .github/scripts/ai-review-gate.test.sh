@@ -119,9 +119,15 @@ done
 # (1) The required job must never become conditional or non-blocking. A
 #     SKIPPED check reports Success; `continue-on-error` swallows a failure.
 #     Either one silently passes the required check without evaluating any
-#     evidence. The pattern covers quoted and space-padded key forms
-#     (`    if :`, `    "if":`) as well as the plain ones.
-if grep -qE '^[[:space:]]*["'\'']?(if|needs|continue-on-error)["'\'']?[[:space:]]*:' "$T/job-block.yml"; then
+#     evidence. The pattern matches the key as a TOKEN after an optional `?`
+#     (YAML explicit key: `? if` / `: false` — valid Actions YAML that GitHub's
+#     own parser accepts) or quote, and accepts a line that ENDS at the key,
+#     because an explicit key puts its `:` on the NEXT line (cycle-3 review).
+#     Text matching still cannot enumerate every spelling: the parsed-document
+#     assertions in tests/test_ai_review_gate_contract.py are spelling-proof.
+#     Plain, quoted (`    "if":`), space-padded (`    if :`) and explicit-key
+#     (`    ? if`) forms are all matched.
+if grep -qE '(^|[[:space:]{,?])["'\'']?(if|needs|continue-on-error)["'\'']?[[:space:]]*(:|$)' "$T/job-block.yml"; then
     bad "gate job gained if:/needs:/continue-on-error: — a skipped or swallowed required check reports Success"
 else
     ok "gate job carries no if:/needs:/continue-on-error: (must always run)"
@@ -144,10 +150,14 @@ else
     bad "trigger is not exactly pull_request_target (pull_request* tokens found: $(printf '%s' "$on_tokens" | tr '\n' ',') ) — a same-repo PR could run its own gate definition"
 fi
 
-# (3) No path filter may gate the workflow: a path-filtered required check
-#     that does not run is reported as Success.
-if grep -qE '^[[:space:]]*["'\'']?(paths|paths-ignore)["'\'']?[[:space:]]*:' "$T/on-block.yml"; then
-    bad "trigger gained a paths:/paths-ignore: filter — a path-filtered required check reports Success"
+# (3) No path filter may gate the workflow. A required check whose workflow is
+#     skipped by path filtering stays PENDING forever, so the PR can never
+#     merge (a self-inflicted deadlock rather than a silent bypass — an earlier
+#     version of this message claimed it reports Success; corrected in the
+#     cycle-3 review). Matched as a token, so a flow mapping on the trigger
+#     line and an explicit key (`? paths`) are both caught.
+if grep -qE '(^|[[:space:]{,?])["'\'']?(paths|paths-ignore)["'\'']?[[:space:]]*(:|$)' "$T/on-block.yml"; then
+    bad "trigger gained a paths:/paths-ignore: filter — a path-filtered required check stays Pending, so the PR can never merge"
 else
     ok "trigger carries no paths:/paths-ignore: filter"
 fi
@@ -165,7 +175,7 @@ fi
 # A JOB-level `permissions:` is valid YAML and OVERRIDES the workflow block for
 # that job, so a job-level grant that drops `pull-requests: read` leaves the
 # assertion above green while making the diff-match path dead in production.
-if grep -qE '^[[:space:]]*["'\'']?permissions["'\'']?[[:space:]]*:' "$T/job-block.yml"; then
+if grep -qE '(^|[[:space:]{,?])["'\'']?permissions["'\'']?[[:space:]]*(:|$)' "$T/job-block.yml"; then
     bad "gate job carries a job-level permissions: override — it can drop pull-requests: read while the workflow-level grant still looks fine"
 else
     ok "gate job carries no job-level permissions: override (workflow grant is effective)"
