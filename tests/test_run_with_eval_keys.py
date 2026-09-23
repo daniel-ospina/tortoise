@@ -16,10 +16,9 @@ The wrapper makes the key source explicit:
   * emits a source + fingerprint line per managed key,
   * ``exec``s the command.
 
-No network, no Docker, no FalkorDB, no real key material. Every fixture value
-below is a deliberately fake string. The wrapper's own default `.env` path is
-exercised by one test that only reads the path from stderr — it never prints a
-value.
+No network, no Docker, no FalkorDB, and no real key material: every fixture is
+read from a temp `.env`, so the wrapper never reads the developer's live `.env`
+and never prints a real value.
 
 Run standalone:      python3 tests/test_run_with_eval_keys.py
 Run under pytest:    TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_run_with_eval_keys.py -q
@@ -29,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -76,12 +76,18 @@ EVALTEST_OK=1
 
 
 def parse_managed_keys(script: Path) -> set[str]:
-    """Extract the wrapper's declared MANAGED_KEYS array."""
+    """Extract the wrapper's declared MANAGED_KEYS array.
+
+    Comments inside the array are stripped first: an uppercase word in a
+    comment (e.g. ``# OPENROUTER is the evals key``) is not a declared key and
+    must not be read as one.
+    """
     text = script.read_text(encoding="utf-8")
     match = re.search(r"MANAGED_KEYS=\(\s*(.*?)\s*\)", text, re.DOTALL)
     if not match:
         raise AssertionError(f"MANAGED_KEYS block not found in {script}")
-    return set(re.findall(r"[A-Z][A-Z0-9_]*", match.group(1)))
+    body = re.sub(r"^\s*#.*$", "", match.group(1), flags=re.MULTILINE)
+    return set(re.findall(r"^\s*([A-Z][A-Z0-9_]*)\s*$", body, re.MULTILINE))
 
 
 class RunWithEvalKeysTests(unittest.TestCase):
@@ -136,17 +142,34 @@ class RunWithEvalKeysTests(unittest.TestCase):
         Without this pin, adding a provider to ``tortoise.ingest._PROVIDERS`` or
         ``tortoise.analyze._LLM_PROVIDERS`` would leave its ambient key un-stripped
         (the #4860 failure mode for the new provider) with a green suite.
+        ``tortoise/model_adapters.py`` is covered too — both its
+        ``_PROVIDER_KEY_ENV`` registry AND any adapter's ``key_env = "…"``
+        class attribute, so a new adapter cannot escape either (VeniceModel is
+        the precedent: it lives only here, not in ``_PROVIDERS``).
         """
         declared = parse_managed_keys(WRAPPER)
         self.assertEqual(declared, set(MANAGED))
         try:
             from tortoise.analyze import _LLM_PROVIDERS
             from tortoise.ingest import _PROVIDERS
+            from tortoise.model_adapters import _PROVIDER_KEY_ENV
         except Exception as exc:  # pragma: no cover - standalone lane
             self.skipTest(f"tortoise registries unavailable here: {exc}")
         derived = {key for _url, key in _PROVIDERS.values() if key}
         derived |= set(_LLM_PROVIDERS)
-        derived.add("VENICE_API_KEY")  # tortoise/model_adapters.py key_env
+        derived |= set(_PROVIDER_KEY_ENV.values())
+        # any adapter class attribute, so a new adapter not yet in the registry
+        # still reddens this guard
+        adapters_src = (ROOT / "tortoise" / "model_adapters.py").read_text(
+            encoding="utf-8"
+        )
+        derived |= set(
+            re.findall(
+                r'^\s*key_env\s*=\s*"([A-Z][A-Z0-9_]*)"',
+                adapters_src,
+                re.MULTILINE,
+            )
+        )
         self.assertEqual(
             derived,
             declared,
@@ -225,6 +248,37 @@ class RunWithEvalKeysTests(unittest.TestCase):
         ds = next(s for s in r1.stderr.splitlines() if "DEEPSEEK_API_KEY source" in s)
         self.assertNotEqual(first, ds)
 
+    def test_short_value_is_fully_redacted_including_its_hash(self):
+        # A short, low-entropy value must not be recoverable from a receipt:
+        # its length plus a deterministic sha256 is a brute-force oracle.
+        short = "abc123"
+        env_file = Path(self._tmp.name) / "short.env"
+        env_file.write_text(f"OPENROUTER_API_KEY={short}\n", encoding="utf-8")
+        r = self.run_wrapper(
+            ["true"],
+            env=self.base_env(EVAL_KEYS_ENV_FILE=str(env_file)),
+            use_fixture=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        line = next(
+            s for s in r.stderr.splitlines() if "OPENROUTER_API_KEY source=" in s
+        )
+        self.assertIn("fingerprint=<redacted>", line)
+        self.assertIn("sha256=redacted", line)
+        self.assertNotIn(short, r.stderr)
+        self.assertNotIn(hashlib.sha256(short.encode()).hexdigest()[:12], r.stderr)
+
+    def test_inherited_xtrace_does_not_leak_the_key(self):
+        # `SHELLOPTS=xtrace` in the caller's env makes bash trace the loader's
+        # `export "$key=$value"` line — dumping the full key into stderr, the
+        # exact channel the receipt keeps clean.
+        env = self.base_env(OPENROUTER_API_KEY=SABOTAGE)
+        env["SHELLOPTS"] = "xtrace"
+        r = self.run_wrapper(["true"], env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn(FIXTURE_OPENROUTER, r.stderr)
+        self.assertNotIn(FIXTURE_OPENROUTER, r.stdout)
+
     # ── the deliberate never-override for everything else ──────────────
 
     def test_non_managed_var_is_not_clobbered(self):
@@ -256,6 +310,25 @@ class RunWithEvalKeysTests(unittest.TestCase):
                 "1",
             ]) + "|",
             r.stderr,
+        )
+
+    def test_env_keys_colliding_with_loader_variables_are_not_dropped(self):
+        # The loader's own shell variables must not shadow a `.env` entry of
+        # the same name: that silently drops config the run needs (e.g. a
+        # `key=` or `value=` line), with no warning.
+        names = ("line", "raw", "key", "value", "first", "last", "already", "present", "fp")
+        env_file = Path(self._tmp.name) / "collide.env"
+        env_file.write_text(
+            "".join(f"{n}=collide-{n}\n" for n in names), encoding="utf-8"
+        )
+        script = "; ".join(f'printf "%s|" "${{{n}}}"' for n in names)
+        r = self.run_wrapper(
+            ["sh", "-c", script],
+            env=self.base_env(EVAL_KEYS_ENV_FILE=str(env_file)),
+            use_fixture=False,
+        )
+        self.assertEqual(
+            r.stdout, "|".join(f"collide-{n}" for n in names) + "|", r.stderr
         )
 
     # ── exec + exit-code fidelity ──────────────────────────────────────
@@ -312,17 +385,74 @@ class RunWithEvalKeysTests(unittest.TestCase):
         self.assertIn("WARNING", r.stderr)
         self.assertIn("OPENROUTER_API_KEY source=unset fingerprint=none", r.stderr)
 
+    def test_env_file_that_is_a_directory_fails_closed(self):
+        # `[ -r ]` is true for a directory; without the regular-file guard the
+        # read fails (or takes the warning path, platform-dependent) and the
+        # provenance block is skipped. Either way: fail closed, warn, no crash.
+        d = Path(self._tmp.name) / "adir"
+        d.mkdir()
+        env = self.base_env(
+            OPENROUTER_API_KEY=SABOTAGE, EVAL_KEYS_ENV_FILE=str(d)
+        )
+        r = self.run_wrapper(
+            ["sh", "-c", "printenv OPENROUTER_API_KEY || echo UNSET"],
+            env=env,
+            use_fixture=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "UNSET")
+        self.assertIn("WARNING", r.stderr)
+        self.assertIn("OPENROUTER_API_KEY source=unset fingerprint=none", r.stderr)
+
     # ── default path is the repo-root .env ─────────────────────────────
 
     def test_default_env_file_is_the_repo_root_env(self):
-        env = self.base_env()
-        r = self.run_wrapper(["true"], env=env, use_fixture=False)
+        # A synthetic repo layout — the wrapper COPIED to <tmp>/repo/tools/…,
+        # so the DEFAULT `.env` path resolves to <tmp>/repo/.env. Reading the
+        # developer's live `.env` here would emit real-key fingerprints into
+        # pytest's captured stderr (they would be dumped on any failure).
+        repo = Path(self._tmp.name) / "repo"
+        (repo / "tools").mkdir(parents=True)
+        copied = repo / "tools" / "run-with-eval-keys.sh"
+        shutil.copyfile(WRAPPER, copied)
+        copied.chmod(copied.stat().st_mode | stat.S_IXUSR)
+        (repo / ".env").write_text(
+            f'OPENROUTER_API_KEY="{FIXTURE_OPENROUTER}"\n', encoding="utf-8"
+        )
+        r = subprocess.run(
+            [str(copied), "true"],
+            capture_output=True,
+            text=True,
+            env=self.base_env(),
+            timeout=60,
+            check=False,
+        )
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn(os.path.normpath(str(ROOT / ".env")), r.stderr)
-        # with the default path the per-key label is the honest `.env` (or
-        # `unset` on a host with no .env, e.g. CI) — never a path
-        self.assertRegex(r.stderr, r"OPENROUTER_API_KEY source=(\.env|unset)")
-        self.assertNotIn("OPENROUTER_API_KEY source=/", r.stderr)
+        # the default path is named with the honest `.env` alias
+        self.assertIn("OPENROUTER_API_KEY source=.env fingerprint=", r.stderr)
+        self.assertIn(FIXTURE_OPENROUTER[:6], r.stderr)
+        self.assertNotIn(FIXTURE_OPENROUTER, r.stderr)
+
+    def test_symlinked_env_file_discloses_its_target(self):
+        # The alias is what is opened (so the label legitimately says `.env`),
+        # but the bytes come from the target — the receipt must disclose it, or
+        # it could claim the evals key while a different file was read.
+        base = Path(self._tmp.name).resolve()
+        target = base / "pi-keys.env"
+        target.write_text(
+            "OPENROUTER_API_KEY=sk-or-v1-TARGETsymlinkvalue0123456\n",
+            encoding="utf-8",
+        )
+        link = base / "linked.env"
+        link.symlink_to(target)
+        r = self.run_wrapper(
+            ["true"],
+            env=self.base_env(EVAL_KEYS_ENV_FILE=str(link)),
+            use_fixture=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"file={link} -> {target}", r.stderr)
+        self.assertNotIn("TARGETsymlinkvalue0123456", r.stderr)
 
     def test_relative_override_is_never_labelled_dot_env(self):
         # A relative EVAL_KEYS_ENV_FILE from a foreign cwd reads THAT file —

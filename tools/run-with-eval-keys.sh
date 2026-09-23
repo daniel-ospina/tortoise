@@ -53,6 +53,12 @@
 
 set -u
 
+# A caller's inherited `SHELLOPTS=xtrace` (or a `BASH_ENV` that runs `set -x`)
+# would trace the `export "$key=$value"` line below and write the FULL key to
+# stderr — the channel this tool exists to keep clean for receipts. Turn
+# tracing off before any secret is read.
+case $- in *x*) set +x ;; esac
+
 # The provider keys this wrapper owns — the set the extraction/reader paths
 # actually read:
 #   tortoise/ingest.py::_PROVIDERS          → OPENROUTER / DEEPSEEK / OPENAI / GEMINI
@@ -71,10 +77,6 @@ MANAGED_KEYS=(
   OPENAI_API_KEY
   GEMINI_API_KEY
 )
-
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
-ENV_FILE=${EVAL_KEYS_ENV_FILE:-$REPO_ROOT/.env}
 
 # Absolute form of a path whose target directory exists (else the value as-is).
 # `pwd -P` so a symlinked directory cannot leak a false path into the label.
@@ -110,6 +112,22 @@ resolve_self() {
     esac
   done
   absolute_path "$p"
+}
+
+# Resolve a symlink chain to its final target (display only — the alias path is
+# what the wrapper opens). Bounded, so a symlink cycle cannot hang the launcher.
+resolve_target() {
+  local p=$1 d n=0
+  while [ -L "$p" ] && [ "$n" -lt 40 ]; do
+    n=$((n + 1))
+    d=$(dirname -- "$p")
+    p=$(readlink "$p")
+    case "$p" in
+      /*) ;;
+      *) p=$d/$p ;;
+    esac
+  done
+  printf '%s' "$p"
 }
 
 SCRIPT_PATH=$(resolve_self "$0")
@@ -172,53 +190,67 @@ unset "${MANAGED_KEYS[@]}"
 #      parsing semantics mirror `mcp_server._load_dotenv`: a leading `export `
 #      is tolerated, blank/# lines are skipped, quoted values are literal, and
 #      an unquoted value loses a ` #` inline comment while a bare `#` survives.
-if [ -r "$ENV_FILE" ]; then
-  while IFS= read -r raw || [ -n "$raw" ]; do
-    line=$(trim "${raw%$'\r'}")
-    case "$line" in
+#
+#      "Already set" is judged against the environment this script INHERITED
+#      (plus keys a previous `.env` line already loaded), never against the
+#      script's own shell variables — otherwise a `.env` entry whose name
+#      collides with a loader variable (`key`, `value`, `line`, …) would be
+#      silently dropped and the run would lose config with no warning. The
+#      names `_RWEK_*` are reserved for this script.
+_RWEK_AMBIENT_ENV=$'\n'$(env)
+_RWEK_LOADED_KEYS=
+if [ -f "$ENV_FILE" ] && [ -r "$ENV_FILE" ]; then
+  while IFS= read -r _rwek_raw || [ -n "${_rwek_raw:-}" ]; do
+    _rwek_line=$(trim "${_rwek_raw%$'\r'}")
+    case "$_rwek_line" in
       '' | '#'*) continue ;;
     esac
-    case "$line" in
-      'export '*) line=${line#export } ;;
+    case "$_rwek_line" in
+      'export '*) _rwek_line=${_rwek_line#export } ;;
     esac
-    case "$line" in
+    case "$_rwek_line" in
       *=*) ;;
       *) continue ;;
     esac
 
-    key=$(trim "${line%%=*}")
-    value=$(trim "${line#*=}")
+    _rwek_key=$(trim "${_rwek_line%%=*}")
+    _rwek_value=$(trim "${_rwek_line#*=}")
 
     # Only well-formed shell/variable identifiers may reach `export`/`eval`.
-    case "$key" in
+    case "$_rwek_key" in
       '' | [0-9]* | *[!A-Za-z0-9_]*) continue ;;
     esac
 
-    first=${value:0:1}
-    last=${value: -1}
-    if { [ "$first" = '"' ] || [ "$first" = "'" ]; } && [ "$last" = "$first" ]; then
+    _rwek_first=${_rwek_value:0:1}
+    _rwek_last=${_rwek_value: -1}
+    if { [ "$_rwek_first" = '"' ] || [ "$_rwek_first" = "'" ]; } && [ "$_rwek_last" = "$_rwek_first" ]; then
       # mirrors _load_dotenv: bare quotes are literal, both ends stripped; a
       # lone quote char yields an empty value (Python's [1:-1] clamps)
-      if [ "${#value}" -ge 2 ]; then
-        value=${value:1:${#value}-2}
+      if [ "${#_rwek_value}" -ge 2 ]; then
+        _rwek_value=${_rwek_value:1:${#_rwek_value}-2}
       else
-        value=""
+        _rwek_value=""
       fi
     else
-      case "$value" in
-        *' #'*) value=$(trim "${value%% #*}") ;;
+      case "$_rwek_value" in
+        *' #'*) _rwek_value=$(trim "${_rwek_value%% #*}") ;;
       esac
     fi
 
-    if is_managed_key "$key"; then
-      export "$key=$value"
+    if is_managed_key "$_rwek_key"; then
+      export "$_rwek_key=$_rwek_value"
     else
-      eval "already=\${$key+x}"
-      if [ -z "$already" ]; then export "$key=$value"; fi
+      case "$_RWEK_AMBIENT_ENV$_RWEK_LOADED_KEYS" in
+        *$'\n'"$_rwek_key="*) ;;   # inherited / already loaded — first wins
+        *)
+          export "$_rwek_key=$_rwek_value"
+          _RWEK_LOADED_KEYS=$_RWEK_LOADED_KEYS$'\n'"$_rwek_key="
+          ;;
+      esac
     fi
   done <"$ENV_FILE"
 else
-  printf '[eval-keys] WARNING: %s not found — no provider key loaded from .env (fail-closed)\n' \
+  printf '[eval-keys] WARNING: %s not found or not a regular file — no provider key loaded from .env (fail-closed)\n' \
     "$ENV_FILE" >&2
 fi
 
@@ -226,23 +258,35 @@ fi
 # The fingerprint is the first 6 characters (the provider's fixed prefix, plus
 # for some issuers a few key characters), the length, and a sha256 prefix —
 # enough to identify the key across receipts without printing it. The full
-# value is never printed, and a value shorter than 12 characters is redacted
-# entirely.
-printf '[eval-keys] provider keys: ambient stripped; file=%s\n' "$ENV_FILE" >&2
-for key in "${MANAGED_KEYS[@]}"; do
-  eval "present=\${$key+x}"
-  if [ -z "$present" ]; then
-    printf '[eval-keys] %s source=unset fingerprint=none\n' "$key" >&2
+# value is never printed; a value shorter than 12 characters is redacted and
+# its hash is withheld too (a short, low-entropy secret is recoverable from
+# len + sha256 alone, and these lines are meant to be pasted into receipts).
+if [ -L "$ENV_FILE" ]; then
+  # The symlink ALIAS is what the wrapper opens (so the label stays `.env`),
+  # but the bytes come from its target — disclose the target, or a receipt
+  # could claim the evals key while a different file (e.g. a fleet key file)
+  # was actually read.
+  printf '[eval-keys] provider keys: ambient stripped; file=%s -> %s\n' \
+    "$ENV_FILE" "$(resolve_target "$ENV_FILE")" >&2
+else
+  printf '[eval-keys] provider keys: ambient stripped; file=%s\n' "$ENV_FILE" >&2
+fi
+for _rwek_key in "${MANAGED_KEYS[@]}"; do
+  eval "_rwek_present=\${$_rwek_key+x}"
+  if [ -z "$_rwek_present" ]; then
+    printf '[eval-keys] %s source=unset fingerprint=none\n' "$_rwek_key" >&2
     continue
   fi
-  eval "value=\${$key}"
-  if [ "${#value}" -ge 12 ]; then
-    fp="${value:0:6}…"
+  eval "_rwek_value=\${$_rwek_key}"
+  if [ "${#_rwek_value}" -ge 12 ]; then
+    _rwek_fp="${_rwek_value:0:6}…"
+    _rwek_hash=$(sha256_of "$_rwek_value")
   else
-    fp="<redacted>"
+    _rwek_fp="<redacted>"
+    _rwek_hash="redacted"
   fi
   printf '[eval-keys] %s source=%s fingerprint=%s len=%s sha256=%s\n' \
-    "$key" "$SOURCE_LABEL" "$fp" "${#value}" "$(sha256_of "$value")" >&2
+    "$_rwek_key" "$SOURCE_LABEL" "$_rwek_fp" "${#_rwek_value}" "$_rwek_hash" >&2
 done
 
 # ── 4. exec the command ───────────────────────────────────────────────────
