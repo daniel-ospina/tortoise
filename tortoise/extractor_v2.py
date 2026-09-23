@@ -1888,15 +1888,22 @@ def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3, *,
     rows = sdk.tortoise_fts_query(query, entity_type=entity_type, limit=fetch)
     out = []
     for r in rows or []:
+        # #4511: the callee returns ``SearchResult.to_dict()`` rows, which key
+        # the kind as ``point_kind`` — never ``kind``. Reading the wrong key
+        # left every row's OUTPUT ``kind`` empty (points and the object/subject
+        # legs alike), blanking the S4 prompt's kind column. The OUTPUT key
+        # the renderer and link-before-create read stays ``kind``; only the
+        # SOURCE key is corrected.
+        row_kind = r.get("point_kind", "")
         if entity_type in ("object", "subject"):
             out.append({"id": r.get("id", ""), "name": r.get("content", ""),
-                        "kind": r.get("kind", "")})
+                        "kind": row_kind})
         elif entity_type == "point" and _is_turn_echo_row(session_id, r):
             # #2552: this capture's transcript echo — never a memory prior.
             continue
         else:
             out.append({"id": r.get("id", ""), "content": r.get("content", ""),
-                        "kind": r.get("kind", "")})
+                        "kind": row_kind})
         if limit > 0 and len(out) >= limit:
             break
     return out
