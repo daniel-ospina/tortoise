@@ -311,7 +311,7 @@ def test_the_pi_and_python_classifiers_agree_on_every_status_parity(tmp_path):
     # "permanent" because `null >= 300` is false).
     driver.write_text(
         f'import {{ classifyFailure }} from "{ext}";\n'
-        "const matrix = [null, undefined, NaN, 200, 301, 400, 402, 403, 408, 409, 422, 425, 429, 500, 503];\n"
+        "const matrix = [null, undefined, NaN, true, false, 0, 200, 301, 400, 402, 403, 408, 409, 422, 425, 429, 500, 503];\n"
         "const out = {};\n"
         "for (const s of matrix) out[String(s)] = classifyFailure(s);\n"
         "console.log(JSON.stringify(out));\n",
@@ -332,7 +332,8 @@ def test_the_pi_and_python_classifiers_agree_on_every_status_parity(tmp_path):
     # nan so a non-finite status is genuinely compared. Mapping NaN onto None
     # would assert `TS(NaN) == Python(None)` and hide the live divergence it
     # used to cover (Python returned "permanent" for a nan).
-    python_input = {"null": None, "undefined": None, "NaN": float("nan")}
+    python_input = {"null": None, "undefined": None, "NaN": float("nan"),
+                    "true": True, "false": False}
     for raw, verdict in pi_map.items():
         status = python_input[raw] if raw in python_input else int(raw)
         assert classify_failure(status) == verdict, (
@@ -345,6 +346,13 @@ def test_the_pi_and_python_classifiers_agree_on_every_status_parity(tmp_path):
     # And the no-status rows, which is exactly where the legs diverged.
     assert pi_map["null"] == pi_map["undefined"] == pi_map["NaN"] == "retry"
     assert classify_failure(float("nan")) == "retry"
+    # The BOOLEAN rows: in Python a bool IS an int, so `math.isfinite(True)` is
+    # True and the value reached "permanent" (i.e. `_discard_entry`, i.e.
+    # deletion) where `Number.isFinite(true)` is false and the Pi leg said
+    # "retry". A real row, not a hypothetical: it is the one value in the int
+    # domain the two legs classified differently, in the destructive direction.
+    assert classify_failure(True) == pi_map["true"] == "retry"
+    assert classify_failure(False) == pi_map["false"] == "retry"
     # An ABSOLUTE pin, not only a leg-vs-leg comparison: a same-direction drift
     # (both legs reclassifying 403's reversible policy state, #4895) would pass a
     # pure comparison. 403 is deliberately still permanent here.
@@ -529,6 +537,21 @@ def test_failure_classification():
     assert classify_failure(float("nan")) == "retry"
     assert classify_failure(float("inf")) == "retry"
     assert classify_failure("500") == "retry"
+    # A bool is an `int` in Python, so `math.isfinite(True)` is True and the
+    # value reached "permanent" — i.e. `_discard_entry`, i.e. DELETION of the
+    # capture — where the Pi leg says "retry" (`Number.isFinite(true)` is false
+    # because `isFinite` requires `typeof === "number"`). `0`/`False` is the
+    # same path. Unreachable from the four real call sites, but the one value in
+    # the int domain the legs classified differently, in the DESTRUCTIVE
+    # direction.
+    assert classify_failure(True) == "retry"
+    assert classify_failure(False) == "retry"
+    # `0` is NOT a bool — `isinstance(0, bool)` is False — and BOTH legs read it
+    # as "permanent" (`Number.isFinite(0)` is true, so the Pi leg falls through
+    # too). Pinned here so the reading is deliberate rather than incidental: no
+    # caller can produce a status of 0 (`PostOutcome.status` is an HTTP code or
+    # None), and the two legs agree, which is what the parity test requires.
+    assert classify_failure(0) == "permanent"
 
 
 # ── (6) Dedup / consolidation ──────────────────────────────────────────────
@@ -555,7 +578,11 @@ def test_the_corrupt_input_helpers_agree_with_the_pi_leg(tmp_path):
     assert _attempts({"attempts": True}) == 0, "a bool is an int in Python"
     assert _attempts({"attempts": -3}) == 0
     assert _attempts({"attempts": 3.7}) == 3, "Math.floor, like the Pi leg"
-    assert _attempts({"attempts": 10 ** 400}) == 64
+    assert _attempts({"attempts": 10 ** 400}) == 0, (
+        "the Pi leg reads the same 401-digit bytes as Infinity -> 0 attempts; a "
+        "direct int() here meant 64 attempts, a SIX-HOUR wait")
+    assert _attempts({"attempts": 1e308}) == 64, (
+        "...but a magnitude JS still parses FINITE clamps to the bound")
     assert _attempts({"attempts": float("nan")}) == 0
     assert _attempts({"attempts": float("inf")}) == 0
     assert _attempts({"attempts": 5}) == 5
@@ -567,6 +594,13 @@ def test_the_corrupt_input_helpers_agree_with_the_pi_leg(tmp_path):
     assert _backoff_ms({"next_attempt_at_ms": float("nan")}) == 0.0
     assert _backoff_ms({"next_attempt_at_ms": 10 ** 400}) == 0.0
     assert _backoff_ms({"next_attempt_at_ms": 31_000}) == 31_000.0
+    # A numeric STRING is honoured by `float()` and ZEROED by `clampWindow`:
+    # a future string window made the Python drain HOLD an entry the Pi drain
+    # retried. A bool is the same class (`float(True)` is 1.0, a window of
+    # 1 ms after the epoch).
+    assert _backoff_ms({"next_attempt_at_ms": "1790000000000"}) == 0.0, (
+        "a string window is corrupt input; the Pi leg's clampWindow zeroes it")
+    assert _backoff_ms({"next_attempt_at_ms": True}) == 0.0
 
 
 def test_an_unchanged_snapshot_is_not_rewritten(tmp_path):

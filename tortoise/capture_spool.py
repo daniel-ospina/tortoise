@@ -345,7 +345,14 @@ def classify_failure(status: int | float | None, detail: str = "") -> str:
     # strictly worse than either verdict this function can return, and it also
     # made the Python leg diverge from the Pi leg, which pins the same absurd
     # magnitude to Infinity and answers "retry".
-    if status is None:
+    if status is None or isinstance(status, bool):
+        # `bool` FIRST, because in Python a bool IS an int: `math.isfinite(True)`
+        # is True, so `True`/`False` would fall through every transient arm and
+        # land on "permanent" — routing a corrupt status to `_discard_entry` and
+        # DELETING the capture. The Pi leg is correct here only by accident
+        # (`Number.isFinite(true)` is false because `isFinite` requires
+        # `typeof === "number"`), which is exactly the sort of accident the
+        # cross-leg parity test cannot see once the two legs stop matching.
         return "retry"
     try:
         if not math.isfinite(status):
@@ -840,7 +847,19 @@ def _backoff_ms(meta: dict) -> float:
     where an escaping error would break `session spool`'s documented exit 0.
     """
     try:
-        value = float(meta.get("next_attempt_at_ms") or 0)
+        raw = meta.get("next_attempt_at_ms") or 0
+    except AttributeError:  # a non-dict meta is #4906's class; stay total anyway
+        return 0.0
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        # A REAL number only, mirroring the Pi leg's `clampWindow`
+        # (`typeof value === "number"`). `float("1790000000000")` would honour a
+        # numeric STRING the Pi leg zeroes — and since the two legs share ONE
+        # spool dir, a future string window would make the Python drain HOLD an
+        # entry the Pi drain retries, while `_carried_window` wrote the
+        # string-derived float back to disk.
+        return 0.0
+    try:
+        value = float(raw)
     except (TypeError, ValueError, OverflowError):
         return 0.0
     if not math.isfinite(value) or value <= 0:
@@ -887,10 +906,19 @@ def _attempts(meta: dict) -> int:
         # legitimate writer produces one, so it is corrupt input.
         return 0
     try:
-        value = int(raw)
+        # Through a FLOAT, so the magnitude JS would have parsed to Infinity is
+        # read the same way here. `10**400` is a 401-digit integer: Python holds
+        # it exactly, but `JSON.parse` yields Infinity and the Pi leg's
+        # `Number.isFinite` then yields attempt 0 (a 30 s wait), where a direct
+        # `int(raw)` yielded attempt 64 (a SIX-HOUR wait) from the same bytes.
+        # Both are retryable, so neither loses the capture — but the two legs
+        # must not disagree about a cadence they share one directory for.
+        as_float = float(raw)
     except (TypeError, ValueError, OverflowError):
         return 0
-    return min(max(0, value), _MAX_ATTEMPTS)
+    if not math.isfinite(as_float):
+        return 0
+    return min(max(0, int(as_float)), _MAX_ATTEMPTS)
 
 
 def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAULT_BOUNDS) -> list[dict]:

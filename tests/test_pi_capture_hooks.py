@@ -124,7 +124,8 @@ def node_supports_ts_version(major: int, minor: int) -> bool:
 
     Pure over its inputs so the boundary is testable without a second Node.
     """
-    return major > 22 or (major == 22 and minor >= 18)
+    return major >= 24 or (major == 23 and minor >= 6) \
+        or (major == 22 and minor >= 18)
 
 
 def _node_supports_ts(node: str) -> bool:
@@ -173,15 +174,18 @@ def test_the_node_floor_matches_the_invocation_the_suite_actually_makes():
     run it — instead of skipping. 22.7 is correct for the SIBLING parity test
     only, because that driver passes the flag.
 
-    Mutation: revert the floor to 22.7 (or 'keep in step' with the parity test)
-    -> the 22.7-22.17 rows RED.
+    Mutation: revert the floor to 22.7, drop the 23.x band, or use a bare
+    `major > 22` -> the corresponding row REDs.
     """
     assert node_supports_ts_version(22, 6) is False
     assert node_supports_ts_version(22, 7) is False, (
         "22.7 has the flag, not the DEFAULT — this suite passes no flag")
     assert node_supports_ts_version(22, 17) is False
     assert node_supports_ts_version(22, 18) is True
-    assert node_supports_ts_version(23, 0) is True
+    assert node_supports_ts_version(23, 5) is False, (
+        "default-on landed in v23.6.0, not v23.0.0 — a bare `major > 22` says "
+        "'supported' on 23.0-23.5, where the module still fails to load")
+    assert node_supports_ts_version(23, 6) is True
     assert node_supports_ts_version(24, 0) is True
 
 
