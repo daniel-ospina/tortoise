@@ -69,6 +69,7 @@ import math
 import os
 import contextlib
 import fcntl
+import logging
 
 import shutil
 import signal
@@ -84,6 +85,14 @@ from tortoise.embedded_reaper import (
     _is_ephemeral_dir,
 )
 from tortoise.env_truthy import is_truthy  # #4097: the declared truthy contract
+
+# #4879: this module was silent at every decision. The dead-socket guard below
+# STOPS a process and REMOVES a registry, and its loud branch deliberately
+# PRESERVES a failure — two outcomes a reader of a CI run must be able to tell
+# apart. Without these lines, "the lane is green" cannot be distinguished from
+# "the lane is green because the loud branch fired and the original defect is
+# still armed".
+logger = logging.getLogger(__name__)
 
 # ── #4214: the exit seam must not stat the temp root once per client ───────
 #
@@ -1856,18 +1865,35 @@ def _install_dead_socket_guard() -> None:
             # divergence is not. (The failed construction leaves a
             # partially-built client whose own atexit `_cleanup` also meets
             # the dead socket — today's behaviour, unchanged.)
+            logger.warning(
+                "#4879: registry %s records a socket that is gone (%s) with a "
+                "live pid, but the holder could not be PROVEN this registry's "
+                "server — NOT repairing (a double-start over a live RDB is "
+                "worse than a loud failure); the replay will fail loudly",
+                registry, recorded_socket)
             return True
         if not _stop_proven_holder(pid):
+            logger.warning(
+                "#4879: stale holder pid %s was proven ours but did not stop; "
+                "not rebuilding (never double-start over its RDB)", pid)
             return True  # proven ours but not stopped -> never double-start
         try:
             os.remove(registry)
-        except OSError:
+        except OSError as exc:
             # Still there -> it would replay the dead socket, so do not let a
             # server be started yet.
+            logger.warning(
+                "#4879: stopped stale holder pid %s but could not remove the "
+                "registry %s (%s); not rebuilding", pid, registry, exc)
             return True
         # The recorded server is confirmed dead (the RDB is released) and the
         # stale registry is gone: `__init__`'s else branch starts a clean
         # server over the same dbdir/dbfilename — now the ONLY writer.
+        logger.warning(
+            "#4879: REPAIRED a stale embedded-redis registry %s — stopped the "
+            "proven holder pid %s (recorded socket %s was gone) and removed "
+            "the registry; the construction rebuilds over the same RDB",
+            registry, pid, recorded_socket)
         return False
 
     RedisMixin._is_redis_running = _is_redis_running
