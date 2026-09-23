@@ -1820,9 +1820,11 @@ def _install_dead_socket_guard() -> None:
     predicate stays authoritative for "is there a live server"; this adds the
     socket-file check the original omits AND, for a recorded socket that is
     GONE under a live pid, the ordered repair (prove -> stop -> drop the
-    stale registry) that keeps redislite from starting a SECOND writer on the
-    same RDB. Idempotent, and never raises: a patch that broke construction
-    would be worse than the bug.
+    stale registry) that keeps redislite from REPLAYING that dead socket. It is
+    safe against the holder THIS REPAIR PROVED, and nothing wider: without a
+    per-<dbdir>/<dbfilename> construction lock, a construction racing here can
+    also start a server over the same RDB (tortoise#4904). Idempotent, and never
+    raises: a patch that broke construction would be worse than the bug.
     """
     global _ORIGINAL_REDISLITE_IS_RUNNING
     try:
