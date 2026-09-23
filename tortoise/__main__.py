@@ -3916,6 +3916,7 @@ def _cmd_sessions_import(args) -> int:
     from pathlib import Path
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
+    from http.client import HTTPException as _HTTPException
 
     from tortoise.session_import import MAX_TURNS, parse_transcript, window_turns
 
@@ -4089,6 +4090,21 @@ def _cmd_sessions_import(args) -> int:
         # the MOST COMMON transient failure, so it must reach the spool too. A
         # retryable failure never losing the session is the point of this path.
         _spool_if_retryable(None, str(e.reason))
+        return 1
+    except (TimeoutError, ConnectionError, _HTTPException,
+            _json.JSONDecodeError) as e:
+        # RESPONSE-PHASE failures. `urlopen`'s handler covers the connect; the
+        # body read and its parse happen UNDER the `with`, and none of these is
+        # a URLError: a read timeout is a bare TimeoutError (an OSError, not a
+        # URLError), a truncated body is IncompleteRead/ConnectionResetError,
+        # and a proxy's HTML error page is a JSONDecodeError. All escaped
+        # unhandled — no spool AND no breadcrumb — which is the same silent-loss
+        # class this path exists to close, and a capacity-gated server that
+        # accepts the connection then stalls is exactly the shape that produces
+        # it (#4714 review).
+        print(f"import failed reading the response: {e}", file=_sys.stderr)
+        _record_capture_error(harness, f"import failed reading the response: {e}")
+        _spool_if_retryable(None, str(e))
         return 1
 
     # Any 2xx is a success — the server stored the Session and wrote its

@@ -54,7 +54,9 @@ __all__ = [
     "DISCARD_CORRUPT",
     "DISCARD_COUNT_EXCEEDED",
     "DISCARD_ENTRY_TOO_LARGE",
+    "DISCARD_PROBE_SESSION",
     "DISCARD_TRANSCRIPT_EMPTY",
+    "PROBE_SESSION_ID_PREFIX",
     "Bounds",
     "FlushSummary",
     "PostOutcome",
@@ -65,10 +67,13 @@ __all__ = [
     "content_digest",
     "entry_key",
     "flush_spool",
+    "is_probe_session_id",
+    "is_spooled",
     "list_spool_metas",
     "read_discards",
     "read_spool_meta",
     "read_spool_turns",
+    "remove_spool_entry",
     "spool_dir",
     "write_spool_entry",
 ]
@@ -88,6 +93,10 @@ DISCARD_BYTES_EXCEEDED = "spool_total_bytes_exceeded"
 DISCARD_TRANSCRIPT_EMPTY = "transcript_empty"
 #: A transcript that cannot be read at all (EACCES, EISDIR, non-UTF-8 bytes).
 DISCARD_TRANSCRIPT_UNREADABLE = "transcript_unreadable"
+#: A `session verify` probe. SYNTHETIC by construction — it must never be
+#: filed, because the drain would POST it into the tenant graph and extract
+#: points from content no human produced (#4714 review).
+DISCARD_PROBE_SESSION = "probe_session"
 #: An UNEXPECTED failure while filing one entry (a bug, not a classification):
 #: recorded and backed off, but the entry is KEPT — an internal bug must never
 #: delete user data.
@@ -455,20 +464,41 @@ def _remove_entry_files(root: Path, session_id: str) -> None:
             path.unlink()
 
 
-def remove_spool_entry(root: Path, session_id: str) -> bool:
-    """Unlink a session's spool entry, returning whether one was there.
-
-    For callers that must leave NOTHING behind for a session they own. The
-    motivating case is ``session verify``: its probe fires the real seam with a
-    SYNTHETIC transcript, so if the import is refused retryably the seam parks
-    the probe in the durable spool — and verify's own cleanup removed only the
-    import receipt. The next automatic drain would then POST the probe into the
-    tenant graph, extracting points from synthetic content (#4714 review).
-    """
-    present = _meta_path(root, session_id).exists() or \
+def is_spooled(root: Path, session_id: str) -> bool:
+    """Whether a session currently has a spool entry (meta or turn log)."""
+    return _meta_path(root, session_id).exists() or \
         _log_path(root, session_id).exists()
+
+
+def remove_spool_entry(root: Path, session_id: str) -> None:
+    """Unlink a session's spool entry (meta + turn log), best effort.
+
+    Deliberately returns nothing: "did something get removed" and "is anything
+    still there" are DIFFERENT questions, and a `bool` that conflates them
+    lets a caller report a removal that silently failed — an unlink can fail on
+    EACCES or a read-only volume (#4714 review). Callers that must know ask
+    `is_spooled` before and after.
+
+    Motivating case: ``session verify`` fires the real seam with a SYNTHETIC
+    transcript, so a retryable refusal parks the probe in the durable spool,
+    where a drain would POST it into the tenant graph. This is the tidy-up; the
+    structural defense is `is_probe_session_id` + the drain's refusal, because
+    the codex/cursor seams write from a DETACHED worker that can outlive this
+    call.
+    """
     _remove_entry_files(root, session_id)
-    return present
+
+
+#: Probes are synthetic by construction — `session verify` names them so its
+#: own cleanup can find them, and an unmistakable prefix also lets the DRAIN
+#: refuse to file one. Never widen this to a substring match: it is the only
+#: thing preventing synthetic probe content from being extracted as memory.
+PROBE_SESSION_ID_PREFIX = "verify-"
+
+
+def is_probe_session_id(session_id: str) -> bool:
+    """Whether ``session_id`` is a ``session verify`` probe (never real data)."""
+    return session_id.startswith(PROBE_SESSION_ID_PREFIX)
 
 
 def _discard_entry(root: Path, meta: dict, reason: str, detail: str = "") -> dict:
@@ -806,6 +836,16 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         return
     if exclude_session_id and sid == exclude_session_id:
         summary.held_back += 1
+        return
+    # STRUCTURAL probe guard, not a timing one. `session verify` fires the real
+    # seam with a synthetic transcript, and the codex/cursor seams write from a
+    # DETACHED worker that can outlive verify's cleanup — so an unlink alone
+    # cannot guarantee the probe is gone. Refusing to file it can. This is the
+    # load-bearing defense; `remove_spool_entry` is the tidy-up.
+    if is_probe_session_id(sid):
+        summary.discarded.append(_discard_entry(
+            root, meta, DISCARD_PROBE_SESSION,
+            "session verify probe — synthetic content is never filed"))
         return
     if meta.get("filed_key") and meta.get("filed_key") == meta.get("capture_key"):
         summary.skipped += 1

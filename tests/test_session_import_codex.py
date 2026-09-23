@@ -628,27 +628,77 @@ def test_an_oversized_turn_is_clamped_before_spooling(tmp_path, monkeypatch):
         f"unclamped turn of {len(turns[0]['content'])} chars reached the spool")
 
 
-def test_remove_spool_entry_unlinks_and_reports(tmp_path):
-    """`remove_spool_entry` is what lets `session verify` take its synthetic
-    probe back out of the spool. It must remove BOTH files (meta + turn log)
-    and report whether anything was there, so a no-op is distinguishable from
-    a removal."""
+def test_remove_spool_entry_removes_and_is_spooled_reports_truthfully(tmp_path):
+    """`remove_spool_entry` is intentionally void: "was it removed?" and "is it
+    gone?" are different questions, and conflating them in a bool is how a
+    caller comes to report a removal that failed. The pairing with `is_spooled`
+    is what makes the answer checkable."""
     from tortoise.capture_spool import (
         Snapshot,
+        is_spooled,
         read_spool_meta,
         remove_spool_entry,
         write_spool_entry,
     )
 
     root = tmp_path / "spool"
+    assert is_spooled(root, "verify-1") is False
     write_spool_entry(root, Snapshot(
-        session_id="probe-1", turns=list(_EXPECTED_TURNS), source="probe",
+        session_id="verify-1", turns=list(_EXPECTED_TURNS), source="probe",
         machine_id="m", model=None, harness="codex"))
-    assert read_spool_meta(root, "probe-1") is not None
+    assert is_spooled(root, "verify-1") is True
 
-    assert remove_spool_entry(root, "probe-1") is True
-    assert read_spool_meta(root, "probe-1") is None
-    # Nothing left for a drain to find: the log must be gone, not just the meta.
-    assert not list(root.rglob("*probe-1*")), list(root.rglob("*"))
-    # A second call reports honestly that there was nothing to remove.
-    assert remove_spool_entry(root, "probe-1") is False
+    remove_spool_entry(root, "verify-1")
+    assert is_spooled(root, "verify-1") is False
+    assert read_spool_meta(root, "verify-1") is None
+    # Nothing left for a drain to find: the LOG must be gone, not just the meta.
+    assert not list(root.rglob("*verify-1*")), list(root.rglob("*"))
+
+    # Removing again is a harmless no-op, and still reports gone.
+    remove_spool_entry(root, "verify-1")
+    assert is_spooled(root, "verify-1") is False
+
+
+def test_a_verify_probe_is_never_filed_even_if_it_stays_spooled(
+        tmp_path, monkeypatch):
+    """THE STRUCTURAL GUARD. The codex/cursor seams write from a DETACHED
+    worker, so a probe can be spooled after verify's cleanup has run — no unlink
+    can be race-free. The drain must therefore refuse to file one at all.
+
+    Mutation: drop the `is_probe_session_id` branch in `_flush_one` — the probe
+    is POSTed and the assertion REDs, which is synthetic content reaching the
+    tenant graph."""
+    from tortoise.capture_spool import (
+        PostOutcome,
+        Snapshot,
+        flush_spool,
+        is_probe_session_id,
+        is_spooled,
+        write_spool_entry,
+    )
+
+    root = tmp_path / "spool"
+    assert is_probe_session_id("verify-abc") is True
+    assert is_probe_session_id("imp_deadbeef") is False
+    assert is_probe_session_id("verify") is False, "not a bare-prefix match"
+
+    write_spool_entry(root, Snapshot(
+        session_id="verify-abc", turns=list(_EXPECTED_TURNS), source="probe",
+        machine_id="m", model=None, harness="codex"))
+    # A REAL session alongside it must still be filed, so the guard is not a
+    # blanket-off that would pass this test while breaking capture.
+    write_spool_entry(root, Snapshot(
+        session_id="imp-real", turns=list(_EXPECTED_TURNS), source="real",
+        machine_id="m", model=None, harness="codex"))
+
+    posted: list[dict] = []
+
+    def _post(payload):
+        posted.append(payload)
+        return PostOutcome(ok=True, status=200,
+                           body={"session_id": payload["session_id"]})
+
+    summary = flush_spool(root, _post)
+    assert [p["session_id"] for p in posted] == ["imp-real"], posted
+    assert summary.filed == 1, summary
+    assert not is_spooled(root, "verify-abc"), "the probe was left queued"

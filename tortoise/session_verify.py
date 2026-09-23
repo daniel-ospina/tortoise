@@ -833,7 +833,8 @@ def verify_session_capture(harness: str,
         # fire-failure return gets it.  There is deliberately no other cleanup
         # call to drift from this one.
         report["cleanup"] = _cleanup(
-            api_url, api_key, probe_id, keep=keep, launch=launch)
+            api_url, api_key, probe_id, keep=keep, launch=launch,
+            env=fire_env)
         report["exit_code"] = _exit_code(report)
     return report
 
@@ -930,7 +931,8 @@ def _probe_id(harness: str) -> str:
 
 def _cleanup(api_url: str, api_key: str, probe_id: str, *,
              keep: bool,
-             launch: LaunchOutcome | None) -> dict[str, Any]:
+             launch: LaunchOutcome | None,
+             env: dict[str, str] | None = None) -> dict[str, Any]:
     """Delete the probe session (and its local import receipt).
 
     Deletion is keyed on the LAUNCH OUTCOME — whether the registered command
@@ -1002,12 +1004,39 @@ def _cleanup(api_url: str, api_key: str, probe_id: str, *,
     # probe. Reported like the receipt: dropped, never fatal on its own (#4714
     # review).
     try:
-        from tortoise.capture_spool import remove_spool_entry, spool_dir
+        from tortoise.capture_spool import (
+            is_spooled,
+            remove_spool_entry,
+            spool_dir,
+        )
 
-        if remove_spool_entry(spool_dir(), probe_id):
-            result["local_spool"] = "removed"
+        # The seam ran under `env` (see `_fire_env`), and this file's invariant
+        # is that the fire and everything verifying it key on the SAME env — a
+        # caller pinning HOME or the spool root must not have verify look for
+        # the entry somewhere else and report a false "removed".
+        if env is not None and env.get("TORTOISE_CAPTURE_SPOOL_DIR"):
+            spool_root = Path(env["TORTOISE_CAPTURE_SPOOL_DIR"])
+        else:
+            spool_root = spool_dir()
+        # Whether the probe is GONE — not whether an unlink was issued. An
+        # unlink can fail, and a caller that reported "removed" on a failed one
+        # would claim a clean run while synthetic content sat queued.
+        was_present = is_spooled(spool_root, probe_id)
+        remove_spool_entry(spool_root, probe_id)
+        if not is_spooled(spool_root, probe_id):
+            result["local_spool"] = "removed" if was_present else "none"
+        else:
+            result["local_spool"] = (
+                f"the probe is STILL SPOOLED at {spool_root} — a drain may file "
+                "synthetic content")
     except Exception as e:      # pragma: no cover - defensive, mirrors the hook
         result["local_spool"] = f"could not check the spool: {e}"
+    # A spooled probe is CONTENT QUEUED FOR THE TENANT GRAPH — not inert like a
+    # leftover receipt — so an unremoved one is a broken run, not a footnote.
+    # (The drain also refuses to file a `verify-` id outright; this is the
+    # second line, for an install whose drain predates that guard.)
+    if result.get("local_spool") not in (None, "none", "removed"):
+        result["error"] = True
     return result
 
 
@@ -1068,6 +1097,13 @@ def render_report(report: dict[str, Any]) -> str:
     cleanup = report.get("cleanup") or {}
     if cleanup.get("detail"):
         lines.append(f"  cleanup: {cleanup['detail']}")
+        # Residue is surfaced, not swallowed: a leftover import receipt or a
+        # leftover SPOOL entry (synthetic content the drain would file) has to
+        # be visible in the default output, not only under --json.
+        if cleanup.get("local_receipt"):
+            lines.append(f"  receipt: {cleanup['local_receipt']}")
+        if cleanup.get("local_spool"):
+            lines.append(f"  spool: {cleanup['local_spool']}")
     code = report.get("exit_code", EXIT_BROKEN)
     verdict = {
         EXIT_OK: "all links PROVEN",
