@@ -65,6 +65,12 @@ surfaces:
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_metering_period_window.py
   - test_metering_window_admission.py  # #3981: the six swallow sites report the dropped increment (caller-level; the coverage is the proof)
+  # #3981: dual-registered with `core` for the same reason as test_boot_regressions.py
+  # above. `api` is an exact-surface match that REPLACES the `core` fallback, so a
+  # tortoise/hosted_api.py-only change would otherwise never run this file — which
+  # holds two uniquely-hosted_api pins (test_alert_store_from_forwards_the_writer,
+  # test_analytics_store_delegates_to_the_incident_seam).
+  - test_operator_alert.py
   - test_onboarding_email_http.py
   # #2006 (W11): the onboarding funnel-event guard. Load-bearing HERE: four of
   # the five emission sites live in tortoise/hosted_api.py, which selects the
@@ -488,6 +494,10 @@ surfaces:
   # gap is #4454's job, not this registration's; do not read this entry as
   # covering a hand-edited document.
   - test_mcp_rename_table.py
+  # #3981: dual-registered with `api` (the arm that fires on a tortoise/hosted_api.py-only
+  # change); this `core` entry is the fallback arm, since core is only added when nothing
+  # else matched.
+  - test_operator_alert.py
   # #4282 Phase 0.3b: dual-registered with `api` for the same reason — `api` is
   # keyed on SOURCE PATTERNS and `tools/sdk_rename_table.py` is named there.
   # NOTE: docs paths are in NON_PYTHON_PREFIXES, not SOURCE_PATTERNS, so editing
@@ -2098,6 +2108,14 @@ durations:
   test_onboarding_auto_complete.py: 0.0
   test_onboarding_seed.py: 0.0
   test_onboarding_variants.py: 0.0
+  # #3981: new file (round-4 registration). No CI junit measurement yet, so enter
+  # at the flat 2.0s default per the #3400/#4221 convention — an unmeasured fast
+  # file drops durations coverage to 89.9% (545/606), under the 90% floor, exactly
+  # the #4348/#3949 trap; the conservative default restores it. No local
+  # measurement is used: registration was taken at host load >200, which is not a
+  # representative number (the repo's conftest import dominates under load).
+  # Refresh from the first post-merge main run that includes it.
+  test_operator_alert.py: 2.0
   test_operator_source_unit.py: 0.0
   test_pair_label_runner.py: 0.0
   test_pipeline_cli.py: 0.0
