@@ -1860,6 +1860,54 @@ def test_a_corrupt_typed_meta_does_not_crash_or_wedge(tmp_path):
     assert summary.filed == 1, "the entry is still filed, not wedged"
 
 
+def test_a_failure_racing_a_successful_filing_does_not_re_arm_the_window(tmp_path):
+    """#4714 cycle-7 review. `_flush_one`'s failure write-back re-reads the meta
+    but never checked whether the content it failed to POST had since been FILED
+    by a concurrent flush of the same `capture_key`. Re-arming the backoff there
+    attaches a window to content that was never refused — and because
+    `write_spool_entry` now CARRIES the window, the next turn's NEW content
+    inherits it and waits up to RETRY_MAX (6 h) with no attempt behind it. Old
+    code wrote (0, 0) here, so its reset cleared the resurrected window; this
+    propagation is the one state the carry-forward makes reachable that the
+    previous behaviour could not.
+
+    MUTATION THAT REDS THIS: drop the `filed_key` guard in the failure
+    write-back -> the resurrected window survives and the next turn inherits it.
+    """
+    from tortoise.capture_spool import _meta_path
+
+    root = tmp_path
+    write_spool_entry(root, _snapshot("sess-race"))
+
+    def post_filed_underneath(payload):
+        # Simulate a CONCURRENT flush completing a 2xx for this capture_key
+        # while our own POST is still in flight.
+        on_disk = read_spool_meta(root, "sess-race")
+        on_disk["filed_key"] = on_disk["capture_key"]
+        on_disk["attempts"] = 0
+        on_disk["next_attempt_at_ms"] = 0
+        _meta_path(root, "sess-race").write_text(
+            json.dumps(on_disk), encoding="utf-8"
+        )
+        return PostOutcome(ok=False, status=402, detail="quota")
+
+    summary = flush_spool(root, post_filed_underneath, now=1000.0)
+    assert summary.attempted == 1
+    assert summary.skipped == 1, "a failure for superseded content is not a retry"
+    assert summary.deferred == 0
+
+    after = read_spool_meta(root, "sess-race")
+    assert after["attempts"] == 0, "the failure re-armed a window on filed content"
+    assert after["next_attempt_at_ms"] == 0, "a resurrected window was attached"
+
+    # And the NEXT turn must not inherit a window it never earned.
+    write_spool_entry(root, _snapshot("sess-race", TURNS + TURNS[:1]))
+    grown = read_spool_meta(root, "sess-race")
+    assert grown["next_attempt_at_ms"] == 0, (
+        "new content inherited a backoff window it never earned"
+    )
+
+
 def test_a_deferred_only_drain_is_counted_not_silent(tmp_path):
     """#4714 review. Moving 402 from "discard" to "defer" removed the drain's
     only signal for a quota-blocked spool: a window-held entry is neither

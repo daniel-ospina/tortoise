@@ -1150,6 +1150,15 @@ export async function flushSpool(
       // Re-read before the backoff write-back for the same reason as the CAS
       // above: never clobber newer turns written while the POST was in flight.
       const pending = readSpoolEntry(dir, meta.session_id) ?? meta;
+      if (pending.filed_key && pending.filed_key === pending.capture_key) {
+        // A CONCURRENT flush already filed this exact content while our POST was
+        // in flight. Re-arming the backoff here would attach a window to content
+        // that was never refused — and since writeSpoolEntry now CARRIES the
+        // window, the next turn's NEW content would inherit it and wait up to
+        // RETRY_MAX_MS with no attempt behind it (#4714 cycle-7 review).
+        summary.skipped += 1;
+        continue;
+      }
       pending.attempts = clampAttempts(meta.attempts) + 1;
       pending.next_attempt_at_ms = nowMs + backoffDelay(pending.attempts);
       writeMeta(dir, pending);

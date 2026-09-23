@@ -584,6 +584,82 @@ def test_an_already_filed_entry_does_not_promise_a_filing(
         assert "already filed" in capsys.readouterr().err
 
 
+def test_the_spooled_message_matches_what_a_drain_would_actually_do(
+        tmp_path, monkeypatch, codex_jsonl, capsys):
+    """TRUTHFUL OUTPUT, bounded BOTH ways. The window is CARRIED across a
+    rewrite now, so a drain inside a live window will NOT file the entry — the
+    message must name that state instead of promising a filing. But a window
+    beyond now + RETRY_MAX is one `_flush_one` treats as CORRUPT and files
+    immediately, so claiming a drain cannot help there would be the opposite
+    lie. The message's bound must be the drain's bound.
+
+    Mutations: (1) drop the live-window branch -> phase 2 REDs (the message
+    promises a filing the drain will refuse). (2) drop the upper bound ->
+    phase 3 REDs (the message refuses a filing the drain would perform)."""
+    import json as _json
+    import time as _time
+
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import (
+        RETRY_MAX_SECONDS,
+        PostOutcome,
+        _meta_path,
+        flush_spool,
+        read_spool_meta,
+    )
+
+    spool = _import_env(tmp_path, monkeypatch)
+    args = SimpleNamespace(file=str(codex_jsonl), harness="codex",
+                           session_id="sid-window")
+    boom = lambda req, timeout=None: (_ for _ in ()).throw(  # noqa: E731
+        _http_error(504, '{"detail":"time budget exceeded"}'))
+
+    # Phase 1: a FRESH entry has no window yet, so the drain really will file it.
+    with mock.patch("urllib.request.urlopen", boom):
+        assert _cmd_sessions_import(args) == 1
+        assert "tortoise session drain" in capsys.readouterr().err
+
+    def _doctor(window_ms):
+        meta = read_spool_meta(spool, "sid-window")
+        meta["next_attempt_at_ms"] = window_ms
+        _meta_path(spool, "sid-window").write_text(
+            _json.dumps(meta), encoding="utf-8")
+
+    # Phase 2: a LIVE window. Doctor it AFTER the spool write (which sanitises a
+    # corrupt window), and stub the write so the doctored value survives to the
+    # read the message is built from.
+    _doctor(_time.time() * 1000.0 + 30_000)
+    with mock.patch("urllib.request.urlopen", boom), \
+            mock.patch("tortoise.capture_spool.write_spool_entry",
+                       lambda *a, **k: {"written": True, "bytes": 1,
+                                        "discards": []}):
+        assert _cmd_sessions_import(args) == 1
+        err = capsys.readouterr().err
+    assert "backoff window" in err, err
+    assert "tortoise session drain" not in err, (
+        "a drain inside the window will NOT file this, so promising one is "
+        "false: " + err)
+
+    # Phase 3: an absurd window is CORRUPT, and the drain files it immediately —
+    # so the message must go back to naming the command.
+    _doctor(_time.time() * 1000.0 + RETRY_MAX_SECONDS * 1000 * 10)
+    with mock.patch("urllib.request.urlopen", boom), \
+            mock.patch("tortoise.capture_spool.write_spool_entry",
+                       lambda *a, **k: {"written": True, "bytes": 1,
+                                        "discards": []}):
+        assert _cmd_sessions_import(args) == 1
+        err = capsys.readouterr().err
+    assert "backoff window" not in err, (
+        "a corrupt window is filed immediately, so claiming a drain cannot "
+        "help is false: " + err)
+    assert "tortoise session drain" in err, err
+
+    # ...and prove the claim rather than asserting it.
+    filed = flush_spool(spool, lambda payload: PostOutcome(
+        ok=True, status=200, body={"session_id": payload["session_id"]}))
+    assert filed.filed == 1, "the message promised a filing the drain refused"
+
+
 def test_an_oversized_turn_is_clamped_before_spooling(tmp_path, monkeypatch):
     """The spool stores the CLAMPED turn, matching `session capture`.
 

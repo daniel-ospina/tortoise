@@ -839,6 +839,52 @@ test("an absurd finite window is treated as corrupt, not honoured (#4714 review)
   assert.equal(carriedWindow(Number.POSITIVE_INFINITY), 0);
 });
 
+test("a failure racing a successful filing does not re-arm the window (#4714 cycle-7 review)", async () => {
+  // The failure write-back re-reads the meta but never checked whether the
+  // content it failed to POST had since been FILED by a concurrent flush of the
+  // same capture_key. Re-arming the backoff there attaches a window to content
+  // that was never refused — and since writeSpoolEntry now CARRIES the window,
+  // the next turn's NEW content inherits it and waits up to RETRY_MAX_MS with no
+  // attempt behind it.
+  //
+  // MUTATION THAT REDS THIS: drop the filed_key guard in the write-back.
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, snapshot("sess-race"));
+  const metaPath = join(spool, "entries", `${entryKey("sess-race")}.meta.json`);
+
+  const fetchImpl = async () => {
+    // Simulate a CONCURRENT flush completing a 2xx while our POST is in flight.
+    const onDisk = readSpoolEntry(spool, "sess-race")!;
+    onDisk.filed_key = onDisk.capture_key;
+    onDisk.attempts = 0;
+    onDisk.next_attempt_at_ms = 0;
+    writeFileSync(metaPath, `${JSON.stringify(onDisk, null, 2)}\n`);
+    return { ok: false, status: 402, json: async () => ({ detail: "quota" }) };
+  };
+
+  const summary = await flushSpool(TEST_CFG, {
+    dir: spool,
+    fetchImpl: fetchImpl as never,
+    now: 1_000,
+  });
+  assert.equal(summary.attempted, 1);
+  assert.equal(summary.skipped, 1, "a failure for superseded content is not a retry");
+  assert.equal(summary.deferred, 0);
+
+  const after = readSpoolEntry(spool, "sess-race")!;
+  assert.equal(after.attempts, 0, "the failure re-armed a window on filed content");
+  assert.equal(after.next_attempt_at_ms, 0, "a resurrected window was attached");
+
+  // And the NEXT turn must not inherit a window it never earned.
+  writeSpoolEntry(spool, snapshot("sess-race", [...SPOOL_TURNS, SPOOL_TURNS[0]]));
+  const grown = readSpoolEntry(spool, "sess-race")!;
+  assert.equal(
+    grown.next_attempt_at_ms,
+    0,
+    "new content inherited a backoff window it never earned",
+  );
+});
+
 test("the server's in-flight 409 is retryable, not a lost write (#3713)", async () => {
   const spool = tmpSpool();
   writeSpoolEntry(spool, snapshot("sess-409"));

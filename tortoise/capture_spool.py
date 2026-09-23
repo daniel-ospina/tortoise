@@ -1117,6 +1117,14 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
     # Re-read before the backoff write-back for the same reason as the CAS
     # above: never clobber newer turns written while the POST was in flight.
     pending = read_spool_meta(root, sid) or meta
+    if pending.get("filed_key") and pending.get("filed_key") == pending.get("capture_key"):
+        # A CONCURRENT flush already filed this exact content while our POST was
+        # in flight. Re-arming the backoff here would attach a window to content
+        # that was never refused — and since `write_spool_entry` now CARRIES the
+        # window, the next turn's NEW content would inherit it and wait up to
+        # RETRY_MAX (6 h) with no attempt behind it (#4714 cycle-7 review).
+        summary.skipped += 1
+        return
     pending["attempts"] = _attempts(meta) + 1
     pending["next_attempt_at_ms"] = now_ms + backoff_delay(pending["attempts"]) * 1000
     _write_meta(root, pending)

@@ -4086,6 +4086,7 @@ def _cmd_sessions_import(args) -> int:
             import time as _time
 
             from tortoise.capture_spool import (
+                RETRY_MAX_SECONDS,
                 Snapshot,
                 _backoff_ms,
                 capture_key,
@@ -4133,19 +4134,25 @@ def _cmd_sessions_import(args) -> int:
             if already_filed:
                 print(f"Session {session_id} is already filed; the spooled copy "
                       "is a no-op.", file=_sys.stderr)
-            elif _backoff_ms(meta) > _time.time() * 1000.0:
-                # The window is CARRIED across a rewrite now, so a drain inside
-                # it will NOT file this: promising one would be false (#4714
-                # review). Name the real state instead.
-                print(f"Spooled session: {session_id} — a retry is waiting on the "
-                      "backoff window; a later drain will file it.",
-                      file=_sys.stderr)
             else:
-                # Name the command: only the claude/pi SessionStart hook
-                # drains automatically, so for a codex/cursor-only install
-                # nothing would file this without the user being told how.
-                print(f"Spooled session: {session_id} — run 'tortoise session "
-                      "drain' to file it.", file=_sys.stderr)
+                now_ms = _time.time() * 1000.0
+                window = _backoff_ms(meta)
+                if now_ms < window <= now_ms + RETRY_MAX_SECONDS * 1000:
+                    # The window is CARRIED across a rewrite now, so a drain
+                    # inside it will NOT file this: promising one would be false
+                    # (#4714 review). The upper bound matters too — `_flush_one`
+                    # treats a window beyond now + RETRY_MAX as corrupt and files
+                    # it IMMEDIATELY, so claiming a drain is pointless there
+                    # would be the opposite lie.
+                    print(f"Spooled session: {session_id} — a retry is waiting "
+                          "on the backoff window; a later drain will file it.",
+                          file=_sys.stderr)
+                else:
+                    # Name the command: only the claude/pi SessionStart hook
+                    # drains automatically, so for a codex/cursor-only install
+                    # nothing would file this without the user being told how.
+                    print(f"Spooled session: {session_id} — run 'tortoise session "
+                          "drain' to file it.", file=_sys.stderr)
         except Exception as exc:
             print(f"spool write failed: {exc}", file=_sys.stderr)
 
