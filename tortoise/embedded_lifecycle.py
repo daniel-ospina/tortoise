@@ -1843,8 +1843,11 @@ def _install_owner_record_patch() -> None:
 # So the repair is ORDERED — prove, stop, drop — and it is the only thing
 # this patch does on that state: the recorded pid is proven to be this
 # registry's own live server, that server is stopped GRACEFULLY, and only
-# then is the stale registry removed so redislite starts clean (the RDB is
-# released, so the new server is the only writer). Both provenance legs
+# then is the stale registry removed so redislite starts clean. That ordering is
+# safe against the holder THIS PATCH PROVED — the RDB is released before the
+# record is dropped — and nothing wider: there is still no per-<dbdir>/
+# <dbfilename> construction lock, so a second construction racing here can also
+# start a server over the same RDB (tortoise#4921). Both provenance legs
 # exist because the recorded pid may be a recycled number pointing at an
 # unrelated process — and signalling THAT, or starting a second server while
 # the real holder lives, are the two ways this predicate can do harm.
@@ -2018,9 +2021,11 @@ def _install_dead_socket_guard() -> None:
     predicate stays authoritative for "is there a live server"; this adds the
     socket-file check the original omits AND, for a recorded socket that is
     GONE under a live pid, the ordered repair (prove -> stop -> drop the
-    stale registry) that keeps redislite from starting a SECOND writer on the
-    same RDB. Idempotent, and never raises: a patch that broke construction
-    would be worse than the bug.
+    stale registry) that keeps redislite from REPLAYING that dead socket. It is
+    safe against the holder THIS REPAIR PROVED, and nothing wider: without a
+    per-<dbdir>/<dbfilename> construction lock, a construction racing here can
+    also start a server over the same RDB (tortoise#4921). Idempotent, and never
+    raises: a patch that broke construction would be worse than the bug.
     """
     global _ORIGINAL_REDISLITE_IS_RUNNING
     try:
@@ -2116,7 +2121,7 @@ def _install_dead_socket_guard() -> None:
             # `... and not self.socket_file`) can NEVER take the registry-load
             # branch: there is no replay here to repair. Keep the original
             # answer — `_cleanup` asks this predicate through
-            # `_connection_count` (client.py:190), and a predicate must not
+            # `_connection_count` (client.py:188), and a predicate must not
             # kill a live server on a path that is not about to start one
             # (the #3653 fail-open class).
             return True
@@ -2176,7 +2181,12 @@ def _install_dead_socket_guard() -> None:
             return True
         # The recorded server is confirmed dead (the RDB is released) and the
         # stale registry is gone: `__init__`'s else branch starts a clean
-        # server over the same dbdir/dbfilename — now the ONLY writer.
+        # server over the same dbdir/dbfilename. What this closes is the
+        # REGISTRY REPLAY — a proven-dead holder's stale record — and nothing
+        # wider. It does NOT make this construction the only writer: redislite
+        # still has no per-<dbdir>/<dbfilename> construction lock, so two
+        # constructions racing between this unlink and the start below can
+        # each bring up a server over one RDB (tortoise#4921).
         logger.warning(
             "#4879: REPAIRED a stale embedded-redis registry %s — stopped the "
             "proven holder pid %s (recorded socket %s was gone) and removed "

@@ -2069,8 +2069,10 @@ def test_partial_init_cleanup_reclaims_the_orphaned_server(tmp_path):
 # `_start_redis()` (client.py:218-236), which passes
 # `'dbdir': self.dbdir, 'dbfilename': self.dbfilename` (client.py:234-235)
 # straight through — THE SAME RDB FILE. So the state built below (registry
-# present, recorded socket GONE, recorded pid LIVE) is exactly the state in
-# which answering False starts a SECOND writer on one RDB. The repair in
+# present, recorded socket GONE, recorded pid LIVE) is A state in which
+# answering False starts a SECOND writer on one RDB — but not the only such
+# state: a plain cold start with no registry does it too (tortoise#4921). The
+# repair in
 # `tortoise/embedded_lifecycle.py` therefore PROVES the live pid is this
 # registry's own server, stops it gracefully, and only then drops the stale
 # registry. These tests pin the END STATE, not "construction succeeded".
@@ -2108,9 +2110,10 @@ def _live_rdb_writers(db_dir, dbfilename):
 def test_live_recorded_server_with_dead_socket_is_stopped_not_doubled(tmp_path):
     """#4879: registry + LIVE server + recorded socket GONE (the hole's state).
 
-    The recorded server is genuinely alive and holding this RDB — the only
-    state in which answering False arms a SECOND writer on the same
-    dbfilename. RED on the first cut (`77ce56763`): construction succeeds but
+    The recorded server is genuinely alive and holding this RDB — a state in
+    which answering False arms a SECOND writer on the same dbfilename, though
+    NOT the only one: a cold start with no registry arms it too (tortoise#4921).
+    RED on the first cut (`77ce56763`): construction succeeds but
     this RDB ends up with TWO live writers. RED on unmodified redislite: the
     construction raises the ``ConnectionError`` above. GREEN: the proven
     holder is stopped, its in-memory write is persisted by that graceful
@@ -2171,7 +2174,7 @@ def test_bound_client_predicate_does_not_signal_a_live_server(tmp_path):
     """#4879 review, scope: the repair fires only where a start is imminent.
 
     `_is_redis_running` is ALSO reached from redislite's close path
-    (`_cleanup` -> `_connection_count`, client.py:190). A client that already
+    (`_cleanup` -> `_connection_count`, client.py:188). A client that already
     holds a socket can never take `__init__`'s registry-load branch
     (client.py:449 requires `not self.socket_file`), so this state is not a
     replay waiting to be repaired: the predicate must keep the ORIGINAL
@@ -2423,11 +2426,16 @@ def test_foreign_live_redis_server_is_not_proven_and_not_signalled(
     earlier `_pid_is_redis` gate and never reaches the start-time or
     argv-binding legs — mutating either leg to a constant left the suite
     green. Here the recorded pid IS a live redis-server (a stub whose argv
-    names ``.../redislite/bin/redis-server unixsocket:<other-dir>/redis.socket``),
-    the pidfile is written AFTER it starts, so the start-time leg PASSES, and
-    only the argv-binding leg can refuse the match. If it does not, the stub
-    is signalled and a second writer is started over this RDB — the
-    divergence #4879 exists to prevent.
+    names a ``redis-server`` under a directory of this test's own choosing —
+    deliberately NOT ``redislite/bin/redis-server``, see
+    `_spawn_redis_server_stub`), the pidfile is written AFTER it starts, so the
+    start-time leg PASSES, and only the argv-binding leg can refuse the match.
+
+    What a wrong match would cost is NOT a doubled writer: this RDB has no live
+    writer at all (`_live_rdb_writers(...) == []`, asserted below), so
+    accepting the stub would kill an innocent process and start the FIRST
+    server over this RDB. The two-writer divergence `#4879` exists to prevent is
+    asserted by the tests that DO hold a live holder, not by this one.
     """
     import atexit
     import json as _json
