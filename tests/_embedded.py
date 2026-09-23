@@ -257,6 +257,10 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     "test_projection_lifecycle",
     "test_reaper",
     "test_reaper_orphan",
+    # #2814: authoritative-config durability across rebuild_all — the wipe is
+    # embedded-only in practice (the bulk-wipe guard refuses non-test graphs in
+    # server mode), so its survival pins must never flip to the server lane.
+    "test_rebuild_config_preservation",
     "test_redis_guard",
     "test_resume_gate_parity",
     "test_smoke_embedded",

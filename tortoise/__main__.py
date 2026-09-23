@@ -50,6 +50,39 @@ def _cmd_rebuild(args):
         proj = FalkorProjection(args.db, skip_health_check=True)
         counts = proj.rebuild_all(args.dir)
         print(f"Done: {counts['nodes']} nodes, {counts['edges']} edges from {counts['events']} events")
+        # #2814: the operator surface for the config third state. Without this a
+        # SUCCESSFUL rebuild that staged the `config_reset` marker would print
+        # `Done:` and say nothing — the marker would be written and never
+        # surfaced on the very path an operator reads. Printed even at zero
+        # expected, so "there was no authoritative config to preserve" is
+        # distinguishable from "preservation was not attempted".
+        print(f"Config: {counts.get('config_restored', 0)} of "
+              f"{counts.get('config_expected', 0)} authoritative entr(y/ies) restored")
+        if counts.get("config_reset"):
+            if counts.get("config_reset_read_failed"):
+                # `config_reset` is fail-SAFE, so it does not prove the marker
+                # is on the graph. Do not assert "IS SET" about a node the
+                # rebuild could not read — and do not tell the operator to
+                # clear a marker whose read is exactly what is failing.
+                print(
+                    "Config: the `config_reset` STATE COULD NOT BE READ — the "
+                    "marker may or may not be present, so this graph's "
+                    "configuration is unproven. Re-check the marker (the "
+                    "`_clear_config_reset()` clear path re-reads it and will "
+                    "fail the same way) before assuming any configuration was "
+                    "preserved "
+                    "(see operations/skills/tortoise-rebuild/SKILL.md, #2814).",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "Config: the `config_reset` marker IS SET — the configuration "
+                    "this graph had could not be proven restored (or its state is "
+                    "unknown after a pre-preservation rescue file). Re-provision "
+                    "the pack configuration and clear the marker "
+                    "(see operations/skills/tortoise-rebuild/SKILL.md, #2814).",
+                    file=sys.stderr,
+                )
     except RebuildDroppedEpisodicPoints as e:
         # #3947 review (cycle 2, D5): the refusal is the intended outcome for a
         # store whose episodic roster cannot be proven recoverable, so it must
