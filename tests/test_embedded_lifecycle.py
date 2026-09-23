@@ -67,6 +67,11 @@ def _count_redis_servers() -> int:
 RAW_EMBEDDED_ALLOWLIST = {
     "_embedded.py",  # seam/helper — raw constructions ARE the embedded-under-test input
     "fixtures/redis-guard/bad_relative_path.py",  # redis-guard fixture — embedded path resolution input
+    # #2814: opens its own FalkorProjection on a scratch path so the
+    # rebuild CLI surface (`python -m tortoise rebuild`) can be driven
+    # against a real DB — raw construction is the input under test, and
+    # the carve-out membership above is the justification.
+    "test_rebuild_config_preservation.py",
     "fixtures/redis-guard/good_absolute_path.py",  # redis-guard fixture — embedded path resolution input
     "repro/reproduce_redislite_leak.py",  # repro — deliberate embedded leak reproduction
     "test_backup_e2e.py",
