@@ -15,6 +15,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
   rmSync,
   utimesSync,
@@ -24,12 +25,16 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import {
   HARNESS,
+  MAX_ATTEMPTS,
   MAX_TURNS,
   PROBE_TIMEOUT_MS,
   REQUEST_TIMEOUT_MS,
+  RETRY_MAX_MS,
   backoffDelay,
   buildCapturePayload,
   captureKey,
+  clampAttempts,
+  clampWindow,
   classifyFailure,
   contentDigest,
   deriveMachineId,
@@ -766,6 +771,42 @@ test("a new turn does not re-arm the retry window (#4714 review)", async () => {
   assert.equal(again.calls.length, 0);
 });
 
+test("a non-finite backoff can never make an entry un-fileable (#4714 review)", async () => {
+  // The backoff is CARRIED across turns now, so a stored Infinity would be
+  // preserved on every write and the entry would be skipped forever while every
+  // surface reports "will retry". And `backoffDelay` computes 2 ** (n - 1), so
+  // an absurd attempt count must saturate rather than attempt a huge exponent.
+  //
+  // MUTATION THAT REDS THIS: return the raw value from clampWindow /
+  // clampAttempts instead of clamping.
+  assert.equal(clampWindow(Number.POSITIVE_INFINITY), 0);
+  assert.equal(clampWindow(Number.NaN), 0);
+  assert.equal(clampWindow(-5), 0);
+  assert.equal(clampWindow(1_700_000_030_000), 1_700_000_030_000);
+  assert.equal(clampAttempts(Number.POSITIVE_INFINITY), 0);
+  assert.equal(clampAttempts(1e9), MAX_ATTEMPTS);
+  assert.ok(Number.isFinite(backoffDelay(Number.POSITIVE_INFINITY)));
+  assert.equal(backoffDelay(1e9), RETRY_MAX_MS);
+
+  // End to end: a corrupt on-disk window must not stop the entry being POSTed.
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, snapshot("sess-inf"));
+  const metaPath = join(
+    spool,
+    "entries",
+    `${entryKey("sess-inf")}.meta.json`,
+  );
+  const corrupt = JSON.parse(readFileSync(metaPath, "utf-8"));
+  corrupt.next_attempt_at_ms = null;   // JSON has no Infinity — this is the shape
+  corrupt.attempts = "lots";
+  writeFileSync(metaPath, `${JSON.stringify(corrupt, null, 2)}\n`);
+
+  const ok = statusFetch(200);
+  const summary = await flushSpool(TEST_CFG, { dir: spool, fetchImpl: ok.fetchImpl, now: 1_000 });
+  assert.equal(summary.attempted, 1, "a corrupt backoff made the entry un-fileable");
+  assert.equal(summary.filed, 1);
+});
+
 test("the server's in-flight 409 is retryable, not a lost write (#3713)", async () => {
   const spool = tmpSpool();
   writeSpoolEntry(spool, snapshot("sess-409"));
@@ -804,6 +845,10 @@ test("every 409 stays retryable — a policy-blocked session is never silently d
   // is a network condition, never a server verdict.
   assert.equal(classifyFailure(null), "retry");
   assert.equal(classifyFailure(Number.NaN), "retry");
+  // An ABSOLUTE pin, not only a leg-vs-leg comparison: 403 stays PERMANENT
+  // (a suspended org is a reversible state, but deferring it is a separate
+  // policy question — #4895). Pinned so a same-direction drift reds here.
+  assert.equal(classifyFailure(403), "permanent");
   // A 3xx (a redirect on a stored api_url) must never delete the capture.
   assert.equal(classifyFailure(301), "retry");
   assert.equal(classifyFailure(422), "permanent");

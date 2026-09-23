@@ -354,6 +354,8 @@ export const SPOOL_MAX_ENTRY_BYTES = 16 * 1024 * 1024;
 /** Exponential backoff for TRANSIENT failures only (network / 5xx / retryable 4xx). */
 export const RETRY_BASE_MS = 30_000;
 export const RETRY_MAX_MS = 6 * 60 * 60 * 1000;
+/** Mirrors the Python leg's `_MAX_ATTEMPTS`: the backoff saturates long before. */
+export const MAX_ATTEMPTS = 64;
 
 /** Discard reasons — every one is written to `discarded.jsonl` (observable). */
 export const DISCARD_ENTRY_TOO_LARGE = "entry_too_large";
@@ -796,8 +798,8 @@ export function writeSpoolEntry(
     // module promises held only for a STATIC entry. A new turn is not a new
     // upload attempt, so carry them forward. The filing path resets them
     // (attempts=0) and a genuinely fresh entry starts at zero.
-    attempts: prior?.attempts ?? 0,
-    next_attempt_at_ms: prior?.next_attempt_at_ms ?? 0,
+    attempts: clampAttempts(prior?.attempts),
+    next_attempt_at_ms: clampWindow(prior?.next_attempt_at_ms),
     ...(prior?.filed_key && prior.content_digest === contentDigest(snapshot.turns)
       ? { filed_key: prior.filed_key, filed_at: prior.filed_at }
       : {}),
@@ -971,9 +973,26 @@ export function classifyFailure(
   return "permanent";
 }
 
+/** `attempts` as a small non-negative int, however corrupt the stored value is.
+ *  Clamped because `backoffDelay` computes `2 ** (n - 1)` from it; the backoff
+ *  saturates (30 s * 2**10 > 6 h) long before this bound. */
+export function clampAttempts(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.min(Math.floor(value), MAX_ATTEMPTS)
+    : 0;
+}
+
+/** `next_attempt_at_ms` as a FINITE epoch-ms value — 0 means "retry now".
+ *  A non-finite window is not a window: `Infinity > nowMs` is true forever, and
+ *  the carry-forward would preserve it across every turn, making a growing
+ *  session permanently un-fileable while every surface says "will retry". */
+export function clampWindow(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
 /** Exponential backoff for attempt N (1-based), capped at RETRY_MAX_MS. */
 export function backoffDelay(attempts: number): number {
-  const exp = Math.max(0, attempts - 1);
+  const exp = Math.max(0, clampAttempts(attempts) - 1);
   return Math.min(RETRY_BASE_MS * 2 ** exp, RETRY_MAX_MS);
 }
 
@@ -1036,7 +1055,7 @@ export async function flushSpool(
       summary.skipped += 1;
       continue;
     }
-    if (meta.next_attempt_at_ms > nowMs) {
+    if (clampWindow(meta.next_attempt_at_ms) > nowMs) {
       summary.skipped += 1;
       continue;
     }
@@ -1102,7 +1121,7 @@ export async function flushSpool(
       // Re-read before the backoff write-back for the same reason as the CAS
       // above: never clobber newer turns written while the POST was in flight.
       const pending = readSpoolEntry(dir, meta.session_id) ?? meta;
-      pending.attempts = (meta.attempts ?? 0) + 1;
+      pending.attempts = clampAttempts(meta.attempts) + 1;
       pending.next_attempt_at_ms = nowMs + backoffDelay(pending.attempts);
       writeMeta(dir, pending);
       summary.deferred += 1;

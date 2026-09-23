@@ -12,6 +12,7 @@ the developer machine's real captures.
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -345,34 +346,58 @@ def test_the_pi_and_python_classifiers_agree_on_every_status_parity(tmp_path):
     # And the no-status rows, which is exactly where the legs diverged.
     assert pi_map["null"] == pi_map["undefined"] == pi_map["NaN"] == "retry"
     assert classify_failure(float("nan")) == "retry"
+    # An ABSOLUTE pin, not only a leg-vs-leg comparison: a same-direction drift
+    # (both legs reclassifying 403's reversible policy state, #4895) would pass a
+    # pure comparison. 403 is deliberately still permanent here.
+    assert classify_failure(403) == pi_map["403"] == "permanent"
+    assert classify_failure(422) == pi_map["422"] == "permanent"
 
 
 def _assert_both_legs_carry_402() -> None:
     """The node-free half of the parity contract.
 
-    Explicitly a SOURCE pin (a spelling guard): it proves the status is present
-    in each classifier's transient set, not that it behaves correctly — the
-    behavioural proofs are the runtime parity test above and each leg's own
-    suite. Its purpose is that the cross-leg guard does not vanish on a box (or
-    CI runner) without node.
+    Explicitly a SOURCE pin: it proves the statuses are present in each
+    classifier's transient set, not that they behave correctly — the behavioural
+    proofs are the runtime parity test above and each leg's own suite. Its
+    purpose is that the cross-leg guard does not vanish on a box (or CI runner)
+    without node.
+
+    It reads the PYTHON half through `ast`, not a regex: a regex over raw source
+    is forgeable by a commented-out predicate and brittle to reformatting, and
+    both failure modes are silent. `ast` sees the real comparison node.
     """
     py_src = (REPO / "tortoise" / "capture_spool.py").read_text(encoding="utf-8")
     ts_raw = (REPO / "tortoise" / "pi-hooks" / "tortoise-capture.ts").read_text(
         encoding="utf-8"
     )
-    # Strip `//` comments first: without this, a COMMENTED-OUT predicate
-    # (`// if (status === 402) return "retry";`) satisfies the pin while the
-    # real classifier has dropped the status — a spelling guard that a comment
-    # can forge is worse than none. The lookbehind preserves `://` in URLs.
-    ts_src = re.sub(r"(?<!:)//[^\n]*", "", ts_raw)
-    py_set = re.search(r"if status in \(([0-9,\s]+)\):", py_src)
-    assert py_set, "capture_spool.classify_failure has no integer transient set"
-    py_codes = {int(x) for x in py_set.group(1).split(",")}
+    # Strip TS comments before matching: without this, a COMMENTED-OUT predicate
+    # (`// if (status === 402) return "retry";`) satisfies the pin while the real
+    # classifier has dropped the status — a spelling guard a comment can forge is
+    # worse than none. `//` (lookbehind preserves `://`) and `/* */`.
+    ts_src = re.sub(r"/\*.*?\*/", "", ts_raw, flags=re.S)
+    ts_src = re.sub(r"(?<!:)//[^\n]*", "", ts_src)
+
+    py_codes: set[int] = set()
+    for node in ast.walk(ast.parse(py_src)):
+        if not (isinstance(node, ast.FunctionDef) and node.name == "classify_failure"):
+            continue
+        for sub in ast.walk(node):
+            if not (isinstance(sub, ast.Compare) and any(isinstance(o, ast.In) for o in sub.ops)):
+                continue
+            for comparator in sub.comparators:
+                if isinstance(comparator, (ast.Tuple, ast.Set, ast.List)):
+                    py_codes |= {
+                        el.value
+                        for el in comparator.elts
+                        if isinstance(el, ast.Constant) and isinstance(el.value, int)
+                    }
+    assert py_codes, "capture_spool.classify_failure has no integer transient set"
+
+    ts_matches = re.findall(r'if \(([^)]*)\) return "retry";', ts_src)
     ts_codes = {
-        int(code)
-        for group in re.findall(r'if \(([^)]*)\) return "retry";', ts_src)
-        for code in re.findall(r"status === (\d+)", group)
+        int(code) for group in ts_matches for code in re.findall(r"status === (\d+)", group)
     }
+    assert ts_codes, "the Pi classifyFailure has no integer transient set"
     for code in (402, 408, 425, 429):
         assert code in py_codes, f"Python leg dropped {code} from its transient set"
         assert code in ts_codes, f"Pi leg dropped {code} from its transient set"
@@ -1839,6 +1864,44 @@ def test_a_corrupt_typed_meta_does_not_crash_or_wedge(tmp_path):
     server = _Server()
     summary = flush_spool(tmp_path, server.post, now=1000.0)
     assert summary.filed == 1, "the entry is still filed, not wedged"
+
+
+def test_a_non_finite_backoff_cannot_make_an_entry_unfileable(tmp_path):
+    """#4714 review. The backoff is CARRIED across turns now, so a stored
+    `inf` would be preserved on every write: `inf > now_ms` is true forever, the
+    entry would never be POSTed, and every surface would still report "will
+    retry" — a promise that can never be kept. `float(10**400)` raises
+    `OverflowError` rather than returning `inf`, and that helper runs on the
+    WRITE path, so an uncaught one would break `session spool`'s exit 0.
+
+    MUTATIONS THAT RED THIS: return the raw float from `_backoff_ms`; drop
+    `OverflowError` from either guard; use `int()` unguarded where the backoff
+    is armed.
+    """
+    from tortoise.capture_spool import _attempts, _backoff_ms, _meta_path
+
+    assert _backoff_ms({"next_attempt_at_ms": float("inf")}) == 0.0
+    assert _backoff_ms({"next_attempt_at_ms": float("nan")}) == 0.0
+    assert _backoff_ms({"next_attempt_at_ms": 10**400}) == 0.0
+    assert _attempts({"attempts": float("inf")}) == 0
+    assert _attempts({"attempts": 10**400}) <= 64, (
+        "an absurd attempt count must saturate, not exponentiate"
+    )
+
+    write_spool_entry(tmp_path, _snapshot("sess-inf"))
+    meta_path = _meta_path(tmp_path, "sess-inf")
+    meta = read_spool_meta(tmp_path, "sess-inf")
+    meta["next_attempt_at_ms"] = 1e400  # inf
+    meta["attempts"] = 10**400
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    # The WRITE path must not raise (session spool always exits 0)...
+    write_spool_entry(tmp_path, _snapshot("sess-inf", TURNS + TURNS[:1]))
+    # ...and the entry must still be POSTed, not skipped forever.
+    server = _Server()
+    summary = flush_spool(tmp_path, server.post, now=1000.0)
+    assert summary.attempted == 1, "a non-finite backoff made the entry un-fileable"
+    assert summary.filed == 1
 
 
 def test_the_turn_hook_records_an_unreadable_transcript(tmp_path):

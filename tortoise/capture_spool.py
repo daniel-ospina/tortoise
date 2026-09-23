@@ -87,6 +87,10 @@ SPOOL_MAX_TOTAL_BYTES = 256 * 1024 * 1024
 SPOOL_MAX_ENTRY_BYTES = 16 * 1024 * 1024
 RETRY_BASE_SECONDS = 30
 RETRY_MAX_SECONDS = 6 * 60 * 60
+# `attempts` is clamped to this before `backoff_delay` computes 2**(n-1): the
+# backoff saturates (30 * 2**10 > 6 h) long before, and a corrupt stored value
+# of 10**400 would otherwise try to materialise an astronomically large int.
+_MAX_ATTEMPTS = 64
 
 DISCARD_ENTRY_TOO_LARGE = "entry_too_large"
 DISCARD_COUNT_EXCEEDED = "spool_count_exceeded"
@@ -800,24 +804,38 @@ def _age_key(meta: dict) -> tuple[str, str, str]:
 
 
 def _backoff_ms(meta: dict) -> float:
-    """`next_attempt_at_ms` as a number, however corrupt the stored value is.
+    """`next_attempt_at_ms` as a finite number, however corrupt the stored value is.
 
     A non-numeric value ("soon", null, a nested dict) raised `ValueError` out of
     `flush_spool` and wedged the drain; 0 means "retry now", which is the safe
     reading.
+
+    A NON-FINITE window is not a window: `inf > now_ms` is true forever, and
+    because `write_spool_entry` now carries this field forward, an `inf` would
+    have made a growing session permanently un-fileable — it reports "will
+    retry" and never can. `float(10**400)` raises `OverflowError` rather than
+    returning `inf`, so that is caught too: this helper runs on the WRITE path,
+    where an escaping error would break `session spool`'s documented exit 0.
     """
     try:
-        return float(meta.get("next_attempt_at_ms") or 0)
-    except (TypeError, ValueError):
+        value = float(meta.get("next_attempt_at_ms") or 0)
+    except (TypeError, ValueError, OverflowError):
         return 0.0
+    return value if math.isfinite(value) else 0.0
 
 
 def _attempts(meta: dict) -> int:
-    """`attempts` as a non-negative int, however corrupt the stored value is."""
+    """`attempts` as a small non-negative int, however corrupt the stored value is.
+
+    Clamped, because `backoff_delay` computes `2 ** (attempts - 1)` from it and
+    a stored `10**400` would try to materialise an astronomically large integer.
+    The backoff is fully saturated long before this bound.
+    """
     try:
-        return max(0, int(meta.get("attempts") or 0))
-    except (TypeError, ValueError):
+        value = int(meta.get("attempts") or 0)
+    except (TypeError, ValueError, OverflowError):
         return 0
+    return min(max(0, value), _MAX_ATTEMPTS)
 
 
 def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAULT_BOUNDS) -> list[dict]:
@@ -902,7 +920,7 @@ def flush_spool(
             }))
             with contextlib.suppress(Exception):
                 retry_meta = read_spool_meta(root, sid) or meta
-                retry_meta["attempts"] = int(meta.get("attempts") or 0) + 1
+                retry_meta["attempts"] = _attempts(meta) + 1
                 retry_meta["next_attempt_at_ms"] = (
                     now_ms + backoff_delay(retry_meta["attempts"]) * 1000)
                 _write_meta(root, retry_meta)
@@ -1067,7 +1085,7 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
     # Re-read before the backoff write-back for the same reason as the CAS
     # above: never clobber newer turns written while the POST was in flight.
     pending = read_spool_meta(root, sid) or meta
-    pending["attempts"] = int(meta.get("attempts") or 0) + 1
+    pending["attempts"] = _attempts(meta) + 1
     pending["next_attempt_at_ms"] = now_ms + backoff_delay(pending["attempts"]) * 1000
     _write_meta(root, pending)
     summary.deferred += 1
