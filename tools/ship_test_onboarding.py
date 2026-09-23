@@ -127,8 +127,10 @@ import contextlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -1274,6 +1276,51 @@ def _monotonic() -> float:
     return time.monotonic()
 
 
+def _ladder(bound: float) -> list[tuple[float, int]]:
+    """The watchdog's rungs, as DATA: ``(delay_seconds, signal)``, in order.
+
+    PURE, so the ARITHMETIC is provable in CI without a browser and without a
+    clock (`mutation_selfcheck` exercises it). The shape is deliberate: a
+    graceful SIGTERM at half the budget leaves a teardown that can still finish
+    half the bound to do it, and SIGKILL at three quarters leaves a quarter as
+    slack before the bound expires. The kill is what releases a close blocked on
+    an unresponsive driver (E11), so the rungs have to be inside the bound.
+    """
+    return [(bound / 2, signal.SIGTERM), (3 * bound / 4, signal.SIGKILL)]
+
+
+def _ladder_is_sound(ladder: list[tuple[float, int]], bound: float) -> bool:
+    """The ladder's contract as a PREDICATE, so a mutant is a value.
+
+    Exactly two rungs; delays strictly increasing and strictly inside the bound;
+    SIGTERM before SIGKILL; at most one of each; and a bound that is actually a
+    bound (``0 < bound <= 10``).
+    """
+    if not (0 < bound <= 10) or len(ladder) != 2:
+        return False
+    (d1, s1), (d2, s2) = ladder
+    return s1 == signal.SIGTERM and s2 == signal.SIGKILL and 0 < d1 < d2 < bound
+
+
+_SIGNAL_LABELS = {signal.SIGTERM: "SIGTERM", signal.SIGKILL: "SIGKILL"}
+
+
+def _wait_until(deadline: float, done: threading.Event) -> bool:
+    """Wait for ``deadline`` unless ``done`` is set first.
+
+    True iff the deadline arrived while the teardown was still running. Polled
+    with a bounded sleep so a healthy run is released in milliseconds rather than
+    waiting out the bound: the whole reason the watchdog does not cost every run
+    its budget.
+    """
+    while not done.is_set():
+        remaining = deadline - _monotonic()
+        if remaining <= 0:
+            return True
+        done.wait(min(0.05, remaining))
+    return False
+
+
 # ── the live walk ───────────────────────────────────────────────────────────
 def run_walk(args) -> Observation:
     """The run, top to bottom: prep → driver → walk → bounded teardown → write.
@@ -1702,22 +1749,13 @@ def _walk(pw, args, obs, td, out_dir, shots, email, password) -> Observation:
         return _finalize(obs, out_dir, td)
 
 
-def _teardown_browser(pw, td, obs) -> None:
-    """Close the browser this run owns. The ONE teardown site's body.
+def _close_all(pw, td, closes: list) -> bool:
+    """Close the context, the browser and the driver, recording each step.
 
-    Close the context → close the browser → `pw.stop()`, recording each step's
-    outcome into `obs.browser_teardown`. Each failure is RECORDED and does not
-    skip the remaining closers, and no failure here can change the verdict or the
-    exit code: cleanup is not the product (#4319's rule, applied to the browser).
-
-    One-shot by construction — `run_walk` spells the call exactly once — plus this
-    guard, so a re-entry cannot close the same objects twice.
+    Every closer runs even after one fails, and no failure may skip the rest:
+    the browser is what reaps the Chromium tree (E8), so a context close that
+    raises must not stop the browser close. Returns True if any closer failed.
     """
-    if td.browser_done:
-        return
-    td.browser_done = True
-    record = obs.browser_teardown
-    closes = record["closes"]
     failed = False
     for name, closer in (("context", td.ctx), ("browser", td.browser)):
         if closer is None:
@@ -1736,8 +1774,83 @@ def _teardown_browser(pw, td, obs) -> None:
         failed = True
         closes.append({"name": "playwright", "how": "close_error",
                        "detail": f"{type(exc).__name__}: {exc}"})
-    record["outcome"] = (BROWSER_TEARDOWN_CLOSE_ERROR if failed
-                         else BROWSER_TEARDOWN_CLEAN)
+    return failed
+
+
+def _teardown_browser(pw, td, obs) -> None:
+    """Close the browser this run owns, BOUNDED. The ONE teardown site's body.
+
+    Close the context → close the browser → `pw.stop()`, recording each step into
+    `obs.browser_teardown`, with a watchdog armed for the whole of it. The closes
+    are unbounded in the API (`Browser.close()` is a timeout-less `send`) and
+    cannot be interrupted, so the BOUND comes from outside them: a thread takes
+    the `_ladder` rungs on the clock seam and signals the run's OWN Playwright
+    driver child, which is what releases a blocked close (E11).
+
+    The watchdog touches NO Playwright object — only `os.kill` through the signal
+    seam and a record — so the sync API's thread-affinity rule is not violated.
+
+    Safety, by construction: the pid is enumerated ONCE, as a direct child of
+    this process, together with its start time, and the start time is re-read
+    immediately before every rung (a bare pid is racy against reuse). With no
+    child enumerated the watchdog signals nothing and the outcome says so
+    (`driver_absent`). Only after a signal is the child reaped. Each failure is
+    RECORDED and cannot change the verdict or the exit code: cleanup is not the
+    product (#4319's rule, applied to the browser).
+
+    One-shot by construction — `run_walk` spells the call exactly once — plus this
+    guard, so a re-entry cannot close the same objects or arm a second watchdog.
+    """
+    if td.browser_done:
+        return
+    td.browser_done = True
+    record = obs.browser_teardown
+    closes = record["closes"]
+
+    driver_pid, driver_start = _driver_pid_and_starttime()
+    signals: list[tuple[int, int]] = []
+    fired = threading.Event()
+    done = threading.Event()
+
+    def _watchdog() -> None:
+        start = _monotonic()
+        for delay, signum in _ladder(TEARDOWN_BOUND_S):
+            if not _wait_until(start + delay, done):
+                return                     # the closes finished before this rung
+            fired.set()
+            if driver_pid is None:
+                continue                   # nothing of ours to signal
+            if _start_time_of(driver_pid) != driver_start:
+                continue                   # the pid is no longer our child
+            _send_signal(driver_pid, signum)
+            signals.append((driver_pid, signum))
+            _reap(driver_pid)
+
+    watchdog = threading.Thread(target=_watchdog, daemon=True)
+    watchdog.start()
+    try:
+        failed = _close_all(pw, td, closes)
+    finally:
+        done.set()
+        # A healthy run must not wait out the bound: `done` releases the ladder's
+        # own wait, so this join returns in milliseconds.
+        watchdog.join(timeout=1.0)
+
+    if signals:
+        record["outcome"] = BROWSER_TEARDOWN_WATCHDOG_KILL
+        record["detail"] = ("the driver did not release the close; signalled "
+                            + ", ".join(f"{p} {_SIGNAL_LABELS.get(s, s)}"
+                                        for p, s in signals))
+    elif fired.is_set():
+        record["outcome"] = BROWSER_TEARDOWN_DRIVER_ABSENT
+        record["detail"] = ("the teardown needed the watchdog, and no driver "
+                            "child was enumerated to signal")
+    elif failed:
+        record["outcome"] = BROWSER_TEARDOWN_CLOSE_ERROR
+        record["detail"] = "; ".join(c["detail"] for c in closes
+                                      if c["how"] == "close_error")
+    else:
+        record["outcome"] = BROWSER_TEARDOWN_CLEAN
 
 
 def _mint_or_read_key(page, ctx, base_url: str) -> tuple[str | None, str]:
@@ -1975,6 +2088,33 @@ def mutation_selfcheck() -> int:
           "a signed-in run that observed nothing")
     if not ok:
         failures.append("product finding is not distinct from the instrument error")
+    # #4907: the teardown bound's ARITHMETIC, as values. The CI half proves the
+    # ladder; that the watchdog USES it (rather than hardcoding the same delays)
+    # is proven by the fast suite's clock-seam assertions. No browser either way.
+    real_ladder = _ladder(TEARDOWN_BOUND_S)
+    ok = _ladder_is_sound(real_ladder, TEARDOWN_BOUND_S)
+    print(f"  {'ok ' if ok else 'BAD'} ladder {real_ladder}  "
+          "the rungs sit strictly inside the bound")
+    if not ok:
+        failures.append("the teardown ladder's rungs are not inside the bound")
+    for name, mutant in (
+            ("reversed (SIGKILL first)",
+             [(3 * TEARDOWN_BOUND_S / 4, signal.SIGKILL),
+              (TEARDOWN_BOUND_S / 2, signal.SIGTERM)]),
+            ("a rung outside the bound",
+             [(TEARDOWN_BOUND_S / 2, signal.SIGTERM),
+              (TEARDOWN_BOUND_S + 1, signal.SIGKILL)]),
+            ("three rungs", [*real_ladder, (TEARDOWN_BOUND_S, signal.SIGKILL)]),
+            ("the same signal twice",
+             [(TEARDOWN_BOUND_S / 2, signal.SIGTERM),
+              (3 * TEARDOWN_BOUND_S / 4, signal.SIGTERM)]),
+            ("a bound that is not one",
+             [(0.0, signal.SIGTERM), (0.0, signal.SIGKILL)])):
+        sound = _ladder_is_sound(mutant, TEARDOWN_BOUND_S)
+        print(f"  {'ok ' if not sound else 'BAD'} {'GREEN' if not sound else 'RED':5} "
+              f"(want RED)  ladder mutant: {name}")
+        if sound:
+            failures.append(f"ladder mutant read as sound: {name}")
     if failures:
         print(f"[mutation-selfcheck] FAILED: {len(failures)} case(s): {failures}")
         return 1

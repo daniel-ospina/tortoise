@@ -2743,8 +2743,8 @@ def test_read_org_ids_reports_a_proxied_upstream_status_and_fails_closed():
 def test_a_completed_run_records_the_browser_teardown_block(monkeypatch, tmp_path):
     """The record has a declared home ON DISK, not just in memory: `asdict`
     serializes DECLARED fields only, so an undeclared attribute is silently
-    dropped from the artifact. PRESENCE/SHAPE only here — the VALUE assertions
-    are the bound's own tests below (this test is upgraded there, not duplicated)."""
+    dropped from the artifact. UPGRADED by the bound's tests to assert the VALUE:
+    a run that ENTERED and COMPLETED the teardown is never `not_run` on disk."""
     import json
 
     import tools.ship_test_onboarding as mod
@@ -2756,6 +2756,11 @@ def test_a_completed_run_records_the_browser_teardown_block(monkeypatch, tmp_pat
     assert set(block) == {"outcome", "closes", "detail"}, block
     assert block["outcome"] in mod.BROWSER_TEARDOWN_OUTCOMES, block
     assert isinstance(block["closes"], list)
+    # THE VALUE, not merely the shape: this run's teardown ran, so `not_run` is
+    # NOT an acceptable value for it.
+    assert block["outcome"] == mod.BROWSER_TEARDOWN_CLEAN, block
+    assert [c["name"] for c in block["closes"]] == ["context", "browser", "playwright"]
+    assert {c["how"] for c in block["closes"]} == {"closed"}
     assert block["detail"] == ""
 
 
@@ -2871,3 +2876,304 @@ def test_the_import_guard_path_writes_not_run_and_enters_no_browser_teardown(
     assert written["browser_teardown"]["outcome"] == "not_run"
     assert written["browser_teardown"]["closes"] == []
     assert calls == [], "the import-guard path must not enter a browser teardown"
+
+
+# ── #4907 — the BOUND: the teardown cannot block forever with a browser live ─
+# Every test here drives the real `run_walk` against a fake that can wedge, raise
+# and be signalled, and every one reads `tmp_path/"ship-test"/"observation.json"`
+# FROM DISK and asserts the recorded VALUE. The in-memory object is never the
+# subject: the record only earns its keep if it is serialized.
+
+def _browser_teardown_from_disk(tmp_path) -> dict:
+    import json
+
+    return json.loads(
+        (tmp_path / "ship-test" / "observation.json").read_text())["browser_teardown"]
+
+
+def _happy_bound_run(monkeypatch, tmp_path, **kw):
+    """A run that completes the walk (so it PASSED) and then enters the teardown
+    with whichever teardown knobs the test needs."""
+    return _run_fake_walk(
+        monkeypatch, tmp_path, plan=_happy_base(),
+        ui_sequence=[NOT_CONNECTED, CONNECTED], mcp_tools_call=_MCP_OK, **kw)
+
+
+def test_the_ladder_is_pure_and_valued_at_half_and_three_quarters() -> None:
+    """The bound's ARITHMETIC as a value. The CI self-check exercises the same
+    function against five mutants; this pins the exact rungs so a drift in the
+    formula is visible in the fast lane too. `_ladder` takes NO clock and no
+    process — it is data."""
+    import tools.ship_test_onboarding as mod
+
+    ladder = mod._ladder(mod.TEARDOWN_BOUND_S)
+    assert ladder == [(mod.TEARDOWN_BOUND_S / 2, signal.SIGTERM),
+                      (3 * mod.TEARDOWN_BOUND_S / 4, signal.SIGKILL)]
+    assert mod._ladder_is_sound(ladder, mod.TEARDOWN_BOUND_S) is True
+    assert mod._ladder_is_sound(
+        [(0.0, signal.SIGTERM), (0.0, signal.SIGKILL)], mod.TEARDOWN_BOUND_S) is False
+
+
+@pytest.mark.timeout(60)
+def test_a_wedged_context_close_returns_within_the_bound_and_records_watchdog_kill(
+        monkeypatch, tmp_path):
+    """AC1. A context close that never returns against an unresponsive driver is
+    the E7 hang (measured: >20s and never returned). The run must return INSIDE
+    the bound, and the artifact ON DISK must say the teardown needed the
+    watchdog. The wedge records WHY it was released — `sigkill` — so a mutant that
+    never signals cannot pass by way of the wedge's own self-release."""
+    import time
+
+    import tools.ship_test_onboarding as mod
+
+    started = time.monotonic()
+    _obs, ctx, _mod = _happy_bound_run(
+        monkeypatch, tmp_path, ctx_close_wedges=True,
+        wedge_release_on=(signal.SIGKILL,))
+    elapsed = time.monotonic() - started
+    harness = ctx.harness
+    assert elapsed < mod.TEARDOWN_BOUND_S, (
+        f"the teardown did not return inside the bound: {elapsed:.2f}s")
+    assert harness.wedges[0].released_by == "sigkill", (
+        f"released by {harness.wedges[0].released_by!r}: the watchdog did not "
+        "deliver the kill that releases a blocked close")
+    assert (4242, signal.SIGKILL) in harness.signals, harness.signals
+    assert {pid for pid, _ in harness.signals} == {4242}
+    assert set(harness.reaps) == {4242}
+    block = _browser_teardown_from_disk(tmp_path)
+    assert block["outcome"] == "watchdog_kill", block
+    assert block["outcome"] != mod.BROWSER_TEARDOWN_NOT_RUN
+
+
+@pytest.mark.timeout(60)
+def test_a_wedged_browser_close_on_the_new_context_path_is_bounded(
+        monkeypatch, tmp_path):
+    """AC1b/AC5. `new_context` failed but the LAUNCH succeeded, so the browser is
+    live while no context exists — and `browser.close()` is itself the
+    timeout-less `send` that blocks. It must be inside the watchdog window
+    exactly like the context close."""
+    _obs, ctx, _mod = _run_fake_walk(
+        monkeypatch, tmp_path, plan={}, ui_sequence=[], mcp_tools_call=_MCP_OK,
+        new_context_raises=True, browser_close_wedges=True,
+        wedge_release_on=(signal.SIGKILL,))
+    assert ctx.harness.wedges[0].released_by == "sigkill"
+    block = _browser_teardown_from_disk(tmp_path)
+    assert block["outcome"] == "watchdog_kill", block
+    assert [c["name"] for c in block["closes"]] == ["browser", "playwright"]
+
+
+@pytest.mark.timeout(60)
+def test_a_wedged_pw_stop_is_bounded_and_forced(monkeypatch, tmp_path):
+    """E7b: `pw.stop()` is no escape either. On the no-browser path a wedged stop
+    is the ONLY thing blocking, and the bound must cover it."""
+    _obs, ctx, _mod = _run_fake_walk(
+        monkeypatch, tmp_path, plan={}, ui_sequence=[], mcp_tools_call=_MCP_OK,
+        launch_raises=True, stop_wedges=True,
+        wedge_release_on=(signal.SIGKILL,))
+    harness = ctx.harness
+    assert harness.wedges[0].released_by == "sigkill"
+    assert harness.signals == [(4242, signal.SIGTERM), (4242, signal.SIGKILL)]
+    block = _browser_teardown_from_disk(tmp_path)
+    assert block["outcome"] == "watchdog_kill", block
+
+
+def test_a_close_that_raises_is_recorded_with_the_closer_and_the_exception(
+        monkeypatch, tmp_path):
+    """AC2. The one case where the teardown did not do its job is the one case it
+    used to `suppress`. It is recorded — WHICH closer, and the exception — and the
+    verdict and reason are untouched: cleanup is not the product. The remaining
+    closers still run (the browser close is what reaps the Chromium tree)."""
+    obs, _ctx, _mod = _happy_bound_run(monkeypatch, tmp_path, ctx_close_raises=True)
+    assert obs.verdict == "passed", (obs.verdict, obs.reason)
+    assert obs.reason == ""
+    block = _browser_teardown_from_disk(tmp_path)
+    assert block["outcome"] == "close_error", block
+    assert [c["name"] for c in block["closes"]] == ["context", "browser", "playwright"]
+    assert block["closes"][0]["how"] == "close_error"
+    assert "RuntimeError: context close failed" in block["closes"][0]["detail"]
+    assert block["closes"][1]["how"] == "closed"
+
+
+def test_a_browser_close_that_raises_is_recorded_and_still_stops_the_driver(
+        monkeypatch, tmp_path):
+    """AC2's other closer. `browser.close()` raising must not skip `pw.stop()` —
+    the driver stop is what the bound rests on — and the recorded closer names the
+    browser. (`expect_reaped=False`: a raise means `browser_closed` is never
+    recorded, which is the honest state — that is the leak the record exists to
+    make visible.)"""
+    obs, _ctx, _mod = _happy_bound_run(
+        monkeypatch, tmp_path, browser_close_raises=True, expect_reaped=False)
+    block = _browser_teardown_from_disk(tmp_path)
+    assert block["outcome"] == "close_error", block
+    assert [c["name"] for c in block["closes"]] == ["context", "browser", "playwright"]
+    assert block["closes"][1]["how"] == "close_error"
+    assert "RuntimeError: browser close failed" in block["closes"][1]["detail"]
+    assert block["closes"][2]["how"] == "closed", "a raising browser close must not skip pw.stop()"
+    assert obs.verdict == "passed"
+
+
+def test_a_healthy_teardown_records_clean_and_sends_no_signal(monkeypatch, tmp_path):
+    """AC3. The bound must cost a healthy run nothing: the on-disk record says
+    `clean`, every closer completed, and NO signal was sent at all. A watchdog
+    that fires at once reddens this (and the two no-browser paths below)."""
+    obs, ctx, _mod = _happy_bound_run(monkeypatch, tmp_path)
+    assert obs.verdict == "passed"
+    block = _browser_teardown_from_disk(tmp_path)
+    assert block["outcome"] == "clean", block
+    assert [c["name"] for c in block["closes"]] == ["context", "browser", "playwright"]
+    assert {c["how"] for c in block["closes"]} == {"closed"}
+    assert ctx.harness.signals == [], ctx.harness.signals
+    assert ctx.harness.reaps == [], ctx.harness.reaps
+
+
+@pytest.mark.timeout(60)
+def test_the_watchdog_signals_only_the_enumerated_driver_child(monkeypatch, tmp_path):
+    """AC4. The watchdog holds ONE pid, obtained by enumerating THIS run's own
+    direct children. Every signal it sends goes to that pid and no other — the
+    safety invariant that lets the kill be automatic."""
+    _obs, ctx, _mod = _happy_bound_run(
+        monkeypatch, tmp_path, ctx_close_wedges=True,
+        wedge_release_on=(signal.SIGKILL,))
+    harness = ctx.harness
+    assert harness.signals, "the wedge needed the watchdog"
+    assert {pid for pid, _ in harness.signals} == {4242}, harness.signals
+    assert all(s in (signal.SIGTERM, signal.SIGKILL) for _, s in harness.signals)
+
+
+@pytest.mark.timeout(60)
+def test_no_driver_child_means_no_signal_and_driver_absent(monkeypatch, tmp_path):
+    """AC4. With no driver child enumerated the watchdog signals NOTHING — a kill
+    with no target must not guess — and the artifact says `driver_absent`."""
+    import tools.ship_test_onboarding as mod
+
+    _obs, ctx, _mod = _happy_bound_run(
+        monkeypatch, tmp_path, ctx_close_wedges=True, driver_absent=True,
+        wedge_timeout=mod.TEARDOWN_BOUND_S)
+    harness = ctx.harness
+    assert harness.signals == [], harness.signals
+    assert harness.wedges[0].released_by == "timeout"
+    assert harness.reaps == []
+    block = _browser_teardown_from_disk(tmp_path)
+    assert block["outcome"] == "driver_absent", block
+
+
+@pytest.mark.timeout(60)
+def test_a_stale_start_time_is_not_signalled(monkeypatch, tmp_path):
+    """AC4/TOCTOU. A bare pid is racy against reuse, so the start time is RE-READ
+    immediately before each rung. When it disagrees with the enumeration the
+    watchdog signals nothing — a reused pid is not this run's child."""
+    import tools.ship_test_onboarding as mod
+
+    _obs, ctx, _mod = _happy_bound_run(
+        monkeypatch, tmp_path, ctx_close_wedges=True,
+        start_time_override="a different start time",
+        wedge_timeout=mod.TEARDOWN_BOUND_S)
+    harness = ctx.harness
+    assert harness.signals == [], harness.signals
+    # re-read once per rung, and the pid it inspected is the ENUMERATED one
+    assert harness.start_time_reads == [4242, 4242], harness.start_time_reads
+    block = _browser_teardown_from_disk(tmp_path)
+    assert block["outcome"] == "driver_absent", block
+
+
+@pytest.mark.timeout(60)
+def test_the_ladder_takes_the_rungs_at_half_and_three_quarters_of_the_bound(
+        monkeypatch, tmp_path):
+    """AC5. The rungs are taken ON THE CLOCK SEAM, at B/2 and 3B/4 — not merely
+    twice. A collapse of both rungs onto one delay reddens the second bound; a
+    ladder that never fires reddens the first (no signal at all)."""
+    import tools.ship_test_onboarding as mod
+
+    _obs, ctx, _mod = _happy_bound_run(
+        monkeypatch, tmp_path, ctx_close_wedges=True,
+        wedge_release_on=(signal.SIGKILL,))
+    harness = ctx.harness
+    assert len(harness.signal_times) == 2, harness.signal_times
+    t0, t1 = harness.signal_times
+    start = harness.teardown_start
+    assert t0 - start >= mod.TEARDOWN_BOUND_S / 2 * 0.9, (t0 - start, start)
+    assert t1 - start >= 3 * mod.TEARDOWN_BOUND_S / 4 * 0.9, (t1 - start, start)
+    assert t0 < t1, "SIGTERM must be taken strictly before SIGKILL"
+
+
+@pytest.mark.timeout(60)
+def test_the_ladder_sends_at_most_one_sigterm_and_one_sigkill(monkeypatch, tmp_path):
+    """AC5. At most one of each — the ladder may legitimately send BOTH, so a test
+    asserting "one signal" would be wrong; a ladder that fires twice per rung
+    would send four. The signalled child is reaped once per signal."""
+    _obs, ctx, _mod = _happy_bound_run(
+        monkeypatch, tmp_path, ctx_close_wedges=True,
+        wedge_release_on=(signal.SIGKILL,))
+    assert ctx.harness.signals == [(4242, signal.SIGTERM), (4242, signal.SIGKILL)], \
+        ctx.harness.signals
+    assert ctx.harness.reaps == [4242, 4242], ctx.harness.reaps
+
+
+def test_the_browser_teardown_is_entered_exactly_once(monkeypatch, tmp_path):
+    """AC5. Entered EXACTLY ONCE on a path that reaches it — counted
+    behaviourally, since a source count cannot see a call reached twice."""
+    import tools.ship_test_onboarding as mod
+
+    calls = []
+    original = mod._teardown_browser
+
+    def _counting(*a, **k):
+        calls.append(a)
+        return original(*a, **k)
+
+    monkeypatch.setattr(mod, "_teardown_browser", _counting)
+    _happy_bound_run(monkeypatch, tmp_path)
+    assert len(calls) == 1, calls
+
+
+def test_a_browser_that_never_launched_is_bounded_by_pw_stop(monkeypatch, tmp_path):
+    """AC5, no-browser path 1. `launch_raises`: there is NO browser and NO
+    context, so the only action is the bounded `pw.stop()`. It completes, records
+    `clean`, and sends no signal — the bound does not fire on a healthy path."""
+    _obs, ctx, _mod = _run_fake_walk(
+        monkeypatch, tmp_path, plan={}, ui_sequence=[], mcp_tools_call=_MCP_OK,
+        launch_raises=True)
+    block = _browser_teardown_from_disk(tmp_path)
+    assert block["outcome"] == "clean", block
+    assert [c["name"] for c in block["closes"]] == ["playwright"]
+    assert ctx.harness.signals == []
+
+
+def test_a_browser_whose_context_failed_is_bounded_and_closes_the_browser(
+        monkeypatch, tmp_path):
+    """AC5, no-browser path 2 (`new_context_raises`): the launch SUCCEEDED, so
+    `browser` is live while `new_context` failed. A healthy close, so `clean` and
+    no signal — but the browser is what gets closed."""
+    _obs, ctx, _mod = _run_fake_walk(
+        monkeypatch, tmp_path, plan={}, ui_sequence=[], mcp_tools_call=_MCP_OK,
+        new_context_raises=True)
+    block = _browser_teardown_from_disk(tmp_path)
+    assert block["outcome"] == "clean", block
+    assert [c["name"] for c in block["closes"]] == ["browser", "playwright"]
+    assert ctx.harness.signals == []
+
+
+def test_a_kill_inside_the_teardown_window_leaves_a_complete_not_run_document(
+        monkeypatch, tmp_path):
+    """AC8. A run killed INSIDE the ≤B window — simulated by a `BaseException`
+    out of the teardown, deliberately DISTINCT from AC2's raising close — leaves
+    on disk a complete, parsable document whose `browser_teardown.outcome` is
+    `not_run`. That is the docstring's promise holding exactly where it matters
+    most, and it is why the pre-teardown write exists."""
+    import json
+
+    import tools.ship_test_onboarding as mod
+
+    def _killed(pw, td, obs):
+        raise KeyboardInterrupt("run killed inside the teardown window")
+
+    monkeypatch.setattr(mod, "_teardown_browser", _killed)
+    with pytest.raises(KeyboardInterrupt):
+        _happy_bound_run(monkeypatch, tmp_path)
+    written = json.loads((tmp_path / "ship-test" / "observation.json").read_text())
+    assert written["browser_teardown"]["outcome"] == "not_run"
+    assert written["browser_teardown"]["closes"] == []
+    # ...and the document is COMPLETE, not a fragment: the org replay and the
+    # verdict are already there.
+    assert written["verdict"] == "passed"
+    assert written["teardown"]["status"] == mod.TEARDOWN_BASELINE_UNAVAILABLE
