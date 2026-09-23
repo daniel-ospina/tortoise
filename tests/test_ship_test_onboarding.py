@@ -2155,8 +2155,8 @@ def test_no_exit_from_the_walk_writes_the_artifact_without_teardown():
     NOT checked here, by construction — a source assertion cannot be an
     adversarial proof, and extending it just moves the boundary. (d) sees
     Name-bindings, so the NON-Name ones escape it: a `match … case _ as td`
-    capture, `import … as td`, `except … as td`. And two further forms get past
-    the whole half: an `_finish`/`_finalize` alias, attribute-form `getattr`, and
+    capture, `import … as td`, `except … as td`. And further forms get past the
+    whole half: an `_finish`/`_finalize` alias, attribute-form `getattr`, and
     mutating the teardown object's fields in place.
 
     What covers those forms is the recorded teardown STATUS. Every one of
