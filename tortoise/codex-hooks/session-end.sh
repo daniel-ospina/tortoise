@@ -68,7 +68,14 @@ _record_breadcrumb() {
   # keeps it distinguishable from a ``sessions import`` capture failure, which
   # writes the same file with ``kind: capture-failure`` (#4314). Best-effort:
   # a breadcrumb write can never break the exit-0 contract.
-  local harness="$1" detail="$2"
+  # The ``kind`` argument distinguishes WHO is recording, and the distinction
+  # is load-bearing: ``install-inert`` is the INSTALL leg's own evidence (an
+  # installer that fired but captured nothing), while ``capture-failure`` is a
+  # real capture failure. `session verify` READS the kind, so recording a
+  # capture failure as ``install-inert`` would report a HEALTHY install as
+  # INERT — precisely the inversion #4314 exists to prevent. It defaults to
+  # the install-inert kind, so the pre-existing callers are unchanged.
+  local harness="$1" detail="$2" kind="${3:-install-inert}"
   local receipt_dir crumb_dir stamp
   receipt_dir="${TORTOISE_IMPORT_RECEIPT_DIR:-${HOME:-/nonexistent}/.tortoise/import-receipts}"
   # Normalize to pathlib's `.parent` semantics (#4373 review). Python's
@@ -85,9 +92,45 @@ _record_breadcrumb() {
     *) crumb_dir="capture-errors" ;;
   esac
   stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  # JSON-escape the detail. A capture error is arbitrary server text and DOES
+  # contain double quotes — the 504 body is
+  # ``{"detail":"The server's wait budget … exceeded"}`` — so interpolating it
+  # raw emitted INVALID JSON and made the breadcrumb unparseable by
+  # `session verify` (measured #4714). Order matters: backslash FIRST, then the
+  # quote, then the control characters (each insertion adds its own backslash,
+  # so escaping the backslash last would double-escape it). The C0 set matters
+  # for more than cosmetics: `sessions import` ALREADY writes this same file
+  # with `json.dumps` on its own failure branches, so an unescaped tab or CR
+  # here would REPLACE a valid breadcrumb with an unparseable one and destroy
+  # the evidence this change exists to preserve. Pure shell: this function must
+  # run where python3 does not exist.
+  local esc="${detail//\\/\\\\}"
+  esc="${esc//\"/\\\"}"
+  esc="${esc//$'\n'/\\n}"
+  esc="${esc//$'\r'/\\r}"
+  esc="${esc//$'\t'/\\t}"
+  # JSON has escapes for BS and FF too, so use them rather than dropping the
+  # characters: escaping is lossless, and a discarded byte is evidence lost.
+  esc="${esc//$'\b'/\\b}"
+  esc="${esc//$'\f'/\\f}"
+  # Sweep whatever is left of the C0 class (NUL, VT, ESC and the rest), which
+  # has NO JSON escape at all. BS/FF were converted to their two-character
+  # escapes directly above and are therefore not raw bytes here. `tr` is POSIX
+  # and as available as the `mkdir`/`date` already used, so the function stays
+  # pure-shell — which matters, because this is also the evidence path for the
+  # branch reached BECAUSE python3 is missing.
+  esc="$(printf '%s' "$esc" | tr -d '\000-\010\013\014\016-\037')"
+  local esc_harness="${harness//\\/\\\\}"
+  esc_harness="${esc_harness//\"/\\\"}"
+  esc_harness="${esc_harness//$'\n'/\\n}"
+  esc_harness="${esc_harness//$'\r'/\\r}"
+  esc_harness="${esc_harness//$'\t'/\\t}"
+  esc_harness="${esc_harness//$'\b'/\\b}"
+  esc_harness="${esc_harness//$'\f'/\\f}"
+  esc_harness="$(printf '%s' "$esc_harness" | tr -d '\000-\010\013\014\016-\037')"
   mkdir -p "$crumb_dir" 2>/dev/null || true
-  printf '{\n  "harness": "%s",\n  "detail": "%s",\n  "recorded_at": "%s",\n  "kind": "install-inert"\n}\n' \
-    "$harness" "$detail" "$stamp" \
+  printf '{\n  "harness": "%s",\n  "detail": "%s",\n  "recorded_at": "%s",\n  "kind": "%s"\n}\n' \
+    "$esc_harness" "$esc" "$stamp" "$kind" \
     > "$crumb_dir/$harness.json" 2>/dev/null || true
 }
 
@@ -180,14 +223,30 @@ print(d.get("session_id") or "")
   fi
 
   # `sessions import --harness codex` is the canonical Codex capture step: it
-  # parses the rollout with `parse_codex`, POSTs the SAME `/v1/sessions`
-  # payload the Claude hook sends (harness + the REAL session_id as the
-  # idempotency key), and writes a local 2xx-only receipt. Fail-open: any
-  # failure exits 0 and files nothing rather than blocking the session.
+  # parses the rollout with the HARNESS-AWARE `parse_transcript` dispatcher
+  # (`parse_codex` returns 6 turns for a real rollout), POSTs the SAME
+  # `/v1/sessions` payload the Claude hook sends (harness + the REAL
+  # session_id as the idempotency key), and stages the parsed session locally.
+  #
+  # #4714: the defect was NOT this command — it was the `|| true` below, which
+  # discarded a real failure so the user was told nothing while nothing was
+  # captured. The failure is now RECORDED as a `capture-failure` breadcrumb.
+  #
+  # Do NOT switch this to `session capture`: that command parses via
+  # `_parse_transcript(text)`, which is not harness-aware, so it finds ZERO
+  # turns in a codex rollout ("No conversation turns found in transcript") and
+  # would turn a transient 504 into a PERMANENT silent no-capture — strictly
+  # worse. Measured 2026-09-22: `parse_codex` 6 turns, `sessions import`
+  # reaches the server, `session capture` 0 turns.
+  #
+  # Fail-open is preserved: the hook still exits 0 and never blocks the
+  # session — a capture failure must be EVIDENCE, not silence.
   if [ -n "$TORTOISE_BIN" ]; then
     ARGS=(sessions import --file "$TRANSCRIPT_PATH" --harness codex)
     [ -n "$SESSION_ID" ] && ARGS+=(--session-id "$SESSION_ID")
-    "$TORTOISE_BIN" "${ARGS[@]}" >/dev/null 2>&1 || true
+    if ! _CAPTURE_ERR="$("$TORTOISE_BIN" "${ARGS[@]}" 2>&1)"; then
+      _record_breadcrumb codex "capture failed: ${_CAPTURE_ERR:-no output}" capture-failure
+    fi
   else
     ARGS=(sessions import --file "$TRANSCRIPT_PATH" --harness codex)
     [ -n "$SESSION_ID" ] && ARGS+=(--session-id "$SESSION_ID")
@@ -196,9 +255,11 @@ print(d.get("session_id") or "")
     # not inject code) and never via ``-m``: CPython prepends the process CWD
     # ahead of PYTHONPATH for ``-m``, so a planted ``tortoise/`` package in
     # the agent's workspace would execute as the user (CWE-427, #4314).
-    "$PYTHON_BIN" -c \
+    if ! _CAPTURE_ERR="$("$PYTHON_BIN" -c \
       'import sys; sys.path[:] = [p for p in sys.path if p not in ("", ".")]; sys.path.insert(0, sys.argv[1]); from tortoise.__main__ import main; raise SystemExit(main(sys.argv[2:]))' \
-      "$TORTOISE_MODULE" "${ARGS[@]}" >/dev/null 2>&1 || true
+      "$TORTOISE_MODULE" "${ARGS[@]}" 2>&1)"; then
+      _record_breadcrumb codex "capture failed: ${_CAPTURE_ERR:-no output}" capture-failure
+    fi
   fi
   exit 0
 fi
