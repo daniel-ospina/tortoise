@@ -2,10 +2,10 @@
 
 The #3981 ruling (2026-09-18, "PROCEED AND ALERT") requires three things: the
 request proceeds, the increment is recorded as unmeterable, and an OPERATOR
-ALERT FIRES. This module is the third leg: it turns an absorbed failure into an
-incident on the repo's existing dual-channel sink
-(:class:`tortoise.alert_store.AlertStore` — GitHub issue + Telegram, create-once
-dedup per (kind, subject)) and never blocks the request path.
+ALERT FIRES. This module is the third leg: it submits an absorbed failure to the repo's
+existing dual-channel sink (:class:`tortoise.alert_store.AlertStore` — GitHub
+issue + Telegram, create-once dedup per (kind, subject)) through a bounded
+thread pool (`_POOL`), so the filing (network) work runs off the caller's thread.
 
 Design:
 - The reporters run on the request path (some inline on the event loop) and a
@@ -90,21 +90,25 @@ _LOCK = threading.Lock()
 _ATTEMPT: collections.OrderedDict[tuple[str, str], tuple[float, float]] = collections.OrderedDict()
 _INFLIGHT: dict[tuple[str, str], float] = {}                # key -> attempt token
 #: ADMITTED-but-unsettled dispatches — THE admission bound. Taken under _LOCK at
-#: admission and released ONLY when the dispatch settles (_forget) or never reached
-#: the pool (the two failure paths), so it tracks POOL OCCUPANCY, not live handles.
-#: _reap_locked must NOT decrement it: an age-reaped handle whose worker is still
-#: wedged holds its pool thread, so releasing there lets the executor queue grow past
-#: the bound without limit — with max_workers=4, four wedged workers would otherwise
-#: queue every later alert forever while each reap admitted ~32 more. The gate is
-#: therefore `_RESERVED >= _MAX_INFLIGHT`, weak enough to shed and loud about it.
+#: admission and released at one of three kinds of site: `_run`'s `finally` once a
+#: started dispatch settles, `_forget` when a future was cancelled before `_run`
+#: started (the done-callback `alert_operator` registers), and `alert_operator`'s two
+#: pre-pool failure paths (no store, rejected submit). _reap_locked must NOT decrement
+#: it: an age-reaped handle whose worker is still wedged holds its pool thread, so
+#: releasing there lets the executor queue grow past the bound without limit — with
+#: max_workers=4, four wedged workers would otherwise queue every later alert forever
+#: while each reap admitted ~32 more. The gate is therefore `_RESERVED >=
+#: _MAX_INFLIGHT`, weak enough to shed and loud about it.
 _RESERVED = 0
 #: future -> submitted ts. Used by `join_operator_alerts` and by _reap_locked for
 #: dead-handle housekeeping — NOT by the shed gate (that reads _RESERVED).
 _HANDLES: dict[Any, float] = {}
 #: The full-map sweep is amortised housekeeping, not the gate: the admission decision
-#: is O(1) (`_due_locked` + `_RESERVED`), and _HANDLES/_INFLIGHT are now bounded by
-#: _MAX_INFLIGHT, so the O(n) scan over _ATTEMPT runs once per _SWEEP_EVERY admissions
-#: (and whenever _ATTEMPT exceeds _PRUNE_ABOVE) instead of on every hot-path write.
+#: is O(1) (`_due_locked` + `_RESERVED`), so the O(n) scan runs once per _SWEEP_EVERY
+#: admissions (and whenever _ATTEMPT exceeds _PRUNE_ABOVE) instead of on every
+#: hot-path write. It prunes `_ATTEMPT` and ages dead handles out of `_HANDLES`;
+#: `_INFLIGHT` is not swept — its bound is `_RESERVED` plus cancelled latches (see
+#: `_prune_locked`).
 _SWEEP_EVERY = 64
 _SINCE_SWEEP = 0
 
@@ -230,10 +234,8 @@ def _prune_locked(now: float) -> None:
     """Amortised map housekeeping — never the admission decision (see _RESERVED).
 
     Deliberately does NOT sweep ``_INFLIGHT``: a stale latch is cleared only by
-    ``_due_locked``, in the same ``_LOCK`` hold that INSTALLS its successor — so a
-    cleared latch is always handed to a worker that can at least try to file (a
-    successor that then finds no channel or a failed submit logs a WARNING instead
-    of dropping silently). (Sweeping it here let a
+    ``_due_locked``, in the same ``_LOCK`` hold that INSTALLS its successor — so
+    clearing one always ADMITS a successor in that hold. (Sweeping it here let a
     queued worker — admitted before, sat behind saturated workers past
     ``_INFLIGHT_STALE_S`` — start, find its token gone with no successor, and return
     WITHOUT filing: the silent drop this module exists to remove.) ``_INFLIGHT`` needs
@@ -302,11 +304,10 @@ def _run(store, key, kind, org_id, detail, token) -> None:
         # filing, and must not reach a store that may be tearing down. SAFE to
         # return here because a missing token means a successor was ADMITTED in the
         # same lock hold that cleared ours (never swept behind our back by
-        # ``_prune_locked``) — not that it succeeded; the successor's own path reports
-        # its own outcome. (No "never lost without a trace" claim: a suppressed kind
-        # returns SUPPRESSED with no line, by design.) The check is
-        # REPEATED below because a newer attempt can start while this one is in
-        # flight.
+        # ``_prune_locked``). A kind paused in ``ops/suppression.json`` returns
+        # ``SUPPRESSED`` with no line, by design (``AlertStore.open_incident_state``).
+        # The check is REPEATED below because a newer attempt can start while this one
+        # is in flight.
         with _LOCK:
             if _INFLIGHT.get(key) != token:
                 return

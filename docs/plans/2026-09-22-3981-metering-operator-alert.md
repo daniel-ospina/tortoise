@@ -273,10 +273,10 @@ def _alert_store():
 
 The #3981 ruling (2026-09-18, "PROCEED AND ALERT") requires three things: the
 request proceeds, the increment is recorded as unmeterable, and an OPERATOR
-ALERT FIRES. This module is the third leg: it turns an absorbed failure into an
-incident on the repo's existing dual-channel sink
-(:class:`tortoise.alert_store.AlertStore` — GitHub issue + Telegram, create-once
-dedup per (kind, subject)) and never blocks the request path.
+ALERT FIRES. This module is the third leg: it submits an absorbed failure to the
+repo's existing dual-channel sink (:class:`tortoise.alert_store.AlertStore` —
+GitHub issue + Telegram, create-once dedup per (kind, subject)) through a bounded
+thread pool (``_POOL``), so the filing (network) work runs off the caller's thread.
 
 Design:
 - The reporters run on the request path (some inline on the event loop) and a
@@ -603,8 +603,9 @@ def reset_operator_alert_state_for_tests() -> None:
   re-raise in the branch whose whole purpose is that metering is unavailable; `alert_operator` is
   never-raising, and its own import failure is why the guard wraps the import, not the call). The other
   option — an accepted log-only residual — is rejected because it would leave the one path where the
-  ledger AND the reporter are both down with no operator signal at all, and the coverage claim in this
-  plan ("every absorbed drop alerts") would be false on exactly the partial-deploy case that most needs
+  ledger AND the reporter are both down with no operator signal at all, and the six-site coverage
+  inventory this plan pins ("the six swallow sites are the six lanes") would be incomplete on exactly
+  the partial-deploy case that most needs
   it. Task 2's test asserts this branch (`monkeypatch` `sys.modules["tortoise.metering"]` to `None` or
   raise on import, then call `ha._alert_unmetered` → a recording fake store sees the incident).
 - Test: `tests/test_metering_window_admission.py`
@@ -888,8 +889,8 @@ mutation**, not by prose.
    path's `move_to_end` deleted (`re-touch must move_to_end` fails).
 3. **Both remaining fallback lanes wired.** `mcp_server._alert_unmetered` and `ask_lane.run_ask_lane`
    step 7 now dispatch through `operator_alert.alert_unmetered_increment`, joining the `hosted_api`
-   branch. No narrowing, no silent residual — the coverage claim ("every absorbed drop alerts") is now
-   true on the partial-deploy case it was written for.
+   branch. The six-site coverage inventory (`test_the_six_swallow_sites_are_the_six_lanes`) holds on
+   the partial-deploy case it was written for.
 4. **The kind constant is reachable where it matters.** `UNMETERED_INCREMENT_KIND` is declared in
    `tortoise/operator_alert.py` (importable when `tortoise.metering` is not) and every site calls the
    shared `alert_unmetered_increment` entry point, so the guarded import can no longer swallow a
@@ -1069,9 +1070,10 @@ Two mutations observed RED (`operations/logs/3981-mutation-evidence.log`).
   matching), which is the shape the three constants around it should be read with in mind: a sentinel
   must never be a value the measured clock could legitimately report.
 * **P2 — two docstrings asserted a universal the code does not hold.** `_run` and `_prune_locked` both
-  claimed "a missing token means a successor WILL file". A successor is ADMITTED, and can then find no
-  channel or fail to submit — both of which log a WARNING. The claim is now the true one: *admitted, and its own path reports its outcome*. This matters more than the wording: that sentence is the entire safety
-  argument for returning without filing, so a lane reasoning from it would reason from a false premise.
+  claimed "a missing token means a successor WILL file". Both now state the observable fact of the
+  mechanism: a missing token means a successor was **ADMITTED** — `_INFLIGHT[key]` is cleared only in a
+  `_LOCK` hold that installs the successor token (`_due_locked`, called from `alert_operator`), and
+  `_prune_locked` deliberately does not sweep `_INFLIGHT`.
 * **P2 — the reset line was unpinned.** `test_reset_clears_every_piece_of_state` now sets
   `_LAST_SHED_LOG` and asserts the reset clears it; without the reset line it is RED
   (`operations/logs/3981-mutation-evidence.log`).
@@ -1106,8 +1108,7 @@ Cycle 7 found no P0/P1 and three P2s, the first of which was the same claim fail
   `ops/suppression.json` returns `SUPPRESSED` with no line at all, by design — and it had already
   re-staled twice while I reworded it in place and re-deployed it at a new site. A self-referential
   claim about a guarantee does not improve with better narration; the fix is deletion. Both sites now
-  state only the observable fact: a missing token means a successor was ADMITTED (the successor reports
-  its own outcome).
+  state only the observable fact: a missing token means a successor was ADMITTED.
 * **The cancellation line no longer asserts a cause it cannot know.** `_forget` fires for pool
   shutdown, a test's cancelling pool, and `cancel_futures` alike, so "(pool shutdown)" was a guess
   printed as fact. It now states only what is observed, and the docstring says why the cause is

@@ -1,4 +1,4 @@
-"""#3981 — the metering-window raise is a SIGNAL, and a dropped increment is never silent.
+"""#3981 — the metering-window raise is a SIGNAL; the six absorbing call sites each report an unmetered increment.
 
 THE COVERAGE PROOF IS COMPLETENESS — SIX SITES, NOT FOUR
 --------------------------------------------------------
@@ -8,7 +8,8 @@ the user write". It does not: **every** production caller wraps the ``record_*``
 call in a broad ``except`` and absorbs the raise, so the request is served and
 the increment is dropped — the pre-#3825 behaviour with a louder module log.
 #3981's fix (owner ruling: proceed-and-alert) leaves the pre-spend admission gate
-untouched and makes the drop **visible to the operator** at all SIX sites:
+untouched; the six absorbing call sites below each emit a lane-naming ERROR record
+and report an unmetered increment:
 
   1. ``hosted_api._record_write_op``        → lane=write_op
   2. ``hosted_api._emit_capture_ledger``    → lane=capture_ledger

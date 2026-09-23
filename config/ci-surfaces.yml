@@ -488,6 +488,7 @@ surfaces:
   # gap is #4454's job, not this registration's; do not read this entry as
   # covering a hand-edited document.
   - test_mcp_rename_table.py
+  - test_operator_alert.py
   # #4282 Phase 0.3b: dual-registered with `api` for the same reason — `api` is
   # keyed on SOURCE PATTERNS and `tools/sdk_rename_table.py` is named there.
   # NOTE: docs paths are in NON_PYTHON_PREFIXES, not SOURCE_PATTERNS, so editing
@@ -2095,6 +2096,14 @@ durations:
   test_onboarding_auto_complete.py: 0.0
   test_onboarding_seed.py: 0.0
   test_onboarding_variants.py: 0.0
+  # #3981: new file (round-4 registration). No CI junit measurement yet, so enter
+  # at the flat 2.0s default per the #3400/#4221 convention — an unmeasured fast
+  # file drops durations coverage to 89.9% (545/606), under the 90% floor, exactly
+  # the #4348/#3949 trap; the conservative default restores it. No local
+  # measurement is used: registration was taken at host load >200, which is not a
+  # representative number (the repo's conftest import dominates under load).
+  # Refresh from the first post-merge main run that includes it.
+  test_operator_alert.py: 2.0
   test_operator_source_unit.py: 0.0
   test_pair_label_runner.py: 0.0
   test_pipeline_cli.py: 0.0
