@@ -2988,10 +2988,9 @@ def test_staged_but_released_claim_emits_no_replay_warning(tmp_path, caplog):
 def test_replay_gate_line_is_debug_and_never_warning(tmp_path, caplog):
     """#4879 regression: a healthy replay must emit NOTHING at WARNING.
 
-    The gate-visibility line names the gate that let a replay through. The
-    gates it reports are the predicate's ordinary outcomes, while its
-    anomalous outcomes are logged at WARNING instead, so it is DEBUG, not
-    WARNING: as a WARNING it polluted the `caplog` of an UNRELATED test —
+    The gate-visibility line names the gate that let a replay through. It is
+    diagnostic, not an alert, so it is DEBUG rather than WARNING: as a
+    WARNING it polluted the `caplog` of an UNRELATED test (#4954) —
     `tests/test_metering.py::TestThresholdEvents::
     test_no_threshold_for_free_tier` asserts that no WARNING record contains
     "threshold", and its own tmpdir is named
@@ -3035,7 +3034,7 @@ def test_replay_gate_line_is_debug_and_never_warning(tmp_path, caplog):
         ]
         assert warnings == [], (
             "#4879: a healthy replay must emit NO WARNING from "
-            "embedded_lifecycle — every gate it reports is a normal outcome; "
+            "embedded_lifecycle; "
             f"got {[(r.levelname, r.getMessage()) for r in warnings]!r}")
 
         # (b) ...and the gate line IS emitted, at DEBUG.

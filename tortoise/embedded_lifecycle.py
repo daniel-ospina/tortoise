@@ -2080,13 +2080,9 @@ def _install_dead_socket_guard() -> None:
         # that had nothing to do ("no branch fired" with no way to tell which
         # gate stopped it).
         #
-        # DEBUG, not WARNING: the gates reported here are this predicate's
-        # ordinary outcomes, while the anomalous ones are logged at WARNING
-        # below — the unproven holder, the holder that would not stop, the
-        # registry changed mid-repair, the unlink failure, and the completed
-        # repair. WARNING was the wrong severity, and a WARNING on a healthy
-        # path in a shared module pollutes the `caplog`
-        # of any unrelated test the message happens to match. It did:
+        # DEBUG, not WARNING: this line is DIAGNOSTIC — it reports a decision
+        # the predicate made, not an alert about a failure. As a WARNING it
+        # polluted the `caplog` of an UNRELATED test (#4954):
         # `tests/test_metering.py::TestThresholdEvents::
         # test_no_threshold_for_free_tier` asserts that no WARNING record
         # contains "threshold", and its own tmpdir is named
