@@ -1130,7 +1130,7 @@ class _FakeRequester:
 class _FakeBrowser:
     """The real `Browser`: `close()` closes the browser AND everything it owns — a
     context still open is force-closed (`ctx_reaped#<serial>`), not leaked — and a
-    second `close()` has no effect (the real one re-sends and swallows the
+    second `close()` has no effect (a launched browser re-sends and swallows the
     target-closed error). Contexts are tracked so the force-close is VISIBLE and
     distinguishable from the instrument's own `ctx_closed#<serial>`."""
 
@@ -1144,6 +1144,8 @@ class _FakeBrowser:
         ctx.events.append("launch")
 
     def new_context(self, **k):
+        if self._closed:
+            raise RuntimeError("browser is closed")
         if self._new_context_raises:
             raise RuntimeError("context creation failed")
         if self._used:
@@ -1254,8 +1256,8 @@ class _FakeCtx:
         # recorder and the event sink, so it is a distinct object whose missing
         # close is visible, while the test's handle keeps seeing every request.
         # Each context carries a unique SERIAL, so a leak cannot be balanced out by
-        # closing another one twice — `id()` is not stable across garbage
-        # collection and two contexts can share one.
+        # closing another one twice — an `id()` can be reused after its object is
+        # collected, and two contexts can carry the same one.
         _FakeCtx._serial += 1
         self.serial = _FakeCtx._serial
         self.request = shares.request if shares else _FakeRequester(plan)
@@ -1583,8 +1585,9 @@ def _assert_not_the_generic_error_handler(obs, name: str) -> None:
 
 
 def _assert_browser_reaped(ctx) -> None:
-    """Nothing the run launched is left open: exactly one browser, closed LAST, and
-    every context it created is settled — closed by the instrument itself
+    """Nothing the run launched is left unrecorded as closed: exactly one browser,
+    closed LAST, and every context it created is settled — closed by the
+    instrument itself
     (`ctx_closed#<serial>`) or force-closed by the browser's own close
     (`ctx_reaped#<serial>`), which is what the real object does with the contexts it
     owns. A run that never launched closes nothing.
@@ -1761,9 +1764,9 @@ def test_walk_without_the_driver_records_a_fail_closed_observation(
 def test_a_browser_launch_that_fails_is_recorded_and_nothing_is_left_open(
         monkeypatch, tmp_path):
     """`pw.chromium.launch` raising lands in the same fail-closed class
-    (instrument error, exit 3) as a missing driver, from a different catch site,
-    and there is no browser or context to close: the harness's reap assertion sees
-    an empty event list."""
+    (instrument error, exit 3) as a missing driver, through the walk body's own
+    `except` — and there is no browser or context to close, so the harness's reap
+    assertion sees an empty event list."""
     obs, _ctx, mod = _run_fake_walk(
         monkeypatch, tmp_path, plan={}, ui_sequence=[], mcp_tools_call=_MCP_OK,
         launch_raises=True)
@@ -1773,10 +1776,34 @@ def test_a_browser_launch_that_fails_is_recorded_and_nothing_is_left_open(
     assert obs.teardown["status"] == mod.TEARDOWN_NOT_REACHED
 
 
+def test_the_fakes_distinguish_a_forced_close_from_the_instruments_own():
+    """Layer 2 (`test_the_walk_closes_its_own_context_before_the_browser`) rests on
+    this distinction: a context the BROWSER closes for a run must be recorded as
+    `ctx_reaped#<serial>`, never `ctx_closed#<serial>` — or that test passes on a
+    run that never closed its own context."""
+    base = "https://app.premiselabs.co"
+    abandoned = _FakeCtx({}, base)
+    browser = _FakeBrowser(abandoned)
+    browser.new_context()
+    browser.close()
+    assert abandoned.events == ["launch", f"ctx_created#{abandoned.serial}",
+                               f"ctx_reaped#{abandoned.serial}",
+                               "browser_closed"], abandoned.events
+
+    closed = _FakeCtx({}, base)
+    second = _FakeBrowser(closed)
+    second.new_context()
+    closed.close()
+    second.close()
+    assert f"ctx_closed#{closed.serial}" in closed.events, closed.events
+    assert f"ctx_reaped#{closed.serial}" not in closed.events, closed.events
+
+
 def test_a_context_that_cannot_be_created_still_closes_the_browser(monkeypatch, tmp_path):
     """The driver starts and then refuses a context: the same fail-closed class
-    (instrument error, exit 3) from the context-creation catch site. Nothing was
-    created, so the browser is all there is to close — and the run closes it."""
+    (instrument error, exit 3) and the same walk-body `except` that catches a
+    launch failure. Nothing was created, so the browser is all there is to close —
+    and the run closes it."""
     obs, ctx, mod = _run_fake_walk(
         monkeypatch, tmp_path, plan={}, ui_sequence=[], mcp_tools_call=_MCP_OK,
         new_context_raises=True)
@@ -1791,8 +1818,7 @@ def test_the_walk_closes_its_own_context_before_the_browser(monkeypatch, tmp_pat
     """The instrument's teardown SHAPE, pinned once: it closes the context it
     created, itself. `Browser.close()` force-closes an open context by itself and a
     second context close is a no-op, so this is a shape standard, not a leak guard —
-    which is why the no-leak pin above must not require it. Every exit runs the same
-    `finally`."""
+    which is why the no-leak pin above must not require it."""
     plan = {("GET", "/api/session"): [(401, {"error": "not_signed_in"})]}
     obs, ctx, _mod = _run_fake_walk(
         monkeypatch, tmp_path, plan=plan, ui_sequence=[], mcp_tools_call=_MCP_OK)
