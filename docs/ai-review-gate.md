@@ -57,8 +57,11 @@ green.
 
 `strict: true` branch protection requires a PR branch to be up to date with
 `main`. Updating it (`gh pr update-branch`) inserts a merge commit and moves
-the head — but the PR's three-dot diff is byte-identical. When evidence was
-keyed only to the head sha, every update invalidated a still-correct verdict,
+the head — but the PR's three-dot diff is byte-identical **whenever `main`'s
+advancement did not touch a file the PR also changes** (if it did, the hunk
+context/blob ids change and the evidence is genuinely stale, so a re-record is
+correct). When evidence was keyed only to the head sha, even an untouched
+diff invalidated a still-correct verdict,
 so a green PR could never reach a terminal mergeable state. Keying evidence to
 the diff lets the verdict carry forward across a merge-only update. A change
 that actually changes the reviewed diff still invalidates it.
@@ -91,8 +94,9 @@ shown unchanged. Closing that trust gap is producer-side work
 Do **not** "fix" it here by requiring the recorded sha to be an ancestor of the
 current head: this repo's documented refresh path is `git rebase origin/main` +
 `git push --force-with-lease`, which rewrites the sha while keeping the
-three-dot diff byte-identical. An ancestor bound would reject exactly the
-carry-forward case #2982 exists for and re-create the deadlock.
+three-dot diff byte-identical whenever the rebase does not have to reconcile
+`main`'s changes into the PR's files. An ancestor bound would reject exactly
+the carry-forward case #2982 exists for and re-create the deadlock.
 
 ### Tests
 

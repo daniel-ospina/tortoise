@@ -19,7 +19,9 @@ name: ai-review-gate
 # What a review approves is the DIFF, not the commit sha (#2982). A sha alone
 # ties the verdict to a commit identity that changes on every merge-only
 # branch update (`gh pr update-branch` inserts a merge commit; the three-dot
-# diff is byte-identical). With `strict: true` branch protection that made the
+# diff is byte-identical unless main's advancement touched a file the PR also
+# changes, in which case the evidence is genuinely stale). With `strict: true`
+# branch protection that made the
 # two policies jointly unsatisfiable: every update invalidated a still-correct
 # verdict, so a green PR could never reach a terminal mergeable state. A marker
 # is therefore accepted when EITHER:
@@ -64,7 +66,8 @@ name: ai-review-gate
 # trust gap on the PRODUCER side (agent-infra#784) — do NOT add a
 # "recorded sha is an ancestor of head" bound here: the repo's documented
 # refresh path is `git rebase origin/main` (sha rewritten, three-dot diff
-# byte-identical), which an ancestor bound would reject, re-creating the
+# byte-identical when the rebase does not reconcile main into the PR's files),
+# which an ancestor bound would reject, re-creating the
 # #2982 deadlock this change exists to remove.
 #
 # ⛔ GH_TOKEN is mandatory for any of this to work (#2982): `gh` refuses to

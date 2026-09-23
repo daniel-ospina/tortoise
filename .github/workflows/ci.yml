@@ -600,7 +600,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.ai_review_gate == 'true'  # #2982: gate workflow/harness only
     # #2982: the ai-review-gate's evidence-validation shell logic runs inline
-    # in the workflow (pull_request_target never checks out PR code). This
+    # in the workflow (that workflow has no checkout step, so it cannot
+    # reference a repo script). This
     # harness extracts that run block and drives it with fabricated signed
     # markers + a stubbed gh, covering sha-match, diff-match, backward compat,
     # fail-closed-on-API-failure, signature-over-diff, PR/repo binding, and the

@@ -39,9 +39,10 @@
 #       suppress the accurate stale/diff explanation
 #   plus the static invariants: the required job must never gain
 #   `if:`/`needs:`/`continue-on-error:` (any indentation or quoting), the
-#   trigger must be EXACTLY `pull_request_target` (asserted as a key SET, so
-#   `pull_request: {}` / quoted / activity-type spellings cannot evade), the
-#   job must carry no job-level `permissions:` override, the workflow must
+#   trigger must be EXACTLY `pull_request_target` (asserted over `pull_request*`
+#   TOKENS, so `pull_request: {}`, a space before the colon, a quoted key, a
+#   flow mapping or an inline `on: pull_request` cannot evade), the job must
+#   carry no job-level `permissions:` override, the workflow must
 #   grant `contents: read` + `pull-requests: read` and no `paths:` filter, the
 #   step must declare `GH_TOKEN`, no unexpected `gh` call shape may occur, and
 #   the extracted block must be the real gate step.
@@ -95,12 +96,25 @@ if bash -n "$RUN_BLOCK"; then ok "extracted run block parses (bash -n)"; else ba
 # These invariants live in the YAML AROUND the extracted run block and so are
 # unreachable by any runtime case below. Each is asserted statically, and each
 # assertion is mutation-checked (see the comments). Isolate the blocks first.
-awk '/^  ai-review-gate:$/ { f=1; next } f && /^  [^ ]/ { exit } f { print }' \
+# The anchors allow quoted keys and whitespace before the colon, because a
+# quoted-but-identical key (`  "ai-review-gate":`) is the same job. An anchor
+# that only matched the unquoted spelling extracted an EMPTY block for the
+# others, and an empty block makes the tripwires below pass VACUOUSLY (they
+# grep a 0-byte file). Fail closed on an empty extraction, like RUN_BLOCK.
+awk '/^  ["'\'']?ai-review-gate["'\'']?[[:space:]]*:/ { f=1; next } f && /^  [^ ]/ { exit } f { print }' \
     "$WF" > "$T/job-block.yml"
-awk '/^on:/ { f=1; next } f && /^[^ ]/ { exit } f { print }' \
+# Print the `on:` line itself too: an inline `on: pull_request` is a valid
+# spelling and its trigger token lives on that line.
+awk '/^["'\'']?on["'\'']?[[:space:]]*:/ { f=1; print; next } f && /^[^ ]/ { exit } f { print }' \
     "$WF" > "$T/on-block.yml"
-awk '/^permissions:/ { f=1; next } f && /^[^ ]/ { exit } f { print }' \
+awk '/^["'\'']?permissions["'\'']?[[:space:]]*:/ { f=1; next } f && /^[^ ]/ { exit } f { print }' \
     "$WF" > "$T/perm-block.yml"
+for _blk in job on perm; do
+    if [ ! -s "$T/${_blk}-block.yml" ]; then
+        echo "  ❌ could not extract the ${_blk} block from $WF — the structural tripwires would pass vacuously"
+        exit 1
+    fi
+done
 
 # (1) The required job must never become conditional or non-blocking. A
 #     SKIPPED check reports Success; `continue-on-error` swallows a failure.
@@ -116,16 +130,18 @@ fi
 # (2) The trigger must be EXACTLY `pull_request_target`. Under `pull_request`, a
 #     same-repo PR executes ITS OWN copy of this workflow (it can `exit 0` and
 #     self-certify the required check), and fork PRs stop receiving
-#     AI_REVIEW_GATE_KEY. Assert the SET of top-level `on:` keys, not one
-#     spelling: `pull_request: {}`, a quoted key, or an activity-type list is
-#     the banned trigger under a different spelling, and matching against one
-#     literal spelling fails open (review finding, #3057).
-on_keys="$(sed -nE 's/^  (["'\'']?[A-Za-z_][A-Za-z0-9_-]*["'\'']?):.*/\1/p' "$T/on-block.yml" \
-  | tr -d "\"'" | sed '/^$/d' | sort -u)"
-if [ "$on_keys" = "pull_request_target" ]; then
+#     AI_REVIEW_GATE_KEY. Assert the SET of `pull_request*` TOKENS in the `on:`
+#     block, not a spelled-out key: a key-spelling matcher misses `pull_request
+#     : {}` (space before colon), `{pull_request: {...}}` (flow mapping), a
+#     quoted key, and an inline `on: pull_request` — each of which is the
+#     banned trigger under a different, VALID spelling (review finding, cycle
+#     2). Token-matching is spelling-agnostic; comments are stripped first so
+#     prose cannot confuse it.
+on_tokens="$(sed 's/#.*//' "$T/on-block.yml" | grep -oE 'pull_request[A-Za-z_-]*' | sort -u | sed '/^$/d')"
+if [ "$on_tokens" = "pull_request_target" ]; then
     ok "trigger is pull_request_target only (PR code can never run the gate)"
 else
-    bad "trigger is not exactly pull_request_target (got: $(printf '%s' "$on_keys" | tr '\n' ',') ) — a same-repo PR could run its own gate definition"
+    bad "trigger is not exactly pull_request_target (pull_request* tokens found: $(printf '%s' "$on_tokens" | tr '\n' ',') ) — a same-repo PR could run its own gate definition"
 fi
 
 # (3) No path filter may gate the workflow: a path-filtered required check
