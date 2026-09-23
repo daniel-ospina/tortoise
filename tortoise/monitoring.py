@@ -61,11 +61,35 @@ PROBE_TIMEOUT = 1.5
 # Bounding (1)+(2) with PROBE_TIMEOUT made a large, fully-reachable graph time
 # out during SETUP and report ``db.ok=false`` / ``status=degraded`` /
 # ``graph_size=0`` — the onboarding gate lie (#2202's symptom class). This is
-# the default cold-start allowance. It is opt-in: the platform liveness gate
-# (/health, selfhost /health, the standalone serve_health server) keeps the
-# tight 1.5s bound for BOTH phases (it is a fast-degrade gate, #1384), while
-# the on-demand MCP health tool — whose only job is to answer "is the served
-# graph reachable?" — passes it. Both phases stay bounded (the worker is
+# the default cold-start allowance. It is opt-in, because it deepens the total
+# to ``setup_timeout + PROBE_TIMEOUT``: only a caller that can afford it may
+# pass it.
+#
+# WHO MAY SPEND IT — the deciding line is whether the probe IS the request's
+# answer, not request-path vs background (#2988/#3243):
+#   * the on-demand MCP health tool passes it: the probe IS the answer (its only
+#     job is "is the served graph reachable?"), so the deep budget is correct;
+#   * NEVER a request-path liveness GATE (a `/health` handler that probes
+#     inline) — there the fast <1.5 s degrade contract must hold;
+#   * a BACKGROUND liveness REFRESHER passes it. The selfhost ``/health``
+#     coordinator does (#2988): its request path reads an in-memory snapshot and
+#     cannot be slowed by the allowance, so the deep budget buys a correct
+#     verdict for a cold large graph at zero gate latency (#3243);
+#   * a REQUEST-PATH liveness probe must NOT. The standalone ``serve_health``
+#     ``/health`` handler keeps ``setup_timeout=None``, because there the
+#     allowance *is* a slower gate — exactly the trade #3243's notes forbid.
+#     The same reasoning keeps the hosted ``/health/ready`` coordinator on the
+#     tight bound, since its request path waits on the verdict.
+#
+# The selfhost liveness coordinator is currently the ONLY background spender
+# of this allowance. The hosted ``/health`` coordinator (``hosted_api.
+# _HEALTH_PROBE``) also reads in-memory, but deliberately keeps
+# ``setup_timeout=None``/``DB_PROBE_HARD_TIMEOUT``: its probe reuses ONE cached
+# connection (``hosted_api._probe_sdk``), so the cold start is paid at most once
+# and its tight bound is already coherent — extending the allowance there is a
+# separate decision owned by the hosted health lineage (#3070/#3062), not a
+# consequence of this rule. Do not "fix" it by analogy.
+# Both phases stay bounded (the worker is
 # abandoned on overrun); the caller is never blocked past its budget.
 PROBE_SETUP_TIMEOUT = 20.0
 
@@ -93,7 +117,11 @@ PROBE_SETUP_TIMEOUT_MAX = 300.0
 
 
 def probe_setup_timeout() -> float:
-    """Resolve the #3143 cold-start allowance for the MCP health tool.
+    """Resolve the #3143 cold-start allowance.
+
+    Spent by the on-demand MCP health tool, and — off the request path only —
+    by the selfhost liveness coordinator's refresher (#2988/#3243; see
+    ``PROBE_SETUP_TIMEOUT`` for the request-path-vs-background rule).
 
     Read at CALL time, not import time, for two reasons:
 
@@ -318,6 +346,81 @@ PROBE_DB_BOUND_MARGIN_S = 0.5
 #: the DB plane).
 PROBE_HARD_TIMEOUT = (PROBE_DB_TOTAL_TIMEOUT + PROBE_SDK_ACQUISITION_BUDGET
                       + PROBE_DB_BOUND_MARGIN_S)
+
+#: How often a background health refresher re-probes, keeping an in-memory
+#: ``db`` field fresh WITHOUT the request path doing any I/O (#2850 hosted,
+#: #2988 selfhost). ONE spelling for both surfaces: the refresh period is a
+#: property of the shared health contract, not of one app, so the two cannot
+#: drift apart or disagree about what ``TORTOISE_HEALTH_PROBE_INTERVAL``
+#: means. (It moved here from ``hosted_api`` when the selfhost liveness
+#: coordinator landed — #3286's one-mechanism-per-requirement discipline,
+#: applied to the refresher period as well as to its executor.)
+#: Must stay below ``PROBE_STALE_AFTER`` (30s) or a healthy DB would read as
+#: degraded between refreshes.
+HEALTH_PROBE_REFRESH_S = 10.0
+#: Lower bound on a configured probe period (round-3 review P2). ``1e-9`` is
+#: finite but turns the refresher into a ~50 Hz loop, each iteration spawning a
+#: probe daemon thread and issuing a DB round trip — the same busy-loop the
+#: ``nan`` rejection exists to prevent. The upper clamp was one-sided.
+HEALTH_PROBE_MIN_INTERVAL_S = 0.5
+
+
+def health_probe_interval() -> float:
+    """Probe refresh period (``TORTOISE_HEALTH_PROBE_INTERVAL``, seconds).
+
+    Shared by the hosted and selfhost liveness coordinators (see
+    ``HEALTH_PROBE_REFRESH_S``).
+
+    Clamped to half the probe staleness window (review P2): a period longer
+    than ``PROBE_STALE_AFTER`` makes a HEALTHY DB read as ``degraded`` between
+    refreshes, which then fails the deploy gate and gets misdiagnosed as a DB
+    outage. Half the window leaves a full refresh of margin.
+
+    NON-FINITE values are rejected and fall back to the default (round-2
+    review P2): ``float()`` accepts ``nan``/``inf`` and neither is caught by
+    the ``v <= 0`` guard (``nan <= 0`` is False) nor by the ``v > cap`` clamp
+    (``nan > cap`` is False). ``nan`` flows into ``asyncio.sleep(nan)``, which
+    returns almost immediately — a busy loop hammering the DB probe and the
+    event loop. ``inf`` means the probe never refreshes, so a healthy DB reads
+    stale forever. Both DISABLE (fall back to ``HEALTH_PROBE_REFRESH_S``).
+
+    A finite but SUB-FLOOR period is rejected the same way (round-3 review
+    P2): ``1e-9`` busy-loops the probe exactly as ``nan`` did.
+    """
+    try:
+        v = float(os.environ.get("TORTOISE_HEALTH_PROBE_INTERVAL") or HEALTH_PROBE_REFRESH_S)
+    except (TypeError, ValueError):
+        return HEALTH_PROBE_REFRESH_S
+    if not math.isfinite(v):
+        logger.error(
+            "TORTOISE_HEALTH_PROBE_INTERVAL=%s is not finite — falling back "
+            "to the default %.0fs; a nan period busy-loops the probe and an "
+            "infinite one leaves a healthy DB reading stale forever",
+            v, HEALTH_PROBE_REFRESH_S)
+        return HEALTH_PROBE_REFRESH_S
+    if v <= 0:
+        return HEALTH_PROBE_REFRESH_S
+    # Round-3 review P2: a finite but tiny period busy-loops the probe just
+    # like ``nan`` did — ``1e-9`` yields ~50 generations/s, each spawning a
+    # daemon thread and issuing a DB round trip. The clamp below is
+    # one-sided, so a floor is required too.
+    if v < HEALTH_PROBE_MIN_INTERVAL_S:
+        logger.warning(
+            "TORTOISE_HEALTH_PROBE_INTERVAL=%s is below the %.2fs floor — "
+            "falling back to the default %.0fs; a sub-floor period "
+            "busy-loops the probe and duplicates the DB round trip",
+            v, HEALTH_PROBE_MIN_INTERVAL_S, HEALTH_PROBE_REFRESH_S)
+        return HEALTH_PROBE_REFRESH_S
+    cap = PROBE_STALE_AFTER / 2.0
+    if v > cap:
+        logger.warning(
+            "TORTOISE_HEALTH_PROBE_INTERVAL=%s exceeds half the probe "
+            "staleness window (%.0fs) — clamping to %.0fs; a longer period "
+            "would report a healthy DB as degraded and fail the deploy gate",
+            v, PROBE_STALE_AFTER, cap)
+        return cap
+    return v
+
 
 #: Default period for the event-retention sweep (seconds). Shared by the
 #: hosted retention loop and the SDK lazy purge so both fall back identically.
@@ -1110,7 +1213,10 @@ def probe_db(sdk, setup_timeout=None) -> dict:
     allowance that bears the ``sdk._get_proj()`` cost (connect + a
     size-dependent ``_ensure_indexes()``) ON TOP of the ``PROBE_TIMEOUT``
     reachability budget. The platform liveness gate passes nothing and keeps
-    the single shared budget; only the MCP ``tortoise_health`` tool opts in.
+    the single shared budget; the callers that opt in are the MCP
+    ``tortoise_health`` tool and the selfhost liveness coordinator's refresher
+    (``selfhost._probe_db``, #2988 — off the request path, which is what makes
+    spending the allowance there free).
 
     #1565: a single TRANSIENT connection-level failure (embedded redislite
     # server mid-startup / momentarily unreachable under parallel load —
@@ -1127,10 +1233,11 @@ def probe_db(sdk, setup_timeout=None) -> dict:
     #3143: ``setup_timeout`` is the projection-cold-start allowance (see
     ``_probe_once``). When it is not given, the cold-start and the query SHARE
     the single ``PROBE_TIMEOUT`` budget, so the platform liveness gate keeps
-    its tight fast-degrade bound (#1384). Only callers that opt in (the MCP
-    ``tortoise_health`` tool) pay a separate allowance for a large graph's
-    cold-start instead of being reported unreachable for it. In that explicit
-    shape the reachability budget is NOT spent waiting for the single #3062
+    its tight fast-degrade bound (#1384). The callers that opt in — the MCP
+    ``tortoise_health`` tool, and the selfhost liveness coordinator's refresher
+    (``selfhost._probe_db``, #2988) — pay a separate allowance for a large
+    graph's cold-start instead of being reported unreachable for it. In that
+    explicit shape the reachability budget is NOT spent waiting for the single #3062
     worker slot — a query queued behind another probe's cold-start is charged
     to the leftover of the allowance instead, so congestion cannot fake the
     degraded/0 report this change exists to remove (review P1).
@@ -1271,9 +1378,11 @@ class HealthProbe:
         """Resolve the self-heal gate to a float (round-4 review P2).
 
         ``refresh_budget`` may be a float (tests, fixed coordinators) or a
-        zero-arg callable that returns one (``_HEALTH_PROBE`` wires it to
-        ``_health_probe_interval()`` so the gate always equals the refresher's
-        ACTUAL, operator-resolved period rather than the import-time default).
+        zero-arg callable that returns one (the selfhost ``_HEALTH_PROBE``
+        wires it to ``monitoring.health_probe_interval`` — the shared resolver
+        since #2988, re-exported by ``hosted_api`` as ``_health_probe_interval``
+        — so the gate always equals the refresher's ACTUAL, operator-resolved
+        period rather than the import-time default).
         A callable that raises falls back to ``PROBE_STALE_AFTER`` — the gate
         must never break an unauthenticated ``/health`` read.
         """
