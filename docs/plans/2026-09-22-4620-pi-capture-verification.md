@@ -119,8 +119,8 @@ statement that neither over- nor under-claims.
 **Acceptance:** `test_pi_is_honestly_unverifiable` passes with the new assertions; the pin fails if the
 reason stops naming the suite / the residual, or if **any** of the banded absolutes returns **anywhere**
 in `tortoise/session_verify.py` — the reason, the `HEADLESS_FIRABLE` ruling comment, the enum, or the
-module docstring. The phrases are reserved for the Pi ruling, so no other harness may use them either;
-Cursor's own reason says "no headless entry point".
+module docstring. The phrases are reserved for the Pi ruling, so the module states them about no
+harness it can actually fire.
 
 **Files:**
 - Modify: `tortoise/session_verify.py` (`UNVERIFIABLE_REASON["pi"]`, the `HEADLESS_FIRABLE` comment, the module-docstring sentence)
@@ -213,14 +213,11 @@ executably verified, (b) what is manual-only, (c) the exact procedure **with its
   one-line pointer *immediately after* the table containing `:43` and *after* item 4 at `:316`,
   **leaving both lines byte-identical** (`:43` is the Integration-Surface row
   `| Claude Code hooks + Pi extension | … | hook smoke; Pi 2xx leg observed |` — the actual stale
-  over-claim; `:248` is a Task-14 `- Test:` bullet, not the verification row). The amendment states:
-  the seam logic + installed artifact ARE executably verified (cite `tortoise-capture.test.ts` and
-  `tests/test_pi_capture_hooks.py`); the real-`pi`-process leg is **manual-only**, its pass condition
-  is **`retrievable` — the specific captured content read back**. `GET /v1/sessions/{id}` is the
-  authoritative session-scoped read; `GET /v1/search?q=…` is graph-wide, so it counts only when a
-  hit's `sessionId` is the probed session's. A list row is not sufficient, and a read-back 504 is
-  UNMEASURABLE
-  (procedure + actor + `#3713`/`#4661`/`#4675`), citing `tortoise/pi-hooks/README.md`.
+  over-claim; `:248` is a Task-14 `- Test:` bullet, not the verification row). The amendment states
+  that the seam logic + installed artifact ARE executably verified (citing `tortoise-capture.test.ts`
+  and `tests/test_pi_capture_hooks.py`), that the real-`pi`-process leg is **manual-only**, and
+  **points to `tortoise/pi-hooks/README.md` § Verification** for the procedure, actor, pass condition
+  and blockers — it does not restate them (a restated procedure drifts from its home).
 - A **Pi/session-capture row is added to `#1714`'s `### Verification Checklist`** (its stated
   done-state; it has no such row today), naming the executable check and the manual residual.
 - A decision comment is posted on `#1714` that (a) cross-links `#4620`, and (b) **names the report

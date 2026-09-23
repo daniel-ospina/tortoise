@@ -320,9 +320,9 @@ aboutObjects: tortoise-memory-capture, tortoise-onboarding
 3. **Cursor spike + Claude-Web filing-path spike** are research tasks inside their slices; verdicts recorded; web row disabled-with-reason until a server-visible signal is confirmed (Task 13 spike verdict) — never hidden.
 4. **Pi hosted-2xx leg** is an ops checklist item (live key + `tortoise-config.json`), not a CI pytest.
    > **#4620 (2026-09-22):** the seam's logic and the installed artifact ARE CI-verified; what remains
-   > manual-only is a real `pi` process loading the installed extension — procedure + actor in
-   > `tortoise/pi-hooks/README.md`. Pass condition is `retrievable`; a read-back 504 is UNMEASURABLE
-   > (`#4661`/`#4675`). See the amendment at the bottom.
+   > manual-only is a real `pi` process loading the installed extension. The procedure, actor, pass
+   > condition and blockers are canonical in `tortoise/pi-hooks/README.md` § Verification.
+   > See the amendment at the bottom.
 5. Every commit through **commit-workflow** (pre-flight, PR, code-review gate).
 
 ## Runtime Prerequisites

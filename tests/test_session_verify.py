@@ -1025,9 +1025,7 @@ def test_pi_is_honestly_unverifiable(hosted, setup):
     # unscanned — including the docstring's honesty paragraph, the very
     # sentence this pin was written for (#4620 review). Nothing legitimate is
     # lost by scanning everything: the phrases are reserved for the Pi ruling,
-    # and the module's one other headless claim — Cursor's — says "no headless
-    # entry point", so an accurate statement about a different harness cannot
-    # redden this gate.
+    # so the module states them about no harness it can actually fire.
     from tortoise import session_verify as _sv
 
     absolutes = (

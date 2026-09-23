@@ -1196,6 +1196,7 @@ __all__ = [
     "CURSOR_EVENT",
     "CURSOR_REGISTRATION_FILE",
     "CURSOR_SCRIPT_NAME",
+    "PI_EXTENSION_NAME",
     "InstallResult",
     "codex_home",
     "cursor_home",
