@@ -98,8 +98,9 @@ class TestRestartPending:
     def test_unavailable_marker_is_not_a_step_set(self):
         # a graph-down read serves the literal 'unavailable' string; the helper
         # must not string-scan it into a fabricated verdict.
-        # RED mutation: drop the isinstance guard → 'unavailable' becomes a
-        # one-element step set and this flips True.
+        # RED mutation: drop the isinstance guard → the `None` assert below
+        # raises TypeError. (The string assert stays False either way:
+        # set("unavailable") holds characters, not step ids.)
         assert restart_pending("unavailable") is False
         assert restart_pending(None) is False
 
@@ -107,8 +108,8 @@ class TestRestartPending:
         # the #3913 owner ruling stands: completion is unchanged by the new
         # step — it is never required, and it never completes anything alone
         # RED mutation: add "connection-written" to _GATE_SELF/_GATE_BUILD →
-        # the third assert (alone) flips to True, or the first (full set)
-        # drops to False.
+        # the FIRST assert (the full set) drops to False. The "alone" assert
+        # stays False either way — the gate needs the other steps regardless.
         full = {"team-named", "harness-connected", "first-points-filed",
                 "decide-completed"}
         for fork in ("self", "build"):
@@ -136,6 +137,23 @@ class TestRestartPending:
         # a SERVER-OBSERVED act still closes the window (fail-closed)
         assert resolve_wire_completion(
             "active", True, [*gf, "harness-connected"]) is False
+
+    def test_read_only_grandfathered_mirror_agrees_on_the_config_write(self):
+        """#3451: ``_legacy_grandfathered`` is the read-only MIRROR of the same
+        grandfathered branch (the #3912 false-completion repair path reads it).
+        It must agree with ``resolve_wire_completion`` about ``connection-written``,
+        or the repair path can judge a legitimately grandfathered org falsely
+        complete and REGRESS its status.
+
+        RED mutation: revert ``_legacy_grandfathered`` to ``s != "team-named"``
+        → the second assert flips False.
+        """
+        assert onboarding_state._legacy_grandfathered(True, ["team-named"]) is True
+        assert onboarding_state._legacy_grandfathered(
+            True, ["team-named", "connection-written"]) is True
+        # a SERVER-OBSERVED act still closes the window
+        assert onboarding_state._legacy_grandfathered(
+            True, ["team-named", "harness-connected"]) is False
 
 
 class TestStepValidation:
