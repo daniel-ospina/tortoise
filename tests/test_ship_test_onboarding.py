@@ -19,8 +19,13 @@ Run: TORTOISE_TEST_CARVE_OUT=1 python -m pytest tests/test_ship_test_onboarding.
 """
 from __future__ import annotations
 
+import ast
+import inspect as _inspect
+import textwrap
+
 import pytest
 
+import tools.ship_test_onboarding as _mod
 from tools.ship_test_onboarding import (
     ABSENT,
     CONNECTED,
@@ -549,6 +554,9 @@ class _Requester:
 
     def post(self, url, data=None):
         return self._call("POST", url, data)
+
+    def delete(self, url):
+        return self._call("DELETE", url)
 
 
 class _RequestCtx:
@@ -1112,6 +1120,9 @@ class _FakeRequester:
     def post(self, url, data=None):
         return self._one("POST", url, data)
 
+    def delete(self, url):
+        return self._one("DELETE", url)
+
     def onboarding_state_calls(self):
         return [c for c in self.calls if c[1].endswith("/onboarding/state")]
 
@@ -1128,9 +1139,17 @@ class _FakeBrowser:
 
 
 class _FakePage:
-    def __init__(self, base_url):
+    def __init__(self, base_url, org_create=False, org_click_raises=False):
         self._base = base_url.rstrip("/")
         self.url = self._base + "/welcome"
+        # OPT-IN: only a walk that is meant to exercise the org-create step
+        # reports the wizard's org-name input as visible. Off by default, so
+        # every pre-existing test keeps the behaviour it was written against.
+        self.org_create = org_create
+        self.org_click_raises = org_click_raises
+        # The wizard write, recorded: a test can then prove that the name the run
+        # WRITES is the name teardown MATCHES against (they are one value).
+        self.fills = []
 
     def on(self, *a, **k):
         pass
@@ -1159,9 +1178,16 @@ class _FakePage:
         pass
 
     def locator(self, sel):
+        page = self
+        # SELECTOR-SPECIFIC: only the org-name input is faked as visible, so the
+        # walk's button loop and `_mint_or_read_key`'s `code` search keep the
+        # behaviour they have always had.
+        is_org_input = sel == 'input[aria-label="Organization name"]'
+        is_create_btn = "Create Organization" in sel
+
         class _L:
             def count(self):
-                return 0
+                return 1 if (is_org_input and page.org_create) else 0
 
             @property
             def first(self):
@@ -1171,28 +1197,37 @@ class _FakePage:
                 return []
 
             def is_visible(self):
-                return False
+                return bool(is_org_input and page.org_create)
 
             def inner_text(self):
                 return ""
 
-            def fill(self, *a, **k):
-                pass
+            def fill(self, value, *a, **k):
+                if is_org_input and page.org_create:
+                    page.fills.append((sel, value))
 
             def click(self, *a, **k):
-                pass
+                # A click that raises: the create POST may or may not have been
+                # dispatched, which is exactly why the walk flags the attempt
+                # BEFORE it clicks.
+                if is_create_btn and page.org_click_raises:
+                    raise RuntimeError("create click failed")
 
         return _L()
 
 
 class _FakeCtx:
-    def __init__(self, plan, base_url):
+    def __init__(self, plan, base_url, org_create=False, org_click_raises=False):
         self.request = _FakeRequester(plan)
         self.cookies = []          # the instrument must never read the jar
         self._base = base_url
+        self._org_create = org_create
+        self._org_click_raises = org_click_raises
+        self.page = None
 
     def new_page(self):
-        return _FakePage(self._base)
+        self.page = _FakePage(self._base, self._org_create, self._org_click_raises)
+        return self.page
 
     def close(self):
         pass
@@ -1221,25 +1256,42 @@ class _FakeSyncPlaywright:
 
 
 def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
-                   mcp_tools_call, surface="card", skip_write=False):
-    """Execute the real `run_walk` against a fake browser. Returns the record."""
+                   mcp_tools_call, surface="card", skip_write=False,
+                   org_create=False, org_click_raises=False, org_name=None,
+                   keep_org=False, front_door_hittable=True,
+                   playwright_available=True):
+    """Execute the real `run_walk` against a fake browser. Returns the record.
+
+    `front_door_hittable=False` makes the front-door probe REPORT the signup CTA
+    as not hittable, driving the pre-session product finding;
+    `playwright_available=False` makes the driver import fail, which is the
+    fail-closed default path.
+    """
     import sys
     import types
 
     import tools.ship_test_onboarding as mod
 
     base = "https://app.premiselabs.co"
-    ctx = _FakeCtx(plan, base)
-    fake_sync = types.ModuleType("playwright.sync_api")
-    fake_sync.sync_playwright = lambda: _FakeSyncPlaywright(ctx)
-    monkeypatch.setitem(sys.modules, "playwright", types.ModuleType("playwright"))
-    monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_sync)
+    ctx = _FakeCtx(plan, base, org_create=org_create,
+                   org_click_raises=org_click_raises)
+    if playwright_available:
+        fake_sync = types.ModuleType("playwright.sync_api")
+        fake_sync.sync_playwright = lambda: _FakeSyncPlaywright(ctx)
+        monkeypatch.setitem(sys.modules, "playwright", types.ModuleType("playwright"))
+        monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_sync)
+    else:
+        # `None` in sys.modules makes `from playwright.sync_api import ...` raise
+        # ImportError — the driver-missing path, without touching the disk.
+        monkeypatch.setitem(sys.modules, "playwright", types.ModuleType("playwright"))
+        monkeypatch.setitem(sys.modules, "playwright.sync_api", None)
 
     # (leaf stubs: things that would otherwise hit the network or need a page)
     monkeypatch.setattr(mod, "_git_sha", lambda: "deadbeef")
     monkeypatch.setattr(mod, "deployed_sha", lambda api_url: "9605f5f249")
     monkeypatch.setattr(mod, "deployed_bundle", lambda base_url: "assets/index-x.js")
-    monkeypatch.setattr(mod, "front_door_probe", lambda page, **k: {"hittable": True})
+    monkeypatch.setattr(mod, "front_door_probe",
+                        lambda page, **k: {"hittable": front_door_hittable})
     monkeypatch.setattr(mod, "connection_surface_kind", lambda page, **k: surface)
     monkeypatch.setattr(mod, "page_body", lambda page: "")
     monkeypatch.setattr(mod, "recorded_body", lambda page: "")
@@ -1262,8 +1314,14 @@ def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
         "--api-url", "https://api.premiselabs.co", "--allow-prod",
         "--timeout", "800", "--settle-ms", "0",
         "--out", str(tmp_path / "ship-test"), "--skip-agent-write" if skip_write else "--email",
-    ] + ([] if skip_write else ["ship@premiselabs.co"]))
+    ] + ([] if skip_write else ["ship@premiselabs.co"])
+      + (["--org-name", org_name] if org_name else [])
+      + (["--keep-org"] if keep_org else []))
     obs = mod.run_walk(args)
+    # BEHAVIOURAL single-exit check: every path the suite exercises must land a
+    # teardown block in the artifact. A future exit routed past `_finalize`
+    # falsifies this for the whole suite instead of for one hand-written case.
+    assert obs.teardown, "run_walk exited without recording teardown"
     return obs, ctx, mod
 
 
@@ -1322,6 +1380,10 @@ def test_walk_without_a_session_is_an_instrument_error_and_writes_nothing(monkey
     assert ("POST", "/api/v1/team/keys") not in [(c[0], c[1]) for c in ctx.request.calls]
     assert not any(c[0] == "POST" for c in ctx.request.calls)
     assert obs.session["detail"].startswith("401")
+    # the recorded teardown STATUS, not mere truthiness: this test passes no
+    # `--keep-org`, so the status recorded for this pre-baseline exit is
+    # `not_reached` (#4843).
+    assert obs.teardown["status"] == mod.TEARDOWN_NOT_REACHED
 
 
 def test_walk_reports_a_failed_write_as_an_instrument_error_not_a_non_observation(
@@ -1346,6 +1408,10 @@ def test_walk_reports_a_failed_write_as_an_instrument_error_not_a_non_observatio
     # it returned BEFORE the poll: no post-write projection read was needed
     assert len(ctx.request.onboarding_state_calls()) == 1
     assert obs.steps[-1].name == "agent-write"
+    # the STATUS, not merely truthiness: this exit is post-create, and a
+    # re-pointed/emptied teardown state records the truthy, non-residue
+    # `not_reached`, which reports an unreaped org as clean.
+    assert obs.teardown["status"] == mod.TEARDOWN_BASELINE_UNAVAILABLE
 
 
 def test_walk_reports_a_never_readable_projection_as_an_instrument_error(
@@ -1363,6 +1429,17 @@ def test_walk_reports_a_never_readable_projection_as_an_instrument_error(
     assert obs.verdict.startswith("instrument-error:"), obs.verdict
     assert "projection_unreadable" in obs.verdict
     assert mod.exit_code_for(obs.reason) == mod.EXIT_INSTRUMENT_ERROR
+    # PIN THE CALL SITE, not just the verdict: the step-7 read produces the SAME
+    # verdict, reason and teardown status, so neutering the poll guard would
+    # leave this test green. `poll_readable` is set on the write step only when
+    # control gets PAST the poll guard.
+    assert "poll_readable" not in obs.steps[-1].extra, obs.steps[-1].extra
+    # The harness serves no org-list route, so the recorded state must be the
+    # fail-closed one. Asserting the STATUS (not just that teardown is truthy) is
+    # what catches a teardown state that reached this exit degraded — a re-bound
+    # or emptied object records the truthy, non-residue `not_reached`, which
+    # reports an unreaped org as clean.
+    assert obs.teardown["status"] == mod.TEARDOWN_BASELINE_UNAVAILABLE
 
 
 def test_walk_reports_a_200_but_unparseable_projection_as_an_instrument_error(
@@ -1381,6 +1458,181 @@ def test_walk_reports_a_200_but_unparseable_projection_as_an_instrument_error(
     assert obs.verdict.startswith("instrument-error:"), obs.verdict
     assert "projection_unreadable" in obs.verdict
     assert mod.exit_code_for(obs.reason) == mod.EXIT_INSTRUMENT_ERROR
+    # PIN THE CALL SITE, not just the verdict: the step-7 read produces the SAME
+    # verdict, reason and teardown status, so neutering the poll guard would
+    # leave this test green. `poll_readable` is set on the write step only when
+    # control gets PAST the poll guard.
+    assert "poll_readable" not in obs.steps[-1].extra, obs.steps[-1].extra
+    # ...and the recorded teardown status, for the same reason as the
+    # never-readable case above.
+    assert obs.teardown["status"] == mod.TEARDOWN_BASELINE_UNAVAILABLE
+
+
+# ── the exits nothing reached (#4843) ───────────────────────────────────────
+# A marker `raise` above each of these left the whole suite green before this
+# change. Three are POST-create — the create-attempt flag and the click are at
+# `:1313`–`:1314` — so each is a path on which this run may have created an org,
+# and each records `obs.teardown` from whatever teardown state reached it. With
+# no test, a degraded teardown state there (a re-bound or emptied object, an
+# in-place field assignment) is invisible to the suite AND flips a residue state
+# to the truthy, deliberately-non-residue `not_reached` — an unreaped org
+# reported as a clean run (the #4291 conflation). So each asserts the recorded
+# teardown STATUS, not merely that `obs.teardown` is truthy: `not_reached`
+# satisfies truthiness.
+#
+# The last two are PRE-create: no org can exist yet, and these tests pass no
+# `--keep-org`, so the recorded status is the clean `TEARDOWN_NOT_REACHED`
+# rather than a residue alarm.
+
+def test_the_teardown_statuses_are_classified_as_residue_or_clean() -> None:
+    """The classifier the statuses get their residue/clean meaning from: a
+    `baseline_unavailable`
+    teardown WARNS — a live org may remain — while `not_reached` is deliberately
+    NOT a residue state, so it raises no false alarm."""
+    assert _mod.TEARDOWN_BASELINE_UNAVAILABLE in _mod.TEARDOWN_RESIDUE_STATES
+    assert _mod.TEARDOWN_NOT_REACHED not in _mod.TEARDOWN_RESIDUE_STATES
+
+
+def _assert_teardown_recorded_fail_closed(obs, mod) -> None:
+    """These harnesses serve no org-list route, so `GET /api/v1/organizations`
+    404s and the recorded status is the fail-closed `baseline_unavailable` — a
+    residue state. Specific enough that any OTHER state a degraded teardown
+    object would record (notably the truthy, non-residue `not_reached`) reds."""
+    assert obs.teardown, "this exit must carry the teardown state"
+    assert obs.teardown["status"] == mod.TEARDOWN_BASELINE_UNAVAILABLE, (
+        f"expected the fail-closed state, got {obs.teardown!r}")
+
+
+def _assert_not_the_generic_error_handler(obs, name: str) -> None:
+    """No `error` step, and the walk's last step is `name`: it did not exit
+    through the walk's generic `except Exception` handler, which appends an
+    `error` step and returns immediately (so it is always the LAST step).
+
+    DEFENCE IN DEPTH, not the discriminator. Each of these tests already fails
+    on a marker raise without it — through a verdict or reason assertion, or (at
+    the claim-failure exit, which sets its own reason before returning) through
+    the step-identity assertion.
+    """
+    assert not [s for s in obs.steps if s.name == "error"], (
+        f"exited through the error handler, not the {name!r} step: {obs.steps}")
+    assert obs.steps[-1].name == name, obs.steps[-1].name
+
+
+def test_walk_that_never_reaches_a_connection_surface_is_incomplete_no_surface(
+        monkeypatch, tmp_path):
+    """The screen renders no connection surface at all, so the NEGATIVE
+    direction was never measured: `INCOMPLETE_NO_SURFACE` (exit 1), never a
+    product failure — and it stops before the agent write."""
+    plan = {
+        ("GET", "/api/session"): _SESSION_200,
+        ("GET", "/api/v1/onboarding/state"): [_PROJ_UNOBSERVED],
+    }
+    obs, ctx, mod = _run_fake_walk(
+        monkeypatch, tmp_path, plan=plan, ui_sequence=[ABSENT],
+        mcp_tools_call=_MCP_OK, org_create=True, org_name=_RUN_ORG)
+
+    assert obs.verdict == mod.INCOMPLETE_NO_SURFACE
+    assert mod.exit_code_for(obs.reason) == mod.EXIT_FAILED
+    # the CREATE really happened (the premise that makes this exit post-create),
+    # and it stopped at the read: no key minted, no agent write
+    assert ctx.page.fills == [('input[aria-label="Organization name"]', _RUN_ORG)]
+    assert ctx.request.onboarding_state_calls(), "the step-5 read never happened"
+    assert not any(c[0] == "POST" for c in ctx.request.calls)
+    _assert_not_the_generic_error_handler(obs, "before-observation")
+    # ...and the step is this exit's, not the claim-failure exit's: that one
+    # carries `page_claims_connection`, this one does not.
+    assert "page_claims_connection" not in obs.steps[-1].extra
+    _assert_teardown_recorded_fail_closed(obs, mod)
+
+
+def test_walk_whose_screen_claims_a_connection_the_server_never_saw_is_a_product_failure(
+        monkeypatch, tmp_path):
+    """The screen says "Connected" while the server's own projection shows no
+    observation. That is the `no_claim_before_observation` assertion failing —
+    the product finding this instrument exists to make — and it is distinct from
+    the absent-surface class directly above, which records no such assertion at
+    all."""
+    plan = {
+        ("GET", "/api/session"): _SESSION_200,
+        ("GET", "/api/v1/onboarding/state"): [_PROJ_UNOBSERVED],
+    }
+    obs, ctx, mod = _run_fake_walk(
+        monkeypatch, tmp_path, plan=plan, ui_sequence=[CONNECTED],
+        mcp_tools_call=_MCP_OK, org_create=True, org_name=_RUN_ORG)
+
+    assert obs.verdict.startswith("failed:"), obs.verdict
+    assert obs.assertions.get("no_claim_before_observation") is False
+    assert mod.exit_code_for(obs.reason) == mod.EXIT_FAILED
+    assert ctx.page.fills == [('input[aria-label="Organization name"]', _RUN_ORG)]
+    assert ctx.request.onboarding_state_calls(), "the step-5 read never happened"
+    assert not any(c[0] == "POST" for c in ctx.request.calls)
+    _assert_not_the_generic_error_handler(obs, "before-observation")
+    # the exit's OWN step: the claim-failure branch records the page's claim,
+    # the absent-surface branch above does not.
+    assert "page_claims_connection" in obs.steps[-1].extra
+    _assert_teardown_recorded_fail_closed(obs, mod)
+
+
+def test_walk_without_a_mintable_key_is_an_instrument_error(monkeypatch, tmp_path):
+    """The write step has no credential: the wizard showed no `tt_`/`tk_` key and
+    the BFF refuses to mint one. The run cannot make the server-observed write,
+    so it is an INSTRUMENT fault (exit 3) — never `server_did_not_observe`, which
+    would blame the product for a credential the instrument never got."""
+    plan = {
+        ("GET", "/api/session"): _SESSION_200,
+        ("GET", "/api/v1/onboarding/state"): [_PROJ_UNOBSERVED],
+        ("POST", "/api/v1/team/keys"): [(403, {"error": "forbidden"})],
+    }
+    obs, ctx, mod = _run_fake_walk(
+        monkeypatch, tmp_path, plan=plan, ui_sequence=[NOT_CONNECTED],
+        mcp_tools_call=_MCP_OK, org_create=True, org_name=_RUN_ORG)
+
+    assert obs.verdict.startswith("instrument-error:"), obs.verdict
+    assert "no_agent_key" in obs.verdict
+    assert mod.exit_code_for(obs.reason) == mod.EXIT_INSTRUMENT_ERROR
+    # the CREATE really happened (the premise that makes this exit post-create)…
+    assert ctx.page.fills == [('input[aria-label="Organization name"]', _RUN_ORG)]
+    # …and the refusal really was the mint call, not a missing call
+    assert [c for c in ctx.request.calls if c[0] == "POST"], ctx.request.calls
+    assert "mint failed" in obs.steps[-1].detail, obs.steps[-1].detail
+    _assert_not_the_generic_error_handler(obs, "agent-write")
+    _assert_teardown_recorded_fail_closed(obs, mod)
+
+
+def test_walk_reports_a_signup_cta_that_is_not_hittable_as_a_product_finding(
+        monkeypatch, tmp_path):
+    """The front-door probe reports the signup CTA as not hittable. This runs
+    BEFORE any session is resolved, so it is a PRODUCT finding (exit 1), not an
+    instrument fault.
+    No org can exist yet and this test passes no `--keep-org`, so the recorded
+    status is the clean `not_reached` (which is deliberately NOT a residue
+    state)."""
+    obs, _ctx, mod = _run_fake_walk(
+        monkeypatch, tmp_path, plan={("GET", "/api/session"): _SESSION_200},
+        ui_sequence=[], mcp_tools_call=_MCP_OK, front_door_hittable=False)
+
+    assert obs.verdict.startswith("failed:"), obs.verdict
+    assert "not hittable" in obs.verdict
+    assert mod.exit_code_for(obs.reason) == mod.EXIT_FAILED
+    assert obs.teardown["status"] == mod.TEARDOWN_NOT_REACHED
+
+
+def test_walk_without_the_driver_records_a_fail_closed_observation(
+        monkeypatch, tmp_path):
+    """The playwright import fails: the driver is missing. That must still
+    produce a RECORDED, fail-closed observation rather than a traceback — the
+    verdict `failed: playwright unavailable`, an instrument exit code, and a
+    recorded teardown status of `not_reached` — no browser context ever existed,
+    and this test passes no `--keep-org`."""
+    obs, _ctx, mod = _run_fake_walk(
+        monkeypatch, tmp_path, plan={}, ui_sequence=[], mcp_tools_call=_MCP_OK,
+        playwright_available=False)
+
+    assert obs.verdict.startswith("failed: playwright unavailable"), obs.verdict
+    # the exception type is named, not swallowed
+    assert "ModuleNotFoundError" in obs.verdict
+    assert mod.exit_code_for(obs.reason) == mod.EXIT_INSTRUMENT_ERROR
+    assert obs.teardown["status"] == mod.TEARDOWN_NOT_REACHED
 
 
 def test_walk_skip_agent_write_cannot_launder_a_lying_ui(monkeypatch, tmp_path):
@@ -1461,6 +1713,12 @@ def test_walk_step5_unreadable_projection_is_an_instrument_error(monkeypatch, tm
     assert mod.exit_code_for(obs.reason) == mod.EXIT_INSTRUMENT_ERROR
     # it stopped at the read: no key was minted and nothing was written
     assert not any(c[0] == "POST" for c in ctx.request.calls)
+    # ...and the recorded teardown STATUS (not merely that teardown is truthy):
+    # this exit is reached only here, so it is the one place that can catch a
+    # teardown state which arrived at it re-bound or emptied — such a state
+    # records the truthy, non-residue `not_reached`, which would report an
+    # unreaped org as clean.
+    assert obs.teardown["status"] == mod.TEARDOWN_BASELINE_UNAVAILABLE
 
 
 def test_walk_step7_unreadable_projection_is_an_instrument_error(monkeypatch, tmp_path):
@@ -1485,6 +1743,8 @@ def test_walk_step7_unreadable_projection_is_an_instrument_error(monkeypatch, tm
     assert mod.exit_code_for(obs.reason) == mod.EXIT_INSTRUMENT_ERROR
     # the observation is NOT recorded as shown, and not as a product failure
     assert obs.assertions.get("shown_when_observed") is None
+    # ...and the teardown STATUS, for the same reason as the exits above.
+    assert obs.teardown["status"] == mod.TEARDOWN_BASELINE_UNAVAILABLE
 
 
 def test_walk_with_an_explicit_agent_key_still_reads_the_truth_through_the_session(
@@ -1535,6 +1795,12 @@ def test_walk_with_an_explicit_agent_key_still_reads_the_truth_through_the_sessi
     obs = mod.run_walk(args)
 
     assert obs.verdict == "passed", (obs.verdict, obs.reason)
+    # this test drives run_walk directly rather than through _run_fake_walk, so
+    # it must make the single-exit guarantee explicit itself
+    assert obs.teardown, "this exit must carry the teardown state"
+    # this harness serves no org-list route, so the baseline read 404s and the
+    # walk honestly records the fail-closed state: no baseline, no delete
+    assert obs.teardown["status"] == _mod.TEARDOWN_BASELINE_UNAVAILABLE
     # the explicit key was used for the WRITE...
     assert written_with["key"] == "tt_explicit"
     # ...and no key was minted, and the truth came only from the session
@@ -1542,3 +1808,513 @@ def test_walk_with_an_explicit_agent_key_still_reads_the_truth_through_the_sessi
     for _method, url, _data in ctx.request.onboarding_state_calls():
         assert url.startswith(base + "/api/v1/onboarding/state"), url
     assert "agent-key" in obs.session["mechanism"]
+
+
+# ── #4319 — the run reaps the org it created ────────────────────────────────
+#
+# This is DESTRUCTIVE code, so these tests are the CONTROL, not a smoke test:
+# each one pins a class from the issue's declared threat surface. The identity
+# proof is DIFFERENTIAL, so the org-list reads arrive in call order and the plan
+# supplies them as a queue:
+#
+#   1. the BASELINE, read before the wizard can create anything
+#   2. the teardown-time read (`after`)
+#   3. the post-DELETE confirmation read
+#
+# `_FakeRequester` pops a queue until one entry remains, then repeats that entry
+# — so "the org is gone" is expressed as the LAST entry.
+_ORG_ROUTE = "/api/v1/organizations"
+_RUN_ORG = "Ship Test 123"
+_AFTER_ROW = {"org_id": "org-1", "org_name": _RUN_ORG}
+
+def _happy_base():
+    """A FRESH plan every call: `_FakeRequester` mutates the entry lists (it pops
+    them), so a shared module-level dict would leak one test's consumption into
+    the next one's reads."""
+    return {
+        ("GET", "/api/session"): _SESSION_200,
+        ("GET", "/api/v1/onboarding/state"): [_PROJ_UNOBSERVED, _PROJ_OBSERVED,
+                                              _PROJ_OBSERVED],
+        ("POST", "/api/v1/team/keys"): [(200, {"key": "tt_minted"})],
+    }
+
+
+_DELETE_OK = [(202, {"status": "delete_scheduled", "org_id": "org-1",
+                     "grace_hours": 168,
+                     "hard_delete_after": "2026-10-01T00:00:00Z"})]
+
+
+def _run_teardown_walk(monkeypatch, tmp_path, *, reads, delete=None,
+                       org_create=True, org_click_raises=False, skip_write=False,
+                       org_name=_RUN_ORG, base=None, ui=None):
+    """A walk whose org-list reads and DELETE are supplied by the caller."""
+    plan = base if base is not None else _happy_base()
+    plan[("GET", _ORG_ROUTE)] = reads
+    if delete is not None:
+        plan[("DELETE", _ORG_ROUTE + "/org-1")] = delete
+    return _run_fake_walk(
+        monkeypatch, tmp_path, plan=plan,
+        ui_sequence=ui or [NOT_CONNECTED, CONNECTED],
+        mcp_tools_call=_MCP_OK, org_create=org_create,
+        org_click_raises=org_click_raises, skip_write=skip_write,
+        org_name=org_name)
+
+
+def _delete_calls(ctx):
+    return [c for c in ctx.request.calls if c[0] == "DELETE"]
+
+
+def test_the_walk_reaps_the_org_it_created_and_records_the_deletion(
+        monkeypatch, tmp_path):
+    """The happy path: baseline empty (a fresh account), the run's org listed at
+    teardown, gone on the confirmation read ⇒ `deleted`, and the DELETE went out
+    as a DELETE on the app origin's own proxy to the id the walked session's own
+    list carried — never a constructed id."""
+    obs, ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path, reads=[(200, []), (200, [_AFTER_ROW]), (200, [])],
+        delete=_DELETE_OK)
+
+    assert obs.verdict == "passed", (obs.verdict, obs.reason)
+    assert obs.teardown["status"] == _mod.TEARDOWN_DELETED
+    assert obs.teardown["org_id"] == "org-1"
+    assert obs.teardown["hard_delete_after"] == "2026-10-01T00:00:00Z"
+    assert _delete_calls(ctx) == [
+        ("DELETE", "https://app.premiselabs.co/api/v1/organizations/org-1", None)]
+    # no POST was smuggled against the org path (the old `bff_api` fallback)
+    assert not [c for c in ctx.request.calls
+                if c[0] == "POST" and "/organizations/" in c[1]]
+
+
+def test_the_name_the_run_writes_is_the_name_teardown_matches(monkeypatch, tmp_path):
+    """One value, two uses: the name filled into the wizard is the name compared
+    at teardown, so the two cannot drift."""
+    obs, ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path, reads=[(200, []), (200, [_AFTER_ROW]), (200, [])],
+        delete=_DELETE_OK)
+    assert ctx.page.fills == [('input[aria-label="Organization name"]', _RUN_ORG)]
+    assert obs.teardown["org_name"] == _RUN_ORG
+
+
+def test_a_same_named_pre_existing_org_is_never_a_teardown_candidate(
+        monkeypatch, tmp_path):
+    """T6 — the differential proof, in the ONLY shape that can tell it apart from
+    a name match: a pre-existing org that carries this run's exact name. It is in
+    the baseline, so it is not a candidate — a name-only selector would delete
+    it. (Mutation-checked: dropping the set difference makes this RED.)"""
+    old = {"org_id": "org-old", "org_name": _RUN_ORG}
+    obs, ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path,
+        reads=[(200, [old]), (200, [old]), (200, [old])],
+        org_name=_RUN_ORG)
+    assert obs.teardown["status"] == _mod.TEARDOWN_NOT_LISTED
+    assert _delete_calls(ctx) == []
+
+
+def test_a_run_org_appearing_beside_a_pre_existing_one_is_the_one_deleted(
+        monkeypatch, tmp_path):
+    """The INCLUDE half of the differential: a NON-EMPTY baseline must not
+    suppress the run's own org — the shape every run on an existing account has.
+    (Mutation-checked: an implementation that only finds the run's org when the
+    baseline is empty turns this RED.)"""
+    old = {"org_id": "org-old", "org_name": "Something Else"}
+    base = _happy_base()
+    base[("DELETE", _ORG_ROUTE + "/org-1")] = _DELETE_OK
+    obs, ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path,
+        reads=[(200, [old]), (200, [old, _AFTER_ROW]), (200, [old])],
+        base=base)
+    assert obs.teardown["status"] == _mod.TEARDOWN_DELETED
+    assert obs.teardown["org_id"] == "org-1"
+    assert [c[1] for c in _delete_calls(ctx)] == [
+        "https://app.premiselabs.co/api/v1/organizations/org-1"]
+
+
+def test_an_org_that_appeared_without_a_create_attempt_is_not_this_runs_to_delete(
+        monkeypatch, tmp_path):
+    """A set difference is not an identity proof: an org that joined this
+    session's list without this run ever asking for one is refused, and recorded
+    as residue rather than as a clean bill."""
+    obs, ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path,
+        reads=[(200, []), (200, [_AFTER_ROW]), (200, [])],
+        org_create=False)
+    assert obs.teardown["status"] == _mod.TEARDOWN_NOT_ATTEMPTED
+    assert obs.teardown["status"] in _mod.TEARDOWN_RESIDUE_STATES
+    assert _delete_calls(ctx) == []
+
+
+def test_a_numerically_looking_name_cannot_ride_a_name_match(monkeypatch, tmp_path):
+    """T1 — the single candidate's name must EQUAL the name this run wrote. A
+    foreign-named org is never deleted, even as the only candidate."""
+    foreign = {"org_id": "org-x", "org_name": "Ship Test 1234 (someone else)"}
+    obs, ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path, reads=[(200, []), (200, [foreign]), (200, [])],
+        delete=_DELETE_OK)
+    assert obs.teardown["status"] == _mod.TEARDOWN_NAME_MISMATCH
+    assert _delete_calls(ctx) == []
+
+
+def test_two_new_orgs_are_ambiguous_and_delete_nothing(monkeypatch, tmp_path):
+    """T2 — ambiguity is refused, never guessed at."""
+    obs, ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path,
+        reads=[(200, []),
+               (200, [_AFTER_ROW, {"org_id": "org-2", "org_name": _RUN_ORG}]),
+               (200, [])],
+        delete=_DELETE_OK)
+    assert obs.teardown["status"] == _mod.TEARDOWN_AMBIGUOUS
+    assert _delete_calls(ctx) == []
+
+
+def test_an_unreadable_baseline_disables_teardown(monkeypatch, tmp_path):
+    """T3 — no baseline means the identity is UNPROVEN. The run fails closed
+    (residue) instead of deleting on a guess."""
+    obs, ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path,
+        reads=[(503, {"error": "upstream_unavailable", "upstream_status": 429}),
+               (200, [_AFTER_ROW]), (200, [])],
+        delete=_DELETE_OK)
+    assert obs.teardown["status"] == _mod.TEARDOWN_BASELINE_UNAVAILABLE
+    assert _delete_calls(ctx) == []
+
+
+def test_a_run_with_no_session_issues_no_org_request_at_all(monkeypatch, tmp_path):
+    """T3 — a walk that never signed in never touched an org."""
+    plan = {("GET", "/api/session"): [(401, {"error": "not_signed_in"})],
+            ("GET", "/api/v1/onboarding/state"): [_PROJ_UNOBSERVED]}
+    obs, ctx, _ = _run_fake_walk(monkeypatch, tmp_path, plan=plan,
+                                 ui_sequence=[NOT_CONNECTED], mcp_tools_call=_MCP_OK)
+    # the run never got as far as the baseline, so this is NOT "the org list was
+    # unreadable" — claiming that would raise a residue alarm for a run that
+    # could not have created anything
+    assert obs.teardown["status"] == _mod.TEARDOWN_NOT_REACHED
+    assert obs.teardown["status"] not in _mod.TEARDOWN_RESIDUE_STATES
+    assert not [c for c in ctx.request.calls if "organizations" in c[1]]
+
+
+def test_a_2xx_that_leaves_the_org_listed_is_not_a_deletion(monkeypatch, tmp_path):
+    """T4 — verify the ARTIFACT, not the send: a 202 with no removal on the
+    confirmation read is `not_confirmed`, never `deleted`."""
+    obs, ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path,
+        reads=[(200, []), (200, [_AFTER_ROW]), (200, [_AFTER_ROW])],
+        delete=_DELETE_OK)
+    assert obs.teardown["status"] == _mod.TEARDOWN_NOT_CONFIRMED
+    assert len(_delete_calls(ctx)) == 1
+
+
+def test_an_unreadable_confirmation_is_not_a_confirmation(monkeypatch, tmp_path):
+    """T4b — `org_id not in (ids or [])` is TRUE when the read failed. An
+    unreadable confirmation must never be recorded as a deletion."""
+    obs, _ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path,
+        reads=[(200, []), (200, [_AFTER_ROW]),
+               (503, {"error": "upstream_unavailable"})],
+        delete=_DELETE_OK)
+    assert obs.teardown["status"] == _mod.TEARDOWN_NOT_CONFIRMED
+    assert obs.teardown["verify_status"] == 503
+
+
+def test_a_refused_delete_is_recorded_with_its_upstream_status(
+        monkeypatch, tmp_path):
+    """T9 — a rate-limited upstream arrives as a proxied 503 that still carries
+    `upstream_status`; the run records it and never turns it into a product
+    result."""
+    obs, _ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path, reads=[(200, []), (200, [_AFTER_ROW]), (200, [])],
+        delete=[(503, {"error": "upstream_unavailable", "upstream_status": 429})])
+    assert obs.teardown["status"] == _mod.TEARDOWN_HTTP_REFUSED
+    assert obs.teardown["upstream_status"] == 429
+    assert obs.verdict == "passed"
+    assert obs.reason == ""
+
+
+def test_a_run_that_created_nothing_issues_no_delete(monkeypatch, tmp_path):
+    """Nothing was created ⇒ nothing to reap, and no request is made."""
+    obs, ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path, reads=[(200, []), (200, [])], org_create=False,
+        delete=_DELETE_OK)
+    assert obs.teardown["status"] == _mod.TEARDOWN_SKIPPED_NO_ORG
+    assert _delete_calls(ctx) == []
+
+
+def test_a_create_attempt_that_is_not_yet_listed_is_residue_not_clean(
+        monkeypatch, tmp_path):
+    """T6b — an empty candidate set AFTER a recorded create attempt is not
+    'nothing to do': the list may simply not have caught up. Suspect residue,
+    never a clean bill of health."""
+    obs, _ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path, reads=[(200, []), (200, []), (200, [])],
+        org_create=True, delete=_DELETE_OK)
+    assert obs.teardown["status"] == _mod.TEARDOWN_NOT_LISTED
+    assert obs.teardown["status"] in _mod.TEARDOWN_RESIDUE_STATES
+
+
+def test_a_create_click_that_raises_still_flags_the_residue(monkeypatch, tmp_path):
+    """The attempt flag is set BEFORE the click, so a click that raises after
+    dispatching the create cannot hide a created org — and the walk still writes
+    its artifact through the `except`-site funnel."""
+    obs, ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path, reads=[(200, []), (200, []), (200, [])],
+        org_create=True, org_click_raises=True, delete=_DELETE_OK)
+    assert obs.verdict.startswith("failed:"), obs.verdict
+    assert obs.teardown["status"] == _mod.TEARDOWN_NOT_LISTED
+    assert _delete_calls(ctx) == []
+    # the artifact was still written, with the teardown block in it
+    artifact = (tmp_path / "ship-test" / "observation.json").read_text()
+    assert '"teardown"' in artifact and _mod.TEARDOWN_NOT_LISTED in artifact
+
+
+def test_teardown_cannot_change_the_verdict_or_lose_the_artifact(
+        monkeypatch, tmp_path):
+    """T5 — the #4291 conflation guard, in both directions. A cleanup that
+    RAISES must not flip a pass, must not propagate, and must not cost the
+    artifact."""
+    import json
+
+    def _boom(obs, td):
+        raise RuntimeError("cleanup exploded")
+
+    monkeypatch.setattr(_mod, "_run_teardown", _boom)
+    obs, _ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path, reads=[(200, []), (200, []), (200, [])])
+    assert obs.verdict == "passed", obs.verdict
+    assert obs.reason == ""
+    assert obs.teardown["status"] == _mod.TEARDOWN_FAILED
+    written = json.loads((tmp_path / "ship-test" / "observation.json").read_text())
+    assert written["verdict"] == "passed"
+    assert written["teardown"]["status"] == _mod.TEARDOWN_FAILED
+
+
+def test_a_passed_run_with_a_failed_teardown_still_exits_zero(monkeypatch):
+    """The exit code is the PRODUCT's outcome. Cleanup must never move it — in
+    either direction."""
+    obs = _mod.Observation(started_at="t", target={})
+    obs.verdict = "passed"
+    obs.teardown = {"status": _mod.TEARDOWN_FAILED, "detail": "boom"}
+    monkeypatch.setattr(_mod, "run_walk", lambda args: obs)
+    assert _mod.main(["--allow-prod"]) == _mod.EXIT_PASSED
+
+
+def test_a_successful_teardown_cannot_rescue_a_failing_verdict(
+        monkeypatch, tmp_path):
+    """T5's other direction: cleanup is not the product. A failing verdict and
+    its reason survive a clean deletion."""
+    base = _happy_base()
+    # one entry repeats: the server never observes anything, so the skipped run
+    # stays the `positive_not_attempted` class rather than becoming a failure
+    base[("GET", "/api/v1/onboarding/state")] = [_PROJ_UNOBSERVED]
+    obs, ctx, mod = _run_teardown_walk(
+        monkeypatch, tmp_path, reads=[(200, []), (200, [_AFTER_ROW]), (200, [])],
+        delete=_DELETE_OK, skip_write=True, ui=[NOT_CONNECTED, NOT_CONNECTED],
+        base=base)
+    assert obs.verdict == mod.INCOMPLETE_SKIPPED_WRITE
+    assert mod.exit_code_for(obs.reason) == mod.EXIT_FAILED
+    assert obs.teardown["status"] == _mod.TEARDOWN_DELETED
+    assert len(_delete_calls(ctx)) == 1
+
+
+def test_keep_org_records_a_deliberate_residue_and_never_deletes(
+        monkeypatch, tmp_path):
+    """T7's explicit form: the one supported way to leave the org behind, and it
+    is recorded as such rather than silently skipped."""
+    plan = _happy_base()
+    plan[("GET", _ORG_ROUTE)] = [(200, []), (200, [_AFTER_ROW]), (200, [])]
+    plan[("DELETE", _ORG_ROUTE + "/org-1")] = _DELETE_OK
+    obs, ctx, _ = _run_fake_walk(
+        monkeypatch, tmp_path, plan=plan, ui_sequence=[NOT_CONNECTED, CONNECTED],
+        mcp_tools_call=_MCP_OK, org_create=True, org_name=_RUN_ORG, keep_org=True)
+    assert obs.teardown["status"] == _mod.TEARDOWN_KEPT
+    assert _delete_calls(ctx) == []
+
+
+def test_no_exit_from_the_walk_writes_the_artifact_without_teardown():
+    """The single-exit property is the whole reason the artifact can be trusted.
+
+    A REFACTOR GUARD, not an obfuscation proof — say plainly what it checks and
+    what it deliberately does not. It is parsed from `run_walk`'s AST rather than
+    text-scanned, so a behaviour-identical reformat (a wrapped call, `_finish (…)`
+    with a space, a renamed teardown local) cannot false-red it, which is the
+    false-red a literal-text count produces.
+
+    It checks four things about the call sites SPELLED OUT in `run_walk`'s own
+    body:
+      (a) `_finish` appears there as no `Name` and no `Attribute`;
+      (b) no bare `Name` call to `getattr`/`globals`/`eval`/`exec`/`vars`;
+      (c) every `_finalize(` call has three positional arguments whose third is
+          the local bound by `Teardown(...)`, and it is the SAME local at every
+          call site;
+      (d) that local has exactly one Name-binding in `run_walk` — every
+          `ast.Name` in a Store context counts (plain assignment, `for`/
+          comprehension target, `with … as`, `+=`, `:=`).
+    (c) and (d) catch the two cheap forms of the same defect: `_finalize`'s third
+    parameter defaults to None, so `_finalize(obs, out_dir)` and
+    `_finalize(obs, out_dir, None)` write the artifact with an EMPTY teardown
+    block; and `td = Teardown(...)` on the line before an exit re-points the
+    local at an object whose `ctx` is None, so `_run_teardown` records the truthy,
+    deliberately-non-residue `not_reached` for an org this run never reaped (the
+    #4291 conflation).
+
+    NOT checked here, by construction — a source assertion cannot be an
+    adversarial proof, and extending it just moves the boundary. (d) sees
+    Name-bindings, so the NON-Name ones escape it: a `match … case _ as td`
+    capture, `import … as td`, `except … as td`. And further forms get past the
+    whole half: an `_finish`/`_finalize` alias, attribute-form `getattr`, and
+    mutating the teardown object's fields in place.
+
+    What covers those forms is the recorded teardown STATUS. Every `_finalize`
+    exit in `run_walk` is executed by at least one test, and at least one of the
+    tests reaching each exit asserts the status — not merely that `obs.teardown`
+    is truthy, since `not_reached` satisfies truthiness and a truthiness-only
+    assert cannot see a residue state degrade into a clean one. Five of them were
+    reached by no test at all until #4843.
+
+    SCOPE: `_finalize` exits only. Two abort paths sit OUTSIDE `run_walk`'s
+    try/except and write no artifact at all — a `--out` that cannot be created,
+    and a driver that will not start — so they are not "exits" in this sense and
+    no test here covers them (#4875).
+    """
+    tree = ast.parse(textwrap.dedent(_inspect.getsource(_mod.run_walk)))
+
+    # (a)+(b) `_finish` must not be SPELLED in `run_walk`, and the obvious
+    # string-built-name route to it must not be open either. Parsed, not
+    # grepped: a `_finish (…)` reformat is invisible to a substring search.
+    # KNOWN GAPS, stated rather than implied — an import alias, an alias of
+    # `_finalize`, and attribute-form `getattr` all get past this; see the
+    # docstring. This half is a refactor guard.
+    reachable = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    reachable |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+    assert "_finish" not in reachable, "_finish must not be spelled in run_walk"
+    dynamic = {"getattr", "globals", "eval", "exec", "vars"}
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                and getattr(n.func, "id", None) in dynamic], (
+        "run_walk must not call a bare "
+        f"{sorted(dynamic)} — the string-built-name route to _finish")
+
+    # (c) every funnel call passes the teardown state the walk actually built.
+    # `_finalize`'s third parameter defaults to None, so BOTH `_finalize(obs,
+    # out_dir)` and `_finalize(obs, out_dir, None)` write the artifact with an
+    # EMPTY teardown block — an arity check alone would not catch the second.
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "_finalize"]
+    assert calls, "no _finalize exit found in run_walk"
+    # Discover the name, do not hardcode it, so renaming the local is free.
+    td_names = {t.id for n in ast.walk(tree)
+                if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
+                and getattr(n.value.func, "id", None) == "Teardown"
+                and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
+                for t in n.targets}
+    assert td_names, "run_walk must build the teardown state it passes"
+    # (d) the teardown local has exactly one Name-binding, so the cheap
+    # re-pointing form (`td = Teardown(...)` on the line before an exit) is
+    # refused. Every `ast.Name` in a Store ctx counts — plain assignment, a
+    # `for`/comprehension target, `with … as`, `+=`, `:=`. Only the NON-Name
+    # bindings (`import … as`, `except … as`, `match … case _ as`) are invisible
+    # here; see the docstring — those are covered behaviourally by the
+    # teardown-STATUS assertions at the exits a test reaches.
+    stores = [n.id for n in ast.walk(tree)
+              if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)]
+    for name in sorted(td_names):
+        assert stores.count(name) == 1, (
+            f"run_walk binds {name!r} by plain assignment {stores.count(name)} "
+            "times; the teardown state must be built once and passed unchanged")
+    assert {len(c.args) for c in calls} == {3}, (
+        "every _finalize call in run_walk must pass the teardown state; got "
+        f"argument counts {sorted(len(c.args) for c in calls)}")
+    assert all(isinstance(c.args[2], ast.Name) and c.args[2].id in td_names
+               for c in calls), (
+        "every _finalize call in run_walk must pass the teardown state ITSELF "
+        f"(the object built by Teardown(...) -> {sorted(td_names)}), not a "
+        "default, a literal or an unrelated name")
+    # ...and the SAME one at every site: a second `Teardown(...)` binding looks
+    # like the teardown state to the checks above, but its `ctx is None` makes
+    # `_run_teardown` record `not_reached` — truthy, and deliberately not a
+    # residue state, so an org this run created and never reaped would be
+    # reported clean. This is the #4291 conflation the guard exists to prevent.
+    used = {c.args[2].id for c in calls}
+    assert len(used) == 1, (
+        "every _finalize call in run_walk must pass ONE teardown state; got "
+        f"{sorted(used)}")
+
+
+def test_an_org_name_the_product_would_refuse_is_rejected_before_any_browser(
+        monkeypatch, capsys):
+    """Teardown matches the name this run WROTE, so a name the product would
+    refuse would make the created org silently unreapable. Exit 2, and the walk
+    is never started. HERMETIC: `run_walk` is stubbed, so a guard regression
+    cannot reach the network from the test suite."""
+    started = []
+    monkeypatch.setattr(_mod, "run_walk", lambda args: started.append(args))
+    assert _mod.main(["--allow-prod", "--org-name", "bad.name"]) == _mod.EXIT_USAGE
+    assert "invalid --org-name" in capsys.readouterr().err
+    assert _mod.main(["--allow-prod", "--org-name", "Foo\nBar"]) == _mod.EXIT_USAGE
+    assert "invalid --org-name" in capsys.readouterr().err
+    assert _mod.main(["--allow-prod", "--org-name", "x" * 65]) == _mod.EXIT_USAGE
+    assert "invalid --org-name" in capsys.readouterr().err
+    assert started == []
+
+
+def test_a_padded_org_name_is_trimmed_to_what_the_product_stores(monkeypatch):
+    """Both the wizard and tenant-provision TRIM before validating and storing,
+    so the name teardown matches must be the trimmed one. A `$`-anchored match
+    (or no trim) would accept `"Foo "` / `"Foo\n"` and then hunt for a name the
+    product never stored. HERMETIC: `run_walk` is stubbed."""
+    seen = {}
+
+    def _fake(args):
+        seen["org_name"] = args.org_name
+        obs = _mod.Observation(started_at="t", target={})
+        obs.verdict = "passed"
+        obs.teardown = {"status": _mod.TEARDOWN_SKIPPED_NO_ORG}
+        return obs
+
+    monkeypatch.setattr(_mod, "run_walk", _fake)
+    for raw in ("  Foo  ", "Foo\n", "Foo "):
+        assert _mod.main(["--allow-prod", "--org-name", raw]) == _mod.EXIT_PASSED
+        assert seen["org_name"] == "Foo"
+
+
+def test_keep_org_is_cli_only_and_never_ambiently_injected():
+    """One ambient variable must never turn teardown off for every run."""
+    assert _mod.build_parser().parse_args([]).keep_org is False
+    assert "SHIP_TEST_KEEP_ORG" not in _inspect.getsource(_mod.build_parser)
+
+
+def test_bff_api_sends_delete_as_delete_and_refuses_an_unknown_verb():
+    """`bff_api` used to send ANY non-GET as POST, which would have downgraded
+    the teardown's DELETE into a wrong-method request."""
+    base = "https://app.premiselabs.co"
+    ctx = _FakeCtx({("DELETE", "/api/v1/organizations/org-1"):
+                    [(202, {"org_id": "org-1"})]}, base)
+    status, body = _mod.bff_api(ctx, base, "DELETE", "/organizations/org-1")
+    assert (status, body) == (202, {"org_id": "org-1"})
+    assert [c[0] for c in ctx.request.calls] == ["DELETE"]
+    with pytest.raises(ValueError):
+        _mod.bff_api(ctx, base, "PUT", "/organizations/org-1")
+
+
+@pytest.mark.parametrize("body,expected", [
+    ([], {}),
+    ([{"org_id": "a", "org_name": "A"}], {"a": "A"}),
+    ({"organizations": [{"org_id": "a", "org_name": "A"}]}, {"a": "A"}),
+    ({"unexpected": []}, None),
+    ([{"no_org_id": 1}], None),
+    ("nope", None),
+    (None, None),
+])
+def test_read_org_ids_reads_only_a_recognized_org_list(body, expected):
+    """An unrecognized shape parsed as \"no orgs\" would silently switch the
+    identity proof off (baseline) and silently confirm a deletion (verify)."""
+    base = "https://app.premiselabs.co"
+    ctx = _FakeCtx({("GET", "/api/v1/organizations"): [(200, body)]}, base)
+    status, ids, _upstream = _mod.read_org_ids(ctx, base)
+    assert status == 200
+    assert ids == expected
+
+
+def test_read_org_ids_reports_a_proxied_upstream_status_and_fails_closed():
+    base = "https://app.premiselabs.co"
+    ctx = _FakeCtx({("GET", "/api/v1/organizations"):
+                    [(503, {"error": "upstream_unavailable", "upstream_status": 429})]},
+                   base)
+    assert _mod.read_org_ids(ctx, base) == (503, None, 429)
