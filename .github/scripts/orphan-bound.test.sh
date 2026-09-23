@@ -192,15 +192,15 @@ echo
 echo "1. a report with cleared=true and COUNT==left PASSES at the sweep's own left"
 run_gate 14 0 report14.json
 assert_eq "$RC" "0" "exits 0"
-assert_contains "$OUT" "left=14" "reports the bound READ from the report"
-assert_contains "$OUT" "cleared=true" "records that the sweep finished"
-assert_contains "$OUT" "within the sweep's own measurement" "states the pass basis"
+assert_contains "$OUT" "orphaned redislite servers after suite: 14 (sweep before=20 left=14 reaped=9, cleared=true) — within the sweep's own measurement" \
+  "the COUNT==left pass line is reported VERBATIM — every field and separator"
 
 echo "2. a DIFFERENT left also PASSES against its own value (the bound is read, not constant)"
 # If the script carried any fixed bound, at most one of cases 1/2 could pass.
 run_gate 7 0 report7.json
 assert_eq "$RC" "0" "exits 0"
-assert_contains "$OUT" "left=7" "reports the second report's own value"
+assert_contains "$OUT" "orphaned redislite servers after suite: 7 (sweep before=9 left=7 reaped=2, cleared=true) — within the sweep's own measurement" \
+  "the bound is READ from the report: the whole pass line carries this report's own values"
 assert_not_contains "$OUT" "left=14" "uses the report's value, not case 1's"
 
 echo "3. cleared=false at COUNT>0 REDs on a normal exit (servers remain, backlog unproven)"
@@ -242,16 +242,15 @@ echo "7. a COUNT BELOW left PASSES at rc=0 (the atexit race is normal)"
 # legitimately sees fewer. This is the direction that must never red.
 run_gate 13 0 report14.json
 assert_eq "$RC" "0" "exits 0 on COUNT < left"
-assert_contains "$OUT" "within the sweep's own measurement" "prints the pass line"
-assert_contains "$OUT" "interpreter exit" "logs the atexit delta"
-assert_contains "$OUT" "reaped=9, cleared=true; 1 shut down at interpreter exit" \
-  "the COUNT<left pass line interpolates the sweep's own cleared=true and delta"
+assert_contains "$OUT" "orphaned redislite servers after suite: 13 (sweep before=20 left=14 reaped=9, cleared=true; 1 shut down at interpreter exit after the sweep's teardown reading) — within the sweep's own measurement" \
+  "the COUNT<left pass line is reported VERBATIM — every field, separator and delta"
 assert_not_contains "$OUT" "::error::" "no red on the healthy atexit boundary"
 
 echo "8. a kill does NOT turn COUNT < left into a red either"
 run_gate 13 124 report14.json
 assert_eq "$RC" "0" "exits 0 on COUNT < left under rc=124"
-assert_contains "$OUT" "within the sweep's own measurement" "prints the pass line"
+assert_contains "$OUT" "orphaned redislite servers after suite: 13 (sweep before=20 left=14 reaped=9, cleared=true; 1 shut down at interpreter exit after the sweep's teardown reading) — within the sweep's own measurement" \
+  "the COUNT<left pass line is VERBATIM under a kill too (the bound is unchanged)"
 assert_not_contains "$OUT" "::warning::" "no spurious warning for a below-bound count"
 
 echo "9. an error report REDs ALWAYS — including under a kill"
@@ -369,7 +368,8 @@ echo "26. the accounting identity reaped + left >= before holds → PASS"
 # reaped=12, left=14, before=26 — the identity holds at exact equality.
 run_gate 14 0 identity_ok.json
 assert_eq "$RC" "0" "exits 0 when reaped + left == before"
-assert_contains "$OUT" "within the sweep's own measurement" "prints the pass line"
+assert_contains "$OUT" "orphaned redislite servers after suite: 14 (sweep before=26 left=14 reaped=12, cleared=true) — within the sweep's own measurement" \
+  "the COUNT==left pass line is VERBATIM for the identity fixture"
 
 echo "27. an identity violation (reaped + left < before) REDs"
 # The sweep reaped servers its own report no longer accounts for: the SWEEP's
@@ -390,7 +390,8 @@ assert_contains "$OUT" "#1371" "cites the kill-aware rationale"
 echo "29. before=null SKIPS the identity (the pre-sweep probe failed) — not a red"
 run_gate 2 0 before_null.json
 assert_eq "$RC" "0" "exits 0"
-assert_contains "$OUT" "within the sweep's own measurement" "prints the pass line"
+assert_contains "$OUT" "orphaned redislite servers after suite: 2 (sweep before=null left=2 reaped=1, cleared=true) — within the sweep's own measurement" \
+  "the COUNT==left pass line is VERBATIM with a null before too"
 assert_not_contains "$OUT" "does not account for" \
   "the identity is not asserted against a null before"
 
@@ -441,7 +442,8 @@ assert_not_contains "$OUT" "within the sweep's own measurement" \
 echo "36. the healthy residue shape PASSES (only cleared separates it from case 35)"
 run_gate 100 0 healthy100.json
 assert_eq "$RC" "0" "exits 0 on reaped>0, cleared=true"
-assert_contains "$OUT" "within the sweep's own measurement" "prints the pass line"
+assert_contains "$OUT" "orphaned redislite servers after suite: 100 (sweep before=109 left=100 reaped=9, cleared=true) — within the sweep's own measurement" \
+  "the COUNT==left pass line is VERBATIM for the healthy residue shape"
 
 echo "37. a DEFERRED sweep warns, skips the mixed-population identity, and PASSES"
 # other_suites non-empty: left counts other suites' servers, so it is not an
@@ -542,6 +544,15 @@ assert_contains "$OUT" "nothing swept" "names the unswept population"
 run_gate 1 0 leftnull.json
 assert_eq "$RC" "1" "left=null: COUNT=1 REDs (the COUNT==0 carve-out is exact, not widened to 3)"
 assert_contains "$OUT" "probe FAILED" "names the failed sweep-side probe"
+# cleared=false is a measured-zero carve-out too (`[ "$COUNT" -gt 0 ]` at
+# :423): COUNT=1 is the first count past it, so widening to `-gt 1`/`-gt 2`
+# would green a run with a live server while its warning claims 0 were seen.
+run_gate 1 0 budget.json
+assert_eq "$RC" "1" "cleared=false: COUNT=1 REDs (the first count past the measured-zero carve-out)"
+assert_contains "$OUT" "::error::" "emits an error, not a warning"
+assert_contains "$OUT" "cleared=false" "names the exhausted budget"
+assert_contains "$OUT" "1 redislite servers remain" "names the actual COUNT, not a blanket zero-excuse"
+assert_not_contains "$OUT" "diagnostic only" "does not excuse a live residue as diagnostic"
 
 echo "42. rc=1 (tests failed) is NOT a watchdog kill — red arms stay RED"
 # #4740 review 6: `1` is the ordinary "tests failed" rc, not a #1371 kill.
@@ -570,9 +581,8 @@ assert_eq "$RC" "0" "exits 0 when the workflow's own probe measured zero"
 assert_contains "$OUT" "::warning::" "warns that the sweep exhausted its budget"
 assert_contains "$OUT" "cleared=false" "names the exhausted budget"
 assert_contains "$OUT" "diagnostic only" "labels it a diagnostic"
-assert_contains "$OUT" "within the sweep's own measurement" "prints the pass line"
-assert_contains "$OUT" "reaped=9, cleared=false; 14 shut down at interpreter exit after the sweep's teardown reading)" \
-  "the pass line interpolates the sweep's own cleared=false, not another value"
+assert_contains "$OUT" "orphaned redislite servers after suite: 0 (sweep before=23 left=14 reaped=9, cleared=false; 14 shut down at interpreter exit after the sweep's teardown reading) — within the sweep's own measurement" \
+  "the COUNT<left pass line is VERBATIM, interpolating this report's own cleared=false"
 assert_not_contains "$OUT" "cleared=true" \
   "the pass line reports the sweep's own cleared=false, never a hardcoded true"
 assert_not_contains "$OUT" "::error::" "does not red an empty residue"
@@ -592,7 +602,8 @@ echo "45. the cleared=false pair under a kill rc: zero warns, non-zero downgrade
 run_gate 0 124 budget.json
 assert_eq "$RC" "0" "exits 0 at COUNT=0 under rc=124"
 assert_contains "$OUT" "::warning::" "still warns at a measured zero under a kill"
-assert_contains "$OUT" "within the sweep's own measurement" "prints the pass line"
+assert_contains "$OUT" "orphaned redislite servers after suite: 0 (sweep before=23 left=14 reaped=9, cleared=false; 14 shut down at interpreter exit after the sweep's teardown reading) — within the sweep's own measurement" \
+  "the COUNT<left pass line is VERBATIM at a measured zero under a kill"
 run_gate 3 124 budget.json
 assert_eq "$RC" "0" "exits 0 at COUNT>0 under rc=124 (downgraded)"
 assert_contains "$OUT" "::warning::" "emits a warning instead of a red"
@@ -630,8 +641,8 @@ echo "48. the COUNT==left pass line reports the sweep's own cleared=false"
 # cleared=false (reaped + left == before, so the identity holds).
 run_gate 0 0 cleared_false_left_zero.json
 assert_eq "$RC" "0" "exits 0 — nothing live to bound"
-assert_contains "$OUT" "reaped=5, cleared=false) — within the sweep's own measurement" \
-  "the COUNT==left pass line reports the sweep's own cleared=false, not a hardcoded true"
+assert_contains "$OUT" "orphaned redislite servers after suite: 0 (sweep before=5 left=0 reaped=5, cleared=false) — within the sweep's own measurement" \
+  "the COUNT==left pass line is VERBATIM, reporting the sweep's own cleared=false"
 assert_not_contains "$OUT" "cleared=true" \
   "never fabricates cleared=true on the COUNT==left pass line"
 
