@@ -314,8 +314,8 @@ _logger = logging.getLogger("tortoise.operator_alert")
 #: suppresses ATTEMPTS — it is not a persistence gate.
 _ALERT_WINDOW_S = 900.0
 _RETRY_WINDOW_S = 60.0
-#: A worker that outlives this is assumed wedged; its latch self-heals so it can
-#: never silence the alert for the process lifetime.
+#: A worker that outlives this is assumed wedged. The reservation it holds is
+#: released at the sites listed on ``_RESERVED``.
 _INFLIGHT_STALE_S = 120.0
 #: Global dispatch bound: a sweep-scale outage drops for many orgs at once.
 _MAX_INFLIGHT = 32
@@ -331,22 +331,21 @@ _LOCK = threading.Lock()
 #: persistently-failing keys a sweep-scale outage produces while keeping cold keys.
 _ATTEMPT: "collections.OrderedDict[tuple[str, str], tuple[float, float]]" = collections.OrderedDict()
 _INFLIGHT: dict[tuple[str, str], float] = {}                # key -> attempt token
-#: ADMITTED-but-unsettled dispatches — THE admission bound. Taken under _LOCK at
-#: admission and released ONLY when the dispatch settles (_forget) or never reached
-#: the pool (the two failure paths), so it tracks POOL OCCUPANCY, not live handles.
-#: _reap_locked must NOT decrement it: an age-reaped handle whose worker is still
-#: wedged holds its pool thread, so releasing there lets the executor queue grow past
-#: the bound without limit — with max_workers=4, four wedged workers would otherwise
-#: queue every later alert forever while each reap admitted ~32 more. The gate is
-#: therefore `_RESERVED >= _MAX_INFLIGHT`, weak enough to shed and loud about it.
+#: ADMITTED-but-unsettled dispatches. Taken under _LOCK at admission and released at
+#: these sites: `_run`'s `finally` once a started dispatch settles, `_forget` when a
+#: future was cancelled before `_run` started (the done-callback `alert_operator`
+#: registers), and `alert_operator`'s two pre-pool failure paths (no store, rejected
+#: submit). `_reap_locked` does not decrement it. The gate is `_RESERVED >=
+#: _MAX_INFLIGHT`.
 _RESERVED = 0
 #: future -> submitted ts. Used by `join_operator_alerts` and by _reap_locked for
 #: dead-handle housekeeping — NOT by the shed gate (that reads _RESERVED).
 _HANDLES: dict[Any, float] = {}
 #: The full-map sweep is amortised housekeeping, not the gate: the admission decision
-#: is O(1) (`_due_locked` + `_RESERVED`), and _HANDLES/_INFLIGHT are now bounded by
-#: _MAX_INFLIGHT, so the O(n) scan over _ATTEMPT runs once per _SWEEP_EVERY admissions
-#: (and whenever _ATTEMPT exceeds _PRUNE_ABOVE) instead of on every hot-path write.
+#: is O(1) (`_due_locked` + `_RESERVED`), so the O(n) scan runs once per _SWEEP_EVERY
+#: admissions (and whenever _ATTEMPT exceeds _PRUNE_ABOVE) instead of on every
+#: hot-path write. It prunes `_ATTEMPT` and ages dead handles out of `_HANDLES`; it
+#: does not touch `_INFLIGHT`.
 _SWEEP_EVERY = 64
 _SINCE_SWEEP = 0
 
@@ -389,10 +388,10 @@ def file_operator_incident(store, kind: str, org_id: str | None, detail: dict) -
     on record" and re-arm the short window. ``store`` is resolved by the caller.
 
     The on-record rule (``outcome in {FILED, DEDUP}``, i.e. ``is not SUPPRESSED``)
-    is ALSO implemented by ``hosted_api._analytics_open_incident``
-    (``hosted_api.py:22129-22145``) — the two must move together. Extracting one
-    shared helper is deferred (Task 7); until then, changing this rule here
-    without changing that one re-creates the #3820 duplicate-rule defect.
+    is ALSO implemented by ``hosted_api._analytics_open_incident``, and
+    ``tests/test_operator_alert.py::test_on_record_predicate_parity`` pins the two
+    equal over every :class:`OpenOutcome` member. Extracting one shared helper is
+    deferred (filed as a follow-up).
     """
     if store is None:
         return False
@@ -407,10 +406,9 @@ def file_operator_incident(store, kind: str, org_id: str | None, detail: dict) -
 
 
 def _reap_locked(now: float) -> None:
-    """Drop dead handles past the stale bound — map housekeeping, NOT the gate.
+    """Drop dead handles past the stale bound — map housekeeping, not the gate.
 
-    Deliberately does NOT touch ``_RESERVED``: a reaped handle's worker is still
-    holding a pool thread, which is exactly what the reservation counts.
+    Does not touch ``_RESERVED``.
     """
     for f, ts in list(_HANDLES.items()):
         if now - ts > _INFLIGHT_STALE_S:
@@ -418,11 +416,7 @@ def _reap_locked(now: float) -> None:
 
 
 def _release_locked() -> None:
-    """Release one admission reservation (caller holds ``_LOCK``).
-
-    Floors at 0 so a double release cannot make the gate permanently open — the
-    failure direction that silences alerts.
-    """
+    """Release one admission reservation (caller holds ``_LOCK``); floors at 0."""
     global _RESERVED
     if _RESERVED > 0:
         _RESERVED -= 1
@@ -475,11 +469,10 @@ def _run(store, key, kind, org_id, detail, token) -> None:
 
 
 def _forget(fut) -> None:
-    """Drop one dispatch's handle; release its reservation only if it NEVER ran.
+    """Drop one dispatch's handle; release its reservation if the future was
+    cancelled before ``_run`` started.
 
-    A future cancelled before starting (pool shutdown, ``cancel_futures``) never
-    enters ``_run``, so its reservation would otherwise leak; a started future
-    releases in ``_run``'s ``finally``. Mutually exclusive, so exactly one release.
+    A started future releases its reservation in ``_run``'s ``finally``.
     """
     with _LOCK:
         _HANDLES.pop(fut, None)
@@ -502,9 +495,8 @@ def alert_operator(kind: str, org_id: str | None, detail: dict | None = None):
             return None
         _ATTEMPT[key] = (now, _RETRY_WINDOW_S)   # provisional; _run re-arms
         _ATTEMPT.move_to_end(key)
-        # THE admission bound: a real reservation, taken atomically with the decision
-        # and released only when the dispatch settles, so a wedged worker's pool
-        # thread stays counted and the queue cannot grow past _MAX_INFLIGHT.
+        # The admission bound: a reservation taken with the decision and released at
+        # the sites listed on _RESERVED.
         if _RESERVED >= _MAX_INFLIGHT:
             shed = True                          # bounded: shed, keep throttled
         else:
@@ -547,12 +539,10 @@ def alert_operator(kind: str, org_id: str | None, detail: dict | None = None):
 def join_operator_alerts(timeout: float = 5.0) -> int:
     """Wait up to *timeout* for in-flight dispatches; returns the UNSETTLED count.
 
-    ``0`` means every TRACKED dispatch settled within the timeout — the strongest
-    claim this seam can make, not a proof that no worker exists: a handle aged past
-    ``_INFLIGHT_STALE_S`` is dropped from ``_HANDLES`` by design, so a genuinely
-    wedged worker is untracked here while still holding its pool thread (and its
-    reservation). A timed-out handle stays tracked (never discarded, so it cannot
-    become an untracked worker that writes state into the next test). Never raises.
+    ``0`` means every tracked dispatch settled within the timeout. A handle aged past
+    ``_INFLIGHT_STALE_S`` is dropped from ``_HANDLES``, so a wedged worker can be
+    untracked here while still holding its pool thread and its reservation. A
+    timed-out handle stays tracked. Never raises.
     """
     with _LOCK:
         handles = list(_HANDLES)
@@ -984,9 +974,7 @@ Cycle 2 found one regression the cycle-1 fix itself introduced, plus three cover
   pool, queued past `_INFLIGHT_STALE_S` (120 s), then started, found its token gone with nobody to
   replace it, and returned *before* filing — no incident, no log. That is the exact silent-drop class
   this module exists to remove, reached under the storm it exists for. `_prune_locked` no longer
-  touches `_INFLIGHT`: a latch is cleared only by a successor (`_due_locked`, which admits one
-  atomically) or a test reset, which is what makes the pre-check safe. No bound is lost — every insert
-  is paired with a reservation, so `_INFLIGHT` is already bounded by `_MAX_INFLIGHT`.
+  touches `_INFLIGHT`.
 * **P2 — the writer forwarding was unpinned.** Forcing `alert_store_from` to ignore `writer` passed
   179 tests, so the merge-blocking #3127/#2844 authority contract could be dropped again with green
   CI. `test_alert_store_from_forwards_the_writer` now pins both legs (default `WRITER_APP`, explicit
@@ -1008,17 +996,15 @@ Four mutations observed RED (`operations/logs/3981-mutation-evidence.log`).
 
 Cycle 3 showed round 4's fix was **incomplete**, and the mechanism was precise enough to pin:
 
-* **P1 — the shed path could still drop an admitted alert.** Removing the `_prune_locked` sweep made
-  `_due_locked`'s self-heal the only non-test way a latch is cleared — but `_due_locked` POPPED the
-  latch and the *same* `alert_operator` call could then decide it was over `_MAX_INFLIGHT` and shed,
-  installing **no** successor. The worker already admitted for that key then returned at `_run`'s
-  ownership check without filing: the incident gone, with only a misleading "dispatch queue full"
-  warning for the *repeat* call. The round-4 docstrings claiming the clear and the install were atomic
-  were therefore false, which is itself the lesson — a claim about the mechanism belongs pinned by a
-  test, not asserted in prose. The shed bound is now decided **before** `_due_locked` may clear a latch,
-  so clear + install happen in one `_LOCK` hold and a latch is only ever handed to a successor that
-  WILL run. A shed also no longer writes `_ATTEMPT`: a shed is not an attempt, and writing it made a
-  later `_due_locked` read a window this call never consumed.
+* **P1 — the shed path could still drop an admitted alert.** `_due_locked` POPPED the latch and the
+  *same* `alert_operator` call could then decide it was over `_MAX_INFLIGHT` and shed, installing
+  **no** successor. The worker already admitted for that key then returned at `_run`'s ownership check
+  without filing: the incident gone, with only a misleading "dispatch queue full" warning for the
+  *repeat* call. The round-4 docstrings claiming the clear and the install were atomic were therefore
+  false, which is itself the lesson — a claim about the mechanism belongs pinned by a test, not
+  asserted in prose. The shed bound is now decided **before** `_due_locked` may pop a latch. A shed
+  also no longer writes `_ATTEMPT`: a shed is not an attempt, and writing it made a later `_due_locked`
+  read a window this call never consumed.
 * **P2 — the two non-owner latch pops** (`store is None`, `_POOL.submit` failure) are token-guarded.
   `alert_store()` runs outside `_LOCK`, so a caller stalled past `_INFLIGHT_STALE_S` could otherwise
   pop a latch that a concurrent dispatch had just re-installed. Reservation release is unchanged.
@@ -1070,10 +1056,7 @@ Two mutations observed RED (`operations/logs/3981-mutation-evidence.log`).
   matching), which is the shape the three constants around it should be read with in mind: a sentinel
   must never be a value the measured clock could legitimately report.
 * **P2 — two docstrings asserted a universal the code does not hold.** `_run` and `_prune_locked` both
-  claimed "a missing token means a successor WILL file". Both now state the observable fact of the
-  mechanism: a missing token means a successor was **ADMITTED** — `_INFLIGHT[key]` is cleared only in a
-  `_LOCK` hold that installs the successor token (`_due_locked`, called from `alert_operator`), and
-  `_prune_locked` deliberately does not sweep `_INFLIGHT`.
+  claimed "a missing token means a successor WILL file". `_prune_locked` does not sweep `_INFLIGHT`.
 * **P2 — the reset line was unpinned.** `test_reset_clears_every_piece_of_state` now sets
   `_LAST_SHED_LOG` and asserts the reset clears it; without the reset line it is RED
   (`operations/logs/3981-mutation-evidence.log`).
@@ -1087,8 +1070,7 @@ Cycle 6 returned **not clean** on three P2s, and two of them were the same lesso
 re-learning — a claim about a guarantee is the thing that re-stales:
 
 * **The false universal survived in a third place.** `alert_operator`'s admission comment still said
-  "a successor that WILL run" 60 lines from where the same sentence had just been corrected. Every
-  instance now reads "a successor that is ADMITTED".
+  "a successor that WILL run" 60 lines from where the same sentence had just been corrected.
 * **"Never lost without a trace" was itself falsified.** A queued alert is the future most likely to
   have been REAPED from `_HANDLES` (aged past `_INFLIGHT_STALE_S` behind wedged workers), so
   `_shutdown_pool`'s pending-handle count cannot see it and `cancel_futures=True` discarded it with no
@@ -1107,8 +1089,7 @@ Cycle 7 found no P0/P1 and three P2s, the first of which was the same claim fail
 * **"never lost without a trace" was DELETED, not qualified again.** It is false — a kind paused in
   `ops/suppression.json` returns `SUPPRESSED` with no line at all, by design — and it had already
   re-staled twice while I reworded it in place and re-deployed it at a new site. A self-referential
-  claim about a guarantee does not improve with better narration; the fix is deletion. Both sites now
-  state only the observable fact: a missing token means a successor was ADMITTED.
+  claim about a guarantee does not improve with better narration; the fix is deletion.
 * **The cancellation line no longer asserts a cause it cannot know.** `_forget` fires for pool
   shutdown, a test's cancelling pool, and `cancel_futures` alike, so "(pool shutdown)" was a guess
   printed as fact. It now states only what is observed, and the docstring says why the cause is
@@ -1118,3 +1099,34 @@ Cycle 7 found no P0/P1 and three P2s, the first of which was the same claim fail
   asserts that a future which RAN stays silent (RED under exactly that mutation).
 
 Three mutations observed RED (`operations/logs/3981-mutation-evidence.log`).
+
+### Implementation record (round 10 — review cycle 8, deletion sweep)
+
+Cycle 8 found the successor-*admission* half of the `_prune_locked` universal false in a real path:
+`alert_operator` resolves the store OUTSIDE `_LOCK` and its two pre-pool failure paths pop the
+caller's latch with no successor installed, so "a stale latch is cleared only by `_due_locked`" and
+"clearing one always ADMITS a successor" both fail. The fix is deletion, not narrowing:
+
+* `operator_alert.py` — deleted the universal/invariant clauses about latch clearing and admission:
+  `_prune_locked` (the whole "cleared only by `_due_locked` … always ADMITS" body), `_due_locked`'s
+  "ONLY on the admitting path" + ordering rationale, `_run`'s "a missing token means a successor was
+  ADMITTED", `alert_operator`'s "only ever handed to a successor that is ADMITTED", `_forget`'s
+  NEVER/exactly-one/only-place phrasing, `_reap_locked`/`_release_locked`/`_SWEEP_EVERY`'s
+  counterfactual invariants, and the `alert_store`/`alert_unmetered_increment` over-claims. What
+  remains states the observable fact of each path; the release sites are the `_RESERVED` enumeration.
+* The plan doc's mechanism claims — the round-4/5/7/8/9 records and the Task-1 listing — carry the
+  same deletions.
+
+**Two P2s.**
+
+* `config/ci-surfaces.yml`: `test_operator_alert.py` dual-registered under `surfaces.api` (it holds
+  two uniquely-`hosted_api` pins, and an exact `api` match REPLACES the `core` fallback, so a
+  `hosted_api.py`-only change did not run it).
+* `tests/test_metering_window_admission.py`: the fence docstring's "Every operator alert is a
+  `_alert_unmetered(...)` / `report_unmetered_increment(...)` call" was a false universal — the
+  shared entry point `alert_unmetered_increment(lane, ...)` and `alert_operator(kind, ...)` match
+  neither regex. The universal is deleted; the fence is described as scanning the lane tokens passed
+  through the two lane-carrying helpers.
+
+Mutation evidence for the earlier rounds is in `operations/logs/3981-mutation-evidence.log`; this
+round is comment/docstring + registration only (AST-stripped digest equality).

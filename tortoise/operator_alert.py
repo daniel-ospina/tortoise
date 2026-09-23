@@ -22,7 +22,7 @@ Design:
 - The dispatcher mirrors ``mcp_server._emit_mcp_tool_call_telemetry``
   (``tortoise/mcp_server.py:177``; join seam ``_flush_mcp_telemetry``, ``:242``) — off-loop, tracked
   handles, a join seam — with a bounded pool for an alert: an unbounded thread per dropped increment
-  is exactly the storm this exists to avoid.
+  is the storm this exists to avoid.
 
 Nothing here changes request semantics: the callers already absorb the failure
 and serve the request.
@@ -59,8 +59,8 @@ UNMETERED_INCREMENT_KIND = "UNMETERED_INCREMENT"
 #: suppresses ATTEMPTS — it is not a persistence gate.
 _ALERT_WINDOW_S = 900.0
 _RETRY_WINDOW_S = 60.0
-#: A worker that outlives this is assumed wedged; its latch self-heals so it can
-#: never silence the alert for the process lifetime.
+#: A worker that outlives this is assumed wedged. The reservation it holds is
+#: released at the sites listed on ``_RESERVED``.
 _INFLIGHT_STALE_S = 120.0
 #: Shed-warning rate limit. The shed path runs on the CALLER's path (some reporters
 #: are inline on the event loop), and the bound is saturated exactly during a
@@ -89,16 +89,12 @@ _LOCK = threading.Lock()
 #: persistently-failing keys a sweep-scale outage produces while keeping cold keys.
 _ATTEMPT: collections.OrderedDict[tuple[str, str], tuple[float, float]] = collections.OrderedDict()
 _INFLIGHT: dict[tuple[str, str], float] = {}                # key -> attempt token
-#: ADMITTED-but-unsettled dispatches — THE admission bound. Taken under _LOCK at
-#: admission and released at one of three kinds of site: `_run`'s `finally` once a
-#: started dispatch settles, `_forget` when a future was cancelled before `_run`
-#: started (the done-callback `alert_operator` registers), and `alert_operator`'s two
-#: pre-pool failure paths (no store, rejected submit). _reap_locked must NOT decrement
-#: it: an age-reaped handle whose worker is still wedged holds its pool thread, so
-#: releasing there lets the executor queue grow past the bound without limit — with
-#: max_workers=4, four wedged workers would otherwise queue every later alert forever
-#: while each reap admitted ~32 more. The gate is therefore `_RESERVED >=
-#: _MAX_INFLIGHT`, weak enough to shed and loud about it.
+#: ADMITTED-but-unsettled dispatches. Taken under _LOCK at admission and released at
+#: these sites: `_run`'s `finally` once a started dispatch settles, `_forget` when a
+#: future was cancelled before `_run` started (the done-callback `alert_operator`
+#: registers), and `alert_operator`'s two pre-pool failure paths (no store, rejected
+#: submit). `_reap_locked` does not decrement it. The gate is `_RESERVED >=
+#: _MAX_INFLIGHT`.
 _RESERVED = 0
 #: future -> submitted ts. Used by `join_operator_alerts` and by _reap_locked for
 #: dead-handle housekeeping — NOT by the shed gate (that reads _RESERVED).
@@ -106,9 +102,8 @@ _HANDLES: dict[Any, float] = {}
 #: The full-map sweep is amortised housekeeping, not the gate: the admission decision
 #: is O(1) (`_due_locked` + `_RESERVED`), so the O(n) scan runs once per _SWEEP_EVERY
 #: admissions (and whenever _ATTEMPT exceeds _PRUNE_ABOVE) instead of on every
-#: hot-path write. It prunes `_ATTEMPT` and ages dead handles out of `_HANDLES`;
-#: `_INFLIGHT` is not swept — its bound is `_RESERVED` plus cancelled latches (see
-#: `_prune_locked`).
+#: hot-path write. It prunes `_ATTEMPT` and ages dead handles out of `_HANDLES`; it
+#: does not touch `_INFLIGHT`.
 _SWEEP_EVERY = 64
 _SINCE_SWEEP = 0
 
@@ -146,14 +141,14 @@ def alert_store():
     and therefore a fresh boto3 client, per call: correct for the
     once-per-window alert this module dispatches, wrong for a caller that asks
     per request (``cohort_cost._alert_store`` runs on every cap-firing capture).
-    So in a hosted process ``hosted_api._incident_alert_store`` is the single
-    builder behind both callers, and patching THIS function still redirects
+    In a hosted process both callers build through
+    ``hosted_api._incident_alert_store``, and patching THIS function redirects
     both.
 
-    It never IMPORTS ``tortoise.hosted_api``: this runs on the MCP stdio path
+    It does not import ``tortoise.hosted_api``: this runs on the MCP stdio path
     for a dropped increment, and importing the hosted app builds the whole
-    FastAPI tree (~1.7 s, ``tortoise/mcp_server.py:31-35``). That branch is
-    taken only when another importer already paid the cost; otherwise the light
+    FastAPI tree (~1.7 s, ``tortoise/mcp_server.py:31-35``). When another importer
+    has already loaded it, the hosted branch above answers; otherwise the light
     leg answers and ``tortoise.hosted_api`` stays out of ``sys.modules``
     (pinned by ``tests/test_operator_alert.py::test_the_light_leg_never_imports_the_hosted_app``).
     """
@@ -169,12 +164,11 @@ def alert_unmetered_increment(lane: str, org_id: str | None,
                               error: BaseException) -> None:
     """Dispatch the ``UNMETERED_INCREMENT`` incident. Never raises.
 
-    THE one entry point for a dropped increment: the reporter in
-    ``tortoise.metering`` and all three import-guard fallbacks (``hosted_api``,
-    ``mcp_server``, ``ask_lane``) call THIS, so the kind string, the
-    message-free detail vocabulary, and the never-raising contract cannot drift
-    between six swallow sites. Importable without ``tortoise.metering`` — which
-    is the whole point: the fallbacks run when that import failed.
+    The entry point for a dropped increment: the reporter in ``tortoise.metering``
+    and the import-guard fallbacks (``hosted_api``, ``mcp_server``, ``ask_lane``)
+    call THIS, so the kind string and the detail vocabulary are written once.
+    Importable without ``tortoise.metering`` — the fallbacks run when that import
+    failed.
     """
     with contextlib.suppress(Exception):  # the alert must never raise
         alert_operator(UNMETERED_INCREMENT_KIND, org_id,
@@ -189,12 +183,10 @@ def file_operator_incident(store, kind: str, org_id: str | None, detail: dict) -
     on record" and re-arm the short window. ``store`` is resolved by the caller.
 
     The on-record rule (``outcome in {FILED, DEDUP}``, i.e. ``is not SUPPRESSED``)
-    is ALSO implemented by ``hosted_api._analytics_open_incident`` — the two must
-    move together, and
-    ``tests/test_operator_alert.py::test_on_record_predicate_parity`` pins them
-    equal over every :class:`OpenOutcome` member. Extracting one shared helper
-    is deferred (filed as a follow-up); until then, changing this rule here
-    without changing that one re-creates the #3820 duplicate-rule defect.
+    is ALSO implemented by ``hosted_api._analytics_open_incident``, and
+    ``tests/test_operator_alert.py::test_on_record_predicate_parity`` pins the two
+    equal over every :class:`OpenOutcome` member. Extracting one shared helper is
+    deferred (filed as a follow-up).
     """
     if store is None:
         return False
@@ -209,10 +201,9 @@ def file_operator_incident(store, kind: str, org_id: str | None, detail: dict) -
 
 
 def _reap_locked(now: float) -> None:
-    """Drop dead handles past the stale bound — map housekeeping, NOT the gate.
+    """Drop dead handles past the stale bound — map housekeeping, not the gate.
 
-    Deliberately does NOT touch ``_RESERVED``: a reaped handle's worker is still
-    holding a pool thread, which is exactly what the reservation counts.
+    Does not touch ``_RESERVED``.
     """
     for f, ts in list(_HANDLES.items()):
         if now - ts > _INFLIGHT_STALE_S:
@@ -220,33 +211,17 @@ def _reap_locked(now: float) -> None:
 
 
 def _release_locked() -> None:
-    """Release one admission reservation (caller holds ``_LOCK``).
-
-    Floors at 0 so a double release cannot make the gate permanently open — the
-    failure direction that silences alerts.
-    """
+    """Release one admission reservation (caller holds ``_LOCK``); floors at 0."""
     global _RESERVED
     if _RESERVED > 0:
         _RESERVED -= 1
 
 
 def _prune_locked(now: float) -> None:
-    """Amortised map housekeeping — never the admission decision (see _RESERVED).
+    """Amortised map housekeeping — not the admission decision (see _RESERVED).
 
-    Deliberately does NOT sweep ``_INFLIGHT``: a stale latch is cleared only by
-    ``_due_locked``, in the same ``_LOCK`` hold that INSTALLS its successor — so
-    clearing one always ADMITS a successor in that hold. (Sweeping it here let a
-    queued worker — admitted before, sat behind saturated workers past
-    ``_INFLIGHT_STALE_S`` — start, find its token gone with no successor, and return
-    WITHOUT filing: the silent drop this module exists to remove.) ``_INFLIGHT`` needs
-    no sweep for its own bound: every ADMISSION is paired with a reservation, so it is
-    ``_RESERVED``-bounded — with one known exception, a future cancelled before
-    ``_run`` starts (``_shutdown_pool``'s ``cancel_futures=True``, and tests): its
-    reservation is released by ``_forget`` while its latch waits out
-    ``_INFLIGHT_STALE_S``. That is shutdown/test-only (its latches are self-healing and
-    bounded by the number of admitted-but-cancelled futures, which cannot grow once the
-    pool is shutting down), so the honest bound is ``_RESERVED`` plus those cancelled
-    latches, not ``_MAX_INFLIGHT`` alone.
+    Prunes ``_ATTEMPT`` and reaps dead handles. Does not touch ``_INFLIGHT`` or
+    ``_RESERVED``.
     """
     if len(_ATTEMPT) > _PRUNE_ABOVE:
         for k, (ts, window) in list(_ATTEMPT.items()):
@@ -275,16 +250,8 @@ def _log_shed(now: float, kind: str) -> None:
 
 
 def _due_locked(key: tuple[str, str], now: float) -> bool:
-    """Is this key due? Clears a wedged latch ONLY on the admitting path.
-
-    The ``_ATTEMPT`` window is checked FIRST, and a stale latch is popped only when
-    this call is about to return ``True``. That ordering is load-bearing, not an
-    optimisation: popping a stale latch on a call that then returns ``False``
-    (throttled) clears it with NO successor installed, and the worker already admitted
-    for that key returns at ``_run``'s ownership check without filing — the silent drop
-    this module exists to remove. Checking the window first makes the pop conditional on
-    the admit, so no ordering between ``_INFLIGHT_STALE_S`` and ``_RETRY_WINDOW_S`` has
-    to hold for correctness.
+    """Is this key due? Checks the ``_ATTEMPT`` window first; the stale-latch pop
+    sits on the path that returns ``True``.
     """
     last = _ATTEMPT.get(key)
     if last is not None and now - last[0] < last[1]:
@@ -299,15 +266,12 @@ def _due_locked(key: tuple[str, str], now: float) -> bool:
 
 def _run(store, key, kind, org_id, detail, token) -> None:
     try:
-        # Ownership check BEFORE the store write: a superseded attempt must not
-        # spend a network call filing an incident its successor is already
-        # filing, and must not reach a store that may be tearing down. SAFE to
-        # return here because a missing token means a successor was ADMITTED in the
-        # same lock hold that cleared ours (never swept behind our back by
-        # ``_prune_locked``). A kind paused in ``ops/suppression.json`` returns
-        # ``SUPPRESSED`` with no line, by design (``AlertStore.open_incident_state``).
-        # The check is REPEATED below because a newer attempt can start while this one
-        # is in flight.
+        # Ownership check BEFORE the store write: a superseded attempt does not
+        # spend a network call filing an incident its successor may already be
+        # filing, and does not reach a store that may be tearing down. A kind paused
+        # in ``ops/suppression.json`` returns ``SUPPRESSED`` with no line, by design
+        # (``AlertStore.open_incident_state``). The check is repeated below because a
+        # newer attempt can start while this one is in flight.
         with _LOCK:
             if _INFLIGHT.get(key) != token:
                 return
@@ -332,19 +296,14 @@ def _run(store, key, kind, org_id, detail, token) -> None:
 
 
 def _forget(fut) -> None:
-    """Drop one dispatch's handle; release its reservation only if it NEVER ran.
+    """Drop one dispatch's handle; release its reservation if the future was
+    cancelled before ``_run`` started.
 
-    A future cancelled before starting (pool shutdown, ``cancel_futures``) never
-    enters ``_run``, so its reservation would otherwise leak; a started future
-    releases in ``_run``'s ``finally``. Mutually exclusive, so exactly one release.
-
-    The cancellation is LOGGED here, and this is the only place that can: a queued
-    alert is the one most likely to have been reaped from ``_HANDLES`` (aged past
-    ``_INFLIGHT_STALE_S`` behind wedged workers), so ``_shutdown_pool``'s
-    pending-handle count cannot see it and the alert would otherwise vanish with no
-    line at all. The line states only what is OBSERVED (it was cancelled before
-    running): this callback cannot know WHY — shutdown, a test's cancelling pool and
-    ``cancel_futures`` all land here.
+    A started future releases its reservation in ``_run``'s ``finally``. The
+    cancellation is logged here: a queued alert aged out of ``_HANDLES`` is not
+    visible to ``_shutdown_pool``'s pending-handle count. The line states what is
+    observed (cancelled before running); the cause — pool shutdown, a test's
+    cancelling pool, ``cancel_futures`` — is not available here.
     """
     with _LOCK:
         _HANDLES.pop(fut, None)
@@ -364,14 +323,8 @@ def alert_operator(kind: str, org_id: str | None, detail: dict | None = None):
         if _SINCE_SWEEP >= _SWEEP_EVERY:
             _SINCE_SWEEP = 0
             _prune_locked(now)
-        # THE admission bound is decided FIRST — and therefore BEFORE `_due_locked`
-        # may clear a stale latch. `_due_locked`'s self-heal POPS `_INFLIGHT[key]`, so
-        # taking the shed decision after it would clear an already-admitted worker's
-        # latch and install NO successor: that worker then returns at `_run`'s
-        # ownership check and the incident is dropped with no log naming it. Deciding
-        # the bound first makes the clear and the install atomic (one `_LOCK`), so a
-        # latch is only ever handed to a successor that is ADMITTED (which then runs,
-        # or logs why it could not).
+        # The admission bound is decided here, before `_due_locked` may pop
+        # `_INFLIGHT[key]`.
         if _RESERVED >= _MAX_INFLIGHT:
             # A shed is not an attempt: leave `_ATTEMPT` untouched, or a later
             # `_due_locked` would read the window this call never consumed.
@@ -393,10 +346,8 @@ def alert_operator(kind: str, org_id: str | None, detail: dict | None = None):
         store = None
     if store is None:
         with _LOCK:
-            # Token-guarded: `alert_store()` ran OUTSIDE the lock, so a same-key
-            # dispatch may have self-healed the latch and admitted a successor in the
-            # meantime. Popping unconditionally would clear THAT worker's latch and
-            # drop its incident, with nobody left to file. Always release our own
+            # Token-guarded: `alert_store()` ran outside the lock, so a same-key
+            # dispatch may have replaced the latch in the meantime. Release our own
             # reservation.
             if _INFLIGHT.get(key) == token:
                 _INFLIGHT.pop(key, None)
@@ -407,16 +358,14 @@ def alert_operator(kind: str, org_id: str | None, detail: dict | None = None):
         fut = _POOL.submit(_run, store, key, kind, org_id, dict(detail or {}), token)
     except Exception:  # pool shutting down — never drop the alert silently
         with _LOCK:
-            if _INFLIGHT.get(key) == token:  # never pop a successor's latch
+            if _INFLIGHT.get(key) == token:  # token-guarded
                 _INFLIGHT.pop(key, None)
             _release_locked()
         _logger.warning("operator alert dispatch failed (kind=%s)", kind,
                         exc_info=True)
         return None
-    # Register the settle callback BEFORE recording the handle, and record it only
-    # while the future is unsettled (both under _LOCK, so _forget cannot interleave):
-    # a future that finishes in this window would otherwise leave a dead handle in
-    # _HANDLES forever (and, if cancelled, leak its reservation).
+    # Register the settle callback before recording the handle, and record the handle
+    # only while the future is unsettled (both under _LOCK).
     fut.add_done_callback(_forget)
     with _LOCK:
         if not fut.done():
@@ -427,12 +376,10 @@ def alert_operator(kind: str, org_id: str | None, detail: dict | None = None):
 def join_operator_alerts(timeout: float = 5.0) -> int:
     """Wait up to *timeout* for in-flight dispatches; returns the UNSETTLED count.
 
-    ``0`` means every TRACKED dispatch settled within the timeout — the strongest
-    claim this seam can make, not a proof that no worker exists: a handle aged past
-    ``_INFLIGHT_STALE_S`` is dropped from ``_HANDLES`` by design, so a genuinely
-    wedged worker is untracked here while still holding its pool thread (and its
-    reservation). A timed-out handle stays tracked (never discarded, so it cannot
-    become an untracked worker that writes state into the next test). Never raises.
+    ``0`` means every tracked dispatch settled within the timeout. A handle aged past
+    ``_INFLIGHT_STALE_S`` is dropped from ``_HANDLES``, so a wedged worker can be
+    untracked here while still holding its pool thread and its reservation. A
+    timed-out handle stays tracked. Never raises.
     """
     with _LOCK:
         handles = list(_HANDLES)
@@ -459,8 +406,6 @@ def reset_operator_alert_state_for_tests() -> None:
     sees, and a stale handle would be joined (or counted) by the next test.
     ``_SINCE_SWEEP`` is reset so a test that pins the amortised sweep is not
     dependent on how many admissions earlier tests happened to make.
-    This cannot un-wedge a worker already running: the pool is not state, and a
-    genuinely stuck worker will release its slot when it finishes.
     """
     global _RESERVED, _SINCE_SWEEP, _LAST_SHED_LOG
     with _LOCK:

@@ -561,11 +561,11 @@ def test_the_six_swallow_sites_are_the_six_lanes():
     """The correctness proof for #3981 IS coverage completeness, so pin the
     inventory against the SOURCE — not against this module's own dict (a bare
     ``len(SITE_LANES) == 6`` is tautological: it counts a literal three lines
-    above it and cannot fail). Every operator alert is a
-    ``_alert_unmetered("<lane>", ...)`` / ``report_unmetered_increment(
-    lane="<lane>", ...)`` call; the (file, lane) pairs actually emitted must be
-    exactly the declared six. A seventh site, a renamed token, or a deleted
-    alert turns this RED.
+    above it and cannot fail). The scan covers every lane token passed through
+    the two lane-carrying helpers — ``_alert_unmetered("<lane>", ...)`` and
+    ``report_unmetered_increment(lane="<lane>", ...)``; the (file, lane) pairs
+    actually emitted must equal the declared six. A seventh site routed through
+    either helper, a renamed token, or a deleted alert turns this RED.
 
     (A seventh silent swallow reusing an EXISTING lane token is not detectable
     by this fence; it is caught by review, and the six lanes above are the
