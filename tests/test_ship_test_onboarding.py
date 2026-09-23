@@ -1137,10 +1137,12 @@ class _FakeBrowser:
         # The FIRST context is the primary one the harness hands back to the test;
         # any further call is a DISTINCT sibling, so an abandoned context is a
         # missing `ctx_closed` rather than an invisible return of the same object.
+        # Each creation/close records the OBJECT'S IDENTITY, so a context that is
+        # left open cannot be balanced out by closing another one twice.
         if self._used:
             return self._ctx.sibling()
         self._used = True
-        self._ctx.events.append("ctx_created")
+        self._ctx.events.append(f"ctx_created#{id(self._ctx):x}")
         return self._ctx
 
     def close(self):
@@ -1244,12 +1246,13 @@ class _FakeCtx:
         return self.page
 
     def close(self):
-        self.events.append("ctx_closed")
+        self.events.append(f"ctx_closed#{id(self):x}")
 
     def sibling(self):
-        self.events.append("ctx_created")
-        return _FakeCtx(None, self._base, self._org_create, self._org_click_raises,
-                        shares=self)
+        sib = _FakeCtx(None, self._base, self._org_create, self._org_click_raises,
+                       shares=self)
+        self.events.append(f"ctx_created#{id(sib):x}")
+        return sib
 
 
 class _FakeChromium:
@@ -1261,9 +1264,6 @@ class _FakeChromium:
         if self._launch_raises:
             raise RuntimeError("browser launch failed")
         return _FakeBrowser(self._ctx)
-
-    def new_context(self, **k):
-        return self._ctx
 
 
 class _FakeSyncPlaywright:
@@ -1542,13 +1542,18 @@ def _assert_not_the_generic_error_handler(obs, name: str) -> None:
 
 
 def _assert_browser_reaped(ctx) -> None:
-    """Every context the run created was closed, and its browser was closed once
-    and last: a leaked context or browser leaves the event counts unequal."""
+    """Exactly one browser was launched and closed, last; every context the run
+    created was closed exactly once — each by identity, so an open context cannot
+    be balanced by closing another one twice. A run that never launched closes
+    nothing."""
     events = ctx.events
     if "launch" not in events:
         assert events == [], events
         return
-    assert events.count("ctx_closed") == events.count("ctx_created"), events
+    created = [e.split("#", 1)[1] for e in events if e.startswith("ctx_created#")]
+    closed = [e.split("#", 1)[1] for e in events if e.startswith("ctx_closed#")]
+    assert sorted(closed) == sorted(created), events
+    assert events.count("launch") == 1, events
     assert events.count("browser_closed") == 1, events
     assert events[-1] == "browser_closed", events
 
