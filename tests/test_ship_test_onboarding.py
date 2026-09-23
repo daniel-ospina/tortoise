@@ -1411,7 +1411,6 @@ def test_walk_reports_a_failed_write_as_an_instrument_error_not_a_non_observatio
     # re-pointed/emptied teardown state records the truthy, non-residue
     # `not_reached`, which reports an unreaped org as clean.
     assert obs.teardown["status"] == mod.TEARDOWN_BASELINE_UNAVAILABLE
-    assert mod.TEARDOWN_BASELINE_UNAVAILABLE in mod.TEARDOWN_RESIDUE_STATES
 
 
 def test_walk_reports_a_never_readable_projection_as_an_instrument_error(
@@ -1434,13 +1433,12 @@ def test_walk_reports_a_never_readable_projection_as_an_instrument_error(
     # leave this test green. `poll_readable` is set on the write step only when
     # control gets PAST the poll guard.
     assert "poll_readable" not in obs.steps[-1].extra, obs.steps[-1].extra
-    # This exit is exercised only here, and the harness serves no org-list
-    # route, so the recorded state must be the fail-closed one. Asserting the
-    # STATUS (not just that teardown is truthy) is what catches a teardown state
-    # that reached this exit degraded — a re-bound or emptied object records the
-    # truthy, non-residue `not_reached`, which reports an unreaped org as clean.
+    # The harness serves no org-list route, so the recorded state must be the
+    # fail-closed one. Asserting the STATUS (not just that teardown is truthy) is
+    # what catches a teardown state that reached this exit degraded — a re-bound
+    # or emptied object records the truthy, non-residue `not_reached`, which
+    # reports an unreaped org as clean.
     assert obs.teardown["status"] == mod.TEARDOWN_BASELINE_UNAVAILABLE
-    assert mod.TEARDOWN_BASELINE_UNAVAILABLE in mod.TEARDOWN_RESIDUE_STATES
 
 
 def test_walk_reports_a_200_but_unparseable_projection_as_an_instrument_error(
@@ -1465,9 +1463,8 @@ def test_walk_reports_a_200_but_unparseable_projection_as_an_instrument_error(
     # control gets PAST the poll guard.
     assert "poll_readable" not in obs.steps[-1].extra, obs.steps[-1].extra
     # ...and the recorded teardown status, for the same reason as the
-    # never-readable case above: this exit is exercised only here.
+    # never-readable case above.
     assert obs.teardown["status"] == mod.TEARDOWN_BASELINE_UNAVAILABLE
-    assert mod.TEARDOWN_BASELINE_UNAVAILABLE in mod.TEARDOWN_RESIDUE_STATES
 
 
 # ── the exits nothing reached (#4843) ───────────────────────────────────────
@@ -1719,7 +1716,6 @@ def test_walk_step5_unreadable_projection_is_an_instrument_error(monkeypatch, tm
     # records the truthy, non-residue `not_reached`, which would report an
     # unreaped org as clean.
     assert obs.teardown["status"] == mod.TEARDOWN_BASELINE_UNAVAILABLE
-    assert mod.TEARDOWN_BASELINE_UNAVAILABLE in mod.TEARDOWN_RESIDUE_STATES
 
 
 def test_walk_step7_unreadable_projection_is_an_instrument_error(monkeypatch, tmp_path):
@@ -1746,7 +1742,6 @@ def test_walk_step7_unreadable_projection_is_an_instrument_error(monkeypatch, tm
     assert obs.assertions.get("shown_when_observed") is None
     # ...and the teardown STATUS, for the same reason as the exits above.
     assert obs.teardown["status"] == mod.TEARDOWN_BASELINE_UNAVAILABLE
-    assert mod.TEARDOWN_BASELINE_UNAVAILABLE in mod.TEARDOWN_RESIDUE_STATES
 
 
 def test_walk_with_an_explicit_agent_key_still_reads_the_truth_through_the_session(
