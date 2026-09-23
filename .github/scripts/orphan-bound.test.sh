@@ -102,13 +102,8 @@
 # removed or weakened (the `probe_failed` COUNT==0 carve-out dropped, the
 # `cleared=false` red removed, the deferral warning or its `COUNT <= left`
 # rescue removed, the mixed-population identity made authoritative again, the
-# contract check neutered, `_sweep`'s report built outside its four real
-# producers — the returned value no longer the builder call, an argument not
-# one of those four names, a reordered unpack, a rebind, a `left`/`before`
-# probe call that is wrapped (`max(...)`/`int(...)`) or takes arguments, or a
-# swapped before/left position, or a report-shaped
-# `dict(...)`, or a subscript/attribute write on the result — a count-branch
-# bound widened past 0, or rc=1 added to the kill set).
+# contract check neutered, a count-branch bound widened past 0, or rc=1 added
+# to the kill set).
 # A case that merely restates a default would not catch its own removal.
 #
 # The assertion count is PINNED (see the summary): a lost case must not be

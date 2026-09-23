@@ -4998,32 +4998,36 @@ def test_sweep_until_cleared_truncated_scan_is_not_cleared():
     assert (total, cleared) == (0, False)
 
 
-def test_sweep_until_cleared_defaults_to_the_real_monotonic_clock():
-    """#4740 review 6: the `clock` default is load-bearing and must be real.
+def test_build_end_sweep_report_defaults_to_the_real_monotonic_clock():
+    """#4740 review 10: the load-bearing `clock` default is the builder's.
 
     All four stop-shape cases above inject `clock=`, and production
-    (`tests/conftest.py`) calls the helper with only two positional args — so
-    the default is what the end-sweep actually runs with. A default of
-    `lambda: 0.0` makes `clock() < deadline` always true, so a
-    deadline-aborted sweep reports `cleared=true`, and the CI gate — which
-    reds on `cleared: false` — greens the very backlog the round-4 fix was
-    for. No clock is injected here on purpose.
+    (`tests/conftest.py`'s `_sweep`) reaches the clock only through
+    `build_end_sweep_report` with three positional args (no `clock`) — the
+    builder passes its OWN `clock` explicitly into `sweep_until_cleared`. So
+    the default production actually runs with is the builder's, not
+    `sweep_until_cleared`'s. A default of `lambda: 0.0` makes
+    `clock() < deadline` always true, so a deadline-aborted sweep reports
+    `cleared=true`, and the CI gate — which reds on `cleared: false` — greens
+    the very backlog the round-4 fix was for. No clock is injected here.
     """
     import inspect
     import time
 
-    from tortoise.embedded_reaper import sweep_until_cleared
+    from tortoise.embedded_reaper import build_end_sweep_report
 
-    default = inspect.signature(sweep_until_cleared).parameters["clock"].default
+    default = inspect.signature(
+        build_end_sweep_report).parameters["clock"].default
     assert default is time.monotonic, (
-        f"sweep_until_cleared's clock default must be the real monotonic "
+        f"build_end_sweep_report's clock default must be the real monotonic "
         f"clock, got {default!r}"
     )
     # A deadline already in the past, with the REAL default: the empty
     # iteration is an already-expired abort, never a cleared backlog.
-    total, cleared = sweep_until_cleared(
-        lambda: _scan_aware([]), deadline=time.monotonic() - 1)
-    assert (total, cleared) == (0, False)
+    report = build_end_sweep_report(
+        lambda: _scan_aware([]), deadline=time.monotonic() - 1,
+        probe=lambda: 0)
+    assert report["cleared"] is False
 
 
 def test_hygiene_report_threads_cleared_verbatim():
@@ -5128,3 +5132,56 @@ def test_build_end_sweep_report_threads_the_sweep_outcome():
     )
     assert report["reaped"] == 0
     assert report["cleared"] is False
+
+
+def test_conftest_sweep_returns_build_end_sweep_report():
+    """#4740 review 10: the call site must RETURN the builder call.
+
+    The behavioural cases above drive `build_end_sweep_report` in isolation,
+    so a `_sweep` that short-circuits it — `return {report} or
+    build_end_sweep_report(...)` — leaves them all green while the gate
+    consumes a hand-written dict. The deleted case-39 producer sub-checks
+    covered this returned-call identity; this is the minimal surviving form.
+    """
+    import ast
+
+    from tortoise.embedded_reaper import _HYGIENE_REPORT_FIELDS
+
+    source = (
+        Path(__file__).resolve().parents[1] / "tests" / "conftest.py"
+    ).read_text()
+    tree = ast.parse(source)
+    sweep = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "_sweep"
+    )
+    builder_returns = [
+        n for n in ast.walk(sweep)
+        if isinstance(n, ast.Return)
+        and isinstance(n.value, ast.Call)
+        and getattr(n.value.func, "id", None) == "build_end_sweep_report"
+    ]
+    assert len(builder_returns) == 1, (
+        "tests/conftest.py's _sweep must return exactly one "
+        "build_end_sweep_report(...) call; a hand-written report dict, or a "
+        "short-circuit around the builder, is not pinned by the behavioural "
+        "tests and would be consumed by the gate unpinned (#4740)"
+    )
+    fixture = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "_redislite_hygiene"
+    )
+    hand_written = [
+        n for n in ast.walk(fixture)
+        if isinstance(n, ast.Return)
+        and isinstance(n.value, ast.Dict)
+        and any(
+            isinstance(k, ast.Constant) and k.value in _HYGIENE_REPORT_FIELDS
+            for k in n.value.keys
+        )
+    ]
+    assert hand_written == [], (
+        "the _redislite_hygiene fixture must not build a report-shaped dict "
+        "anywhere else — the gate must consume only the builder's report "
+        f"(#4740); found at line(s) {[n.lineno for n in hand_written]}"
+    )

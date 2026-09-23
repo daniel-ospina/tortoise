@@ -3570,6 +3570,14 @@ def test_orphan_assert_steps_capture_pgrep_status_fail_closed():
             "else must fail closed (#4740)"
         )
         assert "exit 1" in body, "the failed-probe guard must exit non-zero"
+        assert 'COUNT=$(printf \'%s\' "$PIDS" | wc -w | tr -d \' \')' in body, (
+            "COUNT must be derived from the pgrep output `$PIDS`, not a "
+            "constant — a `COUNT=0` would hand the gate a measured-zero that "
+            "no later leak could ever exceed (#4740 review 10)"
+        )
+        assert '--count "$COUNT"' in body, (
+            "the orphan gate must consume the derived COUNT (#4740 review 10)"
+        )
 
 
 def test_orphan_assert_no_pytest_producer_writes_the_gated_path():
