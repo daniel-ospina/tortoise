@@ -5,6 +5,9 @@ import './index.css'
 // #4336: TIER_LABELS is the display-name map; its parity against
 // product.html's `labels` map is pinned by tests/test_website_static.py.
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
+// #4639: paid-tier suppression for the header and the narrowed upgrade-nudge
+// gate for the error banner — pure, node --test unit-tested (upsellGate.test.js).
+import { errorMessage, headerUpgradeEligible, nudgeRoute, shouldNudgeUpgrade } from './upsellGate.js'
 import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, ONBOARDING_INSTRUCTIONS_URL, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, MCP_URL, SKILLS_INSTALL_URL, SKILLS_LIST, UNIVERSAL_COMMAND, WORKFLOWS_PROMPT, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
 // #1728 Slice 3 (Tasks 16-17): the SHARED 4-state capture-status derivation
 // (off → install-pending → waiting → active, probe-driven) — pure, node --test
@@ -981,13 +984,20 @@ function wizardWorkflowsText(key, mode) {
 // carry it. Before this, a create-key 402 advanced the modal to a broken 'done'
 // stage (an empty `.key-value` box, and a clipboard write of the literal
 // "null") while the notice sat on the tab BEHIND the modal, invisible.
-function CapNotice({ text, team, checkoutPending, onUpgrade }) {
+function CapNotice({ text, route, checkoutPending, billingPending, onUpgrade, onManage }) {
   return (
     <div className="cap-notice" style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', margin: '0.5rem 0 1rem', padding: '0.6rem 0.85rem', border: '1px solid var(--border, #d0d7de)', borderRadius: 8, background: 'var(--bg-soft, #f6f8fa)' }}>
       <span className="dim small">{text}</span>
-      {team?.checkout_price_id ? (
+      {/* #4639: the same route derivation the error banner uses. Checkout 409s
+          on an active subscription, so a paying team gets the portal — never a
+          button that can only fail. No route → the See-pricing fallback. */}
+      {route === 'checkout' ? (
         <button className="ghost small" onClick={onUpgrade} disabled={checkoutPending}>
           {checkoutPending ? 'Opening checkout…' : 'Upgrade'}
+        </button>
+      ) : route === 'portal' ? (
+        <button className="ghost small" onClick={onManage} disabled={billingPending}>
+          {billingPending ? 'Opening portal…' : 'Manage subscription'}
         </button>
       ) : (
         <a className="ghost small" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">See pricing</a>
@@ -2620,10 +2630,16 @@ function claimIntentInFlight() {
   }
   const hasActiveSubscription = team && ACTIVE_STATUSES.includes(team.subscription_status)
   // #1623 (review P2): canceled/unpaid teams still have a Stripe customer —
-  // the portal gives invoice history + cancel management. Upgrade stays for
-  // re-subscription.
+  // the portal gives invoice history + cancel management.
+  // #4639: the header no longer offers an Upgrade to a paid/lapsed team (and
+  // no longer carries the portal button). Plan management and re-subscription
+  // Upgrade live on the Billing plan grid, which still gates on this set.
   const PORTAL_STATUSES = [...ACTIVE_STATUSES, 'canceled', 'unpaid']
   const canManageSubscription = team && PORTAL_STATUSES.includes(team.subscription_status)
+  // #4639: where the banner's limit nudge may send the user — checkout for a
+  // free/anon team with a price, the portal for a team that already has a
+  // Stripe customer, null (no nudge) otherwise. Never a dead control.
+  const limitNudgeRoute = nudgeRoute(team)
 
   // #1623: parameterized upgrade — the header Upgrade button uses the
   // server-resolved default (team.checkout_price_id); the Billing page and
@@ -2653,7 +2669,7 @@ function claimIntentInFlight() {
         checkoutResetTimerRef.current = window.setTimeout(() => setCheckoutPending(false), 90000)
       }
     } catch (err) {
-      setError(err.message)
+      setError(err)
       setCheckoutPending(false)
     }
   }
@@ -2673,7 +2689,7 @@ function claimIntentInFlight() {
         setError('Popup blocked — allow popups for app.premiselabs.co and try again.')
       }
     } catch (err) {
-      setError(err.message)
+      setError(err)
     } finally {
       setBillingPending(false)
     }
@@ -4432,7 +4448,7 @@ function claimIntentInFlight() {
     } catch (e) {
       // Round-12: a stale switch's error must not land under the newer team's header
       if (orgIdRef.current === _teamAtCall) {
-        setError(e.message)
+        setError(e)
         // #3783 (review P2): Promise.all rejects both reads together, so a
         // failure here means the keys payload never landed. Record it, so the
         // connect gate resolves 'error' (retryable) instead of waiting on a
@@ -5112,7 +5128,7 @@ function claimIntentInFlight() {
           // otherwise keys/sessions/backups stay wiped until reload.
           await Promise.all([loadAll(''), loadBackups('')]).catch(() => {})
         }
-        setError(e.message)
+        setError(e)
       }
     }
   }
@@ -5180,7 +5196,9 @@ function claimIntentInFlight() {
       const b = await res.json().catch(() => ({}))
       if (!res.ok) {
         if (res.status === 402) {
-          setError('Graph limit reached for this tier — upgrade to add more graphs.')
+          // #4639: carry the STRUCTURED status so the banner's nudge gate
+          // reads the 402 rather than guessing from the copy.
+          setError({ message: 'Graph limit reached for this tier — upgrade to add more graphs.', status: res.status })
           return
         }
         if (res.status === 409) {
@@ -5188,7 +5206,7 @@ function claimIntentInFlight() {
           // OR API-key cap (the create mints the graph's first key; a full
           // key table rolls the graph back with a 409). The detail is
           // authoritative (plan §6.2 contract).
-          setError(b.detail || 'Graph limit reached — delete a graph or upgrade.')
+          setError({ message: b.detail || 'Graph limit reached — delete a graph or upgrade.', status: res.status })
           return
         }
         throw new Error(b.detail || `HTTP ${res.status}`)
@@ -5210,7 +5228,7 @@ function claimIntentInFlight() {
 
     } catch (e) {
       // Round-18: a stale request's error must not land under the new team
-      if (orgIdRef.current === _teamAtCall) setError(e.message)
+      if (orgIdRef.current === _teamAtCall) setError(e)
     } finally {
       setBusy(false)
     }
@@ -5567,7 +5585,8 @@ function claimIntentInFlight() {
         const b = await res.json().catch(() => ({}))
         if (res.status === 402) {
           // #1875: render the API's detail (upgrade vs at-capacity)
-          setError(typeof b.detail === 'string' ? b.detail : 'Invites require the Builder or Team tier — upgrade to invite members.')
+          // #4639: carry the structured 402 for the banner's nudge gate.
+          setError({ message: typeof b.detail === 'string' ? b.detail : 'Invites require the Builder or Team tier — upgrade to invite members.', status: res.status })
           setBusy(false)
           return
         }
@@ -5580,7 +5599,7 @@ function claimIntentInFlight() {
 
     } catch (e) {
       // Round-18: a stale request's error must not land under the new team
-      if (orgIdRef.current === _teamAtCall) setError(e.message)
+      if (orgIdRef.current === _teamAtCall) setError(e)
     } finally {
       setBusy(false)
     }
@@ -5608,7 +5627,7 @@ function claimIntentInFlight() {
 
     } catch (e) {
       // Round-19: stale DELETE error must not land under the new team
-      if (orgIdRef.current === _teamAtCall) setError(e.message)
+      if (orgIdRef.current === _teamAtCall) setError(e)
     } finally {
       setBusy(false)
     }
@@ -5637,7 +5656,7 @@ function claimIntentInFlight() {
 
     } catch (e) {
       // Round-19: stale PATCH error must not land under the new team
-      if (orgIdRef.current === _teamAtCall) setError(e.message)
+      if (orgIdRef.current === _teamAtCall) setError(e)
     } finally {
       setBusy(false)
     }
@@ -5918,7 +5937,7 @@ function claimIntentInFlight() {
           setKeyModalCapNotice(notice)
           setError('')
         } else {
-          setError(e.message)
+          setError(e)
         }
       }
       return null
@@ -6115,7 +6134,7 @@ function claimIntentInFlight() {
           setCapNotice(rotateCapNoticeFrom(e.message, team))
           setError('')
         } else {
-          setError(e.message)
+          setError(e)
         }
       }
     } finally {
@@ -6277,7 +6296,7 @@ function claimIntentInFlight() {
       await loadAll()
     } catch (e) {
       // Round-18/20: a stale revoke's error must not land under the new team
-      if (!_teamAtCall || orgIdRef.current === _teamAtCall) setError(e.message)
+      if (!_teamAtCall || orgIdRef.current === _teamAtCall) setError(e)
     }
   }
 
@@ -8262,8 +8281,8 @@ function claimIntentInFlight() {
                     cap 402 puts its message on `capNotice` (not `error`), and
                     the tab-level notice sits behind this dialog — so without
                     this the user saw a silent form → empty reveal. */}
-                {keyModalCapNotice && <CapNotice text={keyModalCapNotice} team={team} checkoutPending={checkoutPending} onUpgrade={upgrade} />}
-                {error && <p className="error" role="alert" style={{ marginTop: 8 }}>{error}</p>}
+                {keyModalCapNotice && <CapNotice text={keyModalCapNotice} route={nudgeRoute(team)} checkoutPending={checkoutPending} billingPending={billingPending} onUpgrade={upgrade} onManage={manageBilling} />}
+                {error && <p className="error" role="alert" style={{ marginTop: 8 }}>{errorMessage(error)}</p>}
               </>
             )}
             {/* #4330: the reveal renders the live key only — `newKeyReveal` is
@@ -8514,23 +8533,24 @@ function claimIntentInFlight() {
             </div>
           </div>
         )}
-        {team && team.tier !== 'team' && (
-          <a className="tier-badge" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">
-            {(TIER_LABELS[team.tier] || team.tier || 'free')} tier · Upgrade
-          </a>
-        )}
-        {/* #1290: manage subscription — Stripe portal (upgrade/downgrade/cancel)
-            for teams with an existing Stripe customer (#310 backend exists). */}
-        {team && canManageSubscription && (
-          <button className="tier-badge tier-manage" onClick={manageBilling} disabled={billingPending}>
-            {billingPending ? 'Opening portal…' : 'Manage subscription'}
+        {/* #4639: the header tier badge never SELLS to a paid tier. Free/anon
+            still get an upgrade path — a real checkout control, never the
+            marketing pricing page (a link there is a dead end, and it was the
+            upsell the owner hit on Solo). A paid tier shows its name only.
+            The redundant header plan-management button (#1290) is REMOVED —
+            the Billing tab owns that. An absent checkout price id shows the
+            plain badge rather than a dead control. */}
+        {team && headerUpgradeEligible(team) && team.checkout_price_id ? (
+          <button className="tier-badge" onClick={upgrade} disabled={checkoutPending}>
+            {checkoutPending ? 'Opening checkout…' : `${TIER_LABELS[team.tier] || team.tier || 'free'} tier · Upgrade`}
           </button>
-        )}
+        ) : team ? (
+          <span className={`tier-badge${team.tier === 'team' ? ' tier-team' : ''}`}>
+            {(TIER_LABELS[team.tier] || team.tier || 'free')} tier
+          </span>
+        ) : null}
         {team && team.status === 'flagged' && (
           <span className="tier-badge" title="Suspicious activity detected — see security alerts">⚠ flagged</span>
-        )}
-        {team && team.tier === 'team' && (
-          <span className="tier-badge tier-team">Team tier</span>
         )}
       </header>
 
@@ -8559,10 +8579,23 @@ function claimIntentInFlight() {
         )}
         {error && (
           <div className="error banner">
-            {error}
-            {/402|upgrade|quota|limit|checkout|billing/i.test(error) && (
+            {errorMessage(error)}
+            {/* #4639: a genuine limit refusal offers the route that WORKS for
+                this team — checkout for a free/anon buyer, the portal for an
+                existing Stripe customer (checkout 409s on an active
+                subscription). No route → no nudge, never a dead control. */}
+            {shouldNudgeUpgrade(error) && limitNudgeRoute === 'checkout' && (
               <span>
-                {' '}— <button className="ghost" onClick={upgrade}>Upgrade plan</button>
+                {' '}— <button className="ghost" onClick={upgrade} disabled={checkoutPending}>
+                  {checkoutPending ? 'Opening checkout…' : 'Upgrade plan'}
+                </button>
+              </span>
+            )}
+            {shouldNudgeUpgrade(error) && limitNudgeRoute === 'portal' && (
+              <span>
+                {' '}— <button className="ghost" onClick={manageBilling} disabled={billingPending}>
+                  {billingPending ? 'Opening portal…' : 'Manage subscription'}
+                </button>
               </span>
             )}
           </div>
@@ -8921,7 +8954,7 @@ function claimIntentInFlight() {
             )}
             {/* #1148-ux review: "Lost your key? Generate a new one" removed — the + New key button already covers it. */}
             {/* #4330: the SAME notice component the create-key modal renders. */}
-            {capNotice && <CapNotice text={capNotice} team={team} checkoutPending={checkoutPending} onUpgrade={upgrade} />}
+            {capNotice && <CapNotice text={capNotice} route={nudgeRoute(team)} checkoutPending={checkoutPending} billingPending={billingPending} onUpgrade={upgrade} onManage={manageBilling} />}
 
             {/* #2735: rotate's replacement reveal. #2667 moved create-key
                 into the Create API key modal and DELETED the standalone
