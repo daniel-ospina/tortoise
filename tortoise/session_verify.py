@@ -1021,8 +1021,11 @@ def _tidy_local_probe(result: dict[str, Any], probe_id: str,
     """
     from tortoise.capture_spool import is_spooled, remove_spool_entry, spool_dir
 
-    # An inert leftover receipt — reported, but never fatal on its own.
-    local = _local_import_receipt(probe_id)
+    # An inert leftover receipt — reported, but never fatal on its own. Resolved
+    # against the SAME env the seam ran under, for the same reason the spool arm
+    # is: a caller pinning the receipt dir must not have verify look elsewhere
+    # and report "none" (#4714 review).
+    local = _local_import_receipt(probe_id, env)
     if local is not None:
         try:
             local.unlink()
@@ -1056,11 +1059,12 @@ def _tidy_local_probe(result: dict[str, Any], probe_id: str,
         result["error"] = True
 
 
-def _local_import_receipt(probe_id: str) -> Path | None:
-    path = Path(os.environ.get(
-        "TORTOISE_IMPORT_RECEIPT_DIR",
-        str(Path.home() / ".tortoise" / "import-receipts"))) / \
-        f"{probe_id}.json"
+def _local_import_receipt(probe_id: str,
+                          env: dict[str, str] | None = None) -> Path | None:
+    source = os.environ if env is None else env
+    base = source.get("TORTOISE_IMPORT_RECEIPT_DIR") or str(
+        Path(source.get("HOME") or Path.home()) / ".tortoise" / "import-receipts")
+    path = Path(base) / f"{probe_id}.json"
     return path if path.exists() else None
 
 

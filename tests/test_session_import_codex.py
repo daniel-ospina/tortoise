@@ -815,3 +815,114 @@ def test_a_drained_session_clears_the_stale_failure_breadcrumb(
     assert flush_spool(spool_dir(), _post).filed == 1
     assert not crumb.exists(), (
         "a filed session still reports its harness as having lost a capture")
+
+
+def test_a_failure_reading_the_ERROR_body_is_still_spooled(
+        tmp_path, monkeypatch, codex_jsonl):
+    """P1: the error body is read INSIDE `except HTTPError`, and an exception
+    raised in an `except` block is NOT caught by the later clauses of the same
+    `try`. So a server that returns 504/429 and then stalls while sending the
+    body escaped the command entirely — no spool, no receipt — which is the
+    same silent loss this path exists to close, and exactly the shape a
+    capacity-gated server produces.
+
+    Mutation: drop the inner try/except (or `.decode()` without `replace`) —
+    this REDs.
+
+    The body is decoded with errors="replace" for the sibling case: a non-UTF-8
+    error body must not raise UnicodeDecodeError out of the handler either."""
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import flush_spool, read_spool_meta, read_spool_turns
+
+    spool = _import_env(tmp_path, monkeypatch)
+    args = SimpleNamespace(file=str(codex_jsonl), harness="codex",
+                           session_id="sid-errbody")
+
+    class _Fp:
+        def read(self):
+            raise TimeoutError("stalled sending the error body")
+
+    def _raise(req, timeout=None):
+        raise HTTPError("https://api.tortoise.test/v1/sessions", 504,
+                        "wait budget exceeded", hdrs=None, fp=_Fp())
+
+    with mock.patch("urllib.request.urlopen", _raise):
+        rc = _cmd_sessions_import(args)
+
+    assert rc == 1, "the stalled error body escaped the command"
+    assert not list((tmp_path / "receipts").glob("*.json"))
+    assert read_spool_meta(spool, "sid-errbody") is not None, (
+        "a stalled error body lost the session")
+    assert read_spool_turns(spool, "sid-errbody") == _EXPECTED_TURNS
+    # 504 is retryable, so the drain must still be able to file it.
+    assert flush_spool(spool, lambda p: PostOutcome(
+        ok=True, status=200, body={"session_id": p["session_id"]})).filed == 1
+
+
+def test_a_non_utf8_error_body_is_handled_not_raised(
+        tmp_path, monkeypatch, codex_jsonl):
+    """A proxy's garbled body must not raise UnicodeDecodeError out of the
+    handler — an undecodable refusal is still a retryable refusal."""
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import read_spool_meta
+
+    spool = _import_env(tmp_path, monkeypatch)
+
+    def _raise(req, timeout=None):
+        raise HTTPError("https://api.tortoise.test/v1/sessions", 429,
+                        "saturated", hdrs=None,
+                        fp=io.BytesIO(b"\xff\xfe not utf-8 \x80"))
+
+    with mock.patch("urllib.request.urlopen", _raise):
+        rc = _cmd_sessions_import(SimpleNamespace(
+            file=str(codex_jsonl), harness="codex", session_id="sid-badbody"))
+
+    assert rc == 1
+    assert read_spool_meta(spool, "sid-badbody") is not None
+
+
+def test_the_breadcrumb_clear_is_kind_aware_and_time_aware(
+        tmp_path, monkeypatch, codex_jsonl):
+    """`_clear_breadcrumb_for` must not destroy evidence about something else.
+
+    The breadcrumb path is shared with the shipped hooks' `install-inert`
+    record, which is the ONLY way `session verify` reaches INERT — so a blind
+    unlink let a drain racing verify make an inert install read as PROVEN. And
+    a failure recorded AFTER this session was filed belongs to a DIFFERENT,
+    still-lost session.
+
+    Mutations that must RED this: (a) drop the `kind` check — case 1 fails;
+    (b) drop the timestamp comparison — case 2 fails.
+    """
+    from tortoise.capture_spool import _clear_breadcrumb_for
+    from tortoise.hook_install import KIND_CAPTURE_FAILURE, KIND_INSTALL_INERT
+
+    _import_env(tmp_path, monkeypatch)
+    crumb = tmp_path / "capture-errors" / "codex.json"
+    crumb.parent.mkdir(parents=True, exist_ok=True)
+
+    # (1) An INERT install record is NOT ours to clear.
+    crumb.write_text(json.dumps({
+        "harness": "codex", "kind": KIND_INSTALL_INERT,
+        "detail": "install is inert", "recorded_at": "2020-01-01T00:00:00Z",
+    }), encoding="utf-8")
+    _clear_breadcrumb_for("codex", "2026-09-22T23:00:00.000000Z")
+    assert crumb.exists(), "an INERT install record was cleared — verify lies"
+
+    # (2) A failure recorded AFTER the filed session describes another session.
+    crumb.write_text(json.dumps({
+        "harness": "codex", "kind": KIND_CAPTURE_FAILURE,
+        "detail": "a later session failed", "recorded_at": "2026-09-22T23:30:00Z",
+    }), encoding="utf-8")
+    _clear_breadcrumb_for("codex", "2026-09-22T23:00:00.000000Z")
+    assert crumb.exists(), "a LATER failure was cleared by an earlier filing"
+
+    # (3) A capture-failure at or before the filing IS cleared — and note the
+    # second-resolution breadcrumb vs the microsecond meta stamp.
+    crumb.write_text(json.dumps({
+        "harness": "codex", "kind": KIND_CAPTURE_FAILURE,
+        "detail": "this session failed then recovered",
+        "recorded_at": "2026-09-22T22:59:00Z",
+    }), encoding="utf-8")
+    _clear_breadcrumb_for("codex", "2026-09-22T23:00:00.000000Z")
+    assert not crumb.exists(), "a recovered session left a stale failure record"

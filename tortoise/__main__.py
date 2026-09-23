@@ -3744,10 +3744,18 @@ def _cmd_session_drain(api_key: str, api_url: str,
     for d in summary.discarded:
         print(f"spool discard ({d['reason']}): {d['session_id']} — {d['detail']}",
               file=_sys.stderr)
-    if summary.attempted or summary.discarded:
+    # A probe refusal is counted in `held_back` alongside the live-session hold,
+    # so without this line an operator cannot tell WHY a spooled session never
+    # lands — the entry is simply held every drain until it ages out (#4714
+    # review).
+    for r in summary.probe_refusals:
+        print(f"spool refusal: {r['session_id']} — {r['detail']}",
+              file=_sys.stderr)
+    if summary.attempted or summary.discarded or summary.probe_refusals:
         print(
             f"spool drain: filed {summary.filed}, deferred {summary.deferred}, "
             f"skipped {summary.skipped}, held back {summary.held_back}, "
+            f"probe refusals {len(summary.probe_refusals)}, "
             f"discarded {len(summary.discarded)}",
             file=_sys.stderr,
         )
@@ -4076,7 +4084,17 @@ def _cmd_sessions_import(args) -> int:
         with urlopen(req, timeout=60) as resp:
             result = _json.loads(resp.read())
     except HTTPError as e:
-        body = e.read().decode() if e.fp else ""
+        # The error body is read INSIDE this handler, and an exception raised in
+        # an `except` block is NOT caught by the later clauses of the same `try`
+        # — so a server that returns 504/429 and then stalls or truncates the
+        # body escaped the command entirely (no spool, no receipt): the exact
+        # silent-loss shape this path exists to close (#4714 review). Decode
+        # with `replace` so a non-UTF-8 body cannot raise UnicodeDecodeError
+        # either — an undecodable body is still a retryable refusal.
+        try:
+            body = e.read().decode("utf-8", "replace") if e.fp else ""
+        except (TimeoutError, ConnectionError, _HTTPException) as read_exc:
+            body = f"<error body unreadable: {read_exc}>"
         # 403/402/503 ⇒ fail, NO receipt, honest error (Task 15 acceptance).
         print(f"import failed (HTTP {e.code}): {body}", file=_sys.stderr)
         _record_capture_error(harness, f"import failed (HTTP {e.code}): {body}")

@@ -852,23 +852,58 @@ def flush_spool(
     return summary
 
 
-def _clear_breadcrumb_for(harness: str | None) -> None:
-    """Drop the local capture-failure breadcrumb once the session HAS landed.
+def _stamp_second(value: object) -> str:
+    """UTC ISO stamps to a comparable, second-resolution key (see the caller)."""
+    return str(value or "")[:19]
 
-    Local companion of ``__main__._capture_error_file``: the breadcrumb is the
-    machine-readable "this harness lost its last capture" record, and it is
-    cleared only on a 2xx inside ``sessions import``. A session that was
-    REFUSED retryably and then filed by a later drain never takes that path, so
-    the record kept claiming a loss that had since been recovered. Best effort:
-    a breadcrumb is evidence, never a gate on filing.
+
+def _clear_breadcrumb_for(harness: str | None, before: str | None = None) -> None:
+    """Drop the capture-failure breadcrumb once the session HAS landed.
+
+    The record is per-HARNESS, so this must be narrow in two directions or it
+    destroys evidence about something else (#4714 review):
+
+    * ``kind`` — the shipped hooks write ``install-inert`` to the SAME path, and
+      ``session verify`` reaches INERT only from that record. Unlinking blindly
+      let a drain firing while verify was mid-flight erase it and report an
+      inert install as PROVEN. Only a ``capture-failure`` record is cleared.
+    * ``recorded_at`` — a failure recorded AFTER this session was filed belongs
+      to a DIFFERENT, still-failing session, and must survive.
+
+    Best effort throughout: a breadcrumb is evidence, never a gate on filing.
     """
     if not harness:
         return
-    with contextlib.suppress(OSError):
+    try:
+        import json
+
+        from tortoise.hook_install import KIND_CAPTURE_FAILURE
+
         receipt_dir = Path(os.environ.get(
             "TORTOISE_IMPORT_RECEIPT_DIR",
             str(Path.home() / ".tortoise" / "import-receipts")))
-        (receipt_dir.parent / "capture-errors" / f"{harness}.json").unlink()
+        path = receipt_dir.parent / "capture-errors" / f"{harness}.json"
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if record.get("kind") != KIND_CAPTURE_FAILURE:
+            return
+        recorded = record.get("recorded_at")
+        # Both stamps are UTC ISO but at DIFFERENT resolutions: the breadcrumb is
+        # second-resolution, the spool meta carries microseconds. Comparing the
+        # raw strings would order `…35Z` AFTER `…35.582932Z` (ASCII 'Z' > '.'),
+        # which would skip a clear that should happen. Truncate to the common
+        # second-resolution prefix so the comparison is actually chronological;
+        # a same-second tie clears, because the filing just succeeded.
+        if before and recorded and _stamp_second(recorded) > _stamp_second(before):
+            # A LATER failure describes a session that is still lost.
+            return
+        with contextlib.suppress(OSError):
+            path.unlink()
+    except Exception:
+        # Never let breadcrumb housekeeping affect a successful filing.
+        return
 
 
 def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: PostFn,
@@ -933,7 +968,7 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         # spooled-then-drained session never takes — so a recovered capture
         # left the breadcrumb standing (and `session verify` reading a failure
         # that had already been resolved) (#4714 review).
-        _clear_breadcrumb_for(meta.get("harness"))
+        _clear_breadcrumb_for(meta.get("harness"), meta.get("updated_at"))
         # COMPARE-AND-SWAP, on the POSTED CONTENT. A concurrent capture (a
         # resumed session, or the SessionStart drain racing a live turn) can
         # grow this entry while the POST is in flight. Stamp `filed_key` only
