@@ -587,6 +587,11 @@ def cotenant_holds_server(client) -> bool:
     - in-process: the #3599 per-process owner refcount counts THIS process's
       live clients on the socket (recorded at construction, released at every
       close seam). ``> 1`` -> the process itself holds a co-tenant.
+    - in-process, MID-CONSTRUCTION: a redislite construction that is still
+      inside ``__init__`` and has already committed to replaying this socket
+      is a co-tenant before it can record itself (``_in_flight_replays``,
+      #4879). Its claim is registered before the replay can block, so the
+      socket it is about to ping is never read as "last client".
     - cross-process: the #3599 per-server owner RECORDS name every owning
       process; ``live_owners > 1`` -> another process holds a co-tenant.
     - an uninstrumented spawn (no owner-record dir) cannot be reasoned about
@@ -621,6 +626,17 @@ def cotenant_holds_server(client) -> bool:
             return True  # an in-process co-tenant holds the server
     except Exception:
         return True  # cannot reason about sharing -> fail closed
+    # #4879: a construction that is MID-REPLAY in this process is a co-tenant
+    # the refcount above cannot see yet — its claim is only written after
+    # `RedisMixin.__init__` returns (`_in_flight_replays`). It has not finished
+    # attaching, but it HAS committed to this socket, so tearing the server
+    # down here unlinks the socket it is about to ping (the deterministic
+    # `Error 2 connecting to .../redis.socket. No such file or directory` of
+    # test_pack_state.py). This is a proven co-tenant, not a hedge: a claim is
+    # only ever registered for a construction whose OWN registry resolves to
+    # this exact socket.
+    if _inflight_replay_holds(key):
+        return True
     from tortoise.embedded_reaper import (
         _client_list,
         _owner_records,
@@ -1561,15 +1577,97 @@ def forget_owner(socket_file: str | None) -> bool:
 _ORIGINAL_REDISLITE_INIT = None
 
 
+# ── #4879: a construction that is MID-REPLAY is already a co-tenant ───────
+#
+# `cotenant_holds_server` is the last-client test every teardown seam
+# consults, and its in-process branch reads `_owner_refcounts` — which the
+# `_init` patch below only increments AFTER `original(...)` returns. A
+# construction that is still INSIDE `original(...)` has therefore already
+# read the registry and adopted its socket while remaining invisible to that
+# test. In that window a GC pass that collects an earlier client reads "one
+# claim" as "last client", runs redislite's destructive `_cleanup` (SHUTDOWN
+# + rmtree), and unlinks the socket the in-flight construction is about to
+# ping — the deterministic `Error 2 connecting to .../redis.socket. No such
+# file or directory` of
+# `tests/test_pack_state.py::TestBackfillScript::test_apply_writes_to_introspection_read_target`.
+#
+# Close the ORDERING hole by registering the claim BEFORE `original(...)`:
+# the socket a construction is about to replay is already on disk, in the
+# same `<dbdir>/<dbfilename>.settings` registry redislite is about to load,
+# so it is resolvable without redislite having run. The claim is held for the
+# whole construction and released in a `finally`, so an aborted construction
+# releases it and the hand-off to `record_owner` is seamless (one claim is
+# live at every instant).
+#
+# Deliberately kept SEPARATE from `_owner_refcounts`: that map is
+# reference-counted per process and decremented by `forget_owner` at every
+# close seam, so pre-claiming in it would have to be reconciled against the
+# post-`original` record on every path — and a double-count there means the
+# record is never dropped and the shared server is NEVER torn down. A
+# distinct in-flight counter has no reconciliation: it is registered and
+# released exactly once, around the one call it describes.
+_in_flight_replays: dict[str, int] = {}
+
+
+def _replay_socket_for_init(args, kwargs) -> str | None:
+    """The socket a pending `RedisMixin.__init__` will REPLAY, or None (#4879).
+
+    Mirrors redislite's own registry-path derivation (client.py:415-447) and
+    returns `settings['unixsocket']` only for the shape that actually takes
+    the registry-load branch (client.py:449 — `_is_redis_running()` and no
+    `socket_file`). Anything else yields None: a `host`/`port` construction
+    has no embedded child, an explicit `unix_socket_path` makes
+    `not self.socket_file` False, and a missing/unparseable registry has no
+    socket to replay. Never raises — the patch must never break construction.
+    """
+    if "host" in kwargs or "port" in kwargs:
+        return None
+    if kwargs.get("unix_socket_path"):
+        return None  # client.py:449 requires `not self.socket_file`
+    db_filename = kwargs.get("dbfilename")
+    if db_filename is None and args:
+        db_filename = args[0]
+    try:
+        db_filename = os.fspath(db_filename)
+    except TypeError:
+        return None
+    if not db_filename:
+        return None
+    if db_filename == os.path.basename(db_filename):
+        db_filename = os.path.join(os.getcwd(), db_filename)
+    registry = repr(os.path.join(
+        os.path.dirname(db_filename),
+        os.path.basename(db_filename) + ".settings")).strip("'")
+    settings = _registry_settings(registry)
+    if settings is None:
+        return None
+    sock = settings.get("unixsocket")
+    return sock if isinstance(sock, str) and sock else None
+
+
+def _inflight_replay_holds(key: str) -> bool:
+    """True when a construction in THIS process is mid-replay on `key` (#4879).
+
+    Fail CLOSED on any doubt, exactly like the refcount branch beside it in
+    `cotenant_holds_server`: the cost is a socket dir left for the reaper, the
+    cost of failing open is the #3653 data loss.
+    """
+    try:
+        return _in_flight_replays.get(key, 0) > 0
+    except Exception:
+        return True
+
+
 def _install_owner_record_patch() -> None:
     """#4487: record an owner for every redislite construction (once).
 
     Wraps `RedisMixin.__init__` so that a client constructed by ANY caller —
     guarded or raw — records this process as an owner of the server it just
     started. Runs AFTER the original init (redislite sets `socket_file`
-    inside it); a construction that aborts mid-init records nothing, matching
-    the guard's previous behaviour. Never raises — a `record_owner` I/O
-    failure must never break client construction.
+    inside it); a construction that aborts mid-init leaves no owner RECORD,
+    matching the guard's previous behaviour (the #4879 in-flight claim that
+    spans the call is released in the same `finally`). Never raises — a
+    `record_owner` I/O failure must never break client construction.
     """
     global _ORIGINAL_REDISLITE_INIT
     try:
@@ -1582,26 +1680,51 @@ def _install_owner_record_patch() -> None:
     _ORIGINAL_REDISLITE_INIT = original
 
     def _init(self, *args, **kwargs):
-        original(self, *args, **kwargs)
-        # `record_owner` / `owner_socket_of` are defined above and resolved
-        # at call time; the guard keeps construction unconditional.
-        #
-        # Resolve the socket from the object we are patching FIRST: this
-        # seam fires on the object that OWNS the server (redislite's `Redis`,
-        # including the inner client a `FalkorDB` wrapper builds), whose own
-        # `.socket_file` is authoritative. `owner_socket_of` is the fallback
-        # for any wrapper shape — it is NOT the primary read here because an
-        # inner embedded `Redis` carries its own `.client` attribute, and
-        # `owner_socket_of`'s `getattr(client, 'client', ...)` would then
-        # follow that to a client with no `socket_file` and wrongly report
-        # None (measured: the first cut of this patch wrote no record).
+        # #4879: claim the socket this construction is about to REPLAY before
+        # `original` can block inside the replay (and before any GC pass can
+        # collect an earlier client and read this construction as absent) —
+        # see `_in_flight_replays`. Held across the whole construction and
+        # released in the `finally`, so the refcount written below takes over
+        # with no instant in which neither claim is live.
         try:
-            sock = getattr(self, "socket_file", None)
-            if not (isinstance(sock, str) and sock):
-                sock = owner_socket_of(self)
-            record_owner(sock)
+            pending = _replay_socket_for_init(args, kwargs)
         except Exception:
-            pass
+            pending = None
+        inflight_key = os.path.abspath(pending) if pending else None
+        if inflight_key is not None:
+            _in_flight_replays[inflight_key] = (
+                _in_flight_replays.get(inflight_key, 0) + 1)
+        try:
+            original(self, *args, **kwargs)
+            # `record_owner` / `owner_socket_of` are defined above and resolved
+            # at call time; the guard keeps construction unconditional.
+            #
+            # Resolve the socket from the object we are patching FIRST: this
+            # seam fires on the object that OWNS the server (redislite's `Redis`,
+            # including the inner client a `FalkorDB` wrapper builds), whose own
+            # `.socket_file` is authoritative. `owner_socket_of` is the fallback
+            # for any wrapper shape — it is NOT the primary read here because an
+            # inner embedded `Redis` carries its own `.client` attribute, and
+            # `owner_socket_of`'s `getattr(client, 'client', ...)` would then
+            # follow that to a client with no `socket_file` and wrongly report
+            # None (measured: the first cut of this patch wrote no record).
+            try:
+                sock = getattr(self, "socket_file", None)
+                if not (isinstance(sock, str) and sock):
+                    sock = owner_socket_of(self)
+                record_owner(sock)
+            except Exception:
+                pass
+        finally:
+            if inflight_key is not None:
+                try:
+                    remaining = _in_flight_replays.get(inflight_key, 0) - 1
+                    if remaining > 0:
+                        _in_flight_replays[inflight_key] = remaining
+                    else:
+                        _in_flight_replays.pop(inflight_key, None)
+                except Exception:
+                    _in_flight_replays.pop(inflight_key, None)
 
     RedisMixin.__init__ = _init
     RedisMixin._tortoise_owner_record_patch = True
@@ -1866,15 +1989,41 @@ def _install_dead_socket_guard() -> None:
             return True
         if not running:
             return False
+        # #4879 gate visibility: once the ORIGINAL says a server is there, the
+        # DEAD-SOCKET GUARD's own gates decide whether a REPLAY is allowed or
+        # repaired. Every "allow" leaves this function through `_allow_replay`,
+        # which emits one WARNING naming the gate that let the replay through —
+        # without it a guard that never fired is indistinguishable from a guard
+        # that had nothing to do ("no branch fired" with no way to tell which
+        # gate stopped it). Emitted ONLY for a replay-ELIGIBLE call: one whose
+        # client has no socket yet, i.e. the construction that takes
+        # client.py:449's registry-load branch. The close-path calls
+        # `_connection_count` makes on a client that already holds a socket
+        # therefore never log.
+        replaying_here = not getattr(self, "socket_file", None)
+
+        def _allow_replay(gate: str, **detail) -> bool:
+            if replaying_here:
+                logger.warning(
+                    "#4879: replay allowed for registry %s — gate=%s%s"
+                    " (socket_file empty: this construction takes the "
+                    "registry-load branch)", registry, gate,
+                    "".join(f" {k}={v!r}" for k, v in detail.items()))
+            return True
+
         # The original returned True, so the registry exists, parses, carries a
         # pidfile whose file exists, and that pid is live (client.py:313-332).
         settings = _registry_settings(registry)
         if settings is None:
-            return True  # vanished/mutated between the two reads -> unproven
+            # vanished/mutated between the two reads -> unproven
+            return _allow_replay("registry-vanished")
         recorded_socket = settings.get("unixsocket")
-        if not recorded_socket or os.path.exists(recorded_socket):
-            return True  # nothing recorded to assess, or the socket is there
-        if getattr(self, "socket_file", None):
+        if not recorded_socket:
+            return _allow_replay("no-recorded-socket")
+        if os.path.exists(recorded_socket):
+            return _allow_replay("recorded-socket-present",
+                                 recorded_socket=recorded_socket)
+        if not replaying_here:
             # This client already has a socket, so `__init__` (client.py:449:
             # `... and not self.socket_file`) can NEVER take the registry-load
             # branch: there is no replay here to repair. Keep the original

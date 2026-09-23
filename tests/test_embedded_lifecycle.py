@@ -2657,3 +2657,105 @@ def test_registry_rewritten_during_the_stop_window_is_left_alone(
             if client is not None:
                 with contextlib.suppress(Exception):
                     client._t_close()
+
+
+# ── #4879: the last-client decision must see a MID-CONSTRUCTION co-tenant ──
+#
+# `cotenant_holds_server`'s in-process branch reads `_owner_refcounts`, which
+# the #4487 `RedisMixin.__init__` patch only increments AFTER `original(...)`
+# returns. A construction still INSIDE `original(...)` — `socket_file`
+# assigned from the registry (client.py:376), ping not yet attempted
+# (client.py:471) — is therefore invisible, and the CI shard's ordering turns
+# that into a teardown:
+#
+#   1. `test_pack_state.py:791` builds `TortoiseSDK(db_path=...).org_create(...)`
+#      as a TEMPORARY; its projection survives only through the reference cycle
+#      `proj.g -> _GuardedGraph -> proj` (tortoise/projection/__init__.py), so
+#      it is refcount-unreachable but cycle-held.
+#   2. `:794/:795` constructs again on the SAME `db_path`. The registry exists
+#      and the pid is live, so redislite takes the replay branch and
+#      `_load_setting_registry()` assigns construction #2's `socket_file`.
+#   3. INSIDE that window a cyclic-GC pass collects the leaked projection ->
+#      `weakref.finalize` -> `_gc_close` -> SHUTDOWN + `shutil.rmtree`. The
+#      dying client read `owner_refcounts={<socket>: 1}` as "last client"
+#      because construction #2 had not recorded yet.
+#   4. The socket construction #2 is about to ping is unlinked ->
+#      `ConnectionError: Error 2 connecting to /tmp/tmpXXXX/redis.socket. No
+#      such file or directory.`
+#
+# The test below drives step 3 DETERMINISTICALLY — a `gc.collect()` inside the
+# replay window instead of waiting for CPython's allocator to cross a GC
+# threshold — and pins the pre-fix read (`refcount == 1`, i.e. the refcount
+# branch ALONE cannot see the co-tenant) as well as the outcome.
+
+
+def test_midconstruction_replay_is_a_cotenant_the_last_client_must_see(
+        tmp_path, monkeypatch):
+    """#4879: count a co-tenant that is still MID-REPLAY before it attaches.
+
+    RED before the ordering fix: the collected construction #1 reads a single
+    owner claim as "last client", redislite's ``_cleanup`` unlinks the socket,
+    and construction #2 dies with the ``Error 2 connecting to .../redis.socket.
+    No such file or directory`` above. GREEN: the in-flight claim registered
+    BEFORE ``original(...)`` makes the guard read "shared", so the socket
+    survives the collection and construction #2 is served.
+    """
+    import json as _json
+
+    from redislite.client import RedisMixin
+
+    import tortoise.embedded_lifecycle as _lifecycle
+    from tortoise.sdk import TortoiseSDK
+
+    db_path = str(tmp_path / "midconstruction_replay.db")
+    # Construction #1, leaked EXACTLY as test_pack_state.py:791 leaks it: the
+    # SDK is built as an unbound temporary and only its projection's reference
+    # cycle keeps the server side alive, so a gc.collect() can take it.
+    created = TortoiseSDK(db_path=db_path).org_create("LegacyCo")
+    sock = _json.loads(Path(db_path + ".settings").read_text())["unixsocket"]
+    key = os.path.abspath(sock)
+    assert os.path.exists(sock), "test setup: construction #1 must be live"
+
+    real_load = RedisMixin._load_setting_registry
+    seen: dict = {}
+
+    def _load_then_collect(self):
+        real_load(self)
+        # client.py:376 has just assigned `self.socket_file` from the registry;
+        # the ping (client.py:471) has NOT run. This is the defect's window.
+        seen["refcount"] = _lifecycle._owner_refcounts.get(key, 0)
+        # `getattr` so the same test runs against a tree WITHOUT the fix and
+        # fails on the OUTCOME (the ConnectionError), not on an absent symbol.
+        seen["inflight"] = getattr(
+            _lifecycle, "_in_flight_replays", {}).get(key, 0)
+        seen["replayed"] = os.path.abspath(self.socket_file or "")
+        gc.collect()  # collect the leaked construction #1 HERE, not on luck
+        seen["socket_after_gc"] = os.path.exists(sock)
+
+    monkeypatch.setattr(RedisMixin, "_load_setting_registry", _load_then_collect)
+
+    second = TortoiseSDK(db_path=db_path, namespace=created["id"])
+    try:
+        proj = second._get_proj()
+        client = getattr(proj.db, "client", proj.db)
+        assert seen.get("replayed") == key, (
+            "#4879: test setup — construction #2 must take the replay branch")
+        assert seen["refcount"] <= 1, (
+            "#4879: test setup — the owner refcount alone sees only the leaked "
+            "client's claim, which is exactly why the guard read 'last client'")
+        assert seen["inflight"] >= 1, (
+            "#4879: the in-flight replay claim must be registered BEFORE "
+            "`original(...)` can block; the refcount branch cannot see it")
+        assert seen["socket_after_gc"], (
+            "#4879: collecting the leaked client removed the socket the "
+            "in-flight construction had already adopted (the CI failure)")
+        assert client.ping(), "construction #2 must be served by a live server"
+        assert _pid_alive(client.pid), "the replayed server must still be live"
+        assert os.path.exists(sock), "the replayed socket must still exist"
+        assert not _lifecycle._in_flight_replays.get(key), (
+            "#4879: the in-flight claim must be RELEASED when the construction "
+            "finishes — a stale claim would make every later teardown read "
+            "'shared' and pin this server (and its socket dir) forever")
+    finally:
+        with contextlib.suppress(Exception):
+            second.close()
