@@ -124,7 +124,7 @@ something derivable from today's code.
 | 72 | `tortoise_pack_install` | `tool_registry.py:226` | `upsert_tenant_manifest` ⚠️ **does not resolve** | no | `REMOVED` |
 | 73 | `tortoise_packs_list` | `tool_registry.py:215` | `get_tenant_packs` ⚠️ **does not resolve** | yes | `REMOVED` |
 | 74 | `tortoise_paginated_query` | `tool_registry.py:111` | `paginated_query` | yes | `search_knowledge` |
-| 75 | `tortoise_promote_point` | `tool_registry.py:363` | `promote_point` | no | `refresh_confidence` |
+| 75 | `tortoise_promote_point` | `tool_registry.py:363` | `promote_point` | no | `refresh_confidence` ⚠️ |
 | 76 | `tortoise_provenance` | `tool_registry.py:845` | `provenance` | yes | `check_confidence` |
 | 77 | `tortoise_query` | `tool_registry.py:98` | `query` | yes | `search_knowledge` |
 | 78 | `tortoise_query_points_by_tag` | `tool_registry.py:251` | `query_points_by_tag` | yes | `search_knowledge` |
@@ -135,7 +135,7 @@ something derivable from today's code.
 | 83 | `tortoise_search_sessions` | `tool_registry.py:936` | `search_sessions` | yes | `search_knowledge` |
 | 84 | `tortoise_session_capture` | `tool_registry.py:671` | **none declared** | no | `mine_knowledge_from_session` |
 | 85 | `tortoise_session_context` | `tool_registry.py:661` | `session_context` | yes | `check_confidence` |
-| 86 | `tortoise_set_point_baseline` | `tool_registry.py:406` | `set_point_baseline` | no | `refresh_confidence` |
+| 86 | `tortoise_set_point_baseline` | `tool_registry.py:406` | `set_point_baseline` | no | `refresh_confidence` ⚠️ |
 | 87 | `tortoise_set_source_tier` | `tool_registry.py:987` | `set_source_tier` | no | `manage_source_trust` |
 | 88 | `tortoise_stale` | `tool_registry.py:801` | `stale_points` | yes | `graph_overview` |
 | 89 | `tortoise_status` | `tool_registry.py:644` | `status` | yes | `graph_overview` |
@@ -154,6 +154,11 @@ still answer through the warning shim, and each one's `Destination` is the desti
 the replacement that warning names. The other **82** are live.
 
 Listed so a reader can tell them apart from the live rows that share their destination: `tortoise_get`, `tortoise_get_events`, `tortoise_get_governance`, `tortoise_get_operator`, `tortoise_get_point`, `tortoise_health`, `tortoise_index_sessions`, `tortoise_ingest_corpus`, `tortoise_list_pointkinds`, `tortoise_list_sources`, `tortoise_list_tags`, `tortoise_paginated_query`, `tortoise_query_points_by_tag`, `tortoise_stale`, `tortoise_status`, `tortoise_taxonomy`
+
+**A `⚠️` after a destination means the sibling SDK rename table**
+**(`docs/product/sdk-rename-table.md` §C3b, and its C6 fold record) records that**
+**destination as WRONG.** The map is owner-approved, so it is NOT edited here; §D2c states
+the documented reading and the authority for it.
 
 ### Destination counts
 
@@ -342,6 +347,19 @@ lose the row's whole support, silently — so the generator computes the first-c
 
 - **`tortoise_get_source_reliability`** — map says `list_knowledge`; the first clause names `manage_source_trust`, the full citation names `manage_source_trust`, `list_knowledge`
   > | `assess_source`, `set_source_tier`, `get_source_reliability` | 3 | → `manage_source_trust` for the setter; reads via `list_sources`. |
+
+#### D2c — destinations the sibling SDK rename table records as WRONG
+
+`docs/product/sdk-rename-table.md` reconciles the same surface this file maps, and its
+§C3b finding plus its C6 fold record name a different destination for the rows below.
+**The destination map here is owner-approved, so it is reported, not edited** — the same
+rule D2 states. Each row's documented reading and the authority for it are shown, so the
+disagreement is visible at the row instead of only in the sibling artifact.
+
+- **`tortoise_promote_point`** — map says `refresh_confidence`; the documented reading is `update_knowledge`
+  > The owner-approved MCP list absorbs `promote_point` into `revise_knowledge`, whose beta successor is `update_knowledge`; beta names the new status a FIELD on `update_knowledge`, and promote's incident-operator cascade and approval gate ride with it — `refresh_confidence` recomputes confidence and covers neither.
+- **`tortoise_set_point_baseline`** — map says `refresh_confidence`; the documented reading is `update_knowledge`
+  > Same approved absorption as `tortoise_promote_point`; beta names the starting belief a FIELD on `update_knowledge`, not a separate verb.
 
 #### D3 — citations that name more than one target
 

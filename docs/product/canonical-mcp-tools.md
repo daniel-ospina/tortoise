@@ -19,12 +19,19 @@ related:
   - "#4114"
 ---
 
-# Canonical MCP tool list — 23 tools
+# Canonical MCP tool list — 23 proposed tools (the beta target is 26)
 
 **Owner-approved 2026-09-18.** This is the target MCP surface. Everything not on this
 list is retired, folded into a member below, or archived. The surface is frozen in both
 directions until this list is executed — see `docs/product/mcp-sdk-surface.md` (the
 generated view of the current baseline) and the gate in `tools/surface-guard.py`.
+
+**Amended 2026-09-22** (owner ruling, recorded on #4282): the four placement items this
+document left **OPEN** are settled — `manage_deployment` is **off the MCP**,
+`run_onboarding` is **dropped for `check_connection`**, and `packs_list`/`pack_install` are
+**SDK/REST, post-beta** (#4663). The **23** is this list's own proposal count; the **MCP
+target is 26**. `approved: 2026-09-18` above stays the original ruling date; this paragraph
+records the amendment.
 
 > This document is the **approval record**, not the generated baseline. The generated
 > list of what exists *today* is `docs/product/mcp-sdk-surface.md`, rendered from
@@ -39,9 +46,16 @@ read permission can be granted generously with no path to a destructive action.
 reads and writes — `index_files` is the clean example: both of its members (`index_files`,
 `mine_conversations`) are excluded from tenant HTTP.
 
-**Caveat:** `manage_deployment` was intended as a second example, but two of its three
-members are tenant-served today (`packs_list` is a read, `pack_install` is a write), so its
-placement is still open. See **Open items**.
+**The general rule: containers may be on the MCP; account tenancy is not.** A container that
+mixes reads and writes is fine when it is operator-only and never handed to a tenant
+(`index_files`). What is *not* fine is a container whose members live on the customer-grantable
+surface: a tenant-served read or write inside an operator-only tool either loses that capability
+or smuggles an exemption into the read/write guarantee.
+
+**`manage_deployment` was the worked case, and it is now OFF the MCP** (settled 2026-09-22).
+`org_create` is account tenancy — putting it on the MCP would contradict the recorded tenancy
+ruling — and its two tenant-visible members are rehomed rather than lost: the packs operations
+move to the SDK/REST pack surface. See **Open items**.
 
 ## READ — 9 tools
 
@@ -71,13 +85,21 @@ currently absorbs `get_confidence`, which is read-labelled but writes. See **Ope
 | 14 | `manage_source_trust` | assess_source, get_source_reliability, set_source_tier |
 | 15 | `link_entities` | create_edge, create_operator |
 | 16 | `record_decision` | file_decision, file_human_approval |
-| 17 | `revise_knowledge` | update, update_point, update_entity, supersede, invalidate, retract_point, promote_point, set_point_baseline |
+| 17 | `revise_knowledge` | update, update_point, update_entity, supersede, invalidate, retract_point, promote_point, set_point_baseline — the beta target **splits this into `update_knowledge` + `supersede_knowledge`**; promote/baseline become **fields on `update_knowledge`** |
 | 18 | `delete_knowledge` | delete, delete_point, delete_entity |
 | 19 | `stabilize_beliefs` | dream, compute_confidence |
 | 20 | `approve_merge` | approve_merge |
 | 21 | `adjust_relationship` | operator_action, annotate_operator, mitigate_operator |
-| 22 | `manage_deployment` | org_create, packs_list, pack_install — **placement OPEN**, see Open items |
-| 23 | `run_onboarding` | the seven `onboarding_*` |
+| 22 | `manage_deployment` | org_create, packs_list, pack_install — **OFF the MCP (settled 2026-09-22)**; account tenancy is not on the MCP. See Open items |
+| 23 | `run_onboarding` | the seven `onboarding_*` — **OFF the MCP (settled 2026-09-22)**, dropped for `check_connection`. See Open items |
+
+**Rows 22 and 23 are settled OFF the MCP (2026-09-22).** `manage_deployment` is account tenancy
+(`org_create`) plus two tenant-served pack operations; `run_onboarding` mixed a write with two
+tenant-served reads. Neither container ships on the MCP target. The rehomed members and the
+dropped capability are recorded in **Open items**; the **MCP target count is unchanged at 26** —
+the beta list already carries `check_connection` in `run_onboarding`'s place and the tenancy
+surface outside the MCP. Nothing below is a silent deletion: every member is either rehomed or
+listed as retired.
 
 ## Removed entirely
 
@@ -131,9 +153,9 @@ done by `register_source`; the confidence tools are split across `recall_beliefs
 | **Confidence reads currently WRITE.** `get_confidence` is annotated `readOnlyHint=True` (the `tortoise_get_confidence` entry in `tortoise/tool_registry.py`, `annotations=_ro()`) but, for a dirty root, calls `self.dream(dirty_only=True, ...)` inside `TortoiseSDK.get_confidence` (`tortoise/sdk.py`), which writes `SET n.confidence = p.c` in `tortoise/dream.py` (`_ep_run_batch`). Until that read path stops writing, `recall_beliefs` cannot honestly be called read-only. *(Cited by symbol, not line: line numbers go stale on every rebase.)* | **BLOCKING for the read/write guarantee** |
 | **`tortoise_get_entity` must NOT be retired** by the #3883 warning shim. The map must retire `tortoise_get` → `tortoise_get_entity(id, type=...)` instead, because `list_tools` strips retired names *by string* — so retiring `get_entity` while re-declaring it would hide it from agents entirely. | **✅ RESOLVED — PR #4031 retires `tortoise_get` into `tortoise_get_entity` and keeps `get_entity` live; the tool gained the `type=` dispatch (`point`\|`entity`\|`operator`\|`events`\|`governance`), so the named replacement call resolves, and `TortoiseSDK.get_entity` is untouched. The earlier inverse (retiring `get_entity` into `tortoise_get`) was the must-fix this row raised.** |
 | **`compute_confidence` is mislabelled in the same way.** Annotated read-only, but it persists: `TortoiseSDK.compute_confidence` (`tortoise/sdk.py`) runs `MATCH (n:Point {id: p.id}) SET n.confidence = p.c`. `stabilize_beliefs` (a write tool) is therefore its correct home — confirmed. | resolved — moves to `stabilize_beliefs` |
-| **`packs_list` is tenant-facing, not operator-only.** The registry has it `_ro()`, `http_policy=True`, described as *"List this team's active packs … another tenant's packs are never observable"* (`tortoise/tool_registry.py`). Merging it into an operator-only `manage_deployment` would **remove a tenant-visible read**. Owner call: does a tenant need to list its own packs? If yes, `packs_list` belongs in a customer-readable tool. | **OPEN — owner decision** |
-| **`pack_install` is tenant-facing too — an unflagged write.** It has `http_policy=True` and is described as *"Install a custom expansion pack on the **HOSTED surface** … stores the manifest in the tenant graph and activates it"* (`tortoise/tool_registry.py`); the baseline records it `served: http`. So folding it into an operator-only `manage_deployment` would **remove a tenant-visible write**, the same defect as `packs_list` but for a write. (Its `hosted_only=True` flag is separately dead — see #4114.) Owner call: does a tenant install its own packs? | **OPEN — owner decision** |
-| **`run_onboarding` absorbs two read-only tenant-served tools** — `onboarding_state` and `onboarding_github_status` are `_ro()` and `http_policy=True`. So it is both read and write on the customer-grantable surface, which the principle above forbids. Either mark it operator-only (losing the tenant reads) or accept a read-inside-write and state the exemption. | **OPEN — decision** |
+| **`packs_list` is tenant-facing and NOT on the MCP.** The registry has it `_ro()`, `http_policy=True`, described as *"List this team's active packs … another tenant's packs are never observable"* (`tortoise/tool_registry.py`). **Settled 2026-09-22: it is SDK/REST only and POST-BETA** — the tenant read is preserved there, and no competitor exposes pack installation on its agent API, so the agent-facing MCP does not carry it. Per-graph curation is tracked by **#4663**. | **✅ RESOLVED 2026-09-22 — SDK/REST post-beta (#4663)** |
+| **`pack_install` is tenant-facing too — an unflagged write.** It has `http_policy=True` and is described as *"Install a custom expansion pack on the **HOSTED surface** … stores the manifest in the tenant graph and activates it"* (`tortoise/tool_registry.py`); the baseline records it `served: http`. **Settled 2026-09-22: SDK/REST only and POST-BETA**, so the tenant-visible write survives instead of being destroyed by folding it into an operator-only tool. (Its `hosted_only=True` flag is separately dead — see #4114.) Per-graph curation is tracked by **#4663**. | **✅ RESOLVED 2026-09-22 — SDK/REST post-beta (#4663)** |
+| **`run_onboarding` absorbs two read-only tenant-served tools** — `onboarding_state` and `onboarding_github_status` are `_ro()` and `http_policy=True`. So it is both read and write on the customer-grantable surface, which the principle above forbids. **Settled 2026-09-22: the container is DROPPED** for `check_connection` (*programmatic, returns a result — not a wizard*), and its two tenant-visible reads are **rehomed to the tenancy block (SDK/REST)**. The MCP surface therefore **loses both reads by design** — the capability is reachable, just not through the agent API. The other five setup members are not on the MCP target. | **✅ RESOLVED 2026-09-22 — dropped for `check_connection`; two reads rehomed to SDK/REST** |
 | **`graph_set_recording` — dropping it removes an agent's self-heal path.** The registry says the capture `409` (*"Session recording is disabled for this graph"*) *"routes agents here; call this tool to turn recording back on, then retry the capture"* (the `tortoise_graph_set_recording` entry in `tortoise/tool_registry.py`). REST exposes the same operation at `PATCH /v1/graphs/{graph_id}`, but **an MCP client cannot reach REST** — so dropping it would leave an agent that hits a 409 with no recovery path inside MCP. **Owner ruling 2026-09-21: KEEP IT.** It becomes a **24th approved tool** — this list's own count, not the beta target's, which becomes **26** after its other deltas (a write; needs a `team:manage`-scoped key, so it is not a universal self-heal path). Its SDK method is the builder-only `update_memory_graph`; the SDK's own per-field `graph_set_recording` stays discarded, consistent with the ruling that deleted `set_memory_graph_name`/`set_memory_graph_backend`. | **✅ RESOLVED — kept; the MCP target is 26** |
 | **SDK method `TortoiseSDK.get_entity`** keeps the narrow meaning while this tool takes the broad one — same name, two meanings, one layer apart. | resolve in the SDK pass |
 | **Bridge table** — every `type=`/`mode=` value in these 23 mapped to the SDK method behind it, before implementation starts. | pre-flight |
