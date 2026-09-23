@@ -1510,13 +1510,20 @@ durations:
   # describes; and a 27x under-weight would skew the LPT pack for a ~55s file.
   # Refresh from the first post-merge junit artifact.
   test_from_uri_userinfo.py: 55.6
-  # #2944: new file, and the SAME class as the #3039 block directly above — the
-  # entry is required because leaving it out drops durations coverage from
-  # 90.05% (passing) to 89.92% (544/605 fast files), one file below the 90%
-  # floor, reddening the gated `--integrity` step. Note this file is registered
-  # by the branch's own `core` addition, so the failure appears ONLY at the
-  # merge: the branch parent and the main parent each PASS the same check. That
-  # is what made it worth a review cycle rather than being caught by either side.
+  # #2944: new file. The row is required, and the same-tree pair at the merge
+  # commit is 89.92% (544/605 fast files) WITHOUT it vs 90.08% (545/605) WITH it
+  # — one file below the 90% floor either way you look at it, reddening the
+  # gated `--integrity` step.
+  #
+  # Do not read this as the #3039 block's shape. That block's pair (541/601 ->
+  # 541/602) is one tree, one file apart. Here the two PARENTS each pass
+  # separately (branch parent 525/583 = 90.05%, main parent 544/604 = 90.07%)
+  # and the failure exists only in the merge: main's added fast files moved the
+  # pool 583 -> 605, which is what drops the ratio, and this branch's `core`
+  # registration is the file that lands unweighed. So the red is produced by the
+  # COMBINATION, not by either side, which is why a review cycle caught it and
+  # neither parent could have. The 90.05% figure belongs to the branch parent's
+  # pool and must not be quoted as this tree's with-row state.
   #
   # The value is a LOCAL measurement (30 tests, 66.7s at fleet load), not a CI
   # junit artifact — chosen over the flat 2.0s default for the reason the #3039
