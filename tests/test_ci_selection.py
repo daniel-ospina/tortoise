@@ -95,6 +95,47 @@ def test_public_site_surface_change_selects_onboarding_and_skips_slow():
         assert "test_website_docs_consistency.py" in r["test_files"], changed
 
 
+def test_the_onboarding_copy_gate_is_wired_not_left_to_the_tier1_fallback():
+    """#3673 indicator (2): the parity gate runs on every PR touching either copy.
+
+    The gate is `test_onboarding_variants.py::test_m8_deploy_mirror_matches_canonical`.
+    Before this entry existed, `website/apps/dashboard/public/skills/` matched NO
+    SOURCE_PATTERNS entry, so an edit to the SERVED copy alone produced
+    `surfaces=[]` and the parity test ran only through the tier-1 fallback —
+    coverage that held by accident and that would vanish the moment the file left
+    `tier1`. For the installer the consequence was worse: its guard,
+    `test_installer_preserves_foreign_skill_content.py`, is on `core` and NOT in
+    `tier1`, so an installer-only PR ran no guard for the installer at all — the
+    #1349/#3332/#3616 silent-drop class this file exists to prevent.
+
+    Asserted on the SURFACE, not merely on the test-file list: the tier-1
+    fallback also puts `test_onboarding_variants.py` in `test_files`, so a
+    test-file-only assertion passes with the wiring absent — a gate that can only
+    ever pass. Watched RED before the SOURCE_PATTERNS entries existed, GREEN
+    after, which is the only evidence that distinguishes the two.
+    """
+    cases = (
+        # the two tracked copies whose byte-identity IS the parity contract
+        ("tortoise/onboarding/SKILL.md", "test_onboarding_variants.py"),
+        ("website/apps/dashboard/public/skills/tortoise-onboarding/SKILL.md",
+         "test_onboarding_variants.py"),
+        # a served sibling — the same directory, the same gate
+        ("website/apps/dashboard/public/skills/how-to-use-tortoise/SKILL.md",
+         "test_onboarding_variants.py"),
+        # the installer whose SKILLS=(...) the dashboard's claim is pinned against
+        ("website/apps/dashboard/public/install-tortoise-skills.sh",
+         "test_installer_preserves_foreign_skill_content.py"),
+    )
+    root = Path(__file__).resolve().parents[1]
+    for changed, guard in cases:
+        assert (root / changed).exists(), f"guarded path is gone: {changed}"
+        r = _sel([changed])
+        assert r["surfaces"] == ["onboarding"], (
+            f"{changed} selects {r['surfaces']} — its guard runs only via the "
+            f"tier-1 fallback, which is not a wiring")
+        assert guard in r["test_files"], f"{changed} does not select {guard}"
+
+
 def test_every_source_pattern_is_selectable():
     """The ratchet: every SOURCE_PATTERNS entry must reach `select()`.
 

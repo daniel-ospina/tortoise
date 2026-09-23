@@ -20,6 +20,8 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ONBOARDING_DIR = REPO_ROOT / "tortoise" / "onboarding"
 LIVE_SKILL = ONBOARDING_DIR / "SKILL.md"
@@ -93,14 +95,62 @@ def test_m8_old_prompt_archived_not_deleted():
         "the old staging script must be retired (deployed copies archived)")
 
 
+def assert_copies_parity(canonical: Path, mirror: Path) -> None:
+    """Byte-identity between the two tracked copies, FAIL-CLOSED (#3673).
+
+    #3673 requires that a copy which cannot be read is a FAILURE, never a skip:
+    a gate that quietly skips when a copy is unreadable reports health it has
+    not observed, and a deleted copy is precisely the state a parity gate exists
+    to catch. Both sides are asserted to EXIST before either is read, so a
+    missing file raises a named failure instead of a bare FileNotFoundError from
+    the comparison — the difference between a diagnosis and a traceback.
+    """
+    assert canonical.exists(), f"canonical copy missing: {canonical}"
+    assert mirror.exists(), f"deploy mirror missing: {mirror}"
+    assert mirror.read_text(encoding="utf-8") == canonical.read_text(
+        encoding="utf-8"), (
+        f"parity broken: {mirror} drifted from {canonical}")
+
+
 def test_m8_deploy_mirror_matches_canonical():
     """The dashboard deploy mirror is byte-identical to the canonical
     SKILL.md (drift-proofing — the old stage_variants concat guarantee
-    carried forward)."""
-    assert MIRROR_SKILL.exists(), f"deploy mirror missing: {MIRROR_SKILL}"
-    canonical = LIVE_SKILL.read_text(encoding="utf-8")
-    assert MIRROR_SKILL.read_text(encoding="utf-8") == canonical, (
-        "deploy mirror drifted from the canonical SKILL.md")
+    carried forward).
+
+    #3673: there are exactly TWO tracked copies (the third is gitignored build
+    output), so this is a two-source parity gate and not a one-file no-op gate.
+    Watched failing in BOTH directions — a canonical-only edit and a served-only
+    edit each exit non-zero — then restored to green."""
+    assert_copies_parity(LIVE_SKILL, MIRROR_SKILL)
+
+
+def test_parity_gate_fails_closed_on_a_missing_or_unreadable_copy(tmp_path):
+    """#3673 indicator (3): 0 fail-open paths.
+
+    The only state that may pass is genuine byte-identity. Missing and
+    unreadable copies must RAISE — if any of these returned cleanly the gate
+    would be reporting a comparison it never performed.
+    """
+    canon = tmp_path / "canonical.md"
+    mirror = tmp_path / "mirror.md"
+    canon.write_text("same\n", encoding="utf-8")
+    mirror.write_text("same\n", encoding="utf-8")
+    assert_copies_parity(canon, mirror)          # identical — the only pass
+
+    mirror.write_text("different\n", encoding="utf-8")
+    with pytest.raises(AssertionError, match="drifted"):
+        assert_copies_parity(canon, mirror)      # divergence
+
+    with pytest.raises(AssertionError, match="canonical copy missing"):
+        assert_copies_parity(tmp_path / "absent.md", mirror)
+    with pytest.raises(AssertionError, match="deploy mirror missing"):
+        assert_copies_parity(canon, tmp_path / "absent.md")
+
+    # UNREADABLE — a directory where a document is expected.
+    mirror.unlink()
+    mirror.mkdir()
+    with pytest.raises(OSError):
+        assert_copies_parity(canon, mirror)
 
 
 def test_4365_served_document_sends_chatgpt_to_a_path_that_exists():
