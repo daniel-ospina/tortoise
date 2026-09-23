@@ -745,6 +745,80 @@ def test_the_transport_defers_every_unwrapped_failure(monkeypatch):
 
 
 
+def test_a_refused_post_that_committed_is_not_reported_as_uncommitted(monkeypatch):
+    """#4675: the spool's terminality rule must not be "a retryable status
+    means nothing committed".
+
+    The transport bound ABANDONS its handler rather than cancelling it, so a
+    504 routinely arrives AFTER the server stored the session and its turns.
+    Reporting that as a failure parks an already-durable session in the spool
+    and `session drain` can never reach `filed N, deferred 0`.
+
+    MUTATION THAT REDS THIS: drop `_refused(...)` from the HTTPError arm — the
+    outcome stays `ok=False` and the entry defers forever.
+    """
+    import io
+    from urllib.error import HTTPError
+
+    from tortoise.__main__ import _session_post
+
+    payload = {"session_id": "s-committed", "harness": "codex",
+               "conversation": [{"role": "user", "content": "hi"},
+                                {"role": "assistant", "content": "yo"}]}
+
+    class _Detail(io.BytesIO):
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    methods: list[str] = []
+
+    def _open(req, timeout=None):
+        methods.append(req.get_method())
+        if req.get_method() == "POST":
+            raise HTTPError(req.full_url, 504, "refused", None,
+                            io.BytesIO(b'{"detail":"wait budget exceeded"}'))
+        sid = req.full_url.rsplit("/", 1)[-1]
+        detail = {"id": sid, "extracted": 3,
+                  "turn_points": [{"id": f"{sid}_t0"}, {"id": f"{sid}_t1"}]}
+        return _Detail(json.dumps(detail).encode("utf-8"))
+
+    monkeypatch.setattr("urllib.request.urlopen", _open)
+    out = _session_post("k", "https://api.example")(payload)
+
+    assert out.ok is True, out
+    assert out.status == 200, out
+    assert methods == ["POST", "GET"], methods
+    assert out.body == {"confirmed": "filed"}, out.body
+
+
+def test_a_refused_post_whose_turns_are_absent_still_defers(monkeypatch):
+    """The mirror guard: a genuinely pre-commit refusal must keep deferring.
+
+    MUTATION THAT REDS THIS: treat a 404 from the confirming read as filed.
+    """
+    import io
+    from urllib.error import HTTPError
+
+    from tortoise.__main__ import _session_post
+
+    payload = {"session_id": "s-uncommitted", "harness": "codex",
+               "conversation": [{"role": "user", "content": "hi"}]}
+
+    def _open(req, timeout=None):
+        raise HTTPError(req.full_url,
+                        504 if req.get_method() == "POST" else 404,
+                        "refused", None, io.BytesIO(b'{}'))
+
+    monkeypatch.setattr("urllib.request.urlopen", _open)
+    out = _session_post("k", "https://api.example")(payload)
+    assert out.ok is False and out.status == 504, out
+
+
 def test_cli_reports_and_excludes_non_conversational_turns(tmp_path, monkeypatch, capsys):
     """`System:` lines are excluded by POLICY (the Pi leg does the same at
     capture) — and the exclusion is REPORTED. Silently posting fewer turns than

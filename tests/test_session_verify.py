@@ -895,18 +895,34 @@ def test_guard_wrong_turn_count_reds_captured(hosted, setup, monkeypatch):
     assert report["exit_code"] == EXIT_BROKEN
 
 
-def test_guard_receipt_not_advanced_reds_captured(hosted, setup):
-    """Mutation: the capture stores the session but the server never advances
-    the per-harness receipt — ``captured`` FAILs on the receipt leg even though
-    the session is retrievable with the expected turns."""
+def test_captured_is_proven_on_the_session_even_when_the_receipt_never_advances(
+        hosted, setup):
+    """#4675: `captured` is a per-SESSION fact, so it must be decided on the
+    session — not on `session_capture_receipt_<harness>`, a PER-HARNESS scalar.
+
+    The server writes that scalar only AFTER extraction and only while the
+    session is alive, and verify DELETES its own probe session in the `finally`
+    that follows this check. Requiring it therefore failed the link on captures
+    that had in fact landed — measured live: `session_capture_receipt_codex`
+    was None while the codex probe session was in the graph.
+
+    The non-advance is still SURFACED in the link payload and its detail, so
+    the evidence is not lost — it is just no longer the pass condition.
+
+    MUTATION THAT REDS THIS: restore the `if not receipt_ok: STATUS_FAIL`
+    branch (the link FAILs and the recorded `receipt_advanced` flag becomes
+    unreachable).
+    """
     home, _bindir, _fake = setup
     root = _install(home, "claude")
     graph, _url = hosted
     graph.no_receipt = True
     report = _verify(hosted, home, "claude", root)
-    assert report["exit_code"] == EXIT_BROKEN, report
-    assert report["links"]["captured"]["status"] == "FAIL"
-    assert "did not advance" in report["links"]["captured"]["detail"]
+    captured = report["links"]["captured"]
+    assert captured["status"] == "PROVEN", report
+    assert captured["receipt_advanced"] is False, report
+    assert "did not advance" in captured["detail"], captured
+    assert captured["turns"] == 2, captured
 
 
 def test_guard_missing_source_node_reds_memory(hosted, setup):

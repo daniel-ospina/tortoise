@@ -74,7 +74,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
 from tortoise import capture_install, hook_install
 from tortoise.capture_receipts import capture_receipt_key
@@ -529,14 +528,22 @@ def _fire(root: Path, command: str, payload: dict[str, Any],
 
 
 def _api(api_url: str, api_key: str, path: str, *,
-         method: str = "GET") -> dict[str, Any]:
+         method: str = "GET", timeout: float = 30.0) -> dict[str, Any]:
+    # `urlopen` is imported HERE, not at module scope, for the same reason
+    # `tortoise.__main__._session_post` does it: the transport must be
+    # patchable per-call (`urllib.request.urlopen`) so a capture client's tests
+    # exercise the real refusal path instead of the network (#4675). A
+    # module-level binding would freeze the real transport for every caller
+    # that shares this reader — including the post-commit confirmation.
+    from urllib.request import Request, urlopen
+
     req = Request(
         f"{api_url.rstrip('/')}{path}",
         headers={"Authorization": f"Bearer {api_key}"},
         method=method,
     )
     try:
-        with urlopen(req, timeout=30) as resp:
+        with urlopen(req, timeout=timeout) as resp:
             body = resp.read()
     except HTTPError as e:
         detail = e.read().decode() if e.fp else ""
@@ -563,14 +570,23 @@ def _read_receipt(api_url: str, api_key: str, harness: str) -> str | None:
 
 
 def _session_detail(api_url: str, api_key: str, session_id: str,
+                    *, timeout: float = 30.0,
                     ) -> dict[str, Any] | None:
     """GET a session by id; None on 404."""
     try:
-        return _api(api_url, api_key, f"/v1/sessions/{session_id}")
+        return _api(api_url, api_key, f"/v1/sessions/{session_id}",
+                    timeout=timeout)
     except _ApiError as e:
         if e.status == 404:
             return None
         raise
+
+
+#: Public spelling of the ONE reader of ``GET /v1/sessions/<id>``. The
+#: "post-commit timeout" confirmation (``tortoise/session_confirm.py``, #4675)
+#: reads through THIS definition so the 404→None / other-status-raises contract
+#: cannot drift between the verifier and the capture client.
+session_detail = _session_detail
 
 
 # ── the chain ─────────────────────────────────────────────────────────────
@@ -722,10 +738,19 @@ def verify_session_capture(harness: str,
         report["links"]["installed"] = _install_link(harness, fired, fire_env)
 
         # ── link 2: captured ─────────────────────────────────────────────
+        # OBSERVE THE TURNS, not merely the Session row: the server MERGEs the
+        # Session BEFORE it writes the turns, so a loop that stops at existence
+        # can read a capture mid-flight and then judge it by a turn count of
+        # zero. This link is about the per-SESSION fact, so its window must be
+        # as long for the turns as it is for the row.
         deadline = time.monotonic() + max(1.0, timeout)
-        while time.monotonic() < deadline:
+        expected_turns = len(_PROBE_TURNS)
+        while True:
             detail = _session_detail(api_url, api_key, probe_id)
-            if detail is not None:
+            if (detail is not None
+                    and len(detail.get("turn_points") or []) == expected_turns):
+                break
+            if time.monotonic() >= deadline:
                 break
             time.sleep(0.5)
 
@@ -734,39 +759,46 @@ def verify_session_capture(harness: str,
             receipt_after = _read_receipt(api_url, api_key, harness)
         except _ApiError:
             receipt_after = None
+        receipt_advanced = (receipt_after is not None
+                            and receipt_after != receipt_before)
 
-        expected_turns = len(_PROBE_TURNS)
         if detail is None:
             report["links"]["captured"] = _link(
                 STATUS_FAIL,
                 f"no session {probe_id!r} appeared within {timeout:g}s "
-                f"(receipt {'advanced' if receipt_after != receipt_before else 'did not advance'})",
-                receipt_before=receipt_before, receipt_after=receipt_after)
+                f"(receipt {'advanced' if receipt_advanced else 'did not advance'})",
+                receipt_before=receipt_before, receipt_after=receipt_after,
+                receipt_advanced=receipt_advanced)
         else:
             turn_points = detail.get("turn_points") or []
             turn_count_ok = len(turn_points) == expected_turns
-            receipt_ok = (receipt_after is not None
-                          and receipt_after != receipt_before)
-            if not receipt_ok:
-                report["links"]["captured"] = _link(
-                    STATUS_FAIL,
-                    f"session {probe_id!r} exists but "
-                    f"{capture_receipt_key(harness)} did not advance",
-                    receipt_before=receipt_before, receipt_after=receipt_after,
-                    turns=len(turn_points))
-            elif not turn_count_ok:
+            if not turn_count_ok:
                 report["links"]["captured"] = _link(
                     STATUS_FAIL,
                     f"session {probe_id!r} has {len(turn_points)} turns, "
                     f"expected {expected_turns}",
                     receipt_before=receipt_before, receipt_after=receipt_after,
+                    receipt_advanced=receipt_advanced,
                     turns=len(turn_points))
             else:
+                # PROVEN on the per-SESSION fact. `session_capture_receipt_<h>`
+                # is a PER-HARNESS scalar written only after extraction and
+                # only while the session is alive — and this run DELETES its
+                # own probe session in the `finally` below, so requiring it
+                # failed the link on captures that had in fact landed (#4675).
+                # It is still reported: a harness that never advances it is a
+                # real signal about that harness, just not evidence about
+                # THIS session.
                 report["links"]["captured"] = _link(
                     STATUS_PROVEN,
-                    f"receipt advanced ({receipt_before!r} → {receipt_after!r}); "
-                    f"session {probe_id!r} retrievable with {len(turn_points)} turns",
+                    f"session {probe_id!r} retrievable with "
+                    f"{len(turn_points)} turns"
+                    + (f"; receipt advanced ({receipt_before!r} → "
+                       f"{receipt_after!r})" if receipt_advanced
+                       else f"; {capture_receipt_key(harness)} did not advance "
+                            "(per-harness scalar, not a per-session fact)"),
                     receipt_before=receipt_before, receipt_after=receipt_after,
+                    receipt_advanced=receipt_advanced,
                     turns=len(turn_points))
 
         # Re-evaluate the INSTALL leg now that the observation window has
