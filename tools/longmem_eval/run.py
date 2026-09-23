@@ -25,7 +25,12 @@ Full run needs: the dataset (~tens of MB, auto-downloaded to
 ``~/.cache/tortoise-longmemeval`` or ``TORTOISE_LME_CACHE_DIR``) and provider
 keys (OPENROUTER_API_KEY / OPENAI_API_KEY / …) — never committed, never
 hardcoded. The committed MINI fixture + ``--mock`` exercises the whole
-pipeline in CI, where the pinned embedder is provisioned by contract.
+pipeline offline; the pinned embedder is still REQUIRED (#4718), so a CI
+lane that runs these paths provisions it up front (the main test job's
+``tools/embedder_provision.py`` step, #2573) and the harness invocations
+whose subject is not the dense leg carry ``--skip-preflight`` — a cold or
+absent embedder therefore never downloads mid-suite and never turns an
+unrelated assertion red.
 """
 from __future__ import annotations
 

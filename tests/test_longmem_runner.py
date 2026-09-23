@@ -1,6 +1,17 @@
 """Smoke tests for the LongMemEval-S external comparability runner (#1144,
-axis 2). Runs fully offline against the committed MINI fixture with mocked
-reader + judge — no dataset download, no API keys, embedded FalkorDBLite.
+axis 2). Runs offline against the committed MINI fixture with mocked reader +
+judge — no dataset download, no API keys, embedded FalkorDBLite.
+
+Two resource contracts hold the "offline" claim:
+  * the READER/JUDGE are mocked (``--mock``) — no provider keys, no network;
+  * the DENSE (vector) leg is waived (``--skip-preflight``) on every harness
+    invocation whose subject is not the dense leg itself, so the module stays
+    green on an env without sentence-transformers or the cached model
+    (#4718, R3 #1542 D6). Tests that ASSERT dense-leg behavior opt in via
+    ``_require_embedder()`` and skip visibly when it is unavailable.
+
+--mock is NOT a dense-leg waiver (#4718): a run without the embedder fails
+closed unless ``--skip-preflight`` says so explicitly.
 
 The full 500-question run is @pytest.mark.slow and gated on the dataset +
 provider keys (never exercised in CI).
@@ -990,7 +1001,7 @@ def test_cli_smoke(tmp_path):
     out = tmp_path / "report.json"
     report = run_main([
         "--data", str(MINI), "--limit", "5", "--split", "s",
-        "--mock", "--output", str(out),
+        "--mock", "--skip-preflight", "--output", str(out),
     ])
     assert out.is_file()
     saved = json.loads(out.read_text(encoding="utf-8"))
@@ -2888,7 +2899,8 @@ def test_v2_ingest_cli_flag(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ev2, "extract_session_v2", _fake)
     report = run_main(["--data", str(MINI), "--limit", "1", "--split", "s",
-                       "--ingest-mode", "v2", "--mock"])
+                       "--ingest-mode", "v2", "--mock",
+                       "--skip-preflight"])
     assert report["methodology"]["ingest_mode"] == "v2"
     assert "v2 extractor ingestion" in report["methodology"]["extraction_approach"]
     o = report["outcomes"][0]
@@ -4491,7 +4503,8 @@ def test_knob_cli_flags(tmp_path, monkeypatch):
     monkeypatch.setattr(run_mod, "ingest_haystack", _capture)
     out = tmp_path / "report.json"
     report = run_main(["--data", str(MINI), "--limit", "1", "--split", "s",
-                       "--mock", "--chunk-turns", "4", "--context-cap", "5000",
+                       "--mock", "--skip-preflight",
+                       "--chunk-turns", "4", "--context-cap", "5000",
                        "--max-chunks-per-session", "1", "--output", str(out)])
     assert captured["chunk_turns"] == 4
     m = report["methodology"]
@@ -4507,7 +4520,7 @@ def test_knob_env_vars(tmp_path, monkeypatch):
     monkeypatch.setenv("TORTOISE_LME_CONTEXT_CAP", "6000")
     monkeypatch.setenv("TORTOISE_LME_MAX_CHUNKS_PER_SESSION", "1")
     report = run_main(["--data", str(MINI), "--limit", "1", "--split", "s",
-                       "--mock"])
+                       "--mock", "--skip-preflight"])
     m = report["methodology"]
     assert m["chunk_turns"] == 3
     assert m["context_token_cap"] == 6000
@@ -5564,9 +5577,13 @@ def test_retrieval_only_mock_dense_leg_failure_fails_closed(
     """#4718: --retrieval-only --mock is a MEASUREMENT, so an embedder that
     cannot load must abort with a non-zero exit BEFORE any report exists.
 
-    RED before the fix: the gate keys on ``--mock`` and warns-and-continues,
-    the run completes keyword-only and writes a report that looks like a
-    result — the SystemExit asserted here never happens."""
+    RED before the fix: the gate keyed on ``--mock`` and warned-and-continued,
+    so no SystemExit happened at the gate — the run went on to fail only
+    incidentally, far downstream, after the keyword-only report had already
+    been WRITTEN (the retrieval-only summary crash, #4803). That is exactly
+    the indistinguishable-from-a-result receipt this gate now prevents:
+    the assertion below on the gate's own message is what makes the RED
+    attributable to the dense leg rather than to that crash."""
     import tools.longmem_eval.run as run_mod
     from tortoise.embeddings import EmbeddingModel
     monkeypatch.setattr(EmbeddingModel, "get",

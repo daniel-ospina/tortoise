@@ -1,10 +1,16 @@
 """M2 pre-flight gate tests (#1523, epic #1509): billing probe + 4xx fail-fast.
 
-Runs fully offline — stubbed transports (the existing test_longmem_runner.py
+Runs offline — stubbed transports (the existing test_longmem_runner.py
 pattern), no real keys, embedded FalkorDBLite for the run-loop tests. The
 error-class taxonomy is consumed from P2's production module
 (``tortoise.model_adapters`` — the M2 plan's provisional-copy hedge is
 obsolete; D1: one taxonomy, no divergence).
+
+The ``run_main`` invocation below additionally waives the DENSE-leg gate
+(``--skip-preflight``, #4718): its subject is the reader/judge pre-flight
+block, which ``--mock`` already skips, so the run must not depend on
+sentence-transformers or the cached model. ``--mock`` alone is not a dense-leg
+waiver since #4718.
 """
 from __future__ import annotations
 
@@ -161,10 +167,17 @@ def test_run_main_records_preflight_block(tmp_path, capsys):
 
 
 def test_run_main_mock_records_skipped_preflight(tmp_path):
-    """--mock through run_main records the skipped gate block in the report."""
+    """--mock through run_main records the skipped gate block in the report.
+
+    ``--skip-preflight`` waives only the DENSE-leg gate (#4718); the
+    reader/judge block stays keyed on ``--mock`` (run.py records
+    ``reason="mock"`` and ``mock=True`` whenever ``--mock`` is set), so the
+    two assertions below are the same ones ``--mock`` alone produces — the
+    test's subject is unchanged, it just no longer needs the embedder.
+    """
     out = tmp_path / "report.json"
     report = run_main(["--data", str(MINI), "--limit", "1", "--split", "s",
-                       "--mock", "--output", str(out)])
+                       "--mock", "--skip-preflight", "--output", str(out)])
     assert report["preflight"]["status"] == "skipped"
     assert report["preflight"]["mock"] is True
 

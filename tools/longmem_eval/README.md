@@ -26,8 +26,10 @@ python -m tools.longmem_eval.run --split s --limit 10 # first 10 (sanity)
 The vector/dense retrieval leg runs **only when sentence-transformers is
 installed** (the `[embeddings]` extra — `all-MiniLM-L6-v2`, the MemDelta-pinned
 384-dim embedder, #399). The eval env must install it once; the R3 pre-flight
-**refuses to start a real (non-`--mock`) run without a working embedder** — a
-dense-less report is never published silently.
+**refuses to start a run without a working embedder** — any run, including
+`--mock` (whose flag selects the reader/judge, not the dense leg; #4718). The
+only waiver is the explicit `--skip-preflight` — a dense-less report is never
+published silently.
 
 ```bash
 # eval env (repo root): dev tooling + the extras the real lanes need.
@@ -47,8 +49,13 @@ uv run python -c "from tortoise.embeddings import EmbeddingModel; m = EmbeddingM
 Contract: with the embedder present, every `create_point` writes a 384-dim
 `embedding` and the vector strategy runs at query time (`embedding_coverage`
 per question is `1.0`); without it, coverage is a recorded `0.0` and the
-vector leg traces `no_embedder` — observable, never silent. `--mock` runs warn
-and continue offline (CI smoke stays runnable without the extra).
+vector leg traces `no_embedder` — observable, never silent. A run whose
+dense leg was explicitly **waived** (`--skip-preflight`) warns, records
+`vector_strategy: "unavailable"`, and its report is not a measurement; the
+attribute that decides this is what the run *needs*, never `--mock` (#4718).
+The test suite keeps the same guarantee by waiving the leg on every harness
+invocation that does not assert dense-leg behavior — so a local run without
+the `[embeddings]` extra does not need it either (R3 #1542 D6).
 
 ## Configuration (env-driven, never hardcoded)
 
