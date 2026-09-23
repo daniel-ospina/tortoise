@@ -452,6 +452,12 @@ def test_run_rejects_config_posture_contradicting_env(tmp_path, monkeypatch):
     report = runner.run_benchmark(root=root)  # no env m2 → llm default
     assert report["run_status"] == "completed"
     assert report["resolved_config"]["extractor_posture"] == "llm"
+    # #2552 (end-to-end falsifier, free — this llm run already happens): the
+    # llm lane's receipt must NOT carry the m2 structural excuse. On the
+    # pre-fix code this assertion fails, so it gates the fix at zero added
+    # bench cost.
+    assert "m2 echo lane has no relation extraction" not in "\n".join(
+        report.get("notes", []))
 
 
 def test_run_notes_vacuous_quote_fidelity_and_untracked_cost(tmp_path, monkeypatch):
@@ -494,19 +500,42 @@ def test_operator_audit_m2_clause_is_posture_scoped():
     # The persistence assertion rides BOTH lanes (write-path property).
     assert "operator persistence (#2552): 10/10" in m2_text
 
+    # EXACT-STRING goldens. The m2 note is byte-identical to the pre-refactor
+    # wording, which is the frozen text of the committed m2 receipt — that is
+    # the property that makes this refactor safe on the blessed lane, and a
+    # substring assert cannot hold it (both separator defects found while
+    # rebasing passed every substring assert).
+    m2 = runner.operator_audit_notes(audit, "m2")
+    llm = runner.operator_audit_notes(audit, "llm")
+    assert m2[0] == (
+        "operator-edge audit (#2514): 0/4 planted operator edges graded "
+        "edge_correct (audit dimension only — not yet a gated metric); "
+        "the m2 echo lane has no relation extraction, so 0 is structural "
+        "there, never a bar. #2552: endpoint anchors + mitigation reasons "
+        "grade verbatim-first with the #2405-style paraphrase band — a "
+        "correctly wired edge whose endpoint claim was distilled still "
+        "grades edge_correct"
+    )
+    assert llm[0] == (
+        "operator-edge audit (#2514): 0/4 planted operator edges graded "
+        "edge_correct (audit dimension only — not yet a gated metric). "
+        "#2552: endpoint anchors + mitigation reasons grade verbatim-first "
+        "with the #2405-style paraphrase band — a correctly wired edge whose "
+        "endpoint claim was distilled still grades edge_correct"
+    )
+    assert m2[1] == llm[1] == (
+        "operator persistence (#2552): 10/10 reified operator Points entered "
+        "the retrievable memory layer (eventId-stamped) — a lower numerator "
+        "is the structural drop the layer-2 WIRE fix closed"
+    )
 
-def test_operator_audit_m2_clause_absent_on_llm_run(tmp_path, monkeypatch):
-    """End-to-end leg: an m2 run's report still carries the m2 caveat, and a
-    zero-planted audit never emits the edge note (honest empty denominator)."""
-    root = _tmp_corpus(tmp_path)
-    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
-    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
-    report = runner.run_benchmark(root=root)
-    assert report["run_status"] == "completed"
-    notes = "\n".join(report.get("notes", []))
-    assert report["resolved_config"]["extractor_posture"] == "m2"
-    assert "m2 echo lane has no relation extraction" in notes
-    # zero-planted audit → the edge note is suppressed (pooled empty audit)
+    # A third posture takes the llm-shaped note (documented behaviour: only
+    # "m2" earns the caveat, never "anything not llm").
+    assert "m2 echo lane" not in "\n".join(
+        runner.operator_audit_notes(audit, "futurelane"))
+
+    # Empty denominator: no edge note, persistence still rides. A None audit
+    # yields nothing.
     empty = runner.operator_audit_notes(
         {"planted": 0, "edge_correct": 0, "operators_total": 3,
          "operators_provenanced": 3}, "llm")
