@@ -184,9 +184,9 @@ only — a helper, an alias, a NON-Name binding (`import … as`, `except … as
 `match … case _ as`) or an in-place field assignment gets past it — so it is a
 refactor guard, not a containment proof. What carries
 the `not_reached`-reports-an-unreaped-org-as-clean class instead is the recorded
-teardown STATUS — every one of the 12 `_finalize` exits is executed by at least
-one test, and at least one of the tests reaching each exit asserts the recorded
-status, including the five that no test reached until #4843 (the absent surface,
+teardown STATUS — every `_finalize` exit is executed by at least one test, and
+at least one of the tests reaching each exit asserts the recorded status,
+including the five that no test reached until #4843 (the absent surface,
 the screen that lies, no agent key, a signup CTA that is not hittable, and the
 missing playwright driver). Two abort paths sit outside `run_walk`'s try/except
 and write no artifact — an `--out` that cannot be created, and a driver that will

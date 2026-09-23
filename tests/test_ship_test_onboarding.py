@@ -1262,9 +1262,10 @@ def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
                    playwright_available=True):
     """Execute the real `run_walk` against a fake browser. Returns the record.
 
-    `front_door_hittable=False` drives the pre-session product finding (the
-    signup CTA is not hittable in a clean browser); `playwright_available=False`
-    makes the driver import fail, which is the fail-closed default path.
+    `front_door_hittable=False` makes the front-door probe REPORT the signup CTA
+    as not hittable, driving the pre-session product finding;
+    `playwright_available=False` makes the driver import fail, which is the
+    fail-closed default path.
     """
     import sys
     import types
@@ -1484,7 +1485,8 @@ def test_walk_reports_a_200_but_unparseable_projection_as_an_instrument_error(
 # rather than a residue alarm.
 
 def test_the_teardown_statuses_are_classified_as_residue_or_clean() -> None:
-    """The classifier the per-exit assertions rest on: a `baseline_unavailable`
+    """The classifier the statuses get their residue/clean meaning from: a
+    `baseline_unavailable`
     teardown WARNS — a live org may remain — while `not_reached` is deliberately
     NOT a residue state, so it raises no false alarm."""
     assert _mod.TEARDOWN_BASELINE_UNAVAILABLE in _mod.TEARDOWN_RESIDUE_STATES
@@ -1496,7 +1498,7 @@ def _assert_teardown_recorded_fail_closed(obs, mod) -> None:
     404s and the recorded status is the fail-closed `baseline_unavailable` — a
     residue state. Specific enough that any OTHER state a degraded teardown
     object would record (notably the truthy, non-residue `not_reached`) reds."""
-    assert obs.teardown, "every exit must carry the teardown state"
+    assert obs.teardown, "this exit must carry the teardown state"
     assert obs.teardown["status"] == mod.TEARDOWN_BASELINE_UNAVAILABLE, (
         f"expected the fail-closed state, got {obs.teardown!r}")
 
@@ -1509,9 +1511,7 @@ def _assert_not_the_generic_error_handler(obs, name: str) -> None:
     DEFENCE IN DEPTH, not the discriminator. Each of these tests already fails
     on a marker raise without it — through a verdict or reason assertion, or (at
     the claim-failure exit, which sets its own reason before returning) through
-    the step-identity assertion. It exists so the test stays discriminating if
-    the handler is ever made to set `failure_reason`, which would give it a
-    verdict of the same shape as a product finding.
+    the step-identity assertion.
     """
     assert not [s for s in obs.steps if s.name == "error"], (
         f"exited through the error handler, not the {name!r} step: {obs.steps}")
@@ -1550,8 +1550,8 @@ def test_walk_whose_screen_claims_a_connection_the_server_never_saw_is_a_product
     """The screen says "Connected" while the server's own projection shows no
     observation. That is the `no_claim_before_observation` assertion failing —
     the product finding this instrument exists to make — and it is distinct from
-    the absent-surface class directly above (there the rule is not violated
-    because nothing was claimed)."""
+    the absent-surface class directly above, which records no such assertion at
+    all."""
     plan = {
         ("GET", "/api/session"): _SESSION_200,
         ("GET", "/api/v1/onboarding/state"): [_PROJ_UNOBSERVED],
@@ -1601,8 +1601,9 @@ def test_walk_without_a_mintable_key_is_an_instrument_error(monkeypatch, tmp_pat
 
 def test_walk_reports_a_signup_cta_that_is_not_hittable_as_a_product_finding(
         monkeypatch, tmp_path):
-    """A clean browser cannot reach the signup CTA. This runs BEFORE any session
-    is resolved, so it is a PRODUCT finding (exit 1), not an instrument fault.
+    """The front-door probe reports the signup CTA as not hittable. This runs
+    BEFORE any session is resolved, so it is a PRODUCT finding (exit 1), not an
+    instrument fault.
     No org can exist yet and this test passes no `--keep-org`, so the recorded
     status is the clean `not_reached` (which is deliberately NOT a residue
     state)."""
@@ -1796,7 +1797,7 @@ def test_walk_with_an_explicit_agent_key_still_reads_the_truth_through_the_sessi
     assert obs.verdict == "passed", (obs.verdict, obs.reason)
     # this test drives run_walk directly rather than through _run_fake_walk, so
     # it must make the single-exit guarantee explicit itself
-    assert obs.teardown, "every exit must carry the teardown state"
+    assert obs.teardown, "this exit must carry the teardown state"
     # this harness serves no org-list route, so the baseline read 404s and the
     # walk honestly records the fail-closed state: no baseline, no delete
     assert obs.teardown["status"] == _mod.TEARDOWN_BASELINE_UNAVAILABLE
@@ -2161,12 +2162,12 @@ def test_no_exit_from_the_walk_writes_the_artifact_without_teardown():
     whole half: an `_finish`/`_finalize` alias, attribute-form `getattr`, and
     mutating the teardown object's fields in place.
 
-    What covers those forms is the recorded teardown STATUS. Every one of
-    `run_walk`'s 12 `_finalize` exits is executed by at least one test, and at
-    least one of the tests reaching each exit asserts the status — not merely
-    that `obs.teardown` is truthy, since `not_reached` satisfies truthiness and a
-    truthiness-only assert cannot see a residue state degrade into a clean one.
-    Five of the twelve were reached by no test at all until #4843.
+    What covers those forms is the recorded teardown STATUS. Every `_finalize`
+    exit in `run_walk` is executed by at least one test, and at least one of the
+    tests reaching each exit asserts the status — not merely that `obs.teardown`
+    is truthy, since `not_reached` satisfies truthiness and a truthiness-only
+    assert cannot see a residue state degrade into a clean one. Five of them were
+    reached by no test at all until #4843.
 
     SCOPE: `_finalize` exits only. Two abort paths sit OUTSIDE `run_walk`'s
     try/except and write no artifact at all — a `--out` that cannot be created,
