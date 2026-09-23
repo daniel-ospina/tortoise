@@ -1049,6 +1049,10 @@ def test_cut_resets_approvals_at_the_WRITE_SITE(monkeypatch, tmp_path, derived_b
     WRITE site — which is where it would live — left the suite green (review finding). So
     the previous artifact, carrying approvals, is placed AT THE PATH `cut` WRITES and the
     file it leaves behind is read back.
+
+    The reset is now gated by `--allow-approval-reset` (#4598): it still happens, but only
+    deliberately, and it names what it drops. The refusal half is
+    `test_cut_REFUSES_to_blank_recorded_approvals` below.
     """
     sm = _load_manifest_tool()
     path = tmp_path / "surface-manifest.yml"
@@ -1060,7 +1064,8 @@ def test_cut_resets_approvals_at_the_WRITE_SITE(monkeypatch, tmp_path, derived_b
 
     monkeypatch.setattr(sm, "MANIFEST_FILE", path)
     monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
-    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 0
+    ns = argparse.Namespace(commit="deadbeef", allow_approval_reset=True)
+    assert sm.cmd_cut(ns) == 0
 
     written = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert written["approval_status"] == "pending-owner-approval"
@@ -1073,6 +1078,64 @@ def test_cut_resets_approvals_at_the_WRITE_SITE(monkeypatch, tmp_path, derived_b
         "the write site carried the previous approvals across the re-cut, reversing the "
         f"control CONTRIBUTING.md steps 2-4 rely on: {carried[:5]}"
     )
+
+
+def test_cut_REFUSES_to_blank_recorded_approvals(monkeypatch, tmp_path, capsys, derived_baseline):
+    """A re-cut must not be able to destroy an owner approval SILENTLY (#4598).
+
+    On 2026-09-23 a re-cut landed on `main` through PR #4043 and carried six recorded owner
+    approvals to zero. Nothing went red, because `approval` is NON_DERIVABLE: no derived
+    property compares it, so the loss is invisible to every check that exists. The reset
+    itself is still the documented control — what this pins is that it cannot happen
+    without the operator saying so and seeing which rows they are dropping.
+    """
+    sm = _load_manifest_tool()
+    path = tmp_path / "surface-manifest.yml"
+    prior = copy.deepcopy(_manifest())
+    for row in prior["rows"]:
+        row["approval"] = None
+    approved_row = prior["rows"][0]["name"]
+    prior["rows"][0]["approval"] = "#4173 @daniel-ospina"
+    prior["approval_status"] = "pending-owner-approval"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    before = path.read_text(encoding="utf-8")
+
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    # No flag -> refuse, and the artifact is left EXACTLY as it was found.
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 1
+    out = capsys.readouterr().out
+    assert approved_row in out, f"the row it would drop is not named: {out}"
+    assert "#4173 @daniel-ospina" in out, f"the approval value is not shown: {out}"
+    assert path.read_text(encoding="utf-8") == before, "the refusal WROTE the manifest"
+
+    # With the flag -> it proceeds, and STILL names every row it drops.
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef", allow_approval_reset=True)) == 0
+    out = capsys.readouterr().out
+    assert "DROPPED" in out and approved_row in out, out
+    written = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert all(r.get("approval") is None for r in written["rows"]), (
+        "the flag was passed, so the reset is deliberate and expected — but a row kept an "
+        "approval the re-cut should have cleared"
+    )
+
+
+def test_the_approval_guard_is_not_vacuous_on_a_BROKEN_baseline(monkeypatch, tmp_path, capsys, derived_baseline):
+    """A malformed baseline must not block `cut` — it is the REPAIR tool.
+
+    The guard reads the existing manifest to enumerate what it would drop. If that read
+    raised, the guard would turn a repairable baseline into an unrepairable one. There is
+    no enumerable approval set in an unreadable file, so it must fall through and write.
+    """
+    sm = _load_manifest_tool()
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text("this: [is not\n  a manifest\n", encoding="utf-8")
+
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 0
+    assert yaml.safe_load(path.read_text(encoding="utf-8"))["counts"]["tools"] >= 1
 
 
 def test_cut_refuses_when_the_declaration_cannot_be_IMPORTED(monkeypatch, capsys, tmp_path):
