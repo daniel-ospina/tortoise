@@ -379,13 +379,13 @@ def _post_refused_get_serves(session_id: str, turns: list[dict], *,
     """A transport where the POST is refused and the confirming READ answers
     with the session the abandoned handler went on to write.
 
-    The stored text is built by the WRITER's own helper, because the
-    confirmation compares content as well as ids (#4675 review: the ids are
-    positional, so id-set equality alone is satisfied by an earlier capture of
-    the same session id with a different transcript).
+    The rows are the shape the server actually RETURNS: `role` as its own field
+    and `content` with the `[role] ` prefix STRIPPED (`get_session_detail`).
+    Built from the original turn dicts, never by echoing the writer's
+    `"[role] text"` string — a fake that echoes the writer hides a
+    format-mismatched comparison, which is how this confirmation was inert on
+    its first attempt while these tests stayed green.
     """
-    from tortoise.sdk import _capture_turn_texts
-    texts = _capture_turn_texts([dict(t) for t in turns])
 
     def _open(req, timeout=None):
         if getattr(req, "get_method", lambda: "GET")() == "POST":
@@ -396,9 +396,11 @@ def _post_refused_get_serves(session_id: str, turns: list[dict], *,
             raise _http_error(404, '{"detail":"Session not found"}')
         detail = {
             "id": session_id, "created_at": "2026-09-23T08:21:06Z",
-            "turns": len(texts), "extracted": extracted,
-            "turn_points": [{"id": f"{session_id}_t{i}", "content": text}
-                            for i, text in enumerate(texts)],
+            "turns": len(turns), "extracted": extracted,
+            "turn_points": [{"id": f"{session_id}_t{i}",
+                             "role": turns[i]["role"],
+                             "content": turns[i]["content"]}
+                            for i in range(len(turns))],
             "source": {"url": f"session:{session_id}"},
         }
         return _Resp(json.dumps(detail).encode("utf-8"))
@@ -576,10 +578,8 @@ def test_a_503_whose_session_landed_writes_no_receipt_but_keeps_the_spool(
 
     from tortoise.__main__ import _cmd_sessions_import
     from tortoise.capture_spool import read_spool_meta
-    from tortoise.sdk import _capture_turn_texts
 
     spool = _import_env(tmp_path, monkeypatch)
-    texts = _capture_turn_texts([dict(t) for t in _EXPECTED_TURNS])
 
     class _Detail(io.BytesIO):
         status = 200
@@ -595,9 +595,11 @@ def test_a_503_whose_session_landed_writes_no_receipt_but_keeps_the_spool(
             raise HTTPError(req.full_url, 503, "unavailable", None,
                             io.BytesIO(b'{"detail":"Service Unavailable"}'))
         sid = req.full_url.rsplit("/", 1)[-1]
-        detail = {"id": sid, "turns": len(texts), "extracted": 2,
-                  "turn_points": [{"id": f"{sid}_t{i}", "content": t}
-                                  for i, t in enumerate(texts)]}
+        detail = {"id": sid, "turns": len(_EXPECTED_TURNS), "extracted": 2,
+                  "turn_points": [
+                      {"id": f"{sid}_t{i}", "role": t["role"],
+                       "content": t["content"]}
+                      for i, t in enumerate(_EXPECTED_TURNS)]}
         return _Detail(json.dumps(detail).encode("utf-8"))
 
     monkeypatch.setattr("urllib.request.urlopen", _open)

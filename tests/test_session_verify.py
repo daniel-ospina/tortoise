@@ -915,14 +915,16 @@ def test_guard_receipt_not_advanced_reds_captured(hosted, setup):
     This is #3809's Scope §2 predicate ("a ``session_capture_receipt_<harness>``
     advanced AND the session is retrievable by id with the expected turns") and
     PR #4182's documented guard. #4675 does NOT change it; it changes when the
-    receipt is READ. A short timeout keeps this deterministic case from
-    burning the derived budget.
+    receipt is READ. The DERIVED timeout is used, not a wall-clock constant:
+    the same `timeout` bounds the FIRE, and this file's own doctrine forbids
+    hardcoding one (a 3.0 constant killed the seam's prologue on a loaded box
+    and false-REDed this guard — #3809 rr4).
     """
     home, _bindir, _fake = setup
     root = _install(home, "claude")
     graph, _url = hosted
     graph.no_receipt = True
-    report = _verify(hosted, home, "claude", root, timeout=3.0)
+    report = _verify(hosted, home, "claude", root)
     assert report["exit_code"] == EXIT_BROKEN, report
     captured = report["links"]["captured"]
     assert captured["status"] == "FAIL"
@@ -959,7 +961,7 @@ def test_captured_is_proven_when_the_receipt_advances_after_the_session_row(
     # value while the receipt is still outstanding — the early-break bug that
     # would end the window on a settled-but-correct count.
     graph.receipt_on_state_read = 5
-    report = _verify(hosted, home, "claude", root, timeout=30.0)
+    report = _verify(hosted, home, "claude", root)
     captured = report["links"]["captured"]
     assert graph.state_reads >= 5, graph.state_reads
     assert captured["status"] == "PROVEN", report

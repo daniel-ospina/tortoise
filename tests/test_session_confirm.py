@@ -34,19 +34,28 @@ TURNS = [{"role": "user", "content": "ship it"},
 SESSION = "s1"
 
 
-def _stored(index: int) -> str:
-    from tortoise.sdk import _capture_turn_texts
-    return _capture_turn_texts([dict(t) for t in TURNS])[index]
-
-
 def _detail(turns: list[dict] = TURNS, extracted: int = 2, *,
-            session_id: str = SESSION, contents: list[str] | None = None) -> dict:
-    from tortoise.sdk import _capture_turn_texts
-    texts = (contents if contents is not None
-             else _capture_turn_texts([dict(t) for t in turns]))
-    rows = [{"id": turn_point_id(session_id, i), "content": texts[i]}
-            for i in range(len(texts))]
-    return {"id": session_id, "turns": len(texts), "extracted": extracted,
+            session_id: str = SESSION, contents: list[str] | None = None,
+            roles: list[str] | None = None) -> dict:
+    """A ``GET /v1/sessions/<id>`` payload in the shape the SERVER RETURNS.
+
+    The server serves the role as its own field and the content with the
+    ``[role] `` prefix STRIPPED (``hosted_api.get_session_detail``), so this
+    fake builds its rows from the ORIGINAL turn dicts and never echoes the
+    writer's ``"[role] text"`` string. A fake that echoes the writer makes a
+    format-mismatched comparison look correct while the production path never
+    matches — the defect this shape exists to catch.
+
+    ``contents`` overrides the BODY (already stripped) and ``roles`` the role
+    field, for mismatch cases.
+    """
+    bodies = (contents if contents is not None
+              else [t["content"] for t in turns])
+    row_roles = (roles if roles is not None
+                 else [t["role"] for t in turns])
+    rows = [{"id": turn_point_id(session_id, i), "role": row_roles[i],
+             "content": bodies[i]} for i in range(len(turns))]
+    return {"id": session_id, "turns": len(turns), "extracted": extracted,
             "turn_points": rows}
 
 
@@ -91,16 +100,45 @@ def test_the_same_ids_with_DIFFERENT_TEXT_are_not_filed():
     nowhere on the server. Filing on that loses the only copy.
 
     MUTATION THAT REDS THIS: compare `set(turn_points)` to `set(expected)`
-    instead of the whole `{id: text}` mapping.
+    instead of the whole `{id: (role, text)}` mapping.
     """
-    other = ["[user] a completely different turn", "[assistant] and another",
-             "[user] and a third"]
+    other = ["a completely different turn", "and another", "and a third"]
     assert _confirm(_reader([_detail(contents=other)])) == TURNS_MISSING
+
+
+def test_a_SERVED_row_is_matched_across_the_stripped_role_prefix():
+    """The format boundary, end to end — the defect that made this whole
+    confirmation inert on the first attempt.
+
+    The writer stores `"[user] ship it"`, but `GET /v1/sessions/<id>` serves
+    `role="user", content="ship it"`. A comparison built on the WRITER's string
+    never matches a real response, so every post-commit refusal would keep
+    deferring while tests whose fakes echoed the writer stayed green.
+
+    MUTATION THAT REDS THIS: build `expected_turns` from
+    `_capture_turn_texts` without splitting through the server's own inverse.
+    """
+    assert _confirm(_reader([_detail()])) == FILED
+    # The fake's rows really are the served shape (role separate, prefix gone).
+    rows = _detail()["turn_points"]
+    assert rows[0] == {"id": f"{SESSION}_t0", "role": "user",
+                       "content": "ship it"}, rows[0]
+
+
+def test_a_role_only_change_is_not_filed():
+    """The role is served SEPARATELY, so the comparison must carry it too — an
+    id+body match with the wrong speaker is a different transcript.
+
+    MUTATION THAT REDS THIS: drop `role` from `turn_points` (compare only the
+    stripped body).
+    """
+    roles = ["assistant", "assistant", "user"]
+    assert _confirm(_reader([_detail(roles=roles)])) == TURNS_MISSING
 
 
 def test_one_changed_turn_is_not_filed():
     """Content equality is per row, not per session."""
-    swapped = [_stored(0), _stored(1), "[user] edited"]
+    swapped = ["ship it", "on it", "edited"]
     assert _confirm(_reader([_detail(contents=swapped)])) == TURNS_MISSING
 
 
@@ -171,9 +209,10 @@ def test_a_malformed_detail_is_unknown_not_filed(bad):
 
 def test_a_row_whose_content_is_unreadable_cannot_match():
     """A row we cannot read the text of must never satisfy the comparison."""
-    rows = [{"id": turn_point_id(SESSION, i), "content": None}
-            for i in range(len(TURNS))]
-    assert turn_points({"turn_points": rows})[turn_point_id(SESSION, 0)] != _stored(0)
+    rows = [{"id": turn_point_id(SESSION, i), "role": "user",
+             "content": None} for i in range(len(TURNS))]
+    assert turn_points({"turn_points": rows})[turn_point_id(SESSION, 0)] != \
+        expected_turns(SESSION, TURNS)[turn_point_id(SESSION, 0)]
     assert _confirm(_reader([{"turn_points": rows}])) == TURNS_MISSING
 
 
@@ -216,15 +255,45 @@ def test_the_turn_id_matches_the_servers_own_writer_format():
 
 
 def test_the_stored_text_matches_the_servers_own_writer_definition():
-    """The content comparison must describe the string the server STORES, so it
-    is derived from the writer's shared helper rather than mirrored."""
-    from tortoise.sdk import _capture_turn_texts
+    """The content comparison must describe what the server SERVES, so it is
+    derived from the writer's shared helper AND split by the reader's shared
+    inverse rather than mirrored.
+
+    MUTATION THAT REDS THIS: return the raw `"[role] text"` string (the
+    pre-fix shape) — the expectation stops matching a served row.
+    """
+    from tortoise.sdk import _capture_turn_role_text, _capture_turn_texts
     odd = [{"role": "user", "content": "x"}, {"role": None, "content": None},
            {"role": 7, "content": 42}, {"content": "no role"},
-           {"role": "assistant", "content": "y" * 6000}]
+           {"role": "assistant", "content": "y" * 6000},
+           {"role": "user", "content": "  leading space"}]
     assert expected_turns("abc", odd) == {
-        f"abc_t{i}": text
+        f"abc_t{i}": _capture_turn_role_text(text)
         for i, text in enumerate(_capture_turn_texts([dict(t) for t in odd]))}
+
+
+def test_the_role_split_is_the_inverse_of_the_writer_and_the_servers_own():
+    """The round trip, and the reason the split is shared: `get_session_detail`
+    serves `(role, body)` from the stored `"[role] body"`, so the client must
+    invert the SAME way. Checked against the server's own expression so a
+    change on either side reds here.
+    """
+    import re
+
+    from tortoise.sdk import _capture_turn_role_text, _capture_turn_texts
+
+    stored = _capture_turn_texts([
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "  padded"},
+        {"role": "user", "content": "[user] nested"},
+        {"role": "", "content": "empty role"},
+        {"content": "no role key"},
+    ])
+    for text in stored:
+        match = re.match(r"^\[([^\]]+)\]\s*", text)
+        server = ((match.group(1), text[match.end():]) if match
+                  else ("unknown", text))
+        assert _capture_turn_role_text(text) == server, text
 
 
 def test_session_extracted_is_total_over_odd_values():

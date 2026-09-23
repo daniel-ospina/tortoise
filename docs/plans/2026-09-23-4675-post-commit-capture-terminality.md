@@ -27,6 +27,21 @@ Measured today against `https://api.premiselabs.co`:
 |---|---|---|---|---|---|
 | `h4-cursor-seam-20260923T082102Z` | **200** | 3 | 4 | `…_t0`, `…_t1`, `…_t2` | `session_capture_receipt_cursor = 2026-09-23T08:21:06Z` |
 
+**The served turn shape, from that same live response** (this is what the confirmation must compare
+against):
+
+```
+turn_points[0] = {"id": "h4-cursor-seam-20260923T082102Z_t0", "role": "user",
+                  "content": "<timestamp>Friday, Sep 18, 2026 …"}
+```
+
+The role is served as its own field and `content` has the writer's `"[user] "` prefix **removed**
+(`get_session_detail`). The writer's stored string is `"[user] <content>"`, so comparing the two
+directly never matches — the first revision of this PR did exactly that and was inert against the
+live API (the fakes echoed the writer, so the unit tests stayed green). Verified against the live
+response: `(role, content)` → `_capture_turn_texts` → `_capture_turn_role_text` round-trips exactly
+for all three served rows.
+
 …while the client recorded that same capture as a failure and parked it unfiled:
 
 ```
@@ -88,17 +103,22 @@ verify report FAIL. Both defects are real; they are simply not the same defect.
 ### D1 — terminalise on a **proven** commit (not on the status code)
 
 Add one helper that answers *"are the turns I posted durable?"*, and consult it on the retryable
-path only. The proof is the deterministic turn-id→text map, which the server writes **before**
-extraction (`hosted_api.py:9623-9629`, one batched `UNWIND` through the shared
+path only. The proof is the deterministic turn-id→``(role, body)`` map, which the server writes
+**before** extraction (`hosted_api.py:9623-9629`, one batched `UNWIND` through the shared
 `_write_capture_turns`), so it is unaffected by the extraction the bound abandons:
 
 ```
-GET /v1/sessions/<sid>  →  200 with turn_points {id: {sid}_t{i}, content: <stored text>}
+GET /v1/sessions/<sid>  →  200 with turn_points [{id: {sid}_t{i}, role: R, content: <body>}]
 ```
 
-where `n` is the number of turns actually posted, and the `content` must match the text the
-writer would have stored (`tortoise.sdk._capture_turn_texts`, i.e. `f"[{role}] {content[:5000]}"`).
-Confirmed durable ⇒ the entry is filed
+where `n` is the number of turns actually posted. **The served `content` is NOT the stored text:**
+the writer stores `f"[{role}] {content[:5000]}"` (`tortoise.sdk._capture_turn_texts`) and
+`get_session_detail` serves that string SPLIT — `role` as its own field, `content` with the
+`[role] ` prefix stripped. So the comparison is on the served `(role, body)` pair, and both sides go
+through the one shared inverse `tortoise.sdk._capture_turn_role_text` (used by the reader and the
+client) rather than a mirrored regex. Comparing the writer's raw string against a served row never
+matches: a confirmation built that way is **inert in production** while any test whose fake echoes
+the writer stays green — measured on the live API (see §2's evidence). Confirmed durable ⇒ the entry is filed
 (`filed_key` stamped by `_flush_one`'s existing compare-and-swap) and, on the import path, the local
 receipt is written and the breadcrumb cleared. **Not** confirmed ⇒ behave exactly as today (defer).
 
@@ -138,11 +158,13 @@ link payload as before, so the evidence is not lost.
    `UNKNOWN` / `TURNS_MISSING`. Bounded: `DEFAULT_ATTEMPTS=2`, `DEFAULT_DELAY_S=1.0`,
    `DEFAULT_READ_TIMEOUT_S=5.0` — the POST may already have spent the transport bound's 30 s and
 the Claude `SessionEnd` hook cancels at 60 s, so the confirmation is a *suffix*, not a second
-   budget. The comparison is `{turn_id: stored_text}` against
-   `tortoise.sdk._capture_turn_texts` — the WRITER's own helper — because the turn ids are
+   budget. The comparison is `{turn_id: (role, body)}` — the writer's own string SPLIT by the
+   reader's own inverse (`tortoise.sdk._capture_turn_role_text`, shared with
+   `get_session_detail`) against the served `role`/`content` fields — because the turn ids are
    positional (`f"{session_id}_t{i}"`), so an id-set match is satisfied by an earlier capture of
 the same session id with a different transcript (compaction, a branch, the
-`MAX_SESSION_TURNS` window shift at 500).
+`MAX_SESSION_TURNS` window shift at 500), and because a raw-string comparison never matches a
+served row at all (§2's D1).
 2. `tortoise/__main__.py::_session_post.handle`: on a retryable `PostOutcome`, call the helper; on
    `FILED`/`UNEXTRACTED` return `PostOutcome(ok=True, status=200, …)` carrying `confirmed` and, for
    the unextracted case, `extraction_mode = _CAPTURE_NO_PROVIDER_MODE` so the client's existing
@@ -171,7 +193,10 @@ the same session id with a different transcript (compaction, a branch, the
 - [ ] A permanent refusal, and a **503**, whose session happens to be durable still mints NO
       receipt (rc=1, honest error) and keeps the session spooled — the recorded 2xx-only rule.
 - [ ] A confirmation whose session carries the right ids but different TEXT is NOT a confirmation
-      (ids are positional — see §3.1).
+      (ids are positional — see §3.1), and one whose served `role` differs is NOT a confirmation
+      either.
+- [ ] The comparison matches a row in the shape the SERVER returns (role separate, `[role] `
+      prefix stripped) — a raw-stored-string comparison would be inert in production.
 - [ ] A confirming-read failure of any kind (404, 504, 429, transport, unparseable) defers — it never
       files and never discards.
 - [ ] An UNEXTRACTED confirmation is reported as such (`extraction_mode`), never as an unqualified

@@ -543,6 +543,29 @@ def _capture_turn_texts(windowed: list[dict]) -> list[str]:
     return texts
 
 
+#: The written turn prefix, and its inverse. A READER of a stored turn gets the
+#: role and the body separately (``hosted_api.get_session_detail`` returns
+#: ``role`` as its own field and the content with this prefix STRIPPED), so
+#: anything comparing a stored turn against a served one must go through the
+#: inverse — comparing the raw string never matches (#4675). One definition so
+#: the writer's format and the reader's split cannot drift.
+_CAPTURE_ROLE_PREFIX = re.compile(r"^\[([^\]]+)\]\s*")
+
+
+def _capture_turn_role_text(stored: str) -> tuple[str, str]:
+    """``(role, body)`` for one stored turn text — the inverse of the writer.
+
+    Un-bracketed text reads as ``("unknown", text)``, matching what the server
+    serves for it; the ``\\s*`` is significant, because the writer always emits
+    exactly one space and a body that itself begins with whitespace would
+    otherwise compare unequal on the read side (``"[user]  hi"`` -> ``"hi"``).
+    """
+    match = _CAPTURE_ROLE_PREFIX.match(stored)
+    if match is None:
+        return "unknown", stored
+    return match.group(1), stored[match.end():]
+
+
 def _capture_turn_embeddings(
     turn_texts: list[str],
     expected_dim: int | None,

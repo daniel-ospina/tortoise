@@ -11,7 +11,7 @@ status as "nothing committed" and defers: an entry for a session that is
 already durable retries forever and ``session drain`` never reaches
 ``filed N, deferred 0``.
 
-THE PROOF IS THE POSTED TURNS' OWN IDS *AND STORED TEXT*, never the Session's
+THE PROOF IS THE POSTED TURNS' OWN IDS *AND SERVED TEXT*, never the Session's
 existence. The server writes the whole window in ONE batched transaction
 **before** extraction (``hosted_api.py`` calling the shared
 ``sdk._write_capture_turns``), so those rows are durable independently of the
@@ -23,10 +23,19 @@ extraction the bound may abandon. Two weaker tests are deliberately NOT used:
   so a session id reused for different content with the same number of turns
   (a compaction, a branch, a ``MAX_SESSION_TURNS`` window shift) matches on ids
   while the new text is nowhere on the server. Confirming that would stamp the
-  entry filed and lose the only copy of the new turns. The stored text is
-  therefore compared too, using the WRITER'S OWN definition
-  (``sdk._capture_turn_texts``) rather than a re-implementation that could
-  drift from what the server actually stores.
+  entry filed and lose the only copy of the new turns.
+
+**The comparison is on the SERVED pair, not the stored string.** The writer
+stores ``"[role] text"`` (``sdk._capture_turn_texts``), but
+``GET /v1/sessions/<id>`` serves the role as its own field and the content with
+that prefix STRIPPED (``get_session_detail``). Comparing the writer's raw string
+against a served row therefore NEVER matches, and a confirmation built that way
+is inert in production while any test whose fake echoes the writer stays green
+— which is exactly what happened here. Both sides go through the one shared
+inverse, ``sdk._capture_turn_role_text``, so the writer's format and the
+reader's split cannot drift: ``expected_turns`` splits the writer's string,
+``turn_points`` reads the served ``role``/``content`` fields, and both are
+``(role, body)``.
 
 The read is INJECTED (``reader``), exactly as ``capture_spool.flush_spool``
 injects its ``post``, so the one definition of the ``GET /v1/sessions/<id>``
@@ -34,8 +43,8 @@ injects its ``post``, so the one definition of the ``GET /v1/sessions/<id>``
 
 UNKNOWN NEVER FILES. A 404 (the abandoned handler may not have MERGEd yet), a
 retryable status on the READ, a transport error, a short or grown turn set, or
-any stored text that differs all defer; only an exact match on the posted ids
-AND their stored text files.
+any served role/body that differs all defer; only an exact match on the posted
+ids AND their served role and body files.
 """
 from __future__ import annotations
 
@@ -43,7 +52,7 @@ import time
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
-from tortoise.sdk import _capture_turn_texts
+from tortoise.sdk import _capture_turn_role_text, _capture_turn_texts
 
 __all__ = [
     "FILED",
@@ -98,33 +107,42 @@ def turn_point_id(session_id: str, index: int) -> str:
     return f"{session_id}_t{index}"
 
 
-def expected_turns(session_id: str, turns: Sequence[dict]) -> dict[str, str]:
-    """``{turn_id: stored_text}`` for the turns about to be POSTed.
+def expected_turns(session_id: str,
+                   turns: Sequence[dict]) -> dict[str, tuple[str, str]]:
+    """``{turn_id: (role, text)}`` for the turns about to be POSTed.
 
     The stored text comes from the WRITER'S OWN definition
-    (``sdk._capture_turn_texts``), so this cannot describe a row the server
-    would store differently.
+    (``sdk._capture_turn_texts``), and it is then split by the SAME helper the
+    read path uses (``sdk._capture_turn_role_text``), because
+    ``GET /v1/sessions/<id>`` serves the role SEPARATELY and the content with
+    the ``[role] `` prefix STRIPPED. Comparing the raw stored string against a
+    served row therefore never matches — which is how a confirmation can look
+    correct in tests whose fakes echo the writer and be inert in production.
     """
     texts = _capture_turn_texts([dict(t) for t in turns])
-    return {turn_point_id(session_id, i): text
+    return {turn_point_id(session_id, i): _capture_turn_role_text(text)
             for i, text in enumerate(texts)}
 
 
-def turn_points(detail: Any) -> dict[str, str]:
-    """``{turn_id: stored_text}`` from a ``GET /v1/sessions/<id>`` detail.
+def turn_points(detail: Any) -> dict[str, tuple[str, str]]:
+    """``{turn_id: (role, content)}`` from a ``GET /v1/sessions/<id>`` detail.
+
+    Mirrors the shape ``hosted_api.get_session_detail`` actually returns: the
+    role as its own field and the content already stripped of the prefix.
 
     Total over a malformed payload: a row that is not a mapping with a string
     ``id`` is skipped rather than raising, because this whole module runs
     inside a failure path whose contract is "never replace the honest error
-    with a traceback". A row with no string ``content`` is recorded with a
-    non-matching sentinel so it can never satisfy a content comparison.
+    with a traceback". A row whose ``content`` is not a string is recorded with
+    a non-matching sentinel so it can never satisfy a content comparison, and a
+    missing/odd ``role`` becomes ``""`` — never the expected role.
     """
     if not isinstance(detail, dict):
         return {}
     rows = detail.get("turn_points")
     if not isinstance(rows, list):
         return {}
-    out: dict[str, str] = {}
+    out: dict[str, tuple[str, str]] = {}
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -132,13 +150,16 @@ def turn_points(detail: Any) -> dict[str, str]:
         if not isinstance(tid, str) or not tid:
             continue
         content = row.get("content")
-        out[tid] = content if isinstance(content, str) else _NO_CONTENT
+        role = row.get("role")
+        out[tid] = (
+            role if isinstance(role, str) else "",
+            content if isinstance(content, str) else _NO_CONTENT,
+        )
     return out
 
 
-#: A sentinel that cannot equal a real stored turn text (which is always
-#: ``"[role] text"``). A row whose content we cannot read must never read as a
-#: match.
+#: A sentinel that cannot equal a real turn body. A row whose content we cannot
+#: read must never read as a match.
 _NO_CONTENT = "\x00<no content on the returned row>"
 
 

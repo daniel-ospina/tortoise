@@ -783,11 +783,11 @@ def test_a_refused_post_that_committed_is_not_reported_as_uncommitted(monkeypatc
             raise HTTPError(req.full_url, 504, "refused", None,
                             io.BytesIO(b'{"detail":"wait budget exceeded"}'))
         sid = req.full_url.rsplit("/", 1)[-1]
-        from tortoise.sdk import _capture_turn_texts
-        texts = _capture_turn_texts([dict(t) for t in payload["conversation"]])
         detail = {"id": sid, "extracted": 3,
-                  "turn_points": [{"id": f"{sid}_t{i}", "content": t}
-                                  for i, t in enumerate(texts)]}
+                  "turn_points": [
+                      {"id": f"{sid}_t{i}", "role": t["role"],
+                       "content": t["content"]}
+                      for i, t in enumerate(payload["conversation"])]}
         return _Detail(json.dumps(detail).encode("utf-8"))
 
     monkeypatch.setattr("urllib.request.urlopen", _open)
@@ -870,11 +870,11 @@ def test_a_confirmed_refusal_reaches_the_drain_as_FILED(tmp_path, monkeypatch):
             raise HTTPError(req.full_url, 504, "refused", None,
                             io.BytesIO(b'{"detail":"wait budget exceeded"}'))
         sid = req.full_url.rsplit("/", 1)[-1]
-        from tortoise.sdk import _capture_turn_texts
-        texts = _capture_turn_texts([dict(t) for t in turns])
         detail = {"id": sid, "extracted": 2,
-                  "turn_points": [{"id": f"{sid}_t{i}", "content": t}
-                                  for i, t in enumerate(texts)]}
+                  "turn_points": [
+                      {"id": f"{sid}_t{i}", "role": t["role"],
+                       "content": t["content"]}
+                      for i, t in enumerate(turns)]}
         return _Detail(json.dumps(detail).encode("utf-8"))
 
     monkeypatch.setattr("urllib.request.urlopen", _open)
@@ -900,11 +900,9 @@ def test_a_503_stays_deferred_even_when_the_session_is_durable(monkeypatch):
     from urllib.error import HTTPError
 
     from tortoise.__main__ import _session_post
-    from tortoise.sdk import _capture_turn_texts
 
     payload = {"session_id": "s-503", "harness": "codex",
                "conversation": [{"role": "user", "content": "hi"}]}
-    texts = _capture_turn_texts([dict(t) for t in payload["conversation"]])
 
     class _Detail(io.BytesIO):
         status = 200
@@ -920,9 +918,9 @@ def test_a_503_stays_deferred_even_when_the_session_is_durable(monkeypatch):
             raise HTTPError(req.full_url, 503, "unavailable", None,
                             io.BytesIO(b'{"detail":"Service Unavailable"}'))
         sid = req.full_url.rsplit("/", 1)[-1]
-        detail = {"id": sid, "extracted": 2,
-                  "turn_points": [{"id": f"{sid}_t{i}", "content": t}
-                                  for i, t in enumerate(texts)]}
+        detail = {"id": sid, "extracted": 2, "turn_points": [
+            {"id": f"{sid}_t{i}", "role": t["role"], "content": t["content"]}
+            for i, t in enumerate(payload["conversation"])]}
         return _Detail(json.dumps(detail).encode("utf-8"))
 
     monkeypatch.setattr("urllib.request.urlopen", _open)
@@ -962,11 +960,11 @@ def test_an_unextracted_confirmation_is_reported_not_silent(monkeypatch):
             raise HTTPError(req.full_url, 504, "refused", None,
                             io.BytesIO(b'{"detail":"wait budget exceeded"}'))
         sid = req.full_url.rsplit("/", 1)[-1]
-        from tortoise.sdk import _capture_turn_texts
-        texts = _capture_turn_texts([dict(t) for t in payload["conversation"]])
         detail = {"id": sid, "extracted": 0,
-                  "turn_points": [{"id": f"{sid}_t{i}", "content": t}
-                                  for i, t in enumerate(texts)]}
+                  "turn_points": [
+                      {"id": f"{sid}_t{i}", "role": t["role"],
+                       "content": t["content"]}
+                      for i, t in enumerate(payload["conversation"])]}
         return _Detail(json.dumps(detail).encode("utf-8"))
 
     monkeypatch.setattr("urllib.request.urlopen", _open)
