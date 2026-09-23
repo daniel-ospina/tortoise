@@ -532,7 +532,7 @@ def test_bypass_visibility_is_a_run_summary_write():
     the variable does not count: the append is asserted on a non-comment line.
     """
     text = _BYPASS_SCRIPT.read_text(encoding="utf-8")
-    body = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+    body = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
     assert '>>"$GITHUB_STEP_SUMMARY"' in body, (
         "deploy-bypass.sh must APPEND the bypass block to $GITHUB_STEP_SUMMARY "
         "(the run summary), not only echo it to the log"
@@ -614,8 +614,8 @@ def test_bypass_expiry_is_machine_checked():
     # it as a dependency. A prose mention is fine (it documents the check); a
     # `needs:`/`uses:`/`workflow_run` wiring would not be.
     deploy_body = "\n".join(
-        l for l in _WORKFLOW.read_text(encoding="utf-8").splitlines()
-        if not l.lstrip().startswith("#")
+        line for line in _WORKFLOW.read_text(encoding="utf-8").splitlines()
+        if not line.lstrip().startswith("#")
     )
     assert "skip-bypass-expiry" not in deploy_body, (
         "the expiry check must never be wired into the deploy workflow"
