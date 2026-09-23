@@ -471,6 +471,50 @@ def test_run_notes_vacuous_quote_fidelity_and_untracked_cost(tmp_path, monkeypat
     assert report["cost_usd"] == 0.0
 
 
+def test_operator_audit_m2_clause_is_posture_scoped():
+    """#2552 honesty: the m2-echo-lane caveat ("no relation extraction, so
+    0 is structural there") must appear ONLY in an m2-lane report. On the llm
+    lane a 0 is a behavioural signal; printing the structural excuse in that
+    receipt frames the behavioural result as a non-result in the very
+    artifact a reader consults (the pre-fix behaviour, reported on #2552).
+
+    Pure posture-gate check — no bench run, no graph.
+    """
+    audit = {"planted": 4, "edge_correct": 0, "content_ok": 1,
+             "operators_total": 10, "operators_provenanced": 10}
+
+    llm_notes = runner.operator_audit_notes(audit, "llm")
+    llm_text = "\n".join(llm_notes)
+    assert "operator-edge audit (#2514): 0/4" in llm_text
+    assert "operator persistence (#2552): 10/10" in llm_text
+    assert "m2 echo lane has no relation extraction" not in llm_text
+
+    m2_text = "\n".join(runner.operator_audit_notes(audit, "m2"))
+    assert "m2 echo lane has no relation extraction" in m2_text
+    # The persistence assertion rides BOTH lanes (write-path property).
+    assert "operator persistence (#2552): 10/10" in m2_text
+
+
+def test_operator_audit_m2_clause_absent_on_llm_run(tmp_path, monkeypatch):
+    """End-to-end leg: an m2 run's report still carries the m2 caveat, and a
+    zero-planted audit never emits the edge note (honest empty denominator)."""
+    root = _tmp_corpus(tmp_path)
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    report = runner.run_benchmark(root=root)
+    assert report["run_status"] == "completed"
+    notes = "\n".join(report.get("notes", []))
+    assert report["resolved_config"]["extractor_posture"] == "m2"
+    assert "m2 echo lane has no relation extraction" in notes
+    # zero-planted audit → the edge note is suppressed (pooled empty audit)
+    empty = runner.operator_audit_notes(
+        {"planted": 0, "edge_correct": 0, "operators_total": 3,
+         "operators_provenanced": 3}, "llm")
+    assert not any("operator-edge audit" in n for n in empty)
+    assert any("operator persistence (#2552)" in n for n in empty)
+    assert runner.operator_audit_notes(None, "llm") == []
+
+
 def test_cli_protocol_bless_repins_judge_bump(tmp_path):
     """REVIEW-FIX (round-3 G2): --protocol-bless is the operational re-pin
     path for a legitimate judge-protocol bump — the ordinary CLI bless

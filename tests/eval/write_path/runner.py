@@ -759,27 +759,9 @@ def run_benchmark(
                         if d.get("owner_session") == sid
                     ]
                     result["planted_operators"] = owned
-                if operator_audit["planted"]:
-                    notes.append(
-                        f"operator-edge audit (#2514): "
-                        f"{operator_audit['edge_correct']}/"
-                        f"{operator_audit['planted']} planted operator edges graded "
-                        "edge_correct (audit dimension only — not yet a gated "
-                        "metric); the m2 echo lane has no relation extraction, "
-                        "so 0 is structural there, never a bar. #2552: endpoint "
-                        "anchors + mitigation reasons grade verbatim-first with "
-                        "the #2405-style paraphrase band — a correctly wired "
-                        "edge whose endpoint claim was distilled still grades "
-                        "edge_correct"
-                    )
-                notes.append(
-                    "operator persistence (#2552): "
-                    f"{operator_audit['operators_provenanced']}/"
-                    f"{operator_audit['operators_total']} reified operator "
-                    "Points entered the retrievable memory layer "
-                    "(eventId-stamped) — a lower numerator is the structural "
-                    "drop the layer-2 WIRE fix closed"
-                )
+                if operator_audit is not None:
+                    notes.extend(
+                        operator_audit_notes(operator_audit, posture))
     finally:
         if owned_sdk:
             _close_and_wipe(sdk)
@@ -882,6 +864,52 @@ def run_benchmark(
         "notes": notes,
         "log": log,
     }
+
+
+def operator_audit_notes(audit: dict | None, posture: str) -> list[str]:
+    """The operator-audit note(s) for a run report (#2514/#2552).
+
+    The m2-echo-lane caveat — "no relation extraction, so 0 is structural
+    there, never a bar" — is **posture-scoped**. On the m2 lane a 0 IS
+    structural (the echo extractor emits no relations); on the llm lane a 0
+    is a genuine behavioural signal about emission fidelity, and printing the
+    structural excuse verbatim in that lane's receipt frames the behavioural
+    result as a non-result in the very artifact a reader consults.
+
+    The persistence assertion (operators provenanced) holds on BOTH lanes and
+    is always emitted when an audit exists. Pure (no graph, no env) so the
+    posture gate is unit-testable without a bench run.
+    """
+    notes: list[str] = []
+    if audit is None:
+        return notes
+    if audit.get("planted"):
+        # The m2 clause keeps main's EXACT wording and separator `); ` so an
+        # m2 run's note is byte-identical to the pre-refactor text — the
+        # blessed m2 receipt text is provably unchanged by this refactor. The
+        # llm lane terminates its sentence with a bare `.`, so the note reads
+        # as prose either way.
+        tail = (
+            "; the m2 echo lane has no relation extraction, so 0 is structural "
+            "there, never a bar."
+            if posture == "m2" else "."
+        )
+        notes.append(
+            f"operator-edge audit (#2514): {audit['edge_correct']}/"
+            f"{audit['planted']} planted operator edges graded edge_correct "
+            f"(audit dimension only — not yet a gated metric){tail} "
+            "#2552: endpoint anchors + mitigation reasons grade verbatim-first "
+            "with the #2405-style paraphrase band — a correctly wired edge "
+            "whose endpoint claim was distilled still grades edge_correct"
+        )
+    notes.append(
+        "operator persistence (#2552): "
+        f"{audit['operators_provenanced']}/{audit['operators_total']} "
+        "reified operator Points entered the retrievable memory layer "
+        "(eventId-stamped) — a lower numerator is the structural drop the "
+        "layer-2 WIRE fix closed"
+    )
+    return notes
 
 
 def _safe_metrics(session_results: list[dict]) -> dict:
