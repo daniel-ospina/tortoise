@@ -416,7 +416,8 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
     # shadowed by a local rebinding inside this fixture (a lambda body is not
     # a `Return`, so the pin's hand-written-report check cannot see it) and a
     # local rebinding would silently change what the end-sweep runs. The
-    # attribute form is unshadowable by construction.
+    # attribute form closes that rebinding of the imported FUNCTION name; the
+    # module name itself is still an ordinary local binding.
     from tortoise import embedded_reaper
     from tortoise.embedded_reaper import (
         ACTIVE_SUITES_DIR,
