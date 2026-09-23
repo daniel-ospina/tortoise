@@ -2214,12 +2214,31 @@ app.add_middleware(InFlightMiddleware)
 # reverse it. The exemption is intentional — do not "fix" it by making the
 # bounds uniform.
 #
-#: The one deliberate exemption, METHOD-scoped: the ruling exempts
+#: The exact-match exemptions, METHOD-scoped: the ruling exempts
 #: `POST /v1/context` because that handler's fail-open ceiling is a recorded
 #: decision. `GET /v1/context` (`session_context`, a different handler with no
 #: recorded fallback) is NOT exempt — exempting it would widen the ruling past
 #: its record.
 _TRANSPORT_WAIT_BOUND_EXEMPT = frozenset({("POST", "/v1/context")})
+
+#: The PREFIX exemption — a CLASS, not another instance of the one above, and
+#: deliberately kept separate so the two readings stay distinguishable.
+#:
+#: `/v1/internal/` is the ruling's own SCOPE, not a widening of it. #3834 is an
+#: owner decision about **what a user experiences** ("should a *user's* first
+#: request wait until it can be served"; the budget is "derived from clients'
+#: own startup patience"). Every route under this prefix is an operator/cron
+#: endpoint behind `_check_internal` (`FASTAPI_INTERNAL_KEY`) with no user and no
+#: user-patience budget to derive from — the caller publishes its own instead
+#: (`registry-cron.sh` posts the sweep with `curl -m 600`). A user-patience bound
+#: does not bound anything a user waits on here; it only makes a 600 s batch job
+#: fail at 10 s, which is exactly what left the DR sweep refusing on every hourly
+#: run for 12 days while the archives aged (#4939).
+#:
+#: ⚠️ This exemption is NOT a claim that internal routes are fast or safe to hang
+#: — it is that the transport bound is the wrong instrument for them. Their own
+#: timeout is the caller's, and the cron job's red run is the alarm.
+_TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX = "/v1/internal/"
 
 #: Analytics event name for a breach. Recorded through the EXISTING writer (no
 #: new table, no new metric endpoint). The `org_id` comes from
@@ -2403,8 +2422,8 @@ def _track_wait_bound_request(task) -> None:
 
 
 class WaitBoundMiddleware:
-    """The transport-level wait bound (#3834) — one bound, every route but the
-    one recorded exemption.
+    """The transport-level wait bound (#3834) — one bound, every USER-facing route
+    but the recorded exemptions.
 
     Pure ASGI and OUTERMOST (registered last): it must see the request before
     any middleware can short-circuit it. It is deliberately NOT wrapping-free
@@ -2465,6 +2484,11 @@ class WaitBoundMiddleware:
 
         route_path = get_route_path(scope)
         if (scope.get("method", ""), route_path) in _TRANSPORT_WAIT_BOUND_EXEMPT:
+            await self.app(scope, receive, send)
+            return
+        if route_path.startswith(_TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX):
+            # #4939: a class the #3834 ruling never reached — internal operator /
+            # cron endpoints, which publish their own patience. See the constant.
             await self.app(scope, receive, send)
             return
 

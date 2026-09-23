@@ -334,6 +334,50 @@ async def test_get_context_is_bounded(fast_bound):
     assert rec.status == 504
 
 
+@pytest.mark.asyncio
+async def test_internal_cron_route_is_exempt(fast_bound):
+    """#4939: `/v1/internal/` is a CLASS the #3834 ruling never reached, not a
+    second instance of the `/v1/context` exemption. The ruling is about what a
+    USER experiences; every route under this prefix is an operator/cron endpoint
+    behind `_check_internal`, and its caller publishes its own patience
+    (`registry-cron.sh` posts the sweep with `curl -m 600`). A user-patience
+    bound bounds no user there — it only turns a 600 s batch job into a 10 s
+    failure, which is how the DR sweep refused on every hourly run for 12 days
+    while the archives aged.
+
+    Driven through the REAL `/status` shape the DR driver depends on: if the
+    sweep is refused, nothing backs up and the refusal is what the driver reads
+    as `status=error`.
+    """
+    mw = ha.WaitBoundMiddleware(_slow_app(0.2, status=200))
+    rec = await _drive(mw, _scope("/v1/internal/backups/sweep", method="POST"))
+    assert rec.status == 200, "the DR sweep must reach its handler, not a 10 s refusal"
+
+
+@pytest.mark.parametrize("path", [
+    "/v1/internalfoo",      # a sibling that merely SHARES the letters
+    "/v1/internal",         # the bare prefix: no trailing slash, and no such route
+    "/v1/internalX/sweep",
+    "/v2/internal/sweep",
+])
+@pytest.mark.asyncio
+async def test_internal_exemption_prefix_is_boundary_exact(fast_bound, path):
+    """The MCP arm's boundary test (`test_mcp_prefix_is_boundary_exact`),
+    applied to this prefix: the exemption must not spread by spelling."""
+    mw = ha.WaitBoundMiddleware(_slow_app(5.0))
+    rec = await _drive(mw, _scope(path, method="POST"))
+    assert rec.status == 504, f"{path} must stay bounded"
+
+
+def test_the_two_readings_stay_two_constants():
+    """The exact-match SET is 'one handler whose OWN record exempts it' and the
+    PREFIX is 'a class the ruling never reached'. Folding the prefix into the set
+    would silently make the set's exactness test — and the reasoning it pins —
+    meaningless, so they are asserted separately."""
+    assert ha._TRANSPORT_WAIT_BOUND_EXEMPT == frozenset({("POST", "/v1/context")})
+    assert ha._TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX == "/v1/internal/"
+
+
 # ── the handler is left running, never cancelled ──────────────────────────
 
 @pytest.mark.asyncio
