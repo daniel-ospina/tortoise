@@ -306,6 +306,33 @@ class RunWithEvalKeysTests(unittest.TestCase):
         )
         self.assertEqual(r.stdout, "first", r.stderr)
 
+    def test_malformed_ambient_name_cannot_forge_an_inherited_key(self):
+        # An env entry whose NAME contains a newline (reachable only through a
+        # raw execve, never a normal shell) must not make a legitimate `.env`
+        # key look inherited and silently drop it. `subprocess`'s `env=`
+        # mapping rejects such a name, so the entry is injected via the `env`
+        # binary's argv.
+        env_file = Path(self._tmp.name) / "forge.env"
+        env_file.write_text("EVALTEST_FORGE=from-dotenv\n", encoding="utf-8")
+        r = subprocess.run(
+            [
+                "/usr/bin/env",
+                "EVALTEST_HEAD\nEVALTEST_FORGE=trap",
+                f"PATH={os.environ.get('PATH', '/usr/bin:/bin')}",
+                f"EVAL_KEYS_ENV_FILE={env_file}",
+                str(WRAPPER),
+                "sh",
+                "-c",
+                'printf "%s" "${EVALTEST_FORGE-unset}"',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "from-dotenv", r.stderr)
+
     # ── .env parsing semantics (mirrors _load_dotenv) ──────────────────
 
     def test_parses_export_quotes_and_comments(self):
