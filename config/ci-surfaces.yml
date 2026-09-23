@@ -1419,7 +1419,7 @@ durations:
 # #3400: per-file wall time (seconds) from main's junit.xml artifacts
 # (run 34725816431, head 2e09f9e) — the fast-file pool of that run, 498/500
 # of the pool at measurement time (#4712 refreshed this map from run 35797777044,
-# head a7b4f33e2, so every fast file is measured and the coverage guard has real
+# head a7b4f33e2, so the map now covers the fast pool and the guard has real
 # margin instead of sitting exactly on its floor). Consumed by split_fast_gate (LPT) for BOTH the
 # tier-2 --split path and the full-matrix push halves (#3400). The prior
 # map held 15 hand-entered entries for 500 fast files, so 97% packed at the

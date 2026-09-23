@@ -91,8 +91,9 @@ NL = chr(10)
 
 # Shared/cross-cutting modules -> full matrix (conservative per scope v5).
 #
-# #4713: every entry must be a LEAF (a file), never a whole directory — a
-# directory entry makes any purely local edit run the full matrix — and every
+# #4713: an entry should name a LEAF (a file) rather than a directory — a
+# directory entry makes any purely local edit run the full matrix (the one
+# directory entry below is vacuous today; see its own comment) — and each
 # entry states its consumers in the comment above it, so a stale or merely
 # LARGE (rather than genuinely cross-cutting) entry is visible on review. The
 # rule this file follows: an entry belongs here when a change to it can alter
@@ -139,7 +140,7 @@ SHARED_MODULES = (
     # directory `tortoise/projection/`, which made every local edit inside the
     # package (entities.py, grounding.py, propagation.py, edges.py) run the
     # full matrix. What is genuinely cross-cutting is the package's `__init__`:
-    # everything OUTSIDE the package imports exactly `from [.]projection import
+    # consumers outside the package reach it via `from [.]projection import
     # …`, which resolves here — `tortoise/sdk.py` (sdk), `tortoise/api.py`,
     # `hosted_api.py` and `__main__.py` (api), and `ingest.py`, `m0.py`,
     # `consistency.py`, `backup.py`, `migrate_db.py`, `pipeline_cli.py` (core),

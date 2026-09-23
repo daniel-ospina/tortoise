@@ -1269,7 +1269,7 @@ def test_duration_coverage_guard_boundary_and_realistic():
     assert duration_coverage_issues(below) != [], "89% must fire"
     assert duration_coverage_issues(at) == [], "90% is at the floor, not below"
     assert duration_coverage_issues(above) == [], "95% must be silent"
-    # the real map (#4712): every fast file is measured, so the guard has real
+    # the real map (#4712): it covers the fast pool, so the guard has real
     # margin. This comment used to quote counts ("502/520 … (96.5%)") and they
     # went stale — the map had drifted to 90.083%, exactly ON the floor with
     # zero files of margin, so one new fast file reddened this assertion for
