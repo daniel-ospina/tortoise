@@ -5,7 +5,7 @@ import './index.css'
 // #4336: TIER_LABELS is the display-name map; its parity against
 // product.html's `labels` map is pinned by tests/test_website_static.py.
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
-import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, ONBOARDING_INSTRUCTIONS_URL, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, MCP_URL, SKILLS_INSTALL_URL, UNIVERSAL_COMMAND, WORKFLOWS_PROMPT, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
+import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, ONBOARDING_INSTRUCTIONS_URL, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, MCP_URL, SKILLS_INSTALL_URL, SKILLS_LIST, UNIVERSAL_COMMAND, WORKFLOWS_PROMPT, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
 // #1728 Slice 3 (Tasks 16-17): the SHARED 4-state capture-status derivation
 // (off → install-pending → waiting → active, probe-driven) — pure, node --test
 // unit-tested (captureStatus.test.js). #1927: the re-ask gate predicate was
@@ -940,18 +940,18 @@ function wizardPromptText(harness, step, key, mode) {
     // sit BEFORE the skills line, so an agent following the prompt in order
     // would restart Pi (loading the skills directory) and only then install
     // the skills — requiring a second reload for them to appear.
-    if (step === 1) return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (~/.zshrc).\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding) from ${SKILLS_INSTALL_URL}.\n${onboardingInstructions}\n${twoStepNote} Pi.\n${docs}`
+    if (step === 1) return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (~/.zshrc).\nThen install the Tortoise skills (${SKILLS_LIST}) from ${SKILLS_INSTALL_URL}.\n${onboardingInstructions}\n${twoStepNote} Pi.\n${docs}`
     if (step === 2) return step2Text
   }
   if (harness === 'cursor') {
-    if (step === 1) return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (export TORTOISE_API_KEY=…) so Cursor can read it from its env.\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding) from ${SKILLS_INSTALL_URL}.\n${onboardingInstructions}\n${twoStepNote} Cursor.\n${docs}`
+    if (step === 1) return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (export TORTOISE_API_KEY=…) so Cursor can read it from its env.\nThen install the Tortoise skills (${SKILLS_LIST}) from ${SKILLS_INSTALL_URL}.\n${onboardingInstructions}\n${twoStepNote} Cursor.\n${docs}`
     if (step === 2) return step2Text
   }
   if (harness === 'claude') {
-    return `Add Tortoise MCP at ${url}.\n${keyLine}\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding) from ${SKILLS_INSTALL_URL}.\n${onboardingInstructions}\nThen call tortoise_health and tortoise_create_point to file my first memory.\n${docs}`
+    return `Add Tortoise MCP at ${url}.\n${keyLine}\nThen install the Tortoise skills (${SKILLS_LIST}) from ${SKILLS_INSTALL_URL}.\n${onboardingInstructions}\nThen call tortoise_health and tortoise_create_point to file my first memory.\n${docs}`
   }
   if (harness === 'codex') {
-    return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (export TORTOISE_API_KEY=…).\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding) from ${SKILLS_INSTALL_URL}.\n${onboardingInstructions}\nThen call tortoise_health and tortoise_create_point to file my first memory.\n${docs}`
+    return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (export TORTOISE_API_KEY=…).\nThen install the Tortoise skills (${SKILLS_LIST}) from ${SKILLS_INSTALL_URL}.\n${onboardingInstructions}\nThen call tortoise_health and tortoise_create_point to file my first memory.\n${docs}`
   }
   // #2827: both filesystem-less harnesses (Claude Desktop/Web) need only the
   // verify/file step in the conversation; the workflows body rides

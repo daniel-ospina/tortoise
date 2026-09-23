@@ -34,9 +34,10 @@ follows after you run or paste it — nothing is installed into a skills dir.
 ## When to use
 
 - The user pastes the dashboard's universal setup command into you (any of
-  the 6 skill-installer harnesses) or runs it in a terminal. (A 7th harness —
-  ChatGPT — connects key-less via OAuth and never runs this command; see the
-  §2 note.)
+  the 6 harnesses this document covers — 4 config-writing harnesses that run
+  the skill installer, plus 2 teach-human leaves) or runs it in a terminal.
+  (A 7th harness — ChatGPT — connects key-less via OAuth and never runs this
+  command; see the §2 note.)
 - The Setup guide card / Overview says the organization is waiting on
   "Connect your agent".
 - You are a fresh agent pointed at a Tortoise organization and need to know
@@ -97,7 +98,8 @@ mode → teach-human fallback).
 > → ChatGPT tab: Scan Tools → OAuth consent on the hosted endpoint → paste the
 > workflows prompt). It has no local filesystem, shell, or skill installer, so
 > it never runs these instructions and has no row here — these six rows are the
-> skill-installer/agent harnesses. (If you are ChatGPT and already have the
+> harnesses this document covers (4 config-writing, 2 teach-human). (If you
+> are ChatGPT and already have the
 > tortoise MCP tools via OAuth, skip install: section 4's tortoise_health
 > verify still applies.)
 

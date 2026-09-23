@@ -111,11 +111,20 @@ def _installer_skills() -> list[str]:
     return m.group(1).split()
 
 
-def _skills_in_claim(text: str) -> list[str]:
-    """The skill names listed inside an `Install the Tortoise skills (...)` claim."""
-    m = re.search(r"Install the Tortoise skills \(([^)]*)\)", text)
-    assert m, f"no skill claim found in: {text[:80]!r}"
-    return m.group(1).split(", ")
+def _harness_branch(wizard: str, harness: str) -> str:
+    """The `if (harness === '<id>') { … }` body inside wizardPromptText.
+
+    Slice-based so a PER-PROMPT guarantee can be asserted: a count over the
+    whole function passed while one prompt's entire skill enumeration had been
+    deleted (mutation-verified, #4365 review).
+    """
+    ids = ("pi", "cursor", "claude", "codex")
+    marks = sorted((wizard.index(f"if (harness === '{h}')"), h) for h in ids)
+    for i, (start, h) in enumerate(marks):
+        if h == harness:
+            end = marks[i + 1][0] if i + 1 < len(marks) else len(wizard)
+            return wizard[start:end]
+    raise AssertionError(f"no `if (harness === '{harness}')` branch found")
 
 
 def test_m8_installer_ships_the_three_capabilities_not_onboarding():
@@ -178,51 +187,69 @@ def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
         "https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md"
     ), "the instruction URL must be the served instruction document"
 
-    m = re.search(r"const SKILL_INSTALL = \(harness\) =>\n\s*`([^`]*)`",
+    m = re.search(r"const SKILL_INSTALL = \(harness\)\s*=>\s*`([^`]*)`",
                   harnesses)
     assert m, "SKILL_INSTALL template not found in harnesses.js"
     copy = m.group(1)
-    # #4365: the claim is defined ONCE (`SKILLS_CLAIM`) and EVERY served surface
-    # that enumerates the skill set interpolates it, so the three sites cannot
-    # drift from each other. Assert the constant against the installer, then
-    # assert each site interpolates it — before this, re-adding onboarding to
-    # HARNESS_SKILLS or to the HARNESS_STEPS.cursor label left the suite green.
-    m = re.search(r"export const SKILLS_CLAIM =\s*\n?\s*'([^']+)'", harnesses)
+    # #4365: the shipped set is stated ONCE (`SKILLS_LIST`) and the claim is
+    # BUILT from it (`SKILLS_CLAIM`), so a name cannot go missing from the
+    # claim. Both are asserted against the installer's own SKILLS=(...) array.
+    m = re.search(r"^export const SKILLS_LIST =\s*\n?\s*'([^']+)'",
+                  harnesses, re.M)
+    assert m, "SKILLS_LIST must be an exported constant"
+    assert m.group(1).split(", ") == _installer_skills(), (
+        "SKILLS_LIST must list exactly what the installer ships")
+    m = re.search(r"^export const SKILLS_CLAIM = `([^`]*)`", harnesses, re.M)
     assert m, "SKILLS_CLAIM must be an exported constant"
-    assert _skills_in_claim(m.group(1)) == _installer_skills(), (
-        "SKILLS_CLAIM must list exactly what the installer ships")
+    assert m.group(1) == "Install the Tortoise skills (${SKILLS_LIST})", (
+        "SKILLS_CLAIM must be built from SKILLS_LIST — never a second literal")
     assert "${SKILLS_CLAIM}" in copy, (
         "SKILL_INSTALL must interpolate SKILLS_CLAIM")
-    assert harnesses.count("${SKILLS_CLAIM}") >= 3, (
-        "every served surface that enumerates the skill set must interpolate "
-        "SKILLS_CLAIM (SKILL_INSTALL, HARNESS_SKILLS, HARNESS_STEPS.cursor)")
+    # Exactly three sites in this module state the shipped set. `>= 3` was not
+    # enough: appending a 4th name AFTER the interpolated claim kept both the
+    # count and `includes()` true (mutation-verified, #4365 review round 2).
+    assert harnesses.count("${SKILLS_CLAIM}") == 3, (
+        "SKILL_INSTALL, HARNESS_SKILLS and the HARNESS_STEPS.cursor label are "
+        "the only places that may state the claim")
+    # …and no line that states the set may ALSO name the onboarding SKILL. The
+    # positive form alone tolerated a 4th name appended after the interpolated
+    # claim (mutation-verified, #4365 review round 2). Match the skill name, not
+    # the substring "onboarding" — the legitimate `ONBOARDING_INSTRUCTIONS_URL`
+    # sits on the next source line of the same multi-line template.
+    for line in harnesses.splitlines():
+        if "${SKILLS_CLAIM}" in line or "SKILLS_LIST =" in line:
+            assert "tortoise-onboarding" not in line.lower(), (
+                "a line that states the shipped skill set must not name the "
+                f"onboarding skill: {line.strip()[:90]!r}")
     assert "${ONBOARDING_INSTRUCTIONS_URL}" in copy, (
         "the connect copy must point at the served onboarding instructions")
 
     main = (DASHBOARD_SRC / "main.jsx").read_text(encoding="utf-8")
+    assert "SKILLS_LIST" in main.split("from './harnesses.js'")[0], (
+        "main.jsx must import SKILLS_LIST — the four LIVE wizard prompts are "
+        "the primary served surface and must not restate the list by hand")
     wizard = main[main.index("function wizardPromptText("):
                    main.index("function wizardWorkflowsText(")]
     assert "tortoise-onboarding" not in wizard, (
         "wizard prompts must not claim onboarding arrives via the installer — "
         "it is instructions, not a skill")
-    # …and each prompt's install claim enumerates exactly the shipped set (the
-    # `not in` above catches an onboarding re-add; this catches any other drift).
-    wizard_claims = re.findall(r"install the Tortoise skills \(([^)]*)\)",
-                               wizard, re.I)
-    assert wizard_claims, "the wizard prompts must state the skill-install claim"
-    for frag in wizard_claims:
-        assert frag.split(", ") == _installer_skills(), (
-            "every wizard prompt's install claim must match the installer")
+    # PER PROMPT — a prompt that loses its claim entirely, or that states a
+    # different set, must fail here (`assert wizard_claims` over a findall
+    # stayed GREEN with one prompt's whole enumeration deleted).
+    for h in ("pi", "cursor", "claude", "codex"):
+        body = _harness_branch(wizard, h)
+        assert "${SKILLS_LIST}" in body, (
+            f"{h}: every config-writing prompt must state the shipped set via "
+            f"SKILLS_LIST")
+        assert "${onboardingInstructions}" in body, (
+            f"{h}: every config-writing prompt must name the onboarding "
+            f"instructions")
     assert "ONBOARDING_INSTRUCTIONS_URL" in wizard, (
         "the wizard prompts must name the served onboarding instructions")
     # …and NAME it in the prompts, not merely declare it: the const line alone
     # would satisfy a bare membership check while every prompt interpolated nothing.
     assert "${ONBOARDING_INSTRUCTIONS_URL}" in wizard, (
         "the wizard prompts must INTERPOLATE the onboarding instructions URL")
-    # …and every config-writing prompt must actually NAME it — one shared local
-    # interpolates the URL, and each of the four prompts interpolates that local.
-    assert wizard.count("${onboardingInstructions}") == 4, (
-        "all four config-writing prompts (claude/codex/cursor/pi) must name it")
 
     # …and the filesystem-less harnesses (Claude Desktop/Web, ChatGPT) never ran
     # the installer and have no skills directory — the workflows prompt body is

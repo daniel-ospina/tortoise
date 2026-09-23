@@ -383,14 +383,17 @@ ${PI_CAPTURE_INSTALL}
 export const SKILLS_INSTALL_URL =
   'https://app.premiselabs.co/install-tortoise-skills.sh'
 
-// #4365: the ONE statement of what the installer ships. Every served surface
-// that enumerates the skill set interpolates THIS string — SKILL_INSTALL, the
-// HARNESS_SKILLS block, and the HARNESS_STEPS.cursor label — so the claim
-// cannot drift from the installer's own `SKILLS=(...)` array (pinned by test
-// on both sides). Before this it was written out three times, and re-adding
-// onboarding to any one of them (the #1998 W2 shape) left the suite green.
-export const SKILLS_CLAIM =
-  'Install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding)'
+// #4365: the shipped skill set, stated ONCE. Every surface in THIS module that
+// enumerates it interpolates these — SKILL_INSTALL, the HARNESS_SKILLS block,
+// and the HARNESS_STEPS.cursor label — so the copy cannot drift from the
+// installer's own `SKILLS=(...)` array (pinned by test on both sides). The
+// four LIVE dashboard wizard prompts (main.jsx) interpolate SKILLS_LIST too,
+// and are pinned against the installer by
+// tests/test_onboarding_variants.py::test_4365_served_connect_copy_names_
+// three_skills_plus_the_instructions — the constant is not its own guard.
+export const SKILLS_LIST =
+  'how-to-use-tortoise, tortoise-decide, tortoise-file-finding'
+export const SKILLS_CLAIM = `Install the Tortoise skills (${SKILLS_LIST})`
 
 // #4365: onboarding is NOT one of the installed skills — it is a one-time
 // setup FLOW delivered as INSTRUCTIONS. This is the served instruction set
@@ -565,9 +568,10 @@ export function preferredSurface(family, current) {
 // stay the single 7-harness vocabulary; the harness table in the SERVED
 // onboarding instructions (#4365: an instruction document, not an installed
 // skill) is the agent-side self-adjudication source (the chooser's
-// successor). chatgpt is key-less/OAuth (HARNESS_OAUTH) and
-// renders through a dedicated wizard branch, not this universal command —
-// UNIVERSAL_COMMAND.chatgpt exists for total-loop/roundtrip consumers only.
+// successor). chatgpt is key-less/OAuth (HARNESS_OAUTH); #2698 removed its
+// chooser surface (HARNESS_FAMILIES has no chatgpt entry), so it renders on NO
+// live branch — UNIVERSAL_COMMAND.chatgpt exists for total-loop/roundtrip
+// consumers only (the roundtrip test reads it; nothing in the UI does).
 //
 // Contract (DE2E-5): every harness reaches a connected state verifiable via
 // tortoise_health; the served onboarding instructions take over from the
