@@ -10,12 +10,12 @@
 // package's test runtime is `node --test` with no DOM or React renderer. The
 // assertions below therefore read main.jsx as TEXT — which is what makes the copy
 // module's single-source rule (harnesses.js owns the words; main.jsx renders the
-// helper's return, never the constant) worth pinning.
+// helpers' returns) worth pinning.
 //
 // WHAT THIS FILE PINS. Reading main.jsx as comment-stripped text: the row's
-// disclosure expression, the two bindings the row reads, the copy constants'
-// absence from main.jsx's code, the row's support gate, and that the failure
-// line sits inside it.
+// disclosure expression, the two bindings the row reads, that main.jsx names
+// neither `HARNESS_ATTRIBUTION` nor `HARNESS_CAPTURE_STATUS_LABEL` in code, the
+// row's support gate, and that the failure line sits inside it.
 //
 // WHAT IT IS NOT. A source pin is a tripwire, not a proof: it cannot see CSS or
 // a DOM-level edit, and text can satisfy a pattern without rendering. The durable

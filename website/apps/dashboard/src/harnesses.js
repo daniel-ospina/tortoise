@@ -481,8 +481,9 @@ export const HARNESS_CAPTURE_REASON = {
 // spellings and these state words are unchanged.
 //
 // `install-pending` is the one non-`off` state that is NOT in this group: it is
-// the fall-through when NEITHER per-harness key is present (the dashboard's own
-// no-signal state), so its LABEL carries no attribution — hedging "not installed
+// the fall-through when NEITHER per-harness STATE key (`session_capture_receipt_<h>`
+// / `install_probe_<h>`) is present (the dashboard's own no-signal state), so its
+// LABEL carries no attribution — hedging "not installed
 // yet" as agent-reported would invent a signal the server does not have. A row
 // in this state can still disclose one: a recorded per-harness FAILURE
 // (`session_capture_last_error_<h>`) is itself a per-harness signal, and

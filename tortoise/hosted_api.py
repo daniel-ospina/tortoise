@@ -9354,7 +9354,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         params={"sid": session_id},
     ).result_set[0]
     session_existed = bool(session_row[0])
-    # #3681 (server-stamped harness): a session-JWT caller never names a
+    # #3681 (first-writer-wins harness resolution): a session-JWT caller never names a
     # harness (bare receipt), and an agent credential can never RELABEL an
     # already-captured session — the STORED harness wins (first-writer-wins).
     # ``body.harness`` only ever introduces a harness on a session the server
@@ -10581,9 +10581,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
 # unregistered key would be silently dropped by the _update_onboarding_state
 # allowlist filter.
 #
-# #3809: the key SPELLING lives in ONE place — ``tortoise.capture_receipts``
+# #3809: the helpers below derive the key name from ``tortoise.capture_receipts``
 # — imported above as ``_capture_receipt_key`` / ``_capture_last_error_key``
 # so both this server and ``tortoise session verify`` derive the same name.
+# Two spots in this file re-spell the keys inline (``_reconcile_capture_receipts``
+# / ``_capture_server_owned_keys`` — #4893).
 
 
 def _record_capture_last_error(org_id: str, harness: str | None,
