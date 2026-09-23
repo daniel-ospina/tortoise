@@ -275,7 +275,8 @@ class TestPatchRefusesFabricatedReceipt:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Part 2b — #3681: the receipt harness is SERVER-resolved
+# Part 2b — #3681: the receipt harness is CALLER-resolved (stored or claimed),
+# never server-observed — see #3700
 # ═══════════════════════════════════════════════════════════════════
 
 _CAPTURE_TEAM = {
@@ -386,7 +387,8 @@ class TestCaptureReceiptHarnessResolution:
 
     def test_fresh_agent_capture_names_its_own_harness(self, env):
         """The legitimate form: a FRESH session's agent credential declares its
-        harness, and the receipt names it (the agent is the observation)."""
+        harness, and the receipt names it — a CALLER declaration, not a server
+        observation of the harness (#3700; the capture itself IS observed)."""
         tc, _holder, seen = env
         r = self._capture(tc, session_id="S-fresh", harness="cursor")
         assert r.status_code == 200, r.text

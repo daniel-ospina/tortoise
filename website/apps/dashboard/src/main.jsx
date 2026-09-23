@@ -7751,10 +7751,12 @@ function claimIntentInFlight() {
                                     said "not installed yet"). The capability
                                     flag still decides whether ANY sentence may
                                     print ('none' for no install path, recording
-                                    off, or NO HARNESS PICKER offered). A true
-                                    flag with no installed seam (#3575, lane B1)
-                                    is still a separate defect this screen cannot
-                                    detect. */}
+                                    off, or NO HARNESS PICKER offered). #3575 was
+                                    resolved by the in-repo Pi capture seam, so
+                                    the capability flag is derived from a real
+                                    install step; the general "flag true with no
+                                    installed seam" class is pinned by the
+                                    harness registry's tests, not here. */}
                                 {doneCaptureClaim === 'present' && "Tortoise is capturing your agent's sessions. "}
                                 {doneCaptureClaim === 'future' && "Tortoise will capture your agent's sessions. "}
                                 {doneCaptureClaim === 'install-pending' && `Session capture is ${doneCaptureStatusLabel}. `}
@@ -10081,7 +10083,13 @@ function MemorySources(props) {
                   {/* review P2-5: the polite live region is scoped to the HEAD
                       — the harness name, its disclosure and the state word — so
                       it still does not announce the whole multi-line snippet
-                      below.
+                      below. That is a deliberate OVERRIDE of P2-5 (PR #1830),
+                      which moved the region OFF the container and ONTO the
+                      state pill: its hazard was the multi-line snippet, and the
+                      #3700 disclosure must be announced with the state it
+                      qualifies. Moving the region to the head keeps the snippet
+                      out while covering the name and the disclosure, which a
+                      pill-scoped region cannot do.
                       review P2-3: unsupported harnesses render the REASON only,
                       no pill and no failure line (no install path exists for
                       `claude-web`, `claude-desktop` or `chatgpt` — a per-harness

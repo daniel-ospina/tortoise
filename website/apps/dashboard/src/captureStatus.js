@@ -55,11 +55,12 @@ export function captureStatusForHarness(state, harness) {
 //
 // Call sites go through this helper, never index HARNESS_CAPTURE_STATUS_LABEL
 // directly: main.jsx no longer imports the raw table, so re-indexing it there
-// is a `no-undef` error rather than a silent attribution drop. That pin covers
-// the call sites in main.jsx only — the table stays exported (the harness
-// registry's own test asserts it), so a NEW module could still import it
-// directly; that is convention, not enforcement, and the honest statement of it
-// matters more than a stronger claim the mechanism does not back.
+// is a `no-undef` error — one mapping point a new state cannot bypass, rather
+// than a second place that has to agree. That pin covers the call sites in
+// main.jsx only — the table stays exported (the harness registry's own test
+// asserts it), so a NEW module could still import it directly; that is
+// convention, not enforcement, and the honest statement of it matters more than
+// a stronger claim the mechanism does not back.
 export function captureStatusLabelForHarness(state, harness) {
   return HARNESS_CAPTURE_STATUS_LABEL[captureStatusForHarness(state, harness)]
 }
@@ -133,12 +134,14 @@ export function harnessAttributionForHarness(state, harness) {
 //               recording off-switch is set. Saying nothing is the only
 //               honest option in both cases.
 //
-// Per-harness consequence today: Pi can NOT reach 'present' (no receipt can be
-// produced while #3575 leaves its install seam unimplemented), so the false
-// present-tense claim is unreachable for Pi — without this lane touching the
-// install seam (B1 owns #3575) or the capability flag (#3575's own framing
-// requires that flag be *derived*, not patched here). When B1 derives it, Pi
-// falls to 'none' automatically.
+// Per-harness consequence today: none. The Pi gap this paragraph used to record
+// is closed — #3575 was resolved by the in-repo Pi capture seam
+// (`HARNESS_CAPTURE_SEAM.pi`), so `session_capture_receipt_pi` is producible and
+// Pi can legitimately reach 'present'. The capability flag stays DERIVED from
+// that seam (never asserted), which is what makes a `true` with no install step
+// unreachable here; the general "flag true, no installed seam" class is pinned
+// by `harnesses.test.js` and `tests/test_harness_mcp_config.py`, not by this
+// lane.
 export function captureClaimForHarness(state, harness) {
   if (!HARNESS_CAPTURE_SUPPORT[harness]) return 'none'
   const status = captureStatusForHarness(state, harness)

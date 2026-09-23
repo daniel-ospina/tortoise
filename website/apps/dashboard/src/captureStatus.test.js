@@ -250,11 +250,11 @@ test('#3428: GIVEN capture capability, the tense follows the RECEIPT', () => {
 // This EXECUTES the helpers main.jsx renders from (`harnessAttributionForHarness`
 // beside the harness name, `captureErrorForHarness` for the failure line) rather
 // than scanning source. It pins each helper's DECISION; it cannot pin that
-// main.jsx calls them — deleting a render site would leave this file green —
-// which is the same residual the label table carries (see
-// `captureStatusLabelForHarness`). What the suite does cover for the render side
-// is the raw-table index, which is a CI `no-undef` error now that main.jsx no
-// longer imports it.
+// main.jsx calls them — this file cannot see main.jsx's call sites at all, so
+// deleting a render site would leave it green. That call site is pinned
+// separately, by `harnessDisclosureTripwire.test.js` (the render is the whole
+// point of the fix, and no execution-based test in this repo can reach it —
+// there is no DOM test infrastructure and the e2e suite never opens Settings).
 //
 // NAMED MUTATIONS that reinstate the defect — each must RED this test:
 //   RECEIPT_LABEL_CLAIMS_SERVER_OBSERVATION
@@ -331,9 +331,11 @@ test('#3700: the per-harness attribution is disclosed on the row, not baked into
   assert.equal(harnessAttributionForHarness(
     { session_recording: true, 'session_capture_receipt_claude-web': 't' }, 'claude-web'), null)
 
-  // (4) the sibling FAILURE sub-line reads the key the same `stored or claimed`
-  //     resolution wrote, so it is the same defect class — but it renders inside
-  //     a `role="alert"` live region, so it carries the failure ALONE and must be
+  // (4) the sibling FAILURE sub-line reads a key whose harness is a CALLER
+  //     declaration on EVERY writer of it — the REST capture resolves it
+  //     `stored or claimed`, the MCP capture records the request's own harness
+  //     (#4898) — so it is the same defect class. It renders inside a
+  //     `role="alert"` live region, so it carries the failure ALONE and must be
   //     null (not an empty string) when there is no error, since the caller uses
   //     it as its own render guard. The row's attribution (3) is what discloses
   //     the harness; a caveat in here would be announced as part of the failure
