@@ -1486,8 +1486,8 @@ def test_the_teardown_statuses_are_classified_as_residue_or_clean() -> None:
     """The invariant the per-exit assertions below rest on, asserted ONCE (a
     membership is a property of the constants, not of any exit): a
     `baseline_unavailable` teardown WARNS — a live org may remain — while
-    `not_reached`, the state every pre-create exit records, is deliberately NOT
-    a residue state, so it raises no false alarm."""
+    `not_reached` is deliberately NOT a residue state, so it raises no false
+    alarm."""
     assert _mod.TEARDOWN_BASELINE_UNAVAILABLE in _mod.TEARDOWN_RESIDUE_STATES
     assert _mod.TEARDOWN_NOT_REACHED not in _mod.TEARDOWN_RESIDUE_STATES
 
