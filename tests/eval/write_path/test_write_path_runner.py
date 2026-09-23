@@ -528,6 +528,9 @@ def test_operator_audit_m2_clause_is_posture_scoped():
         "the retrievable memory layer (eventId-stamped) — a lower numerator "
         "is the structural drop the layer-2 WIRE fix closed"
     )
+    # Count and order are part of the contract: edge note first, then the
+    # persistence note, and nothing else (a third note would go unnoticed).
+    assert len(m2) == len(llm) == 2
 
     # A third posture takes the llm-shaped note (documented behaviour: only
     # "m2" earns the caveat, never "anything not llm").
@@ -693,6 +696,11 @@ def test_run_carries_operator_edge_audit_dimension(tmp_path, monkeypatch):
     notes = "\n".join(report.get("notes", []))
     assert "operator-edge audit (#2514)" in notes
     assert "operator persistence (#2552)" in notes
+    # #2552: this is an m2 run, so its receipt MUST carry the m2 caveat. This is
+    # the call-site half of the posture gate: without it, a call site passing
+    # the wrong posture leaves every other test green while the blessed m2
+    # receipt silently loses its caveat — the exact property PR #4806 protects.
+    assert "m2 echo lane has no relation extraction" in notes
     # Per-session detail rides the owning session's result (the cross-session
     # SUPERSEDE is owned by wp07; its to-anchor lives in wp06's memory layer).
     owned_by = {
