@@ -19,8 +19,11 @@ Run: TORTOISE_TEST_CARVE_OUT=1 python -m pytest tests/test_ship_test_onboarding.
 """
 from __future__ import annotations
 
+import inspect as _inspect
+
 import pytest
 
+import tools.ship_test_onboarding as _mod
 from tools.ship_test_onboarding import (
     ABSENT,
     CONNECTED,
@@ -1299,6 +1302,10 @@ def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
       + (["--org-name", org_name] if org_name else [])
       + (["--keep-org"] if keep_org else []))
     obs = mod.run_walk(args)
+    # BEHAVIOURAL single-exit check: every path the suite exercises must land a
+    # teardown block in the artifact. A future exit routed past `_finalize`
+    # falsifies this for the whole suite instead of for one hand-written case.
+    assert obs.teardown, "run_walk exited without recording teardown"
     return obs, ctx, mod
 
 
@@ -1592,10 +1599,6 @@ def test_walk_with_an_explicit_agent_key_still_reads_the_truth_through_the_sessi
 #
 # `_FakeRequester` pops a queue until one entry remains, then repeats that entry
 # — so "the org is gone" is expressed as the LAST entry.
-import inspect as _inspect
-
-import tools.ship_test_onboarding as _mod
-
 _ORG_ROUTE = "/api/v1/organizations"
 _RUN_ORG = "Ship Test 123"
 _AFTER_ROW = {"org_id": "org-1", "org_name": _RUN_ORG}
@@ -1668,21 +1671,33 @@ def test_the_name_the_run_writes_is_the_name_teardown_matches(monkeypatch, tmp_p
     assert obs.teardown["org_name"] == _RUN_ORG
 
 
-def test_a_pre_existing_org_is_never_a_teardown_candidate(monkeypatch, tmp_path):
-    """T6 — the differential proof. An org that was ALREADY there (it is in the
-    baseline) can never be a candidate, however the list shifts; the run's own
-    new org is the only thing deleted."""
-    old = {"org_id": "org-old", "org_name": "Something Else"}
-    base = _happy_base()
-    base[("DELETE", _ORG_ROUTE + "/org-1")] = _DELETE_OK
+def test_a_same_named_pre_existing_org_is_never_a_teardown_candidate(
+        monkeypatch, tmp_path):
+    """T6 — the differential proof, in the ONLY shape that can tell it apart from
+    a name match: a pre-existing org that carries this run's exact name. It is in
+    the baseline, so it is not a candidate — a name-only selector would delete
+    it. (Mutation-checked: dropping the set difference makes this RED.)"""
+    old = {"org_id": "org-old", "org_name": _RUN_ORG}
     obs, ctx, _ = _run_teardown_walk(
-        monkeypatch, tmp_path, reads=[(200, [old]), (200, [old, _AFTER_ROW]),
-                                      (200, [old])],
-        base=base)
-    assert obs.teardown["status"] == _mod.TEARDOWN_DELETED
-    assert obs.teardown["org_id"] == "org-1"
-    assert [c[1] for c in _delete_calls(ctx)] == [
-        "https://app.premiselabs.co/api/v1/organizations/org-1"]
+        monkeypatch, tmp_path,
+        reads=[(200, [old]), (200, [old]), (200, [old])],
+        org_name=_RUN_ORG)
+    assert obs.teardown["status"] == _mod.TEARDOWN_NOT_LISTED
+    assert _delete_calls(ctx) == []
+
+
+def test_an_org_that_appeared_without_a_create_attempt_is_not_this_runs_to_delete(
+        monkeypatch, tmp_path):
+    """A set difference is not an identity proof: an org that joined this
+    session's list without this run ever asking for one is refused, and recorded
+    as residue rather than as a clean bill."""
+    obs, ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path,
+        reads=[(200, []), (200, [_AFTER_ROW]), (200, [])],
+        org_create=False)
+    assert obs.teardown["status"] == _mod.TEARDOWN_NOT_ATTEMPTED
+    assert obs.teardown["status"] in _mod.TEARDOWN_RESIDUE_STATES
+    assert _delete_calls(ctx) == []
 
 
 def test_a_numerically_looking_name_cannot_ride_a_name_match(monkeypatch, tmp_path):
@@ -1726,7 +1741,11 @@ def test_a_run_with_no_session_issues_no_org_request_at_all(monkeypatch, tmp_pat
             ("GET", "/api/v1/onboarding/state"): [_PROJ_UNOBSERVED]}
     obs, ctx, _ = _run_fake_walk(monkeypatch, tmp_path, plan=plan,
                                  ui_sequence=[NOT_CONNECTED], mcp_tools_call=_MCP_OK)
-    assert obs.teardown["status"] == _mod.TEARDOWN_BASELINE_UNAVAILABLE
+    # the run never got as far as the baseline, so this is NOT "the org list was
+    # unreadable" — claiming that would raise a residue alarm for a run that
+    # could not have created anything
+    assert obs.teardown["status"] == _mod.TEARDOWN_NOT_REACHED
+    assert obs.teardown["status"] not in _mod.TEARDOWN_RESIDUE_STATES
     assert not [c for c in ctx.request.calls if "organizations" in c[1]]
 
 
@@ -1744,7 +1763,7 @@ def test_a_2xx_that_leaves_the_org_listed_is_not_a_deletion(monkeypatch, tmp_pat
 def test_an_unreadable_confirmation_is_not_a_confirmation(monkeypatch, tmp_path):
     """T4b — `org_id not in (ids or [])` is TRUE when the read failed. An
     unreadable confirmation must never be recorded as a deletion."""
-    obs, ctx, _ = _run_teardown_walk(
+    obs, _ctx, _ = _run_teardown_walk(
         monkeypatch, tmp_path,
         reads=[(200, []), (200, [_AFTER_ROW]),
                (503, {"error": "upstream_unavailable"})],
@@ -1814,7 +1833,7 @@ def test_teardown_cannot_change_the_verdict_or_lose_the_artifact(
         raise RuntimeError("cleanup exploded")
 
     monkeypatch.setattr(_mod, "_run_teardown", _boom)
-    obs, _ctx, mod = _run_teardown_walk(
+    obs, _ctx, _ = _run_teardown_walk(
         monkeypatch, tmp_path, reads=[(200, []), (200, []), (200, [])])
     assert obs.verdict == "passed", obs.verdict
     assert obs.reason == ""
@@ -1866,15 +1885,31 @@ def test_keep_org_records_a_deliberate_residue_and_never_deletes(
     assert _delete_calls(ctx) == []
 
 
-def test_every_exit_from_the_walk_funnels_through_the_teardown_exit():
-    """The single-exit property is the whole reason the artifact can be trusted:
-    an unconverted `_finish` site would exit with no teardown recorded."""
+def test_no_exit_from_the_walk_writes_the_artifact_without_teardown():
+    """The single-exit property is the whole reason the artifact can be trusted.
+
+    Deliberately SHAPE-INDEPENDENT: it asserts that no `_finish(` call appears
+    inside `run_walk` at all, rather than counting `_finalize` literals — a
+    reformat (or a thirteenth exit) cannot false-red it, and an exit that calls
+    `_finish` cannot slip past it. The behavioural half of the same guarantee is
+    the `assert obs.teardown` in `_run_fake_walk`, which every walk test rides.
+    """
     src = _inspect.getsource(_mod.run_walk)
-    assert "return _finish(obs, out_dir)" not in src
-    assert src.count("return _finalize(obs, out_dir, td)") == 12
+    assert "_finish(" not in src
+    assert "_finalize(obs, out_dir, td)" in src
+
+
+def test_an_org_name_the_product_would_rewrite_is_refused_up_front(capsys):
+    """Teardown matches the name this run WROTE, so a name the wizard or
+    tenant-provision would rewrite (or refuse) would make the created org
+    silently unreapable. Exit 2, before any browser."""
+    code = _mod.main(["--allow-prod", "--org-name", "bad.name"])
+    assert code == _mod.EXIT_USAGE
+    assert "invalid --org-name" in capsys.readouterr().err
 
 
 def test_keep_org_is_cli_only_and_never_ambiently_injected():
+    """One ambient variable must never turn teardown off for every run."""
     assert _mod.build_parser().parse_args([]).keep_org is False
     assert "SHIP_TEST_KEEP_ORG" not in _inspect.getsource(_mod.build_parser)
 
@@ -1906,7 +1941,7 @@ def test_read_org_ids_reads_only_a_recognized_org_list(body, expected):
     identity proof off (baseline) and silently confirm a deletion (verify)."""
     base = "https://app.premiselabs.co"
     ctx = _FakeCtx({("GET", "/api/v1/organizations"): [(200, body)]}, base)
-    status, ids, upstream = _mod.read_org_ids(ctx, base)
+    status, ids, _upstream = _mod.read_org_ids(ctx, base)
     assert status == 200
     assert ids == expected
 

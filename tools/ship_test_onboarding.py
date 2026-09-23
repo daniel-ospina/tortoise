@@ -106,6 +106,7 @@ what keep the probe itself honest.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -704,6 +705,15 @@ UNUSABLE_SESSION_STATES = (SESSION_NOT_SIGNED_IN, SESSION_STORE_UNAVAILABLE,
 
 SESSION_MECHANISM = "browser cookie jar → app-origin /api/session → /api/v1 BFF proxy"
 
+# The product's own org-name rule, kept in sync with the server
+# (`supabase/functions/tenant-provision`: ORG_NAME_RE) and the client
+# (`website/apps/dashboard/src/wizardFlow.js::orgNameError`). Teardown matches
+# the name this run WROTE, so a name the product would rewrite (the server falls
+# back to an email-prefix name) or refuse would silently make the created org
+# unreapable. Reject it up front (exit 2) rather than discovering it later as a
+# `name_mismatch` that looks like an org-list problem.
+ORG_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$")
+
 
 def bff_session(ctx, base_url: str) -> tuple[str, str]:
     """Resolve the walk's session on the app origin, as the app itself does.
@@ -818,6 +828,7 @@ def read_projection(ctx, base_url: str) -> tuple[int, dict | None]:
 TEARDOWN_DELETED = "deleted"
 TEARDOWN_SKIPPED_NO_ORG = "skipped_no_org"
 TEARDOWN_NOT_LISTED = "not_listed"
+TEARDOWN_NOT_ATTEMPTED = "not_attempted"
 TEARDOWN_KEPT = "kept_by_flag"
 TEARDOWN_NOT_REACHED = "not_reached"
 TEARDOWN_BASELINE_UNAVAILABLE = "baseline_unavailable"
@@ -833,9 +844,10 @@ TEARDOWN_FAILED = "failed"
 # clean — warning on those would be a false alarm, and a false residue alarm is
 # the #4291 conflation in reverse.
 TEARDOWN_RESIDUE_STATES = (
-    TEARDOWN_NOT_LISTED, TEARDOWN_KEPT, TEARDOWN_BASELINE_UNAVAILABLE,
-    TEARDOWN_LIST_UNREADABLE, TEARDOWN_AMBIGUOUS, TEARDOWN_NAME_MISMATCH,
-    TEARDOWN_HTTP_REFUSED, TEARDOWN_NOT_CONFIRMED, TEARDOWN_FAILED,
+    TEARDOWN_NOT_LISTED, TEARDOWN_NOT_ATTEMPTED, TEARDOWN_KEPT,
+    TEARDOWN_BASELINE_UNAVAILABLE, TEARDOWN_LIST_UNREADABLE, TEARDOWN_AMBIGUOUS,
+    TEARDOWN_NAME_MISMATCH, TEARDOWN_HTTP_REFUSED, TEARDOWN_NOT_CONFIRMED,
+    TEARDOWN_FAILED,
 )
 
 
@@ -855,6 +867,11 @@ class Teardown:
     # baseline is a readable EMPTY list; "no baseline" is not "empty", it is
     # "unproven", and an unproven identity must never delete anything.
     enabled: bool = False
+    # True once the baseline read was ATTEMPTED. Distinguishes "the list was
+    # unreadable" (a real, attributable residue risk) from "the run exited
+    # before it ever looked" (which cannot have created anything and must not
+    # raise a residue alarm).
+    baseline_attempted: bool = False
     reason: str = ""
     before: dict = field(default_factory=dict)   # org_id -> org_name
     # Set immediately BEFORE the create click: a click that raises after
@@ -925,9 +942,15 @@ def _run_teardown(obs: Observation, td: Teardown) -> None:
         obs.teardown = {"status": TEARDOWN_KEPT, "org_name": td.org_name,
                         "detail": "--keep-org: the residue is deliberate and countable"}
         return
-    if td.ctx is None:
-        obs.teardown = {"status": TEARDOWN_NOT_REACHED,
-                        "detail": "the walk never reached a browser context"}
+    if td.ctx is None or not td.baseline_attempted:
+        # No baseline was ever READ. Nothing in this run can be attributed to
+        # it, and the org is only created by the wizard click that comes AFTER
+        # the baseline — so claiming "the org list was unreadable" here would be
+        # a residue alarm for a run that never got far enough to create one.
+        obs.teardown = {
+            "status": TEARDOWN_NOT_REACHED,
+            "detail": ("the walk never reached a browser context" if td.ctx is None
+                       else "the walk exited before the cleanup baseline was read")}
         return
     if not td.enabled:
         obs.teardown = {"status": TEARDOWN_BASELINE_UNAVAILABLE,
@@ -954,6 +977,15 @@ def _run_teardown(obs: Observation, td: Teardown) -> None:
         return
     if len(created) > 1:
         obs.teardown = {"status": TEARDOWN_AMBIGUOUS, "org_name": td.org_name,
+                        "created_ids": sorted(created)}
+        return
+    if not td.create_attempted:
+        # The set difference alone is NOT an identity proof: an org that joined
+        # this session's own list without this run EVER asking for one is not
+        # this run's to delete. (It appeared after the baseline, so it is in the
+        # same disposable account — but "same account" is not "created by this
+        # run".) Refuse, and say so as residue rather than as a clean bill.
+        obs.teardown = {"status": TEARDOWN_NOT_ATTEMPTED, "org_name": td.org_name,
                         "created_ids": sorted(created)}
         return
 
@@ -1129,7 +1161,8 @@ def run_walk(args) -> Observation:
     # ones that predate a context. The org NAME is computed once, here, and is
     # both what the wizard is told and what teardown compares against, so the two
     # cannot drift.
-    td = Teardown(org_name=args.org_name or f"Ship Test {int(time.time())}",
+    td = Teardown(org_name=args.org_name
+                  or f"Ship Test {int(time.time())}-{uuid.uuid4().hex[:4]}",
                   base_url=args.base_url, keep=args.keep_org)
 
     try:
@@ -1246,6 +1279,7 @@ def run_walk(args) -> Observation:
             # DISABLED — it fails closed (residue) rather than deleting on an
             # unproven identity.
             b_status, before_ids, b_upstream = read_org_ids(ctx, args.base_url)
+            td.baseline_attempted = True
             if before_ids is None:
                 td.reason = (f"baseline GET /api/v1/organizations -> {b_status}"
                              + (f" (upstream {b_upstream})" if b_upstream else ""))
@@ -1455,10 +1489,8 @@ def run_walk(args) -> Observation:
             # literally true.
             for closer in (ctx, browser):
                 if closer is not None:
-                    try:
+                    with contextlib.suppress(Exception):
                         closer.close()
-                    except Exception:
-                        pass
 
 
 def _mint_or_read_key(page, ctx, base_url: str) -> tuple[str | None, str]:
@@ -1735,6 +1767,14 @@ def main(argv: list[str] | None = None) -> int:
     if any(not _is_loopback(u) for u in targets) and not args.allow_prod:
         print("ship-test: non-loopback target — pass --allow-prod (or "
               "SHIP_TEST_ALLOW_PROD=1) to observe a live deployment", file=sys.stderr)
+        return EXIT_USAGE
+    if args.org_name and not ORG_NAME_RE.match(args.org_name):
+        print("ship-test: invalid --org-name — the product accepts letters, "
+              "numbers, space, dash and underscore, starting with a letter or "
+              "number, at most 64 characters (the rule both the wizard and "
+              "tenant-provision apply). A name outside that rule is rewritten "
+              "or refused server-side, which would make the org this run "
+              "created unreapable.", file=sys.stderr)
         return EXIT_USAGE
     try:
         obs = run_walk(args)
