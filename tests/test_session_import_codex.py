@@ -20,6 +20,7 @@ from urllib.error import HTTPError
 
 import pytest
 
+from tortoise.capture_spool import PostOutcome as PostOutcome
 from tortoise.session_import import parse_codex, parse_pi, parse_transcript
 
 # A minimal codex-shaped session file exercising every record shape the
@@ -659,17 +660,21 @@ def test_remove_spool_entry_removes_and_is_spooled_reports_truthfully(tmp_path):
     assert is_spooled(root, "verify-1") is False
 
 
-def test_a_verify_probe_is_never_filed_even_if_it_stays_spooled(
-        tmp_path, monkeypatch):
+def test_a_verify_probe_is_never_filed_and_a_real_session_still_is(
+        tmp_path):
     """THE STRUCTURAL GUARD. The codex/cursor seams write from a DETACHED
     worker, so a probe can be spooled after verify's cleanup has run — no unlink
-    can be race-free. The drain must therefore refuse to file one at all.
+    is race-free. The drain therefore refuses to file a probe at all.
 
-    Mutation: drop the `is_probe_session_id` branch in `_flush_one` — the probe
-    is POSTed and the assertion REDs, which is synthetic content reaching the
-    tenant graph."""
+    Just as important: the match must be NARROW. Session ids also come from
+    `_local_session_id` (`<transcript-stem>-<digest>`), so a real transcript
+    named `verify-my-notes.jsonl` derives `verify-my-notes-0e9ebe1a9262`.
+    Under a prefix test that REAL capture was both refused and deleted — silent
+    data destruction, which is worse than the leak this guard prevents.
+
+    Mutations that must RED this: (a) drop the guard — the probe is filed;
+    (b) widen it to a prefix match — the real session is refused."""
     from tortoise.capture_spool import (
-        PostOutcome,
         Snapshot,
         flush_spool,
         is_probe_session_id,
@@ -677,19 +682,32 @@ def test_a_verify_probe_is_never_filed_even_if_it_stays_spooled(
         write_spool_entry,
     )
 
-    root = tmp_path / "spool"
-    assert is_probe_session_id("verify-abc") is True
+    # The exact shape `session_verify._probe_id` emits.
+    assert is_probe_session_id("verify-codex-20260922T184500Z-a1b2c3") is True
+    assert is_probe_session_id("verify-cursor-20260101T000000Z-ffffff") is True
+    # ...and things that merely LOOK like it must not be treated as probes.
+    assert is_probe_session_id("verify-my-notes-0e9ebe1a9262") is False, (
+        "a real session id derived from a verify-*.jsonl filename")
+    assert is_probe_session_id("verify-abc") is False
+    assert is_probe_session_id("verify") is False
     assert is_probe_session_id("imp_deadbeef") is False
-    assert is_probe_session_id("verify") is False, "not a bare-prefix match"
+    assert is_probe_session_id(
+        "verify-codex-20260922T184500Z-a1b2c3-extra") is False, "not a suffix"
 
+    root = tmp_path / "spool"
+    probe_id = "verify-codex-20260922T184500Z-a1b2c3"
     write_spool_entry(root, Snapshot(
-        session_id="verify-abc", turns=list(_EXPECTED_TURNS), source="probe",
+        session_id=probe_id, turns=list(_EXPECTED_TURNS), source="probe",
         machine_id="m", model=None, harness="codex"))
     # A REAL session alongside it must still be filed, so the guard is not a
     # blanket-off that would pass this test while breaking capture.
     write_spool_entry(root, Snapshot(
         session_id="imp-real", turns=list(_EXPECTED_TURNS), source="real",
         machine_id="m", model=None, harness="codex"))
+    # ...including the look-alike, which is real user data.
+    write_spool_entry(root, Snapshot(
+        session_id="verify-my-notes-0e9ebe1a9262", turns=list(_EXPECTED_TURNS),
+        source="notes", machine_id="m", model=None, harness="codex"))
 
     posted: list[dict] = []
 
@@ -698,7 +716,102 @@ def test_a_verify_probe_is_never_filed_even_if_it_stays_spooled(
         return PostOutcome(ok=True, status=200,
                            body={"session_id": payload["session_id"]})
 
-    summary = flush_spool(root, _post)
-    assert [p["session_id"] for p in posted] == ["imp-real"], posted
-    assert summary.filed == 1, summary
-    assert not is_spooled(root, "verify-abc"), "the probe was left queued"
+    flush_spool(root, _post)
+    assert sorted(p["session_id"] for p in posted) == [
+        "imp-real", "verify-my-notes-0e9ebe1a9262"], posted
+    # The probe is NOT filed — but it is also NOT destroyed: a false positive
+    # must cost nothing, so the refusal holds the entry rather than unlinking
+    # it. verify's own cleanup removes what it created.
+    assert probe_id not in [p["session_id"] for p in posted]
+    assert is_spooled(root, probe_id), "the refusal must not destroy the entry"
+
+
+@pytest.mark.parametrize("exc", [
+    TimeoutError("timed out reading the response"),
+    ConnectionResetError("connection reset by peer"),
+    json.JSONDecodeError("Expecting value", "<html>proxy</html>", 0),
+])
+def test_a_response_phase_failure_is_spooled_too(
+        tmp_path, monkeypatch, codex_jsonl, exc):
+    """The body read and its parse happen UNDER the `with`, and none of these
+    is a URLError: a read timeout is a bare TimeoutError (an OSError, not a
+    URLError), a truncated body is ConnectionResetError, and a proxy's HTML
+    error page is a JSONDecodeError. Before this they escaped UNHANDLED — no
+    spool and no breadcrumb — which is the same silent-loss class this path
+    exists to close, and a capacity-gated server that accepts the connection
+    then stalls is exactly that shape.
+
+    Mutation: narrow the handler tuple so this clause is dead — this REDs."""
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import flush_spool, read_spool_meta, read_spool_turns
+
+    spool = _import_env(tmp_path, monkeypatch)
+    args = SimpleNamespace(file=str(codex_jsonl), harness="codex",
+                           session_id="sid-resp")
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            raise exc
+
+    with mock.patch("urllib.request.urlopen", lambda req, timeout=None: _Resp()):
+        rc = _cmd_sessions_import(args)
+
+    # An HONEST failure: exit 1, no receipt — the spool is additional.
+    assert rc == 1, f"{type(exc).__name__} escaped instead of exiting 1"
+    assert not list((tmp_path / "receipts").glob("*.json"))
+    # ...and the turns are durable, with a breadcrumb so the harness owner sees it.
+    assert read_spool_meta(spool, "sid-resp") is not None, (
+        f"{type(exc).__name__} lost the session")
+    assert read_spool_turns(spool, "sid-resp") == _EXPECTED_TURNS
+    crumb = tmp_path / "capture-errors" / "codex.json"
+    assert crumb.exists(), "a response-phase failure wrote no breadcrumb"
+
+    filed: list[dict] = []
+
+    def _post(payload):
+        filed.append(payload)
+        return PostOutcome(ok=True, status=200,
+                           body={"session_id": payload["session_id"]})
+
+    assert flush_spool(spool, _post).filed == 1
+
+
+def test_a_drained_session_clears_the_stale_failure_breadcrumb(
+        tmp_path, monkeypatch, codex_jsonl):
+    """A drain-recovered session must not leave the machine-local "this harness
+    lost its last capture" breadcrumb standing.
+
+    `sessions import` clears it only on a 2xx — a path a spooled-then-drained
+    session never takes — so after this PR's recovery flow the breadcrumb still
+    claimed a loss that had already been repaired, and `session verify` read a
+    resolved failure as current.
+
+    Mutation: drop the `_clear_breadcrumb_for` call — this REDs."""
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import PostOutcome, flush_spool, spool_dir
+
+    _import_env(tmp_path, monkeypatch)
+    args = SimpleNamespace(file=str(codex_jsonl), harness="codex",
+                           session_id="sid-recover")
+
+    with mock.patch("urllib.request.urlopen",
+                    lambda req, timeout=None: (_ for _ in ()).throw(
+                        _http_error(504, '{"detail":"wait budget exceeded"}'))):
+        assert _cmd_sessions_import(args) == 1
+
+    crumb = tmp_path / "capture-errors" / "codex.json"
+    assert crumb.exists(), "the failure must be recorded in the first place"
+
+    def _post(payload):
+        return PostOutcome(ok=True, status=200,
+                           body={"session_id": payload["session_id"]})
+
+    assert flush_spool(spool_dir(), _post).filed == 1
+    assert not crumb.exists(), (
+        "a filed session still reports its harness as having lost a capture")

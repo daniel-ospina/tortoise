@@ -41,9 +41,10 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -54,7 +55,6 @@ __all__ = [
     "DISCARD_CORRUPT",
     "DISCARD_COUNT_EXCEEDED",
     "DISCARD_ENTRY_TOO_LARGE",
-    "DISCARD_PROBE_SESSION",
     "DISCARD_TRANSCRIPT_EMPTY",
     "PROBE_SESSION_ID_PREFIX",
     "Bounds",
@@ -93,10 +93,6 @@ DISCARD_BYTES_EXCEEDED = "spool_total_bytes_exceeded"
 DISCARD_TRANSCRIPT_EMPTY = "transcript_empty"
 #: A transcript that cannot be read at all (EACCES, EISDIR, non-UTF-8 bytes).
 DISCARD_TRANSCRIPT_UNREADABLE = "transcript_unreadable"
-#: A `session verify` probe. SYNTHETIC by construction — it must never be
-#: filed, because the drain would POST it into the tenant graph and extract
-#: points from content no human produced (#4714 review).
-DISCARD_PROBE_SESSION = "probe_session"
 #: An UNEXPECTED failure while filing one entry (a bug, not a classification):
 #: recorded and backed off, but the entry is KEPT — an internal bug must never
 #: delete user data.
@@ -173,6 +169,11 @@ class FlushSummary:
     # for its own final flush (see ``exclude_session_id``). Counted separately
     # from ``skipped`` so the drain reports WHICH it did.
     held_back: int = 0
+    # `session verify` probes refused filing (they are synthetic by
+    # construction). Separate from `held_back` so a drain can SAY a refusal
+    # happened: a silent refusal would leave an operator wondering why a
+    # spooled session never lands.
+    probe_refusals: list[dict] = field(default_factory=list)
     discarded: list[dict] = field(default_factory=list)
     outcomes: dict[str, PostOutcome] = field(default_factory=dict)
 
@@ -191,22 +192,31 @@ class FlushSummary:
 # ── Paths ──────────────────────────────────────────────────────────────────
 
 
-def spool_dir() -> Path:
+def spool_dir(env: Mapping[str, str] | None = None) -> Path:
     """The local capture spool. ``TORTOISE_CAPTURE_SPOOL_DIR`` overrides it.
+
+    ``env`` is the environment the CALLER means — pass the env a hook was fired
+    under, not this process's. Every lookup below honours it, because a caller
+    that pins ``HOME`` (as `session verify` callers do) would otherwise have
+    the seam write to one spool and the verification look in another, and
+    report a false "nothing to clean up" (#4714 review).
 
     Fail-safe in tests: a test (or a PROCESS a test spawns) must never reach the
     developer machine's real spool (#3721's trap). Under pytest the path is
     derived DETERMINISTICALLY from the test id, so every process of one test
     shares one spool and none of them touches ``~/.tortoise``.
     """
-    override = os.environ.get("TORTOISE_CAPTURE_SPOOL_DIR")
+    source: Mapping[str, str] = os.environ if env is None else env
+    override = source.get("TORTOISE_CAPTURE_SPOOL_DIR")
     if override:
         return Path(override)
-    test_id = os.environ.get("PYTEST_CURRENT_TEST")
+    test_id = source.get("PYTEST_CURRENT_TEST")
     if test_id:
         digest = hashlib.sha256(_utf8(test_id)).hexdigest()[:16]
         return Path(tempfile.gettempdir()) / "tortoise-capture-spool-tests" / digest
-    return Path.home() / ".tortoise" / "capture-spool"
+    home = source.get("HOME")
+    base = Path(home) if home else Path.home()
+    return base / ".tortoise" / "capture-spool"
 
 
 def _entries_dir(root: Path) -> Path:
@@ -489,16 +499,30 @@ def remove_spool_entry(root: Path, session_id: str) -> None:
     _remove_entry_files(root, session_id)
 
 
-#: Probes are synthetic by construction — `session verify` names them so its
-#: own cleanup can find them, and an unmistakable prefix also lets the DRAIN
-#: refuse to file one. Never widen this to a substring match: it is the only
-#: thing preventing synthetic probe content from being extracted as memory.
+#: A `session verify` probe id, matched STRUCTURALLY — `verify-<harness>-
+#: <stamp>-<hex>` per `session_verify._probe_id`.
+#:
+#: A PREFIX test is not enough, and the difference is destructive: session ids
+#: also come from `_local_session_id` (`<transcript-stem>-<digest>`), so a real
+#: session file named `verify-my-notes.jsonl` derives the id
+#: `verify-my-notes-0e9ebe1a9262`. Under a prefix test that real capture was
+#: both refused AND deleted, with a ledger line calling it a probe — silently
+#: destroying user data (#4714 review).
 PROBE_SESSION_ID_PREFIX = "verify-"
+_PROBE_SESSION_ID_RE = re.compile(
+    r"verify-[a-z][a-z0-9-]*-\d{8}T\d{6}Z-[0-9a-f]{6}\Z")
 
 
 def is_probe_session_id(session_id: str) -> bool:
-    """Whether ``session_id`` is a ``session verify`` probe (never real data)."""
-    return session_id.startswith(PROBE_SESSION_ID_PREFIX)
+    """Whether ``session_id`` is a ``session verify`` probe (never real data).
+
+    Matches the full probe shape, not the prefix — see `_PROBE_SESSION_ID_RE`.
+    This is the only thing preventing synthetic probe content from being
+    extracted as memory, so it must stay narrow: a false NEGATIVE leaks a probe
+    (recoverable, and verify's cleanup already removes it), while a false
+    POSITIVE destroys a real capture (irreversible).
+    """
+    return _PROBE_SESSION_ID_RE.match(session_id) is not None
 
 
 def _discard_entry(root: Path, meta: dict, reason: str, detail: str = "") -> dict:
@@ -828,6 +852,25 @@ def flush_spool(
     return summary
 
 
+def _clear_breadcrumb_for(harness: str | None) -> None:
+    """Drop the local capture-failure breadcrumb once the session HAS landed.
+
+    Local companion of ``__main__._capture_error_file``: the breadcrumb is the
+    machine-readable "this harness lost its last capture" record, and it is
+    cleared only on a 2xx inside ``sessions import``. A session that was
+    REFUSED retryably and then filed by a later drain never takes that path, so
+    the record kept claiming a loss that had since been recovered. Best effort:
+    a breadcrumb is evidence, never a gate on filing.
+    """
+    if not harness:
+        return
+    with contextlib.suppress(OSError):
+        receipt_dir = Path(os.environ.get(
+            "TORTOISE_IMPORT_RECEIPT_DIR",
+            str(Path.home() / ".tortoise" / "import-receipts")))
+        (receipt_dir.parent / "capture-errors" / f"{harness}.json").unlink()
+
+
 def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: PostFn,
                now_ms: float, only_session_id: str | None,
                exclude_session_id: str | None, bounds: Bounds) -> None:
@@ -840,12 +883,18 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
     # STRUCTURAL probe guard, not a timing one. `session verify` fires the real
     # seam with a synthetic transcript, and the codex/cursor seams write from a
     # DETACHED worker that can outlive verify's cleanup — so an unlink alone
-    # cannot guarantee the probe is gone. Refusing to file it can. This is the
-    # load-bearing defense; `remove_spool_entry` is the tidy-up.
+    # cannot guarantee the probe is gone. Refusing to file it can.
+    #
+    # REFUSE, never destroy: the entry is held back, so a false positive costs
+    # nothing (the session stays spooled and is caught next time) while a probe
+    # still cannot reach the graph. verify's own cleanup removes the entry it
+    # created; deletion here would turn a matching bug into data loss.
     if is_probe_session_id(sid):
-        summary.discarded.append(_discard_entry(
-            root, meta, DISCARD_PROBE_SESSION,
-            "session verify probe — synthetic content is never filed"))
+        summary.held_back += 1
+        summary.probe_refusals.append({
+            "session_id": sid,
+            "detail": "session verify probe — synthetic content is never filed",
+        })
         return
     if meta.get("filed_key") and meta.get("filed_key") == meta.get("capture_key"):
         summary.skipped += 1
@@ -878,6 +927,13 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
     outcome = post(payload)
     summary.outcomes[sid] = outcome
     if outcome.ok:
+        # The deferred session HAS now landed, so the machine-local "this
+        # harness lost its last capture" breadcrumb is no longer true. It was
+        # only ever cleared on a 2xx inside `sessions import`, which a
+        # spooled-then-drained session never takes — so a recovered capture
+        # left the breadcrumb standing (and `session verify` reading a failure
+        # that had already been resolved) (#4714 review).
+        _clear_breadcrumb_for(meta.get("harness"))
         # COMPARE-AND-SWAP, on the POSTED CONTENT. A concurrent capture (a
         # resumed session, or the SessionStart drain racing a live turn) can
         # grow this entry while the POST is in flight. Stamp `filed_key` only
