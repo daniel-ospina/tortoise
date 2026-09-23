@@ -503,6 +503,14 @@ export const HARNESS_CAPTURE_STATUS_LABEL = {
 // act on, and where a trailing caveat would collide with server detail that
 // itself ends in a parenthesis or a full stop. The row already carries the
 // attribution (see above).
+//
+// The sentence deliberately names no HARNESS either, even though an assertive
+// announcement then reaches the screen reader without the row it belongs to:
+// the harness is the caller's own declaration, so naming it here would restate
+// a declared label OUTSIDE the disclosure above, in a region that cannot carry
+// it — re-creating the #3700 misreading the disclosure exists to prevent. The
+// alert is a child of the row, so its harness is the row's, named once in the
+// head beside that disclosure.
 export const HARNESS_CAPTURE_LAST_ATTEMPT = (detail) =>
   `Last attempt — ${detail}`
 

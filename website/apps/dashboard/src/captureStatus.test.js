@@ -208,30 +208,27 @@ test('#3819: cursor is capture-capable — the tense follows the RECEIPT, never 
     'present')
 })
 
-test('#3428 / #3575 boundary: Pi cannot reach the present-tense claim today', () => {
-  // Pi's HARNESS_CAPTURE_SUPPORT is true while its installer ships no capture
-  // seam (#3575, lane B1), so no receipt can be produced and the present-tense
-  // sentence is UNREACHABLE for Pi — without this lane touching the install
-  // seam or the capability flag (#3575 requires that flag be *derived*).
-  // Pi's only reachable projection states today: nothing observed → the honest
-  // 'install-pending' (#3782), a probe with no receipt → 'future'.
+test('#3428: a receipt-less Pi stays install-pending / future, never present', () => {
+  // Pi's capability flag is true and its capture seam is implemented (#3575 was
+  // resolved by the in-repo seam), so the tense follows the RECEIPT: with no
+  // receipt the honest projections are 'install-pending' (#3782) and, once a
+  // probe arrives, 'future' — never the present-tense sentence. The
+  // receipt-bearing case (Pi DOES reach 'present') is asserted in the next test.
   assert.equal(captureClaimForHarness({ session_recording: true }, 'pi'), 'install-pending')
   assert.equal(captureClaimForHarness({ session_recording: true, install_probe_pi: 't' }, 'pi'), 'future')
 })
 
 test('#3428: GIVEN capture capability, the tense follows the RECEIPT', () => {
-  // review cycle 4 (item 6): the old name ("the tense follows the RECEIPT, not
-  // the capability flag") overstated. `HARNESS_CAPTURE_SUPPORT` is a HARD
-  // PRECONDITION — `if (!HARNESS_CAPTURE_SUPPORT[harness]) return 'none'` runs
-  // BEFORE the receipt read — so flipping Pi's flag makes these assertions fail:
-  // the test requires the flag to stay true (the receipt-less-'none' case is
-  // pinned by the loops above, e.g. cursor with a receipt).
-  // Guards the seam with B1: if #3575 is ever 'fixed' by flipping the flag
-  // rather than deriving the seam, a receipt-less Pi must still read
-  // 'install-pending' (#3782 — never 'present', never a promise), so the screen
+  // `HARNESS_CAPTURE_SUPPORT` is a HARD PRECONDITION —
+  // `if (!HARNESS_CAPTURE_SUPPORT[harness]) return 'none'` runs BEFORE the
+  // receipt read — so flipping Pi's flag makes these assertions fail: the test
+  // requires the flag to stay true (the receipt-less-'none' case is pinned by
+  // the loops above, e.g. cursor with a receipt).
+  // A receipt-less Pi must read 'install-pending' (#3782 — never 'present',
+  // never a promise) whichever way the flag or the seam moves, so the screen
   // cannot start claiming an unobserved capture. Both sides of that boundary
-  // are asserted here (review cycle 3, P2-5 — the comment described the
-  // receipt-less case while the only assertion pinned the receipt-bearing one).
+  // are asserted here — the receipt-less case and the receipt-bearing one — so
+  // neither can be described without the other being pinned.
   assert.equal(captureClaimForHarness({ session_recording: true }, 'pi'), 'install-pending')
   assert.equal(captureClaimForHarness({ session_recording: true, session_capture_receipt_pi: 't' }, 'pi'), 'present')
 })

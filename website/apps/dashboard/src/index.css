@@ -983,8 +983,11 @@ input::placeholder, textarea::placeholder {
 /* #3700: the harness name and its disclosure are ONE flex item, so the row's
    `space-between` still separates only {name + disclosure} from the state pill.
    BOTH levels wrap: the disclosure stacks under the name inside this group, and
-   the pill drops onto its own line, so the longer row cannot overrun the card
-   and the group can never collapse onto (and paint over) its own children. */
+   the pill drops onto its own line, so the longer row wraps before the card
+   overruns and the group can never collapse onto (and paint over) its own
+   children. The pill alone is `white-space: nowrap` and ~215px wide, so it needs
+   a content box at least that wide; real cards are >=240px (`.app` pads 20px at
+   a 320px viewport), and below that the pill by itself would overrun. */
 .harness-status-name { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; min-width: 0; }
 .harness-status-head strong { font-size: 13px; }
 .capture-state {

@@ -15,9 +15,10 @@
 // constant) is not merely conventional.
 //
 // Both directions, like the sibling tripwires: an edit that DROPS the disclosure
-// render, or that hard-codes the attribution constant at the call site, fails
-// here; a behaviour-identical reformat (whitespace) stays green — the patterns
-// below are whitespace-tolerant.
+// render, that nulls the binding it reads, or that hard-codes the attribution
+// constant at the call site fails here; a behaviour-identical reformat
+// (whitespace, or a call's arguments broken across lines) stays green — the
+// patterns below are whitespace-tolerant.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -54,11 +55,31 @@ test('#3700: main.jsx renders the helper, never the copy constant', () => {
     'main.jsx must not index the raw label table (the helper is the only path)')
 })
 
+test('#3700 / #4896: the row reads its facts through the module bindings', () => {
+  // The assertions above pin the render's SHAPE; these pin its SOURCE. Without
+  // them the whole disclosure is one edit away from silently disabling itself:
+  // `const harnessAttribution = (h) => null` removes it from every row and
+  // leaves BOTH suites green, because the executed test calls the module helper
+  // and never sees main.jsx's binding.
+  assert.match(
+    mainJsx,
+    /const\s+harnessAttribution\s*=\s*\(h\)\s*=>\s*harnessAttributionForHarness\(\s*state\s*,\s*h\s*,?\s*\)/,
+    'the row\'s disclosure must come from harnessAttributionForHarness(state, h)')
+  assert.match(
+    mainJsx,
+    /const\s+lastError\s*=\s*\(h\)\s*=>\s*captureErrorForHarness\(\s*state\s*,\s*h\s*,?\s*\)/,
+    'the row\'s failure sentence must come from captureErrorForHarness(state, h)')
+})
+
 test('#3700 / #4896: the failure line renders only on a supported row', () => {
   // #4896: the per-harness failure sub-line used to render on unsupported rows,
   // where the card states the capability is unavailable — a per-harness claim
   // (and, since #3700, a disclosure the predicate would not have produced).
-  // Both the guard and the caveat-free wording are pinned here.
+  // Pinned here: the guard, and that the alert renders the helper's value
+  // unchanged. The sentence itself is pinned by the binding test above plus the
+  // executed assertion on `HARNESS_CAPTURE_LAST_ATTEMPT` — so a caveat re-added
+  // at the call site fails on `{lastError(h)}`, and one re-added in the copy
+  // module fails the executed test.
   assert.match(mainJsx, /supported\s*&&\s*lastError\(h\)\s*&&/,
     'the failure line must sit inside the capture-support guard')
   assert.match(mainJsx, /role="alert"[\s\S]{0,160}\{lastError\(h\)\}/,
