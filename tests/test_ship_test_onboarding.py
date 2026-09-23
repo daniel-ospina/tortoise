@@ -1130,13 +1130,21 @@ class _FakeRequester:
 class _FakeBrowser:
     def __init__(self, ctx):
         self._ctx = ctx
+        self._used = False
         ctx.events.append("launch")
 
     def new_context(self, **k):
+        # The FIRST context is the primary one the harness hands back to the test;
+        # any further call is a DISTINCT sibling, so an abandoned context is a
+        # missing `ctx_closed` rather than an invisible return of the same object.
+        if self._used:
+            return self._ctx.sibling()
+        self._used = True
+        self._ctx.events.append("ctx_created")
         return self._ctx
 
     def close(self):
-        self._ctx.events.append("browser")
+        self._ctx.events.append("browser_closed")
 
 
 class _FakePage:
@@ -1218,10 +1226,14 @@ class _FakePage:
 
 
 class _FakeCtx:
-    def __init__(self, plan, base_url, org_create=False, org_click_raises=False):
-        self.request = _FakeRequester(plan)
+    def __init__(self, plan, base_url, org_create=False, org_click_raises=False,
+                 shares=None):
+        # A sibling context (a second `browser.new_context()`) SHARES the request
+        # recorder and the event sink, so it is a distinct object whose missing
+        # close is visible, while the test's handle keeps seeing every request.
+        self.request = shares.request if shares else _FakeRequester(plan)
         self.cookies = []          # the instrument must never read the jar
-        self.events = []           # launch/close order, asserted per run (#4902)
+        self.events = shares.events if shares else []
         self._base = base_url
         self._org_create = org_create
         self._org_click_raises = org_click_raises
@@ -1232,14 +1244,22 @@ class _FakeCtx:
         return self.page
 
     def close(self):
-        self.events.append("ctx")
+        self.events.append("ctx_closed")
+
+    def sibling(self):
+        self.events.append("ctx_created")
+        return _FakeCtx(None, self._base, self._org_create, self._org_click_raises,
+                        shares=self)
 
 
 class _FakeChromium:
-    def __init__(self, ctx):
+    def __init__(self, ctx, launch_raises=False):
         self._ctx = ctx
+        self._launch_raises = launch_raises
 
     def launch(self, **k):
+        if self._launch_raises:
+            raise RuntimeError("browser launch failed")
         return _FakeBrowser(self._ctx)
 
     def new_context(self, **k):
@@ -1247,8 +1267,8 @@ class _FakeChromium:
 
 
 class _FakeSyncPlaywright:
-    def __init__(self, ctx):
-        self.chromium = _FakeChromium(ctx)
+    def __init__(self, ctx, launch_raises=False):
+        self.chromium = _FakeChromium(ctx, launch_raises)
 
     def __enter__(self):
         return self
@@ -1261,7 +1281,7 @@ def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
                    mcp_tools_call, surface="card", skip_write=False,
                    org_create=False, org_click_raises=False, org_name=None,
                    keep_org=False, front_door_hittable=True,
-                   playwright_available=True):
+                   playwright_available=True, launch_raises=False):
     """Execute the real `run_walk` against a fake browser. Returns the record.
 
     `front_door_hittable=False` makes the front-door probe REPORT the signup CTA
@@ -1279,7 +1299,7 @@ def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
                    org_click_raises=org_click_raises)
     if playwright_available:
         fake_sync = types.ModuleType("playwright.sync_api")
-        fake_sync.sync_playwright = lambda: _FakeSyncPlaywright(ctx)
+        fake_sync.sync_playwright = lambda: _FakeSyncPlaywright(ctx, launch_raises)
         monkeypatch.setitem(sys.modules, "playwright", types.ModuleType("playwright"))
         monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_sync)
     else:
@@ -1522,10 +1542,15 @@ def _assert_not_the_generic_error_handler(obs, name: str) -> None:
 
 
 def _assert_browser_reaped(ctx) -> None:
-    """A launched browser and its context are each closed exactly once, in that
-    order; a run that never launched one closes neither."""
-    expected = ["launch", "ctx", "browser"] if "launch" in ctx.events else []
-    assert ctx.events == expected, ctx.events
+    """Every context the run created was closed, and its browser was closed once
+    and last: a leaked context or browser leaves the event counts unequal."""
+    events = ctx.events
+    if "launch" not in events:
+        assert events == [], events
+        return
+    assert events.count("ctx_closed") == events.count("ctx_created"), events
+    assert events.count("browser_closed") == 1, events
+    assert events[-1] == "browser_closed", events
 
 
 def test_walk_that_never_reaches_a_connection_surface_is_incomplete_no_surface(
@@ -1641,6 +1666,20 @@ def test_walk_without_the_driver_records_a_fail_closed_observation(
     assert obs.verdict.startswith("failed: playwright unavailable"), obs.verdict
     # the exception type is named, not swallowed
     assert "ModuleNotFoundError" in obs.verdict
+    assert mod.exit_code_for(obs.reason) == mod.EXIT_INSTRUMENT_ERROR
+    assert obs.teardown["status"] == mod.TEARDOWN_NOT_REACHED
+
+
+def test_a_browser_launch_that_fails_is_recorded_and_nothing_is_left_open(
+        monkeypatch, tmp_path):
+    """`pw.chromium.launch` raising lands in the same fail-closed handling as a
+    missing driver, and there is no browser or context to close: the harness's
+    reap assertion sees an empty event list."""
+    obs, _ctx, mod = _run_fake_walk(
+        monkeypatch, tmp_path, plan={}, ui_sequence=[], mcp_tools_call=_MCP_OK,
+        launch_raises=True)
+
+    assert obs.verdict.startswith("failed: RuntimeError"), obs.verdict
     assert mod.exit_code_for(obs.reason) == mod.EXIT_INSTRUMENT_ERROR
     assert obs.teardown["status"] == mod.TEARDOWN_NOT_REACHED
 
