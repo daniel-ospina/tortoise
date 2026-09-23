@@ -166,15 +166,34 @@ artifact); each lever reports shared-question deltas vs that baseline with CIs (
   *counting* step (E5/E6 state already on the points) — falsified by KU golds where the
   user changed the value mid-window.
 
-## 8. Product-owner decision (open)
+## 8. Product-owner decision — **DECIDED (c)**, 2026-09-22
 
 **How should the coverage-incomplete honesty signal surface on the answer surface?**
-Options: (a) **abstention** — no numeric answer, name the missing facets (strictest,
-aligns with the epistemic differentiator); (b) **in-band flag** — provisional answer +
-"retrieved M of N contributing sessions; may be incomplete"; (c) **posture-dependent** —
-flag by default, strict abstention under C5 numeric aggregation when coverage <
-threshold. This decides the C3/C5 reader contract and the ask-surface API. Default
-recommendation: (c), flag-first, with (a) reserved for numeric-aggregation answers.
+
+**Ruling: (c) posture-dependent.** Flag by default — *"retrieved M of N contributing
+sessions; may be incomplete"* — and **strict abstention (no numeric answer, named missing
+facets) when the question asks for a total or count across sessions** and coverage is
+below threshold.
+
+The alternatives considered: (a) **abstention** everywhere — no numeric answer, name the
+missing facets (strictest, aligns with the epistemic differentiator); (b) **in-band flag**
+everywhere — provisional answer + the M-of-N note. This decides the C3/C5 reader contract
+and the ask-surface API.
+
+Why (c): blanket (a) withholds a good answer over a possibly-irrelevant gap — the sealed
+census puts evidence loss at **9 of 71 questions**, so it would fire on roughly 13% of real
+questions, most of them narrative ones where the gap does not change the answer. Blanket
+(b) trains the reader to ignore the flag, destroying the signal. (c) spends strictness only
+where a gap produces a **wrong** answer rather than a **weaker** one: a missing session in a
+narrative question degrades quality, but in a numeric question it yields a confident wrong
+total. It reuses the question-type detection C5 already requires, so it costs nothing extra.
+
+**OVERRIDES:** the common RAG default of answering without any coverage signal — we surface
+retrieved/excluded counts and abstain on numeric aggregation, because a silently missing
+session turns a count or total into a confident wrong answer, and a wrong number is a worse
+failure than an admitted gap.
+
+Authoritative record: the owner ruling on #2513 (comment 5787468112), 2026-09-22.
 
 ## 9. Child issues created
 
