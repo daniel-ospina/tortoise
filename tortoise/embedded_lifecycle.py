@@ -1743,7 +1743,7 @@ def _install_owner_record_patch() -> None:
         if claimed:
             _in_flight_replays[inflight_key] = (
                 _in_flight_replays.get(inflight_key, 0) + 1)
-            # F2: the dead-socket guard's #4879 WARNING is gated on THIS
+            # F2: the dead-socket guard's #4879 gate line is gated on THIS
             # claim being live, so it can never fire on a close-path call
             # whose `socket_file` merely happens to be empty. Stash the key
             # on the object the guard will see (the same `self`).
@@ -2075,12 +2075,27 @@ def _install_dead_socket_guard() -> None:
         # #4879 gate visibility: once the ORIGINAL says a server is there, the
         # DEAD-SOCKET GUARD's own gates decide whether a REPLAY is allowed or
         # repaired. Every "allow" leaves this function through `_allow_replay`,
-        # which emits one WARNING naming the gate that let the replay through —
+        # which emits one DEBUG naming the gate that let the replay through —
         # without it a guard that never fired is indistinguishable from a guard
         # that had nothing to do ("no branch fired" with no way to tell which
         # gate stopped it).
         #
-        # The WARNING is gated on THIS construction's claim actually being live
+        # DEBUG, not WARNING: every gate it reports is a NORMAL outcome —
+        # `registry-vanished` and `no-recorded-socket` both mean "no replay,
+        # start fresh", and `recorded-socket-present` means "replay normally".
+        # None of them is anomalous, so WARNING was the wrong severity, and a
+        # WARNING on a healthy path in a shared module pollutes the `caplog`
+        # of any unrelated test the message happens to match. It did:
+        # `tests/test_metering.py::TestThresholdEvents::
+        # test_no_threshold_for_free_tier` asserts that no WARNING record
+        # contains "threshold", and its own tmpdir is named
+        # `test_no_threshold_for_free_tie0`, so the registry PATH embedded in
+        # this line made that assertion fail on a frozen graph — the
+        # regression this line introduced when #4927 merged. The detail stays
+        # verbatim — the path IS the useful part — because at DEBUG it can no
+        # longer collide with a WARNING-level assertion.
+        #
+        # The DEBUG is gated on THIS construction's claim actually being live
         # in `_in_flight_replays` (the key the `RedisMixin.__init__` patch
         # stashed on `self`), NOT on `socket_file` being empty: redislite nulls
         # `socket_file` in `_cleanup` (client.py:146) BEFORE `pidfile`
@@ -2097,7 +2112,7 @@ def _install_dead_socket_guard() -> None:
                     and not getattr(self, "_tortoise_replay_logged", False)
                     and _in_flight_replays.get(claim_key, 0) > 0):
                 self._tortoise_replay_logged = True
-                logger.warning(
+                logger.debug(
                     "#4879: replay allowed for registry %s — gate=%s%s"
                     " (this construction holds the in-flight replay claim)",
                     registry, gate,

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import gc
+import logging
 import os
 import re
 import signal as _signal
@@ -2866,7 +2867,7 @@ def test_fork_midconstruction_drops_the_inherited_in_flight_claim(
             second.close()
 
 
-# ── #4879 F2: the replay WARNING is a CONSTRUCTION claim, not socket_file ──
+# ── #4879 F2: the replay gate line is a CONSTRUCTION claim, not socket_file ──
 
 
 def test_close_path_with_empty_socket_file_emits_no_replay_warning(
@@ -2878,6 +2879,10 @@ def test_close_path_with_empty_socket_file_emits_no_replay_warning(
     `_connection_count` -> `_is_redis_running` also has an empty
     `socket_file`. The old `socket_file`-empty proxy logged a replay that
     client was never part of; gating on the live in-flight claim does not.
+
+    Captured at DEBUG, not WARNING: the gate line is DEBUG-only (a normal
+    replay is not an anomaly), so a WARNING-level capture could no longer
+    see the record this test exists to prove absent.
     """
     import json as _json
 
@@ -2899,7 +2904,7 @@ def test_close_path_with_empty_socket_file_emits_no_replay_warning(
         # The mid-teardown shape: `socket_file` already nulled, `pidfile` not.
         client.socket_file = None
         caplog.clear()
-        caplog.set_level("WARNING")
+        caplog.set_level("DEBUG", logger="tortoise.embedded_lifecycle")
         client._cleanup()
         offenders = [
             record.getMessage() for record in caplog.records
@@ -2930,6 +2935,7 @@ def test_staged_but_released_claim_emits_no_replay_warning(tmp_path, caplog):
     `_is_redis_running`'s shape guard answers False before `_allow_replay`,
     so the construction starts a fresh server and never logs. RED (liveness
     conjunct deleted): this close path emits one `#4879: replay allowed`.
+    The capture is DEBUG because the gate line is DEBUG-only.
     """
     import json as _json
 
@@ -2961,7 +2967,7 @@ def test_staged_but_released_claim_emits_no_replay_warning(tmp_path, caplog):
         # The mid-teardown shape: `socket_file` already nulled, `pidfile` not.
         client.client.socket_file = None
         caplog.clear()
-        caplog.set_level("WARNING")
+        caplog.set_level("DEBUG", logger="tortoise.embedded_lifecycle")
         client.client._cleanup()
         offenders = [
             record.getMessage() for record in caplog.records
@@ -2974,6 +2980,91 @@ def test_staged_but_released_claim_emits_no_replay_warning(tmp_path, caplog):
     finally:
         with contextlib.suppress(Exception):
             client._t_close()
+
+
+# ── #4879 regression: the gate line is DEBUG-only, never a WARNING ────────
+
+
+def test_replay_gate_line_is_debug_and_never_warning(tmp_path, caplog):
+    """#4879 regression: a healthy replay must emit NOTHING at WARNING.
+
+    The gate-visibility line names the gate that let a replay through, and
+    every gate it reports is a NORMAL outcome (`registry-vanished` /
+    `no-recorded-socket` = "no replay, start fresh";
+    `recorded-socket-present` = "replay normally"). It is therefore DEBUG,
+    not WARNING: as a WARNING it polluted the `caplog` of an UNRELATED test —
+    `tests/test_metering.py::TestThresholdEvents::
+    test_no_threshold_for_free_tier` asserts that no WARNING record contains
+    "threshold", and its own tmpdir is named
+    `test_no_threshold_for_free_tie0`, so the registry PATH embedded in this
+    line failed that assertion on a frozen graph.
+
+    Both halves are required:
+    (a) the healthy replay path emits ZERO `tortoise.embedded_lifecycle`
+        records at WARNING — so it cannot collide with another test's
+        WARNING-level `caplog` assertion, and
+    (b) the same flow DOES emit the gate line at DEBUG — so the diagnostic
+        the orchestrator asked for stays available and cannot be silently
+        deleted.
+
+    RED without the fix (gate line at WARNING): (a) captures the line and
+    the first assertion fails, naming it.
+    """
+    import json as _json
+
+    from tortoise.sdk import TortoiseSDK
+
+    db_path = str(tmp_path / "gate_level.db")
+    first = TortoiseSDK(db_path=db_path)
+    second = None
+    third = None
+    try:
+        first.org_create("GateLevelCo")
+        sock = _json.loads(
+            Path(db_path + ".settings").read_text())["unixsocket"]
+        assert os.path.exists(sock), "test setup: server #1 must be live"
+
+        # (a) The healthy replay path is SILENT at WARNING.
+        caplog.clear()
+        with caplog.at_level(logging.WARNING,
+                             logger="tortoise.embedded_lifecycle"):
+            second = TortoiseSDK(db_path=db_path, namespace="gate-level")
+            second._get_proj()
+        warnings = [
+            record for record in caplog.records
+            if record.name == "tortoise.embedded_lifecycle"
+        ]
+        assert warnings == [], (
+            "#4879: a healthy replay must emit NO WARNING from "
+            "embedded_lifecycle — every gate it reports is a normal outcome; "
+            f"got {[(r.levelname, r.getMessage()) for r in warnings]!r}")
+
+        # (b) ...and the gate line IS emitted, at DEBUG.
+        caplog.clear()
+        with caplog.at_level(logging.DEBUG,
+                             logger="tortoise.embedded_lifecycle"):
+            third = TortoiseSDK(db_path=db_path, namespace="gate-level-2")
+            third._get_proj()
+        gate = [
+            record for record in caplog.records
+            if record.levelno == logging.DEBUG
+            and "#4879: replay allowed" in record.getMessage()
+        ]
+        assert gate, (
+            "#4879: the gate-visibility diagnostic must still be emitted at "
+            "DEBUG — a healthy replay must say which gate allowed it")
+        assert any("recorded-socket-present" in r.getMessage() for r in gate), (
+            "#4879: the gate that allowed this replay must be named, got "
+            f"{[r.getMessage() for r in gate]!r}")
+    finally:
+        with contextlib.suppress(Exception):
+            if third is not None:
+                third.close()
+        with contextlib.suppress(Exception):
+            if second is not None:
+                second.close()
+        with contextlib.suppress(Exception):
+            first.close()
 
 
 # ── #4879 F4: claim registration mirrors redislite's replay shape ─────────
