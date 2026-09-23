@@ -226,9 +226,10 @@ def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
     m = re.search(r"^export const SKILLS_LIST =\s*\n?\s*'([^']+)'",
                   harnesses, re.M)
     assert m, "SKILLS_LIST must be an exported constant"
-    assert m.group(1).split(", ") == _installer_skills(), (
+    shipped_set_literal = m.group(1)
+    assert shipped_set_literal.split(", ") == _installer_skills(), (
         "SKILLS_LIST must list exactly what the installer ships")
-    assert "onboarding" not in m.group(1), (
+    assert "onboarding" not in shipped_set_literal, (
         "SKILLS_LIST must not include the onboarding skill")
     m = re.search(r"^export const SKILLS_CLAIM = `([^`]*)`", harnesses, re.M)
     assert m, "SKILLS_CLAIM must be an exported constant"
@@ -236,26 +237,44 @@ def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
         "SKILLS_CLAIM must be built from SKILLS_LIST — never a second literal")
     assert "${SKILLS_CLAIM}" in copy, (
         "SKILL_INSTALL must interpolate SKILLS_CLAIM")
-    # Exactly three sites in this module state the shipped set; the count is a
-    # floor, not an equality, so a legitimate fourth site is not a failure.
-    assert harnesses.count("${SKILLS_CLAIM}") >= 3, (
-        "SKILL_INSTALL, HARNESS_SKILLS and the HARNESS_STEPS.cursor label must "
-        "each interpolate the shared claim")
-    # …and every TEMPLATE in this module that states the claim must state
-    # nothing else. Template-scoped, not line-scoped: `tortoise-rebuild`
-    # appended on its own source line inside the same template slipped a
-    # line-scoped check (mutation-verified, #4365 review round 4).
-    seen_claim_template = False
-    for tmpl in re.findall(r"`([^`]*)`", harnesses):
-        if "${SKILLS_CLAIM}" not in tmpl:
-            continue
-        seen_claim_template = True
-        rest = tmpl.replace("${SKILLS_CLAIM}", "")
+    # The shipped set is stated as a literal in EXACTLY ONE place — SKILLS_LIST.
+    # Any second site that hardcodes the triple (rather than interpolating the
+    # claim) is the drift class #4365 exists to kill, and is invisible to a
+    # check that only inspects interpolating templates (mutation-verified: a new
+    # constant with a hardcoded triple left both suites green, #4365 round 5).
+    assert harnesses.count(shipped_set_literal) == 1, (
+        "the three shipped skill names must appear as a literal only in "
+        "SKILLS_LIST; every other site must interpolate ${SKILLS_CLAIM}")
+    # …and each of the three LIVE sites must interpolate the claim, sliced by
+    # its own declaration. Anchored, not paired: pairing every backtick in the
+    # file is defeated by one stray backtick in a comment (false RED) or an
+    # escaped backtick inside a template (false GREEN) — mutation-verified,
+    # #4365 review round 5.
+    for anchor in (
+        "const SKILL_INSTALL = (harness)",
+        "export const HARNESS_SKILLS = (harness)",
+    ):
+        start = harnesses.index(anchor)
+        block = harnesses[start:harnesses.index("\n\n", start)]
+        assert "${SKILLS_CLAIM}" in block, (
+            f"{anchor!r} must interpolate the shared claim, not restate it")
+        tmpl = re.search(r"`([^`]*)`", block)
+        assert tmpl, f"no template literal in the {anchor!r} block"
+        rest = tmpl.group(1).replace("${SKILLS_CLAIM}", "")
         assert "tortoise-" not in rest, (
             "a template that states the shipped skill set must state nothing "
             f"else: {rest.strip()[:90]!r}")
-    assert seen_claim_template, (
-        "no template in harnesses.js interpolates ${SKILLS_CLAIM}")
+    # …including the third live site, the HARNESS_STEPS.cursor label, which is
+    # not a top-level `const … = (…) =>` declaration.
+    claim_lines = [ln for ln in harnesses.splitlines() if "${SKILLS_CLAIM}" in ln]
+    assert len(claim_lines) >= 3, (
+        "SKILL_INSTALL, HARNESS_SKILLS and the HARNESS_STEPS.cursor label must "
+        "each interpolate the shared claim")
+    for ln in claim_lines:
+        rest = re.sub(r"https?://\S+", "", ln.replace("${SKILLS_CLAIM}", ""))
+        assert "tortoise-" not in rest, (
+            "a line that states the shipped skill set must state nothing "
+            f"else: {rest.strip()[:90]!r}")
     assert "${ONBOARDING_INSTRUCTIONS_URL}" in copy, (
         "the connect copy must point at the served onboarding instructions")
 
@@ -306,12 +325,10 @@ def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
     # the archived-block line-count pin in overview.test.js. A review round
     # flagged it as a live surface that had drifted from the shared constant;
     # it is neither live nor reachable.
-    assert "ONBOARDING_INSTRUCTIONS_URL" in wizard, (
-        "the wizard prompts must name the served onboarding instructions")
-    # …and NAME it in the prompts, not merely declare it: the const line alone
-    # would satisfy a bare membership check while every prompt interpolated nothing.
-    assert "${ONBOARDING_INSTRUCTIONS_URL}" in wizard, (
-        "the wizard prompts must INTERPOLATE the onboarding instructions URL")
+    # The prompts are pinned through the template they RETURN (see the
+    # `${onboardingInstructions}` loop above) plus the constant's own body — a
+    # bare whole-file membership check here would be satisfied by the
+    # declaration alone and would overstate what it measures (#4365 round 5).
 
     # …and the filesystem-less harnesses (Claude Desktop/Web, ChatGPT) never ran
     # the installer and have no skills directory — the workflows prompt body is

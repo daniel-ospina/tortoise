@@ -68,11 +68,18 @@ test('#4365: no connect copy claims onboarding as an installed skill, and each n
   // (mutation-verified, #4365 review round 4). URLs are stripped first —
   // SKILLS_INSTALL_URL itself contains `tortoise-skills`.
   const claimTokens = (s) => [...new Set(
-    s.replace(/https?:\/\/\S+/g, '').match(/[a-z0-9-]*tortoise[a-z0-9-]*/g) || [])].sort()
+    s.replace(/https?:\/\/\S+/g, '').match(/[a-z0-9-]*tortoise[a-z0-9-]*/g) || [])]
+    // the bare `tortoise` is the MCP server name (`mcp add … tortoise <url>`),
+    // never a skill name.
+    .filter((t) => t !== 'tortoise').sort()
   const shipped = [...SKILLS_LIST.split(', ')].sort()
   for (const h of ['claude', 'codex']) {
     assert.deepEqual(claimTokens(HARNESS_SKILLS(h)), shipped,
       `${h}: the HARNESS_SKILLS block must name exactly the shipped skills`)
+    // …and the SAME render-level guard on the universal command, so
+    // SKILL_INSTALL is not left to the source-text check alone.
+    assert.deepEqual(claimTokens(UNIVERSAL_COMMAND[h](KEY)), shipped,
+      `${h}: the universal command must name exactly the shipped skills`)
   }
   assert.deepEqual(claimTokens(cursorStep.label), shipped,
     'HARNESS_STEPS.cursor install step must name exactly the shipped skills')
