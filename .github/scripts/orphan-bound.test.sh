@@ -663,6 +663,13 @@ echo "46. the accounting identity is enforced under cleared=false at COUNT==0"
 # through to the warning-plus-pass line.
 run_gate 0 0 identity_bad_unproven.json
 assert_eq "$RC" "1" "exits 1 when reaped + left < before at COUNT=0 under cleared=false"
+# This fixture's `left` (5) differs from the COUNT (0) this case drives, so the
+# line below is satisfied ONLY by the sweep's own measurement: a `left=$left`
+# -> `left=$COUNT` swap on the identity red prints `left=0` for a report that
+# measured `left=5` and cannot satisfy this pin (case 27 cannot catch that swap:
+# there COUNT == left == 2, so both readings print identically).
+assert_contains "$OUT" "::error::redislite orphan gate: the sweep does not account for the servers it started with — before=40, reaped=0, left=5 (reaped + left < before); the sweep's own measurement is broken — pytest rc 0 (issue #1005 / epic #1647 E2E-7)" \
+  "the accounting-identity red is VERBATIM with left=5 != COUNT=0"
 
 echo "47. the accounting identity guard's lower boundaries RED (cleared=true)"
 # The identity is skipped ONLY when `before` is null or measures zero, so its
@@ -706,7 +713,7 @@ assert_contains "$OUT" "deferred sweep: 2 counted; the end-sweep deferred to las
 echo
 # A LOST case must not be indistinguishable from success: deleting a case
 # leaves FAIL=0 and merely a LOWER count, so the count is pinned too.
-expected_assertions=186
+expected_assertions=187
 if [ "$PASS" -eq "$expected_assertions" ]; then
   PASS=$((PASS + 1))
   echo "  ✅ assertion count pinned at $expected_assertions (a lost case is not a green run)"
