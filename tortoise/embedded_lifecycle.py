@@ -1679,6 +1679,39 @@ def _registry_settings(registry_path: str | None) -> dict | None:
     return settings if isinstance(settings, dict) else None
 
 
+def _registry_still_records(registry: str | None, pidfile: str,
+                            pid: int) -> bool:
+    """True when `registry` STILL records the proven `pidfile`/`pid`.
+
+    #4879 review: the repair reads the registry, then spends up to
+    `_STALE_HOLDER_SIGTERM_TIMEOUT + _STALE_HOLDER_DEATH_TIMEOUT` (~10 s)
+    proving and stopping the holder, and only THEN unlinks it. A concurrent
+    construction on the same `<dbdir>/<dbfilename>` can, inside that window,
+    stop the same holder and rewrite the registry with a NEW, live
+    pidfile/socket; unlinking THAT would destroy the concurrent construction's
+    registry and let this one start a second writer over the same RDB — the
+    exact divergence this patch exists to prevent. So the registry is re-read
+    at the last moment and the unlink proceeds only while it still matches
+    what was proven.
+
+    The recorded pid is compared only while the pidfile is still READABLE:
+    redis-server unlinks its own pidfile on the graceful SIGTERM shutdown
+    `_stop_proven_holder` performs, so an absent pidfile is the expected
+    post-stop state, not evidence of a change. A registry that vanished or
+    cannot be parsed, a different `pidfile`, or a pidfile rewritten with a
+    DIFFERENT pid is a change. Never raises.
+    """
+    fresh = _registry_settings(registry)
+    if fresh is None or fresh.get("pidfile") != pidfile:
+        return False
+    try:
+        with open(pidfile) as file_handle:
+            fresh_pid = int(file_handle.read().strip())
+    except Exception:  # own graceful stop removed it, or unreadable
+        return True
+    return fresh_pid == pid
+
+
 def _proven_stale_holder_pid(settings: dict) -> int | None:
     """The registry's recorded server pid, ONLY when provenance proves it.
 
@@ -1872,11 +1905,29 @@ def _install_dead_socket_guard() -> None:
                 "worse than a loud failure); the replay will fail loudly",
                 registry, recorded_socket)
             return True
+        proven_pidfile = settings.get("pidfile")
         if not _stop_proven_holder(pid):
             logger.warning(
                 "#4879: stale holder pid %s was proven ours but did not stop; "
                 "not rebuilding (never double-start over its RDB)", pid)
             return True  # proven ours but not stopped -> never double-start
+        # Last-moment re-validation (see `_registry_still_records`): the
+        # window between the registry read above and this unlink is up to
+        # `_STALE_HOLDER_SIGTERM_TIMEOUT + _STALE_HOLDER_DEATH_TIMEOUT` (~10 s),
+        # long enough for a concurrent construction on the same
+        # `<dbdir>/<dbfilename>` to stop the same holder and install a NEW,
+        # live registry. Unlinking THAT would make this construction start a
+        # second writer over the same RDB — the divergence this patch exists
+        # to prevent. An unchanged registry (or one whose pidfile the stopped
+        # server removed on its way out) is still ours to drop.
+        if not _registry_still_records(registry, proven_pidfile, pid):
+            logger.warning(
+                "#4879: registry %s changed while proven holder pid %s was "
+                "being stopped — it is no longer this repair's stale record "
+                "(a concurrent construction owns it); leaving it alone and "
+                "NOT starting a server (never double-start over its RDB)",
+                registry, pid)
+            return True
         try:
             os.remove(registry)
         except OSError as exc:
