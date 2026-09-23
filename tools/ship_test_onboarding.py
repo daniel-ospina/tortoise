@@ -714,6 +714,17 @@ SESSION_MECHANISM = "browser cookie jar → app-origin /api/session → /api/v1 
 # leave the created org unreapable. Teardown matches the name this run WROTE, so
 # a name the product would rewrite or refuse is rejected up front (exit 2)
 # instead of surfacing later as a `name_mismatch`.
+#
+# DELIBERATELY STRICTER THAN THE PRODUCT AT EXACTLY ONE CODE POINT: Python's
+# `str.strip()` and JS's `String.prototype.trim()` disagree on U+FEFF (JS trims
+# a BOM, Python does not). `"--org-name \ufeffFoo"` is therefore refused here
+# though the product would accept it as `"Foo"`. That is the fail-closed
+# direction — no org is created, so there is no residue and nothing left
+# unreapable — and DROPPING the strictness would be the unsafe direction, so it
+# is recorded rather than papered over with a hand-rolled, drift-prone
+# WhiteSpace set. The other direction ("Foo\x85", "Foo\x1c": Python trims,
+# JS does not) is harmless, because the instrument types the STRIPPED value and
+# the product re-trims what it is given.
 ORG_NAME_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}")
 
 

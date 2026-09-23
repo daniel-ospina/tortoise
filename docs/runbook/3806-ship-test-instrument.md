@@ -156,7 +156,7 @@ product.
 
 | Where | What | Count |
 | --- | --- | --- |
-| `tests/test_ship_test_onboarding.py` | Fast pure-Python: the classifier, the page-wide claim sweep, the DOM reader, the server-observation reader, the MCP write-result reader (JSON **and** SSE framing, both tool-error shapes, notification frames), the per-surface verdict seam, the verdict assembly, the session seam (`/api/session` + BFF), the loud-failure guard (session, write, projection, driver) — plus **the real `run_walk` executed against a fake browser**, which pins the call site (which read it uses, with what credential, in what order) rather than grepping for it — **plus the teardown control set**: each threat class of the destructive surface (pre-existing org, foreign name, ambiguity, unreadable baseline, unreadable confirmation, ambiguous candidate, refused delete, residue-vs-clean, verdict conservation both ways, single-exit funnel) | 130 |
+| `tests/test_ship_test_onboarding.py` | Fast pure-Python: the classifier, the page-wide claim sweep, the DOM reader, the server-observation reader, the MCP write-result reader (JSON **and** SSE framing, both tool-error shapes, notification frames), the per-surface verdict seam, the verdict assembly, the session seam (`/api/session` + BFF), the loud-failure guard (session, write, projection, driver) — plus **the real `run_walk` executed against a fake browser**, which pins the call site (which read it uses, with what credential, in what order) rather than grepping for it — **plus the teardown control set**: each threat class of the destructive surface (pre-existing org, foreign name, ambiguity, unreadable baseline, unreadable confirmation, ambiguous candidate, refused delete, residue-vs-clean, verdict conservation both ways, single-exit funnel) | 132 |
 | `tests/e2e/test_ship_test_onboarding.py` | Real-browser, opt-in (`RUN_DASHBOARD_E2E=1`): the three assertions against the deployment's own built bundle, the wire observation that the client issues no `harness-connected` write, and RED/GREEN evidence against a mutated COPY of the real bundle | 8 |
 
 Both suites execute the instrument's **real decision code** (`judge`, the
@@ -171,9 +171,23 @@ behaviourally fixed, not greped. The teardown control set is mutation-checked
 RED). A few *structural* `inspect.getsource` assertions remain for ORDERING that
 the harness does not aim at (that the
 session gate precedes the agent write, that the write-failure check precedes the
-projection check), plus one shape-independent completeness assertion — that no
-`_finish(` call remains inside `run_walk` AND that every `_finalize(` call in it
-passes the teardown state, so no exit can write the artifact without teardown;
+projection check), plus one completeness assertion over `run_walk`'s call sites.
+It is parsed from `run_walk`'s AST, not text-scanned, so a behaviour-identical
+reformat or a renamed teardown local cannot false-red it, and it checks four
+things: `_finish` is not spelled there (no `Name`, no `Attribute`); there is no
+bare `getattr`/`globals`/`eval`/`exec`/`vars` call; every `_finalize(` call has
+three positional arguments whose third is the LOCAL bound by `Teardown(...)`;
+and that local has exactly one Name-binding (every `ast.Name` in a Store context
+counts — plain assignment, `for`/comprehension target, `with … as`, `+=`, `:=`).
+It covers the call sites spelled out in `run_walk`'s own body and the cheap forms
+only — a helper, an alias, a NON-Name binding (`import … as`, `except … as`,
+`match … case _ as`) or an in-place field assignment gets past it — so it is a
+refactor guard, not a containment proof. What carries
+the `not_reached`-reports-an-unreaped-org-as-clean class instead is the recorded
+teardown STATUS, asserted in the test for each post-create exit a test reaches
+(three of them — the absent-surface, the lying-screen and the no-agent-key exits
+— are reached by no test and rest on `_run_teardown`'s runtime gates alone:
+#4843);
 they complement the behavioural tests, they do not replace
 them. The RED/GREEN property is the core
 requirement: a behaviour-identical reformat must not move the verdict, and a UI

@@ -19,7 +19,9 @@ Run: TORTOISE_TEST_CARVE_OUT=1 python -m pytest tests/test_ship_test_onboarding.
 """
 from __future__ import annotations
 
+import ast
 import inspect as _inspect
+import textwrap
 
 import pytest
 
@@ -1388,6 +1390,11 @@ def test_walk_reports_a_failed_write_as_an_instrument_error_not_a_non_observatio
     # it returned BEFORE the poll: no post-write projection read was needed
     assert len(ctx.request.onboarding_state_calls()) == 1
     assert obs.steps[-1].name == "agent-write"
+    # the STATUS, not merely truthiness: this exit is post-create, and a
+    # re-pointed/emptied teardown state records the truthy, non-residue
+    # `not_reached`, which reports an unreaped org as clean.
+    assert obs.teardown["status"] == mod.TEARDOWN_BASELINE_UNAVAILABLE
+    assert mod.TEARDOWN_BASELINE_UNAVAILABLE in mod.TEARDOWN_RESIDUE_STATES
 
 
 def test_walk_reports_a_never_readable_projection_as_an_instrument_error(
@@ -1405,6 +1412,13 @@ def test_walk_reports_a_never_readable_projection_as_an_instrument_error(
     assert obs.verdict.startswith("instrument-error:"), obs.verdict
     assert "projection_unreadable" in obs.verdict
     assert mod.exit_code_for(obs.reason) == mod.EXIT_INSTRUMENT_ERROR
+    # This exit is exercised only here, and the harness serves no org-list
+    # route, so the recorded state must be the fail-closed one. Asserting the
+    # STATUS (not just that teardown is truthy) is what catches a teardown state
+    # that reached this exit degraded — a re-bound or emptied object records the
+    # truthy, non-residue `not_reached`, which reports an unreaped org as clean.
+    assert obs.teardown["status"] == mod.TEARDOWN_BASELINE_UNAVAILABLE
+    assert mod.TEARDOWN_BASELINE_UNAVAILABLE in mod.TEARDOWN_RESIDUE_STATES
 
 
 def test_walk_reports_a_200_but_unparseable_projection_as_an_instrument_error(
@@ -1423,6 +1437,10 @@ def test_walk_reports_a_200_but_unparseable_projection_as_an_instrument_error(
     assert obs.verdict.startswith("instrument-error:"), obs.verdict
     assert "projection_unreadable" in obs.verdict
     assert mod.exit_code_for(obs.reason) == mod.EXIT_INSTRUMENT_ERROR
+    # ...and the recorded teardown status, for the same reason as the
+    # never-readable case above: this exit is exercised only here.
+    assert obs.teardown["status"] == mod.TEARDOWN_BASELINE_UNAVAILABLE
+    assert mod.TEARDOWN_BASELINE_UNAVAILABLE in mod.TEARDOWN_RESIDUE_STATES
 
 
 def test_walk_skip_agent_write_cannot_launder_a_lying_ui(monkeypatch, tmp_path):
@@ -1503,6 +1521,13 @@ def test_walk_step5_unreadable_projection_is_an_instrument_error(monkeypatch, tm
     assert mod.exit_code_for(obs.reason) == mod.EXIT_INSTRUMENT_ERROR
     # it stopped at the read: no key was minted and nothing was written
     assert not any(c[0] == "POST" for c in ctx.request.calls)
+    # ...and the recorded teardown STATUS (not merely that teardown is truthy):
+    # this exit is reached only here, so it is the one place that can catch a
+    # teardown state which arrived at it re-bound or emptied — such a state
+    # records the truthy, non-residue `not_reached`, which would report an
+    # unreaped org as clean.
+    assert obs.teardown["status"] == mod.TEARDOWN_BASELINE_UNAVAILABLE
+    assert mod.TEARDOWN_BASELINE_UNAVAILABLE in mod.TEARDOWN_RESIDUE_STATES
 
 
 def test_walk_step7_unreadable_projection_is_an_instrument_error(monkeypatch, tmp_path):
@@ -1527,6 +1552,9 @@ def test_walk_step7_unreadable_projection_is_an_instrument_error(monkeypatch, tm
     assert mod.exit_code_for(obs.reason) == mod.EXIT_INSTRUMENT_ERROR
     # the observation is NOT recorded as shown, and not as a product failure
     assert obs.assertions.get("shown_when_observed") is None
+    # ...and the teardown STATUS, for the same reason as the exits above.
+    assert obs.teardown["status"] == mod.TEARDOWN_BASELINE_UNAVAILABLE
+    assert mod.TEARDOWN_BASELINE_UNAVAILABLE in mod.TEARDOWN_RESIDUE_STATES
 
 
 def test_walk_with_an_explicit_agent_key_still_reads_the_truth_through_the_session(
@@ -1577,6 +1605,12 @@ def test_walk_with_an_explicit_agent_key_still_reads_the_truth_through_the_sessi
     obs = mod.run_walk(args)
 
     assert obs.verdict == "passed", (obs.verdict, obs.reason)
+    # this test drives run_walk directly rather than through _run_fake_walk, so
+    # it must make the single-exit guarantee explicit itself
+    assert obs.teardown, "every exit must carry the teardown state"
+    # this harness serves no org-list route, so the baseline read 404s and the
+    # walk honestly records the fail-closed state: no baseline, no delete
+    assert obs.teardown["status"] == _mod.TEARDOWN_BASELINE_UNAVAILABLE
     # the explicit key was used for the WRITE...
     assert written_with["key"] == "tt_explicit"
     # ...and no key was minted, and the truth came only from the session
@@ -1907,19 +1941,107 @@ def test_keep_org_records_a_deliberate_residue_and_never_deletes(
 def test_no_exit_from_the_walk_writes_the_artifact_without_teardown():
     """The single-exit property is the whole reason the artifact can be trusted.
 
-    Deliberately SHAPE-INDEPENDENT: it asserts that no `_finish(` call appears
-    inside `run_walk` at all, rather than counting `_finalize` literals — a
-    reformat (or a thirteenth exit) cannot false-red it, and an exit that calls
-    `_finish` cannot slip past it. The behavioural half of the same guarantee is
-    the `assert obs.teardown` in `_run_fake_walk`, which every walk test rides.
+    A REFACTOR GUARD, not an obfuscation proof — say plainly what it checks and
+    what it deliberately does not. It is parsed from `run_walk`'s AST rather than
+    text-scanned, so a behaviour-identical reformat (a wrapped call, `_finish (…)`
+    with a space, a renamed teardown local) cannot false-red it, which is the
+    false-red a literal-text count produces.
+
+    It checks four things about the call sites SPELLED OUT in `run_walk`'s own
+    body:
+      (a) `_finish` appears there as no `Name` and no `Attribute`;
+      (b) no bare `Name` call to `getattr`/`globals`/`eval`/`exec`/`vars`;
+      (c) every `_finalize(` call has three positional arguments whose third is
+          the local bound by `Teardown(...)`, and it is the SAME local at every
+          call site;
+      (d) that local has exactly one Name-binding in `run_walk` — every
+          `ast.Name` in a Store context counts (plain assignment, `for`/
+          comprehension target, `with … as`, `+=`, `:=`).
+    (c) and (d) catch the two cheap forms of the same defect: `_finalize`'s third
+    parameter defaults to None, so `_finalize(obs, out_dir)` and
+    `_finalize(obs, out_dir, None)` write the artifact with an EMPTY teardown
+    block; and `td = Teardown(...)` on the line before an exit re-points the
+    local at an object whose `ctx` is None, so `_run_teardown` records the truthy,
+    deliberately-non-residue `not_reached` for an org this run never reaped (the
+    #4291 conflation).
+
+    NOT checked here, by construction — a source assertion cannot be an
+    adversarial proof, and extending it just moves the boundary. (d) sees
+    Name-bindings, so the NON-Name ones escape it: a `match … case _ as td`
+    capture, `import … as td`, `except … as td`. And two further forms get past
+    the whole half: an `_finish`/`_finalize` alias, attribute-form `getattr`, and
+    mutating the teardown object's fields in place.
+
+    What covers those forms is the recorded teardown STATUS, asserted in the
+    test for each post-create exit a test reaches — `:1370` step 5, `:1428` the
+    failed write, `:1449` the poll, `:1471` step 7, `:1491` the final exit,
+    `:1497` the exception exit. The status, not merely that `obs.teardown` is
+    truthy: `not_reached` satisfies mere truthiness, so a truthiness-only assert
+    cannot see a residue state degrade into a clean one. Three post-create exits
+    (`:1390`, `:1401`, `:1460`) are reached by NO test, so they carry no such
+    assertion and only `_run_teardown`'s runtime gates guard them (#4843).
     """
-    src = _inspect.getsource(_mod.run_walk)
-    assert "_finish(" not in src
-    # ...and every funnel call passes the teardown state: `_finalize(obs,
-    # out_dir)` (the `td` default is None) would write the artifact with an
-    # EMPTY teardown block and still satisfy a bare "no _finish" assertion.
-    assert src.count("_finalize(") == src.count("_finalize(obs, out_dir, td)")
-    assert src.count("_finalize(obs, out_dir, td)") >= 1
+    tree = ast.parse(textwrap.dedent(_inspect.getsource(_mod.run_walk)))
+
+    # (a)+(b) `_finish` must not be SPELLED in `run_walk`, and the obvious
+    # string-built-name route to it must not be open either. Parsed, not
+    # grepped: a `_finish (…)` reformat is invisible to a substring search.
+    # KNOWN GAPS, stated rather than implied — an import alias, an alias of
+    # `_finalize`, and attribute-form `getattr` all get past this; see the
+    # docstring. This half is a refactor guard.
+    reachable = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    reachable |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+    assert "_finish" not in reachable, "_finish must not be spelled in run_walk"
+    dynamic = {"getattr", "globals", "eval", "exec", "vars"}
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                and getattr(n.func, "id", None) in dynamic], (
+        "run_walk must not call a bare "
+        f"{sorted(dynamic)} — the string-built-name route to _finish")
+
+    # (c) every funnel call passes the teardown state the walk actually built.
+    # `_finalize`'s third parameter defaults to None, so BOTH `_finalize(obs,
+    # out_dir)` and `_finalize(obs, out_dir, None)` write the artifact with an
+    # EMPTY teardown block — an arity check alone would not catch the second.
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "_finalize"]
+    assert calls, "no _finalize exit found in run_walk"
+    # Discover the name, do not hardcode it, so renaming the local is free.
+    td_names = {t.id for n in ast.walk(tree)
+                if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
+                and getattr(n.value.func, "id", None) == "Teardown"
+                and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
+                for t in n.targets}
+    assert td_names, "run_walk must build the teardown state it passes"
+    # (d) the teardown local has exactly one Name-binding, so the cheap
+    # re-pointing form (`td = Teardown(...)` on the line before an exit) is
+    # refused. Every `ast.Name` in a Store ctx counts — plain assignment, a
+    # `for`/comprehension target, `with … as`, `+=`, `:=`. Only the NON-Name
+    # bindings (`import … as`, `except … as`, `match … case _ as`) are invisible
+    # here; see the docstring — those are covered behaviourally by the
+    # teardown-STATUS assertions at the exits a test reaches.
+    stores = [n.id for n in ast.walk(tree)
+              if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)]
+    for name in sorted(td_names):
+        assert stores.count(name) == 1, (
+            f"run_walk binds {name!r} by plain assignment {stores.count(name)} "
+            "times; the teardown state must be built once and passed unchanged")
+    assert {len(c.args) for c in calls} == {3}, (
+        "every _finalize call in run_walk must pass the teardown state; got "
+        f"argument counts {sorted(len(c.args) for c in calls)}")
+    assert all(isinstance(c.args[2], ast.Name) and c.args[2].id in td_names
+               for c in calls), (
+        "every _finalize call in run_walk must pass the teardown state ITSELF "
+        f"(the object built by Teardown(...) -> {sorted(td_names)}), not a "
+        "default, a literal or an unrelated name")
+    # ...and the SAME one at every site: a second `Teardown(...)` binding looks
+    # like the teardown state to the checks above, but its `ctx is None` makes
+    # `_run_teardown` record `not_reached` — truthy, and deliberately not a
+    # residue state, so an org this run created and never reaped would be
+    # reported clean. This is the #4291 conflation the guard exists to prevent.
+    used = {c.args[2].id for c in calls}
+    assert len(used) == 1, (
+        "every _finalize call in run_walk must pass ONE teardown state; got "
+        f"{sorted(used)}")
 
 
 def test_an_org_name_the_product_would_refuse_is_rejected_before_any_browser(
