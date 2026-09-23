@@ -39,7 +39,8 @@
 #     is not a diagnostic, and reading it as one is the #4740 review-5
 #     fail-open.
 #   * missing / unreadable / structurally-incomplete reports → RED (cases
-#     17-20), downgraded only by a watchdog kill (cases 18, 20).
+#     17-21: 17/18 missing, 19/20 unreadable, 21 the report missing `left`),
+#     downgraded only by a watchdog kill (cases 18, 20).
 #   * the #1371 rc-unknown red path (the empty-rc case 22) and the fail-loud
 #     argument validation (cases 23-25).
 #   * the accounting identity `reaped + left >= before` → PASS at the boundary

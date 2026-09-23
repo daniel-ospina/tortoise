@@ -411,14 +411,19 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
     import time
     import uuid
 
+    # #4740 review 11: the builder and the probe are reached through the
+    # MODULE attribute, never a bare imported name. A bare name can be
+    # shadowed by a local rebinding inside this fixture (a lambda body is not
+    # a `Return`, so the pin's hand-written-report check cannot see it) and a
+    # local rebinding would silently change what the end-sweep runs. The
+    # attribute form is unshadowable by construction.
+    from tortoise import embedded_reaper
     from tortoise.embedded_reaper import (
         ACTIVE_SUITES_DIR,
         _ReaperLock,
         _run_sweep,
         active_suite_markers,
         active_suite_tokens,
-        build_end_sweep_report,
-        live_embedded_server_count,
         sweep_stale_index_pid_files,
     )
 
@@ -497,12 +502,14 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
                     # #4740 review 9: the raw composition — the pre-sweep
                     # probe (`before`), the sweep, the post-sweep probe
                     # (`left`) and their arrangement into the report — lives in
-                    # `build_end_sweep_report` (behaviourally pinned in
-                    # tests/test_reaper.py). Both probes run while
+                    # `embedded_reaper.build_end_sweep_report` (behaviourally
+                    # pinned in tests/test_reaper.py). Both probes run while
                     # TORTOISE_REAPER_MIN_UPTIME still holds this sweep's own
                     # setting (the `finally` below restores it); `None` (not 0)
-                    # marks a failed probe.
-                    return build_end_sweep_report(
+                    # marks a failed probe. The module-attribute call and
+                    # probe (see the import block above) are pinned by
+                    # `test_conftest_sweep_returns_build_end_sweep_report`.
+                    return embedded_reaper.build_end_sweep_report(
                         lambda: _run_sweep(
                             dry_run=False, batch_size=SWEEP_BATCH_SIZE,
                             only_safe=only_safe, jobs=8, kill_pacing=0.4,
@@ -521,7 +528,7 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
                             # redding the leg with the reaper in _kill/probe).
                             deadline=deadline),
                         deadline,
-                        live_embedded_server_count,
+                        embedded_reaper.live_embedded_server_count,
                     )
                 finally:
                     if prev is None:

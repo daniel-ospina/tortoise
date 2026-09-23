@@ -5135,20 +5135,32 @@ def test_build_end_sweep_report_threads_the_sweep_outcome():
 
 
 def test_conftest_sweep_returns_build_end_sweep_report():
-    """#4740 review 10: every `_sweep` return is pinned, builder or not.
+    """Reject the enumerated unpinned-report shapes at the `_sweep` call site.
 
-    The behavioural cases above drive `build_end_sweep_report` in isolation,
-    so a `_sweep` that short-circuits it — `return {report} or
-    build_end_sweep_report(...)` — leaves them all green while the gate
-    consumes a hand-written dict. The deleted case-39 producer sub-checks
-    covered this returned-call identity; this is the minimal surviving form.
+    The behavioural cases above drive `embedded_reaper.build_end_sweep_report`
+    in isolation, so a `_sweep` that short-circuits it — `return {report} or
+    embedded_reaper.build_end_sweep_report(...)` — leaves them all green while
+    the gate reads a hand-written dict. This test rejects these specific
+    shapes:
 
-    Review 10 counted builder `Return`s alone, which a DEAD return satisfies:
-    `if False: return build_end_sweep_report(...)` with the live path
-    returning a helper's report keeps the count at 1 and the gate unpinned.
-    So every `Return` in `_sweep` is now enumerated and must be either the
-    single live builder call or one of the three documented early returns
-    (`no_embedded_servers`, `skipped`, `error`).
+    * a report-shaped `Dict` literal ANYWHERE in the fixture — in a `Return`
+      or inside a lambda body (a lambda body is not a `Return`, so a local
+      `build_end_sweep_report = lambda ...: {report}` rebinding would
+      otherwise leave the pin green);
+    * a `Return` in `_sweep` other than the single live builder call and the
+      three documented early returns (`no_embedded_servers`, `skipped`,
+      `error`);
+    * a builder call reached through a BARE name rather than the
+      `embedded_reaper` module attribute (a bare name is shadowable by a
+      local rebinding, so the module attribute is the only accepted form);
+    * a builder call that is statically unreachable (`if False:`);
+    * a builder call whose arguments are not exactly the three positional
+      ones — a `lambda: _run_sweep(...)`, the `deadline` name, and
+      `embedded_reaper.live_embedded_server_count` (a fabricated probe,
+      e.g. `lambda: 999`, is a different shape and is rejected).
+
+    This test does not prove the call site correct in general; it rejects the
+    shapes listed above (#4740).
     """
     import ast
 
@@ -5199,23 +5211,63 @@ def test_conftest_sweep_returns_build_end_sweep_report():
         return len(keys) == 1 and keys <= early_keys
 
     returns = [n for n in ast.walk(sweep) if isinstance(n, ast.Return)]
-    builder_returns = [
-        n for n in returns
-        if isinstance(n.value, ast.Call)
-        and getattr(n.value.func, "id", None) == "build_end_sweep_report"
-    ]
+    def is_module_builder_call(value: ast.AST) -> bool:
+        """True for `embedded_reaper.build_end_sweep_report(...)`."""
+        return (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Attribute)
+            and value.func.attr == "build_end_sweep_report"
+            and isinstance(value.func.value, ast.Name)
+            and value.func.value.id == "embedded_reaper"
+        )
+
+    builder_returns = [n for n in returns if is_module_builder_call(n.value)]
     assert len(builder_returns) == 1, (
         "tests/conftest.py's _sweep must contain exactly one "
-        "build_end_sweep_report(...) call; a hand-written report dict, or a "
-        "short-circuit around the builder, is not pinned by the behavioural "
-        "tests and would be consumed by the gate unpinned (#4740)"
+        "`embedded_reaper.build_end_sweep_report(...)` call reached through "
+        "the module attribute; a bare-name call (shadowable by a local "
+        "rebinding), a hand-written report dict, or a short-circuit around "
+        "the builder is not pinned by the behavioural tests and would leave "
+        "the gate reading an unpinned report (#4740)"
     )
     builder_return = builder_returns[0]
     assert not under_constant_false_guard(builder_return), (
-        "tests/conftest.py's _sweep returns build_end_sweep_report(...) from a "
-        "statically unreachable branch (`if False:`): the count is satisfied "
-        "by a DEAD return while the live path escapes the pin (#4740); dead "
-        f"return at line {builder_return.lineno}"
+        "tests/conftest.py's _sweep returns "
+        "embedded_reaper.build_end_sweep_report(...) from a statically "
+        "unreachable branch (`if False:`): the count is satisfied by a DEAD "
+        "return while the live path escapes the pin (#4740); dead return at "
+        f"line {builder_return.lineno}"
+    )
+    call = builder_return.value
+    assert isinstance(call, ast.Call)  # narrows the type for the reader
+    assert len(call.args) == 3 and call.keywords == [], (
+        "the builder call must pass exactly 3 positional arguments and no "
+        "keywords — the sweep lambda, the deadline, and the live-server "
+        "probe; any other arity leaves an argument unpinned (#4740)"
+    )
+    sweep_lambda, deadline_arg, probe_arg = call.args
+    assert (
+        isinstance(sweep_lambda, ast.Lambda)
+        and isinstance(sweep_lambda.body, ast.Call)
+        and isinstance(sweep_lambda.body.func, ast.Name)
+        and sweep_lambda.body.func.id == "_run_sweep"
+    ), (
+        "argument 1 must be a `lambda: _run_sweep(...)`; a constant or a "
+        "different callee hands the builder a sweep that never ran (#4740)"
+    )
+    assert isinstance(deadline_arg, ast.Name) and deadline_arg.id == "deadline", (
+        "argument 2 must be the `deadline` name — the budget the sweep and "
+        "the builder share; any other expression decouples them (#4740)"
+    )
+    assert (
+        isinstance(probe_arg, ast.Attribute)
+        and isinstance(probe_arg.value, ast.Name)
+        and probe_arg.value.id == "embedded_reaper"
+        and probe_arg.attr == "live_embedded_server_count"
+    ), (
+        "argument 3 must be `embedded_reaper.live_embedded_server_count` — "
+        "the real probe; a fabricated probe (e.g. `lambda: 999`) hands the "
+        "gate a bound the run never measured (#4740)"
     )
     undocumented = [
         n for n in returns
@@ -5223,11 +5275,11 @@ def test_conftest_sweep_returns_build_end_sweep_report():
     ]
     assert undocumented == [], (
         "tests/conftest.py's _sweep must return only the single "
-        "build_end_sweep_report(...) call or one of the three documented "
-        "early returns (no_embedded_servers / skipped / error); any other "
-        "return is not pinned by the behavioural tests and would be consumed "
-        f"by the gate unpinned (#4740); found at line(s) "
-        f"{[n.lineno for n in undocumented]}"
+        "`embedded_reaper.build_end_sweep_report(...)` call or one of the "
+        "three documented early returns (no_embedded_servers / skipped / "
+        "error); any other return is not pinned by the behavioural tests "
+        f"and would leave the gate reading an unpinned report (#4740); found "
+        f"at line(s) {[n.lineno for n in undocumented]}"
     )
     fixture = next(
         n for n in ast.walk(tree)
@@ -5235,15 +5287,15 @@ def test_conftest_sweep_returns_build_end_sweep_report():
     )
     hand_written = [
         n for n in ast.walk(fixture)
-        if isinstance(n, ast.Return)
-        and isinstance(n.value, ast.Dict)
+        if isinstance(n, ast.Dict)
         and any(
             isinstance(k, ast.Constant) and k.value in _HYGIENE_REPORT_FIELDS
-            for k in n.value.keys
+            for k in n.keys
         )
     ]
     assert hand_written == [], (
-        "the _redislite_hygiene fixture must not build a report-shaped dict "
-        "anywhere else — the gate must consume only the builder's report "
+        "the _redislite_hygiene fixture must not contain a report-shaped dict "
+        "literal anywhere — not in a `Return` and not in a lambda body; such "
+        "a literal bypasses the builder and the gate would read it unpinned "
         f"(#4740); found at line(s) {[n.lineno for n in hand_written]}"
     )
