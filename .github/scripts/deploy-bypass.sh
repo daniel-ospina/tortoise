@@ -172,7 +172,7 @@ days_since() {
 # may hand-roll its own summary (that is the inconsistency #4759 removed).
 cmd_report() {
   local key='' input_fired='' variable_fired='' set_at='' effect='' window='' today=''
-  local label dispatch_input lanes='' window_note='' marker
+  local label dispatch_input lanes='' window_note=''
 
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -255,9 +255,12 @@ cmd_report() {
 # End-of-job. Every gate in the job is stated as bypassed or not, from the LANE
 # state (always knowable) plus, for the `wrapper` gates, whether the skip was
 # actually applied (the marker the report step writes in that same branch — a
-# lane armed with no marker means the checker did not return exit 1). Running
-# with `if: always()` makes this the authoritative line even when an earlier
-# step failed before its own report step could run.
+# lane armed with no marker means no exit-1 bypass was applied). The lines state
+# the BYPASS, never whether the gate's step executed: an earlier step failing
+# can skip a checker, and claiming "it ran" there is a false statement about a
+# red run. Whether a gate executed is the job's colour and its step list.
+# Running with `if: always()` makes this the authoritative bypass line even when
+# an earlier step failed before its own report step could run.
 cmd_audit() {
   local job='this job' marker_file='' any=0 spec key label kind in_fired var_fired lanes
   local bypassed=''
@@ -293,7 +296,7 @@ cmd_audit() {
     [ "$in_fired" = 'true' ] && lanes='input'
     [ "$var_fired" = 'true' ] && lanes="${lanes:+$lanes,}variable"
     if [ -z "$lanes" ]; then
-      emit "- \`${key}\` (${label}) — lane NOT set: this gate was **not bypassed** (it ran — a red run here means it failed)"
+      emit "- \`${key}\` (${label}) — lane NOT set: **not bypassed** (a bypass requires a lane, so this gate was not skipped)"
       continue
     fi
     any=1
@@ -302,7 +305,7 @@ cmd_audit() {
     elif printf '%s\n' "$bypassed" | grep -qxF "$key"; then
       emit "- \`${key}\` (${label}) — **BYPASSED** (lane(s): ${lanes}) — the checker's exit-1 class was translated for this deploy"
     else
-      emit "- \`${key}\` (${label}) — lane(s) ${lanes} armed but **NOT bypassed** — the checker did not report exit-1 violations (exit 2 still blocks)"
+      emit "- \`${key}\` (${label}) — lane(s) ${lanes} armed but **NOT bypassed** — the checker applied no exit-1 bypass (it either returned no violations or did not run; the exit-2 class still blocks)"
     fi
   done
   if [ "$any" -eq 0 ]; then

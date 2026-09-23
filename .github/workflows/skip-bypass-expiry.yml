@@ -15,7 +15,7 @@
 #                             aged is the prose failure mode returning, so it is
 #                             a violation, never a pass
 #
-# The window is `WINDOW_DAYS=7` in .github/scripts/deploy-bypass.sh. Seven days
+# The window is `WINDOW_DAYS_DEFAULT=7` in .github/scripts/deploy-bypass.sh. Seven days
 # because these lanes serve HOURS-TO-DAYS incident windows (the #4605 DB-health
 # window was a day-scale data-plane restore): a week never nags during a real
 # incident, while a bypass that outlives one working week is stale by any
