@@ -4,12 +4,15 @@
 #
 # WHY THIS EXISTS
 # ---------------
-# The repo's `.env` loader (`tortoise/mcp_server.py::_load_dotenv`) only fills
-# keys that are ABSENT — "never override an explicitly set (even empty)
-# environment variable". So any ambient LLM key in the calling shell (this
-# fleet sources `~/pi-keys.env`) BEATS the repo `.env`. On 2026-09-23 the
-# sealed #2552 write-path measurement silently billed the ambient fleet
-# OpenRouter key (which was exhausted: `limit=100, limit_remaining=0`) and
+# Eval/measurement entry points read provider keys straight from the process
+# env, and they do NOT load the repo `.env`: `tortoise.mcp_server::_load_dotenv`
+# is the repo's only `.env` loader, and the eval runner does not import it. The
+# one loader that does exist only fills keys that are ABSENT — "never override
+# an explicitly set (even empty) environment variable" — so even where it runs,
+# an ambient key wins. Either way the key a run bills is whatever the calling
+# shell exported (this fleet sources `~/pi-keys.env`), NOT the repo `.env`. On
+# 2026-09-23 the sealed #2552 write-path measurement silently billed the ambient
+# fleet OpenRouter key (which was exhausted: `limit=100, limit_remaining=0`) and
 # returned HTTP 403 on all 7 sessions, while a healthy evals key sat in `.env`
 # the whole time — and nothing in the run output said which key had been used.
 #
@@ -20,9 +23,11 @@
 #      evals key deterministically wins. Every *other* `.env` key keeps
 #      `_load_dotenv`'s deliberate never-override semantics, so an explicitly
 #      exported `TORTOISE_DB_URI` still wins (that behaviour is intentional).
-#   3. Prints a source + non-revealing fingerprint line for each managed key,
-#      so the key a run used is knowable from its output. Paste the lines into
-#      the run receipt; they never contain key material.
+#   3. Prints a source + fingerprint line for each managed key, so the key a run
+#      used is knowable from its output. The fingerprint shows the first 6
+#      characters (the provider's fixed prefix, plus for some issuers a few key
+#      characters), the length, and a sha256 prefix; the full value is never
+#      printed. Paste the lines into the run receipt.
 #   4. `exec`s the command, so the wrapper process becomes the command (signals
 #      land on the real process and the exported env is never lost).
 #
@@ -48,14 +53,17 @@
 
 set -u
 
-# The provider keys this wrapper owns — exactly the set the extraction/reader
-# paths actually read:
+# The provider keys this wrapper owns — the set the extraction/reader paths
+# actually read:
 #   tortoise/ingest.py::_PROVIDERS          → OPENROUTER / DEEPSEEK / OPENAI / GEMINI
 #   tortoise/analyze.py::_LLM_PROVIDERS     → DEEPSEEK / OPENAI
 #   tortoise/model_adapters.py              → VENICE (ask + longmem lanes)
 # ANTHROPIC_API_KEY is deliberately NOT managed: no tortoise provider reads it
 # (hosted_api.py::_llm_provider_keys documents the same exclusion), so managing
-# it would only mask unrelated host noise.
+# it would only mask unrelated host noise. Hand-maintained here, but PINNED
+# against those registries by
+# tests/test_run_with_eval_keys.py::test_managed_keys_match_the_code_registries —
+# adding a provider key to a registry without managing it here reddens that test.
 MANAGED_KEYS=(
   OPENROUTER_API_KEY
   DEEPSEEK_API_KEY
@@ -69,27 +77,56 @@ REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 ENV_FILE=${EVAL_KEYS_ENV_FILE:-$REPO_ROOT/.env}
 
 # Absolute form of a path whose target directory exists (else the value as-is).
+# `pwd -P` so a symlinked directory cannot leak a false path into the label.
 absolute_path() {
   local p=$1 d b
   d=$(dirname -- "$p")
   b=$(basename -- "$p")
   if [ -d "$d" ]; then
-    (CDPATH= cd -- "$d" && printf '%s/%s' "$(pwd)" "$b")
+    (CDPATH= cd -- "$d" && printf '%s/%s' "$(pwd -P)" "$b")
   else
     printf '%s' "$p"
   fi
 }
 
-# The declaration label. `.env` means the repo-root file and is used ONLY when
-# EVAL_KEYS_ENV_FILE is unset (then ENV_FILE IS the repo-root .env). With the
-# seam set, the absolute resolved path is printed instead — a relative seam
-# value like `.env` from a foreign cwd must never be labelled `.env`, which
-# would be false provenance in exactly the way this tool exists to prevent.
+# The wrapper's own real location, symlinks resolved (macOS has no `readlink -f`),
+# so `<repo-root>/.env` names the REAL repo root even when the wrapper is invoked
+# through a symlink or a bare PATH lookup — otherwise `$0`'s directory would
+# derive a foreign repo root and the `.env` label would name a file the wrapper
+# never read.
+resolve_self() {
+  local p=$1 d n=0
+  case "$p" in
+    */*) ;;
+    *) p=$(command -v "$p" 2>/dev/null) || p=$1 ;;
+  esac
+  while [ -L "$p" ] && [ "$n" -lt 40 ]; do
+    n=$((n + 1))
+    d=$(dirname -- "$p")
+    p=$(readlink "$p")
+    case "$p" in
+      /*) ;;
+      *) p=$d/$p ;;
+    esac
+  done
+  absolute_path "$p"
+}
+
+SCRIPT_PATH=$(resolve_self "$0")
+SCRIPT_DIR=$(dirname -- "$SCRIPT_PATH")
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)
+ENV_FILE=${EVAL_KEYS_ENV_FILE:-$REPO_ROOT/.env}
+
+# The declaration label. `.env` is used ONLY when the resolved env file IS the
+# resolved repo-root `.env`; otherwise the absolute path is printed, so the
+# label never names a file the wrapper did not read.
 if [ -n "${EVAL_KEYS_ENV_FILE:-}" ]; then
   ENV_FILE=$(absolute_path "$ENV_FILE")
-  SOURCE_LABEL=$ENV_FILE
-else
+fi
+if [ "$(absolute_path "$ENV_FILE")" = "$REPO_ROOT/.env" ]; then
   SOURCE_LABEL=.env
+else
+  SOURCE_LABEL=$ENV_FILE
 fi
 
 if [ "$#" -eq 0 ]; then
@@ -185,10 +222,12 @@ else
     "$ENV_FILE" >&2
 fi
 
-# ── 3. self-declare: source + fingerprint, never key material ─────────────
-# The first 6 characters of a provider key are a shared, non-secret prefix
-# (`sk-or-`, `sk-…`); the sha256 prefix carries the identity. A short value is
-# redacted entirely rather than printed in full.
+# ── 3. self-declare: source + fingerprint, never the full key ─────────────
+# The fingerprint is the first 6 characters (the provider's fixed prefix, plus
+# for some issuers a few key characters), the length, and a sha256 prefix —
+# enough to identify the key across receipts without printing it. The full
+# value is never printed, and a value shorter than 12 characters is redacted
+# entirely.
 printf '[eval-keys] provider keys: ambient stripped; file=%s\n' "$ENV_FILE" >&2
 for key in "${MANAGED_KEYS[@]}"; do
   eval "present=\${$key+x}"

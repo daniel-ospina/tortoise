@@ -1,16 +1,19 @@
 """Hermetic tests for tools/run-with-eval-keys.sh (#2718, incident #4860).
 
-The defect these tests pin: the repo's `.env` loader (``mcp_server._load_dotenv``)
-only fills keys that are ABSENT, so any ambient LLM provider key in the calling
-shell BEATS the repo `.env`. On 2026-09-23 the sealed #2552 write-path run
-silently billed the ambient fleet OpenRouter key (``limit_remaining=0``) and
-returned HTTP 403 on all 7 sessions while a healthy evals key sat in `.env` —
-and nothing in the run output said which key had been used.
+The defect these tests pin: eval/measurement entry points read provider keys
+from the process env and do NOT load the repo `.env` — the repo's only `.env`
+loader (``mcp_server._load_dotenv``) is not imported by them, and where it does
+run it only fills keys that are ABSENT, never overriding an ambient var. So the
+key a run bills is whatever the calling shell exported. On 2026-09-23 the sealed
+#2552 write-path run silently billed the ambient fleet OpenRouter key
+(``limit_remaining=0``) and returned HTTP 403 on all 7 sessions while a healthy
+evals key sat in `.env` — and nothing in the run output said which key had been
+used.
 
 The wrapper makes the key source explicit:
   * it STRIPS the ambient provider keys it owns,
   * loads the repo-root `.env` with explicit override for those keys,
-  * emits a source + non-revealing fingerprint line per managed key,
+  * emits a source + fingerprint line per managed key,
   * ``exec``s the command.
 
 No network, no Docker, no FalkorDB, no real key material. Every fixture value
@@ -19,12 +22,13 @@ exercised by one test that only reads the path from stderr — it never prints a
 value.
 
 Run standalone:      python3 tests/test_run_with_eval_keys.py
-Run under pytest:    python3 -m pytest tests/test_run_with_eval_keys.py -q
+Run under pytest:    TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_run_with_eval_keys.py -q
 """
 from __future__ import annotations
 
 import hashlib
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -39,6 +43,9 @@ WRAPPER = ROOT / "tools" / "run-with-eval-keys.sh"
 # read (tortoise/ingest.py::_PROVIDERS, tortoise/analyze.py::_LLM_PROVIDERS,
 # tortoise/model_adapters.py). ANTHROPIC_API_KEY is deliberately NOT here —
 # no tortoise provider reads it (hosted_api.py::_llm_provider_keys).
+# Pinned against those registries by
+# test_managed_keys_match_the_code_registries below, so a new provider cannot
+# silently escape the launcher.
 MANAGED = (
     "OPENROUTER_API_KEY",
     "DEEPSEEK_API_KEY",
@@ -68,6 +75,15 @@ EVALTEST_OK=1
 """
 
 
+def parse_managed_keys(script: Path) -> set[str]:
+    """Extract the wrapper's declared MANAGED_KEYS array."""
+    text = script.read_text(encoding="utf-8")
+    match = re.search(r"MANAGED_KEYS=\(\s*(.*?)\s*\)", text, re.DOTALL)
+    if not match:
+        raise AssertionError(f"MANAGED_KEYS block not found in {script}")
+    return set(re.findall(r"[A-Z][A-Z0-9_]*", match.group(1)))
+
+
 class RunWithEvalKeysTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(prefix="eval-keys-test-")
@@ -78,10 +94,13 @@ class RunWithEvalKeysTests(unittest.TestCase):
     # ── helpers ────────────────────────────────────────────────────────
 
     def base_env(self, **extra: str) -> dict[str, str]:
-        """A clean env: no managed provider key, no wrapper override."""
-        env = os.environ.copy()
-        for key in (*MANAGED, "EVAL_KEYS_ENV_FILE"):
-            env.pop(key, None)
+        """A HERMETIC env: PATH only, plus any explicit override.
+
+        Deliberately does not inherit ``os.environ``: CI runs pytest with
+        ``TORTOISE_DB_URI`` exported (the docker lane), and inheriting it made
+        ``test_non_managed_var_is_filled_when_absent`` fail there.
+        """
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
         env.update(extra)
         return env
 
@@ -110,6 +129,30 @@ class RunWithEvalKeysTests(unittest.TestCase):
         self.assertTrue(WRAPPER.is_file(), f"missing {WRAPPER}")
         mode = WRAPPER.stat().st_mode
         self.assertTrue(mode & stat.S_IXUSR, "wrapper is not executable")
+
+    def test_managed_keys_match_the_code_registries(self):
+        """A provider key added to the code must not silently escape the wrapper.
+
+        Without this pin, adding a provider to ``tortoise.ingest._PROVIDERS`` or
+        ``tortoise.analyze._LLM_PROVIDERS`` would leave its ambient key un-stripped
+        (the #4860 failure mode for the new provider) with a green suite.
+        """
+        declared = parse_managed_keys(WRAPPER)
+        self.assertEqual(declared, set(MANAGED))
+        try:
+            from tortoise.analyze import _LLM_PROVIDERS
+            from tortoise.ingest import _PROVIDERS
+        except Exception as exc:  # pragma: no cover - standalone lane
+            self.skipTest(f"tortoise registries unavailable here: {exc}")
+        derived = {key for _url, key in _PROVIDERS.values() if key}
+        derived |= set(_LLM_PROVIDERS)
+        derived.add("VENICE_API_KEY")  # tortoise/model_adapters.py key_env
+        self.assertEqual(
+            derived,
+            declared,
+            "the wrapper's MANAGED_KEYS drifted from the provider keys the "
+            "code reads — manage the new key in tools/run-with-eval-keys.sh",
+        )
 
     def test_usage_error_without_command(self):
         r = self.run_wrapper([])
@@ -150,10 +193,13 @@ class RunWithEvalKeysTests(unittest.TestCase):
         r = self.run_wrapper(["true"], env=env)
         self.assertEqual(r.returncode, 0, r.stderr)
 
-        # the label names the file actually read — with the test seam that is
-        # the fixture path, never a claim of `.env`
-        self.assertIn(f"OPENROUTER_API_KEY source={self.env_file} fingerprint=", r.stderr)
-        self.assertIn(f"DEEPSEEK_API_KEY source={self.env_file} fingerprint=", r.stderr)
+        # the label names the file actually read (resolved — the wrapper uses
+        # `pwd -P`, so a symlinked temp dir reports its physical path)
+        resolved_env = Path(self.env_file).resolve()
+        self.assertIn(
+            f"OPENROUTER_API_KEY source={resolved_env} fingerprint=", r.stderr
+        )
+        self.assertIn(f"DEEPSEEK_API_KEY source={resolved_env} fingerprint=", r.stderr)
 
         # never the full key — on either stream
         self.assertNotIn(FIXTURE_OPENROUTER, r.stderr)
@@ -302,6 +348,31 @@ class RunWithEvalKeysTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("OPENROUTER_API_KEY source=.env ", r.stderr)
         self.assertRegex(r.stderr, r"OPENROUTER_API_KEY source=/.+[/\\]\.env ")
+
+    def test_symlinked_invocation_resolves_the_real_repo_root(self):
+        # A symlink in a foreign directory must not make that directory the
+        # repo root — the `.env` label would then name a file the wrapper did
+        # not read (the `$0`-derived REPO_ROOT hole).
+        bin_dir = Path(self._tmp.name) / "bin"
+        bin_dir.mkdir()
+        link = bin_dir / "rwek.sh"
+        link.symlink_to(WRAPPER)
+        (bin_dir / ".env").write_text(
+            "OPENROUTER_API_KEY=sk-or-v1-FOREIGNsymlinkvalue\n", encoding="utf-8"
+        )
+        r = subprocess.run(
+            [str(link), "true"],
+            capture_output=True,
+            text=True,
+            env=self.base_env(),
+            cwd=str(bin_dir),
+            timeout=60,
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # the header names the REAL repo-root .env, not the symlink's dir
+        self.assertIn(os.path.normpath(str(ROOT / ".env")), r.stderr)
+        self.assertNotIn("FOREIGNsymlinkvalue", r.stderr)
 
 
 if __name__ == "__main__":

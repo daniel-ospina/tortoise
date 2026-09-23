@@ -238,8 +238,9 @@ numbers on the 15-edge denominator) is REQUIRED before the llm lane is
 comparable again — see the scoping note's "Sealed run required to activate".
 
 > ⚠️ **Start the llm lane through `tools/run-with-eval-keys.sh`** (#2718 /
-> #4860): an ambient provider key BEATS the repo `.env` (the loader never
-> overrides), which is how the 2026-09-23 sealed run billed an exhausted fleet
-> key and 403'd 7/7 while `.env` held a healthy evals key. The wrapper strips
-> the ambient provider keys, loads `.env` with override, and prints the
-> source + fingerprint of every key it set — paste that into the receipt.
+> #4860): this runner reads provider keys from the process env and never loads
+> the repo `.env`, so an ambient shell key is what gets billed. That is how the
+> 2026-09-23 sealed run billed an exhausted fleet key and 403'd 7/7 while
+> `.env` held a healthy evals key. The wrapper strips the ambient provider
+> keys, loads `.env` with override, and prints the source + fingerprint of
+> every key it set — paste that into the receipt.

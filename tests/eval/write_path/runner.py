@@ -58,13 +58,14 @@ cost_usd) plus the run detail an auditor needs to reproduce the number.
 Validated by ``validate_receipt`` before any commit.
 
 ⚠️ **Key source — start the llm lane through the wrapper (#2718 / #4860).**
-The runner reads provider keys from the process env, and
-``mcp_server._load_dotenv`` only fills keys that are ABSENT — it never
-overrides an ambient one. So a shell that exported ``OPENROUTER_API_KEY`` /
-``DEEPSEEK_API_KEY`` silently bills THOSE, not the repo ``.env``. On
-2026-09-23 the sealed #2552 run billed an exhausted ambient OpenRouter key
-(HTTP 403, 7/7 sessions aborted) while a healthy evals key sat in ``.env`` —
-and the receipt named no key. Always start the llm lane with
+This runner reads provider keys straight from the process env and never loads
+the repo ``.env`` (the repo's only ``.env`` loader,
+``mcp_server._load_dotenv``, is not imported here — and where it does run it
+only fills keys that are ABSENT, never overriding an ambient one). So a shell
+that exported ``OPENROUTER_API_KEY`` / ``DEEPSEEK_API_KEY`` is what gets
+billed. On 2026-09-23 the sealed #2552 run billed an exhausted ambient
+OpenRouter key (HTTP 403, 7/7 sessions aborted) while a healthy evals key sat
+in ``.env`` — and the receipt named no key. Always start the llm lane with
 ``tools/run-with-eval-keys.sh``: it strips the ambient provider keys, loads
 the repo-root ``.env`` with override, prints the ``source`` + fingerprint of
 each key it set, and execs the command. Paste that block into the receipt::
