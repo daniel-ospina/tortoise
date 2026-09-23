@@ -716,8 +716,9 @@ def run_benchmark(
         # surface is re-snapshotted once here (post-dream state).  Additive
         # AUDIT dimension carried on every run (both lanes) — NOT a
         # METRIC_VALUES member in this change (scoping note 2026-09-07-2514-).
-        # On the m2 echo lane it is structural 0 (no relation extraction) —
-        # expected and noted, never a quality bar.
+        # On the m2 echo lane the planted edges are graded by a cue-word
+        # relation stage, so the score is structurally low and not comparable
+        # with the llm lane's — expected and noted, never a quality bar.
         operator_audit = None
         if not runner_errors:
             golds = {sid: corpus.load_gold(sid, root) for sid in selected}
