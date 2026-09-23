@@ -550,6 +550,9 @@ class _Requester:
     def post(self, url, data=None):
         return self._call("POST", url, data)
 
+    def delete(self, url):
+        return self._call("DELETE", url)
+
 
 class _RequestCtx:
     """A BrowserContext stand-in: `.request` shares its cookie jar."""
@@ -1112,6 +1115,9 @@ class _FakeRequester:
     def post(self, url, data=None):
         return self._one("POST", url, data)
 
+    def delete(self, url):
+        return self._one("DELETE", url)
+
     def onboarding_state_calls(self):
         return [c for c in self.calls if c[1].endswith("/onboarding/state")]
 
@@ -1128,9 +1134,17 @@ class _FakeBrowser:
 
 
 class _FakePage:
-    def __init__(self, base_url):
+    def __init__(self, base_url, org_create=False, org_click_raises=False):
         self._base = base_url.rstrip("/")
         self.url = self._base + "/welcome"
+        # OPT-IN: only a walk that is meant to exercise the org-create step
+        # reports the wizard's org-name input as visible. Off by default, so
+        # every pre-existing test keeps the behaviour it was written against.
+        self.org_create = org_create
+        self.org_click_raises = org_click_raises
+        # The wizard write, recorded: a test can then prove that the name the run
+        # WRITES is the name teardown MATCHES against (they are one value).
+        self.fills = []
 
     def on(self, *a, **k):
         pass
@@ -1159,9 +1173,16 @@ class _FakePage:
         pass
 
     def locator(self, sel):
+        page = self
+        # SELECTOR-SPECIFIC: only the org-name input is faked as visible, so the
+        # walk's button loop and `_mint_or_read_key`'s `code` search keep the
+        # behaviour they have always had.
+        is_org_input = sel == 'input[aria-label="Organization name"]'
+        is_create_btn = "Create Organization" in sel
+
         class _L:
             def count(self):
-                return 0
+                return 1 if (is_org_input and page.org_create) else 0
 
             @property
             def first(self):
@@ -1171,28 +1192,37 @@ class _FakePage:
                 return []
 
             def is_visible(self):
-                return False
+                return bool(is_org_input and page.org_create)
 
             def inner_text(self):
                 return ""
 
-            def fill(self, *a, **k):
-                pass
+            def fill(self, value, *a, **k):
+                if is_org_input and page.org_create:
+                    page.fills.append((sel, value))
 
             def click(self, *a, **k):
-                pass
+                # A click that raises: the create POST may or may not have been
+                # dispatched, which is exactly why the walk flags the attempt
+                # BEFORE it clicks.
+                if is_create_btn and page.org_click_raises:
+                    raise RuntimeError("create click failed")
 
         return _L()
 
 
 class _FakeCtx:
-    def __init__(self, plan, base_url):
+    def __init__(self, plan, base_url, org_create=False, org_click_raises=False):
         self.request = _FakeRequester(plan)
         self.cookies = []          # the instrument must never read the jar
         self._base = base_url
+        self._org_create = org_create
+        self._org_click_raises = org_click_raises
+        self.page = None
 
     def new_page(self):
-        return _FakePage(self._base)
+        self.page = _FakePage(self._base, self._org_create, self._org_click_raises)
+        return self.page
 
     def close(self):
         pass
@@ -1221,7 +1251,9 @@ class _FakeSyncPlaywright:
 
 
 def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
-                   mcp_tools_call, surface="card", skip_write=False):
+                   mcp_tools_call, surface="card", skip_write=False,
+                   org_create=False, org_click_raises=False, org_name=None,
+                   keep_org=False):
     """Execute the real `run_walk` against a fake browser. Returns the record."""
     import sys
     import types
@@ -1229,7 +1261,8 @@ def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
     import tools.ship_test_onboarding as mod
 
     base = "https://app.premiselabs.co"
-    ctx = _FakeCtx(plan, base)
+    ctx = _FakeCtx(plan, base, org_create=org_create,
+                   org_click_raises=org_click_raises)
     fake_sync = types.ModuleType("playwright.sync_api")
     fake_sync.sync_playwright = lambda: _FakeSyncPlaywright(ctx)
     monkeypatch.setitem(sys.modules, "playwright", types.ModuleType("playwright"))
@@ -1262,7 +1295,9 @@ def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
         "--api-url", "https://api.premiselabs.co", "--allow-prod",
         "--timeout", "800", "--settle-ms", "0",
         "--out", str(tmp_path / "ship-test"), "--skip-agent-write" if skip_write else "--email",
-    ] + ([] if skip_write else ["ship@premiselabs.co"]))
+    ] + ([] if skip_write else ["ship@premiselabs.co"])
+      + (["--org-name", org_name] if org_name else [])
+      + (["--keep-org"] if keep_org else []))
     obs = mod.run_walk(args)
     return obs, ctx, mod
 
@@ -1542,3 +1577,343 @@ def test_walk_with_an_explicit_agent_key_still_reads_the_truth_through_the_sessi
     for _method, url, _data in ctx.request.onboarding_state_calls():
         assert url.startswith(base + "/api/v1/onboarding/state"), url
     assert "agent-key" in obs.session["mechanism"]
+
+
+# ── #4319 — the run reaps the org it created ────────────────────────────────
+#
+# This is DESTRUCTIVE code, so these tests are the CONTROL, not a smoke test:
+# each one pins a class from the issue's declared threat surface. The identity
+# proof is DIFFERENTIAL, so the org-list reads arrive in call order and the plan
+# supplies them as a queue:
+#
+#   1. the BASELINE, read before the wizard can create anything
+#   2. the teardown-time read (`after`)
+#   3. the post-DELETE confirmation read
+#
+# `_FakeRequester` pops a queue until one entry remains, then repeats that entry
+# — so "the org is gone" is expressed as the LAST entry.
+import inspect as _inspect
+
+import tools.ship_test_onboarding as _mod
+
+_ORG_ROUTE = "/api/v1/organizations"
+_RUN_ORG = "Ship Test 123"
+_AFTER_ROW = {"org_id": "org-1", "org_name": _RUN_ORG}
+
+def _happy_base():
+    """A FRESH plan every call: `_FakeRequester` mutates the entry lists (it pops
+    them), so a shared module-level dict would leak one test's consumption into
+    the next one's reads."""
+    return {
+        ("GET", "/api/session"): _SESSION_200,
+        ("GET", "/api/v1/onboarding/state"): [_PROJ_UNOBSERVED, _PROJ_OBSERVED,
+                                              _PROJ_OBSERVED],
+        ("POST", "/api/v1/team/keys"): [(200, {"key": "tt_minted"})],
+    }
+
+
+_DELETE_OK = [(202, {"status": "delete_scheduled", "org_id": "org-1",
+                     "grace_hours": 168,
+                     "hard_delete_after": "2026-10-01T00:00:00Z"})]
+
+
+def _run_teardown_walk(monkeypatch, tmp_path, *, reads, delete=None,
+                       org_create=True, org_click_raises=False, skip_write=False,
+                       org_name=_RUN_ORG, base=None, ui=None):
+    """A walk whose org-list reads and DELETE are supplied by the caller."""
+    plan = base if base is not None else _happy_base()
+    plan[("GET", _ORG_ROUTE)] = reads
+    if delete is not None:
+        plan[("DELETE", _ORG_ROUTE + "/org-1")] = delete
+    return _run_fake_walk(
+        monkeypatch, tmp_path, plan=plan,
+        ui_sequence=ui or [NOT_CONNECTED, CONNECTED],
+        mcp_tools_call=_MCP_OK, org_create=org_create,
+        org_click_raises=org_click_raises, skip_write=skip_write,
+        org_name=org_name)
+
+
+def _delete_calls(ctx):
+    return [c for c in ctx.request.calls if c[0] == "DELETE"]
+
+
+def test_the_walk_reaps_the_org_it_created_and_records_the_deletion(
+        monkeypatch, tmp_path):
+    """The happy path: baseline empty (a fresh account), the run's org listed at
+    teardown, gone on the confirmation read ⇒ `deleted`, and the DELETE went out
+    as a DELETE on the app origin's own proxy to the id the walked session's own
+    list carried — never a constructed id."""
+    obs, ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path, reads=[(200, []), (200, [_AFTER_ROW]), (200, [])],
+        delete=_DELETE_OK)
+
+    assert obs.verdict == "passed", (obs.verdict, obs.reason)
+    assert obs.teardown["status"] == _mod.TEARDOWN_DELETED
+    assert obs.teardown["org_id"] == "org-1"
+    assert obs.teardown["hard_delete_after"] == "2026-10-01T00:00:00Z"
+    assert _delete_calls(ctx) == [
+        ("DELETE", "https://app.premiselabs.co/api/v1/organizations/org-1", None)]
+    # no POST was smuggled against the org path (the old `bff_api` fallback)
+    assert not [c for c in ctx.request.calls
+                if c[0] == "POST" and "/organizations/" in c[1]]
+
+
+def test_the_name_the_run_writes_is_the_name_teardown_matches(monkeypatch, tmp_path):
+    """One value, two uses: the name filled into the wizard is the name compared
+    at teardown, so the two cannot drift."""
+    obs, ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path, reads=[(200, []), (200, [_AFTER_ROW]), (200, [])],
+        delete=_DELETE_OK)
+    assert ctx.page.fills == [('input[aria-label="Organization name"]', _RUN_ORG)]
+    assert obs.teardown["org_name"] == _RUN_ORG
+
+
+def test_a_pre_existing_org_is_never_a_teardown_candidate(monkeypatch, tmp_path):
+    """T6 — the differential proof. An org that was ALREADY there (it is in the
+    baseline) can never be a candidate, however the list shifts; the run's own
+    new org is the only thing deleted."""
+    old = {"org_id": "org-old", "org_name": "Something Else"}
+    base = _happy_base()
+    base[("DELETE", _ORG_ROUTE + "/org-1")] = _DELETE_OK
+    obs, ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path, reads=[(200, [old]), (200, [old, _AFTER_ROW]),
+                                      (200, [old])],
+        base=base)
+    assert obs.teardown["status"] == _mod.TEARDOWN_DELETED
+    assert obs.teardown["org_id"] == "org-1"
+    assert [c[1] for c in _delete_calls(ctx)] == [
+        "https://app.premiselabs.co/api/v1/organizations/org-1"]
+
+
+def test_a_numerically_looking_name_cannot_ride_a_name_match(monkeypatch, tmp_path):
+    """T1 — the single candidate's name must EQUAL the name this run wrote. A
+    foreign-named org is never deleted, even as the only candidate."""
+    foreign = {"org_id": "org-x", "org_name": "Ship Test 1234 (someone else)"}
+    obs, ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path, reads=[(200, []), (200, [foreign]), (200, [])],
+        delete=_DELETE_OK)
+    assert obs.teardown["status"] == _mod.TEARDOWN_NAME_MISMATCH
+    assert _delete_calls(ctx) == []
+
+
+def test_two_new_orgs_are_ambiguous_and_delete_nothing(monkeypatch, tmp_path):
+    """T2 — ambiguity is refused, never guessed at."""
+    obs, ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path,
+        reads=[(200, []),
+               (200, [_AFTER_ROW, {"org_id": "org-2", "org_name": _RUN_ORG}]),
+               (200, [])],
+        delete=_DELETE_OK)
+    assert obs.teardown["status"] == _mod.TEARDOWN_AMBIGUOUS
+    assert _delete_calls(ctx) == []
+
+
+def test_an_unreadable_baseline_disables_teardown(monkeypatch, tmp_path):
+    """T3 — no baseline means the identity is UNPROVEN. The run fails closed
+    (residue) instead of deleting on a guess."""
+    obs, ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path,
+        reads=[(503, {"error": "upstream_unavailable", "upstream_status": 429}),
+               (200, [_AFTER_ROW]), (200, [])],
+        delete=_DELETE_OK)
+    assert obs.teardown["status"] == _mod.TEARDOWN_BASELINE_UNAVAILABLE
+    assert _delete_calls(ctx) == []
+
+
+def test_a_run_with_no_session_issues_no_org_request_at_all(monkeypatch, tmp_path):
+    """T3 — a walk that never signed in never touched an org."""
+    plan = {("GET", "/api/session"): [(401, {"error": "not_signed_in"})],
+            ("GET", "/api/v1/onboarding/state"): [_PROJ_UNOBSERVED]}
+    obs, ctx, _ = _run_fake_walk(monkeypatch, tmp_path, plan=plan,
+                                 ui_sequence=[NOT_CONNECTED], mcp_tools_call=_MCP_OK)
+    assert obs.teardown["status"] == _mod.TEARDOWN_BASELINE_UNAVAILABLE
+    assert not [c for c in ctx.request.calls if "organizations" in c[1]]
+
+
+def test_a_2xx_that_leaves_the_org_listed_is_not_a_deletion(monkeypatch, tmp_path):
+    """T4 — verify the ARTIFACT, not the send: a 202 with no removal on the
+    confirmation read is `not_confirmed`, never `deleted`."""
+    obs, ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path,
+        reads=[(200, []), (200, [_AFTER_ROW]), (200, [_AFTER_ROW])],
+        delete=_DELETE_OK)
+    assert obs.teardown["status"] == _mod.TEARDOWN_NOT_CONFIRMED
+    assert len(_delete_calls(ctx)) == 1
+
+
+def test_an_unreadable_confirmation_is_not_a_confirmation(monkeypatch, tmp_path):
+    """T4b — `org_id not in (ids or [])` is TRUE when the read failed. An
+    unreadable confirmation must never be recorded as a deletion."""
+    obs, ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path,
+        reads=[(200, []), (200, [_AFTER_ROW]),
+               (503, {"error": "upstream_unavailable"})],
+        delete=_DELETE_OK)
+    assert obs.teardown["status"] == _mod.TEARDOWN_NOT_CONFIRMED
+    assert obs.teardown["verify_status"] == 503
+
+
+def test_a_refused_delete_is_recorded_with_its_upstream_status(
+        monkeypatch, tmp_path):
+    """T9 — a rate-limited upstream arrives as a proxied 503 that still carries
+    `upstream_status`; the run records it and never turns it into a product
+    result."""
+    obs, _ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path, reads=[(200, []), (200, [_AFTER_ROW]), (200, [])],
+        delete=[(503, {"error": "upstream_unavailable", "upstream_status": 429})])
+    assert obs.teardown["status"] == _mod.TEARDOWN_HTTP_REFUSED
+    assert obs.teardown["upstream_status"] == 429
+    assert obs.verdict == "passed"
+    assert obs.reason == ""
+
+
+def test_a_run_that_created_nothing_issues_no_delete(monkeypatch, tmp_path):
+    """Nothing was created ⇒ nothing to reap, and no request is made."""
+    obs, ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path, reads=[(200, []), (200, [])], org_create=False,
+        delete=_DELETE_OK)
+    assert obs.teardown["status"] == _mod.TEARDOWN_SKIPPED_NO_ORG
+    assert _delete_calls(ctx) == []
+
+
+def test_a_create_attempt_that_is_not_yet_listed_is_residue_not_clean(
+        monkeypatch, tmp_path):
+    """T6b — an empty candidate set AFTER a recorded create attempt is not
+    'nothing to do': the list may simply not have caught up. Suspect residue,
+    never a clean bill of health."""
+    obs, _ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path, reads=[(200, []), (200, []), (200, [])],
+        org_create=True, delete=_DELETE_OK)
+    assert obs.teardown["status"] == _mod.TEARDOWN_NOT_LISTED
+    assert obs.teardown["status"] in _mod.TEARDOWN_RESIDUE_STATES
+
+
+def test_a_create_click_that_raises_still_flags_the_residue(monkeypatch, tmp_path):
+    """The attempt flag is set BEFORE the click, so a click that raises after
+    dispatching the create cannot hide a created org — and the walk still writes
+    its artifact through the `except`-site funnel."""
+    obs, ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path, reads=[(200, []), (200, []), (200, [])],
+        org_create=True, org_click_raises=True, delete=_DELETE_OK)
+    assert obs.verdict.startswith("failed:"), obs.verdict
+    assert obs.teardown["status"] == _mod.TEARDOWN_NOT_LISTED
+    assert _delete_calls(ctx) == []
+    # the artifact was still written, with the teardown block in it
+    artifact = (tmp_path / "ship-test" / "observation.json").read_text()
+    assert '"teardown"' in artifact and _mod.TEARDOWN_NOT_LISTED in artifact
+
+
+def test_teardown_cannot_change_the_verdict_or_lose_the_artifact(
+        monkeypatch, tmp_path):
+    """T5 — the #4291 conflation guard, in both directions. A cleanup that
+    RAISES must not flip a pass, must not propagate, and must not cost the
+    artifact."""
+    import json
+
+    def _boom(obs, td):
+        raise RuntimeError("cleanup exploded")
+
+    monkeypatch.setattr(_mod, "_run_teardown", _boom)
+    obs, _ctx, mod = _run_teardown_walk(
+        monkeypatch, tmp_path, reads=[(200, []), (200, []), (200, [])])
+    assert obs.verdict == "passed", obs.verdict
+    assert obs.reason == ""
+    assert obs.teardown["status"] == _mod.TEARDOWN_FAILED
+    written = json.loads((tmp_path / "ship-test" / "observation.json").read_text())
+    assert written["verdict"] == "passed"
+    assert written["teardown"]["status"] == _mod.TEARDOWN_FAILED
+
+
+def test_a_passed_run_with_a_failed_teardown_still_exits_zero(monkeypatch):
+    """The exit code is the PRODUCT's outcome. Cleanup must never move it — in
+    either direction."""
+    obs = _mod.Observation(started_at="t", target={})
+    obs.verdict = "passed"
+    obs.teardown = {"status": _mod.TEARDOWN_FAILED, "detail": "boom"}
+    monkeypatch.setattr(_mod, "run_walk", lambda args: obs)
+    assert _mod.main(["--allow-prod"]) == _mod.EXIT_PASSED
+
+
+def test_a_successful_teardown_cannot_rescue_a_failing_verdict(
+        monkeypatch, tmp_path):
+    """T5's other direction: cleanup is not the product. A failing verdict and
+    its reason survive a clean deletion."""
+    base = _happy_base()
+    # one entry repeats: the server never observes anything, so the skipped run
+    # stays the `positive_not_attempted` class rather than becoming a failure
+    base[("GET", "/api/v1/onboarding/state")] = [_PROJ_UNOBSERVED]
+    obs, ctx, mod = _run_teardown_walk(
+        monkeypatch, tmp_path, reads=[(200, []), (200, [_AFTER_ROW]), (200, [])],
+        delete=_DELETE_OK, skip_write=True, ui=[NOT_CONNECTED, NOT_CONNECTED],
+        base=base)
+    assert obs.verdict == mod.INCOMPLETE_SKIPPED_WRITE
+    assert mod.exit_code_for(obs.reason) == mod.EXIT_FAILED
+    assert obs.teardown["status"] == _mod.TEARDOWN_DELETED
+    assert len(_delete_calls(ctx)) == 1
+
+
+def test_keep_org_records_a_deliberate_residue_and_never_deletes(
+        monkeypatch, tmp_path):
+    """T7's explicit form: the one supported way to leave the org behind, and it
+    is recorded as such rather than silently skipped."""
+    plan = _happy_base()
+    plan[("GET", _ORG_ROUTE)] = [(200, []), (200, [_AFTER_ROW]), (200, [])]
+    plan[("DELETE", _ORG_ROUTE + "/org-1")] = _DELETE_OK
+    obs, ctx, _ = _run_fake_walk(
+        monkeypatch, tmp_path, plan=plan, ui_sequence=[NOT_CONNECTED, CONNECTED],
+        mcp_tools_call=_MCP_OK, org_create=True, org_name=_RUN_ORG, keep_org=True)
+    assert obs.teardown["status"] == _mod.TEARDOWN_KEPT
+    assert _delete_calls(ctx) == []
+
+
+def test_every_exit_from_the_walk_funnels_through_the_teardown_exit():
+    """The single-exit property is the whole reason the artifact can be trusted:
+    an unconverted `_finish` site would exit with no teardown recorded."""
+    src = _inspect.getsource(_mod.run_walk)
+    assert "return _finish(obs, out_dir)" not in src
+    assert src.count("return _finalize(obs, out_dir, td)") == 12
+
+
+def test_keep_org_is_cli_only_and_never_ambiently_injected():
+    assert _mod.build_parser().parse_args([]).keep_org is False
+    assert "SHIP_TEST_KEEP_ORG" not in _inspect.getsource(_mod.build_parser)
+
+
+def test_bff_api_sends_delete_as_delete_and_refuses_an_unknown_verb():
+    """`bff_api` used to send ANY non-GET as POST, which would have downgraded
+    the teardown's DELETE into a wrong-method request."""
+    base = "https://app.premiselabs.co"
+    ctx = _FakeCtx({("DELETE", "/api/v1/organizations/org-1"):
+                    [(202, {"org_id": "org-1"})]}, base)
+    status, body = _mod.bff_api(ctx, base, "DELETE", "/organizations/org-1")
+    assert (status, body) == (202, {"org_id": "org-1"})
+    assert [c[0] for c in ctx.request.calls] == ["DELETE"]
+    with pytest.raises(ValueError):
+        _mod.bff_api(ctx, base, "PUT", "/organizations/org-1")
+
+
+@pytest.mark.parametrize("body,expected", [
+    ([], {}),
+    ([{"org_id": "a", "org_name": "A"}], {"a": "A"}),
+    ({"organizations": [{"org_id": "a", "org_name": "A"}]}, {"a": "A"}),
+    ({"unexpected": []}, None),
+    ([{"no_org_id": 1}], None),
+    ("nope", None),
+    (None, None),
+])
+def test_read_org_ids_reads_only_a_recognized_org_list(body, expected):
+    """An unrecognized shape parsed as \"no orgs\" would silently switch the
+    identity proof off (baseline) and silently confirm a deletion (verify)."""
+    base = "https://app.premiselabs.co"
+    ctx = _FakeCtx({("GET", "/api/v1/organizations"): [(200, body)]}, base)
+    status, ids, upstream = _mod.read_org_ids(ctx, base)
+    assert status == 200
+    assert ids == expected
+
+
+def test_read_org_ids_reports_a_proxied_upstream_status_and_fails_closed():
+    base = "https://app.premiselabs.co"
+    ctx = _FakeCtx({("GET", "/api/v1/organizations"):
+                    [(503, {"error": "upstream_unavailable", "upstream_status": 429})]},
+                   base)
+    assert _mod.read_org_ids(ctx, base) == (503, None, 429)
