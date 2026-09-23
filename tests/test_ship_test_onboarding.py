@@ -1137,12 +1137,12 @@ class _FakeBrowser:
         # The FIRST context is the primary one the harness hands back to the test;
         # any further call is a DISTINCT sibling, so an abandoned context is a
         # missing `ctx_closed` rather than an invisible return of the same object.
-        # Each creation/close records the OBJECT'S IDENTITY, so a context that is
-        # left open cannot be balanced out by closing another one twice.
+        # Each creation/close names the context's SERIAL, so a context left open
+        # cannot be balanced out by closing another one twice.
         if self._used:
             return self._ctx.sibling()
         self._used = True
-        self._ctx.events.append(f"ctx_created#{id(self._ctx):x}")
+        self._ctx.events.append(f"ctx_created#{self._ctx.serial:x}")
         return self._ctx
 
     def close(self):
@@ -1228,11 +1228,18 @@ class _FakePage:
 
 
 class _FakeCtx:
+    _serial = 0
+
     def __init__(self, plan, base_url, org_create=False, org_click_raises=False,
                  shares=None):
         # A sibling context (a second `browser.new_context()`) SHARES the request
         # recorder and the event sink, so it is a distinct object whose missing
         # close is visible, while the test's handle keeps seeing every request.
+        # Each context carries a unique SERIAL, so a leak cannot be balanced out by
+        # closing another one twice — `id()` is not stable across garbage
+        # collection and two contexts can share one.
+        _FakeCtx._serial += 1
+        self.serial = _FakeCtx._serial
         self.request = shares.request if shares else _FakeRequester(plan)
         self.cookies = []          # the instrument must never read the jar
         self.events = shares.events if shares else []
@@ -1246,12 +1253,12 @@ class _FakeCtx:
         return self.page
 
     def close(self):
-        self.events.append(f"ctx_closed#{id(self):x}")
+        self.events.append(f"ctx_closed#{self.serial:x}")
 
     def sibling(self):
         sib = _FakeCtx(None, self._base, self._org_create, self._org_click_raises,
                        shares=self)
-        self.events.append(f"ctx_created#{id(sib):x}")
+        self.events.append(f"ctx_created#{sib.serial:x}")
         return sib
 
 
@@ -1543,9 +1550,9 @@ def _assert_not_the_generic_error_handler(obs, name: str) -> None:
 
 def _assert_browser_reaped(ctx) -> None:
     """Exactly one browser was launched and closed, last; every context the run
-    created was closed exactly once — each by identity, so an open context cannot
-    be balanced by closing another one twice. A run that never launched closes
-    nothing."""
+    created was closed exactly once — keyed by a unique serial per context, so an
+    open context cannot be balanced by closing another one twice. A run that never
+    launched closes nothing."""
     events = ctx.events
     if "launch" not in events:
         assert events == [], events
@@ -1677,9 +1684,10 @@ def test_walk_without_the_driver_records_a_fail_closed_observation(
 
 def test_a_browser_launch_that_fails_is_recorded_and_nothing_is_left_open(
         monkeypatch, tmp_path):
-    """`pw.chromium.launch` raising lands in the same fail-closed handling as a
-    missing driver, and there is no browser or context to close: the harness's
-    reap assertion sees an empty event list."""
+    """`pw.chromium.launch` raising lands in the same fail-closed class
+    (instrument error, exit 3) as a missing driver, from a different catch site,
+    and there is no browser or context to close: the harness's reap assertion sees
+    an empty event list."""
     obs, _ctx, mod = _run_fake_walk(
         monkeypatch, tmp_path, plan={}, ui_sequence=[], mcp_tools_call=_MCP_OK,
         launch_raises=True)
