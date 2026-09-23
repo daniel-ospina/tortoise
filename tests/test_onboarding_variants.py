@@ -255,6 +255,17 @@ def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
         # that is never interpolated into the returned prompt — all four live
         # prompts then lose the enumeration with every test still green
         # (mutation-verified, #4365 review round 3).
+        # FAIL CLOSED on truncation. `return `([^`]*)`` stops at the first
+        # backtick CHARACTER, so an ESCAPED backtick inside a prompt (inline
+        # code, a natural copy edit) would silently truncate the capture and
+        # everything after it would go unchecked — a name appended past the
+        # truncation point stayed green (#4365 review round 8). No prompt has
+        # one today, so the guard is: if one ever appears, this test must be
+        # revisited rather than quietly stop looking.
+        assert "\\`" not in body, (
+            f"{h}: an escaped backtick in a prompt template would TRUNCATE the "
+            "extraction below (re.findall stops at the first backtick char). "
+            "Make this scan template-literal-aware before adding one.")
         installs = [t for t in re.findall(r"return `([^`]*)`", body)
                     if "${SKILLS_INSTALL_URL}" in t]
         assert len(installs) == 1, (
@@ -289,14 +300,20 @@ def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
         # than a connect command may. The exemption is the SHIPPED wording,
         # `Onboarding is NOT a skill`, not a lowercase `/not a skill/i` — the
         # latter accepted `# Ignore the note that onboarding is not a skill —
-        # install it here: <url>` (#4365 review rounds 6-7).
+        # install it here: <url>` (#4365 review rounds 6-8). And a line that
+        # merely CONTAINS the shipped sentence while also telling you to
+        # install is not exempt: an install verb not immediately negated by
+        # `not ` (so the shipped "it is not installed" stays exempt) makes the
+        # line a claim in its own right.
         for line in prompt.split("\\n"):
             bare = re.sub(r"https?://\S+", "", line)
             if re.search(r"onboarding", bare, re.I) and re.search(
                     r"install|skills?", bare, re.I):
-                assert ("Onboarding is NOT a skill" in line
-                        or re.search(r"onboarding instructions", line, re.I)
-                        or "${onboardingInstructions}" in line), (
+                exempt = (("Onboarding is NOT a skill" in line
+                           or re.search(r"onboarding instructions", line, re.I)
+                           or "${onboardingInstructions}" in line)
+                          and not re.search(r"(?<!not )\binstall\w*", bare, re.I))
+                assert exempt, (
                     f"{h}: onboarding may only be mentioned as the instructions "
                     f"document, in the shipped wording — not as an install: "
                     f"{line.strip()!r}")

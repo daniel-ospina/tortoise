@@ -3469,12 +3469,13 @@ async def health_security():
 async def version_info() -> dict:
     """Deployed build surface — clients detect an outdated server (#2208).
 
-    Public (no auth, like /health): a client or onboarding skill reads this
-    BEFORE authenticating to compare the running server against the version
-    it expects (skew detection — the #2208 failure class shipped code whose
-    server had silently drifted behind main). ``version`` is the package
-    version (tortoise.__version__, mirrors pyproject.toml); ``commit_sha`` is
-    the exact deploy commit, baked at deploy time by deploy-hosted.yml
+    Public (no auth, like /health): the onboarding instructions (not a skill —
+    #4365) and any client read this BEFORE authenticating to compare the
+    running server against the version it expects (skew detection — the #2208
+    failure class shipped code whose server had silently drifted behind main).
+    ``version`` is the package version (tortoise.__version__, mirrors
+    pyproject.toml); ``commit_sha`` is the exact deploy commit, baked at
+    deploy time by deploy-hosted.yml
     (TORTOISE_GIT_SHA=${GITHUB_SHA} staged into the release env). Null when
     no deploy pipeline set it (selfhost / local dev). Never touches the DB.
     """

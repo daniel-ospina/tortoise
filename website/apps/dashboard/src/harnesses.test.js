@@ -155,16 +155,30 @@ test('#4365: no connect copy claims onboarding as an installed skill, and each n
     for (const line of text.split('\n')) {
       if (!/onboarding/i.test(line)) continue
       onboardingLines.add(line.trim())
-      for (const url of line.match(/https?:\/\/\S+/gi) || []) {
-        assert.equal(url.replace(/[.,)]+$/, ''), ONBOARDING_INSTRUCTIONS_URL,
-          `${label}: an onboarding line may only point at the approved document: ${line.trim()}`)
+      // Any URL, not just http(s): a protocol-relative or non-http endpoint is
+      // still a URL, and `//evil.example.com` passed the http-only match
+      // (#4365 review round 8). Matched from `//` so every scheme is seen, then
+      // compared by suffix against the approved document so surrounding prose
+      // punctuation can vary freely — requiring an exact whole match FALSE-RED
+      // the approved URL whenever it was quoted, bracketed, or followed by a
+      // colon (#4365 review round 8).
+      for (const raw of line.match(/\/\/\S+/gi) || []) {
+        const url = raw.replace(/^[<"'(\[]+/, '').replace(/[>"'),\]:;.]+$/, '')
+        assert.ok(ONBOARDING_INSTRUCTIONS_URL.endsWith(url),
+          `${label}: an onboarding line may only point at the approved document ` +
+          `(got ${url}): ${line.trim()}`)
       }
       // Strip URLs first: the document's own path contains `skills/`, which is
       // not a claim that onboarding is installable.
-      const bare = line.replace(/https?:\/\/\S+/gi, '')
-      const installsOnboarding = /install/i.test(bare) || /\bskills?\b/i.test(bare)
-      if (installsOnboarding) {
-        assert.ok(line.includes(ONBOARDING_SENTENCE) || /onboarding instructions/i.test(line),
+      const bare = line.replace(/\/\/\S+/gi, '')
+      // `(?<!not )` keeps the shipped "it is not installed" exempt while still
+      // catching a line that merely CONTAINS the approved sentence and then
+      // tells you to install (#4365 review round 8).
+      const installVerb = /(?<!not )\binstall\w*/i
+      if (/onboarding/i.test(bare) && (/install/i.test(bare) || /\bskills?\b/i.test(bare))) {
+        const exempt = (line.includes(ONBOARDING_SENTENCE)
+          || /onboarding instructions/i.test(line)) && !installVerb.test(bare)
+        assert.ok(exempt,
           `${label}: onboarding may only be mentioned as the instructions \n` +
           `document, in the shipped wording ("${ONBOARDING_SENTENCE}") — not as an install.\n` +
           `Offending line: ${line.trim()}`)
