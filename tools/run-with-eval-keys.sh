@@ -199,10 +199,14 @@ unset "${_RWEK_MANAGED_KEYS[@]}"
 #      `splitlines()` treats it as one — only a trailing `\r` (CRLF) is
 #      stripped, which is what a `.env` written on this platform looks like.)
 #
-#      "Already set" is judged against the shell's own variables, which — with
-#      every launcher variable in the reserved `_RWEK_`/`_rwek_` namespace and
-#      that namespace refused below — means exactly "inherited from the caller,
-#      or loaded from an earlier `.env` line".
+#      "Already set" is judged by exact variable NAME against the environment
+#      this script INHERITED (`compgen -e`), plus the keys an earlier `.env`
+#      line already filled — never by "is some shell variable set", which
+#      would also catch bash's own non-exported internals (`PS4`, `IFS`, …)
+#      and silently drop a `.env` key naming one. Names only, newline-
+#      delimited, so a value containing `\nKEY=` cannot forge a hit.
+_RWEK_INHERITED_NAMES=$'\n'"$(compgen -e)"$'\n'
+_RWEK_LOADED_NAMES=$'\n'
 if [ -f "$_RWEK_ENV_FILE" ] && [ -r "$_RWEK_ENV_FILE" ]; then
   while IFS= read -r _rwek_raw || [ -n "${_rwek_raw:-}" ]; do
     _rwek_line=$(trim "${_rwek_raw%$'\r'}")
@@ -250,8 +254,14 @@ if [ -f "$_RWEK_ENV_FILE" ] && [ -r "$_RWEK_ENV_FILE" ]; then
 
     if is_managed_key "$_rwek_key"; then
       export "$_rwek_key=$_rwek_value"
-    elif [ -z "${!_rwek_key+x}" ]; then
-      export "$_rwek_key=$_rwek_value"   # absent — fill (first `.env` line wins)
+    else
+      case "$_RWEK_INHERITED_NAMES$_RWEK_LOADED_NAMES" in
+        *$'\n'"$_rwek_key"$'\n'*) ;;   # inherited / already loaded — first wins
+        *)
+          export "$_rwek_key=$_rwek_value"
+          _RWEK_LOADED_NAMES=$_RWEK_LOADED_NAMES$_rwek_key$'\n'
+          ;;
+      esac
     fi
   done <"$_RWEK_ENV_FILE"
 else

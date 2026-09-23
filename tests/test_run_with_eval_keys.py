@@ -144,9 +144,9 @@ class RunWithEvalKeysTests(unittest.TestCase):
         (the #4860 failure mode for the new provider) with a green suite.
         ``tortoise/model_adapters.py`` is covered too — both its
         ``_PROVIDER_KEY_ENV`` registry AND every ``key_env = "…"`` class
-        attribute declared anywhere under ``tortoise/*.py``, so a new adapter
-        cannot escape either (VeniceModel is the precedent: it lives only here,
-        not in ``_PROVIDERS``).
+        attribute declared anywhere in the ``tortoise`` package, so a new
+        adapter cannot escape either (VeniceModel is the precedent: it lives
+        only here, not in ``_PROVIDERS``).
         """
         declared = parse_managed_keys(WRAPPER)
         self.assertEqual(declared, set(MANAGED))
@@ -159,11 +159,11 @@ class RunWithEvalKeysTests(unittest.TestCase):
         derived = {key for _url, key in _PROVIDERS.values() if key}
         derived |= set(_LLM_PROVIDERS)
         derived |= set(_PROVIDER_KEY_ENV.values())
-        # every adapter class attribute in the package, so a new adapter in a
-        # new module (not just model_adapters.py) still reddens this guard
+        # every adapter class attribute in the package — recursive, so a new
+        # adapter in a subpackage (not just tortoise/*.py) still reddens this
         adapters_src = "\n".join(
             p.read_text(encoding="utf-8")
-            for p in sorted((ROOT / "tortoise").glob("*.py"))
+            for p in sorted((ROOT / "tortoise").rglob("*.py"))
         )
         derived |= set(
             re.findall(
@@ -175,8 +175,8 @@ class RunWithEvalKeysTests(unittest.TestCase):
         self.assertEqual(
             derived,
             declared,
-            "the wrapper's MANAGED_KEYS drifted from the provider keys the "
-            "code reads — manage the new key in tools/run-with-eval-keys.sh",
+            "the wrapper's _RWEK_MANAGED_KEYS drifted from the provider keys "
+            "the code reads — manage the new key in tools/run-with-eval-keys.sh",
         )
 
     def test_usage_error_without_command(self):
@@ -292,6 +292,20 @@ class RunWithEvalKeysTests(unittest.TestCase):
         r = self.run_wrapper(["sh", "-c", 'printf "%s" "$TORTOISE_DB_URI"'])
         self.assertEqual(r.stdout, "docker://:falkordb@localhost:6379/from-env-file")
 
+    def test_first_occurrence_of_a_duplicate_env_key_wins(self):
+        # `_load_dotenv` never overrides a key it has already set, so the FIRST
+        # `.env` occurrence wins — the child env must agree.
+        env_file = Path(self._tmp.name) / "dup.env"
+        env_file.write_text(
+            "EVALTEST_DUP=first\nEVALTEST_DUP=second\n", encoding="utf-8"
+        )
+        r = self.run_wrapper(
+            ["sh", "-c", 'printf "%s" "$EVALTEST_DUP"'],
+            env=self.base_env(EVAL_KEYS_ENV_FILE=str(env_file)),
+            use_fixture=False,
+        )
+        self.assertEqual(r.stdout, "first", r.stderr)
+
     # ── .env parsing semantics (mirrors _load_dotenv) ──────────────────
 
     def test_parses_export_quotes_and_comments(self):
@@ -375,6 +389,19 @@ class RunWithEvalKeysTests(unittest.TestCase):
         # and every managed key is still declared
         for key in MANAGED:
             self.assertIn(f"[eval-keys] {key} ", r.stderr)
+
+    def test_env_key_naming_a_non_exported_shell_variable_is_still_loaded(self):
+        # `_load_dotenv` judges "already set" by the process ENVIRONMENT, so a
+        # `.env` key naming a bash-internal, NON-exported variable (PS4 here)
+        # is still loaded. A "is this shell variable set" probe would drop it.
+        env_file = Path(self._tmp.name) / "internals.env"
+        env_file.write_text("PS4=TRACEprompt+\n", encoding="utf-8")
+        r = self.run_wrapper(
+            ["sh", "-c", 'printf "%s" "$PS4"'],
+            env=self.base_env(EVAL_KEYS_ENV_FILE=str(env_file)),
+            use_fixture=False,
+        )
+        self.assertEqual(r.stdout, "TRACEprompt+", r.stderr)
 
     def test_multiline_ambient_value_does_not_shadow_an_env_key(self):
         # "Already inherited" is judged by variable NAME, never by scanning a
