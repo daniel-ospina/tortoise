@@ -97,6 +97,9 @@ def _reset_rerank_state(force_sparse_tfidf):
     rerank._fail_cache.clear()
     EmbeddingModel._reset()
     # force_sparse_tfidf (tests/conftest.py) pins EmbeddingModel.get -> None.
+    # #4718: that pin now trips the CLI's dense-leg gate, which is REQUIRED by
+    # default, so every run_main call in this module passes the explicit
+    # --skip-preflight waiver (see the CLI section below).
     yield
     rerank._scorer_cache.clear()
     rerank._fail_cache.clear()
@@ -680,7 +683,8 @@ def _run_cli(tmp_path, *extra, monkeypatch=None):
         _inject_fake(monkeypatch)
     out = tmp_path / "report.json"
     report = run_main(["--data", str(MINI), "--limit", "5", "--split", "s",
-                       "--mock", "--output", str(out), *extra])
+                       "--mock", "--skip-preflight",
+                       "--output", str(out), *extra])
     return report, out
 
 
@@ -688,7 +692,8 @@ def test_cli_rerank_smoke(tmp_path, monkeypatch):
     _inject_fake(monkeypatch)
     out = tmp_path / "report.json"
     report = run_main(["--data", str(MINI), "--limit", "5", "--split", "s",
-                       "--mock", "--rerank", "--output", str(out)])
+                       "--mock", "--skip-preflight", "--rerank",
+                       "--output", str(out)])
     rr = report["rerank"]
     assert rr["enabled"] is True
     assert rr["model"] == rerank.RERANK_MODEL_DEFAULT
@@ -713,7 +718,8 @@ def test_cli_rerank_off_report_has_no_rerank_keys(tmp_path, monkeypatch):
     monkeypatch.setenv("TORTOISE_LME_RERANK", "1")  # leaked env + explicit
     out = tmp_path / "report.json"                  # --no-rerank: the
     report = run_main(["--data", str(MINI), "--limit", "5", "--split", "s",
-                       "--mock", "--no-rerank", "--output", str(out)])
+                       "--mock", "--skip-preflight", "--no-rerank",
+                       "--output", str(out)])
     assert "rerank" not in report
     assert "rerank" not in report["latency_ms"]     # zero-keys contract covers
     assert "rerank" not in report["retrieval"]      # ALL report surfaces
@@ -726,15 +732,18 @@ def test_cli_rerank_off_report_has_no_rerank_keys(tmp_path, monkeypatch):
 def test_cli_rerank_invalid_lambda_fails_fast(tmp_path, capsys):
     with pytest.raises(SystemExit):
         run_main(["--data", str(MINI), "--limit", "5", "--split", "s",
-                  "--mock", "--rerank", "--rerank-lambda", "1.5",
+                  "--mock", "--skip-preflight", "--rerank",
+                  "--rerank-lambda", "1.5",
                   "--output", str(tmp_path / "r.json")])
     with pytest.raises(SystemExit):
         run_main(["--data", str(MINI), "--limit", "5", "--split", "s",
-                  "--mock", "--rerank", "--rerank-cap", "0",
+                  "--mock", "--skip-preflight", "--rerank",
+                  "--rerank-cap", "0",
                   "--output", str(tmp_path / "r.json")])
     with pytest.raises(SystemExit):
         run_main(["--data", str(MINI), "--limit", "5", "--split", "s",
-                  "--mock", "--rerank", "--rerank-pool", "0",
+                  "--mock", "--skip-preflight", "--rerank",
+                  "--rerank-pool", "0",
                   "--output", str(tmp_path / "r.json")])
     # no checkpoint written, no questions executed
 
@@ -742,7 +751,8 @@ def test_cli_rerank_invalid_lambda_fails_fast(tmp_path, capsys):
 def test_cli_rerank_boundary_values_accepted(tmp_path, monkeypatch):
     _inject_fake(monkeypatch)
     report = run_main(["--data", str(MINI), "--limit", "1", "--split", "s",
-                       "--mock", "--rerank", "--rerank-cap", "1",
+                       "--mock", "--skip-preflight", "--rerank",
+                       "--rerank-cap", "1",
                        "--rerank-lambda", "0.0",
                        "--output", str(tmp_path / "r2.json")])
     assert report["rerank"]["per_session_cap"] == 1
@@ -757,7 +767,8 @@ def test_cli_rerank_all_degraded(tmp_path, monkeypatch):
                         lambda model=None: (None, "load failed: outage"))
     out = tmp_path / "report.json"
     report = run_main(["--data", str(MINI), "--limit", "5", "--split", "s",
-                       "--mock", "--rerank", "--output", str(out)])
+                       "--mock", "--skip-preflight", "--rerank",
+                       "--output", str(out)])
     rr = report["rerank"]
     assert rr["degraded_n"] == 5
     assert rr["applied_fraction"] == 0.0
@@ -774,17 +785,17 @@ def test_env_out_of_range_fails_fast(tmp_path, monkeypatch):
     monkeypatch.setenv("TORTOISE_LME_RERANK_CAP", "0")
     with pytest.raises(SystemExit):
         run_main(["--data", str(MINI), "--limit", "1", "--split", "s",
-                  "--mock", "--rerank"])
+                  "--mock", "--skip-preflight", "--rerank"])
     monkeypatch.delenv("TORTOISE_LME_RERANK_CAP", raising=False)
     monkeypatch.setenv("TORTOISE_LME_RERANK_LAMBDA", "1.5")
     with pytest.raises(SystemExit):
         run_main(["--data", str(MINI), "--limit", "1", "--split", "s",
-                  "--mock", "--rerank"])
+                  "--mock", "--skip-preflight", "--rerank"])
     monkeypatch.delenv("TORTOISE_LME_RERANK_LAMBDA", raising=False)
     monkeypatch.setenv("TORTOISE_LME_RERANK_POOL", "0")
     with pytest.raises(SystemExit):
         run_main(["--data", str(MINI), "--limit", "1", "--split", "s",
-                  "--mock", "--rerank"])
+                  "--mock", "--skip-preflight", "--rerank"])
 
 
 def test_env_parse_garbage_and_negative(tmp_path, monkeypatch):
@@ -813,7 +824,8 @@ def test_effective_pool_recorded_truthfully(tmp_path, monkeypatch):
     _inject_fake(monkeypatch)
     out = tmp_path / "report.json"
     report = run_main(["--data", str(MINI), "--limit", "5", "--split", "s",
-                       "--mock", "--rerank", "--rerank-pool", "40",
+                       "--mock", "--skip-preflight", "--rerank",
+                       "--rerank-pool", "40",
                        "--k", "5,10,20,50", "--output", str(out)])
     assert report["rerank"]["pool_size"] == 50
 
