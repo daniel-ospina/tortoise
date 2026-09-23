@@ -1487,6 +1487,7 @@ durations:
   test_platform_seams.py: 73.3
   test_2952_degraded_read.py: 70.0   # #2952 (B)+(C): docker-lane warm-up/degraded-read suite
   test_quota.py: 65.3
+  test_rotate_key.py: 3.6
   # #3501: the migration-backlog gate. A pure static scan of website/ (no
   # wrangler, no server), so it runs in the python-ci matrix like any other
   # static guard. Measured 53s-90s standalone across runs — a SINGLE SAMPLE of a
