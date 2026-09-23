@@ -200,6 +200,64 @@ def test_m8_installer_still_delivers_the_onboarding_instructions():
 # The served connect surfaces that tell a user/agent what the installer ships.
 DASHBOARD_SRC = REPO_ROOT / "website" / "apps" / "dashboard" / "src"
 
+# ── the content rules a rendered onboarding surface must satisfy ──────────
+#
+# Applied to BOTH the four returned wizard prompts AND the shared
+# `onboardingInstructions` declaration they interpolate. The declaration sits
+# OUTSIDE every `_harness_branch` body (main.jsx:940, the first branch starts at
+# :941), so pinning it with two weaker membership checks left the ONE string
+# every live prompt renders unscanned: a skill name, a hostile URL or an
+# escaped backtick appended to it reached the user with BOTH suites green
+# (#4365 review round 9).
+_ALLOWED_PROMPT_TOKENS = {
+    "tortoise",  # the product name in "Install the Tortoise skills"
+    "tortoise_api_key", "tortoise_create_point", "tortoise_health",  # MCP
+}
+_NEGATION = re.compile(r"\b(no|not|isn'?t|aren'?t|wasn'?t|never|without|nor)\b",
+                       re.I)
+_URL_SHAPED = re.compile(r"//\S+|\b[a-z0-9-]+(?:\.[a-z0-9-]+)+/\S*", re.I)
+
+
+def _scan_rendered_onboarding(label: str, text: str) -> None:
+    """The three #4365 content rules, applied to a rendered prompt template.
+
+    (1) no skill is named by hand — the set arrives via ``${SKILLS_LIST}``;
+    (2) an onboarding line points only at the approved document;
+    (3) onboarding is never presented as an installable.
+    """
+    found = {t.lower() for t in
+             re.findall(r"[a-z0-9_-]*tortoise[a-z0-9_-]*", text, re.I)}
+    assert found <= _ALLOWED_PROMPT_TOKENS, (
+        f"{label}: must name no skill by hand (the set arrives via "
+        f"${{SKILLS_LIST}}); unexpected tokens: "
+        f"{sorted(found - _ALLOWED_PROMPT_TOKENS)}")
+    for line in text.split("\\n"):
+        if not re.search(r"onboarding", line, re.I):
+            continue
+        # `//evil.example.com` AND the scheme-less `evil.example.com/onboarding`
+        # are both endpoint references; `${...}` interpolations are removed
+        # first, because the approved URL arrives as one.
+        for raw in _URL_SHAPED.findall(re.sub(r"\$\{[^}]*\}", "", line)):
+            url = raw.strip("<>\"'([`").rstrip("<>\"'),]:;.`")
+            assert "app.premiselabs.co" in url, (
+                f"{label}: an onboarding line may only point at the approved "
+                f"document (got {url!r}): {line.strip()!r}")
+        if not re.search(r"install|skills?", line, re.I):
+            continue
+        # An install-family VERB makes the line a claim unless it is negated.
+        # `\binstall\w*` missed `reinstall`/`preinstall` because the trigger is
+        # an unanchored substring test, and a fixed-width lookbehind made
+        # `isn't installed` / `not currently installed` false REDs while `/i`
+        # turned `NOT install` into a negation (#4365 review round 9).
+        claims = [m for m in re.finditer(r"\w*install\w*", line, re.I)
+                  if not _NEGATION.search(line[max(0, m.start() - 30):m.start()])]
+        exempt = (re.search(r"not a skill", line, re.I)
+                  or re.search(r"onboarding instructions", line, re.I))
+        assert exempt and not claims, (
+            f"{label}: onboarding may only be mentioned as the instructions "
+            f"document, in the shipped wording — not as an install: "
+            f"{line.strip()!r}")
+
 
 def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
     """#4365: the served connect copy must not claim an install the installer
@@ -245,6 +303,19 @@ def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
     assert "tortoise-onboarding" not in wizard, (
         "wizard prompts must not claim onboarding arrives via the installer — "
         "it is instructions, not a skill")
+    # FAIL CLOSED on truncation, over the WHOLE wizard region including the
+    # shared declaration. `const onboardingInstructions = `([^`]*)`` stops at the
+    # first backtick CHARACTER, so an ESCAPED backtick anywhere in a template
+    # would silently truncate a capture and everything after it would go
+    # unchecked — a name appended past the truncation point stayed green
+    # (#4365 review rounds 8-9). No template has one today, so the guard is: if
+    # one ever appears, this test must be revisited rather than quietly stop
+    # looking.
+    assert "\\`" not in wizard, (
+        "an escaped backtick in a prompt template would TRUNCATE the `return `"
+        "`([^`]*)`` / `const onboardingInstructions = `([^`]*)`` extractions "
+        "below (re.findall stops at the first backtick char). Make this scan "
+        "template-literal-aware before adding one.")
     # PER PROMPT — a prompt that loses its claim entirely, or that states a
     # different set, must fail here (`assert wizard_claims` over a findall
     # stayed GREEN with one prompt's whole enumeration deleted).
@@ -255,17 +326,6 @@ def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
         # that is never interpolated into the returned prompt — all four live
         # prompts then lose the enumeration with every test still green
         # (mutation-verified, #4365 review round 3).
-        # FAIL CLOSED on truncation. `return `([^`]*)`` stops at the first
-        # backtick CHARACTER, so an ESCAPED backtick inside a prompt (inline
-        # code, a natural copy edit) would silently truncate the capture and
-        # everything after it would go unchecked — a name appended past the
-        # truncation point stayed green (#4365 review round 8). No prompt has
-        # one today, so the guard is: if one ever appears, this test must be
-        # revisited rather than quietly stop looking.
-        assert "\\`" not in body, (
-            f"{h}: an escaped backtick in a prompt template would TRUNCATE the "
-            "extraction below (re.findall stops at the first backtick char). "
-            "Make this scan template-literal-aware before adding one.")
         installs = [t for t in re.findall(r"return `([^`]*)`", body)
                     if "${SKILLS_INSTALL_URL}" in t]
         assert len(installs) == 1, (
@@ -277,55 +337,20 @@ def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
             f"SKILLS_LIST")
         assert "${onboardingInstructions}" in prompt, (
             f"{h}: the RETURNED prompt must name the onboarding instructions")
-        # …and the returned prompt must not name ANY skill by hand. The shipped
-        # set arrives via ${SKILLS_LIST}; the only tortoise-shaped tokens a
-        # prompt may contain are the MCP tool names it calls. A hardcoded fourth
-        # skill name (e.g. `tortoise-rebuild`) appended to a prompt was green in
-        # both suites (#4365 review round 6) — this closes it by token SET, not
-        # by regex over source structure.
-        # `tortoise` is the product name ("Install the Tortoise skills"), the
-        # two `tortoise_*` are the MCP tools the prompt calls — neither is a
-        # skill. Lowercased so capitalisation cannot smuggle a name through
-        # (`Tortoise-Rebuild` was green against the lowercase-only version,
-        # #4365 review round 7).
-        ALLOWED_PROMPT_TOKENS = {"tortoise", "tortoise_api_key",
-                                "tortoise_create_point", "tortoise_health"}
-        found = {t.lower() for t in
-                 re.findall(r"[a-z0-9_-]*tortoise[a-z0-9_-]*", prompt, re.I)}
-        assert found <= ALLOWED_PROMPT_TOKENS, (
-            f"{h}: the returned prompt may name no skill by hand (the set "
-            f"arrives via ${{SKILLS_LIST}}); unexpected tokens: "
-            f"{sorted(found - ALLOWED_PROMPT_TOKENS)}")
-        # …and the rendered prompt may no more mention onboarding as an install
-        # than a connect command may. The exemption is the SHIPPED wording,
-        # `Onboarding is NOT a skill`, not a lowercase `/not a skill/i` — the
-        # latter accepted `# Ignore the note that onboarding is not a skill —
-        # install it here: <url>` (#4365 review rounds 6-8). And a line that
-        # merely CONTAINS the shipped sentence while also telling you to
-        # install is not exempt: an install verb not immediately negated by
-        # `not ` (so the shipped "it is not installed" stays exempt) makes the
-        # line a claim in its own right.
-        for line in prompt.split("\\n"):
-            bare = re.sub(r"https?://\S+", "", line)
-            if re.search(r"onboarding", bare, re.I) and re.search(
-                    r"install|skills?", bare, re.I):
-                exempt = (("Onboarding is NOT a skill" in line
-                           or re.search(r"onboarding instructions", line, re.I)
-                           or "${onboardingInstructions}" in line)
-                          and not re.search(r"(?<!not )\binstall\w*", bare, re.I))
-                assert exempt, (
-                    f"{h}: onboarding may only be mentioned as the instructions "
-                    f"document, in the shipped wording — not as an install: "
-                    f"{line.strip()!r}")
-    # …and the shared line must SAY something: interpolating an empty constant
-    # satisfied the per-prompt assertions above while the four live prompts lost
-    # the whole point of #4365. (An empty body is caught incidentally, because
-    # the URL then disappears from the slice; a bodyless sentence was GREEN.)
-    m = re.search(r"const onboardingInstructions = `([^`]*)`", wizard)
-    assert m, "the shared onboarding-instructions line must be declared"
-    assert "${ONBOARDING_INSTRUCTIONS_URL}" in m.group(1), (
+        # …and the rules in §1 of this module apply to EVERY rendered prompt.
+        _scan_rendered_onboarding(h, prompt)
+    # …including the SHARED declaration every prompt interpolates, which lives
+    # outside all four `_harness_branch` bodies and so was missed by the loop
+    # above entirely (#4365 review round 9).
+    declared = re.search(r"const onboardingInstructions = `([^`]*)`", wizard)
+    assert declared, "the shared onboarding-instructions line must be declared"
+    _scan_rendered_onboarding("onboardingInstructions", declared.group(1))
+    # …and it must SAY something. Interpolating an empty constant satisfied the
+    # per-prompt assertions while the four live prompts lost the whole point of
+    # #4365: a bodyless sentence was GREEN.
+    assert "${ONBOARDING_INSTRUCTIONS_URL}" in declared.group(1), (
         "the shared line must interpolate the served instructions URL")
-    assert "not a skill" in m.group(1), (
+    assert "not a skill" in declared.group(1), (
         "the shared line must say onboarding is not a skill")
     # NOTE: the step-2 skills primer at main.jsx:~7950 is NOT pinned here and is
     # deliberately NOT made to interpolate SKILLS_LIST — it lives INSIDE the

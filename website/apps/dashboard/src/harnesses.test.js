@@ -159,25 +159,54 @@ test('#4365: no connect copy claims onboarding as an installed skill, and each n
       // still a URL, and `//evil.example.com` passed the http-only match
       // (#4365 review round 8). Matched from `//` so every scheme is seen, then
       // compared by suffix against the approved document so surrounding prose
-      // punctuation can vary freely — requiring an exact whole match FALSE-RED
-      // the approved URL whenever it was quoted, bracketed, or followed by a
-      // colon (#4365 review round 8).
+      // punctuation can vary freely. The strip must include the BACKTICK: a
+      // backtick-quoted URL is the natural markdown inline-code form, and
+      // leaving it out FALSE-REDded correct copy — a false RED contradicting
+      // this PR's own mutation row (#4365 review round 9).
+      const strip = (s) => s.replace(/^[<>"'(\[`]+/, '').replace(/[<>"'),\]:;.`]+$/, '')
       for (const raw of line.match(/\/\/\S+/gi) || []) {
-        const url = raw.replace(/^[<"'(\[]+/, '').replace(/[>"'),\]:;.]+$/, '')
+        const url = strip(raw)
         assert.ok(ONBOARDING_INSTRUCTIONS_URL.endsWith(url),
           `${label}: an onboarding line may only point at the approved document ` +
           `(got ${url}): ${line.trim()}`)
       }
-      // Strip URLs first: the document's own path contains `skills/`, which is
-      // not a claim that onboarding is installable.
+      // …and a host written WITHOUT a scheme. `evil.example.com/onboarding`
+      // carried no `//`, so the matcher above never saw it (#4365 round 9).
+      for (const raw of line.match(/\b[a-z0-9-]+(?:\.[a-z0-9-]+)+\/\S*/gi) || []) {
+        const url = strip(raw)
+        assert.ok(ONBOARDING_INSTRUCTIONS_URL.includes(url),
+          `${label}: an onboarding line may only point at the approved document ` +
+          `(got ${url}): ${line.trim()}`)
+      }
+      // Strip those out before the verb test: the document's own path contains
+      // `skills/`, which is not a claim that onboarding is installable.
       const bare = line.replace(/\/\/\S+/gi, '')
-      // `(?<!not )` keeps the shipped "it is not installed" exempt while still
-      // catching a line that merely CONTAINS the approved sentence and then
-      // tells you to install (#4365 review round 8).
-      const installVerb = /(?<!not )\binstall\w*/i
+        .replace(/\b[a-z0-9-]+(?:\.[a-z0-9-]+)+\/\S*/gi, '')
+      // An install-family VERB means the line is making a claim unless THAT
+      // verb is negated. Three attempts got this wrong: `\binstall` missed
+      // `reinstall`/`preinstall` (the trigger is an unanchored substring test);
+      // a fixed-width lookbehind made `isn't installed` / `not currently
+      // installed` false REDs while `/i` made `NOT install` a negation; and a
+      // 30-char lookback let the approved sentence's OWN "NOT a skill" negate a
+      // LATER verb, so `Onboarding is NOT a skill — reinstall the
+      // tortoise-onboarding skill` passed (#4365 review round 9).
+      // A negation now counts only if it is adjacent to the verb: the gap
+      // between them may hold an adverb (`not currently installed`) but no
+      // clause break, so a negation in a previous clause cannot launder a
+      // following claim.
+      const NEGATION = /\b(no|not|isn'?t|aren'?t|wasn'?t|never|without|nor)\b/gi
+      const CLAUSE_BREAK = /[\u2014;.,:!?)]/
+      const negated = (before) => {
+        let last = null
+        for (const n of before.matchAll(NEGATION)) last = n
+        return last !== null
+          && !CLAUSE_BREAK.test(before.slice(last.index + last[0].length))
+      }
+      const installClaims = [...bare.matchAll(/\w*install\w*/gi)]
+        .some((m) => !negated(bare.slice(Math.max(0, m.index - 30), m.index)))
       if (/onboarding/i.test(bare) && (/install/i.test(bare) || /\bskills?\b/i.test(bare))) {
         const exempt = (line.includes(ONBOARDING_SENTENCE)
-          || /onboarding instructions/i.test(line)) && !installVerb.test(bare)
+          || /onboarding instructions/i.test(line)) && !installClaims
         assert.ok(exempt,
           `${label}: onboarding may only be mentioned as the instructions \n` +
           `document, in the shipped wording ("${ONBOARDING_SENTENCE}") — not as an install.\n` +
