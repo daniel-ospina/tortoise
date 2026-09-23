@@ -41,6 +41,29 @@ def test_docs_only_runs_tier1():
     assert set(r["test_files"]) == _tier1()
 
 
+def test_docs_scanning_gates_stay_in_tier1():
+    # #4309: a docs-only PR runs *only* tier1.
+    #
+    # A gate whose whole job is to stop a claim being re-scattered across the
+    # doc tree is silent on the exact change it exists to catch unless it is
+    # registered in `tier1` — every other surface needs a Python path to be
+    # selected. #4283 registered the durability gate in `tier1` + `core` for
+    # exactly this reason; the older #4179 retention gate stayed out of `tier1`
+    # and so ran no part of its scan on a docs-only edit (e.g. to
+    # docs/retention-and-deletion.md), letting a new unlinked retention claim
+    # merge green. Pin both: dropping either from `tier1` re-opens that hole.
+    tier1 = _tier1()
+    assert "test_retention_promise.py" in tier1, (
+        "#4179 retention/deletion anti-scatter gate must stay in tier1 — a "
+        "docs-only PR runs only tier1, so without it a new unlinked retention "
+        "claim in docs/ merges green (#4309)"
+    )
+    assert "test_durability_posture.py" in tier1, (
+        "#2881 durability gate must stay in tier1 — same docs-only silent-drop "
+        "class (#4309)"
+    )
+
+
 def test_public_site_surface_change_selects_onboarding_and_skips_slow():
     """#3332: a public *site surface* change selects `onboarding`.
 
@@ -1114,8 +1137,9 @@ def test_duration_integrity():
 
 # ── #3400: duration-balanced full-matrix halves + durations coverage ──────
 # The push halves used to be index-parity (`fast[0::2]` / `fast[1::2]`) —
-# duration-blind, so half (b) collected the slow files by luck (a=29.7m vs
-# b=49.5m on the swept #3395 map) and blew the 55m watchdog. These pin the LPT pack (#1473)
+# duration-blind, so half (b) collected the slow files by luck, tilted the split
+# far past the ratio the assertion below allows, and blew the 55m watchdog
+# (#3400). These pin the LPT pack (#1473)
 # on the full-matrix path and the coverage floor that keeps the `durations`
 # map from rotting back to a handful of entries.
 

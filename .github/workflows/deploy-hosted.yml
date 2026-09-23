@@ -67,24 +67,34 @@ on:
       - 'uv.lock'
   workflow_dispatch:
     inputs:
-      # #1719 (Task 7): DB-health gate bypass for incident-fix deploys.
-      # Defaults TRUE during the incident window (RC3 FalkorDB restore is
-      # in flight — db.ok=false is the CURRENT prod state, and a hard gate
-      # would block the very fix that restores it). Flip to false once the
-      # data plane is healthy so the gate guards every deploy again.
+      # #1719 (Task 7): DB-health verification bypass for incident-fix deploys.
+      # Defaults FALSE — re-armed by #4605 (2026-09-22, UTC). This input was
+      # 'true' ONLY as the RC3 FalkorDB-restore mitigation, a dated
+      # incident-window state with its own exit condition ("flip to false once
+      # the data plane is healthy"). That condition was evaluated and MET:
+      # sampling https://api.premiselabs.co/health on 2026-09-22 returned
+      # db.ok=true on every completed response (db latency 2.4-713.7 ms
+      # against the 1500 ms probe budget) with /health/ready 200
+      # {"db":"connected","control_plane":"connected"}, so fail-closed
+      # verification no longer reddens a healthy deploy. DO NOT "restore" the
+      # incident-window default: bypass per run with this input, or per window
+      # with the SKIP_DB_HEALTH_GATE repo variable (docs/infra-runbook.md
+      # §8.2).
+      # Since #4538 it reports release health in its own job
+      # (`post-deploy-verify`) and does not colour the deploy job.
       # Emits a ::warning:: when bypassed (auditability — never silently
       # skipped).
       skip-db-health-gate:
-        description: 'Skip the post-deploy DB health gate (incident-fix deploys)'
+        description: 'Skip the post-deploy DB health verification (incident-fix deploys)'
         required: false
-        default: 'true'
+        default: 'false'
         type: boolean
       # #1929: incident-fix deploys must not be blocked by a packaging-gate
       # flake (the smoke builds Dockerfile.hosted locally, incl. the HF
       # model bake). Mirrors skip-db-health-gate; a skipped gate emits a
       # warning — never silent. Incident-window convention: set
       # vars.SKIP_PACK_SMOKE=true during packaging incidents, clear it after
-      # (same runbook as SKIP_DB_HEALTH_GATE).
+      # (docs/infra-runbook.md §8 — the SKIP_* bypass convention).
       skip-pack-smoke:
         description: 'Skip the pack-catalog smoke (incident-fix deploys)'
         required: false
@@ -98,7 +108,7 @@ on:
       # incident-fix deploys; exit-2 (could-not-determine: API error, shape
       # drift) can NEVER be bypassed. Incident-window convention: set
       # vars.SKIP_FLY_MACHINES_GUARD=true during incidents, CLEAR IT AFTER
-      # (same runbook as SKIP_DB_HEALTH_GATE).
+      # (docs/infra-runbook.md §8 — the SKIP_* bypass convention).
       skip-fly-machines-guard:
         description: 'Skip the Fly machine fleet guard (incident-fix deploys)'
         required: false
@@ -112,7 +122,8 @@ on:
       # emits a warning — never silent. Exit-2 (missing or empty secret list,
       # unparsable manifest) can NEVER be bypassed. Convention: set
       # vars.SKIP_FLY_SECRET_PROVENANCE=true during the incident, CLEAR IT AFTER,
-      # and declare the secret in .github/scripts/fly-managed-secrets.txt.
+      # and declare the secret in .github/scripts/fly-managed-secrets.txt
+      # (docs/infra-runbook.md §8.1 — the provenance gate).
       skip-fly-secret-provenance:
         description: 'Skip the Fly secret provenance guard (incident-fix deploys)'
         required: false
@@ -183,7 +194,8 @@ jobs:
     steps:
       - name: Warn when pack smoke bypassed (#1929)
         # Auditability — a bypassed pack gate must never be silent (mirrors
-        # the skip-db-health-gate warning convention below).
+        # the skip-db-health-gate warning convention, which since #4538 lives
+        # in the post-deploy-verify job, not in this one).
         if: ${{ inputs.skip-pack-smoke || vars.SKIP_PACK_SMOKE == 'true' }}
         run: |
           echo "::warning::pack-catalog smoke BYPASSED (skip-pack-smoke) — the hosted image ships without a pack gate"
@@ -488,7 +500,7 @@ jobs:
             exit 2
           fi
           if [ "$RC" -eq 1 ] && [ "${{ inputs.skip-fly-machines-guard || vars.SKIP_FLY_MACHINES_GUARD == 'true' }}" = "true" ]; then
-            echo "::warning::Fly machine guard violations BYPASSED (skip-fly-machines-guard) — orphan/crash-loop machines will NOT block this deploy. Clear the input/var after the incident (runbook: SKIP_DB_HEALTH_GATE)." >&2
+            echo "::warning::Fly machine guard violations BYPASSED (skip-fly-machines-guard) — orphan/crash-loop machines will NOT block this deploy. Clear the input/var after the incident (docs/infra-runbook.md §8 — the SKIP_* bypass convention)." >&2
             exit 0
           fi
           exit "$RC"
@@ -611,7 +623,7 @@ jobs:
           if [ -z "$OPENROUTER_API_KEY" ] && [ -n "$TORTOISE_SESSION_LLM_MODEL" ]; then
             echo "::notice::TORTOISE_SESSION_LLM_MODEL comes from a GitHub secret — the key it names must be configured"
           elif [ -z "$TORTOISE_SESSION_LLM_MODEL" ] && [ -z "$OPENROUTER_API_KEY" ]; then
-            echo "::warning::TORTOISE_SESSION_LLM_MODEL is the versioned openrouter default but OPENROUTER_API_KEY is not set on GitHub — session-capture extraction will fail until that key is configured or the model override is changed (docs/infra-runbook.md §4)"
+            echo "::warning::TORTOISE_SESSION_LLM_MODEL is the versioned openrouter default but OPENROUTER_API_KEY is not set on GitHub — session-capture extraction will fail until that key is configured or the model override is changed (docs/infra-runbook.md §4.6)"
           fi
           if [ -n "$TORTOISE_SESSION_LLM_MODEL" ]; then
             ARGS+=(TORTOISE_SESSION_LLM_MODEL="$TORTOISE_SESSION_LLM_MODEL")
@@ -710,15 +722,53 @@ jobs:
           exit 1
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_DEPLOY }}
-      - name: Post-deploy DB health gate (#1719 Task 7)
+
+  # ── Post-deploy verification (own job; #4538 decision, option b) ──────────
+  #
+  # WHY THIS IS A SEPARATE JOB
+  #   This check runs AFTER `flyctl deploy` has released the image and there is
+  #   NO rollback — it cannot PREVENT anything, it can only REPORT. While it was
+  #   the last step of `deploy-api`, its colour WAS the job's colour, so a red
+  #   verification was rendered as *the deploy failed* — the misattribution that
+  #   made a shipped, healthy release look failed. In its own job, `deploy-api`'s
+  #   conclusion is the DEPLOY's conclusion and this one's is its own: a red run
+  #   here means **the release is live and unhealthy**, never "the deploy failed".
+  #
+  # ⛔ OVERRIDES: the `post-deploy-verify` convention that a post-deploy check is
+  #   WARN-ONLY ("the deploy is already done … never blocks the pipeline") — this
+  #   verification deliberately stays **fail-closed**, because #1719's recorded
+  #   decision is that the pipeline must not report success for a release whose
+  #   graph DB plane is dead. A red run here means *the release is live and
+  #   unhealthy*, which is a real condition worth failing on; the false red that
+  #   made it read as *"the deploy failed"* is what #4545/#4548 removed.
+  #   Do NOT "tidy" this into warn-only: the false red is already fixed, and
+  #   silencing the real signal as well is the fail-open shape #4126 and #4545
+  #   were both fought over.
+  #
+  # Skipped when `deploy-api` did not succeed — there is no release to verify;
+  # this preserves the pre-#4538 behaviour when the deploy itself was skipped.
+  post-deploy-verify:
+    runs-on: ubuntu-latest
+    needs: deploy-api
+    if: ${{ needs.deploy-api.result == 'success' }}
+    steps:
+      # Own checkout: this job runs the repo script below.
+      - uses: actions/checkout@v4
+      - name: Post-deploy DB health verification (post-release; does not gate the deploy)
         # The deploy pipeline previously certified a GREEN deploy while the
         # graph DB was dead (NXDOMAIN, #1381 recurrence — /health returned
-        # 200 with status:degraded). Gate the deploy on BOTH planes:
+        # 200 with status:degraded). Verify the release on BOTH planes:
         # fail fast ONLY on app-unreachable (curl error); poll db.ok (the
         # FalkorDB data plane) for >=3 min (cold-start DB connection exceeds
         # 60s per #338; DNS propagation after a restart runs ~2 min per
         # #1381); then poll /health/ready (it ANDs the Supabase control plane
         # + the data plane) over its OWN budget, LAST.
+        #
+        # A FAILURE HERE MEANS: THE RELEASE IS LIVE AND UNHEALTHY. It does NOT
+        # mean the deploy failed — `flyctl deploy` already succeeded and the
+        # image is released. There is no rollback; the durable detector for the
+        # ongoing condition is the #3981-style runtime alert plus the
+        # availability watchdog (#2850). This is a release-health signal.
         #
         # The logic lives in .github/scripts/deploy-health-gate.sh so that it
         # is TESTABLE — its harness (.github/scripts/deploy-health-gate.test.sh,
@@ -732,11 +782,11 @@ jobs:
         # the repo variable SKIP_DB_HEALTH_GATE='true' (code-review P2 — on
         # push-triggered runs the inputs context is null, so the variable
         # lane is the ONLY way to bypass; set it during the incident window,
-        # clear it when RC3 is restored).
+        # clear it when the data plane is healthy).
         if: ${{ ! (inputs.skip-db-health-gate || vars.SKIP_DB_HEALTH_GATE == 'true') }}
         run: bash .github/scripts/deploy-health-gate.sh
         shell: bash
-      - name: Warn when DB health gate bypassed
+      - name: Warn when DB health verification bypassed
         if: ${{ inputs.skip-db-health-gate || vars.SKIP_DB_HEALTH_GATE == 'true' }}
         run: |
-          echo "::warning::DB health gate SKIPPED (skip-db-health-gate input or SKIP_DB_HEALTH_GATE repo variable). Clear it once the data plane is healthy (RC3 restored)."
+          echo "::warning::DB health verification SKIPPED (skip-db-health-gate input or SKIP_DB_HEALTH_GATE repo variable). Clear it once the data plane is healthy."

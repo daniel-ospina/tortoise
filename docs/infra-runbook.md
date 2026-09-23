@@ -7,7 +7,7 @@ subjects.team: epistemic-team
 aboutSubjects: tortoise-infra
 aboutObjects: fly-io, falkordb, cloudflare
 created: 2026-08-03
-updated: 2026-09-20
+updated: 2026-09-22
 ---
 
 # Tortoise Hosted Platform — Infrastructure Runbook
@@ -15,7 +15,7 @@ updated: 2026-09-20
 > **Retention/deletion windows:** the single source of truth is `docs/retention-and-deletion.md`. Do not restate a window here — link that document.
 
 **Epic:** #7711 (legacy provisioning epic — provenance) · availability watchdog: #2850
-**Last updated:** 2026-09-19
+**Last updated:** 2026-09-22
 
 ## 1. Initial Provisioning
 
@@ -714,7 +714,7 @@ above must not be read as assuming either outcome:
   `grace_period` is the configured `"180s"` — generous headroom the TCP check
   does not need. The listener exists within seconds of start (the ~85 s
   torch/model load does not gate a connect), and the ~2 min FalkorDB DNS tail
-  (#1381) is surfaced by the deploy workflow's DB health gate, not by this check.
+  (#1381) is surfaced by the deploy workflow's DB health verification, not by this check.
 - **If the clamp exists**: the effective grace period is **60 s**, still far
   longer than the seconds it takes the listener to bind, so the clamp is no
   longer a cold-start hazard for the TCP check. The historical worry — that a
@@ -780,7 +780,7 @@ Machines API / Uptime Kuma / the existing Telegram alerting used by the backup
 sweep) that fires when the public endpoint fails for >2 consecutive probes.
 
 The deploy workflow only probes at deploy time (`.github/workflows/deploy-hosted.yml`
-"Post-deploy DB health gate"), so during #2850 nothing alerted for ~35 min while
+"Post-deploy DB health verification"), so during #2850 nothing alerted for ~35 min while
 the machine was locally healthy and serving. `fly checks list` and the presence
 of `[PR01] no known healthy instances` in the proxy logs are the two signals
 that would have caught it immediately.
@@ -1389,6 +1389,152 @@ surface.
 - Only one machine exists, so any restart is a (multi-minute) outage by itself
   — there is no failover. A restart is therefore always the *last* automated
   resort, gated on a trustworthy verdict (see the egress control).
+
+## 8. Deploy Gates — the `SKIP_*` bypass convention and the Fly secret-provenance gate (#4126)
+
+`deploy-hosted.yml` runs a set of **fail-closed deploy gates**: migration drift
+(#1095), Fly machine orphan/crash-loop (#1896), Fly secret provenance (#4126),
+pack-catalog smoke (#1929), and post-release DB health (#1719 — since #4538 it
+runs in its own `post-deploy-verify` job and does not colour the deploy job).
+Some can be bypassed for an incident-fix deploy — and **a bypass is an
+incident-window state, not a setting.** **Not every gate is bypassable:** the
+migration-drift gate has no `if:` guard and no `SKIP_` lane by design (the #1001
+P0 recurred while a migration was missing from prod, so a missing token or an
+error must fail the deploy).
+
+### 8.1 The Fly secret-provenance gate (#4126)
+
+**What it checks.** Every name returned by `flyctl secrets list -a tortoise-y4mjjq`
+must have a declared *managing source* in version control. A name that exists
+only on Fly is drift by construction: it survives every deploy unversioned,
+nobody can rotate it from GitHub, and CI cannot see it. This gate exists because
+that exact state shipped an outage: `TORTOISE_SESSION_LLM_MODEL` and
+`OPENROUTER_API_KEY` were hand-set on Fly, the deployed key 403'd on every
+extraction call, and production answered `200` with `extracted: 0` for 50/50
+sessions — invisible to every other gate, because a name no file mentions cannot
+be compared against anything.
+
+- **Declared inventory (the contract):** `.github/scripts/fly-managed-secrets.txt`
+  — every Fly secret, with its managing source, the entry format, and each
+  token's constraints. **That file is authoritative for the grammar; the token
+  table below is a one-line orientation only, not the contract.**
+- **Checker:** `.github/scripts/check-fly-secret-drift.py` — in production it
+  reads the live list via `flyctl secrets list --app <app> --json` (the
+  `FLY_SECRETS_FILE` seam is what makes the test suite hermetic; tests:
+  `tests/test_fly_secret_drift.py`).
+- **Workflow step:** `Check Fly secret provenance (fail-closed)`. It runs before
+  the migration-drift gate so its output is visible on every deploy attempt, not
+  only on one that gets as far as Fly.
+
+The source tokens are:
+
+| Token | Meaning |
+|---|---|
+| `gh-secret:<GH_NAME>` | propagated by the workflow from the GitHub Actions secret `<GH_NAME>` (not always the same name — e.g. `GITHUB_CLIENT_ID` ← `GH_CLIENT_ID`) |
+| `workflow` | set by the workflow from non-secret context (`${GITHUB_SHA}`, a composed feature flag) |
+| `fly-toml-env` | applied from `fly.toml` `[env]` — versioned, and the deploy applies it |
+| `fly-only:<issue-ref>` | a **deliberately** out-of-band secret; the named issue carries the recorded decision (§8.3) |
+
+A bare `unmanaged` entry — present on Fly with no declared source — **FAILS the
+gate**. It names the #4126 defect precisely, not debt to be recorded.
+
+**Fail-closed, and the two exit classes.** Exit 1 = undeclared or stale
+declarations (the actionable incident-time class). Exit 2 = the gate *could not
+determine state* (missing/empty secret list, unparsable manifest, PyYAML
+provisioning failure, an unreadable `fly-only:` ref) — **exit 2 can NEVER be
+bypassed** and always blocks the deploy. A `gh-secret:X` declaration also needs
+its matching probe line in the workflow's `GH_SECRETS_PRESENT` block: no CI
+token can list repository secrets, so the run states which ones it carries, and
+a forgotten line FAILS the deploy for that name rather than passing it.
+
+### 8.2 The `SKIP_*` bypass convention
+
+Every bypassable gate has **two lanes**: a `workflow_dispatch` input and a repo
+variable with a `SKIP_` prefix. On a **push-triggered** run the `inputs` context
+is null, so the **repo variable is the only lane** — which is why the incident
+procedure sets the variable.
+
+| Repo variable | Dispatch input | Gate |
+|---|---|---|
+| `SKIP_DB_HEALTH_GATE` | `skip-db-health-gate` | post-release DB health verification (#1719) |
+| `SKIP_PACK_SMOKE` | `skip-pack-smoke` | pack-catalog smoke (#1929) |
+| `SKIP_FLY_MACHINES_GUARD` | `skip-fly-machines-guard` | Fly machine orphan/crash-loop guard (#1896) |
+| `SKIP_FLY_SECRET_PROVENANCE` | `skip-fly-secret-provenance` | Fly secret provenance (§8.1, #4126) |
+
+Rules that hold for every one of them:
+
+- **A bypass is never silent** — each emits a `::warning::` naming the gate it
+  skipped, so a run stays auditable after the fact.
+- **Set the variable for the incident window and CLEAR IT AFTER.** A bypass left
+  set means that gate guards no deploy — check it first when a gate seems never
+  to fire.
+- **How much a bypass skips depends on the gate's shape.** The two guards whose
+  wrapper translates the checker's exit code — provenance (#4126) and machines
+  (#1896) — are bypassed for **exit 1 only** (undeclared/stale declarations,
+  fleet violations); their **exit 2** (could not determine state) can **never**
+  be bypassed and always blocks the deploy. The other two are a plain
+  step/job-level `if:` — `SKIP_PACK_SMOKE` skips the whole packaging-smoke job,
+  and `SKIP_DB_HEALTH_GATE` skips the whole health step — so nothing in it
+  runs, and the bypass is not exit-class-limited.
+
+**A bypass is never the committed default.** Every `skip-*` dispatch input
+defaults to the non-bypass value, so clearing the repo variable re-arms the gate
+on a dispatch run for every gate in the table — the concrete defaults live in
+`.github/workflows/deploy-hosted.yml` (`workflow_dispatch.inputs`) and are not
+restated here. That was *not* true between #1719 and the #4605 re-arm:
+`skip-db-health-gate.default` was `'true'` during the RC3 restore window (when
+`db.ok=false` was the live prod state), so clearing the variable alone left the
+health verification skipped and the input also had to be passed as `false`.
+That default was an incident-window mitigation with its own exit condition —
+re-arm once the data plane is healthy — and #4605 re-armed it on 2026-09-22
+after sampling `/health` showed `db.ok=true` on every completed response.
+(`#4538` moved the check into its own job; it did not change this default.) If
+the data plane is unhealthy again, bypass **per run** via the input or **per
+window** via the variable — the committed default stays `false`.
+
+```bash
+gh variable list                                             # what is currently bypassed
+gh variable set    SKIP_FLY_SECRET_PROVENANCE --body true    # during the incident
+gh variable delete SKIP_FLY_SECRET_PROVENANCE                # after — REQUIRED
+```
+
+### 8.3 Why a name can be deliberately Fly-only (#661) — do NOT "tidy" it into a GitHub secret
+
+`REGISTRY_STREAM_KEY` is declared `fly-only:#661` in the manifest, and #661 is a
+**closed recorded decision**: the key must be *never present in GitHub*
+(operator out-of-band) so registry content confidentiality does not inherit the
+GitHub trust boundary — with its own E2E, "a GH workflow cannot decrypt a
+registry archive with the Fly-only key". Its `OVERRIDES:` marker is on #661.
+
+Moving it into a GitHub Actions secret **reverses that security decision**;
+retiring it breaks registry streaming. If you believe the decision is wrong, the
+route is to **reopen #661** and argue the evidence there — not to drop the
+`fly-only:` line. A new `fly-only:` entry needs an owner decision, not a
+convenience spelling; a bare `unmanaged` entry is not the same thing. Rotation
+stays out-of-band: `tools/rotate-backup-keys.py --role registry_stream`.
+
+### 8.4 When the gate fails, where to look
+
+1. The failing run's `::error::` names the exact Fly variable and, for a
+   `gh-secret:` declaration, the GitHub secret it expected.
+2. Read the entry (or the missing entry) in
+   `.github/scripts/fly-managed-secrets.txt` — its header contract states what
+   each source token requires.
+3. Inspect the live state:
+   ```bash
+   fly secrets list -a tortoise-y4mjjq
+   ```
+4. Resolve it by **declaring the real source**: add the propagation line to the
+   workflow plus the matching probe line (§8.1), or record the value in
+   `fly.toml [env]` and unset the Fly secret — **deploy the `[env]` entry first**,
+   because a Fly secret SHADOWS `[env]`.
+5. Only if that is impossible **during an incident** (e.g. an operator must
+   hand-set a secret mid-incident) may you set
+   `SKIP_FLY_SECRET_PROVENANCE=true` for the window — clear it afterwards, and
+   declare the secret anyway.
+
+**Rotation:** for a `gh-secret:` name, rotating the GitHub secret is the only
+step — the next deploy propagates it.
 
 ## Secrets Matrix
 
