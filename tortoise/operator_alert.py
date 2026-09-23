@@ -62,6 +62,14 @@ _RETRY_WINDOW_S = 60.0
 #: A worker that outlives this is assumed wedged; its latch self-heals so it can
 #: never silence the alert for the process lifetime.
 _INFLIGHT_STALE_S = 120.0
+#: Shed-warning rate limit. The shed path runs on the CALLER's path (some reporters
+#: are inline on the event loop), and the bound is saturated exactly during a
+#: sweep-scale outage — so one WARNING per dropped increment would make the alert
+#: mechanism amplify the storm it exists to report. One line per interval is enough
+#: to see it happening; the suppressed count is deliberately not carried, because the
+#: log budget must not grow with the outage either.
+_SHED_LOG_INTERVAL_S = 60.0
+_LAST_SHED_LOG = 0.0
 #: Global dispatch bound: a sweep-scale outage drops for many orgs at once.
 _MAX_INFLIGHT = 32
 #: Map bounds: keys outside the windows are pruned; a hard cap evicts oldest.
@@ -222,8 +230,13 @@ def _prune_locked(now: float) -> None:
     queued worker — admitted before, sat behind saturated workers past
     ``_INFLIGHT_STALE_S`` — start, find its token gone with no successor, and return
     WITHOUT filing: the silent drop this module exists to remove.) ``_INFLIGHT`` needs
-    no sweep for its own bound — every insert is paired with a reservation, so it is
-    already bounded by ``_MAX_INFLIGHT``.
+    no sweep for its own bound: every ADMISSION is paired with a reservation, so it is
+    ``_RESERVED``-bounded — with one known exception, a future cancelled before
+    ``_run`` starts (``_shutdown_pool``'s ``cancel_futures=True``, and tests): its
+    reservation is released by ``_forget`` while its latch waits out
+    ``_INFLIGHT_STALE_S``. That is shutdown/test-only — nothing is mid-life, and no new
+    admission can occur once the pool is shutting down — so the honest bound is
+    ``_RESERVED`` plus those cancelled latches, not ``_MAX_INFLIGHT`` alone.
     """
     if len(_ATTEMPT) > _PRUNE_ABOVE:
         for k, (ts, window) in list(_ATTEMPT.items()):
@@ -234,14 +247,43 @@ def _prune_locked(now: float) -> None:
     _reap_locked(now)
 
 
+def _log_shed(now: float, kind: str) -> None:
+    """Rate-limited shed warning — at most one line per ``_SHED_LOG_INTERVAL_S``.
+
+    The shed path runs on the CALLER's path, and the bound saturates exactly during a
+    sweep-scale outage, so one WARNING per dropped increment would make the alert
+    mechanism amplify the storm it exists to report. The suppressed count is
+    deliberately not carried: the log budget must not grow with the outage either.
+    """
+    global _LAST_SHED_LOG
+    with _LOCK:
+        if now - _LAST_SHED_LOG < _SHED_LOG_INTERVAL_S:
+            return
+        _LAST_SHED_LOG = now
+    _logger.warning("operator alert shed — dispatch queue full (kind=%s)", kind)
+
+
 def _due_locked(key: tuple[str, str], now: float) -> bool:
+    """Is this key due? Clears a wedged latch ONLY on the admitting path.
+
+    The ``_ATTEMPT`` window is checked FIRST, and a stale latch is popped only when
+    this call is about to return ``True``. That ordering is load-bearing, not an
+    optimisation: popping a stale latch on a call that then returns ``False``
+    (throttled) clears it with NO successor installed, and the worker already admitted
+    for that key returns at ``_run``'s ownership check without filing — the silent drop
+    this module exists to remove. Checking the window first makes the pop conditional on
+    the admit, so no ordering between ``_INFLIGHT_STALE_S`` and ``_RETRY_WINDOW_S`` has
+    to hold for correctness.
+    """
+    last = _ATTEMPT.get(key)
+    if last is not None and now - last[0] < last[1]:
+        return False                      # throttled — leave the latch alone
     started = _INFLIGHT.get(key)
     if started is not None:
         if now - started <= _INFLIGHT_STALE_S:
             return False
-        _INFLIGHT.pop(key, None)          # wedged worker self-heals
-    last = _ATTEMPT.get(key)
-    return last is None or now - last[0] >= last[1]
+        _INFLIGHT.pop(key, None)          # wedged worker self-heals; an admit follows
+    return True
 
 
 def _run(store, key, kind, org_id, detail, token) -> None:
@@ -321,7 +363,7 @@ def alert_operator(kind: str, org_id: str | None, detail: dict | None = None):
             _RESERVED += 1
             _INFLIGHT[key] = token
     if shed:
-        _logger.warning("operator alert shed — dispatch queue full (kind=%s)", kind)
+        _log_shed(now, kind)
         return None
     try:
         store = alert_store()                    # CALLER thread — deterministic
@@ -398,10 +440,13 @@ def reset_operator_alert_state_for_tests() -> None:
     This cannot un-wedge a worker already running: the pool is not state, and a
     genuinely stuck worker will release its slot when it finishes.
     """
-    global _RESERVED, _SINCE_SWEEP
+    global _RESERVED, _SINCE_SWEEP, _LAST_SHED_LOG
     with _LOCK:
         _ATTEMPT.clear()
         _INFLIGHT.clear()
         _HANDLES.clear()
         _RESERVED = 0
         _SINCE_SWEEP = 0
+        # Also the shed-log rate limit, or the first test to shed would silence the
+        # warning for every later test inside _SHED_LOG_INTERVAL_S.
+        _LAST_SHED_LOG = 0.0

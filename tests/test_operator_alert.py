@@ -15,6 +15,7 @@ mutation, and the command + output is recorded in the PR.
 """
 from __future__ import annotations
 
+import itertools
 import logging
 import subprocess
 import sys
@@ -580,48 +581,103 @@ def test_prune_never_sweeps_an_unsettled_latch(monkeypatch):
 def test_a_shed_never_clears_an_admitted_latch(monkeypatch):
     """Pin: the shed bound must be decided BEFORE ``_due_locked`` self-heals.
 
-    ``_due_locked`` POPS a stale latch. If the same call is then shed (queue full),
-    that latch would be gone with no successor installed, and the worker already
-    admitted for the key would return at ``_run``'s ownership check without filing —
-    the incident dropped, with no log naming it. Driven by saturating the pool,
-    ageing the latch, and re-dispatching the SAME key so the re-dispatch is the shed
-    one. The store records only AFTER its gate opens, so "reached the store" is a
-    real signal rather than "started".
+    The production drop shape is a QUEUED worker, not a running one: all four pool
+    threads are blocked, the target sits in the queue, and a same-key re-dispatch —
+    for which ``_due_locked`` may self-heal the stale latch — is then SHED. If the
+    bound were decided after that self-heal, the latch would be gone with no successor
+    installed and the queued worker would return at ``_run``'s ownership check without
+    ever reaching the store. The store records only AFTER its gate opens, so "recorded"
+    means the worker actually got past that check.
     """
 
     class _BlockThenRecord:
         def __init__(self, ev):
             self.ev = ev
             self.calls: list[tuple[str, str]] = []
+            self.entered = threading.Semaphore(0)
 
         def open_incident_state(self, kind, org_id="", detail=None):
+            self.entered.release()
             self.ev.wait(timeout=30)
             self.calls.append((kind, org_id))
             return OpenOutcome.FILED
 
-    monkeypatch.setattr(oa, "_MAX_INFLIGHT", 2)
+    # 4 pool threads, bound 5: four blockers wedge every thread, so the target key is
+    # genuinely QUEUED, and the next dispatch is the shed one.
+    monkeypatch.setattr(oa, "_MAX_INFLIGHT", 5)
     monkeypatch.setattr(oa, "_INFLIGHT_STALE_S", 0.02)
     monkeypatch.setattr(oa, "_RETRY_WINDOW_S", 0.01)
     gate = threading.Event()
     store = _BlockThenRecord(gate)
     monkeypatch.setattr(oa, "alert_store", lambda: store)
 
-    assert oa.alert_operator(_KIND, "org-h", {}) is not None
-    assert oa.alert_operator(_KIND, "org-fill", {}) is not None
+    for i in range(4):
+        assert oa.alert_operator(_KIND, f"org-blk{i}", {}) is not None
+    for _ in range(4):
+        assert store.entered.acquire(timeout=10), (
+            "precondition: all 4 pool threads are inside the store")
+    assert oa.alert_operator(_KIND, "org-q", {}) is not None      # QUEUED behind them
     try:
-        time.sleep(0.05)                      # age org-h's latch past the bound
+        time.sleep(0.05)                      # age org-q's latch past the bound
         with oa._LOCK:
-            assert oa._RESERVED == 2, "precondition: the pool is saturated"
-        assert oa.alert_operator(_KIND, "org-h", {}) is None, (
-            "precondition: the re-dispatch is the shed one")
+            assert oa._RESERVED == 5, "precondition: the bound is saturated"
+        assert oa.alert_operator(_KIND, "org-q", {}) is None, (
+            "precondition: the same-key re-dispatch is the shed one")
         with oa._LOCK:
-            assert oa._INFLIGHT.get((_KIND, "org-h")) is not None, (
-                "a shed must not clear an admitted worker's latch")
+            assert oa._INFLIGHT.get((_KIND, "org-q")) is not None, (
+                "a shed must not clear a QUEUED worker's latch")
     finally:
         gate.set()
         oa.join_operator_alerts()
-    assert (_KIND, "org-h") in store.calls, (
-        "the originally-admitted worker must still file its incident")
+    assert (_KIND, "org-q") in store.calls, (
+        "the queued worker must still file its incident")
+
+
+def test_a_stalled_resolver_does_not_clear_a_successors_latch(monkeypatch):
+    """Pin the token guard on the ``store is None`` path.
+
+    ``alert_store()`` runs OUTSIDE ``_LOCK``. A caller that stalls there past
+    ``_INFLIGHT_STALE_S`` must not pop the latch a concurrent same-key dispatch has
+    since re-installed — popping it drops the successor's incident with nobody left to
+    file, because the stalled caller has no store. Depends on the
+    ``if _INFLIGHT.get(key) == token`` guard; without it the latch is cleared.
+    """
+    monkeypatch.setattr(oa, "_MAX_INFLIGHT", 8)
+    monkeypatch.setattr(oa, "_INFLIGHT_STALE_S", 0.02)
+    monkeypatch.setattr(oa, "_RETRY_WINDOW_S", 0.01)
+    stall, hold, entered = threading.Event(), threading.Event(), threading.Event()
+    nth = itertools.count(1)
+    store = _GatedStore(hold)
+
+    def _resolver():
+        if next(nth) == 1:
+            entered.set()
+            stall.wait(timeout=30)      # parks the FIRST caller, outside _LOCK
+            return None
+        return store
+
+    monkeypatch.setattr(oa, "alert_store", _resolver)
+    first = threading.Thread(target=oa.alert_operator, args=(_KIND, "org-s", {}))
+    first.start()
+    try:
+        assert entered.wait(timeout=10), (
+            "precondition: the first caller is parked in the resolver")
+        time.sleep(0.05)                # age the first caller's latch
+        assert oa.alert_operator(_KIND, "org-s", {}) is not None, (
+            "precondition: a successor is admitted")
+        with oa._LOCK:
+            succ = oa._INFLIGHT.get((_KIND, "org-s"))
+        assert succ is not None, "precondition: the successor installed its latch"
+        stall.set()
+        first.join(timeout=10)
+        assert not first.is_alive()
+        with oa._LOCK:
+            assert oa._INFLIGHT.get((_KIND, "org-s")) == succ, (
+                "a stalled resolver must not clear the successor's latch")
+    finally:
+        stall.set()
+        hold.set()
+        oa.join_operator_alerts()
 
 
 def test_reset_clears_the_light_leg_dedup_store(monkeypatch):

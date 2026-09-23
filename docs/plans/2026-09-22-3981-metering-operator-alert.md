@@ -1026,3 +1026,34 @@ Cycle 3 showed round 4's fix was **incomplete**, and the mechanism was precise e
 re-dispatches the same key so the *re-dispatch* is the shed one — the only shape that exposes it. Its
 store records only after its gate opens, so "reached the store" is a real signal, not "started". Red
 under the reverted order (`operations/logs/3981-mutation-evidence.log`).
+
+### Implementation record (round 6 — review cycle 4 fixes, no P0/P1)
+
+Cycle 4 found no P0/P1: the cycle-3 fix held and its pin was load-bearing. Five P2s, all dispositioned:
+
+* **Shed-log amplification (fixed).** With the bound decided first and `_ATTEMPT` no longer written on
+  a shed, every same-key call under saturation re-logged — 50 calls produced 50 WARNINGs where the old
+  order produced zero. The shed path runs on the caller's path and saturates exactly during a
+  sweep-scale outage, so the alert mechanism would have amplified the storm it reports.
+  `_SHED_LOG_INTERVAL_S = 60` (reset per test), and the suppressed count is deliberately not carried:
+  the log budget must not grow with the outage either.
+* **`_due_locked`'s stale-latch pop was coupled to constant ordering (fixed).** It popped the latch and
+  could then return `False` (throttled), clearing it with no successor — unreachable only because
+  `_INFLIGHT_STALE_S` (120) > `_RETRY_WINDOW_S` (60). The window is now checked FIRST and the pop
+  happens only on the admitting path, so correctness no longer rests on that ordering — which a future
+  tuning change could have silently broken. This also removes the `_run` docstring's dependence on it.
+* **The queued-shape pin was overstated (fixed).** `test_a_shed_never_clears_an_admitted_latch` had the
+  store record *before* blocking, so both workers were already past the ownership check and its final
+  assertion passed under the mutation. It now wedges all four pool threads with blockers and queues the
+  target, so the drop shape is real: under the reverted order the target's latch is gone and it never
+  reaches the store. The store records only after its gate opens.
+* **The two token guards were unpinned (fixed).** `test_a_stalled_resolver_does_not_clear_a_successors_latch`
+  parks a caller in `alert_store()` past `_INFLIGHT_STALE_S`, admits a same-key successor, then lets the
+  stalled caller return `None` — asserting the successor's latch survives. Without the guard
+  `_INFLIGHT == {}` and the successor's incident is dropped.
+* **The `_INFLIGHT` bound claim was wrong in the “paired with a reservation” direction (fixed).** A
+  future cancelled before `_run` (shutdown's `cancel_futures=True`) is released by `_forget` while its
+  latch waits out `_INFLIGHT_STALE_S`; the docstring now states the bound as `_RESERVED` plus those
+  cancelled latches, and why that is shutdown/test-only.
+
+Two mutations observed RED (`operations/logs/3981-mutation-evidence.log`).
