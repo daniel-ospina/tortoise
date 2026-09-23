@@ -1114,8 +1114,8 @@ def test_duration_integrity():
 
 # ── #3400: duration-balanced full-matrix halves + durations coverage ──────
 # The push halves used to be index-parity (`fast[0::2]` / `fast[1::2]`) —
-# duration-blind, so half (b) collected the slow files by luck (25.8m vs
-# 46.2m on the swept map) and blew the 55m watchdog. These pin the LPT pack (#1473)
+# duration-blind, so half (b) collected the slow files by luck (a=29.7m vs
+# b=49.5m on the swept #3395 map) and blew the 55m watchdog. These pin the LPT pack (#1473)
 # on the full-matrix path and the coverage floor that keeps the `durations`
 # map from rotting back to a handful of entries.
 
@@ -1218,8 +1218,8 @@ def test_duration_coverage_guard_boundary_and_realistic():
     assert duration_coverage_issues(below) != [], "89% must fire"
     assert duration_coverage_issues(at) == [], "90% is at the floor, not below"
     assert duration_coverage_issues(above) == [], "95% must be silent"
-    # the real map must be silent — the measured figure lives in the durations
-    # map's own header, not here (a number copied into this comment goes stale)
+    # the real map must be silent — coverage is computed by the guard itself,
+    # not restated here (a number copied into this comment goes stale)
     assert duration_coverage_issues(load_manifest()) == []
 
 

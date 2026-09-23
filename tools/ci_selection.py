@@ -63,10 +63,10 @@ WORKFLOW = REPO / ".github" / "workflows" / "python-ci.yml"
 HALF_IMBALANCE_TOLERANCE = 3
 
 # #3400: with measured durations, the halves must stay DURATION-balanced
-# within this ratio. Index parity on the same pool leaves a=25.8m vs b=46.2m
-# (1.79x) on the swept map; the LPT pack lands at 1.00x. 1.25 is loose enough
-# for run-to-run noise and
-# tight enough that a reversion to parity (1.79x on the real pool) reds.
+# within this ratio. Index parity on the same pool leaves a=29.7m vs b=49.5m
+# (1.67x) on the swept #3395 map; the LPT pack lands at 1.00x. 1.25 is loose
+# enough for run-to-run noise and
+# tight enough that a reversion to parity (1.67x on the real pool) reds.
 HALF_DURATION_IMBALANCE_RATIO = 1.25
 
 # #1473: weight for a fast file with no measured duration. The pack can only
@@ -1027,10 +1027,10 @@ def push_legs(manifest: dict) -> dict:
     fast = fast_pool(manifest)
     # #3400: pack the push halves by measured duration (#1473 LPT) instead of
     # the duration-blind index-parity split this used to be (`fast[0::2]` /
-    # `fast[1::2]`). Parity on the real pool leaves a 1.79x tilt (measured on
-    # the swept #3395 map: 25.8m in one half against 46.2m) and blew the 55m
-    # watchdog; LPT is deterministic (ties break on name) and lands the same
-    # pool at 36.0m / 36.0m. split_fast_gate returns `tests/`-prefixed names;
+    # `fast[1::2]`). Parity on the real pool leaves a 1.67x tilt (a=29.7m
+    # against b=49.5m on the swept #3395 map) and blew the 55m watchdog; LPT is
+    # deterministic (ties break on name) and lands the same pool at 39.6m /
+    # 39.6m. split_fast_gate returns `tests/`-prefixed names;
     # the workflow's matrix format is bare, so strip the prefix.
     fast_a, fast_b = split_fast_gate(fast,
                                      _durations_map(manifest))
