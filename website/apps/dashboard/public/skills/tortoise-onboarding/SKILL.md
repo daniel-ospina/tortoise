@@ -12,6 +12,15 @@ allowed-tools: read write bash
 ---
 
 > ⛔ **This is the single live onboarding script.** `AGENT_ONBOARDING.md` and its deployed copies are ARCHIVED under `tortoise/onboarding/archive/` (M8, epic #1976) — never create a second live onboarding script. Edit THIS file; the deployed mirror (`website/apps/dashboard/public/skills/tortoise-onboarding/SKILL.md`) is byte-identical by test.
+>
+> **#4365 — delivered as INSTRUCTIONS, never installed as a skill.** Onboarding is a
+> one-time setup FLOW, not a reusable capability, so this document is READ — at the
+> served URL (`https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md`),
+> printed by `tortoise init` as `onboarding_prompt_url`, or named by the dashboard's
+> connect command — and is never copied into a harness's skills namespace. The skill
+> installer ships the three reusable capabilities only (`how-to-use-tortoise`,
+> `tortoise-decide`, `tortoise-file-finding`); reach across all six harnesses comes
+> from reading this document, not from a local install.
 
 # Tortoise Onboarding — install and connect your agent
 
@@ -19,8 +28,8 @@ Successor to the archived `AGENT_ONBOARDING.md` question flow. Instead of a
 paste-the-prompt Q&A, onboarding is now: **read state → pick your harness →
 install/connect (self-hosted: Docker Compose first — §3a) → verify →
 checkpoint → (later) seed + decide**. The dashboard wizard
-hands you ONE universal command; this skill is what your agent follows after
-you run or paste it.
+hands you ONE universal command; the instructions below are what your agent
+follows after you run or paste it — nothing is installed into a skills dir.
 
 ## When to use
 
@@ -87,7 +96,7 @@ mode → teach-human fallback).
 > connects key-less through OpenAI's Developer-mode OAuth connector (dashboard
 > → ChatGPT tab: Scan Tools → OAuth consent on the hosted endpoint → paste the
 > workflows prompt). It has no local filesystem, shell, or skill installer, so
-> it never runs this skill and has no row here — these six rows are the
+> it never runs these instructions and has no row here — these six rows are the
 > skill-installer/agent harnesses. (If you are ChatGPT and already have the
 > tortoise MCP tools via OAuth, skip install: section 4's tortoise_health
 > verify still applies.)

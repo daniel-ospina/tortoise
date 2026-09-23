@@ -102,17 +102,94 @@ def test_m8_deploy_mirror_matches_canonical():
         "deploy mirror drifted from the canonical SKILL.md")
 
 
-def test_m8_installer_ships_tortoise_onboarding():
-    """The skill installer (dashboard public/) includes tortoise-onboarding
-    so all 4 CLI harnesses can install the ONE live script."""
+def _installer_skills() -> list[str]:
+    """The served installer's `SKILLS=(...)` payload set."""
     installer = (REPO_ROOT / "website" / "apps" / "dashboard" / "public"
                  / "install-tortoise-skills.sh").read_text(encoding="utf-8")
-    assert "tortoise-onboarding" in installer
+    m = re.search(r"^SKILLS=\(([^)]*)\)", installer, re.M)
+    assert m, "installer SKILLS=(...) array not found"
+    return m.group(1).split()
+
+
+def test_m8_installer_ships_the_three_capabilities_not_onboarding():
+    """#4365: onboarding is DELIVERED AS INSTRUCTIONS, not installed as a
+    skill — the installer ships the three reusable capabilities only. The
+    #1998 W2 shape (a 4th basename) must fail here."""
+    assert _installer_skills() == [
+        "how-to-use-tortoise", "tortoise-decide", "tortoise-file-finding"
+    ], ("the installer must ship the 3 capabilities; onboarding is not a skill")
+
+
+def test_m8_installer_still_delivers_the_onboarding_instructions():
+    """The reach invariant the removal must not break: a harness with no
+    skills directory still learns WHERE the onboarding instructions are — the
+    served document the dashboard command and `tortoise init` both name."""
+    installer = (REPO_ROOT / "website" / "apps" / "dashboard" / "public"
+                 / "install-tortoise-skills.sh").read_text(encoding="utf-8")
+    assert "tortoise-onboarding/SKILL.md" in installer, (
+        "the installer's AGENTS.md block must point at the served instructions")
     # name-grep contract: the installer validates each downloaded SKILL.md's
     # frontmatter name (not a literal skill name baked into the script).
     assert 'grep -q "^name: $s$"' in installer, (
         "installer must validate the downloaded SKILL.md frontmatter name")
     assert "SKILLS_VERSION=" in installer
+
+
+# The served connect surfaces that tell a user/agent what the installer ships.
+DASHBOARD_SRC = REPO_ROOT / "website" / "apps" / "dashboard" / "src"
+
+
+def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
+    """#4365: the served connect copy must not claim an install the installer
+    does not perform (the live defect — harnesses.js claimed 4 while the
+    installer shipped 3), and must name the onboarding instruction document so
+    the flow is reachable with NO skill installed."""
+    harnesses = (DASHBOARD_SRC / "harnesses.js").read_text(encoding="utf-8")
+
+    m = re.search(
+        r"^export const ONBOARDING_INSTRUCTIONS_URL =\s*\n?\s*'([^']+)'",
+        harnesses, re.M)
+    assert m, "ONBOARDING_INSTRUCTIONS_URL must be an exported constant"
+    assert m.group(1) == (
+        "https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md"
+    ), "the instruction URL must be the served instruction document"
+
+    m = re.search(r"const SKILL_INSTALL = \(harness\) =>\n\s*`([^`]*)`",
+                  harnesses)
+    assert m, "SKILL_INSTALL template not found in harnesses.js"
+    copy = m.group(1)
+    claim = re.search(r"Install the Tortoise skills \(([^)]*)\)", copy)
+    assert claim, "the skill-install claim must be present"
+    assert claim.group(1).split(", ") == _installer_skills(), (
+        "the served claim must list exactly what the installer ships")
+    assert "${ONBOARDING_INSTRUCTIONS_URL}" in copy, (
+        "the connect copy must point at the served onboarding instructions")
+
+    main = (DASHBOARD_SRC / "main.jsx").read_text(encoding="utf-8")
+    wizard = main[main.index("function wizardPromptText("):
+                   main.index("function wizardWorkflowsText(")]
+    assert "tortoise-onboarding" not in wizard, (
+        "wizard prompts must not claim onboarding arrives via the installer — "
+        "it is instructions, not a skill")
+    assert "ONBOARDING_INSTRUCTIONS_URL" in wizard, (
+        "the wizard prompts must name the served onboarding instructions")
+    # …and NAME it in the prompts, not merely declare it: the const line alone
+    # would satisfy a bare membership check while every prompt interpolated nothing.
+    assert "${ONBOARDING_INSTRUCTIONS_URL}" in wizard, (
+        "the wizard prompts must INTERPOLATE the onboarding instructions URL")
+    # …and every config-writing prompt must actually NAME it — one shared local
+    # interpolates the URL, and each of the four prompts interpolates that local.
+    assert wizard.count("${onboardingInstructions}") >= 4, (
+        "all four config-writing prompts (claude/codex/cursor/pi) must name it")
+
+    # …and the filesystem-less harnesses (Claude Desktop/Web, ChatGPT) never ran
+    # the installer and have no skills directory — the workflows prompt body is
+    # their ONLY delivery surface, so it must name the instructions too.
+    wf_start = main.index("function wizardWorkflowsText(")
+    wf_end = main.index("\nfunction ", wf_start + 1)
+    workflows = main[wf_start:wf_end]
+    assert "${ONBOARDING_INSTRUCTIONS_URL}" in workflows, (
+        "the teach-human workflows prompt must name the onboarding instructions")
 
 
 def test_m8_no_live_reference_to_old_paths_outside_archive():

@@ -59,12 +59,17 @@
 # Prints the verify step.
 set -euo pipefail
 
-SKILLS_VERSION="v2"   # bump when the skill set changes
+SKILLS_VERSION="v3"   # bump when the skill set changes
 SKILLS_BASE="https://app.premiselabs.co/skills"
-# v2 (#1998 W2): +tortoise-onboarding — the ONE live onboarding script
-# (successor to AGENT_ONBOARDING.md, archived M8). The installer is the
-# distribution path the dashboard's universal command relies on.
-SKILLS=(how-to-use-tortoise tortoise-decide tortoise-file-finding tortoise-onboarding)
+# v3 (#4365): -tortoise-onboarding. Onboarding is a one-time SETUP FLOW, not a
+# reusable capability, so it is NOT installed into a harness's skills
+# namespace — it is DELIVERED as instructions (the served document at
+# $SKILLS_BASE/tortoise-onboarding/SKILL.md, also printed by `tortoise init`)
+# plus the per-harness MCP config the dashboard's universal command writes.
+# This installer ships the three reusable capabilities only. v2 (#1998 W2) had
+# added the 4th; it is also the one basename with no upstream counterpart, so
+# it widened a flat, shared namespace this installer only MERGES into (#4327).
+SKILLS=(how-to-use-tortoise tortoise-decide tortoise-file-finding)
 
 usage() {
   cat <<'HELP'
@@ -330,11 +335,13 @@ emit_codex_agents_block() {
 # Tortoise — agent memory (this project is connected to Tortoise Cloud)
 - If the Tortoise MCP tools are available in this session (search/query/health +
   graph-write tools) and these skills (how-to-use-tortoise, tortoise-decide,
-  tortoise-file-finding, tortoise-onboarding) are installed, use the graph without
+  tortoise-file-finding) are installed, use the graph without
   being asked to: after a decision or a research finding, file it; search the graph
   before answering from memory; say plainly when nothing relevant is stored.
-- When the user says \"Set up Tortoise\", run the tortoise-onboarding flow and verify
-  with tortoise_health before reporting done.
+- When the user says \"Set up Tortoise\", follow the onboarding instructions at
+  $SKILLS_BASE/tortoise-onboarding/SKILL.md and verify with tortoise_health
+  before reporting done. Onboarding is delivered as INSTRUCTIONS, not as an
+  installed skill.
 - First-time MCP calls may prompt for approval — tortoise_health and the read tools
   are safe to allow.
 ${me}" > "$block"
