@@ -120,14 +120,14 @@ def test_active_subscriber_manage_subscription_posts_portal(page: Page) -> None:
     _submit_api_key(page, "tt_loop_key_abcdef0123456789")
     expect(page).to_have_url(re.compile("^" + re.escape(DASHBOARD_URL)), timeout=20_000)
     expect(page.locator("body")).to_contain_text("Graphs", timeout=20_000)
-    # Header manage-subscription button (restored #310 surface) renders.
-    expect(page.locator("button.tier-manage")).to_contain_text("Manage subscription")
+    # #4639: the redundant HEADER "Manage subscription" is removed — plan
+    # management lives on the Billing tab, so the Overview tab carries none.
+    expect(page.locator("header button.tier-manage")).to_have_count(0)
     page.locator("nav button", has_text="Billing").click()
     expect(page.locator("body")).to_contain_text("Builder plan", timeout=10_000)
     expect(page.locator("body")).to_contain_text("Active")
     with page.expect_request(lambda r: r.url.endswith("/v1/billing/portal")) as req_info:
-        # The prominent header Manage button (the billing row has a second
-        # one for active subscribers).
+        # The Billing row's Manage button (#4639 removed the header one).
         page.locator("button.tier-manage").first.click()
     req = req_info.value
     assert req.method == "POST"

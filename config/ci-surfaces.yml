@@ -370,6 +370,10 @@ surfaces:
   # registered under `core` because `tortoise/capture_spool.py` and
   # `tortoise/claude-hooks/` match no named surface and fall through to `core`.
   - test_capture_spool.py
+  # #2814: guards tortoise/__main__.py's rebuild reporting (the CLI is the
+  # operator surface for the config third state); a __main__-only PR would
+  # otherwise select `api` and never run it.
+  - test_rebuild_config_preservation.py
   battery:
   - test_battery_arms.py
   # (removed a duplicate test_battery_derive_truth_leg.py entry here on the
@@ -859,6 +863,11 @@ surfaces:
   - test_pre_migration_safety.py
   - test_probe_json_mode.py
   - test_projection.py
+  # #2814: authoritative-config durability across rebuild_all — the config
+  # registry + sidecar section live in tortoise/projection/ (core fallback),
+  # and pack_state/pack_manifest_store are the writer modules whose labels
+  # the registry must agree with.
+  - test_rebuild_config_preservation.py
   - test_projection_embedded_socket_timeout.py  # #3350: embedded lane socket timeout + bounded retry (carve-out)
   - test_projection_lifecycle.py
   - test_projection_maxmemory_message.py  # #2981: a full-but-healthy DB is not corrupt — maxmemory write-refusal gets its own error, never the rebuild advice
@@ -930,6 +939,7 @@ surfaces:
   - test_trash_lock.py             # #2470 restore lock timeout (fake CP)
   - test_trash_grace.py            # #2465 trash recovery-window grace (supabase lane, fake CP)
   - test_tripwire.py
+  - test_unjournaled_mutation_class.py
   - test_uri_env_mutations_declared.py
   - test_validity_windows.py
   - test_value_extractor.py
@@ -1356,6 +1366,7 @@ slow_files:
 - test_migrate_db.py
 - test_pack_shipping_wheel.py
 - test_projection.py
+- test_rebuild_config_preservation.py  # #2814: drives the real full rebuild_all wipe+replay
 - test_projection_embedded_socket_timeout.py  # #3350: embedded lane socket timeout (carve-out)
 - test_projection_lifecycle.py
 - test_reaper.py
@@ -1408,6 +1419,10 @@ carve_out:
 - test_projection_lifecycle.py
 - test_reaper.py
 - test_reaper_orphan.py
+# #2814: authoritative-config durability across rebuild_all (the embedded
+# carve-out is load-bearing — the pins exercise the real unconditional wipe,
+# which the server-side bulk-wipe guard refuses on a non-test graph).
+- test_rebuild_config_preservation.py
 - test_redis_guard.py
 - bench/test_smoke_embedded.py
 push_extra: []
@@ -1535,6 +1550,7 @@ durations:
   test_onboarding_telemetry_w11.py: 2.0
   test_graph_diagnostics.py: 37.3
   eval/write_path/test_write_path_runner.py: 36.0
+  test_unjournaled_mutation_class.py: 100.0  # #4743: locally measured (46 tests, live FalkorDB); refresh from CI junit — the file builds a projection per row.
   test_write_verb.py: 35.7
   test_index_restore.py: 35.2
   test_capture_session.py: 31.2

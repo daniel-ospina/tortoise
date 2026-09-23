@@ -287,8 +287,8 @@ def ensure_tenant_packs(sdk: TortoiseSDK, *, starter: list[str] | tuple[str, ...
         try:
             with _pack_install_lock(lock_graph, ns):
                 g.query(
-                    "MERGE (p:PackInstall {namespace: $ns}) "
-                "SET p.version = $version, p.status = 'active', "
+                    f"MERGE (p:{PACK_INSTALL_LABEL} {{namespace: $ns}}) "
+                    "SET p.version = $version, p.status = 'active', "
                 "    p.source = 'starter', "
                 "    p.installed_at = coalesce(p.installed_at, $now)",
                 params={"ns": ns, "version": meta["version"], "now": now},
@@ -342,7 +342,7 @@ def get_tenant_packs(sdk: TortoiseSDK, *, graph_name: str | None = None) -> list
 def _read_installs(g) -> list[tuple[str, str, str, str, str | None]]:
     """Raw install-state read: (namespace, version, status, source, installed_at)."""
     rows = g.query(
-        "MATCH (p:PackInstall) "
+        f"MATCH (p:{PACK_INSTALL_LABEL}) "
         "RETURN p.namespace, p.version, p.status, p.source, p.installed_at "
         "ORDER BY p.namespace",
     ).result_set

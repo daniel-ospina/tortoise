@@ -1589,20 +1589,20 @@ def test_part_c2_reasons_and_sources_are_read() -> None:
     parsed = {n: (int(ln), reason) for n, ln, reason in rows}
     assert parsed == {
         "org_create": (
-            15547,
+            15591,
             "No target method creates an organisation account. The tenancy block reads "
             "one (`get_organisation_account`) and files account *closure* as a console "
             "operation, but no row covers creation.",
         ),
         "compute_reputation": (
-            20340,
+            20578,
             "The canonical `stabilize_beliefs` group lists it, but that group's beta "
             "target is `refresh_confidence` — “Recompute confidence after changes”. "
             "Reputation scoring is not confidence recomputation, and no other target "
             "absorbs it.",
         ),
         "record_calibration": (
-            20590,
+            20828,
             "Same group, same mismatch: `refresh_confidence` recomputes confidence; "
             "recording a calibration milestone is a different operation and has no target.",
         ),

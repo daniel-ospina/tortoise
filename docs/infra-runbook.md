@@ -7,7 +7,7 @@ subjects.team: epistemic-team
 aboutSubjects: tortoise-infra
 aboutObjects: fly-io, falkordb, cloudflare
 created: 2026-08-03
-updated: 2026-09-22
+updated: 2026-09-23
 ---
 
 # Tortoise Hosted Platform — Infrastructure Runbook
@@ -1395,7 +1395,8 @@ surface.
 `deploy-hosted.yml` runs a set of **fail-closed deploy gates**: migration drift
 (#1095), Fly machine orphan/crash-loop (#1896), Fly secret provenance (#4126),
 pack-catalog smoke (#1929), and post-release DB health (#1719 — since #4538 it
-runs in its own `post-deploy-verify` job and does not colour the deploy job).
+runs in its own `post-deploy-verify` job and does not colour the deploy job; its
+phase contract — the weaker predicate informs, the strongest decides — is §8.5).
 Some can be bypassed for an incident-fix deploy — and **a bypass is an
 incident-window state, not a setting.** **Not every gate is bypassable:** the
 migration-drift gate has no `if:` guard and no `SKIP_` lane by design (the #1001
@@ -1535,6 +1536,42 @@ stays out-of-band: `tools/rotate-backup-keys.py --role registry_stream`.
 
 **Rotation:** for a `gh-secret:` name, rotating the GitHub secret is the only
 step — the next deploy propagates it.
+
+### 8.5 The post-release DB health gate's phases — the weaker predicate informs, the strongest decides (#4771)
+
+The `post-deploy-verify` job runs `.github/scripts/deploy-health-gate.sh` after
+the release. It has **three phases**, and their roles differ deliberately:
+
+| phase | predicate | on failure |
+|---|---|---|
+| 1 | app reachable (5 quick probes) | **exit 1** — a dead app is a deploy failure, not a DB wait |
+| 2 | `db.ok` — the FalkorDB data plane **alone** | `::warning::` only — the run **PROCEEDS** |
+| 3 | `/health/ready` — `AND(Supabase control plane, FalkorDB data plane)` | **exit 1** |
+
+**Phase 3 is the only phase that decides the run.** Phase 2 stays because it is
+the faster, more specific observation — it *names* FalkorDB — but it is the
+**weaker** predicate and no longer gets to decide. The two phases poll
+**independent** probes with different budgets: `db.ok` is served from the
+background liveness refresher (`_HEALTH_PROBE`), while readiness runs its own
+coordinator, `_READY_PROBE`, at request time (`tortoise/hosted_api.py::health_ready`).
+So they can legitimately disagree — observed in production on 2026-09-22:
+`/health` reported `db.ok=false` on a 1.5 s probe timeout while `/health/ready`
+answered `200` on **both** planes.
+
+**This is not a weakening.** Readiness ANDs the *same* FalkorDB data plane (its
+probe calls the same `_probe_db()`), so a genuinely unreachable FalkorDB fails
+phase 3 too and the run still exits 1. What changed is only that the weaker
+observation can no longer decide on its own. **Do not "restore" phase 2's
+`exit 1`** — that is the #4771 defect (the #4545 invariant violated at the
+decision level, after #4545 had fixed it at the assertion level). The harness
+`.github/scripts/deploy-health-gate.test.sh` pins both halves: `db.ok` never true
++ readiness 200 → pass, and `db.ok` never true + readiness never 200 → fail.
+
+**OVERRIDES:** the general expectation that a deploy gate should fail on **any**
+unhealthy subsystem — here the weaker `db.ok` observation *informs* and the
+strongest observed predicate (`/health/ready`, an AND of both planes) *decides*,
+because two independent probes on different budgets can disagree and only the
+stronger one is evidence that the release is actually unready.
 
 ## Secrets Matrix
 
