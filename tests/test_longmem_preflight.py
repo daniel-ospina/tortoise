@@ -1,10 +1,16 @@
 """M2 pre-flight gate tests (#1523, epic #1509): billing probe + 4xx fail-fast.
 
-Runs fully offline — stubbed transports (the existing test_longmem_runner.py
+Runs offline — stubbed transports (the existing test_longmem_runner.py
 pattern), no real keys, embedded FalkorDBLite for the run-loop tests. The
 error-class taxonomy is consumed from P2's production module
 (``tortoise.model_adapters`` — the M2 plan's provisional-copy hedge is
 obsolete; D1: one taxonomy, no divergence).
+
+The ``run_main`` invocation below additionally waives the DENSE-leg gate
+(``--skip-preflight``, #4718): its subject is the reader/judge pre-flight
+block, which ``--mock`` already skips, so the run must not depend on
+sentence-transformers or the cached model. ``--mock`` alone is not a dense-leg
+waiver since #4718.
 """
 from __future__ import annotations
 
@@ -41,6 +47,30 @@ from tortoise.model_adapters import (  # noqa: E402, RUF100
 )
 
 MINI = Path(__file__).parent / "fixtures" / "longmemeval_mini.json"
+
+
+def _pin_embedder_available(monkeypatch) -> None:
+    """Pin the DENSE leg AVAILABLE (#4718).
+
+    Since #4718 the dense-leg gate runs FIRST and aborts a run that requires
+    the leg with ``SystemExit(1)`` when the embedder is unusable — so a test
+    whose subject is the reader/judge gate must pin the dense leg out of the
+    way, or it short-circuits on any host without sentence-transformers / the
+    cached model. The double answers ``encode(["probe"])`` with one 384-dim
+    vector, which is all ``_preflight_embedder`` inspects.
+
+    ``--skip-preflight`` is NOT an option here: it waives the reader/judge
+    gate too (``run_main`` records a skipped block when either flag is set),
+    which is precisely the gate under test.
+    """
+    from tortoise.embeddings import EmbeddingModel
+
+    class _FakeEmbedder:
+        def encode(self, texts):
+            return [[0.0] * 384 for _ in texts]
+
+    monkeypatch.setattr(EmbeddingModel, "get",
+                        staticmethod(lambda load_timeout=None: _FakeEmbedder()))
 
 
 def _mini() -> list[dict]:
@@ -161,12 +191,20 @@ def test_run_main_records_preflight_block(tmp_path, capsys):
 
 
 def test_run_main_mock_records_skipped_preflight(tmp_path):
-    """--mock through run_main records the skipped gate block in the report."""
+    """--mock through run_main records the skipped gate block in the report.
+
+    ``--skip-preflight`` waives only the DENSE-leg gate (#4718); the
+    reader/judge block stays keyed on ``--mock`` (run.py records
+    ``reason="mock"`` and ``mock=True`` whenever ``--mock`` is set), so the
+    two assertions below are the same ones ``--mock`` alone produces — the
+    test's subject is unchanged, it just no longer needs the embedder.
+    """
     out = tmp_path / "report.json"
     report = run_main(["--data", str(MINI), "--limit", "1", "--split", "s",
-                       "--mock", "--output", str(out)])
+                       "--mock", "--skip-preflight", "--output", str(out)])
     assert report["preflight"]["status"] == "skipped"
     assert report["preflight"]["mock"] is True
+    assert report["preflight"]["reason"] == "mock"  # not "skip-preflight"
 
 
 def test_skip_preflight_flag_bypasses_gate(monkeypatch, tmp_path):
@@ -250,19 +288,34 @@ def test_preflight_fatal_401_402_403_abort(monkeypatch, status):
 
 
 def test_run_main_preflight_failure_exits_nonzero(monkeypatch, tmp_path):
-    """A failed gate → run_main exits non-zero and NO question executes."""
+    """A failed gate → run_main exits non-zero and NO question executes.
+
+    #4718: the dense leg is pinned AVAILABLE. This is a non-mock run, so it
+    requires the leg; on a host with no embedder the dense-leg gate would
+    raise ``SystemExit(1)`` on its own. ``--skip-preflight`` cannot be used
+    instead — it skips that gate.
+
+    The ``gate_called`` counter is what makes this test mean what it says:
+    the dense-leg gate raises the SAME ``SystemExit(1)`` with ``executed == 0``,
+    so on the two assertions alone the test cannot tell "the reader/judge gate
+    was exercised" from "the dense gate short-circuited first" (review round 3
+    demonstrated exactly that by swapping the pin for a ``None`` embedder — the
+    assertions still passed).
+    """
     _set_all_keys(monkeypatch)
+    _pin_embedder_available(monkeypatch)
     import tools.longmem_eval.run as run_mod
 
+    seen = {"gate_called": 0, "n": 0}
+
     def _fatal_gate(**kw):
+        seen["gate_called"] += 1
         raise PreflightError([{
             "what": "extractor-billing-probe", "status": "fatal",
             "detail": "HTTPError: 402 Payment Required"}])
 
-    executed = {"n": 0}
-
     def _must_not_run(*a, **k):  # pragma: no cover — gate must fail first
-        executed["n"] += 1
+        seen["n"] += 1
 
     monkeypatch.setattr(run_mod, "run_preflight", _fatal_gate)
     monkeypatch.setattr(run_mod, "run_evaluation", _must_not_run)
@@ -270,7 +323,8 @@ def test_run_main_preflight_failure_exits_nonzero(monkeypatch, tmp_path):
         run_mod.run_main(["--data", str(MINI), "--limit", "1", "--split", "s",
                           "--output", str(tmp_path / "r.json")])
     assert ei.value.code == 1
-    assert executed["n"] == 0  # nothing in the 500-Q loop started
+    assert seen["gate_called"] == 1  # the subject was actually reached
+    assert seen["n"] == 0  # nothing in the 500-Q loop started
 
 
 # ── Judge key presence (explicit, config-only) ────────────────────────────

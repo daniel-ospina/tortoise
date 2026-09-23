@@ -3455,7 +3455,15 @@ def _session_post(api_key: str, api_url: str):
                 return PostOutcome(ok=True, status=getattr(resp, "status", 200),
                                    body=_json.loads(resp.read()))
         except HTTPError as e:
-            body = e.read().decode() if e.fp else ""
+            # Read INSIDE the handler: an exception raised here is not caught by
+            # the sibling clauses below, so an unguarded read made a 504 whose
+            # error body stalls raise out of the drain and record a spurious
+            # `entry_failed` discard (#4714 review). Broad on purpose — this is
+            # a diagnostic body; failing to read it must not fail the entry.
+            try:
+                body = e.read().decode("utf-8", "replace") if e.fp else ""
+            except Exception as read_exc:
+                body = f"<error body unreadable: {read_exc}>"
             return PostOutcome(ok=False, status=e.code, detail=body[:500])
         except URLError as e:
             return PostOutcome(ok=False, status=None,
@@ -3778,10 +3786,18 @@ def _cmd_session_drain(api_key: str, api_url: str,
     for d in summary.discarded:
         print(f"spool discard ({d['reason']}): {d['session_id']} — {d['detail']}",
               file=_sys.stderr)
-    if summary.attempted or summary.discarded:
+    # A probe refusal is counted in `held_back` alongside the live-session hold,
+    # so without this line an operator cannot tell WHY a spooled session never
+    # lands — the entry is retried every drain and only leaves the spool when
+    # the count/byte ceiling evicts it (there is no TTL).
+    for r in summary.probe_refusals:
+        print(f"spool refusal: {r['session_id']} — {r['detail']}",
+              file=_sys.stderr)
+    if summary.attempted or summary.discarded or summary.probe_refusals:
         print(
             f"spool drain: filed {summary.filed}, deferred {summary.deferred}, "
             f"skipped {summary.skipped}, held back {summary.held_back}, "
+            f"probe refusals {len(summary.probe_refusals)}, "
             f"discarded {len(summary.discarded)}",
             file=_sys.stderr,
         )
@@ -3885,7 +3901,8 @@ def _capture_error_file(harness: str) -> Path:
     return receipt_dir.parent / "capture-errors" / f"{harness}.json"
 
 
-def _record_capture_error(harness: str, detail: str) -> None:
+def _record_capture_error(harness: str, detail: str,
+                          session_id: str | None = None) -> None:
     """Write the local capture-failure breadcrumb. Best-effort only — a
     breadcrumb write must never break the capture path it observes.
 
@@ -3905,6 +3922,12 @@ def _record_capture_error(harness: str, detail: str) -> None:
             "harness": harness,
             "detail": detail,
             "kind": KIND_CAPTURE_FAILURE,
+            # WHICH session failed. Without it a later clear can only guess from
+            # timestamps, and `updated_at` is not a proxy for "when this session
+            # failed" — it is frozen on the spool's dedup path, so the most
+            # obvious retry (re-import identical content) never cleared its own
+            # record (#4714 review).
+            "session_id": session_id,
             "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }, indent=2), encoding="utf-8")
     except OSError:
@@ -3950,6 +3973,7 @@ def _cmd_sessions_import(args) -> int:
     from pathlib import Path
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
+    from http.client import HTTPException as _HTTPException
 
     from tortoise.session_import import MAX_TURNS, parse_transcript, window_turns
 
@@ -4018,6 +4042,97 @@ def _cmd_sessions_import(args) -> int:
             harness, "no .tortoise config found (run 'tortoise init "
                      "--api-key <key>')")
         return 1
+    # Validate the URL BEFORE the request try. `Request()` raises ValueError for
+    # a scheme-less URL, and the response-phase clause now takes the
+    # superclasses — so without this a typo in TORTOISE_API_URL was reported as
+    # "import failed reading the response", sending the user to debug a spool
+    # instead of the URL they mistyped (#4714 review). This stays LOUD and
+    # writes no spool entry: a malformed URL never becomes valid by retrying.
+    # Only the scheme-less case can be judged here — a malformed URL that still
+    # parses falls through to the response-phase clause, where it is at least
+    # SPOOLED rather than lost (fail-safe, but its message is less precise).
+    if not api_url.startswith(("http://", "https://")):
+        print(f"Invalid API URL {api_url!r} — set TORTOISE_API_URL to an "
+              "absolute http(s) URL.", file=_sys.stderr)
+        _record_capture_error(harness, f"invalid API URL {api_url!r}",
+                              session_id=session_id)
+        return 1
+
+    def _spool_if_retryable(status: int | None, detail: str) -> None:
+        """Park the turns in the DURABLE SPOOL when the refusal is RETRYABLE.
+
+        The server's capture guard REFUSES rather than enqueues (its capacity
+        gate advertises `Retry-After`), and `classify_failure` already treats
+        5xx / 408 / 425 / 429 / 409 / 3xx / no-status as transient. A refusal is
+        therefore a DEFERRAL, not a rejection of the content: the POST reached
+        the server, there is no server-side copy to fall back on, and without
+        this the turns are lost. `claude` and `pi` survive the identical 504
+        because `session capture` spools BEFORE its POST; this path must too.
+
+        PERMANENT failures must NOT be parked here — a malformed payload never
+        becomes valid by waiting, and it would retry forever.
+
+        Best-effort by construction: the spool is ADDITIONAL to the
+        `capture-failure` breadcrumb the caller already wrote, never a
+        replacement, so a spool bug must not replace the honest error with a
+        traceback (the hook's fail-open contract).
+        """
+        try:
+            from tortoise.capture_spool import (
+                Snapshot,
+                capture_key,
+                classify_failure,
+                read_spool_meta,
+                spool_dir,
+                write_spool_entry,
+            )
+            from tortoise.session_attribution import (
+                derive_machine_id,
+                sanitize_attribution_field,
+            )
+
+            if classify_failure(status, detail) != "retry":
+                return
+            # Clamp exactly as `session capture` does. The spool's per-entry
+            # bound is sized on the CLAMPED maximum (500 turns x 5000 chars), so
+            # an unclamped turn can overflow it — and write_spool_entry then
+            # DISCARDS the entry, losing the very session this exists to save.
+            # The server clamps to the same width, so nothing stored differs.
+            spool_turns = [{"role": t["role"], "content": t["content"][:5000]}
+                           for t in turns]
+            root = spool_dir()
+            spooled = write_spool_entry(root, Snapshot(
+                session_id=session_id,
+                turns=spool_turns,
+                source=file_path.stem,
+                machine_id=sanitize_attribution_field(
+                    derive_machine_id(), max_length=256) or "",
+                # `sessions import` registers no --model, so there is nothing to
+                # attribute; `session capture` derives it from its own arg.
+                model=None,
+                harness=harness,
+            ))
+            for d in spooled.get("discards", []):
+                print(f"spool discard ({d['reason']}): {d['detail']}",
+                      file=_sys.stderr)
+            if not (spooled.get("written") or spooled.get("bytes")):
+                return
+            # Report truthfully: an entry whose content was ALREADY filed is
+            # SKIPPED by the next drain, so promising a filing would be false.
+            meta = read_spool_meta(root, session_id) or {}
+            already_filed = bool(meta.get("filed_key")) and \
+                meta.get("filed_key") == capture_key(session_id, spool_turns)
+            if already_filed:
+                print(f"Session {session_id} is already filed; the spooled copy "
+                      "is a no-op.", file=_sys.stderr)
+            else:
+                # Name the command: only the claude/pi SessionStart hook
+                # drains automatically, so for a codex/cursor-only install
+                # nothing would file this without the user being told how.
+                print(f"Spooled session: {session_id} — run 'tortoise session "
+                      "drain' to file it.", file=_sys.stderr)
+        except Exception as exc:
+            print(f"spool write failed: {exc}", file=_sys.stderr)
 
     payload = {"harness": harness, "session_id": session_id,
                "source": file_path.stem, "conversation": turns}
@@ -4033,15 +4148,54 @@ def _cmd_sessions_import(args) -> int:
         with urlopen(req, timeout=60) as resp:
             result = _json.loads(resp.read())
     except HTTPError as e:
-        body = e.read().decode() if e.fp else ""
+        # The error body is read INSIDE this handler, and an exception raised in
+        # an `except` block is NOT caught by the later clauses of the same `try`
+        # — so a server that returns 504/429 and then stalls or truncates the
+        # body escaped the command entirely (no spool, no receipt): the exact
+        # silent-loss shape this path exists to close (#4714 review). Decode
+        # with `replace` so a non-UTF-8 body cannot raise UnicodeDecodeError
+        # either — an undecodable body is still a retryable refusal.
+        try:
+            body = e.read().decode("utf-8", "replace") if e.fp else ""
+        except Exception as read_exc:
+            # Deliberately broad: reading a DIAGNOSTIC body must never replace
+            # the honest failure with a traceback, whatever it raises.
+            body = f"<error body unreadable: {read_exc}>"
         # 403/402/503 ⇒ fail, NO receipt, honest error (Task 15 acceptance).
         print(f"import failed (HTTP {e.code}): {body}", file=_sys.stderr)
-        _record_capture_error(harness, f"import failed (HTTP {e.code}): {body}")
+        _record_capture_error(harness, f"import failed (HTTP {e.code}): {body}",
+                              session_id=session_id)
+        _spool_if_retryable(e.code, body)
         return 1
     except URLError as e:
         print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
         _record_capture_error(
-            harness, f"cannot reach API at {api_url}: {e.reason}")
+            harness, f"cannot reach API at {api_url}: {e.reason}",
+            session_id=session_id)
+        # No status at all (network / timeout) is classified "retry" — and it is
+        # the MOST COMMON transient failure, so it must reach the spool too. A
+        # retryable failure never losing the session is the point of this path.
+        _spool_if_retryable(None, str(e.reason))
+        return 1
+    except (OSError, ValueError, _HTTPException) as e:
+        # RESPONSE-PHASE failures. `urlopen`'s handler covers the connect; the
+        # body read and its parse happen UNDER the `with` and none of them is a
+        # URLError — and the members are deliberately SUPERCLASSES, because
+        # enumerating them is how this kept losing sessions (#4714 review):
+        #   * OSError       — a read timeout is a bare TimeoutError, a truncated
+        #                     body is ConnectionResetError, and ssl.SSLError and
+        #                     generic OSError all share this base. URLError is
+        #                     NOT caught here (listed first, above).
+        #   * ValueError    — `json.loads(bytes)` raises UnicodeDecodeError for a
+        #                     non-UTF-8 proxy page, which is NOT a
+        #                     JSONDecodeError; ValueError covers both.
+        #   * HTTPException — a malformed HTTP response.
+        # A refusal we cannot even read the body of is still a retryable
+        # refusal, so it must spool rather than escape as a traceback.
+        print(f"import failed reading the response: {e}", file=_sys.stderr)
+        _record_capture_error(harness, f"import failed reading the response: {e}",
+                              session_id=session_id)
+        _spool_if_retryable(None, str(e))
         return 1
 
     # Any 2xx is a success — the server stored the Session and wrote its

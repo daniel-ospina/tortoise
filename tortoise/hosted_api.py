@@ -4624,6 +4624,13 @@ def _alert_unmetered(lane: str, org_id: str | None,
             "UNMETERED INCREMENT (#3981): lane=%s team=%s error=%s: %s "
             "(metering module unavailable)", lane, org_id or "<none>",
             type(error).__name__, error)
+        # The fallback still ALERTS — a log line on an ephemeral Fly rootfs is
+        # the #3677 loss class. The kind constant and the dispatcher live in
+        # ``operator_alert``, which is importable when ``metering`` is not.
+        with contextlib.suppress(Exception):
+            from tortoise.operator_alert import alert_unmetered_increment
+
+            alert_unmetered_increment(lane, org_id, error)
         return
     report_unmetered_increment(lane=lane, org_id=org_id, error=error)
 
@@ -22471,42 +22478,74 @@ def _analytics_incident_detail(outcome: str, reason: str) -> dict:
         }
 
 
+def _incident_alert_store(writer: str | None = None):
+    """THE alert-channel builder for operator incidents — ALERT creds only.
+
+    Deliberately NOT gated on ``BACKUP_SWEEP_ENABLED`` (#3820 D5a): the sweep
+    switch decides whether backups RUN, never whether an incident is VISIBLE.
+    When the sweep is enabled its config is used as-is; otherwise
+    ``load_alert_config`` reads the alert credentials ungated. Returns ``None``
+    when there is no issue filer (``DR_ISSUES_PAT`` unset) or the object store
+    cannot be built; the caller then keeps its log line. Env-only: no network
+    at construction.
+
+    ``writer`` is threaded through to ``_alert_store_from`` so a caller that
+    must act as a specific identity (the watcher, ``WRITER_WATCHER``) keeps
+    main's #3127/#2844 authority check — the store's resolves are checked
+    against ``KIND_OWNERS``. Default ``None`` → the app's own identity.
+
+    The rule executed here (and the constructor it calls) live in
+    ``tortoise/alert_channel.py``, because ``operator_alert.alert_store()`` —
+    the lane that fires from a dropped increment — must reach the identical
+    channel without importing this module: importing it builds the whole
+    FastAPI app (~1.7 s, see ``tortoise/mcp_server.py:31-35``) and that cost
+    would ride the MCP stdio path for a bookkeeping alert. This function
+    injects THIS module's factories, which is the only difference between the
+    two legs.
+
+    D6 residual, narrowed: the channel can fail to exist for TWO physical
+    reasons — no ``DR_ISSUES_PAT`` means no filer, and an unusable object store
+    (missing or typoed ``R2_*`` — the store constructor raises unless all four
+    are set) means no dedup seam. It is therefore "no PAT **or** no usable
+    object store", not "no PAT" alone. Counting must never be conditioned on
+    this returning a store.
+
+    SEAM MAP (one policy, several names — for a reader, not for a caller):
+      * ``alert_channel.incident_alert_store`` — the chokepoint holding the
+        ALERT-only policy; ``hosted_api._incident_alert_store`` injects the
+        hosted factories into it. ``operator_alert.alert_store`` PREFERS this
+        function whenever ``tortoise.hosted_api`` is already imported, and
+        only falls back to the light leg when it is not — so in the hosted
+        process there is ONE builder and one cached store.
+      * ``_analytics_alert_store`` — a retained TEST PATCH POINT; it delegates
+        here and adds no policy of its own. Patching it does NOT redirect
+        ``operator_alert``/``cohort_cost``, which resolve through this function
+        (or ``operator_alert.alert_store``); patch the plane you mean.
+      * ``cohort_cost._alert_store`` — retained as a stable internal API for its
+        module; it delegates through ``operator_alert.alert_store``.
+      * ``_alert_store_from(cfg, writer=None)`` — the pure constructor from an
+        already-loaded config; it dereferences ``cfg`` and must never be handed
+        ``None``.
+    """
+    from tortoise import alert_channel
+
+    return alert_channel.incident_alert_store(
+        config_safe=_backup_config_safe, storage_factory=_backup_storage,
+        writer=writer)
+
+
 def _analytics_alert_store():
     """The AlertStore for sink incidents, or ``None`` when unavailable.
 
     #3820: the indirection seam — tests monkeypatch THIS, never
     ``_alert_store_from``.
 
-    #3820 (D5a): the channel is built from the ALERT credentials, NEVER from
-    the backup-sweep gate. ``_backup_config_safe()`` is ``None`` whenever
-    ``BACKUP_SWEEP_ENABLED`` is false — the default — and building this on it
-    meant an incident was never filed on such a deployment, leaving only an
-    unscraped counter and a log on an ephemeral Fly rootfs: #3677's loss class,
-    re-created through the alert channel. When the sweep is enabled its config
-    is used as-is (same env contract); otherwise, and when it is invalid,
-    ``load_alert_config()`` reads the alert credentials ungated. What remains
-    is the CHANNEL's own construction, not a feature switch: no
-    ``DR_ISSUES_PAT`` means no filer, and an unusable object store (missing or
-    typoed ``R2_*`` — ``_alert_store_from`` builds ``R2Storage``, whose
-    ``__init__`` raises unless all four R2 vars are set) means no dedup seam,
-    so the store cannot be built and the counter + WARNING are the residual.
-    The D6 residue is therefore "no PAT **or** no usable object store" — a real
-    physical limit, not "no PAT" alone.
-
-    Counting must never be conditioned on this returning a store.
+    #3820 (D5a)/#3981: delegates to ``_incident_alert_store`` so the analytics
+    sink and the operator-alert kinds share ONE channel policy and cannot
+    drift apart — see that function for the ALERT-only gate and the D6
+    residual. Counting must never be conditioned on this returning a store.
     """
-    try:
-        cfg = _backup_config_safe()
-        if cfg is None:
-            from tortoise.backup_config import load_alert_config
-
-            cfg = load_alert_config()
-        if cfg is None:
-            return None
-        return _alert_store_from(cfg)
-    except Exception as e:  # absence of a channel is not a loss
-        _logger.warning("analytics alert store unavailable: %s", e)
-        return None
+    return _incident_alert_store()
 
 
 def _as_call_count(value) -> int:
@@ -24784,15 +24823,16 @@ _PURGE_INFLIGHT = asyncio.Lock()  # #2304 trash-purge in-flight guard
 
 
 def _backup_config_safe() -> BackupConfig | None:  # noqa: F821
-    """Sweep config, or None when disabled (fail-closed)."""
-    from tortoise.backup_config import ConfigError, load_config
+    """Sweep config, or None when disabled (fail-closed).
 
-    try:
-        cfg = load_config()
-    except ConfigError as e:
-        _logger.warning("backup sweep config invalid: %s", e)
-        return None
-    return cfg if cfg.enabled else None
+    Thin delegate to ``alert_channel.sweep_config_safe`` — the ALERT channel's
+    light leg needs the same fail-closed rule without importing this module.
+    Kept as a module global because tests patch THIS name (``test_notify``,
+    ``test_email_notify``).
+    """
+    from tortoise import alert_channel
+
+    return alert_channel.sweep_config_safe()
 
 
 def _alert_store_from(cfg, writer: str | None = None) -> AlertStore:  # noqa: F821
@@ -24802,40 +24842,19 @@ def _alert_store_from(cfg, writer: str | None = None) -> AlertStore:  # noqa: F8
     KIND_OWNERS actually declares itself — otherwise the authority check is
     short-circuited for the whole app path and the map is inert. The watcher
     passes WRITER_WATCHER explicitly at its construction site.
+
+    The body lives in ``alert_channel.alert_store_from`` so the light leg
+    (``operator_alert``, which must not import this module) builds a
+    byte-identical store. ``_backup_storage`` is passed as a FACTORY, resolved
+    at call time, so the test patch point on this module keeps working and the
+    hosted leg keeps its cache-keyed R2 singleton (#3968). ``writer`` is
+    forwarded verbatim — the #3127/#2844 authority contract is main's, and this
+    delegate must not narrow it.
     """
-    from tortoise import github_issue as gi
-    from tortoise.alert_store import WRITER_APP, AlertStore
-    from tortoise.telegram_push import send_message
+    from tortoise import alert_channel
 
-    writer = WRITER_APP if writer is None else writer
-
-    storage = _backup_storage()
-
-    def file_issue(title: str, body: str) -> int:
-        return gi.create_issue(
-            cfg.gh_repo, cfg.github_issues_pat, title=title, body=body,
-            assignee=cfg.alert_assignee,
-        )
-
-    def close_issue(number: int, comment: str | None = None) -> None:
-        gi.close_issue(cfg.gh_repo, cfg.github_issues_pat, number, comment)
-
-    def search_open(kind: str, org_id: str = "") -> list[int]:
-        return gi.search_open_incident(
-            cfg.gh_repo, cfg.github_issues_pat, kind, org_id)
-
-    def push_telegram(text: str) -> None:
-        send_message(cfg.telegram_bot_token, cfg.telegram_chat_id, text)
-
-    def issue_open(number: int) -> bool:
-        return gi.issue_is_open_checked(cfg.gh_repo, cfg.github_issues_pat, number)
-
-    return AlertStore(
-        storage, file_issue=file_issue, close_issue=close_issue,
-        search_open=search_open, push_telegram=push_telegram,
-        issue_open=issue_open, default_writer=writer,
-        repo=cfg.gh_repo, assignee=cfg.alert_assignee,
-    )
+    return alert_channel.alert_store_from(
+        cfg, storage_factory=_backup_storage, writer=writer)
 
 
 def _sweep_org_lock(org_id: str) -> threading.Lock:

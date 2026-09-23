@@ -286,7 +286,14 @@ def test_run_cell_resume_skips_completed(tmp_path):
 
 def test_smoke_command_uses_mini_fixture_and_v2(tmp_path, capsys):
     """The pre-pilot smoke targets 1 real-extractor question via the committed
-    MINI fixture (no dataset download) with --ingest-mode v2."""
+    MINI fixture (no dataset download) with --ingest-mode v2.
+
+    #4718: the mock form must ALSO carry `--skip-preflight`. `--mock` selects
+    the reader/judge and is not a dense-leg waiver, so without the flag this
+    documented "offline" wiring smoke would stop at the dense-leg pre-flight
+    on any host lacking the embedder — the exact contract this command exists
+    to keep.
+    """
     state = _fresh_state(tmp_path)
     rp.cmd_smoke(state, argparse_namespace(mock=True, dry_run=True))
     out = capsys.readouterr().out
@@ -294,7 +301,19 @@ def test_smoke_command_uses_mini_fixture_and_v2(tmp_path, capsys):
     assert "--limit 1" in out
     assert "--ingest-mode v2" in out
     assert "--mock" in out
+    assert "--skip-preflight" in out  # #4718: the mock smoke declares the waiver
     assert "[dry-run]" in out
+
+
+def test_smoke_command_real_form_requires_the_dense_leg(tmp_path, capsys):
+    """#4718 counter-case: the REAL (non-mock) smoke must NOT waive the dense
+    leg — only the mock wiring check may. Without this, the waiver could widen
+    to every smoke run and quietly disable the gate for a real one."""
+    state = _fresh_state(tmp_path)
+    rp.cmd_smoke(state, argparse_namespace(mock=False, dry_run=True))
+    out = capsys.readouterr().out
+    assert "--mock" not in out
+    assert "--skip-preflight" not in out
 
 
 def test_full_context_cli_dry_run(tmp_path, capsys):
@@ -306,6 +325,11 @@ def test_full_context_cli_dry_run(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "tools.longmem_eval.full_context" in out
     assert "--limit 50" in out
+    # #4718: NO dense-leg waiver here, deliberately — full_context.py has no
+    # dense-leg gate and its parser REJECTS --skip-preflight (argparse exit 2).
+    # Asserting the absence pins the regression that round 3 introduced and
+    # then had to revert.
+    assert "--skip-preflight" not in out
     assert "[dry-run]" in out
     # default output is timestamped (two cell runs — pilot + 500 — must not
     # clobber each other's ceiling measurement)
