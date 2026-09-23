@@ -21,11 +21,14 @@ state keys (never client state):
   ``harness`` without checking it against the Session's stored harness — so the
   harness in this key is a caller declaration on both writers.
 
-Both the hosted API (``tortoise/hosted_api.py``) and the CLI's
-``tortoise session verify`` (#3809) derive them from THIS module, so the two
-can never disagree about the key spelling.  A local copy in either caller is
-exactly the sibling-divergence class the capture lane has paid review cycles
-for — one function, two importers.
+The hosted API (``tortoise/hosted_api.py``) imports both keys from THIS module,
+and the CLI's ``tortoise session verify`` (#3809) imports ``capture_receipt_key``
+(it reads no last-error key). The hosted API is not a single-importer: where it
+reconciles the receipt keys against the server-owned key set it still re-spells
+both keys inline (``_reconcile_capture_receipts`` / ``_capture_server_owned_keys``
+— filed as #4893), so this module is the one DEFINITION while the hosted API is a
+second spelling in those spots. One function, two importers remains the target;
+until #4893 lands, neither copy may be changed alone.
 """
 from __future__ import annotations
 

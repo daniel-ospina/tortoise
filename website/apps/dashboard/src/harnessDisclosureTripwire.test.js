@@ -15,10 +15,13 @@
 // constant) is not merely conventional.
 //
 // Both directions, like the sibling tripwires: an edit that DROPS the disclosure
-// render, that nulls the binding it reads, or that hard-codes the attribution
-// constant at the call site fails here; a behaviour-identical reformat
-// (whitespace, or a call's arguments broken across lines) stays green — the
-// patterns below are whitespace-tolerant.
+// render, that nulls the binding it reads, that renders a literal instead of the
+// helper's value, or that hard-codes the attribution constant at the call site
+// fails here; a behaviour-identical reformat (whitespace, or a call's arguments
+// broken across lines) stays green — the patterns below are whitespace-tolerant.
+// What a source pin cannot see: CSS. A rule hiding the fragment, or any DOM-level
+// edit, is beyond this file (this repo has no DOM test runtime). The assertions
+// below pin the expression and its data source, not painted pixels.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -37,10 +40,10 @@ assert.notEqual(headEnd, -1, 'the harness-status card head must be closed')
 const head = mainJsx.slice(headStart, headEnd)
 
 test('#3700: the row renders the harness disclosure from the helper', () => {
-  assert.match(head, /harnessAttribution\(h\)\s*&&/,
-    'the card head must render the disclosure, guarded on the helper\'s return')
-  assert.match(head, /className="dim small"[\s\S]{0,160}harnessAttribution\(h\)/,
-    'the helper\'s value must render as the row\'s dim `·` disclosure fragment')
+  assert.match(head, /\{harnessAttribution\(h\)\s*&&\s*\(/,
+    'the card head must guard the disclosure on the helper\'s own return, not on a re-derived literal')
+  assert.match(head, /className="dim small"\s*>\s*·\s*(?:\{" "\}\s*)?\{harnessAttribution\(h\)\}\s*<\/span>/,
+    'the dim `·` fragment must render the helper\'s VALUE alone — any literal here restores the #3700 misreading with every test green')
   assert.match(head, /captureStatusLabelForHarness\(\s*state\s*,\s*h\s*,?\s*\)/,
     'the state word must come from the shared label helper')
 })

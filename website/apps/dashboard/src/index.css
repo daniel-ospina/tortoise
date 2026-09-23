@@ -989,6 +989,10 @@ input::placeholder, textarea::placeholder {
    a content box at least that wide; real cards are >=240px (`.app` pads 20px at
    a 320px viewport), and below that the pill by itself would overrun. */
 .harness-status-name { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; min-width: 0; }
+/* #3700: the disclosure fragment itself must not break — wrapped at its `·` it
+   reads as an orphaned bullet above the sentence it belongs to (measured at a
+   320px viewport, the narrowest supported). It wraps as ONE unit instead. */
+.harness-status-name .dim.small { white-space: nowrap; }
 .harness-status-head strong { font-size: 13px; }
 .capture-state {
   font-size: 12px;
