@@ -1642,9 +1642,6 @@ def test_pi_leg_flush_survives_an_unreadable_turn_log():
     MUTATION THAT REDS THIS: restore the unguarded `readFileSync` in
     `readSpoolTurns` (or `existsSync`-only guard).
     """
-    node = subprocess.run(["node", "--version"], capture_output=True, text=True)
-    if node.returncode != 0:
-        pytest.skip("node not available")
     script = r'''
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
