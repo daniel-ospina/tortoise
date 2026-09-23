@@ -13,7 +13,7 @@ import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HAR
 // (off → install-pending → waiting → active, probe-driven) — pure, node --test
 // unit-tested (captureStatus.test.js). #1927: the re-ask gate predicate was
 // removed with the consent gate (default-ON, ToS-covered).
-import { captureStatusForHarness, captureClaimForHarness, captureStatusLabelForHarness, lastErrorForHarness } from './captureStatus.js'
+import { captureStatusForHarness, captureClaimForHarness, captureStatusLabelForHarness, captureErrorForHarness } from './captureStatus.js'
 import { setupGuide } from './setupGuide.js'
 // #2000 (W4): the Overview calm — EXACTLY 3 elements (connection status,
 // memory digest, next action), zero toggles. Pure derivations, node --test
@@ -9825,7 +9825,7 @@ function MemorySources(props) {
   const githubLastIndexed = formatRelativeTime(state.github_indexed_at, now)
 
   const status = (h) => captureStatusForHarness(state, h)
-  const lastError = (h) => lastErrorForHarness(state, h)
+  const lastError = (h) => captureErrorForHarness(state, h)
 
   return (
     <div className="memory-sources">
@@ -10087,7 +10087,7 @@ function MemorySources(props) {
                   {supported && st === 'install-pending' && sessionsOn && (
                     <pre className="snippet">{HARNESS_CAPTURE_INSTALL[h]}</pre>
                   )}
-                  {lastError(h) && <p className="error small" role="alert">Last attempt: {lastError(h)}</p>}
+                  {lastError(h) && <p className="error small" role="alert">{lastError(h)}</p>}
                 </div>
               )
             })}

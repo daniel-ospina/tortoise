@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 import {
   CAPTURE_STATES,
   captureClaimForHarness,
+  captureErrorForHarness,
   captureStatusForHarness,
   captureStatusLabelForHarness,
   lastErrorForHarness,
@@ -274,10 +275,22 @@ test('#3700: caller-declared harness states render as agent-reported, never a se
   const probeLabel = captureStatusLabelForHarness(st, 'pi')
   assert.equal(receiptLabel, `active (${HARNESS_ATTRIBUTION})`)
   assert.equal(probeLabel, `installed (${HARNESS_ATTRIBUTION}) — waiting for first capture`)
-  assert.equal(HARNESS_ATTRIBUTION, 'reported by your agent')
+  assert.equal(HARNESS_ATTRIBUTION, 'harness reported by your agent')
   assert.notEqual(receiptLabel, 'active', 'the receipt-derived label must not read as a server-observed harness')
   assert.ok(probeLabel.includes(HARNESS_ATTRIBUTION),
     'the probe-derived label must carry the same agent attribution as the receipt')
+
+  // (3b) the sibling FAILURE sub-line is the same defect class: the key it
+  //      reads (`session_capture_last_error_<h>`) carries the harness the same
+  //      `stored or claimed` resolution produced, so the rendered sentence must
+  //      be attributed too — and must be null (not an empty string) when there
+  //      is no error, since the caller uses it as its own render guard.
+  const errState = { ...st, session_capture_last_error_claude: 'timed out' }
+  assert.equal(captureErrorForHarness(errState, 'claude'),
+    `Last attempt (${HARNESS_ATTRIBUTION}) — timed out`)
+  assert.equal(lastErrorForHarness(errState, 'claude'), 'timed out',
+    'the raw accessor keeps returning the bare message')
+  assert.equal(captureErrorForHarness(st, 'claude'), null)
 
   // (3) an undeclared harness never gets another harness's label — the
   //     attribution cannot leak onto a state the server has no signal for.

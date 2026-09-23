@@ -8,6 +8,7 @@
 // table below. harnesses.js is pure constants (no browser globals, no imports),
 // so this import keeps the module node --test-testable and cannot cycle.
 import {
+  HARNESS_ATTRIBUTION,
   HARNESS_CAPTURE_STATUS_LABEL,
   HARNESS_CAPTURE_SUPPORT,
 } from './harnesses.js'
@@ -46,10 +47,15 @@ export function captureStatusForHarness(state, harness) {
 // (the stable API the derivation and its tests read) mapped through the ONE
 // shared label table in harnesses.js. The caller-declared states (`active`,
 // `waiting`) render with their agent-reported attribution so no product surface
-// presents a declared harness as a server-observed fact. Call sites must use
-// this, never index HARNESS_CAPTURE_STATUS_LABEL directly (main.jsx no longer
-// imports the raw table, so a direct index is a `no-undef` lint error), so the
-// attribution cannot be dropped at one of them.
+// presents a declared harness as a server-observed fact.
+//
+// Call sites go through this helper, never index HARNESS_CAPTURE_STATUS_LABEL
+// directly: main.jsx no longer imports the raw table, so re-indexing it there
+// is a `no-undef` error rather than a silent attribution drop. That pin covers
+// the call sites in main.jsx only — the table stays exported (the harness
+// registry's own test asserts it), so a NEW module could still import it
+// directly; that is convention, not enforcement, and the honest statement of it
+// matters more than a stronger claim the mechanism does not back.
 export function captureStatusLabelForHarness(state, harness) {
   return HARNESS_CAPTURE_STATUS_LABEL[captureStatusForHarness(state, harness)]
 }
@@ -114,4 +120,19 @@ export function captureClaimForHarness(state, harness) {
 export function lastErrorForHarness(state, harness) {
   if (!state) return null
   return state[`session_capture_last_error_${harness}`] || null
+}
+
+// #3700: the per-harness FAILURE sub-line's rendered sentence — the sibling of
+// the status pill, and the same defect class. `session_capture_last_error_<h>`
+// is written by the same `_observed_capture_harness` resolution as the receipt
+// (`stored or claimed`, see tortoise/capture_receipts.py), so its harness is
+// likewise the CALLER's declaration and must not render as the harness whose
+// attempt failed. Funnelling the sentence through here keeps the attribution on
+// the one shared constant instead of at a call site that can forget it.
+// Returns null when there is no recorded error, so callers can use it directly
+// as the render guard.
+export function captureErrorForHarness(state, harness) {
+  const error = lastErrorForHarness(state, harness)
+  if (!error) return null
+  return `Last attempt (${HARNESS_ATTRIBUTION}) — ${error}`
 }

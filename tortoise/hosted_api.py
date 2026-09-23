@@ -9018,13 +9018,15 @@ async def capture_session(body: SessionRequest, request: Request, org: dict = De
     last-error, and only the BARE ``session_capture_receipt`` — the same bare
     member legacy no-harness hooks write.
 
-    #3700: ``capture_harness`` (``hosted_api._observed_capture_harness``) is
-    RESOLVED, not OBSERVED. The server observes that an authenticated agent
-    credential captured; the harness attribution is the caller's declaration
-    (``body.harness`` on a fresh session, the stored Session harness on a
-    re-capture). No credential→harness binding exists, so no surface may read
-    the per-harness key as proof the server saw that harness — only the capture
-    itself is observed.
+    #3700: the harness in those keys is what
+    ``_observed_capture_harness(org, body.harness, <stored>)`` resolves (bound
+    as ``capture_harness`` in ``_capture_session_impl``, which writes the
+    receipt) — RESOLVED, not OBSERVED. The server observes that an
+    authenticated agent credential captured; the harness attribution is the
+    caller's declaration (``body.harness`` on a fresh session, the stored
+    Session harness on a re-capture). No credential→harness binding exists, so
+    no surface may read the per-harness key as proof the server saw that
+    harness — only the capture itself is observed.
     """
     _require_scope(org, "graphs:write", "capture_session")
     try:

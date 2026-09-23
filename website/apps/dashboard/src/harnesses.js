@@ -461,9 +461,9 @@ export const HARNESS_CAPTURE_REASON = {
 // #1728 (Task 17): receipt/probe labels for the 4-state capture status
 // (shared by the wizard step-1 and the dashboard panel).
 //
-// #3700: every non-`off` state in this table is derived from a per-harness
-// onboarding key whose harness is the CALLER's DECLARATION, not a server
-// observation:
+// #3700: the two states in this table that NAME a harness are derived from a
+// per-harness onboarding key whose harness is the CALLER's DECLARATION, not a
+// server observation:
 //   * `active` reads `session_capture_receipt_<harness>` — `body.harness` on a
 //     fresh session (an authenticated agent self-report) or the Session's
 //     stored harness on a re-capture, itself recorded from that declaration;
@@ -475,7 +475,13 @@ export const HARNESS_CAPTURE_REASON = {
 // attribution the server can stand behind — agent-reported — and never present
 // the harness as a server-observed fact. The state VOCABULARY and the key
 // spellings are unchanged; only the rendered attribution narrows.
-export const HARNESS_ATTRIBUTION = 'reported by your agent'
+//
+// `install-pending` is the one non-`off` state that is NOT in this group: it is
+// the fall-through when NEITHER per-harness key is present (the dashboard's own
+// no-signal state), embeds no harness, and must therefore carry NO attribution —
+// hedging "not installed yet" as agent-reported would invent a claim about a
+// harness the server has no signal for at all.
+export const HARNESS_ATTRIBUTION = 'harness reported by your agent'
 export const HARNESS_CAPTURE_STATUS_LABEL = {
   off: 'off',
   'install-pending': 'not installed yet',
