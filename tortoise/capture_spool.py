@@ -852,23 +852,22 @@ def flush_spool(
     return summary
 
 
-def _stamp_second(value: object) -> str:
-    """UTC ISO stamps to a comparable, second-resolution key (see the caller)."""
-    return str(value or "")[:19]
+def _clear_breadcrumb_for(harness: str | None, session_id: str | None) -> None:
+    """Drop the capture-failure breadcrumb once THAT session has landed.
 
-
-def _clear_breadcrumb_for(harness: str | None, before: str | None = None) -> None:
-    """Drop the capture-failure breadcrumb once the session HAS landed.
-
-    The record is per-HARNESS, so this must be narrow in two directions or it
+    The record is per-HARNESS, so this must be narrow in three directions or it
     destroys evidence about something else (#4714 review):
 
     * ``kind`` — the shipped hooks write ``install-inert`` to the SAME path, and
       ``session verify`` reaches INERT only from that record. Unlinking blindly
       let a drain firing while verify was mid-flight erase it and report an
       inert install as PROVEN. Only a ``capture-failure`` record is cleared.
-    * ``recorded_at`` — a failure recorded AFTER this session was filed belongs
-      to a DIFFERENT, still-failing session, and must survive.
+    * ``session_id`` — a failure recorded for a DIFFERENT session must survive.
+      This is an IDENTITY check; a timestamp check does NOT work, because the
+      spool's ``updated_at`` is frozen by the dedup path and so cannot say when
+      this session last failed.
+    * a record with no recorded ``session_id`` predates this field and is
+      cleared, preserving the earlier behaviour for old records.
 
     Best effort throughout: a breadcrumb is evidence, never a gate on filing.
     """
@@ -889,15 +888,9 @@ def _clear_breadcrumb_for(harness: str | None, before: str | None = None) -> Non
             return
         if record.get("kind") != KIND_CAPTURE_FAILURE:
             return
-        recorded = record.get("recorded_at")
-        # Both stamps are UTC ISO but at DIFFERENT resolutions: the breadcrumb is
-        # second-resolution, the spool meta carries microseconds. Comparing the
-        # raw strings would order `…35Z` AFTER `…35.582932Z` (ASCII 'Z' > '.'),
-        # which would skip a clear that should happen. Truncate to the common
-        # second-resolution prefix so the comparison is actually chronological;
-        # a same-second tie clears, because the filing just succeeded.
-        if before and recorded and _stamp_second(recorded) > _stamp_second(before):
-            # A LATER failure describes a session that is still lost.
+        recorded_id = record.get("session_id")
+        if recorded_id and session_id and recorded_id != session_id:
+            # A DIFFERENT session's failure — still current, must survive.
             return
         with contextlib.suppress(OSError):
             path.unlink()
@@ -968,7 +961,7 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         # spooled-then-drained session never takes — so a recovered capture
         # left the breadcrumb standing (and `session verify` reading a failure
         # that had already been resolved) (#4714 review).
-        _clear_breadcrumb_for(meta.get("harness"), meta.get("updated_at"))
+        _clear_breadcrumb_for(meta.get("harness"), sid)
         # COMPARE-AND-SWAP, on the POSTED CONTENT. A concurrent capture (a
         # resumed session, or the SessionStart drain racing a live turn) can
         # grow this entry while the POST is in flight. Stamp `filed_key` only

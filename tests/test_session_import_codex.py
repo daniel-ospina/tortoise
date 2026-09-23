@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import io
 import json
+import ssl
 from types import SimpleNamespace
 from unittest import mock
 from urllib.error import HTTPError
@@ -881,18 +882,23 @@ def test_a_non_utf8_error_body_is_handled_not_raised(
     assert read_spool_meta(spool, "sid-badbody") is not None
 
 
-def test_the_breadcrumb_clear_is_kind_aware_and_time_aware(
+def test_the_breadcrumb_clear_is_kind_aware_and_identity_aware(
         tmp_path, monkeypatch, codex_jsonl):
     """`_clear_breadcrumb_for` must not destroy evidence about something else.
 
     The breadcrumb path is shared with the shipped hooks' `install-inert`
     record, which is the ONLY way `session verify` reaches INERT — so a blind
     unlink let a drain racing verify make an inert install read as PROVEN. And
-    a failure recorded AFTER this session was filed belongs to a DIFFERENT,
-    still-lost session.
+    a failure recorded for a DIFFERENT session is still current, however
+    recently it happened.
+
+    The check is by IDENTITY, not timestamp: the spool's `updated_at` is frozen
+    on the dedup path, so it cannot say when a session last failed — the most
+    obvious retry (re-importing identical content) never cleared its own
+    record under a timestamp comparison.
 
     Mutations that must RED this: (a) drop the `kind` check — case 1 fails;
-    (b) drop the timestamp comparison — case 2 fails.
+    (b) drop the identity check — case 2 fails.
     """
     from tortoise.capture_spool import _clear_breadcrumb_for
     from tortoise.hook_install import KIND_CAPTURE_FAILURE, KIND_INSTALL_INERT
@@ -904,25 +910,101 @@ def test_the_breadcrumb_clear_is_kind_aware_and_time_aware(
     # (1) An INERT install record is NOT ours to clear.
     crumb.write_text(json.dumps({
         "harness": "codex", "kind": KIND_INSTALL_INERT,
-        "detail": "install is inert", "recorded_at": "2020-01-01T00:00:00Z",
+        "detail": "install is inert",
     }), encoding="utf-8")
-    _clear_breadcrumb_for("codex", "2026-09-22T23:00:00.000000Z")
+    _clear_breadcrumb_for("codex", "sid-mine")
     assert crumb.exists(), "an INERT install record was cleared — verify lies"
 
-    # (2) A failure recorded AFTER the filed session describes another session.
+    # (2) Another session's failure is still current.
     crumb.write_text(json.dumps({
         "harness": "codex", "kind": KIND_CAPTURE_FAILURE,
-        "detail": "a later session failed", "recorded_at": "2026-09-22T23:30:00Z",
+        "detail": "a different session failed", "session_id": "sid-other",
     }), encoding="utf-8")
-    _clear_breadcrumb_for("codex", "2026-09-22T23:00:00.000000Z")
-    assert crumb.exists(), "a LATER failure was cleared by an earlier filing"
+    _clear_breadcrumb_for("codex", "sid-mine")
+    assert crumb.exists(), "another session's live failure was cleared"
 
-    # (3) A capture-failure at or before the filing IS cleared — and note the
-    # second-resolution breadcrumb vs the microsecond meta stamp.
+    # (3) OUR record IS cleared — including via an old record with no id.
     crumb.write_text(json.dumps({
         "harness": "codex", "kind": KIND_CAPTURE_FAILURE,
         "detail": "this session failed then recovered",
-        "recorded_at": "2026-09-22T22:59:00Z",
+        "session_id": "sid-mine",
     }), encoding="utf-8")
-    _clear_breadcrumb_for("codex", "2026-09-22T23:00:00.000000Z")
+    _clear_breadcrumb_for("codex", "sid-mine")
     assert not crumb.exists(), "a recovered session left a stale failure record"
+
+    crumb.write_text(json.dumps({
+        "harness": "codex", "kind": KIND_CAPTURE_FAILURE,
+        "detail": "written by an older build",
+    }), encoding="utf-8")
+    _clear_breadcrumb_for("codex", "sid-mine")
+    assert not crumb.exists(), "a legacy record must still clear"
+
+
+@pytest.mark.parametrize("body_bytes,label", [
+    (b"<html>caf\xe9</html>", "a non-UTF-8 proxy page"),
+    (b"\xff\xfe\x00<\x00h", "a UTF-16 body truncated mid-character"),
+])
+def test_a_non_utf8_success_body_does_not_escape(
+        tmp_path, monkeypatch, codex_jsonl, body_bytes, label):
+    """`json.loads(bytes)` raises UnicodeDecodeError for a non-UTF-8 body, which
+    is a ValueError sibling of JSONDecodeError — NOT a JSONDecodeError. Catching
+    only JSONDecodeError therefore let a latin-1 or truncated-multibyte response
+    escape the command entirely: no spool, no receipt, an unhandled traceback.
+    Enumerating exception types is how this kept losing sessions; the handler
+    now takes the SUPERCLASSES.
+
+    Mutation: narrow the tuple back to JSONDecodeError — this REDs."""
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import read_spool_meta
+
+    spool = _import_env(tmp_path, monkeypatch)
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return body_bytes
+
+    with mock.patch("urllib.request.urlopen", lambda req, timeout=None: _Resp()):
+        rc = _cmd_sessions_import(SimpleNamespace(
+            file=str(codex_jsonl), harness="codex", session_id="sid-nonutf8"))
+
+    assert rc == 1, f"{label} escaped the command"
+    assert read_spool_meta(spool, "sid-nonutf8") is not None, (
+        f"{label} lost the session")
+
+
+@pytest.mark.parametrize("exc", [
+    OSError(5, "Input/output error"),
+    ssl.SSLError("handshake stall mid-read"),
+])
+def test_a_bare_oserror_reading_the_response_is_spooled(
+        tmp_path, monkeypatch, codex_jsonl, exc):
+    """`resp.read()` can raise OSError/ssl.SSLError, which are neither
+    TimeoutError nor ConnectionError — enumerating the OSError family instead of
+    naming the base let these escape too. Mutation: narrow the tuple — REDs."""
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import read_spool_meta
+
+    spool = _import_env(tmp_path, monkeypatch)
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            raise exc
+
+    with mock.patch("urllib.request.urlopen", lambda req, timeout=None: _Resp()):
+        rc = _cmd_sessions_import(SimpleNamespace(
+            file=str(codex_jsonl), harness="codex", session_id="sid-oserr"))
+
+    assert rc == 1, f"{type(exc).__name__} escaped the command"
+    assert read_spool_meta(spool, "sid-oserr") is not None

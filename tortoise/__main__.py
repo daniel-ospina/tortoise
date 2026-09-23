@@ -3421,7 +3421,15 @@ def _session_post(api_key: str, api_url: str):
                 return PostOutcome(ok=True, status=getattr(resp, "status", 200),
                                    body=_json.loads(resp.read()))
         except HTTPError as e:
-            body = e.read().decode() if e.fp else ""
+            # Read INSIDE the handler: an exception raised here is not caught by
+            # the sibling clauses below, so an unguarded read made a 504 whose
+            # error body stalls raise out of the drain and record a spurious
+            # `entry_failed` discard (#4714 review). Broad on purpose — this is
+            # a diagnostic body; failing to read it must not fail the entry.
+            try:
+                body = e.read().decode("utf-8", "replace") if e.fp else ""
+            except Exception as read_exc:
+                body = f"<error body unreadable: {read_exc}>"
             return PostOutcome(ok=False, status=e.code, detail=body[:500])
         except URLError as e:
             return PostOutcome(ok=False, status=None,
@@ -3859,7 +3867,8 @@ def _capture_error_file(harness: str) -> Path:
     return receipt_dir.parent / "capture-errors" / f"{harness}.json"
 
 
-def _record_capture_error(harness: str, detail: str) -> None:
+def _record_capture_error(harness: str, detail: str,
+                          session_id: str | None = None) -> None:
     """Write the local capture-failure breadcrumb. Best-effort only — a
     breadcrumb write must never break the capture path it observes.
 
@@ -3879,6 +3888,12 @@ def _record_capture_error(harness: str, detail: str) -> None:
             "harness": harness,
             "detail": detail,
             "kind": KIND_CAPTURE_FAILURE,
+            # WHICH session failed. Without it a later clear can only guess from
+            # timestamps, and `updated_at` is not a proxy for "when this session
+            # failed" — it is frozen on the spool's dedup path, so the most
+            # obvious retry (re-import identical content) never cleared its own
+            # record (#4714 review).
+            "session_id": session_id,
             "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }, indent=2), encoding="utf-8")
     except OSError:
@@ -4093,35 +4108,44 @@ def _cmd_sessions_import(args) -> int:
         # either — an undecodable body is still a retryable refusal.
         try:
             body = e.read().decode("utf-8", "replace") if e.fp else ""
-        except (TimeoutError, ConnectionError, _HTTPException) as read_exc:
+        except Exception as read_exc:
+            # Deliberately broad: reading a DIAGNOSTIC body must never replace
+            # the honest failure with a traceback, whatever it raises.
             body = f"<error body unreadable: {read_exc}>"
         # 403/402/503 ⇒ fail, NO receipt, honest error (Task 15 acceptance).
         print(f"import failed (HTTP {e.code}): {body}", file=_sys.stderr)
-        _record_capture_error(harness, f"import failed (HTTP {e.code}): {body}")
+        _record_capture_error(harness, f"import failed (HTTP {e.code}): {body}",
+                              session_id=session_id)
         _spool_if_retryable(e.code, body)
         return 1
     except URLError as e:
         print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
         _record_capture_error(
-            harness, f"cannot reach API at {api_url}: {e.reason}")
+            harness, f"cannot reach API at {api_url}: {e.reason}",
+            session_id=session_id)
         # No status at all (network / timeout) is classified "retry" — and it is
         # the MOST COMMON transient failure, so it must reach the spool too. A
         # retryable failure never losing the session is the point of this path.
         _spool_if_retryable(None, str(e.reason))
         return 1
-    except (TimeoutError, ConnectionError, _HTTPException,
-            _json.JSONDecodeError) as e:
+    except (OSError, ValueError, _HTTPException) as e:
         # RESPONSE-PHASE failures. `urlopen`'s handler covers the connect; the
-        # body read and its parse happen UNDER the `with`, and none of these is
-        # a URLError: a read timeout is a bare TimeoutError (an OSError, not a
-        # URLError), a truncated body is IncompleteRead/ConnectionResetError,
-        # and a proxy's HTML error page is a JSONDecodeError. All escaped
-        # unhandled — no spool AND no breadcrumb — which is the same silent-loss
-        # class this path exists to close, and a capacity-gated server that
-        # accepts the connection then stalls is exactly the shape that produces
-        # it (#4714 review).
+        # body read and its parse happen UNDER the `with` and none of them is a
+        # URLError — and the members are deliberately SUPERCLASSES, because
+        # enumerating them is how this kept losing sessions (#4714 review):
+        #   * OSError       — a read timeout is a bare TimeoutError, a truncated
+        #                     body is ConnectionResetError, and ssl.SSLError and
+        #                     generic OSError all share this base. URLError is
+        #                     NOT caught here (listed first, above).
+        #   * ValueError    — `json.loads(bytes)` raises UnicodeDecodeError for a
+        #                     non-UTF-8 proxy page, which is NOT a
+        #                     JSONDecodeError; ValueError covers both.
+        #   * HTTPException — a malformed HTTP response.
+        # A refusal we cannot even read the body of is still a retryable
+        # refusal, so it must spool rather than escape as a traceback.
         print(f"import failed reading the response: {e}", file=_sys.stderr)
-        _record_capture_error(harness, f"import failed reading the response: {e}")
+        _record_capture_error(harness, f"import failed reading the response: {e}",
+                              session_id=session_id)
         _spool_if_retryable(None, str(e))
         return 1
 
