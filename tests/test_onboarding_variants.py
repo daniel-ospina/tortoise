@@ -265,7 +265,7 @@ def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
     checked = 0
     skill_names = _installer_skills()
     for label, text in surfaces.items():
-        for inner in re.findall(r"install[^\n]{0,60}?skills\s*\(([^)]*)\)", text, re.I):
+        for inner in re.findall(r"install[^\n]{0,60}?skills?\s*\(([^)]*)\)", text, re.I):
             # The phrase is GENERALIZED, not the literal "install the Tortoise
             # skills": a reworded claim ("Also install the Tortoise helper skills
             # (agent-memory) from …") reintroduced the defect class while never

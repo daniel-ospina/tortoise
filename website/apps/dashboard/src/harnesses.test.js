@@ -85,9 +85,16 @@ test('#4365: no connect copy claims onboarding as an installed skill, and each n
   // ` (` — a space — so it never fired and every superset passed (#4365
   // review round 7, caught by re-running the reviewer's own mutations).
   const PHRASE = 'Install the Tortoise skills'
-  // The one legitimate parenthetical after the phrase that is NOT a set: the
-  // Cursor step list names the step and says where to run it.
-  const NON_SET_HINTS = new Set(['run in a terminal'])
+  // A parenthetical after the phrase is either the shipped SET or a prose HINT
+  // ("run in a terminal"). Recognised by SHAPE, not by an exact-match allowlist:
+  // exact-matching the hint FALSE-REDded a legitimate rewording of instructional
+  // prose, and it also misread a hyphenated prose token as a skill id. Mirrors
+  // the rule in wizardPrompts.test.js so the two gates cannot disagree.
+  const SKILL_NAMES = SKILLS_LIST.split(', ')
+  const hasSkillIdShape = (inner) =>
+    /(?:^|[\s,])([a-z][a-z0-9]*(?:-[a-z0-9]+)+)(?=$|[\s,)]|\s)/.test(inner)
+  const looksLikeEnumeration = (inner) =>
+    inner.includes(',') || SKILL_NAMES.some((n) => inner.includes(n)) || hasSkillIdShape(inner)
   for (const [label, text] of surfaces) {
     for (const line of text.split('\n')) {
       let at = line.indexOf(PHRASE)
@@ -100,8 +107,8 @@ test('#4365: no connect copy claims onboarding as an installed skill, and each n
             `${label}: the install claim's parentheses must close on the same ` +
             `line: ${line.trim()}`)
           const inside = tail.slice(open + 1, close)
-          assert.ok(inside === SKILLS_LIST || NON_SET_HINTS.has(inside),
-            `${label}: a rendered statement of the shipped set must be EXACTLY ` +
+          assert.ok(inside === SKILLS_LIST || !looksLikeEnumeration(inside),
+            `${label}: a statement that enumerates capabilities must be EXACTLY ` +
             `the shipped set (got ${JSON.stringify(inside)})`)
         }
         at = line.indexOf(PHRASE, at + 1)

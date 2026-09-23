@@ -26,7 +26,15 @@ import {
   wizardPromptText,
   wizardWorkflowsText,
 } from './wizardPrompts.js'
-import { SKILLS_INSTALL_URL, SKILLS_LIST, UNIVERSAL_COMMAND } from './harnesses.js'
+import {
+  HARNESS_INTRO,
+  HARNESS_NAMES,
+  HARNESS_STEPS,
+  SKILLS_INSTALL_URL,
+  SKILLS_LIST,
+  UNIVERSAL_COMMAND,
+  harnessFamilyOf,
+} from './harnesses.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const snapshot = JSON.parse(readFileSync(join(here, 'wizardPrompts.snapshot.json'), 'utf8'))
@@ -117,6 +125,27 @@ function allRenderedSurfaces() {
   for (const [name, text] of Object.entries(WIZARD_CAPTIONS)) {
     surfaces.push({ id: `caption.${name}`, text })
   }
+  // The other live, data-driven render surfaces. harnesses.test.js covers some
+  // of these with its OWN list; the two lists were not supersets of the live
+  // render, and every remaining false green came from that seam.
+  for (const [id, text] of Object.entries(HARNESS_INTRO)) surfaces.push({ id: `HARNESS_INTRO.${id}`, text })
+  for (const harness of Object.keys(HARNESS_NAMES)) {
+    // NOT HARNESS_SKILLS: its only consumers are inside LEGACY_WIZARD_ARCHIVED
+    // (main.jsx:7857/7864, flag=false), so it is not a live render and pinning
+    // it would red the gate for an edit to dead code.
+    const steps = HARNESS_STEPS(harness, KEY)
+    const list = steps && steps[harness]
+    if (Array.isArray(list)) {
+      for (const [n, entry] of list.entries()) {
+        if (typeof entry === 'string') surfaces.push({ id: `HARNESS_STEPS.${harness}[${n}]`, text: entry })
+        else if (entry && typeof entry === 'object') {
+          for (const [k, v] of Object.entries(entry)) {
+            if (typeof v === 'string') surfaces.push({ id: `HARNESS_STEPS.${harness}[${n}].${k}`, text: v })
+          }
+        }
+      }
+    }
+  }
   for (const harness of COMMAND_HARNESSES) {
     surfaces.push({ id: `UNIVERSAL_COMMAND.${harness}`, text: UNIVERSAL_COMMAND[harness](KEY) })
   }
@@ -129,7 +158,7 @@ function allRenderedSurfaces() {
 // …") reintroduced the #4365 defect class while never matching the literal.
 function setStatements(text) {
   const out = []
-  const re = /install[^\n]{0,60}?skills\s*\(([^)]*)\)/gi
+  const re = /install[^\n]{0,60}?skills?\s*\(([^)]*)\)/gi
   let m
   while ((m = re.exec(text)) !== null) {
     out.push({ at: m.index, inner: m[1], end: m.index + m[0].length })
@@ -257,17 +286,26 @@ test('#4365: every endpoint on every rendered surface is an approved host', () =
   // indistinguishable from a filename or a decimal: the enumeration here really
   // does contain `SKILL.md`, `config.toml`, `0.10` and `servers.tortoise`.
   const URL_HOST = /(?:https?:\/\/|\/\/)([a-z0-9.-]+)/gi
-  // A bare domain is only treated as one with THREE or more labels — a 2-label
-  // token is genuinely ambiguous (`SKILL.md`, `claude.ai`, `evil.com`).
-  const BARE_DOMAIN = /(?<![\w.-])((?:[a-z0-9-]+\.){2,}[a-z]{2,})(?![\w-])/gi
+  // A bare token counts as a host when its last label is a plausible public TLD.
+  // The earlier "three or more labels" rule let a 2-label host through
+  // (`evil.com`), while a pure filename (`SKILL.md`, `config.toml`) must stay
+  // out — which the TLD test gives for free, since `md`/`toml` are not TLDs.
+  const PUBLIC_TLD = /^(?:com|org|net|io|co|dev|app|ai|info|xyz|me|us|uk|de|fr|es|to|cc|site|online|cloud|premiselabs)$/i
+  // Extensions that would otherwise read as a ccTLD (`install-tortoise-skills.sh`).
+  const FILE_EXT = /^(?:md|sh|json|js|mjs|jsx|ts|tsx|py|txt|toml|yml|yaml|html|css|lock|cfg|ini|log|csv|svg|png|jpg)$/i
+  const BARE_DOMAIN = /(?<![\w.-])((?:[a-z0-9-]+\.){1,}[a-z]{2,})(?![\w-])/gi
   for (const { id, text } of allRenderedSurfaces()) {
     for (const m of text.matchAll(URL_HOST)) {
       assert.ok(APPROVED_HOSTS.has(m[1].toLowerCase()),
         `${id}: a URL points at a non-approved host ${JSON.stringify(m[0])}`)
     }
     for (const m of text.matchAll(BARE_DOMAIN)) {
-      assert.ok(APPROVED_HOSTS.has(m[1].toLowerCase()),
-        `${id}: a bare domain does not match an approved host ${JSON.stringify(m[1])}`)
+      const host = m[1].toLowerCase()
+      const lastLabel = host.split('.').pop()
+      if (FILE_EXT.test(lastLabel)) continue // install-tortoise-skills.sh
+      if (!PUBLIC_TLD.test(lastLabel)) continue // a decimal, a nested key, an abbreviation
+      assert.ok(APPROVED_HOSTS.has(host),
+        `${id}: a bare domain does not match an approved host ${JSON.stringify(host)}`)
     }
   }
   // …and the reach invariant: an onboarding surface names the document itself.
@@ -276,6 +314,23 @@ test('#4365: every endpoint on every rendered surface is an approved host', () =
     if (mentions > 0) {
       assert.ok(text.includes(ONBOARDING_URL),
         `${id}: an onboarding surface must name the approved instructions URL`)
+    }
+  }
+})
+
+test('#4365: a line that calls onboarding a skill must negate it', () => {
+  // "Onboarding is also available as a skill." uses no install verb and never
+  // names `tortoise-onboarding`, so BOTH earlier rules missed it. harnesses.js's
+  // own Guard 3 rejects that wording, but only on ITS surfaces — these are the
+  // wizard surfaces, which its list did not reach.
+  for (const { id, text } of allRenderedSurfaces()) {
+    for (const raw of text.split('\n')) {
+      // the document URL's own path contains /skills/ — not prose
+      const line = raw.split(ONBOARDING_URL).join('')
+      if (!/onboarding/i.test(line) || !/\bskills?\b/i.test(line)) continue
+      assert.match(line, /\b(not|never|no)\b[^—;.]*\bskills?\b/i,
+        `${id}: a line that mentions onboarding and the word "skill" must say it is `
+        + `NOT one — got ${JSON.stringify(line)}`)
     }
   }
 })
