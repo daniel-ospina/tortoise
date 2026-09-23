@@ -91,15 +91,19 @@ claim comment blocks its own dispatch too, because a false COLLISION costs one
 manual check while a false CLEAN causes duplicate work. The REMEDY line names
 the offending comment so the lane can verify it by hand.
 
-The claim pattern is ``origin/main``'s, UNCHANGED. It is broad by design and
-false-positives on ordinary prose ("taking this into account", "in progress",
-"already fixing"); that is the SAFER direction — a missed duplicate is worse
-than an unnecessary manual check — and a refusal driven by a claim-shaped
-comment carries a REMEDY line naming that comment. Tightening it into a tiered
-classifier is NOT sufficient here: the exit-code consumers (``issue-workflow`` /
-``executing-plans``) act on the exit code ALONE, so an advisory "weak" tier
-would not block and would not be seen by the dispatcher. Claim precision is
-tracked in tortoise #4224.
+The claim pattern is narrowed in two places (#4368). The bare word
+``\bclaim(?:ing)?\b`` matched the ordinary NOUN — core product vocabulary here
+("a false claim to users", "the claim that X") — so the ``claim`` alternative is
+restricted to the VERB governing a work object or a first-person/modal subject,
+and a negated verb ("not claiming this") is excluded. The non-``claim``
+alternatives (``working on``, ``on it``, …) are ordinary English too — a
+complement or adverbial in prose, a predicate in a claim — and no regex can
+separate the two readings, so the WHOLE terse arm is reported as a WEAK,
+non-blocking signal. Blocking stays with the machine-unambiguous forms:
+``/claim``, the claim-verb arm, number matches, an assignee, a closed-PR closing
+reference and INCOMPLETE. A refusal driven by a claim-shaped comment still
+carries a REMEDY line naming that comment. Claim precision is tracked in
+tortoise #4224.
 
 Number matching is applied to full refs/paths/PR text; keyword matching is
 applied only to NAME-LIKE fields (branch refs, worktree basenames, PR head
@@ -148,8 +152,10 @@ sibling repos before any verdict is issued.
 
 Exit codes
 ----------
-    0  CLEAN        every surface queried and no hit (weak prose-only
-                    cross-references may be listed; they are non-blocking)
+    0  CLEAN        every surface queried and no BLOCKING hit (weak signals —
+                    cross-reference prose, a terse work-claim phrase, the
+                    issue's own PR/branch/worktree, a keyword-only match on a
+                    merged PR — may be listed; none of them blocks)
     1  COLLISION    >= 1 hit on >= 1 surface (do NOT dispatch)
     2  INCOMPLETE   >= 1 surface could not be queried (NOT clean)
     3  usage / internal error
@@ -360,26 +366,74 @@ _STRUCTURAL = {
 # defects: prose that must NOT force a COLLISION, and genuine claims that must
 # still be DETECTED.
 #
-# CLASSIFICATION IS `origin/main`'s, UNCHANGED (cycle-4 decision). Three review
-# cycles tried to sharpen this pattern — a tiered positive grammar with
-# strong/weak confidence — and each closed some false positives while the next
-# verifier found new ones. The tiering was refuted at its foundation: the
-# CONSUMERS of this gate read the EXIT CODE, not the report text.
-# `~/.pi/agent/skills/issue-workflow/SKILL.md` and `executing-plans/SKILL.md`
-# treat exit 0 / CLEAN as the only outcome that authorizes dispatch and stop on
-# ANY non-zero exit. A weak hit yields exit 0, so a dispatcher proceeds however
-# the advisory text is worded — "a weak hit is still reported" was true of the
-# REPORT and false of the DISPATCHER. Making an advisory tier work needs a
-# third verdict in the consuming contract, which lives in agent-infra and is
-# out of scope for this PR. Precision work is filed separately; until then the
-# gate keeps main's pattern, where a false positive is the SAFER direction (a
-# missed duplicate is worse than an unnecessary manual check) and the refusal
-# carries a REMEDY line naming the comment that caused it.
+# #4368 — THE ONE DELIBERATE WEAKENING vs `main`, AND ITS COMPENSATION.
+# `main` matched the bare word `\bclaim(?:ing)?\b`, which fired on the ordinary
+# NOUN that is core product vocabulary here ("a false claim to users", "the
+# claim that X", "claims about Y"). The mandated workflow posts evidence
+# comments, so any issue carrying such a comment became permanently
+# undispatchable. The `claim` alternative is therefore narrowed to the VERB
+# governing a work object or a first-person/modal subject; a negated verb
+# ("I am not claiming this") is excluded.
+#
+# Work objects the verb may govern: deictic (`claim this`, `claiming this one`,
+# `claim it`), an issue number (`claim #4027`, attached `claiming#4027`), a
+# determined work noun (`the PR`, `the epic`, `the issue`, …),
+# `ownership`/`responsibility`, or an attached `-`/`/` joiner (`claim-this`).
+# `this` is guarded so an adjective phrase ("a claim this strong") is not read
+# as the deictic object. RESIDUAL (deliberate, fail-CLOSED): a prose noun
+# followed by a DETERMINED work object — "the claim the PR makes" — is
+# shape-identical to a verb phrase and still matches; deciding it needs the
+# determiner's antecedent, and a false COLLISION is the safe direction.
+_CLAIM_WORK_NOUNS = (
+    r"pull\s+request|worktree|problem|feature|ticket|branch|defect|issue|"
+    r"task|work|fix|bug|item|epic|pr|job"
+)
+_CLAIM_DEICTIC_NOUNS = _CLAIM_WORK_NOUNS + r"|one"
+_CLAIM_WORK_OBJECT_RE = (
+    r"(?:"
+    r"this(?=(?:\s+(?:" + _CLAIM_DEICTIC_NOUNS + r")s?\b)|(?:\s*[^\w\s])|$)|"
+    r"it|#\d+|"
+    r"the\s+(?:" + _CLAIM_WORK_NOUNS + r")s?|"
+    r"ownership|responsibility"
+    r")"
+)
+# The verb, with markdown emphasis runs CONSUMED and a trailing assertion that
+# excludes `*`/`_` (so `**claim**` is not split) and further word characters
+# (so `claims` is not `claim`).
+_CLAIM_VERB_RE = r"[*_]{0,3}claim(?:ing)?[*_]{0,3}(?![A-Za-z0-9*_])"
+# What may separate the verb from its object: whitespace, a `-`/`/` joiner, or
+# NOTHING at all immediately before an issue number (`claim#4027`).
+_CLAIM_OBJECT_SEP = r"(?:\s+|[-/]|(?=#\d))"
+
+# A negator adjacent to the claim verb means the claim was DECLINED, not made
+# ("I am not claiming this", "never claim this", "won't claim it", "without
+# claiming the issue"). Fixed-width negative lookbehinds, so each phrase is
+# explicit; a negated subject outside this set ("no lane is claiming this") is a
+# residual fail-CLOSED false positive.
 _CLAIM_RE = re.compile(
     r"(?i)(?:"
     r"/claim\b|"
+    r"(?<!\bnot )(?<!n't )(?<!\bnever )(?<!\bcannot )(?<!\bwithout )(?<!\bnor )"
+    r"(?<!\bno longer )(?<!\bnobody is )(?<!\bno one is )(?<!\bnone is )"
+    r"(?:\b(?:i|we)(?:'?(?:ll|m|re))?\s+"
+    r"(?:(?:will|would|can|could|am|are)\s+)?" + _CLAIM_VERB_RE + r"|"
+    r"(?<![A-Za-z0-9])" + _CLAIM_VERB_RE + _CLAIM_OBJECT_SEP
+    + _CLAIM_WORK_OBJECT_RE + r"\b"
+    r")"
+    r")"
+)
+
+# The terse fragments of `main`'s pattern, VERBATIM. These are ordinary English
+# — a complement or adverbial in prose ("a gate handling this", "a change will
+# fix X", "a test run started this morning") and a predicate in a claim ("I'm
+# handling this") — and a regex cannot separate the two readings. Hand-narrowing
+# them (four adversarial rounds) only oscillated between false positives and
+# missed claims, so the WHOLE arm is reported WEAK and never blocks. The
+# machine-unambiguous forms above stay blocking.
+_TERSE_CLAIM_RE = re.compile(
+    r"(?i)(?:"
     r"\bworking on\b|\bwork(?:ing)? this\b|\bon it\b|\bin progress\b|"
-    r"\btaking (?:this|it)\b|\bi'?ll (?:take|do|handle|fix)\b|\bclaim(?:ing)?\b|"
+    r"\btaking (?:this|it)\b|\bi'?ll (?:take|do|handle|fix)\b|"
     r"\bassigned to\b|\bdispatching\b|\bpicked (?:this|it) up\b|"
     r"\bhandling this\b|\bwill (?:fix|implement|handle)\b|"
     r"\bstarted (?:on )?this\b|\balready (?:fixing|working|implementing)\b"
@@ -495,8 +549,8 @@ def _sanitize(text: str | None) -> str:
 # `[@-Z\\-_]` and the CSI final byte `[@-~]`, both of which include WORD
 # characters, so a stray sequence can MERGE a word boundary and DROP a match
 # main would find (`I'll take ESC this` -> `I'll takethis`; `ESC I'll take
-# this` -> `'ll take this`). Matching the raw body as well makes main's
-# decision a SUBSET of this predicate, so the sanitiser can only ADD matches
+# this` -> `'ll take this`). Matching the raw body as well makes the RAW body's
+# decision a SUBSET of this predicate, so de-sequencing can only ADD matches
 # (fail closed) and can never remove one — a reverse divergence is impossible
 # by construction.
 _ESCAPE_RE = re.compile(
@@ -546,6 +600,31 @@ def closing_reference(text: str, issue: int) -> bool:
         rf"(?i)\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s*:?\s*#{issue}(?![0-9])"
     )
     return re.search(pattern, text) is not None
+
+
+def branch_name(ref: str) -> str:
+    """The local BRANCH name behind a ref: ``refs/heads/feat/3963-x`` ->
+    ``feat/3963-x``. A PR ``headRefName`` is already a bare branch name, so
+    normalising both lets the self-match set hold either shape (#4375)."""
+    prefix = "refs/heads/"
+    return ref[len(prefix):] if ref.startswith(prefix) else ref
+
+
+def _current_branch(git_bin: str, path: str, timeout: float) -> str | None:
+    """The branch checked out at `path`, or None (detached HEAD / error).
+
+    Used to recognise the INVOKING checkout as this issue's own work when it
+    carries the issue number (#4375): a lane re-running the pre-flight for the
+    issue it is already working on must not be blocked by its own branch or
+    worktree. Any failure returns None, which leaves the self set empty — the
+    fail-closed direction."""
+    rc, out, _err, _to = _run(
+        [git_bin, "symbolic-ref", "--short", "-q", "HEAD"], path, timeout,
+    )
+    if rc != 0:
+        return None
+    name = out.strip()
+    return name or None
 
 
 def _tokens(text: str) -> set[str]:
@@ -651,10 +730,28 @@ def _git_refs(git_bin: str, repo: str, namespace: str, timeout: float) -> list[s
 def scan_branch_surface(
     surface: Surface, refs: list[str], issue: int, keywords: list[str],
     min_keywords: int, allow_keywords: bool,
+    self_branches: set[str] | None = None,
 ) -> None:
     """Number matching always; keyword matching only where it is precise
-    enough to be useful (`allow_keywords` is False for the remote namespace)."""
+    enough to be useful (`allow_keywords` is False for the remote namespace).
+
+    A ref in `self_branches` is the ISSUE'S OWN work — the INVOKING checkout's
+    branch for this issue — and is recorded as a WEAK, non-blocking signal
+    instead of a collision (#4375). The self check runs BEFORE the number match
+    because the issue's own branch carries the issue number by convention, and
+    matching that first made the gate unsatisfiable while the issue was being
+    worked on. A branch belonging to ANOTHER lane is not in `self_branches` and
+    still blocks."""
+    self_branches = self_branches or set()
     for ref in refs:
+        if branch_name(ref) in self_branches:
+            surface.add(
+                ref,
+                f"this ref is #{issue}'s OWN branch (this is the work, not "
+                "separate in-flight work) — non-blocking",
+                "weak",
+            )
+            continue
         if number_present(ref, issue):
             surface.add(ref, f"matched issue-number ({issue})", "strong")
             continue
@@ -685,13 +782,30 @@ def _worktree_blocks(porcelain: str) -> list[dict]:
 def scan_worktree_surface(
     surface: Surface, blocks: list[dict], issue: int, keywords: list[str],
     min_keywords: int,
+    self_branches: set[str] | None = None,
+    self_worktrees: set[str] | None = None,
 ) -> None:
     """Untruncated worktree scan. Number match on the full path and branch;
-    keyword match on the basename and branch only (never the parent dir)."""
+    keyword match on the basename and branch only (never the parent dir).
+
+    A worktree is the ISSUE'S OWN checkout — and a WEAK, non-blocking signal
+    (#4375) — when its path is the INVOKING checkout, or its branch is that
+    checkout's branch. Another lane's worktree is in neither set and still
+    blocks."""
+    self_branches = self_branches or set()
+    self_worktrees = self_worktrees or set()
     for block in blocks:
         path = block.get("path", "")
         branch = block.get("branch", "")
         basename = Path(path).name
+        if path in self_worktrees or branch_name(branch) in self_branches:
+            surface.add(
+                f"{path} [{branch or 'detached'}]",
+                f"this worktree is #{issue}'s OWN checkout (this is the work, "
+                "not separate in-flight work) — non-blocking",
+                "weak",
+            )
+            continue
         if number_present(path, issue) or number_present(branch, issue):
             surface.add(f"{path} [{branch or 'detached'}]",
                         f"matched issue-number ({issue})", "strong")
@@ -789,7 +903,7 @@ def _closed_pr_list_rest(gh_bin: str, slug: str | None, cwd: str,
         "api", "--paginate",
         f"repos/{slug}/pulls?state=closed&per_page={REST_PAGE_SIZE}",
         "--jq",
-        "map({number, title, body, state, url, headRefName: .head.ref})",
+        "map({number, title, body, state, url, headRefName: .head.ref, merged_at})",
     ]
     prs: list[dict] = []
     for page in _gh_json_stream(gh_bin, args, cwd, timeout):
@@ -816,7 +930,7 @@ def _pr_ref(pr: dict) -> str:
 
 def scan_pr_surface(
     surface: Surface, prs: list[dict], issue: int, keywords: list[str],
-    min_keywords: int,
+    min_keywords: int, keyword_only_advisory: bool = False,
 ) -> None:
     """PR surface matching.
 
@@ -827,11 +941,28 @@ def scan_pr_surface(
     cross-reference prose is not work (live bug: "restored in #2745" on closed
     PR #2926 and "filed as #2751" on PR #2754 read as strong COLLISIONs).
     Keyword matching applies to the head ref only (name-like), never prose.
+
+    Two #4375 relaxations, both WEAK (non-blocking):
+
+    * `PR number == issue`. GitHub numbers issues and PRs in one space, so that
+      PR *IS* the issue — the work, not a duplicate of it. Recognising this
+      FIRST (before the number/keyword tiers) is what makes the gate satisfiable
+      for an issue that has its own PR.
+    * `keyword_only_advisory` (the CLOSED-PR surface): a keyword overlap with a
+      MERGED PR is completed work, so it is recorded WEAK. An UNMERGED closed PR
+      is abandoned-but-unfinished and keeps `keyword` strength (blocking),
+      decided PER-PR from `merged_at` with an absent/null value meaning
+      unmerged. The STRONG tiers on this surface are unchanged.
     """
     for pr in prs:
         title = pr.get("title") or ""
         body = pr.get("body") or ""
         head = pr.get("headRefName") or ""
+        if str(pr.get("number")) == str(issue):
+            surface.add(_pr_ref(pr),
+                        f"PR number == issue ({issue}): this PR *is* the issue, "
+                        "not separate in-flight work (non-blocking)", "weak")
+            continue
         if number_present(title, issue):
             surface.add(_pr_ref(pr), f"matched issue-number ({issue}) in title", "strong")
             continue
@@ -844,13 +975,15 @@ def scan_pr_surface(
             continue
         kws = keyword_hit(head, keywords, min_keywords)
         if kws:
-            surface.add(_pr_ref(pr),
-                        "keyword(s): " + ", ".join(kws), "keyword")
-            continue
-        if str(pr.get("number")) == str(issue):
-            surface.add(_pr_ref(pr),
-                        f"PR number == issue ({issue}): this PR *is* the issue, "
-                        "not separate in-flight work (non-blocking)", "weak")
+            detail = "keyword(s): " + ", ".join(kws)
+            # Only a MERGED PR is completed work; `merged_at` absent/null means
+            # unmerged, which keeps the keyword hit BLOCKING (fail closed).
+            if keyword_only_advisory and pr.get("merged_at"):
+                surface.add(_pr_ref(pr),
+                            detail + " — merged PR: a keyword-only match is "
+                            "not in-flight work (non-blocking)", "weak")
+            else:
+                surface.add(_pr_ref(pr), detail, "keyword")
             continue
         if number_present(body, issue):
             surface.add(_pr_ref(pr),
@@ -904,12 +1037,12 @@ def scan_issue_surface(
 ) -> None:
     """Assignee + claim comments.
 
-    A comment matching `_CLAIM_RE` is ALWAYS a hit — there is no attribution of
+    A comment matching `_CLAIM_RE` is a STRONG hit — there is no attribution of
     a claim comment to the lane that wrote it, so a lane's own claim comment
-    blocks its own dispatch too. That is `origin/main`'s behaviour and the
-    fail-closed direction: a false COLLISION costs one manual check, a false
-    CLEAN causes duplicate work. The REMEDY line names the comment so the lane
-    can verify it by hand.
+    blocks its own dispatch too. A comment matching only `_TERSE_CLAIM_RE` is a
+    WEAK, non-blocking hit: those fragments are ordinary English (see the
+    pattern comment). A blocking comment is named by the REMEDY line so the
+    lane can verify it by hand.
 
     An ASSIGNEE carries only a login, with no lane or session marker. On this
     shared-account fleet an assignee equal to our own login is therefore NOT
@@ -938,24 +1071,26 @@ def scan_issue_surface(
             )
     for comment in issue_data.get("comments") or []:
         body = comment.get("body") or ""
-        # Classification is `_CLAIM_RE` (origin/main's pattern), run on the
-        # RAW body OR the de-sequenced text. `origin/main` matches the raw
-        # body, which is a SUBSET of this predicate: de-sequencing can only
-        # ADD matches (`ta ESC king this`), never drop one (`I'll take ESC
-        # this`), so the gate cannot fail OPEN relative to main. A
-        # claim-shaped comment is a hit — no attribution, no tiers.
-        if not (_CLAIM_RE.search(body)
-                or _CLAIM_RE.search(_strip_control_sequences(body))):
+        # Classification runs on the RAW body OR the de-sequenced text;
+        # de-sequencing can only ADD matches, never drop one. A comment in the
+        # blocking `_CLAIM_RE` is STRONG; a comment matching only the terse
+        # fragments is WEAK (reported, never blocking). No attribution, no
+        # tiers.
+        stripped = _strip_control_sequences(body)
+        if _CLAIM_RE.search(body) or _CLAIM_RE.search(stripped):
+            detail = "claim-style comment: " + _one_line(body, 90)
+            strength = "strong"
+        elif _TERSE_CLAIM_RE.search(body) or _TERSE_CLAIM_RE.search(stripped):
+            detail = ("work-claim phrase (ordinary English — advisory, "
+                      "non-blocking): " + _one_line(body, 90))
+            strength = "weak"
+        else:
             continue
         author = comment.get("author") or {}
         login = author.get("login") if isinstance(author, dict) else (
             str(author) if author else None
         )
-        surface.add(
-            _comment_ref(comment, login),
-            "claim-style comment: " + _one_line(body, 90),
-            "strong",
-        )
+        surface.add(_comment_ref(comment, login), detail, strength)
     if not surface.hits:
         state = issue_data.get("state")
         if state and state.upper() != "OPEN":
@@ -1233,6 +1368,19 @@ def run_preflight(
             "--keywords was not supplied"
         )
 
+    # 1b. SELF-IDENTITY (#4375). What counts as "this issue's own work" for
+    #     THIS run: the invoking checkout's own branch/worktree when that branch
+    #     carries the issue number. Such refs are recorded WEAK, never
+    #     blocking; a DIFFERENT lane's branch/worktree for the same issue is not
+    #     in these sets and still blocks (two lanes on one issue are caught).
+    self_branches: set[str] = set()
+    self_worktrees: set[str] = set()
+    if target.path is not None:
+        invoking = _current_branch(git_bin, cwd, timeout)
+        if invoking and number_present(invoking, issue):
+            self_branches.add(invoking)
+            self_worktrees.add(target.path)
+
     # 2. PR surfaces — enumerated to COMPLETENESS, each over the transport that
     #    actually works for its state. Open PRs use `gh pr list` (one GraphQL
     #    request, fetched as `--limit cap+1`); closed PRs use the REST API with
@@ -1271,7 +1419,10 @@ def run_preflight(
                     "--closed-pr-limit (or COLLISION_PREFLIGHT_*_PR_LIMIT)."
                 )
                 prs = prs[:limit]
-            scan_pr_surface(surface, prs, issue, keywords, min_keywords)
+            scan_pr_surface(
+                surface, prs, issue, keywords, min_keywords,
+                keyword_only_advisory=(surface_name == SURFACE_CLOSED_PRS),
+            )
             if not surface.truncated:
                 surface.note = f"{len(prs)} PR(s) enumerated (complete, cap {limit})"
         except SurfaceError as exc:
@@ -1294,7 +1445,8 @@ def run_preflight(
             continue
         try:
             refs = _git_refs(git_bin, cwd, namespace, timeout)
-            scan_branch_surface(surface, refs, issue, keywords, min_keywords, allow_kw)
+            scan_branch_surface(surface, refs, issue, keywords, min_keywords,
+                                allow_kw, self_branches)
             surface.note = f"{len(refs)} ref(s) enumerated"
             if not allow_kw and keywords:
                 surface.note += "; number-only (remote refs are stale/numerous)"
@@ -1322,7 +1474,8 @@ def run_preflight(
                 1 for ln in out.splitlines() if ln.startswith("worktree ")
             ):
                 raise SurfaceError("worktree porcelain parse lost an entry (refusing partial scan)")
-            scan_worktree_surface(surface, blocks, issue, keywords, min_keywords)
+            scan_worktree_surface(surface, blocks, issue, keywords,
+                                  min_keywords, self_branches, self_worktrees)
             surface.note = f"{len(blocks)} worktree(s) enumerated (untruncated)"
         except SurfaceError as exc:
             surface.incomplete(f"git-unavailable: {exc}")
@@ -1408,10 +1561,12 @@ def format_report(
                 )
     if weak and not strong and not keyword_hits:
         lines.append("")
-        lines.append("WEAK SIGNALS (non-blocking — prose is not work)")
+        lines.append("WEAK SIGNALS (non-blocking — not in-flight work)")
         lines.append(
-            f"  {len(weak)} prose-only cross-reference(s) of #{issue}; no title / "
-            "branch / worktree / closing-reference match. These do NOT block."
+            f"  {len(weak)} non-blocking signal(s) for #{issue}: the issue's own "
+            "PR/branch/worktree, cross-reference prose, a terse work-claim "
+            "phrase, and/or a keyword-only match on a MERGED PR. None of these "
+            "is in-flight work. These do NOT block."
         )
     if incomplete:
         lines.append("")
@@ -1425,8 +1580,9 @@ def format_report(
             f"{len({h.surface for h in hits})} surface(s) for #{issue} in {slug}; "
             "do NOT dispatch"
         )
-        # The remedy belongs at the POINT OF REFUSAL. `_CLAIM_RE` is broad by
-        # design, so a claim-shaped hit can be ordinary prose; this gate has NO
+        # The remedy belongs at the POINT OF REFUSAL. `_CLAIM_RE` still has
+        # deliberate fail-CLOSED false positives ("the claim the PR makes"), so
+        # a claim-shaped hit need not be a real claim; this gate has NO
         # dismissal switch (no `--ignore` / advisory flag), so the honest
         # remedy is to name the exact comment and say it must be verified by
         # hand — not to imply a re-run flag that does not exist. It names only
@@ -1478,8 +1634,8 @@ def format_report(
         return "\n".join(lines) + "\n", EXIT_INCOMPLETE
     if weak:
         lines.append(
-            f"NOTE: {len(weak)} weak prose signal(s) ignored (cross-reference prose "
-            "is not work; non-blocking)"
+            f"NOTE: {len(weak)} weak signal(s) ignored (not in-flight work; "
+            "non-blocking)"
         )
     lines.append(
         f"VERDICT: CLEAN (exit {EXIT_CLEAN}) — {len(ordered)}/{len(ALL_SURFACES)} surfaces "

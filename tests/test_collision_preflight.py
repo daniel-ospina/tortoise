@@ -288,6 +288,17 @@ class CollisionPreflightTest(unittest.TestCase):
         for row in SURFACE_ROWS:
             self.assertIn(row, out, f"surface row missing from output: {row}")
 
+    def surface_row(self, out: str, name: str) -> tuple[str, int]:
+        """(STATUS, hit count) for one surface row, parsed from the report's
+        fixed-width table. The #4375 matrix pins EXACT per-surface counts, so a
+        surface that silently gains or loses a hit fails the test."""
+        prefix = f"{name:<24} "
+        for line in out.splitlines():
+            if line.startswith(prefix):
+                parts = line[len(prefix):].split(None, 2)
+                return parts[0], int(parts[1])
+        raise AssertionError(f"surface row not found: {name}\n{out}")
+
     # ── clean ───────────────────────────────────────────────────────────────
 
     def test_clean_no_hits_exits_zero_and_says_clean(self):
@@ -360,9 +371,11 @@ class CollisionPreflightTest(unittest.TestCase):
 
     def test_closed_pr_own_number_is_weak_not_blocking(self):
         # Closed PR #3061 (the issue is itself a closed PR). Its own number and
-        # any prose in its body are not separate in-flight work.
+        # any prose in its body are not separate in-flight work. The title
+        # carries #3061 too, so this also pins the ORDER: the number==issue
+        # check runs BEFORE the number tier (which would otherwise be strong).
         self.gh_fixtures(closed_prs=[{
-            "number": 3061, "title": "fix(battery): #2712 restore the pin test",
+            "number": 3061, "title": "fix(battery): #3061 restore the pin test",
             "body": "restored in #3061", "headRefName": "fix/2712-pin-preflight-test",
         }])
         rc, out = self.run_tool()
@@ -370,6 +383,108 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("VERDICT: CLEAN", out)
         self.assertNotIn("do NOT dispatch", out)
         self.assertIn("PR number == issue (3061)", out)
+
+    def test_4375_closed_pr_keyword_only_hit_is_advisory(self):
+        # The #3673/#4365 shape: the ONLY hits are keyword-only matches on
+        # MERGED closed PRs, so nothing is in flight. `merged_at` distinguishes
+        # MERGED (advisory) from unmerged-closed (blocking).
+        self.gh_fixtures(
+            issue=self.issue_payload(title="onboarding parity gate — drift is silent"),
+            closed_prs=[{
+                "number": 3974,
+                "title": "fix(deps): re-sync requirements.txt with uv.lock",
+                "body": "",
+                "headRefName": "fix/deploy-parity-requirements-drift",
+                "merged_at": "2026-09-18T14:31:32Z",
+            }],
+        )
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("keyword(s): parity, drift", out)
+        self.assertIn("merged PR", out)
+        self.assertIn("(weak)", out)
+
+    def test_4375_unmerged_closed_pr_keyword_hit_still_blocks(self):
+        # An UNMERGED closed PR is abandoned-but-unfinished: its keyword hit
+        # must still block. The decision is PER-PR, so one merged PR must not
+        # swallow it. An ABSENT `merged_at` is not evidence of a merge.
+        for merged in (None, "__absent__"):
+            pr = {
+                "number": 3974,
+                "title": "fix(deps): re-sync requirements.txt with uv.lock",
+                "body": "",
+                "headRefName": "fix/deploy-parity-requirements-drift",
+            }
+            if merged != "__absent__":
+                pr["merged_at"] = merged
+            with self.subTest(merged=merged):
+                self.gh_fixtures(
+                    issue=self.issue_payload(
+                        title="onboarding parity gate — drift is silent"),
+                    closed_prs=[pr],
+                )
+                rc, out = self.run_tool()
+                self.assertNotEqual(rc, 0, out)
+                self.assertIn("VERDICT: COLLISION (keyword-only)", out)
+                self.assertIn("keyword(s): parity, drift", out)
+                self.assertNotIn("(weak)", out)
+
+    def test_4375_open_pr_keyword_hit_still_blocks(self):
+        # An OPEN PR is in-flight work; only the CLOSED surface has the
+        # merged-PR advisory. A keyword-only head-ref match still refuses.
+        self.gh_fixtures(
+            issue=self.issue_payload(title="onboarding parity gate — drift is silent"),
+            open_prs=[{
+                "number": 9001, "title": "unrelated title", "body": "",
+                "headRefName": "fix/deploy-parity-requirements-drift",
+            }],
+        )
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION (keyword-only)", out)
+        self.assertNotIn("(weak)", out)
+
+    def test_4375_advisory_hits_do_not_mask_a_hard_incomplete(self):
+        # An unqueryable surface is INCOMPLETE (exit 2) no matter how many
+        # advisory weak hits are listed. Weakening the keyword tier must never
+        # weaken the completeness contract.
+        self.gh_fixtures(
+            issue=self.issue_payload(title="onboarding parity gate — drift is silent"),
+            closed_prs=[{
+                "number": 3974, "title": "unrelated", "body": "",
+                "headRefName": "fix/deploy-parity-requirements-drift",
+                "merged_at": "2026-09-18T14:31:32Z",
+            }],
+        )
+        (self.gh_dir / "open_prs.json").unlink()  # open-PR surface now fails
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        self.assertIn("[open PRs]", out)
+        self.assertEqual(self.surface_row(out, "recently-closed PRs"), ("HIT", 1))
+
+    def test_4375_invoking_checkout_branch_is_weak_but_another_lane_blocks(self):
+        # Re-running the pre-flight from the lane's own worktree must not refuse
+        # its own dispatch. A DIFFERENT lane's branch/worktree for the SAME
+        # issue is not self and must still block.
+        mine = self.add_worktree("impl/3061-self", branch="fix/3061-self")
+        rc, out = self.run_tool(repo_arg=str(mine), cwd=mine)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("OWN branch", out)
+        self.assertIn("OWN checkout", out)
+        self.assertEqual(self.surface_row(out, "local branches"), ("HIT", 1))
+        self.assertEqual(self.surface_row(out, "local worktrees"), ("HIT", 1))
+
+        self.add_worktree("impl/3061-other", branch="fix/3061-other")
+        rc, out = self.run_tool(repo_arg=str(mine), cwd=mine)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("refs/heads/fix/3061-other", out)
+        self.assertEqual(self.surface_row(out, "local branches"), ("HIT", 2))
+        self.assertEqual(self.surface_row(out, "local worktrees"), ("HIT", 2))
 
     def test_closed_pr_closing_reference_is_still_a_hit(self):
         # "Closes #N" IS a claim on the issue and must stay a strong hit.
@@ -450,7 +565,7 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("fail closed", out)
 
     def test_issue_claim_comment_hit(self):
-        self.gh_fixtures(issue=self.issue_payload(comments=("I'm working on this now.",)))
+        self.gh_fixtures(issue=self.issue_payload(comments=("I'll claim this.",)))
         rc, out = self.run_tool()
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
@@ -786,6 +901,7 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("state=closed", argv)
         self.assertIn("--paginate", argv)
         self.assertIn("headRefName: .head.ref", argv)
+        self.assertIn("merged_at", argv)
 
     # ── target repo: never certify a scope you did not establish (#4027) ────
 
@@ -929,10 +1045,10 @@ class CollisionPreflightTest(unittest.TestCase):
             "I'll claim this — lane W0 is only cc'd.",
             "I'll claim #4027. lane W0 handles follow-up.",
             "I'll claim this. 'lane W0 owns it'",
-            "I'll take this on lane W3, not lane W0.",
-            "I'll take this, and lane W0 owns the follow-up.",
+            "I'll claim this on lane W3, not lane W0.",
+            "I'll claim this, and lane W0 owns the follow-up.",
             f"Claiming this.\n\nFLEET BOARD — lane table W0 session `{our_session}`",
-            "lane W0 is done here — I'll take this",
+            "lane W0 is done here — I'll claim this",
             "Owner: lane W0 — claiming this.",
             f"claiming this (session {our_session}).",
         ):
@@ -947,36 +1063,13 @@ class CollisionPreflightTest(unittest.TestCase):
                 self.assertIn("claim-style comment", out)
 
     def test_second_party_claim_still_collides(self):
-        # The other direction, and the one that must never weaken: a claim by a
-        # DIFFERENT party still blocks. Every body below matches origin/main's
-        # `_CLAIM_RE`, which is the pattern this PR keeps for classification
-        # (cycle 4). `we'll fix this` is deliberately NOT here: that was a
-        # cycle-3 grammar arm's shape and main's regex never matched it, so
-        # asserting a collision on it would pin behaviour the reverted pattern
-        # does not have.
-        for body in ("/claim", "I'll take this", "working on this now",
-                     "dispatching #3061", "taking this", "Claiming this.",
-                     "I will implement this", "assigned to me",
-                     "I'm on it", "On it!", "Handling this",
-                     "I'm working on the collision preflight fix",
-                     "dispatching a sub-agent for #3061",
-                     "dispatching a lane for #4027",
-                     "will fix this", "we will fix this today",
-                     "assigned to @daniel-ospina", "assigned to lane W3",
-                     # The anchored forms the cycle-2 fix introduced must keep
-                     # every genuine shape — these lock the deictic/issue,
-                     # first-person and article arms explicitly.
-                     "working on #3061", "I'm working on it",
-                     "I am handling this",
-                     "dispatching a workstream for #3061",
-                     "dispatching a session for this",
-                     "assigned to #3061",
-                     "will fix it",
-                     # Cycle-3 grammar shapes that ALSO match main's pattern —
-                     # first-person, line-start imperative and modal arms.
-                     "I'll take this.",
-                     "I am working on this", "working on #4027",
-                     "Working on this now.", "Claiming this"):
+        # A claim by a DIFFERENT party still blocks. Only the machine-unambiguous
+        # claim arm is here; the terse fragments are WEAK by design (see
+        # `test_terse_work_claim_phrases_are_weak_not_blocking`).
+        for body in ("/claim", "Claiming this.", "I'll claim this",
+                     "I will claim this", "we can claim this",
+                     "claim #3061", "claiming the issue",
+                     "I'm claiming it", "claim this one"):
             with self.subTest(body=body):
                 self.gh_fixtures(issue=self.issue_payload(comments=[
                     ("other-agent", body),
@@ -987,41 +1080,63 @@ class CollisionPreflightTest(unittest.TestCase):
                 self.assertIn("claim-style comment", out)
                 self.assertIn("other-agent", out)
 
+    def test_terse_work_claim_phrases_are_weak_not_blocking(self):
+        # #4368/F3: the non-`claim` fragments are ordinary English — a
+        # complement or adverbial in prose, a predicate in a claim — and no
+        # regex can separate the two readings. The whole arm is reported WEAK,
+        # so a comment matching only it does not block.
+        for body in ("I'll take this", "working on this now", "On it!",
+                     "Handling this", "taking this", "will fix this",
+                     "dispatching #3061", "assigned to me",
+                     "I'm working on the collision preflight fix"):
+            with self.subTest(body=body):
+                self.gh_fixtures(issue=self.issue_payload(comments=[
+                    ("other-agent", body),
+                ]))
+                rc, out = self.run_tool()
+                self.assertEqual(rc, 0, f"body={body!r}\n{out}")
+                self.assertIn("VERDICT: CLEAN", out)
+                self.assertNotIn("do NOT dispatch", out)
+                self.assertIn("work-claim phrase", out)
+                self.assertIn("(weak)", out)
+
     def test_same_account_unmarked_claim_fails_closed(self):
         # Another lane shares our account; an unmarked claim by it must still
         # collide. With attribution removed there is no "whose is it" question
         # left to get wrong — every claim-shaped comment is a hit.
         self.gh_fixtures(issue=self.issue_payload(comments=[
-            ("test-agent", "I will handle this."),
+            ("test-agent", "I will claim this."),
         ]))
         rc, out = self.run_tool()
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
         self.assertIn("claim-style comment", out)
 
-    def test_claim_pattern_is_main_and_false_positives_carry_a_remedy(self):
-        # Cycle-4 scoping decision: classification is origin/main's `_CLAIM_RE`,
-        # unchanged. It is broad by design and DOES match ordinary prose — the
-        # sentences below forced a false COLLISION on main and still do. That
-        # is accepted: a missed duplicate (false negative) is the worse
-        # failure, and the exit-code consumers (issue-workflow / executing-plans)
-        # cannot act on an advisory tier without a contract change in
-        # agent-infra. What must hold is that the false positive is CHEAPLY
-        # DISMISSIBLE: the refusal names the comment and states plainly that no
-        # dismissal switch exists, so the reader must verify it by hand.
+    def test_4368_prose_noun_does_not_arm_the_gate(self):
+        # The false refusal this change fixes: `claim` as an ordinary NOUN is
+        # core product vocabulary, and the mandated workflow posts evidence
+        # comments, so the old bare `\bclaim(?:ing)?\b` made a commented issue
+        # permanently undispatchable. These comments must NOT block.
         for body in (
-            "Taking this into account, the drift is expected.",
-            "The regression started this morning.",
-            "Let's work this out before the release.",
-            "Handling this kind of error requires a retry loop.",
-            "The team is already fixing the drift.",
-            "The migration is in progress upstream; nothing for us to do.",
-            # cycle-1/2 reproductions that main's pattern also matches
-            "after working on the docs we found this",
-            "the tests will fix the drift later",
-            "the issue was assigned to another account by a bot",
-            "still working on it",
+            "This is a false claim to users.",
+            "The claim that the surface is complete is wrong.",
+            "We should be careful about claims like this.",
+            "There is a claim of ownership over the docs.",
         ):
+            with self.subTest(body=body):
+                self.gh_fixtures(issue=self.issue_payload(comments=[
+                    ("other-agent", body),
+                ]))
+                rc, out = self.run_tool()
+                self.assertEqual(rc, 0, f"body={body!r}\n{out}")
+                self.assertIn("VERDICT: CLEAN", out)
+                self.assertNotIn("do NOT dispatch", out)
+
+    def test_4368_claim_verb_arm_still_blocks_with_a_remedy(self):
+        # The narrowing must not lose a genuine claim of work: the verb arm
+        # still blocks and the refusal still names the comment.
+        for body in ("I'll claim this.", "Claiming this one.",
+                     "claim #4027", "I'm claiming the issue"):
             with self.subTest(body=body):
                 self.gh_fixtures(issue=self.issue_payload(comments=[
                     ("other-agent", body),
@@ -1033,38 +1148,38 @@ class CollisionPreflightTest(unittest.TestCase):
                 self.assertIn("comment by other-agent", out)
                 self.assertIn("NO dismissal switch", out)
 
-    # ── claim classification: origin/main's pattern, no tiers (cycle 4) ────
+    # ── claim classification: a blocking verb arm + a weak terse arm ────────
 
-    def test_classification_is_main_claim_re_without_tiers(self):
-        # The reverted contract, asserted directly so a future re-introduction
-        # of tiering cannot land silently: classification is exactly
-        # `_CLAIM_RE` — no `classify_claim`, no strong/weak split. These two
-        # groups only assert MATCHING; every match BLOCKS, with no attribution
-        # (asserted in the tests above).
+    def test_classification_is_claim_re_without_tiers(self):
+        # Direct pattern contract. There is still no `classify_claim` / tier
+        # machinery: `_CLAIM_RE` is the BLOCKING arm and `_TERSE_CLAIM_RE` is
+        # the WEAK arm, and strength is decided by which one matched.
         cp = _tool_module()
         self.assertFalse(hasattr(cp, "classify_claim"))
         self.assertFalse(hasattr(cp, "_CLAIM_WEAK_RE"))
         self.assertFalse(hasattr(cp, "_CLAIM_STRONG_RES"))
         for body in (
-            "/claim", "I'll take this.", "Claiming this.", "taking this",
-            "Handling this", "On it!", "I'm on it", "I am on it",
-            "working on this now", "Working on this now.",
-            "working on #3061", "I'm working on it",
-            "I am working on this", "I will implement this",
-            "we will fix this today", "will fix this", "will fix it",
-            "dispatching #3061", "dispatching a sub-agent for #3061",
-            "assigned to me", "assigned to @daniel-ospina",
-            "assigned to lane W3", "assigned to #3061",
+            "/claim", "Claiming this.", "I'll claim this", "claim #4027",
+            "claiming the issue", "I'm claiming it", "claim this one",
+            "we can claim this", "I will claim this",
         ):
             with self.subTest(body=body):
                 self.assertIsNotNone(cp._CLAIM_RE.search(body), body)
         for body in (
             "The PR claims that the surface is complete.",  # `claims` != `claim`
             "the PR claims it is complete",
-            "we'll fix this",  # a cycle-3 arm shape main never matched
+            "a false claim to users",
+            "the claim that X is true",
+            "claims about Y",
+            "I am not claiming this",
         ):
             with self.subTest(body=body):
                 self.assertIsNone(cp._CLAIM_RE.search(body), body)
+        for body in ("I'll take this", "working on this now", "On it!",
+                     "Handling this", "will fix this", "dispatching #3061"):
+            with self.subTest(body=body):
+                self.assertIsNone(cp._CLAIM_RE.search(body), body)
+                self.assertIsNotNone(cp._TERSE_CLAIM_RE.search(body), body)
 
     def test_escape_stripper_keeps_whitespace_and_still_removes_sequences(self):
         # Cycle-3 regression fixed: the `\x1b.` alternative consumed ESC plus
@@ -1076,52 +1191,41 @@ class CollisionPreflightTest(unittest.TestCase):
         cp = _tool_module()
         self.assertEqual(cp._strip_control_sequences("a\x1b[2Kb"), "ab")
         self.assertEqual(cp._strip_control_sequences("a\x1b]52;c;AAAA\x07b"), "ab")
-        cleaned = cp._strip_control_sequences("I'll take this\x1b now")
-        self.assertEqual(cleaned, "I'll take this now")
+        cleaned = cp._strip_control_sequences("I'll claim this\x1b now")
+        self.assertEqual(cleaned, "I'll claim this now")
         self.assertIsNotNone(cp._CLAIM_RE.search(cleaned))
         # A BARE ESC directly before a claim must not hide it: the pre-fix
-        # fallback consumed the following character ("\x1bon it now" ->
-        # "n it now"), and the gate read CLEAN on a real claim.
-        self.assertEqual(cp._strip_control_sequences("\x1bon it now"), "on it now")
-        self.assertIsNotNone(cp._CLAIM_RE.search(cp._strip_control_sequences("\x1bon it now")))
+        # fallback consumed the following character ("\x1bclaim this." ->
+        # "laim this."), and the gate read CLEAN on a real claim.
+        self.assertEqual(cp._strip_control_sequences("\x1bclaim this."), "claim this.")
+        self.assertIsNotNone(cp._CLAIM_RE.search(cp._strip_control_sequences("\x1bclaim this.")))
         # The classification path applies the same stripper, so the end-to-end
         # run sees the claim too rather than a merged "thisnow".
         self.gh_fixtures(issue=self.issue_payload(comments=[
-            ("other-agent", "I'll take this\x1b now"),
+            ("other-agent", "I'll claim this\x1b now"),
         ]))
         rc, out = self.run_tool()
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
 
-    def test_raw_body_match_survives_sanitisation(self):
-        # Cycle-7 regression. The sanitiser's whole-sequence rules accept a
-        # final byte in the Fe class `[@-Z\\-_]` and the CSI final byte
-        # `[@-~]`, both of which include WORD characters, so a stray sequence
-        # can MERGE a word boundary and DELETE a match that `origin/main`
-        # (which matches the RAW body) would find. Classification matches the
-        # raw body OR the de-sequenced text, which makes main's decision a
-        # SUBSET — sanitisation can only ADD matches. Each body below is a
-        # reverse divergence on the stripped-only predicate (raw matches, the
-        # de-sequenced text does NOT), so this pins the raw OR-leg as
-        # load-bearing AND proves the gate fails closed on it.
+    def test_raw_body_or_stripped_body_matches_a_claim(self):
+        # Classification matches the RAW body OR the de-sequenced text, so an
+        # escape can never HIDE a claim the other variant would find. Each
+        # body below matches on at least one variant.
         cp = _tool_module()
         for body in (
-            "\x1bI'll take this",     # Fe escape deletes the leading 'I'
-            "I'll take\x1b_this",     # Fe escape merges the two-word arm
-            "claim\x1b[ing this",     # CSI introducer eats a letter
-            "will fix\x1b_this",      # Fe escape merges the two-word arm
-            "/claim\x1b_x",           # Fe escape merges the claim token
-            "working on\x1b_this",    # Fe escape merges the two-word arm
+            "\x1bI'll claim this",    # Fe escape eats the I -> raw matches
+            "I'll claim\x1b this",     # subject arm needs no object
+            "claim\x1b this",          # stripped variant recovers the object
         ):
             with self.subTest(body=body):
-                stripped = cp._strip_control_sequences(body)
-                self.assertIsNotNone(cp._CLAIM_RE.search(body), body)
-                self.assertIsNone(
-                    cp._CLAIM_RE.search(stripped),
-                    f"premise: stripped must NOT match {stripped!r}")
-                self.assertIsNotNone(
+                self.assertTrue(
                     cp._CLAIM_RE.search(body)
-                    or cp._CLAIM_RE.search(stripped), body)
+                    or cp._CLAIM_RE.search(cp._strip_control_sequences(body))
+                    or cp._TERSE_CLAIM_RE.search(body)
+                    or cp._TERSE_CLAIM_RE.search(
+                        cp._strip_control_sequences(body)),
+                    body)
                 self.gh_fixtures(issue=self.issue_payload(comments=[
                     ("other-agent", body),
                 ]))
@@ -1137,7 +1241,7 @@ class CollisionPreflightTest(unittest.TestCase):
         self.gh_fixtures(issue=self.issue_payload(comments=[{
             "id": "IC_kwDOAAA123",
             "author": {"login": "other-agent"},
-            "body": "I'll take this.",
+            "body": "I'll claim this.",
         }]))
         rc, out = self.run_tool()
         self.assertNotEqual(rc, 0, out)
@@ -1154,7 +1258,7 @@ class CollisionPreflightTest(unittest.TestCase):
         evil = "normal\x1b[2K\x1b[1A title"
         self.gh_fixtures(
             issue=self.issue_payload(title=evil, comments=[
-                ("other-agent", "I'll take this \x1b]52;c;AAAA\x07 now"),
+                ("other-agent", "I'll claim this \x1b]52;c;AAAA\x07 now"),
             ]),
             open_prs=[{
                 "number": 1, "title": "evil\x1b[2K pr", "body": "",
@@ -1166,7 +1270,7 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotIn("\x1b", out)
         self.assertNotIn("\x07", out)
         self.assertIn("VERDICT: COLLISION", out)
-        self.assertIn("I'll take this", out)
+        self.assertIn("I'll claim this", out)
 
     def test_control_sequences_in_issue_state_are_stripped(self):
         # `state` is the one GitHub-sourced field that reached a note RAW
