@@ -15,8 +15,9 @@ lane closes the two that share a seam and cites the other two:
      ⚠️ The producer covers all five labels; whether the FOLD can match them
      depends on the CREATION door. `Document` creation via
      `create_entity(type="document")` / `create_document` goes through
-     `_create_entity`, which writes an inline `DocumentCreated` :GraphEvent and
-     **no JSONL record** — so a mutation of a Document created THAT way journals
+     `_create_entity`, which writes **neither** a JSONL record **nor** a
+     `DocumentCreated` :GraphEvent (`DocumentCreated` is not in
+     `_GRAPH_EVENT_TYPES`) — so a mutation of a Document created THAT way journals
      an `EntityMutated label="Document"` whose fold can only warn, and a rebuild
      destroys the Document. Pre-existing and tracked by **#2296**. (The
      ingest/frontmatter route DOES journal `DocumentCreated`, and a Document
@@ -33,9 +34,11 @@ lane closes the two that share a seam and cites the other two:
   4. **Carrier present but unfolded** (``_NO_PROJECTION_FOLD``). cited:
      #1048
 
-So this PR claims **two of four** mechanisms — not class closure. The two
-citations are asserted below as *documented absences* so that a reader cannot
-mistake this suite for a proof that the class is gone.
+So this PR claims **two of four** mechanisms — not class closure. Mechanism 4
+IS asserted below as a *documented absence* (`_NO_PROJECTION_FOLD` non-empty), so
+a reader cannot mistake this suite for a proof that the class is gone. Mechanism
+3 (no carrier for edges/tags, #2296/#2897) is **cited but NOT pinned** — no
+assertion exists for it, and this docstring does not pretend otherwise.
 
 THE DESIGN (one seam, not two patches):
 
@@ -362,8 +365,9 @@ class TestPropertyMutationRoundTrip:
 
         The producer journals for all five non-`Point` labels, but only FOUR of
         them can fold: `Document` creation goes through `_create_entity`, which
-        writes an inline `DocumentCreated` :GraphEvent and **no JSONL record**
-        (pre-existing, #2296). A `Document` mutation therefore journals an
+        writes **neither** a JSONL record **nor** a `DocumentCreated`
+        :GraphEvent (`DocumentCreated` is not in `_GRAPH_EVENT_TYPES`;
+        pre-existing, #2296). A `Document` mutation therefore journals an
         `EntityMutated label="Document"` whose fold can only ever warn, and a
         rebuild destroys the Document. That is #2296's disclosed residual, NOT
         something this seam fixes — so this test asserts the labels it actually
@@ -696,11 +700,15 @@ class TestNonFoldedSet:
             sdk._get_proj().rebuild_all(str(events))
         assert _MISS not in " ".join(_fold_warnings(caplog))
 
-    def test_miss_is_visible_through_every_replay_engine(self, env, caplog):
-        """``apply()`` DISCARDS the returned count, and ``recover_from_log`` /
-        ``restore`` route through the same fold — so the warning must live
-        INSIDE the fold. A call-site-only warning would be invisible on three
-        of the four engines."""
+    def test_miss_is_visible_through_apply_the_shared_fold_entry_point(
+            self, env, caplog):
+        """``apply()`` DISCARDS the returned count, so the warning must live
+        INSIDE the fold rather than at a call site.
+
+        SCOPE, stated honestly: this row exercises ``apply()`` only. That
+        ``recover_from_log`` / ``backup.restore`` inherit it is a claim about the
+        CODE PATH (they reach this same fold through ``projection.apply``), not
+        something asserted here — the name must not read as four engines."""
         sdk, _events = env
         proj = sdk._get_proj()
         caplog.clear()
