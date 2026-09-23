@@ -24,7 +24,10 @@ const KEY = 'tt_w2_test_key'
 // a harness's skills namespace. No connect copy may claim otherwise, and every
 // copy must name where the onboarding instructions live.
 test('#4365: no connect copy claims onboarding as an installed skill, and each names the instructions', () => {
-  for (const h of HARNESS_ORDER) {
+  // Iterate EVERY exported command, not HARNESS_ORDER: `codexDesktop` is a
+  // live connect copy (rendered by the wizard) that HARNESS_ORDER excludes by
+  // design, so a loop over the vocabulary would leave it unpinned.
+  for (const h of Object.keys(UNIVERSAL_COMMAND)) {
     const cmd = UNIVERSAL_COMMAND[h](KEY)
     assert.ok(!/Install the Tortoise skills \([^)]*onboarding/i.test(cmd),
       `${h}: the install claim must never name onboarding — it is not a skill`)
@@ -41,23 +44,25 @@ test('#4365: no connect copy claims onboarding as an installed skill, and each n
     'SKILLS_CLAIM must be built from SKILLS_LIST — never a second literal')
   assert.ok(!/onboarding/i.test(SKILLS_LIST),
     'the shipped set must never include onboarding — it is not a skill')
-  // Positive AND negative: appending a 4th name AFTER the interpolated claim
-  // kept the positive form true (mutation-verified, #4365 review round 2).
+  // EXACT equality on the RENDERED claim LINE, not on the parenthesised list:
+  // `includes()`, a token count, and even a `\(([^)]*)\)` capture all stayed
+  // true when a 4th name was appended AFTER the closing paren (mutation-verified,
+  // #4365 review rounds 2 and 3).
+  const claimLine = (s) => (s.match(/^# Install the Tortoise skills[^\n]*/m) || [])[0] || null
   for (const h of ['claude', 'codex']) {
-    assert.ok(UNIVERSAL_COMMAND[h](KEY).includes(SKILLS_CLAIM),
-      `${h}: the install claim must list exactly the 3 shipped capabilities`)
-    assert.ok(HARNESS_SKILLS(h).includes(SKILLS_CLAIM),
-      `${h}: the HARNESS_SKILLS block must interpolate the shared claim`)
+    assert.equal(claimLine(UNIVERSAL_COMMAND[h](KEY)), `# ${SKILLS_CLAIM}:`,
+      `${h}: the rendered claim line must be EXACTLY the shipped set`)
+    assert.equal(claimLine(HARNESS_SKILLS(h)), `# ${SKILLS_CLAIM}:`,
+      `${h}: the HARNESS_SKILLS claim line must be EXACTLY the shipped set`)
     assert.ok(!/onboarding/i.test(HARNESS_SKILLS(h)),
       `${h}: the HARNESS_SKILLS block must not name onboarding at all`)
   }
   // The Cursor step list renders the same claim as a step label.
   const cursorStep = HARNESS_STEPS('cursor', KEY)
     .find((s) => s && typeof s === 'object' && /Install the Tortoise skills/.test(s.label))
-  assert.ok(cursorStep && cursorStep.label.includes(SKILLS_CLAIM),
-    'HARNESS_STEPS.cursor install step must interpolate the shared claim')
-  assert.ok(!/onboarding/i.test(cursorStep.label),
-    'HARNESS_STEPS.cursor install step must not name onboarding at all')
+  assert.ok(cursorStep, 'HARNESS_STEPS.cursor must carry the install step')
+  assert.equal(cursorStep.label, `${SKILLS_CLAIM}:`,
+    'HARNESS_STEPS.cursor install step must be EXACTLY the shipped claim')
 })
 
 test('DE2E-5: the 7-harness vocabulary — self-install (4) + teach-human (3, incl. OAuth chatgpt) cover HARNESS_ORDER exactly', () => {

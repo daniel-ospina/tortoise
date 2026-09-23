@@ -390,6 +390,16 @@ if [ ${#missing[@]} -eq 0 ]; then
   echo "Onboarding is NOT a skill — it is the instructions your agent reads:"
   echo "   $SKILLS_BASE/tortoise-onboarding/SKILL.md"
   echo ""
+  # #4365: an earlier v2 installer wrote tortoise-onboarding into this same
+  # namespace. #4327 forbids deleting content we did not write, so it stays —
+  # and saying nothing would leave the user with TWO live onboarding artifacts,
+  # which is the thing #4365 exists to end.
+  if [ -f "$DEST/tortoise-onboarding/SKILL.md" ]; then
+    echo "⚠️  A superseded copy is still at $DEST/tortoise-onboarding/SKILL.md"
+    echo "    Onboarding is no longer an installed skill; this copy is stale."
+    echo "    Remove it:  rm -rf \"$DEST/tortoise-onboarding\""
+    echo ""
+  fi
   echo "Next: restart your agent, then confirm the skills are listed:"
   case "$HARNESS" in
     claude) echo "   claude — the skills appear under /skills" ;;

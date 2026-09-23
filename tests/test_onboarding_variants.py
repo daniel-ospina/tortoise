@@ -165,7 +165,14 @@ def test_m8_installer_still_delivers_the_onboarding_instructions():
     # frontmatter name (not a literal skill name baked into the script).
     assert 'grep -q "^name: $s$"' in installer, (
         "installer must validate the downloaded SKILL.md frontmatter name")
-    assert "SKILLS_VERSION=" in installer
+    # The VERSION must be pinned, not just present: reverting v3 → v2 restored
+    # the four-skill era and left every test green (mutation-verified, round 3).
+    assert 'SKILLS_VERSION="v3"' in installer, (
+        "the installer must advertise the v3 (three-capability) skill set")
+    # …and a superseded copy left by a v2 install must be NAMED, not silently
+    # ignored — otherwise the user keeps two live onboarding artifacts.
+    assert "superseded copy is still at" in installer, (
+        "the installer must warn about a stale tortoise-onboarding copy")
 
 
 # The served connect surfaces that tell a user/agent what the installer ships.
@@ -211,16 +218,22 @@ def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
     assert harnesses.count("${SKILLS_CLAIM}") == 3, (
         "SKILL_INSTALL, HARNESS_SKILLS and the HARNESS_STEPS.cursor label are "
         "the only places that may state the claim")
-    # …and no line that states the set may ALSO name the onboarding SKILL. The
+    # …and no line that states the set may ALSO name a skill of its own. The
     # positive form alone tolerated a 4th name appended after the interpolated
-    # claim (mutation-verified, #4365 review round 2). Match the skill name, not
-    # the substring "onboarding" — the legitimate `ONBOARDING_INSTRUCTIONS_URL`
-    # sits on the next source line of the same multi-line template.
+    # claim — including a NON-onboarding name, which the `tortoise-onboarding`
+    # check below could not see (mutation-verified, round 3).
     for line in harnesses.splitlines():
-        if "${SKILLS_CLAIM}" in line or "SKILLS_LIST =" in line:
+        if "${SKILLS_CLAIM}" in line:
+            rest = line.replace("${SKILLS_CLAIM}", "")
+            assert "tortoise-" not in rest, (
+                "a line that states the shipped skill set must state nothing "
+                f"else: {line.strip()[:90]!r}")
             assert "tortoise-onboarding" not in line.lower(), (
                 "a line that states the shipped skill set must not name the "
                 f"onboarding skill: {line.strip()[:90]!r}")
+    assert "tortoise-onboarding" not in (
+        re.search(r"^export const SKILLS_LIST =[^\n]*", harnesses, re.M).group(0)
+    ).lower(), "SKILLS_LIST must not include the onboarding skill"
     assert "${ONBOARDING_INSTRUCTIONS_URL}" in copy, (
         "the connect copy must point at the served onboarding instructions")
 
@@ -238,12 +251,29 @@ def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
     # stayed GREEN with one prompt's whole enumeration deleted).
     for h in ("pi", "cursor", "claude", "codex"):
         body = _harness_branch(wizard, h)
-        assert "${SKILLS_LIST}" in body, (
-            f"{h}: every config-writing prompt must state the shipped set via "
+        # Assert on the RETURNED TEMPLATE, not the branch slice: a membership
+        # check over the whole body is satisfied by a token parked in a local
+        # that is never interpolated into the returned prompt — all four live
+        # prompts then lose the enumeration with every test still green
+        # (mutation-verified, #4365 review round 3).
+        installs = [t for t in re.findall(r"return `([^`]*)`", body)
+                    if "${SKILLS_INSTALL_URL}" in t]
+        assert len(installs) == 1, (
+            f"{h}: the branch must return exactly one prompt that runs the "
+            f"installer (found {len(installs)})")
+        prompt = installs[0]
+        assert "${SKILLS_LIST}" in prompt, (
+            f"{h}: the RETURNED prompt must state the shipped set via "
             f"SKILLS_LIST")
-        assert "${onboardingInstructions}" in body, (
-            f"{h}: every config-writing prompt must name the onboarding "
-            f"instructions")
+        assert "${onboardingInstructions}" in prompt, (
+            f"{h}: the RETURNED prompt must name the onboarding instructions")
+    # NOTE: the step-2 skills primer at main.jsx:~7950 is NOT pinned here and is
+    # deliberately NOT made to interpolate SKILLS_LIST — it lives INSIDE the
+    # `LEGACY_WIZARD_ARCHIVED` block (main.jsx:7854-8129, flag=false), i.e. it is
+    # dead code kept byte-identical for the A0 rollback path. Editing it breaks
+    # the archived-block line-count pin in overview.test.js. A review round
+    # flagged it as a live surface that had drifted from the shared constant;
+    # it is neither live nor reachable.
     assert "ONBOARDING_INSTRUCTIONS_URL" in wizard, (
         "the wizard prompts must name the served onboarding instructions")
     # …and NAME it in the prompts, not merely declare it: the const line alone

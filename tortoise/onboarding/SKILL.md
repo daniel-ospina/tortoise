@@ -93,12 +93,15 @@ If you are unsure which row applies (e.g. a wrapper/terminal agent), assume
 the config-writing class — you can verify after writing (section 3, failure
 mode → teach-human fallback).
 
-> **#1701 — ChatGPT is a 7th dashboard harness, outside this table.** ChatGPT
-> connects key-less through OpenAI's Developer-mode OAuth connector (dashboard
-> → ChatGPT tab: Scan Tools → OAuth consent on the hosted endpoint → paste the
-> workflows prompt). It has no local filesystem, shell, or skill installer, so
-> it never runs these instructions and has no row here — these six rows are the
-> harnesses this document covers (4 config-writing, 2 teach-human). (If you
+> **#1701 — ChatGPT is a 7th harness, outside this table.** ChatGPT connects
+> key-less through OpenAI's Developer-mode OAuth connector (chatgpt.com →
+> Settings → Security and login → Developer mode, then chatgpt.com/plugins →
+> new app → MCP server URL → OAuth → Scan Tools → paste the workflows prompt).
+> There is no ChatGPT surface in the dashboard chooser (#2698), so this is the
+> path a ChatGPT user takes. It has no local filesystem, shell, or skill
+> installer, so it never runs these instructions and has no row here — these
+> six rows are the harnesses this document covers (4 config-writing, 2
+> teach-human). (If you
 > are ChatGPT and already have the
 > tortoise MCP tools via OAuth, skip install: section 4's tortoise_health
 > verify still applies.)
