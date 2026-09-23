@@ -292,7 +292,7 @@ Design:
   is exactly the storm this exists to avoid.
 
 Nothing here changes request semantics: the callers already absorb the failure
-and serve the request; this only makes the absorption visible to the operator.
+and serve the request.
 """
 
 from __future__ import annotations
@@ -1070,8 +1070,7 @@ Two mutations observed RED (`operations/logs/3981-mutation-evidence.log`).
   must never be a value the measured clock could legitimately report.
 * **P2 — two docstrings asserted a universal the code does not hold.** `_run` and `_prune_locked` both
   claimed "a missing token means a successor WILL file". A successor is ADMITTED, and can then find no
-  channel or fail to submit — both of which log a WARNING. The claim is now the true one: *admitted, and
-  never lost without a trace*. This matters more than the wording: that sentence is the entire safety
+  channel or fail to submit — both of which log a WARNING. The claim is now the true one: *admitted, and its own path reports its outcome*. This matters more than the wording: that sentence is the entire safety
   argument for returning without filing, so a lane reasoning from it would reason from a false premise.
 * **P2 — the reset line was unpinned.** `test_reset_clears_every_piece_of_state` now sets
   `_LAST_SHED_LOG` and asserts the reset clears it; without the reset line it is RED

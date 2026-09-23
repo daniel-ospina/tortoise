@@ -25,7 +25,7 @@ Design:
   is exactly the storm this exists to avoid.
 
 Nothing here changes request semantics: the callers already absorb the failure
-and serve the request; this only makes the absorption visible to the operator.
+and serve the request.
 """
 
 from __future__ import annotations
