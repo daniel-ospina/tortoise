@@ -535,6 +535,7 @@ surfaces:
   - test_client_status_vocabulary.py
   - test_cmux_dispatch.py
   - test_embedder_provision.py
+  - test_embedding_model_required.py   # #4861: the REQUIRED-embedder contract (core: embeddings.py + exceptions.py)
   - test_embedded_evidence.py
   - test_installer_preserves_foreign_skill_content.py
   - test_lifecycle_guards.py        # #2498: shared lifecycle guard — also runs on a tortoise/live.py-only change (terminal vocabulary pin)
@@ -2256,6 +2257,7 @@ durations:
   test_dream_noop_3139.py: 3.5
   test_durability_posture.py: 1.6
   test_embedder_provision.py: 1.1
+  test_embedding_model_required.py: 0.5
   test_entity_delete_rebuild.py: 1.9
   test_env_truthy.py: 11.2
   test_health_client_effect.py: 3.5
