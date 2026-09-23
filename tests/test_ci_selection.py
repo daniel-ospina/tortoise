@@ -1253,7 +1253,10 @@ def test_duration_coverage_guard_boundary_and_realistic():
     assert duration_coverage_issues(below) != [], "89% must fire"
     assert duration_coverage_issues(at) == [], "90% is at the floor, not below"
     assert duration_coverage_issues(above) == [], "95% must be silent"
-    # the real map: 502/520 fast files measured (96.5%)
+    # the real map: every fast file is measured (603/603, #4712). This used
+    # to read "502/520 … (96.5%)" — stale on both numbers, and the real map
+    # had drifted to 545/605 = 90.083%, i.e. exactly ON the floor with zero
+    # files of margin, so one new fast file reddened this assertion for every PR.
     assert duration_coverage_issues(load_manifest()) == []
 
 
