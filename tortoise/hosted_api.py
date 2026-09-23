@@ -45,6 +45,7 @@ import tortoise
 # a monkeypatch/override of the canonical constant reaches BOTH surfaces instead
 # of leaving a stale copy in this module.
 from tortoise import mcp_auth as _mcp_auth
+from tortoise import monitoring as _monitoring  # #2924: call-time bound read
 from tortoise.abuse import _int_env  # #1081 signup limiter env knobs (SignupVelocityTracker)
 from tortoise.alert_store import OpenOutcome, ResolveOutcome  # #3820 resolve/open tri-state
 from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op without key)
@@ -82,8 +83,8 @@ from tortoise.hosted_backup import (
 )
 from tortoise.mcp_server import create_http_app
 from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
+    HEALTH_PROBE_REFRESH_S,  # noqa: F401 — re-exported (tests import it here)
     PROBE_HARD_TIMEOUT,
-    PROBE_STALE_AFTER,
     ControlPlaneOffloadError,
     HealthProbe,
     event_retention_interval,
@@ -98,6 +99,9 @@ from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     start_stall_watchdog,
     workload_enter,
     workload_exit,
+)
+from tortoise.monitoring import (
+    health_probe_interval as _health_probe_interval,  # #2988: shared with selfhost
 )
 from tortoise.onboarding import state as _os  # #2001 (W5) canonical FLOW-state module
 from tortoise.projection import (
@@ -754,68 +758,17 @@ def _iter_registered_orgs() -> list[dict]:
 # ═══════════════════════════════════════════════════════════════════════════
 
 #: How often the background refresher re-probes the DB. Keeps ``/health``'s
-#: ``db`` field fresh WITHOUT the request path doing any I/O. Must stay below
-#: monitoring.PROBE_STALE_AFTER (30s) or a healthy DB would read as degraded.
-HEALTH_PROBE_REFRESH_S = 10.0
-#: Lower bound on a configured probe period (round-3 review P2). ``1e-9`` is
-#: finite but turns the refresher into a ~50 Hz loop, each iteration spawning a
-#: probe daemon thread and issuing a DB round trip — the same busy-loop the
-#: ``nan`` rejection exists to prevent. The upper clamp was one-sided.
-HEALTH_PROBE_MIN_INTERVAL_S = 0.5
-
-
-def _health_probe_interval() -> float:
-    """Probe refresh period (``TORTOISE_HEALTH_PROBE_INTERVAL``, seconds).
-
-    Clamped to half the probe staleness window (review P2): a period longer
-    than ``PROBE_STALE_AFTER`` makes a HEALTHY DB read as ``degraded`` between
-    refreshes, which then fails the deploy gate and gets misdiagnosed as a DB
-    outage. Half the window leaves a full refresh of margin.
-
-    NON-FINITE values are rejected and fall back to the default (round-2
-    review P2): ``float()`` accepts ``nan``/``inf`` and neither is caught by
-    the ``v <= 0`` guard (``nan <= 0`` is False) nor by the ``v > cap`` clamp
-    (``nan > cap`` is False). ``nan`` flows into ``asyncio.sleep(nan)``, which
-    returns almost immediately — a busy loop hammering the DB probe and the
-    event loop. ``inf`` means the probe never refreshes, so a healthy DB reads
-    stale forever. Both DISABLE (fall back to ``HEALTH_PROBE_REFRESH_S``).
-
-    A finite but SUB-FLOOR period is rejected the same way (round-3 review
-    P2): ``1e-9`` busy-loops the probe exactly as ``nan`` did.
-    """
-    try:
-        v = float(os.environ.get("TORTOISE_HEALTH_PROBE_INTERVAL") or HEALTH_PROBE_REFRESH_S)
-    except (TypeError, ValueError):
-        return HEALTH_PROBE_REFRESH_S
-    if not math.isfinite(v):
-        _logger.error(
-            "TORTOISE_HEALTH_PROBE_INTERVAL=%s is not finite — falling back "
-            "to the default %.0fs; a nan period busy-loops the probe and an "
-            "infinite one leaves a healthy DB reading stale forever",
-            v, HEALTH_PROBE_REFRESH_S)
-        return HEALTH_PROBE_REFRESH_S
-    if v <= 0:
-        return HEALTH_PROBE_REFRESH_S
-    # Round-3 review P2: a finite but tiny period busy-loops the probe just
-    # like ``nan`` did — ``1e-9`` yields ~50 generations/s, each spawning a
-    # daemon thread and issuing a DB round trip. The clamp below is
-    # one-sided, so a floor is required too.
-    if v < HEALTH_PROBE_MIN_INTERVAL_S:
-        _logger.warning(
-            "TORTOISE_HEALTH_PROBE_INTERVAL=%s is below the %.2fs floor — "
-            "falling back to the default %.0fs; a sub-floor period "
-            "busy-loops the probe and duplicates the DB round trip",
-            v, HEALTH_PROBE_MIN_INTERVAL_S, HEALTH_PROBE_REFRESH_S)
-        return HEALTH_PROBE_REFRESH_S
-    cap = PROBE_STALE_AFTER / 2.0
-    if v > cap:
-        _logger.warning(
-            "TORTOISE_HEALTH_PROBE_INTERVAL=%s exceeds half the probe "
-            "staleness window (%.0fs) — clamping to %.0fs; a longer period "
-            "would report a healthy DB as degraded and fail the deploy gate",
-            v, PROBE_STALE_AFTER, cap)
-        return cap
-    return v
+#: ``db`` field fresh WITHOUT the request path doing any I/O. The resolver and
+#: ``HEALTH_PROBE_REFRESH_S`` are the SHARED ``monitoring`` spelling (#2988 moved
+#: them there when the selfhost liveness coordinator landed), re-exported here so
+#: existing importers/tests keep resolving them on this module (the resolver
+#: arrives as ``_health_probe_interval``). ``monitoring.HEALTH_PROBE_MIN_INTERVAL_S``
+#: is the resolver's own lower clamp and stays on ``monitoring`` — nothing
+#: imported it from this module, so it is not re-exported.
+#:
+#: NOTE the log lines for a rejected ``TORTOISE_HEALTH_PROBE_INTERVAL`` now
+#: come from ``tortoise.monitoring`` — the resolver lives there, and its
+#: warnings must not be attributed to a caller that did not compute them.
 
 
 async def _first_contact_prewarm() -> None:
@@ -4670,6 +4623,13 @@ def _alert_unmetered(lane: str, org_id: str | None,
             "UNMETERED INCREMENT (#3981): lane=%s team=%s error=%s: %s "
             "(metering module unavailable)", lane, org_id or "<none>",
             type(error).__name__, error)
+        # The fallback still ALERTS — a log line on an ephemeral Fly rootfs is
+        # the #3677 loss class. The kind constant and the dispatcher live in
+        # ``operator_alert``, which is importable when ``metering`` is not.
+        with contextlib.suppress(Exception):
+            from tortoise.operator_alert import alert_unmetered_increment
+
+            alert_unmetered_increment(lane, org_id, error)
         return
     report_unmetered_increment(lane=lane, org_id=org_id, error=error)
 
@@ -5412,7 +5372,7 @@ def _graph_unavailable() -> HTTPException:
     )
 
 
-async def _graph_offload(fn, *, op: str):
+async def _graph_offload(fn, *, op: str, timeout: float | None = None):
     """#3773: run ONE synchronous DATA-PLANE graph helper off the event loop.
 
     Thin hosted-side wrapper over the #3498 seam (``_cp_offload`` ->
@@ -5448,11 +5408,18 @@ async def _graph_offload(fn, *, op: str):
     are identifiable by op — but they share the 512-entry buffer, so a graph
     burst can evict PostgREST records. Splitting the buffer per pool is a
     follow-up, not part of #3773.
+
+    ``timeout`` (#2924) overrides the lane bound for a caller whose FAILURE
+    MODE is not a degraded write but a fail-open fallback: the onboarding gate
+    vetoes nothing when it fails, it only keeps the onboarding tools visible, so
+    it is willing to trade a cold-projection false-open for never parking a
+    graph worker for the lane's full cold-start allowance. Callers that write
+    leave it unset.
     """
     ctx = contextvars.copy_context()
     return await _cp_offload(
         functools.partial(ctx.run, fn), op=op, pool="graph",
-        timeout=graph_offload_timeout_s(),
+        timeout=graph_offload_timeout_s() if timeout is None else timeout,
         unavailable=_graph_unavailable)
 
 
@@ -20231,6 +20198,56 @@ def _get_onboarding_projection(org_id: str) -> dict:
     return state
 
 
+async def _get_onboarding_projection_off_loop(org_id: str) -> dict:
+    """The onboarding projection read, off the event loop (#2924).
+
+    ``_get_onboarding_projection`` is synchronous END TO END, and both of its
+    legs block:
+
+    * the jsonb leg — ``_get_onboarding_state`` reads
+      ``teams.onboarding_state`` through the blocking ``SupabaseControlPlane``
+      transport (``httpx.Client``, ``supabase_control.py:454``);
+    * the graph leg — ``_graph_has_org_namespace`` / ``_open_org_graph_sdk``
+      reach ``_registry_existing_graphs`` / ``_get_proj()``, which CONSTRUCT a
+      fresh ``FalkorProjection`` per call (``ssl.create_default_context`` →
+      ``load_default_certs`` → TLS handshake → ``Is_Sentinel`` INFO), then
+      issue the query.
+
+    Called inline from a coroutine that is a periodic hot path, it blocks the
+    single event loop for the WHOLE resolution. That is the #2924 stall:
+    ``async def list_tools`` (``mcp_server.py``) calls the synchronous gate
+    ``_org_onboarding_complete()``, and a ``py-spy`` MainThread dump taken while
+    ``GET /health`` was stalled 1.08 s captured the loop parked in exactly
+    these frames (``read`` ← ``httpx`` sync backend ← ``query`` ←
+    ``org_onboarding_state`` ← ``_get_onboarding_state`` ←
+    ``_get_onboarding_projection``; and ``create_default_context`` ←
+    ``_registry_existing_graphs`` ← ``_graph_has_org_namespace`` ← the same
+    function). Loopback ``GET /health`` answered in ~4 ms across 178 probes
+    while the public path stalled 0.9–2.2 s on 10 of them, and the app's own
+    heartbeat recorded ``loop_lag_max_ms`` of 2033 ms — so the stall is the
+    loop, not the transport.
+
+    The unit of offload is the RESOLUTION, not an individual HTTP call (the
+    #3498 design): one hop keeps the projection's internal ordering (the jsonb
+    read feeds the merge) inside one worker. The pool is ``graph`` because the
+    resolution's cold-start-prone leg is the projection open, and the graph
+    lane's wait bound is derived from ``probe_setup_timeout()`` precisely so a
+    cold projection is not false-degraded (#3773). Failures propagate: callers
+    that must fail open (the MCP gate) already coerce to ``False``.
+    """
+    return await _graph_offload(
+        lambda: _get_onboarding_projection(org_id),
+        op="onboarding_projection",
+        # #2924: the gate's contract is fail-open, so a hung or cold graph must
+        # not park a graph worker for the lane's cold-start allowance — the
+        # seam's standard REQUEST bound is the right price here.
+        # #2924 review: read the constant at CALL time, not import time — the
+        # seam's bound tests monkeypatch ``monitoring``, and the lane bound
+        # (``graph_offload_timeout_s()``) resolves at call time for the same
+        # reason.
+        timeout=_monitoring.CONTROL_PLANE_OFFLOAD_TIMEOUT_S)
+
+
 # #1727 (Slice 2, Task 11): PATCH-field → state-key translation for the
 # per-harness capture keys. Pydantic field names cannot carry hyphens, but
 # the STATE keys are hyphenated per Literal member (session_capture_receipt_
@@ -22460,42 +22477,74 @@ def _analytics_incident_detail(outcome: str, reason: str) -> dict:
         }
 
 
+def _incident_alert_store(writer: str | None = None):
+    """THE alert-channel builder for operator incidents — ALERT creds only.
+
+    Deliberately NOT gated on ``BACKUP_SWEEP_ENABLED`` (#3820 D5a): the sweep
+    switch decides whether backups RUN, never whether an incident is VISIBLE.
+    When the sweep is enabled its config is used as-is; otherwise
+    ``load_alert_config`` reads the alert credentials ungated. Returns ``None``
+    when there is no issue filer (``DR_ISSUES_PAT`` unset) or the object store
+    cannot be built; the caller then keeps its log line. Env-only: no network
+    at construction.
+
+    ``writer`` is threaded through to ``_alert_store_from`` so a caller that
+    must act as a specific identity (the watcher, ``WRITER_WATCHER``) keeps
+    main's #3127/#2844 authority check — the store's resolves are checked
+    against ``KIND_OWNERS``. Default ``None`` → the app's own identity.
+
+    The rule executed here (and the constructor it calls) live in
+    ``tortoise/alert_channel.py``, because ``operator_alert.alert_store()`` —
+    the lane that fires from a dropped increment — must reach the identical
+    channel without importing this module: importing it builds the whole
+    FastAPI app (~1.7 s, see ``tortoise/mcp_server.py:31-35``) and that cost
+    would ride the MCP stdio path for a bookkeeping alert. This function
+    injects THIS module's factories, which is the only difference between the
+    two legs.
+
+    D6 residual, narrowed: the channel can fail to exist for TWO physical
+    reasons — no ``DR_ISSUES_PAT`` means no filer, and an unusable object store
+    (missing or typoed ``R2_*`` — the store constructor raises unless all four
+    are set) means no dedup seam. It is therefore "no PAT **or** no usable
+    object store", not "no PAT" alone. Counting must never be conditioned on
+    this returning a store.
+
+    SEAM MAP (one policy, several names — for a reader, not for a caller):
+      * ``alert_channel.incident_alert_store`` — the chokepoint holding the
+        ALERT-only policy; ``hosted_api._incident_alert_store`` injects the
+        hosted factories into it. ``operator_alert.alert_store`` PREFERS this
+        function whenever ``tortoise.hosted_api`` is already imported, and
+        only falls back to the light leg when it is not — so in the hosted
+        process there is ONE builder and one cached store.
+      * ``_analytics_alert_store`` — a retained TEST PATCH POINT; it delegates
+        here and adds no policy of its own. Patching it does NOT redirect
+        ``operator_alert``/``cohort_cost``, which resolve through this function
+        (or ``operator_alert.alert_store``); patch the plane you mean.
+      * ``cohort_cost._alert_store`` — retained as a stable internal API for its
+        module; it delegates through ``operator_alert.alert_store``.
+      * ``_alert_store_from(cfg, writer=None)`` — the pure constructor from an
+        already-loaded config; it dereferences ``cfg`` and must never be handed
+        ``None``.
+    """
+    from tortoise import alert_channel
+
+    return alert_channel.incident_alert_store(
+        config_safe=_backup_config_safe, storage_factory=_backup_storage,
+        writer=writer)
+
+
 def _analytics_alert_store():
     """The AlertStore for sink incidents, or ``None`` when unavailable.
 
     #3820: the indirection seam — tests monkeypatch THIS, never
     ``_alert_store_from``.
 
-    #3820 (D5a): the channel is built from the ALERT credentials, NEVER from
-    the backup-sweep gate. ``_backup_config_safe()`` is ``None`` whenever
-    ``BACKUP_SWEEP_ENABLED`` is false — the default — and building this on it
-    meant an incident was never filed on such a deployment, leaving only an
-    unscraped counter and a log on an ephemeral Fly rootfs: #3677's loss class,
-    re-created through the alert channel. When the sweep is enabled its config
-    is used as-is (same env contract); otherwise, and when it is invalid,
-    ``load_alert_config()`` reads the alert credentials ungated. What remains
-    is the CHANNEL's own construction, not a feature switch: no
-    ``DR_ISSUES_PAT`` means no filer, and an unusable object store (missing or
-    typoed ``R2_*`` — ``_alert_store_from`` builds ``R2Storage``, whose
-    ``__init__`` raises unless all four R2 vars are set) means no dedup seam,
-    so the store cannot be built and the counter + WARNING are the residual.
-    The D6 residue is therefore "no PAT **or** no usable object store" — a real
-    physical limit, not "no PAT" alone.
-
-    Counting must never be conditioned on this returning a store.
+    #3820 (D5a)/#3981: delegates to ``_incident_alert_store`` so the analytics
+    sink and the operator-alert kinds share ONE channel policy and cannot
+    drift apart — see that function for the ALERT-only gate and the D6
+    residual. Counting must never be conditioned on this returning a store.
     """
-    try:
-        cfg = _backup_config_safe()
-        if cfg is None:
-            from tortoise.backup_config import load_alert_config
-
-            cfg = load_alert_config()
-        if cfg is None:
-            return None
-        return _alert_store_from(cfg)
-    except Exception as e:  # absence of a channel is not a loss
-        _logger.warning("analytics alert store unavailable: %s", e)
-        return None
+    return _incident_alert_store()
 
 
 def _as_call_count(value) -> int:
@@ -24773,15 +24822,16 @@ _PURGE_INFLIGHT = asyncio.Lock()  # #2304 trash-purge in-flight guard
 
 
 def _backup_config_safe() -> BackupConfig | None:  # noqa: F821
-    """Sweep config, or None when disabled (fail-closed)."""
-    from tortoise.backup_config import ConfigError, load_config
+    """Sweep config, or None when disabled (fail-closed).
 
-    try:
-        cfg = load_config()
-    except ConfigError as e:
-        _logger.warning("backup sweep config invalid: %s", e)
-        return None
-    return cfg if cfg.enabled else None
+    Thin delegate to ``alert_channel.sweep_config_safe`` — the ALERT channel's
+    light leg needs the same fail-closed rule without importing this module.
+    Kept as a module global because tests patch THIS name (``test_notify``,
+    ``test_email_notify``).
+    """
+    from tortoise import alert_channel
+
+    return alert_channel.sweep_config_safe()
 
 
 def _alert_store_from(cfg, writer: str | None = None) -> AlertStore:  # noqa: F821
@@ -24791,40 +24841,19 @@ def _alert_store_from(cfg, writer: str | None = None) -> AlertStore:  # noqa: F8
     KIND_OWNERS actually declares itself — otherwise the authority check is
     short-circuited for the whole app path and the map is inert. The watcher
     passes WRITER_WATCHER explicitly at its construction site.
+
+    The body lives in ``alert_channel.alert_store_from`` so the light leg
+    (``operator_alert``, which must not import this module) builds a
+    byte-identical store. ``_backup_storage`` is passed as a FACTORY, resolved
+    at call time, so the test patch point on this module keeps working and the
+    hosted leg keeps its cache-keyed R2 singleton (#3968). ``writer`` is
+    forwarded verbatim — the #3127/#2844 authority contract is main's, and this
+    delegate must not narrow it.
     """
-    from tortoise import github_issue as gi
-    from tortoise.alert_store import WRITER_APP, AlertStore
-    from tortoise.telegram_push import send_message
+    from tortoise import alert_channel
 
-    writer = WRITER_APP if writer is None else writer
-
-    storage = _backup_storage()
-
-    def file_issue(title: str, body: str) -> int:
-        return gi.create_issue(
-            cfg.gh_repo, cfg.github_issues_pat, title=title, body=body,
-            assignee=cfg.alert_assignee,
-        )
-
-    def close_issue(number: int, comment: str | None = None) -> None:
-        gi.close_issue(cfg.gh_repo, cfg.github_issues_pat, number, comment)
-
-    def search_open(kind: str, org_id: str = "") -> list[int]:
-        return gi.search_open_incident(
-            cfg.gh_repo, cfg.github_issues_pat, kind, org_id)
-
-    def push_telegram(text: str) -> None:
-        send_message(cfg.telegram_bot_token, cfg.telegram_chat_id, text)
-
-    def issue_open(number: int) -> bool:
-        return gi.issue_is_open_checked(cfg.gh_repo, cfg.github_issues_pat, number)
-
-    return AlertStore(
-        storage, file_issue=file_issue, close_issue=close_issue,
-        search_open=search_open, push_telegram=push_telegram,
-        issue_open=issue_open, default_writer=writer,
-        repo=cfg.gh_repo, assignee=cfg.alert_assignee,
-    )
+    return alert_channel.alert_store_from(
+        cfg, storage_factory=_backup_storage, writer=writer)
 
 
 def _sweep_org_lock(org_id: str) -> threading.Lock:
@@ -25772,10 +25801,13 @@ def _billing_email_like(value: object) -> bool:
     return bool(local) and bool(domain)
 
 
-def _billing_customer_email(sdk, org: dict) -> str:
+def _billing_customer_email(sdk: TortoiseSDK | None, org: dict) -> str:
     """Resolve the billing email via the fallback chain (review fix 1):
 
-    1. ``Org.email`` — set at /v1/register (self-service orgs).
+    1. ``Org.email`` — set at /v1/register (self-service orgs); the resolved
+       org dict carries it in BOTH lanes (registry Team node / Supabase orgs
+       row) and is read as the ``t.email`` twin (#4640: Supabase mode passes
+       ``sdk=None`` — the registry graph is deleted post-#669).
     2. ``APIKey.created_by`` — provision-path orgs (created via
        /internal/provision) have no ``Org.email``; the Edge Function stored
        the creator on the APIKey node instead. Prefer the key used for THIS
@@ -25792,26 +25824,37 @@ def _billing_customer_email(sdk, org: dict) -> str:
        client-supplied body/header. Last in the chain: the existing
        resolutions keep precedence.
     4. 400 last resort — clear message, no crash.
+
+    ``sdk`` is None in Supabase mode (#4640): the registry reads are skipped
+    entirely, and resolution runs through the resolved org dict, which the
+    control-plane seam populated from the authoritative row.
     """
     org_id = org["org_id"]
-    row = sdk._get_registry().query(
-        "MATCH (t:Team {id:$id}) RETURN t.email", params={"id": org_id}
-    ).result_set
-    if row and row[0][0]:
-        return row[0][0]
-    key_id = org.get("key_id")
-    if key_id:
+    if sdk is not None:
         row = sdk._get_registry().query(
-            "MATCH (k:APIKey {id:$id}) RETURN k.created_by", params={"id": key_id}
+            "MATCH (t:Team {id:$id}) RETURN t.email", params={"id": org_id}
+        ).result_set
+        if row and row[0][0]:
+            return row[0][0]
+    # #4640: the resolved org row's email — the ``t.email`` twin above, and the
+    # only link available in Supabase mode. Registry parity: org["email"] IS
+    # the t.email that read returns, so this is a selfhost no-op.
+    if _billing_email_like(org.get("email")):
+        return org["email"].strip()
+    if sdk is not None:
+        key_id = org.get("key_id")
+        if key_id:
+            row = sdk._get_registry().query(
+                "MATCH (k:APIKey {id:$id}) RETURN k.created_by", params={"id": key_id}
+            ).result_set
+            if row and _billing_email_like(row[0][0]):
+                return row[0][0].strip()
+        row = sdk._get_registry().query(
+            "MATCH (k:APIKey {org_id:$tid}) RETURN k.created_by LIMIT 1",
+            params={"tid": org_id},
         ).result_set
         if row and _billing_email_like(row[0][0]):
             return row[0][0].strip()
-    row = sdk._get_registry().query(
-        "MATCH (k:APIKey {org_id:$tid}) RETURN k.created_by LIMIT 1",
-        params={"tid": org_id},
-    ).result_set
-    if row and _billing_email_like(row[0][0]):
-        return row[0][0].strip()
     # #4504: verified session email — before the 400, after the existing
     # resolutions (precedence unchanged). Reached whenever no earlier link
     # produced an address — including a non-email ``created_by``.
@@ -25831,25 +25874,49 @@ def _billing_checkout_sync(org: dict, price_id: str) -> dict:
 
     Order matters (scoping P1-2, review fix 1): resolve/validate price →
     stored-mirror guard → resolve email → create-or-reuse Stripe customer →
-    SYNC-PERSIST ``stripe_customer_id`` on the Org node (plus ``customer_email``
-    on first bind, or as a backfill when the stored one is empty — a reused
-    customer keeps its stored email, see below) → stale-mirror race guard
-    (list_subscriptions) → create Checkout session. A missed first webhook
-    event leaves a reconcilable mirror (Task 8).
+    SYNC-PERSIST ``stripe_customer_id`` on the authoritative store (#4640: the
+    orgs row in Supabase mode, the Org node in registry mode; plus
+    ``customer_email`` on first bind, or as a backfill when the stored one is
+    empty — a reused customer keeps its stored email, see below) →
+    stale-mirror race guard (list_subscriptions) → create Checkout session. A
+    missed first webhook event leaves a reconcilable mirror (Task 8).
+
+    #4640: Supabase mode reads/writes ``organizations`` through the
+    control-plane seam, exactly as the webhook's ``_set`` does (#669: the
+    registry graph is deleted there). The pre-fix code read and wrote the
+    registry unconditionally — the reads matched nothing and the persist was a
+    silent no-op (or a registry-graph resurrection, #878), so the portal's
+    read of the same store found no customer.
     """
     from tortoise.billing import StripeClient
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+        org_billing_state,
+        update_org_billing,
+    )
     org_id = org["org_id"]
-    sdk = _make_sdk(namespace="registry")
+    supabase_mode = is_supabase_enabled()
+    # Supabase mode never constructs a registry-namespaced SDK: post-#669 the
+    # registry graph is deleted, so a read finds nothing and a write would
+    # resurrect it (#878).
+    sdk = None if supabase_mode else _make_sdk(namespace="registry")
 
     # Layer 1 guard: stored mirror already active → reject before any Stripe call.
-    row = sdk._get_registry().query(
-        "MATCH (t:Team {id:$id}) "
-        "RETURN t.subscription_status, t.stripe_customer_id, t.customer_email",
-        params={"id": org_id},
-    ).result_set
-    status = row[0][0] if row else None
-    stored_customer_id = row[0][1] if row else None
-    stored_customer_email = row[0][2] if row else None
+    if supabase_mode:
+        stored = org_billing_state(get_control_plane(), org_id)
+    else:
+        row = sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) "
+            "RETURN t.subscription_status, t.stripe_customer_id, t.customer_email",
+            params={"id": org_id},
+        ).result_set
+        stored = ({"subscription_status": row[0][0],
+                   "stripe_customer_id": row[0][1],
+                   "customer_email": row[0][2]} if row else {})
+    status = stored.get("subscription_status")
+    stored_customer_id = stored.get("stripe_customer_id")
+    stored_customer_email = stored.get("customer_email")
     if status in _BILLING_ACTIVE_STATUSES:
         raise HTTPException(status_code=409, detail="team already has an active subscription")
 
@@ -25870,7 +25937,12 @@ def _billing_checkout_sync(org: dict, price_id: str) -> dict:
     # rewriting it would make the mirror disagree with the address invoices go
     # to. Backfill only when the stored value is empty (the checkout webhook
     # persisted the binding without a customer_email).
-    if stored_customer_id and stored_customer_email:
+    binding = {"stripe_customer_id": customer_id}
+    if not (stored_customer_id and stored_customer_email):
+        binding["customer_email"] = email
+    if supabase_mode:
+        update_org_billing(get_control_plane(), org_id, binding)
+    elif stored_customer_id and stored_customer_email:
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.stripe_customer_id=$cid",
             params={"id": org_id, "cid": customer_id},
@@ -26053,14 +26125,30 @@ async def billing_checkout_new_org(body: NewOrgCheckoutRequest, user: dict = Dep
 
 def _billing_portal_sync(org: dict) -> dict:
     """Sync body of POST /v1/billing/portal — portal session for an existing
-    Stripe customer; 404 when the org never checked out (no customer id)."""
+    Stripe customer; 404 when the org never checked out (no customer id).
+
+    #4640: the customer binding is read from the SAME store the checkout
+    persisted it to. Supabase mode reads the authoritative orgs row through
+    the control-plane seam (#669: the registry graph is deleted there — the
+    pre-fix registry read missed the row the webhook wrote and 404'd a
+    just-subscribed org). Registry mode keeps the Team-node read (selfhost).
+    """
     from tortoise.billing import StripeClient
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+        org_billing_state,
+    )
     org_id = org["org_id"]
-    sdk = _make_sdk(namespace="registry")
-    row = sdk._get_registry().query(
-        "MATCH (t:Team {id:$id}) RETURN t.stripe_customer_id", params={"id": org_id}
-    ).result_set
-    customer_id = row[0][0] if row else None
+    if is_supabase_enabled():
+        customer_id = org_billing_state(
+            get_control_plane(), org_id).get("stripe_customer_id")
+    else:
+        sdk = _make_sdk(namespace="registry")
+        row = sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) RETURN t.stripe_customer_id", params={"id": org_id}
+        ).result_set
+        customer_id = row[0][0] if row else None
     if not customer_id:
         raise HTTPException(status_code=404, detail="no Stripe customer for this team — start a checkout first")
     try:
