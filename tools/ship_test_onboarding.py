@@ -384,6 +384,23 @@ def exit_code_for(reason: str) -> int:
     return EXIT_FAILED
 
 
+def run_exit_code(obs: Observation) -> int:
+    """The exit code THIS run earned — the ONE definition, shared by `main` and
+    by the teardown's last resort.
+
+    `exit_code_for(obs.reason)` alone is NOT it: a PASSED run has an empty reason
+    (`failure_reason` returns "" for `passed`), which `exit_code_for` scores as a
+    failure. The abandon path used to call `exit_code_for` directly, so a run
+    that measured the product and PASSED exited 1 when its teardown gave up —
+    the cleanup fault moving the exit code, which is exactly what #4319 forbids
+    and what a verification pass caught. Both callers now go through here, so
+    they cannot drift apart.
+    """
+    if obs.verdict == "passed":
+        return EXIT_PASSED
+    return exit_code_for(obs.reason)
+
+
 def verdict_for(neg: Verdict, observed_after: bool, pos: Verdict, *,
                 session_state: str, skip_agent_write: bool = False) -> str:
     """Assemble the walk's verdict from its measured halves.
@@ -571,9 +588,15 @@ BROWSER_TEARDOWN_CLEAN = "clean"
 BROWSER_TEARDOWN_CLOSE_ERROR = "close_error"
 BROWSER_TEARDOWN_WATCHDOG_KILL = "watchdog_kill"
 BROWSER_TEARDOWN_DRIVER_ABSENT = "driver_absent"
+# The ladder was spent and a close was STILL blocked, with no enumerated child to
+# release it: the run terminated itself rather than hang forever. Distinct from
+# `driver_absent` (no child, but the close returned) — this one means the
+# process's own exit was the bound.
+BROWSER_TEARDOWN_ABANDONED = "abandoned"
 BROWSER_TEARDOWN_OUTCOMES = (
     BROWSER_TEARDOWN_NOT_RUN, BROWSER_TEARDOWN_CLEAN, BROWSER_TEARDOWN_CLOSE_ERROR,
     BROWSER_TEARDOWN_WATCHDOG_KILL, BROWSER_TEARDOWN_DRIVER_ABSENT,
+    BROWSER_TEARDOWN_ABANDONED,
 )
 
 # The teardown budget, in seconds. The watchdog's rungs are timed off it and the
@@ -1233,7 +1256,7 @@ def _driver_pid_and_starttime() -> tuple[int | None, str | None]:
     me = os.getpid()
     try:
         out = subprocess.run(["ps", "-axo", "pid=,ppid=,lstart=,command="],
-                             capture_output=True, text=True, timeout=10).stdout
+                             capture_output=True, text=True, timeout=2).stdout
     except Exception:
         return None, None
     for line in out.splitlines():
@@ -1260,7 +1283,7 @@ def _start_time_of(pid: int) -> str | None:
     """The process's start time, re-read at signal time (the TOCTOU re-check)."""
     try:
         out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)],
-                             capture_output=True, text=True, timeout=10).stdout
+                             capture_output=True, text=True, timeout=2).stdout
     except Exception:
         return None
     return out.strip() or None
@@ -1356,7 +1379,7 @@ def run_walk(args) -> Observation:
             # pre-teardown document has been written by `_finalize`, so a run
             # that dies inside it leaves a complete artifact whose
             # `browser_teardown.outcome` is `not_run`.
-            _teardown_browser(pw, td, obs)
+            _teardown_browser(pw, td, obs, out_dir)
     # THE ONE AUTHORITATIVE WRITE+PRINT SITE: after the teardown, for every
     # returning path. A `_walk` exception propagates past it (the `finally` has
     # already torn the browser down), which is the killed-inside-the-window case.
@@ -1777,7 +1800,7 @@ def _close_all(pw, td, closes: list) -> bool:
     return failed
 
 
-def _teardown_browser(pw, td, obs) -> None:
+def _teardown_browser(pw, td, obs, out_dir) -> None:
     """Close the browser this run owns, BOUNDED. The ONE teardown site's body.
 
     Close the context → close the browser → `pw.stop()`, recording each step into
@@ -1786,6 +1809,16 @@ def _teardown_browser(pw, td, obs) -> None:
     cannot be interrupted, so the BOUND comes from outside them: a thread takes
     the `_ladder` rungs on the clock seam and signals the run's OWN Playwright
     driver child, which is what releases a blocked close (E11).
+
+    The bound does NOT depend on a child being enumerable: when the ladder is
+    spent and a close is still blocked, `_abandon` writes the record and exits
+    the process with the run's own exit code. Without that last resort the
+    promise would hold only where a driver child happened to be found — measured
+    as a real hang (the gate reproduced 30s against a 5s bound with the no-child
+    seams).
+
+    The budget starts BEFORE the enumerator runs, so a slow `ps` cannot spend the
+    teardown's own slack.
 
     The watchdog touches NO Playwright object — only `os.kill` through the signal
     seam and a record — so the sync API's thread-affinity rule is not violated.
@@ -1807,15 +1840,15 @@ def _teardown_browser(pw, td, obs) -> None:
     record = obs.browser_teardown
     closes = record["closes"]
 
+    started = _monotonic()
     driver_pid, driver_start = _driver_pid_and_starttime()
     signals: list[tuple[int, int]] = []
     fired = threading.Event()
     done = threading.Event()
 
     def _watchdog() -> None:
-        start = _monotonic()
         for delay, signum in _ladder(TEARDOWN_BOUND_S):
-            if not _wait_until(start + delay, done):
+            if not _wait_until(started + delay, done):
                 return                     # the closes finished before this rung
             fired.set()
             if driver_pid is None:
@@ -1825,6 +1858,9 @@ def _teardown_browser(pw, td, obs) -> None:
             _send_signal(driver_pid, signum)
             signals.append((driver_pid, signum))
             _reap(driver_pid)
+        # THE LAST RESORT: every rung is spent and the teardown is still blocked.
+        if not done.is_set():
+            _abandon(obs, record, driver_pid, out_dir)
 
     watchdog = threading.Thread(target=_watchdog, daemon=True)
     watchdog.start()
@@ -1851,6 +1887,46 @@ def _teardown_browser(pw, td, obs) -> None:
                                       if c["how"] == "close_error")
     else:
         record["outcome"] = BROWSER_TEARDOWN_CLEAN
+
+
+def _exit_now(code: int) -> None:
+    """Terminate the process without unwinding. A SEAM, so a test can observe it.
+
+    `os._exit`, not `sys.exit`: the main thread is blocked in a C-level wait, so
+    an exception-based exit could not run from this thread. This is the only exit
+    that works while another thread is stuck.
+    """
+    os._exit(code)
+
+
+def _abandon(obs, record, driver_pid, out_dir) -> None:
+    """The ladder is spent and a close is still blocked: end the run, bounded.
+
+    Called from the watchdog thread with the main thread stuck in a timeout-less
+    `close()`. Nothing here touches a Playwright object.
+
+    The exit code is the run's OWN, computed exactly as `_finish` would, because
+    a cleanup fault must never move the verdict (#4319). The pre-teardown
+    document is already on disk, and the authoritative one is written here, so a
+    run that had to abandon its teardown still says what it measured and why the
+    browser was not released.
+    """
+    record["outcome"] = BROWSER_TEARDOWN_ABANDONED
+    record["detail"] = (
+        f"the ladder was spent with the teardown still blocked and "
+        f"{'no driver child enumerated' if driver_pid is None else f'driver child {driver_pid} still holding the close'}"
+        f"; the run terminated itself so it could not hang forever")
+    if not obs.reason:
+        obs.reason = failure_reason(
+            obs.verdict, session_state=(obs.session or {}).get("state", ""))
+    with contextlib.suppress(BaseException):
+        _write_observation(obs, out_dir)
+    print(f"[ship-test] BROWSER TEARDOWN — {record['outcome']}: {record['detail']}."
+          f" The artifact on disk records it; the verdict ({obs.verdict}) and the"
+          f" exit code are unchanged by it.", file=sys.stderr)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    _exit_now(run_exit_code(obs))
 
 
 def _mint_or_read_key(page, ctx, base_url: str) -> tuple[str | None, str]:
@@ -1894,8 +1970,16 @@ def _write_observation(obs: Observation, out_dir: Path) -> Path:
     """
     path = out_dir / "observation.json"
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(asdict(obs), indent=2) + "\n")
-    os.replace(tmp, path)
+    try:
+        tmp.write_text(json.dumps(asdict(obs), indent=2) + "\n")
+        os.replace(tmp, path)
+    except BaseException:
+        # Never leave the tmp behind for the NEXT run to trip over (or for a
+        # reader to mistake for the artifact). The repo's convention for the
+        # atomic-write pair, e.g. tools/embedded_evidence.py (~#4585).
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
     return path
 
 
@@ -2227,9 +2311,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ship-test: INSTRUMENT ERROR — run aborted: "
               f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return EXIT_INSTRUMENT_ERROR
-    if obs.verdict == "passed":
-        return EXIT_PASSED
-    return exit_code_for(obs.reason)
+    return run_exit_code(obs)
 
 
 if __name__ == "__main__":

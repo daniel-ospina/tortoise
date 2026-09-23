@@ -143,11 +143,18 @@ direct child of the instrument's own process, together with its start time; the
 start time is **re-read immediately before every rung** (a bare pid is racy
 against reuse). With no child enumerated the watchdog signals nothing and records
 `driver_absent`. Only after a signal is the child reaped.
+* **The bound holds even with nothing to signal (`abandoned`).** The ladder is
+released by a *signal*, so if no driver child is enumerable there is nothing that
+can release a close which never returns. After the final rung, with a close still
+blocked, the run writes the record (`outcome: abandoned`, naming whether a child
+was found) and **ends itself with its own exit code** rather than hang forever —
+a cleanup fault may not move the verdict (#4319). The window is bounded either
+way; what changes is that the process, not the driver, provides the bound.
 * **The watchdog touches no Playwright object** — only the signal call and its own
 record — so the sync API's thread-affinity rule holds.
 * **The outcome is recorded, in a closed vocabulary.** `browser_teardown.outcome`
 is one of `not_run` | `clean` | `close_error` | `watchdog_kill` |
-`driver_absent`, and `browser_teardown.closes` names each closer (`context`,
+`driver_absent` | `abandoned`, and `browser_teardown.closes` names each closer (`context`,
 `browser`, `playwright`) with its `how` and any exception. A non-clean outcome
 prints a `BROWSER TEARDOWN — …` line on stderr. **It never changes the verdict or
 the exit code** — cleanup is not the product (#4319's rule, applied to the
@@ -180,7 +187,7 @@ deliberately not this one.
 | `assertions` | `front_door_reachable`, `walk_completed`, `no_claim_before_observation`, `shown_when_observed` |
 | `session` | How the run authenticated: `state` (one of `signed_in` / `not_signed_in` / `store_unavailable` / `unreachable`), `detail`, `mechanism` |
 | `teardown` | The run's own cleanup outcome (#4319). `status` is one of `deleted` / `skipped_no_org` (nothing was created) / `not_reached` (no browser context, or the run exited before the cleanup baseline was read) / `kept_by_flag` (`--keep-org`) / `baseline_unavailable` / `not_listed` / `not_attempted` / `list_unreadable` / `ambiguous` / `name_mismatch` / `http_refused` / `not_confirmed` / `failed`. Every status except `deleted`/`skipped_no_org`/`not_reached` means a live org may remain and is warned on stderr. The keys carried depend on the status: `org_id` on `deleted`/`name_mismatch`/`http_refused`/`not_confirmed`; `http_status` + `upstream_status` on `list_unreadable`/`http_refused` (an upstream 429 arrives as a 503); `verify_status` + `verify_upstream_status` on `not_confirmed`; `created_ids` on `ambiguous`/`not_attempted`; `before_count`/`after_count` on `not_listed`; `grace_hours` + `hard_delete_after` on `deleted` |
-| `browser_teardown` | The BROWSER teardown's outcome (#4907), distinct from the org reaper's. `outcome` is one of `not_run` / `clean` / `close_error` / `watchdog_kill` / `driver_absent`; `closes[]` is `{name, how, detail}` per closer (`context`, `browser`, `playwright`); `detail` summarises a non-clean outcome. `not_run` is the PRE-teardown document's value — a run killed inside the ≤5 s window keeps it — and is never the value after a completed teardown. A non-clean value is warned on stderr and never changes the verdict or the exit code. See *Browser teardown* above and **#4928** for the residue |
+| `browser_teardown` | The BROWSER teardown's outcome (#4907), distinct from the org reaper's. `outcome` is one of `not_run` / `clean` / `close_error` / `watchdog_kill` / `driver_absent` / `abandoned`; `closes[]` is `{name, how, detail}` per closer (`context`, `browser`, `playwright`); `detail` summarises a non-clean outcome. `not_run` is the PRE-teardown document's value — a run killed inside the ≤5 s window keeps it — and is never the value after a completed teardown. A non-clean value is warned on stderr and never changes the verdict or the exit code. See *Browser teardown* above and **#4928** for the residue |
 | `reason` | The failure CLASS — empty iff `verdict == "passed"`. `instrument_error` (exit 3, says nothing about the product) vs `server_did_not_observe` / `positive_not_shown` / `positive_not_attempted` / `walk_incomplete` / `walk_failed` (exit 1) |
 | `verdict` | `passed` / `failed: …` / `incomplete: …` / `instrument-error: …` |
 

@@ -1184,10 +1184,32 @@ class _DriverHarness:
         self.reaps = []
         self.clock_reads = []
         self.teardown_start = None
+        self.out_dir = None          # set by the walk helper, for the exit capture
+        self.exits = []              # exit codes the abandon path passed to `_exit_now`
+        self.exit_docs = []          # the on-disk document as it was at that moment
 
     def enumerate_driver(self):
         self.teardown_start = self.clock()
         return self.driver
+
+    def exit_now(self, code):
+        """The last-resort exit, as a SEAM so the suite survives it.
+
+        In production `os._exit` ends the process here, so the blocked main thread
+        never matters. In the suite there is no process to end, so this records
+        the call, captures the document the abandon path wrote, and releases the
+        wedge — otherwise the fake's main thread would stay blocked forever.
+        """
+        import json
+
+        self.exits.append(code)
+        try:
+            self.exit_docs.append(json.loads(
+                (self.out_dir / "observation.json").read_text())["browser_teardown"])
+        except Exception:
+            self.exit_docs.append(None)
+        for wedge in list(self.wedges):
+            wedge.release(signal.SIGKILL)
 
     def send_signal(self, pid, signum):
         self.signals.append((pid, signum))
@@ -1529,13 +1551,15 @@ def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
 
     monkeypatch.setattr(mod, "mcp_call", _mcp_call)
 
-    # The five teardown seams: recorded here, replaced nowhere else, so the
+    # The SIX teardown seams: recorded here, replaced nowhere else, so the
     # teardown's process-facing reads/writes are the fake's.
     monkeypatch.setattr(mod, "_driver_pid_and_starttime", harness.enumerate_driver)
     monkeypatch.setattr(mod, "_send_signal", harness.send_signal)
     monkeypatch.setattr(mod, "_start_time_of", harness.start_time_of)
     monkeypatch.setattr(mod, "_reap", harness.reap)
     monkeypatch.setattr(mod, "_monotonic", harness.clock)
+    monkeypatch.setattr(mod, "_exit_now", harness.exit_now)
+    harness.out_dir = tmp_path / "ship-test"
 
     args = mod.build_parser().parse_args([
         "--base-url", base, "--auth-url", "https://tortoise.premiselabs.co",
@@ -2770,13 +2794,110 @@ def test_the_browser_teardown_vocabulary_is_closed() -> None:
     import tools.ship_test_onboarding as mod
 
     assert mod.BROWSER_TEARDOWN_OUTCOMES == (
-        "not_run", "clean", "close_error", "watchdog_kill", "driver_absent")
-    assert len(set(mod.BROWSER_TEARDOWN_OUTCOMES)) == 5
+        "not_run", "clean", "close_error", "watchdog_kill", "driver_absent",
+        "abandoned")
+    assert len(set(mod.BROWSER_TEARDOWN_OUTCOMES)) == 6
     assert "passed" not in mod.BROWSER_TEARDOWN_OUTCOMES
     for name in ("BROWSER_TEARDOWN_NOT_RUN", "BROWSER_TEARDOWN_CLEAN",
                  "BROWSER_TEARDOWN_CLOSE_ERROR", "BROWSER_TEARDOWN_WATCHDOG_KILL",
-                 "BROWSER_TEARDOWN_DRIVER_ABSENT"):
+                 "BROWSER_TEARDOWN_DRIVER_ABSENT", "BROWSER_TEARDOWN_ABANDONED"):
         assert getattr(mod, name) in mod.BROWSER_TEARDOWN_OUTCOMES
+
+
+def test_the_atomic_write_leaves_no_temp_file_behind_when_it_fails(
+        monkeypatch, tmp_path) -> None:
+    """The write is `tmp` + `os.replace`, so a failure must not leave the tmp for
+    the next run to trip over — or for a reader to mistake for the artifact. The
+    gate found the cleanup missing; nothing covered it."""
+    import os
+
+    import tools.ship_test_onboarding as mod
+
+    obs = mod.Observation(started_at=mod._now(), target={})
+    out_dir = tmp_path / "ship-test"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    def _boom(src, dst):
+        raise OSError("replace refused")
+
+    monkeypatch.setattr(os, "replace", _boom)
+    with pytest.raises(OSError):
+        mod._write_observation(obs, out_dir)
+    leftovers = sorted(p.name for p in out_dir.iterdir())
+    assert leftovers == [], f"the failed write left {leftovers} behind"
+    assert not (out_dir / "observation.json").exists()
+
+
+def test_the_production_enumerator_returns_only_this_processs_own_marked_child():
+    """AC4's safety clause at the PRODUCTION seam, not the fake's.
+
+    Every other teardown test stubs `_driver_pid_and_starttime`, so the filter
+    that decides what may EVER be signalled — `ppid == os.getpid()` plus the
+    driver marker — would otherwise be pinned by nothing: a mutant returning any
+    child, or a process that is not a child at all, would pass the suite. Here
+    two REAL children are spawned, the unmarked one FIRST, so an enumerator that
+    returned "the first child" fails."""
+    import os
+    import subprocess
+    import sys
+
+    import tools.ship_test_onboarding as mod
+
+    marker = mod.TEARDOWN_DRIVER_MARKERS[0]
+    plain = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    driver = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)", marker])
+    try:
+        deadline = time.monotonic() + 10
+        pid, started = None, None
+        while time.monotonic() < deadline:
+            pid, started = mod._driver_pid_and_starttime()
+            if pid is not None:
+                break
+            time.sleep(0.1)
+        assert pid == driver.pid, (
+            f"enumerated {pid}; expected the MARKED child {driver.pid} "
+            f"(the unmarked {plain.pid} was spawned first)")
+        ppid = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)],
+                              capture_output=True, text=True).stdout.strip()
+        assert ppid == str(os.getpid()), f"{pid} is not this process's child"
+        assert started, "no start time was carried alongside the pid"
+        assert mod._start_time_of(pid) == started, (
+            "the start time must re-read identically, or the TOCTOU re-check "
+            "would silently refuse to signal the real driver")
+    finally:
+        for p in (plain, driver):
+            p.kill()
+            p.wait()
+
+
+def test_the_run_exit_code_has_one_definition_for_main_and_the_abandon_path():
+    """`exit_code_for(obs.reason)` is NOT the run's exit code: a PASSED run has an
+    empty reason, which `exit_code_for` scores as a failure. The abandon path used
+    it directly, so a passing run that had to abandon its teardown exited 1 — the
+    cleanup fault moving the exit code, exactly what #4319 forbids. A verification
+    pass caught it, and the test above had asserted the same wrong function, so it
+    was green ON the bug. These are the three cases, and the structural half pins
+    that `main` cannot drift back off the shared definition."""
+    import tools.ship_test_onboarding as mod
+
+    passed = mod.Observation(started_at=mod._now(), target={})
+    passed.verdict = "passed"
+    assert mod.run_exit_code(passed) == mod.EXIT_PASSED
+
+    failed = mod.Observation(started_at=mod._now(), target={})
+    failed.verdict = "failed: positive_not_shown"
+    failed.reason = "positive_not_shown"
+    assert mod.run_exit_code(failed) == mod.EXIT_FAILED
+
+    broken = mod.Observation(started_at=mod._now(), target={})
+    broken.verdict = "instrument-error: no driver"
+    broken.reason = mod.REASON_INSTRUMENT_ERROR
+    assert mod.run_exit_code(broken) == mod.EXIT_INSTRUMENT_ERROR
+
+    assert "return run_exit_code(obs)" in _inspect.getsource(mod.main), (
+        "main must return the shared definition, so it cannot drift from the "
+        "teardown's abandon path")
 
 
 def test_the_teardown_bound_is_pinned() -> None:
@@ -3098,18 +3219,56 @@ def test_the_watchdog_signals_only_the_enumerated_driver_child(monkeypatch, tmp_
 @pytest.mark.timeout(60)
 def test_no_driver_child_means_no_signal_and_driver_absent(monkeypatch, tmp_path):
     """AC4. With no driver child enumerated the watchdog signals NOTHING — a kill
-    with no target must not guess — and the artifact says `driver_absent`."""
+    with no target must not guess — and when the close then releases on its own
+    the artifact says `driver_absent`.
+
+    The wedge is timed to land BETWEEN the rungs (after B/2, before 3B/4), so the
+    watchdog has fired but the close finishes without help: that is the only
+    sequence in which `driver_absent` is the honest record. A close that never
+    releases takes the `abandoned` path instead — see the next test."""
     import tools.ship_test_onboarding as mod
 
     _obs, ctx, _mod = _happy_bound_run(
         monkeypatch, tmp_path, ctx_close_wedges=True, driver_absent=True,
-        wedge_timeout=mod.TEARDOWN_BOUND_S)
+        wedge_timeout=mod.TEARDOWN_BOUND_S * 0.6)
     harness = ctx.harness
     assert harness.signals == [], harness.signals
-    assert harness.wedges[0].released_by == "timeout"
     assert harness.reaps == []
+    assert harness.exits == [], "the run self-terminated unnecessarily"
     block = _browser_teardown_from_disk(tmp_path)
     assert block["outcome"] == "driver_absent", block
+
+
+@pytest.mark.timeout(120)
+def test_a_close_that_never_releases_abandons_the_run_inside_the_bound(
+        monkeypatch, tmp_path):
+    """AC1 (the hard half). The ladder is released by a SIGNAL, so with no child
+    enumerated there is nothing to release a close that never returns; the bound
+    then has to come from the process itself. The gate reproduced the defect this
+    test pins: with the no-child seams and a never-returning close, the run stayed
+    blocked past the bound (30s against B=5).
+
+    The record at that moment is `abandoned`, written from the watchdog thread;
+    the exit code is the RUN'S OWN (a cleanup fault may not move the verdict,
+    #4319), and nothing was signalled or reaped."""
+    import tools.ship_test_onboarding as mod
+
+    start = time.monotonic()
+    obs, ctx, _mod = _happy_bound_run(
+        monkeypatch, tmp_path, ctx_close_wedges=True, driver_absent=True,
+        wedge_timeout=60.0)
+    elapsed = time.monotonic() - start
+    harness = ctx.harness
+    assert harness.signals == [] and harness.reaps == []
+    assert harness.exits == [mod.EXIT_PASSED], (
+        f"a PASSED run whose teardown abandoned must still exit {mod.EXIT_PASSED} "
+        f"(#4319: a cleanup fault may not move the exit code); got {harness.exits} "
+        f"for verdict {obs.verdict!r} / reason {obs.reason!r}")
+    assert harness.exit_docs[0] is not None, "nothing was on disk at abandon time"
+    assert harness.exit_docs[0]["outcome"] == "abandoned", harness.exit_docs[0]
+    # the ladder was SPENT before it gave up, and the run still came in bounded
+    assert elapsed >= 3 * mod.TEARDOWN_BOUND_S / 4 - 0.3, elapsed
+    assert elapsed < mod.TEARDOWN_BOUND_S + 2.0, elapsed
 
 
 @pytest.mark.timeout(60)
@@ -3219,7 +3378,7 @@ def test_a_kill_inside_the_teardown_window_leaves_a_complete_not_run_document(
 
     import tools.ship_test_onboarding as mod
 
-    def _killed(pw, td, obs):
+    def _killed(pw, td, obs, out_dir):
         raise KeyboardInterrupt("run killed inside the teardown window")
 
     monkeypatch.setattr(mod, "_teardown_browser", _killed)
