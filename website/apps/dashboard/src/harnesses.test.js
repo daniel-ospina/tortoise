@@ -63,6 +63,19 @@ test('#4365: no connect copy claims onboarding as an installed skill, and each n
   assert.ok(cursorStep, 'HARNESS_STEPS.cursor must carry the install step')
   assert.equal(cursorStep.label, `${SKILLS_CLAIM}:`,
     'HARNESS_STEPS.cursor install step must be EXACTLY the shipped claim')
+  // RENDER-level token check: a brand-new name appended on its OWN SOURCE LINE
+  // inside the same template slipped every source-text check, Python and JS
+  // (mutation-verified, #4365 review round 4). URLs are stripped first —
+  // SKILLS_INSTALL_URL itself contains `tortoise-skills`.
+  const claimTokens = (s) => [...new Set(
+    s.replace(/https?:\/\/\S+/g, '').match(/[a-z0-9-]*tortoise[a-z0-9-]*/g) || [])].sort()
+  const shipped = [...SKILLS_LIST.split(', ')].sort()
+  for (const h of ['claude', 'codex']) {
+    assert.deepEqual(claimTokens(HARNESS_SKILLS(h)), shipped,
+      `${h}: the HARNESS_SKILLS block must name exactly the shipped skills`)
+  }
+  assert.deepEqual(claimTokens(cursorStep.label), shipped,
+    'HARNESS_STEPS.cursor install step must name exactly the shipped skills')
 })
 
 test('DE2E-5: the 7-harness vocabulary — self-install (4) + teach-human (3, incl. OAuth chatgpt) cover HARNESS_ORDER exactly', () => {

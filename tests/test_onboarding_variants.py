@@ -102,6 +102,23 @@ def test_m8_deploy_mirror_matches_canonical():
         "deploy mirror drifted from the canonical SKILL.md")
 
 
+def test_4365_served_document_sends_chatgpt_to_a_path_that_exists():
+    """#4365/#2698: the served document's §2 note must not send a ChatGPT user to
+    the dashboard's "ChatGPT tab" — #2698 removed it from the chooser
+    (HARNESS_FAMILIES has no chatgpt entry). Reverting the note to the retired
+    tab tripped no test at all (mutation-verified, #4365 review round 4).
+
+    Canonical only: the mirror is pinned byte-identical by
+    `test_m8_deploy_mirror_matches_canonical`, so this covers both copies."""
+    skill = LIVE_SKILL.read_text(encoding="utf-8")
+    assert "chatgpt.com/plugins" in skill, (
+        "the served document must name the ChatGPT Developer-mode path")
+    assert "ChatGPT tab" not in skill, (
+        "the served document must not name the retired dashboard ChatGPT tab")
+    assert "no ChatGPT surface in the dashboard chooser" in skill, (
+        "the served document must state that there is no ChatGPT chooser surface")
+
+
 def _installer_skills() -> list[str]:
     """The served installer's `SKILLS=(...)` payload set."""
     installer = (REPO_ROOT / "website" / "apps" / "dashboard" / "public"
@@ -157,9 +174,14 @@ def test_m8_installer_still_delivers_the_onboarding_instructions():
     assert "Onboarding is delivered as INSTRUCTIONS" in emitted, (
         "the emitted block must state that onboarding is instructions")
     # …and the installer names them in its SUCCESS output for every harness,
-    # not only in the codex-only AGENTS.md block.
-    success = installer[installer.index("Tortoise skills installed to"):]
-    assert "tortoise-onboarding/SKILL.md" in success, (
+    # not only in the codex-only AGENTS.md block. Anchor on the UNIQUE line:
+    # slicing from "Tortoise skills installed to" to end-of-file also contains
+    # the stale-copy warning, which carries the same path — a membership check
+    # over that slice stayed GREEN with the success line deleted
+    # (mutation-verified, #4365 review round 4).
+    assert re.search(
+        r'echo "Onboarding is NOT a skill[^\n]*\n\s*echo "   '
+        r'\$SKILLS_BASE/tortoise-onboarding/SKILL\.md"', installer), (
         "the installer's success output must name the onboarding instructions")
     # name-grep contract: the installer validates each downloaded SKILL.md's
     # frontmatter name (not a literal skill name baked into the script).
@@ -206,34 +228,34 @@ def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
     assert m, "SKILLS_LIST must be an exported constant"
     assert m.group(1).split(", ") == _installer_skills(), (
         "SKILLS_LIST must list exactly what the installer ships")
+    assert "onboarding" not in m.group(1), (
+        "SKILLS_LIST must not include the onboarding skill")
     m = re.search(r"^export const SKILLS_CLAIM = `([^`]*)`", harnesses, re.M)
     assert m, "SKILLS_CLAIM must be an exported constant"
     assert m.group(1) == "Install the Tortoise skills (${SKILLS_LIST})", (
         "SKILLS_CLAIM must be built from SKILLS_LIST — never a second literal")
     assert "${SKILLS_CLAIM}" in copy, (
         "SKILL_INSTALL must interpolate SKILLS_CLAIM")
-    # Exactly three sites in this module state the shipped set. `>= 3` was not
-    # enough: appending a 4th name AFTER the interpolated claim kept both the
-    # count and `includes()` true (mutation-verified, #4365 review round 2).
-    assert harnesses.count("${SKILLS_CLAIM}") == 3, (
-        "SKILL_INSTALL, HARNESS_SKILLS and the HARNESS_STEPS.cursor label are "
-        "the only places that may state the claim")
-    # …and no line that states the set may ALSO name a skill of its own. The
-    # positive form alone tolerated a 4th name appended after the interpolated
-    # claim — including a NON-onboarding name, which the `tortoise-onboarding`
-    # check below could not see (mutation-verified, round 3).
-    for line in harnesses.splitlines():
-        if "${SKILLS_CLAIM}" in line:
-            rest = line.replace("${SKILLS_CLAIM}", "")
-            assert "tortoise-" not in rest, (
-                "a line that states the shipped skill set must state nothing "
-                f"else: {line.strip()[:90]!r}")
-            assert "tortoise-onboarding" not in line.lower(), (
-                "a line that states the shipped skill set must not name the "
-                f"onboarding skill: {line.strip()[:90]!r}")
-    assert "tortoise-onboarding" not in (
-        re.search(r"^export const SKILLS_LIST =[^\n]*", harnesses, re.M).group(0)
-    ).lower(), "SKILLS_LIST must not include the onboarding skill"
+    # Exactly three sites in this module state the shipped set; the count is a
+    # floor, not an equality, so a legitimate fourth site is not a failure.
+    assert harnesses.count("${SKILLS_CLAIM}") >= 3, (
+        "SKILL_INSTALL, HARNESS_SKILLS and the HARNESS_STEPS.cursor label must "
+        "each interpolate the shared claim")
+    # …and every TEMPLATE in this module that states the claim must state
+    # nothing else. Template-scoped, not line-scoped: `tortoise-rebuild`
+    # appended on its own source line inside the same template slipped a
+    # line-scoped check (mutation-verified, #4365 review round 4).
+    seen_claim_template = False
+    for tmpl in re.findall(r"`([^`]*)`", harnesses):
+        if "${SKILLS_CLAIM}" not in tmpl:
+            continue
+        seen_claim_template = True
+        rest = tmpl.replace("${SKILLS_CLAIM}", "")
+        assert "tortoise-" not in rest, (
+            "a template that states the shipped skill set must state nothing "
+            f"else: {rest.strip()[:90]!r}")
+    assert seen_claim_template, (
+        "no template in harnesses.js interpolates ${SKILLS_CLAIM}")
     assert "${ONBOARDING_INSTRUCTIONS_URL}" in copy, (
         "the connect copy must point at the served onboarding instructions")
 
@@ -267,9 +289,19 @@ def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
             f"SKILLS_LIST")
         assert "${onboardingInstructions}" in prompt, (
             f"{h}: the RETURNED prompt must name the onboarding instructions")
+    # …and the shared line must SAY something: interpolating an empty constant
+    # satisfied the per-prompt assertions above while the four live prompts lost
+    # the whole point of #4365. (An empty body is caught incidentally, because
+    # the URL then disappears from the slice; a bodyless sentence was GREEN.)
+    m = re.search(r"const onboardingInstructions = `([^`]*)`", wizard)
+    assert m, "the shared onboarding-instructions line must be declared"
+    assert "${ONBOARDING_INSTRUCTIONS_URL}" in m.group(1), (
+        "the shared line must interpolate the served instructions URL")
+    assert "not a skill" in m.group(1), (
+        "the shared line must say onboarding is not a skill")
     # NOTE: the step-2 skills primer at main.jsx:~7950 is NOT pinned here and is
     # deliberately NOT made to interpolate SKILLS_LIST — it lives INSIDE the
-    # `LEGACY_WIZARD_ARCHIVED` block (main.jsx:7854-8129, flag=false), i.e. it is
+    # `LEGACY_WIZARD_ARCHIVED` block (main.jsx:7845-8122, flag=false), i.e. it is
     # dead code kept byte-identical for the A0 rollback path. Editing it breaks
     # the archived-block line-count pin in overview.test.js. A review round
     # flagged it as a live surface that had drifted from the shared constant;
