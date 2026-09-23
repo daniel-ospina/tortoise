@@ -1419,6 +1419,14 @@ durations:
 # duration_coverage_issues() floors coverage at 90% (#3400).
 # Regenerate from tools/ci_timing.py / the run's junit artifacts.
 #
+# Post-#3400 additions: a file that is NOT yet on main has no main-run
+# measurement, yet the 90% coverage floor blocks its merge — so its entry is
+# sourced from the first run in which that file executed (its own junit
+# `testcase/@time`), not from run 34725816431. First such entry:
+#   test_rotate_key.py from run 35782572252 (pytest-log-test-a)
+# This is a stopgap, not the intended state: auto-populating it is #4817,
+# and the value-level re-sweep that supersedes the number is #4729.
+#
 # #4221: the six `test_shared_state_*.py` files (moved out of
 # tortoise/shared_state/tests/, where no CI lane collected them) enter the fast
 # pool for the first time here. They have NO CI junit measurement — a file that
