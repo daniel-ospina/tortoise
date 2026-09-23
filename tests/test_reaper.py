@@ -4281,6 +4281,53 @@ def test_embedded_orphans_never_uses_the_swallowing_enumerator(monkeypatch):
     assert res["live_servers"] == 0
 
 
+def test_pgrep_redis_servers_or_none_distinguishes_failure_from_zero(
+        monkeypatch):
+    """#4740: `_pgrep_redis_servers` collapses a probe FAILURE into `[]`, which
+    reads identically to a measured zero. The gate binds its bound to the
+    sweep's `left`, so an unmeasured residue must be `None`, not a plausible
+    0 — while the swallowing function's contract for its many other callers
+    is unchanged."""
+    import tortoise.embedded_reaper as _R
+
+    class _Ok:
+        returncode = 0
+        stdout = "111\n222\n"
+
+    monkeypatch.setattr(_R.subprocess, "run", lambda *a, **k: _Ok())
+    assert _R._pgrep_redis_servers_or_none() == [111, 222]
+
+    def _timeout(*_a, **_k):
+        raise _R.subprocess.TimeoutExpired("pgrep", 5)
+
+    monkeypatch.setattr(_R.subprocess, "run", _timeout)
+    assert _R._pgrep_redis_servers_or_none() is None
+    assert _R._pgrep_redis_servers() == []
+
+    def _missing(*_a, **_k):
+        raise OSError("pgrep not found")
+
+    monkeypatch.setattr(_R.subprocess, "run", _missing)
+    assert _R._pgrep_redis_servers_or_none() is None
+    assert _R._pgrep_redis_servers() == []
+
+    # pgrep exits 1 on NO MATCHES — a successful probe reporting zero, never a
+    # failure. An unexpected status (2/3) is a failure, not an answer.
+    class _NoMatch:
+        returncode = 1
+        stdout = ""
+
+    monkeypatch.setattr(_R.subprocess, "run", lambda *a, **k: _NoMatch())
+    assert _R._pgrep_redis_servers_or_none() == []
+
+    class _Bad:
+        returncode = 2
+        stdout = ""
+
+    monkeypatch.setattr(_R.subprocess, "run", lambda *a, **k: _Bad())
+    assert _R._pgrep_redis_servers_or_none() is None
+
+
 def test_reap_refuses_when_an_owner_attached_after_confirmation(
         monkeypatch, tmp_path):
     """#3599 adversarial review (fail-open): `_orphan_confirmed` is set during

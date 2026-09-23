@@ -1178,6 +1178,37 @@ def _pgrep_redis_servers() -> list[int]:
     return pids
 
 
+def _pgrep_redis_servers_or_none() -> list[int] | None:
+    """Live redislite redis-server PIDs, or None when the PROBE failed.
+
+    `_pgrep_redis_servers` collapses a timeout, a missing pgrep, or any
+    subprocess error into `[]` — indistinguishable from "measured zero".
+    A caller that must report an unaccounted residue (#4740: the conftest
+    session-end sweep's `left`, which the CI orphan gate binds its bound to)
+    needs the difference: `[]` means measured-none, `None` means
+    not-measured. Kept alongside (not inside) `_pgrep_redis_servers` so the
+    many existing callers keep their exact `[]`-on-failure contract.
+
+    pgrep exits 0 on matches and 1 on no matches — both are successful
+    probes. Any other status, a timeout, or an OSError is a failed probe.
+    """
+    try:
+        out = subprocess.run(
+            ["pgrep", "-f", "redislite/bin/redis-server"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if out.returncode not in (0, 1):
+        return None
+    pids: list[int] = []
+    for line in out.stdout.splitlines():
+        line = line.strip()
+        if line.isdigit():
+            pids.append(int(line))
+    return pids
+
+
 def _socket_dir_from_cmdline(pid: int) -> str | None:
     """Extract the unixsocket dir from a redis-server cmdline.
 

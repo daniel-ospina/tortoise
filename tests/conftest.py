@@ -523,8 +523,15 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
                     # swallow.
                     cleared = not acted
                     try:
-                        from tortoise.embedded_reaper import _pgrep_redis_servers
-                        left = len(_pgrep_redis_servers())
+                        from tortoise.embedded_reaper import (
+                            _pgrep_redis_servers_or_none,
+                        )
+
+                        probe = _pgrep_redis_servers_or_none()
+                        # None (not 0) when the probe itself failed: the gate
+                        # must name an unmeasured residue, not read a
+                        # timeout/missing-pgrep as "nothing left" (#4740).
+                        left = len(probe) if probe is not None else None
                     except Exception:
                         # never fail the suite over the hygiene report: an
                         # unreadable count is reported as null and the gate

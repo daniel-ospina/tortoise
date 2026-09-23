@@ -19,21 +19,41 @@
 #     A bound of `left` could be satisfied by a leak that inflates its own bound.
 #     A `{reaped, cleared, left}` report is therefore accepted only when BOTH
 #     hold:
-#       * the workflow's `pgrep` COUNT equals the sweep's own `left` — the two
-#         probes run the identical `pgrep -f redislite/bin/redis-server`, one
-#         step apart, so a disagreement means the counter is measuring a
-#         different population than this suite;
+#       * the workflow's `pgrep` COUNT is at or below the sweep's own `left` —
+#         the two probes run the identical `pgrep -f redislite/bin/redis-server`,
+#         one step apart. COUNT ABOVE `left` means the counter is measuring a
+#         population the sweep did not account for, which REDs. COUNT BELOW
+#         `left` is the NORMAL atexit outcome: the sweep's `left` is read during
+#         fixture teardown, and redislite's own `atexit` handler shuts servers
+#         down (`redislite/client.py`) after pytest fully exits, so the
+#         workflow's later probe may legitimately see fewer. A count BELOW the
+#         sweep's measurement is therefore a PASS with the delta logged, not an
+#         anomaly.
 #       * `cleared == true` — the sweep FINISHED rather than running out of its
 #         time budget. `cleared: false` means the residue is arbitrary, which is
-#         the real "hygiene is broken" signal, and it reds whatever the count is.
+#         the real "hygiene is broken" signal, and it reds whatever the count is
+#         — except under a #1371 watchdog kill, where the run is already red and
+#         a second red adds no signal.
 #
 # VERDICT TABLE
 #   sweep.error               → RED, always: the hygiene path crashed, so the
 #                               residue is unaccounted for.
-#   sweep.skipped             → RED, always: the sweep never ran (reaper lock
+#   sweep.skipped (any value
+#     other than no-pytest)   → RED, always: the sweep never ran (reaper lock
 #                               held), so nothing cleared the backlog.
+#   sweep.skipped=no-pytest   → pytest never ran (the run step found an empty
+#                               file selection, so the conftest sweep could not
+#                               have written a report). PASS only when COUNT==0;
+#                               a non-zero count means servers exist that
+#                               nothing swept — RED. This is NOT a relaxation of
+#                               `missing`: a real pytest run that produced no
+#                               report is still `missing`/`unreadable` → RED.
 #   sweep.no_embedded_servers → bound 0: nothing was spawned, so nothing may
 #                               remain.
+#   sweep.left == null        → RED (kill-downgradable): the sweep's own probe
+#                               FAILED, so the run produced no `left` to bind
+#                               to — an unmeasured residue, named as such rather
+#                               than read as a plausible 0.
 #   {reaped, cleared, left}   → bound `left`, plus the two positive controls.
 #   missing/unreadable report → RED: the residue is unaccounted for.
 #
@@ -42,8 +62,9 @@
 #   conftest end-sweep, so the finalizer that would have produced the report
 #   never ran. A count ABOVE this gate's own bound therefore downgrades to a
 #   `::warning::` (the run is already red and a second red only blinds the
-#   detector). `cleared: false` and a count BELOW the sweep's own measurement
-#   are not kill artifacts and stay RED.
+#   detector), as does a budget-exhausted sweep and a failed probe. `error` and
+#   `skipped` stay RED even under a kill: those are unaccounted no matter why
+#   pytest stopped.
 #
 # NO LITERAL BOUND. Every number this gate compares against is read from the
 #   hygiene report (`left`) or supplied as `--count`. The only numeric literals
@@ -115,10 +136,20 @@ if not isinstance(sweep, dict):
     print("kind=unreadable")
 elif "error" in sweep:
     print("kind=error")
+elif sweep.get("skipped") == "no-pytest":
+    print("kind=skipped_nopytest")
 elif "skipped" in sweep:
     print("kind=skipped")
 elif sweep.get("no_embedded_servers") is True:
     print("kind=no_embedded_servers")
+elif (
+    isinstance(sweep.get("cleared"), bool)
+    and "left" in sweep
+    and sweep["left"] is None
+):
+    # The sweep ran but its own probe failed: an unmeasured residue, never a
+    # plausible 0.
+    print("kind=probe_failed")
 elif (
     isinstance(sweep.get("cleared"), bool)
     and "left" in sweep
@@ -179,6 +210,17 @@ case "$kind" in
   skipped)
     red "redislite orphan gate: the hygiene end-sweep was skipped (reaper lock held) — nothing cleared the backlog (issue #1005)"
     ;;
+  skipped_nopytest)
+    # The run step found an empty file selection and wrote this report before
+    # exiting: pytest never ran, so the conftest end-sweep never ran either and
+    # no report could exist. Nothing was spawned by this leg, so a zero count is
+    # the honest outcome; any non-zero count is servers nothing swept.
+    if [ "$COUNT" -gt 0 ]; then
+      red "redislite orphan gate: pytest never ran for this selection (skipped=no-pytest) but $COUNT redislite servers are live and nothing swept them (issue #1005)"
+    fi
+    echo "pytest never ran for this selection (skipped=no-pytest); no redislite server was spawned, $COUNT remain after suite"
+    exit 0
+    ;;
   no_embedded_servers)
     # Nothing was ever spawned, so nothing may remain. This bound is structural
     # (zero), not a chosen tolerance.
@@ -188,18 +230,34 @@ case "$kind" in
     echo "no embedded redislite server was running; $COUNT remain after suite"
     exit 0
     ;;
+  probe_failed)
+    red_or_kill_warning "redislite orphan gate: the hygiene end-sweep's own count probe FAILED (left=null) — the run produced no measurement to bind the bound to, so the $COUNT residue is unaccounted for (issue #1005)"
+    ;;
   report)
     if [ "$cleared" != "true" ]; then
+      # A budget-exhausted sweep is the real "hygiene is broken" signal and reds
+      # whatever the count is. The single exception is a #1371 watchdog kill:
+      # pytest DOES run session teardown on SIGINT, so a killed run can
+      # legitimately exhaust the sweep budget — and the run is already red, so a
+      # second red adds no signal.
+      if is_kill_rc; then
+        echo "::warning::redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) — rc=$RC: a watchdog kill can legitimately exhaust the sweep, so this is a kill-path artifact rather than a hygiene signal (issue #1371 / #1005)"
+        exit 0
+      fi
       red "redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) — the $COUNT residue is arbitrary, not a bounded outcome (issue #1005)"
     fi
-    if [ "$COUNT" != "$left" ]; then
-      if [ "$COUNT" -gt "$left" ]; then
-        red_or_kill_warning "redislite orphan gate: $COUNT servers counted but the sweep reported left=$left — the two probes must observe the same population"
-      else
-        red "redislite orphan gate: $COUNT servers counted but the sweep reported left=$left — the workflow counter is measuring a different population than the suite's own probe (issue #1005)"
-      fi
+    if [ "$COUNT" -gt "$left" ]; then
+      red_or_kill_warning "redislite orphan gate: $COUNT servers counted but the sweep reported left=$left — the counter observes a population the sweep did not account for"
     fi
-    echo "orphaned redislite servers after suite: $COUNT (sweep left=$left, cleared=true) — within the sweep's own measurement"
+    # COUNT <= left: the workflow's later probe sees the same population or
+    # fewer. Fewer is the documented atexit race (redislite shuts its last-client
+    # servers down at interpreter exit, after the sweep's in-teardown reading),
+    # so it is a pass — with the delta logged so it stays visible.
+    if [ "$COUNT" -lt "$left" ]; then
+      echo "orphaned redislite servers after suite: $COUNT (sweep left=$left, cleared=true; $((left - COUNT)) shut down at interpreter exit after the sweep's teardown reading) — within the sweep's own measurement"
+    else
+      echo "orphaned redislite servers after suite: $COUNT (sweep left=$left, cleared=true) — within the sweep's own measurement"
+    fi
     exit 0
     ;;
   *)

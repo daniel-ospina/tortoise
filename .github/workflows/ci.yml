@@ -292,6 +292,10 @@ jobs:
                   startswith(".github/scripts/orphan-bound"),
                   isfile(".github/workflows/python-ci.yml"),
                   isfile(".github/workflows/ci.yml"),
+                  # #4740: tests/conftest.py defines the JSON contract the gate
+                  # parses (the session-end sweep's report) — a conftest-only
+                  # contract change must re-run the harness.
+                  isfile("tests/conftest.py"),
               ),
               # dashboard-e2e (#2166/#2178): the two-server keys-table suite
               # (mixed fixture — durable-only render regression). Triggers on

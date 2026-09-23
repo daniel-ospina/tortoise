@@ -608,6 +608,11 @@ jobs:
           if [ -z "$FILES" ]; then
             echo "no selected files for this half — skipping"
             echo 0 > "${RUNNER_TEMP:-/tmp}/pytest-rc"
+            # #4740: pytest never runs here, so the conftest session-end sweep
+            # never writes its report. Write an explicit, honest one instead of
+            # leaving the gate to parse a missing report (which must stay RED
+            # for a real no-report run).
+            printf '{"sweep":{"skipped":"no-pytest"}}' > "${RUNNER_TEMP:-/tmp}/redislite-hygiene-end.json"
             exit 0
           fi
           # Epic #1647 Task 6 (plan-review P1-7): emit the run's own file
@@ -1052,6 +1057,10 @@ jobs:
           if [ -z "$FILES" ]; then
             echo "no slow files selected — skipping"
             echo 0 > "${RUNNER_TEMP:-/tmp}/pytest-rc"
+            # #4740: pytest never runs here, so the conftest sweep never writes
+            # its report — write the explicit "no-pytest" one rather than
+            # leaving the orphan gate to parse a missing report.
+            printf '{"sweep":{"skipped":"no-pytest"}}' > "${RUNNER_TEMP:-/tmp}/redislite-hygiene-end.json"
             exit 0
           fi
           # Epic #1647 Task 9 (cycle-6 P2-8): the run's own file list + rc
@@ -1531,6 +1540,10 @@ jobs:
           if [ -z "$FILES" ]; then
             echo "no carve-out files selected — skipping"
             echo 0 > "${RUNNER_TEMP:-/tmp}/pytest-rc"
+            # #4740: pytest never runs here, so the conftest sweep never writes
+            # its report — write the explicit "no-pytest" one rather than
+            # leaving the orphan gate to parse a missing report.
+            printf '{"sweep":{"skipped":"no-pytest"}}' > "${RUNNER_TEMP:-/tmp}/redislite-hygiene-end.json"
             exit 0
           fi
           echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
@@ -1605,26 +1618,21 @@ jobs:
             echo "pytest rc=$RC — skip guard skipped (job already red)"
           fi
       - name: Assert no redislite orphans (issue #1005 / epic #1647 E2E-7)
-        # The carve-out IS the embedded surface — the bounded (<20) assert
-        # applies (threshold 5, the pre-existing leak gate).
+        # Same gate contract as the fast/slow asserts (#4740): the bound is read
+        # from the conftest session-end sweep's own report
+        # (.github/scripts/orphan-bound.sh), never a hand-picked constant. The
+        # carve-out runs embedded, so the sweep reports its own `left`; a real
+        # leak still reds (E2E-7). Kill-aware downgrade per #1371.
         if: always()
         run: |
           set +e
           RC=""
           [ -f "${RUNNER_TEMP:-/tmp}/pytest-rc" ] && RC=$(cat "${RUNNER_TEMP:-/tmp}/pytest-rc")
           COUNT=$(pgrep -f "redislite/bin/redis-server" | wc -l | tr -d ' ')
-          echo "orphaned redislite servers after carve-out: $COUNT (pytest rc: ${RC:-unknown})"
-          if [ "$COUNT" -gt 5 ]; then
-            if [ "$RC" = "124" ] || [ "$RC" = "137" ] || [ "$RC" = "2" ]; then
-              echo "::warning::redislite servers present after watchdog kill (rc=$RC): $COUNT is an expected kill-path artifact, not a leak (issue #1371)"
-            elif [ -z "$RC" ]; then
-              echo "::error::redislite server leak: $COUNT orphans after carve-out, pytest rc unknown (cancelled/killed?) (issue #1005)"
-              exit 1
-            else
-              echo "::error::redislite server leak: $COUNT orphans after carve-out (issue #1005)"
-              exit 1
-            fi
-          fi
+          bash .github/scripts/orphan-bound.sh \
+            --count "$COUNT" \
+            --rc "$RC" \
+            --hygiene "${RUNNER_TEMP:-/tmp}/redislite-hygiene-end.json"
       - name: Upload carve-out log (measurement artifact, #1477)
         if: always()
         continue-on-error: true
