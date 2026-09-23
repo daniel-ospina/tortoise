@@ -17,7 +17,15 @@ whole chain for the four beta harnesses (claude, pi, cursor, codex):
    ignores.  The record is cleared immediately BEFORE the fire, so only a
    breadcrumb THIS fire produced can count;
 2. **captured** — a ``session_capture_receipt_<harness>`` advanced and the
-   session is retrievable by id with the expected turns;
+   session is retrievable by id with the expected turns.  Both legs are
+   OBSERVED to one deadline (#4675): the receipt is written by a handler the
+   transport bound ABANDONED rather than cancelled, so it lands *after* the
+   session row is already visible (measured live: a seam fired 08:21:02 and
+   the receipt was written 08:21:06).  Reading it once, on the first sighting
+   of the row, FAILed a capture that had landed.  The predicate is unchanged
+   ("receipt advanced AND expected turns retrievable"); only the observation
+   window is.  A settled turn count that is NOT the expected one still breaks
+   the window early, because it never becomes the expected one;
 3. **memory** — the session appears in the graph as a ``Source`` and its turns
    were extracted into memory Points.
 
@@ -738,29 +746,48 @@ def verify_session_capture(harness: str,
         report["links"]["installed"] = _install_link(harness, fired, fire_env)
 
         # ── link 2: captured ─────────────────────────────────────────────
-        # OBSERVE THE TURNS, not merely the Session row: the server MERGEs the
-        # Session BEFORE it writes the turns, so a loop that stops at existence
-        # can read a capture mid-flight and then judge it by a turn count of
-        # zero. This link is about the per-SESSION fact, so its window must be
-        # as long for the turns as it is for the row.
+        # The PREDICATE is #3809's: the per-harness receipt advanced AND the
+        # session is retrievable with its expected turns. What this run fixes
+        # is the OBSERVATION, not the predicate.
+        #
+        # It used to read the session row once (breaking on the first sighting)
+        # and then read the receipt exactly once. The server keeps running a
+        # handler the transport bound abandoned, so the receipt is written
+        # AFTER the session row becomes visible — measured live: a seam fired
+        # 08:21:02 and `session_capture_receipt_cursor` was written 08:21:06.
+        # A single read taken in that window reported "did not advance" for a
+        # capture that had landed. Both legs are therefore polled to the same
+        # deadline, and the early break is kept for the two shapes that cannot
+        # converge: the expected turn count WITH the receipt, and a non-empty
+        # turn count that has stopped changing.
         deadline = time.monotonic() + max(1.0, timeout)
         expected_turns = len(_PROBE_TURNS)
+        receipt_after: str | None = None
+        turns_seen = 0
+        previous_turns: int | None = None
         while True:
             detail = _session_detail(api_url, api_key, probe_id)
-            if (detail is not None
-                    and len(detail.get("turn_points") or []) == expected_turns):
+            try:
+                receipt_after = _read_receipt(api_url, api_key, harness)
+            except _ApiError:
+                receipt_after = None
+            receipt_advanced = (receipt_after is not None
+                                and receipt_after != receipt_before)
+            turns_seen = len(detail.get("turn_points") or []) \
+                if detail is not None else 0
+            if (detail is not None and turns_seen == expected_turns
+                    and receipt_advanced):
                 break
+            if turns_seen and turns_seen == previous_turns \
+                    and turns_seen != expected_turns:
+                # A settled, WRONG turn count never becomes right — do not
+                # spend the rest of the window on it. The expected count must
+                # keep the window open: the receipt is still to come.
+                break
+            previous_turns = turns_seen
             if time.monotonic() >= deadline:
                 break
             time.sleep(0.5)
-
-        receipt_after: str | None = None
-        try:
-            receipt_after = _read_receipt(api_url, api_key, harness)
-        except _ApiError:
-            receipt_after = None
-        receipt_advanced = (receipt_after is not None
-                            and receipt_after != receipt_before)
 
         if detail is None:
             report["links"]["captured"] = _link(
@@ -772,33 +799,31 @@ def verify_session_capture(harness: str,
         else:
             turn_points = detail.get("turn_points") or []
             turn_count_ok = len(turn_points) == expected_turns
-            if not turn_count_ok:
+            if not receipt_advanced:
+                report["links"]["captured"] = _link(
+                    STATUS_FAIL,
+                    f"session {probe_id!r} exists but "
+                    f"{capture_receipt_key(harness)} did not advance within "
+                    f"{timeout:g}s",
+                    receipt_before=receipt_before, receipt_after=receipt_after,
+                    receipt_advanced=False,
+                    turns=len(turn_points))
+            elif not turn_count_ok:
                 report["links"]["captured"] = _link(
                     STATUS_FAIL,
                     f"session {probe_id!r} has {len(turn_points)} turns, "
                     f"expected {expected_turns}",
                     receipt_before=receipt_before, receipt_after=receipt_after,
-                    receipt_advanced=receipt_advanced,
+                    receipt_advanced=True,
                     turns=len(turn_points))
             else:
-                # PROVEN on the per-SESSION fact. `session_capture_receipt_<h>`
-                # is a PER-HARNESS scalar written only after extraction and
-                # only while the session is alive — and this run DELETES its
-                # own probe session in the `finally` below, so requiring it
-                # failed the link on captures that had in fact landed (#4675).
-                # It is still reported: a harness that never advances it is a
-                # real signal about that harness, just not evidence about
-                # THIS session.
                 report["links"]["captured"] = _link(
                     STATUS_PROVEN,
+                    f"receipt advanced ({receipt_before!r} → {receipt_after!r}); "
                     f"session {probe_id!r} retrievable with "
-                    f"{len(turn_points)} turns"
-                    + (f"; receipt advanced ({receipt_before!r} → "
-                       f"{receipt_after!r})" if receipt_advanced
-                       else f"; {capture_receipt_key(harness)} did not advance "
-                            "(per-harness scalar, not a per-session fact)"),
+                    f"{len(turn_points)} turns",
                     receipt_before=receipt_before, receipt_after=receipt_after,
-                    receipt_advanced=receipt_advanced,
+                    receipt_advanced=True,
                     turns=len(turn_points))
 
         # Re-evaluate the INSTALL leg now that the observation window has

@@ -16,7 +16,8 @@ The issue frames one defect. Scoping found **two**, which produce the same user-
 
 `tortoise/__main__.py::_cmd_sessions_import` (4149-4168) and `capture_spool.py::_flush_one`
 (1010-1029) both treat *every* retryable status as "not committed" and defer. The deployed server
-**abandons, never cancels**, on its 10 s transport bound (`hosted_api.py:2518-2533`; the 504 is
+**abandons, never cancels**, on its 10 s transport bound (`hosted_api.py:2515-2517` —
+`asyncio.wait_for(asyncio.shield(task), …)`; the 504 is
 emitted by middleware at 2581-2596), so the handler keeps running after the client is told it
 failed — a 504 routinely arrives **after** the commit.
 
@@ -87,15 +88,17 @@ verify report FAIL. Both defects are real; they are simply not the same defect.
 ### D1 — terminalise on a **proven** commit (not on the status code)
 
 Add one helper that answers *"are the turns I posted durable?"*, and consult it on the retryable
-path only. The proof is the deterministic turn-id set, which the server writes **before** extraction
-(`hosted_api.py:9623-9629`, one batched `UNWIND` through the shared `_write_capture_turns`), so it is
-unaffected by the extraction the bound abandons:
+path only. The proof is the deterministic turn-id→text map, which the server writes **before**
+extraction (`hosted_api.py:9623-9629`, one batched `UNWIND` through the shared
+`_write_capture_turns`), so it is unaffected by the extraction the bound abandons:
 
 ```
-GET /v1/sessions/<sid>  →  200 with turn_points ids {sid}_t0 … {sid}_t{n-1}
+GET /v1/sessions/<sid>  →  200 with turn_points {id: {sid}_t{i}, content: <stored text>}
 ```
 
-where `n` is the number of turns actually posted. Confirmed durable ⇒ the entry is filed
+where `n` is the number of turns actually posted, and the `content` must match the text the
+writer would have stored (`tortoise.sdk._capture_turn_texts`, i.e. `f"[{role}] {content[:5000]}"`).
+Confirmed durable ⇒ the entry is filed
 (`filed_key` stamped by `_flush_one`'s existing compare-and-swap) and, on the import path, the local
 receipt is written and the breadcrumb cleared. **Not** confirmed ⇒ behave exactly as today (defer).
 
@@ -104,54 +107,81 @@ the confirming GET 504/429/5xx; a 404 (the abandoned handler may not have MERGEd
 transport error; an unparseable body; more server rows than we posted (a concurrent grown
 transcript — the CAS in `_flush_one` owns that case).
 
-Placement: a single closure in `tortoise/__main__.py` next to `_session_post` (3423), because that is
-the only place holding `api_key`/`api_url`, and it is reached by **both** the drain and
-`session capture`. `capture_spool.py` gains no credentials and no new API — `_flush_one` already
-stamps `filed_key` on any `ok` outcome.
+Placement: `tortoise/session_confirm.py`, imported by `tortoise/__main__.py` (which holds
+`api_key`/`api_url`, and is reached by **both** the drain and `session capture`) and by
+`tortoise/session_verify.py`. A module rather than a closure because the Pi/TypeScript leg needs the
+same mechanism and must not re-implement the comparison — the two classifiers already diverged once
+(#4895); the residual is filed as #4924. `capture_spool.py` gains no credentials and no new API —
+`_flush_one` already stamps `filed_key` on any `ok` outcome.
 
-### D2 — `captured` measures the session, not the harness
+### D2 — `captured` reads its evidence BEFORE the evidence exists
 
-`session_verify`'s `captured` link becomes PROVEN on the per-session facts it already retrieves —
-the session exists **and** its `turn_points` cover the probe's expected turns — and reports the
-receipt as **corroboration**, surfaced in the link's detail (and as a warning when it did not
-advance) instead of as the pass condition. The `memory` link (Source node + `extracted >= 1`) is
-unchanged, so a capture that stored turns but never extracted is still caught by the chain.
+`session_verify`'s `captured` predicate is **unchanged** — it is a recorded decision (#3809
+Scope §2: *"a `session_capture_receipt_<harness>` advanced AND the session is retrievable by id
+with the expected turns"*, restated in PR #4182's guard table). The defect is the **observation
+window**, not the predicate: the receipt is written by the same abandoned handler (D1), so it
+lands *after* the session row is visible — and on the `session verify` path the read happened once,
+before the loop, which is why `session_capture_receipt_codex` was `None` while the codex probe
+session sat in the graph.
 
-This is a *correction of the predicate to what the link means*, not a relaxation of the gate: today
-the gate requires evidence the verifier makes impossible to produce.
+The fix polls **both** legs to the same deadline. An early break remains for the case that can
+never converge — a settled turn count that is *not* the expected one — but the expected count must
+keep the window open, because the receipt is still to come. `receipt_advanced` is reported in the
+link payload as before, so the evidence is not lost.
 
 ---
 
 ## 3. Implementation steps
 
-1. `tortoise/__main__.py`: add `_session_confirm_committed(api_url, api_key, session_id, expected_turns) -> bool`
-   (bounded: a small number of GET attempts, short sleeps, total ≪ the caller's own budget).
-   Turn ids compared as a set against `{sid}_t{i}` for `i in range(expected_turns)`.
+1. `tortoise/session_confirm.py` (new): `confirm_capture(reader, api_url, api_key, session_id,
+   turns, *, attempts, delay_s, read_timeout_s, sleep)` returning `FILED` / `UNEXTRACTED` /
+   `UNKNOWN` / `TURNS_MISSING`. Bounded: `DEFAULT_ATTEMPTS=2`, `DEFAULT_DELAY_S=1.0`,
+   `DEFAULT_READ_TIMEOUT_S=5.0` — the POST may already have spent the transport bound's 30 s and
+the Claude `SessionEnd` hook cancels at 60 s, so the confirmation is a *suffix*, not a second
+   budget. The comparison is `{turn_id: stored_text}` against
+   `tortoise.sdk._capture_turn_texts` — the WRITER's own helper — because the turn ids are
+   positional (`f"{session_id}_t{i}"`), so an id-set match is satisfied by an earlier capture of
+the same session id with a different transcript (compaction, a branch, the
+`MAX_SESSION_TURNS` window shift at 500).
 2. `tortoise/__main__.py::_session_post.handle`: on a retryable `PostOutcome`, call the helper; on
-   confirmation return `PostOutcome(ok=True, status=200, detail=…)` carrying the confirmation.
-3. `tortoise/__main__.py::_cmd_sessions_import`: in the `HTTPError`, `URLError` and response-phase
-   branches, call the helper before spooling; on confirmation write the local receipt (2xx-equivalent
-   path), clear the breadcrumb, print a truthful "already filed" line and return 0.
-4. `tortoise/session_verify.py`: restructure the `captured` link predicate as in D2, keeping
-   `receipt_before`/`receipt_after` in the link payload and adding `receipt_advanced`; the
-   non-advance case becomes a warning carried on a PROVEN link, not a FAIL.
-5. Tests: `tests/test_capture_spool.py`, `tests/test_session_import_codex.py`,
-   `tests/test_session_verify.py` — each new guard mutation-verified RED.
+   `FILED`/`UNEXTRACTED` return `PostOutcome(ok=True, status=200, …)` carrying `confirmed` and, for
+   the unextracted case, `extraction_mode = _CAPTURE_NO_PROVIDER_MODE` so the client's existing
+   #4188 disclosure fires (no unqualified "Captured session").
+3. `tortoise/__main__.py::_confirm_already_captured`: gated on
+   `status == 503 or classify_failure(status, detail) != "retry"` — the recorded rule is a
+   **2xx-only** local receipt (403/402/503 ⇒ exit 1, honest error, no receipt) and this must not mint
+   a receipt for a refusal the plan is refused on. 403/402 fall out of the classifier (`permanent`);
+   **503 does not** (`status >= 500 → "retry"`), so it is excluded by name — see #4925 for the
+   standing question. Cost of the exclusion: a 503 whose commit landed defers, never loses (503 is
+   `retry`, so `_spool_if_retryable` keeps the entry). The drain's `_refused` carries the same
+   exclusion so the two paths cannot drift. Writes the receipt, clears the breadcrumb via
+   `capture_spool._clear_breadcrumb_for(harness, session_id)` (not the harness-wide
+   `_clear_capture_error`), prints the truthful "already filed" line.
+4. `tortoise/session_verify.py`: poll both legs of the UNCHANGED #3809 predicate to one deadline;
+   keep `receipt_before`/`receipt_after`/`receipt_advanced` in the link payload.
+5. Tests: `tests/test_session_confirm.py` (new), `tests/test_capture_spool.py`,
+   `tests/test_session_import_codex.py`, `tests/test_session_verify.py` — each new guard
+   mutation-verified RED; `tests/test_session_confirm.py` registered in `config/ci-surfaces.yml`
+   (both halves).
 
 ## 4. Acceptance criteria
 
 - [ ] A retryable POST whose session is provably committed terminalises: the spool entry gains
       `filed_key`/`filed_at` and the drain reports it filed, not deferred.
-- [ ] A retryable POST whose session is **not** committed still defers (unchanged), and a genuine
-      permanent failure is still discarded.
+- [ ] A permanent refusal, and a **503**, whose session happens to be durable still mints NO
+      receipt (rc=1, honest error) and keeps the session spooled — the recorded 2xx-only rule.
+- [ ] A confirmation whose session carries the right ids but different TEXT is NOT a confirmation
+      (ids are positional — see §3.1).
 - [ ] A confirming-read failure of any kind (404, 504, 429, transport, unparseable) defers — it never
       files and never discards.
-- [ ] `session verify`'s `captured` link is PROVEN when the probe session exists with its expected
-      turns, even when the per-harness receipt never advanced; the non-advance is still reported.
+- [ ] An UNEXTRACTED confirmation is reported as such (`extraction_mode`), never as an unqualified
+      success (#4188/#1529).
+- [ ] `session verify`'s `captured` link is PROVEN when the receipt advances only AFTER the session
+      row is visible (the real ordering), and still FAILs when it never advances.
 - [ ] `session verify` still FAILs `captured` when the session is absent, or short of its expected
       turns.
 - [ ] `memory` is unchanged: `extracted >= 1` and the Source node still gate it.
-- [ ] Existing suites green; `ruff` clean.
+- [ ] Existing suites green; `ruff` clean; `ci_selection.py --integrity` clean.
 
 ## 5. Out of scope (filed, not absorbed)
 

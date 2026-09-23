@@ -17,7 +17,7 @@ import json
 import ssl
 from types import SimpleNamespace
 from unittest import mock
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 import pytest
 
@@ -372,22 +372,33 @@ class _Resp(io.BytesIO):
         return False
 
 
-def _post_refused_get_serves(session_id: str, turns: int, *,
+def _post_refused_get_serves(session_id: str, turns: list[dict], *,
                             extracted: int = 2, body: str =
                             '{"detail":"The server\'s wait budget was exceeded"}',
-                            get_404: bool = False):
-    """A transport where the POST is refused (504) and the confirming READ
-    answers with the session the abandoned handler went on to write."""
+                            get_404: bool = False, post_exc=None):
+    """A transport where the POST is refused and the confirming READ answers
+    with the session the abandoned handler went on to write.
+
+    The stored text is built by the WRITER's own helper, because the
+    confirmation compares content as well as ids (#4675 review: the ids are
+    positional, so id-set equality alone is satisfied by an earlier capture of
+    the same session id with a different transcript).
+    """
+    from tortoise.sdk import _capture_turn_texts
+    texts = _capture_turn_texts([dict(t) for t in turns])
+
     def _open(req, timeout=None):
         if getattr(req, "get_method", lambda: "GET")() == "POST":
+            if post_exc is not None:
+                raise post_exc
             raise _http_error(504, body)
         if get_404:
             raise _http_error(404, '{"detail":"Session not found"}')
         detail = {
             "id": session_id, "created_at": "2026-09-23T08:21:06Z",
-            "turns": turns, "extracted": extracted,
-            "turn_points": [{"id": f"{session_id}_t{i}"}
-                            for i in range(turns)],
+            "turns": len(texts), "extracted": extracted,
+            "turn_points": [{"id": f"{session_id}_t{i}", "content": text}
+                            for i, text in enumerate(texts)],
             "source": {"url": f"session:{session_id}"},
         }
         return _Resp(json.dumps(detail).encode("utf-8"))
@@ -415,7 +426,7 @@ def test_a_post_commit_504_writes_the_receipt_and_is_not_spooled(
     n = len(_EXPECTED_TURNS)
     monkeypatch.setattr(
         "urllib.request.urlopen",
-        _post_refused_get_serves("sid-committed", n))
+        _post_refused_get_serves("sid-committed", _EXPECTED_TURNS))
 
     rc = _cmd_sessions_import(SimpleNamespace(
         file=str(codex_jsonl), harness="codex", session_id="sid-committed"))
@@ -448,10 +459,9 @@ def test_a_post_commit_504_without_extraction_still_spools(
     from tortoise.capture_spool import read_spool_meta
 
     spool = _import_env(tmp_path, monkeypatch)
-    n = len(_EXPECTED_TURNS)
     monkeypatch.setattr(
         "urllib.request.urlopen",
-        _post_refused_get_serves("sid-keyless", n, extracted=0))
+        _post_refused_get_serves("sid-keyless", _EXPECTED_TURNS, extracted=0))
 
     rc = _cmd_sessions_import(SimpleNamespace(
         file=str(codex_jsonl), harness="codex", session_id="sid-keyless"))
@@ -477,7 +487,7 @@ def test_a_504_whose_session_never_appears_still_spools(
     spool = _import_env(tmp_path, monkeypatch)
     monkeypatch.setattr(
         "urllib.request.urlopen",
-        _post_refused_get_serves("sid-never", 0, get_404=True))
+        _post_refused_get_serves("sid-never", _EXPECTED_TURNS, get_404=True))
 
     rc = _cmd_sessions_import(SimpleNamespace(
         file=str(codex_jsonl), harness="codex", session_id="sid-never"))
@@ -485,6 +495,121 @@ def test_a_504_whose_session_never_appears_still_spools(
     assert rc == 1
     assert not list((tmp_path / "receipts").glob("*.json"))
     assert read_spool_meta(spool, "sid-never") is not None
+
+
+def test_an_unreachable_api_that_still_committed_writes_the_receipt(
+        tmp_path, monkeypatch, codex_jsonl, capsys):
+    """The URLError branch gets the SAME confirmation. A read timeout or a
+    dropped connection after the server received the POST is exactly the
+    post-commit shape, and today it parks the turns and reports a failure.
+
+    MUTATION THAT REDS THIS: drop `_confirm_already_captured(None, ...)` from
+    the URLError branch.
+    """
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import read_spool_meta
+
+    spool = _import_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _post_refused_get_serves("sid-offline", _EXPECTED_TURNS,
+                                 post_exc=URLError("Connection refused")))
+
+    rc = _cmd_sessions_import(SimpleNamespace(
+        file=str(codex_jsonl), harness="codex", session_id="sid-offline"))
+
+    assert rc == 0, capsys.readouterr().err
+    assert [p.name for p in (tmp_path / "receipts").glob("*.json")] == \
+        ["sid-offline.json"]
+    assert read_spool_meta(spool, "sid-offline") is None
+
+
+def test_a_permanent_refusal_is_never_confirmed(tmp_path, monkeypatch,
+                                                codex_jsonl):
+    """The local import receipt is 2xx-only by a RECORDED decision, and #4675's
+    own body restates it: 403/402/503 ⇒ exit 1, honest error, NO receipt. The
+    confirmation is therefore gated on the RETRYABLE class — the same gate the
+    drain's `_refused` applies — so a 402 whose session happens to be durable
+    does not mint a receipt for a refusal the plan is refused on.
+
+    MUTATION THAT REDS THIS: drop the `classify_failure(...) != "retry"` gate
+    from `_confirm_already_captured`.
+    """
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import read_spool_meta
+
+    spool = _import_env(tmp_path, monkeypatch)
+
+    def _post_402(req, timeout=None):
+        if getattr(req, "get_method", lambda: "GET")() == "POST":
+            raise _http_error(402, '{"detail":"Team points limit reached"}')
+        raise AssertionError("the confirmation must not run for a permanent "
+                             "refusal")
+
+    monkeypatch.setattr("urllib.request.urlopen", _post_402)
+    rc = _cmd_sessions_import(SimpleNamespace(
+        file=str(codex_jsonl), harness="codex", session_id="sid-quota"))
+
+    assert rc == 1
+    assert not list((tmp_path / "receipts").glob("*.json"))
+    # 402 is not retryable, so it is not spooled either (unchanged behaviour).
+    assert read_spool_meta(spool, "sid-quota") is None
+
+
+def test_a_503_whose_session_landed_writes_no_receipt_but_keeps_the_spool(
+        tmp_path, monkeypatch, codex_jsonl, capsys):
+    """503 is `retry` to the CLASSIFIER (`status >= 500`) but it is in the
+    recorded no-receipt set, so the confirmation must exclude it by NAME.
+
+    #4675's body, verbatim: *"a LOCAL receipt is written on a **2xx**
+    (403/402/503 ⇒ exit 1, honest error, NO receipt) … that rule is correct and
+    must not be weakened"* — and the Task-15 acceptance line in
+    `tortoise/__main__.py`. A 503 whose commit landed must still exit 1 with no
+    receipt; what it must NOT do is lose the session, so the entry is spooled
+    and recoverable (§3.3).
+
+    MUTATION THAT REDS THIS: drop `status == 503` from the gate in
+    `_confirm_already_captured` — a durable 503 mints a receipt and exits 0.
+    """
+    import io
+    from urllib.error import HTTPError
+
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import read_spool_meta
+    from tortoise.sdk import _capture_turn_texts
+
+    spool = _import_env(tmp_path, monkeypatch)
+    texts = _capture_turn_texts([dict(t) for t in _EXPECTED_TURNS])
+
+    class _Detail(io.BytesIO):
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _open(req, timeout=None):
+        if req.get_method() == "POST":
+            raise HTTPError(req.full_url, 503, "unavailable", None,
+                            io.BytesIO(b'{"detail":"Service Unavailable"}'))
+        sid = req.full_url.rsplit("/", 1)[-1]
+        detail = {"id": sid, "turns": len(texts), "extracted": 2,
+                  "turn_points": [{"id": f"{sid}_t{i}", "content": t}
+                                  for i, t in enumerate(texts)]}
+        return _Detail(json.dumps(detail).encode("utf-8"))
+
+    monkeypatch.setattr("urllib.request.urlopen", _open)
+    rc = _cmd_sessions_import(SimpleNamespace(
+        file=str(codex_jsonl), harness="codex", session_id="sid-503"))
+
+    assert rc == 1, capsys.readouterr().err
+    assert "HTTP 503" in capsys.readouterr().err
+    assert not list((tmp_path / "receipts").glob("*.json")), \
+        "the recorded 2xx-only rule: a 503 mint no receipt"
+    assert read_spool_meta(spool, "sid-503") is not None, \
+        "honouring the 503 rule must not cost the session — it stays spooled"
 
 
 @pytest.mark.parametrize("code,body", [

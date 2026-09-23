@@ -3444,12 +3444,19 @@ def _session_post(api_key: str, api_url: str):
             session AND its turns. Without this read the spool defers an entry
             that is already durable, and `session drain` can never reach
             `filed N, deferred 0`. Only an exact match on the posted turn ids
-            files; every inconclusive read falls through to the original
-            outcome and defers, which is always safe.
+            AND their stored text files; every inconclusive read falls through
+            to the original outcome and defers, which is always safe.
+
+            503 is excluded to match the LOCAL-receipt gate in
+            `_confirm_already_captured` — see the recorded 2xx-only rule there.
+            Uniformity is deliberate: a reviewer must not have to work out why
+            one path confirms a 503 and the other does not. The deferral is
+            recoverable either way (503 is `retry`, so the entry is kept and
+            re-posted); #4925 holds the question of broadening both.
             """
             from tortoise.capture_spool import classify_failure
-            if outcome.ok or classify_failure(outcome.status,
-                                              outcome.detail) != "retry":
+            if outcome.ok or outcome.status == 503 or classify_failure(
+                    outcome.status, outcome.detail) != "retry":
                 return outcome
             if not isinstance(payload, dict):
                 # A non-mapping payload has nothing to confirm against; the
@@ -3465,15 +3472,24 @@ def _session_post(api_key: str, api_url: str):
             verdict = confirm_capture(
                 session_detail, api_url, api_key,
                 str(payload.get("session_id") or ""),
-                len(payload.get("conversation") or []))
+                payload.get("conversation") or [])
             if verdict in (FILED, UNEXTRACTED):
                 # The spool's contract is TURN DURABILITY, so a confirmed
                 # capture terminalises on either verdict — `_flush_one` stamps
                 # `filed_key` through its own compare-and-swap.
+                #
+                # An UNEXTRACTED confirmation carries the keyless-mode marker
+                # so `session capture`'s existing #4188 disclosure fires: the
+                # caller must not print an unqualified success for a capture
+                # whose memory points were never minted.
+                body: dict = {"confirmed": verdict}
+                if verdict == UNEXTRACTED:
+                    from tortoise.sdk import _CAPTURE_NO_PROVIDER_MODE
+                    body["extraction_mode"] = _CAPTURE_NO_PROVIDER_MODE
                 return PostOutcome(
                     ok=True, status=200,
                     detail=f"{outcome.status} after commit — confirmed {verdict}",
-                    body={"confirmed": verdict})
+                    body=body)
             return outcome
 
         try:
@@ -4176,7 +4192,7 @@ def _cmd_sessions_import(args) -> int:
         except Exception as exc:
             print(f"spool write failed: {exc}", file=_sys.stderr)
 
-    def _confirm_already_captured() -> bool:
+    def _confirm_already_captured(status: int | None, detail: str) -> bool:
         """Did the refused POST commit anyway? (#4675)
 
         The transport bound ABANDONS its handler rather than cancelling it, so
@@ -4185,7 +4201,22 @@ def _cmd_sessions_import(args) -> int:
         user is told a capture that already landed "would retry" — and (with
         no drain wired for this harness) it would never be filed.
 
-        Writes the local receipt ONLY on :data:`FILED`. `turn_points` are
+        RETRYABLE ONLY. A non-retryable status is not the post-commit-timeout
+        shape this closes. The same gate the drain's `_refused` applies.
+
+        **503 is excluded explicitly.** The local receipt is 2xx-only by a
+        RECORDED decision (#4675's own body: *"a LOCAL receipt is written on a
+        **2xx** (403/402/503 ⇒ exit 1, honest error, NO receipt) … that rule is
+        correct and must not be weakened"*; `tortoise/__main__.py` carries it as
+        the Task-15 acceptance line). `classify_failure` calls 503 `retry`
+        (`status >= 500`), so the classifier gate does NOT exclude it — this
+        line is what keeps the recorded rule true. The cost of honouring it is
+        a deferral, not a loss: a 503 whose commit landed is spooled (503 is
+        `retry`, so `_spool_if_retryable` keeps it) and filed by a later
+        attempt. #4925 records the tension — 503 and 504 are both 5xx and the
+        post-commit shape is identical; broadening needs that reopened.
+
+        Writes the local receipt ONLY on :data:`FILED`. The turn rows are
         durable BEFORE extraction, so the read can confirm the turns while the
         extraction the bound abandoned is still running; the receipt asserts a
         COMPLETED import, and #4188 requires a keyless capture to keep
@@ -4196,11 +4227,17 @@ def _cmd_sessions_import(args) -> int:
         never replace the honest error with a traceback (fail-open contract).
         """
         try:
+            from tortoise.capture_spool import (
+                _clear_breadcrumb_for,
+                classify_failure,
+            )
             from tortoise.session_confirm import FILED, confirm_capture
             from tortoise.session_verify import session_detail
 
+            if status == 503 or classify_failure(status, detail) != "retry":
+                return False
             if confirm_capture(session_detail, api_url, api_key,
-                               session_id, len(turns)) != FILED:
+                               session_id, turns) != FILED:
                 return False
             receipt_dir.mkdir(parents=True, exist_ok=True)
             receipt.write_text(_json.dumps({
@@ -4211,7 +4248,11 @@ def _cmd_sessions_import(args) -> int:
                 "turns": len(turns),
                 "confirmed_after_refusal": True,
             }, indent=2), encoding="utf-8")
-            _clear_capture_error(harness)
+            # `_clear_breadcrumb_for`, not `_clear_capture_error`: it checks
+            # `kind == capture-failure` and matches the session id, so this can
+            # never erase an unrelated record (the shared-spool sibling of that
+            # defect is #1529's install-inert false PROVEN).
+            _clear_breadcrumb_for(harness, session_id)
             print(f"Imported session {session_id} ({len(turns)} turns, "
                   f"harness={harness}) — the refusal arrived after the "
                   "server committed it.", file=_sys.stderr)
@@ -4249,7 +4290,7 @@ def _cmd_sessions_import(args) -> int:
             body = f"<error body unreadable: {read_exc}>"
         # 403/402/503 ⇒ fail, NO receipt, honest error (Task 15 acceptance).
         print(f"import failed (HTTP {e.code}): {body}", file=_sys.stderr)
-        if _confirm_already_captured():
+        if _confirm_already_captured(e.code, body):
             return 0
         _record_capture_error(harness, f"import failed (HTTP {e.code}): {body}",
                               session_id=session_id)
@@ -4257,7 +4298,7 @@ def _cmd_sessions_import(args) -> int:
         return 1
     except URLError as e:
         print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
-        if _confirm_already_captured():
+        if _confirm_already_captured(None, str(e.reason)):
             return 0
         _record_capture_error(
             harness, f"cannot reach API at {api_url}: {e.reason}",
@@ -4283,7 +4324,7 @@ def _cmd_sessions_import(args) -> int:
         # A refusal we cannot even read the body of is still a retryable
         # refusal, so it must spool rather than escape as a traceback.
         print(f"import failed reading the response: {e}", file=_sys.stderr)
-        if _confirm_already_captured():
+        if _confirm_already_captured(None, str(e)):
             return 0
         _record_capture_error(harness, f"import failed reading the response: {e}",
                               session_id=session_id)

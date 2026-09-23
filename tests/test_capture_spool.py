@@ -783,8 +783,11 @@ def test_a_refused_post_that_committed_is_not_reported_as_uncommitted(monkeypatc
             raise HTTPError(req.full_url, 504, "refused", None,
                             io.BytesIO(b'{"detail":"wait budget exceeded"}'))
         sid = req.full_url.rsplit("/", 1)[-1]
+        from tortoise.sdk import _capture_turn_texts
+        texts = _capture_turn_texts([dict(t) for t in payload["conversation"]])
         detail = {"id": sid, "extracted": 3,
-                  "turn_points": [{"id": f"{sid}_t0"}, {"id": f"{sid}_t1"}]}
+                  "turn_points": [{"id": f"{sid}_t{i}", "content": t}
+                                  for i, t in enumerate(texts)]}
         return _Detail(json.dumps(detail).encode("utf-8"))
 
     monkeypatch.setattr("urllib.request.urlopen", _open)
@@ -817,6 +820,161 @@ def test_a_refused_post_whose_turns_are_absent_still_defers(monkeypatch):
     monkeypatch.setattr("urllib.request.urlopen", _open)
     out = _session_post("k", "https://api.example")(payload)
     assert out.ok is False and out.status == 504, out
+
+
+def test_a_confirmed_refusal_reaches_the_drain_as_FILED(tmp_path, monkeypatch):
+    """End-to-end on the spool contract: a post-commit refusal must leave the
+    entry FILED, not deferred forever.
+
+    `_flush_one` stamps `filed_key`/`filed_at` through its own compare-and-swap
+    only on an `ok` outcome, so this is the assertion that the confirming read
+    actually converges a drain — `filed 1, deferred 0` on a session that is
+    already durable.
+
+    MUTATION THAT REDS THIS: drop `_refused(...)` from the HTTPError arm of
+    `_session_post` — the entry defers on every drain.
+    """
+    import io
+    from urllib.error import HTTPError
+
+    from tortoise.__main__ import _session_post
+    from tortoise.capture_spool import (
+        Snapshot,
+        flush_spool,
+        read_spool_meta,
+        spool_dir,
+        write_spool_entry,
+    )
+
+    monkeypatch.setenv("TORTOISE_CAPTURE_SPOOL_DIR", str(tmp_path / "spool"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    root = spool_dir()
+    turns = [{"role": "user", "content": "hi"},
+             {"role": "assistant", "content": "yo"}]
+    entry = write_spool_entry(root, Snapshot(
+        session_id="s-drain", turns=turns, source="probe",
+        machine_id="m", model=None, harness="codex"))
+    assert entry.get("written") or entry.get("bytes"), entry
+
+    class _Detail(io.BytesIO):
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _open(req, timeout=None):
+        if req.get_method() == "POST":
+            raise HTTPError(req.full_url, 504, "refused", None,
+                            io.BytesIO(b'{"detail":"wait budget exceeded"}'))
+        sid = req.full_url.rsplit("/", 1)[-1]
+        from tortoise.sdk import _capture_turn_texts
+        texts = _capture_turn_texts([dict(t) for t in turns])
+        detail = {"id": sid, "extracted": 2,
+                  "turn_points": [{"id": f"{sid}_t{i}", "content": t}
+                                  for i, t in enumerate(texts)]}
+        return _Detail(json.dumps(detail).encode("utf-8"))
+
+    monkeypatch.setattr("urllib.request.urlopen", _open)
+    summary = flush_spool(root, _session_post("k", "https://api.example"))
+
+    assert summary.filed == 1, summary
+    assert summary.deferred == 0, summary
+    meta = read_spool_meta(root, "s-drain")
+    assert meta["filed_key"], meta
+    assert meta["filed_at"], meta
+
+
+def test_a_503_stays_deferred_even_when_the_session_is_durable(monkeypatch):
+    """503 is `retry` to the classifier but is in the RECORDED no-receipt set,
+    and the drain applies the same exclusion as `_confirm_already_captured` so
+    the two paths cannot drift. The cost is a deferral, never a loss — the
+    entry is kept and re-posted (see #4925 for the standing question).
+
+    MUTATION THAT REDS THIS: drop `outcome.status == 503` from `_refused` —
+    the drain files a 503 it is supposed to keep deferring.
+    """
+    import io
+    from urllib.error import HTTPError
+
+    from tortoise.__main__ import _session_post
+    from tortoise.sdk import _capture_turn_texts
+
+    payload = {"session_id": "s-503", "harness": "codex",
+               "conversation": [{"role": "user", "content": "hi"}]}
+    texts = _capture_turn_texts([dict(t) for t in payload["conversation"]])
+
+    class _Detail(io.BytesIO):
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _open(req, timeout=None):
+        if req.get_method() == "POST":
+            raise HTTPError(req.full_url, 503, "unavailable", None,
+                            io.BytesIO(b'{"detail":"Service Unavailable"}'))
+        sid = req.full_url.rsplit("/", 1)[-1]
+        detail = {"id": sid, "extracted": 2,
+                  "turn_points": [{"id": f"{sid}_t{i}", "content": t}
+                                  for i, t in enumerate(texts)]}
+        return _Detail(json.dumps(detail).encode("utf-8"))
+
+    monkeypatch.setattr("urllib.request.urlopen", _open)
+    out = _session_post("k", "https://api.example")(payload)
+
+    assert out.ok is False and out.status == 503, out
+
+
+def test_an_unextracted_confirmation_is_reported_not_silent(monkeypatch):
+    """#4188/#1529: a confirmed capture whose memory points were never minted
+    must not print an unqualified success. The confirming outcome carries the
+    keyless-mode marker so the caller's existing disclosure fires.
+
+    MUTATION THAT REDS THIS: return `body={"confirmed": verdict}` without
+    `extraction_mode` — the information is lost before the caller sees it.
+    """
+    import io
+    from urllib.error import HTTPError
+
+    from tortoise.__main__ import _session_post
+    from tortoise.sdk import _CAPTURE_NO_PROVIDER_MODE
+
+    payload = {"session_id": "s-keyless", "harness": "codex",
+               "conversation": [{"role": "user", "content": "hi"}]}
+
+    class _Detail(io.BytesIO):
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _open(req, timeout=None):
+        if req.get_method() == "POST":
+            raise HTTPError(req.full_url, 504, "refused", None,
+                            io.BytesIO(b'{"detail":"wait budget exceeded"}'))
+        sid = req.full_url.rsplit("/", 1)[-1]
+        from tortoise.sdk import _capture_turn_texts
+        texts = _capture_turn_texts([dict(t) for t in payload["conversation"]])
+        detail = {"id": sid, "extracted": 0,
+                  "turn_points": [{"id": f"{sid}_t{i}", "content": t}
+                                  for i, t in enumerate(texts)]}
+        return _Detail(json.dumps(detail).encode("utf-8"))
+
+    monkeypatch.setattr("urllib.request.urlopen", _open)
+    out = _session_post("k", "https://api.example")(payload)
+
+    assert out.ok is True, out
+    assert out.body["confirmed"] == "unextracted", out.body
+    assert out.body["extraction_mode"] == _CAPTURE_NO_PROVIDER_MODE, out.body
 
 
 def test_cli_reports_and_excludes_non_conversational_turns(tmp_path, monkeypatch, capsys):

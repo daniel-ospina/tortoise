@@ -6,9 +6,9 @@ cancelling it, so the work completes after the 504 is sent. The client's
 terminality rule therefore cannot be "the status was retryable ⇒ nothing
 committed" — it must ask the server, and it must ask the right question.
 
-These tests pin the QUESTION (the deterministic turn-id set, not the Session
-row) and the ANSWER for every inconclusive read (defer, never file, never
-discard).
+These tests pin the QUESTION (the posted rows, by id AND by stored text — not
+the Session row, and not the id set alone) and the ANSWER for every
+inconclusive read (defer, never file, never discard).
 """
 from __future__ import annotations
 
@@ -20,27 +20,39 @@ from tortoise.session_confirm import (
     UNEXTRACTED,
     UNKNOWN,
     confirm_capture,
-    expected_turn_ids,
+    expected_turns,
     session_extracted,
     turn_point_id,
-    turn_point_ids,
+    turn_points,
 )
+from tortoise.session_verify import _ApiError
+
+TURNS = [{"role": "user", "content": "ship it"},
+         {"role": "assistant", "content": "on it"},
+         {"role": "user", "content": "unrelated"}]
+
+SESSION = "s1"
 
 
-def _detail(session_id: str, turns: int, extracted: int = 2,
-            ids: list[str] | None = None) -> dict:
-    return {
-        "id": session_id,
-        "turns": turns,
-        "extracted": extracted,
-        "turn_points": [{"id": i} for i in (ids or (
-            [turn_point_id(session_id, i) for i in range(turns)]))],
-    }
+def _stored(index: int) -> str:
+    from tortoise.sdk import _capture_turn_texts
+    return _capture_turn_texts([dict(t) for t in TURNS])[index]
+
+
+def _detail(turns: list[dict] = TURNS, extracted: int = 2, *,
+            session_id: str = SESSION, contents: list[str] | None = None) -> dict:
+    from tortoise.sdk import _capture_turn_texts
+    texts = (contents if contents is not None
+             else _capture_turn_texts([dict(t) for t in turns]))
+    rows = [{"id": turn_point_id(session_id, i), "content": texts[i]}
+            for i in range(len(texts))]
+    return {"id": session_id, "turns": len(texts), "extracted": extracted,
+            "turn_points": rows}
 
 
 def _reader(responses):
-    """A reader yielding the given responses in order; entries may be an
-    exception CLASS to raise, ``None`` for a 404, or a detail dict."""
+    """A reader yielding the given responses in order; an entry may be an
+    exception INSTANCE to raise, ``None`` for a 404, or a detail dict."""
     seq = list(responses)
     calls: list[dict] = []
 
@@ -48,79 +60,98 @@ def _reader(responses):
         calls.append({"api_url": api_url, "session_id": session_id,
                       "timeout": timeout})
         item = seq.pop(0) if seq else None
-        if isinstance(item, type) and issubclass(item, BaseException):
-            raise item("refused")
+        if isinstance(item, BaseException):
+            raise item
         return item
 
     read.calls = calls
     return read
 
 
-def test_the_posted_turn_set_and_extraction_is_filed():
-    reader = _reader([_detail("s1", 3, extracted=4)])
-    assert confirm_capture(reader, "u", "k", "s1", 3,
-                           sleep=lambda _s: None) == FILED
+def _confirm(reader, turns=TURNS, **kw):
+    kw.setdefault("sleep", lambda _s: None)
+    return confirm_capture(reader, "u", "k", SESSION, turns, **kw)
+
+
+def test_the_posted_rows_and_extraction_is_filed():
+    assert _confirm(_reader([_detail()])) == FILED
 
 
 def test_durable_turns_without_extraction_is_unextracted():
     """Extraction runs AFTER the turn write, so the confirmation can prove the
     turns while the extraction the bound abandoned is still running. The SPOOL
     may terminalise on that; the import RECEIPT may not (#4188)."""
-    reader = _reader([_detail("s1", 3, extracted=0)])
-    assert confirm_capture(reader, "u", "k", "s1", 3,
-                           sleep=lambda _s: None) == UNEXTRACTED
+    assert _confirm(_reader([_detail(extracted=0)])) == UNEXTRACTED
+
+
+def test_the_same_ids_with_DIFFERENT_TEXT_are_not_filed():
+    """The P0 this guards: the ids are POSITIONAL, so a session id reused for
+    different content with the same number of turns — a compaction, a branch, a
+    MAX_SESSION_TURNS window shift — matches on ids while the new text is
+    nowhere on the server. Filing on that loses the only copy.
+
+    MUTATION THAT REDS THIS: compare `set(turn_points)` to `set(expected)`
+    instead of the whole `{id: text}` mapping.
+    """
+    other = ["[user] a completely different turn", "[assistant] and another",
+             "[user] and a third"]
+    assert _confirm(_reader([_detail(contents=other)])) == TURNS_MISSING
+
+
+def test_one_changed_turn_is_not_filed():
+    """Content equality is per row, not per session."""
+    swapped = [_stored(0), _stored(1), "[user] edited"]
+    assert _confirm(_reader([_detail(contents=swapped)])) == TURNS_MISSING
 
 
 def test_more_turns_than_posted_is_not_filed():
-    """A concurrent capture that grew the transcript is not evidence that THIS
-    payload committed. A superset must never read as filed."""
-    reader = _reader([_detail("s1", 5)])
-    assert confirm_capture(reader, "u", "k", "s1", 3,
-                           sleep=lambda _s: None) == TURNS_MISSING
+    grown = [*TURNS, {"role": "assistant", "content": "fourth"}]
+    reader = _reader([_detail(grown)])
+    assert _confirm(reader, turns=TURNS) == TURNS_MISSING
+    # The grown set is a SUPERSET — accepting it would mean a concurrent
+    # capture's rows satisfy our POST.
+    assert len(reader.calls) == 1
 
 
 def test_a_partial_turn_set_is_not_filed():
-    reader = _reader([_detail("s1", 1)])
-    assert confirm_capture(reader, "u", "k", "s1", 3,
-                           sleep=lambda _s: None) == TURNS_MISSING
+    assert _confirm(_reader([_detail(turns=TURNS[:1])])) == TURNS_MISSING
 
 
-def test_404_through_the_whole_window_is_unknown():
-    """The abandoned handler may not have MERGEd yet — unknown, never
-    'not committed', so the caller defers."""
-    reader = _reader([None, None, None])
-    assert confirm_capture(reader, "u", "k", "s1", 3,
-                           sleep=lambda _s: None) == UNKNOWN
-    assert len(reader.calls) == 3
-
-
-def test_a_refused_read_is_unknown():
-    reader = _reader([TimeoutError, TimeoutError, TimeoutError])
-    assert confirm_capture(reader, "u", "k", "s1", 3,
-                           sleep=lambda _s: None) == UNKNOWN
+@pytest.mark.parametrize("response", [
+    None,                                       # 404: not MERGEd yet
+    _ApiError("HTTP 504", status=504),          # a refused READ
+    _ApiError("HTTP 429", status=429),
+    TimeoutError("read timed out"),             # transport
+])
+def test_every_inconclusive_read_defers(response):
+    """UNKNOWN never files. The abandoned handler may simply not have written
+    yet, and a read we could not complete is not evidence either way."""
+    reader = _reader([response, response])
+    assert _confirm(reader) == UNKNOWN
+    assert len(reader.calls) == 2
 
 
 def test_a_404_that_appears_is_filed_within_the_window():
     """The bounded re-read exists for exactly this: the write is racing us."""
-    reader = _reader([None, _detail("s1", 2)])
-    assert confirm_capture(reader, "u", "k", "s1", 2,
-                           sleep=lambda _s: None) == FILED
+    reader = _reader([None, _detail()])
+    assert _confirm(reader) == FILED
     assert len(reader.calls) == 2
 
 
+def test_a_transient_read_failure_then_success_is_filed():
+    reader = _reader([TimeoutError("read timed out"), _detail()])
+    assert _confirm(reader) == FILED
+
+
 def test_no_turns_posted_is_never_confirmed():
-    """A payload we never sent cannot be confirmed — the reader must not even
-    be consulted, or an empty conversation would file against a coincidental
-    id-space match."""
-    reader = _reader([_detail("s1", 0)])
-    assert confirm_capture(reader, "u", "k", "s1", 0,
-                           sleep=lambda _s: None) == UNKNOWN
+    reader = _reader([_detail(turns=[])])
+    assert _confirm(reader, turns=[]) == UNKNOWN
     assert reader.calls == []
 
 
 def test_a_missing_session_id_is_never_confirmed():
-    reader = _reader([_detail("", 1)])
-    assert confirm_capture(reader, "u", "k", "", 1,
+    reader = _reader([_detail()])
+    assert confirm_capture(reader, "u", "k", "", TURNS,
                            sleep=lambda _s: None) == UNKNOWN
     assert reader.calls == []
 
@@ -134,34 +165,66 @@ def test_a_missing_session_id_is_never_confirmed():
     None,
 ])
 def test_a_malformed_detail_is_unknown_not_filed(bad):
-    reader = _reader([bad, bad, bad])
-    assert confirm_capture(reader, "u", "k", "s1", 1,
-                           sleep=lambda _s: None) == UNKNOWN
+    reader = _reader([bad, bad])
+    assert _confirm(reader) == UNKNOWN
+
+
+def test_a_row_whose_content_is_unreadable_cannot_match():
+    """A row we cannot read the text of must never satisfy the comparison."""
+    rows = [{"id": turn_point_id(SESSION, i), "content": None}
+            for i in range(len(TURNS))]
+    assert turn_points({"turn_points": rows})[turn_point_id(SESSION, 0)] != _stored(0)
+    assert _confirm(_reader([{"turn_points": rows}])) == TURNS_MISSING
 
 
 def test_the_sleep_runs_between_attempts_only():
     slept: list[float] = []
-    reader = _reader([None, None, None])
-    confirm_capture(reader, "u", "k", "s1", 1, attempts=3, delay_s=0.25,
-                    sleep=slept.append)
-    assert slept == [0.25, 0.25], slept
+    reader = _reader([None, None])
+    _confirm(reader, attempts=2, delay_s=0.25, sleep=slept.append)
+    assert slept == [0.25], slept
 
 
 def test_the_read_timeout_is_the_short_one_not_the_post_timeout():
-    reader = _reader([_detail("s1", 1)])
-    confirm_capture(reader, "u", "k", "s1", 1, read_timeout_s=7.5,
-                    sleep=lambda _s: None)
+    reader = _reader([_detail()])
+    _confirm(reader, read_timeout_s=7.5)
     assert reader.calls[0]["timeout"] == 7.5
 
 
-def test_turn_point_ids_are_the_servers_idempotency_ids():
-    """The contract the confirmation rests on: the hosted writer MERGEs
-    ``{session_id}_t{i}`` for the whole window BEFORE extraction."""
+def test_the_default_budget_fits_inside_a_hook_that_already_waited_on_the_post():
+    """The confirmation runs AFTER a POST that may have spent its own 30s, and
+    the Claude SessionEnd hook that runs `session capture` synchronously is
+    cancelled at 60s. Keep the worst case small."""
+    from tortoise import session_confirm as sc
+    worst = (sc.DEFAULT_ATTEMPTS * sc.DEFAULT_READ_TIMEOUT_S
+             + (sc.DEFAULT_ATTEMPTS - 1) * sc.DEFAULT_DELAY_S)
+    assert worst <= 15.0, worst
+
+
+# ── the format contract this rests on ────────────────────────────────────
+
+
+def test_the_turn_id_matches_the_servers_own_writer_format():
+    """Drift guard. `{session_id}_t{i}` is the writer's per-row idempotency key;
+    if it changes server-side, every confirmation would silently defer."""
+    src = (__import__("pathlib").Path(__file__).resolve().parents[1]
+           / "tortoise" / "sdk.py").read_text(encoding="utf-8")
+    assert 'f"{session_id}_t{i}"' in src, (
+        "sdk._write_capture_turns no longer builds its ids that way — "
+        "session_confirm.turn_point_id must follow it")
     assert turn_point_id("abc", 0) == "abc_t0"
     assert turn_point_id("abc", 12) == "abc_t12"
-    assert expected_turn_ids("abc", 3) == {"abc_t0", "abc_t1", "abc_t2"}
-    assert expected_turn_ids("abc", 0) == set()
-    assert turn_point_ids(_detail("abc", 2)) == {"abc_t0", "abc_t1"}
+
+
+def test_the_stored_text_matches_the_servers_own_writer_definition():
+    """The content comparison must describe the string the server STORES, so it
+    is derived from the writer's shared helper rather than mirrored."""
+    from tortoise.sdk import _capture_turn_texts
+    odd = [{"role": "user", "content": "x"}, {"role": None, "content": None},
+           {"role": 7, "content": 42}, {"content": "no role"},
+           {"role": "assistant", "content": "y" * 6000}]
+    assert expected_turns("abc", odd) == {
+        f"abc_t{i}": text
+        for i, text in enumerate(_capture_turn_texts([dict(t) for t in odd]))}
 
 
 def test_session_extracted_is_total_over_odd_values():
