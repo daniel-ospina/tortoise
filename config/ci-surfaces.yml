@@ -754,10 +754,11 @@ surfaces:
   # OPENROUTER_API_KEY inside Fly-only env) produced a total extraction outage
   # that the API reported as 200/partial, and nothing in CI could see the drift.
   # Registered in `core` alongside its sibling deploy-time guards
-  # (test_fly_machines_guard.py, test_deploy_workflow.py). It is hermetic but
-  # multi-minute, so it carries an explicit `durations:` weight (see the
-  # durations map) — an unmeasured entry would also drop fast-pool coverage
-  # below the 90% floor (#4259 review).
+  # (test_fly_machines_guard.py, test_deploy_workflow.py). It is hermetic, and
+  # its cost is measured in the durations map like every other fast file. An
+  # ABSENT row packs it at the 2.0s default and drops fast-pool coverage (the
+  # guard tests key presence); a ZERO row packs it at weight 0. Neither is a
+  # substitute for the measured value (#4259 review).
   - test_fly_secret_drift.py
   # #3039: percent-decoding of URI userinfo (the single shared rule in
   # tortoise/config.py, which is a core-surface path) — registered here so a
@@ -1458,16 +1459,18 @@ durations:
 # the full-matrix push halves; duration_coverage_issues() floors coverage at 90%.
 # A weight is a measured CI value wherever one exists: the sweep takes the CI junit
 # wall time of the leg that CARRIES the file, not a local timing, because the CI wall
-# is what the split must model. The two exceptions are named below — the pinned
-# equality (borrowed from a measured sibling) and the row retained from main (a local
-# embedded-lane timing from #4602, kept deliberately; see the RETAINED paragraph).
+# is what the split must model. Three exceptions are named below — the pinned equality
+# (borrowed from a measured sibling), the row retained from main (a local embedded-lane
+# timing from #4602, kept deliberately) and any row marked `# unmeasured` (a file no leg
+# of this sweep's four source runs collected; see the RETAINED paragraph).
 #
 # ONE row borrows its value: test_mcp_rename_table.py is held equal to
 # test_bridge_table.py's measurement because
 # tests/test_mcp_rename_table.py::test_duration_weight_matches_the_sibling_generator_suite
 # requires the two generator suites to carry one weight — the pin constrains
 # equality, not the number. (Only the RETAINED row below shares the property that its
-# value is not this sweep's measurement of the file; see there.)
+# value is not this sweep's measurement of the file, as are the two rows marked
+# `# unmeasured` below; see there.)
 #
 # OVERRIDES: rows whose previous value was a recorded decision or a deliberate
 # cost-model choice — a #4282 reserve, a load-range value, a #3895 loose middle,
@@ -1548,10 +1551,6 @@ durations:
   test_backup_watcher_health.py: 0.2
   eval/retrieval/test_integration.py: 1523.4
   test_onboarding_state_split.py: 310.7
-  # #3746: the new onboarding truth-surface file. 31 docker-lane cases, junit
-  # sum 3.6s in run 35705184320 (`test (a)`), the same artifact source the
-  # block above cites. Without a row it packed at the flat 2.0s default and
-  # tipped durations coverage to 89.9%, under the 90% floor (#3400).
   test_onboarding_truth_surface.py: 4.0
   eval/write_path/test_write_path_benchmark.py: 101.8
   test_tortoise_client.py: 11.9
@@ -1679,7 +1678,7 @@ durations:
   test_tenancy_spine.py: 3.0
   test_transport_wait_bound.py: 5.8
   test_collision_preflight.py: 13.1
-  test_branch_reaper.py: 2.0  # unmeasured — new file: no main junit measurement yet; flat default
+  test_branch_reaper.py: 2.0  # unmeasured — no measurement in the four source runs; flat default
   test_control_plane_offload_3498.py: 1.4
   test_analytics_offloop_4015.py: 0.6
   test_free_team_entitlement.py: 4.8
