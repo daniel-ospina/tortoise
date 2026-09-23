@@ -379,7 +379,11 @@ def report_unmetered_increment(lane: str, org_id: str | None,
     ``mcp_write_op`` and ``ask_ledger``.
 
     Never raises: the alert itself must not become a new failure path (a signal
-    that can raise is a refusal by another name).
+    that can raise is a refusal by another name). The incident — a GitHub issue
+    plus Telegram, deduped per (kind, org) — is the durable operator signal; the
+    ERROR record below is the local one. The increment still reads short on the
+    ledger: this makes the drop VISIBLE, it does not repair it (leg 2 of the
+    ruling is tracked separately, see the plan doc / #3981).
     """
     with contextlib.suppress(Exception):  # the alert must never raise
         _logger.error(
@@ -390,6 +394,9 @@ def report_unmetered_increment(lane: str, org_id: str | None,
             lane, org_id or "<none>", type(error).__name__, error,
             exc_info=error,
         )
+        from tortoise.operator_alert import alert_unmetered_increment
+
+        alert_unmetered_increment(lane, org_id, error)
 
 
 def _display_period_label() -> str:

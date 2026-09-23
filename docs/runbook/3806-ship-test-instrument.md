@@ -57,6 +57,11 @@ python tools/ship_test_onboarding.py \
   Each exit-3 cause is named in the verdict — e.g. `not_signed_in`,
   `agent_write_failed`, `projection_unreadable`.
 * A loopback target (a local or self-hosted deployment) needs no `--allow-prod`.
+* **Teardown is ON by default.** The run reaps the org it created (see below).
+  `--keep-org` turns it OFF and leaves the org behind on purpose — use it only
+  to inspect a FAILED run. **A teardown `failed`/`not_confirmed` is a cleanup
+  fault, not a product failure**: it never changes the verdict or the exit code,
+  and it is printed loudly on stderr (`RESIDUE — …`) so nobody has to infer it.
 * `--headed` to watch it; `--skip-agent-write` to run only the negative half
   (which is recorded as `positive_not_attempted`, never as a server-side
   no-observation); `--agent-key tt_…` to supply the **agent write** credential
@@ -101,6 +106,23 @@ MCP `tortoise_create_point` write** (the server's
 it), then reloads and reads Overview again. It never writes the onboarding
 checkpoint itself — that edge is the server's observation, not the client's.
 
+**Teardown (#4319).** After the reads are done the run **reaps the org it
+created**. The identity of "the org this run created" is proven
+**differentially**, never by its name: the walked session's own org list
+(`GET /api/v1/organizations`, through the same-origin BFF proxy) is read once
+**before the wizard can create anything** and once at teardown, so this run's
+orgs are exactly the set difference. That set must be exactly one org, this run
+must have **actually attempted the org-create** (a set difference alone is not
+an identity proof — an org that joined this session's list without this run
+asking for one is not this run's to delete), and only then is its name compared
+to the name this run wrote into the wizard. A name on
+its own is not a proof of creation: `--org-name` and the provisioning lane's own
+upsert can both put this run's name on an org this run did not create. The
+delete goes to `DELETE /api/v1/organizations/{org_id}` through the **same**
+origin's proxy as the org's owner, and `deleted` is recorded only after a
+readable re-read shows the org gone from that same list (the list is derived
+from active memberships, and the delete cascade removes them).
+
 ## The observation artifact
 
 `<out>/observation.json` plus per-step screenshots. The record carries:
@@ -115,6 +137,7 @@ checkpoint itself — that edge is the server's observation, not the client's.
 | `steps[]` | Per step: name, URL, resolved `ui` state, `observed`, `ok`, detail, screenshot |
 | `assertions` | `front_door_reachable`, `walk_completed`, `no_claim_before_observation`, `shown_when_observed` |
 | `session` | How the run authenticated: `state` (one of `signed_in` / `not_signed_in` / `store_unavailable` / `unreachable`), `detail`, `mechanism` |
+| `teardown` | The run's own cleanup outcome (#4319). `status` is one of `deleted` / `skipped_no_org` (nothing was created) / `not_reached` (no browser context, or the run exited before the cleanup baseline was read) / `kept_by_flag` (`--keep-org`) / `baseline_unavailable` / `not_listed` / `not_attempted` / `list_unreadable` / `ambiguous` / `name_mismatch` / `http_refused` / `not_confirmed` / `failed`. Every status except `deleted`/`skipped_no_org`/`not_reached` means a live org may remain and is warned on stderr. The keys carried depend on the status: `org_id` on `deleted`/`name_mismatch`/`http_refused`/`not_confirmed`; `http_status` + `upstream_status` on `list_unreadable`/`http_refused` (an upstream 429 arrives as a 503); `verify_status` + `verify_upstream_status` on `not_confirmed`; `created_ids` on `ambiguous`/`not_attempted`; `before_count`/`after_count` on `not_listed`; `grace_hours` + `hard_delete_after` on `deleted` |
 | `reason` | The failure CLASS — empty iff `verdict == "passed"`. `instrument_error` (exit 3, says nothing about the product) vs `server_did_not_observe` / `positive_not_shown` / `positive_not_attempted` / `walk_incomplete` / `walk_failed` (exit 1) |
 | `verdict` | `passed` / `failed: …` / `incomplete: …` / `instrument-error: …` |
 
@@ -133,7 +156,7 @@ product.
 
 | Where | What | Count |
 | --- | --- | --- |
-| `tests/test_ship_test_onboarding.py` | Fast pure-Python: the classifier, the page-wide claim sweep, the DOM reader, the server-observation reader, the MCP write-result reader (JSON **and** SSE framing, both tool-error shapes, notification frames), the per-surface verdict seam, the verdict assembly, the session seam (`/api/session` + BFF), the loud-failure guard (session, write, projection, driver) — plus **the real `run_walk` executed against a fake browser**, which pins the call site (which read it uses, with what credential, in what order) rather than grepping for it | 100 |
+| `tests/test_ship_test_onboarding.py` | Fast pure-Python: the classifier, the page-wide claim sweep, the DOM reader, the server-observation reader, the MCP write-result reader (JSON **and** SSE framing, both tool-error shapes, notification frames), the per-surface verdict seam, the verdict assembly, the session seam (`/api/session` + BFF), the loud-failure guard (session, write, projection, driver) — plus **the real `run_walk` executed against a fake browser**, which pins the call site (which read it uses, with what credential, in what order) rather than grepping for it — **plus the teardown control set**: each threat class of the destructive surface (pre-existing org, foreign name, ambiguity, unreadable baseline, unreadable confirmation, ambiguous candidate, refused delete, residue-vs-clean, verdict conservation both ways, single-exit funnel) | 132 |
 | `tests/e2e/test_ship_test_onboarding.py` | Real-browser, opt-in (`RUN_DASHBOARD_E2E=1`): the three assertions against the deployment's own built bundle, the wire observation that the client issues no `harness-connected` write, and RED/GREEN evidence against a mutated COPY of the real bundle | 8 |
 
 Both suites execute the instrument's **real decision code** (`judge`, the
@@ -141,11 +164,31 @@ verdict assembly, the classifier, the readers) — never a source-text scan of i
 The strongest pin in the fast lane is the **fake-browser `run_walk` suite**: it
 executes the real walk end to end — no session, a failed write, an unreadable
 projection at each of the three read sites (step 5, the poll, step 7), the happy
-path, `--skip-agent-write`, and an explicit `--agent-key` — so the call site is
-behaviourally fixed, not greped. A few *structural* `inspect.getsource`
-assertions remain for ORDERING that the harness does not aim at (that the
+path, `--skip-agent-write`, an explicit `--agent-key`, and the teardown control
+set — so the call site is
+behaviourally fixed, not greped. The teardown control set is mutation-checked
+(dropping the baseline set difference, or the create-attempted gate, turns it
+RED). A few *structural* `inspect.getsource` assertions remain for ORDERING that
+the harness does not aim at (that the
 session gate precedes the agent write, that the write-failure check precedes the
-projection check); they complement the behavioural tests, they do not replace
+projection check), plus one completeness assertion over `run_walk`'s call sites.
+It is parsed from `run_walk`'s AST, not text-scanned, so a behaviour-identical
+reformat or a renamed teardown local cannot false-red it, and it checks four
+things: `_finish` is not spelled there (no `Name`, no `Attribute`); there is no
+bare `getattr`/`globals`/`eval`/`exec`/`vars` call; every `_finalize(` call has
+three positional arguments whose third is the LOCAL bound by `Teardown(...)`;
+and that local has exactly one Name-binding (every `ast.Name` in a Store context
+counts — plain assignment, `for`/comprehension target, `with … as`, `+=`, `:=`).
+It covers the call sites spelled out in `run_walk`'s own body and the cheap forms
+only — a helper, an alias, a NON-Name binding (`import … as`, `except … as`,
+`match … case _ as`) or an in-place field assignment gets past it — so it is a
+refactor guard, not a containment proof. What carries
+the `not_reached`-reports-an-unreaped-org-as-clean class instead is the recorded
+teardown STATUS, asserted in the test for each post-create exit a test reaches
+(three of them — the absent-surface, the lying-screen and the no-agent-key exits
+— are reached by no test and rest on `_run_teardown`'s runtime gates alone:
+#4843);
+they complement the behavioural tests, they do not replace
 them. The RED/GREEN property is the core
 requirement: a behaviour-identical reformat must not move the verdict, and a UI
 that lies must go RED.
@@ -197,13 +240,57 @@ and adds no new job).
   because letting a key carry the projection read is the false pass that was
   fixed. Pass a key only for the org the walk signs up, or omit the flag and let
   the instrument mint one through the session.
-* **Each run creates a production user + org.** The run signs up a fresh
-  disposable identity (`ship-test-<ts>-<hex>@premiselabs.co`) and creates the
-  org `Ship Test <epoch>` (`--org-name` overrides the label only). The residue
-  is a real org row per run: the instrument has **no cleanup surface** (there is
-  no org-delete API for it to call), so the honest options are a disposable
-  identity to run against, or an explicit cleanup path that does not yet exist.
-  The side effect is on the record in #4291 rather than silently absorbed.
+* **Each run creates a production user + org, and the org is reaped by
+default.** The run signs up a fresh disposable identity
+(`ship-test-<ts>-<hex>@premiselabs.co`) and creates the org
+`Ship Test <epoch>-<hex4>` (the random suffix makes a same-named pre-existing
+org vanishingly unlikely for a default run; `--org-name` overrides the label
+only, and is
+validated against the product's own rule up front — exit 2 — because the server
+rewrites a name it will not accept, which would make the created org silently
+unreapable). Since **#4319** the run deletes that org
+itself, as its owner, through the walked session's own BFF proxy — see
+*Teardown* above. Three residual classes remain, and all three are explicit
+rather than silent:
+  * **`--keep-org`, or any run whose teardown did not confirm**
+    (`baseline_unavailable` / `not_listed` / `not_attempted` / `list_unreadable` /
+    `http_refused` / `not_confirmed` / …) leaves the org live. The observation
+    records which, and stderr prints the `RESIDUE` warning. An unreadable org
+    list at teardown **fails closed** (residue) rather than deleting on an
+    unproven identity; an empty candidate set after a recorded create attempt is
+    treated as suspect residue (`not_listed`).
+  * **A stale baseline read is the one shape not detected.** The differential can
+    only exclude an org it *saw*: if the baseline read returned a list that was
+    already stale (omitting an org that was in fact there), and that org carried
+    exactly this run's name, and this run's own create then failed, it would be
+    the single candidate. The unique default name above makes the shape
+    vanishingly unlikely, `--org-name` is validated, and ambiguity (two
+    candidates) still refuses — but it is a race, not a proof, and it is stated
+    rather than papered over.
+  * **The crash window.** A run that dies after creating the org and before
+    teardown leaves it behind, and no in-process code can reap it: the org
+    belongs to a different (per-run) account and no credential for it survives.
+    This is why teardown cannot be the whole answer to residue — but it bounds
+    the residue to crashes instead of making it the norm.
+* **Deletion is a SOFT delete, then a purge.** `DELETE /v1/organizations/{id}`
+kills access immediately (API keys revoked, memberships removed, invitations
+revoked) and stamps a grace window; the org's graph + control-plane rows are
+hard-purged by the boot + hourly purge once that window elapses
+(`TORTOISE_TEAM_DELETE_GRACE_HOURS`, recorded as `hard_delete_after`). The
+disposable auth **account is not deleted** — the product deliberately does not
+cascade an org delete into the account, and there is no auth-admin wiring to do
+it. Backups are out of scope for this org: hosted backup eligibility is
+`tier != 'free' AND backup_enabled`, and a ship-test org is created on a fresh
+free account, so no backup pool is ever created for it (#4190 covers the
+non-free case).
+* **The delete budget is shared, and a refusal is diagnosable.** `team_delete` is
+rate limited to 5/hour keyed on the client IP, and behind the BFF every
+dashboard-originated delete presents the Worker's egress IP (the proxy strips
+`cf-connecting-ip` / `x-forwarded-*`; the API trusts Fly's `Fly-Client-IP`), so
+that budget is effectively shared across all dashboard deletes. An upstream 429
+arrives at the proxy as a **503** — but the 503 body carries
+`upstream_status: 429`, which the recorded `teardown.upstream_status` preserves,
+so "rate limited" stays distinguishable from "store down".
 * **The two shipped derivations differ, and the guard must pick per surface.**
   The Overview accepts the server's wire-complete forms
   (`overview.js::overviewConnection`); the wizard is edge-only
