@@ -871,12 +871,16 @@ def operator_audit_notes(audit: dict | None, posture: str) -> list[str]:
     """The operator-audit note(s) for a run report (#2514/#2552).
 
     The m2-echo-lane caveat — "no relation extraction, so 0 is structural
-    there, never a bar" — is **posture-scoped**. The m2 lane's relation stage
-    is a cue-word heuristic, not the product extractor, so its edge score is
-    not comparable with the llm lane's; on the llm lane the score IS a genuine
-    behavioural signal about emission fidelity, and printing the m2 lane's
-    excuse verbatim in that receipt frames a real result as a non-result in
-    the very artifact a reader consults.
+    there, never a bar" — is **posture-scoped**. (The quoted wording is itself
+    stale on BOTH counts: the lane's cue-word stage does extract relations, and
+    its grading is no longer 0. It is preserved verbatim here only because this
+    refactor is scoped to posture, not to the note's prose; the prose fix is
+    tracked by #4807.) The m2 lane's relation stage is a cue-word heuristic,
+    not the product extractor, so its edge score is not comparable with the llm
+    lane's; on the llm lane the score IS a genuine behavioural signal about
+    emission fidelity, and printing the m2 lane's excuse verbatim in that
+    receipt frames a real result as a non-result in the very artifact a reader
+    consults.
 
     The caveat is emitted ONLY when ``posture == "m2"``; any other value
     (including a future lane) takes the llm-shaped note, whereas the
