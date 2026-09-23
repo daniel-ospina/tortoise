@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import stat
 import subprocess
 import time
@@ -246,7 +248,63 @@ def test_a_permanent_4xx_discards_with_a_reason_and_is_never_retried(tmp_path):
     assert second.attempted == 0, "a permanent rejection must never be retried"
 
 
-def test_a_quota_refusal_defers_the_capture_instead_of_destroying_it(tmp_path):
+def test_the_pi_and_python_classifiers_agree_on_every_status(tmp_path):
+    """#4714. The two capture legs classify THE SAME spool directory
+    (``~/.tortoise/capture-spool``), so transient-vs-permanent must be ONE
+    policy, not two independent ones that happen to agree today. The Pi leg is
+    TypeScript and is the one a Python-only fix forgets — leaving 402 permanent
+    there re-opens the data loss, because the next Pi drain unlinks what the
+    Python drain correctly deferred.
+
+    A runtime comparison, not a source-spelling scan: it calls the real Pi
+    `classifyFailure` and compares it to the real Python `classify_failure` over
+    a status matrix.
+
+    MUTATION THAT REDS THIS: drop 402 from EITHER classifier -> the maps
+    disagree and the unrecoverable-from-one-leg case is exposed.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available — the Python-side tests still ran")
+    version = subprocess.run(
+        [node, "--version"], capture_output=True, text=True, timeout=15
+    ).stdout.strip()
+    match = re.match(r"v(\d+)\.(\d+)", version)
+    if not match or (int(match.group(1)), int(match.group(2))) < (22, 6):
+        pytest.skip(f"{version} cannot strip TypeScript types")
+
+    ext = (REPO / "tortoise" / "pi-hooks" / "tortoise-capture.ts").as_uri()
+    driver = tmp_path / "classifier-parity.mjs"
+    driver.write_text(
+        f'import {{ classifyFailure }} from "{ext}";\n'
+        "const matrix = [null, 200, 301, 400, 402, 403, 408, 409, 422, 425, 429, 500, 503];\n"
+        "const out = {};\n"
+        "for (const s of matrix) out[String(s)] = classifyFailure(s === null ? undefined : s);\n"
+        "console.log(JSON.stringify(out));\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [node, "--experimental-strip-types", str(driver)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        cwd=str(REPO),
+    )
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    pi_map = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    for raw, verdict in pi_map.items():
+        status = None if raw == "null" else int(raw)
+        assert classify_failure(status) == verdict, (
+            f"the Pi and Python classifiers disagree on status {raw}: "
+            f"pi={verdict!r} python={classify_failure(status)!r}"
+        )
+    # The matrix must actually exercise the transient 4xx family, or the parity
+    # is vacuous (the two maps would agree on "permanent" alone).
+    assert classify_failure(402) == pi_map["402"] == "retry"
+
+
+def test_a_quota_refusal_defers_the_capture_instead_of_destroying_it(tmp_path, monkeypatch):
     """#4714. The hosted quota gate refuses a capture whose ESTIMATED point cost
     would cross the org cap. That estimate is computed from the incoming
     capture, so the SAME capture lands once a node is freed — the refusal is
@@ -261,7 +319,11 @@ def test_a_quota_refusal_defers_the_capture_instead_of_destroying_it(tmp_path):
     `classify_failure` -> the entry is discarded, `read_spool_meta` returns
     None, and the capture is gone.
     """
-    root = tmp_path
+    # A successful file clears the harness breadcrumb, which resolves through
+    # `TORTOISE_IMPORT_RECEIPT_DIR` and would otherwise read the developer's
+    # real ~/.tortoise/state. Pin it into tmp_path like `_isolate` does.
+    monkeypatch.setenv("TORTOISE_IMPORT_RECEIPT_DIR", str(tmp_path / "receipts"))
+    root = tmp_path / "spool"
     write_spool_entry(root, _snapshot("sess-quota"))
     quota = _Server(PostOutcome(
         ok=False, status=402,

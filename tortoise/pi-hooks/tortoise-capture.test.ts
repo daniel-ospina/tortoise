@@ -695,6 +695,34 @@ test("a permanent 4xx discards with a recorded reason and is never retried", asy
   assert.equal(calls.length, 1, "exactly one POST, never a retry loop");
 });
 
+test("a quota-refused 402 defers the capture instead of destroying it (#4714)", async () => {
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, snapshot("sess-402"));
+  // The hosted quota gate refuses a capture whose ESTIMATED point cost would
+  // cross the org cap; that estimate comes from the INCOMING capture, so the
+  // same capture succeeds once a node is freed.
+  //
+  // MUTATIONS THAT RED THIS:
+  //   * drop 402 from the transient set → discarded, entry unlinked, capture GONE;
+  //   * unlink the meta/log but still count it deferred → readSpoolEntry undefined.
+  const quota = statusFetch(
+    402,
+    "Team points limit reached: 24956 in use + 48 estimated for this capture exceeds 25000. Upgrade your plan.",
+  );
+  const first = await flushSpool(TEST_CFG, { dir: spool, fetchImpl: quota.fetchImpl, now: 1_000 });
+  assert.equal(first.deferred, 1, "a quota refusal must be retried, not dropped");
+  assert.equal(first.discarded.length, 0, "a quota refusal must never discard");
+  assert.ok(readSpoolEntry(spool, "sess-402"), "the spool's only copy of the session was destroyed");
+
+  // And it is genuinely retryable: once the quota allows it, the SAME entry
+  // files without a re-capture. The spool is shared with the Python leg
+  // (~/.tortoise/capture-spool), which classifies 402 retryable too — the two
+  // classifiers are a parity contract, not two independent policies.
+  const ok = statusFetch(200);
+  const second = await flushSpool(TEST_CFG, { dir: spool, fetchImpl: ok.fetchImpl, now: 10 ** 12 });
+  assert.equal(second.filed, 1, "the deferred capture must file once the quota clears");
+});
+
 test("the server's in-flight 409 is retryable, not a lost write (#3713)", async () => {
   const spool = tmpSpool();
   writeSpoolEntry(spool, snapshot("sess-409"));
@@ -718,6 +746,15 @@ test("every 409 stays retryable — a policy-blocked session is never silently d
   assert.equal(classifyFailure(undefined), "retry");
   assert.equal(classifyFailure(503), "retry");
   assert.equal(classifyFailure(429), "retry");
+  // 402 is TRANSIENT (#4714, parity with the Python leg's classify_failure).
+  // The quota estimate is computed from the INCOMING capture, so the identical
+  // capture succeeds once a node is freed — permanent here unlinked the only
+  // copy of a real 3-turn session, and both legs share one spool directory.
+  assert.equal(
+    classifyFailure(402, "Team points limit reached: 24956 in use + 48 estimated for this capture exceeds 25000."),
+    "retry",
+  );
+  assert.equal(classifyFailure(402), "retry");
   // A 3xx (a redirect on a stored api_url) must never delete the capture.
   assert.equal(classifyFailure(301), "retry");
   assert.equal(classifyFailure(422), "permanent");

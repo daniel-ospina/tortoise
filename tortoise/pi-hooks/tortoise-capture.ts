@@ -917,7 +917,8 @@ export function pruneSpool(
  *
  * TRANSIENT (retry with backoff): no status (network / timeout), 5xx, 3xx (a
  * redirect on a stored api_url must not delete the capture), the retryable 4xx
- * family (408 request-timeout, 425 too-early, 429 rate-limit), and EVERY 409.
+ * family (402 quota-refusal, 408 request-timeout, 425 too-early, 429
+ * rate-limit), and EVERY 409.
  *
  * On this idempotent upsert a 409 is either #3713's in-flight concurrency
  * condition (retry then replays) or a policy state (recording disabled) that
@@ -926,6 +927,19 @@ export function pruneSpool(
  * avoided: the client ships independently of the server, so a reworded detail
  * would silently turn #3713's benign 409 into a lost write.
  *
+ * 402 is TRANSIENT (#4714), and the Python leg already classifies it so. The
+ * hosted quota gate refuses a capture whose *estimated* point cost would cross
+ * the org's cap, and `est` is computed from the INCOMING capture — so the
+ * identical capture succeeds the moment a node is freed or the tier changes,
+ * exactly the "becomes valid by waiting" property that defines transient here.
+ * Classified permanent, `flushSpool` routed it to `discardEntry`, which
+ * UNLINKS the meta and the turn log. Both legs share ONE spool directory
+ * (`~/.tortoise/capture-spool`), so leaving 402 permanent here re-opens the
+ * data loss the Python fix closes: a capture the Python drain correctly defers
+ * is destroyed by the next Pi drain. Retry is bounded by the spool's
+ * count/byte bound and `backoffDelay`, so an unrecoverable 402 costs disk and
+ * a capped cadence rather than a capture.
+ *
  * PERMANENT (discard + record): every other 4xx — a malformed payload or an
  * out-of-range turn count never becomes valid by waiting.
  */
@@ -933,7 +947,7 @@ export function classifyFailure(status: number | undefined, detail?: string): "r
   if (status === undefined) return "retry";
   if (status >= 300 && status < 400) return "retry";
   if (status >= 500) return "retry";
-  if (status === 408 || status === 425 || status === 429) return "retry";
+  if (status === 402 || status === 408 || status === 425 || status === 429) return "retry";
   if (status === 409) return "retry";
   return "permanent";
 }

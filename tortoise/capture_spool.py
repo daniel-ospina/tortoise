@@ -279,7 +279,7 @@ def classify_failure(status: int | None, detail: str = "") -> str:
 
     TRANSIENT: no status (network / timeout), 5xx, 3xx (a redirect on a stored
     api_url must not delete the capture), the retryable 4xx family
-    (408/425/429), EVERY 409, and 402. On this idempotent upsert a 409 is either
+    (402/408/425/429), and EVERY 409. On this idempotent upsert a 409 is either
     #3713's in-flight concurrency condition (retry then replays) or a policy
     state (recording disabled) the user can reverse — a capture must not be
     destroyed because recording was briefly off. Matching the server's prose is
@@ -305,10 +305,13 @@ def classify_failure(status: int | None, detail: str = "") -> str:
 
     Not detected by prose: the client ships independently of the server's
     wording, and a capacity/billing refusal is a category, not a string. Any
-    402 is retried, bounded by `SPOOL_MAX_ENTRIES`/`SPOOL_MAX_TOTAL_BYTES` and
-    `backoff_delay` — so a genuinely unrecoverable 402 costs disk and a capped
-    retry cadence, never a lost capture. Retry is the safe direction here: the
-    asymmetry is a bounded retry versus irreversible data loss.
+    402 is retried, with `backoff_delay` capping the cadence. That converts
+    immediate loss into a BOUNDED, DEFERRED one: `SPOOL_MAX_ENTRIES` /
+    `SPOOL_MAX_TOTAL_BYTES` still apply, and `prune_spool` evicts oldest-first
+    with a recorded reason, so an org that stays over quota does eventually lose
+    the oldest captures — visibly, on the discard ledger, never silently. Retry
+    is the safe direction here: the asymmetry is a bounded, recorded deferral
+    versus irreversible unlink of the only copy.
 
     PERMANENT: every other 4xx — a malformed payload or an out-of-range turn
     count never becomes valid by waiting.

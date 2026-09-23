@@ -4062,7 +4062,7 @@ def _cmd_sessions_import(args) -> int:
 
         The server's capture guard REFUSES rather than enqueues (its capacity
         gate advertises `Retry-After`), and `classify_failure` already treats
-        5xx / 408 / 425 / 429 / 409 / 3xx / no-status as transient. A refusal is
+        5xx / 402 / 408 / 425 / 429 / 409 / 3xx / no-status as transient. A refusal is
         therefore a DEFERRAL, not a rejection of the content: the POST reached
         the server, there is no server-side copy to fall back on, and without
         this the turns are lost. `claude` and `pi` survive the identical 504
