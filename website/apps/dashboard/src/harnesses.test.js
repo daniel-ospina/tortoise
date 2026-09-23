@@ -49,6 +49,10 @@ test('#4365: no connect copy claims onboarding as an installed skill, and each n
   // true when a 4th name was appended AFTER the closing paren (mutation-verified,
   // #4365 review rounds 2 and 3).
   const claimLine = (s) => (s.match(/^# Install the Tortoise skills[^\n]*/m) || [])[0] || null
+  // NOTE: the HARNESS_SKILLS absence check here is NOT redundant with the
+  // rendered guards further down — it says the connect block must not mention
+  // onboarding AT ALL (that block is pure install), while the rendered guards
+  // allow the approved "Onboarding is NOT a skill" instruction sentence.
   for (const h of ['claude', 'codex']) {
     assert.equal(claimLine(UNIVERSAL_COMMAND[h](KEY)), `# ${SKILLS_CLAIM}:`,
       `${h}: the rendered claim line must be EXACTLY the shipped set`)
@@ -56,6 +60,74 @@ test('#4365: no connect copy claims onboarding as an installed skill, and each n
       `${h}: the HARNESS_SKILLS claim line must be EXACTLY the shipped set`)
     assert.ok(!/onboarding/i.test(HARNESS_SKILLS(h)),
       `${h}: the HARNESS_SKILLS block must not name onboarding at all`)
+  }
+  // RENDERED-level guards. Source-text parsing was defeated three review
+  // rounds running — a name appended on its own source line, then an escaped
+  // backtick, then a formatting-only blank line that false-REDded (#4365
+  // rounds 4-6). These assert on the strings the wizard actually renders.
+  //
+  // (1) No rendered line may claim onboarding is INSTALLED. The one approved
+  //     sentence says the opposite ("Onboarding is NOT a skill") and the one
+  //     URL it points at is the instructions document; anything else that both
+  //     mentions onboarding and reaches for an install/skill/plugin is not
+  //     covered by #4365's delivery story.
+  //     Case-insensitive and prose-tolerant: "# Also install the tortoise
+  //     onboarding skill" and "Tortoise-Onboarding…skill" are exactly the
+  //     claim this issue exists to kill, and both stayed green through every
+  //     lowercase/hyphen token check (#4365 review round 6).
+  // (2) Every rendered statement of the shipped set must spell it EXACTLY,
+  //     and appear at most once per surface — a second claim line further down
+  //     the same template (after a blank line) was invisible to both suites and
+  //     could state a different set (#4365 round 6).
+  //
+  //     A "statement of the set" is a parenthesised BARE COMMA-SEPARATED LIST
+  //     after the phrase; the Cursor step's `(run in a terminal)` is a UI hint,
+  //     not a set, and is skipped by the shape test rather than by a special
+  //     case. A list of ONE name is a statement too — `(tortoise-rebuild)` must
+  //     fail, not slip past an equality that only looks at multi-name lists.
+  const SET_LIST = /^[a-z0-9-]+(?:,\s*[a-z0-9-]+)*$/
+  const setStatements = (text) => String(text).split('\n')
+    .map((line) => (line.match(/Install the Tortoise skills \(([^)]*)\)/i) || [])[1])
+    .filter((parens) => parens !== undefined && SET_LIST.test(parens.trim()))
+  const renderedSurfaces = [
+    ...Object.keys(UNIVERSAL_COMMAND).map((h) => [h, UNIVERSAL_COMMAND[h](KEY)]),
+    ...['claude', 'codex'].map((h) => [`HARNESS_SKILLS(${h})`, HARNESS_SKILLS(h)]),
+    ...Object.keys(HARNESS_NAMES).flatMap((h) =>
+      // teach-human harnesses have no steps (the HUMAN runs them) — skip them.
+      (HARNESS_STEPS(h, KEY) || [])
+        .filter((s) => s && typeof s === 'object' && s.label)
+        .map((s, i) => [`HARNESS_STEPS(${h})[${i}].label`, s.label])),
+  ]
+  for (const [label, text] of renderedSurfaces) {
+    for (const line of String(text).split('\n')) {
+      // The forbidden shape is onboarding AS AN INSTALLABLE — a line that both
+      // mentions onboarding and reaches for an install/skill/plugin. A bare
+      // verb use is fine and real: "then pick the Organization you're
+      // onboarding." is a legit teach-human step, not a claim about a skill.
+      if (/onboarding/i.test(line) && /install|skill|plugin/i.test(line)) {
+        assert.ok(/not a skill/i.test(line) || /onboarding instructions/i.test(line)
+          || line.includes(ONBOARDING_INSTRUCTIONS_URL),
+          `${label}: a rendered line may only mention onboarding as the ` +
+          `instructions document (not as an install). Offending line: ${line.trim()}`)
+      }
+    }
+    const statements = setStatements(text)
+    assert.ok(statements.length <= 1,
+      `${label}: a surface may state the shipped set at most once, found ` +
+      `${statements.length}: ${statements.join(' | ')}`)
+    for (const parens of statements) {
+      assert.deepEqual(parens.split(',').map((s) => s.trim()), SKILLS_LIST.split(', '),
+        `${label}: the rendered statement of the shipped set must be EXACTLY ` +
+        `the shipped set (got ${parens})`)
+    }
+  }
+  // …and the set IS stated on the surfaces that install it, so "at most once"
+  // cannot be satisfied by nobody stating it at all.
+  for (const h of ['claude', 'codex']) {
+    assert.equal(setStatements(UNIVERSAL_COMMAND[h](KEY)).length, 1,
+      `${h}: the connect command must state the shipped set exactly once`)
+    assert.equal(setStatements(HARNESS_SKILLS(h)).length, 1,
+      `${h}: the HARNESS_SKILLS block must state the shipped set exactly once`)
   }
   // The Cursor step list renders the same claim as a step label.
   const cursorStep = HARNESS_STEPS('cursor', KEY)
@@ -66,7 +138,9 @@ test('#4365: no connect copy claims onboarding as an installed skill, and each n
   // RENDER-level token check: a brand-new name appended on its OWN SOURCE LINE
   // inside the same template slipped every source-text check, Python and JS
   // (mutation-verified, #4365 review round 4). URLs are stripped first —
-  // SKILLS_INSTALL_URL itself contains `tortoise-skills`.
+  // SKILLS_INSTALL_URL itself contains `tortoise-skills`. NOTE the declared
+  // limit: this regex sees only names that SPELL `tortoise`; a name like
+  // `agent-memory` is covered by the claim-line equality above, not here.
   const claimTokens = (s) => [...new Set(
     s.replace(/https?:\/\/\S+/g, '').match(/[a-z0-9-]*tortoise[a-z0-9-]*/g) || [])]
     // the bare `tortoise` is the MCP server name (`mcp add … tortoise <url>`),

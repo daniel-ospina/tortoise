@@ -216,13 +216,14 @@ def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
         "https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md"
     ), "the instruction URL must be the served instruction document"
 
-    m = re.search(r"const SKILL_INSTALL = \(harness\)\s*=>\s*`([^`]*)`",
-                  harnesses)
-    assert m, "SKILL_INSTALL template not found in harnesses.js"
-    copy = m.group(1)
-    # #4365: the shipped set is stated ONCE (`SKILLS_LIST`) and the claim is
-    # BUILT from it (`SKILLS_CLAIM`), so a name cannot go missing from the
-    # claim. Both are asserted against the installer's own SKILLS=(...) array.
+    # This test asserts the STRUCTURE that makes the claim un-driftable: one
+    # literal, built-from-it claim, three live interpolating sites. The
+    # rendered CONTENT of those sites is asserted against the real rendered
+    # strings in website/apps/dashboard/src/harnesses.test.js, not parsed out of
+    # this file — source-text template extraction was defeated three review
+    # rounds running (a name appended on a second source line, then an escaped
+    # backtick, then a blank line between the declaration and its template,
+    # which also false-REDded a formatting-only edit). #4365 review rounds 4-6.
     m = re.search(r"^export const SKILLS_LIST =\s*\n?\s*'([^']+)'",
                   harnesses, re.M)
     assert m, "SKILLS_LIST must be an exported constant"
@@ -231,52 +232,21 @@ def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
         "SKILLS_LIST must list exactly what the installer ships")
     assert "onboarding" not in shipped_set_literal, (
         "SKILLS_LIST must not include the onboarding skill")
+    # Each shipped name appears in this module EXACTLY ONCE, so no second site
+    # can state the set — in any order or spacing. A `count(<the whole
+    # literal>) == 1` check was defeated by restating the triple reordered
+    # (#4365 review round 6).
+    for name in shipped_set_literal.split(", "):
+        assert harnesses.count(name) == 1, (
+            f"{name!r} must appear only in SKILLS_LIST; every other site must "
+            "interpolate ${SKILLS_CLAIM}, never restate the set")
     m = re.search(r"^export const SKILLS_CLAIM = `([^`]*)`", harnesses, re.M)
     assert m, "SKILLS_CLAIM must be an exported constant"
     assert m.group(1) == "Install the Tortoise skills (${SKILLS_LIST})", (
         "SKILLS_CLAIM must be built from SKILLS_LIST — never a second literal")
-    assert "${SKILLS_CLAIM}" in copy, (
-        "SKILL_INSTALL must interpolate SKILLS_CLAIM")
-    # The shipped set is stated as a literal in EXACTLY ONE place — SKILLS_LIST.
-    # Any second site that hardcodes the triple (rather than interpolating the
-    # claim) is the drift class #4365 exists to kill, and is invisible to a
-    # check that only inspects interpolating templates (mutation-verified: a new
-    # constant with a hardcoded triple left both suites green, #4365 round 5).
-    assert harnesses.count(shipped_set_literal) == 1, (
-        "the three shipped skill names must appear as a literal only in "
-        "SKILLS_LIST; every other site must interpolate ${SKILLS_CLAIM}")
-    # …and each of the three LIVE sites must interpolate the claim, sliced by
-    # its own declaration. Anchored, not paired: pairing every backtick in the
-    # file is defeated by one stray backtick in a comment (false RED) or an
-    # escaped backtick inside a template (false GREEN) — mutation-verified,
-    # #4365 review round 5.
-    for anchor in (
-        "const SKILL_INSTALL = (harness)",
-        "export const HARNESS_SKILLS = (harness)",
-    ):
-        start = harnesses.index(anchor)
-        block = harnesses[start:harnesses.index("\n\n", start)]
-        assert "${SKILLS_CLAIM}" in block, (
-            f"{anchor!r} must interpolate the shared claim, not restate it")
-        tmpl = re.search(r"`([^`]*)`", block)
-        assert tmpl, f"no template literal in the {anchor!r} block"
-        rest = tmpl.group(1).replace("${SKILLS_CLAIM}", "")
-        assert "tortoise-" not in rest, (
-            "a template that states the shipped skill set must state nothing "
-            f"else: {rest.strip()[:90]!r}")
-    # …including the third live site, the HARNESS_STEPS.cursor label, which is
-    # not a top-level `const … = (…) =>` declaration.
-    claim_lines = [ln for ln in harnesses.splitlines() if "${SKILLS_CLAIM}" in ln]
-    assert len(claim_lines) >= 3, (
+    assert harnesses.count("${SKILLS_CLAIM}") >= 3, (
         "SKILL_INSTALL, HARNESS_SKILLS and the HARNESS_STEPS.cursor label must "
         "each interpolate the shared claim")
-    for ln in claim_lines:
-        rest = re.sub(r"https?://\S+", "", ln.replace("${SKILLS_CLAIM}", ""))
-        assert "tortoise-" not in rest, (
-            "a line that states the shipped skill set must state nothing "
-            f"else: {rest.strip()[:90]!r}")
-    assert "${ONBOARDING_INSTRUCTIONS_URL}" in copy, (
-        "the connect copy must point at the served onboarding instructions")
 
     main = (DASHBOARD_SRC / "main.jsx").read_text(encoding="utf-8")
     assert "SKILLS_LIST" in main.split("from './harnesses.js'")[0], (
@@ -308,6 +278,33 @@ def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
             f"SKILLS_LIST")
         assert "${onboardingInstructions}" in prompt, (
             f"{h}: the RETURNED prompt must name the onboarding instructions")
+        # …and the returned prompt must not name ANY skill by hand. The shipped
+        # set arrives via ${SKILLS_LIST}; the only tortoise-shaped tokens a
+        # prompt may contain are the MCP tool names it calls. A hardcoded fourth
+        # skill name (e.g. `tortoise-rebuild`) appended to a prompt was green in
+        # both suites (#4365 review round 6) — this closes it by token SET, not
+        # by regex over source structure.
+        ALLOWED_PROMPT_TOKENS = {"tortoise_create_point", "tortoise_health"}
+        found = set(re.findall(r"[a-z0-9_-]*tortoise[a-z0-9_-]*", prompt))
+        assert found <= ALLOWED_PROMPT_TOKENS, (
+            f"{h}: the returned prompt may name no skill by hand (the set "
+            f"arrives via ${{SKILLS_LIST}}); unexpected tokens: "
+            f"{sorted(found - ALLOWED_PROMPT_TOKENS)}")
+        # …and the rendered prompt may no more mention onboarding as an install
+        # than a connect command may. Case-insensitive and prose-tolerant: a
+        # plain rendered line "# Also install the tortoise onboarding skill"
+        # passed every lowercase/hyphen token check (#4365 review round 6).
+        for line in prompt.split("\\n"):
+            # The forbidden shape is onboarding AS AN INSTALLABLE — a line that
+            # both mentions onboarding and reaches for an install/skill/plugin.
+            if re.search(r"onboarding", line, re.I) and re.search(
+                    r"install|skill|plugin", line, re.I):
+                assert (re.search(r"not a skill", line, re.I)
+                        or re.search(r"onboarding instructions", line, re.I)
+                        or "${ONBOARDING_INSTRUCTIONS_URL}" in line
+                        or "${onboardingInstructions}" in line), (
+                    f"{h}: a rendered prompt line may only mention onboarding "
+                    f"as the instructions document: {line.strip()!r}")
     # …and the shared line must SAY something: interpolating an empty constant
     # satisfied the per-prompt assertions above while the four live prompts lost
     # the whole point of #4365. (An empty body is caught incidentally, because
