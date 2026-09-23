@@ -755,9 +755,10 @@ surfaces:
   # that the API reported as 200/partial, and nothing in CI could see the drift.
   # Registered in `core` alongside its sibling deploy-time guards
   # (test_fly_machines_guard.py, test_deploy_workflow.py). It is hermetic, and
-  # its cost is measured in the durations map like every other fast file — an
-  # entry that is zero or absent would pack it at the 2.0s default and take
-  # fast-pool coverage down with it (#4259 review).
+  # its cost is measured in the durations map like every other fast file. An
+  # ABSENT row packs it at the 2.0s default and drops fast-pool coverage (the
+  # guard tests key presence); a ZERO row packs it at weight 0. Neither is a
+  # substitute for the measured value (#4259 review).
   - test_fly_secret_drift.py
   # #3039: percent-decoding of URI userinfo (the single shared rule in
   # tortoise/config.py, which is a core-surface path) — registered here so a
@@ -1464,10 +1465,12 @@ durations:
 # requires the two generator suites to carry one weight — the pin constrains
 # equality, not the number.
 #
-# OVERRIDES — rows whose previous value was a RECORDED DECISION, replaced here by
+# OVERRIDES — rows whose previous value was a recorded decision (or a deliberate
+# load-range / local-sample estimate rather than a measurement), replaced here by
 # the measurement. Each is reopened on #3395 for a veto; none was changed silently:
-#   test_bridge_table.py, test_mcp_rename_table.py   240.0 -> measured. A documented
-#     reserve (#4282: "CI-observed range 34s-537s depending on box load").
+#   test_bridge_table.py 240.0 -> measured. A documented reserve (#4282:
+#     "CI-observed range 34s-537s depending on box load"). Its sibling
+#     test_mcp_rename_table.py 240.0 -> held equal to it (the pin below), not measured.
 #   test_sdk_rename_table.py 60.0, test_sdk_surface.py 120.0 -> measured. The same
 #     load-range convention ("measured 46s-553s / 88s-105s depending on box load").
 #   test_pages_bindings.py 40.0 -> measured. Raised from 10.0 by the #3620 review
@@ -1495,8 +1498,10 @@ durations:
 # re-measure-from-junit note is dropped by the sweep: the re-derivation IS that refresh.
 #
 # Coverage rests on measurement: every row below is a measured value except the
-# pinned pair above and any row marked `# unmeasured` (a file no source leg
-# collected, whose value is carried forward and is not a measurement).
+# pinned row above (test_mcp_rename_table.py, held equal to its measured sibling),
+# the RETAINED row (test_selfhost_health_probe_executor.py), and any row marked
+# `# unmeasured` (a file no source leg collected, whose value is carried forward
+# and is not a measurement).
   test_fly_secret_drift.py: 8.5
   test_embedded_evidence.py: 17.2
   test_shared_state_concurrency.py: 0.2

@@ -65,7 +65,7 @@ HALF_IMBALANCE_TOLERANCE = 3
 # #3400: with measured durations, the halves must stay DURATION-balanced
 # within this ratio. Index parity on the same pool leaves a tilt far above it —
 # which files land on even vs odd indices has nothing to do with what they cost
-# — while the LPT pack lands at 1.00x. 1.25 is loose enough for run-to-run noise
+# — while the LPT pack balances the same pool. 1.25 is loose enough for noise
 # and tight enough that a reversion to parity reds. (Do not restate either
 # figure here: both move whenever the pool does.)
 HALF_DURATION_IMBALANCE_RATIO = 1.25
@@ -1038,8 +1038,8 @@ def push_legs(manifest: dict) -> dict:
     # the duration-blind index-parity split this used to be (`fast[0::2]` /
     # `fast[1::2]`). Parity on the real pool leaves a tilt far above the ratio
     # below — the pool's cost is not index-uniform — and blew the 55m watchdog;
-    # LPT is deterministic (ties break on name) and lands the same pool balanced
-    # to 1.00x. split_fast_gate returns `tests/`-prefixed names;
+    # LPT is deterministic (ties break on name) and balances the same pool.
+    # split_fast_gate returns `tests/`-prefixed names;
     # the workflow's matrix format is bare, so strip the prefix.
     fast_a, fast_b = split_fast_gate(fast,
                                      _durations_map(manifest))
