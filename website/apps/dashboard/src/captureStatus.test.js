@@ -6,8 +6,10 @@ import {
   CAPTURE_STATES,
   captureClaimForHarness,
   captureStatusForHarness,
+  captureStatusLabelForHarness,
   lastErrorForHarness,
 } from './captureStatus.js'
+import { CAPTURE_RECEIPT_ATTRIBUTION } from './harnesses.js'
 
 test('canonical 4-state vocabulary is off → install-pending → waiting → active', () => {
   assert.deepEqual(CAPTURE_STATES, ['off', 'install-pending', 'waiting', 'active'])
@@ -230,4 +232,52 @@ test('#3428: GIVEN capture capability, the tense follows the RECEIPT', () => {
   // receipt-less case while the only assertion pinned the receipt-bearing one).
   assert.equal(captureClaimForHarness({ session_recording: true }, 'pi'), 'install-pending')
   assert.equal(captureClaimForHarness({ session_recording: true, session_capture_receipt_pi: 't' }, 'pi'), 'present')
+})
+
+// ── #3700: the per-harness RECEIPT attributes the harness to the AGENT, ──
+// never to the server. `session_capture_receipt_<harness>` names the harness
+// the CALLER declared (body.harness on a fresh session — an authenticated
+// agent self-report — or the Session's stored harness on a re-capture, itself
+// recorded from that declaration). No credential→harness binding exists for
+// tt_/tk_ keys, so the server OBSERVES the capture and not the harness. The
+// RENDERED per-harness state must therefore carry the agent-reported
+// attribution; only the state VOCABULARY (the stable API the derivation and
+// its tests read) may stay `active`.
+//
+// This EXECUTES the rendered-path derivation (`captureStatusLabelForHarness`,
+// the function main.jsx's Settings pill calls) rather than scanning source:
+// a source-text tripwire could stay green while the rendered word claimed a
+// server-observed harness.
+//
+// NAMED MUTATION that reinstates the defect — must RED this test:
+//   RECEIPT_LABEL_CLAIMS_SERVER_OBSERVATION
+//   In `harnesses.js`, revert `active: \`active (${CAPTURE_RECEIPT_ATTRIBUTION})\``
+//   to `active: 'active'` (the pre-#3700 label). The attribution assertion
+//   below then fails while the state-vocabulary assertion stays green — which
+//   is exactly the split the fix exists to preserve.
+test('#3700: a per-harness receipt renders as agent-reported, never a server-observed harness', () => {
+  const st = { session_recording: true, session_capture_receipt_claude: '2026-09-23T00:00:00Z' }
+
+  // (1) the state VOCABULARY is unchanged — this is the API the derivation,
+  //     the panel, and every sibling test read.
+  assert.equal(captureStatusForHarness(st, 'claude'), 'active')
+
+  // (2) the RENDERED label carries the attribution the server can stand
+  //     behind, and never presents the bare `active` as an observed harness.
+  const label = captureStatusLabelForHarness(st, 'claude')
+  assert.equal(label, `active (${CAPTURE_RECEIPT_ATTRIBUTION})`)
+  assert.equal(CAPTURE_RECEIPT_ATTRIBUTION, 'reported by your agent')
+  assert.notEqual(label, 'active', 'the receipt-derived label must not read as a server-observed harness')
+
+  // (3) an UNOBSERVED harness never gets the receipt label at all — the
+  //     attribution cannot leak onto a state the server has no evidence for.
+  assert.equal(
+    captureStatusLabelForHarness({ session_recording: true, session_capture_receipt_claude: 't' }, 'pi'),
+    'not installed yet')
+
+  // (4) the non-receipt states keep their existing (already-honest) labels.
+  assert.equal(
+    captureStatusLabelForHarness({ session_recording: true, install_probe_pi: 't' }, 'pi'),
+    'installed — waiting for first capture')
+  assert.equal(captureStatusLabelForHarness(null, 'claude'), 'off')
 })

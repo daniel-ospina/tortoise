@@ -3,10 +3,17 @@
 The dashboard's capture-status surface reads these server-written onboarding
 state keys (never client state):
 
-* ``session_capture_receipt_<harness>`` proves a durable hosted 2xx capture
-  (the bare ``session_capture_receipt`` is the legacy no-harness key);
+* ``session_capture_receipt_<harness>`` records a durable hosted 2xx capture
+  under an authenticated agent credential, ATTRIBUTED to ``<harness>``. The
+  attribution is the caller's declaration, not a server observation: on a
+  fresh ``session_id`` it is ``body.harness`` (an agent self-report), and on a
+  re-capture it is the Session's stored harness — itself recorded from that
+  first declaration. No credential→harness binding exists (``tt_``/``tk_``
+  keys carry no harness, `#3700`), so nothing here proves the server OBSERVED
+  which harness captured. The bare ``session_capture_receipt`` is the
+  harness-unproven key (legacy no-harness hooks, session-JWT captures).
 * ``session_capture_last_error_<harness>`` carries the last non-2xx attempt's
-  detail (the per-harness failure sub-line).
+  detail (the per-harness failure sub-line) — same attribution rule.
 
 Both the hosted API (``tortoise/hosted_api.py``) and the CLI's
 ``tortoise session verify`` (#3809) derive them from THIS module, so the two

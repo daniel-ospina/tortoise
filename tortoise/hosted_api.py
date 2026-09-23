@@ -9004,13 +9004,20 @@ async def capture_session(body: SessionRequest, request: Request, org: dict = De
     #1927: the session_recording OPT-OUT check is FIRST in the gate stack (before
     the quota 402) so disabled orgs do no quota work at all. The bookkeeping
     keys are per LANE (#3681): an AGENT credential's 2xx records
-    ``session_capture_receipt_{observed_harness}``, and its non-2xx records
-    ``session_capture_last_error_{observed_harness}`` (the dashboard failure
+    ``session_capture_receipt_{resolved_harness}``, and its non-2xx records
+    ``session_capture_last_error_{resolved_harness}`` (the dashboard failure
     sub-line reads this, NOT client state) — except the #3060 capacity 429 and
     the #3129 in-flight 409, which are server conditions. A session-JWT
     (dashboard/browser) caller observes no harness: it records NO per-harness
     last-error, and only the BARE ``session_capture_receipt`` — the same bare
     member legacy no-harness hooks write.
+
+    #3700: ``resolved_harness`` is RESOLVED, not OBSERVED. The server observes
+    that an authenticated agent credential captured; the harness attribution is
+    the caller's declaration (``body.harness`` on a fresh session, the stored
+    Session harness on a re-capture). No credential→harness binding exists, so
+    no surface may read the per-harness key as proof the server saw that
+    harness — only the capture itself is observed.
     """
     _require_scope(org, "graphs:write", "capture_session")
     try:
@@ -10546,8 +10553,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
 
 # ── #1727 Slice 2 (Task 11): per-harness receipt + last-error helpers ──────
 # The dashboard's capture-status surface reads THESE server-written keys
-# (never client state): session_capture_receipt_{harness} proves a durable
-# hosted 2xx capture; session_capture_last_error_{harness} carries the last
+# (never client state): session_capture_receipt_{harness} records a durable
+# hosted 2xx capture under an authenticated agent credential, attributed to
+# the RESOLVED harness — the caller's declaration (`body.harness` on a fresh
+# session, the stored Session harness on a re-capture), NOT a server
+# observation of the harness (#3700; see tortoise/capture_receipts.py).
+# session_capture_last_error_{harness} carries the last
 # non-2xx attempt's detail (the per-harness failure sub-line). Both are
 # REGISTERED onboarding state keys (Task 11's registration table) — an
 # unregistered key would be silently dropped by the _update_onboarding_state

@@ -13,7 +13,7 @@ import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HAR
 // (off → install-pending → waiting → active, probe-driven) — pure, node --test
 // unit-tested (captureStatus.test.js). #1927: the re-ask gate predicate was
 // removed with the consent gate (default-ON, ToS-covered).
-import { captureStatusForHarness, captureClaimForHarness, lastErrorForHarness } from './captureStatus.js'
+import { captureStatusForHarness, captureClaimForHarness, captureStatusLabelForHarness, lastErrorForHarness } from './captureStatus.js'
 import { setupGuide } from './setupGuide.js'
 // #2000 (W4): the Overview calm — EXACTLY 3 elements (connection status,
 // memory digest, next action), zero toggles. Pure derivations, node --test
@@ -7723,8 +7723,12 @@ function claimIntentInFlight() {
                                     corrected in cycle 4 (item 8), and #3782: the
                                     sentence printed follows the server's
                                     OBSERVATION, not the capability flag.
-                                    'present' prints only on an observed
-                                    per-harness RECEIPT; 'future' only once an
+                                    'present' prints only on a per-harness
+                                    capture RECEIPT — and that receipt proves
+                                    the CAPTURE, not the harness: the harness in
+                                    the key is the caller's declaration (#3700),
+                                    so this sentence may claim the capture and
+                                    nothing more. 'future' only once an
                                     install PROBE was observed (the install is
                                     confirmed server-side, capture has not fired);
                                     'install-pending' — recording on, nothing
@@ -10064,8 +10068,12 @@ function MemorySources(props) {
                         only) — the container-level region announced the whole
                         multi-line snippet. review P2-3: unsupported harnesses
                         render the REASON only, no pill (no install path exists
-                        for web/cursor — a pill would contradict it). */}
-                    {supported && <span className="capture-state" aria-live="polite">{HARNESS_CAPTURE_STATUS_LABEL[st]}</span>}
+                        for web/cursor — a pill would contradict it).
+                        #3700: the label comes from captureStatusLabelForHarness
+                        — the ONE shared table — so the receipt-derived `active`
+                        state always carries its agent-reported attribution and
+                        never reads as a server-observed harness. */}
+                    {supported && <span className="capture-state" aria-live="polite">{captureStatusLabelForHarness(state, h)}</span>}
                   </div>
                   {!supported && <p className="dim small">{HARNESS_CAPTURE_REASON[h]}</p>}
                   {supported && st === 'install-pending' && sessionsOn && (
