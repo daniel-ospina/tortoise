@@ -1320,6 +1320,15 @@ test('#3218: the Pi/Cursor step-1 prompts install the skills before the restart 
     assert.ok(p.slice(iRestart).startsWith(
       `Tell me when to restart ${h === 'pi' ? 'Pi' : 'Cursor'}.`),
       `${h}: the restart cue names the harness`)
+    // "Nothing actionable may follow the cue" — IMPLEMENTED, not just claimed:
+    // the cue is a hand-back, so what follows it is pinned exactly (the docs
+    // line and nothing else). A note inserted after it ("Then delete ~/.pi")
+    // was GREEN against an earlier revision that only rejected the install
+    // phrase while its comment claimed this stronger property.
+    assert.equal(
+      p.slice(iRestart),
+      `Tell me when to restart ${h === 'pi' ? 'Pi' : 'Cursor'}.\nDocs: https://tortoise.premiselabs.co/docs`,
+      `${h}: the restart cue must be the last actionable line — only the docs line may follow it`)
     assert.ok(!INSTALL.test(p.slice(iRestart)),
       `${h}: the restart-before-skills order must not come back`)
   }

@@ -5,8 +5,8 @@
 // decides from the SHAPE of the source is defeated by any source of a different
 // shape, and that mechanism produced five distinct false greens (#4365 review,
 // cycle 11): a whole live prompt body that was never scanned at all, a shipped
-// set that was only ever checked for PRESENCE, and a declaration matched after
-// stripping the very interpolation that could hide a second host.
+// set that was only ever checked for PRESENCE, and a shared declaration matched
+// after stripping the very interpolation that could hide a second host.
 //
 // The builders now live in wizardPrompts.js — no JSX, no side effects — so every
 // assertion below reads the RENDERED string the agent actually receives.
@@ -25,7 +25,7 @@ import {
   wizardPromptText,
   wizardWorkflowsText,
 } from './wizardPrompts.js'
-import { SKILLS_LIST, UNIVERSAL_COMMAND } from './harnesses.js'
+import { SKILLS_INSTALL_URL, SKILLS_LIST, UNIVERSAL_COMMAND } from './harnesses.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const snapshot = JSON.parse(readFileSync(join(here, 'wizardPrompts.snapshot.json'), 'utf8'))
@@ -36,6 +36,28 @@ const HARNESSES = ['pi', 'cursor', 'claude', 'codex', 'claude-desktop', 'claude-
 const COMMAND_HARNESSES = Object.keys(UNIVERSAL_COMMAND)
 const KEY = 'tk_snapshot'
 const ONBOARDING_URL = 'https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md'
+
+// The surfaces that MUST render, pinned by HAND — never derived from the renders
+// themselves, because a deleted prompt would then simply drop out of the
+// enumeration and pass (mutation-verified: deleting pi's step-2 return).
+const REQUIRED_SURFACES = [
+  'pi/1', 'pi/2',
+  'cursor/1', 'cursor/2',
+  'claude/1', 'claude/2',
+  'codex/1', 'codex/2',
+  'claude-desktop/2', 'claude-web/2',
+]
+
+// The ONLY hosts the agent-facing copy may send an agent to, pinned so that
+// introducing a new one is a reviewed change. `claude.ai` and `chatgpt.com` are
+// the connector leaves' own setup pages.
+const APPROVED_HOSTS = new Set([
+  'api.premiselabs.co',
+  'app.premiselabs.co',
+  'tortoise.premiselabs.co',
+  'claude.ai',
+  'chatgpt.com',
+])
 
 // ── 1. The rendered snapshot ───────────────────────────────────────────────
 // Regenerate with: node scripts/gen-wizard-prompts-snapshot.mjs
@@ -72,8 +94,8 @@ test('#4880: every required wizard surface still renders, and the snapshot cover
 })
 
 // ── the subjects of every invariant below ─────────────────────────────────
-// The whole point of cycle 11's fix: this list is derived from the RENDER, so a
-// surface cannot be silently left out the way `step2Text` was.
+// The whole point of the cycle-11 fix: this list is derived from the RENDER, so
+// a surface cannot be silently left out the way `step2Text` was.
 function allRenderedSurfaces() {
   const surfaces = []
   for (const harness of HARNESSES) {
@@ -102,23 +124,19 @@ function setStatements(text) {
   return out
 }
 
-// Characters that legitimately follow the set's `)`: a `:` on the command's
-// claim line, or a space before " from …" in a prompt. Anything else — `,`
-// included, which is how `, plus agent.memory` arrives — is an appendage.
-const ALLOWED_AFTER_PAREN = /[\s:]/
-
 const EXPECTED_SET = ` (${SKILLS_LIST})`
 
-// The surfaces that MUST render, pinned by HAND — never derived from the renders
-// themselves, because a deleted prompt would then simply drop out of the
-// enumeration and pass (mutation-verified: M10, deleting pi's step-2 return).
-const REQUIRED_SURFACES = [
-  'pi/1', 'pi/2',
-  'cursor/1', 'cursor/2',
-  'claude/1', 'claude/2',
-  'codex/1', 'codex/2',
-  'claude-desktop/2', 'claude-web/2',
-]
+// Parentheticals that are legitimately NOT the shipped set: the Cursor command
+// tells the user to run the installer in a terminal instead of enumerating the
+// skills (its skills ride the steps). Exact-matched rather than pattern-matched,
+// so a new "hint" that is really a skill name still fails.
+const NON_SET_HINTS = new Set(['run in a terminal'])
+
+// What may legitimately follow the set's `)`. ANCHORED, because a bare
+// "any whitespace" probe cannot tell the legitimate ` from <installer URL>.`
+// from a hostile ` plus agent-memory:` — the space-separated variant of the
+// #4365 defect class slipped through an earlier revision of this gate.
+const TAIL_FORMS = [':\n', ` from ${SKILLS_INSTALL_URL}.`]
 
 // Install-family verb that is NOT negated in its own clause. Clause-scoped on
 // purpose: "Onboarding is not a skill — install it" carries `not` in an EARLIER
@@ -133,16 +151,9 @@ function unnegatedInstall(line) {
   return NEGATION.test(clause) ? null : m[0]
 }
 
-// Parentheticals that are legitimately NOT the shipped set. The Cursor command
-// tells the user to run the installer in a terminal instead of enumerating the
-// skills (its skills ride the steps), so "Install the Tortoise skills (run in a
-// terminal)" is a real, distinct phrasing — exact-matched here rather than
-// pattern-matched, so a new "hint" that is really a skill name still fails.
-const NON_SET_HINTS = new Set(['run in a terminal'])
-
 test('#4365: every rendered shipped-set statement is EXACTLY the shipped set', () => {
   // The old guard compared only the text INSIDE the parentheses, so a superset
-  // appended after `)` — `…, plus agent.memory` — was invisible.
+  // appended after `)` was invisible in EITHER form (`, plus X` and ` plus X`).
   let seen = 0
   for (const { id, text } of allRenderedSurfaces()) {
     const stmts = setStatements(text)
@@ -159,10 +170,10 @@ test('#4365: every rendered shipped-set statement is EXACTLY the shipped set', (
           `${id}: the set statement must enumerate exactly "${SKILLS_LIST}" — got `
           + `${JSON.stringify(tail.slice(0, 60))}`)
       }
-      // Nothing may be appended to the statement: not `, plus X`, not ` X`, not `+X`.
-      const after = tail.slice(close + 1)[0] ?? ''
-      assert.ok(ALLOWED_AFTER_PAREN.test(after),
-        `${id}: text is appended after ")" — ${JSON.stringify(tail.slice(0, 60))}`)
+      const after = tail.slice(close + 1)
+      assert.ok(TAIL_FORMS.some((form) => after.startsWith(form)),
+        `${id}: only ${JSON.stringify(TAIL_FORMS)} may follow the set statement — `
+        + `got ${JSON.stringify(after.slice(0, 40))}`)
     }
   }
   assert.ok(seen > 0, 'precondition: the rendered surfaces carry set statements')
@@ -193,14 +204,14 @@ test('#4365: no rendered surface presents onboarding as an installed skill', () 
 
 test('#4365: no rendered surface names a tortoise-shaped skill outside the set', () => {
   // Cycle 11: a non-tortoise-shaped extra name (e.g. `agent.memory`) escaped a
-  // set-shaped check; this is the complementary rule, and it caught nothing.
+  // set-shaped check; this is the complementary rule.
   const ALLOWED = new Set([
     'tortoise',                 // the MCP server name, and the product
     'tortoise-onboarding',      // the instructions document
     'tortoise_health',
     'tortoise_create_point',
     'tortoise_api_key',
-    'your-tortoise-api-key',  // the Cursor command's placeholder key
+    'your-tortoise-api-key',    // the Cursor command's placeholder key
     'how-to-use-tortoise',
     'tortoise-decide',
     'tortoise-file-finding',
@@ -219,22 +230,32 @@ test('#4365: no rendered surface names a tortoise-shaped skill outside the set',
   }
 })
 
-test('#4365: every host on an onboarding line is the approved host', () => {
-  // Cycle 11: both host matchers required a trailing `/path`, so a bare
-  // `evil.example.com` was unmatched. Extract hosts WITHOUT that requirement,
-  // and remove the approved URL first so its own `….co/SKILL.md` cannot read as
-  // a host named "skill.md".
-  const HOST = /(?:https?:\/\/|\/\/)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?/gi
+test('#4365: every endpoint on every rendered surface is an approved host', () => {
+  // Uniform over ALL surfaces and ALL lines — no "onboarding line" filter. An
+  // earlier revision gated this on /onboarding/i, so a hostile host substituted
+  // into the step-2 verify prompt's OWN `Docs:` line (a live surface for four
+  // harnesses) was never observed.
+  //
+  // Two unambiguous classes, because a bare dotted token is otherwise
+  // indistinguishable from a filename or a decimal: the enumeration here really
+  // does contain `SKILL.md`, `config.toml`, `0.10` and `servers.tortoise`.
+  const URL_HOST = /(?:https?:\/\/|\/\/)([a-z0-9.-]+)/gi
+  // A bare domain is only treated as one with THREE or more labels — a 2-label
+  // token is genuinely ambiguous (`SKILL.md`, `claude.ai`, `evil.com`).
+  const BARE_DOMAIN = /(?<![\w.-])((?:[a-z0-9-]+\.){2,}[a-z]{2,})(?![\w-])/gi
   for (const { id, text } of allRenderedSurfaces()) {
-    let mentions = 0
-    for (const line of text.split('\n')) {
-      if (!/onboarding/i.test(line)) continue
-      mentions += 1
-      const hosts = (line.split(ONBOARDING_URL).join(' ').match(HOST) ?? [])
-      assert.deepEqual(hosts, [],
-        `${id}: an onboarding line carries a non-approved host ${JSON.stringify(hosts)}: `
-        + JSON.stringify(line))
+    for (const m of text.matchAll(URL_HOST)) {
+      assert.ok(APPROVED_HOSTS.has(m[1].toLowerCase()),
+        `${id}: a URL points at a non-approved host ${JSON.stringify(m[0])}`)
     }
+    for (const m of text.matchAll(BARE_DOMAIN)) {
+      assert.ok(APPROVED_HOSTS.has(m[1].toLowerCase()),
+        `${id}: a bare domain does not match an approved host ${JSON.stringify(m[1])}`)
+    }
+  }
+  // …and the reach invariant: an onboarding surface names the document itself.
+  for (const { id, text } of allRenderedSurfaces()) {
+    const mentions = text.split('\n').filter((line) => /onboarding/i.test(line)).length
     if (mentions > 0) {
       assert.ok(text.includes(ONBOARDING_URL),
         `${id}: an onboarding surface must name the approved instructions URL`)

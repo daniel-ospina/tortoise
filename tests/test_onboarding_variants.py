@@ -279,12 +279,21 @@ def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
     assert checked >= 4, (
         f"expected the four config-writing prompts to state the set (found "
         f"{checked} statements) — a prompt that lost its enumeration must fail")
-    # …and nothing is appended to a rendered set statement after its ")".
+    # …and only the sanctioned text may follow a rendered set statement. The tail
+    # is ANCHORED, not probed one character at a time: a bare `\s` probe cannot
+    # tell the legitimate ` from <installer URL>.` from a hostile
+    # ` plus agent-memory:` — the space-separated form of the #4365 defect class
+    # slipped through an earlier revision of this check.
+    m = re.search(
+        r"^export const SKILLS_INSTALL_URL =\s*\n?\s*'([^']+)'", harnesses, re.M)
+    assert m, "SKILLS_INSTALL_URL must be an exported constant"
+    tail_forms = (":\n", f" from {m.group(1)}.")
     for label, text in surfaces.items():
-        for tail in re.findall(r"install the Tortoise skills\s*\([^)]*\)(.)", text, re.I):
-            assert tail in (" ", ":", "\n"), (
-                f"{label}: text is appended to the shipped set after its "
-                f"closing paren ({tail!r}) — the set must be the whole statement")
+        for tail in re.findall(
+                r"install the Tortoise skills\s*\([^)]*\)([\s\S]{0,60})", text, re.I):
+            assert tail.startswith(tail_forms), (
+                f"{label}: only {tail_forms} may follow the shipped set statement — "
+                f"got {tail[:40]!r}")
 
     # The reach invariant: the four config-writing prompts carry the
     # instructions inline; the two connector leaves get them in the workflows
