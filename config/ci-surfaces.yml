@@ -1456,39 +1456,49 @@ durations:
 #
 # #3400: consumed by split_fast_gate (LPT) for BOTH the tier-2 `--split` path and
 # the full-matrix push halves; duration_coverage_issues() floors coverage at 90%.
-# A weight is a measured CI value wherever one exists — except the two rows named
-# below (the pinned equality and the row retained from main) — and local timings
-# are NOT the input, because the CI wall time is what the split must model.
+# A weight is a measured CI value wherever one exists: the sweep takes the CI junit
+# wall time of the leg that CARRIES the file, not a local timing, because the CI wall
+# is what the split must model. The two exceptions are named below — the pinned
+# equality (borrowed from a measured sibling) and the row retained from main (a local
+# embedded-lane timing from #4602, kept deliberately; see the RETAINED paragraph).
 #
-# ONE row's value is not its own measurement: test_mcp_rename_table.py is held equal to
-# test_bridge_table.py because
+# ONE row borrows its value: test_mcp_rename_table.py is held equal to
+# test_bridge_table.py's measurement because
 # tests/test_mcp_rename_table.py::test_duration_weight_matches_the_sibling_generator_suite
 # requires the two generator suites to carry one weight — the pin constrains
-# equality, not the number.
+# equality, not the number. (Only the RETAINED row below shares the property that its
+# value is not this sweep's measurement of the file; see there.)
 #
-# OVERRIDES — rows whose previous value was a recorded decision or a deliberately
-# conservative estimate (a #4282 reserve, a load-range value, a #3895 loose
-# middle, a #2517 pin), replaced here by the measurement — or, for the pinned
-# generator row, held equal to its measured sibling. Provisional first cuts (a flat
-# 2.0 default, a single local timing entered pending CI) are not decisions and are
-# not listed — except the #3501/#3718 rows below, which are surfaced because they
-# err high (a floor that errs high is the safe direction to keep in view).
-# Each is reopened on #3395 for a veto; none was changed silently:
-#   test_bridge_table.py 240.0 -> measured. A documented reserve (#4282:
-#     "CI-observed range 34s-537s depending on box load"). Its sibling
+# OVERRIDES: rows whose previous value was a recorded decision or a deliberate
+# cost-model choice — a #4282 reserve, a load-range value, a #3895 loose middle,
+# a #2517 pin, a #3501/#3718 high-variance sample — replaced here by the
+# measurement, or (the pinned generator row) held equal to its measured sibling.
+# The criterion is the note's INTENT, not its size: each of these rows was hand-set
+# to steer the packer. A first cut entered only to clear the 90% coverage floor — a
+# flat 2.0 default, or a local reading whose note says "refresh from junit once there
+# is one" — states provenance rather than a weighing choice, so it is not a decision
+# and is not listed; the four largest such re-derivations are named after the list so
+# that a veto can reach them too. Each override is reopened on #3395 for a veto;
+# none was changed silently:
+#   test_bridge_table.py 240.0 -> measured. A documented reserve, recorded in the row
+#     comment this sweep replaces (the #4282 banner workstream, PR #4519 — the wording
+#     is on the row, not on #4282 itself: "CI-observed range 34s-537s depending on box
+#     load"). Its sibling
 #     test_mcp_rename_table.py 240.0 -> held equal to it (the pin below), not measured.
 #   test_sdk_rename_table.py 60.0, test_sdk_surface.py 120.0 -> measured. The same
-#     load-range convention ("measured 46s-553s / 88s-105s depending on box load").
+#     load-range convention as the replaced row comments ("measured 46s-553s /
+#     88s-105s depending on box load").
 #   test_pages_bindings.py 40.0 -> measured. Raised from 10.0 by the #3620 review
 #     because local warm samples were 30-45s; the CI junit for this file is 5.5-7.3s.
 #   test_no_legacy_token_path.py 60.0, test_dump_edge_asymmetry_3895.py 90.0,
 #     test_read_routes_loop_responsiveness.py 30.0,
 #     test_graph_write_loop_responsiveness.py 30.0 -> measured. Local/host samples
 #     (#3501, #3895, #3718 — both halves of the #3718 pair) rather than CI wall time.
-#     Three of these four notes ask to be re-measured (#3501 calls itself a SINGLE
-#     SAMPLE, both #3718 halves say to re-measure, and the read half calls itself a
-#     FIRST ESTIMATE); they are listed anyway because they err high, and a floor
-#     that errs high is the safe direction to keep in view for a veto.
+#     Each of these four notes frames its number as a weighing choice for a
+#     high-variance file (a SINGLE SAMPLE, a loose middle, a FIRST ESTIMATE) rather
+#     than a measurement of it, and all four err high (the measured replacement is
+#     smaller in every case), which is the conservative side to keep in view for a
+#     veto — but that is not why they are listed.
 #   test_build_cohorts_2517.py, test_session_reinjection.py,
 #     test_session_reinjection_rules.py, test_eval_reinjection_cap_resume.py,
 #     test_guard_measured_revision.py -> measured, from a deliberate 0.0 (#2517: the
@@ -1496,18 +1506,29 @@ durations:
 #     re-derivation re-packs the pool by construction, so that pin no longer
 #     preserves what it was there to preserve; #2517's concern (order-dependent
 #     isolation failures) is what this branch's CI run tests.
+#   Not decisions, but among the largest re-derivations and named so a veto can reach
+#   them too (local readings whose notes asked for a refresh from junit):
+#   test_fly_secret_drift.py 434.0 -> 8.5, test_4314_inert_hooks.py 170.0 -> 23.9,
+#   test_from_uri_userinfo.py 55.6 -> 2.7, test_finding_provenance.py 30.0 -> 1.7.
 #
 # ONE row is RETAINED rather than re-derived: test_selfhost_health_probe_executor.py
 # keeps main's 28.1 (#4602), whose own note asks for a re-measurement from the first
-# POST-merge junit artifact — all four source runs predate #4602, so they cannot make
-# that measurement, and for a split bounded by a wall-clock watchdog the larger of the
-# two values is the safe side (this sweep measures 3.3 for the file). The PRE-sweep
-# block's other 0.0 rows were measured-negligible values from the #3400 sweep, not pins:
-# only the five #2517 rows in the OVERRIDES list above were deliberate. A row's comment is
-# kept only while the value it describes is unchanged, so for a row the sweep
-# re-derives a provisional re-measure-from-junit note is dropped: the re-derivation
-# IS that refresh. (The retained row above keeps its note because it was not
-# re-derived at all.)
+# POST-merge junit artifact. The discriminator is that NOTE, not the run dates: #4602
+# also rewrote test_selfhost.py, test_monitoring.py and test_ci_selection.py, and those
+# rows WERE re-derived from the same pre-#4602 runs. Only test_selfhost.py's
+# re-derivation moves down (21.6 -> 6.2; the other two move up), and for a split bounded
+# by a wall-clock watchdog the larger value is the safe side — but 15.4s is 0.6% of a
+# half and no note asks for that file to be re-measured, so its measurement stands and
+# the row is flagged here rather than retained. The PRE-sweep block's other 0.0 rows
+# were measured-negligible values from the #3400 sweep, not pins: only the five #2517
+# rows in the OVERRIDES list above were deliberate.
+# A row's comment is kept only while the value AND its stated basis are unchanged:
+# a provisional "re-measure from junit" note is dropped when the sweep re-derives the
+# row (the re-derivation IS that refresh), and a note whose cited run is not in the
+# basis is dropped as stale provenance even where the value survives — why
+# test_onboarding_truth_surface.py keeps its 4.0 with no note (it cited run 35705184320
+# and 3.6s; #3746 asks for a row, never for a value). (The retained row keeps its note
+# because it was not re-derived at all.)
 #
 # Coverage rests on measurement: every row below is a measured value except the
 # pinned row (test_mcp_rename_table.py, held equal to its measured sibling), the
