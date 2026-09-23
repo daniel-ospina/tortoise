@@ -137,9 +137,8 @@ SHARED_MODULES = (
     "tortoise/mcp_server.py",
     # #4713: the projection PACKAGE'S ENTRY POINT only. This used to be the
     # directory `tortoise/projection/`, which made every local edit inside the
-    # 8723-line package (entities.py, grounding.py, propagation.py, edges.py)
-    # run the full matrix. What is genuinely cross-cutting is the package's
-    # `__init__`:
+    # package (entities.py, grounding.py, propagation.py, edges.py) run the
+    # full matrix. What is genuinely cross-cutting is the package's `__init__`:
     # everything OUTSIDE the package imports exactly `from [.]projection import
     # …`, which resolves here — `tortoise/sdk.py` (sdk), `tortoise/api.py`,
     # `hosted_api.py` and `__main__.py` (api), and `ingest.py`, `m0.py`,
