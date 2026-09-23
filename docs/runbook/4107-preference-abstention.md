@@ -87,26 +87,31 @@ specific industries that are more in demand for data scientists?
 between the evidence and the **committed answer**; when the committed answer is an abstention, the
 floor measures the abstention's wording, not the gold. The 2026-09-23 run scores `l3_grounding:
 true` only because the abstention's own phrase "so I don't have information" happens to share the
-4-word span `i don t have` with the evidence. The committed 2026-09-18 and both 2026-09-19 receipts
-score `l3_grounding: false` for this same question. So the honest reading is: **presence rests on
+4-word span `i don t have` with the evidence. The four committed FTS-only receipts (2026-09-18, the
+plain 2026-09-19 run, and the two 2026-09-19 `-dense-leg-run{1,2}` runs — all four carry the
+instrument's own inert-dense-leg caveat) score `l3_grounding: false` for this same question. So the honest reading is: **presence rests on
 `ctx_recall`, the 16-word gold span, and the rank + rendered block above — not on L3.** (This is why
 the failure is characterised as "the reader abstained with the answer-bearing turn in context": an
 L1 failure, with retrieval and provenance green.)
 
 ## 2. The abstention, verbatim
 
-| run | verbatim abstention |
-|---|---|
-| 2026-09-18 receipt | "The context does not contain information about whether attending a high school reunion would be a good idea. It does mention the user's happy high school memori…" (160-char head) |
-| 2026-09-19 dense-leg run 1 | "The context does not contain information about whether attending a high school reunion would be a good idea." |
-| 2026-09-19 dense-leg run 2 | "The context does not contain information about whether attending a high school reunion would be a good idea." |
-| **2026-09-23 (this tree)** | "The context does not mention a high school reunion or any plans to attend one, so I don't have information to answer that." |
+| receipt | lane | verbatim abstention |
+|---|---|---|
+| `ask-shape-rate-2026-09-18.json` (generated 2026-09-19 01:57Z) | FTS-only | "The context does not contain information about whether attending a high school reunion would be a good idea. It does mention the user's happy high school memori…" (160-char head) |
+| `ask-shape-rate-2026-09-19.json` (05:29Z) | FTS-only | same 160-char head wording |
+| `ask-shape-rate-2026-09-19-dense-leg-run1.json` (18:18Z) | FTS-only (file name is legacy) | "The context does not contain information about whether attending a high school reunion would be a good idea." |
+| `ask-shape-rate-2026-09-19-dense-leg-run2.json` (19:01Z) | FTS-only (file name is legacy) | "The context does not contain information about whether attending a high school reunion would be a good idea." |
+| **`ask-shape-rate-2026-09-23.json` (this tree)** | **dense leg active** | "The context does not mention a high school reunion or any plans to attend one, so I don't have information to answer that." |
 
-All four are abstentions. One names the reunion as **unmentioned** (2026-09-23 — the Phase-2
-`asked subject absent` shape); the two 2026-09-19 forms share the 2026-09-18 form's first sentence
-("does not contain information about whether attending a high school reunion would be a good idea") —
-no information about the *evaluation* — differing from it only in that they omit the memory citation.
-The written text and the `abstained` predicate agree in every run — there is no discarded answer.
+All five are abstentions. One names the reunion as **unmentioned** (2026-09-23 — the Phase-2
+`asked subject absent` shape); the two FTS-only forms above it share the 2026-09-18 form's first
+sentence ("does not contain information about whether attending a high school reunion would be a good
+idea") — no information about the *evaluation* — differing from the 2026-09-18 wording only in that
+they omit the memory citation. Each "FTS-only" receipt carries the instrument's own caveat that the
+dense leg was inert (`no_embeddings`), so those four rows are sparse-lane (FTS+RRF) measurements;
+only the 2026-09-23 row ran with the dense leg active. The written text and the `abstained` predicate
+agree in every run — there is no discarded answer.
 
 ## 3. The prompt that was actually emitted
 
@@ -155,7 +160,7 @@ The abstention is **truthful under a literal reading of Phase 2** and **wrong un
 license**. The
 prompt does not say which rule wins, and the model picks the guard.
 
-**This is not reader variance.** All four independent measurements above abstain, at temperature 0,
+**This is not reader variance.** All five committed runs above abstain, at temperature 0,
 under the asserted pin; the 2026-09-18 and 2026-09-23 wordings differ but the decision does not.
 
 ### Prior art — this is not the #2027 cause
@@ -166,7 +171,8 @@ a green regression test for the same shape
 (`tests/test_reader_abstention_calibration.py::test_preference_synthesis_commits_on_generic_baseline`,
 fixture 2). The two are **not** in conflict:
 
-- #2027's cause was *"no category matched, so the reader defaulted to abstain"*. The fix added the
+- #2027's cause was that, with no type fragment engaged, "the reader treated 'no category matched' as
+  'abstain'" (`tortoise/reader.py:196`). The fix added the
   category-independent presence-commit rule. Its regression test is a **wiring pin driven by a
   compliant-model fake** — the fake mechanically executes the pinned rule, so it verifies that the
   rule reaches the model, not that the real model follows it (the test's own docstring says so).
@@ -216,7 +222,7 @@ The candidate sentence (recorded in the diagnostic as `ADVICE_SENTENCE`, **not s
 
 ## 6. Scope decision
 
-**It is a real, reproducible read-path gap — not single-sample wobble** (four abstentions, §2), and
+**It is a real, reproducible read-path gap — not single-sample wobble** (five abstentions, §2), and
 its mechanism is the §4 rule tension, not retrieval (rank 4, `ctx_recall` green) and not the
 `_PREFERENCE_FRAGMENT` route (§5.1).
 

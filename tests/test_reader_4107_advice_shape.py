@@ -29,10 +29,12 @@ a regression fixture for this exact ``d6233ab6`` shape
 (``test_reader_abstention_calibration.py::test_preference_synthesis_commits_on_generic_baseline``,
 fixture 2). That test pins the WIRING with a compliant-model fake — the fake
 mechanically obeys the clause, so it cannot detect that the real pinned model
-does not. #2027's cause was "no category matched, so the reader defaulted to
-abstain"; this one is distinct — the asked *event* is absent, so the clause's
-own asked-subject scoping guard licenses the abstention. A landed candidate
-sentence (#4837) would amend the #1775/#2027 ordered clause.
+does not. #2027's cause was that, with no type fragment engaged, "the reader
+treated 'no category matched' as 'abstain'" (``tortoise/reader.py:196``); this
+one is distinct — the asked *event* is absent, so the clause's own
+asked-subject scoping guard licenses the abstention. A candidate sentence
+(filed with the battery under #4837) would amend the #1775/#2027 ordered
+clause.
 
 If a future change flips any of these, this test fails and the reader of it
 is pointed at the runbook to re-characterise — it is a drift alarm, not a
