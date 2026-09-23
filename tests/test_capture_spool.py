@@ -266,6 +266,34 @@ def test_a_permanent_4xx_discards_with_a_reason_and_is_never_retried(tmp_path):
     assert second.attempted == 0, "a permanent rejection must never be retried"
 
 
+def _node_that_can_strip_ts() -> str:
+    """The node on PATH, or a SKIP if it cannot run a TYPELESS `.ts` driver.
+
+    Shared, because EVERY `--experimental-strip-types` driver in this file needs
+    the same floor and a floor restated per call site is one that will be
+    omitted: it was missing from two of the three invocations here, so on Node
+    20-22.6 — a host the rest of the suite supports — the driver exits on an
+    unknown flag and a test that should SKIP REDs instead (#4714 review).
+
+    22.7, not 22.6: the driver is typeless with no `package.json`, so it needs
+    ambient module-syntax DETECTION; at 22.6 the flag strips types and the
+    import still fails.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available — the node-free pins still ran")
+    try:
+        version = subprocess.run(
+            [node, "--version"], capture_output=True, text=True, timeout=15
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        pytest.skip(f"node could not be probed ({exc}) — the node-free pins ran")
+    match = re.match(r"v(\d+)\.(\d+)", version or "")
+    if not match or (int(match.group(1)), int(match.group(2))) < (22, 7):
+        pytest.skip(f"{version} cannot strip AND auto-detect TypeScript types")
+    return node
+
+
 def test_the_pi_and_python_classifiers_agree_on_every_status_parity(tmp_path):
     """#4714. The two capture legs classify THE SAME spool directory
     (``~/.tortoise/capture-spool``), so transient-vs-permanent must be ONE
@@ -287,21 +315,7 @@ def test_the_pi_and_python_classifiers_agree_on_every_status_parity(tmp_path):
     """
     _assert_both_legs_carry_402()
 
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node not available — the node-free source pin still ran")
-    try:
-        version = subprocess.run(
-            [node, "--version"], capture_output=True, text=True, timeout=15
-        ).stdout.strip()
-    except (OSError, subprocess.SubprocessError) as exc:
-        pytest.skip(f"node could not be probed ({exc}) — source pin still ran")
-    match = re.match(r"v(\d+)\.(\d+)", version or "")
-    # 22.7, not 22.6: the driver is a TYPELESS .ts and the repo ships no
-    # package.json, so it needs ambient module-syntax detection (22.7). At 22.6
-    # the flag strips types but the import fails, so 22.6 would red, not skip.
-    if not match or (int(match.group(1)), int(match.group(2))) < (22, 7):
-        pytest.skip(f"{version} cannot strip AND auto-detect TypeScript types")
+    node = _node_that_can_strip_ts()
 
     ext = (REPO / "tortoise" / "pi-hooks" / "tortoise-capture.ts").as_uri()
     driver = tmp_path / "classifier-parity.mjs"
@@ -625,9 +639,7 @@ def test_the_corrupt_input_helpers_agree_with_the_pi_leg(tmp_path):
     """
     from tortoise.capture_spool import _attempts, _backoff_ms
 
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node not available — the node-free policy pins still ran")
+    node = _node_that_can_strip_ts()
 
     ext = (REPO / "tortoise" / "pi-hooks" / "tortoise-capture.ts").as_uri()
     driver = tmp_path / "clamp-parity.mjs"
@@ -1659,7 +1671,8 @@ const doFetch = (_url, init) => {
 await flushSpool({ apiUrl: "http://x", apiKey: "k" }, { dir, fetchImpl: doFetch });
 console.log(JSON.stringify({ posted, discards: readDiscards(dir).map(d => d.reason) }));
 '''
-    proc = subprocess.run(["node", "--experimental-strip-types", "--input-type=module",
+    node = _node_that_can_strip_ts()
+    proc = subprocess.run([node, "--experimental-strip-types", "--input-type=module",
                            "-e", script], cwd=str(REPO), capture_output=True,
                           text=True, timeout=120)
     assert proc.returncode == 0, f"flushSpool must not throw: {proc.stderr}"
