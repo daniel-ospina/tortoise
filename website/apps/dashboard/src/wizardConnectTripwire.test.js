@@ -1292,10 +1292,25 @@ test('#3218: the prompt-card labels describe the prompt, never a rival step numb
 // the cue load the skills directory before the skills existed.
 test('#3218: the Pi/Cursor step-1 prompts install the skills before the restart note', () => {
   const fn = slice('function wizardPromptText(', 'function wizardWorkflowsText(', 'wizardPromptText')
-  assert.match(fn, /from \$\{SKILLS_INSTALL_URL\}\.\\n\$\{twoStepNote\} Pi\./,
-    'Pi: skills install first, restart note last')
-  assert.match(fn, /from \$\{SKILLS_INSTALL_URL\}\.\\n\$\{twoStepNote\} Cursor\./,
-    'Cursor: skills install first, restart note last')
+  // #4365: the ordering contract, now positional — the onboarding-instructions
+  // line sits BETWEEN the skills install and the restart cue, because the cue
+  // is a hand-back ("Tell me when to restart") that an agent acting on the
+  // prompt may stop at. Asserting positions rather than literal adjacency keeps
+  // #3218's guard (skills BEFORE restart) intact while forbidding a new
+  // instruction after the cue.
+  for (const h of ['Pi', 'Cursor']) {
+    // #4365: the order is skills install → onboarding instructions → restart
+    // note. The restart cue ("Tell me when to restart X.") is a hand-back
+    // point, so the onboarding document — what the agent follows to finish
+    // setup — must not sit after it. Stated as a plain substring so no regex
+    // escaping stands between the assertion and the source text.
+    const ordered = 'from ${SKILLS_INSTALL_URL}.' + '\\n' +
+      '${onboardingInstructions}' + '\\n' + '${twoStepNote} ' + h + '.'
+    assert.ok(fn.includes(ordered),
+      `${h}: skills install → onboarding instructions → restart note`)
+    assert.ok(fn.indexOf('${SKILLS_INSTALL_URL}') < fn.indexOf('${onboardingInstructions}'),
+      `${h}: the skills install must precede the onboarding instructions`)
+  }
   assert.doesNotMatch(fn, /\$\{twoStepNote\} (Pi|Cursor)\.\\nThen install the Tortoise skills/,
     'the restart-before-skills order must not come back')
 })

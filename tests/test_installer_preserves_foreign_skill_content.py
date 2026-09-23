@@ -2,7 +2,7 @@
 
 The destination (``~/.pi/agent/skills`` for the Pi harness) is a flat, SHARED
 namespace. Measured 2026-09-20: a different owner's tool (agent-infra) had
-already written three of the four basenames, byte-identical to its
+already written three of the basenames, byte-identical to its
 ``origin/main``, and the install replaced them verbatim — no merge, no backup,
 no message — silently dropping two machine-wide conventions carried by 95-96
 of 122 installed skills:

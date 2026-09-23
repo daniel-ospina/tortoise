@@ -11,7 +11,7 @@ import {
   HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON,
   HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CAPTURE_SEAM,
   PI_CAPTURE_INSTALL,
-  HARNESS_OAUTH, CANONICAL_MCP_URL, ONBOARDING_INSTRUCTIONS_URL,
+  HARNESS_OAUTH, CANONICAL_MCP_URL, ONBOARDING_INSTRUCTIONS_URL, SKILLS_CLAIM,
   HARNESS_FAMILIES, HARNESS_FAMILY_IDS, harnessFamilyOf, preferredSurface,
   harnessDisplayName, knownHarnessName,
 } from './harnesses.js'
@@ -23,7 +23,6 @@ const KEY = 'tt_w2_test_key'
 // a harness's skills namespace. No connect copy may claim otherwise, and every
 // copy must name where the onboarding instructions live.
 test('#4365: no connect copy claims onboarding as an installed skill, and each names the instructions', () => {
-  const CLAIM = 'Install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding)'
   for (const h of HARNESS_ORDER) {
     const cmd = UNIVERSAL_COMMAND[h](KEY)
     assert.ok(!/Install the Tortoise skills \([^)]*onboarding/i.test(cmd),
@@ -31,11 +30,26 @@ test('#4365: no connect copy claims onboarding as an installed skill, and each n
     assert.ok(cmd.includes(ONBOARDING_INSTRUCTIONS_URL),
       `${h}: every connect copy must name the served onboarding instructions`)
   }
+  // The claim is defined ONCE (`SKILLS_CLAIM`) and EVERY served surface that
+  // enumerates the skill set interpolates it, so the sites cannot drift from
+  // each other. Before this, re-adding onboarding to HARNESS_SKILLS or to the
+  // HARNESS_STEPS.cursor label left the suite green (mutation-verified).
+  assert.ok(SKILLS_CLAIM.startsWith('Install the Tortoise skills ('),
+    'SKILLS_CLAIM is the shared install claim')
+  assert.ok(!/onboarding/i.test(SKILLS_CLAIM),
+    'SKILLS_CLAIM must never name onboarding — it is not a skill')
   // The shared helper's claim enumerates exactly what the installer ships.
   for (const h of ['claude', 'codex']) {
-    assert.ok(UNIVERSAL_COMMAND[h](KEY).includes(CLAIM),
+    assert.ok(UNIVERSAL_COMMAND[h](KEY).includes(SKILLS_CLAIM),
       `${h}: the install claim must list exactly the 3 shipped capabilities`)
+    assert.ok(HARNESS_SKILLS(h).includes(SKILLS_CLAIM),
+      `${h}: the HARNESS_SKILLS block must interpolate the shared claim`)
   }
+  // The Cursor step list renders the same claim as a step label.
+  const cursorStep = HARNESS_STEPS('cursor', KEY)
+    .find((s) => s && typeof s === 'object' && /Install the Tortoise skills/.test(s.label))
+  assert.ok(cursorStep && cursorStep.label.includes(SKILLS_CLAIM),
+    'HARNESS_STEPS.cursor install step must interpolate the shared claim')
 })
 
 test('DE2E-5: the 7-harness vocabulary — self-install (4) + teach-human (3, incl. OAuth chatgpt) cover HARNESS_ORDER exactly', () => {

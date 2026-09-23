@@ -136,7 +136,7 @@ export const HARNESS_STEPS = (harness, key) => ({
   cursor: [
     { label: 'Export the key — add this line to your shell profile (~/.zshrc or ~/.bashrc) so it persists:', code: `export TORTOISE_API_KEY=${key}`, copy: `export TORTOISE_API_KEY=${key}` },
     'Create .cursor/mcp.json in this project with the JSON below — the config references the env var, not the key:',
-    { label: 'Install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding):', code: `curl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness cursor`, copy: `curl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness cursor` },
+    { label: `${SKILLS_CLAIM}:`, code: `curl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness cursor`, copy: `curl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness cursor` },
     // #3819 (owner ruling): the IDE-only limitation is disclosed on the
     // install/connect surface, not buried in a footnote.
     { label: 'Install session capture (the sessionEnd hook):', code: 'tortoise install cursor', copy: 'tortoise install cursor' },
@@ -383,6 +383,15 @@ ${PI_CAPTURE_INSTALL}
 export const SKILLS_INSTALL_URL =
   'https://app.premiselabs.co/install-tortoise-skills.sh'
 
+// #4365: the ONE statement of what the installer ships. Every served surface
+// that enumerates the skill set interpolates THIS string — SKILL_INSTALL, the
+// HARNESS_SKILLS block, and the HARNESS_STEPS.cursor label — so the claim
+// cannot drift from the installer's own `SKILLS=(...)` array (pinned by test
+// on both sides). Before this it was written out three times, and re-adding
+// onboarding to any one of them (the #1998 W2 shape) left the suite green.
+export const SKILLS_CLAIM =
+  'Install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding)'
+
 // #4365: onboarding is NOT one of the installed skills — it is a one-time
 // setup FLOW delivered as INSTRUCTIONS. This is the served instruction set
 // the agent follows after the connect command (also printed by `tortoise
@@ -403,7 +412,7 @@ export const HARNESS_SKILLS_IN_STEPS = ['cursor']
 export const HARNESS_SKILLS = (harness) =>
   HARNESS_SKILLLESS.includes(harness) || HARNESS_SKILLS_IN_PROMPT.includes(harness) || HARNESS_SKILLS_IN_STEPS.includes(harness)
     ? ''
-    : `\n\n# Install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding):\ncurl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness ${harness}`
+    : `\n\n# ${SKILLS_CLAIM}:\ncurl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness ${harness}`
 
 // #1694: per-harness label for the Copy action (Claude Web/Pi copy a
 // prompt to paste into the agent, not a setup command).
@@ -584,7 +593,7 @@ export const HARNESS_OAUTH = ['claude-desktop', 'claude-web', 'chatgpt']
 // onboarding is not among them. Onboarding is the instructions the agent
 // reads at ONBOARDING_INSTRUCTIONS_URL, plus the MCP config in the block above.
 const SKILL_INSTALL = (harness) =>
-  `# Install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding):\ncurl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness ${harness}\n\n# Onboarding is NOT a skill — it is the instructions below plus the config above.\n# Read and follow them here: ${ONBOARDING_INSTRUCTIONS_URL}`
+  `# ${SKILLS_CLAIM}:\ncurl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness ${harness}\n\n# Onboarding is NOT a skill — it is the instructions below plus the config above.\n# Read and follow them here: ${ONBOARDING_INSTRUCTIONS_URL}`
 
 // One copyable block per harness. The wizard renders + copies exactly this.
 export const UNIVERSAL_COMMAND = {

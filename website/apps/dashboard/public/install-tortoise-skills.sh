@@ -385,6 +385,11 @@ if [ ${#missing[@]} -eq 0 ]; then
   echo "✅ Tortoise skills installed to $DEST"
   echo "   ${SKILLS[*]}"
   echo ""
+  # #4365: onboarding is NOT one of the installed skills — say where it lives,
+  # unconditionally (before only the codex harness learned it, via AGENTS.md).
+  echo "Onboarding is NOT a skill — it is the instructions your agent reads:"
+  echo "   $SKILLS_BASE/tortoise-onboarding/SKILL.md"
+  echo ""
   echo "Next: restart your agent, then confirm the skills are listed:"
   case "$HARNESS" in
     claude) echo "   claude — the skills appear under /skills" ;;

@@ -177,8 +177,10 @@ harness dir (a write-logic change, owned by #4327's lane); add the notice once
 leaves the in-tree bytes — and so the
 onboarding byte-identity contract — untouched and reaches every installed copy
 — under #4365 that is the three reusable capabilities: `tortoise-onboarding` is
-now delivered as INSTRUCTIONS and is never installed, so it does not appear in
-an installed copy at all). The
+now delivered as INSTRUCTIONS and is not installed by the current
+`SKILLS_VERSION=v3` installer. A copy an earlier v2 installer already put on
+disk is deliberately left in place by v3 (#4327 preservation), so that copy
+stays outside this notice-injection reach). The
 mechanism adopted for the *installer* half — the notice in the script's own
 header — does **not** close this residual: an installed `SKILL.md` still holds
 no notice of its own. Tracked on **#4398**, not absorbed here; the first

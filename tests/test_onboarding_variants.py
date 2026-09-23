@@ -111,6 +111,13 @@ def _installer_skills() -> list[str]:
     return m.group(1).split()
 
 
+def _skills_in_claim(text: str) -> list[str]:
+    """The skill names listed inside an `Install the Tortoise skills (...)` claim."""
+    m = re.search(r"Install the Tortoise skills \(([^)]*)\)", text)
+    assert m, f"no skill claim found in: {text[:80]!r}"
+    return m.group(1).split(", ")
+
+
 def test_m8_installer_ships_the_three_capabilities_not_onboarding():
     """#4365: onboarding is DELIVERED AS INSTRUCTIONS, not installed as a
     skill — the installer ships the three reusable capabilities only. The
@@ -121,13 +128,30 @@ def test_m8_installer_ships_the_three_capabilities_not_onboarding():
 
 
 def test_m8_installer_still_delivers_the_onboarding_instructions():
-    """The reach invariant the removal must not break: a harness with no
-    skills directory still learns WHERE the onboarding instructions are — the
-    served document the dashboard command and `tortoise init` both name."""
+    """The CODEX reach invariant the removal must not break: the emitter that
+    writes AGENTS.md into a codex project must still point the agent at the
+    served onboarding instructions. (The filesystem-less harnesses never run
+    this installer — their reach is asserted via wizardWorkflowsText in
+    `test_4365_served_connect_copy_names_three_skills_plus_the_instructions`.)"""
     installer = (REPO_ROOT / "website" / "apps" / "dashboard" / "public"
                  / "install-tortoise-skills.sh").read_text(encoding="utf-8")
-    assert "tortoise-onboarding/SKILL.md" in installer, (
-        "the installer's AGENTS.md block must point at the served instructions")
+    # Assert on the block the installer EMITS, not on the whole file: the same
+    # literal also sits in a top-of-file `#` comment that is never written to
+    # any AGENTS.md, so a whole-file membership check stayed GREEN with the
+    # reach bullet deleted (mutation-verified RED/GREEN, #4365 review).
+    fn_start = installer.index("emit_codex_agents_block() {")
+    fn_end = installer.index("\n}\n", fn_start)
+    emitted = installer[fn_start:fn_end]
+    assert "tortoise-onboarding/SKILL.md" in emitted, (
+        "the installer's emitted AGENTS.md block must point at the served "
+        "instructions")
+    assert "Onboarding is delivered as INSTRUCTIONS" in emitted, (
+        "the emitted block must state that onboarding is instructions")
+    # …and the installer names them in its SUCCESS output for every harness,
+    # not only in the codex-only AGENTS.md block.
+    success = installer[installer.index("Tortoise skills installed to"):]
+    assert "tortoise-onboarding/SKILL.md" in success, (
+        "the installer's success output must name the onboarding instructions")
     # name-grep contract: the installer validates each downloaded SKILL.md's
     # frontmatter name (not a literal skill name baked into the script).
     assert 'grep -q "^name: $s$"' in installer, (
@@ -158,10 +182,20 @@ def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
                   harnesses)
     assert m, "SKILL_INSTALL template not found in harnesses.js"
     copy = m.group(1)
-    claim = re.search(r"Install the Tortoise skills \(([^)]*)\)", copy)
-    assert claim, "the skill-install claim must be present"
-    assert claim.group(1).split(", ") == _installer_skills(), (
-        "the served claim must list exactly what the installer ships")
+    # #4365: the claim is defined ONCE (`SKILLS_CLAIM`) and EVERY served surface
+    # that enumerates the skill set interpolates it, so the three sites cannot
+    # drift from each other. Assert the constant against the installer, then
+    # assert each site interpolates it — before this, re-adding onboarding to
+    # HARNESS_SKILLS or to the HARNESS_STEPS.cursor label left the suite green.
+    m = re.search(r"export const SKILLS_CLAIM =\s*\n?\s*'([^']+)'", harnesses)
+    assert m, "SKILLS_CLAIM must be an exported constant"
+    assert _skills_in_claim(m.group(1)) == _installer_skills(), (
+        "SKILLS_CLAIM must list exactly what the installer ships")
+    assert "${SKILLS_CLAIM}" in copy, (
+        "SKILL_INSTALL must interpolate SKILLS_CLAIM")
+    assert harnesses.count("${SKILLS_CLAIM}") >= 3, (
+        "every served surface that enumerates the skill set must interpolate "
+        "SKILLS_CLAIM (SKILL_INSTALL, HARNESS_SKILLS, HARNESS_STEPS.cursor)")
     assert "${ONBOARDING_INSTRUCTIONS_URL}" in copy, (
         "the connect copy must point at the served onboarding instructions")
 
@@ -171,6 +205,14 @@ def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
     assert "tortoise-onboarding" not in wizard, (
         "wizard prompts must not claim onboarding arrives via the installer — "
         "it is instructions, not a skill")
+    # …and each prompt's install claim enumerates exactly the shipped set (the
+    # `not in` above catches an onboarding re-add; this catches any other drift).
+    wizard_claims = re.findall(r"install the Tortoise skills \(([^)]*)\)",
+                               wizard, re.I)
+    assert wizard_claims, "the wizard prompts must state the skill-install claim"
+    for frag in wizard_claims:
+        assert frag.split(", ") == _installer_skills(), (
+            "every wizard prompt's install claim must match the installer")
     assert "ONBOARDING_INSTRUCTIONS_URL" in wizard, (
         "the wizard prompts must name the served onboarding instructions")
     # …and NAME it in the prompts, not merely declare it: the const line alone
@@ -179,7 +221,7 @@ def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
         "the wizard prompts must INTERPOLATE the onboarding instructions URL")
     # …and every config-writing prompt must actually NAME it — one shared local
     # interpolates the URL, and each of the four prompts interpolates that local.
-    assert wizard.count("${onboardingInstructions}") >= 4, (
+    assert wizard.count("${onboardingInstructions}") == 4, (
         "all four config-writing prompts (claude/codex/cursor/pi) must name it")
 
     # …and the filesystem-less harnesses (Claude Desktop/Web, ChatGPT) never ran

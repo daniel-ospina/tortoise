@@ -924,23 +924,27 @@ function wizardPromptText(harness, step, key, mode) {
   // heading the user reads ("Give this prompt…", "Restart X…") is the JSX
   // caption above the card — the SINGLE place that sentence may appear.
   // #4365: onboarding is NOT installed as a skill — it is instructions the
-  // agent READS. Every connect surface names the served instruction set: the
-  // four config-writing prompts below inline it, the two Claude connector
-  // leaves (Claude Desktop/Web — which never ran the installer and have no
-  // skills directory) get it in the workflows prompt body
-  // (wizardWorkflowsText), and ChatGPT — outside this chooser entirely —
-  // gets it in UNIVERSAL_COMMAND.chatgpt. One constant (harnesses.js) for the URL.
+  // agent READS. Every LIVE connect surface names the served instruction set:
+  // the four config-writing prompts below inline it, and the two Claude
+  // connector leaves (Claude Desktop/Web — which never ran the installer and
+  // have no skills directory) get it in the workflows prompt body
+  // (wizardWorkflowsText). ChatGPT has NO surface in this chooser (#2698 keeps
+  // it out of HARNESS_FAMILIES; a persisted 'chatgpt' is reset to 'pi' above),
+  // so its URL rides the exported UNIVERSAL_COMMAND.chatgpt for roundtrip/
+  // total-loop consumers only — not a live delivery path, and the copy test's
+  // chatgpt arm is vocabulary-level, not render-level. One constant
+  // (harnesses.js) for the URL.
   const onboardingInstructions = `Onboarding is instructions, not a skill — read and follow them at ${ONBOARDING_INSTRUCTIONS_URL}.`
   if (harness === 'pi') {
     // #3218: MCP config → skills install → restart. The restart note used to
     // sit BEFORE the skills line, so an agent following the prompt in order
     // would restart Pi (loading the skills directory) and only then install
     // the skills — requiring a second reload for them to appear.
-    if (step === 1) return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (~/.zshrc).\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding) from ${SKILLS_INSTALL_URL}.\n${twoStepNote} Pi.\n${onboardingInstructions}\n${docs}`
+    if (step === 1) return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (~/.zshrc).\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding) from ${SKILLS_INSTALL_URL}.\n${onboardingInstructions}\n${twoStepNote} Pi.\n${docs}`
     if (step === 2) return step2Text
   }
   if (harness === 'cursor') {
-    if (step === 1) return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (export TORTOISE_API_KEY=…) so Cursor can read it from its env.\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding) from ${SKILLS_INSTALL_URL}.\n${twoStepNote} Cursor.\n${onboardingInstructions}\n${docs}`
+    if (step === 1) return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (export TORTOISE_API_KEY=…) so Cursor can read it from its env.\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding) from ${SKILLS_INSTALL_URL}.\n${onboardingInstructions}\n${twoStepNote} Cursor.\n${docs}`
     if (step === 2) return step2Text
   }
   if (harness === 'claude') {
