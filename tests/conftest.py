@@ -48,6 +48,13 @@ os.environ.setdefault("TORTOISE_TEST_MODE", "1")
 SWEEP_TIME_BUDGET = 30.0
 SWEEP_BATCH_SIZE = 200
 
+# #4740: the session-end sweep report's field set — a single source of truth
+# the orphan-bound harness reads from THIS file's source and pins against the
+# gate's parser (.github/scripts/orphan-bound.test.sh). A rename here without
+# the gate following must red the harness, not ship a report the gate silently
+# drops. Order is the order the report dict is built in.
+_HYGIENE_REPORT_FIELDS = ("reaped", "cleared", "left", "before")
+
 # #1371: opt-in fast interpreter-exit close for ephemeral embedded test
 # servers (tortoise/embedded_lifecycle.py) — kills the ~10-15 min atexit
 # teardown tail on every test run (local + CI + post-merge-validation, which
@@ -413,6 +420,7 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
         active_suite_markers,
         active_suite_tokens,
         sweep_stale_index_pid_files,
+        sweep_until_cleared,
     )
 
     marker_dir = ACTIVE_SUITES_DIR
@@ -505,14 +513,13 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
                     # a multi-hundred backlog (the old single batch_size=50
                     # pass could not; the 445-orphan wave needed 9 sweeps).
                     deadline = time.monotonic() + SWEEP_TIME_BUDGET
-                    total = 0
                     # The budget bounds ITERATIONS, not wall time — one
                     # iteration at batch 200 with kill_pacing 0.4 takes ~80s
                     # of pacing, so a multi-hundred backlog can run past the
                     # 30s soft budget (review P2; it still terminates). The
                     # cron sweeps every 10 min make up the difference.
-                    while True:
-                        acted = _run_sweep(
+                    total, cleared = sweep_until_cleared(
+                        lambda: _run_sweep(
                             dry_run=False, batch_size=SWEEP_BATCH_SIZE,
                             only_safe=only_safe, jobs=8, kill_pacing=0.4,
                             # Epic #1647 (PR #1684 CI-fix): the suite is
@@ -522,39 +529,39 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
                             # CI load (observed: TestMcpHandlers teardown
                             # timed out at 600s with the reaper in _kill).
                             sigterm_timeout=3.0,
-                            # deadline is now threaded INTO reap(): the
-                            # eager pre-probe cache is skipped and the record
-                            # loop aborts once the budget is spent — the
-                            # end-sweep can never run past pytest-timeout on
-                            # a large stale backlog (observed: >300s teardown
-                            # timeout redding the leg with the reaper in
-                            # _kill/probe).
-                            deadline=deadline)
-                        total += len(acted)
-                        if not acted or time.monotonic() >= deadline:
-                            break
-                    # #4740: the loop already distinguishes the two outcomes it
-                    # can stop on and used to discard the distinction — `not
-                    # acted` is a CLEARED backlog, the deadline is an EXHAUSTED
-                    # budget. Record which, plus the post-sweep live count read
-                    # with the SAME probe the CI orphan gate runs, while
+                            # deadline is threaded INTO reap(): the eager
+                            # pre-probe cache is skipped and the record loop
+                            # aborts once the budget is spent — the end-sweep
+                            # can never run past pytest-timeout on a large
+                            # stale backlog (observed: >300s teardown timeout
+                            # redding the leg with the reaper in _kill/probe).
+                            deadline=deadline),
+                        deadline,
+                    )
+                    # #4740: `cleared` is True only for a COMPLETED, empty
+                    # backlog (see sweep_until_cleared) — a deadline-aborted
+                    # sweep that acted on nothing no longer reports a cleared
+                    # backlog it never examined. The post-sweep live count is
+                    # read with the SAME probe the CI orphan gate runs, while
                     # TORTOISE_REAPER_MIN_UPTIME still holds this sweep's own
                     # setting (the `finally` below restores it). The gate binds
                     # to this measurement instead of a hand-picked constant;
                     # `cleared: false` marks a residue that is arbitrary rather
                     # than bounded, which is the signal a bigger constant would
                     # swallow.
-                    cleared = not acted
                     # None (not 0) when the probe itself failed: the gate must
                     # name an unmeasured residue, not read a timeout/missing-
                     # pgrep as "nothing left" (#4740). Never raises.
                     left = _live_count_or_none()
-                    return {
+                    # Build the report from the declared field set so the
+                    # harness's contract pin and this dict cannot drift.
+                    _values = {
                         "reaped": total,
                         "cleared": cleared,
                         "left": left,
                         "before": before,
                     }
+                    return {_f: _values[_f] for _f in _HYGIENE_REPORT_FIELDS}
                 finally:
                     if prev is None:
                         os.environ.pop("TORTOISE_REAPER_MIN_UPTIME", None)

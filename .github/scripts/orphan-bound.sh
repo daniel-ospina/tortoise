@@ -44,6 +44,14 @@
 #         Skipped only when `before` is `null` (the probe failed — a distinct
 #         state) or `0`; a report that OMITS `before` is unusable → RED, so the
 #         control can never be disabled by a report shape change.
+#     One shape LIMITS the controls: a DEFERRED end-sweep (`other_suites`
+#     non-empty) ran with `only_safe=True`, so `left` measures the whole
+#     host's embedded servers, not this suite's residue. `left` is then NOT an
+#     authoritative bound and the mixed-population identity is vacuous, so the
+#     gate emits a `::warning::` naming the deferral and applies ONLY the
+#     `COUNT <= left` direction. Warning, not RED: the deferral is a designed
+#     state (`only_safe=bool(others)`), and a red would fire on a healthy
+#     concurrent run; the documented CI report carries `other_suites: []`.
 #
 # VERDICT TABLE
 #   sweep.error               → RED, always: the hygiene path crashed, so the
@@ -60,15 +68,24 @@
 #                               report is still `missing`/`unreadable` → RED.
 #   sweep.no_embedded_servers → bound 0: nothing was spawned, so nothing may
 #                               remain.
-#   sweep.left == null        → RED (kill-downgradable): the sweep's own probe
-#                               FAILED, so the run produced no `left` to bind
-#                               to — an unmeasured residue, named as such rather
-#                               than read as a plausible 0.
+#   sweep.left == null        → RED (kill-downgradable) when COUNT > 0: the
+#                               sweep's own probe FAILED, so the run produced
+#                               no `left` to bind to — an unmeasured residue,
+#                               named as such rather than read as a plausible
+#                               0. When COUNT == 0 the workflow's own identical
+#                               pgrep measured nothing live, so there is no
+#                               residue to account for: a `::warning::`
+#                               naming the failed sweep-side probe, and PASS
+#                               (an empty residue has nothing to bind).
 #   {reaped, cleared, left,
 #     before}                  → bound `left`, plus the positive controls above
 #                               (the count/probe agreement, `cleared`, and the
 #                               `reaped + left >= before` accounting identity).
-#                               An uncomparably large number (18+ digits, past
+#                               When the report carries non-empty
+#                               `other_suites` the sweep DEFERRED and `left`
+#                               is not authoritative — a `::warning::` and
+#                               only the `COUNT <= left` direction. An
+#                               uncomparably large number (18+ digits, past
 #                               bash's 64-bit integer range) is a usage error →
 #                               exit 2, never a pass.
 #   missing/unreadable report → RED: the residue is unaccounted for.
@@ -176,6 +193,16 @@ except Exception:
     raise SystemExit(0)
 
 sweep = doc.get("sweep") if isinstance(doc, dict) else None
+# #4740 review 4: the report carries the defer-to-last-suite-standing signal
+# (`other_suites` / `foreign_pids`). When it is non-empty the sweep ran with
+# only_safe=True and `left` counts the live servers of OTHER suites — an
+# inflated figure that must not be adopted as an authoritative bound for the
+# residue of this suite. The parser surfaces the counts; the shell decides
+# the verdict.
+_other = doc.get("other_suites") if isinstance(doc, dict) else None
+_foreign = doc.get("foreign_pids") if isinstance(doc, dict) else None
+others_n = len(_other) if isinstance(_other, list) else 0
+foreign_n = len(_foreign) if isinstance(_foreign, list) else 0
 if not isinstance(sweep, dict):
     print("kind=unreadable")
 elif "error" in sweep:
@@ -211,12 +238,14 @@ elif (
         print("kind=oversized")
     else:
         print(
-            "kind=report cleared=%s left=%d reaped=%d before=%s"
+            "kind=report cleared=%s left=%d reaped=%d before=%s others=%d foreign=%d"
             % (
                 "true" if sweep["cleared"] else "false",
                 left,
                 reaped,
                 "null" if before is None else str(before),
+                others_n,
+                foreign_n,
             )
         )
 else:
@@ -229,6 +258,8 @@ cleared=""
 left=""
 reaped=""
 before=""
+others=""
+foreign=""
 for _tok in $HYGIENE_OUT; do
   case "$_tok" in
     kind=*) kind="${_tok#kind=}" ;;
@@ -236,6 +267,8 @@ for _tok in $HYGIENE_OUT; do
     left=*) left="${_tok#left=}" ;;
     reaped=*) reaped="${_tok#reaped=}" ;;
     before=*) before="${_tok#before=}" ;;
+    others=*) others="${_tok#others=}" ;;
+    foreign=*) foreign="${_tok#foreign=}" ;;
   esac
 done
 
@@ -296,6 +329,14 @@ case "$kind" in
     exit 0
     ;;
   probe_failed)
+    # #4740 review 4: a failed sweep-side probe is only a red when there is a
+    # residue to account for. When the workflow's OWN identical pgrep measured
+    # zero, nothing is live and there is nothing to account for — the failed
+    # probe is a diagnostic, not an orphan. RED only when COUNT > 0.
+    if [ "$COUNT" -eq 0 ]; then
+      echo "::warning::redislite orphan gate: the hygiene end-sweep's own count probe FAILED (left=null) while the workflow's probe measured 0 live servers — no residue exists to account for; the failed sweep-side probe is diagnostic only (issue #1005)"
+      exit 0
+    fi
     red_or_kill_warning "redislite orphan gate: the hygiene end-sweep's own count probe FAILED (left=null) — the run produced no measurement to bind the bound to, so the $COUNT residue is unaccounted for (issue #1005)"
     ;;
   oversized)
@@ -317,6 +358,24 @@ case "$kind" in
         exit 0
       fi
       red "redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) — the $COUNT residue is arbitrary, not a bounded outcome (issue #1005)"
+    fi
+    # #4740 review 4: a DEFERRED sweep (other_suites non-empty) ran with
+    # only_safe=True, so `left` measures the whole host's embedded servers —
+    # including other suites' — not this suite's residue. It is therefore NOT
+    # an authoritative bound, and the mixed-population accounting identity
+    # would be satisfied trivially. Surface the deferral and apply ONLY the
+    # `COUNT <= left` direction: the count must not exceed even this inflated
+    # measurement. A warning, not a red: the deferral is a designed state
+    # (`only_safe=bool(others)`), while a red would fire on a healthy
+    # concurrent run; the documented CI report carries `other_suites: []` and
+    # takes the normal path below.
+    if [ "${others:-0}" -gt 0 ]; then
+      echo "::warning::redislite orphan gate: the hygiene end-sweep deferred to last-suite-standing (other_suites=$others foreign_pids=$foreign) — left=$left counts other suites' live servers, so it is not an authoritative bound for this suite's residue; only the COUNT <= left direction is applied (issue #4740)"
+      if [ "$COUNT" -gt "$left" ]; then
+        red_or_kill_warning "redislite orphan gate: $COUNT servers counted exceed even the deferred sweep's left=$left (other_suites=$others live) — the counter observes a population the sweep did not account for"
+      fi
+      echo "deferred sweep: $COUNT counted; the end-sweep deferred to last-suite-standing (other_suites=$others), so left=$left is not an authoritative bound for this suite's residue"
+      exit 0
     fi
     # The sweep's own ACCOUNTING IDENTITY: a sweep that reaped `reaped` and
     # left `left` must account for at least everything it started with. `left`

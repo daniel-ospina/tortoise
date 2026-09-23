@@ -3,8 +3,9 @@
 #
 # Run: bash .github/scripts/orphan-bound.test.sh
 # Exits 0 when ALL assertions pass, 1 on any failure. Self-contained: writes
-# hygiene-report fixtures to a temp dir. No CI, no runner, no network, no
-# conftest.
+# hygiene-report fixtures to a temp dir. No CI, no runner, no network. Case 39
+# reads `tests/conftest.py`'s SOURCE with `ast` to pin the report contract —
+# it never imports or runs conftest.
 #
 # Coverage — one case per VERDICT-TABLE row, plus the positive controls that
 # make the row's rule load-bearing:
@@ -27,7 +28,9 @@
 #     and is distinct (case 11's fixture is a DIFFERENT fixture from case 17's).
 #   * `left: null` (the sweep's probe failed) → RED named as a probe failure
 #     (case 16), downgraded only by a watchdog kill (case 16b) — never read as
-#     a plausible 0.
+#     a plausible 0 — BUT a `COUNT` of 0 PASSES with a warning (case 34): the
+#     workflow's own identical probe measured nothing live, so there is no
+#     residue to account for.
 #   * missing / unreadable / structurally-incomplete reports → RED (cases
 #     17-20), downgraded only by a watchdog kill (cases 18, 20).
 #   * the #1371 rc-unknown red path (case 21) and the fail-loud argument
@@ -37,6 +40,20 @@
 #     only a kill downgrades it (case 28); skipped on `before: null` (case 29)
 #     and `before: 0` (case 30) — while a report OMITTING `before` is unusable
 #     → RED (case 31), so the control cannot be disabled by a shape change.
+#   * the deadline-aborted sweep report (`reaped: 0, cleared: false`, with the
+#     identity trivially satisfied and COUNT == left) → RED (case 35), while
+#     the healthy residue shape (`cleared: true`) PASSES (case 36). Only the
+#     `cleared` field separates them, so a gate that drops the `cleared`
+#     branch greens the exact abort the sweep now reports.
+#   * a DEFERRED sweep (`other_suites` non-empty) → a warning and PASS with
+#     the accounting identity skipped and only the `COUNT <= left` direction
+#     applied (case 37); a deferred `COUNT` above even the mixed-population
+#     `left` still REDs (case 38).
+#   * the conftest↔gate report contract (case 39): the field set declared by
+#     `_HYGIENE_REPORT_FIELDS` in `tests/conftest.py` (read from its source
+#     with `ast` — never imported or run) must be named by the gate's parser
+#     and carried by the harness's own canonical fixture, so a conftest rename
+#     cannot leave the harness green while the gate silently drops a field.
 #   * magnitude: an 18+ digit `--count` (case 32) and an 18+ digit `left` in
 #     the report (case 33) both exit 2 as usage errors instead of reaching the
 #     PASS line.
@@ -47,7 +64,11 @@
 # the bound stops being read from `left`. Cases 27, 29, 30, 31, 32, 33
 # likewise fail when their new branch is removed or weakened (identity check
 # dropped, `before: null` no longer accepted, `before` no longer required,
-# either magnitude guard removed). A case that merely restates a default would
+# either magnitude guard removed). Cases 34-39 fail when their branch is
+# removed or weakened (the `probe_failed` COUNT==0 carve-out dropped, the
+# `cleared=false` red removed, the deferral warning or its `COUNT <= left`
+# rescue removed, the mixed-population identity made authoritative again, or
+# the contract check neutered). A case that merely restates a default would
 # not catch its own removal.
 #
 # The assertion count is PINNED (see the summary): a lost case must not be
@@ -91,6 +112,9 @@ printf '{"sweep":{"reaped":1,"cleared":true,"left":2,"before":null}}' > "$WORK/b
 printf '{"sweep":{"reaped":0,"cleared":true,"left":2,"before":0}}' > "$WORK/before_zero.json"
 printf '{"sweep":{"reaped":9,"cleared":true,"left":14}}' > "$WORK/nobefore.json"
 printf '{"sweep":{"reaped":1,"cleared":true,"left":99999999999999999999999999,"before":10}}' > "$WORK/overflow_left.json"
+printf '{"sweep":{"reaped":0,"cleared":false,"left":100,"before":100}}' > "$WORK/aborted.json"
+printf '{"sweep":{"reaped":9,"cleared":true,"left":100,"before":109}}' > "$WORK/healthy100.json"
+printf '{"token":"t","other_suites":["1234-abcdef12"],"foreign_pids":[],"sweep":{"reaped":1,"cleared":true,"left":2,"before":40}}' > "$WORK/deferred.json"
 printf '{"sweep":{"error":"probe exploded"}}' > "$WORK/error.json"
 printf '{"sweep":{"skipped":"reaper-lock-held"}}' > "$WORK/skipped.json"
 printf '{"sweep":{"skipped":"no-pytest"}}' > "$WORK/nopytest.json"
@@ -337,10 +361,86 @@ OUT=$(bash "$GATE" --count 1 --rc 0 --hygiene "$WORK/overflow_left.json" 2>&1) |
 assert_eq "$bad_rc" "2" "exits 2"
 assert_contains "$OUT" "too large to compare" "names the magnitude guard"
 
+echo "34. left=null with COUNT=0 PASSES with a warning (nothing live to account for)"
+# The workflow's own identical pgrep measured zero, so no residue exists:
+# a failed sweep-side probe is a diagnostic, not an orphan. RED only when
+# COUNT > 0 (case 16b).
+run_gate 0 0 leftnull.json
+assert_eq "$RC" "0" "exits 0 when the workflow's own probe measured zero"
+assert_contains "$OUT" "::warning::" "warns that the sweep-side probe failed"
+assert_not_contains "$OUT" "unaccounted for" "does not red an empty residue"
+
+echo "35. a deadline-aborted sweep report REDs (cleared=false proves it)"
+# The abort shape: reap() hit the already-expired deadline on its first
+# record and returned []; the identity holds (0 + 100 >= 100) and
+# COUNT == left (100), so ONLY the cleared field can catch the unexamined
+# backlog. Before the conftest fix this shape reported cleared=true.
+run_gate 100 0 aborted.json
+assert_eq "$RC" "1" "exits 1 even though the identity holds and COUNT==left"
+assert_contains "$OUT" "cleared=false" "names the aborted sweep"
+assert_not_contains "$OUT" "within the sweep's own measurement" \
+  "does NOT fall through to the pass line (fail-open pin)"
+
+echo "36. the healthy residue shape PASSES (only cleared separates it from case 35)"
+run_gate 100 0 healthy100.json
+assert_eq "$RC" "0" "exits 0 on reaped>0, cleared=true"
+assert_contains "$OUT" "within the sweep's own measurement" "prints the pass line"
+
+echo "37. a DEFERRED sweep warns, skips the mixed-population identity, and PASSES"
+# other_suites non-empty: left counts other suites' servers, so it is not an
+# authoritative bound. Here the foreign suite exited mid-sweep, so
+# reaped + left (3) < before (40) — the identity would false-red a healthy
+# deferral, which is exactly why it is skipped under a deferral.
+run_gate 2 0 deferred.json
+assert_eq "$RC" "0" "exits 0 — left is not an authoritative bound under a deferral"
+assert_contains "$OUT" "::warning::" "names the deferral"
+assert_contains "$OUT" "not an authoritative bound" "states why the bound is not authoritative"
+assert_not_contains "$OUT" "does not account for" \
+  "the mixed-population identity is not asserted under a deferral"
+
+echo "38. a deferred COUNT above even the mixed-population left still REDs"
+run_gate 3 0 deferred.json
+assert_eq "$RC" "1" "exits 1 when the count exceeds even the deferred measurement"
+
+echo "39. the conftest↔gate report contract (single source of truth)"
+# #4740: tests/conftest.py declares the report field set in
+# _HYGIENE_REPORT_FIELDS; the gate's parser must name every field, and this
+# harness's canonical fixture must carry exactly that set. The conftest source
+# is PARSED with ast — never imported or run. The orphan_bound_scripts CI
+# trigger lists tests/conftest.py for exactly this case.
+CONFTEST="$SCRIPT_DIR/../../tests/conftest.py"
+FIELDS="$(python3 - "$CONFTEST" <<'PY' 2>/dev/null
+import ast
+import sys
+
+try:
+    tree = ast.parse(open(sys.argv[1], encoding="utf-8").read())
+except OSError:
+    raise SystemExit(0)
+for node in tree.body:
+    if isinstance(node, ast.Assign) and any(
+        getattr(t, "id", None) == "_HYGIENE_REPORT_FIELDS"
+        for t in node.targets
+    ):
+        print(" ".join(ast.literal_eval(node.value)))
+        break
+PY
+)"
+assert_eq "$FIELDS" "reaped cleared left before" \
+  "reads the report field set from conftest's own source"
+MISSING=""
+for _field in $FIELDS; do
+  grep -q "\"$_field\"" "$GATE" || MISSING="$MISSING $_field"
+done
+assert_eq "$MISSING" "" "the gate's parser names every conftest report field"
+FIXTURE_KEYS="$(python3 -c 'import json,sys; print(" ".join(sorted(json.load(open(sys.argv[1]))["sweep"])))' "$WORK/report14.json")"
+assert_eq "$FIXTURE_KEYS" "$(printf '%s\n' $FIELDS | sort | tr '\n' ' ' | sed 's/ *$//')" \
+  "the harness's canonical fixture carries exactly the declared field set"
+
 echo
 # A LOST case must not be indistinguishable from success: deleting a case
 # leaves FAIL=0 and merely a LOWER count, so the count is pinned too.
-expected_assertions=96
+expected_assertions=112
 if [ "$PASS" -eq "$expected_assertions" ]; then
   PASS=$((PASS + 1))
   echo "  ✅ assertion count pinned at $expected_assertions (a lost case is not a green run)"

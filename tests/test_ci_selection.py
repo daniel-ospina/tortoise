@@ -3511,3 +3511,62 @@ def test_every_changed_set_diff_disables_rename_detection():
         "changed_set_git_diff_commands the new spelling (#4378):\n  "
         + "\n  ".join(unparsed)
     )
+
+
+# ── #4740 review 4: the orphan-assert steps' fail-closed pgrep probe ───────
+# Each of the three `Assert no redislite orphans` steps in python-ci.yml is
+# the newest fail-closed control on the orphan count, and NO other test can
+# see it: `orphan-bound.test.sh` reads only the gate script, and the gate
+# receives an already-computed `--count`. A mutation (`-le 1` → `-lt 1`, or a
+# revert to `COUNT=$(pgrep … | wc -l)`) would be undetectable. This pin reads
+# the workflow text and requires, per step, that pgrep's OWN status is
+# captured and the count is never read from a `pgrep | …` pipeline (whose
+# status is the last command's — `tr`, always 0 — so a failed probe would
+# read as a measured 0 and pass).
+
+
+def _orphan_assert_steps() -> list[dict]:
+    wf = _load_python_ci()
+    steps = [
+        s
+        for job in wf["jobs"].values()
+        for s in (job.get("steps") or [])
+        if str(s.get("name", "")).startswith("Assert no redislite orphans")
+    ]
+    return steps
+
+
+def test_orphan_assert_steps_capture_pgrep_status_fail_closed():
+    """#4740 review 4: pgrep's own status must gate the orphan count."""
+    steps = _orphan_assert_steps()
+    assert len(steps) == 3, (
+        f"expected the three 'Assert no redislite orphans' steps, found "
+        f"{len(steps)} — this pin must not pass vacuously"
+    )
+    for s in steps:
+        # Drop whole-line comments: they QUOTE the rejected pipeline form
+        # (`COUNT=$(pgrep … | wc -l)`) and the `${PIPESTATUS[0]}` rationale, so
+        # scanning raw text would flag the documentation rather than the code.
+        body = "\n".join(
+            line
+            for line in s["run"].splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        assert "PIPESTATUS" not in body, (
+            "a ${PIPESTATUS[0]} read after `COUNT=$(pgrep … | wc -l)` is the "
+            "`tr` status, never pgrep's, so the guard would be inert (#4740)"
+        )
+        assert re.search(r"\$\(pgrep\b[^)]*\|", body) is None, (
+            "COUNT must not be read from a `pgrep | …` pipeline: its status is "
+            "the last command's, so a failed probe reads as a measured 0 and "
+            "passes (the #4740 fail-open)"
+        )
+        assert 'PIDS=$(pgrep -f "redislite/bin/redis-server")' in body, (
+            "pgrep must run on a bare assignment so `$?` is its own status"
+        )
+        assert "prc=$?" in body, "pgrep's own status must be captured"
+        assert '[ "$prc" -le 1 ]' in body, (
+            "rc 0 (matches) and rc 1 (none) are real measurements; anything "
+            "else must fail closed (#4740)"
+        )
+        assert "exit 1" in body, "the failed-probe guard must exit non-zero"

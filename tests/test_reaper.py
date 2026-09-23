@@ -4931,3 +4931,68 @@ def test_socketless_binding_never_resolves_the_candidate_path(
         {"dbdir": str(decoy), "socket_path": str(decoy / "redis.socket"),
          "pid": os.getpid()})
     assert refusal is not None, "planted symlink forged the socket-less binding"
+
+
+# ── #4740 review 4: the end-sweep's `cleared` derivation ───────────────────
+# `sweep_until_cleared` is the loop conftest's session-end sweep runs. Its
+# `cleared` field is what the CI orphan gate binds to, and review 4 found the
+# previous `cleared = not acted` reported True for a deadline-aborted sweep
+# (`reap()` breaks on its first record and returns [], which is not proof the
+# backlog is clear). These cases pin all four stop shapes.
+
+
+def _scan_aware(records, complete=True):
+    """A `_run_sweep`-shaped result: a list carrying `.complete`."""
+    from tortoise.embedded_reaper import _ScanAwareList
+
+    out = _ScanAwareList(records)
+    out.complete = complete
+    return out
+
+
+def test_sweep_until_cleared_healthy_path():
+    """Acting, then an empty iteration with budget remaining → cleared."""
+    from tortoise.embedded_reaper import sweep_until_cleared
+
+    responses = iter([_scan_aware([{"pid": 1}]), _scan_aware([])])
+    total, cleared = sweep_until_cleared(
+        responses.__next__, deadline=1030.0, clock=lambda: 1000.0)
+    assert (total, cleared) == (1, True)
+
+
+def test_sweep_until_cleared_already_expired_deadline_is_not_cleared():
+    """The abort the fix exists for: reap() hits an already-expired deadline
+    on its first record and returns []. `not acted` must not read as clear."""
+    from tortoise.embedded_reaper import sweep_until_cleared
+
+    total, cleared = sweep_until_cleared(
+        lambda: _scan_aware([]), deadline=999.0, clock=lambda: 1000.0)
+    assert (total, cleared) == (0, False)
+
+
+def test_sweep_until_cleared_spent_budget_after_work_is_not_cleared():
+    """The budget runs out while servers are still being acted on: the loop
+    must STOP on the spent deadline (not keep iterating) and report not
+    cleared. `run_one` is a bounded sequence so removing the deadline break
+    shows up as a different `total`, not a hang."""
+    from tortoise.embedded_reaper import sweep_until_cleared
+
+    responses = iter([
+        _scan_aware([{"pid": 1}]),
+        _scan_aware([{"pid": 2}]),
+        _scan_aware([]),
+    ])
+    total, cleared = sweep_until_cleared(
+        responses.__next__, deadline=1030.0, clock=lambda: 9999.0)
+    assert (total, cleared) == (1, False)
+
+
+def test_sweep_until_cleared_truncated_scan_is_not_cleared():
+    """A partial discovery scan that acted on nothing proves nothing, even
+    with budget remaining (`.complete` is fail-closed False)."""
+    from tortoise.embedded_reaper import sweep_until_cleared
+
+    total, cleared = sweep_until_cleared(
+        lambda: _scan_aware([], complete=False), deadline=1030.0,
+        clock=lambda: 1000.0)
+    assert (total, cleared) == (0, False)

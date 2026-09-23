@@ -2779,6 +2779,49 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
     return out
 
 
+def sweep_until_cleared(run_one, deadline, clock=time.monotonic):
+    """Drive discover->reap iterations until the backlog clears or the
+    deadline passes; return ``(total_acted, cleared)``.
+
+    ``cleared`` is the sweep's own claim that it finished its work — the
+    field the CI orphan gate binds to. It is True ONLY when ALL hold:
+
+    * the loop stopped on an iteration that acted on NOTHING (the backlog is
+      empty — the intended stop), not on the deadline;
+    * the deadline had NOT passed when that empty iteration returned, so the
+      empty result is a real measurement rather than ``reap()``'s
+      first-record deadline break returning a partial, possibly empty list;
+    * that iteration's discovery scan was COMPLETE (``.complete`` on the
+      scan-aware list — fail-closed False for an unknown/truncated scan). A
+      partial scan that acted on nothing proves nothing.
+
+    #4740 review 4: the previous ``cleared = not acted`` treated an
+    already-expired-deadline abort (``reap()`` returns ``[]`` because its
+    first record hit the deadline) as a CLEARED backlog, so the gate greened
+    a residue whose entire backlog had never been examined. A spent deadline
+    is not proof the backlog is clear.
+    """
+    total = 0
+    cleared = False
+    acted = []
+    while True:
+        acted = run_one()
+        total += len(acted)
+        if not acted:
+            # The one stop that can mean "cleared" — but only if the budget
+            # remained: an empty list returned BECAUSE the deadline had
+            # already expired is an unexamined backlog, not a clear one.
+            cleared = clock() < deadline
+            break
+        if clock() >= deadline:
+            # Budget exhausted while servers were still being acted on: the
+            # residue is arbitrary, so `cleared` stays False.
+            break
+    # A partial discovery scan is never "cleared", whatever it acted on.
+    cleared = cleared and bool(getattr(acted, "complete", False))
+    return total, cleared
+
+
 def _zero_client_state_read() -> dict:
     """Read the persisted zero-client observation state (best-effort).
 
