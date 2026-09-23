@@ -2703,3 +2703,59 @@ def test_read_org_ids_reports_a_proxied_upstream_status_and_fails_closed():
                     [(503, {"error": "upstream_unavailable", "upstream_status": 429})]},
                    base)
     assert _mod.read_org_ids(ctx, base) == (503, None, 429)
+
+
+# ── #4907 — the browser teardown's record, bound and single verdict print ────
+
+def test_a_completed_run_records_the_browser_teardown_block(monkeypatch, tmp_path):
+    """The record has a declared home ON DISK, not just in memory: `asdict`
+    serializes DECLARED fields only, so an undeclared attribute is silently
+    dropped from the artifact. PRESENCE/SHAPE only here — the VALUE assertions
+    are the bound's own tests below (this test is upgraded there, not duplicated)."""
+    import json
+
+    import tools.ship_test_onboarding as mod
+
+    _obs, _ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path, reads=[(200, []), (200, [])], org_create=False)
+    written = json.loads((tmp_path / "ship-test" / "observation.json").read_text())
+    block = written["browser_teardown"]
+    assert set(block) == {"outcome", "closes", "detail"}, block
+    assert block["outcome"] in mod.BROWSER_TEARDOWN_OUTCOMES, block
+    assert isinstance(block["closes"], list)
+    assert block["detail"] == ""
+
+
+def test_the_browser_teardown_vocabulary_is_closed() -> None:
+    """The closed set the artifact may carry. `passed` is deliberately absent:
+    the browser teardown is never a product verdict."""
+    import tools.ship_test_onboarding as mod
+
+    assert mod.BROWSER_TEARDOWN_OUTCOMES == (
+        "not_run", "clean", "close_error", "watchdog_kill", "driver_absent")
+    assert len(set(mod.BROWSER_TEARDOWN_OUTCOMES)) == 5
+    assert "passed" not in mod.BROWSER_TEARDOWN_OUTCOMES
+    for name in ("BROWSER_TEARDOWN_NOT_RUN", "BROWSER_TEARDOWN_CLEAN",
+                 "BROWSER_TEARDOWN_CLOSE_ERROR", "BROWSER_TEARDOWN_WATCHDOG_KILL",
+                 "BROWSER_TEARDOWN_DRIVER_ABSENT"):
+        assert getattr(mod, name) in mod.BROWSER_TEARDOWN_OUTCOMES
+
+
+def test_the_teardown_bound_is_pinned() -> None:
+    """An inflated bound is not a bound: the value is pinned, and the pin is a
+    RANGE, so an inflated bound is as RED as a zero one."""
+    import tools.ship_test_onboarding as mod
+
+    assert mod.TEARDOWN_BOUND_S == 5.0
+    assert 0 < mod.TEARDOWN_BOUND_S <= 10
+
+
+def test_the_verdict_is_printed_exactly_once(capsys, monkeypatch, tmp_path):
+    """The pre-teardown write is print-free: two writes, ONE verdict line — so
+    stdout and the file cannot disagree about how many runs happened."""
+    obs, _ctx, _mod = _run_fake_walk(
+        monkeypatch, tmp_path, plan=_happy_base(),
+        ui_sequence=[NOT_CONNECTED, CONNECTED], mcp_tools_call=_MCP_OK)
+    out = capsys.readouterr().out
+    assert obs.verdict == "passed", (obs.verdict, obs.reason)
+    assert out.count("[ship-test] passed") == 1, out

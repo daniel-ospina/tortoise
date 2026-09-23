@@ -537,6 +537,37 @@ class Step:
     extra: dict = field(default_factory=dict)
 
 
+# ── the BROWSER teardown's own record and bound (#4907) ──────────────────────
+# DISTINCT from the org reaper above: `obs.teardown` is the ORG teardown's outcome
+# (it drives the residue warning and ~40 existing assertions), while this is the
+# BROWSER teardown's. The vocabulary is CLOSED, and `not_run` is what the
+# pre-teardown document carries: a run killed inside the bounded window still
+# lands a complete, parsable artifact that says the teardown never finished.
+#
+# A `pw.stop()` failure is `close_error`, alongside a context/browser close that
+# raises. `close_error` therefore means "a close the run attempted did not
+# complete", whichever closer it was — the `closes` list names it.
+BROWSER_TEARDOWN_NOT_RUN = "not_run"
+BROWSER_TEARDOWN_CLEAN = "clean"
+BROWSER_TEARDOWN_CLOSE_ERROR = "close_error"
+BROWSER_TEARDOWN_WATCHDOG_KILL = "watchdog_kill"
+BROWSER_TEARDOWN_DRIVER_ABSENT = "driver_absent"
+BROWSER_TEARDOWN_OUTCOMES = (
+    BROWSER_TEARDOWN_NOT_RUN, BROWSER_TEARDOWN_CLEAN, BROWSER_TEARDOWN_CLOSE_ERROR,
+    BROWSER_TEARDOWN_WATCHDOG_KILL, BROWSER_TEARDOWN_DRIVER_ABSENT,
+)
+
+# The teardown budget, in seconds. The watchdog's rungs are timed off it and the
+# teardown returns by it; the pin (`0 < TEARDOWN_BOUND_S <= 10`) lives in the
+# test that owns the constant, because an inflated bound is not a bound.
+TEARDOWN_BOUND_S = 5.0
+
+
+def _browser_teardown_record() -> dict:
+    """The pre-teardown document's shape: `not_run`, no closes, no detail."""
+    return {"outcome": BROWSER_TEARDOWN_NOT_RUN, "closes": [], "detail": ""}
+
+
 @dataclass
 class Observation:
     started_at: str
@@ -560,6 +591,10 @@ class Observation:
     # serializes with `dataclasses.asdict`, which emits declared fields only —
     # an undeclared attribute is silently dropped from the artifact.
     teardown: dict = field(default_factory=dict)
+    # The BROWSER teardown's outcome (#4907). Declared for the same reason as
+    # `teardown` — `asdict` emits declared fields only — and pinned to the closed
+    # vocabulary above. `not_run` until a teardown actually completes.
+    browser_teardown: dict = field(default_factory=_browser_teardown_record)
     # The failure CLASS (#4291). Empty iff `verdict == "passed"`. A run whose
     # class is `instrument_error` measured nothing about the product and exits 3.
     reason: str = ""
@@ -1600,12 +1635,28 @@ def _mint_or_read_key(page, ctx, base_url: str) -> tuple[str | None, str]:
                   f"{scrub(json.dumps(body), 200)}")
 
 
+def _write_observation(obs: Observation, out_dir: Path) -> Path:
+    """Serialize the observation ATOMICALLY: ``tmp`` + ``os.replace``.
+
+    A normal run writes the document TWICE — once pre-teardown (the `not_run`
+    fallback, so a run killed inside the bounded window still leaves a complete,
+    parsable artifact) and once after it (authoritative). A truncate-in-place
+    write lets a reader see a half-written file between the two; an atomic
+    replace cannot. Deliberately PRINT-FREE: the verdict is printed once, by
+    `_finish`, so the two writes cannot produce two verdict lines.
+    """
+    path = out_dir / "observation.json"
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(asdict(obs), indent=2) + "\n")
+    os.replace(tmp, path)
+    return path
+
+
 def _finish(obs: Observation, out_dir: Path) -> Observation:
     if not obs.reason:
         obs.reason = failure_reason(
             obs.verdict, session_state=(obs.session or {}).get("state", ""))
-    path = out_dir / "observation.json"
-    path.write_text(json.dumps(asdict(obs), indent=2) + "\n")
+    path = _write_observation(obs, out_dir)
     print(f"[ship-test] {obs.verdict}")
     for s in obs.steps:
         mark = "PASS" if s.ok else ("FAIL" if s.ok is False else "--")
