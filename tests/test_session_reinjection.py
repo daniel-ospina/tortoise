@@ -749,6 +749,11 @@ def test_both_arms_on_aborts_with_message_and_nonzero_exit(
     with pytest.raises(SystemExit) as excinfo:
         _run.run_main([
             "--data", str(MINI), "--limit", "1", "--split", "s", "--mock",
+            # #4718: the module's autouse _no_embedder fixture pins the dense
+            # leg out, so the waiver must be explicit — --mock no longer
+            # silently waives it. The arm-conflict abort under test is
+            # independent of the dense leg.
+            "--skip-preflight",
             "--coverage-loop", "--session-reinjection",
             "--output", str(tmp_path / "r.json")])
     assert excinfo.value.code == 1
@@ -760,8 +765,10 @@ def test_run_level_tristate_and_methodology(monkeypatch, tmp_path):
     """CLI flag > env > OFF at the run level, and the resolved arm + guard
     are recorded in the methodology (methodology == actual)."""
     from tools.longmem_eval import run as _run
+    # #4718: the autouse _no_embedder fixture pins the dense leg out; the
+    # dense-leg waiver is now explicit (--mock alone no longer grants it).
     base = ["--data", str(MINI), "--limit", "1", "--split", "s", "--mock",
-            "--output", str(tmp_path / "r.json")]
+            "--skip-preflight", "--output", str(tmp_path / "r.json")]
     monkeypatch.setenv("TORTOISE_LME_SESSION_REINJECTION", "1")
     monkeypatch.delenv("TORTOISE_LME_COVERAGE_LOOP", raising=False)
     rep = _run.run_main([*base, "--no-session-reinjection"])
