@@ -20,7 +20,9 @@
 #     and `left` is produced by the very same probe as the workflow's `COUNT`,
 #     one step later — so neither alone can detect a sweep whose own
 #     measurement is broken. A `{reaped, cleared, left, before}` report is
-#     therefore accepted only when ALL hold:
+#     therefore accepted when the count/probe agreement and the accounting
+#     identity hold, with `cleared` a confidence flag whose effect is keyed on
+#     the measured `COUNT`:
 #       * the workflow's `pgrep` COUNT is at or below the sweep's own `left` —
 #         the two probes run the identical `pgrep -f redislite/bin/redis-server`,
 #         one step apart. COUNT ABOVE `left` means the counter is measuring a

@@ -5008,8 +5008,11 @@ def test_build_end_sweep_report_defaults_to_the_real_monotonic_clock():
     the default production actually runs with is the builder's, not
     `sweep_until_cleared`'s. A default of `lambda: 0.0` makes
     `clock() < deadline` always true, so a deadline-aborted sweep reports
-    `cleared=true`, and the CI gate — which reds on `cleared: false` — greens
-    the very backlog the round-4 fix was for. No clock is injected here.
+    `cleared=true`, so a deadline-aborted sweep would be reported as finished
+    rather than exhausted and the gate would not red it. The gate's `cleared`
+    effect is keyed on the measured count: at a measured zero a
+    `cleared: false` report warns and passes (nothing remains to bound), and
+    above zero it reds. No clock is injected here.
     """
     import inspect
     import time
@@ -5034,11 +5037,11 @@ def test_hygiene_report_threads_cleared_verbatim():
     """#4740 review 6: the report builder must use the declared field set AND
     thread `cleared` through verbatim.
 
-    The CI orphan gate reds on `cleared: false` whatever the count is, so a
-    builder that hardcoded `True` would green a deadline-aborted backlog.
-    This is behavioural — the real module is imported and called — so the AST
-    shapes that passed the round-5 pin (a subscript store, a dead branch
-    around the literal, a tuple reorder) cannot satisfy it.
+    The gate keys the effect of `cleared: false` on the measured count: at a
+    measured zero it warns and passes (nothing remains to bound), and above
+    zero it reds. This is behavioural — the real module is imported and
+    called — so the AST shapes that passed the round-5 pin (a subscript store,
+    a dead branch around the literal, a tuple reorder) cannot satisfy it.
     """
     from tortoise.embedded_reaper import (
         _HYGIENE_REPORT_FIELDS,

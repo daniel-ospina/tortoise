@@ -51,7 +51,9 @@
 #     (case 26), RED when violated even though COUNT <= left (case 27), and
 #     only a kill downgrades it (case 28); skipped on `before: null` (case 29)
 #     and `before: 0` (case 30) — while a report OMITTING `before` is unusable
-#     → RED (case 31), so the control cannot be disabled by a shape change.
+#     → RED (case 31), so the control cannot be disabled by a shape change —
+#     and it is enforced on the `cleared: false` path at COUNT == 0 (case 46),
+#     where it is the remaining self-consistency control.
 #   * the deadline-aborted sweep report (`reaped: 0, cleared: false`, with the
 #     identity trivially satisfied and COUNT == left) → RED at COUNT > 0 (case
 #     35), while the healthy residue shape (`cleared: true`) PASSES (case 36).
@@ -112,7 +114,8 @@
 # stops keying on `COUNT` — red restored at COUNT == 0 (case 43), the COUNT > 0
 # red weakened to a pass (case 44), or the kill downgrade dropped (case 45) —
 # and case 40 fails if the `probe_failed` arm goes back to keying on `cleared`
-# at COUNT == 0. The count-branch boundary pins (case 41) and the rc=1 kill-set
+# at COUNT == 0. Case 46 fails if the accounting identity is skipped whenever
+# `cleared` is false. The count-branch boundary pins (case 41) and the rc=1 kill-set
 # pin (case 42) likewise fail when a bound is widened past 0 or `1` is added to
 # the kill set.
 # A case that merely restates a default would not catch its own removal.
@@ -152,6 +155,7 @@ trap 'find "$WORK" -depth -mindepth 1 -delete 2>/dev/null; rmdir "$WORK" 2>/dev/
 printf '{"sweep":{"reaped":9,"cleared":true,"left":14,"before":20}}' > "$WORK/report14.json"
 printf '{"sweep":{"reaped":2,"cleared":true,"left":7,"before":9}}' > "$WORK/report7.json"
 printf '{"sweep":{"reaped":9,"cleared":false,"left":14,"before":23}}' > "$WORK/budget.json"
+printf '{"sweep":{"reaped":0,"cleared":false,"left":5,"before":40}}' > "$WORK/identity_bad_unproven.json"
 printf '{"sweep":{"reaped":12,"cleared":true,"left":14,"before":26}}' > "$WORK/identity_ok.json"
 printf '{"sweep":{"reaped":1,"cleared":true,"left":2,"before":10}}' > "$WORK/identity_bad.json"
 printf '{"sweep":{"reaped":1,"cleared":true,"left":2,"before":null}}' > "$WORK/before_null.json"
@@ -562,6 +566,8 @@ assert_contains "$OUT" "::warning::" "warns that the sweep exhausted its budget"
 assert_contains "$OUT" "cleared=false" "names the exhausted budget"
 assert_contains "$OUT" "diagnostic only" "labels it a diagnostic"
 assert_contains "$OUT" "within the sweep's own measurement" "prints the pass line"
+assert_not_contains "$OUT" "cleared=true" \
+  "the pass line reports the sweep's own cleared=false, never a hardcoded true"
 assert_not_contains "$OUT" "::error::" "does not red an empty residue"
 
 echo "44. cleared=false with COUNT>0 REDs and names the actual count"
@@ -587,10 +593,19 @@ assert_contains "$OUT" "#1371" "cites the kill-aware rationale"
 assert_not_contains "$OUT" "within the sweep's own measurement" \
   "the warning path does not print a pass line either"
 
+echo "46. the accounting identity is enforced under cleared=false at COUNT==0"
+# A budget-exhausted sweep is unproven, not exempt from its own accounting:
+# `reaped + left < before` means the sweep's own measurement is broken even
+# when nothing is live. This is the remaining self-consistency control on the
+# cleared=false path, so a report that violates it must RED rather than fall
+# through to the warning-plus-pass line.
+run_gate 0 0 identity_bad_unproven.json
+assert_eq "$RC" "1" "exits 1 when reaped + left < before at COUNT=0 under cleared=false"
+
 echo
 # A LOST case must not be indistinguishable from success: deleting a case
 # leaves FAIL=0 and merely a LOWER count, so the count is pinned too.
-expected_assertions=156
+expected_assertions=158
 if [ "$PASS" -eq "$expected_assertions" ]; then
   PASS=$((PASS + 1))
   echo "  ✅ assertion count pinned at $expected_assertions (a lost case is not a green run)"

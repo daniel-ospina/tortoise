@@ -2791,11 +2791,12 @@ def _hygiene_report(reaped, cleared, left, before) -> dict:
     """Build the session-end hygiene report the CI orphan gate consumes (#4740).
 
     ``cleared`` is the sweep's OWN outcome (see :func:`sweep_until_cleared`),
-    threaded through verbatim and never synthesised here: the gate reds on
-    ``cleared: false`` whatever the count is, so a builder that hardcoded
-    ``True`` would green a deadline-aborted backlog. Keeping the construction
-    out of ``_sweep`` also leaves no local report literal there for a dead
-    branch or a subscript store to bypass (the round-5 pin's hole).
+    threaded through verbatim and never synthesised here. The gate keys the
+    effect of ``cleared: false`` on the measured count: at a measured zero it
+    warns and passes (nothing remains to bound), and above zero it reds.
+    Keeping the construction out of ``_sweep`` also leaves no local report
+    literal there for a dead branch or a subscript store to bypass (the
+    round-5 pin's hole).
     """
     values = {
         "reaped": reaped,
@@ -2870,8 +2871,8 @@ def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic) -> di
     into the report — is behaviourally testable (`tests/test_reaper.py` drives
     this function directly). `probe` is called twice: the first reading is
     `before`, the second is `left`; `cleared` is threaded verbatim from
-    `sweep_until_cleared`, because the gate reds on `cleared: false` whatever
-    the count.
+    `sweep_until_cleared`, because the gate keys the effect of `cleared: false`
+    on the measured count — a warning and pass at zero, a red above zero.
     """
     before = probe()
     reaped, cleared = sweep_until_cleared(run_one, deadline, clock)
