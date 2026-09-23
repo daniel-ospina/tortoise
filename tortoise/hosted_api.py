@@ -45,6 +45,7 @@ import tortoise
 # a monkeypatch/override of the canonical constant reaches BOTH surfaces instead
 # of leaving a stale copy in this module.
 from tortoise import mcp_auth as _mcp_auth
+from tortoise import monitoring as _monitoring  # #2924: call-time bound read
 from tortoise.abuse import _int_env  # #1081 signup limiter env knobs (SignupVelocityTracker)
 from tortoise.alert_store import OpenOutcome, ResolveOutcome  # #3820 resolve/open tri-state
 from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op without key)
@@ -82,8 +83,8 @@ from tortoise.hosted_backup import (
 )
 from tortoise.mcp_server import create_http_app
 from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
+    HEALTH_PROBE_REFRESH_S,  # noqa: F401 — re-exported (tests import it here)
     PROBE_HARD_TIMEOUT,
-    PROBE_STALE_AFTER,
     ControlPlaneOffloadError,
     HealthProbe,
     event_retention_interval,
@@ -98,6 +99,9 @@ from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     start_stall_watchdog,
     workload_enter,
     workload_exit,
+)
+from tortoise.monitoring import (
+    health_probe_interval as _health_probe_interval,  # #2988: shared with selfhost
 )
 from tortoise.onboarding import state as _os  # #2001 (W5) canonical FLOW-state module
 from tortoise.projection import (
@@ -754,68 +758,17 @@ def _iter_registered_orgs() -> list[dict]:
 # ═══════════════════════════════════════════════════════════════════════════
 
 #: How often the background refresher re-probes the DB. Keeps ``/health``'s
-#: ``db`` field fresh WITHOUT the request path doing any I/O. Must stay below
-#: monitoring.PROBE_STALE_AFTER (30s) or a healthy DB would read as degraded.
-HEALTH_PROBE_REFRESH_S = 10.0
-#: Lower bound on a configured probe period (round-3 review P2). ``1e-9`` is
-#: finite but turns the refresher into a ~50 Hz loop, each iteration spawning a
-#: probe daemon thread and issuing a DB round trip — the same busy-loop the
-#: ``nan`` rejection exists to prevent. The upper clamp was one-sided.
-HEALTH_PROBE_MIN_INTERVAL_S = 0.5
-
-
-def _health_probe_interval() -> float:
-    """Probe refresh period (``TORTOISE_HEALTH_PROBE_INTERVAL``, seconds).
-
-    Clamped to half the probe staleness window (review P2): a period longer
-    than ``PROBE_STALE_AFTER`` makes a HEALTHY DB read as ``degraded`` between
-    refreshes, which then fails the deploy gate and gets misdiagnosed as a DB
-    outage. Half the window leaves a full refresh of margin.
-
-    NON-FINITE values are rejected and fall back to the default (round-2
-    review P2): ``float()`` accepts ``nan``/``inf`` and neither is caught by
-    the ``v <= 0`` guard (``nan <= 0`` is False) nor by the ``v > cap`` clamp
-    (``nan > cap`` is False). ``nan`` flows into ``asyncio.sleep(nan)``, which
-    returns almost immediately — a busy loop hammering the DB probe and the
-    event loop. ``inf`` means the probe never refreshes, so a healthy DB reads
-    stale forever. Both DISABLE (fall back to ``HEALTH_PROBE_REFRESH_S``).
-
-    A finite but SUB-FLOOR period is rejected the same way (round-3 review
-    P2): ``1e-9`` busy-loops the probe exactly as ``nan`` did.
-    """
-    try:
-        v = float(os.environ.get("TORTOISE_HEALTH_PROBE_INTERVAL") or HEALTH_PROBE_REFRESH_S)
-    except (TypeError, ValueError):
-        return HEALTH_PROBE_REFRESH_S
-    if not math.isfinite(v):
-        _logger.error(
-            "TORTOISE_HEALTH_PROBE_INTERVAL=%s is not finite — falling back "
-            "to the default %.0fs; a nan period busy-loops the probe and an "
-            "infinite one leaves a healthy DB reading stale forever",
-            v, HEALTH_PROBE_REFRESH_S)
-        return HEALTH_PROBE_REFRESH_S
-    if v <= 0:
-        return HEALTH_PROBE_REFRESH_S
-    # Round-3 review P2: a finite but tiny period busy-loops the probe just
-    # like ``nan`` did — ``1e-9`` yields ~50 generations/s, each spawning a
-    # daemon thread and issuing a DB round trip. The clamp below is
-    # one-sided, so a floor is required too.
-    if v < HEALTH_PROBE_MIN_INTERVAL_S:
-        _logger.warning(
-            "TORTOISE_HEALTH_PROBE_INTERVAL=%s is below the %.2fs floor — "
-            "falling back to the default %.0fs; a sub-floor period "
-            "busy-loops the probe and duplicates the DB round trip",
-            v, HEALTH_PROBE_MIN_INTERVAL_S, HEALTH_PROBE_REFRESH_S)
-        return HEALTH_PROBE_REFRESH_S
-    cap = PROBE_STALE_AFTER / 2.0
-    if v > cap:
-        _logger.warning(
-            "TORTOISE_HEALTH_PROBE_INTERVAL=%s exceeds half the probe "
-            "staleness window (%.0fs) — clamping to %.0fs; a longer period "
-            "would report a healthy DB as degraded and fail the deploy gate",
-            v, PROBE_STALE_AFTER, cap)
-        return cap
-    return v
+#: ``db`` field fresh WITHOUT the request path doing any I/O. The resolver and
+#: ``HEALTH_PROBE_REFRESH_S`` are the SHARED ``monitoring`` spelling (#2988 moved
+#: them there when the selfhost liveness coordinator landed), re-exported here so
+#: existing importers/tests keep resolving them on this module (the resolver
+#: arrives as ``_health_probe_interval``). ``monitoring.HEALTH_PROBE_MIN_INTERVAL_S``
+#: is the resolver's own lower clamp and stays on ``monitoring`` — nothing
+#: imported it from this module, so it is not re-exported.
+#:
+#: NOTE the log lines for a rejected ``TORTOISE_HEALTH_PROBE_INTERVAL`` now
+#: come from ``tortoise.monitoring`` — the resolver lives there, and its
+#: warnings must not be attributed to a caller that did not compute them.
 
 
 async def _first_contact_prewarm() -> None:
@@ -5423,7 +5376,7 @@ def _graph_unavailable() -> HTTPException:
     )
 
 
-async def _graph_offload(fn, *, op: str):
+async def _graph_offload(fn, *, op: str, timeout: float | None = None):
     """#3773: run ONE synchronous DATA-PLANE graph helper off the event loop.
 
     Thin hosted-side wrapper over the #3498 seam (``_cp_offload`` ->
@@ -5459,11 +5412,18 @@ async def _graph_offload(fn, *, op: str):
     are identifiable by op — but they share the 512-entry buffer, so a graph
     burst can evict PostgREST records. Splitting the buffer per pool is a
     follow-up, not part of #3773.
+
+    ``timeout`` (#2924) overrides the lane bound for a caller whose FAILURE
+    MODE is not a degraded write but a fail-open fallback: the onboarding gate
+    vetoes nothing when it fails, it only keeps the onboarding tools visible, so
+    it is willing to trade a cold-projection false-open for never parking a
+    graph worker for the lane's full cold-start allowance. Callers that write
+    leave it unset.
     """
     ctx = contextvars.copy_context()
     return await _cp_offload(
         functools.partial(ctx.run, fn), op=op, pool="graph",
-        timeout=graph_offload_timeout_s(),
+        timeout=graph_offload_timeout_s() if timeout is None else timeout,
         unavailable=_graph_unavailable)
 
 
@@ -20240,6 +20200,56 @@ def _get_onboarding_projection(org_id: str) -> dict:
     state["onboarding_complete"] = _os.resolve_wire_completion(
         node.get("status"), bool(raw.get("onboarding_complete")), steps)
     return state
+
+
+async def _get_onboarding_projection_off_loop(org_id: str) -> dict:
+    """The onboarding projection read, off the event loop (#2924).
+
+    ``_get_onboarding_projection`` is synchronous END TO END, and both of its
+    legs block:
+
+    * the jsonb leg — ``_get_onboarding_state`` reads
+      ``teams.onboarding_state`` through the blocking ``SupabaseControlPlane``
+      transport (``httpx.Client``, ``supabase_control.py:454``);
+    * the graph leg — ``_graph_has_org_namespace`` / ``_open_org_graph_sdk``
+      reach ``_registry_existing_graphs`` / ``_get_proj()``, which CONSTRUCT a
+      fresh ``FalkorProjection`` per call (``ssl.create_default_context`` →
+      ``load_default_certs`` → TLS handshake → ``Is_Sentinel`` INFO), then
+      issue the query.
+
+    Called inline from a coroutine that is a periodic hot path, it blocks the
+    single event loop for the WHOLE resolution. That is the #2924 stall:
+    ``async def list_tools`` (``mcp_server.py``) calls the synchronous gate
+    ``_org_onboarding_complete()``, and a ``py-spy`` MainThread dump taken while
+    ``GET /health`` was stalled 1.08 s captured the loop parked in exactly
+    these frames (``read`` ← ``httpx`` sync backend ← ``query`` ←
+    ``org_onboarding_state`` ← ``_get_onboarding_state`` ←
+    ``_get_onboarding_projection``; and ``create_default_context`` ←
+    ``_registry_existing_graphs`` ← ``_graph_has_org_namespace`` ← the same
+    function). Loopback ``GET /health`` answered in ~4 ms across 178 probes
+    while the public path stalled 0.9–2.2 s on 10 of them, and the app's own
+    heartbeat recorded ``loop_lag_max_ms`` of 2033 ms — so the stall is the
+    loop, not the transport.
+
+    The unit of offload is the RESOLUTION, not an individual HTTP call (the
+    #3498 design): one hop keeps the projection's internal ordering (the jsonb
+    read feeds the merge) inside one worker. The pool is ``graph`` because the
+    resolution's cold-start-prone leg is the projection open, and the graph
+    lane's wait bound is derived from ``probe_setup_timeout()`` precisely so a
+    cold projection is not false-degraded (#3773). Failures propagate: callers
+    that must fail open (the MCP gate) already coerce to ``False``.
+    """
+    return await _graph_offload(
+        lambda: _get_onboarding_projection(org_id),
+        op="onboarding_projection",
+        # #2924: the gate's contract is fail-open, so a hung or cold graph must
+        # not park a graph worker for the lane's cold-start allowance — the
+        # seam's standard REQUEST bound is the right price here.
+        # #2924 review: read the constant at CALL time, not import time — the
+        # seam's bound tests monkeypatch ``monitoring``, and the lane bound
+        # (``graph_offload_timeout_s()``) resolves at call time for the same
+        # reason.
+        timeout=_monitoring.CONTROL_PLANE_OFFLOAD_TIMEOUT_S)
 
 
 # #1727 (Slice 2, Task 11): PATCH-field → state-key translation for the
