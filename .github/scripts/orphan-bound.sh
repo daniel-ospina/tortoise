@@ -105,6 +105,26 @@
 #                               exit 2, never a pass.
 #   missing/unreadable report → RED: the residue is unaccounted for.
 #
+# WHAT THIS BOUND DOES NOT CATCH — do not read the table above as "a real leak
+#   reds". The bound IS the sweep's own post-sweep measurement (`left`), and
+#   `COUNT` is the same `pgrep` pattern measured later, after interpreter exit
+#   — a point at which atexit can only REMOVE servers. So `COUNT <= left` holds
+#   for any residue present at teardown, including a residue the sweep MEASURES
+#   and DECLINES to act on: `reap()` skips a server with a live client at
+#   teardown and an unconfirmed path-based server (tortoise/embedded_reaper.py).
+#   That class lands in `left`, is reported with `cleared: true`, and PASSES at
+#   `COUNT == left` — this gate is bounded by that measurement and does not
+#   independently red it. What the gate DOES red: a leak that appears AFTER the
+#   sweep (`COUNT > left`), a sweep that aborted or failed (`cleared: false`,
+#   `error`, `skipped`, `probe_failed`), an identity violation
+#   (`reaped + left < before`), and an unaccounted/unreadable report.
+#   FOLLOW-UP: catching the declined class needs a measurement the sweep does
+#   not yet produce — the count it examined and declined, with reasons — a
+#   separate change, issue #4884. No hand-picked constant is reintroduced for
+#   it: the old constant DID red this class, and that red was the false red
+#   #4740 exists to remove (13-15 orphans is the end-sweep's documented
+#   designed residue, per tests/conftest.py).
+#
 # #1371 KILL-AWARE: after a WATCHDOG kill (pytest rc 124/137/2) the counted
 #   servers are a GUARANTEED kill-path artifact — SIGKILL skips atexit and the
 #   conftest end-sweep, so the finalizer that would have produced the report

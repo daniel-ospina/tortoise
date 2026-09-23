@@ -794,7 +794,14 @@ jobs:
         # not always ~0 by construction — the embedded-file-contract atexit race
         # leaves strays on the full matrix
         # too (trunk run 34928488659 measured 7), and that residue is what the
-        # sweep's own `left` now accounts for; a real leak still reds (E2E-7).
+        # sweep's own `left` now accounts for. What this gate reds: a leak
+        # that appears AFTER the sweep (COUNT > left), a sweep that aborted or
+        # failed (cleared=false, error, skipped, probe_failed), an identity
+        # violation (reaped + left < before), and an unaccounted/unreadable
+        # report. It does NOT independently red a residue the sweep itself
+        # measures and declines to act on (a server with a live client, an
+        # unconfirmed path-based server): that lands in `left` and passes at
+        # COUNT == left, bounded by the sweep's own measurement (#4884).
         # #1371 kill-aware: after a WATCHDOG kill (rc 124/137/2) the
         # orphan count is a GUARANTEED kill-path artifact — SIGKILL skips atexit
         # and the conftest end-sweep — not a leak signal, so the gate downgrades
@@ -1641,8 +1648,12 @@ jobs:
         # Same gate contract as the fast/slow asserts (#4740): the bound is read
         # from the conftest session-end sweep's own report
         # (.github/scripts/orphan-bound.sh), never a hand-picked constant. The
-        # carve-out runs embedded, so the sweep reports its own `left`; a real
-        # leak still reds (E2E-7). Kill-aware downgrade per #1371.
+        # carve-out runs embedded, so the sweep reports its own `left`. The
+        # gate reds a leak that appears AFTER the sweep, a sweep that aborted
+        # or failed, an identity violation, and an unaccounted/unreadable
+        # report; a residue the sweep itself measures and declines to act on
+        # is bounded by that measurement, not independently red (#4884).
+        # Kill-aware downgrade per #1371.
         if: always()
         run: |
           set +e

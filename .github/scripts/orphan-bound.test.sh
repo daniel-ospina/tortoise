@@ -56,14 +56,19 @@
 #     source with `ast` — never imported or run) must be named by the gate's
 #     parser and carried by the harness's own canonical fixture, so a rename
 #     cannot leave the harness green while the gate silently drops a field.
-#     The SAME case pins the PRODUCER in `tests/conftest.py`: `_sweep` must
-#     build its report ONLY by calling `_hygiene_report(...)` — there must be
-#     no local dict literal carrying a `"cleared"` key (the round-5 shape a
-#     dead branch or subscript store bypassed), exactly one builder call, and
-#     its `cleared` argument must be the NAME the `sweep_until_cleared(...)`
-#     unpack bound in position 1 (never a literal, never a reordered target).
-#     The BUILDER's own behaviour (that it threads `cleared` verbatim) is
-#     pinned behaviourally in `tests/test_reaper.py`, where the real module is
+#     The SAME case pins the PRODUCER in `tests/conftest.py`: `_sweep`'s
+#     producing statement must BE `return _hygiene_report(total, cleared, left,
+#     before)` — the Return value IS the builder call (same node, never a name
+#     pointing at a variable), the four positional arguments are exactly those
+#     four names in that order, and each name is bound EXACTLY ONCE by its
+#     producer (`total`/`cleared` by the `sweep_until_cleared(...)` unpack at
+#     positions 0/1, `left`/`before` by a call — the live-count probe — never a
+#     literal or a rebind). No report-shaped constructor carrying a `"cleared"`
+#     key may exist (a dict literal OR a `dict(...)` call — the round-5 dead
+#     branch that a literal-only counter cannot see), and no subscript or
+#     attribute store, or `.update(...)`, may touch a result variable. The
+#     BUILDER's own behaviour (that it threads `cleared` verbatim) is pinned
+#     behaviourally in `tests/test_reaper.py`, where the real module is
 #     imported — no AST shape trick can satisfy that.
 #   * magnitude: an 18+ digit `--count` (case 32) and an 18+ digit `left` in
 #     the report (case 33) both exit 2 as usage errors instead of reaching the
@@ -88,8 +93,11 @@
 # removed or weakened (the `probe_failed` COUNT==0 carve-out dropped, the
 # `cleared=false` red removed, the deferral warning or its `COUNT <= left`
 # rescue removed, the mixed-population identity made authoritative again, the
-# contract check neutered, `_sweep`'s report built outside `_hygiene_report`,
-# a count-branch bound widened past 0, or rc=1 added to the kill set).
+# contract check neutered, `_sweep`'s report built outside its four real
+# producers — the returned value no longer the builder call, an argument not
+# one of those four names, a reordered unpack, a rebind or a report-shaped
+# `dict(...)`, or a subscript/attribute write on the result — a count-branch
+# bound widened past 0, or rc=1 added to the kill set).
 # A case that merely restates a default would not catch its own removal.
 #
 # The assertion count is PINNED (see the summary): a lost case must not be
@@ -461,16 +469,27 @@ FIXTURE_KEYS="$(python3 -c 'import json,sys; print(" ".join(sorted(json.load(ope
 assert_eq "$FIXTURE_KEYS" "$(printf '%s\n' $FIELDS | sort | tr '\n' ' ' | sed 's/ *$//')" \
   "the harness's canonical fixture carries exactly the declared field set"
 
-# The PRODUCER: `_sweep` must build its report by CALLING `_hygiene_report`
-# with the helper's own result — not by reintroducing a local dict. Round 5
-# pinned the old local dict's SHAPE (`stores=1 helper=1 report=1`), which M5
-# (a subscript store), M6 (a reordered unpack) and M19 (a dead branch keeping
-# the pinned dict while the live branch hardcodes `cleared`) all passed. The
-# construction now lives in the builder (pinned behaviourally in
-# tests/test_reaper.py), so what this reads is: NO local dict carrying a
-# `"cleared"` key (no dead literal to pin), exactly ONE `_hygiene_report(...)`
-# call, and its `cleared` argument is the NAME the `sweep_until_cleared(...)`
-# unpack bound in position 1.
+# The PRODUCER: `_sweep` must RETURN the `_hygiene_report(...)` call itself,
+# built from the producers. Round 5 pinned presence of AST shapes (`stores=1
+# helper=1 report=1`), which M5 (a subscript store), M6 (a reordered unpack)
+# and M19 (a dead branch keeping the pinned dict while the live branch
+# hardcodes `cleared`) all passed; round 6 pinned the builder call but not what
+# `_sweep` RETURNED, so a hardcoded `cleared`, an inflated `left`, a subscript
+# store on the result, or a `dict(...)` (invisible to a literal-only counter)
+# all stayed green. This binds the returned value AND every binding that feeds
+# it:
+#   returncall — the Return value IS the builder call (same node), so nothing
+#                is done to the result after construction;
+#   args       — the four positional arguments are exactly total, cleared,
+#                left, before, in that order (position matters: a reordered
+#                unpack REDs);
+#   binds      — each of the four names is bound EXACTLY ONCE, by its real
+#                producer (the `sweep_until_cleared` unpack for total/cleared,
+#                a call for left/before) — a literal or a rebind REDs;
+#   stores     — no `Subscript`/`Attribute` store or `.update(...)` on a name
+#                the builder's result was assigned to;
+#   dicts      — no report-shaped constructor carrying a `"cleared"` key,
+#                whether a dict literal or a `dict(...)` call (M19's shape).
 PRODUCER="$(python3 - "$CONFTEST" <<'PY' 2>/dev/null
 import ast
 import sys
@@ -490,19 +509,47 @@ if fn is None:
     print("no-sweep-fn")
     raise SystemExit(0)
 
-# Any dict literal in `_sweep` carrying `"cleared"` is the bypass shape.
-dicts = sum(
-    1
-    for node in ast.walk(fn)
-    if isinstance(node, ast.Dict)
-    and any(
+# Each argument name must be bound exactly once, by its real producer.
+TARGETS = ("total", "cleared", "left", "before")
+EXPECTED = ("total", "cleared", "left", "before")
+
+# Report-shaped constructors carrying a `"cleared"` key. A `dict(...)` CALL
+# counts too: the round-5 M19 dead branch wrote `dict(reaped=...,
+# cleared=..., ...)`, which a literal-only counter could not see.
+dicts = 0
+for node in ast.walk(fn):
+    if isinstance(node, ast.Dict) and any(
         isinstance(k, ast.Constant) and k.value == "cleared"
         for k in node.keys
-    )
-)
+    ):
+        dicts += 1
+    elif (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "dict"
+        and any(kw.arg == "cleared" for kw in node.keywords)
+    ):
+        dicts += 1
 
-# The NAME bound by the 2nd element of the `sweep_until_cleared(...)` unpack.
-helper_cleared = None
+# Every assignment to one of the four names, and the node that binds it.
+binds = {name: [] for name in TARGETS}
+for node in ast.walk(fn):
+    if isinstance(node, ast.Assign):
+        targets = node.targets
+    elif isinstance(node, ast.AnnAssign):
+        targets = [node.target]
+    elif isinstance(node, ast.AugAssign):
+        targets = [node.target]
+    else:
+        continue
+    for tgt in targets:
+        for inner in ast.walk(tgt):
+            if isinstance(inner, ast.Name) and inner.id in binds:
+                binds[inner.id].append(node)
+
+# The `sweep_until_cleared(...)` unpack and the two names it binds.
+unpack_assign = None
+unpack_names = (None, None)
 for node in ast.walk(fn):
     if not isinstance(node, ast.Assign):
         continue
@@ -514,7 +561,8 @@ for node in ast.walk(fn):
         continue
     for tgt in node.targets:
         if isinstance(tgt, ast.Tuple) and len(tgt.elts) == 2:
-            helper_cleared = tgt.elts[1]
+            unpack_assign = node
+            unpack_names = (tgt.elts[0], tgt.elts[1])
 
 calls = [
     n
@@ -523,28 +571,91 @@ calls = [
     and isinstance(n.func, ast.Name)
     and n.func.id == "_hygiene_report"
 ]
-threads = 0
-if len(calls) == 1:
-    params = ("reaped", "cleared", "left", "before")
-    call = calls[0]
-    cleared_arg = None
-    if len(call.args) > params.index("cleared"):
-        cleared_arg = call.args[params.index("cleared")]
-    else:
-        for kw in call.keywords:
-            if kw.arg == "cleared":
-                cleared_arg = kw.value
-    threads = int(
-        isinstance(cleared_arg, ast.Name)
-        and isinstance(helper_cleared, ast.Name)
-        and cleared_arg.id == helper_cleared.id
-    )
 
-print(f"calls={len(calls)} threads={threads} dicts={dicts}")
+# (a) the Return value IS the builder call — same node, not a name.
+returncall = int(
+    len(calls) == 1
+    and any(
+        isinstance(n, ast.Return) and n.value is calls[0]
+        for n in ast.walk(fn)
+    )
+)
+
+# (b) the four positional arguments are the expected NAMES, in order. Also
+# remember any name the builder result was assigned to, so the store scan
+# below can find a write through it.
+args_ok = 0
+result_name = None
+if len(calls) == 1:
+    call = calls[0]
+    arg_ids = [a.id for a in call.args if isinstance(a, ast.Name)]
+    args_ok = int(
+        len(call.args) == len(EXPECTED)
+        and not call.keywords
+        and arg_ids == list(EXPECTED)
+    )
+    for node in ast.walk(fn):
+        if (
+            isinstance(node, ast.Assign)
+            and node.value is call
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        ):
+            result_name = node.targets[0].id
+
+# (c) exactly one binding per name, from the right producer. total/cleared:
+# the `sweep_until_cleared` unpack, at positions 0/1. left/before: a single
+# assignment whose value is a CALL (the live-count probe), never a literal.
+binds_ok = 0
+if unpack_assign is not None and all(isinstance(n, ast.Name) for n in unpack_names):
+    def _unique(name):
+        return binds[name][0] if len(binds[name]) == 1 else None
+
+    ok = True
+    for pos, name in ((0, "total"), (1, "cleared")):
+        if _unique(name) is not unpack_assign or unpack_names[pos].id != name:
+            ok = False
+    for name in ("left", "before"):
+        bound = _unique(name)
+        if bound is None or not isinstance(bound.value, ast.Call):
+            ok = False
+    binds_ok = int(ok)
+
+# (d) no Subscript/Attribute STORE and no `.update(...)` on the result.
+stores = 0
+if result_name is not None:
+    for node in ast.walk(fn):
+        if (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.ctx, ast.Store)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == result_name
+        ):
+            stores += 1
+        elif (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.ctx, ast.Store)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == result_name
+        ):
+            stores += 1
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("update", "setdefault")
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == result_name
+        ):
+            stores += 1
+
+print(
+    f"calls={len(calls)} returncall={returncall} args={args_ok} "
+    f"binds={binds_ok} stores={stores} dicts={dicts}"
+)
 PY
 )"
-assert_eq "$PRODUCER" "calls=1 threads=1 dicts=0" \
-  "_sweep builds its report only via _hygiene_report, threading the unpacked cleared"
+assert_eq "$PRODUCER" "calls=1 returncall=1 args=1 binds=1 stores=0 dicts=0" \
+  "_sweep RETURNS the _hygiene_report(...) call built from its producers, untampered"
 
 echo "40. left=null with cleared=FALSE REDs even at COUNT=0 (an exhausted budget is not a diagnostic)"
 # #4740 review 5: the COUNT==0 carve-out (case 34) exists only for a sweep that
