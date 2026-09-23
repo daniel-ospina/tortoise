@@ -67,7 +67,7 @@ python tools/ship_test_onboarding.py \
   no-observation); `--agent-key tt_…` to supply the **agent write** credential
   (CLI-only, deliberately not env-settable) instead of minting one through the
   session. It does **not** carry the projection read.
-* **The browser teardown is bounded at 5 s** (`TEARDOWN_BOUND_S`) and its outcome
+* **The browser teardown is bounded at 30 s** (`TEARDOWN_BOUND_S`) and its outcome
   is recorded as `browser_teardown` — see *Browser teardown* below. It is cleanup:
   it never changes the verdict or the exit code.
 * A degraded session store answers 503 on `/api/v1` while `/api/session` still
@@ -135,14 +135,18 @@ interrupted, so the bound comes from outside them: a watchdog thread signals the
 run's **own** Playwright driver child, which is what releases a close blocked
 against an unresponsive driver.
 
-* **The bound is 5 seconds** (`TEARDOWN_BOUND_S = 5.0`, seconds). The ladder is
-graceful first: `SIGTERM` at B/2, then `SIGKILL` at 3B/4, so the run returns by B.
-A healthy run sends no signal and does not wait out the bound.
+* **The bound is 30 seconds** (`TEARDOWN_BOUND_S = 30.0`, seconds). The ladder is
+graceful first: `SIGTERM` at B/2 (15 s), then `SIGKILL` at 3B/4 (22.5 s), so the
+run returns by B. A healthy run's teardown (~2.6 s measured) finishes well inside
+the first rung, so a healthy run sends no signal and does not wait out the bound:
+the graceful window is ~6x the healthy path, while a close that never returns is
+still hard-bounded.
 * **Only the run's own child is ever signalled.** The pid is enumerated once, as a
 direct child of the instrument's own process, together with its start time; the
 start time is **re-read immediately before every rung** (a bare pid is racy
-against reuse). With no child enumerated the watchdog signals nothing and records
-`driver_absent`. Only after a signal is the child reaped.
+against reuse). With no child enumerated the watchdog signals nothing, and —
+when the close then returns — records `driver_absent`. Only after a signal is the
+child reaped.
 * **The bound holds even with nothing to signal (`abandoned`).** The ladder is
 released by a *signal*, so if no driver child is enumerable there is nothing that
 can release a close which never returns. After the final rung, with a close still
@@ -159,11 +163,11 @@ is one of `not_run` | `clean` | `close_error` | `watchdog_kill` |
 prints a `BROWSER TEARDOWN — …` line on stderr. **It never changes the verdict or
 the exit code** — cleanup is not the product (#4319's rule, applied to the
 browser).
-* **The artifact is written twice, atomically.** A complete PRE-teardown document
-(outcome `not_run`) is written before the teardown starts, and the authoritative
-one after it. A run killed inside the ≤5 s window therefore still leaves a
-complete, parsable artifact saying the teardown never finished — the `not_run`
-window is disclosed, not discovered.
+* **The artifact is written twice, atomically, on any run that enters the
+teardown.** A complete PRE-teardown document (outcome `not_run`) is written before
+the teardown starts, and the authoritative one after it. A run killed inside the
+≤30 s window therefore still leaves a complete, parsable artifact saying the
+teardown never finished — the `not_run` window is disclosed, not discovered.
 * **Residue, not closed (#4928).** A run killed inside that window **while the
 driver is unresponsive** still orphans the driver and its Chromium children: no
 in-process code runs after the kill, and the frozen driver cannot read the stdin
@@ -187,7 +191,7 @@ deliberately not this one.
 | `assertions` | `front_door_reachable`, `walk_completed`, `no_claim_before_observation`, `shown_when_observed` |
 | `session` | How the run authenticated: `state` (one of `signed_in` / `not_signed_in` / `store_unavailable` / `unreachable`), `detail`, `mechanism` |
 | `teardown` | The run's own cleanup outcome (#4319). `status` is one of `deleted` / `skipped_no_org` (nothing was created) / `not_reached` (no browser context, or the run exited before the cleanup baseline was read) / `kept_by_flag` (`--keep-org`) / `baseline_unavailable` / `not_listed` / `not_attempted` / `list_unreadable` / `ambiguous` / `name_mismatch` / `http_refused` / `not_confirmed` / `failed`. Every status except `deleted`/`skipped_no_org`/`not_reached` means a live org may remain and is warned on stderr. The keys carried depend on the status: `org_id` on `deleted`/`name_mismatch`/`http_refused`/`not_confirmed`; `http_status` + `upstream_status` on `list_unreadable`/`http_refused` (an upstream 429 arrives as a 503); `verify_status` + `verify_upstream_status` on `not_confirmed`; `created_ids` on `ambiguous`/`not_attempted`; `before_count`/`after_count` on `not_listed`; `grace_hours` + `hard_delete_after` on `deleted` |
-| `browser_teardown` | The BROWSER teardown's outcome (#4907), distinct from the org reaper's. `outcome` is one of `not_run` / `clean` / `close_error` / `watchdog_kill` / `driver_absent` / `abandoned`; `closes[]` is `{name, how, detail}` per closer (`context`, `browser`, `playwright`); `detail` summarises a non-clean outcome. `not_run` is the PRE-teardown document's value — a run killed inside the ≤5 s window keeps it — and is never the value after a completed teardown. A non-clean value is warned on stderr and never changes the verdict or the exit code. See *Browser teardown* above and **#4928** for the residue |
+| `browser_teardown` | The BROWSER teardown's outcome (#4907), distinct from the org reaper's. `outcome` is one of `not_run` / `clean` / `close_error` / `watchdog_kill` / `driver_absent` / `abandoned`; `closes[]` is `{name, how, detail}` per closer (`context`, `browser`, `playwright`); `detail` summarises a non-clean outcome. `not_run` is the PRE-teardown document's value — a run killed inside the ≤30 s window keeps it — and is never the value after a completed teardown. Any value other than `not_run`/`clean` is warned on stderr and never changes the verdict or the exit code. See *Browser teardown* above and **#4928** for the residue |
 | `reason` | The failure CLASS — empty iff `verdict == "passed"`. `instrument_error` (exit 3, says nothing about the product) vs `server_did_not_observe` / `positive_not_shown` / `positive_not_attempted` / `walk_incomplete` / `walk_failed` (exit 1) |
 | `verdict` | `passed` / `failed: …` / `incomplete: …` / `instrument-error: …` |
 
@@ -206,7 +210,7 @@ product.
 
 | Where | What | Count |
 | --- | --- | --- |
-| `tests/test_ship_test_onboarding.py` | Fast pure-Python: the classifier, the page-wide claim sweep, the DOM reader, the server-observation reader, the MCP write-result reader (JSON **and** SSE framing, both tool-error shapes, notification frames), the per-surface verdict seam, the verdict assembly, the session seam (`/api/session` + BFF), the loud-failure guard (session, write, projection, driver) — plus **the real `run_walk` executed against a fake browser**, which pins the call site (which read it uses, with what credential, in what order) rather than grepping for it — **plus the teardown control set**: each threat class of the destructive surface (pre-existing org, foreign name, ambiguity, unreadable baseline, unreadable confirmation, ambiguous candidate, refused delete, residue-vs-clean, verdict conservation both ways, single-writer funnel, every `_finalize` exit executed and status-asserted) — **plus the bound's own set**: the wedge (context, browser, and `pw.stop()`), the raising closes, the healthy zero-signal run, the exact-pid/`driver_absent`/stale-start-time cases, the ladder's rungs and its at-most-one-of-each, the exactly-one-entry count, the two no-browser paths, and the killed-inside-the-window document — every one reading `observation.json` **from disk** and asserting the recorded value — **plus the acceptance map**, which names for each of the nine criteria the test that proves it and pins the `_walk` exit count at 11, so a criterion cannot lose its covering test unnoticed | 179 |
+| `tests/test_ship_test_onboarding.py` | Fast pure-Python: the classifier, the page-wide claim sweep, the DOM reader, the server-observation reader, the MCP write-result reader (JSON **and** SSE framing, both tool-error shapes, notification frames), the per-surface verdict seam, the verdict assembly, the session seam (`/api/session` + BFF), the loud-failure guard (session, write, projection, driver) — plus **the real `run_walk` executed against a fake browser**, which pins the call site (which read it uses, with what credential, in what order) rather than grepping for it — **plus the teardown control set**: each threat class of the destructive surface (pre-existing org, foreign name, ambiguity, unreadable baseline, unreadable confirmation, ambiguous candidate, refused delete, residue-vs-clean, verdict conservation both ways, single-writer funnel, every `_finalize` exit executed and status-asserted) — **plus the bound's own set**: the wedge (context, browser, and `pw.stop()`), the raising closes, the healthy zero-signal run, the exact-pid/`driver_absent`/stale-start-time cases, the ladder's rungs and its at-most-one-of-each, the exactly-one-entry count, the two no-browser paths, and the killed-inside-the-window document — plus the **hardening set**: a healthy run's margin over the measured teardown with no signal, the abandon path's printed summary and its write-conditional artifact claim, a signal seam that raises, the space-padded `%c` start time, the refusal of a non-positive pid, the absolute `ps` path and its budgeted timeout, the symlink-refusing atomic write, and the scrubbed free text — every one reading `observation.json` **from disk** and asserting the recorded value — **plus the acceptance map**, which names for each of the nine criteria the test that proves it and pins the `_walk` exit count at 11, so a criterion cannot lose its covering test unnoticed | 200 |
 | `tests/e2e/test_ship_test_onboarding.py` | Real-browser, opt-in (`RUN_DASHBOARD_E2E=1`): the three assertions against the deployment's own built bundle, the wire observation that the client issues no `harness-connected` write, and RED/GREEN evidence against a mutated COPY of the real bundle | 8 |
 
 Both suites execute the instrument's **real decision code** (`judge`, the

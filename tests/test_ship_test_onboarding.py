@@ -1180,6 +1180,7 @@ class _DriverHarness:
         self.wedges = []
         self.driver = (4242, "fake-lstart")   # (pid, start_time) the enumerator returns
         self.start_time_override = None       # makes the TOCTOU re-read disagree
+        self.signal_raises = False            # a signal seam that raises, for the guard
         self.start_time_reads = []
         self.reaps = []
         self.clock_reads = []
@@ -1212,6 +1213,8 @@ class _DriverHarness:
             wedge.release(signal.SIGKILL)
 
     def send_signal(self, pid, signum):
+        if self.signal_raises:
+            raise RuntimeError("signal seam failed")
         self.signals.append((pid, signum))
         self.signal_times.append(self.clock())
         for wedge in list(self.wedges):
@@ -1450,9 +1453,11 @@ class _FakeSyncPlaywright:
     def __init__(self, ctx, launch_raises=False, new_context_raises=False,
                  start_raises=False, browser_close_wedges=False,
                  browser_close_raises=False, stop_wedges=False,
-                 wedge_release_on=None, wedge_timeout=None):
+                 wedge_release_on=None, wedge_timeout=None,
+                 stop_raises_base=False):
         self._ctx = ctx
         self._start_raises = start_raises
+        self._stop_raises_base = stop_raises_base
         self._wedge = (_Wedge(ctx.harness, release_on=wedge_release_on,
                               timeout=wedge_timeout) if stop_wedges else None)
         self.chromium = _FakeChromium(ctx, launch_raises, new_context_raises,
@@ -1468,6 +1473,10 @@ class _FakeSyncPlaywright:
     def stop(self):
         if self._wedge is not None:
             self._wedge.wait()
+        if self._stop_raises_base:
+            # A BaseException, deliberately not an Exception: the instrument's own
+            # teardown must complete and RECORD it rather than lose the run.
+            raise KeyboardInterrupt("driver stop was killed")
         self._ctx.harness.driver_events.append("driver_stopped")
 
     def __enter__(self):
@@ -1488,7 +1497,8 @@ def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
                    browser_close_wedges=False, browser_close_raises=False,
                    stop_wedges=False, driver_absent=False,
                    start_time_override=None, wedge_release_on=None,
-                   wedge_timeout=None, expect_reaped=True):
+                   wedge_timeout=None, expect_reaped=True, signal_raises=False,
+                   stop_raises_base=False, harness_sink=None):
     """Execute the real `run_walk` against a fake browser. Returns the record.
 
     `front_door_hittable=False` makes the front-door probe REPORT the signup CTA
@@ -1505,9 +1515,14 @@ def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
 
     base = "https://app.premiselabs.co"
     harness = _DriverHarness()
+    if harness_sink is not None:
+        # A handle is needed by tests whose `run_walk` raises before returning
+        # (an unfinalized run), where the ctx is never handed back.
+        harness_sink.append(harness)
     if driver_absent:
         harness.driver = (None, None)
     harness.start_time_override = start_time_override
+    harness.signal_raises = signal_raises
     ctx = _FakeCtx(plan, base, org_create=org_create,
                    org_click_raises=org_click_raises, harness=harness,
                    ctx_close_wedges=ctx_close_wedges,
@@ -1519,7 +1534,7 @@ def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
         fake_sync.sync_playwright = lambda: _FakeSyncPlaywright(
             ctx, launch_raises, new_context_raises, start_raises,
             browser_close_wedges, browser_close_raises, stop_wedges,
-            wedge_release_on, wedge_timeout)
+            wedge_release_on, wedge_timeout, stop_raises_base)
         monkeypatch.setitem(sys.modules, "playwright", types.ModuleType("playwright"))
         monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_sync)
     else:
@@ -2828,6 +2843,116 @@ def test_the_atomic_write_leaves_no_temp_file_behind_when_it_fails(
     assert not (out_dir / "observation.json").exists()
 
 
+def test_the_atomic_write_ignores_a_symlink_at_the_old_predictable_temp_name(
+        tmp_path) -> None:
+    """FIX 5. The old temp name was predictable (``.<name>.<pid>.tmp``) and
+    ``write_text`` FOLLOWS a symlink, so a link planted there was written through.
+    The ``mkstemp`` temp is unguessable and ``os.replace`` renames onto the
+    artifact path, never through the planted link's target (the #4098 class
+    documented in ``tools/branch_reaper.py::_write_text_safe``)."""
+    import os
+
+    import tools.ship_test_onboarding as mod
+
+    obs = mod.Observation(started_at=mod._now(), target={})
+    out_dir = tmp_path / "ship-test"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("untouched")
+    planted = out_dir / f".observation.json.{os.getpid()}.tmp"
+    planted.symlink_to(victim)
+
+    mod._write_observation(obs, out_dir)
+
+    assert victim.read_text() == "untouched", "the planted link was written through"
+    assert (out_dir / "observation.json").is_file()
+
+
+def test_a_symlinked_observation_leaf_is_refused(tmp_path) -> None:
+    """FIX 5. A symlink planted AT the artifact path must be refused, not followed:
+    ``write_text`` would truncate its target, and the artifact is written into an
+    operator-controlled ``--out`` that defaults inside the checkout."""
+    import tools.ship_test_onboarding as mod
+
+    obs = mod.Observation(started_at=mod._now(), target={})
+    out_dir = tmp_path / "ship-test"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    victim = tmp_path / "victim.json"
+    victim.write_text("untouched")
+    (out_dir / "observation.json").symlink_to(victim)
+
+    with pytest.raises(OSError):
+        mod._write_observation(obs, out_dir)
+    assert victim.read_text() == "untouched"
+    assert (out_dir / "observation.json").is_symlink()
+
+
+def test_the_printed_verdict_is_scrubbed(capsys, tmp_path) -> None:
+    """FIX 8e. The verdict can carry free text assembled from an exception
+    message, so the shared print path scrubs it — the abandon path prints through
+    the same helper."""
+    import tools.ship_test_onboarding as mod
+
+    obs = mod.Observation(started_at=mod._now(), target={})
+    obs.verdict = "failed: RuntimeError: tt_SEKRIT1234 refused"
+    mod._print_summary(obs, tmp_path / "observation.json")
+    out = capsys.readouterr().out
+    assert "tt_SEKRIT1234" not in out, out
+    assert "[REDACTED]" in out, out
+
+
+def test_a_closing_failure_detail_is_scrubbed() -> None:
+    """FIX 8e. A closer's exception message is free text and may echo a credential;
+    it is scrubbed like every other recorded site."""
+    import tools.ship_test_onboarding as mod
+
+    class _Raising:
+        def close(self):
+            raise RuntimeError("session_token=tt_SEKRIT1234 refused")
+
+    class _Driver:
+        def stop(self):
+            pass
+
+    td = mod.Teardown(ctx=_Raising(), browser=_Raising())
+    closes = []
+    mod._close_all(_Driver(), td, closes)
+    assert "tt_SEKRIT1234" not in str(closes), closes
+    assert "[REDACTED]" in str(closes), closes
+
+
+def test_the_abandon_detail_is_scrubbed(monkeypatch, tmp_path) -> None:
+    """FIX 8e. The abandon record's detail is recorded free text like any other, so
+    it is scrubbed before it lands in the artifact."""
+    import tools.ship_test_onboarding as mod
+
+    obs = mod.Observation(started_at=mod._now(), target={})
+    obs.verdict = "passed"
+    record = mod._browser_teardown_record()
+    exits = []
+    monkeypatch.setattr(mod, "_exit_now", lambda code: exits.append(code))
+    mod._abandon(obs, record, "tt_SEKRIT1234", tmp_path)
+    assert "tt_SEKRIT1234" not in record["detail"], record["detail"]
+    assert "[REDACTED]" in record["detail"], record["detail"]
+    assert exits == [mod.EXIT_PASSED], exits
+
+
+def test_a_teardown_that_raises_a_base_exception_completes_and_is_recorded(
+        monkeypatch, tmp_path) -> None:
+    """FIX 8i. The instrument's OWN teardown can raise a `BaseException` (a
+    `KeyboardInterrupt` during `pw.stop()`): the run must still complete, the
+    closer's failure recorded, and the verdict left alone. This is the REAL knob
+    (the killed-inside-the-window test substitutes `_teardown_browser` wholesale
+    and so cannot exercise this)."""
+    obs, _ctx, _mod = _happy_bound_run(monkeypatch, tmp_path, stop_raises_base=True)
+    assert obs.verdict == "passed", (obs.verdict, obs.reason)
+    block = _browser_teardown_from_disk(tmp_path)
+    assert block["outcome"] == "close_error", block
+    assert [c["name"] for c in block["closes"]] == ["context", "browser", "playwright"]
+    assert block["closes"][2]["how"] == "close_error", block["closes"]
+    assert "KeyboardInterrupt" in block["closes"][2]["detail"], block["closes"]
+
+
 def test_the_production_enumerator_returns_only_this_processs_own_marked_child():
     """AC4's safety clause at the PRODUCTION seam, not the fake's.
 
@@ -2871,6 +2996,97 @@ def test_the_production_enumerator_returns_only_this_processs_own_marked_child()
             p.wait()
 
 
+class _PS:
+    """The `subprocess.run` return the `ps` readers need: a `.stdout`."""
+
+    def __init__(self, stdout=""):
+        self.stdout = stdout
+
+
+def test_the_start_time_forms_agree_on_a_space_padded_single_digit_day(
+        monkeypatch) -> None:
+    """FIX 1. `ps` renders `lstart` as `%c`, whose day-of-month field is
+    SPACE-padded (`Thu Jan  1 00:00:00 2026`), while the enumerator's field-split
+    form collapses the whitespace runs. Normalised, the two forms must compare
+    equal — otherwise the TOCTOU re-check refuses every rung on days 1-9, the
+    driver is never signalled, and a healthy passing run falls to `_abandon`.
+    `%c` is fixed by POSIX, so the padding is not locale-specific."""
+    import os
+
+    import tools.ship_test_onboarding as mod
+
+    enumerated = f"4242 {os.getpid()} Thu Jan  1 00:00:00 2026 python run-driver"
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _PS(stdout=enumerated))
+    pid, started = mod._driver_pid_and_starttime()
+    assert pid == 4242, pid
+    # the re-read returns the RAW `lstart=` form, space-padded on the same day
+    monkeypatch.setattr(mod.subprocess, "run",
+                        lambda *a, **k: _PS(stdout="Thu Jan  1 00:00:00 2026\n"))
+    reread = mod._start_time_of(4242)
+    assert reread == started, f"{reread!r} != {started!r}"
+
+
+@pytest.mark.parametrize("bad_pid", ["0", "-1"])
+def test_a_nonpositive_pid_is_never_returned_as_the_driver(monkeypatch, bad_pid) -> None:
+    """FIX 2. `os.kill(-1, SIGKILL)` signals every process this uid may signal, so
+    a field-split that misread the pid must never become the signal target."""
+    import os
+
+    import tools.ship_test_onboarding as mod
+
+    line = f"{bad_pid} {os.getpid()} Thu Jan  1 00:00:00 2026 python run-driver"
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _PS(stdout=line))
+    assert mod._driver_pid_and_starttime() == (None, None)
+
+
+def test_the_ps_binary_is_absolute_and_a_missing_one_refuses(monkeypatch) -> None:
+    """FIX 2. Both `ps` calls run the ABSOLUTE binary, so a PATH-planted `ps`
+    cannot choose the pid the watchdog signals; when that binary is absent the
+    reader refuses (no pid, so nothing is signalled) rather than falling back."""
+    import os
+
+    import tools.ship_test_onboarding as mod
+
+    assert os.path.isabs(mod._PS_BIN), mod._PS_BIN
+    calls = []
+
+    def _fake_run(argv, **k):
+        calls.append(argv)
+        return _PS(stdout="")
+
+    monkeypatch.setattr(mod.subprocess, "run", _fake_run)
+    mod._driver_pid_and_starttime()
+    mod._start_time_of(1)
+    assert len(calls) == 2, calls
+    assert all(c[0] == mod._PS_BIN for c in calls), calls
+
+    monkeypatch.setattr(mod, "_PS_BIN", "/nonexistent/ps")
+    assert mod._driver_pid_and_starttime() == (None, None)
+    assert mod._start_time_of(1) is None
+
+
+def test_the_ps_read_is_budgeted_inside_the_ladder_slack(monkeypatch) -> None:
+    """FIX 8d. The last rung is at 3B/4, so B/4 of slack remains; the re-read's own
+    bound must sit inside that slack, and both `ps` calls must use it, or a slow
+    `ps` could push the abandon past the bound."""
+    import tools.ship_test_onboarding as mod
+
+    assert 0 < mod._ps_timeout() <= mod.TEARDOWN_BOUND_S / 4
+    # ...and the cap tracks the BOUND, not merely the absolute constant
+    monkeypatch.setattr(mod, "TEARDOWN_BOUND_S", 1.0)
+    assert mod._ps_timeout() == mod.TEARDOWN_BOUND_S / 4, mod._ps_timeout()
+    seen = []
+
+    def _fake_run(argv, **k):
+        seen.append(k.get("timeout"))
+        return _PS(stdout="")
+
+    monkeypatch.setattr(mod.subprocess, "run", _fake_run)
+    mod._driver_pid_and_starttime()
+    mod._start_time_of(1)
+    assert seen == [mod._ps_timeout(), mod._ps_timeout()], seen
+
+
 def test_the_run_exit_code_has_one_definition_for_main_and_the_abandon_path():
     """`exit_code_for(obs.reason)` is NOT the run's exit code: a PASSED run has an
     empty reason, which `exit_code_for` scores as a failure. The abandon path used
@@ -2902,11 +3118,13 @@ def test_the_run_exit_code_has_one_definition_for_main_and_the_abandon_path():
 
 def test_the_teardown_bound_is_pinned() -> None:
     """An inflated bound is not a bound: the value is pinned, and the pin is a
-    RANGE, so an inflated bound is as RED as a zero one."""
+    RANGE, so an inflated bound is as RED as a zero one. The first rung is B/2,
+    so the value must clear the measured healthy teardown (~2.6 s) with room to
+    spare — a bound near it is the false-alarm class this pin exists to catch."""
     import tools.ship_test_onboarding as mod
 
-    assert mod.TEARDOWN_BOUND_S == 5.0
-    assert 0 < mod.TEARDOWN_BOUND_S <= 10
+    assert mod.TEARDOWN_BOUND_S == 30.0
+    assert 0 < mod.TEARDOWN_BOUND_S <= 60
 
 
 def test_the_verdict_is_printed_exactly_once(capsys, monkeypatch, tmp_path):
@@ -2973,6 +3191,12 @@ def test_the_runbook_discloses_the_bound_the_vocabulary_and_the_residue() -> Non
     # ...and the window that produces `not_run`
     assert "not_run" in doc
     assert "killed" in doc.lower() or "dies" in doc.lower()
+    # FIX 8f: the MODULE docstring states the same closed vocabulary and
+    # qualifies the twice-write to the runs that actually enter the teardown.
+    module_flat = " ".join((mod.__doc__ or "").split())
+    for term in mod.BROWSER_TEARDOWN_OUTCOMES:
+        assert term in module_flat, f"the module docstring does not name {term!r}"
+    assert "on any run that enters the teardown" in module_flat
 
 
 # ── #4875 — the two aborts that write NO artifact, and the guard that does ───
@@ -3102,6 +3326,10 @@ def test_a_wedged_context_close_returns_within_the_bound_and_records_watchdog_ki
 
     import tools.ship_test_onboarding as mod
 
+    # The production bound is 30 s; the wedge tests drive the LADDER on a short
+    # bound so the suite stays fast. The value-pin test asserts the production
+    # constant itself.
+    monkeypatch.setattr(mod, "TEARDOWN_BOUND_S", 1.0)
     started = time.monotonic()
     _obs, ctx, _mod = _happy_bound_run(
         monkeypatch, tmp_path, ctx_close_wedges=True,
@@ -3128,6 +3356,9 @@ def test_a_wedged_browser_close_on_the_new_context_path_is_bounded(
     live while no context exists — and `browser.close()` is itself the
     timeout-less `send` that blocks. It must be inside the watchdog window
     exactly like the context close."""
+    import tools.ship_test_onboarding as mod
+
+    monkeypatch.setattr(mod, "TEARDOWN_BOUND_S", 1.0)
     _obs, ctx, _mod = _run_fake_walk(
         monkeypatch, tmp_path, plan={}, ui_sequence=[], mcp_tools_call=_MCP_OK,
         new_context_raises=True, browser_close_wedges=True,
@@ -3142,6 +3373,9 @@ def test_a_wedged_browser_close_on_the_new_context_path_is_bounded(
 def test_a_wedged_pw_stop_is_bounded_and_forced(monkeypatch, tmp_path):
     """E7b: `pw.stop()` is no escape either. On the no-browser path a wedged stop
     is the ONLY thing blocking, and the bound must cover it."""
+    import tools.ship_test_onboarding as mod
+
+    monkeypatch.setattr(mod, "TEARDOWN_BOUND_S", 1.0)
     _obs, ctx, _mod = _run_fake_walk(
         monkeypatch, tmp_path, plan={}, ui_sequence=[], mcp_tools_call=_MCP_OK,
         launch_raises=True, stop_wedges=True,
@@ -3207,6 +3441,9 @@ def test_the_watchdog_signals_only_the_enumerated_driver_child(monkeypatch, tmp_
     """AC4. The watchdog holds ONE pid, obtained by enumerating THIS run's own
     direct children. Every signal it sends goes to that pid and no other — the
     safety invariant that lets the kill be automatic."""
+    import tools.ship_test_onboarding as mod
+
+    monkeypatch.setattr(mod, "TEARDOWN_BOUND_S", 1.0)
     _obs, ctx, _mod = _happy_bound_run(
         monkeypatch, tmp_path, ctx_close_wedges=True,
         wedge_release_on=(signal.SIGKILL,))
@@ -3228,6 +3465,7 @@ def test_no_driver_child_means_no_signal_and_driver_absent(monkeypatch, tmp_path
     releases takes the `abandoned` path instead — see the next test."""
     import tools.ship_test_onboarding as mod
 
+    monkeypatch.setattr(mod, "TEARDOWN_BOUND_S", 1.0)
     _obs, ctx, _mod = _happy_bound_run(
         monkeypatch, tmp_path, ctx_close_wedges=True, driver_absent=True,
         wedge_timeout=mod.TEARDOWN_BOUND_S * 0.6)
@@ -3237,6 +3475,8 @@ def test_no_driver_child_means_no_signal_and_driver_absent(monkeypatch, tmp_path
     assert harness.exits == [], "the run self-terminated unnecessarily"
     block = _browser_teardown_from_disk(tmp_path)
     assert block["outcome"] == "driver_absent", block
+    # FIX 8c: the no-child case says so, and does not claim a re-check refusal.
+    assert "no driver child was enumerated" in block["detail"], block["detail"]
 
 
 @pytest.mark.timeout(120)
@@ -3253,6 +3493,7 @@ def test_a_close_that_never_releases_abandons_the_run_inside_the_bound(
     #4319), and nothing was signalled or reaped."""
     import tools.ship_test_onboarding as mod
 
+    monkeypatch.setattr(mod, "TEARDOWN_BOUND_S", 1.0)
     start = time.monotonic()
     obs, ctx, _mod = _happy_bound_run(
         monkeypatch, tmp_path, ctx_close_wedges=True, driver_absent=True,
@@ -3274,10 +3515,18 @@ def test_a_close_that_never_releases_abandons_the_run_inside_the_bound(
 @pytest.mark.timeout(60)
 def test_a_stale_start_time_is_not_signalled(monkeypatch, tmp_path):
     """AC4/TOCTOU. A bare pid is racy against reuse, so the start time is RE-READ
-    immediately before each rung. When it disagrees with the enumeration the
-    watchdog signals nothing — a reused pid is not this run's child."""
+    immediately before every rung. When it disagrees with the enumeration the
+    watchdog signals nothing — a reused pid is not this run's child.
+
+    On the real path the close is still blocked at the last rung, so the refusal
+    is observed at the LAST RESORT: the run abandons (`abandoned`, with the
+    `_exit_now` evidence captured at that moment). The wedge is released only by
+    the fake exit seam, so nothing here depends on a self-release by timeout, and
+    deleting `_abandon` removes the exit call — which reddens this test.
+    """
     import tools.ship_test_onboarding as mod
 
+    monkeypatch.setattr(mod, "TEARDOWN_BOUND_S", 1.0)
     _obs, ctx, _mod = _happy_bound_run(
         monkeypatch, tmp_path, ctx_close_wedges=True,
         start_time_override="a different start time",
@@ -3286,8 +3535,159 @@ def test_a_stale_start_time_is_not_signalled(monkeypatch, tmp_path):
     assert harness.signals == [], harness.signals
     # re-read once per rung, and the pid it inspected is the ENUMERATED one
     assert harness.start_time_reads == [4242, 4242], harness.start_time_reads
+    # the last resort ran, with the run's own exit code
+    assert harness.exits == [mod.EXIT_PASSED], harness.exits
+    assert harness.exit_docs[0] is not None, "nothing was on disk at abandon time"
+    assert harness.exit_docs[0]["outcome"] == "abandoned", harness.exit_docs[0]
+    # ...and the record distinguishes a REFUSED child from "no child enumerated"
+    # (FIX 8c): the on-disk record after the main thread completes.
     block = _browser_teardown_from_disk(tmp_path)
     assert block["outcome"] == "driver_absent", block
+    assert "refused by the start-time re-check" in block["detail"], block["detail"]
+
+
+def test_a_healthy_run_records_clean_with_no_signal_inside_the_first_rung(
+        monkeypatch, tmp_path):
+    """FIX 3's false-alarm half. A healthy real teardown takes ~2.6 s and the
+    first rung is at B/2, so at the production bound the graceful window is ~6x
+    the healthy path: a healthy run records `clean` and sends no signal at all.
+    The margin is asserted AS A VALUE, so a bound lowered back onto the healthy
+    path (the live false alarm: every healthy run recorded `watchdog_kill` and
+    took a SIGTERM) is RED here."""
+    import tools.ship_test_onboarding as mod
+
+    assert mod.TEARDOWN_BOUND_S / 2 >= 5 * 2.6, (
+        f"the first rung ({mod.TEARDOWN_BOUND_S / 2}s) must clear the measured "
+        f"healthy teardown (~2.6s) with margin")
+    obs, ctx, _mod = _happy_bound_run(monkeypatch, tmp_path)
+    assert obs.verdict == "passed"
+    block = _browser_teardown_from_disk(tmp_path)
+    assert block["outcome"] == "clean", block
+    assert ctx.harness.signals == [], ctx.harness.signals
+    assert ctx.harness.exits == [], ctx.harness.exits
+
+
+@pytest.mark.timeout(60)
+def test_the_abandon_path_still_prints_the_authoritative_summary(
+        capsys, monkeypatch, tmp_path):
+    """FIX 4. `_abandon` exits before `_finish`, so it shares the print path: the
+    verdict line, the per-step summary and the `observation → path` line a CI job
+    keys on are all printed from the record the abandon wrote.
+
+    Called DIRECTLY: on the real path the fake `_exit_now` returns and `_finish`
+    prints a second copy, which would mask a silent `_abandon`."""
+    import tools.ship_test_onboarding as mod
+
+    obs = mod.Observation(started_at=mod._now(), target={"dashboard": "x"})
+    obs.verdict = "passed"
+    obs.add(name="front-door", ok=True, detail="hittable")
+    record = mod._browser_teardown_record()
+    exits = []
+    monkeypatch.setattr(mod, "_exit_now", lambda code: exits.append(code))
+    mod._abandon(obs, record, None, tmp_path)
+    captured = capsys.readouterr()
+    assert "[ship-test] passed" in captured.out, captured.out
+    assert "  PASS front-door" in captured.out, captured.out
+    assert "[ship-test] observation →" in captured.out, captured.out
+    assert exits == [mod.EXIT_PASSED], exits
+    assert record["outcome"] == "abandoned", record
+
+
+@pytest.mark.timeout(60)
+def test_the_abandon_artifact_claim_is_conditional_on_the_write(
+        capsys, monkeypatch, tmp_path):
+    """FIX 4. The abandon path may only claim the artifact records the outcome when
+    the write actually succeeded; when it failed, the stderr line says so, so a
+    lost write is never reported as a recorded one."""
+    import tools.ship_test_onboarding as mod
+
+    monkeypatch.setattr(mod, "TEARDOWN_BOUND_S", 1.0)
+    real = mod._write_observation
+    calls = []
+
+    def _failing_on_abandon(obs, out_dir):
+        calls.append(1)
+        if len(calls) == 2:          # 1 = pre-teardown write, 2 = the abandon's
+            raise OSError("disk gone")
+        return real(obs, out_dir)
+
+    monkeypatch.setattr(mod, "_write_observation", _failing_on_abandon)
+    _obs, _ctx, _mod = _happy_bound_run(
+        monkeypatch, tmp_path, ctx_close_wedges=True, driver_absent=True,
+        wedge_timeout=60.0)
+    captured = capsys.readouterr()
+    assert "could NOT be written" in captured.err, captured.err
+
+
+@pytest.mark.timeout(60)
+def test_a_signal_seam_that_raises_still_reaches_abandon(monkeypatch, tmp_path):
+    """FIX 6. `os.kill` can raise (a vanished child, a permission refusal). The
+    watchdog thread must not die on it: the ladder continues, no exception escapes
+    the thread, and the last resort still bounds the run."""
+    import threading
+
+    import tools.ship_test_onboarding as mod
+
+    monkeypatch.setattr(mod, "TEARDOWN_BOUND_S", 1.0)
+    escaped = []
+    monkeypatch.setattr(threading, "excepthook", lambda args: escaped.append(args))
+    _obs, ctx, _mod = _happy_bound_run(
+        monkeypatch, tmp_path, ctx_close_wedges=True, signal_raises=True,
+        wedge_timeout=mod.TEARDOWN_BOUND_S * 1.5)
+    harness = ctx.harness
+    assert harness.signals == [], harness.signals
+    assert harness.exits == [mod.EXIT_PASSED], harness.exits
+    assert harness.exit_docs[0] is not None
+    assert harness.exit_docs[0]["outcome"] == "abandoned", harness.exit_docs[0]
+    assert escaped == [], escaped
+
+
+@pytest.mark.timeout(60)
+def test_a_raising_close_is_reported_as_close_error_even_after_a_rung_fired(
+        monkeypatch, tmp_path):
+    """FIX 8b. An attempted close that RAISED is `close_error` — the specific,
+    actionable record — and must not be masked by `driver_absent` because a rung
+    fired on the way. With no child enumerated no signal was sent, so the only
+    fault is the raising close."""
+    import tools.ship_test_onboarding as mod
+
+    monkeypatch.setattr(mod, "TEARDOWN_BOUND_S", 1.0)
+    _obs, ctx, _mod = _happy_bound_run(
+        monkeypatch, tmp_path, ctx_close_wedges=True, ctx_close_raises=True,
+        driver_absent=True, wedge_timeout=mod.TEARDOWN_BOUND_S * 0.6)
+    harness = ctx.harness
+    assert harness.signals == [], harness.signals
+    block = _browser_teardown_from_disk(tmp_path)
+    assert block["outcome"] == "close_error", block
+    assert "context close failed" in block["detail"], block["detail"]
+
+
+@pytest.mark.timeout(60)
+def test_an_unfinalized_record_abandons_as_an_instrument_error(
+        monkeypatch, tmp_path):
+    """FIX 8a. An unfinalized record — `_walk` escaped before `_finalize` could
+    write the pre-teardown document — is an instrument fault, and `main` returns
+    `EXIT_INSTRUMENT_ERROR` for it. The teardown's last resort must exit the same
+    way rather than scoring the record's non-`passed` verdict as a product code.
+
+    Driven with a write that always fails: `_finalize` raises, `obs.reason` is
+    never set, and the run's verdict is the walk's error text — the shape that
+    would exit 1 the product way without the mapping."""
+    import tools.ship_test_onboarding as mod
+
+    monkeypatch.setattr(mod, "TEARDOWN_BOUND_S", 1.0)
+
+    def _write_always_fails(obs, out_dir):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(mod, "_write_observation", _write_always_fails)
+    sink = []
+    with pytest.raises(OSError):
+        _happy_bound_run(monkeypatch, tmp_path, ctx_close_wedges=True,
+                         driver_absent=True, wedge_timeout=60.0,
+                         harness_sink=sink)
+    harness = sink[0]
+    assert harness.exits == [mod.EXIT_INSTRUMENT_ERROR], harness.exits
 
 
 @pytest.mark.timeout(60)
@@ -3298,6 +3698,7 @@ def test_the_ladder_takes_the_rungs_at_half_and_three_quarters_of_the_bound(
     ladder that never fires reddens the first (no signal at all)."""
     import tools.ship_test_onboarding as mod
 
+    monkeypatch.setattr(mod, "TEARDOWN_BOUND_S", 1.0)
     _obs, ctx, _mod = _happy_bound_run(
         monkeypatch, tmp_path, ctx_close_wedges=True,
         wedge_release_on=(signal.SIGKILL,))
@@ -3315,6 +3716,9 @@ def test_the_ladder_sends_at_most_one_sigterm_and_one_sigkill(monkeypatch, tmp_p
     """AC5. At most one of each — the ladder may legitimately send BOTH, so a test
     asserting "one signal" would be wrong; a ladder that fires twice per rung
     would send four. The signalled child is reaped once per signal."""
+    import tools.ship_test_onboarding as mod
+
+    monkeypatch.setattr(mod, "TEARDOWN_BOUND_S", 1.0)
     _obs, ctx, _mod = _happy_bound_run(
         monkeypatch, tmp_path, ctx_close_wedges=True,
         wedge_release_on=(signal.SIGKILL,))
