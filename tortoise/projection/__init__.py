@@ -1406,9 +1406,12 @@ _ENTITY_MUTATION_OPS: tuple[str, ...] = (
     "delete", "rename", "restatus", "revise",       # fold arms exist
     "retract", "supersede",                          # recorded on #3299 — no arm yet
 )
-# FOLD capability, not producer reach: `rename` is implemented and must stay so
-# (a raw/legacy or future record still folds), but the PRODUCER deliberately does
-# not emit it yet — see `sdk._update_entity`'s `name` branch. #3377 returned to
+# FOLD capability, not producer reach: the `rename` arm is implemented and must
+# stay so, but the PRODUCER deliberately does not emit `rename` yet — see
+# `sdk._update_entity`'s `name` branch. The arm applies `state`, so a raw/legacy
+# or future `rename` record folds ONLY if it carries the new name as
+# `state["name"]`; a record carrying just a top-level `name` unfolds and is
+# reported as a fold miss. #3377 returned to
 # open; #4769 lands rename journalling WITH the structural sweep-ordering fix.
 _ENTITY_MUTATION_IMPLEMENTED_OPS: frozenset[str] = frozenset(
     {"delete", "rename", "restatus", "revise"})

@@ -17389,13 +17389,13 @@ class TortoiseSDK:
     def _journal_entity_mutation(self, label: str, id_val: str, op: str, *,
                                  state: dict | None = None,
                                  name: str | None = None) -> None:
-        # NOTE ON ``name``: FOLD INPUT ONLY, currently reserved. No producer
-        # passes it any more — the rename op is deferred to #4769 (§ the
-        # ``if "name" in props`` branch in ``_update_entity``), so ``rename``
-        # reaches this builder only from a raw/legacy journal line, which bypasses
-        # the builder entirely. It is kept because the record shape is fixed by
-        # the fold (`_fold_entity_mutation` reads ``record["name"]``) and a
-        # future producer must be able to emit the documented shape.
+        # NOTE ON ``name``: RESERVED AND CURRENTLY UNREAD. No producer passes it
+        # (the rename op is deferred to #4769), and `_fold_entity_mutation` does
+        # NOT read it — the fold's `rename` arm applies `state`, so a record
+        # carrying only a top-level `name` unfolds and is reported as a fold
+        # miss. Do NOT treat this field as the way to journal a rename: put the
+        # new name in `state` under `"name"`. #4769 decides whether this field
+        # earns its keep or is deleted.
         """Build and emit ONE ``EntityMutated`` record (#3299).
 
         THE only place an ``EntityMutated`` record is constructed — asserted by
@@ -17607,6 +17607,13 @@ class TortoiseSDK:
                             )
 
                     if matched:
+                        # #2296 residual, deliberately NOT promised away here: if
+                        # this label's CREATION was never journaled (a `Document`
+                        # made by `_create_entity`), `rebuild_all` does not merely
+                        # revert the `name`, it DESTROYS the node. The warning
+                        # below therefore claims only what the deferred rename
+                        # does — it does not promise the node or its siblings
+                        # survive.
                         # Warn on EVERY occurrence, not once per process: this
                         # class recurs, and a one-shot net would leave the
                         # second and later reverts silent — the exact failure
@@ -17618,8 +17625,7 @@ class TortoiseSDK:
                             "ObjectSuperseded on replay: the rename moves the "
                             "node's name before the deferred supersede sweep "
                             "matches on it). THE `name` WILL BE REVERTED BY "
-                            "`rebuild_all`; every other key in this write IS "
-                            "journaled and survives."
+                            "`rebuild_all`."
                         )
                     continue
                 keys = list(props)

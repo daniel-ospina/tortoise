@@ -24,7 +24,8 @@
 >
 > **Interim behaviour:** a `name`-bearing write applies live and journals **every
 > other key**, withholding only `name`, and **warns on every occurrence** naming
-> #4769. The `rename` FOLD arm is retained so a raw/legacy record still folds.
+> #4769. The `rename` FOLD arm is retained, and it applies `state` — so a
+> raw/legacy record folds only if it carries the new name as `state["name"]`.
 >
 > ---
 
