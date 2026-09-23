@@ -108,7 +108,12 @@ SHARED_MODULES = (
     "tortoise/env_truthy.py",
     "tortoise/tool_registry.py",
     "tortoise/mcp_server.py",
-    "tortoise/projection/",
+    # ⚠️ #4713: naming the package's entry point rather than the whole
+    # `tortoise/projection/` directory is a deliberate coverage REDUCTION. A
+    # submodule edit now runs only the surfaces registered for it below, plus the
+    # `core` pins that exercise it — the sdk/api suites wait for the next main
+    # push. Take the `edges.py` treatment below as the model if that is wrong.
+    "tortoise/projection/__init__.py",
     "tests/conftest.py",
     "tests/fake_control_plane.py",
     "pyproject.toml",
@@ -394,7 +399,8 @@ SOURCE_PATTERNS = {
             # the entries above: the flat "tools/" prefix would swallow a
             # shape-rate-only PR into tier-1 smoke and the ask-lane tests
             # would not run where the measurement changed.
-            "tools/ask_shape_rate.py"),
+            "tools/ask_shape_rate.py",
+            "tortoise/projection/edges.py"),
     "api": ("tortoise/hosted_api.py", "tortoise/hosted_backup.py",
             "tortoise/acl_graph_users.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",
             # #3154: hosted_api.py imports hosted_backup.py at module level (the
@@ -504,7 +510,8 @@ SOURCE_PATTERNS = {
 # `--manifest-only` alone selected only tier-1 smoke — the pin for the code being
 # changed would not have run. That is the #1349/#3332/#3616 silent-drop class, on
 # the file this PR modifies.
-CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.py")
+CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.py",
+             "tortoise/projection/edges.py")
 
 # Paths that are NOT python-relevant (docs/config PRs skip the matrix).
 NON_PYTHON_PREFIXES = (
@@ -1325,7 +1332,12 @@ def _durations_map(manifest: dict) -> dict:
 
 
 def duration_issues(manifest: dict) -> list[str]:
-    """#1473: every durations key must be classified and non-slow."""
+    """#1473/#4712: every durations key must be a CLASSIFIED test file.
+
+    Slow and carve-out lane keys carry their measured cost here too, so a cost
+    regression in a lane that exists *because* it is expensive is visible.
+    Values must additionally be numeric and finite.
+    """
     issues = []
     # #3407 review cycle 4 (pre-existing): this site and `--split` below used
     # `.get("durations", {})`, which returns a present-but-NULL `durations:` key
@@ -1341,14 +1353,11 @@ def duration_issues(manifest: dict) -> list[str]:
     if raw is not None and not isinstance(raw, dict):
         return [f"durations is not a mapping: {type(raw).__name__}"]
     durations = _durations_map(manifest)
-    slow = set(manifest.get("slow_files", []))
     classified = set()
     for s, files in manifest["surfaces"].items():  # noqa: B007
         classified.update(files)
     classified.update(manifest.get("tier1", []))
     for name in durations:
-        if name in slow:
-            issues.append(f"durations key {name} is a slow file (must be fast-gate)")
         if name not in classified:
             issues.append(f"durations key {name} is not classified in the manifest")
         # P2 (#3407 review): validate the VALUE, not just the key. Both guards

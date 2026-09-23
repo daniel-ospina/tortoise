@@ -6,11 +6,14 @@ Phase 0 (#7748): Foundation — FalkorDB indexes, RRF fusion, degradation chain,
 from __future__ import annotations  # noqa: I001
 
 import logging
+import os
 import threading
 import time
 from collections import Counter
 from dataclasses import dataclass, asdict, field
 from typing import Any, Literal
+
+from .env_truthy import is_truthy
 
 # #1391: terminal (no-longer-current) Point statuses EXCLUDED from every
 # default read surface (FTS/vector/structural/operator + sdk query paths).
@@ -287,6 +290,51 @@ class EpBreakdown:
             self.evidence = EpEvidence()
 
 
+# ── Provenance enrichment flag (objectives 5/9, owner decision #3837) ───────
+# The default read path carries SOURCE + WHEN LEARNED + CONFIDENCE; confidence
+# already rides ``ep``. Source (``extractedFrom``) and capture time
+# (``createdAt``) are additive and OFF by default: the search point fetch reads
+# those columns only when this flag is set, so a default call is byte-identical
+# (the #3986 freeze carve-out — a default-off response field is not a surface
+# change. NO RECORDING SURFACE EXISTS for it: ``config/surface-manifest.yml`` has
+# no ``response_fields`` key and ``tools/surface_manifest.py`` derives none, so
+# this carve-out is ASSERTED here, not recorded in the manifest. Recording it
+# would need both a manifest key and its derivation path — a change to the
+# artifact and to the ``cut``/``check`` pair that owns it).
+SEARCH_PROVENANCE_FLAG_ENV = "TORTOISE_SEARCH_PROVENANCE"
+
+
+def search_provenance_enabled() -> bool:
+    """Resolve the additive search-provenance flag. Default OFF.
+
+    Delegates to the single declared env-truthiness contract (#4097):
+    :func:`tortoise.env_truthy.is_truthy` — unset, blank, and garbage all read
+    OFF. A second copy of the vocabulary here is exactly the drift #4097 exists
+    to prevent (and is build-red in ``tests/test_env_truthy.py``).
+
+    ⛔ KNOWN LIMITATION — the flag is a NO-OP on the degraded fallback path AND
+    on every non-Point entity type.
+    The two fallback tiers (``fallback_snapshot.search_snapshot`` and
+    ``fallback_tfidf``) build their ``SearchResult``s and return from
+    ``TortoiseSDK`` BEFORE the flag-gated point fetch runs, so they carry
+    neither ``source_ref`` nor ``captured_at`` and ``to_dict`` emits no
+    ``provenance`` block however the flag is set. This is a boundary, not an
+    oversight: the snapshot keeps a deliberately LEAN projection
+    (``fallback_snapshot._SNAPSHOT_QUERY`` — id/content/pointKind/status/
+    outdated/search_keys/has_answer, no provenance columns) and adding those to
+    it is a separate, policy-governed change to the corpus it caches. A
+    degraded run therefore gets no provenance enrichment. The enrichment is
+    also POINT-ONLY: the flag-gated fetch and the two columns it reads
+    (``n.extractedFrom`` / ``n.createdAt``) sit inside the project search's
+    ``if entity_type == "point":`` branch, while ``SearchResult`` is constructed
+    for every entity type — so a normal (non-degraded) ``document`` / ``event``
+    / ``subject`` search carries no ``source_ref``/``captured_at`` either, and
+    ``to_dict`` emits no ``provenance`` block. The flag enriches the
+    non-degraded POINT query path only.
+    """
+    return is_truthy(os.environ.get(SEARCH_PROVENANCE_FLAG_ENV))
+
+
 @dataclass
 class SearchResult:
     id: str
@@ -321,6 +369,14 @@ class SearchResult:
     # in to_dict (emitted only when True — the wire shape stays clean for
     # the 99% unmarked majority).
     has_answer: bool = False
+    # Provenance enrichment (objectives 5/9; owner decision #3837 — the default
+    # path carries source + when learned + confidence; confidence already rides
+    # ``ep``). ADDITIVE and OFF by default: the point fetch reads these columns
+    # ONLY when ``search_provenance_enabled()``, and ``to_dict`` emits the
+    # ``provenance`` block only when a value is present, so a default call is
+    # byte-identical to pre-change output.
+    source_ref: Any = None  # Point.extractedFrom — the Source/document link
+    captured_at: str = ""   # Point.createdAt — when the fact entered memory
 
     def to_dict(self) -> dict:
         """Convert to JSON-safe dict for API responses."""
@@ -367,6 +423,16 @@ class SearchResult:
         # (unmarked hits stay byte-identical on the wire).
         if self.has_answer:
             d["has_answer"] = True
+        # Provenance (#3837 owner decision: source + when learned). Additive —
+        # emitted only when a value is present, so an unflagged call and an
+        # unflagged empty-provenance hit both stay byte-identical.
+        if self.source_ref or self.captured_at:
+            prov: dict[str, Any] = {}
+            if self.source_ref:
+                prov["source"] = self.source_ref
+            if self.captured_at:
+                prov["captured_at"] = self.captured_at
+            d["provenance"] = prov
         return d
 
 
@@ -2312,6 +2378,9 @@ def fallback_tfidf(query: str, points: list[dict], limit: int = 10) -> list[dict
                 # embedded fallback hits too (``self.query`` nodes carry
                 # ``has_answer``; absent = False).
                 has_answer=bool(meta.get(r["id"], {}).get("has_answer")),
+                # ⛔ No ``source_ref``/``captured_at`` here — this tier is a
+                # no-op for TORTOISE_SEARCH_PROVENANCE; see the KNOWN
+                # LIMITATION note on ``search_provenance_enabled`` above.
             ).to_dict()
             for r in results
         ]
