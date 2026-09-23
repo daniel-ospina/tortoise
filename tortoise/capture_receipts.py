@@ -23,12 +23,13 @@ state keys (never client state):
 
 The hosted API (``tortoise/hosted_api.py``) imports both keys from THIS module,
 and the CLI's ``tortoise session verify`` (#3809) imports ``capture_receipt_key``
-(it reads no last-error key). The hosted API is not a single-importer: where it
-reconciles the receipt keys against the server-owned key set it still re-spells
-both keys inline (``_reconcile_capture_receipts`` / ``_capture_server_owned_keys``
-— filed as #4893), so this module is the one DEFINITION while the hosted API is a
-second spelling in those spots. One function, two importers remains the target;
-until #4893 lands, neither copy may be changed alone.
+(it reads no last-error key). The hosted API is not a single-importer: its
+``_reconcile_capture_receipts`` re-spells the receipt keys against the Session's
+harness buckets, and its ``_capture_server_owned_keys`` re-spells both keys to
+define the server-owned set (filed as #4893), so this module is the one
+DEFINITION while the hosted API is a second spelling in those two spots. One
+function, two importers remains the target; until #4893 lands, neither copy may be
+changed alone.
 """
 from __future__ import annotations
 
