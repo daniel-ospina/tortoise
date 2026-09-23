@@ -557,14 +557,17 @@ def test_failure_classification():
 # ── (6) Dedup / consolidation ──────────────────────────────────────────────
 
 
-def test_the_corrupt_input_helpers_agree_with_the_pi_leg(tmp_path):
-    """The two legs share ONE spool directory, so a corrupt on-disk value must
+def test_the_corrupt_input_helpers_match_the_pi_policy_pins():
+    """The PINNED policy for a corrupt on-disk value — node-free, so it runs
+    even where node is absent. These are the values the Pi leg produces; the
+    runtime comparison in `test_the_corrupt_input_helpers_agree_with_the_pi_leg`
+    is what checks that the Pi leg still produces them.
+
+    The two legs share ONE spool directory, so a corrupt on-disk value must
     produce the SAME retry cadence on both — otherwise a session refused on the
     Pi leg waits 16 minutes while the Python leg would have tried it now.
-
-    The safe reading of an unusable value is "retry now" (0 attempts, window 0),
-    which is what the Pi leg's `clampAttempts`/`clampWindow` already do; these
-    pins are what the Python leg must match.
+    The safe reading of an unusable value is "retry now" (0 attempts, window
+    0), which is what the Pi leg's `clampAttempts`/`clampWindow` do.
 
     MUTATION THAT REDS THIS: `int(meta.get('attempts') or 0)` without the type
     check -> a stored "5" yields attempt 5 (16 min) instead of 1; drop the
@@ -601,6 +604,80 @@ def test_the_corrupt_input_helpers_agree_with_the_pi_leg(tmp_path):
     assert _backoff_ms({"next_attempt_at_ms": "1790000000000"}) == 0.0, (
         "a string window is corrupt input; the Pi leg's clampWindow zeroes it")
     assert _backoff_ms({"next_attempt_at_ms": True}) == 0.0
+
+
+def test_the_corrupt_input_helpers_agree_with_the_pi_leg(tmp_path):
+    """The RUNTIME half: the same corrupt values through the REAL
+    `clampAttempts`/`clampWindow`, compared against the Python helpers.
+
+    Without this, the policy pins above are a table of constants asserting that
+    Python equals today's Pi behaviour while nothing checks the Pi side — so
+    renaming `MAX_ATTEMPTS`, or changing `Math.floor` to `Math.round`, would
+    leave a test called "agree" green while the legs diverge on shared state.
+    That is the failure class this branch exists to close, so it is compared the
+    same way the status classifier is (a Node driver importing the real
+    module) rather than trusted.
+
+    MUTATION THAT REDS THIS: change `MAX_ATTEMPTS` in the Pi leg -> the `1e308`
+    row's attempt count diverges; drop the `value > 0` guard from `clampWindow`
+    -> the negative rows diverge; drop the `typeof value === "number"` guard
+    from either helper -> the `"5"` and bool rows diverge.
+    """
+    from tortoise.capture_spool import _attempts, _backoff_ms
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available — the node-free policy pins still ran")
+
+    ext = (REPO / "tortoise" / "pi-hooks" / "tortoise-capture.ts").as_uri()
+    driver = tmp_path / "clamp-parity.mjs"
+    # NaN/Infinity/undefined are pushed in CODE, not carried in the JSON: Python
+    # emits bare `NaN`/`Infinity` which `JSON.parse` rejects, and `undefined`
+    # has no JSON spelling at all. The JSON half carries only what really can
+    # sit in a spool meta file.
+    driver.write_text(
+        f'import {{ clampAttempts, clampWindow }} from "{ext}";\n'
+        "const vals = JSON.parse(process.argv[2]);\n"
+        "const out = vals.map((v) => [clampAttempts(v), clampWindow(v)]);\n"
+        "out.push([clampAttempts(NaN), clampWindow(NaN)]);\n"
+        "out.push([clampAttempts(Infinity), clampWindow(Infinity)]);\n"
+        "out.push([clampAttempts(undefined), clampWindow(undefined)]);\n"
+        "console.log(JSON.stringify(out));\n",
+        encoding="utf-8",
+    )
+    # `10**400` is the important row: Python holds it exactly, JS `JSON.parse`
+    # reads the same bytes as Infinity — which is why `_attempts` goes through a
+    # float, so both legs land on 0 (30 s) instead of Python's 64 (6 h).
+    matrix = [None, True, False, 0, -0.0, -0.5, 3.7, 30_000, 1e308,
+              10 ** 400, "5"]
+    proc = subprocess.run(
+        [node, "--experimental-strip-types", str(driver), json.dumps(matrix)],
+        capture_output=True, text=True, timeout=60, cwd=str(REPO),
+    )
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    pi_rows = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    expected = [
+        [_attempts({"attempts": v}), _backoff_ms({"next_attempt_at_ms": v})]
+        for v in matrix
+    ]
+    expected += [
+        [_attempts({"attempts": float("nan")}),
+         _backoff_ms({"next_attempt_at_ms": float("nan")})],
+        [_attempts({"attempts": float("inf")}),
+         _backoff_ms({"next_attempt_at_ms": float("inf")})],
+        [_attempts({"attempts": None}), _backoff_ms({"next_attempt_at_ms": None})],
+    ]
+    assert pi_rows == expected, (
+        "the Pi and Python corrupt-input helpers disagree (row order: "
+        f"{[*matrix, 'NaN', 'Infinity', 'undefined']}):\n"
+        f"pi={pi_rows}\npython={expected}"
+    )
+    # An ABSOLUTE pin as well: a same-direction drift would pass a pure
+    # comparison. A magnitude JS still parses FINITE clamps to the bound; one it
+    # reads as Infinity is "retry now".
+    assert pi_rows[8] == expected[8] == [64, 1e308]
+    assert pi_rows[9] == expected[9] == [0, 0.0]
 
 
 def test_an_unchanged_snapshot_is_not_rewritten(tmp_path):
