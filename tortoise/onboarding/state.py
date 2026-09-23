@@ -118,6 +118,23 @@ _GATES: dict[str, frozenset[str]] = {
     FORK_BUILD: _GATE_BUILD,
 }
 
+# Steps that are NOT evidence of agent onboarding work, and therefore do NOT
+# terminate the grandfathered-window guard (``resolve_wire_completion``,
+# ``recompute_completion``, ``_legacy_grandfathered``):
+#
+# - ``team-named`` is auto-satisfied at org-create (name REQUIRED) — never an
+#   agent act.
+# - ``connection-written`` (#3451) records a CLIENT-side config WRITE that the
+#   server cannot observe. #3913 rests completion on the acts the server
+#   OBSERVES, so a trace of a local file write must not close a completion the
+#   wire still grants — it says nothing about whether a harness ever connected.
+#   Without this exclusion, the §3 checkpoint alone would flip a legitimately
+#   grandfathered org to incomplete before the restart was even attempted.
+#
+# The window closes on the first SERVER-OBSERVED agent step.
+_NON_AGENT_STEPS: frozenset[str] = frozenset(
+    {"team-named", "connection-written"})
+
 # edge labels / node labels
 ONBOARDING_NODE_LABEL = "OnboardingState"
 ONBOARDING_STEP_LABEL = "OnboardingStep"
@@ -235,17 +252,18 @@ def resolve_wire_completion(node_status: str | None,
 
     1. node.status == 'complete' → True (server-owned, gate-written).
     2. Grandfathered-window guard: node present but NOT complete, ZERO
-       AGENT step edges (the org-named edge is auto-satisfied at init and
-       never counts), and jsonb onboarding_complete=true → True — kills the
-       poisoned-false window for orgs completing via the legacy wizard
-       during the T2→T7 carve-out. One-directional and self-terminating:
-       the FIRST agent step edge flips control to the node.
+       AGENT step edges (``_NON_AGENT_STEPS`` — the org-named edge is
+       auto-satisfied at init and ``connection-written`` is a client-only
+       trace, so neither counts), and jsonb onboarding_complete=true → True —
+       kills the poisoned-false window for orgs completing via the legacy
+       wizard during the T2→T7 carve-out. One-directional and self-terminating:
+       the FIRST server-observed agent step edge flips control to the node.
     3. Otherwise → False (a node-present org without gate-complete status
        is never re-onboarded via the flag; accept-and-drop makes the jsonb
        writer inert post-W1)."""
     if node_status == STATUS_COMPLETE:
         return True
-    agent_steps = [s for s in completed_steps if s != "team-named"]
+    agent_steps = [s for s in completed_steps if s not in _NON_AGENT_STEPS]
     return bool(raw_complete and not agent_steps)
 
 
@@ -715,7 +733,7 @@ def recompute_completion(graph: Any, org_id: str,
     if node.get("status") == STATUS_COMPLETE:
         return "unchanged-already-complete"
     steps = completed_steps(graph, org_id)
-    agent_steps = [s for s in steps if s != "team-named"]
+    agent_steps = [s for s in steps if s not in _NON_AGENT_STEPS]
     if legacy_complete and not agent_steps:
         write_status(graph, org_id, STATUS_COMPLETE)
         return "complete-grandfathered"
@@ -965,7 +983,7 @@ def _legacy_grandfathered(legacy_complete: bool | None,
     same as false: we would rather leave a status alone than regress a
     completion the wire still grants.
     """
-    agent_steps = [s for s in steps if s != "team-named"]
+    agent_steps = [s for s in steps if s not in _NON_AGENT_STEPS]
     return (legacy_complete is not False) and not agent_steps
 
 

@@ -25,6 +25,7 @@ from tortoise.onboarding.state import (
     STATUS_COMPLETE,
     STEP_IDS,
     completion_gate_satisfied,
+    resolve_wire_completion,
     restart_pending,
     validate_step_id,
 )
@@ -96,12 +97,18 @@ class TestRestartPending:
 
     def test_unavailable_marker_is_not_a_step_set(self):
         # a graph-down read serves the literal 'unavailable' string; the helper
-        # must not string-scan it into a fabricated verdict
+        # must not string-scan it into a fabricated verdict.
+        # RED mutation: drop the isinstance guard → 'unavailable' becomes a
+        # one-element step set and this flips True.
         assert restart_pending("unavailable") is False
+        assert restart_pending(None) is False
 
     def test_new_step_is_in_no_completion_gate(self):
         # the #3913 owner ruling stands: completion is unchanged by the new
         # step — it is never required, and it never completes anything alone
+        # RED mutation: add "connection-written" to _GATE_SELF/_GATE_BUILD →
+        # the third assert (alone) flips to True, or the first (full set)
+        # drops to False.
         full = {"team-named", "harness-connected", "first-points-filed",
                 "decide-completed"}
         for fork in ("self", "build"):
@@ -110,6 +117,25 @@ class TestRestartPending:
                 full | {"connection-written"}, fork, False) is True
             assert completion_gate_satisfied(
                 {"connection-written"}, fork, False) is False
+
+    def test_config_write_never_closes_the_grandfathered_window(self):
+        """#3451: ``connection-written`` is a CLIENT-only trace, so it must not
+        terminate the grandfathered-window guard — that window closes on the
+        first SERVER-OBSERVED act (#3913). A grandfathered org (node present,
+        status active, legacy jsonb complete=true) that follows §3 must stay
+        complete on the wire; only a real observed act may flip it.
+
+        RED mutation: drop 'connection-written' from ``_NON_AGENT_STEPS`` → the
+        second assert flips False, i.e. the config checkpoint alone regresses a
+        legitimately grandfathered org to incomplete before the restart.
+        """
+        gf = ["team-named"]
+        assert resolve_wire_completion("active", True, gf) is True
+        assert resolve_wire_completion(
+            "active", True, [*gf, "connection-written"]) is True
+        # a SERVER-OBSERVED act still closes the window (fail-closed)
+        assert resolve_wire_completion(
+            "active", True, [*gf, "harness-connected"]) is False
 
 
 class TestStepValidation:

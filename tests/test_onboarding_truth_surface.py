@@ -265,9 +265,10 @@ class TestRestartPendingProjection:
     """
 
     def _projection(self, monkeypatch, steps, *, node_present=True,
-                    graph_down=False):
+                    graph_down=False, namespace=True):
         monkeypatch.setattr(ha, "_get_onboarding_state", lambda oid: {})
-        monkeypatch.setattr(ha, "_graph_has_org_namespace", lambda oid: True)
+        monkeypatch.setattr(ha, "_graph_has_org_namespace",
+                            lambda oid: namespace)
         if graph_down:
             def _boom(oid):
                 raise RuntimeError("graph down")
@@ -297,6 +298,21 @@ class TestRestartPendingProjection:
 
     def test_absent_node_never_claims_restart_pending(self, monkeypatch):
         state = self._projection(monkeypatch, [], node_present=False)
+        assert state["restart_pending"] is False
+
+    def test_no_namespace_never_claims_restart_pending(self, monkeypatch):
+        """#3451: the NO-NAMESPACE branch (the org has no graph at all) must
+        also serve False — an org with no state cannot have a config written.
+
+        This is the fourth of the projection's four return paths and was
+        otherwise unpinned: the node-absent and graph-down paths were covered,
+        so a mutation setting ``True`` here escaped every test.
+
+        RED mutation: set ``restart_pending`` True on the no-namespace return
+        path (or omit the key) → both assertions fail.
+        """
+        state = self._projection(monkeypatch, [], namespace=False)
+        assert "restart_pending" in state, state
         assert state["restart_pending"] is False
 
     def test_verified_connection_is_not_pending(self, monkeypatch):
