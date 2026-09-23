@@ -3570,3 +3570,57 @@ def test_orphan_assert_steps_capture_pgrep_status_fail_closed():
             "else must fail closed (#4740)"
         )
         assert "exit 1" in body, "the failed-probe guard must exit non-zero"
+
+
+def test_orphan_assert_no_pytest_producer_writes_the_gated_path():
+    """#4740 review 5: each empty-selection block must WRITE the no-pytest
+    report to the very path the orphan gate is handed.
+
+    Cases 11-13 of orphan-bound.test.sh pin the gate's READING of that report,
+    but nothing pinned the PRODUCER: deleting one `printf` left both the
+    harness and the pgrep pin green, so the cycle-1 P0 (the gate parses a
+    `missing` report and REDs a legitimately-empty selection) could silently
+    return. This reads the real workflow via `_load_python_ci()`.
+    """
+    report_path = "${RUNNER_TEMP:-/tmp}/redislite-hygiene-end.json"
+    producers = [
+        s
+        for job in _load_python_ci()["jobs"].values()
+        for s in (job.get("steps") or [])
+        if isinstance(s.get("run"), str) and '"skipped":"no-pytest"' in s["run"]
+    ]
+    assert len(producers) == 3, (
+        f"expected the three empty-selection blocks that write the "
+        f"'no-pytest' report, found {len(producers)} — one `printf` deleted "
+        f"leaves the gate parsing a missing report and REDs a healthy skip "
+        f"(the #4740 cycle-1 P0)"
+    )
+    for s in producers:
+        printf_lines = [
+            line
+            for line in s["run"].splitlines()
+            if '"skipped":"no-pytest"' in line
+        ]
+        assert len(printf_lines) == 1, (
+            f"step {s.get('name')!r} must write the no-pytest report exactly "
+            f"once, found {len(printf_lines)} lines carrying it"
+        )
+        line = printf_lines[0].strip()
+        assert line.startswith("printf '"), (
+            f"step {s.get('name')!r} must WRITE the report with printf, got "
+            f"{line!r}"
+        )
+        assert line.endswith(f'> "{report_path}"'), (
+            f"step {s.get('name')!r} must write the no-pytest report to "
+            f"{report_path} — the exact path the orphan gate is handed, not a "
+            f"different file (#4740)"
+        )
+    handed = [
+        s
+        for s in _orphan_assert_steps()
+        if f'--hygiene "{report_path}"' in s["run"]
+    ]
+    assert len(handed) == 3, (
+        f"all three orphan-assert steps must be handed {report_path}, the "
+        f"path the empty-selection blocks write; found {len(handed)}"
+    )

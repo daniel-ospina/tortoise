@@ -28,9 +28,11 @@
 #     and is distinct (case 11's fixture is a DIFFERENT fixture from case 17's).
 #   * `left: null` (the sweep's probe failed) → RED named as a probe failure
 #     (case 16), downgraded only by a watchdog kill (case 16b) — never read as
-#     a plausible 0 — BUT a `COUNT` of 0 PASSES with a warning (case 34): the
-#     workflow's own identical probe measured nothing live, so there is no
-#     residue to account for.
+#     a plausible 0. A `COUNT` of 0 PASSES with a warning (case 34) ONLY when
+#     the sweep also reported `cleared: true`; the same shape with
+#     `cleared: false` still REDs at COUNT == 0 (case 40): an exhausted budget
+#     is not a diagnostic, and reading it as one is the #4740 review-5
+#     fail-open.
 #   * missing / unreadable / structurally-incomplete reports → RED (cases
 #     17-20), downgraded only by a watchdog kill (cases 18, 20).
 #   * the #1371 rc-unknown red path (case 21) and the fail-loud argument
@@ -54,6 +56,11 @@
 #     with `ast` — never imported or run) must be named by the gate's parser
 #     and carried by the harness's own canonical fixture, so a conftest rename
 #     cannot leave the harness green while the gate silently drops a field.
+#     The SAME ast pass (case 39) pins the PRODUCER: in `_sweep`'s body the
+#     name `cleared` must have exactly one binding, from
+#     `sweep_until_cleared(...)`, and the report dict must carry that NAME —
+#     so a regression to `cleared = True` (or `= not acted`) after the call
+#     cannot green the gate by discarding the honest value.
 #   * magnitude: an 18+ digit `--count` (case 32) and an 18+ digit `left` in
 #     the report (case 33) both exit 2 as usage errors instead of reaching the
 #     PASS line.
@@ -64,12 +71,12 @@
 # the bound stops being read from `left`. Cases 27, 29, 30, 31, 32, 33
 # likewise fail when their new branch is removed or weakened (identity check
 # dropped, `before: null` no longer accepted, `before` no longer required,
-# either magnitude guard removed). Cases 34-39 fail when their branch is
+# either magnitude guard removed). Cases 34-40 fail when their branch is
 # removed or weakened (the `probe_failed` COUNT==0 carve-out dropped, the
 # `cleared=false` red removed, the deferral warning or its `COUNT <= left`
-# rescue removed, the mixed-population identity made authoritative again, or
-# the contract check neutered). A case that merely restates a default would
-# not catch its own removal.
+# rescue removed, the mixed-population identity made authoritative again, the
+# contract check neutered, or `_sweep`'s `cleared` rebindable from a literal).
+# A case that merely restates a default would not catch its own removal.
 #
 # The assertion count is PINNED (see the summary): a lost case must not be
 # indistinguishable from a passing one.
@@ -121,6 +128,7 @@ printf '{"sweep":{"skipped":"no-pytest"}}' > "$WORK/nopytest.json"
 printf '{"sweep":{"no_embedded_servers":true}}' > "$WORK/none.json"
 printf '{"sweep":{"reaped":9,"cleared":true}}' > "$WORK/noleft.json"
 printf '{"sweep":{"reaped":9,"cleared":true,"left":null}}' > "$WORK/leftnull.json"
+printf '{"sweep":{"reaped":0,"cleared":false,"left":null,"before":5}}' > "$WORK/leftnull_aborted.json"
 printf 'not json at all' > "$WORK/unreadable.json"
 MISSING="$WORK/does-not-exist.json"
 
@@ -394,6 +402,7 @@ echo "37. a DEFERRED sweep warns, skips the mixed-population identity, and PASSE
 run_gate 2 0 deferred.json
 assert_eq "$RC" "0" "exits 0 — left is not an authoritative bound under a deferral"
 assert_contains "$OUT" "::warning::" "names the deferral"
+assert_contains "$OUT" "non-gating diagnostic" "labels the deferred path a non-gating diagnostic"
 assert_contains "$OUT" "not an authoritative bound" "states why the bound is not authoritative"
 assert_not_contains "$OUT" "does not account for" \
   "the mixed-population identity is not asserted under a deferral"
@@ -437,10 +446,95 @@ FIXTURE_KEYS="$(python3 -c 'import json,sys; print(" ".join(sorted(json.load(ope
 assert_eq "$FIXTURE_KEYS" "$(printf '%s\n' $FIELDS | sort | tr '\n' ' ' | sed 's/ *$//')" \
   "the harness's canonical fixture carries exactly the declared field set"
 
+# The SAME source, pinned for the PRODUCER rather than the field set: `_sweep`
+# must thread the helper's own `cleared` into the report. The gate cases above
+# pin the CONSUMER (`cleared: false` reds) and tests/test_reaper.py pins the
+# helper's stop shapes — but nothing pinned that `_sweep` binds `cleared` FROM
+# the helper, so a regression to `cleared = True` (or `= not acted`) after the
+# call would green a deadline-aborted backlog invisibly (#4740 review 5). Read
+# `_sweep`'s AST: `cleared` must have exactly ONE Store binding and it must be
+# the `sweep_until_cleared(...)` unpack; the report dict must carry that NAME.
+PRODUCER="$(python3 - "$CONFTEST" <<'PY' 2>/dev/null
+import ast
+import sys
+
+try:
+    tree = ast.parse(open(sys.argv[1], encoding="utf-8").read())
+except OSError:
+    print("no-source")
+    raise SystemExit(0)
+
+fn = None
+for node in ast.walk(tree):
+    if isinstance(node, ast.FunctionDef) and node.name == "_sweep":
+        fn = node
+        break
+if fn is None:
+    print("no-sweep-fn")
+    raise SystemExit(0)
+
+stores = [
+    n
+    for n in ast.walk(fn)
+    if isinstance(n, ast.Name)
+    and n.id == "cleared"
+    and isinstance(n.ctx, ast.Store)
+]
+
+helper = 0
+for node in ast.walk(fn):
+    if not isinstance(node, ast.Assign):
+        continue
+    if not (
+        isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "sweep_until_cleared"
+    ):
+        continue
+    for tgt in node.targets:
+        helper += len(
+            [
+                n
+                for n in ast.walk(tgt)
+                if isinstance(n, ast.Name)
+                and n.id == "cleared"
+                and isinstance(n.ctx, ast.Store)
+            ]
+        )
+
+report = any(
+    isinstance(k, ast.Constant)
+    and k.value == "cleared"
+    and isinstance(v, ast.Name)
+    and v.id == "cleared"
+    for node in ast.walk(fn)
+    if isinstance(node, ast.Dict)
+    for k, v in zip(node.keys, node.values)
+)
+
+print(f"stores={len(stores)} helper={helper} report={int(report)}")
+PY
+)"
+assert_eq "$PRODUCER" "stores=1 helper=1 report=1" \
+  "_sweep binds cleared only from sweep_until_cleared and reports that NAME"
+
+echo "40. left=null with cleared=FALSE REDs even at COUNT=0 (an exhausted budget is not a diagnostic)"
+# #4740 review 5: the COUNT==0 carve-out (case 34) exists only for a sweep that
+# FINISHED. The same failed probe from an EXHAUSTED budget is the sweep's own
+# "hygiene is broken" signal and must red whatever the count is.
+run_gate 0 0 leftnull_aborted.json
+assert_eq "$RC" "1" "exits 1 at COUNT=0 when the sweep reported cleared=false"
+assert_contains "$OUT" "cleared=false" "names the exhausted budget"
+assert_contains "$OUT" "probe FAILED" "names the failed sweep-side probe"
+assert_not_contains "$OUT" "diagnostic only" "does not excuse the aborted sweep"
+run_gate 0 124 leftnull_aborted.json
+assert_eq "$RC" "0" "a watchdog kill still downgrades it (rc=124)"
+assert_contains "$OUT" "::warning::" "emits a warning under a kill"
+
 echo
 # A LOST case must not be indistinguishable from success: deleting a case
 # leaves FAIL=0 and merely a LOWER count, so the count is pinned too.
-expected_assertions=112
+expected_assertions=120
 if [ "$PASS" -eq "$expected_assertions" ]; then
   PASS=$((PASS + 1))
   echo "  ✅ assertion count pinned at $expected_assertions (a lost case is not a green run)"
