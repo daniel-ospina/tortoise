@@ -2775,6 +2775,7 @@ def test_midconstruction_replay_is_a_cotenant_the_last_client_must_see(
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX fork only")
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")  # fork in pytest
 def test_fork_midconstruction_drops_the_inherited_in_flight_claim(
         tmp_path, monkeypatch):
     """#4879 F1: a forked child has NO thread to release an inherited claim.
@@ -2904,6 +2905,69 @@ def test_close_path_with_empty_socket_file_emits_no_replay_warning(
             sdk.close()
 
 
+def test_staged_but_released_claim_emits_no_replay_warning(tmp_path, caplog):
+    """#4879 F2: the warning gate needs a LIVE claim, not just a claim KEY.
+
+    `_tortoise_inflight_replay_key` is stashed on a construction that WILL
+    replay and is never cleared, so a finished construction still carries the
+    key after its claim was released in the patch's `finally`. A later
+    close-path `_cleanup` on that client (with `socket_file` nulled) then has
+    `claim_key` truthy and `_tortoise_replay_logged` still False, yet its
+    claim is NOT live; only the `_in_flight_replays.get(...) > 0` conjunct
+    stops the warning.
+
+    That state is built NATURALLY here: a registry that parses and names a
+    socket but carries NO `pidfile` makes `_replay_socket_for_init` resolve
+    the socket (the claim registers and the key is stashed) while
+    `_is_redis_running`'s shape guard answers False before `_allow_replay`,
+    so the construction starts a fresh server and never logs. RED (liveness
+    conjunct deleted): this close path emits one `#4879: replay allowed`.
+    """
+    import json as _json
+
+    import tortoise.embedded_lifecycle as _lifecycle
+    from tortoise import FalkorDB
+
+    db_path = tmp_path / "staged_claim.db"
+    staged_socket = str(tmp_path / "dead-4879.socket")
+    # A registry with `unixsocket` but NO `pidfile`: `_replay_socket_for_init`
+    # resolves it (claim registered, key stashed) while the guard's shape
+    # check returns False before any `_allow_replay` — the construction
+    # starts clean.
+    (tmp_path / "staged_claim.db.settings").write_text(
+        _json.dumps({"unixsocket": staged_socket}))
+    client = FalkorDB(str(db_path))
+    try:
+        live_socket = client.client.socket_file
+        assert live_socket and live_socket != staged_socket, (
+            "test setup: the pidfile-less registry must have started a FRESH "
+            "server, not replayed the hand-made one")
+        staged = client.client._tortoise_inflight_replay_key
+        assert staged == os.path.abspath(staged_socket), (
+            "#4879 F2: test setup — the construction must carry a STAGED "
+            f"claim key, got {staged!r}")
+        assert not _lifecycle._in_flight_replays.get(staged, 0), (
+            "#4879 F2: test setup — the staged claim must be NO LONGER LIVE")
+        assert not getattr(client.client, "_tortoise_replay_logged", False), (
+            "#4879 F2: test setup — the construction must not have logged")
+        # The mid-teardown shape: `socket_file` already nulled, `pidfile` not.
+        client.client.socket_file = None
+        caplog.clear()
+        caplog.set_level("WARNING")
+        client.client._cleanup()
+        offenders = [
+            record.getMessage() for record in caplog.records
+            if "#4879: replay allowed" in record.getMessage()
+        ]
+        assert offenders == [], (
+            "#4879 F2: a client whose staged claim is NO LONGER LIVE must "
+            "emit ZERO replay warnings on the close path (only the "
+            f"live-claim conjunct stops it), got {offenders!r}")
+    finally:
+        with contextlib.suppress(Exception):
+            client._t_close()
+
+
 # ── #4879 F4: claim registration mirrors redislite's replay shape ─────────
 
 
@@ -3005,6 +3069,82 @@ def test_owner_handoff_failure_keeps_the_in_flight_claim(
         # Drop the deliberately-stuck claim BEFORE closing the last client,
         # so the server is still reaped at the end of the test (the claim is
         # exactly what would otherwise pin it forever).
+        if key is not None:
+            _lifecycle._in_flight_replays.pop(key, None)
+        with contextlib.suppress(Exception):
+            first.close()
+
+
+def test_owner_handoff_returning_false_keeps_the_claim_and_the_guard(
+        tmp_path, monkeypatch):
+    """#4879 F3 (review): `record_owner` does NOT raise on its documented
+    failures — it RETURNS False (`os.makedirs`/`os.open` OSError,
+    embedded_lifecycle.py). On those paths `_owner_refcounts[key]` is NOT
+    incremented, so the client is LIVE but UNRECORDED and the claim must be
+    KEPT (fail CLOSED), exactly as when the hand-off raises. The sibling test
+    forces the `raise` path, which the never-raise contract makes latent;
+    this one forces the REAL failure mode.
+
+    Two assertions, mechanism and verdict:
+    (a) the in-flight claim survives the ignored-failure path, and
+    (b) the last-client decision (`cotenant_holds_server`) reports the
+        unrecorded live client as a co-tenant. The peer's pool is dropped
+        first (the client itself stays live) so a raw CLIENT LIST can no
+        longer see a peer and ONLY the kept claim can answer "shared" —
+        without that isolation the CLIENT LIST fallback fails closed on its
+        own and the guard verdict would be green even with the claim gone.
+    RED (return value ignored): `cotenant_holds_server` returns False.
+    """
+    import json as _json
+
+    import tortoise.embedded_lifecycle as _lifecycle
+    from tortoise.embedded_lifecycle import cotenant_holds_server
+    from tortoise.sdk import TortoiseSDK
+
+    db_path = str(tmp_path / "owner_handoff_false.db")
+    first = TortoiseSDK(db_path=db_path)
+    second = None
+    key = None
+    try:
+        first.org_create("HandoffFalseCo")
+        sock = _json.loads(
+            Path(db_path + ".settings").read_text())["unixsocket"]
+        key = os.path.abspath(sock)
+
+        def _fail_to_record(_socket_file):
+            # The documented failure: nothing written, refcount untouched.
+            return False
+
+        monkeypatch.setattr(_lifecycle, "record_owner", _fail_to_record)
+        second = TortoiseSDK(db_path=db_path, namespace="handoff-false")
+        proj = second._get_proj()
+        client = getattr(proj.db, "client", proj.db)
+        assert client.ping(), (
+            "#4879 F3: a falsy owner hand-off must not break construction")
+        # (a) MECHANISM — the claim survives the ignored-failure path.
+        assert _lifecycle._in_flight_replays.get(key, 0) >= 1, (
+            "#4879 F3: `record_owner` returned False (nothing written) — the "
+            "in-flight claim must be KEPT; the client is live but unrecorded")
+        # ...because no record was written, the refcount branch alone is blind.
+        assert _lifecycle._owner_refcounts.get(key, 0) == 1, (
+            "#4879 F3: test setup — the falsy hand-off must leave the "
+            "refcount at construction #1's single claim")
+        # (b) VERDICT — isolate the claim from the CLIENT LIST fallback by
+        # dropping the peer's connection (the peer object stays live; only
+        # its pool is disconnected), then ask the last-client decision.
+        proj1 = first._get_proj()
+        peer = getattr(proj1.db, "client", proj1.db)
+        _lifecycle.disconnect_only(peer)
+        assert cotenant_holds_server(client) is True, (
+            "#4879 F3: the last-client decision must read the UNRECORDED live "
+            "client as a co-tenant — otherwise the #3653 blind-teardown "
+            "window re-opens")
+    finally:
+        with contextlib.suppress(Exception):
+            if second is not None:
+                second.close()
+        # Drop the deliberately-stuck claim BEFORE closing the last client,
+        # so the server is still reaped at the end of the test.
         if key is not None:
             _lifecycle._in_flight_replays.pop(key, None)
         with contextlib.suppress(Exception):

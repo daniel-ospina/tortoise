@@ -1724,15 +1724,16 @@ def _install_owner_record_patch() -> None:
         # The claim's lifetime is explicit so the invariant is readable. A
         # claim is RELEASED only when the construction left no live claim
         # behind: it either aborted inside `original(...)` (`release_claim`
-        # stays True), or the owner record was written successfully. If the
-        # HAND-OFF itself fails (`record_owner` raised) the claim is
-        # deliberately NOT released — the client is alive but UNRECORDED, so
-        # dropping the claim would make the last-client decision blind to a
-        # live client (the #3653 failure this guard exists to stop), while a
-        # claim left behind only costs a socket dir left for the reaper (the
-        # guard's documented cheaper error). The increment is OUTSIDE the
-        # `try`, so the counter can never underflow: the release below runs
-        # only under `claimed`.
+        # stays True), or the owner record was written successfully. A
+        # HAND-OFF that did not record the client — `record_owner` returned
+        # falsy (its documented I/O-failure mode) OR raised — is deliberately
+        # NOT released: the client is alive but UNRECORDED, so dropping the
+        # claim would make the last-client decision blind to a live client
+        # (the #3653 failure this guard exists to stop), while a claim left
+        # behind only costs a socket dir left for the reaper (the guard's
+        # documented cheaper error). The increment is OUTSIDE the `try`, so
+        # the counter can never underflow: the release below runs only under
+        # `claimed`.
         try:
             pending = _replay_socket_for_init(args, kwargs)
         except Exception:
@@ -1766,7 +1767,28 @@ def _install_owner_record_patch() -> None:
                 sock = getattr(self, "socket_file", None)
                 if not (isinstance(sock, str) and sock):
                     sock = owner_socket_of(self)
+                # `record_owner` is documented NEVER-RAISE, so its RETURN
+                # VALUE — not the `except` below — is the real failure
+                # signal; the exception branch is a net, not the contract.
+                # The value is AMBIGUOUS on its own: `False` means BOTH "this
+                # process ALREADY owns the record" (the refcount was STILL
+                # incremented — recorded) AND "no record could be written"
+                # (`os.makedirs`/`os.open` OSError — the refcount is UNTOUCHED
+                # — NOT recorded). Read the refcount to tell them apart: this
+                # client is recorded exactly when it advanced. Anything else
+                # (a falsy socket, or a failed write) is live-but-UNRECORDED
+                # and must KEEP the claim (fail CLOSED, lifetime note above).
+                owner_key = (
+                    os.path.abspath(sock)
+                    if isinstance(sock, str) and sock else None)
+                before = (_owner_refcounts.get(owner_key, 0)
+                          if owner_key else 0)
                 record_owner(sock)
+                recorded = (
+                    owner_key is not None
+                    and _owner_refcounts.get(owner_key, 0) > before)
+                if not recorded:
+                    release_claim = False
             except Exception:
                 # Fail CLOSED: the client is live but has no owner record, so
                 # keep the in-flight claim (the lifetime note above).
