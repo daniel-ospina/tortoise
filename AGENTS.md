@@ -390,6 +390,31 @@ Public repository that houses:
 | Any non-trivial research | `skills/research/SKILL.md` | Shallow analysis, costly rework |
 | Dispatching work on any issue (worktree, branch, sub-agent, parallel workstream) | `python3 tools/collision_preflight.py <N> --repo .` — must exit 0 before dispatch | A second agent duplicates live work; overlapping PRs and a wasted dispatch cycle (#3061) |
 
+### ⛔ HARD RULE: MCP/SDK Surface Approval — Ask Daniel Before You Change the Surface
+
+You may **not** add or remove a tool from the MCP surface, or a method from the SDK surface,
+without **human approval from Daniel**. This is a mandated rule, not a suggestion, and it is not
+machine-enforced.
+
+- **THE RULE.** The MCP tool surface is `TOOL_REGISTRY` in `tortoise/tool_registry.py`; the SDK
+  surface is the public (non-underscore) methods on `TortoiseSDK` in `tortoise/sdk.py`. Adding,
+  removing, or renaming either is a surface change.
+- **WHY IT EXISTS.** The surface is the contract every agent and customer integration is built
+  on — changing it changes what every agent can see and do, so it materially affects customer
+  outcomes.
+- **WHAT TO DO.** Get Daniel's approval **first**, before you write the change or re-cut the
+  baseline, through the "USER QUESTIONS" / "DECISION RELAY" path above: name the tool or method,
+  say what it does and why it is needed. Then follow `CONTRIBUTING.md` → "The MCP tool surface and
+  public SDK methods cannot grow by accident".
+- **THE GATE IS NOT THE APPROVAL.** `tools/surface-guard.py` and `tools/surface_manifest.py check`
+  are **drift controls**: a change that updates the code and `config/surface-manifest.yml`
+  together **passes both**. They catch an *unrecorded* change and cannot tell an approved addition
+  from an unapproved one. A green run is not consent.
+
+Do **not** propose replacing this with a GitHub ruleset, `CODEOWNERS`, a required second approver,
+or a separate automation identity — the owner **rejected** that direction on #4282 as
+over-engineering.
+
 ### ⛔ HARD RULE: Collision Pre-Flight Before Any Dispatch
 
 Before spawning a workstream, opening a worktree, or dispatching a sub-agent for issue **N**,

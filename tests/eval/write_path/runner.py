@@ -716,8 +716,9 @@ def run_benchmark(
         # surface is re-snapshotted once here (post-dream state).  Additive
         # AUDIT dimension carried on every run (both lanes) — NOT a
         # METRIC_VALUES member in this change (scoping note 2026-09-07-2514-).
-        # On the m2 echo lane it is structural 0 (no relation extraction) —
-        # expected and noted, never a quality bar.
+        # On the m2 echo lane the planted edges are graded by a cue-word
+        # relation stage, so the score is structurally low and not comparable
+        # with the llm lane's — expected and noted, never a quality bar.
         operator_audit = None
         if not runner_errors:
             golds = {sid: corpus.load_gold(sid, root) for sid in selected}
@@ -759,27 +760,9 @@ def run_benchmark(
                         if d.get("owner_session") == sid
                     ]
                     result["planted_operators"] = owned
-                if operator_audit["planted"]:
-                    notes.append(
-                        f"operator-edge audit (#2514): "
-                        f"{operator_audit['edge_correct']}/"
-                        f"{operator_audit['planted']} planted operator edges graded "
-                        "edge_correct (audit dimension only — not yet a gated "
-                        "metric); the m2 echo lane has no relation extraction, "
-                        "so 0 is structural there, never a bar. #2552: endpoint "
-                        "anchors + mitigation reasons grade verbatim-first with "
-                        "the #2405-style paraphrase band — a correctly wired "
-                        "edge whose endpoint claim was distilled still grades "
-                        "edge_correct"
-                    )
-                notes.append(
-                    "operator persistence (#2552): "
-                    f"{operator_audit['operators_provenanced']}/"
-                    f"{operator_audit['operators_total']} reified operator "
-                    "Points entered the retrievable memory layer "
-                    "(eventId-stamped) — a lower numerator is the structural "
-                    "drop the layer-2 WIRE fix closed"
-                )
+                # ``operator_audit_notes`` handles the None case itself, so this
+                # needs no guard of its own.
+                notes.extend(operator_audit_notes(operator_audit, posture))
     finally:
         if owned_sdk:
             _close_and_wipe(sdk)
@@ -882,6 +865,64 @@ def run_benchmark(
         "notes": notes,
         "log": log,
     }
+
+
+def operator_audit_notes(audit: dict | None, posture: str) -> list[str]:
+    """The operator-audit note(s) for a run report (#2514/#2552).
+
+    The m2-echo-lane caveat — "no relation extraction, so 0 is structural
+    there, never a bar" — is **posture-scoped**. (The quoted wording is itself
+    stale on BOTH counts: the lane's cue-word stage does extract relations, and
+    its grading is no longer 0. It is preserved verbatim here only because this
+    refactor is scoped to posture, not to the note's prose; the prose fix is
+    tracked by #4807.) The m2 lane's relation stage is a cue-word heuristic,
+    not the product extractor, so its edge score is not comparable with the llm
+    lane's; on the llm lane the score IS a genuine behavioural signal about
+    emission fidelity, and printing the m2 lane's excuse verbatim in that
+    receipt frames a real result as a non-result in the very artifact a reader
+    consults.
+
+    The caveat is emitted ONLY when ``posture == "m2"``; any other value
+    (including a future lane) takes the llm-shaped note, whereas the
+    pre-refactor code emitted the caveat on every lane. The persistence
+    assertion (operators provenanced) rides BOTH lanes and is emitted whenever
+    an audit is passed. Pure (no graph, no env) so the posture gate is
+    unit-testable without a bench run.
+    """
+    notes: list[str] = []
+    if audit is None:
+        return notes
+    # ``audit["planted"]`` rather than ``.get`` deliberately preserves the
+    # pre-refactor fail-loud behaviour: an audit missing the key must not
+    # silently drop the edge note from a receipt whose job is honesty about
+    # the audit.
+    if audit["planted"]:
+        # The m2 clause keeps main's EXACT wording and separator `); ` so an
+        # m2 run's note is byte-identical to the pre-refactor text — the
+        # blessed m2 receipt text is provably unchanged by this refactor. The
+        # llm lane terminates its sentence with a bare `.`, so the note reads
+        # as prose either way.
+        tail = (
+            "; the m2 echo lane has no relation extraction, so 0 is structural "
+            "there, never a bar."
+            if posture == "m2" else "."
+        )
+        notes.append(
+            f"operator-edge audit (#2514): {audit['edge_correct']}/"
+            f"{audit['planted']} planted operator edges graded edge_correct "
+            f"(audit dimension only — not yet a gated metric){tail} "
+            "#2552: endpoint anchors + mitigation reasons grade verbatim-first "
+            "with the #2405-style paraphrase band — a correctly wired edge "
+            "whose endpoint claim was distilled still grades edge_correct"
+        )
+    notes.append(
+        "operator persistence (#2552): "
+        f"{audit['operators_provenanced']}/{audit['operators_total']} "
+        "reified operator Points entered the retrievable memory layer "
+        "(eventId-stamped) — a lower numerator is the structural drop the "
+        "layer-2 WIRE fix closed"
+    )
+    return notes
 
 
 def _safe_metrics(session_results: list[dict]) -> dict:
