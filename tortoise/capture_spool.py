@@ -170,6 +170,13 @@ class FlushSummary:
     filed: int = 0
     deferred: int = 0
     skipped: int = 0
+    # Entries INSIDE their backoff window — deferred by a previous refusal, not
+    # by anything wrong now. Counted separately from `skipped` because since
+    # #4714 moved 402 from "discard" to "defer", a quota-blocked spool reaches a
+    # steady state where EVERY drain skips and nothing is attempted: without
+    # this counter the drain prints nothing at all and N captures sit unfiled
+    # invisibly (the discard ledger used to be the signal).
+    held_by_backoff: int = 0
     # Deliberately not attempted: the session that is LIVE right now, held back
     # for its own final flush (see ``exclude_session_id``). Counted separately
     # from ``skipped`` so the drain reports WHICH it did.
@@ -729,7 +736,7 @@ def write_spool_entry(
         # new upload attempt, so carry them forward. The filing path resets them
         # (attempts=0) and a genuinely fresh entry starts at zero.
         "attempts": _attempts(prior or {}),
-        "next_attempt_at_ms": _backoff_ms(prior or {}),
+        "next_attempt_at_ms": _carried_window(prior or {}),
     }
     if snapshot.model:
         meta["model"] = snapshot.model
@@ -822,6 +829,21 @@ def _backoff_ms(meta: dict) -> float:
     except (TypeError, ValueError, OverflowError):
         return 0.0
     return value if math.isfinite(value) else 0.0
+
+
+def _carried_window(prior: dict) -> float:
+    """The prior entry's backoff window, bounded to what the write path can produce.
+
+    `_backoff_ms` makes it a finite number; this makes it a PLAUSIBLE one. A
+    legitimately written window is at most ``written_at + RETRY_MAX_SECONDS``
+    (``backoff_delay`` saturates there), so anything further out is corrupt — and
+    because this value is CARRIED forward it would be re-written on every turn
+    and strand the entry permanently, with every surface reporting nothing
+    wrong.
+    """
+    window = _backoff_ms(prior)
+    ceiling = time.time() * 1000.0 + RETRY_MAX_SECONDS * 1000
+    return window if window <= ceiling else 0.0
 
 
 def _attempts(meta: dict) -> int:
@@ -1019,7 +1041,17 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
     if meta.get("filed_key") and meta.get("filed_key") == meta.get("capture_key"):
         summary.skipped += 1
         return
-    if _backoff_ms(meta) > now_ms:
+    window = _backoff_ms(meta)
+    if window > now_ms + RETRY_MAX_SECONDS * 1000:
+        # No legitimately-written window is further out than now + RETRY_MAX: the
+        # write path can only produce `written_at + backoff_delay(n)`, and
+        # `backoff_delay` saturates at RETRY_MAX. A value beyond that is corrupt,
+        # and the safe reading of an unusable window is "retry now" — honouring
+        # it would strand the entry indefinitely while every surface stayed
+        # silent, the same failure the non-finite guard closes.
+        window = 0.0
+    if window > now_ms:
+        summary.held_by_backoff += 1
         summary.skipped += 1
         return
     turns = read_spool_turns(root, sid)

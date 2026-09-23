@@ -429,6 +429,14 @@ export interface FlushSummary {
   /** Entries not attempted: already filed, or still inside a backoff window. */
   skipped: number;
   /**
+   * Entries INSIDE their backoff window — deferred by a previous refusal, not
+   * by anything wrong now. Counted separately from `skipped` because since
+   * #4714 moved 402 from "discard" to "defer", a quota-blocked spool reaches a
+   * steady state where EVERY flush skips and nothing is attempted: without this
+   * counter the flush logs nothing at all and captures sit unfiled invisibly.
+   */
+  heldByBackoff: number;
+  /**
    * Entries deliberately NOT attempted because they are the session that is
    * LIVE right now (`excludeSessionId`). Counted separately from `skipped`:
    * "already filed" and "held back for its own final flush" are different
@@ -799,7 +807,7 @@ export function writeSpoolEntry(
     // upload attempt, so carry them forward. The filing path resets them
     // (attempts=0) and a genuinely fresh entry starts at zero.
     attempts: clampAttempts(prior?.attempts),
-    next_attempt_at_ms: clampWindow(prior?.next_attempt_at_ms),
+    next_attempt_at_ms: carriedWindow(prior?.next_attempt_at_ms),
     ...(prior?.filed_key && prior.content_digest === contentDigest(snapshot.turns)
       ? { filed_key: prior.filed_key, filed_at: prior.filed_at }
       : {}),
@@ -955,8 +963,9 @@ export function pruneSpool(
  * is destroyed by the next Pi drain. Retry is bounded by the spool's count/byte
  * bound and the ENTRY's `backoffDelay` — carried across turns, so an
  * actively-growing session is retried on the backoff clock rather than once per
- * turn — so an unrecoverable 402 costs disk and a capped cadence rather than a
- * capture.
+ * turn. That bound is real but finite: sustained over-quota still evicts
+ * oldest-first at the count/byte ceiling, with a recorded reason, so the two
+ * legs describe the same policy (`capture_spool.py`).
  *
  * PERMANENT (discard + record): every other 4xx — a malformed payload or an
  * out-of-range turn count never becomes valid by waiting.
@@ -988,6 +997,16 @@ export function clampAttempts(value: unknown): number {
  *  session permanently un-fileable while every surface says "will retry". */
 export function clampWindow(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/** The prior entry's window, bounded to what the write path can produce.
+ *  `clampWindow` makes it finite; this makes it PLAUSIBLE. A legitimate window
+ *  is at most `written_at + RETRY_MAX_MS` (`backoffDelay` saturates there), so
+ *  anything further out is corrupt — and because it is CARRIED forward it would
+ *  be re-written on every turn and strand the entry permanently, silently. */
+export function carriedWindow(value: unknown): number {
+  const window = clampWindow(value);
+  return window <= Date.now() + RETRY_MAX_MS ? window : 0;
 }
 
 /** Exponential backoff for attempt N (1-based), capped at RETRY_MAX_MS. */
@@ -1037,6 +1056,7 @@ export async function flushSpool(
     filed: 0,
     deferred: 0,
     skipped: 0,
+    heldByBackoff: 0,
     heldBack: 0,
     discarded: [],
   };
@@ -1055,7 +1075,16 @@ export async function flushSpool(
       summary.skipped += 1;
       continue;
     }
-    if (clampWindow(meta.next_attempt_at_ms) > nowMs) {
+    let window = clampWindow(meta.next_attempt_at_ms);
+    if (window > nowMs + RETRY_MAX_MS) {
+      // No legitimately-written window is further out than now + RETRY_MAX:
+      // `backoffDelay` saturates there. Beyond it the value is corrupt, and the
+      // safe reading of an unusable window is "retry now" — honouring it would
+      // strand the entry indefinitely.
+      window = 0;
+    }
+    if (window > nowMs) {
+      summary.heldByBackoff += 1;
       summary.skipped += 1;
       continue;
     }
@@ -1198,12 +1227,15 @@ function warn(message: string): void {
   console.warn(`[tortoise-capture] ${message}`);
 }
 
-/** Report a flush outcome — success lines only on 2xx, every discard named. */
+/** Report a flush outcome — success lines on 2xx, every discard named. */
 function reportFlush(summary: FlushSummary, where: string): void {
-  if (summary.filed > 0) {
+  // Deferrals are reported too: a quota-blocked spool is otherwise a steady
+  // state that logs NOTHING while captures sit unfiled (#4714 review).
+  if (summary.filed > 0 || summary.deferred > 0 || summary.heldByBackoff > 0) {
     log(
       `spool flush (${where}): filed ${summary.filed}, deferred ${summary.deferred}, ` +
-        `skipped ${summary.skipped}, held back ${summary.heldBack}`,
+        `skipped ${summary.skipped} (${summary.heldByBackoff} waiting on backoff), ` +
+        `held back ${summary.heldBack}`,
     );
   }
   for (const d of summary.discarded) {

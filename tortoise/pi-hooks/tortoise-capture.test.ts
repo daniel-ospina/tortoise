@@ -33,6 +33,7 @@ import {
   backoffDelay,
   buildCapturePayload,
   captureKey,
+  carriedWindow,
   clampAttempts,
   clampWindow,
   classifyFailure,
@@ -805,6 +806,37 @@ test("a non-finite backoff can never make an entry un-fileable (#4714 review)", 
   const summary = await flushSpool(TEST_CFG, { dir: spool, fetchImpl: ok.fetchImpl, now: 1_000 });
   assert.equal(summary.attempted, 1, "a corrupt backoff made the entry un-fileable");
   assert.equal(summary.filed, 1);
+});
+
+test("a deferred-only flush is counted, not silent (#4714 review)", async () => {
+  // Moving 402 from "discard" to "defer" removed the flush's only signal for a
+  // quota-blocked spool: a window-held entry is neither attempted nor
+  // discarded, so `reportFlush` logged NOTHING while captures sat unfiled.
+  // `heldByBackoff` is that missing signal.
+  //
+  // MUTATION THAT REDS THIS: drop the `heldByBackoff` increment.
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, snapshot("sess-wait"));
+  const first = statusFetch(402, "quota");
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: first.fetchImpl, now: 1_000 });
+
+  const again = statusFetch(402, "quota");
+  const summary = await flushSpool(TEST_CFG, { dir: spool, fetchImpl: again.fetchImpl, now: 1_001 });
+  assert.equal(summary.attempted, 0);
+  assert.equal(summary.skipped, 1);
+  assert.equal(summary.heldByBackoff, 1, "a window-held entry is invisible to the flush");
+  assert.equal(again.calls.length, 0);
+});
+
+test("an absurd finite window is treated as corrupt, not honoured (#4714 review)", () => {
+  // A legitimate window is at most `written_at + RETRY_MAX_MS`; anything
+  // further out is corrupt, and because the write path CARRIES it, honouring it
+  // would strand the entry on every turn.
+  //
+  // MUTATION THAT REDS THIS: return the raw value from `carriedWindow`.
+  assert.equal(carriedWindow(9.9e15), 0);
+  assert.equal(carriedWindow(31_000), 31_000);
+  assert.equal(carriedWindow(Number.POSITIVE_INFINITY), 0);
 });
 
 test("the server's in-flight 409 is retryable, not a lost write (#3713)", async () => {

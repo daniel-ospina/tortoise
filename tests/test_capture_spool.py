@@ -12,7 +12,6 @@ the developer machine's real captures.
 """
 from __future__ import annotations
 
-import ast
 import json
 import os
 import re
@@ -356,17 +355,28 @@ def test_the_pi_and_python_classifiers_agree_on_every_status_parity(tmp_path):
 def _assert_both_legs_carry_402() -> None:
     """The node-free half of the parity contract.
 
-    Explicitly a SOURCE pin: it proves the statuses are present in each
-    classifier's transient set, not that they behave correctly — the behavioural
-    proofs are the runtime parity test above and each leg's own suite. Its
-    purpose is that the cross-leg guard does not vanish on a box (or CI runner)
-    without node.
+    The PYTHON half is checked BEHAVIOURALLY — the interpreter is right here, so
+    there is nothing to forge and no source to misread. (An earlier version
+    parsed the Python source with `ast`; any unreachable `in (...)` node forged
+    it, which is exactly the silent-green failure the pin exists to prevent.)
 
-    It reads the PYTHON half through `ast`, not a regex: a regex over raw source
-    is forgeable by a commented-out predicate and brittle to reformatting, and
-    both failure modes are silent. `ast` sees the real comparison node.
+    The TypeScript half is a SOURCE pin, because without node there is no way to
+    call it: comments are stripped so a commented-out predicate cannot satisfy
+    it. That half proves membership, not behaviour — the behavioural proof is
+    the runtime parity test above and the Pi suite.
     """
-    py_src = (REPO / "tortoise" / "capture_spool.py").read_text(encoding="utf-8")
+    for code in (402, 408, 425, 429):
+        assert classify_failure(code) == "retry", (
+            f"Python leg does not treat {code} as transient"
+        )
+    # Pinned the other way too: a same-direction drift that widened the retry set
+    # (e.g. deferring the reversible suspended-org 403, #4895) must red here as
+    # well as in the runtime parity test.
+    for code in (403, 422):
+        assert classify_failure(code) == "permanent", (
+            f"Python leg no longer treats {code} as permanent"
+        )
+
     ts_raw = (REPO / "tortoise" / "pi-hooks" / "tortoise-capture.ts").read_text(
         encoding="utf-8"
     )
@@ -377,29 +387,13 @@ def _assert_both_legs_carry_402() -> None:
     ts_src = re.sub(r"/\*.*?\*/", "", ts_raw, flags=re.S)
     ts_src = re.sub(r"(?<!:)//[^\n]*", "", ts_src)
 
-    py_codes: set[int] = set()
-    for node in ast.walk(ast.parse(py_src)):
-        if not (isinstance(node, ast.FunctionDef) and node.name == "classify_failure"):
-            continue
-        for sub in ast.walk(node):
-            if not (isinstance(sub, ast.Compare) and any(isinstance(o, ast.In) for o in sub.ops)):
-                continue
-            for comparator in sub.comparators:
-                if isinstance(comparator, (ast.Tuple, ast.Set, ast.List)):
-                    py_codes |= {
-                        el.value
-                        for el in comparator.elts
-                        if isinstance(el, ast.Constant) and isinstance(el.value, int)
-                    }
-    assert py_codes, "capture_spool.classify_failure has no integer transient set"
-
-    ts_matches = re.findall(r'if \(([^)]*)\) return "retry";', ts_src)
     ts_codes = {
-        int(code) for group in ts_matches for code in re.findall(r"status === (\d+)", group)
+        int(code)
+        for group in re.findall(r'if \(([^)]*)\) return "retry";', ts_src)
+        for code in re.findall(r"status === (\d+)", group)
     }
     assert ts_codes, "the Pi classifyFailure has no integer transient set"
     for code in (402, 408, 425, 429):
-        assert code in py_codes, f"Python leg dropped {code} from its transient set"
         assert code in ts_codes, f"Pi leg dropped {code} from its transient set"
 
 
@@ -1864,6 +1858,61 @@ def test_a_corrupt_typed_meta_does_not_crash_or_wedge(tmp_path):
     server = _Server()
     summary = flush_spool(tmp_path, server.post, now=1000.0)
     assert summary.filed == 1, "the entry is still filed, not wedged"
+
+
+def test_a_deferred_only_drain_is_counted_not_silent(tmp_path):
+    """#4714 review. Moving 402 from "discard" to "defer" removed the drain's
+    only signal for a quota-blocked spool: a window-held entry is neither
+    attempted nor discarded, so the summary line's trigger
+    (`attempted or discarded or probe_refusals`) was false and the drain printed
+    NOTHING while captures sat unfiled — the old behaviour at least named a
+    discard. `held_by_backoff` is that missing signal.
+
+    MUTATION THAT REDS THIS: drop the `held_by_backoff` increment.
+    """
+    root = tmp_path
+    write_spool_entry(root, _snapshot("sess-wait"))
+    flush_spool(
+        root,
+        _Server(PostOutcome(ok=False, status=402, detail="quota")).post,
+        now=1000.0,
+    )
+
+    again = _Server()
+    summary = flush_spool(root, again.post, now=1000.0 + 1)
+    assert summary.attempted == 0
+    assert summary.skipped == 1
+    assert summary.held_by_backoff == 1, (
+        "a window-held entry is invisible to the drain and to the operator"
+    )
+    assert again.posts == 0
+
+
+def test_an_absurd_finite_window_is_treated_as_corrupt_not_honoured(tmp_path):
+    """#4714 review. Non-finite was closed, but ANY finite value passed: a window
+    ~258 years out is equally not a window, and because the write path now
+    CARRIES it, it was re-written on every turn — stranding the entry forever
+    while every surface reported nothing wrong. A legitimately written window is
+    at most `written_at + RETRY_MAX`.
+
+    MUTATIONS THAT RED THIS: honour a window beyond now + RETRY_MAX; drop the
+    `_carried_window` bound.
+    """
+    from tortoise.capture_spool import _carried_window, _meta_path
+
+    assert _carried_window({"next_attempt_at_ms": 9.9e15}) == 0.0
+    assert _carried_window({"next_attempt_at_ms": 31_000.0}) == 31_000.0
+
+    write_spool_entry(tmp_path, _snapshot("sess-far"))
+    meta_path = _meta_path(tmp_path, "sess-far")
+    meta = read_spool_meta(tmp_path, "sess-far")
+    meta["next_attempt_at_ms"] = 9.9e15
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    server = _Server()
+    summary = flush_spool(tmp_path, server.post, now=1000.0)
+    assert summary.attempted == 1, "an absurd finite window stranded the entry"
+    assert summary.filed == 1
 
 
 def test_a_non_finite_backoff_cannot_make_an_entry_unfileable(tmp_path):

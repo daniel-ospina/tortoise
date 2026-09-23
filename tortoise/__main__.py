@@ -3792,10 +3792,13 @@ def _cmd_session_drain(api_key: str, api_url: str,
     for r in summary.probe_refusals:
         print(f"spool refusal: {r['session_id']} — {r['detail']}",
               file=_sys.stderr)
-    if summary.attempted or summary.discarded or summary.probe_refusals:
+    if summary.attempted or summary.discarded or summary.probe_refusals \
+            or summary.held_by_backoff:
         print(
             f"spool drain: filed {summary.filed}, deferred {summary.deferred}, "
-            f"skipped {summary.skipped}, held back {summary.held_back}, "
+            f"skipped {summary.skipped} "
+            f"({summary.held_by_backoff} waiting on backoff), "
+            f"held back {summary.held_back}, "
             f"probe refusals {len(summary.probe_refusals)}, "
             f"discarded {len(summary.discarded)}",
             file=_sys.stderr,
@@ -3947,7 +3950,7 @@ def _cmd_sessions_import(args) -> int:
     The parsed session is staged LOCALLY (data preservation), POSTed to
     /v1/sessions with a deterministic idempotency key (explicit --session-id
     or a content-hash-derived one), and a LOCAL receipt is written on a 2xx
-    (403/503 ⇒ exit 1, honest error, NO receipt) — and a RETRYABLE refusal
+    (403 ⇒ exit 1, honest error, NO receipt) — and a RETRYABLE refusal
     (402/408/425/429/5xx) is additionally spooled for a later drain by
     `_spool_if_retryable` while still exiting 1 with no receipt (#4714) —
     EXCEPT a deferred keyless
@@ -4080,8 +4083,11 @@ def _cmd_sessions_import(args) -> int:
         traceback (the hook's fail-open contract).
         """
         try:
+            import time as _time
+
             from tortoise.capture_spool import (
                 Snapshot,
+                _backoff_ms,
                 capture_key,
                 classify_failure,
                 read_spool_meta,
@@ -4127,6 +4133,13 @@ def _cmd_sessions_import(args) -> int:
             if already_filed:
                 print(f"Session {session_id} is already filed; the spooled copy "
                       "is a no-op.", file=_sys.stderr)
+            elif _backoff_ms(meta) > _time.time() * 1000.0:
+                # The window is CARRIED across a rewrite now, so a drain inside
+                # it will NOT file this: promising one would be false (#4714
+                # review). Name the real state instead.
+                print(f"Spooled session: {session_id} — a retry is waiting on the "
+                      "backoff window; a later drain will file it.",
+                      file=_sys.stderr)
             else:
                 # Name the command: only the claude/pi SessionStart hook
                 # drains automatically, so for a codex/cursor-only install
@@ -4163,9 +4176,9 @@ def _cmd_sessions_import(args) -> int:
             # Deliberately broad: reading a DIAGNOSTIC body must never replace
             # the honest failure with a traceback, whatever it raises.
             body = f"<error body unreadable: {read_exc}>"
-        # 403/503 ⇒ fail, NO receipt, honest error (Task 15 acceptance); a
-        # RETRYABLE refusal (402/408/425/429/5xx) is spooled for a later drain
-        # (#4714) but still exits 1 above with no receipt.
+        # 403 ⇒ fail, NO receipt, honest error (Task 15 acceptance); a
+        # RETRYABLE refusal (402/408/425/429/5xx, INCLUDING 503) is spooled for a
+        # later drain (#4714) but still exits 1 above with no receipt.
         print(f"import failed (HTTP {e.code}): {body}", file=_sys.stderr)
         _record_capture_error(harness, f"import failed (HTTP {e.code}): {body}",
                               session_id=session_id)
@@ -4205,8 +4218,9 @@ def _cmd_sessions_import(args) -> int:
     # Any 2xx is a success — the server stored the Session and wrote its
     # per-harness receipt state key. A degraded extraction (error/empty) or
     # server-side errors/warnings still imported the session; surface them as
-    # warnings, not failures (403/503 ⇒ fail above via HTTPError; a retryable
-    # 402/408/425/429/5xx is spooled by _spool_if_retryable and also fails).
+    # warnings, not failures (403 ⇒ fail above via HTTPError; a retryable
+    # 402/408/425/429/5xx — including 503 — is spooled by _spool_if_retryable
+    # and also fails).
     if result.get("errors") or result.get("warnings") or \
             result.get("extraction_mode") in ("error", "empty"):
         print("import warnings: " + str(
