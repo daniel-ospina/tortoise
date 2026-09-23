@@ -458,3 +458,259 @@ def test_skip_bypass_inputs_are_re_armed_by_default():
             "incident-window state (docs/infra-runbook.md §8.2), never the "
             "committed default"
         )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# #4759 — bypass VISIBILITY and the machine-checked window
+#
+# Before this change a bypassed gate and a passed gate were indistinguishable to
+# a reader of the run summary (the only trace was a `::warning::` inside one
+# step's log, and the four gates did not even render that trace the same way),
+# and nothing checked how long a `SKIP_*` variable had been left set — the
+# incident window closed by prose alone (#4605). These tests pin both halves:
+# every bypass is reported through ONE helper into `$GITHUB_STEP_SUMMARY`, every
+# deploy job ends with an audit that states each of its gates as bypassed or not,
+# and a scheduled workflow ages every set lane.
+# ══════════════════════════════════════════════════════════════════════════════
+
+_REPO = Path(__file__).resolve().parent.parent
+_BYPASS_SCRIPT = _REPO / ".github" / "scripts" / "deploy-bypass.sh"
+_EXPIRY_WORKFLOW = _REPO / ".github" / "workflows" / "skip-bypass-expiry.yml"
+
+
+def _bypass_gates() -> list[tuple[str, str, str, str]]:
+    """The helper's canonical gate table: (variable, input, label, kind).
+
+    Read from the SCRIPT, so a gate added or renamed there cannot silently leave
+    these guards covering one gate fewer — the same reason
+    ``test_skip_bypass_inputs_are_re_armed_by_default`` pins names rather than
+    the ``skip-`` prefix.
+    """
+    text = _BYPASS_SCRIPT.read_text(encoding="utf-8")
+    table = _region(text, "GATES=(", "\n)")
+    rows = [tuple(m.groups()) for m in re.finditer(r'"([^"|]+)\|([^"|]+)\|([^"|]+)\|([^"|]+)"', table)]
+    assert len(rows) == 4, f"expected FOUR bypassable gates in the helper table, found {rows!r}"
+    return rows
+
+
+def _step_runs() -> dict[str, str]:
+    """Every named step that has a ``run:`` body → that body."""
+    return {name: step["run"] for name, step in _steps().items() if step.get("run")}
+
+
+def test_every_bypass_reports_through_the_shared_helper():
+    """All four bypasses render through ONE reporter (#4759).
+
+    The old shape was inconsistent: two gates had a dedicated warning step and
+    two emitted an inline ``echo … >&2`` from inside a larger step, which is part
+    of why a bypass was easy to miss. Every site must now call the shared helper
+    exactly once, and no step may hand-roll its own bypass warning any more.
+    """
+    wf, gates = _WORKFLOW.read_text(encoding="utf-8"), _bypass_gates()
+    for key, _inp, _label, _kind in gates:
+        assert wf.count(f"--key {key}") == 1, (
+            f"{key} must be reported exactly once through deploy-bypass.sh — "
+            f"found {wf.count(f'--key {key}')}"
+        )
+    assert wf.count("deploy-bypass.sh report") == len(gates), (
+        "one report call per bypassable gate"
+    )
+    # No step may still hand-roll a bypass warning in its own run text.
+    for name, run in _step_runs().items():
+        hit = re.search(r"::warning::[^\n]*(?:BYPASSED|SKIPPED)", run)
+        assert hit is None, (
+            f"step {name!r} still hand-rolls a bypass warning ({hit.group(0)!r}) — "
+            "route it through deploy-bypass.sh report so all four render alike"
+        )
+
+
+def test_bypass_visibility_is_a_run_summary_write():
+    """The visibility mechanism is a real ``$GITHUB_STEP_SUMMARY`` append.
+
+    The acceptance is that a bypass is detectable WITHOUT reading a step log, so
+    the helper must append to the summary — not merely log. A comment mentioning
+    the variable does not count: the append is asserted on a non-comment line.
+    """
+    text = _BYPASS_SCRIPT.read_text(encoding="utf-8")
+    body = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+    assert '>>"$GITHUB_STEP_SUMMARY"' in body, (
+        "deploy-bypass.sh must APPEND the bypass block to $GITHUB_STEP_SUMMARY "
+        "(the run summary), not only echo it to the log"
+    )
+    # Each report/audit step must leave the summary to the helper, and must bind
+    # the per-job audit marker the helper records a fired bypass into.
+    for name, step in _steps().items():
+        run = step.get("run") or ""
+        if "deploy-bypass.sh" not in run:
+            continue
+        assert "GITHUB_STEP_SUMMARY" not in run, (
+            f"step {name!r} must leave $GITHUB_STEP_SUMMARY to the helper"
+        )
+        assert "DEPLOY_BYPASS_MARKER" in (step.get("env") or {}), (
+            f"step {name!r} must bind DEPLOY_BYPASS_MARKER for the per-job audit"
+        )
+
+
+def test_deploy_jobs_audit_every_bypassable_gate():
+    """Each deploy job ENDS by stating every gate it holds as bypassed or not.
+
+    Without this, the ABSENCE of a bypass block is itself ambiguous — exactly the
+    "failure mode looks like its success mode" defect #4759 fixes. The audit runs
+    ``if: always()`` so an earlier failure cannot suppress it.
+    """
+    doc = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
+    audits: dict[str, dict] = {}
+    for job_name, job in doc["jobs"].items():
+        for step in job.get("steps", []):
+            if "deploy-bypass.sh audit" in (step.get("run") or ""):
+                audits[job_name] = step
+    assert set(audits) == {"deploy-api", "post-deploy-verify"}, (
+        f"both deploy jobs must audit their bypassable gates, got {sorted(audits)}"
+    )
+    named: list[str] = []
+    for job_name, step in audits.items():
+        assert step.get("if") == "always()", f"{job_name} audit must run on failure too"
+        run = step["run"]
+        assert not re.search(r"\$\{\{\s*vars\.", run), (
+            "audit values must be env-bound, not interpolated"
+        )
+        named += re.findall(r'--state\s+"?([A-Z0-9_]+)=', run)
+    assert sorted(named) == sorted(key for key, *_ in _bypass_gates()), (
+        "every bypassable gate must be named by exactly one job's audit"
+    )
+
+
+def test_bypass_expiry_is_machine_checked():
+    """The ``vars.SKIP_*`` window is checked by a MACHINE, daily (#4759 ask 2).
+
+    The window start is the dated companion ``SKIP_<VAR>_SET_AT`` read through
+    the ordinary ``vars`` context — `gh variable list --json updatedAt` is not
+    usable with the workflow token (the endpoint needs the fine-grained
+    "Variables" permission) and `vars` exposes no `updatedAt`. The check is a
+    SEPARATE scheduled workflow, so a red run can never block a deploy.
+    """
+    assert _EXPIRY_WORKFLOW.is_file(), f"missing scheduled check: {_EXPIRY_WORKFLOW}"
+    doc = yaml.safe_load(_EXPIRY_WORKFLOW.read_text(encoding="utf-8"))
+    on = doc.get("on") or doc.get(True)
+    crons = [entry["cron"] for entry in on["schedule"]]
+    assert crons, "the bypass-expiry check must be SCHEDULED, not dispatch-only"
+    env = doc["jobs"]["check"]["env"]
+    for key, *_ in _bypass_gates():
+        assert env.get(key) == f"${{{{ vars.{key} }}}}", f"{key} must be read from vars"
+        assert env.get(f"{key}_SET_AT") == f"${{{{ vars.{key}_SET_AT }}}}", (
+            f"{key}_SET_AT must be read from vars — it is the window start"
+        )
+    runs = " ".join((s.get("run") or "") for s in doc["jobs"]["check"]["steps"])
+    assert "deploy-bypass.sh expiry" in runs, "the job must run the machine check"
+
+    # The window itself is stated ONCE, in the helper, and pinned here.
+    m = re.search(r"^WINDOW_DAYS_DEFAULT=(\d+)$", _BYPASS_SCRIPT.read_text(encoding="utf-8"), re.M)
+    assert m, "WINDOW_DAYS_DEFAULT must be a literal in deploy-bypass.sh"
+    assert m.group(1) == "7", (
+        "the bypass window is 7 days — changing it is a deliberate act, so this pin "
+        "must be updated with the justification, not silently re-tuned"
+    )
+    # ...and it can never block a deploy: the deploy workflow does not reference
+    # it as a dependency. A prose mention is fine (it documents the check); a
+    # `needs:`/`uses:`/`workflow_run` wiring would not be.
+    deploy_body = "\n".join(
+        l for l in _WORKFLOW.read_text(encoding="utf-8").splitlines()
+        if not l.lstrip().startswith("#")
+    )
+    assert "skip-bypass-expiry" not in deploy_body, (
+        "the expiry check must never be wired into the deploy workflow"
+    )
+    assert "workflow_run" not in deploy_body, (
+        "deploy-hosted must not be triggered by another workflow"
+    )
+
+
+@pytest.mark.parametrize(
+    "step_name,key",
+    [
+        ("Check Fly secret provenance (fail-closed)", "SKIP_FLY_SECRET_PROVENANCE"),
+        ("Check Fly machines (orphan + crash-loop guard, fail-closed)", "SKIP_FLY_MACHINES_GUARD"),
+    ],
+)
+def test_exit2_still_cannot_be_bypassed_and_precedes_the_skip(step_name, key):
+    """``exit 2`` (could-not-determine) is never bypassable, and stays FIRST.
+
+    The wrapper gates translate ONLY the checker's exit 1. This pins the order —
+    the exit-2 branch must be tested before the skip branch — and that the exit-2
+    branch consults no skip lane at all. #4759's changes are reporting-only and
+    must not have weakened this.
+    """
+    run = _steps()[step_name]["run"]
+    i2 = run.index('if [ "$RC" -eq 2 ]')
+    i1 = run.index('if [ "$RC" -eq 1 ]')
+    assert i2 < i1, "the exit-2 branch must be handled BEFORE the bypass branch"
+    exit2 = run[i2:i1]
+    assert "exit 2" in exit2, "the exit-2 branch must still block the deploy"
+    assert "skip-" not in exit2 and "SKIP_" not in exit2, (
+        "the exit-2 (could-not-determine) branch must never consult a skip lane"
+    )
+    assert key in run[i1:], "the bypass branch must still require this gate's lane"
+
+
+def test_bypass_lane_conditions_are_unchanged_and_never_date_gated():
+    """No bypass was widened, and the dated companion cannot ENABLE one (#4759).
+
+    The four lane conditions are pinned verbatim: the change is reporting-only.
+    ``SKIP_<VAR>_SET_AT`` is a window start, never a switch — if it could satisfy
+    a lane condition it would be a new way to bypass a gate.
+    """
+    doc = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
+    assert doc["jobs"]["packaging-smoke"]["if"] == (
+        "${{ ! (inputs.skip-pack-smoke || vars.SKIP_PACK_SMOKE == 'true') }}"
+    )
+    steps = _steps()
+    assert steps["Post-deploy DB health verification (post-release; does not gate the deploy)"]["if"] == (
+        "${{ ! (inputs.skip-db-health-gate || vars.SKIP_DB_HEALTH_GATE == 'true') }}"
+    )
+    for step_name, expr in (
+        ("Check Fly machines (orphan + crash-loop guard, fail-closed)",
+         "${{ inputs.skip-fly-machines-guard || vars.SKIP_FLY_MACHINES_GUARD == 'true' }}"),
+        ("Check Fly secret provenance (fail-closed)",
+         "${{ inputs.skip-fly-secret-provenance || vars.SKIP_FLY_SECRET_PROVENANCE == 'true' }}"),
+    ):
+        assert expr in steps[step_name]["run"], f"{step_name}: lane condition changed"
+
+    # Every `_SET_AT` occurrence must be a window-start DATA use: an env binding,
+    # a `--set-at` argument, or prose. Never a condition.
+    for line in _WORKFLOW.read_text(encoding="utf-8").splitlines():
+        if "_SET_AT" not in line:
+            continue
+        stripped = line.strip()
+        assert (
+            stripped.startswith("#")
+            or re.fullmatch(r"[A-Z0-9_]+_SET_AT: \$\{\{ vars\.[A-Z0-9_]+_SET_AT \}\}", stripped)
+            or re.fullmatch(r'--set-at "\$[A-Z0-9_]+_SET_AT" \\?', stripped)
+        ), f"unexpected _SET_AT use (must never gate a bypass): {stripped!r}"
+
+
+def test_bypass_values_are_env_bound_never_interpolated_into_shell():
+    """#4334 discipline: a `vars` VALUE is never substituted into shell source.
+
+    A repo variable is operator-controlled, so `${{ vars.X }}` inside run text
+    would be re-parsed by bash — a value containing `$(…)` would EXECUTE and one
+    containing `"` would lose its quoting, the exact class of the STRIPE_PRICE_IDS
+    outage. The bypass steps bind each value in `env:` and read it as a quoted
+    shell variable. (A COMPARISON, `${{ vars.X == 'true' }}`, is evaluated by the
+    Actions expression engine to a literal `true`/`false` before bash sees it, so
+    it is not interpolation of the value and is allowed.)
+    """
+    for name, step in _steps().items():
+        run = step.get("run") or ""
+        if "deploy-bypass.sh" not in run:
+            continue
+        # A bare value interpolation (`${{ vars.X }}`) re-parses the operator's
+        # value as shell source. A COMPARISON (`${{ vars.X == 'true' }}`) is
+        # evaluated by the Actions expression engine to a literal true/false and
+        # is safe — that is the pre-existing lane-condition form.
+        hit = re.search(r"\$\{\{\s*vars\.[A-Z0-9_]+\s*\}\}", run)
+        assert hit is None, (
+            f"step {name!r} interpolates a vars VALUE into its run text ({hit.group(0)!r})"
+        )
+        env = step.get("env") or {}
+        for var in re.findall(r"\$([A-Z0-9_]+_SET_AT)", run):
+            assert var in env, f"step {name!r} reads ${var} but never binds it in env:"
