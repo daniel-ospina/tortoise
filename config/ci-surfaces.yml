@@ -707,6 +707,11 @@ surfaces:
   # (under the docker redirect it constructs against the server and the
   # opt-in half reds). Registered in `core` (the projection surface).
   - test_embedded_durability_claim.py
+  # #4879: the mid-attach co-tenant teardown race — a leaked embedded
+  # projection's GC close must not tear down a peer that is still attaching.
+  # Embedded-only (it forces a cyclic collection inside a live redislite
+  # attach window), so it is routed to the URI-unset carve-out lane below.
+  - test_cotenant_attach_race.py
   - test_embedded_lifecycle.py
   - test_embedded_lifecycle_fast_close.py
   - test_embeddings.py
@@ -1407,6 +1412,7 @@ carve_out:
 - test_config.py
 - test_cross_tenant_read_isolation.py  # #3663: asserts production org_{org_id} graph-name scoping; the carve-out exemption is load-bearing (without it the test redirect would rename every path-built graph, so in a URI-set lane the scoping checks would FAIL — hard RED, not a false pass)
 - test_embedded_concurrency.py
+- test_cotenant_attach_race.py  # #4879: mid-attach co-tenant teardown race (embedded redislite attach window)
 - test_embedded_durability_claim.py  # #2879: embedded AOF durability drift pin (on-disk appendonlydir measurement)
 - test_embedded_lifecycle.py
 - test_embedded_lifecycle_fast_close.py

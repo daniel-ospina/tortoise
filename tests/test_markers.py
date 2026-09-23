@@ -487,6 +487,9 @@ def test_no_redirect_stems_registry_exact():
     from tests._embedded import TEST_NO_REDIRECT_STEMS
     expected = frozenset({
         "test_backup_e2e",
+        # #4879: the mid-attach co-tenant teardown race (embedded redislite
+        # attach window) — carve-out, mirroring config/ci-surfaces.yml.
+        "test_cotenant_attach_race",
         "test_config",
         "test_embedded_concurrency",
         # #2879: embedded AOF durability drift pin (carve-out — the docker

@@ -194,6 +194,11 @@ def _worker_stem_embedded_probe(results: list, path: str) -> None:
 # eval_* and longmem stems below are each dated additions.)
 TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     "test_backup_e2e",
+    # #4879: forces a cyclic collection inside a live redislite attach window
+    # (a second construction pinging a socket that a leaked peer's GC close
+    # would otherwise unlink). Embedded-only: under the URI redirect there is
+    # no embedded attach window to race.
+    "test_cotenant_attach_race",
     "test_config",
     "test_embedded_concurrency",
     # #2879: the embedded AOF durability drift pin measures an on-disk
