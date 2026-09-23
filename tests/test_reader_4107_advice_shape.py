@@ -101,8 +101,12 @@ def test_detector_emits_the_generic_prompt_not_the_preference_fragment():
     # the fixture's own label — which the instrument does NOT pass through
     assert q["question_type"] == "single-session-preference"
     assert detect_question_type(q["question"]) is None
-    emitted = system_prompt_for(None)
-    assert emitted == system_prompt_for(detect_question_type(q["question"]))
+    emitted = system_prompt_for(detect_question_type(q["question"]))
+    # The premise of the §4 tension: the universal clause — synthesis licence
+    # included — is what actually reaches the reader, not a category-specific
+    # prompt. (An equality against ``system_prompt_for(None)`` would be
+    # vacuous: the line above already pins the detector's ``None``.)
+    assert "asks what the user prefers" in emitted
     assert "PREFERENCE INSTRUCTIONS" not in emitted
 
 

@@ -143,14 +143,16 @@ question whose asked *event* is absent but whose relevant *experiences* are pres
    context; if they are absent, abstain (Phase 2)**." Phase 2 then reads: "abstain ONLY when no turn
    in the context mentions the asked subject or event at all."
 
-On `d6233ab6` the two collide: **no** turn mentions the reunion (the two incidental `reunion`
-strings in the haystack are a family-gatherings list in `f916c63a_2_t3` and a "Friends reunion"
-reference in `e419b7c3_4_t5`, neither about the user), while the debate-team / AP-economics memories
-are present *and are the gold answer's basis*. Phase 2's literal condition is therefore satisfied,
-and the pinned reader resolves the tension **against** the synthesis license: it abstains, correctly
-noting the asked event is unmentioned.
+On `d6233ab6` the two collide: **no** turn mentions the user's high school reunion — the only
+`reunion` string in the assembled evidence is an unrelated generic bullet in a photo-organizing plan
+in `f916c63a_2` ("Family Gatherings (holidays, reunions, etc.)"), and the `e419b7c3_4_t5`
+"Friends reunion" reference is haystack-only and never rendered — while the debate-team /
+AP-economics memories are present *and are the gold answer's basis*. Phase 2's condition is
+therefore met on the asked event, and the pinned reader resolves the tension **against** the
+synthesis license: it abstains, correctly noting the asked event is unmentioned.
 
-The abstention is **literal-truthful under Phase 2** and **wrong under the synthesis license**. The
+The abstention is **truthful under a literal reading of Phase 2** and **wrong under the synthesis
+license**. The
 prompt does not say which rule wins, and the model picks the guard.
 
 **This is not reader variance.** All four independent measurements above abstain, at temperature 0,
@@ -200,8 +202,8 @@ the evidence as `being part of the debate team and taking advanced placement` (*
 would clear the L3 floor as well as L1.
 
 ⚠️ Reader wording varies run-to-run at temperature 0 (the 2026-09-19 and 2026-09-23 forms differ);
-the **decision** (abstain / commit) does not vary across any recorded run. Quote the receipt for the
-exact wording.
+the **decision** (abstain / commit) does not vary across any recorded run of the shipped prompt
+(§2). Quote the receipt for the exact wording.
 
 The candidate sentence (recorded in the diagnostic as `ADVICE_SENTENCE`, **not shipped**) is:
 
