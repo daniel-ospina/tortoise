@@ -1128,24 +1128,41 @@ class _FakeRequester:
 
 
 class _FakeBrowser:
-    def __init__(self, ctx):
+    """The real `Browser`: `close()` closes the browser AND everything it owns — a
+    context still open is force-closed (`ctx_reaped#<serial>`), not leaked — and a
+    second `close()` is swallowed. Contexts are tracked so the force-close is
+    VISIBLE and distinguishable from the instrument's own `ctx_closed#<serial>`."""
+
+    def __init__(self, ctx, new_context_raises=False):
         self._ctx = ctx
+        self._owned = []           # only contexts it actually created
         self._used = False
+        self._closed = False
+        self._new_context_raises = new_context_raises
+        ctx.browser = self
         ctx.events.append("launch")
 
     def new_context(self, **k):
-        # The FIRST context is the primary one the harness hands back to the test;
-        # any further call is a DISTINCT sibling, so an abandoned context is a
-        # missing `ctx_closed` rather than an invisible return of the same object.
-        # Each creation/close names the context's SERIAL, so a context left open
-        # cannot be balanced out by closing another one twice.
+        if self._new_context_raises:
+            raise RuntimeError("context creation failed")
         if self._used:
-            return self._ctx.sibling()
-        self._used = True
-        self._ctx.events.append(f"ctx_created#{self._ctx.serial:x}")
-        return self._ctx
+            # A second call is a DISTINCT sibling, so a context the instrument
+            # abandons is visible in the log instead of being an invisible return
+            # of the object it already has.
+            ctx = self._ctx.sibling()
+        else:
+            self._used = True
+            ctx = self._ctx
+        self._owned.append(ctx)
+        self._ctx.events.append(f"ctx_created#{ctx.serial}")
+        return ctx
 
     def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        for owned in self._owned:      # force-close, as Browser.close() really does
+            owned._reap()
         self._ctx.events.append("browser_closed")
 
 
@@ -1247,35 +1264,48 @@ class _FakeCtx:
         self._org_create = org_create
         self._org_click_raises = org_click_raises
         self.page = None
+        self.browser = None        # set by the browser that creates it
+        self._closed = False
 
     def new_page(self):
         self.page = _FakePage(self._base, self._org_create, self._org_click_raises)
         return self.page
 
     def close(self):
-        self.events.append(f"ctx_closed#{self.serial:x}")
+        # The real `BrowserContext.close()` returns early when it is already
+        # closing or closed, so a second call is a no-op, not a failure.
+        if self._closed:
+            return
+        self._closed = True
+        self.events.append(f"ctx_closed#{self.serial}")
+
+    def _reap(self):
+        """What `Browser.close()` does to a context the run left open."""
+        if self._closed:
+            return
+        self._closed = True
+        self.events.append(f"ctx_reaped#{self.serial}")
 
     def sibling(self):
-        sib = _FakeCtx(None, self._base, self._org_create, self._org_click_raises,
-                       shares=self)
-        self.events.append(f"ctx_created#{sib.serial:x}")
-        return sib
+        return _FakeCtx(None, self._base, self._org_create, self._org_click_raises,
+                        shares=self)
 
 
 class _FakeChromium:
-    def __init__(self, ctx, launch_raises=False):
+    def __init__(self, ctx, launch_raises=False, new_context_raises=False):
         self._ctx = ctx
         self._launch_raises = launch_raises
+        self._new_context_raises = new_context_raises
 
     def launch(self, **k):
         if self._launch_raises:
             raise RuntimeError("browser launch failed")
-        return _FakeBrowser(self._ctx)
+        return _FakeBrowser(self._ctx, self._new_context_raises)
 
 
 class _FakeSyncPlaywright:
-    def __init__(self, ctx, launch_raises=False):
-        self.chromium = _FakeChromium(ctx, launch_raises)
+    def __init__(self, ctx, launch_raises=False, new_context_raises=False):
+        self.chromium = _FakeChromium(ctx, launch_raises, new_context_raises)
 
     def __enter__(self):
         return self
@@ -1288,13 +1318,15 @@ def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
                    mcp_tools_call, surface="card", skip_write=False,
                    org_create=False, org_click_raises=False, org_name=None,
                    keep_org=False, front_door_hittable=True,
-                   playwright_available=True, launch_raises=False):
+                   playwright_available=True, launch_raises=False,
+                   new_context_raises=False):
     """Execute the real `run_walk` against a fake browser. Returns the record.
 
     `front_door_hittable=False` makes the front-door probe REPORT the signup CTA
     as not hittable, driving the pre-session product finding;
     `playwright_available=False` makes the driver import fail, which is the
-    fail-closed default path.
+    fail-closed default path; `new_context_raises=True` makes the driver start and
+    then refuse a context.
     """
     import sys
     import types
@@ -1306,7 +1338,8 @@ def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
                    org_click_raises=org_click_raises)
     if playwright_available:
         fake_sync = types.ModuleType("playwright.sync_api")
-        fake_sync.sync_playwright = lambda: _FakeSyncPlaywright(ctx, launch_raises)
+        fake_sync.sync_playwright = lambda: _FakeSyncPlaywright(
+            ctx, launch_raises, new_context_raises)
         monkeypatch.setitem(sys.modules, "playwright", types.ModuleType("playwright"))
         monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_sync)
     else:
@@ -1549,20 +1582,62 @@ def _assert_not_the_generic_error_handler(obs, name: str) -> None:
 
 
 def _assert_browser_reaped(ctx) -> None:
-    """Exactly one browser was launched and closed, last; every context the run
-    created was closed exactly once — keyed by a unique serial per context, so an
-    open context cannot be balanced by closing another one twice. A run that never
-    launched closes nothing."""
+    """Nothing the run launched is left open: exactly one browser, closed LAST, and
+    every context it created is settled — closed by the instrument itself
+    (`ctx_closed#<serial>`) or force-closed by the browser's own close
+    (`ctx_reaped#<serial>`), which is what the real object does with the contexts it
+    owns. A run that never launched closes nothing.
+
+    This is the no-leak property, so it does not require the graceful shape: the
+    instrument's own explicit context close is pinned once, by
+    `test_the_walk_closes_its_own_context_before_the_browser`.
+    """
     events = ctx.events
     if "launch" not in events:
         assert events == [], events
         return
     created = [e.split("#", 1)[1] for e in events if e.startswith("ctx_created#")]
-    closed = [e.split("#", 1)[1] for e in events if e.startswith("ctx_closed#")]
-    assert sorted(closed) == sorted(created), events
+    settled = [e.split("#", 1)[1] for e in events
+               if e.startswith(("ctx_closed#", "ctx_reaped#"))]
+    assert sorted(settled) == sorted(created), (
+        f"still open: {sorted(set(created) - set(settled))}; "
+        f"settled but never created: {sorted(set(settled) - set(created))}; "
+        f"events={events}")
     assert events.count("launch") == 1, events
     assert events.count("browser_closed") == 1, events
     assert events[-1] == "browser_closed", events
+
+
+@pytest.mark.parametrize("events,accepted", [
+    (["launch", "ctx_created#1", "ctx_closed#1", "browser_closed"], True),
+    # launch succeeded, then the driver refused a context: nothing was created
+    (["launch", "browser_closed"], True),
+    # one context, force-closed by the browser rather than closed by the run
+    (["launch", "ctx_created#1", "ctx_reaped#1", "browser_closed"], True),
+    # two contexts, both settled: the multiset the harness never compares live
+    (["launch", "ctx_created#1", "ctx_created#2", "ctx_closed#2",
+      "ctx_reaped#1", "browser_closed"], True),
+    # one of two left open
+    (["launch", "ctx_created#1", "ctx_created#2", "ctx_closed#1",
+      "browser_closed"], False),
+    # a second browser, one of them never closed
+    (["launch", "launch", "ctx_created#1", "ctx_closed#1", "browser_closed"], False),
+    # the browser is never closed: the leak this pin exists for
+    (["launch", "ctx_created#1", "ctx_closed#1"], False),
+    # the browser is closed before the context it owns
+    (["launch", "browser_closed", "ctx_created#1", "ctx_closed#1"], False),
+])
+def test_the_reap_pin_gates_only_a_settled_run(events, accepted):
+    """The pin's contract, exercised directly on constructed event logs, including
+    shapes the tool cannot currently produce (a force-reaped context, two contexts,
+    a browser closed before its own context)."""
+    ctx = _FakeCtx({}, "https://app.premiselabs.co")
+    ctx.events.extend(events)
+    if accepted:
+        _assert_browser_reaped(ctx)
+    else:
+        with pytest.raises(AssertionError):
+            _assert_browser_reaped(ctx)
 
 
 def test_walk_that_never_reaches_a_connection_surface_is_incomplete_no_surface(
@@ -1695,6 +1770,35 @@ def test_a_browser_launch_that_fails_is_recorded_and_nothing_is_left_open(
     assert obs.verdict.startswith("failed: RuntimeError"), obs.verdict
     assert mod.exit_code_for(obs.reason) == mod.EXIT_INSTRUMENT_ERROR
     assert obs.teardown["status"] == mod.TEARDOWN_NOT_REACHED
+
+
+def test_a_context_that_cannot_be_created_still_closes_the_browser(monkeypatch, tmp_path):
+    """The driver starts and then refuses a context: the same fail-closed class
+    (instrument error, exit 3) from the context-creation catch site. Nothing was
+    created, so the browser is all there is to close — and the run closes it."""
+    obs, ctx, mod = _run_fake_walk(
+        monkeypatch, tmp_path, plan={}, ui_sequence=[], mcp_tools_call=_MCP_OK,
+        new_context_raises=True)
+
+    assert obs.verdict.startswith("failed: RuntimeError"), obs.verdict
+    assert mod.exit_code_for(obs.reason) == mod.EXIT_INSTRUMENT_ERROR
+    assert obs.teardown["status"] == mod.TEARDOWN_NOT_REACHED
+    assert ctx.events == ["launch", "browser_closed"], ctx.events
+
+
+def test_the_walk_closes_its_own_context_before_the_browser(monkeypatch, tmp_path):
+    """The instrument's teardown SHAPE, pinned once: it closes the context it
+    created, itself. `Browser.close()` force-closes an open context by itself and a
+    second context close is a no-op, so this is a shape standard, not a leak guard —
+    which is why the no-leak pin above must not require it. Every exit runs the same
+    `finally`."""
+    plan = {("GET", "/api/session"): [(401, {"error": "not_signed_in"})]}
+    obs, ctx, _mod = _run_fake_walk(
+        monkeypatch, tmp_path, plan=plan, ui_sequence=[], mcp_tools_call=_MCP_OK)
+
+    assert obs.verdict.startswith("instrument-error:"), obs.verdict
+    assert f"ctx_closed#{ctx.serial}" in ctx.events, ctx.events
+    assert "browser_closed" in ctx.events, ctx.events
 
 
 def test_walk_skip_agent_write_cannot_launder_a_lying_ui(monkeypatch, tmp_path):
