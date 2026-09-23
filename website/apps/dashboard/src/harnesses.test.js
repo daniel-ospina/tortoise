@@ -11,12 +11,32 @@ import {
   HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON,
   HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CAPTURE_SEAM,
   PI_CAPTURE_INSTALL,
-  HARNESS_OAUTH, CANONICAL_MCP_URL,
+  HARNESS_OAUTH, CANONICAL_MCP_URL, ONBOARDING_INSTRUCTIONS_URL,
   HARNESS_FAMILIES, HARNESS_FAMILY_IDS, harnessFamilyOf, preferredSurface,
   harnessDisplayName, knownHarnessName,
 } from './harnesses.js'
 
 const KEY = 'tt_w2_test_key'
+
+// #4365: the served installer ships THREE capabilities — onboarding is
+// delivered as INSTRUCTIONS (a document the agent reads), never installed into
+// a harness's skills namespace. No connect copy may claim otherwise, and every
+// copy must name where the onboarding instructions live.
+test('#4365: no connect copy claims onboarding as an installed skill, and each names the instructions', () => {
+  const CLAIM = 'Install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding)'
+  for (const h of HARNESS_ORDER) {
+    const cmd = UNIVERSAL_COMMAND[h](KEY)
+    assert.ok(!/Install the Tortoise skills \([^)]*onboarding/i.test(cmd),
+      `${h}: the install claim must never name onboarding — it is not a skill`)
+    assert.ok(cmd.includes(ONBOARDING_INSTRUCTIONS_URL),
+      `${h}: every connect copy must name the served onboarding instructions`)
+  }
+  // The shared helper's claim enumerates exactly what the installer ships.
+  for (const h of ['claude', 'codex']) {
+    assert.ok(UNIVERSAL_COMMAND[h](KEY).includes(CLAIM),
+      `${h}: the install claim must list exactly the 3 shipped capabilities`)
+  }
+})
 
 test('DE2E-5: the 7-harness vocabulary — self-install (4) + teach-human (3, incl. OAuth chatgpt) cover HARNESS_ORDER exactly', () => {
   assert.equal(HARNESS_ORDER.length, 7)
