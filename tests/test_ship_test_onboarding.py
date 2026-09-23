@@ -1443,6 +1443,108 @@ def test_walk_reports_a_200_but_unparseable_projection_as_an_instrument_error(
     assert mod.TEARDOWN_BASELINE_UNAVAILABLE in mod.TEARDOWN_RESIDUE_STATES
 
 
+# ── the three post-create exits nothing reached (#4843) ─────────────────────
+# A marker `raise` above each of these three left the whole suite green. All
+# three are POST-create — the wizard's Create-Organization click (`:1313`) is
+# behind them — so each is a path on which this run may have created an org, and
+# each records `obs.teardown` from whatever teardown state reached it. With no
+# test here, a degraded teardown state at these exits (a re-bound or emptied
+# object, an in-place field assignment) is invisible to the suite AND flips a
+# residue state to the truthy, deliberately-non-residue `not_reached` — an
+# unreaped org reported as a clean run (the #4291 conflation). So each test
+# asserts the recorded teardown STATUS, not merely that `obs.teardown` is
+# truthy: `not_reached` satisfies truthiness.
+#
+# These harnesses serve no org-list route, so `GET /api/v1/organizations` 404s
+# and the honest status is the fail-closed `baseline_unavailable` (in
+# `TEARDOWN_RESIDUE_STATES`). That is the point: the assertion is specific
+# enough to catch any OTHER state a degraded object would record.
+
+def _assert_teardown_recorded_fail_closed(obs, mod) -> None:
+    assert obs.teardown, "every exit must carry the teardown state"
+    assert obs.teardown["status"] == mod.TEARDOWN_BASELINE_UNAVAILABLE, (
+        f"expected the fail-closed state, got {obs.teardown!r}")
+    assert mod.TEARDOWN_BASELINE_UNAVAILABLE in mod.TEARDOWN_RESIDUE_STATES
+
+
+def _assert_exited_at_its_own_step(obs, name: str) -> None:
+    """The exit was reached AT ITS OWN STEP, not through the walk's generic
+    `except Exception` handler. Both record a verdict of the same shape (the
+    handler writes `failed: <exc>`, and it fires AFTER the assertion under test
+    was recorded), so without this pin the test could pass while its exit is
+    unreachable — a coverage test that cannot fail."""
+    assert not [s for s in obs.steps if s.name == "error"], (
+        f"exited through the error handler, not the {name!r} step: {obs.steps}")
+    assert obs.steps[-1].name == name, obs.steps[-1].name
+
+
+def test_walk_that_never_reaches_a_connection_surface_is_incomplete_no_surface(
+        monkeypatch, tmp_path):
+    """The screen renders no connection surface at all, so the NEGATIVE
+    direction was never measured: `INCOMPLETE_NO_SURFACE` (exit 1), never a
+    product failure — and it stops before the agent write."""
+    plan = {
+        ("GET", "/api/session"): _SESSION_200,
+        ("GET", "/api/v1/onboarding/state"): [_PROJ_UNOBSERVED],
+    }
+    obs, ctx, mod = _run_fake_walk(
+        monkeypatch, tmp_path, plan=plan, ui_sequence=[ABSENT],
+        mcp_tools_call=_MCP_OK)
+
+    assert obs.verdict == mod.INCOMPLETE_NO_SURFACE
+    assert mod.exit_code_for(obs.reason) == mod.EXIT_FAILED
+    # it stopped at the read: no key was minted and nothing was written
+    assert not any(c[0] == "POST" for c in ctx.request.calls)
+    _assert_exited_at_its_own_step(obs, "before-observation")
+    _assert_teardown_recorded_fail_closed(obs, mod)
+
+
+def test_walk_whose_screen_claims_a_connection_the_server_never_saw_is_a_product_failure(
+        monkeypatch, tmp_path):
+    """The screen says "Connected" while the server's own projection shows no
+    observation. That is the `no_claim_before_observation` assertion failing —
+    the product finding this instrument exists to make — and it is distinct from
+    the absent-surface class directly above (there the rule is not violated
+    because nothing was claimed)."""
+    plan = {
+        ("GET", "/api/session"): _SESSION_200,
+        ("GET", "/api/v1/onboarding/state"): [_PROJ_UNOBSERVED],
+    }
+    obs, ctx, mod = _run_fake_walk(
+        monkeypatch, tmp_path, plan=plan, ui_sequence=[CONNECTED],
+        mcp_tools_call=_MCP_OK)
+
+    assert obs.verdict.startswith("failed:"), obs.verdict
+    assert obs.verdict != mod.INCOMPLETE_NO_SURFACE
+    assert obs.assertions.get("no_claim_before_observation") is False
+    assert mod.exit_code_for(obs.reason) == mod.EXIT_FAILED
+    assert not any(c[0] == "POST" for c in ctx.request.calls)
+    _assert_exited_at_its_own_step(obs, "before-observation")
+    _assert_teardown_recorded_fail_closed(obs, mod)
+
+
+def test_walk_without_a_mintable_key_is_an_instrument_error(monkeypatch, tmp_path):
+    """The write step has no credential: the wizard showed no `tt_`/`tk_` key and
+    the BFF refuses to mint one. The run cannot make the server-observed write,
+    so it is an INSTRUMENT fault (exit 3) — never `server_did_not_observe`, which
+    would blame the product for a credential the instrument never got."""
+    plan = {
+        ("GET", "/api/session"): _SESSION_200,
+        ("GET", "/api/v1/onboarding/state"): [_PROJ_UNOBSERVED],
+        ("POST", "/api/v1/team/keys"): [(403, {"error": "forbidden"})],
+    }
+    obs, _ctx, mod = _run_fake_walk(
+        monkeypatch, tmp_path, plan=plan, ui_sequence=[NOT_CONNECTED],
+        mcp_tools_call=_MCP_OK)
+
+    assert obs.verdict.startswith("instrument-error:"), obs.verdict
+    assert "no_agent_key" in obs.verdict
+    assert "never observed" not in obs.verdict
+    assert mod.exit_code_for(obs.reason) == mod.EXIT_INSTRUMENT_ERROR
+    _assert_exited_at_its_own_step(obs, "agent-write")
+    _assert_teardown_recorded_fail_closed(obs, mod)
+
+
 def test_walk_skip_agent_write_cannot_launder_a_lying_ui(monkeypatch, tmp_path):
     """With --skip-agent-write a screen that claims a connection is still a
     product FAILURE (exit 1), not the `positive_not_attempted` incomplete."""
@@ -1973,13 +2075,14 @@ def test_no_exit_from_the_walk_writes_the_artifact_without_teardown():
     mutating the teardown object's fields in place.
 
     What covers those forms is the recorded teardown STATUS, asserted in the
-    test for each post-create exit a test reaches — `:1370` step 5, `:1428` the
-    failed write, `:1449` the poll, `:1471` step 7, `:1491` the final exit,
-    `:1497` the exception exit. The status, not merely that `obs.teardown` is
-    truthy: `not_reached` satisfies mere truthiness, so a truthiness-only assert
-    cannot see a residue state degrade into a clean one. Three post-create exits
-    (`:1390`, `:1401`, `:1460`) are reached by NO test, so they carry no such
-    assertion and only `_run_teardown`'s runtime gates guard them (#4843).
+    test for EVERY post-create exit — `:1370` step 5, `:1390` the absent surface,
+    `:1401` the screen that lies, `:1428` the failed write, `:1449` the poll,
+    `:1460` no agent key, `:1471` step 7, `:1491` the final exit, `:1497` the
+    exception exit. The status, not merely that `obs.teardown` is truthy:
+    `not_reached` satisfies mere truthiness, so a truthiness-only assert cannot
+    see a residue state degrade into a clean one. (The three that no test reached
+    until #4843 now have their own tests, each pinned to its own step so the test
+    cannot pass through the walk's generic error handler instead.)
     """
     tree = ast.parse(textwrap.dedent(_inspect.getsource(_mod.run_walk)))
 
