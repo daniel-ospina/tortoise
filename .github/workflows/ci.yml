@@ -824,7 +824,7 @@ jobs:
           python-version: '3.12'
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'   # --experimental-strip-types needs >= 22.6 (#373 harness)
+          node-version: '22'   # .ts type-stripping + syntax detection needs >= 22.7 (#373 harness, #4714 parity test)
       - run: pip install -e '.[test]'
       - run: python -m playwright install --with-deps chromium
       # #1511: serve THIS branch's website/ (wrangler pages dev, mirroring the

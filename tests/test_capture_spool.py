@@ -46,8 +46,8 @@ SESSION_START = REPO / "tortoise" / "claude-hooks" / "session-start.sh"
 def _never_touch_real_breadcrumbs(tmp_path, monkeypatch):
     """No test in this file may READ or UNLINK the developer's real breadcrumb.
 
-    `_clear_breadcrumb_for` (capture_spool.py:887) resolves the path at CALL
-    time from the ambient env and UNLINKS it when the recorded ``session_id``
+    `_clear_breadcrumb_for` (tortoise/capture_spool.py) resolves the path at
+    CALL time from the ambient env and UNLINKS it when the recorded ``session_id``
     matches. A per-test pin is one test deep: every other success-path flush in
     this file reaches the same helper with the ambient environment and deletes
     the real ``~/.tortoise/capture-errors/<harness>.json`` that
@@ -327,8 +327,12 @@ def test_the_pi_and_python_classifiers_agree_on_every_status_parity(tmp_path):
     assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
     pi_map = json.loads(proc.stdout.strip().splitlines()[-1])
 
-    # Every JS non-finite row maps onto the Python input that must agree with it.
-    python_input = {"null": None, "undefined": None, "NaN": None}
+    # Faithful mapping, not a convenience one: Python has no `undefined`, so it
+    # corresponds to `None` (both mean "no status"); `NaN` maps to an ACTUAL
+    # nan so a non-finite status is genuinely compared. Mapping NaN onto None
+    # would assert `TS(NaN) == Python(None)` and hide the live divergence it
+    # used to cover (Python returned "permanent" for a nan).
+    python_input = {"null": None, "undefined": None, "NaN": float("nan")}
     for raw, verdict in pi_map.items():
         status = python_input[raw] if raw in python_input else int(raw)
         assert classify_failure(status) == verdict, (
@@ -339,7 +343,8 @@ def test_the_pi_and_python_classifiers_agree_on_every_status_parity(tmp_path):
     # is vacuous. This also catches both legs drifting the same way.
     assert classify_failure(402) == pi_map["402"] == "retry"
     # And the no-status rows, which is exactly where the legs diverged.
-    assert pi_map["null"] == pi_map["undefined"] == "retry"
+    assert pi_map["null"] == pi_map["undefined"] == pi_map["NaN"] == "retry"
+    assert classify_failure(float("nan")) == "retry"
 
 
 def _assert_both_legs_carry_402() -> None:
@@ -352,9 +357,14 @@ def _assert_both_legs_carry_402() -> None:
     CI runner) without node.
     """
     py_src = (REPO / "tortoise" / "capture_spool.py").read_text(encoding="utf-8")
-    ts_src = (REPO / "tortoise" / "pi-hooks" / "tortoise-capture.ts").read_text(
+    ts_raw = (REPO / "tortoise" / "pi-hooks" / "tortoise-capture.ts").read_text(
         encoding="utf-8"
     )
+    # Strip `//` comments first: without this, a COMMENTED-OUT predicate
+    # (`// if (status === 402) return "retry";`) satisfies the pin while the
+    # real classifier has dropped the status — a spelling guard that a comment
+    # can forge is worse than none. The lookbehind preserves `://` in URLs.
+    ts_src = re.sub(r"(?<!:)//[^\n]*", "", ts_raw)
     py_set = re.search(r"if status in \(([0-9,\s]+)\):", py_src)
     assert py_set, "capture_spool.classify_failure has no integer transient set"
     py_codes = {int(x) for x in py_set.group(1).split(",")}

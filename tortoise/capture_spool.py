@@ -40,6 +40,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import math
 import os
 import re
 import tempfile
@@ -274,12 +275,12 @@ def entry_key(session_id: str) -> str:
 # ── Failure classification + backoff ───────────────────────────────────────
 
 
-def classify_failure(status: int | None, detail: str = "") -> str:
+def classify_failure(status: int | float | None, detail: str = "") -> str:
     """``"retry"`` (transient) or ``"permanent"``.
 
-    TRANSIENT: no status (network / timeout), 5xx, 3xx (a redirect on a stored
-    api_url must not delete the capture), the retryable 4xx family
-    (402/408/425/429), and EVERY 409. On this idempotent upsert a 409 is either
+    TRANSIENT: no status (network / timeout / an unparseable status), 5xx, 3xx (a
+    redirect on a stored api_url must not delete the capture), the retryable 4xx
+    family (402/408/425/429), and EVERY 409. On this idempotent upsert a 409 is either
     #3713's in-flight concurrency condition (retry then replays) or a policy
     state (recording disabled) the user can reverse — a capture must not be
     destroyed because recording was briefly off. Matching the server's prose is
@@ -316,7 +317,12 @@ def classify_failure(status: int | None, detail: str = "") -> str:
     PERMANENT: every other 4xx — a malformed payload or an out-of-range turn
     count never becomes valid by waiting.
     """
-    if status is None:
+    # Total over "no status", matching the Pi leg's classifyFailure exactly so
+    # the two cannot disagree: None (never got one) and a non-finite value (an
+    # unparseable status). Without the isfinite arm a NaN returned "permanent"
+    # while the Pi leg returned "retry" for the same input — a divergence the
+    # cross-leg parity test is meant to make impossible.
+    if status is None or not math.isfinite(status):
         return "retry"
     if 300 <= status < 400:
         return "retry"

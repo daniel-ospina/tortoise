@@ -7,7 +7,8 @@ it IS the opt-in — the #3575 trap was a capture extension that defaulted off),
 and it talks to both hosted capture endpoints.
 
 The behavioral assertions run the extension's own `node --test` suite when the
-local Node supports native TypeScript type stripping (Node >= 22.6); the
+local Node supports native TypeScript type stripping AND module-syntax
+detection (Node >= 22.7 — the `.ts` is typeless with no `package.json`); the
 source-level assertions always run, so the surface stays pinned even where
 Node is older or absent.
 """
@@ -116,7 +117,12 @@ def _node_supports_ts(node: str) -> bool:
     if not m:
         return False
     major, minor = int(m.group(1)), int(m.group(2))
-    return major > 22 or (major == 22 and minor >= 6)
+    # 22.7, not 22.6: the extension is a TYPELESS .ts and the repo ships no
+    # package.json, so it needs ambient module-syntax DETECTION — type stripping
+    # alone (22.6) strips the annotations and then fails to import the module.
+    # A floor stated too low is worse than a high one: it REDs instead of
+    # skipping. Keep in step with the parity test in test_capture_spool.py.
+    return major > 22 or (major == 22 and minor >= 7)
 
 
 def _scrubbed_env(tmpdir: str) -> dict[str, str]:
@@ -149,7 +155,7 @@ def test_extension_behavioral_suite():
     if node is None:
         pytest.skip("node not available — extension source pins above still ran")
     if not _node_supports_ts(node):
-        pytest.skip("node < 22.6 cannot strip TypeScript types — source pins still ran")
+        pytest.skip("node < 22.7 cannot strip AND detect TypeScript types — source pins still ran")
     with tempfile.TemporaryDirectory() as fake_home:
         proc = subprocess.run(
             [node, "--test", str(EXTENSION_TEST)],
