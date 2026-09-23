@@ -50,13 +50,17 @@
 #                        default is <repo-root>/.env.
 #
 # This wrapper only READS `.env`. It never writes it.
+#
+# The `_RWEK_`/`_rwek_` namespace belongs to this script: the loader SKIPS any
+# `.env` entry named into it, so a `.env` can never rewrite the launcher's own
+# state (the env file path, the source label, the managed-key set). There is no
+# `eval` on a `.env`-derived name anywhere below.
 
 set -u
 
-# A caller's inherited `SHELLOPTS=xtrace` (or a `BASH_ENV` that runs `set -x`)
-# would trace the `export "$key=$value"` line below and write the FULL key to
-# stderr — the channel this tool exists to keep clean for receipts. Turn
-# tracing off before any secret is read.
+# An inherited `SHELLOPTS=xtrace` traces `export "$key=$value"` and writes the
+# FULL key to stderr — the channel this tool exists to keep clean for receipts.
+# Turn tracing off before any secret is read.
 case $- in *x*) set +x ;; esac
 
 # The provider keys this wrapper owns — the set the extraction/reader paths
@@ -70,7 +74,7 @@ case $- in *x*) set +x ;; esac
 # against those registries by
 # tests/test_run_with_eval_keys.py::test_managed_keys_match_the_code_registries —
 # adding a provider key to a registry without managing it here reddens that test.
-MANAGED_KEYS=(
+_RWEK_MANAGED_KEYS=(
   OPENROUTER_API_KEY
   DEEPSEEK_API_KEY
   VENICE_API_KEY
@@ -130,21 +134,21 @@ resolve_target() {
   printf '%s' "$p"
 }
 
-SCRIPT_PATH=$(resolve_self "$0")
-SCRIPT_DIR=$(dirname -- "$SCRIPT_PATH")
-REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)
-ENV_FILE=${EVAL_KEYS_ENV_FILE:-$REPO_ROOT/.env}
+_RWEK_SCRIPT_PATH=$(resolve_self "$0")
+_RWEK_SCRIPT_DIR=$(dirname -- "$_RWEK_SCRIPT_PATH")
+_RWEK_REPO_ROOT=$(CDPATH= cd -- "$_RWEK_SCRIPT_DIR/.." && pwd -P)
+_RWEK_ENV_FILE=${EVAL_KEYS_ENV_FILE:-$_RWEK_REPO_ROOT/.env}
 
 # The declaration label. `.env` is used ONLY when the resolved env file IS the
 # resolved repo-root `.env`; otherwise the absolute path is printed, so the
 # label never names a file the wrapper did not read.
 if [ -n "${EVAL_KEYS_ENV_FILE:-}" ]; then
-  ENV_FILE=$(absolute_path "$ENV_FILE")
+  _RWEK_ENV_FILE=$(absolute_path "$_RWEK_ENV_FILE")
 fi
-if [ "$(absolute_path "$ENV_FILE")" = "$REPO_ROOT/.env" ]; then
-  SOURCE_LABEL=.env
+if [ "$(absolute_path "$_RWEK_ENV_FILE")" = "$_RWEK_REPO_ROOT/.env" ]; then
+  _RWEK_SOURCE_LABEL=.env
 else
-  SOURCE_LABEL=$ENV_FILE
+  _RWEK_SOURCE_LABEL=$_RWEK_ENV_FILE
 fi
 
 if [ "$#" -eq 0 ]; then
@@ -154,7 +158,7 @@ fi
 
 is_managed_key() {
   local k=$1 m
-  for m in "${MANAGED_KEYS[@]}"; do
+  for m in "${_RWEK_MANAGED_KEYS[@]}"; do
     [ "$k" = "$m" ] && return 0
   done
   return 1
@@ -183,23 +187,23 @@ sha256_of() {
 # After this, a managed key can come from exactly one place: the repo `.env`.
 # (Or be unset — which is the fail-closed outcome, never a silent fallback to
 # the ambient key.)
-unset "${MANAGED_KEYS[@]}"
+unset "${_RWEK_MANAGED_KEYS[@]}"
 
 # ── 2. load `.env` — explicit override for MANAGED keys, fill-if-absent for
 #      everything else (never clobber an explicit TORTOISE_DB_URI). The
-#      parsing semantics mirror `mcp_server._load_dotenv`: a leading `export `
-#      is tolerated, blank/# lines are skipped, quoted values are literal, and
-#      an unquoted value loses a ` #` inline comment while a bare `#` survives.
+#      parsing semantics mirror `mcp_server._load_dotenv` on LF-separated
+#      files: a leading `export ` is tolerated, blank/# lines are skipped,
+#      quoted values are literal, and an unquoted value loses a ` #` inline
+#      comment while a bare `#` survives. (One deliberate divergence: a bare
+#      `\r` mid-line is NOT a line separator here, where Python's
+#      `splitlines()` treats it as one — only a trailing `\r` (CRLF) is
+#      stripped, which is what a `.env` written on this platform looks like.)
 #
-#      "Already set" is judged against the environment this script INHERITED
-#      (plus keys a previous `.env` line already loaded), never against the
-#      script's own shell variables — otherwise a `.env` entry whose name
-#      collides with a loader variable (`key`, `value`, `line`, …) would be
-#      silently dropped and the run would lose config with no warning. The
-#      names `_RWEK_*` are reserved for this script.
-_RWEK_AMBIENT_ENV=$'\n'$(env)
-_RWEK_LOADED_KEYS=
-if [ -f "$ENV_FILE" ] && [ -r "$ENV_FILE" ]; then
+#      "Already set" is judged against the shell's own variables, which — with
+#      every launcher variable in the reserved `_RWEK_`/`_rwek_` namespace and
+#      that namespace refused below — means exactly "inherited from the caller,
+#      or loaded from an earlier `.env` line".
+if [ -f "$_RWEK_ENV_FILE" ] && [ -r "$_RWEK_ENV_FILE" ]; then
   while IFS= read -r _rwek_raw || [ -n "${_rwek_raw:-}" ]; do
     _rwek_line=$(trim "${_rwek_raw%$'\r'}")
     case "$_rwek_line" in
@@ -216,9 +220,16 @@ if [ -f "$ENV_FILE" ] && [ -r "$ENV_FILE" ]; then
     _rwek_key=$(trim "${_rwek_line%%=*}")
     _rwek_value=$(trim "${_rwek_line#*=}")
 
-    # Only well-formed shell/variable identifiers may reach `export`/`eval`.
+    # Only well-formed shell/variable identifiers may be exported.
     case "$_rwek_key" in
       '' | [0-9]* | *[!A-Za-z0-9_]*) continue ;;
+    esac
+    # The launcher's own namespace is reserved, and enforced here rather than
+    # merely documented: a `.env` entry named `_RWEK_*`/`_rwek_*` could
+    # otherwise redefine the env-file path, the source label, or the managed
+    # set from inside the file being read.
+    case "$_rwek_key" in
+      _RWEK_* | _rwek_*) continue ;;
     esac
 
     _rwek_first=${_rwek_value:0:1}
@@ -239,19 +250,13 @@ if [ -f "$ENV_FILE" ] && [ -r "$ENV_FILE" ]; then
 
     if is_managed_key "$_rwek_key"; then
       export "$_rwek_key=$_rwek_value"
-    else
-      case "$_RWEK_AMBIENT_ENV$_RWEK_LOADED_KEYS" in
-        *$'\n'"$_rwek_key="*) ;;   # inherited / already loaded — first wins
-        *)
-          export "$_rwek_key=$_rwek_value"
-          _RWEK_LOADED_KEYS=$_RWEK_LOADED_KEYS$'\n'"$_rwek_key="
-          ;;
-      esac
+    elif [ -z "${!_rwek_key+x}" ]; then
+      export "$_rwek_key=$_rwek_value"   # absent — fill (first `.env` line wins)
     fi
-  done <"$ENV_FILE"
+  done <"$_RWEK_ENV_FILE"
 else
   printf '[eval-keys] WARNING: %s not found or not a regular file — no provider key loaded from .env (fail-closed)\n' \
-    "$ENV_FILE" >&2
+    "$_RWEK_ENV_FILE" >&2
 fi
 
 # ── 3. self-declare: source + fingerprint, never the full key ─────────────
@@ -261,23 +266,23 @@ fi
 # value is never printed; a value shorter than 12 characters is redacted and
 # its hash is withheld too (a short, low-entropy secret is recoverable from
 # len + sha256 alone, and these lines are meant to be pasted into receipts).
-if [ -L "$ENV_FILE" ]; then
+if [ -L "$_RWEK_ENV_FILE" ]; then
   # The symlink ALIAS is what the wrapper opens (so the label stays `.env`),
   # but the bytes come from its target — disclose the target, or a receipt
   # could claim the evals key while a different file (e.g. a fleet key file)
   # was actually read.
   printf '[eval-keys] provider keys: ambient stripped; file=%s -> %s\n' \
-    "$ENV_FILE" "$(resolve_target "$ENV_FILE")" >&2
+    "$_RWEK_ENV_FILE" "$(resolve_target "$_RWEK_ENV_FILE")" >&2
 else
-  printf '[eval-keys] provider keys: ambient stripped; file=%s\n' "$ENV_FILE" >&2
+  printf '[eval-keys] provider keys: ambient stripped; file=%s\n' \
+    "$_RWEK_ENV_FILE" >&2
 fi
-for _rwek_key in "${MANAGED_KEYS[@]}"; do
-  eval "_rwek_present=\${$_rwek_key+x}"
-  if [ -z "$_rwek_present" ]; then
+for _rwek_key in "${_RWEK_MANAGED_KEYS[@]}"; do
+  if [ -z "${!_rwek_key+x}" ]; then
     printf '[eval-keys] %s source=unset fingerprint=none\n' "$_rwek_key" >&2
     continue
   fi
-  eval "_rwek_value=\${$_rwek_key}"
+  _rwek_value=${!_rwek_key}
   if [ "${#_rwek_value}" -ge 12 ]; then
     _rwek_fp="${_rwek_value:0:6}…"
     _rwek_hash=$(sha256_of "$_rwek_value")
@@ -286,7 +291,8 @@ for _rwek_key in "${MANAGED_KEYS[@]}"; do
     _rwek_hash="redacted"
   fi
   printf '[eval-keys] %s source=%s fingerprint=%s len=%s sha256=%s\n' \
-    "$_rwek_key" "$SOURCE_LABEL" "$_rwek_fp" "${#_rwek_value}" "$_rwek_hash" >&2
+    "$_rwek_key" "$_RWEK_SOURCE_LABEL" "$_rwek_fp" "${#_rwek_value}" \
+    "$_rwek_hash" >&2
 done
 
 # ── 4. exec the command ───────────────────────────────────────────────────

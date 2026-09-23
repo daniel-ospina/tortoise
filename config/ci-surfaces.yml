@@ -498,7 +498,7 @@ surfaces:
   # change); this `core` entry is the fallback arm, since core is only added when nothing
   # else matched.
   - test_operator_alert.py
-  # #2718: the eval-key launcher's guard — it pins (`MANAGED_KEYS` drift) the
+  # #2718: the eval-key launcher's guard — it pins (managed-key-set drift) the
   # provider registries, and `core` is the docs/default surface this file is
   # otherwise selected under. The `ep` surface carries the second arm, because
   # a `tortoise/analyze.py`-only change selects `ep` and would otherwise never
@@ -1022,7 +1022,7 @@ surfaces:
   # keeps them for engine-wide changes, `ep` runs them on analyze.py edits.
   - test_analyze.py
   - test_analyze_scoped.py
-  # #2718: the eval-key launcher's guard derives its expected `MANAGED_KEYS`
+  # #2718: the eval-key launcher's guard derives its expected managed-key set
   # from `tortoise/analyze.py::_LLM_PROVIDERS` (an ep-mapped source). A
   # SOURCE_PATTERNS match REPLACES the `core` fallback, so without this
   # registration a new provider key added to `_LLM_PROVIDERS` would leave the

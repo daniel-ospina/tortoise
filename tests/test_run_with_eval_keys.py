@@ -76,16 +76,16 @@ EVALTEST_OK=1
 
 
 def parse_managed_keys(script: Path) -> set[str]:
-    """Extract the wrapper's declared MANAGED_KEYS array.
+    """Extract the wrapper's declared managed-key array.
 
     Comments inside the array are stripped first: an uppercase word in a
     comment (e.g. ``# OPENROUTER is the evals key``) is not a declared key and
     must not be read as one.
     """
     text = script.read_text(encoding="utf-8")
-    match = re.search(r"MANAGED_KEYS=\(\s*(.*?)\s*\)", text, re.DOTALL)
+    match = re.search(r"_RWEK_MANAGED_KEYS=\(\s*(.*?)\s*\)", text, re.DOTALL)
     if not match:
-        raise AssertionError(f"MANAGED_KEYS block not found in {script}")
+        raise AssertionError(f"_RWEK_MANAGED_KEYS block not found in {script}")
     body = re.sub(r"^\s*#.*$", "", match.group(1), flags=re.MULTILINE)
     return set(re.findall(r"^\s*([A-Z][A-Z0-9_]*)\s*$", body, re.MULTILINE))
 
@@ -143,9 +143,10 @@ class RunWithEvalKeysTests(unittest.TestCase):
         ``tortoise.analyze._LLM_PROVIDERS`` would leave its ambient key un-stripped
         (the #4860 failure mode for the new provider) with a green suite.
         ``tortoise/model_adapters.py`` is covered too — both its
-        ``_PROVIDER_KEY_ENV`` registry AND any adapter's ``key_env = "…"``
-        class attribute, so a new adapter cannot escape either (VeniceModel is
-        the precedent: it lives only here, not in ``_PROVIDERS``).
+        ``_PROVIDER_KEY_ENV`` registry AND every ``key_env = "…"`` class
+        attribute declared anywhere under ``tortoise/*.py``, so a new adapter
+        cannot escape either (VeniceModel is the precedent: it lives only here,
+        not in ``_PROVIDERS``).
         """
         declared = parse_managed_keys(WRAPPER)
         self.assertEqual(declared, set(MANAGED))
@@ -158,10 +159,11 @@ class RunWithEvalKeysTests(unittest.TestCase):
         derived = {key for _url, key in _PROVIDERS.values() if key}
         derived |= set(_LLM_PROVIDERS)
         derived |= set(_PROVIDER_KEY_ENV.values())
-        # any adapter class attribute, so a new adapter not yet in the registry
-        # still reddens this guard
-        adapters_src = (ROOT / "tortoise" / "model_adapters.py").read_text(
-            encoding="utf-8"
+        # every adapter class attribute in the package, so a new adapter in a
+        # new module (not just model_adapters.py) still reddens this guard
+        adapters_src = "\n".join(
+            p.read_text(encoding="utf-8")
+            for p in sorted((ROOT / "tortoise").glob("*.py"))
         )
         derived |= set(
             re.findall(
@@ -331,6 +333,61 @@ class RunWithEvalKeysTests(unittest.TestCase):
             r.stdout, "|".join(f"collide-{n}" for n in names) + "|", r.stderr
         )
 
+    def test_env_cannot_rewrite_the_launchers_own_state(self):
+        # A `.env` is inert DATA: it must not be able to redirect the env-file
+        # path, forge the source label, or edit the managed-key set — nor reach
+        # the wrapped command under those reserved names.
+        env_file = Path(self._tmp.name) / "hostile.env"
+        env_file.write_text(
+            "\n".join(
+                [
+                    f'OPENROUTER_API_KEY="{FIXTURE_OPENROUTER}"',
+                    "_RWEK_ENV_FILE=/etc/passwd",
+                    "_RWEK_SOURCE_LABEL=/etc/shadow",
+                    "_RWEK_MANAGED_KEYS=oops",
+                    "_RWEK_REPO_ROOT=/tmp",
+                    "_rwek_key=corrupt",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        r = self.run_wrapper(
+            [
+                "sh",
+                "-c",
+                'printf "%s|%s" "${_RWEK_ENV_FILE:-unset}" "${_rwek_key:-unset}"',
+            ],
+            env=self.base_env(EVAL_KEYS_ENV_FILE=str(env_file)),
+            use_fixture=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # the reserved names never reached the child env
+        self.assertEqual(r.stdout, "unset|unset")
+        # the header names the file actually read, not the one the .env asked
+        # for
+        resolved = Path(env_file).resolve()
+        self.assertIn(f"file={resolved}", r.stderr)
+        self.assertNotIn("/etc/passwd", r.stderr)
+        # the source label was not forged
+        self.assertIn(f"source={resolved} fingerprint=", r.stderr)
+        self.assertNotIn("/etc/shadow", r.stderr)
+        # and every managed key is still declared
+        for key in MANAGED:
+            self.assertIn(f"[eval-keys] {key} ", r.stderr)
+
+    def test_multiline_ambient_value_does_not_shadow_an_env_key(self):
+        # "Already inherited" is judged by variable NAME, never by scanning a
+        # dump of the environment: a multi-line ambient value containing
+        # `TORTOISE_DB_URI=…` must not make the key look inherited (which would
+        # silently drop the `.env` value).
+        env = self.base_env()
+        env["EVALTEST_DECOY"] = "x\nTORTOISE_DB_URI=evil"
+        r = self.run_wrapper(["sh", "-c", 'printf "%s" "$TORTOISE_DB_URI"'], env=env)
+        self.assertEqual(
+            r.stdout, "docker://:falkordb@localhost:6379/from-env-file", r.stderr
+        )
+
     # ── exec + exit-code fidelity ──────────────────────────────────────
 
     def test_exec_replaces_the_wrapper_process(self):
@@ -482,11 +539,23 @@ class RunWithEvalKeysTests(unittest.TestCase):
     def test_symlinked_invocation_resolves_the_real_repo_root(self):
         # A symlink in a foreign directory must not make that directory the
         # repo root — the `.env` label would then name a file the wrapper did
-        # not read (the `$0`-derived REPO_ROOT hole).
+        # not read (the `$0`-derived REPO_ROOT hole). The whole scenario is
+        # synthetic (a COPY of the wrapper in a temp repo layout), so the real
+        # repo-root `.env` is never read and no real-key fingerprint can reach
+        # pytest's captured stderr.
+        repo = Path(self._tmp.name) / "repo"
+        (repo / "tools").mkdir(parents=True)
+        copied = repo / "tools" / "run-with-eval-keys.sh"
+        shutil.copyfile(WRAPPER, copied)
+        copied.chmod(copied.stat().st_mode | stat.S_IXUSR)
+        (repo / ".env").write_text(
+            f'OPENROUTER_API_KEY="{FIXTURE_OPENROUTER}"\n', encoding="utf-8"
+        )
         bin_dir = Path(self._tmp.name) / "bin"
         bin_dir.mkdir()
         link = bin_dir / "rwek.sh"
-        link.symlink_to(WRAPPER)
+        link.symlink_to(copied)
+        # a DECOY .env in the symlink's own directory must be ignored
         (bin_dir / ".env").write_text(
             "OPENROUTER_API_KEY=sk-or-v1-FOREIGNsymlinkvalue\n", encoding="utf-8"
         )
@@ -500,9 +569,10 @@ class RunWithEvalKeysTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(r.returncode, 0, r.stderr)
-        # the header names the REAL repo-root .env, not the symlink's dir
-        self.assertIn(os.path.normpath(str(ROOT / ".env")), r.stderr)
+        # the header names the REAL repo layout's .env, not the symlink's dir
+        self.assertIn(f"file={Path(repo).resolve()}/.env", r.stderr)
         self.assertNotIn("FOREIGNsymlinkvalue", r.stderr)
+        self.assertIn(FIXTURE_OPENROUTER[:6], r.stderr)
 
 
 if __name__ == "__main__":
