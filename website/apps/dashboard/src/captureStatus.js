@@ -20,20 +20,20 @@ export const CAPTURE_STATES = Object.freeze(['off', 'install-pending', 'waiting'
 // - off            — the team's session_recording off-switch is not set
 // - install-pending — recording on, NO server-visible install probe yet (the
 //                     install steps render inline)
-// - waiting        — install probe seen (install confirmed server-side), no
+// - waiting        — install probe seen (a server-visible install signal), no
 //                    capture receipt yet (waiting shown only after a probe)
 // - active         — a per-harness capture receipt is present
 //                    (RECEIPT-AUTHORITATIVE: receipt wins over probe; a
 //                    re-enable after decline resolves straight to active)
 //
-// #3700: `active` does NOT mean the server observed THIS harness capturing.
-// The receipt key is `session_capture_receipt_<harness>`, and the harness in
-// it is the caller's declaration the server resolved (`body.harness` on a
-// fresh session; the stored harness on a re-capture — itself declared on that
-// session's first capture). What the server OBSERVES is that an authenticated
-// agent credential captured; the harness attribution is an authenticated
-// self-report. The rendered label carries that attribution
-// (`CAPTURE_RECEIPT_ATTRIBUTION`) — see `captureStatusLabelForHarness`.
+// #3700: neither `active` nor `waiting` means the server observed THIS harness.
+// Both keys embed a harness the CALLER declared — `session_capture_receipt_<h>`
+// (`body.harness` on a fresh session; the stored harness on a re-capture,
+// itself declared on that session's first capture) and `install_probe_<h>`
+// (`body.harness` on the probe POST) — and no credential→harness binding exists.
+// What the server OBSERVES is that a credential reached it; the harness
+// attribution is a self-report. The rendered labels carry that attribution
+// (`HARNESS_ATTRIBUTION` in harnesses.js) — see `captureStatusLabelForHarness`.
 export function captureStatusForHarness(state, harness) {
   if (!state) return 'off'
   if (!state.session_recording) return 'off'
@@ -44,11 +44,12 @@ export function captureStatusForHarness(state, harness) {
 
 // #3700: the RENDERED per-harness status word — the state vocabulary above
 // (the stable API the derivation and its tests read) mapped through the ONE
-// shared label table in harnesses.js. The receipt-derived `active` state
-// renders with its agent-reported attribution so no product surface presents a
-// caller-declared harness as a server-observed fact. Call sites must use this,
-// never re-index HARNESS_CAPTURE_STATUS_LABEL directly, so the attribution can
-// never be dropped at one of them.
+// shared label table in harnesses.js. The caller-declared states (`active`,
+// `waiting`) render with their agent-reported attribution so no product surface
+// presents a declared harness as a server-observed fact. Call sites must use
+// this, never index HARNESS_CAPTURE_STATUS_LABEL directly (main.jsx no longer
+// imports the raw table, so a direct index is a `no-undef` lint error), so the
+// attribution cannot be dropped at one of them.
 export function captureStatusLabelForHarness(state, harness) {
   return HARNESS_CAPTURE_STATUS_LABEL[captureStatusForHarness(state, harness)]
 }
@@ -70,11 +71,14 @@ export function captureStatusLabelForHarness(state, harness) {
 //               `captureStatusForHarness`), so the sentence may claim the
 //               CAPTURE — which the server observed — and never the harness,
 //               which it did not. The rendered capture status carries the
-//               `CAPTURE_RECEIPT_ATTRIBUTION` for the same reason.
+//               `HARNESS_ATTRIBUTION` for the same reason.
 //   'future'  — the install PROBE has been observed server-side, so capture is
 //               installed and has not fired yet (probe with no receipt). The
 //               screen states what WILL happen. The PROBE is what makes the
 //               future tense honest: an unobserved state can never reach it.
+//               #3700: the probe's HARNESS is likewise caller-declared (see
+//               `captureStatusForHarness`) — the server observed that an
+//               install signal arrived, not which harness sent it.
 //   'install-pending' — recording is on and the server has observed NOTHING for
 //               this harness: no probe, no receipt (#3782). The screen must
 //               render the honest pending/not-installed state — the SAME
@@ -98,7 +102,7 @@ export function captureClaimForHarness(state, harness) {
   if (!HARNESS_CAPTURE_SUPPORT[harness]) return 'none'
   const status = captureStatusForHarness(state, harness)
   if (status === 'active') return 'present'          // capture observed; harness = agent self-report (#3700)
-  if (status === 'waiting') return 'future'          // probe observed — install confirmed
+  if (status === 'waiting') return 'future'          // install signal observed; harness = agent self-report (#3700)
   if (status === 'install-pending') return 'install-pending'  // #3782: nothing observed
   return 'none'   // the team's off-switch — claim nothing
 }

@@ -461,24 +461,26 @@ export const HARNESS_CAPTURE_REASON = {
 // #1728 (Task 17): receipt/probe labels for the 4-state capture status
 // (shared by the wizard step-1 and the dashboard panel).
 //
-// #3700: the `active` state is read from a per-harness capture RECEIPT
-// (`session_capture_receipt_<harness>`). The harness in that key is the
-// caller's DECLARATION, resolved by the server (`body.harness` on a fresh
-// session — an authenticated agent self-report — or the Session's stored
-// harness on a re-capture, itself recorded from that same declaration). No
-// credential→harness binding exists (a `tt_`/`tk_` key carries no harness), so
-// the server never OBSERVES which harness captured; it observes that an
-// authenticated agent credential captured. The rendered label therefore
-// states the attribution the server can stand behind — agent-reported — and
-// never presents the harness as a server-observed fact. The state VOCABULARY
-// (`active`) and the key spelling are unchanged; only the rendered
-// attribution narrows.
-export const CAPTURE_RECEIPT_ATTRIBUTION = 'reported by your agent'
+// #3700: every non-`off` state in this table is derived from a per-harness
+// onboarding key whose harness is the CALLER's DECLARATION, not a server
+// observation:
+//   * `active` reads `session_capture_receipt_<harness>` — `body.harness` on a
+//     fresh session (an authenticated agent self-report) or the Session's
+//     stored harness on a re-capture, itself recorded from that declaration;
+//   * `waiting` reads `install_probe_<harness>` — `body.harness` on the
+//     install-probe POST the installed artifact fires.
+// No credential→harness binding exists (a `tt_`/`tk_` key carries no harness),
+// so the server never OBSERVES which harness captured or installed; it observes
+// that a credential reached it. The rendered labels therefore state the
+// attribution the server can stand behind — agent-reported — and never present
+// the harness as a server-observed fact. The state VOCABULARY and the key
+// spellings are unchanged; only the rendered attribution narrows.
+export const HARNESS_ATTRIBUTION = 'reported by your agent'
 export const HARNESS_CAPTURE_STATUS_LABEL = {
   off: 'off',
   'install-pending': 'not installed yet',
-  waiting: 'installed — waiting for first capture',
-  active: `active (${CAPTURE_RECEIPT_ATTRIBUTION})`,
+  waiting: `installed (${HARNESS_ATTRIBUTION}) — waiting for first capture`,
+  active: `active (${HARNESS_ATTRIBUTION})`,
 }
 
 // #1710: bare command with a comment lead-in — paste-safe in a terminal.

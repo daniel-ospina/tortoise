@@ -8,7 +8,7 @@ import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
 // #4639: paid-tier suppression for the header and the narrowed upgrade-nudge
 // gate for the error banner — pure, node --test unit-tested (upsellGate.test.js).
 import { errorMessage, headerUpgradeEligible, nudgeRoute, shouldNudgeUpgrade } from './upsellGate.js'
-import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, MCP_URL, SKILLS_INSTALL_URL, UNIVERSAL_COMMAND, WORKFLOWS_PROMPT, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
+import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, MCP_URL, SKILLS_INSTALL_URL, UNIVERSAL_COMMAND, WORKFLOWS_PROMPT, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
 // #1728 Slice 3 (Tasks 16-17): the SHARED 4-state capture-status derivation
 // (off → install-pending → waiting → active, probe-driven) — pure, node --test
 // unit-tested (captureStatus.test.js). #1927: the re-ask gate predicate was
@@ -1434,6 +1434,10 @@ function claimIntentInFlight() {
   // here so the derivation is a plain value (unit-testable without a React
   // harness, which this repo does not have).
   const harnessCaptureClaim = captureClaimForHarness(onboarding, wizardHarness)
+  // #3700: the RENDERED per-harness status word (agent-attributed for the
+  // caller-declared states) — derived here so both done-screen sentences read
+  // the ONE shared label table via the helper, never the raw table.
+  const harnessCaptureStatusLabel = captureStatusLabelForHarness(onboarding, wizardHarness)
   const wizardFocusInit = React.useRef(false)
   const lastWizardStepRef = React.useRef(-1)  // #2361 r4: focus only on step change
   const onboardingRefreshedAtDoneRef = React.useRef(false)
@@ -6732,6 +6736,7 @@ function claimIntentInFlight() {
     ? (knownHarnessName(wizardHarness) || 'your agent')
     : 'your agent'
   const doneCaptureClaim = harnessPickEstablished ? harnessCaptureClaim : 'none'
+  const doneCaptureStatusLabel = harnessPickEstablished ? harnessCaptureStatusLabel : ''
   // #3428/#2937 (lane B3, review cycle 2 P2-4 / cycle 3 P1-D + P2-7): the
   // not-connected body's remedy clause is DERIVED, the same way the capture
   // claim is. "(running it creates a fresh key)" is true only where the user
@@ -7729,8 +7734,11 @@ function claimIntentInFlight() {
                                     the key is the caller's declaration (#3700),
                                     so this sentence may claim the capture and
                                     nothing more. 'future' only once an
-                                    install PROBE was observed (the install is
-                                    confirmed server-side, capture has not fired);
+                                    install PROBE was observed (an install
+                                    signal arrived server-side, capture has not
+                                    fired) — and, #3700, the probe's harness is
+                                    likewise caller-declared, so this sentence
+                                    claims the install signal, not the harness;
                                     'install-pending' — recording on, nothing
                                     observed for this harness — prints the SAME
                                     "not installed yet" string Settings renders
@@ -7746,7 +7754,7 @@ function claimIntentInFlight() {
                                     detect. */}
                                 {doneCaptureClaim === 'present' && "Tortoise is capturing your agent's sessions. "}
                                 {doneCaptureClaim === 'future' && "Tortoise will capture your agent's sessions. "}
-                                {doneCaptureClaim === 'install-pending' && `Session capture is ${HARNESS_CAPTURE_STATUS_LABEL['install-pending']}. `}
+                                {doneCaptureClaim === 'install-pending' && `Session capture is ${doneCaptureStatusLabel}. `}
                                 You can ask your agent to query it, use it to make decisions, and embed it in your workflows.
                               </p>
                               {/* The redirect is PROSE, not a control: we cannot open
