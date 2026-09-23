@@ -652,6 +652,87 @@ def cotenant_holds_server(client) -> bool:
     return verdict not in ("dead", "missing")
 
 
+# ── #4879: never replay a `.settings` registry whose socket is gone ────────
+#
+# redislite reuses a live daemon by loading `<dbdir>/<dbfilename>.settings`
+# and taking `unixsocket` from it (`_load_setting_registry()`). Its
+# `_is_redis_running()` guard (client.py:305-330) checks that the registry
+# file exists, that the recorded **pidfile** exists, and that the recorded
+# **pid** is a live process — and it NEVER checks that the recorded **socket
+# file** exists. A recycled pid (or a daemon that died while its pid was
+# reused) therefore satisfies every check while the socket it names is gone,
+# so the client is pointed at a dead path and dies on first use:
+#
+#     redis.exceptions.ConnectionError: Error 2 connecting to
+#     /tmp/tmpXXXX/redis.socket. No such file or directory.
+#
+# That is #4879: a one-test flake on a red `main` whose signature moves with
+# the fast-suite ORDER (the #3981 chain changed `config/ci-surfaces.yml` from
+# 722 to 724 registered files), because it is really cross-construction
+# registry state, not the victim's own environment.
+#
+# Deleting the whole socket dir is already handled (the pidfile lives in the
+# same `mkdtemp` dir, so `_is_redis_running()` returns False). The hole is
+# exactly "socket file gone while dir and pidfile survive".
+#
+# Reusing a registry whose socket is absent can only ever fail — the socket
+# file IS the endpoint — so drop that registry here and let redislite start
+# clean. `_save_setting_registry()` runs only AFTER the socket is confirmed
+# present (client.py:261-273), so a saved registry always names a socket that
+# existed at save time; a missing one means the server is gone. This is the
+# in-repo equivalent of fixing the guard where it lives: the guard itself is
+# in the vendored dependency, but our construction seam sits on the same path.
+
+
+def prune_dead_setting_registry(db_path) -> bool:
+    """#4879: drop a redislite `.settings` registry that replays a DEAD socket.
+
+    Returns True when a registry naming a non-existent socket was removed.
+
+    Best-effort by construction: it runs on the embedded construction path
+    (tortoise/__init__.py, before redislite reads the registry), so it must
+    never raise and never turn a hygiene prune into a failed construction.
+    Every branch that cannot be judged is a no-op:
+
+    - a missing, unreadable or unparseable registry -> no-op;
+    - a registry that is not a JSON object -> no-op;
+    - a `unixsocket` that is not a non-empty `str` -> no-op. redislite always
+      writes a `str` path (`_save_setting_registry()`), and the type matters:
+      `os.path.exists(['/x'])` raises TypeError, while `os.path.exists(123)`
+      silently reads an OPEN FILE DESCRIPTOR and would prune on a false
+      negative.
+    """
+    import json  # local: keeps this module's import block untouched
+
+    if not isinstance(db_path, str) or not db_path or db_path == ":memory:":
+        return False
+    # Mirrors redislite exactly (`client.py:441-445`): the registry sits
+    # beside the db file and is named after it.
+    registry = os.path.join(
+        os.path.dirname(db_path), os.path.basename(db_path) + ".settings"
+    )
+    try:
+        with open(registry, encoding="utf-8") as fh:
+            settings = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(settings, dict):
+        return False
+    socket_path = settings.get("unixsocket")
+    if not isinstance(socket_path, str) or not socket_path:
+        return False
+    try:
+        if os.path.exists(socket_path):
+            return False
+        os.remove(registry)
+    except (OSError, ValueError):
+        # OSError: raced with another pruner/remover — the goal state is
+        # reached. ValueError: an impossible path shape (e.g. a NUL byte);
+        # leave it alone rather than abort a construction over hygiene.
+        return False
+    return True
+
+
 # ── #3653: reclaim a partially-initialized client's orphaned server ────────
 #
 # `RedisMixin.__init__` starts the embedded server (and writes its pidfile)

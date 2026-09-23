@@ -115,6 +115,19 @@ if _OriginalFalkorDB is not None:
                     # above) would no-op via dirname "" → ".".
                     data_dir = os.path.dirname(path)
                     os.makedirs(data_dir or ".", exist_ok=True)
+                    # #4879: never replay a redislite `.settings` registry whose
+                    # recorded socket is gone. redislite's `_is_redis_running()`
+                    # guard checks the registry file, the pidfile and pid
+                    # liveness — but NOT the recorded socket — so a recycled pid
+                    # replays a dead path and the first use dies with
+                    # "redis.socket. No such file or directory". Must run BEFORE
+                    # the registry is read, which happens inside
+                    # `super().__init__()` below.
+                    from tortoise.embedded_lifecycle import (
+                        prune_dead_setting_registry,
+                    )
+
+                    prune_dead_setting_registry(path)
                     args = (path, *args[1:])
             # #3845 part 2: keep the embedded daemon's verbosity above NOTICE
             # so a GRAPH.COPY module-fork child cannot block on the macOS

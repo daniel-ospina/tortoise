@@ -571,6 +571,7 @@ surfaces:
   - test_branch_reaper.py   # #4408: local-branch reaper — PR-state classification + safety guards
   - test_health_ready_nonblocking.py  # #2988: /health/ready off-loop + bounded probes
   - test_selfhost_health_probe_executor.py  # #3287/#2988/#3243: selfhost health probes (dual-registered)
+  - test_stale_registry_prune.py
   - test_transport_wait_bound.py  # #3834: transport wait bound + cold-half gate wiring (dual: api)
   # #2877: DB-free guards that a dead backup watcher degrades /health (the file
   # it guards, tortoise/hosted_api.py, selects the `api` surface, so it is
@@ -2134,6 +2135,13 @@ durations:
   test_session_import_desktop.py: 0.0
   test_session_indexer_ollama.py: 0.0
   test_session_login_helpers.py: 0.0
+  # #4879: new file (the stale-`.settings`-registry pin). No CI junit measurement
+  # yet, so enter at the flat 2.0s default per the #3400/#4221 convention — an
+  # unmeasured fast file drops durations coverage under the 90% floor. No local
+  # measurement is used: the local value is dominated by interpreter+redislite
+  # import under concurrent lanes, which the map's own policy rejects as stale.
+  # Refresh from the first post-merge main run that includes it.
+  test_stale_registry_prune.py: 2.0
   test_subgraph_render.py: 0.0
   test_telegram_push.py: 0.0
   test_temporal_constraint.py: 0.0
