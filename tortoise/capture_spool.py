@@ -926,20 +926,25 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
     if exclude_session_id and sid == exclude_session_id:
         summary.held_back += 1
         return
-    # STRUCTURAL probe guard, not a timing one. `session verify` fires the real
-    # seam with a synthetic transcript, and the codex/cursor seams write from a
-    # DETACHED worker that can outlive verify's cleanup — so an unlink alone
-    # cannot guarantee the probe is gone. Refusing to file it can.
+    # STRUCTURAL probe guard, not a timing one — but ONLY for an unfiltered
+    # flush. `session verify` fires the real seam, and the seam runs
+    # `session capture`, which files through THIS function: refusing there would
+    # stop the probe landing at all, so `captured` would read FAIL for every
+    # harness and verify could never prove the chain it exists to prove (a real
+    # regression, caught in CI, not by review).
     #
-    # REFUSE, never destroy: the entry is held back, so a false positive costs
-    # nothing (the session stays spooled and is caught next time) while a probe
-    # still cannot reach the graph. verify's own cleanup removes the entry it
-    # created; deletion here would turn a matching bug into data loss.
-    if is_probe_session_id(sid):
+    # The leak this guards is a probe LINGERING — a detached codex/cursor worker
+    # spooling one after verify's cleanup has run — and the next thing that
+    # would file it is an automatic `session drain`. So: refuse only when the
+    # caller named no session (`only_session_id is None` == a drain), and always
+    # allow a targeted filing, where the caller knows which session it means.
+    # The refusal is non-destructive: verify's own cleanup removes what it made.
+    if only_session_id is None and is_probe_session_id(sid):
         summary.held_back += 1
         summary.probe_refusals.append({
             "session_id": sid,
-            "detail": "session verify probe — synthetic content is never filed",
+            "detail": "session verify probe — synthetic content is never filed "
+                      "by a drain",
         })
         return
     if meta.get("filed_key") and meta.get("filed_key") == meta.get("capture_key"):

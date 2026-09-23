@@ -661,25 +661,37 @@ def test_remove_spool_entry_removes_and_is_spooled_reports_truthfully(tmp_path):
     assert is_spooled(root, "verify-1") is False
 
 
-def test_a_verify_probe_is_never_filed_and_a_real_session_still_is(
+def test_a_verify_probe_is_never_filed_by_a_DRAIN_but_its_own_capture_files(
         tmp_path):
-    """THE STRUCTURAL GUARD. The codex/cursor seams write from a DETACHED
-    worker, so a probe can be spooled after verify's cleanup has run — no unlink
-    is race-free. The drain therefore refuses to file a probe at all.
+    """THE STRUCTURAL GUARD — and the line it must not cross.
+
+    An automatic drain must never file a `session verify` probe: the codex/
+    cursor seams write from a DETACHED worker that can spool one after verify's
+    cleanup has run, and the next drain would POST synthetic content into the
+    tenant graph.
+
+    But `session verify` fires the real seam, and the seam runs
+    `session capture`, which files THROUGH THE SAME CODE — so refusing there
+    stops the probe landing at all, `captured` reads FAIL for every harness, and
+    verify can never prove the chain it exists to prove. That was a real
+    regression (caught in CI). The guard applies to the unfiltered drain only,
+    never to a filing that names its session.
 
     Just as important: the match must be NARROW. Session ids also come from
     `_local_session_id` (`<transcript-stem>-<digest>`), so a real transcript
     named `verify-my-notes.jsonl` derives `verify-my-notes-0e9ebe1a9262`.
-    Under a prefix test that REAL capture was both refused and deleted — silent
-    data destruction, which is worse than the leak this guard prevents.
+    Under a prefix test that REAL capture was both refused and deleted.
 
-    Mutations that must RED this: (a) drop the guard — the probe is filed;
-    (b) widen it to a prefix match — the real session is refused."""
+    Mutations that must RED this: (a) drop the guard — the drain files the
+    probe; (b) widen it to a prefix match — the real session is refused;
+    (c) apply it to a targeted filing too — "captured" becomes unfillable."""
     from tortoise.capture_spool import (
+        PostOutcome,
         Snapshot,
         flush_spool,
         is_probe_session_id,
         is_spooled,
+        read_spool_meta,
         write_spool_entry,
     )
 
@@ -718,13 +730,33 @@ def test_a_verify_probe_is_never_filed_and_a_real_session_still_is(
                            body={"session_id": payload["session_id"]})
 
     flush_spool(root, _post)
-    assert sorted(p["session_id"] for p in posted) == [
-        "imp-real", "verify-my-notes-0e9ebe1a9262"], posted
-    # The probe is NOT filed — but it is also NOT destroyed: a false positive
-    # must cost nothing, so the refusal holds the entry rather than unlinking
-    # it. verify's own cleanup removes what it created.
-    assert probe_id not in [p["session_id"] for p in posted]
+    drain_ids = [p["session_id"] for p in posted]
+    assert sorted(drain_ids) == ["imp-real", "verify-my-notes-0e9ebe1a9262"], (
+        drain_ids)
+    # The probe is NOT filed by a drain — but it is also NOT destroyed: the
+    # refusal HOLDS the entry, so a false positive costs nothing. verify's own
+    # cleanup removes what it created.
+    assert probe_id not in drain_ids, "a drain filed a verify probe"
     assert is_spooled(root, probe_id), "the refusal must not destroy the entry"
+
+    # ...but a TARGETED filing — which is exactly what `session capture` does,
+    # and therefore what verify's own seam does — MUST go through. Refusing here
+    # stopped the probe landing at all, so `captured` read FAIL for every
+    # harness and verify could never prove the chain it exists to prove. That
+    # was a real regression, caught in CI and not by review.
+    posted.clear()
+    flush_spool(root, _post, only_session_id=probe_id)
+    assert [p["session_id"] for p in posted] == [probe_id], (
+        "verify's own capture could not file its probe — captured reads FAIL")
+    # A filed entry stays on the spool with `filed_key` stamped (that is the
+    # design — the file is the record); what matters is that it POSTED, and that
+    # the next drain will SKIP it rather than re-file it.
+    meta = read_spool_meta(root, probe_id) or {}
+    assert meta.get("filed_key"), "the probe was filed without stamping filed_key"
+    posted.clear()
+    flush_spool(root, _post)
+    assert probe_id not in [p["session_id"] for p in posted], (
+        "the already-filed probe was re-posted by a drain")
 
 
 @pytest.mark.parametrize("exc", [
