@@ -1510,6 +1510,20 @@ durations:
   # describes; and a 27x under-weight would skew the LPT pack for a ~55s file.
   # Refresh from the first post-merge junit artifact.
   test_from_uri_userinfo.py: 55.6
+  # #2944: new file, and the SAME class as the #3039 block directly above — the
+  # entry is required because leaving it out drops durations coverage from
+  # 90.05% (passing) to 89.92% (544/605 fast files), one file below the 90%
+  # floor, reddening the gated `--integrity` step. Note this file is registered
+  # by the branch's own `core` addition, so the failure appears ONLY at the
+  # merge: the branch parent and the main parent each PASS the same check. That
+  # is what made it worth a review cycle rather than being caught by either side.
+  #
+  # The value is a LOCAL measurement (30 tests, 66.7s at fleet load), not a CI
+  # junit artifact — chosen over the flat 2.0s default for the reason the #3039
+  # block gives: a 33x under-weight would skew the LPT pack for a ~67s file
+  # (the map median is 0.8s, so this is ~80x the median). Refresh from the first
+  # post-merge main junit run that includes it.
+  test_destructive_wipe_guard.py: 66.7
   test_export_cli.py: 53.7
   test_github_indexer.py: 51.5
   test_doctor.py: 44.8
