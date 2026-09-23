@@ -1460,14 +1460,14 @@ durations:
 # below (the pinned equality and the row retained from main) — and local timings
 # are NOT the input, because the CI wall time is what the split must model.
 #
-# ONE row is not a measurement: test_mcp_rename_table.py is held equal to
+# ONE row's value is not its own measurement: test_mcp_rename_table.py is held equal to
 # test_bridge_table.py because
 # tests/test_mcp_rename_table.py::test_duration_weight_matches_the_sibling_generator_suite
 # requires the two generator suites to carry one weight — the pin constrains
 # equality, not the number.
 #
 # OVERRIDES — rows whose previous value was a recorded decision or a deliberately
-# conservative estimate (a #4282 reserve, a load-range value, a #3895/#3718 loose
+# conservative estimate (a #4282 reserve, a load-range value, a #3895 loose
 # middle, a #2517 pin), replaced here by the measurement — or, for the pinned
 # generator row, held equal to its measured sibling. Provisional first cuts (a flat
 # 2.0 default, a single local timing entered pending CI) are not decisions and are
@@ -1485,9 +1485,10 @@ durations:
 #     test_read_routes_loop_responsiveness.py 30.0,
 #     test_graph_write_loop_responsiveness.py 30.0 -> measured. Local/host samples
 #     (#3501, #3895, #3718 — both halves of the #3718 pair) rather than CI wall time.
-#     Included although #3501's note calls itself a SINGLE SAMPLE and both #3718
-#     halves ask to be re-measured: they err high, so they are surfaced for the
-#     veto too.
+#     Three of these four notes ask to be re-measured (#3501 calls itself a SINGLE
+#     SAMPLE, both #3718 halves say to re-measure, and the read half calls itself a
+#     FIRST ESTIMATE); they are listed anyway because they err high, and a floor
+#     that errs high is the safe direction to keep in view for a veto.
 #   test_build_cohorts_2517.py, test_session_reinjection.py,
 #     test_session_reinjection_rules.py, test_eval_reinjection_cap_resume.py,
 #     test_guard_measured_revision.py -> measured, from a deliberate 0.0 (#2517: the
@@ -1503,12 +1504,14 @@ durations:
 # two values is the safe side (this sweep measures 3.3 for the file). The PRE-sweep
 # block's other 0.0 rows were measured-negligible values from the #3400 sweep, not pins:
 # only the five #2517 rows in the OVERRIDES list above were deliberate. A row's comment is
-# kept only while the value it describes is unchanged, so a provisional
-# re-measure-from-junit note is dropped by the sweep: the re-derivation IS that refresh.
+# kept only while the value it describes is unchanged, so for a row the sweep
+# re-derives a provisional re-measure-from-junit note is dropped: the re-derivation
+# IS that refresh. (The retained row above keeps its note because it was not
+# re-derived at all.)
 #
 # Coverage rests on measurement: every row below is a measured value except the
-# pinned row above (test_mcp_rename_table.py, held equal to its measured sibling),
-# the RETAINED row (test_selfhost_health_probe_executor.py), and any row marked
+# pinned row (test_mcp_rename_table.py, held equal to its measured sibling), the
+# RETAINED row (test_selfhost_health_probe_executor.py), and any row marked
 # `# unmeasured` (a file no source leg collected, whose value is carried forward
 # and is not a measurement).
   test_fly_secret_drift.py: 8.5
