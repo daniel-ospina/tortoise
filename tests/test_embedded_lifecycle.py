@@ -2174,7 +2174,7 @@ def test_bound_client_predicate_does_not_signal_a_live_server(tmp_path):
     """#4879 review, scope: the repair fires only where a start is imminent.
 
     `_is_redis_running` is ALSO reached from redislite's close path
-    (`_cleanup` -> `_connection_count`, client.py:190). A client that already
+    (`_cleanup` -> `_connection_count`, client.py:188). A client that already
     holds a socket can never take `__init__`'s registry-load branch
     (client.py:449 requires `not self.socket_file`), so this state is not a
     replay waiting to be repaired: the predicate must keep the ORIGINAL

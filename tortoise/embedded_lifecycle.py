@@ -1884,7 +1884,7 @@ def _install_dead_socket_guard() -> None:
             # `... and not self.socket_file`) can NEVER take the registry-load
             # branch: there is no replay here to repair. Keep the original
             # answer — `_cleanup` asks this predicate through
-            # `_connection_count` (client.py:190), and a predicate must not
+            # `_connection_count` (client.py:188), and a predicate must not
             # kill a live server on a path that is not about to start one
             # (the #3653 fail-open class).
             return True
