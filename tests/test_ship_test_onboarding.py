@@ -1429,6 +1429,11 @@ def test_walk_reports_a_never_readable_projection_as_an_instrument_error(
     assert obs.verdict.startswith("instrument-error:"), obs.verdict
     assert "projection_unreadable" in obs.verdict
     assert mod.exit_code_for(obs.reason) == mod.EXIT_INSTRUMENT_ERROR
+    # PIN THE CALL SITE, not just the verdict: the step-7 read produces the SAME
+    # verdict, reason and teardown status, so neutering the poll guard would
+    # leave this test green. `poll_readable` is set on the write step only when
+    # control gets PAST the poll guard.
+    assert "poll_readable" not in obs.steps[-1].extra, obs.steps[-1].extra
     # This exit is exercised only here, and the harness serves no org-list
     # route, so the recorded state must be the fail-closed one. Asserting the
     # STATUS (not just that teardown is truthy) is what catches a teardown state
@@ -1454,6 +1459,11 @@ def test_walk_reports_a_200_but_unparseable_projection_as_an_instrument_error(
     assert obs.verdict.startswith("instrument-error:"), obs.verdict
     assert "projection_unreadable" in obs.verdict
     assert mod.exit_code_for(obs.reason) == mod.EXIT_INSTRUMENT_ERROR
+    # PIN THE CALL SITE, not just the verdict: the step-7 read produces the SAME
+    # verdict, reason and teardown status, so neutering the poll guard would
+    # leave this test green. `poll_readable` is set on the write step only when
+    # control gets PAST the poll guard.
+    assert "poll_readable" not in obs.steps[-1].extra, obs.steps[-1].extra
     # ...and the recorded teardown status, for the same reason as the
     # never-readable case above: this exit is exercised only here.
     assert obs.teardown["status"] == mod.TEARDOWN_BASELINE_UNAVAILABLE
@@ -1473,15 +1483,16 @@ def test_walk_reports_a_200_but_unparseable_projection_as_an_instrument_error(
 # satisfies truthiness.
 #
 # The last two are PRE-create, so no org can exist yet and the honest status is
-# the clean `TEARDOWN_NOT_REACHED`; they are here so that EVERY one of
-# `run_walk`'s exits is executed by a test (reviewer #2 on this PR found them).
+# the clean `TEARDOWN_NOT_REACHED` rather than a residue alarm.
 
-def test_the_fail_closed_teardown_status_is_a_residue_state() -> None:
-    """The invariant the per-exit assertions below rest on, asserted ONCE: a
-    `baseline_unavailable` teardown WARNS (`TEARDOWN_RESIDUE_STATES`) because a
-    live org may remain. Kept out of the per-exit helper, which then asserts only
-    what depends on the observation at hand."""
+def test_the_teardown_statuses_are_classified_as_residue_or_clean() -> None:
+    """The invariant the per-exit assertions below rest on, asserted ONCE (a
+    membership is a property of the constants, not of any exit): a
+    `baseline_unavailable` teardown WARNS — a live org may remain — while
+    `not_reached`, the state every pre-create exit records, is deliberately NOT
+    a residue state, so it raises no false alarm."""
     assert _mod.TEARDOWN_BASELINE_UNAVAILABLE in _mod.TEARDOWN_RESIDUE_STATES
+    assert _mod.TEARDOWN_NOT_REACHED not in _mod.TEARDOWN_RESIDUE_STATES
 
 
 def _assert_teardown_recorded_fail_closed(obs, mod) -> None:
@@ -1525,9 +1536,10 @@ def test_walk_that_never_reaches_a_connection_surface_is_incomplete_no_surface(
 
     assert obs.verdict == mod.INCOMPLETE_NO_SURFACE
     assert mod.exit_code_for(obs.reason) == mod.EXIT_FAILED
-    # it stopped at the read: the org-create attempt happened, but no key was
-    # minted and no agent write went out
-    assert ctx.request.calls, "the walk made no request at all — wrong exit"
+    # the CREATE really happened (the premise that makes this exit post-create),
+    # and it stopped at the read: no key minted, no agent write
+    assert ctx.page.fills == [('input[aria-label="Organization name"]', _RUN_ORG)]
+    assert ctx.request.onboarding_state_calls(), "the step-5 read never happened"
     assert not any(c[0] == "POST" for c in ctx.request.calls)
     _assert_not_the_generic_error_handler(obs, "before-observation")
     # ...and the step is this exit's, not the claim-failure exit's: that one
@@ -1554,7 +1566,8 @@ def test_walk_whose_screen_claims_a_connection_the_server_never_saw_is_a_product
     assert obs.verdict.startswith("failed:"), obs.verdict
     assert obs.assertions.get("no_claim_before_observation") is False
     assert mod.exit_code_for(obs.reason) == mod.EXIT_FAILED
-    assert ctx.request.calls, "the walk made no request at all — wrong exit"
+    assert ctx.page.fills == [('input[aria-label="Organization name"]', _RUN_ORG)]
+    assert ctx.request.onboarding_state_calls(), "the step-5 read never happened"
     assert not any(c[0] == "POST" for c in ctx.request.calls)
     _assert_not_the_generic_error_handler(obs, "before-observation")
     # the exit's OWN step: the claim-failure branch records the page's claim,
@@ -1580,7 +1593,9 @@ def test_walk_without_a_mintable_key_is_an_instrument_error(monkeypatch, tmp_pat
     assert obs.verdict.startswith("instrument-error:"), obs.verdict
     assert "no_agent_key" in obs.verdict
     assert mod.exit_code_for(obs.reason) == mod.EXIT_INSTRUMENT_ERROR
-    # the refusal really was the mint call, not a missing call
+    # the CREATE really happened (the premise that makes this exit post-create)…
+    assert ctx.page.fills == [('input[aria-label="Organization name"]', _RUN_ORG)]
+    # …and the refusal really was the mint call, not a missing call
     assert [c for c in ctx.request.calls if c[0] == "POST"], ctx.request.calls
     assert "mint failed" in obs.steps[-1].detail, obs.steps[-1].detail
     _assert_not_the_generic_error_handler(obs, "agent-write")
@@ -1601,7 +1616,6 @@ def test_walk_reports_a_signup_cta_that_is_not_hittable_as_a_product_finding(
     assert "not hittable" in obs.verdict
     assert mod.exit_code_for(obs.reason) == mod.EXIT_FAILED
     assert obs.teardown["status"] == mod.TEARDOWN_NOT_REACHED
-    assert mod.TEARDOWN_NOT_REACHED not in mod.TEARDOWN_RESIDUE_STATES
 
 
 def test_walk_without_the_driver_records_a_fail_closed_observation(
@@ -2150,14 +2164,17 @@ def test_no_exit_from_the_walk_writes_the_artifact_without_teardown():
     the whole half: an `_finish`/`_finalize` alias, attribute-form `getattr`, and
     mutating the teardown object's fields in place.
 
-    What covers those forms is the recorded teardown STATUS. Every exit
-    `run_walk` has — all 12 — is executed by at least one test, and at least one
-    of the tests reaching each exit asserts the status (not merely that
-    `obs.teardown` is truthy: `not_reached` satisfies truthiness, so a
-    truthiness-only assert cannot see a residue state degrade into a clean one).
-    Five of the twelve were reached by no test at all until #4843; the
-    post-create ones assert the fail-closed residue state, the pre-create ones
-    the clean `not_reached`, because no org can exist before the create click.
+    What covers those forms is the recorded teardown STATUS. Every one of
+    `run_walk`'s 12 `_finalize` exits is executed by at least one test, and at
+    least one of the tests reaching each exit asserts the status — not merely
+    that `obs.teardown` is truthy, since `not_reached` satisfies truthiness and a
+    truthiness-only assert cannot see a residue state degrade into a clean one.
+    Five of the twelve were reached by no test at all until #4843.
+
+    SCOPE: `_finalize` exits only. Two abort paths sit OUTSIDE `run_walk`'s
+    try/except and write no artifact at all — a `--out` that cannot be created,
+    and a driver that will not start — so they are not "exits" in this sense and
+    no test here covers them (#4875).
     """
     tree = ast.parse(textwrap.dedent(_inspect.getsource(_mod.run_walk)))
 
