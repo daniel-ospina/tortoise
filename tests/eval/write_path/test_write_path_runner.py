@@ -501,10 +501,11 @@ def test_operator_audit_m2_clause_is_posture_scoped():
     assert "operator persistence (#2552): 10/10" in m2_text
 
     # EXACT-STRING goldens. The m2 note is byte-identical to the pre-refactor
-    # wording, which is the frozen text of the committed m2 receipt — that is
-    # the property that makes this refactor safe on the blessed lane, and a
-    # substring assert cannot hold it (both separator defects found while
-    # rebasing passed every substring assert).
+    # wording at the same call site — the wording the committed m2 receipt's
+    # note is built from (its numbers differ, `2/15` vs `0/4` here; the wording
+    # does not). That is the property that makes this refactor safe on the
+    # blessed lane, and a substring assert cannot hold it (both separator
+    # defects found while rebasing passed every substring assert).
     m2 = runner.operator_audit_notes(audit, "m2")
     llm = runner.operator_audit_notes(audit, "llm")
     assert m2[0] == (
