@@ -5087,6 +5087,10 @@ class BackupRestoreRequest(BaseModel):
 # the allowlist filter silently drops it (STATE-KEY REGISTRATION TABLE).
 DEFAULT_ONBOARDING_STATE = {
     "github_connected": False,
+    # #1924: per-source enable intent (see _ONBOARDING_DEFAULT_STATE) —
+    # registered in BOTH dicts or the allowlist filter silently drops it.
+    "issues_enabled": True,
+    "docs_enabled": True,
     "github_org": None,
     "github_connected_at": None,
     "github_indexed": False,
@@ -19677,6 +19681,14 @@ async def issue_insight(title: str, body: str | None = None,
 
 _ONBOARDING_DEFAULT_STATE = {
     "github_connected": False,
+    # #1924: per-source ENABLE intent, separate from the GitHub CONNECTION
+    # (github_connected). Both default ON so a connected org keeps today's
+    # behavior; `False` is the user's "don't bring this source in" choice and
+    # NEVER tears down the OAuth token. Before #1924 the Issues off-toggle
+    # PATCHed github_connected=False — a full disconnect that also killed the
+    # docs source and forced a fresh OAuth round-trip to re-enable.
+    "issues_enabled": True,
+    "docs_enabled": True,
     "github_indexed": False,
     "github_indexed_at": None,            # #1894: last github index completion (ISO, parity with github_indexed)
     "github_docs_indexed": False,         # #1726: docs staged + ingested (Slice 1)
@@ -20514,6 +20526,10 @@ _PATCH_FIELD_TO_STATE_KEY: dict[str, str] = {
 
 class OnboardingStatePatchRequest(BaseModel):
     github_connected: bool | None = None
+    # #1924: per-source enable intent — the off-toggles write THESE, never
+    # github_connected (which is the connection, shared by both sources).
+    issues_enabled: bool | None = None
+    docs_enabled: bool | None = None
     github_indexed: bool | None = None
     github_indexed_at: str | None = None  # #1894: last github index completion (ISO timestamp, server-stamped)
     demo_created: bool | None = None

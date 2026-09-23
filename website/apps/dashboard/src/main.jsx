@@ -35,7 +35,7 @@ import { MemberEmptyStateKeyNote } from './onboardingEmptyStateKeyNote.js'
 import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError, durableKeyName, wizardStageLabel } from './wizardFlow.js'
 // #1894: indexed-state + job-progress derivations — pure, node --test
 // unit-tested (memorySourcesStatus.test.js).
-import { docsIndexedLabel, formatRelativeTime, jobStatusLine } from './memorySourcesStatus.js'
+import { docsIndexedLabel, docsSourceOn, formatRelativeTime, issuesSourceOn, jobStatusLine } from './memorySourcesStatus.js'
 // #1708 D8: pure session-key predicates extracted to sessionKey.js (node --test
 // unit-tested). #2166 + #2426: isManagedKey selects the durable product keys
 // the API Keys page shows — bootstrap session credentials excluded, expiring
@@ -1263,6 +1263,13 @@ function claimIntentInFlight() {
   const [memoryErrors, setMemoryErrors] = React.useState({})      // per-ROW errors (role=alert) — never the global banner
   const indexPollRef = React.useRef(null)
   const docsPollRef = React.useRef(null)
+  // #1926: the id of the LIVE index/docs job whose poll callbacks may apply.
+  // A superseded job's late tick — or a completion that lands AFTER the
+  // source was toggled off — compares its own id against this and drops out.
+  // Clearing `indexJob`/`docsJob` alone could not stop a callback already in
+  // flight; this is the identity the guard reads.
+  const indexJobIdRef = React.useRef(null)
+  const docsJobIdRef = React.useRef(null)
   // #1845: source-scope selector state (shared by the docs + issues rows).
   // reposList = SHORT repo names from GET /v1/onboarding/github/repos (loaded
   // once when connected); branchLists[repo] = branches for a repo (lazy-loaded
@@ -3064,25 +3071,45 @@ function claimIntentInFlight() {
   // tries + terminal-status short-circuit; the handle lives in a ref
   // (cleared on success + unmount); per-team staleness guard. Deliberately
   // does NOT copy the old github connect poll's dangling-timer anti-pattern.
-  function startBoundedPoll(ref, { url, interval = 3000, maxTries = 40, isTerminal, onStatus, onDone }) {
-    if (ref.current) { clearInterval(ref.current); ref.current = null }
+  //
+  // #1926: the poll releases only its OWN interval handle (`releaseOwn`), so a
+  // tick already in flight when the source is toggled off — or one superseded
+  // by a NEW poll for the same ref — can never clear the handle that replaced
+  // it. A stale tick also applies NO onStatus/onDone, so a completion that
+  // lands after the toggle-off never surfaces (the caller owns the identity
+  // via `isStale`; a caller that omits it keeps the pre-#1926 behavior).
+  function startBoundedPoll(ref, { url, interval = 3000, maxTries = 40, isTerminal, onStatus, onDone, isStale }) {
+    stopBoundedPoll(ref)
     const teamAtStart = orgIdRef.current
+    const stale = () => typeof isStale === 'function' && isStale()
+    let handle = null
+    const releaseOwn = () => {
+      const mine = handle
+      handle = null
+      if (mine != null) clearInterval(mine)
+      // only clear the shared ref when it still points at OUR handle
+      if (ref.current === mine) ref.current = null
+    }
     let tries = 0
     const tick = async () => {
       tries += 1
-      if (orgIdRef.current !== teamAtStart) { stopBoundedPoll(ref); return }  // per-team staleness guard
+      if (orgIdRef.current !== teamAtStart) { releaseOwn(); return }  // per-team staleness guard
+      if (stale()) { releaseOwn(); return }
       try {
         const job = await api(url, { useSession: true })
+        if (stale()) { releaseOwn(); return }
         if (onStatus) onStatus(job)
-        if (job && isTerminal(job)) { stopBoundedPoll(ref); if (onDone) onDone(job); return }
+        if (job && isTerminal(job)) { releaseOwn(); if (onDone) onDone(job); return }
       } catch (e) {
+        if (stale()) { releaseOwn(); return }
         // 404 = the in-memory job was evicted (1h TTL) — a TERMINAL state
         // the UI renders honestly ("status expired — re-check"), not a retry loop.
-        if (e && e.status === 404) { stopBoundedPoll(ref); if (onDone) onDone({ status: 'expired', error: e.message }); return }
+        if (e && e.status === 404) { releaseOwn(); if (onDone) onDone({ status: 'expired', error: e.message }); return }
       }
-      if (tries >= maxTries) { stopBoundedPoll(ref); if (onDone) onDone({ status: 'timeout' }) }
+      if (tries >= maxTries) { releaseOwn(); if (onDone) onDone({ status: 'timeout' }) }
     }
-    ref.current = setInterval(tick, interval)
+    handle = setInterval(tick, interval)
+    ref.current = handle
   }
   function stopBoundedPoll(ref) {
     if (ref.current) { clearInterval(ref.current); ref.current = null }
@@ -3247,24 +3274,53 @@ function claimIntentInFlight() {
     }
   }
 
+  // #1924: one PATCH helper for the per-source ENABLE intents — the four call
+  // sites (2 sources × on/off) differ only in key, value and error copy. It
+  // writes the ENABLE flag only; the GitHub CONNECTION (github_connected) is
+  // never touched here, which is the whole point of #1924.
+  async function setSourceEnabled(key, enabled, row, message) {
+    setMemoryBusy(row)
+    setRowError(row, '')
+    try {
+      await api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
+        body: JSON.stringify({ [key]: enabled }) })
+      await refreshOnboarding()
+      return true
+    } catch (e) {
+      setRowError(row, (e && e.message) || message)
+      return false
+    } finally {
+      setMemoryBusy('')
+    }
+  }
+
+  // #1924: the off-toggle writes the per-source ENABLE intent
+  // (`issues_enabled`) — NEVER `github_connected`. Flipping the connection
+  // flag was a full GitHub disconnect: it also killed the docs source, and
+  // re-enabling forced a fresh OAuth round-trip just to hide issues.
   async function toggleIssues(next) {
     if (memoryBusy) return
     if (!next) {
-      // off: PATCH the display flag (no server-side disconnect exists —
-      // re-enabling re-runs the OAuth connect).
-      setMemoryBusy('issues')
-      setRowError('issues', '')
+      // #1926: stop the in-flight re-index FIRST and invalidate its callbacks
+      // (an interval tick already past its await would otherwise still apply),
+      // then clear the job — so no "Indexing complete" can render for a source
+      // the user just turned off.
+      indexJobIdRef.current = null
+      stopBoundedPoll(indexPollRef)
+      setIndexJob(null)
       setIssuesWantOn(false)
-      try {
-        await api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
-          body: JSON.stringify({ github_connected: false }) })
-        await refreshOnboarding()
-      } catch (e) {
-        setRowError('issues', (e && e.message) || 'Could not update GitHub issues — try again.')
-      } finally {
-        setMemoryBusy('')
-      }
-    } else if (onboarding && onboarding.github_connected) {
+      await setSourceEnabled('issues_enabled', false, 'issues',
+        'Could not update GitHub issues — try again.')
+      return
+    }
+    // ON: clear any persisted off-intent first, so the switch, the row and the
+    // server never disagree about what the user asked for.
+    if (onboarding && onboarding.issues_enabled === false) {
+      const ok = await setSourceEnabled('issues_enabled', true, 'issues',
+        'Could not update GitHub issues — try again.')
+      if (!ok) return
+    }
+    if (onboarding && onboarding.github_connected) {
       // already connected → re-poll the diff (in-flight single-flight reuse)
       reindexGithub()
     } else {
@@ -3273,15 +3329,31 @@ function claimIntentInFlight() {
     }
   }
 
+  // #1924: docs is an independent source — its own enable intent, and an off
+  // path that did not exist before this change (the switch was terminal once
+  // indexed, so docs could never be turned off).
   async function toggleDocs(next) {
     if (memoryBusy) return
-    setDocsWantOn(next)
-    setRowError('docs', '')
-    if (next && onboarding && onboarding.github_connected && !(onboarding.github_docs_indexed)) {
-      // toggle-on reveals the explicit Index-docs action (T1-P7) — the user
-      // presses it to run the job (auto-running would surprise); the row
-      // already shows the action button when docsWantOn.
+    if (!next) {
+      // #1926 (sibling of the issues fix): stop the in-flight docs index poll
+      // and invalidate its callbacks so no stale completion report renders.
+      docsJobIdRef.current = null
+      stopBoundedPoll(docsPollRef)
+      setDocsJob(null)
+      setDocsWantOn(false)
+      await setSourceEnabled('docs_enabled', false, 'docs',
+        'Could not update GitHub docs — try again.')
+      return
     }
+    if (onboarding && onboarding.docs_enabled === false) {
+      const ok = await setSourceEnabled('docs_enabled', true, 'docs',
+        'Could not update GitHub docs — try again.')
+      if (!ok) return
+    }
+    // #1835/#1894: toggle-on reveals the explicit Index-docs action (T1-P7) —
+    // the user presses it to run the job (auto-running would surprise); the
+    // row already shows the action button when docsWantOn.
+    setDocsWantOn(true)
   }
 
   async function reindexGithub() {
@@ -3299,9 +3371,17 @@ function claimIntentInFlight() {
       const jobId = res && res.job_id
       if (!jobId) throw new Error('index job did not return a job id')
       setIndexJob({ status: 'started', job_id: jobId })
+      // #1926: bind the LIVE job id before the poll starts. A tick from a
+      // superseded job — or one that lands after the off-toggle nulled this —
+      // reads it and drops out instead of reporting a completion.
+      indexJobIdRef.current = jobId
       startBoundedPoll(indexPollRef, {
         url: `/v1/index/github/${jobId}`,
         isTerminal: (j) => j && (j.status === 'completed' || j.status === 'failed'),
+        // #1926: the poll's single stale guard — all of its onStatus/onDone
+        // paths check this, so a superseded job (and a completion that lands
+        // after the off-toggle) applies nothing.
+        isStale: () => indexJobIdRef.current !== jobId,
         onStatus: setIndexJob,
         // #1894: refresh onboarding state on terminal so the newly-stamped
         // github_indexed_at appears WITHOUT a manual reload.
@@ -3340,9 +3420,13 @@ function claimIntentInFlight() {
       const jobId = res && res.job_id
       if (!jobId) throw new Error('docs job did not return a job id')
       setDocsJob({ status: 'started', job_id: jobId })
+      // #1926: same live-id guard as the github re-poll (see reindexGithub).
+      docsJobIdRef.current = jobId
       startBoundedPoll(docsPollRef, {
         url: `/v1/index/docs/${jobId}`,
         isTerminal: (j) => j && (j.status === 'completed' || j.status === 'failed'),
+        // #1926: same single stale guard as the github re-poll.
+        isStale: () => docsJobIdRef.current !== jobId,
         onStatus: setDocsJob,
         // #1894: refresh onboarding state on terminal so the newly-stamped
         // github_docs_indexed_at appears WITHOUT a manual reload.
@@ -3391,8 +3475,11 @@ function claimIntentInFlight() {
           setWizardGithub((g) => ({ ...g, busy: false }))
           if (st && st.connected) {
             setIssuesWantOn(true)
+            // #1924: connecting from the Issues row is an explicit "bring
+            // issues in" — clear any stale off-intent in the same write so the
+            // source cannot come back up disabled.
             api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
-              body: JSON.stringify({ github_connected: true }) }).catch(() => {})
+              body: JSON.stringify({ github_connected: true, issues_enabled: true }) }).catch(() => {})
             refreshOnboarding().catch(() => {})
             // connected+indexing: the OAuth callback auto-enqueues the
             // first run — surface it via the re-poll (single-flight reuse
@@ -9802,10 +9889,12 @@ function MemorySources(props) {
   const githubConnected = !!state.github_connected
   const sessionsOn = !!state.session_recording
   const docsIndexed = !!state.github_docs_indexed
-  // issues state machine: off → on-but-not-connected (inline Connect CTA) →
-  // connected+indexing. The switch reads connected OR the user's intent.
-  const issuesOn = githubConnected || issuesWantOn
-  const docsOn = docsWantOn || docsIndexed
+  // #1924: the Issues/Docs switches control their OWN source via a persisted
+  // ENABLE intent (issues_enabled / docs_enabled) that is INDEPENDENT of the
+  // GitHub connection. Before this, the Issues switch's off-state WAS the
+  // connection (a full disconnect that also killed docs).
+  const issuesOn = issuesSourceOn(state, issuesWantOn)
+  const docsOn = docsSourceOn(state, docsWantOn)
   // #1894: "Indexed · <relative time>" (honest — no time when the persisted
   // timestamp is absent, e.g. legacy indexed teams). Independent of
   // connectivity: the label is a historical claim about indexing.
@@ -9832,7 +9921,7 @@ function MemorySources(props) {
         <div className="toggle-body">
           <h4>GitHub issues</h4>
           <p>Issues become work items with a lifecycle record.</p>
-          {githubConnected ? (
+          {issuesOn && githubConnected ? (
             <>
               <p className="dim small" aria-live="polite">
                 {github.repos != null ? `Connected — ${github.repos} repos available. ` : 'Connected. '}
@@ -9894,8 +9983,12 @@ function MemorySources(props) {
               </button>{' '}
               to bring issues in as memory sources.
             </p>
+          ) : githubConnected ? (
+            // #1924: Issues off is NOT a GitHub disconnect — say so, so the
+            // off state never reads as "your connection was torn down".
+            <p className="dim small">Issues are off. GitHub stays connected for docs — turn this back on any time; no re-authorization needed.</p>
           ) : null}
-          {indexJob && <GithubIndexStatus job={indexJob} now={now} />}
+          {issuesOn && indexJob && <GithubIndexStatus job={indexJob} now={now} />}
           {memoryErrors.issues && <p className="error" role="alert">{memoryErrors.issues}</p>}
         </div>
       </div>
@@ -9908,10 +10001,9 @@ function MemorySources(props) {
           role="switch"
           aria-checked={docsOn}
           data-on={docsOn ? 'true' : 'false'}
-          data-locked-on={docsIndexed ? 'true' : undefined}  // #1894: terminal indexed docs switch — full-opacity ON (CSS scopes on this attr; the generic disabled busy-dim stays for busy windows)
           aria-label="GitHub docs as a memory source"
           onClick={() => onToggleDocs(!docsOn)}
-          disabled={memoryBusy === 'docs' || docsIndexed}  // #1835: connect-inline like issues — not connected just reveals the CTA; review P1-1: docs indexed ⇒ the switch is terminal (re-index refreshes, never un-indexes)
+          disabled={memoryBusy === 'docs'}  // #1924: NOT terminal once indexed — docs can be turned off independently of the GitHub connection (and of issues)
         />
         <div className="toggle-body">
           <h4>GitHub docs</h4>
@@ -9926,10 +10018,14 @@ function MemorySources(props) {
           ) : !githubConnected && !docsIndexed ? (
             <p className="dim small">Connect GitHub first to index docs.</p>
           ) : null}
-          {docsIndexed && docsLabel && (
+          {docsOn && docsIndexed && docsLabel && (
             <p className="memory-source-state" aria-live="polite">{docsLabel}</p>
           )}
-          {githubConnected && (docsWantOn || docsIndexed) && !docsJob && (
+          {githubConnected && !docsOn && docsIndexed && (
+            // #1924: docs off is a source choice, not a disconnect or a delete.
+            <p className="dim small">Docs are off. Your indexed docs stay in the graph — turn this back on any time; no re-authorization needed.</p>
+          )}
+          {githubConnected && docsOn && !docsJob && (
             <>
               {/* #1845: repo + branch scope for the docs index — "All repos"
                   default; when specific repos are picked, each gets its own
@@ -10021,7 +10117,7 @@ function MemorySources(props) {
               </p>
             </>
           )}
-          {docsJob && <DocsIndexStatus job={docsJob} now={now} />}
+          {docsOn && docsJob && <DocsIndexStatus job={docsJob} now={now} />}
           {memoryErrors.docs && <p className="error" role="alert">{memoryErrors.docs}</p>}
         </div>
       </div>
