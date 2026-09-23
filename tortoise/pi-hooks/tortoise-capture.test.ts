@@ -755,6 +755,12 @@ test("every 409 stays retryable — a policy-blocked session is never silently d
     "retry",
   );
   assert.equal(classifyFailure(402), "retry");
+  // "No status" is TOTAL. JS's `null >= 300` and `null >= 500` are both false,
+  // so `null` used to fall through to "permanent" -> discardEntry -> unlink,
+  // while the Python leg returned "retry" for the same input. A missing status
+  // is a network condition, never a server verdict.
+  assert.equal(classifyFailure(null), "retry");
+  assert.equal(classifyFailure(Number.NaN), "retry");
   // A 3xx (a redirect on a stored api_url) must never delete the capture.
   assert.equal(classifyFailure(301), "retry");
   assert.equal(classifyFailure(422), "permanent");

@@ -920,6 +920,13 @@ export function pruneSpool(
  * family (402 quota-refusal, 408 request-timeout, 425 too-early, 429
  * rate-limit), and EVERY 409.
  *
+ * "No status" is TOTAL, and it has to be: `undefined` (the fetch never
+ * resolved), `null` (a transport/fetchImpl that models absence as null), and a
+ * non-finite value (an unparseable status). JS's `null >= 300` and `null >= 500`
+ * are both FALSE, so `null` used to fall through to "permanent" -> discardEntry
+ * -> unlink the capture, while the Python leg returned "retry" for the same
+ * input. A missing status is a network condition, never a server verdict.
+ *
  * On this idempotent upsert a 409 is either #3713's in-flight concurrency
  * condition (retry then replays) or a policy state (recording disabled) that
  * the user can reverse — a capture must not be destroyed because recording was
@@ -943,8 +950,11 @@ export function pruneSpool(
  * PERMANENT (discard + record): every other 4xx — a malformed payload or an
  * out-of-range turn count never becomes valid by waiting.
  */
-export function classifyFailure(status: number | undefined, detail?: string): "retry" | "permanent" {
-  if (status === undefined) return "retry";
+export function classifyFailure(
+  status: number | null | undefined,
+  detail?: string,
+): "retry" | "permanent" {
+  if (status === undefined || status === null || !Number.isFinite(status)) return "retry";
   if (status >= 300 && status < 400) return "retry";
   if (status >= 500) return "retry";
   if (status === 402 || status === 408 || status === 425 || status === 429) return "retry";

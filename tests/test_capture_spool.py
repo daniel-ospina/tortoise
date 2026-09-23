@@ -40,6 +40,24 @@ from tortoise.capture_spool import (
 
 REPO = Path(__file__).resolve().parent.parent
 SESSION_START = REPO / "tortoise" / "claude-hooks" / "session-start.sh"
+
+
+@pytest.fixture(autouse=True)
+def _never_touch_real_breadcrumbs(tmp_path, monkeypatch):
+    """No test in this file may READ or UNLINK the developer's real breadcrumb.
+
+    `_clear_breadcrumb_for` (capture_spool.py:887) resolves the path at CALL
+    time from the ambient env and UNLINKS it when the recorded ``session_id``
+    matches. A per-test pin is one test deep: every other success-path flush in
+    this file reaches the same helper with the ambient environment and deletes
+    the real ``~/.tortoise/capture-errors/<harness>.json`` that
+    ``session verify`` reads to report INERT vs PROVEN. The env var redirects
+    BOTH the read and the unlink, so pinning it here makes the whole file
+    hermetic rather than one test.
+    """
+    monkeypatch.setenv(
+        "TORTOISE_IMPORT_RECEIPT_DIR", str(tmp_path / "import-receipts")
+    )
 SESSION_END = REPO / "tortoise" / "claude-hooks" / "session-end.sh"
 SESSION_TURN = REPO / "tortoise" / "claude-hooks" / "session-turn.sh"
 
@@ -248,7 +266,7 @@ def test_a_permanent_4xx_discards_with_a_reason_and_is_never_retried(tmp_path):
     assert second.attempted == 0, "a permanent rejection must never be retried"
 
 
-def test_the_pi_and_python_classifiers_agree_on_every_status(tmp_path):
+def test_the_pi_and_python_classifiers_agree_on_every_status_parity(tmp_path):
     """#4714. The two capture legs classify THE SAME spool directory
     (``~/.tortoise/capture-spool``), so transient-vs-permanent must be ONE
     policy, not two independent ones that happen to agree today. The Pi leg is
@@ -258,28 +276,44 @@ def test_the_pi_and_python_classifiers_agree_on_every_status(tmp_path):
 
     A runtime comparison, not a source-spelling scan: it calls the real Pi
     `classifyFailure` and compares it to the real Python `classify_failure` over
-    a status matrix.
+    a status matrix. That needs node, so `_assert_both_legs_carry_402` runs
+    unconditionally FIRST — a guard that disappears with a missing runtime is
+    not a guard.
 
     MUTATION THAT REDS THIS: drop 402 from EITHER classifier -> the maps
-    disagree and the unrecoverable-from-one-leg case is exposed.
+    disagree and the unrecoverable-from-one-leg case is exposed. The final 402
+    pin also catches both legs drifting the SAME way, which a pure comparison
+    cannot.
     """
+    _assert_both_legs_carry_402()
+
     node = shutil.which("node")
     if node is None:
-        pytest.skip("node not available — the Python-side tests still ran")
-    version = subprocess.run(
-        [node, "--version"], capture_output=True, text=True, timeout=15
-    ).stdout.strip()
-    match = re.match(r"v(\d+)\.(\d+)", version)
-    if not match or (int(match.group(1)), int(match.group(2))) < (22, 6):
-        pytest.skip(f"{version} cannot strip TypeScript types")
+        pytest.skip("node not available — the node-free source pin still ran")
+    try:
+        version = subprocess.run(
+            [node, "--version"], capture_output=True, text=True, timeout=15
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        pytest.skip(f"node could not be probed ({exc}) — source pin still ran")
+    match = re.match(r"v(\d+)\.(\d+)", version or "")
+    # 22.7, not 22.6: the driver is a TYPELESS .ts and the repo ships no
+    # package.json, so it needs ambient module-syntax detection (22.7). At 22.6
+    # the flag strips types but the import fails, so 22.6 would red, not skip.
+    if not match or (int(match.group(1)), int(match.group(2))) < (22, 7):
+        pytest.skip(f"{version} cannot strip AND auto-detect TypeScript types")
 
     ext = (REPO / "tortoise" / "pi-hooks" / "tortoise-capture.ts").as_uri()
     driver = tmp_path / "classifier-parity.mjs"
+    # `null`/`NaN` are passed THROUGH, not converted to `undefined`: the legs
+    # must agree on the values a real caller can produce, and the conversion
+    # hid the one genuine divergence (JS `classifyFailure(null)` was
+    # "permanent" because `null >= 300` is false).
     driver.write_text(
         f'import {{ classifyFailure }} from "{ext}";\n'
-        "const matrix = [null, 200, 301, 400, 402, 403, 408, 409, 422, 425, 429, 500, 503];\n"
+        "const matrix = [null, undefined, NaN, 200, 301, 400, 402, 403, 408, 409, 422, 425, 429, 500, 503];\n"
         "const out = {};\n"
-        "for (const s of matrix) out[String(s)] = classifyFailure(s === null ? undefined : s);\n"
+        "for (const s of matrix) out[String(s)] = classifyFailure(s);\n"
         "console.log(JSON.stringify(out));\n",
         encoding="utf-8",
     )
@@ -293,18 +327,48 @@ def test_the_pi_and_python_classifiers_agree_on_every_status(tmp_path):
     assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
     pi_map = json.loads(proc.stdout.strip().splitlines()[-1])
 
+    # Every JS non-finite row maps onto the Python input that must agree with it.
+    python_input = {"null": None, "undefined": None, "NaN": None}
     for raw, verdict in pi_map.items():
-        status = None if raw == "null" else int(raw)
+        status = python_input[raw] if raw in python_input else int(raw)
         assert classify_failure(status) == verdict, (
             f"the Pi and Python classifiers disagree on status {raw}: "
             f"pi={verdict!r} python={classify_failure(status)!r}"
         )
     # The matrix must actually exercise the transient 4xx family, or the parity
-    # is vacuous (the two maps would agree on "permanent" alone).
+    # is vacuous. This also catches both legs drifting the same way.
     assert classify_failure(402) == pi_map["402"] == "retry"
+    # And the no-status rows, which is exactly where the legs diverged.
+    assert pi_map["null"] == pi_map["undefined"] == "retry"
 
 
-def test_a_quota_refusal_defers_the_capture_instead_of_destroying_it(tmp_path, monkeypatch):
+def _assert_both_legs_carry_402() -> None:
+    """The node-free half of the parity contract.
+
+    Explicitly a SOURCE pin (a spelling guard): it proves the status is present
+    in each classifier's transient set, not that it behaves correctly — the
+    behavioural proofs are the runtime parity test above and each leg's own
+    suite. Its purpose is that the cross-leg guard does not vanish on a box (or
+    CI runner) without node.
+    """
+    py_src = (REPO / "tortoise" / "capture_spool.py").read_text(encoding="utf-8")
+    ts_src = (REPO / "tortoise" / "pi-hooks" / "tortoise-capture.ts").read_text(
+        encoding="utf-8"
+    )
+    py_set = re.search(r"if status in \(([0-9,\s]+)\):", py_src)
+    assert py_set, "capture_spool.classify_failure has no integer transient set"
+    py_codes = {int(x) for x in py_set.group(1).split(",")}
+    ts_codes = {
+        int(code)
+        for group in re.findall(r'if \(([^)]*)\) return "retry";', ts_src)
+        for code in re.findall(r"status === (\d+)", group)
+    }
+    for code in (402, 408, 425, 429):
+        assert code in py_codes, f"Python leg dropped {code} from its transient set"
+        assert code in ts_codes, f"Pi leg dropped {code} from its transient set"
+
+
+def test_a_quota_refusal_defers_the_capture_instead_of_destroying_it(tmp_path):
     """#4714. The hosted quota gate refuses a capture whose ESTIMATED point cost
     would cross the org cap. That estimate is computed from the incoming
     capture, so the SAME capture lands once a node is freed — the refusal is
@@ -319,10 +383,8 @@ def test_a_quota_refusal_defers_the_capture_instead_of_destroying_it(tmp_path, m
     `classify_failure` -> the entry is discarded, `read_spool_meta` returns
     None, and the capture is gone.
     """
-    # A successful file clears the harness breadcrumb, which resolves through
-    # `TORTOISE_IMPORT_RECEIPT_DIR` and would otherwise read the developer's
-    # real ~/.tortoise/state. Pin it into tmp_path like `_isolate` does.
-    monkeypatch.setenv("TORTOISE_IMPORT_RECEIPT_DIR", str(tmp_path / "receipts"))
+    # The breadcrumb redirect is file-level (`_never_touch_real_breadcrumbs`),
+    # so this test cannot read or unlink the developer's real state.
     root = tmp_path / "spool"
     write_spool_entry(root, _snapshot("sess-quota"))
     quota = _Server(PostOutcome(
