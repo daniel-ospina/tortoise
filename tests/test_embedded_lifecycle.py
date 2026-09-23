@@ -2069,8 +2069,10 @@ def test_partial_init_cleanup_reclaims_the_orphaned_server(tmp_path):
 # `_start_redis()` (client.py:218-236), which passes
 # `'dbdir': self.dbdir, 'dbfilename': self.dbfilename` (client.py:234-235)
 # straight through — THE SAME RDB FILE. So the state built below (registry
-# present, recorded socket GONE, recorded pid LIVE) is exactly the state in
-# which answering False starts a SECOND writer on one RDB. The repair in
+# present, recorded socket GONE, recorded pid LIVE) is A state in which
+# answering False starts a SECOND writer on one RDB — but not the only such
+# state: a plain cold start with no registry does it too (tortoise#4921). The
+# repair in
 # `tortoise/embedded_lifecycle.py` therefore PROVES the live pid is this
 # registry's own server, stops it gracefully, and only then drops the stale
 # registry. These tests pin the END STATE, not "construction succeeded".
@@ -2108,9 +2110,10 @@ def _live_rdb_writers(db_dir, dbfilename):
 def test_live_recorded_server_with_dead_socket_is_stopped_not_doubled(tmp_path):
     """#4879: registry + LIVE server + recorded socket GONE (the hole's state).
 
-    The recorded server is genuinely alive and holding this RDB — the only
-    state in which answering False arms a SECOND writer on the same
-    dbfilename. RED on the first cut (`77ce56763`): construction succeeds but
+    The recorded server is genuinely alive and holding this RDB — a state in
+    which answering False arms a SECOND writer on the same dbfilename, though
+    NOT the only one: a cold start with no registry arms it too (tortoise#4921).
+    RED on the first cut (`77ce56763`): construction succeeds but
     this RDB ends up with TWO live writers. RED on unmodified redislite: the
     construction raises the ``ConnectionError`` above. GREEN: the proven
     holder is stopped, its in-memory write is persisted by that graceful

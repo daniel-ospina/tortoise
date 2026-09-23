@@ -1646,7 +1646,7 @@ def _install_owner_record_patch() -> None:
 # safe against the holder THIS PATCH PROVED — the RDB is released before the
 # record is dropped — and nothing wider: there is still no per-<dbdir>/
 # <dbfilename> construction lock, so a second construction racing here can also
-# start a server over the same RDB (tortoise#4904). Both provenance legs
+# start a server over the same RDB (tortoise#4921). Both provenance legs
 # exist because the recorded pid may be a recycled number pointing at an
 # unrelated process — and signalling THAT, or starting a second server while
 # the real holder lives, are the two ways this predicate can do harm.
@@ -1823,7 +1823,7 @@ def _install_dead_socket_guard() -> None:
     stale registry) that keeps redislite from REPLAYING that dead socket. It is
     safe against the holder THIS REPAIR PROVED, and nothing wider: without a
     per-<dbdir>/<dbfilename> construction lock, a construction racing here can
-    also start a server over the same RDB (tortoise#4904). Idempotent, and never
+    also start a server over the same RDB (tortoise#4921). Idempotent, and never
     raises: a patch that broke construction would be worse than the bug.
     """
     global _ORIGINAL_REDISLITE_IS_RUNNING
@@ -1949,7 +1949,7 @@ def _install_dead_socket_guard() -> None:
         # wider. It does NOT make this construction the only writer: redislite
         # still has no per-<dbdir>/<dbfilename> construction lock, so two
         # constructions racing between this unlink and the start below can
-        # each bring up a server over one RDB (tortoise#4904).
+        # each bring up a server over one RDB (tortoise#4921).
         logger.warning(
             "#4879: REPAIRED a stale embedded-redis registry %s — stopped the "
             "proven holder pid %s (recorded socket %s was gone) and removed "
