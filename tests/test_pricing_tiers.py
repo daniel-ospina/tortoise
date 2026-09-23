@@ -45,6 +45,7 @@ class TestPricingLoader:
         solo = pricing.tier_limits("solo")
         assert solo["max_graphs_per_team"] == 2
         assert solo["included_write_ops_per_month"] == 10000
+        assert solo["overage"] is True  # #4815: every paid tier is metered
 
         pro = pricing.tier_limits("pro")
         assert pro["max_graphs_per_team"] is None  # unlimited
@@ -62,7 +63,33 @@ class TestPricingLoader:
     def test_overage_config(self):
         assert pricing.overage_price_per_10k() == 5.0
         assert pricing.has_overage("pro") and pricing.has_overage("team")
-        assert not pricing.has_overage("free") and not pricing.has_overage("solo")
+        # #4815: solo is a PAID tier → metered (it was the only paid tier
+        # without overage). free/anon are not covered by the ruling.
+        assert pricing.has_overage("solo")
+        assert not pricing.has_overage("free") and not pricing.has_overage("anon")
+
+    def test_every_paid_tier_has_overage(self):
+        """#4815 (owner ruling): overage is ON for EVERY paid tier — the tier
+        prices FEATURES (graphs, colleagues), never a paying customer's
+        refusal. Solo was the last paid tier without overage; this going red
+        means a paid tier has silently reverted to a hard cap."""
+        paid = [t for t in pricing.all_tiers() if pricing.tier_price(t) > 0]
+        assert paid, "pricing.json must define at least one paid tier"
+        for tier in paid:
+            assert pricing.tier_limits(tier)["overage"] is True, (
+                f"paid tier {tier!r} must have overage=True (#4815)")
+
+    def test_overage_tiers_list_agrees_with_tier_flags(self):
+        """pricing.json states overage eligibility TWICE — per-tier
+        ``tiers.<t>.overage`` and ``billing.overage_tiers``. The latter is
+        what ``has_overage()`` reads, and therefore what metering actually
+        enforces; if the two diverge, a tier can be advertised as metered
+        while the metering path still refuses it (#4815)."""
+        metered = {t for t in pricing.all_tiers()
+                   if pricing.tier_limits(t)["overage"]}
+        assert set(pricing.overage_tiers()) == metered, (
+            f"billing.overage_tiers {sorted(pricing.overage_tiers())} != "
+            f"tiers with overage=True {sorted(metered)}")
 
     def test_no_max_teams_field(self):
         # Per-team billing: multi-team is a user capability, NOT a tier field

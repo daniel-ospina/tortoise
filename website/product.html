@@ -654,7 +654,7 @@
       },
       tiers: {
         free: { price: 0, graphs: 1, users: 1, ops: 10000, nodes: 10000, keys: 2, overage: false, popular: false, features: ["1 graph", "1 collaborator", "10,000 write ops/mo", "10,000-node graph", "2 API keys", "Unlimited integrations"], excluded: ["Overage"] },
-        solo: { price: 9, graphs: 2, users: 1, ops: 10000, nodes: 25000, keys: 5, overage: false, popular: false, features: ["2 graphs", "1 collaborator", "10,000 write ops/mo", "25,000-node graph", "5 API keys", "Unlimited integrations"], excluded: ["Overage"] },
+        solo: { price: 9, graphs: 2, users: 1, ops: 10000, nodes: 25000, keys: 5, overage: true, popular: false, features: ["2 graphs", "1 collaborator", "10,000 write ops/mo", "25,000-node graph", "5 API keys", "Unlimited integrations", "Usage-based overage"], excluded: [] },
         pro: { price: 25, graphs: "∞", users: 2, ops: 50000, nodes: 100000, keys: 10, overage: true, popular: true, features: ["Unlimited graphs", "2 collaborators", "50,000 write ops/mo", "100,000-node graph", "10 API keys", "Unlimited integrations", "Usage-based overage"], excluded: [] },
         team: { price: 149, graphs: "∞", users: "∞", ops: 200000, nodes: 600000, keys: 20, overage: true, popular: false, features: ["Unlimited graphs", "Unlimited collaborators (invites + RBAC)", "200,000 write ops/mo", "600,000-node graph", "20 API keys", "Unlimited integrations", "Usage-based overage", "Priority support"], excluded: [] }
       }
@@ -702,7 +702,10 @@
           <a href="/auth" class="btn${name === 'free' ? ' secondary' : ''}">${cta}</a>
         </div>`;
       }).join('');
-      document.getElementById('pricing-usage-line').textContent = `${PRICING.display.overage_line} — applies to Builder and Team`;
+      // Derived from the tier data — the overage line can never drift from
+      // which tiers are actually metered (#4815).
+      const overageTiers = names.filter((n) => PRICING.tiers[n].overage).map((n) => labels[n]);
+      document.getElementById('pricing-usage-line').textContent = `${PRICING.display.overage_line} — applies to ${overageTiers.join(', ')}`;
     }
 
     function renderSelfHost() {

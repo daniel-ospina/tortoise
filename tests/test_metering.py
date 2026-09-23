@@ -267,7 +267,9 @@ class TestThresholdEvents:
         )
 
     def test_no_threshold_for_free_tier(self, reg_sdk, caplog):
-        """Free/Solo tiers never trigger threshold events (no overage)."""
+        """Free (a zero-price tier) never triggers threshold events: no
+        overage. Solo is PAID and therefore metered since #4815 — see
+        test_paid_solo_tier_triggers_threshold_events."""
         sdk, tid = reg_sdk
         _reset_thresholds_for_tests()
         # Switch team to free tier
@@ -283,6 +285,33 @@ class TestThresholdEvents:
                     if "threshold" in r.message]
         assert len(warnings) == 0, (
             f"Free tier should not trigger threshold events, got: {warnings}"
+        )
+
+    def test_paid_solo_tier_triggers_threshold_events(self, reg_sdk, caplog):
+        """#4815: solo is a PAID tier, so overage is ON — it emits the
+        80%/100% threshold events exactly as pro/team do. This is the
+        ruling's observable metering consequence."""
+        sdk, tid = reg_sdk
+        _reset_thresholds_for_tests()
+        sdk._get_registry().query(
+            "MATCH (t:Team {id: $tid}) SET t.tier = 'solo'",
+            params={"tid": tid},
+        )
+
+        with caplog.at_level(logging.WARNING):
+            record_write_ops(tid, tier="solo", n=99999)
+
+        warnings = [r for r in caplog.records
+                    if r.levelno == logging.WARNING and "80%" in r.message]
+        errors = [r for r in caplog.records
+                  if r.levelno == logging.ERROR and "100%" in r.message]
+        assert warnings, (
+            f"Solo (paid) must fire the 80% threshold, got: "
+            f"{[r.message for r in caplog.records]}"
+        )
+        assert errors, (
+            f"Solo (paid) must fire the 100% threshold, got: "
+            f"{[r.message for r in caplog.records]}"
         )
 
 
@@ -539,7 +568,12 @@ class TestPricingIntegration:
     def test_free_tier_has_no_overage(self):
         from tortoise.pricing import has_overage
         assert has_overage("free") is False
-        assert has_overage("solo") is False
+        assert has_overage("anon") is False
+
+    def test_solo_tier_has_overage(self):
+        # #4815: solo is a PAID tier → metered (no longer a hard cap).
+        from tortoise.pricing import has_overage
+        assert has_overage("solo") is True
 
     def test_pro_and_team_have_overage(self):
         from tortoise.pricing import has_overage
