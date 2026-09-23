@@ -1002,3 +1002,27 @@ Cycle 2 found one regression the cycle-1 fix itself introduced, plus three cover
   hosted branch's import-time-only check.
 
 Four mutations observed RED (`operations/logs/3981-mutation-evidence.log`).
+
+### Implementation record (round 5 — review cycle 3 fix: the shed ordering)
+
+Cycle 3 showed round 4's fix was **incomplete**, and the mechanism was precise enough to pin:
+
+* **P1 — the shed path could still drop an admitted alert.** Removing the `_prune_locked` sweep made
+  `_due_locked`'s self-heal the only non-test way a latch is cleared — but `_due_locked` POPPED the
+  latch and the *same* `alert_operator` call could then decide it was over `_MAX_INFLIGHT` and shed,
+  installing **no** successor. The worker already admitted for that key then returned at `_run`'s
+  ownership check without filing: the incident gone, with only a misleading "dispatch queue full"
+  warning for the *repeat* call. The round-4 docstrings claiming the clear and the install were atomic
+  were therefore false, which is itself the lesson — a claim about the mechanism belongs pinned by a
+  test, not asserted in prose. The shed bound is now decided **before** `_due_locked` may clear a latch,
+  so clear + install happen in one `_LOCK` hold and a latch is only ever handed to a successor that
+  WILL run. A shed also no longer writes `_ATTEMPT`: a shed is not an attempt, and writing it made a
+  later `_due_locked` read a window this call never consumed.
+* **P2 — the two non-owner latch pops** (`store is None`, `_POOL.submit` failure) are token-guarded.
+  `alert_store()` runs outside `_LOCK`, so a caller stalled past `_INFLIGHT_STALE_S` could otherwise
+  pop a latch that a concurrent dispatch had just re-installed. Reservation release is unchanged.
+
+`test_a_shed_never_clears_an_admitted_latch` pins the P1: it saturates the pool, ages the latch, and
+re-dispatches the same key so the *re-dispatch* is the shed one — the only shape that exposes it. Its
+store records only after its gate opens, so "reached the store" is a real signal, not "started". Red
+under the reverted order (`operations/logs/3981-mutation-evidence.log`).

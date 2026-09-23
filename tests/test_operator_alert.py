@@ -566,13 +566,62 @@ def test_prune_never_sweeps_an_unsettled_latch(monkeypatch):
     gate = threading.Event()
     monkeypatch.setattr(oa, "alert_store", lambda: _GatedStore(gate))
     assert oa.alert_operator(_KIND, "org-latch", {}) is not None
-    time.sleep(0.05)
-    with oa._LOCK:
-        oa._prune_locked(time.monotonic())
-        assert oa._INFLIGHT.get((_KIND, "org-latch")) is not None, (
-            "the sweep must leave the latch to the successor")
-    gate.set()
-    oa.join_operator_alerts()
+    try:
+        time.sleep(0.05)
+        with oa._LOCK:
+            oa._prune_locked(time.monotonic())
+            assert oa._INFLIGHT.get((_KIND, "org-latch")) is not None, (
+                "the sweep must leave the latch to the successor")
+    finally:
+        gate.set()
+        oa.join_operator_alerts()
+
+
+def test_a_shed_never_clears_an_admitted_latch(monkeypatch):
+    """Pin: the shed bound must be decided BEFORE ``_due_locked`` self-heals.
+
+    ``_due_locked`` POPS a stale latch. If the same call is then shed (queue full),
+    that latch would be gone with no successor installed, and the worker already
+    admitted for the key would return at ``_run``'s ownership check without filing —
+    the incident dropped, with no log naming it. Driven by saturating the pool,
+    ageing the latch, and re-dispatching the SAME key so the re-dispatch is the shed
+    one. The store records only AFTER its gate opens, so "reached the store" is a
+    real signal rather than "started".
+    """
+
+    class _BlockThenRecord:
+        def __init__(self, ev):
+            self.ev = ev
+            self.calls: list[tuple[str, str]] = []
+
+        def open_incident_state(self, kind, org_id="", detail=None):
+            self.ev.wait(timeout=30)
+            self.calls.append((kind, org_id))
+            return OpenOutcome.FILED
+
+    monkeypatch.setattr(oa, "_MAX_INFLIGHT", 2)
+    monkeypatch.setattr(oa, "_INFLIGHT_STALE_S", 0.02)
+    monkeypatch.setattr(oa, "_RETRY_WINDOW_S", 0.01)
+    gate = threading.Event()
+    store = _BlockThenRecord(gate)
+    monkeypatch.setattr(oa, "alert_store", lambda: store)
+
+    assert oa.alert_operator(_KIND, "org-h", {}) is not None
+    assert oa.alert_operator(_KIND, "org-fill", {}) is not None
+    try:
+        time.sleep(0.05)                      # age org-h's latch past the bound
+        with oa._LOCK:
+            assert oa._RESERVED == 2, "precondition: the pool is saturated"
+        assert oa.alert_operator(_KIND, "org-h", {}) is None, (
+            "precondition: the re-dispatch is the shed one")
+        with oa._LOCK:
+            assert oa._INFLIGHT.get((_KIND, "org-h")) is not None, (
+                "a shed must not clear an admitted worker's latch")
+    finally:
+        gate.set()
+        oa.join_operator_alerts()
+    assert (_KIND, "org-h") in store.calls, (
+        "the originally-admitted worker must still file its incident")
 
 
 def test_reset_clears_the_light_leg_dedup_store(monkeypatch):

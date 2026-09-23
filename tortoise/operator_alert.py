@@ -216,14 +216,14 @@ def _release_locked() -> None:
 def _prune_locked(now: float) -> None:
     """Amortised map housekeeping — never the admission decision (see _RESERVED).
 
-    Deliberately does NOT sweep ``_INFLIGHT``: a stale latch may ONLY be cleared
-    by a successor (``_due_locked``, which admits one atomically) or by a test
-    reset. Sweeping it here would let a queued worker — admitted before, sat
-    behind saturated workers past ``_INFLIGHT_STALE_S`` — start, find its token
-    gone with no successor, and return WITHOUT filing: the silent drop this
-    module exists to remove. ``_INFLIGHT`` needs no sweep for its own bound —
-    every insert is paired with a reservation, so it is already bounded by
-    ``_MAX_INFLIGHT``.
+    Deliberately does NOT sweep ``_INFLIGHT``: a stale latch is cleared only by
+    ``_due_locked``, in the same ``_LOCK`` hold that INSTALLS its successor — so a
+    cleared latch is always handed to a worker that will run. (Sweeping it here let a
+    queued worker — admitted before, sat behind saturated workers past
+    ``_INFLIGHT_STALE_S`` — start, find its token gone with no successor, and return
+    WITHOUT filing: the silent drop this module exists to remove.) ``_INFLIGHT`` needs
+    no sweep for its own bound — every insert is paired with a reservation, so it is
+    already bounded by ``_MAX_INFLIGHT``.
     """
     if len(_ATTEMPT) > _PRUNE_ABOVE:
         for k, (ts, window) in list(_ATTEMPT.items()):
@@ -249,9 +249,9 @@ def _run(store, key, kind, org_id, detail, token) -> None:
         # Ownership check BEFORE the store write: a superseded attempt must not
         # spend a network call filing an incident its successor is already
         # filing, and must not reach a store that may be tearing down. SAFE to
-        # return here because a latch is only ever cleared by a SUCCESSOR
-        # (``_due_locked``) or a test reset — never swept behind our back (see
-        # ``_prune_locked``), so a missing token means someone else will file.
+        # return here because a latch is cleared only by ``_due_locked`` in the
+        # same lock hold that installs its successor (never swept behind our back
+        # by ``_prune_locked``), so a missing token means a successor WILL file.
         # The check is REPEATED below because a newer attempt can start while
         # this one is in flight.
         with _LOCK:
@@ -301,16 +301,22 @@ def alert_operator(kind: str, org_id: str | None, detail: dict | None = None):
         if _SINCE_SWEEP >= _SWEEP_EVERY:
             _SINCE_SWEEP = 0
             _prune_locked(now)
-        if not _due_locked(key, now):
-            return None
-        _ATTEMPT[key] = (now, _RETRY_WINDOW_S)   # provisional; _run re-arms
-        _ATTEMPT.move_to_end(key)
-        # THE admission bound: a real reservation, taken atomically with the decision
-        # and released only when the dispatch settles, so a wedged worker's pool
-        # thread stays counted and the queue cannot grow past _MAX_INFLIGHT.
+        # THE admission bound is decided FIRST — and therefore BEFORE `_due_locked`
+        # may clear a stale latch. `_due_locked`'s self-heal POPS `_INFLIGHT[key]`, so
+        # taking the shed decision after it would clear an already-admitted worker's
+        # latch and install NO successor: that worker then returns at `_run`'s
+        # ownership check and the incident is dropped with no log naming it. Deciding
+        # the bound first makes the clear and the install atomic (one `_LOCK`), so a
+        # latch is only ever handed to a successor that WILL run.
         if _RESERVED >= _MAX_INFLIGHT:
+            # A shed is not an attempt: leave `_ATTEMPT` untouched, or a later
+            # `_due_locked` would read the window this call never consumed.
             shed = True                          # bounded: shed, keep throttled
+        elif not _due_locked(key, now):
+            return None
         else:
+            _ATTEMPT[key] = (now, _RETRY_WINDOW_S)   # provisional; _run re-arms
+            _ATTEMPT.move_to_end(key)
             token = now
             _RESERVED += 1
             _INFLIGHT[key] = token
@@ -323,7 +329,13 @@ def alert_operator(kind: str, org_id: str | None, detail: dict | None = None):
         store = None
     if store is None:
         with _LOCK:
-            _INFLIGHT.pop(key, None)
+            # Token-guarded: `alert_store()` ran OUTSIDE the lock, so a same-key
+            # dispatch may have self-healed the latch and admitted a successor in the
+            # meantime. Popping unconditionally would clear THAT worker's latch and
+            # drop its incident, with nobody left to file. Always release our own
+            # reservation.
+            if _INFLIGHT.get(key) == token:
+                _INFLIGHT.pop(key, None)
             _release_locked()
         _logger.warning("operator alert not filed — no alert channel (kind=%s)", kind)
         return None
@@ -331,7 +343,8 @@ def alert_operator(kind: str, org_id: str | None, detail: dict | None = None):
         fut = _POOL.submit(_run, store, key, kind, org_id, dict(detail or {}), token)
     except Exception:  # pool shutting down — never drop the alert silently
         with _LOCK:
-            _INFLIGHT.pop(key, None)
+            if _INFLIGHT.get(key) == token:  # never pop a successor's latch
+                _INFLIGHT.pop(key, None)
             _release_locked()
         _logger.warning("operator alert dispatch failed (kind=%s)", kind,
                         exc_info=True)
