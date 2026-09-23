@@ -764,6 +764,16 @@ jobs:
         # #1381); then poll /health/ready (it ANDs the Supabase control plane
         # + the data plane) over its OWN budget, LAST.
         #
+        # THE WEAKER PREDICATE INFORMS; THE STRONGEST DECIDES (#4771). The db.ok
+        # poll no longer fails the run on its own — it is the FalkorDB data plane
+        # ALONE, and it reads the background liveness refresher, so it can
+        # disagree with readiness (observed live 2026-09-22: db.ok=false on a
+        # 1.5s probe timeout while /health/ready returned 200 on BOTH planes).
+        # On exhaustion phase 2 emits a loud ::warning:: and the run proceeds;
+        # /health/ready — which ANDs the SAME data plane with the control plane —
+        # is what exits 1. This is NOT a weakening: a genuinely unreachable
+        # FalkorDB fails readiness's own probe too (both call _probe_db()).
+        #
         # A FAILURE HERE MEANS: THE RELEASE IS LIVE AND UNHEALTHY. It does NOT
         # mean the deploy failed — `flyctl deploy` already succeeded and the
         # image is released. There is no rollback; the durable detector for the
@@ -778,6 +788,10 @@ jobs:
         # a still-connecting control plane reddened a HEALTHY deploy 2-3s after
         # the data plane came up. The gate must never assert a predicate it has
         # not itself observed to be true, on the strength of a weaker one.
+        # #4771 applied the same rule to the DECISION: the harness now pins
+        # (a) db.ok never true + readiness 200 → PASS with a warning, and
+        # (b) db.ok never true + readiness never 200 → FAIL. DO NOT "restore"
+        # phase 2's `exit 1` — it is what made the weaker observation decide.
         # Bypassable for incident-fix deploys: the workflow_dispatch input OR
         # the repo variable SKIP_DB_HEALTH_GATE='true' (code-review P2 — on
         # push-triggered runs the inputs context is null, so the variable
