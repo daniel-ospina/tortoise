@@ -501,6 +501,9 @@ surfaces:
   # on precisely the PRs that can break it. `core` is the docs/default surface.
   - test_bridge_table.py
   - test_graph_name_ownership.py
+  # #3634: guards the graph-name ownership vocabulary (the prefix sets that
+  # authorise a sweep) — the register, the deny-safe residue predicate, and the
+  # AST pin keeping the opt-in legacy sweep out of every default path.
   # #4282: dual-registered with `api` for the same reason as test_bridge_table.py
   # above — `tools/mcp_rename_table.py` is named in SOURCE_PATTERNS["api"], so a
   # GENERATOR-only edit selects `api` and runs this drift gate.

@@ -80,6 +80,8 @@ Layer vocabulary: **unit** = `_FakeDb`/`_FakeProj` or `object.__new__` (the `tes
 
 ## Acceptance Criteria
 
+> **⛔ Every task that creates a new test file must also register it.** `tests/test_ci_selection.py` fails on an unclassified test file. Run `python3 tools/ci_selection.py --register --surface core` (the canonical tool — do not hand-edit the list) and confirm `python3 tools/ci_selection.py --integrity` exits 0. Discovered during Task 1, which hit it with `tests/test_graph_name_ownership.py`; Tasks 3 and 5 create new files too.
+
 1. One **declared** graph-name ownership contract in `tests/_embedded.py`. **Declared surface** = `tests/_embedded.py`, `tortoise/sdk.py`, `tortoise/projection/__init__.py`. Every **named** prefix constant on that surface is registered **by reference** (a test asserts the ties and fails on an unregistered constant). Anonymous prefix *literals* — and named constants in any file outside the three — are **out of the scanner's scope**; they stay governed by the DIVERGENCE comment at the declaration.
 2. A test-derived registry name carries the approved prefix, **prepending only when absent**; `tests/test_derived_names.py` stays green; `registry_tortoise` and `registry_control_plane` are **never** dropped (fail-closed regression test).
 3. Legacy reclamation is opt-in by exact `"1"`; **off** ⇒ no default path deletes anything new, enforced by an **AST pin** (not prose); **on** ⇒ only the declared residue is reclaimed.
@@ -294,6 +296,7 @@ def test_shared_registry_name_is_never_prefixed(tmp_path):
 **Files:**
 - Modify: `tests/_embedded.py` (new `_legacy_sweep_allowed` + `_sweep_legacy_strays`, modelled on `_team_sweep_allowed` ~1131-1157 and `_sweep_team_strays` ~1142)
 - Modify: `tests/test_env_truthy.py` (`_KNOWN_NARROW_READS` entry + amend its "can only shrink" docstring)
+- Modify: `config/ci-surfaces.yml` (register any **new** test file — see the note below)
 - Test: `tests/test_wipe_server.py` (gate matrix + live leg); `tests/test_graph_name_ownership.py` (AST pin)
 
 **Step 1: Write the failing tests.** `_FakeDb`'s first parameter is `fail_delete`, **not** the graph list (`tests/test_wipe_server.py:82-89`); set `db.graphs` and pass `_FakeProj(db)` positionally (the pattern at `:960`):
@@ -420,6 +423,7 @@ The corruption direction is **already pinned** by `test_genuine_corruption_still
 - Modify: `tests/_embedded.py` (add `_owned_survivors` and `_live_graph_names`)
 - Modify: `tests/conftest.py` (imports ~700-707; capture ~757; gate ~781-808)
 - Modify: `docs/epics/2026-08-24-test-db-migration/plan.md` (changelog table)
+- Modify: `config/ci-surfaces.yml` (register the new test file — see the note below)
 - Test: `tests/test_server_hygiene_gate.py` (new)
 
 **Step 1: Write the failing test** — the ownership filter is **inside** the helper, and the fixture includes the false-positive case:

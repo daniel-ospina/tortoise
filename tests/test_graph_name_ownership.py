@@ -113,11 +113,12 @@ def test_the_residue_census_cohort_is_exact():
 def test_the_owned_and_production_refusals_fire_when_a_residue_prefix_overlaps(monkeypatch):
     """The owned and literal-production refusals are load-bearing, not incidental.
 
-    `test_owned_name` is refused today because no residue prefix matches it,
-    and `tortoise` because no residue prefix matches it — neither because its
-    guard fired. Patch an OVERLAPPING prefix onto the module (importing the
-    module as an object so the patch is visible to `is_legacy_residue`) to pin
-    each guard itself.
+    `test_owned_name` and `tortoise` are both refused today because no residue
+    prefix matches them — with or without the guard, since the residue
+    fall-through also refuses them. An assertion that does not force an
+    overlap therefore cannot tell whether the guard fired. Patch an
+    OVERLAPPING prefix onto the module (importing the module as an object so
+    the patch is visible to `is_legacy_residue`) to pin each guard itself.
     """
     monkeypatch.setattr(embedded, "_LEGACY_RESIDUE_PREFIXES", ("test_",))
     assert not embedded.is_legacy_residue("test_owned_name", default_graph=None)
