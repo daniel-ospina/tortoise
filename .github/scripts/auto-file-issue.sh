@@ -86,7 +86,13 @@ af_open_issue() { # <stable-title>
   # empty the search and turn the monitor back into a duplicate spammer.
   q="repo:${REPO} is:issue is:open in:title author:app/github-actions \"$title\""
   enc="$(printf '%s' "$q" | jq -sRr @uri)"
-  if ! out="$(gh api "search/issues?q=${enc}&per_page=20" 2>/dev/null)"; then
+  # PAGED, mirroring availability-watchdog.sh (the implementation this substrate
+  # generalizes). `per_page=100 --paginate` walks every page — GitHub's own
+  # 1000-result cap bounds it — so search ranking (relevance-based, NOT
+  # equality-first) can never push the real exact-match off page 1 and turn the
+  # monitor back into a duplicate filer. `jq -rs` slurps the concatenated page
+  # docs before the select.
+  if ! out="$(gh api "search/issues?q=${enc}&per_page=100" --paginate 2>/dev/null)"; then
     af_err "issue search failed — refusing to file a possible duplicate; this failing run IS the alert"
     printf '__ERR__'
     return 0
@@ -95,9 +101,9 @@ af_open_issue() { # <stable-title>
   # empty item list ("no incident") is NOT a failure — only an unparseable
   # answer is (conflating the two makes the monitor refuse to file on the very
   # first outage).
-  if ! n="$(printf '%s' "$out" | jq -r \
+  if ! n="$(printf '%s' "$out" | jq -rs \
       --arg login "$AUTO_FILE_BOT_LOGIN" --arg title "$title" \
-      '[.items[]? | select((.user.login // "") == $login) | select((.title // "") == $title)][0].number // empty' \
+      '[.[].items[]? | select((.user.login // "") == $login) | select((.title // "") == $title)][0].number // empty' \
       2>/dev/null)"; then
     af_err "issue search returned an unparseable body"
     printf '__ERR__'
@@ -106,7 +112,7 @@ af_open_issue() { # <stable-title>
   if [ -z "$n" ]; then
     # Distinguish "nothing matched" from "something matched but was NOT ours":
     # the latter is the forged-title case, and it is worth a loud line.
-    total="$(printf '%s' "$out" | jq -r '.items | length' 2>/dev/null || true)"
+    total="$(printf '%s' "$out" | jq -rs '[.[].items[]?] | length' 2>/dev/null || true)"
     case "$total" in
       ''|*[!0-9]*) total=0 ;;
     esac
@@ -123,10 +129,26 @@ af_open_issue() { # <stable-title>
 }
 
 # How many occurrence comments does this issue already carry? Counted from the
-# issue (the durable, human-visible record), never from a local file. A failed
-# or unparseable page returns the count SO FAR: the counter may under-report,
-# but it can never fabricate a number, and under-reporting only means the next
-# comment re-states a lower N (harmless) rather than skipping one (misleading).
+# issue (the durable, human-visible record), never from a local file.
+#
+# AUTHOR-FILTERED. The marker is not secret — the public comments API returns it
+# verbatim on every recurrence comment — so a bare `contains($m)` let ANY third
+# party inflate the count by posting comments that carry the marker. The count
+# would then jump (one real recurrence + three outsider markers → `Recurrence
+# #5`), and the recurrence number is the ONE field of #3907 an outsider can
+# corrupt. Filtering on the reserved bot LOGIN, exactly as the dedupe search
+# does, closes the over-count direction.
+#
+# A failed or unparseable page returns the count SO FAR: the counter may
+# UNDER-report (the next comment re-states a lower N — harmless) but it can
+# never be inflated by a third party, and it never fabricates a number.
+#
+# MAGNITUDE: recurrence comments carry the run URL, not a re-stated magnitude.
+# The magnitude is written ONCE in the issue body at first filing, so a material
+# escalation (1 → 10,000) is not re-stated on later comments — the recurrence
+# COUNT is the escalation signal, and the latest run URL links the detail. This
+# is deliberate (#3907: file the finding, not the occurrence — re-posting the
+# full body each run would re-introduce the hourly spam the dedupe removes).
 af_occurrence_count() { # <issue-number> -> integer
   local n="${1:-}" page=1 total=0 resp cnt len
   [ -n "$n" ] || { printf '0'; return 0; }
@@ -134,8 +156,8 @@ af_occurrence_count() { # <issue-number> -> integer
     if ! resp="$(gh api "repos/${REPO}/issues/${n}/comments?per_page=100&page=${page}" 2>/dev/null)"; then
       printf '%s' "$total"; return 0
     fi
-    cnt="$(printf '%s' "$resp" | jq -r --arg m "$AUTO_FILE_MARKER" \
-      '[.[]? | select(((.body // "") | contains($m))) ] | length' 2>/dev/null || true)"
+    cnt="$(printf '%s' "$resp" | jq -r --arg m "$AUTO_FILE_MARKER" --arg login "$AUTO_FILE_BOT_LOGIN" \
+      '[.[]? | select(((.user.login // "") == $login) and ((.body // "") | contains($m)))] | length' 2>/dev/null || true)"
     len="$(printf '%s' "$resp" | jq -r 'if type == "array" then length else -1 end' 2>/dev/null || echo -1)"
     case "$cnt" in ''|*[!0-9]*) cnt=0 ;; esac
     case "$len" in ''|*[!0-9]*) len=-1 ;; esac

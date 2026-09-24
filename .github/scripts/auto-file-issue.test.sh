@@ -30,6 +30,11 @@
 #  13. no token → fail closed before contacting GitHub
 #  14. the filed body is the body FILE's content (not the title)
 #  15. AUTO_FILE_LIB_ONLY=1 sources the lib without executing main
+#  16. an OUTSIDER marker comment cannot inflate the recurrence counter (P2:
+#      the marker is public; only the Actions bot's marked comments count)
+#  17. the dedupe SEARCH pages to an exact match beyond page 1 (P3: search
+#      ranking is not equality-first, so a single-page read files a duplicate)
+#  18. the search asks for a full page (per_page=100) and passes --paginate
 #
 # Case 2 is the #3907 acceptance pin: it FAILS on the old behaviour (a duplicate
 # issue per run) and on the silent-drop behaviour (no comment at all).
@@ -73,12 +78,12 @@ mkdir -p "$STUB_TMP"
 cat > "$BIN/gh" <<'GH_EOF'
 #!/usr/bin/env bash
 # Handles exactly the shapes the helper uses:
-#   gh api "search/issues?q=…&per_page=20"                 (GET search)
+#   gh api "search/issues?q=…&per_page=100" --paginate  (GET search, paged)
 #   gh api "repos/O/R/issues/N/comments?per_page=100&page=P" (GET comments)
 #   gh api "repos/O/R/issues/N/comments" --method POST -f body=…  (comment)
 #   gh api "repos/O/R/issues" --method POST -f …           (create)
 [ "${1:-}" = "api" ] || { echo "GH unexpected: $*" >&2; exit 1; }
-path="${2:-}"; method="GET"
+path="${2:-}"; method="GET"; paginate=0
 shift 2 || true
 fields=()
 while [ $# -gt 0 ]; do
@@ -86,6 +91,7 @@ while [ $# -gt 0 ]; do
     --method) method="$2"; shift 2 ;;
     --input)  shift ;;
     --jq)     shift 2 ;;
+    --paginate) paginate=1; shift ;;
     -f)       fields+=("$2"); shift 2 ;;
     *)        shift ;;
   esac
@@ -96,9 +102,15 @@ DEFAULT_ITEMS_JSON='{"items":[]}'
 echo "GH ${method} ${path}" >> "$STUB_TMP/calls.log"
 case "$path" in
   search/issues*)
-    echo "GH-Q ${path}" >> "$STUB_TMP/calls.log"
+    echo "GH-Q paginate=${paginate} ${path}" >> "$STUB_TMP/calls.log"
     [ "${STUB_SEARCH_FAIL:-0}" = "1" ] && { echo "gh: search failed" >&2; exit 1; }
-    printf '%s' "${STUB_SEARCH_JSON:-$DEFAULT_ITEMS_JSON}" ;;
+    # `gh api --paginate` emits ONE JSON DOCUMENT PER PAGE (the code slurps
+    # them with `jq -rs`). Page 2 is only emitted when --paginate was passed,
+    # so a single-page implementation (the pre-fix `per_page=20`) never sees it.
+    printf '%s\n' "${STUB_SEARCH_JSON:-$DEFAULT_ITEMS_JSON}"
+    if [ "$paginate" = "1" ] && [ -n "${STUB_SEARCH_JSON_P2:-}" ]; then
+      printf '%s\n' "$STUB_SEARCH_JSON_P2"
+    fi ;;
   */comments\?*)
     # Paged occurrence counting: page 2 (if requested) is a distinct fixture.
     page="1"
@@ -139,7 +151,7 @@ reset_case() {
   rm -f "$STUB_TMP/created.txt" "$STUB_TMP/comment.txt"
   unset STUB_SEARCH_JSON STUB_SEARCH_FAIL STUB_CREATE_FAIL STUB_COMMENT_FAIL \
         STUB_COMMENTS_JSON STUB_COMMENTS_JSON_P2 STUB_COMMENTS_JSON_P3 \
-        STUB_COMMENTS_FAIL || true
+        STUB_COMMENTS_FAIL STUB_SEARCH_JSON_P2 || true
   export GH_TOKEN="test-token"
 }
 
@@ -163,14 +175,33 @@ search_json() { # <number> [title] [login] [type]
     "$n" "$t" "$l" "$ty"
 }
 # A page of `n` comments, `with_marker` of which carry the occurrence marker.
+# Marked comments are authored by the Actions bot (as production is); human
+# comments carry a distinct, non-bot author so the author filter is exercised.
 comments_page() { # <n> <with_marker>
   local total="$1" marked="$2" i out="["
   for ((i = 0; i < total; i++)); do
-    if [ "$i" -lt "$marked" ]; then b="🔁 Recurrence #$((i + 1)) <!-- auto-file-occurrence -->"; else b="a human comment"; fi
+    if [ "$i" -lt "$marked" ]; then
+      b="🔁 Recurrence #$((i + 1)) <!-- auto-file-occurrence -->"
+      u='{"login":"github-actions[bot]","type":"Bot"}'
+    else
+      b="a human comment"
+      u='{"login":"someone","type":"User"}'
+    fi
     [ "$i" -gt 0 ] && out+=","
-    out+="{\"body\":\"${b}\"}"
+    out+="{\"body\":\"${b}\",\"user\":${u}}"
   done
   printf '%s]' "$out"
+}
+# A search page of `n` machine-authored WORD-MATCH look-alikes (the title
+# CONTAINS the key but is not equal to it). Used to fill page 1 so an exact
+# match only exists on page 2.
+lookalike_search_page() { # <n>
+  local total="$1" i out=""
+  for ((i = 0; i < total; i++)); do
+    [ "$i" -gt 0 ] && out+=","
+    out+="{\"number\":$((1000 + i)),\"title\":\"${STABLE_TITLE} (superseded ${i})\",\"user\":{\"login\":\"github-actions[bot]\",\"type\":\"Bot\"}}"
+  done
+  printf '{"items":[%s]}' "$out"
 }
 
 echo "auto-file-issue.test.sh — #3907 taxonomy"
@@ -304,6 +335,49 @@ so="$(AUTO_FILE_LIB_ONLY=1 bash -c 'set -uo pipefail; . "$1"; printf "lib-ok"' _
 assert_eq "$rc" "0" "15. AUTO_FILE_LIB_ONLY=1 sources cleanly"
 assert_contains "$so" "lib-ok" "15. sourcing under LIB_ONLY does not run main"
 assert_eq "$(count_calls 'GH ')" "0" "15. sourcing under LIB_ONLY contacts nothing"
+
+# ── 16: an OUTSIDER marker comment cannot inflate the counter ──────────────
+# The marker is NOT secret: the public comments API returns it verbatim on
+# every recurrence comment. A bare `contains($m)` therefore let ANY account
+# inflate the number by posting the marker — one legitimate recurrence plus
+# three outsider markers made the next comment `Recurrence #5` instead of #2,
+# and the recurrence number is the ONE field of #3907 an outsider can corrupt.
+# The count must ignore any author other than the reserved Actions bot.
+reset_case
+export STUB_SEARCH_JSON="$(search_json 42)"
+export STUB_COMMENTS_JSON='[{"body":"🔁 Recurrence #1 <!-- auto-file-occurrence -->","user":{"login":"github-actions[bot]","type":"Bot"}},{"body":"<!-- auto-file-occurrence -->","user":{"login":"attacker","type":"User"}},{"body":"<!-- auto-file-occurrence -->","user":{"login":"attacker","type":"User"}},{"body":"<!-- auto-file-occurrence -->","user":{"login":"renovate[bot]","type":"Bot"}}]'
+run_helper
+assert_eq "$RC" "0" "16. outsider marker comments → exit 0"
+assert_contains "$(commented)" "Recurrence #2" "16. an outsider marker does NOT inflate the counter (1 legit → #2)"
+assert_not_contains "$(commented)" "Recurrence #5" "16. the P2 over-count direction is closed (incl. a foreign bot)"
+
+# ── 17: the dedupe search PAGES to an exact match beyond page 1 ────────────
+# GitHub search ranking is relevance-based, NOT equality-first: a key query can
+# fill page 1 with machine-authored word-match look-alikes and leave the EXACT
+# issue on page 2. A single-page read (the pre-fix `per_page=20`) returns
+# "none" and files a DUPLICATE — the substrate must not be weaker than
+# availability-watchdog.sh, which uses `per_page=100 --paginate`. Page 2 is
+# only emitted by the stub when `--paginate` is passed, so the pre-fix code
+# genuinely fails this case.
+reset_case
+export STUB_SEARCH_JSON="$(lookalike_search_page 100)"
+export STUB_SEARCH_JSON_P2="$(search_json 77)"
+export STUB_COMMENTS_JSON='[]'
+run_helper
+assert_eq "$RC" "0" "17. page-2 exact match → exit 0"
+assert_eq "$(count_calls 'GH POST repos/.*/issues$')" "0" "17. page-2 exact match → NO duplicate issue filed"
+assert_eq "$(count_calls 'GH POST repos/.*/issues/77/comments$')" "1" "17. page-2 exact match → the page-2 issue is commented on"
+assert_contains "$(commented)" "Recurrence #1" "17. page-2 exact match → recurrence recorded on the right issue"
+
+# ── 18: the search requests a FULL page with pagination enabled ─────────────
+# The mechanism behind case 17: the query must ask for 100 per page and pass
+# --paginate, otherwise page 2 is never fetched.
+reset_case
+export STUB_SEARCH_JSON="$(search_json 42)"
+export STUB_COMMENTS_JSON='[]'
+run_helper
+assert_eq "$(count_calls 'GH-Q.*per_page=100')" "1" "18. the dedupe search asks for a full page (per_page=100)"
+assert_eq "$(count_calls 'GH-Q paginate=1')" "1" "18. the dedupe search passes --paginate (page-2 walk is live)"
 
 echo
 if [ "$FAIL" -eq 0 ]; then

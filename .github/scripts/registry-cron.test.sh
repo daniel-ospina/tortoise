@@ -98,6 +98,8 @@
 #  71. a FAILED recurrence comment is never fatal and never duplicates: the run
 #      stays RED, no second issue is filed, and the driver says the record did
 #      not happen (so it cannot claim a comment it did not post)
+#  72. an OUTSIDER marker comment cannot inflate the recurrence counter (P2:
+#      the marker is public; only the Actions bot's marked comments count)
 #
 # Fixtures are simulated; the real driver defers nothing.
 
@@ -1283,7 +1285,7 @@ export STUB_STATUS_BODY="$(status_body false '\"REGISTRY_STREAM_KEY not set\"' n
 export STUB_412=1
 export STUB_GET_BODY='{"kind":"SWEEP_CONFIG_ERROR","issue_number":42}'
 export GH_ISSUE_STATE=open
-export STUB_COMMENTS_JSON='[{"body":"🔁 Recurrence #1 <!-- dr-occurrence -->"},{"body":"a human comment"},{"body":"🔁 Recurrence #2 <!-- dr-occurrence -->"}]'
+export STUB_COMMENTS_JSON='[{"body":"🔁 Recurrence #1 <!-- dr-occurrence -->","user":{"login":"github-actions[bot]","type":"Bot"}},{"body":"a human comment","user":{"login":"someone","type":"User"}},{"body":"🔁 Recurrence #2 <!-- dr-occurrence -->","user":{"login":"github-actions[bot]","type":"Bot"}}]'
 run_driver
 assert_eq "$RC" 1 "69. the repeat is still RED (1)"
 assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "69. no duplicate issue is filed"
@@ -1332,6 +1334,26 @@ assert_eq "$RC" 1 "71. a failed recurrence comment still exits RED (1)"
 assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "71. a failed comment never produces a duplicate issue"
 assert_match "$OUT" "recurrence comment on issue #42 FAILED" "71. the driver does not claim a record it did not write"
 assert_not_match "$OUT" "recorded recurrence #1" "71. no false 'recorded' claim on a failed comment"
+
+# ── 72. an OUTSIDER marker cannot inflate the recurrence counter (P2) ──────
+# The occurrence marker is NOT secret: the public comments API returns it
+# verbatim, so a bare `contains($m)` let ANY account inflate the number by
+# posting the marker. One legitimate bot recurrence plus three outsider
+# markers (a human and a foreign bot) once published `Recurrence #5` instead of
+# #2 — and the recurrence number is the ONE field of #3907 an outsider can
+# corrupt. Only the reserved `github-actions[bot]` login may be counted.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false '\"REGISTRY_STREAM_KEY not set\"' null)"
+export STUB_412=1
+export STUB_GET_BODY='{"kind":"SWEEP_CONFIG_ERROR","issue_number":42}'
+export GH_ISSUE_STATE=open
+export STUB_COMMENTS_JSON='[{"body":"🔁 Recurrence #1 <!-- dr-occurrence -->","user":{"login":"github-actions[bot]","type":"Bot"}},{"body":"<!-- dr-occurrence -->","user":{"login":"attacker","type":"User"}},{"body":"<!-- dr-occurrence -->","user":{"login":"attacker","type":"User"}},{"body":"<!-- dr-occurrence -->","user":{"login":"renovate[bot]","type":"Bot"}}]'
+run_driver
+assert_eq "$RC" 1 "72. the repeat is still RED (1)"
+assert_match "$(cat "$LOG")" "GH POST .*/issues/42/comments .*Recurrence #2" "72. an outsider marker does NOT inflate the counter (1 legit → #2)"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues/42/comments .*Recurrence #5" "72. the P2 over-count direction is closed (incl. a foreign bot)"
 
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"

@@ -267,6 +267,13 @@ gh_comment() { # number body -> curl's status (0 when posted)
 # with the server-side AlertStore, which rewrites it, so a counter kept there
 # would be reset by the other writer.
 OCCURRENCE_MARKER='<!-- dr-occurrence -->'
+# The only author whose marked comment may be counted. The marker is not secret
+# (the public comments API returns it verbatim), so a bare `contains($m)` let ANY
+# third party post the marker and inflate the recurrence number — the one field
+# of #3907 an outsider can corrupt. Filtering on the reserved bot login closes
+# the over-count direction; the count may still under-report on a read failure,
+# which only re-states a lower N (harmless).
+OCCURRENCE_BOT_LOGIN='github-actions[bot]'
 OCCURRENCE_MAX_PAGES=20
 gh_occurrence_count() { # number -> integer (0 when unreadable: under-count, never fabricate)
   local n="${1:-}" page=1 total=0 body cnt len
@@ -274,8 +281,8 @@ gh_occurrence_count() { # number -> integer (0 when unreadable: under-count, nev
   while [ "$page" -le "$OCCURRENCE_MAX_PAGES" ]; do
     body="$(curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
       "https://api.github.com/repos/${REPO}/issues/${n}/comments?per_page=100&page=${page}" 2>/dev/null || true)"
-    cnt="$(printf '%s' "$body" | jq -r --arg m "$OCCURRENCE_MARKER" \
-      '[.[]? | select(((.body // "") | contains($m)))] | length' 2>/dev/null || true)"
+    cnt="$(printf '%s' "$body" | jq -r --arg m "$OCCURRENCE_MARKER" --arg login "$OCCURRENCE_BOT_LOGIN" \
+      '[.[]? | select(((.user.login // "") == $login) and ((.body // "") | contains($m)))] | length' 2>/dev/null || true)"
     len="$(printf '%s' "$body" | jq -r 'if type == "array" then length else -1 end' 2>/dev/null || echo -1)"
     case "$cnt" in ''|*[!0-9]*) cnt=0 ;; esac
     case "$len" in ''|*[!0-9]*) len=-1 ;; esac
