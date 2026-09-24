@@ -2021,13 +2021,11 @@ def _get_kind_expander():
 def _decorate_fallback_hits(results: list[dict], graph) -> list[dict]:
     """Attach promoted epistemic state (D8) to embedded-fallback hits — one
     batch fetch (#1353, E5 #1537). Additive, mirroring SearchResult.to_dict:
-    an absent state adds no key, so a graph with no CORRECTS edges renders
-    byte-identically to today — with ONE deliberate exception: #4889's
-    ``subject_unavailable`` is written precisely when the state is *empty* on a
-    graph that cannot carry ``aboutSubject``, so a producer-less graph is NOT
-    byte-identical (that is the point — the silence is replaced by a reason).
-    Decoration must never break retrieval — a graph failure returns the hits
-    undecorated.
+    a key is added only when its state field is present — except for #4889's
+    ``subject_unavailable``, which is written when the state is *empty* on a
+    graph that cannot carry ``aboutSubject`` (the loud half of a read surface
+    that would otherwise be silently empty). Decoration must never break
+    retrieval — a graph failure returns the hits undecorated.
 
     #4889: the degraded fallback is a Point-only surface that advertises the
     same promoted-state fields as the primary path, so it owes the same
