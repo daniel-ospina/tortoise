@@ -2791,9 +2791,10 @@ def _hygiene_report(reaped, cleared, left, before) -> dict:
     """Build the session-end hygiene report the CI orphan gate consumes (#4740).
 
     ``cleared`` is the sweep's OWN outcome (see :func:`sweep_until_cleared`),
-    threaded through verbatim and never synthesised here. The gate keys the
-    effect of ``cleared: false`` on the measured count: at a measured zero it
-    warns and passes (nothing remains to bound), and above zero it reds.
+    threaded through verbatim and never synthesised here. ``cleared`` is a
+    diagnostic flag that does not decide the gate's verdict at any measured
+    count: at every count it reports whether the sweep's time budget sufficed
+    — a function of runner load — not the residue.
     Keeping the construction out of ``_sweep`` also leaves no local report
     literal there for a dead branch or a subscript store to bypass (the
     round-5 pin's hole).
@@ -2811,8 +2812,9 @@ def sweep_until_cleared(run_one, deadline, clock=time.monotonic):
     """Drive discover->reap iterations until the backlog clears or the
     deadline passes; return ``(total_acted, cleared)``.
 
-    ``cleared`` is the sweep's own claim that it finished its work — the
-    field the CI orphan gate binds to. It is True ONLY when ALL hold:
+    ``cleared`` is the sweep's own budget/stop-condition claim, carried into
+    the report for diagnosis — not a field the CI orphan gate decides its
+    verdict on. It is True ONLY when ALL hold:
 
     * the loop stopped on an iteration that acted on NOTHING (the backlog is
       empty — the intended stop), not on the deadline;
@@ -2871,8 +2873,8 @@ def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic) -> di
     into the report — is behaviourally testable (`tests/test_reaper.py` drives
     this function directly). `probe` is called twice: the first reading is
     `before`, the second is `left`; `cleared` is threaded verbatim from
-    `sweep_until_cleared`, because the gate keys the effect of `cleared: false`
-    on the measured count — a warning and pass at zero, a red above zero.
+    `sweep_until_cleared`, because `cleared` is a diagnostic flag that does
+    not decide the gate's verdict at any measured count.
     """
     before = probe()
     reaped, cleared = sweep_until_cleared(run_one, deadline, clock)
