@@ -2773,7 +2773,7 @@ def ingest_code_fingerprint(paths: tuple[Path, ...] | None = None) -> str:
     checkout. ``paths`` is injectable for hermetic tests (fake files). An
     unreadable file hashes as empty content (never aborts a run — a
     missing module would fail the ingest itself long before). P1 (#2607-
-    review class): the two modules' IMPORT CLOSURE (chain_enforcer,
+    review class): the three modules' IMPORT CLOSURE (chain_enforcer,
     kind_classifier, commit_ops, model_adapters, embeddings …) also shapes
     extraction output but is not in ``paths`` — so the repo ``git_sha``
     rides as a second dimension: ANY repo code change (in or out of the

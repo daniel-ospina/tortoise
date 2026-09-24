@@ -481,11 +481,24 @@ def _item_content(section: str, item: Mapping[str, Any]) -> str:
     return str(item.get("content")).strip()
 
 
+def _item_text_variants(section: str, item: Mapping[str, Any]) -> set[str]:
+    """Normalized texts the embedder can key OR mint an endpoint from.
+
+    The UNION of the candidate identity (``name or content``) and the content:
+    `execute_embed` *resolves* an endpoint on content but its #2552 mint pre-pass
+    materializes whatever text the operator wrote — so a point carrying both keys
+    can be re-materialised from either. Subtracting ``surviving_texts`` keeps the
+    broader set safe (a survivor providing either form shields the operator).
+    """
+    return (_norm_variants(_item_text(section, item))
+            | _norm_variants(_item_content(section, item)))
+
+
 def _normalized_texts(embed_list: object) -> set[str]:
-    """Normalized CONTENT of every point/event (the operator-endpoint surface)."""
+    """Normalized endpoint-surface texts of every point/event."""
     out: set[str] = set()
     for section, _index, item in _iter_items(embed_list):
-        out |= _norm_variants(_item_content(section, item))
+        out |= _item_text_variants(section, item)
     return out
 
 
@@ -521,7 +534,7 @@ def _operator_endpoint_text(op: Mapping[str, Any]) -> set[str]:
         v = op.get(key)
         if v and str(v).strip():
             out |= _norm_variants(v)
-    if str(op.get("op_type") or "").upper() == "MITIGATES":
+    if str(op.get("op_type", "")).upper() == "MITIGATES":
         target = op.get("target") or op.get("target_edge")
         if isinstance(target, dict):
             for key in ("src", "dst"):
@@ -710,7 +723,7 @@ def apply_vet(embed_list: Mapping[str, Any],
                 if name:
                     removed_entity_names.add(name)
             else:
-                removed_context |= _norm_variants(_item_content(section, item))
+                removed_context |= _item_text_variants(section, item)
             warnings.append(
                 f"vet: discarded {section} "
                 f"{_item_text(section, item)[:80]!r}")
