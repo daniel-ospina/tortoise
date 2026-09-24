@@ -40,7 +40,7 @@ name: ai-review-gate
 # cannot be satisfied by editing the PR body.
 #
 # Fail closed — scoped to the DIFF-MATCH arm: if the live diff hash cannot be
-# computed (API blip, missing gh/openssl, empty diff) a STALE-SHA `diff=`
+# computed (API blip, missing gh/openssl/python3, empty diff) a STALE-SHA `diff=`
 # marker is NOT accepted via rule (b) — only the sha-match path remains
 # usable. A network failure never becomes a pass. Explicitly: a marker with
 # diff= must never be accepted VIA THE DIFF-MATCH PATH when BOTH live diff
@@ -95,8 +95,8 @@ name: ai-review-gate
 # saw. It verifies only that the marker is signed and that the signed `diff=`
 # equals this PR's diff at check time. The binding between a recorded sha and
 # the diff actually reviewed is enforced by record-review.sh's stale-sha guard,
-# not here. Once the producer half ships (agent-infra PR #767), its
-# `--force-stale` override and its head-fetch fail-open arm will compute `diff=`
+# not here. The producer half (agent-infra PR #767) has SHIPPED, so its
+# `--force-stale` override and its head-fetch fail-open arm compute `diff=`
 # from the PR's CURRENT diff while keeping the caller-supplied stale sha, so a
 # marker minted that way IS accepted by rule (b) even though the reviewed
 # artifact cannot be shown unchanged. Close that

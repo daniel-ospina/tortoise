@@ -36,11 +36,14 @@ green.
   regex that omits the optional segment rejects every correctly-signed
   post-#2982 marker before the HMAC check is ever reached (#3076).
 
-  > **Producer dependency.** The `diff=` form ships in the producer half of
-  > #2982 (`record-review.sh` in agent-infra, PR #767). Until that producer is
-  > deployed, `record-review.sh` emits the legacy sha-only form and only the
-  > sha-match path is exercised in production — the diff-match path is
-  > covered by the gate harness below.
+  > **Producer status.** The `diff=` form ships in the producer half of #2982
+  > (`record-review.sh` in agent-infra, PR #767), which **is deployed** (merged
+  > 2026-09-23; the installed `~/.pi/agent/scripts/record-review.sh` is
+  > byte-identical to agent-infra `main` and emits `diff=<raw sha256>`). The
+  > **raw** digest is therefore the live stale-sha carry-forward arm; the
+  > **normalized** digest stays inert until the #1362 producer half
+  > (agent-infra#1431) lands *and* the farm refreshes
+  > `scripts/lib/diff-normalize.py` — see the binary carve-out below.
 
 - The `ai-review-gate` workflow (`.github/workflows/ai-review-gate.yml`,
   `pull_request_target`) recomputes the HMAC signature with the
@@ -70,12 +73,12 @@ so a green PR could never reach a terminal mergeable state. Keying evidence to
 the diff lets the verdict carry forward across a merge-only update. A change
 that actually changes the reviewed diff still invalidates it.
 
-The producer half (agent-infra PR #767, **not yet deployed**) also carries a
-verdict forward itself: asked to record a now-stale sha whose diff is unchanged
-from what was recorded, it re-records against the current head, and it refuses
-a stale sha whose diff changed (exit 3). Until it ships, the deployed
-`record-review.sh` still refuses *any* stale sha and emits no `diff=` — see the
-producer-dependency note above.
+The producer half (agent-infra PR #767, **deployed**) also carries a verdict
+forward itself: asked to record a now-stale sha whose diff is unchanged from
+what was recorded, it re-records against the current head, and it refuses a
+stale sha whose diff changed (exit 3). It emits `diff=<raw sha256>` today; the
+normalized digest appears only once agent-infra#1431 lands and the farm
+refreshes `scripts/lib/diff-normalize.py` — see the producer-status note above.
 
 Both the producer and the gate hash the bytes returned by the REST API
 (`Accept: application/vnd.github.v3.diff`) — never a local `git diff`, whose
@@ -158,8 +161,8 @@ the marker is signed and that the signed `diff=` equals this PR's diff at check
 time. The binding between a recorded sha and the diff actually reviewed is
 enforced by `record-review.sh`'s stale-sha guard, not by the gate.
 
-That matters once the producer half lands (agent-infra PR #767). Its
-`--force-stale` (and its head-fetch fail-open arm) will compute `diff=` from the
+That matters with the producer half deployed (agent-infra PR #767). Its
+`--force-stale` (and its head-fetch fail-open arm) computes `diff=` from the
 PR's **current** diff while keeping the caller-supplied stale sha, so a marker
 minted that way IS accepted here even though the reviewed artifact cannot be
 shown unchanged. Closing that trust gap is producer-side work

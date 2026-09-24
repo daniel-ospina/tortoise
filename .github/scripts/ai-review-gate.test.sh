@@ -56,6 +56,11 @@
 #       (the predicate is HUNK PRESENCE, not binary-marker presence), the
 #       legacy raw-hash arm still accepts, and everything still fails closed
 #       when the diff cannot be fetched
+#   (q2) multi-entry ENTRY-SCOPING: two distinct binaries sharing a diff with a
+#       hunk-bearing entry keep DISTINCT digests (binary before AND after the
+#       hunk), and the multi-entry normalized bytes are pinned — a normalizer
+#       that shares hunk state across entry boundaries, or drops an entry on
+#       flush, fails HERE (every `index KEPT` vector above is single-entry)
 #   plus direct vector tests of the extracted `normalize_review_diff`
 #       function against the #1362 spec (ENTRY-SCOPED index-line drop —
 #       dropped only when the entry carries a hunk, kept verbatim otherwise —
@@ -181,6 +186,39 @@ if [ "$nl_missing" = "1" ] && [ "$nl_present" = "2" ]; then
 else
     bad "normalization changed the final-newline state (missing -> '$nl_missing' bytes, present -> '$nl_present' bytes)"
 fi
+
+# ── (q2) multi-entry entry-scoping (the #1362 amendment, pinned) ──────────
+# Every `index KEPT` vector above is a SINGLE-entry fixture, so a normalizer
+# whose hunk state leaks ACROSS entry boundaries — a whole-diff `has_hunk`, or
+# an entry reset that drops the preceding entry — satisfies them all. With a
+# hunk-bearing entry sharing the diff, such a normalizer makes two DISTINCT
+# binaries normalize IDENTICALLY: exactly the unreviewed-binary fail-open this
+# amendment closes. These pairs differ ONLY in a binary entry's `index` line,
+# in BOTH orders, and the multi-entry normalized BYTES are pinned verbatim.
+HUNK_ENTRY=$'diff --git a/t.txt b/t.txt\nindex aaaaaaa..bbbbbbb 100644\n--- a/t.txt\n+++ b/t.txt\n@@ -1,3 +1,4 @@\n ctx\n+added\n ctx2'
+BIN_V1_ENTRY=$'diff --git a/f.bin b/f.bin\nindex 1111111..2222222 100644\nBinary files a/f.bin and b/f.bin differ'
+BIN_V2_ENTRY=$'diff --git a/f.bin b/f.bin\nindex 3333333..4444444 100644\nBinary files a/f.bin and b/f.bin differ'
+# binary BEFORE hunk
+printf '%s\n%s\n' "$BIN_V1_ENTRY" "$HUNK_ENTRY" > "$T/multi-bh-v1.diff"
+printf '%s\n%s\n' "$BIN_V2_ENTRY" "$HUNK_ENTRY" > "$T/multi-bh-v2.diff"
+# hunk BEFORE binary
+printf '%s\n%s\n' "$HUNK_ENTRY" "$BIN_V1_ENTRY" > "$T/multi-hb-v1.diff"
+printf '%s\n%s\n' "$HUNK_ENTRY" "$BIN_V2_ENTRY" > "$T/multi-hb-v2.diff"
+for _order in bh hb; do
+    _m1="$(normalize_review_diff < "$T/multi-${_order}-v1.diff" | openssl dgst -sha256 | awk '{print $NF}')"
+    _m2="$(normalize_review_diff < "$T/multi-${_order}-v2.diff" | openssl dgst -sha256 | awk '{print $NF}')"
+    if [ -n "$_m1" ] && [ "$_m1" != "$_m2" ]; then
+        ok "(q2) distinct binaries keep DISTINCT digests in a multi-entry diff ($_order)"
+    else
+        bad "(q2) entry-scoping lost: distinct binaries normalized IDENTICALLY in a multi-entry diff ($_order) — $_m1"
+    fi
+done
+# Pin the multi-entry bytes. A whole-diff `has_hunk` drops the binary entry's
+# kept `index` line; resetting the entry buffer BEFORE `flush` drops the binary
+# ENTRY entirely — both would pass every single-entry assertion above, and both
+# turn this vector red.
+check_norm "$(printf '%s\n%s\n' "$BIN_V1_ENTRY" "$HUNK_ENTRY")" \
+           $'diff --git a/f.bin b/f.bin\nindex 1111111..2222222 100644\nBinary files a/f.bin and b/f.bin differ\ndiff --git a/t.txt b/t.txt\n--- a/t.txt\n+++ b/t.txt\n@@ -0,3 +0,4 @@\n ctx\n+added\n ctx2'
 
 # ── Structural tripwires ─────────────────────────────────────────────────
 # These invariants live in the YAML AROUND the extracted run block and so are
