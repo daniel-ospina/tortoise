@@ -3100,6 +3100,10 @@ _UNREADABLE = frozenset({"unreadable"})
 # whitespace but keeps punctuation, so "team." and "team" would otherwise read
 # as different tokens and the substitution test would fire on a full stop.
 _TOKEN_EDGE_PUNCT = ".,;:!?\"'`()[]{}*_"
+# Clitic apostrophes, normalised to the ASCII form before tokenising.  LLM
+# output routinely spells "don't" with U+2019, and a negator the marker list
+# cannot see is a negator the boundary fails to guard.
+_APOSTROPHES = str.maketrans({"\u2019": "'", "\u02bc": "'", "\uff07": "'"})
 # Non-Latin scripts, by the codepoint block that identifies them.
 _SCRIPT_BLOCKS = (
     ("greek", 0x0370, 0x03FF),
@@ -3131,8 +3135,12 @@ def _guard_token_seq(content: str) -> list[str]:
     check must not use it, because set iteration order is by hash and discards
     the positions the comparison is about.
     """
-    return [t for t in (_s.strip(_TOKEN_EDGE_PUNCT)
-                        for _s in _norm(content).split()) if t]
+    text = _norm(content).translate(_APOSTROPHES)
+    # Internal apostrophes go too, so that one claim's two spellings are one
+    # token set: "don't" and "dont" both negate, and "it's" and "its" are the
+    # same possessive to a comparison that cannot conjugate a verb.
+    return [t.replace("'", "")
+            for t in (_s.strip(_TOKEN_EDGE_PUNCT) for _s in text.split()) if t]
 
 
 def _guard_tokens(content: str) -> set[str]:
@@ -3140,9 +3148,9 @@ def _guard_tokens(content: str) -> set[str]:
     return set(_guard_token_seq(content))
 
 
-def _value_tokens(content: str) -> frozenset[str]:
-    """Number-shaped tokens in one normalised form: number words map to their
-    value ("six" → "6"), and clock forms are removed entirely.
+def _value_token_seq(content: str) -> tuple[str, ...]:
+    """Number-shaped tokens in one normalised form, IN ORDER: number words map
+    to their value ("six" → "6"), and clock forms are removed entirely.
 
     Clock forms are removed because ``_value_signature`` compares them in its
     own normalised encoding, where "6pm", "six pm" and "6:00 pm" are one
@@ -3150,21 +3158,27 @@ def _value_tokens(content: str) -> frozenset[str]:
     value change.  The signature alone is not sufficient either: it returns
     early once both sides carry one, and so misses a differing number sitting
     BESIDE an equal clock value ("3 crates at 9am" vs "4 crates at 9am").
+
+    Ordered, not a set: a claim's numbers are bound to the nouns beside them,
+    and "we shipped 3 crates to 2 stores" vs "we shipped 2 crates to 3
+    stores" carries the same two numbers in a different pairing.  A set reads
+    that as one claim, and the in-capture seam would DELETE the rival.
     """
-    out: set[str] = set()
-    for t in _guard_tokens(_CLOCK_RE.sub(" ", _norm(content))):
+    out: list[str] = []
+    for t in _guard_token_seq(_CLOCK_RE.sub(" ", _norm(content))):
         if any(c.isdigit() for c in t):
-            out.add(t)
+            out.append(t)
         else:
             v = _num_word_value(t)
             if v is not None:
-                out.add(str(v))
-    return frozenset(out)
+                out.append(str(v))
+    return tuple(out)
 
 
 def _negation_markers(content: str) -> frozenset[str]:
-    """Negation markers, including the clitic form no bare-word list entry
-    matches ('dont' is in the set, "don't" is not, and both negate)."""
+    """Negation markers.  ``_guard_token_seq`` has already stripped the
+    apostrophe, so 'dont' — a list entry — is what "don't" becomes.
+    """
     return frozenset(t for t in _guard_tokens(content)
                      if t in _NEGATION_MARKERS or t.endswith("n't"))
 
@@ -3192,7 +3206,10 @@ def _content_tokens(content: str) -> set[str]:
     dimension, and "six pm"/"6pm" must not read as a content substitution.
     Date words go with them — "shipped in march" vs "shipped in april" is a
     DATE difference, and counting the month as substituted content as well
-    would refuse the value update the date dimension exists to permit.
+    would refuse the value update the date dimension exists to permit.  The
+    cost is that a month used as a proper name ("june is our contact" vs
+    "april is our contact") reaches no dimension that could veto the update;
+    telling a month from a name there needs a model, so it is left to one.
 
     Entity-bearing pronouns and possessives are KEPT (``_CONTENT_STOPWORDS``
     is the frame set minus them): a change of subject is a change of entity.
@@ -3267,14 +3284,30 @@ def _identity_differences(a: str, b: str) -> frozenset[str]:
         out.add("negation")
     if con_a != con_b:
         out.add("condition")
-    if (neg_a or neg_b or con_a or con_b) and _marker_scope(a) != _marker_scope(b):
-        out.add("scope")
     script_a, script_b = _scripts(a), _scripts(b)
     if script_a and script_b and script_a != script_b:
         out.add("language")
     content_a, content_b = _content_tokens(a), _content_tokens(b)
-    if (content_a - content_b) and (content_b - content_a):
+    only_a, only_b = content_a - content_b, content_b - content_a
+    if only_a and only_b:
         out.add("substituted_content")
+    elif (only_a | only_b) & _ENTITY_PRONOUNS:
+        # A pronoun or possessive on ONE side re-subjects the claim: "the
+        # manager approved the plan" and "his manager approved the plan" are
+        # not one claim in two spellings.  Every other one-sided token is the
+        # documented broadening case ("the team meets weekly in main office"
+        # ← "the team meets weekly"), which must stay foldable.
+        out.add("substituted_content")
+    # Negation and condition are SCOPE-bearing, and a set cannot express that:
+    # "the cache is not the problem, the lock is" and "the cache is the
+    # problem, the lock is not" carry one marker and one multiset in two
+    # attachments.  Restricted to marker-bearing pairs, because a legitimate
+    # paraphrase may reorder freely — "backpressure control is missing from
+    # the ingest queue" and "the ingest queue is missing backpressure
+    # control" are one claim, and #4652 pins that they fold.
+    if (neg_a or neg_b or con_a or con_b) \
+            and _marker_scope(a) != _marker_scope(b):
+        out.add("scope")
     return frozenset(out)
 
 
@@ -3302,7 +3335,7 @@ def _boundary(a: str, b: str) -> tuple[str | None, frozenset[str]]:
         # a differing number ANYWHERE in the claim, including the one that sits
         # beside an equal signature — which comparing signatures alone misses,
         # because it returns early once both sides carry one.
-        if sig_a != sig_b or _value_tokens(a) != _value_tokens(b):
+        if sig_a != sig_b or _value_token_seq(a) != _value_token_seq(b):
             dimension = "number"
         elif _date_tokens(a) != _date_tokens(b):
             dimension = "date"

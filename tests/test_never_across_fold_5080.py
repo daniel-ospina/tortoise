@@ -65,6 +65,17 @@ NEVER_ACROSS = [
     ("he won the race", "she won the race", "substituted_content"),
     ("my manager approved the plan",
      "your manager approved the plan", "substituted_content"),
+    # A re-subjection carried on ONE side only: a pronoun or possessive that
+    # appears in just one claim changes what the claim is about, even though
+    # every other one-sided token is the documented broadening case.
+    ("the manager approved the plan",
+     "his manager approved the plan", "substituted_content"),
+    ("the plan is approved", "our plan is approved", "substituted_content"),
+    # A pair of numbers is BOUND to the nouns beside them: the same two
+    # numbers in a different pairing is not the same claim.
+    ("we shipped 3 crates to 2 stores",
+     "we shipped 2 crates to 3 stores", "number"),
+    ("we have 2 cats and 3 dogs", "we have 3 cats and 2 dogs", "number"),
 ]
 
 # Pairs differing in a VALUE dimension AND an identity dimension at once.  The
@@ -139,6 +150,19 @@ class TestDistinguishingDifference:
         assert v2.distinguishing_difference(
             "i don't like it", "i like it") == "negation"
 
+    @pytest.mark.parametrize("apostrophe", ["\u2019", "\u02bc", "\uff07"])
+    def test_a_clitic_in_any_apostrophe_spelling_negates(self, apostrophe):
+        """LLM output routinely spells the clitic with U+2019; a negator the
+        marker list cannot see is a negator the boundary fails to guard."""
+        assert v2.distinguishing_difference(
+            f"i don{apostrophe}t like it", "i like it") == "negation"
+        assert v2.distinguishing_difference(
+            f"the build isn{apostrophe}t green",
+            "the build is green") == "negation"
+        # ... and the spelling itself is still not a difference.
+        assert v2.distinguishing_difference(
+            f"i don{apostrophe}t like it", "i dont like it") is None
+
     def test_a_notation_change_is_not_a_value_difference(self):
         """'six' and '6' are one value in two spellings."""
         assert v2.distinguishing_difference("gym at six", "gym at 6") is None
@@ -149,6 +173,61 @@ class TestDistinguishingDifference:
         assert v2.distinguishing_difference(
             "we ship the web server first.", "we ship the web server first"
         ) is None
+
+    def test_a_latin_difference_is_decided_by_script_not_by_content(self):
+        """A script change is the one language difference decidable without a
+        model; a same-script language difference is refused as substituted
+        content instead, which is why the `language` label is not asserted
+        for a Latin-vs-Latin pair."""
+        a, b = "the final result is correct", "le r\u00e9sultat final est correct"
+        assert v2.distinguishing_difference(a, b) == "substituted_content"
+        assert not v2.fold_allowed(a, b)
+
+    def test_a_one_sided_detail_is_still_a_broadening(self):
+        """The allowance the boundary was built with: a token on ONE side that
+        carries no entity is a claim broadened, not a rival claim.
+
+        Pinned because the two rules above both tighten it — a rule that
+        refused every one-sided token would refuse every real paraphrase.
+        """
+        assert v2.fold_allowed("the team meets weekly in main office",
+                               "the team meets weekly")
+        assert v2.fold_allowed("gym at 6pm", "workout at the gym at six pm")
+
+    def test_a_role_inversion_is_a_known_limit(self):
+        """Documented residual, pinned so it cannot go silent.
+
+        A marker-free pair that inverts a role carries one multiset and two
+        meanings, and a token-level predicate cannot see the inversion.  The
+        obvious fix — refuse every pair whose content order differs — is
+        WRONG: a legitimate paraphrase reorders freely and #4652 pins that
+        "backpressure control is missing from the ingest queue" folds into
+        "the ingest queue is missing backpressure control", which is the same
+        multiset in a different order.  Separating a reordering from a role
+        inversion needs syntax, so it is left to a model (filed as #5131).
+        """
+        assert v2.fold_allowed("the cat chased the dog",
+                               "the dog chased the cat")
+        # ... and the reason the shape above cannot be tightened: this pair is
+        # the same multiset in a different order and MUST fold (#4652).
+        assert v2.fold_allowed(
+            "backpressure control is missing from the ingest queue",
+            "the ingest queue is missing backpressure control")
+
+    def test_a_month_used_as_a_name_is_a_known_limit(self):
+        """Documented residual, pinned so it cannot go silent.
+
+        A month name is dropped from the content skeleton so that a real date
+        change stays a supersedable value change; the cost is that a month
+        used as a proper name reaches no dimension that could veto the
+        update.  Separating the two needs a model, so it is left to one.
+        """
+        assert v2.distinguishing_difference(
+            "june is our contact", "april is our contact") == "date"
+        assert not v2.fold_allowed("june is our contact",
+                                   "april is our contact")
+        assert v2.supersede_allowed("june is our contact",
+                                    "april is our contact")
 
     def test_a_value_difference_does_not_mask_an_identity_one(self):
         """A pair differing in a number AND in its predicate is a rival claim.
