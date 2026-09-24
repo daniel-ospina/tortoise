@@ -389,6 +389,47 @@ class TestRenderElementInventory:
         for name in ("free", "solo", "pro", "team"):
             assert f"'{name}'" in fn or f'"{name}"' in fn
 
+    def test_render_pricing_has_no_undefined_name_path(self):
+        """#4815: `names` and `labels` are separate hand-maintained lists, so a
+        tier in one but not the other used to print the literal string
+        "undefined" in customer copy — and an empty metered set dangled the
+        " — applies to " separator."""
+        fn = _render_pricing_fn(PRODUCT_HTML.read_text(encoding="utf-8"))
+
+        # Exactly one name resolver, and it carries the fallback...
+        assert "const displayName = (n) => labels[n] ||" in fn, (
+            "renderPricing() must resolve display names through one helper "
+            "with a fallback")
+        # ...so no render site indexes `labels` bare (no fallback → undefined).
+        resolver = "(n) => labels[n] ||"
+        assert "labels[" not in fn.replace(resolver, "", 1), (
+            "a bare `labels[...]` lookup renders `undefined` when the tier is "
+            "missing from the map — every use must go through displayName()")
+        # The sentence must not render its separator with nothing after it.
+        assert "overageTiers.length" in fn, (
+            "the overage line must be skipped (not left dangling) when no "
+            "tier is metered")
+
+    def test_dashboard_plan_grid_discloses_overage(self):
+        """#4815: `planOptions()` computed an `overage` flag and the plan
+        grids rendered nothing, so a metered tier was invisible on the card
+        the user upgrades from — the card Solo is bought on. The string must
+        come from pricing.json's own `display.overage_line`, never a second
+        hardcoded copy of the price."""
+        js = DASHBOARD_PRICING_JS.read_text(encoding="utf-8")
+        main = (REPO_ROOT / "website" / "apps" / "dashboard" / "src"
+                / "main.jsx").read_text(encoding="utf-8")
+
+        assert "overageLine: t.overage" in js, (
+            "planOptions() must expose the disclosure only for a metered tier")
+        assert "pricing.display?.overage_line" in js, (
+            "the disclosure must be pricing.json's own display.overage_line")
+        assert "{p.overageLine && (" in main, (
+            "the plan grid must render the disclosure when the flag is set")
+        assert "per additional 10k" not in main, (
+            "the overage price string belongs in pricing.json, not re-typed "
+            "in the dashboard")
+
     def test_set_billing_references_toggle_buttons(self):
         html = PRODUCT_HTML.read_text(encoding="utf-8")
         fn = _function_refs(html, "setBilling")

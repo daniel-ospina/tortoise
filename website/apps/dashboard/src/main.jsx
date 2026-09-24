@@ -9862,7 +9862,7 @@ function claimIntentInFlight() {
                   </div>
                   <p className="dim small" style={{ marginTop: 6 }}>
                     {Math.round(((team.write_ops_used ?? 0) / team.write_ops_limit) * 100)}% of monthly write ops
-                    {team.overage_eligible && team.overage_cost_usd ? ` · overage after limit at $${team.overage_cost_usd}/10k ops` : ''}
+                    {team.overage_eligible && team.overage_cost_usd ? ` · overage so far this period: $${team.overage_cost_usd.toFixed(2)}` : ''}
                   </p>
                 </div>
               )}
@@ -9905,6 +9905,11 @@ function claimIntentInFlight() {
                     <ul className="plan-limits">
                       {p.limits.map((l) => <li key={l}>{l}</li>)}
                     </ul>
+                    {/* #4815: metered-tier disclosure on the upgrade card (solo was the
+                        first tier where omitting it could mislead a buyer). */}
+                    {p.overageLine && (
+                      <p className="dim small" style={{ marginTop: 6 }}>{p.overageLine}</p>
+                    )}
                     {current ? (
                       <button className="ghost" disabled title="You're on this plan">Current plan</button>
                     ) : canManageSubscription ? (
