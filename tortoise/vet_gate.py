@@ -605,8 +605,8 @@ def removal_pool(before: object, after: object) -> dict:
     does not resolve an endpoint on it. A present ENTITY's name does, for a
     different reason — the embedder drops an entity-named endpoint rather than
     minting a Point for it, so pruning would only mis-attribute the drop. That
-    shield is limited to names the mint guard can actually match, i.e. names no
-    longer than :data:`_MAX_CONTENT` (see :func:`apply_vet`).
+    shield covers only the names the mint's guard can match — see
+    :func:`apply_vet` for the exact criterion.
     """
     before_entities = _entity_map(before)
     after_entities = _entity_map(after)
