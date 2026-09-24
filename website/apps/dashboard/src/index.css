@@ -20,6 +20,9 @@
   --accent-hover: #0891b2;
   --green: #4ade80;
   --red: #f87171;
+  /* #4331: usage-warning amber — the same #fbbf24 the keys Expires cell
+     uses; a named token so the node usage bar (>=80%) has one source. */
+  --amber: #fbbf24;
   --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
 }
 
