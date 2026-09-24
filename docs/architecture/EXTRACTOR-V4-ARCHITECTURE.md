@@ -48,6 +48,10 @@ Production graph: **~25,000 quota nodes in 4 active days** (~27 per emitting ses
 
 ## 2. Three tiers — and where each one lives
 
+> **Numbering note:** the three tiers are described in the prose below, not as numbered
+> headings, so this section's first numbered subsection is **§2.4** — the deliberate
+> "fourth layer". The gap is intentional; §2.1–§2.3 have no headings.
+
 > **⚠️ Plus a fourth, proposed 2026-09-23 — the verbatim raw fact. See §2.4.**
 
 **The architecture has three tiers with different cost/quality trade-offs. Earlier drafts conflated the first two, and named the third wrongly.**
@@ -323,7 +327,9 @@ S6  COMMIT     create entities + connections + metadata/lifecycle
 | Version | `contentHash` — identifies a **version** of that identity |
 | Raw content | **append-only** — a differing hash on re-fetch is a **new version, never an edit** |
 | Extraction | **version-scoped** — the version read is recorded on the extraction link |
-| Version change | **closes** the previous interval and **adds a supersession link** — never an overwrite |
+| Version change | appends a **journal record** that **closes** the current version's window and opens the new one — never an overwrite |
+
+**⭐ One node per `url` — the version history lives in the journal, and what is superseded is the FACTS.** `:Source` MERGEs on `url`, so exactly one node per source carries the **current** version; a version change creates no second node and rewrites no older one. No Source→Source supersession edge exists or is needed: successor facts attach to the standing `:Source` (`extractedFrom` is keyed by `url`), and the earlier facts are replaced through the ordinary `CORRECTS` mechanism. **The source is the identity; the entities are the belief.**
 
 **⭐ The policy is B — mark stale now, supersede on re-inference (owner).** A re-fetched source's entities are **marked stale immediately** and **superseded only when re-inference produces their successors**. **Not A (immediate supersession)**: A withdraws the belief *before* producing its successor, so between the source changing and re-inference running the graph asserts **nothing** about a subject it previously had a position on — strictly worse than a stale-but-present belief. **`stale ≠ wrong`:** supersession is **additive**, never a delete.
 
@@ -397,7 +403,7 @@ This is v2's S2, with priors in hand. Still proposes only; decides nothing.
 #### Level 1 — per-candidate (many, cheap, evaluated in parallel)
 1. **Adversarial:** is this actually an entity, or a reference? → the `PR #465` / `the X` class (**62.3% of Objects**)
 2. **Atomicity:** is this ONE claim, or several fused together? *(Atomicity is a property of the item — this is where it belongs, not on the narrative.)*
-3. **Worth keeping — judged against THE PACK (§1026's `valueGate`).** Not a generic value judgment: **is this durable, per the pack's own declaration?**
+3. **Worth keeping — judged against THE PACK (`#1026`'s `valueGate`).** Not a generic value judgment: **is this durable, per the pack's own declaration?**
 
 > **This is where the pack stops being prose.** `packs/dev/manifest.yaml` already declares `memory_granularity` — *"Durable: problem-family reasoning … Ephemeral: issue/PR numbers, CI status, test counts, commit hashes, tool workarounds, sprint mechanics."* Today that string is **rendered into the S1 prompt and not enforced** (`_granularity_text()`). **S2.2 is the step where the declaration becomes a gate** — the missing `valueGate` slot of `#1026`, realised as an adversarial question. See `#4899`.
 

@@ -509,7 +509,7 @@ While checking D10, a separate defect surfaced and it may be the more consequent
 
 The owner raised the gap the D10 pass left open: *"shouldn't we have some form of version tracking for sources? at least to know if they changed and we might need to re-infer the Entities and check they're not superseded in a new version of a doc."* The answer is **yes**, and the model is now stated in `ONTOLOGY.md` §4.6 (`v3.15`). This section records **why it costs what it costs** — a storage question, and therefore this section's.
 
-**The requirement was already half-stated.** `§4.6` already defined `contentHash` as *"idempotency anchor — skip re-extraction if unchanged"* and already listed `document` under `sourceKind`. The ontology stated the requirement and **the model never completed it**. This change **populates declared slots** (`validFrom`/`validTo`/`expiredAt` were declared and never written) rather than adding new ones.
+**The requirement was already half-stated.** The ontology's `§4.6` already defined `contentHash` as *"idempotency anchor — skip re-extraction if unchanged"* and already listed `document` under `sourceKind`. The ontology stated the requirement and **the model never completed it** — `ONTOLOGY.md` `v3.15` now states it as a **version anchor**. This change **populates declared slots** (`validFrom`/`validTo`/`expiredAt` were declared and never written) rather than adding new ones.
 
 #### The model, in five rules
 
@@ -519,16 +519,20 @@ The owner raised the gap the D10 pass left open: *"shouldn't we have some form o
 | Version | `contentHash` — identifies a **version** of that identity |
 | Raw content | **append-only** — a differing hash on re-fetch is a **new version, never an edit** |
 | Extraction | **version-scoped** — *"are these entities current?"* compares the **recorded** version against the **current** version |
-| Version change | **closes** the previous interval and **adds a supersession link** — never an overwrite |
+| Version change | appends a **journal record** that **closes** the current version's window and opens the new one — never an overwrite |
 
-**And one rule that is a write-time obligation, not a later repair: interval-closing is part of the write.** An unclosed `validTo` reads as *"still true"* indefinitely — the field names this as **the #1 production bug** in temporal knowledge graphs, and it is exactly what T6 above produces today.
+**⭐ One node per `url`, and the version history lives in the journal.** `:Source` MERGEs on `url`, so exactly one node exists per source and it carries the **current** version. A version change does not create a second node and does not rewrite an older one — there is no older node to rewrite. The prior version's window is a **journal fact**, recoverable by replay (`derived = replay(journal)`, §3), the same place every other append-only record lives.
+
+**⭐ What is superseded is the FACTS, not the source.** No Source→Source supersession edge exists or is needed. Successor facts attach to the standing `:Source` (`extractedFrom` is keyed by `url`, which a version change does not move), and the earlier facts are replaced through the ordinary `CORRECTS` mechanism. **The source is the identity; the entities are the belief.**
+
+**And one rule that is a write-time obligation, not a later repair: closing the interval is part of the write.** An unclosed `validTo` reads as *"still true"* indefinitely — the field names this as **the #1 production bug** in temporal knowledge graphs, and it is exactly what T6 above produces today.
 
 #### ⭐ The missing piece, in one line
 
 **`extractedFrom` records the SOURCE, not the source VERSION.** Identity is not version. Without the version on the link:
 
 - *"are these entities **trustworthy**?"* → answerable (confidence, no NAND, not superseded — already a read);
-- *"are these entities **about the content we currently hold**?"* → **unanswerable.**
+- *"are these entities **about the content we currently hold**?"* → needs the version, and since there is **one node per `url`** the anchor must sit on the **LINK**, not on a version node.
 
 **Both are reads; only one has an anchor.** That is the whole gap — and it is why the fix is a field on an edge, not a new subsystem.
 
@@ -554,7 +558,7 @@ The convergence is on **two layers with different jobs**: the **source** carries
 
 **⇒ This is why the version goes on the extraction link and not only on the source** — and it is why the storage cost lands on the edge, not on a document store.
 
-**Research:** `docs/research/2026-09-24-source-versioning/research-brief.md`. **Adoption gate: ADOPT** — no recorded decision contradicted; D7 governs it; §4.7 already declares the Source window; D30 bounds the cost. **Tracked:** `#5038` (the model) · `#5024` (the in-place mutation that blocks it) · `#5025` · `#5026`.
+**Research:** `docs/research/2026-09-24-source-versioning/research-brief.md`. **Adoption gate: ADOPT** — no recorded decision contradicted; D7 governs it; the ontology's `§4.7` already declares the Source window; D30 bounds the cost. **Tracked:** `#5038` (the model) · `#5024` (the in-place mutation that blocks it) · `#5025` · `#5026`.
 
 ---
 
@@ -1004,7 +1008,7 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 
 **The published fix:** *"TierMem then writes back **verified findings as new summary units linked to their raw sources**."*
 
-**⚠️ This is the mechanism we do not have, and it is the difference between a tiering scheme that gets cheaper over time and one that does not.** The published failure list names its absence directly as **"no attribution loop."** **⛔ The write-back must respect §2.4.2: a finding written back to Tier 1 carries the SPAN, and the raw fact behind it stays immutable.** Anything else turns the summary tier into a system that quietly overwrites its own evidence.
+**⚠️ This is the mechanism we do not have, and it is the difference between a tiering scheme that gets cheaper over time and one that does not.** The published failure list names its absence directly as **"no attribution loop."** **⛔ The write-back must respect extractor §2.4.2: a finding written back to Tier 1 carries the SPAN, and the raw fact behind it stays immutable.** Anything else turns the summary tier into a system that quietly overwrites its own evidence.
 
 ### 12.6 The published architecture — `TierMem` (arXiv 2602.17913, 20 Feb 2026)
 **The owner's design, published, with measured results — which means we adopt its specifics rather than invent them.**
@@ -1018,14 +1022,14 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 
 **Reading the trade honestly:** the tiered path is **2.2 accuracy points worse** and **~2.5× cheaper**. That is the real price of tiering, and it is a good trade — but it is **not free**, and the 2.2 points are the number to beat or accept.
 
-**Its shape matches ours already:** immutable raw log (§2.4.2) · provenance link (the span) · summary ≠ evidence (§2.4). **We are missing the router and the write-back.**
+**Its shape matches ours already:** immutable raw log (extractor §2.4.2) · provenance link (the span) · summary ≠ evidence (extractor §2.4). **We are missing the router and the write-back.**
 
 ### 12.7 Failure modes to design against (adversarial pass — all published, none ours)
 | failure | what it looks like here |
 |---|---|
 | **context collapse** | assembling so much that the reader cannot find the decisive fact |
 | **compaction discontinuity** | S1's narrative loses what a later query needed — the `#3011` falsifier, seen from the write side |
-| **structural blindness** | serving text where the query needed the **operator structure** — i.e. serving Tier 1 to a "why is it this way" question (§2.4) |
+| **structural blindness** | serving text where the query needed the **operator structure** — i.e. serving Tier 1 to a "why is it this way" question (extractor §2.4) |
 | **no attribution loop** | escalating repeatedly and learning nothing (§12.5) |
 | **router overhead** | the router costing more than the retrieval it routes. Published instances: **vector fragmentation** and **routing serialization** |
 | **policy drift / incorrect promotion** | the router learning to fetch from the wrong tier |
