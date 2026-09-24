@@ -755,6 +755,28 @@ def test_present_entity_name_does_not_get_its_operator_pruned():
         "would fabricate a Point for the truncated ref")
     assert any("pruned" in w for w in warnings3), warnings3
 
+    # The truncation has to be the MINT's (truncate, then normalise). A name
+    # whose 1000th character falls inside a whitespace run normalises to
+    # something shorter, so it shields under a normalise-then-truncate test
+    # while the mint keys it at the shorter length and fabricates.
+    spaced = "a" * 900 + " " * 200 + "b" * 50
+    assert len(spaced) > vg._MAX_CONTENT
+    assert len(vg._norm(spaced)) <= vg._MAX_CONTENT < len(spaced), (
+        "fixture must straddle the boundary the way the mint truncates")
+    spaced_el = {"entities": [
+                     {"name": spaced, "kind": "core:tool"},
+                     {"name": spaced, "kind": "core:concept"}],
+                 "events": [],
+                 "points": [{"content": "K", "pointKind": "statement"}],
+                 "operators": [{"src": spaced, "dst": "K", "op_type": "IMPL"}]}
+    first_sp = next(vg._item_id(*t) for t in vg._iter_items(spaced_el)
+                    if t[0] == "entities" and t[1] == 0)
+    out4, warnings4 = vg.apply_vet(spaced_el,
+                                   {first_sp: {"outcome": vg.DISCARD}})
+    assert out4["operators"] == [], (
+        "the mint truncates before normalising — this name is not shielded")
+    assert any("pruned" in w for w in warnings4), warnings4
+
 
 def test_a_genuinely_removed_item_still_fills_the_pool():
     """The other side of the same rule: an item that IS absent from ``after``

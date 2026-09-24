@@ -835,14 +835,20 @@ def apply_vet(embed_list: Mapping[str, Any],
     # endpoint was present, with a warning claiming it "was discarded".
     #
     # The shield has to key EXACTLY as the mint does, or it un-prunes an
-    # endpoint the mint will fabricate: ``_mint_endpoint`` compares
-    # ``_norm(str(ref).strip()[:1000])`` against ``emitted_entity_names``, which
-    # holds the FULL name — so an entity whose name exceeds ``_MAX_CONTENT`` is
-    # NOT seen by the guard, and an operator naming it mints a claim Point out
-    # of a participant name. Such a name therefore does not shield — shielding a
-    # 1,100-char name fabricates a Point.
-    present_entity_names = {n for n in _entity_map(out)
-                            if _norm(n[:_MAX_CONTENT]) == n}
+    # endpoint the mint will fabricate. ``_mint_endpoint`` TRUNCATES the
+    # reference and then normalises — ``_norm(str(ref).strip()[:1000])`` — and
+    # compares that against ``emitted_entity_names``, which holds the FULL name
+    # normalised. So a name is shielded only when truncating it does not change
+    # what normalisation yields: a name longer than ``_MAX_CONTENT``, and one
+    # whose 1000th character falls inside a whitespace run that ``_norm`` would
+    # collapse (verified: a 1,150-char name normalising to 951 characters
+    # shields under the normalise-then-truncate test, while the mint keys it at
+    # 900 and fabricates a Point). Computed from the RAW name for that reason.
+    present_entity_names: set[str] = set()
+    for name, item in _entity_map(out).items():
+        raw = str(item.get("name") or "")
+        if _norm(raw.strip()[:_MAX_CONTENT]) == name:
+            present_entity_names.add(name)
     gone = (removed_context | prior_texts | removed_entity_names
             | set(prior_entities)) - surviving_texts - set(canonical) \
         - present_entity_names
