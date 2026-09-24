@@ -2645,10 +2645,16 @@ class TortoiseSDK:
             ns = self._namespace or ""
             # Epic #1647 (T7): the hyphenated test-* namespace family is
             # normalized in _get_proj (test-tiers → test_tiers_tortoise); the
-            # control-plane prefix must normalize identically so the registry
-            # graph ({ns}_{test_graph}_control_plane) — the JOURNAL sweep owns
-            # these (wipe_server's prefix filter cannot: namespaced registries
-            # start with the ns, not test_).
+            # control-plane path normalizes identically so it derives its name
+            # from the SAME `ns` string. The EMITTED test-derived name is
+            # `test_{ns}_{test_graph}_control_plane` (the `test_` prefix is
+            # applied just below), so it DOES start with `test_` and the
+            # server's prefix filter (`_SERVER_WIPE_PREFIXES`) DOES match it:
+            # `wipe_server` owns it by prefix. The journal append below is the
+            # ADDITIONAL ownership record, read by the journal sweep
+            # (`_SWEEP_OWNED_PREFIXES`). The shared names `{ns}_control_plane`
+            # and `control_plane` are NEVER prefixed — they belong to the
+            # namespace, and NEITHER sweeping set owns them.
             if ns.startswith("test-"):
                 ns = ns.replace("-", "_")
             if graph_name and graph_name.startswith(("tortoise_test_", "test_")):

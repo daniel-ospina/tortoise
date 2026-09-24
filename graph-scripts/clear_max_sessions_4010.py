@@ -180,9 +180,9 @@ def main() -> int:
     sdk = TortoiseSDK(namespace="registry")
     try:
         reg = sdk._get_registry()
-        target = getattr(reg, "name", "control_plane")
-        # path — `TortoiseSDK(namespace="registry")` derives the registry name
-        # from the NAMESPACE, not from the URI path.
+        target = reg.name
+        # The URI path never names this graph — `TortoiseSDK(namespace="registry")`
+        # derives the registry name from the NAMESPACE, not from the URI path.
         test_guard(target, args.yes)
         print(f"Registry graph (SDK-resolved): {target}")
         report = clear_stored_max_sessions(reg, dry_run=args.dry_run)

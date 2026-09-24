@@ -87,7 +87,7 @@ def main() -> int:
     sdk = TortoiseSDK(namespace="registry")
     try:
         reg = sdk._get_registry()
-        print(f"Registry graph on this server: {getattr(reg, 'name', 'control_plane')}")
+        print(f"Registry graph on this server: {reg.name}")
         result = sdk.sweep_invite_ghost_memberships(dry_run=args.dry_run)
     finally:
         sdk.close()
