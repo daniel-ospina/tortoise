@@ -54,7 +54,7 @@
 # The `_RWEK_`/`_rwek_` namespace belongs to this script: the loader SKIPS any
 # `.env` entry named into it, so a `.env` can never rewrite the launcher's own
 # state (the env file path, the source label, the managed-key set). There is no
-# # `eval` on a `.env`-derived name anywhere below.
+# `eval` on a `.env`-derived name anywhere below.
 
 # A caller can export a shell FUNCTION through the environment
 # (`BASH_FUNC_<name>%%`) that shadows a builtin — `unset`, `export`, `set`,
@@ -68,10 +68,12 @@
 # `_RWEK_SANITIZED` is that guard's marker and is dropped again immediately, so
 # it cannot reach the wrapped command or a NESTED invocation of this launcher —
 # a nested run that skipped sanitization would print a receipt with no truth in
-# it. It is still a caller-settable opt-out, and a caller who shadows `export`
-# or `exec` prevents the re-exec: the two fail-closed checks below (tracing, and
-# the ambient strip) still run, but a shadow of `exec` would leave the wrapped
-# command unrun while a receipt was printed and the launcher exited 0.
+# it. It is still a caller-settable opt-out, and a caller who shadows `exec`
+# prevents the re-exec: the two fail-closed checks below (tracing, and the
+# ambient strip) still run, but the wrapped command then never runs while a
+# receipt is printed and the launcher exits 0. (A shadowed `export` only costs
+# one extra re-exec hop — the unexported marker makes the `-p` child re-exec
+# again — and the run is still sanitized.)
 #
 # This is an auditability guard, not a privilege boundary — the invoking
 # principal supplies the ambient keys and can already read them.
