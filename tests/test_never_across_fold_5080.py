@@ -343,6 +343,123 @@ class TestDistinguishingDifference:
             assert v2.distinguishing_difference(a, b) == "number"
             assert not v2.fold_allowed(a, b)
 
+    def test_an_entity_fused_to_any_punctuation_is_still_an_entity(self):
+        """A name is a name whatever quotes it.
+
+        Edge punctuation is stripped in any script, because LLM output wraps a
+        word in the typographic marks too.  With an ASCII-only strip, "Alice"
+        inside curly quotes kept the quote, stopped reading as a proper noun,
+        and the whole pair folded — the quoting character decided whether a
+        named entity was visible.
+        """
+        for open_, close in (("\u201c", "\u201d"), ("\u00ab", "\u00bb"),
+                             ("'", "'"), ("(", ")"), ("[", "]")):
+            a = "The deploy failed"
+            b = f"The deploy failed for {open_}Alice{close}"
+            assert v2.distinguishing_difference(a, b) == "substituted_content", b
+            assert not v2.fold_allowed(a, b)
+        for punct in ("@", "#", "~", "/", "&", "\u00bf", "\u2026"):
+            a = "The deploy failed"
+            b = f"The deploy failed for {punct}Alice"
+            assert v2.distinguishing_difference(a, b) == "substituted_content", b
+
+    def test_a_pronoun_or_possessive_fused_to_punctuation_is_still_one(self):
+        """The entity signal is read from the word, not from the token."""
+        assert v2.distinguishing_difference(
+            "the manager approved the plan",
+            "\u201chis\u201d manager approved the plan") == "substituted_content"
+        assert v2.distinguishing_difference(
+            "the deploy failed", "bob's\u201d deploy failed") \
+            == "substituted_content"
+        # A quoted word is not a difference when EVERY side carries the quote.
+        assert v2.distinguishing_difference(
+            "\u201cthe team meets weekly\u201d", "the team meets weekly") is None
+        assert v2.fold_allowed("the answer is 5!", "the answer is 5")
+
+    def test_a_negator_fused_to_punctuation_is_still_a_negator(self):
+        """Presence vs absence of a negator, whatever trails the word."""
+        for tail in ("\u2026", "~~", "\u201d", "\u00bb", "", ")"):
+            negated = [
+                f"we do not{tail} ship the build",
+                f"we ship the build{tail} not",
+                f"we don't{tail} ship the build",
+                "\u201cnot\u201d",
+            ]
+            for b in negated:
+                assert v2.distinguishing_difference(
+                    "we ship the build", b) == "negation", b
+                assert not v2.fold_allowed("we ship the build", b)
+
+    def test_a_condition_marker_fused_to_punctuation_is_still_one(self):
+        for tail in ("\u2026", "\u201d", "\u00bb"):
+            b = f"we ship the build passes if{tail}"
+            assert v2.distinguishing_difference(
+                "we ship the build passes", b) == "condition", b
+            assert not v2.fold_allowed("we ship the build passes", b)
+
+    def test_a_date_fused_to_punctuation_is_still_a_date(self):
+        """A relative day is a date even with an ellipsis against it.
+
+        This is NOT the word-list gap: "tomorrow" IS a date word, so the
+        dimension was silenced by the trailing character, not by the list.
+        """
+        for b in ("we ship the build tomorrow\u2026", "we ship the build \u2026tomorrow"):
+            assert v2.distinguishing_difference("we ship the build", b) == "date", b
+            assert not v2.fold_allowed("we ship the build", b)
+
+    def test_a_numeric_suffix_still_changes_what_is_counted(self):
+        """Widening the strip must not re-collapse a percent or a currency."""
+        assert v2.distinguishing_difference(
+            "we got 50% of the vote", "we got 50 of the vote") == "number"
+        assert v2.distinguishing_difference("we paid $50", "we paid 50") == "number"
+        assert v2.distinguishing_difference("we run v1.2", "we run v12") == "number"
+        for lead in (".", ",", ":"):
+            a, b = f"the answer is {lead}5", "the answer is 5"
+            assert v2.distinguishing_difference(a, b) == "number"
+
+    def test_a_compound_number_is_one_value(self):
+        """"twenty three" is 23, not the two values 20 and 3.
+
+        Read apart, the bound pairings (boxes, 20) and (boxes, 3) matched
+        a genuinely different claim spelling the same digits apart.
+        """
+        assert v2.distinguishing_difference(
+            "we need twenty three boxes", "we need 20 3 boxes") == "number"
+        assert not v2.fold_allowed("we need twenty three boxes",
+                                   "we need 20 3 boxes")
+        assert v2.distinguishing_difference(
+            "we need twenty three boxes", "we need 24 boxes") == "number"
+        # Both spellings of the SAME value stay one value.
+        assert v2.distinguishing_difference(
+            "we need twenty three boxes", "we need 23 boxes") is None
+        assert v2.distinguishing_difference(
+            "we need twenty-three boxes", "we need 23 boxes") is None
+        assert v2.fold_allowed("we need forty two crates", "we need 42 crates")
+
+    def test_an_apostrophe_collapse_is_a_known_limit(self):
+        """Documented residual, pinned so it cannot go silent.
+
+        Apostrophes are removed before the content skeleton is compared, so
+        that a contraction's spellings agree.  The cost is that a word needing
+        its apostrophe to mean something else reaches no dimension: "we'll"
+        collapses onto "well".  Distinguishing them needs a model.
+        """
+        assert v2.fold_allowed("we'll ship the build", "well ship the build")
+        assert v2.fold_allowed("she'll ship the build", "shell ship the build")
+
+    def test_a_script_list_gap_is_a_known_limit(self):
+        """Documented residual, pinned so it cannot go silent (#5139).
+
+        ``_SCRIPT_BLOCKS`` is finite, so a word in a script it does not name
+        reaches no dimension and is a one-sided broadening.  This is the
+        word-list gap's shape applied to the script list; a whole-claim
+        language change is still refused as a content substitution.
+        """
+        assert v2.fold_allowed("we ship the build", "we ship \u0568 the build")
+        assert v2.distinguishing_difference(
+            "the final result is correct", "le r\u00e9sultat final est correct") \
+            == "substituted_content"
+
     def test_a_word_list_gap_is_a_known_limit(self):
         """Documented residual, pinned so it cannot go silent (#5139).
 
@@ -355,6 +472,47 @@ class TestDistinguishingDifference:
         assert v2.fold_allowed("we hardly ship", "we ship")
         assert v2.fold_allowed("we ship lest the build fails",
                                "we ship the build fails")
+
+    @pytest.mark.parametrize("marker", sorted(v2._NEGATION_MARKERS))
+    def test_every_named_negator_negates(self, marker):
+        """Class coverage, not exemplars: every member of the list, spelled the
+        way the list spells it."""
+        assert v2.distinguishing_difference(
+            "we ship the build", f"we {marker} ship the build") == "negation"
+        assert not v2.fold_allowed("we ship the build",
+                                   f"we {marker} ship the build")
+
+    @pytest.mark.parametrize("marker", sorted(v2._CONDITION_MARKERS))
+    def test_every_named_condition_marker_conditions(self, marker):
+        assert v2.distinguishing_difference(
+            "we ship the build", f"we ship the build {marker}") == "condition"
+        assert not v2.fold_allowed("we ship the build",
+                                   f"we ship the build {marker}")
+
+    @pytest.mark.parametrize("phrase", sorted(v2._CONDITION_PHRASES))
+    def test_every_named_condition_phrase_conditions(self, phrase):
+        assert v2.distinguishing_difference(
+            "we ship the build", f"we ship the build {phrase}") == "condition"
+        assert not v2.fold_allowed("we ship the build",
+                                   f"we ship the build {phrase}")
+
+    @pytest.mark.parametrize("day", sorted(v2._DATE_WORDS))
+    def test_every_named_date_word_is_a_date(self, day):
+        assert v2.distinguishing_difference(
+            "we ship the build", f"we ship the build {day}") == "date"
+        assert not v2.fold_allowed("we ship the build",
+                                   f"we ship the build {day}")
+
+    def test_a_range_or_a_version_is_a_different_quantity(self):
+        """The separators inside a numeric token are part of its value."""
+        for a, b in (("we ship 3-4 crates", "we ship 4-3 crates"),
+                     ("we ship 3-4 crates", "we ship 3 4 crates"),
+                     ("we run v1.2.3", "we run v1.2.4"),
+                     ("we run v1.2.3", "we run v123"),
+                     ("we ship 1.2 tons", "we ship 12 tons"),
+                     ("we ship 1.2 tons", "we ship 1.3 tons")):
+            assert v2.distinguishing_difference(a, b) == "number", (a, b)
+            assert not v2.fold_allowed(a, b)
 
     def test_an_ambiguous_month_is_a_date_only_in_a_date_position(self):
         """"may" is a month and the commonest modal, and neither blanket rule is

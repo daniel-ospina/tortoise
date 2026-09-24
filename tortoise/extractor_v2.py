@@ -62,6 +62,7 @@ import random
 import re
 import threading
 import time
+import unicodedata
 import warnings
 import weakref
 from typing import Any
@@ -3125,10 +3126,16 @@ _CONTENT_STOPWORDS = _FRAME_STOPWORDS - _ENTITY_PRONOUNS
 # sees them.
 _CONTENT_STOPWORDS = _CONTENT_STOPWORDS - {"on"}
 _UNREADABLE = frozenset({"unreadable"})
+
 # Token edges stripped before comparison.  `_norm` lowercases and collapses
 # whitespace but keeps punctuation, so "team." and "team" would otherwise read
 # as different tokens and the substitution test would fire on a full stop.
 _TOKEN_EDGE_PUNCT = ".,;:!?\"'`()[]{}*_"
+# A numeric token's own edges are part of its value, and two shapes have to
+# survive the strip: a LEADING separator that begins a numeral (".5", "$50")
+# and a TRAILING suffix that changes what it counts ("50%").
+_NUMERIC_LEAD = frozenset(".,:+-$#")
+_NUMERIC_TRAIL = frozenset("%$#")
 # Clitic apostrophes, normalised to the ASCII form before tokenising.  LLM
 # output routinely spells "don't" with U+2019, and a negator the marker list
 # cannot see is a negator the boundary fails to guard.
@@ -3202,17 +3209,35 @@ def _guard_token_seq(content: str) -> list[str]:
     return [t for t in (_strip_edges(_s) for _s in text.split()) if t]
 
 
-def _strip_edges(t: str) -> str:
-    """Edge punctuation stripped, EXCEPT a LEADING separator that begins a
-    numeral: ".5", ",5" and ":30" are quantities, and stripping the separator
-    folded .5 into 5.  Leading only — a trailing full stop is punctuation, so
-    "5." and "5" stay one value.
+def _is_edge_punct(ch: str) -> bool:
+    """Punctuation or symbol, in any script.
+
+    ``_TOKEN_EDGE_PUNCT`` alone is ASCII, and LLM output wraps words in the
+    typographic characters too.  A name or a negator fused to one of them
+    ("\u201cAlice\u201d", "not\u2026", "tomorrow\u2026") kept the quoting
+    character, so it stopped being the word it was and its whole dimension went
+    silent.
     """
-    stripped = t.strip(_TOKEN_EDGE_PUNCT)
-    lead = len(t) - len(t.lstrip(_TOKEN_EDGE_PUNCT))
-    if lead and stripped and t[lead:lead + 1].isdigit():
-        return t[:lead] + stripped
-    return stripped
+    return ch in _TOKEN_EDGE_PUNCT or unicodedata.category(ch)[:1] in ("P", "S")
+
+
+def _strip_edges(t: str) -> str:
+    """Edge punctuation and symbols stripped, in any script.
+
+    Two numeric shapes are preserved: a leading separator that begins a numeral
+    (".5", "$50") and a trailing suffix that changes what it counts ("50%").
+    Leading only for the first, so "5." and "5" stay one value.
+    """
+    start, end = 0, len(t)
+    while start < end and _is_edge_punct(t[start]):
+        if t[start] in _NUMERIC_LEAD and t[start + 1:start + 2].isdigit():
+            break
+        start += 1
+    while end > start and _is_edge_punct(t[end - 1]):
+        if t[end - 1] in _NUMERIC_TRAIL and t[start:end - 1][-1:].isdigit():
+            break
+        end -= 1
+    return t[start:end]
 
 
 def _guard_tokens(content: str) -> set[str]:
@@ -3239,12 +3264,12 @@ def _canonicalise_clocks(content: str) -> str:
 def _value_bindings(content: str) -> tuple[tuple[str, str], ...]:
     """Each value token paired with the content token BEFORE it, IN ORDER.
 
-    Number words map to their value ("six" → "6") and clock forms are removed
-    entirely, because ``_value_signature`` compares those in its own normalised
-    encoding, where "6pm", "six pm" and "6:00 pm" are one value.  The signature
-    alone is not sufficient: it returns early once both sides carry one, so it
-    misses a differing number sitting BESIDE an equal clock value ("3 crates at
-    9am" vs "4 crates at 9am").
+    Number words map to their value ("six" → "6") and clock forms to one
+    placeholder, because ``_value_signature`` compares those in its own
+    normalised encoding, where "6pm", "six pm" and "6:00 pm" are one value.
+    The signature alone is not sufficient: it returns early once both sides
+    carry one, so it misses a differing number sitting BESIDE an equal clock
+    value ("3 crates at 9am" vs "4 crates at 9am").
 
     The PAIRING is the point, and it is why neither a set nor a bare sequence
     will do.  "we have 2 cats and 3 dogs" and "we have 2 dogs and 3 cats" carry
@@ -3254,10 +3279,17 @@ def _value_bindings(content: str) -> tuple[tuple[str, str], ...]:
     so no lookahead is needed and a paraphrase that reorders clauses still
     anchors each value to the same word — which is what keeps #4652's
     marker-free paraphrase foldable.
+
+    A compound number spelled in two words is ONE value ("twenty three" →
+    "23"), not two: read apart, "twenty three boxes" bound "20" and "3" and
+    matched the genuine pair 20 and 3.
     """
+    seq = _guard_token_seq(_canonicalise_clocks(content))
     out: list[tuple[str, str]] = []
     anchor = ""
-    for t in _guard_token_seq(_canonicalise_clocks(content)):
+    i = 0
+    while i < len(seq):
+        t = seq[i]
         # The token itself, NOT `_canon_token(t)`: stripping non-word
         # characters collapses "1.2" into "12", "50%" into "50" and "$50"
         # into "50", turning a different quantity into the same binding.  The
@@ -3269,13 +3301,20 @@ def _value_bindings(content: str) -> tuple[tuple[str, str], ...]:
             value = "meridiem-" + t
         if value is None:
             v = _num_word_value(t)
-            value = str(v) if v is not None else None
+            if v is not None and i + 1 < len(seq):
+                two = _num_word_value(t + " " + seq[i + 1])
+                if two is not None:
+                    value, i = str(two), i + 1
+            if value is None:
+                value = str(v) if v is not None else None
         if value is not None:
             out.append((anchor, value))
+            i += 1
             continue
         if t not in _CONTENT_STOPWORDS and t not in _CLOCK_UNITS \
                 and t not in _DATE_WORDS:
             anchor = t
+        i += 1
     return tuple(out)
 
 
@@ -3341,7 +3380,7 @@ def _proper_nouns(content: str) -> frozenset[str]:
     ``_norm`` discards it.  The first token is excluded because it is
     capitalised by position rather than by being a name.
     """
-    raw = [t.strip(_TOKEN_EDGE_PUNCT) for t in str(content or "").split()]
+    raw = [_strip_edges(t) for t in str(content or "").split()]
     return frozenset(_apostrophe_free(_norm(t))
                      for i, t in enumerate(raw)
                      if i and t and t[:1].isupper())
