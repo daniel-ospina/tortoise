@@ -63,6 +63,14 @@ the `[embeddings]` extra does not need it either (R3 #1542 D6).
 
 ## Configuration (env-driven, never hardcoded)
 
+> ⛔ **Use `tools/run-with-eval-keys.sh` for real runs (#2718 / #4860).** The
+> harness reads provider keys from the process env and never loads the repo
+> `.env`, so an ambient shell key (this fleet sources `~/pi-keys.env`) is what
+> gets billed. The wrapper strips the ambient provider keys, loads the repo
+> `.env` with override, and prints the key `source` + fingerprint to paste into
+> the run record:
+> `tools/run-with-eval-keys.sh .venv/bin/python -m tools.longmem_eval.run ...`
+
 | Var | Purpose | Default |
 |---|---|---|
 | `OPENROUTER_API_KEY` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` / `GEMINI_API_KEY` | provider keys (existing repo pattern, `tortoise.ingest._PROVIDERS`) | required for non-mock runs |

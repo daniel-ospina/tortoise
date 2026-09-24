@@ -946,7 +946,8 @@ class TestBootOrder:
 
 class TestVersionEndpoint:
     """GET /v1/version — public version/sha surface so clients (and the
-    onboarding skill) can detect an outdated server before authenticating.
+    onboarding instructions — not a skill, #4365) can detect an outdated
+    server before authenticating.
     """
 
     def test_version_returns_package_version(self, client):
@@ -3464,6 +3465,43 @@ class TestInternalProvision:
         assert gn in _read_journal_file(str(journal)), \
             "tenant_provision mint must be journaled (#1686)"
 
+    def test_provision_does_not_journal_a_graph_it_did_not_mint(
+            self, internal_client, monkeypatch, tmp_path):
+        """#7795 review P2-3: `provision_tenant` takes a CALLER-SUPPLIED
+        `org_id` (`body.get("org_id")`) with no existence guard, so an
+        unconditional journal append would hand the session sweep a graph
+        THIS call did not create — a live tenant graph for DETACH+DELETE.
+        The append is existence-guarded (mirroring
+        `_eager_provision_org_graph`): a provision whose graph already
+        carries a `TeamMeta` mints nothing and must NOT journal it."""
+        from tests._embedded import _read_journal_file
+
+        journal = tmp_path / "provision_preexisting.graphs.jsonl"
+        monkeypatch.setenv("TORTOISE_TEST_JOURNAL_FILE", str(journal))
+        payload = {
+            "org_id": "provisioned-team-preexisting",
+            "org_name": "Provisioned Team Preexisting",
+            "api_key_hash": "abc123hash",
+            "created_by": "user-pe",
+        }
+        # First call mints the graph (and journals it — pinned by the test
+        # above).
+        r1 = internal_client.post("/internal/provision", json=payload,
+                                  headers=self.INTERNAL_HEADERS)
+        assert r1.status_code == 200, r1.text
+        gn = r1.json()["graph_name"]
+        assert gn in _read_journal_file(str(journal))
+        # Reset the RECORD only: the graph (and its TeamMeta) still exists,
+        # so the second call mints nothing and must not re-journal it.
+        journal.write_text("")
+        r2 = internal_client.post("/internal/provision", json=payload,
+                                  headers=self.INTERNAL_HEADERS)
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["graph_name"] == gn
+        assert gn not in _read_journal_file(str(journal)), \
+            "the graph pre-existed this call — journaling it would hand the " \
+            "sweep a tenant graph this call did not mint (#7795 P2-3)"
+
     def test_provision_missing_fields_returns_400(self, internal_client):
         r = internal_client.post("/internal/provision", json={}, headers=self.INTERNAL_HEADERS)
         assert r.status_code == 400, r.text
@@ -4228,7 +4266,7 @@ class TestQuotaFailClosed:
         from tortoise.quota import QuotaCheckError  # noqa: I001
         import tortoise.quota as quota_mod
 
-        def _fail_count(_limits, _resource, sdk=None):
+        def _fail_count(_limits, _resource, sdk=None, **_kwargs):
             raise QuotaCheckError("simulated count query failure")
 
         monkeypatch.setattr(quota_mod, "enforce_org_limit", _fail_count)
@@ -4246,7 +4284,7 @@ class TestQuotaFailClosed:
         from tortoise.quota import QuotaExceededError  # noqa: I001
         import tortoise.quota as quota_mod
 
-        def _fail_exceeded(_limits, _resource, sdk=None):
+        def _fail_exceeded(_limits, _resource, sdk=None, **_kwargs):
             raise QuotaExceededError("Team points limit reached (1000)")
 
         monkeypatch.setattr(quota_mod, "enforce_org_limit", _fail_exceeded)
@@ -9474,3 +9512,103 @@ class TestFirstContactPrewarm:
         assert "Retry-After" in exposed, (
             "a browser client cannot read Retry-After without "
             f"Access-Control-Expose-Headers (got {exposed!r})")
+
+
+# ── #4625: the capture path must not compute the projection it discards ──────
+#
+# `_update_onboarding_state` computes the merged projection as its RETURN VALUE
+# (the GET/PATCH writer-echo contract). That projection is not free: it reaches
+# `_registry_existing_graphs()` up to twice (two when the org graph exists,
+# which is the per-capture case), and in URI mode each probe builds a fresh
+# `_make_sdk(namespace="registry")` and opens a NEW FalkorDB connection — TCP +
+# TLS handshake + `Is_Sentinel`'s INFO + `list_graphs` — executed ON the event
+# loop.
+#
+# An AGENT capture — the fleet case — calls the router TWICE (the receipt
+# write, then the last-error clear) and discards both returns: four synchronous
+# TLS handshakes per capture. (A no-harness session-JWT capture makes one call,
+# since it has no last-error key.) With ~46 lanes capturing per turn that stalls the
+# loop for seconds at a time, every read in flight blows the 10s transport
+# bound, and the agent's `tools/list` returns 504 with an EMPTY toolbelt.
+# Reproduced live by py-spy: loop thread in `do_handshake (ssl.py:1319)` <-
+# `_registry_existing_graphs` <- `_get_onboarding_projection` <-
+# `_record_capture_last_error` <- `_capture_session_impl` <- `capture_session`.
+#
+# These tests pin the write-only contract and the echo the GET/PATCH callers
+# depend on. They fail if `_echo=False` stops being honoured (i.e. if the
+# projection is computed again on the discard path).
+
+
+class TestCapturePathSkipsDiscardedProjection:
+    """#4625 — write-only onboarding writes must not compute the echo."""
+
+    @staticmethod
+    def _spy(monkeypatch):
+        """Replace the projection + jsonb legs; record what ACTUALLY ran."""
+        proj_calls: list[str] = []
+        writes: list[tuple] = []
+
+        def _spy_projection(org_id):
+            proj_calls.append(org_id)
+            return {}
+
+        def _spy_write(org_id, state):
+            writes.append((org_id, dict(state)))
+
+        monkeypatch.setattr(_ha_mod, "_get_onboarding_projection", _spy_projection)
+        monkeypatch.setattr(_ha_mod, "_get_onboarding_state", lambda org_id: {})
+        monkeypatch.setattr(_ha_mod, "_write_onboarding_state", _spy_write)
+        return proj_calls, writes
+
+    def test_write_only_skips_the_projection(self, monkeypatch):
+        _ha = _ha_mod
+        proj_calls, writes = self._spy(monkeypatch)
+        key = _ha._capture_last_error_key("codex")
+        assert key is not None, "fixture requires a registered harness key"
+
+        _ha._update_onboarding_state("org-4625", _echo=False, **{key: "boom"})
+
+        # Non-vacuous: the write must still have happened.
+        assert writes, "the write must still happen when the echo is skipped"
+        assert proj_calls == [], (
+            "the write-only path computed the onboarding projection — that is "
+            "the #4625 event-loop stall (two fresh FalkorDB TLS handshakes)")
+
+    def test_default_still_returns_the_echo(self, monkeypatch):
+        """GET/PATCH writer-echo contract must be unchanged."""
+        _ha = _ha_mod
+        proj_calls, _writes = self._spy(monkeypatch)
+        key = _ha._capture_last_error_key("codex")
+        assert key is not None
+
+        reversed_echo = _ha._update_onboarding_state("org-4625", **{key: "boom"})
+
+        assert proj_calls == ["org-4625"], (
+            "the default path must still compute the echo")
+        assert isinstance(reversed_echo, dict)
+        # overlay: the just-written field wins over the projection's value
+        assert reversed_echo.get(key) == "boom"
+
+    def test_record_capture_last_error_is_write_only(self, monkeypatch):
+        """The per-capture hot path — called on 2xx AND non-2xx.
+
+        Asserts the WRITE, not just the absence of a projection call: an
+        early return inside ``_record_capture_last_error`` (e.g. an
+        unresolvable harness key) would satisfy ``proj_calls == []``
+        vacuously and pin nothing.
+        """
+        _ha = _ha_mod
+        proj_calls, writes = self._spy(monkeypatch)
+        key = _ha._capture_last_error_key("codex")
+        assert key is not None, "fixture requires a registered harness key"
+
+        _ha._record_capture_last_error("org-4625", "codex", "capture boom")
+
+        assert writes, (
+            "_record_capture_last_error never reached the write — the absence "
+            "of a projection call would then prove nothing")
+        assert writes[0][1].get(key) == "capture boom", (
+            "the last-error detail must be written")
+        assert proj_calls == [], (
+            "_record_capture_last_error computed the projection it discards — "
+            "this is the per-capture hot path across the fleet")
