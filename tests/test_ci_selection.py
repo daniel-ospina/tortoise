@@ -2011,6 +2011,26 @@ def test_required_gate_excludes_the_long_legs():
             "visible, or the post-merge detection is silent")
         assert spec.get("if") not in ("false", False), (
             f"{leg} must not be unconditionally disabled")
+        # NOT push-only: the workflow's own comment cites the `--admin` rail's
+        # lane parity as the reason these legs are not skipped on PRs, so a
+        # per-leg `github.event_name` filter is the exact regression to refuse.
+        # And job-level `continue-on-error` is not enough — a silenced STEP
+        # inside the job produces the same missing signal.
+        assert "github.event_name" not in str(spec.get("if") or ""), (
+            f"{leg} must not carry an event filter (e.g. push-only): a "
+            "`skipped` shard is not coverage, and the `--admin` rail's lane "
+            "parity (`ADMIN_MERGE_LANE_PARITY=require`) refuses a merge when "
+            "the PR lane did not execute a shard main's lane executes "
+            "(#4263/#4457)")
+        pytest_steps = [s for s in spec.get("steps", [])
+                        if "pytest" in (s.get("run") or "")]
+        assert pytest_steps, f"{leg} must still RUN pytest"
+        silenced = [s.get("name") for s in pytest_steps
+                    if s.get("continue-on-error")]
+        assert not silenced, (
+            f"{leg}'s pytest step(s) must not be continue-on-error — that "
+            "silences the signal the disclosure says is still produced: "
+            f"{silenced}")
 
 
 # ── #2938: surface audit (report-only) ───────────────────────────────────
