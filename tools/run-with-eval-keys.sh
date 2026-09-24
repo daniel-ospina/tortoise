@@ -84,12 +84,15 @@
 #     caller who shadows it makes those responses no-ops. The ambient-strip path
 #     then continues, and its receipt stays TRUE on every line because the state
 #     it reads (`_RWEK_ABORTED`, the per-key `_RWEK_FROM_FILE` string, the header
-#     text) is assigned — assignments are not builtins — so nothing names the env
-#     file as the source of a value the strip failed to remove (the #4860
-#     attribution class), and the run still does not proceed. The TRACING path has
-#     no such fallback: with `exec` shadowed, xtrace stays ON and the loader's
-#     `export` line can print a key. Shadowing `exec` is therefore the one thing
-#     that breaks the "no value is printed" guarantee as well as the silence one.
+#     text) is assigned — assignments are not builtins — and because a key is
+#     recorded as coming from the file only after the export is PROVEN to have
+#     taken (`declare -p` shows `-x` AND the value matches the file's). A value
+#     that merely coincides with the file's is indistinguishable from a survivor
+#     and is labelled with the file whose value it matches. The TRACING path has
+#     no such fallback: with `exec` shadowed, xtrace stays ON and bash prints the
+#     `.env` lines it reads as well as the loader's `export`, so a key can appear
+#     in stderr. Shadowing `exec` is therefore the one thing that breaks the "no
+#     value is printed" guarantee as well as the silence one.
 #   - a shadowed `exec` makes the re-exec AND the final `exec "$@"` no-ops, so the
 #     wrapped command never runs. The sentinel after the final exec is an
 #     absolute-path `"$_RWEK_BASH" -p -c …`, so it still reports that and exits 3
@@ -369,21 +372,30 @@ if [ -f "$_RWEK_ENV_FILE" ] && [ -r "$_RWEK_ENV_FILE" ]; then
 
     if is_managed_key "$_rwek_key"; then
       export "$_rwek_key=$_rwek_value"
-      # Record the file as this key's source ONLY if the export actually took.
-      # `export` is a builtin a caller can shadow; recording the INTENT would
-      # then name the env file as the source of a value the file never supplied
-      # (the ambient survivor is still in the environment), which is the
-      # false-attribution class this record exists to prevent. A shadowed
-      # `export` also means the run's key provenance is untrustworthy, so the
-      # strip state is flipped too. (The `${!key+x}` test distinguishes "unset"
-      # from "set to empty", so an empty file value is still recorded.)
-      case "${!_rwek_key+x}" in
-        ?*)
-          case "${!_rwek_key}" in
-            "$_rwek_value") _RWEK_FROM_FILE="$_RWEK_FROM_FILE $_rwek_key" ;;
-            *) _RWEK_ABORTED=1 ;;
+      # Record the file as this key's source only if the export BOTH assigned the
+      # file's value AND exported it. `export` is a builtin a caller can shadow:
+      # a shadow that assigns without exporting hides the value from the child,
+      # and one that does nothing leaves the ambient value (or nothing) behind —
+      # either way the receipt must not name the file, so the `-x` flag is read
+      # with the `declare` builtin exactly as the fill-if-absent branch below
+      # does. A shadowed probe can only make this MORE conservative.
+      _rwek_proven=
+      _rwek_decl=$(builtin declare -p "$_rwek_key" 2>/dev/null) || _rwek_decl=
+      _rwek_flags=${_rwek_decl#declare -}
+      _rwek_flags=${_rwek_flags%% *}
+      case "$_rwek_flags" in
+        *x*)
+          case "${!_rwek_key+x}" in
+            ?*)
+              case "${!_rwek_key}" in
+                "$_rwek_value") _rwek_proven=1 ;;
+              esac
+              ;;
           esac
           ;;
+      esac
+      case "${_rwek_proven:-}" in
+        ?*) _RWEK_FROM_FILE="$_RWEK_FROM_FILE $_rwek_key" ;;
         *) _RWEK_ABORTED=1 ;;
       esac
     else
@@ -452,7 +464,7 @@ for _rwek_key in "${_RWEK_MANAGED_KEYS[@]}"; do
     *)
       case " ${_RWEK_FROM_FILE:- } " in
         *" $_rwek_key "*) ;;
-        *) _rwek_label='<aborted: the ambient strip failed, NOT from this file>' ;;
+        *) _rwek_label='<aborted: this run was not sanitized, source not attested>' ;;
       esac
       ;;
   esac
