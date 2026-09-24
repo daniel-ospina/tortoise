@@ -862,7 +862,7 @@ jobs:
           python-version: '3.12'
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'   # --experimental-strip-types needs >= 22.6 (#373 harness)
+          node-version: '22'   # .ts type stripping + syntax detection is DEFAULT-ON from 22.18; the parity driver passes --experimental-strip-types (>= 22.7), test_pi_capture_hooks' `node --test` does not (#373 harness, #4714 parity test)
       - run: pip install -e '.[test]'
       - run: python -m playwright install --with-deps chromium
       # #1511: serve THIS branch's website/ (wrangler pages dev, mirroring the

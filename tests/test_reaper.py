@@ -4935,10 +4935,11 @@ def test_socketless_binding_never_resolves_the_candidate_path(
 
 # ── #4740 review 4: the end-sweep's `cleared` derivation ───────────────────
 # `sweep_until_cleared` is the loop conftest's session-end sweep runs. Its
-# `cleared` field is what the CI orphan gate binds to, and review 4 found the
-# previous `cleared = not acted` reported True for a deadline-aborted sweep
-# (`reap()` breaks on its first record and returns [], which is not proof the
-# backlog is clear). These cases pin all four stop shapes.
+# `cleared` field is the sweep's own budget/stop-condition claim, carried for
+# diagnosis — not a field the CI orphan gate decides its verdict on; review 4
+# found the previous `cleared = not acted` reported True for a deadline-aborted
+# sweep (`reap()` breaks on its first record and returns [], which is not proof
+# the backlog is clear). These cases pin all four stop shapes.
 
 
 def _scan_aware(records, complete=True):
@@ -5008,11 +5009,9 @@ def test_build_end_sweep_report_defaults_to_the_real_monotonic_clock():
     the default production actually runs with is the builder's, not
     `sweep_until_cleared`'s. A default of `lambda: 0.0` makes
     `clock() < deadline` always true, so a deadline-aborted sweep reports
-    `cleared=true`, so a deadline-aborted sweep would be reported as finished
-    rather than exhausted and the gate would not red it. The gate's `cleared`
-    effect is keyed on the measured count: at a measured zero a
-    `cleared: false` report warns and passes (nothing remains to bound), and
-    above zero it reds. No clock is injected here.
+    `cleared=true` — reported as finished rather than exhausted, losing the
+    exhausted-budget diagnostic. `cleared` is a diagnostic flag that does not
+    decide the gate's verdict at any measured count. No clock is injected here.
     """
     import inspect
     import time
@@ -5037,9 +5036,8 @@ def test_hygiene_report_threads_cleared_verbatim():
     """#4740 review 6: the report builder must use the declared field set AND
     thread `cleared` through verbatim.
 
-    The gate keys the effect of `cleared: false` on the measured count: at a
-    measured zero it warns and passes (nothing remains to bound), and above
-    zero it reds. This is behavioural — the real module is imported and
+    `cleared` is a diagnostic flag that does not decide the gate's verdict at
+    any measured count. This is behavioural — the real module is imported and
     called — so the AST shapes that passed the round-5 pin (a subscript store,
     a dead branch around the literal, a tuple reorder) cannot satisfy it.
     """

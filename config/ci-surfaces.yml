@@ -366,6 +366,13 @@ surfaces:
   # rather than PROVEN on rc=0 with no downstream effect. Same dual
   # registration as test_session_verify.py (mechanism = core; CLI = api).
   - test_4314_inert_hooks.py
+  # #4675: the post-commit confirmation — a client-side refusal whose effect
+  # LANDED. Its source is tortoise/session_confirm.py (an ENGINE path matching
+  # no SOURCE_PATTERNS entry, so `core` via the `tortoise/` fallback) plus the
+  # import / spool-drain / `session verify` wiring in tortoise/__main__.py and
+  # tortoise/session_verify.py, which select `api`. Same dual registration as
+  # test_session_verify.py.
+  - test_session_confirm.py
   # #3795/#3801: the `tortoise hooks` CLI surface lives in tortoise/__main__.py
   # (api-classified source) — dual-registered so a CLI-wiring regression runs
   # this guard. See the core entry for the mechanism half.
@@ -664,6 +671,12 @@ surfaces:
   # rather than PROVEN on rc=0 with no downstream effect. Same dual
   # registration as test_session_verify.py (mechanism = core; CLI = api).
   - test_4314_inert_hooks.py
+  # #4675: the post-commit confirmation — a client-side refusal whose effect
+  # LANDED. Its sources are `tortoise/session_confirm.py` and the client paths
+  # it re-arms in `tortoise/__main__.py` (the `session import` / spool drain
+  # refusal handlers) — the latter selects `api`. See the core entry for the
+  # mechanism half.
+  - test_session_confirm.py
   # #3795/#3801: capture-hook install drift detection + in-place upgrade. Its
   # sources are `tortoise/hook_install.py` and `tortoise/claude-hooks/` — an
   # ENGINE path classified `core` (any unmatched `tortoise/` prefix). Dual-

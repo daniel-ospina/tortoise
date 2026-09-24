@@ -17,7 +17,7 @@ import json
 import ssl
 from types import SimpleNamespace
 from unittest import mock
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 import pytest
 
@@ -358,6 +358,276 @@ def _import_env(tmp_path, monkeypatch):
     return spool
 
 
+class _Resp(io.BytesIO):
+    """A minimal context-manager response for the patched transport."""
+
+    def __init__(self, body: bytes, status: int = 200):
+        super().__init__(body)
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _post_refused_get_serves(session_id: str, turns: list[dict], *,
+                            extracted: int = 2, body: str =
+                            '{"detail":"The server\'s wait budget was exceeded"}',
+                            get_404: bool = False, post_exc=None):
+    """A transport where the POST is refused and the confirming READ answers
+    with the session the abandoned handler went on to write.
+
+    The rows are the shape the server actually RETURNS: `role` as its own field
+    and `content` with the `[role] ` prefix STRIPPED (`get_session_detail`).
+    Built from the original turn dicts, never by echoing the writer's
+    `"[role] text"` string — a fake that echoes the writer hides a
+    format-mismatched comparison, which is how this confirmation was inert on
+    its first attempt while these tests stayed green.
+    """
+
+    def _open(req, timeout=None):
+        if getattr(req, "get_method", lambda: "GET")() == "POST":
+            if post_exc is not None:
+                raise post_exc
+            raise _http_error(504, body)
+        if get_404:
+            raise _http_error(404, '{"detail":"Session not found"}')
+        detail = {
+            "id": session_id, "created_at": "2026-09-23T08:21:06Z",
+            "turns": len(turns), "extracted": extracted,
+            "turn_points": [{"id": f"{session_id}_t{i}",
+                             "role": turns[i]["role"],
+                             "content": turns[i]["content"]}
+                            for i in range(len(turns))],
+            "source": {"url": f"session:{session_id}"},
+        }
+        return _Resp(json.dumps(detail).encode("utf-8"))
+    return _open
+
+
+def test_a_post_commit_504_writes_the_receipt_and_is_not_spooled(
+        tmp_path, monkeypatch, codex_jsonl, capsys):
+    """#4675: the 504 arrived AFTER the commit, so the honest verdict is
+    'imported', not 'failed'.
+
+    The transport bound ABANDONS its handler rather than cancelling it, so the
+    POST's work completes server-side while the client is told it was refused.
+    Reporting that as a failure parks the turns in the spool AND tells the user
+    a capture that already landed will retry — and with no drain wired for
+    codex it would never be filed.
+
+    MUTATION THAT REDS THIS: drop the `_confirm_already_captured()` call from
+    the HTTPError branch (or the receipt write inside it) — rc is 1 and no
+    receipt is written.
+    """
+    from tortoise.__main__ import _cmd_sessions_import
+
+    spool = _import_env(tmp_path, monkeypatch)
+    n = len(_EXPECTED_TURNS)
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _post_refused_get_serves("sid-committed", _EXPECTED_TURNS))
+
+    rc = _cmd_sessions_import(SimpleNamespace(
+        file=str(codex_jsonl), harness="codex", session_id="sid-committed"))
+
+    assert rc == 0, capsys.readouterr().err
+    receipts = list((tmp_path / "receipts").glob("*.json"))
+    assert [p.name for p in receipts] == ["sid-committed.json"], receipts
+    record = json.loads(receipts[0].read_text())
+    assert record["harness"] == "codex"
+    assert record["turns"] == n
+    assert record["confirmed_after_refusal"] is True
+    assert "committed it" in capsys.readouterr().err
+    # Nothing is parked: the turns are already on the server.
+    from tortoise.capture_spool import read_spool_meta
+    assert read_spool_meta(spool, "sid-committed") is None
+
+
+def test_a_post_commit_504_without_extraction_still_spools(
+        tmp_path, monkeypatch, codex_jsonl, capsys):
+    """#4188 is not regressed. A keyless capture stores the turns and SKIPS
+    extraction; writing the local 'imported' receipt for it would make every
+    later explicit re-import a no-op, so the session could never gain memory
+    points once a key appears. Durable turns with no extraction therefore still
+    defer to the spool.
+
+    MUTATION THAT REDS THIS: accept UNEXTRACTED in `_confirm_already_captured`
+    — a receipt appears and the session can never be re-extracted.
+    """
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import read_spool_meta
+
+    spool = _import_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _post_refused_get_serves("sid-keyless", _EXPECTED_TURNS, extracted=0))
+
+    rc = _cmd_sessions_import(SimpleNamespace(
+        file=str(codex_jsonl), harness="codex", session_id="sid-keyless"))
+
+    assert rc == 1
+    assert not list((tmp_path / "receipts").glob("*.json")), (
+        "a capture whose extraction never ran must stay re-importable")
+    assert read_spool_meta(spool, "sid-keyless") is not None, (
+        "the turns must survive for the next drain")
+
+
+def test_a_504_whose_session_never_appears_still_spools(
+        tmp_path, monkeypatch, codex_jsonl):
+    """A genuinely pre-commit refusal keeps today's behaviour exactly: an
+    honest failure and a durable spool entry. The confirmation must not turn
+    'I could not tell' into 'it committed'.
+
+    MUTATION THAT REDS THIS: treat a 404 (or any inconclusive read) as filed.
+    """
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import read_spool_meta
+
+    spool = _import_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _post_refused_get_serves("sid-never", _EXPECTED_TURNS, get_404=True))
+
+    rc = _cmd_sessions_import(SimpleNamespace(
+        file=str(codex_jsonl), harness="codex", session_id="sid-never"))
+
+    assert rc == 1
+    assert not list((tmp_path / "receipts").glob("*.json"))
+    assert read_spool_meta(spool, "sid-never") is not None
+
+
+def test_an_unreachable_api_that_still_committed_writes_the_receipt(
+        tmp_path, monkeypatch, codex_jsonl, capsys):
+    """The URLError branch gets the SAME confirmation. A read timeout or a
+    dropped connection after the server received the POST is exactly the
+    post-commit shape, and today it parks the turns and reports a failure.
+
+    MUTATION THAT REDS THIS: drop `_confirm_already_captured(None, ...)` from
+    the URLError branch.
+    """
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import read_spool_meta
+
+    spool = _import_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _post_refused_get_serves("sid-offline", _EXPECTED_TURNS,
+                                 post_exc=URLError("Connection refused")))
+
+    rc = _cmd_sessions_import(SimpleNamespace(
+        file=str(codex_jsonl), harness="codex", session_id="sid-offline"))
+
+    assert rc == 0, capsys.readouterr().err
+    assert [p.name for p in (tmp_path / "receipts").glob("*.json")] == \
+        ["sid-offline.json"]
+    assert read_spool_meta(spool, "sid-offline") is None
+
+
+def test_a_402_whose_session_landed_writes_no_receipt_but_keeps_the_spool(
+        tmp_path, monkeypatch, codex_jsonl, capsys):
+    """402 is `retry` to the CLASSIFIER (#4614: a quota refusal is transient —
+    its `est` is computed from the INCOMING capture, so the identical capture
+    succeeds once a node is freed), but it is in the recorded no-receipt set,
+    so the confirmation must exclude it by NAME.
+
+    #4675's body, verbatim: *"a LOCAL receipt is written on a **2xx**
+    (403/402/503 ⇒ exit 1, honest error, NO receipt) … that rule is correct and
+    must not be weakened"* — and the Task-15 acceptance line in
+    `tortoise/__main__.py`.
+
+    **The session here IS durable** — the read serves exactly the posted rows —
+    and that is what makes the test DISCRIMINATE. With the set derived from the
+    classifier, the confirmation runs, matches, and mints a receipt for a
+    refusal (rc 0): the recorded rule, weakened. An unreachable fake cannot
+    test this, because the confirmation swallows its own errors (fail-open by
+    contract), so "the read must not happen" is not assertable by making the
+    read raise — an earlier version of this test did exactly that and stayed
+    green under the mutation.
+
+    MUTATION THAT REDS THIS: drop 402 from `_NO_RECEIPT_REFUSAL_STATUSES` (or
+    derive the set from `classify_failure`) — rc becomes 0 and a receipt lands.
+    """
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import read_spool_meta
+
+    spool = _import_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _post_refused_get_serves(
+            "sid-quota", _EXPECTED_TURNS,
+            post_exc=_http_error(402,
+                                 '{"detail":"Team points limit reached"}')))
+
+    rc = _cmd_sessions_import(SimpleNamespace(
+        file=str(codex_jsonl), harness="codex", session_id="sid-quota"))
+
+    assert rc == 1, capsys.readouterr().err
+    assert "HTTP 402" in capsys.readouterr().err
+    assert not list((tmp_path / "receipts").glob("*.json")), \
+        "the recorded 2xx-only rule: a 402 must not mint a receipt"
+    assert read_spool_meta(spool, "sid-quota") is not None, \
+        "honouring the 402 rule must not cost the session — #4614 keeps it"
+
+
+def test_a_503_whose_session_landed_writes_no_receipt_but_keeps_the_spool(
+        tmp_path, monkeypatch, codex_jsonl, capsys):
+    """503 is `retry` to the CLASSIFIER (`status >= 500`) but it is in the
+    recorded no-receipt set, so the confirmation must exclude it by NAME.
+
+    #4675's body, verbatim: *"a LOCAL receipt is written on a **2xx**
+    (403/402/503 ⇒ exit 1, honest error, NO receipt) … that rule is correct and
+    must not be weakened"* — and the Task-15 acceptance line in
+    `tortoise/__main__.py`. A 503 whose commit landed must still exit 1 with no
+    receipt; what it must NOT do is lose the session, so the entry is spooled
+    and recoverable (§3.3).
+
+    MUTATION THAT REDS THIS: drop `status == 503` from the gate in
+    `_confirm_already_captured` — a durable 503 mints a receipt and exits 0.
+    """
+    import io
+    from urllib.error import HTTPError
+
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import read_spool_meta
+
+    spool = _import_env(tmp_path, monkeypatch)
+
+    class _Detail(io.BytesIO):
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _open(req, timeout=None):
+        if req.get_method() == "POST":
+            raise HTTPError(req.full_url, 503, "unavailable", None,
+                            io.BytesIO(b'{"detail":"Service Unavailable"}'))
+        sid = req.full_url.rsplit("/", 1)[-1]
+        detail = {"id": sid, "turns": len(_EXPECTED_TURNS), "extracted": 2,
+                  "turn_points": [
+                      {"id": f"{sid}_t{i}", "role": t["role"],
+                       "content": t["content"]}
+                      for i, t in enumerate(_EXPECTED_TURNS)]}
+        return _Detail(json.dumps(detail).encode("utf-8"))
+
+    monkeypatch.setattr("urllib.request.urlopen", _open)
+    rc = _cmd_sessions_import(SimpleNamespace(
+        file=str(codex_jsonl), harness="codex", session_id="sid-503"))
+
+    assert rc == 1, capsys.readouterr().err
+    assert "HTTP 503" in capsys.readouterr().err
+    assert not list((tmp_path / "receipts").glob("*.json")), \
+        "the recorded 2xx-only rule: a 503 mint no receipt"
+    assert read_spool_meta(spool, "sid-503") is not None, \
+        "honouring the 503 rule must not cost the session — it stays spooled"
+
+
 @pytest.mark.parametrize("code,body", [
     (429, '{"detail":"capture capacity saturated — too many captures in '
           'flight; retry shortly"}'),
@@ -582,6 +852,82 @@ def test_an_already_filed_entry_does_not_promise_a_filing(
     with mock.patch("urllib.request.urlopen", boom):
         assert _cmd_sessions_import(args) == 1
         assert "already filed" in capsys.readouterr().err
+
+
+def test_the_spooled_message_matches_what_a_drain_would_actually_do(
+        tmp_path, monkeypatch, codex_jsonl, capsys):
+    """TRUTHFUL OUTPUT, bounded BOTH ways. The window is CARRIED across a
+    rewrite now, so a drain inside a live window will NOT file the entry — the
+    message must name that state instead of promising a filing. But a window
+    beyond now + RETRY_MAX is one `_flush_one` treats as CORRUPT and files
+    immediately, so claiming a drain cannot help there would be the opposite
+    lie. The message's bound must be the drain's bound.
+
+    Mutations: (1) drop the live-window branch -> phase 2 REDs (the message
+    promises a filing the drain will refuse). (2) drop the upper bound ->
+    phase 3 REDs (the message refuses a filing the drain would perform)."""
+    import json as _json
+    import time as _time
+
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import (
+        RETRY_MAX_SECONDS,
+        PostOutcome,
+        _meta_path,
+        flush_spool,
+        read_spool_meta,
+    )
+
+    spool = _import_env(tmp_path, monkeypatch)
+    args = SimpleNamespace(file=str(codex_jsonl), harness="codex",
+                           session_id="sid-window")
+    boom = lambda req, timeout=None: (_ for _ in ()).throw(  # noqa: E731
+        _http_error(504, '{"detail":"time budget exceeded"}'))
+
+    # Phase 1: a FRESH entry has no window yet, so the drain really will file it.
+    with mock.patch("urllib.request.urlopen", boom):
+        assert _cmd_sessions_import(args) == 1
+        assert "tortoise session drain" in capsys.readouterr().err
+
+    def _doctor(window_ms):
+        meta = read_spool_meta(spool, "sid-window")
+        meta["next_attempt_at_ms"] = window_ms
+        _meta_path(spool, "sid-window").write_text(
+            _json.dumps(meta), encoding="utf-8")
+
+    # Phase 2: a LIVE window. Doctor it AFTER the spool write (which sanitises a
+    # corrupt window), and stub the write so the doctored value survives to the
+    # read the message is built from.
+    _doctor(_time.time() * 1000.0 + 30_000)
+    with mock.patch("urllib.request.urlopen", boom), \
+            mock.patch("tortoise.capture_spool.write_spool_entry",
+                       lambda *a, **k: {"written": True, "bytes": 1,
+                                        "discards": []}):
+        assert _cmd_sessions_import(args) == 1
+        err = capsys.readouterr().err
+    assert "backoff window" in err, err
+    assert "tortoise session drain" not in err, (
+        "a drain inside the window will NOT file this, so promising one is "
+        "false: " + err)
+
+    # Phase 3: an absurd window is CORRUPT, and the drain files it immediately —
+    # so the message must go back to naming the command.
+    _doctor(_time.time() * 1000.0 + RETRY_MAX_SECONDS * 1000 * 10)
+    with mock.patch("urllib.request.urlopen", boom), \
+            mock.patch("tortoise.capture_spool.write_spool_entry",
+                       lambda *a, **k: {"written": True, "bytes": 1,
+                                        "discards": []}):
+        assert _cmd_sessions_import(args) == 1
+        err = capsys.readouterr().err
+    assert "backoff window" not in err, (
+        "a corrupt window is filed immediately, so claiming a drain cannot "
+        "help is false: " + err)
+    assert "tortoise session drain" in err, err
+
+    # ...and prove the claim rather than asserting it.
+    filed = flush_spool(spool, lambda payload: PostOutcome(
+        ok=True, status=200, body={"session_id": payload["session_id"]}))
+    assert filed.filed == 1, "the message promised a filing the drain refused"
 
 
 def test_an_oversized_turn_is_clamped_before_spooling(tmp_path, monkeypatch):
