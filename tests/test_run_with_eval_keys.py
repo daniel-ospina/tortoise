@@ -150,12 +150,20 @@ class RunWithEvalKeysTests(unittest.TestCase):
         """
         declared = parse_managed_keys(WRAPPER)
         self.assertEqual(declared, set(MANAGED))
+        # Import THIS repo's package, not whatever a `tortoise` distribution put
+        # in site-packages: when the file is run standalone, `sys.path[0]` is
+        # `tests/`, so an installed `tortoise` shadows it — and the guard then
+        # skipped itself, a drift guard failing OPEN. Pin the path, and fail if
+        # the registries cannot be read at all: reddening when a provider
+        # escapes the launcher is this test's whole job.
+        if str(ROOT) not in sys.path:
+            sys.path.insert(0, str(ROOT))
         try:
             from tortoise.analyze import _LLM_PROVIDERS
             from tortoise.ingest import _PROVIDERS
             from tortoise.model_adapters import _PROVIDER_KEY_ENV
-        except Exception as exc:  # pragma: no cover - standalone lane
-            self.skipTest(f"tortoise registries unavailable here: {exc}")
+        except Exception as exc:
+            self.fail(f"cannot read the registries from {ROOT}: {exc!r}")
         derived = {key for _url, key in _PROVIDERS.values() if key}
         derived |= set(_LLM_PROVIDERS)
         derived |= set(_PROVIDER_KEY_ENV.values())
@@ -252,10 +260,41 @@ class RunWithEvalKeysTests(unittest.TestCase):
 
     def test_short_value_is_fully_redacted_including_its_hash(self):
         # A short, low-entropy value must not be recoverable from a receipt:
-        # its length plus a deterministic sha256 is a brute-force oracle.
-        short = "abc123"
-        env_file = Path(self._tmp.name) / "short.env"
-        env_file.write_text(f"OPENROUTER_API_KEY={short}\n", encoding="utf-8")
+        # `len` plus a deterministic sha256 prefix is a brute-force oracle for
+        # the characters the fingerprint does not print. The boundary is 20 — at
+        # 12 only 6 characters are hidden, which is ~5.7e10 candidates against a
+        # 48-bit filter (hours of GPU).
+        for value in ("abc123", ("abc123" * 4)[:19]):
+            with self.subTest(value=value):
+                env_file = Path(self._tmp.name) / f"short-{len(value)}.env"
+                env_file.write_text(
+                    f"OPENROUTER_API_KEY={value}\n", encoding="utf-8"
+                )
+                r = self.run_wrapper(
+                    ["true"],
+                    env=self.base_env(EVAL_KEYS_ENV_FILE=str(env_file)),
+                    use_fixture=False,
+                )
+                self.assertEqual(r.returncode, 0, r.stderr)
+                line = next(
+                    s
+                    for s in r.stderr.splitlines()
+                    if "OPENROUTER_API_KEY source=" in s
+                )
+                self.assertIn("fingerprint=<redacted>", line)
+                self.assertIn("sha256=redacted", line)
+                self.assertNotIn(value, r.stderr)
+                self.assertNotIn(
+                    hashlib.sha256(value.encode()).hexdigest()[:12], r.stderr
+                )
+
+    def test_twenty_char_value_is_fingerprinted(self):
+        # The boundary is inclusive and must not creep: at 20 characters 14 stay
+        # hidden (~1.2e25), which is not brute-forceable, so the key stays
+        # identifiable across receipts as intended.
+        value = ("abc123" * 4)[:20]
+        env_file = Path(self._tmp.name) / "boundary.env"
+        env_file.write_text(f"OPENROUTER_API_KEY={value}\n", encoding="utf-8")
         r = self.run_wrapper(
             ["true"],
             env=self.base_env(EVAL_KEYS_ENV_FILE=str(env_file)),
@@ -265,10 +304,10 @@ class RunWithEvalKeysTests(unittest.TestCase):
         line = next(
             s for s in r.stderr.splitlines() if "OPENROUTER_API_KEY source=" in s
         )
-        self.assertIn("fingerprint=<redacted>", line)
-        self.assertIn("sha256=redacted", line)
-        self.assertNotIn(short, r.stderr)
-        self.assertNotIn(hashlib.sha256(short.encode()).hexdigest()[:12], r.stderr)
+        self.assertIn("fingerprint=abc123", line)
+        self.assertIn("len=20", line)
+        self.assertIn(hashlib.sha256(value.encode()).hexdigest()[:12], line)
+        self.assertNotIn(value, r.stderr)
 
     def test_inherited_xtrace_does_not_leak_the_key(self):
         # `SHELLOPTS=xtrace` in the caller's env makes bash trace the loader's
@@ -409,6 +448,92 @@ class RunWithEvalKeysTests(unittest.TestCase):
         self.assertIn("OPENROUTER_API_KEY source=", r.stderr)
 
     # ── .env parsing semantics (mirrors _load_dotenv) ──────────────────
+
+    def test_the_strip_is_proven_not_assumed(self):
+        # The `unset` of the ambient keys is an ordinary builtin; the proof that
+        # it took is what makes the receipt's `source=` line trustworthy. The
+        # marker path (`_RWEK_SANITIZED=1`, the caller-settable opt-out) skips
+        # the re-exec, so a shadowed `unset` leaves an ambient key in place — the
+        # proof must then abort with 3 rather than print a receipt that
+        # attributes that value to the env file.
+        env = self.base_env(OPENROUTER_API_KEY=SABOTAGE, _RWEK_SANITIZED="1")
+        env["BASH_FUNC_unset%%"] = "() { return 0; }"
+        r = self.run_wrapper(["true"], env=env)
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertIn("survived the ambient strip", r.stderr)
+        # no per-key receipt line, so no source claim is made about the ambient
+        # value the strip failed to remove
+        self.assertNotIn("fingerprint=", r.stderr)
+        self.assertNotIn(SABOTAGE, r.stderr)
+
+    def test_a_shadowed_exit_cannot_produce_a_false_source(self):
+        # The proof's RESPONSE is `printf` + `exit` — builtins a caller can
+        # shadow. With `exit` shadowed the FATAL is printed and ignored, the run
+        # continues, and the child receives the ambient key. Nothing in-band can
+        # stop that (there is no privilege boundary — see the launcher header),
+        # but the receipt must not LIE about it: the source label is assigned (an
+        # assignment is not a builtin) so the ambient value is never reported as
+        # coming from the env file.
+        env = self.base_env(OPENROUTER_API_KEY=SABOTAGE, _RWEK_SANITIZED="1")
+        env["BASH_FUNC_unset%%"] = "() { return 0; }"
+        env["BASH_FUNC_exit%%"] = "() { return 0; }"
+        r = self.run_wrapper(["true"], env=env)
+        self.assertNotIn(
+            f"source={self.env_file}",
+            r.stderr,
+            "the receipt attributed a surviving ambient key to the env file",
+        )
+        self.assertIn("ambient strip failed", r.stderr)
+        self.assertNotIn(SABOTAGE, r.stderr)
+
+    def test_a_shadowed_exec_fails_loudly_instead_of_silently(self):
+        # A caller CAN export `BASH_FUNC_exec%%`. That makes the re-exec AND the
+        # final `exec "$@"` no-ops, so the wrapped command never runs — the one
+        # outcome that must never look like success. The sentinel after the
+        # final exec turns it into exit 3 with a FATAL, not a receipt + exit 0.
+        env = self.base_env()
+        env["BASH_FUNC_exec%%"] = "() { return 0; }"
+        r = self.run_wrapper(["true"], env=env)
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertIn("the command did NOT run", r.stderr)
+
+    def test_env_file_cannot_redirect_a_nested_invocation(self):
+        # `EVAL_KEYS_ENV_FILE` is the launcher's own INPUT, not a key to
+        # publish. A `.env` line naming it would be exported (fill-if-absent)
+        # and a NESTED run of the launcher would then read a different file — so
+        # the "a `.env` can never rewrite the launcher's own state" claim would
+        # be false one level down. Synthetic repo layout, so the DEFAULT `.env`
+        # path is the fixture and the developer's live `.env` is never read.
+        repo = Path(self._tmp.name) / "redirect-repo"
+        (repo / "tools").mkdir(parents=True)
+        copied = repo / "tools" / "run-with-eval-keys.sh"
+        shutil.copyfile(WRAPPER, copied)
+        copied.chmod(copied.stat().st_mode | stat.S_IXUSR)
+        other = repo / "other.env"
+        other.write_text(f"OPENROUTER_API_KEY={SABOTAGE}\n", encoding="utf-8")
+        (repo / ".env").write_text(
+            f"EVAL_KEYS_ENV_FILE={other}\n"
+            f"OPENROUTER_API_KEY={FIXTURE_OPENROUTER}\n",
+            encoding="utf-8",
+        )
+        r = subprocess.run(
+            [
+                str(copied),
+                "sh",
+                "-c",
+                'printf "%s" "${EVAL_KEYS_ENV_FILE:-<unset>}"',
+            ],
+            capture_output=True,
+            text=True,
+            env=self.base_env(),
+            timeout=60,
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(
+            r.stdout, "<unset>", "a `.env` line published the launcher's own input"
+        )
+        self.assertNotIn("DEADBEEF", r.stderr)
 
     def test_parses_export_quotes_and_comments(self):
         script = "; ".join(f'printf "%s|" "$EVALTEST_{name}"' for name in (

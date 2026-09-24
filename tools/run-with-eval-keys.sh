@@ -68,12 +68,34 @@
 # `_RWEK_SANITIZED` is that guard's marker and is dropped again immediately, so
 # it cannot reach the wrapped command or a NESTED invocation of this launcher —
 # a nested run that skipped sanitization would print a receipt with no truth in
-# it. It is still a caller-settable opt-out, and a caller who shadows `exec`
-# prevents the re-exec: the two fail-closed checks below (tracing, and the
-# ambient strip) still run, but the wrapped command then never runs while a
-# receipt is printed and the launcher exits 0. (A shadowed `export` only costs
-# one extra re-exec hop — the unexported marker makes the `-p` child re-exec
-# again — and the run is still sanitized.)
+# it. It is still a caller-settable opt-out, and that opt-out is a HOLE in this
+# guard, not a cost-free switch. Both holes need the caller to export something
+# (`_RWEK_SANITIZED=1`, or a function) and are stated here exactly as measured:
+#
+#   - `_RWEK_SANITIZED=1` skips the re-exec, so the caller's own function
+#     shadows stay live for the whole run. The two fail-closed checks below
+#     (tracing, ambient strip) still EVALUATE — their condition is `case` and
+#     parameter expansion, which no function can shadow — but their RESPONSE is
+#     `printf` + `exit`, ordinary builtins a caller can shadow. With `exit`
+#     shadowed the FATAL is printed and then IGNORED: the run continues, hands
+#     the ambient key to the wrapped command, and exits 0. A shadowed `unset`
+#     alone is not enough (the strip proof catches it), and `printf` shadowed
+#     alone only silences the message. `_RWEK_SOURCE_LABEL` is therefore an
+#     ASSIGNMENT (not shadowable) set on that path, so the receipt cannot claim
+#     the `.env` file as the provenance of a surviving ambient value — the
+#     #4860 false-attribution class. Nothing here can stop the child from
+#     running with the ambient key; the assignment only removes the lie.
+#   - a shadowed `exec` (no marker needed) makes the re-exec AND the final
+#     `exec "$@"` no-ops, so the wrapped command never runs; the sentinel after
+#     the final `exec` turns that into a loud `exit 3` instead of a silent 0.
+#
+# This is an auditability guard, not a privilege boundary: the invoking
+# principal supplies the ambient keys and can read them without this script, so
+# the guarantee is "no correct invocation is misreported", never "a hostile
+# environment cannot misreport". Closing the class needs a privilege boundary
+# the shell cannot supply. (A shadowed `export` only costs one extra re-exec
+# hop — the unexported marker makes the `-p` child re-exec again — and the run
+# is still sanitized.)
 #
 # This is an auditability guard, not a privilege boundary — the invoking
 # principal supplies the ambient keys and can already read them.
@@ -235,6 +257,10 @@ for _rwek_key in "${_RWEK_MANAGED_KEYS[@]}"; do
     ?*)
       printf '[eval-keys] FATAL: %s survived the ambient strip; refusing to run\n' \
         "$_rwek_key" >&2
+      # An assignment, so a shadowed `exit` (which would turn the `exit 3` below
+      # into a no-op) cannot leave a receipt claiming this ambient value came
+      # from the env file. Assignment is not a builtin and cannot be shadowed.
+      _RWEK_SOURCE_LABEL='<aborted: the ambient strip failed, NOT from this file>'
       exit 3
       ;;
   esac
@@ -286,6 +312,14 @@ if [ -f "$_RWEK_ENV_FILE" ] && [ -r "$_RWEK_ENV_FILE" ]; then
     case "$_rwek_key" in
       _RWEK_* | _rwek_*) continue ;;
     esac
+    # `EVAL_KEYS_ENV_FILE` is this launcher's own INPUT (a plain name, so the
+    # pattern above does not cover it). Left loadable, a `.env` line could set
+    # it for the wrapped command, and a NESTED invocation would then read a
+    # different env file — the "a `.env` can never rewrite the launcher's own
+    # state" claim above would be false for every child.
+    case "$_rwek_key" in
+      EVAL_KEYS_ENV_FILE) continue ;;
+    esac
 
     _rwek_first=${_rwek_value:0:1}
     _rwek_last=${_rwek_value: -1}
@@ -329,9 +363,13 @@ fi
 # The fingerprint is the first 6 characters (the provider's fixed prefix, plus
 # for some issuers a few key characters), the length, and a sha256 prefix —
 # enough to identify the key across receipts without printing it. The full
-# value is never printed; a value shorter than 12 characters is redacted and
-# its hash is withheld too (a short, low-entropy secret is recoverable from
-# len + sha256 alone, and these lines are meant to be pasted into receipts).
+# value is never printed; a value shorter than 20 characters is redacted and
+# its hash is withheld too, because `len` plus a 48-bit digest filter brutes
+# the HIDDEN characters: at 12 characters that is 6 hidden from a 62-char
+# alphabet (≈5.7e10 — hours of GPU), exactly the oracle the redaction exists to
+# deny. 20 leaves 14 hidden (≈1.2e25) and still covers every key in use here
+# (the shortest is 30+). These lines are meant to be pasted into receipts, so
+# the margin is deliberate.
 if [ -L "$_RWEK_ENV_FILE" ]; then
   # The symlink ALIAS is what the wrapper opens (so the label stays `.env`),
   # but the bytes come from its target — disclose the target, or a receipt
@@ -349,7 +387,7 @@ for _rwek_key in "${_RWEK_MANAGED_KEYS[@]}"; do
     continue
   fi
   _rwek_value=${!_rwek_key}
-  if [ "${#_rwek_value}" -ge 12 ]; then
+  if [ "${#_rwek_value}" -ge 20 ]; then
     _rwek_fp="${_rwek_value:0:6}…"
     _rwek_hash=$(sha256_of "$_rwek_value")
   else
@@ -362,4 +400,13 @@ for _rwek_key in "${_RWEK_MANAGED_KEYS[@]}"; do
 done
 
 # ── 4. exec the command ───────────────────────────────────────────────────
+# The `exec` is the whole point (the wrapped command must replace this process,
+# so its stdout/stderr/exit status are its own), and a caller CAN shadow it with
+# an exported `BASH_FUNC_exec%%`. Without a sentinel that shadow is a silent
+# no-op: a receipt is printed, the command never runs, and the launcher exits 0.
+# The line after `exec` is unreachable whenever `exec` worked (a successfully
+# exec'd process does not come back, and a FAILED exec makes a non-interactive
+# bash exit by itself), so reaching it can only mean the builtin was shadowed.
 exec "$@"
+printf '[eval-keys] FATAL: exec did not replace this process, the command did NOT run\n' >&2
+exit 3
