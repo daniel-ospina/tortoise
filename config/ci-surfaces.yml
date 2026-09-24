@@ -587,6 +587,21 @@ surfaces:
   - test_selfhost_health_probe_executor.py  # #3287/#2988/#3243: selfhost health probes (dual-registered)
   - test_source_dedup_registration.py
   - test_source_identity.py
+  # #5024 (T6): the `:Source` version transition must be JOURNALLED and
+  # REPEAT-SAFE — a changed `contentHash` writes a `SourceVersioned` record
+  # carrying `previousContentHash`, a no-op re-fetch writes NOTHING, and a
+  # `rebuild_all` reproduces the node field for field. `core` is the arm that
+  # owns the change: `tortoise/projection/entities.py` (where `_upsert_source`
+  # and `_fold_source_versioned` live) selects `core`, per
+  # `python3 tools/ci_selection.py --changed tortoise/projection/entities.py`.
+  # `tortoise/sdk.py` and `tortoise/projection/__init__.py` are SHARED_MODULES
+  # (already the full matrix), so 2 of the 3 changed modules need no separate
+  # arm. **Deliberately NOT dual-registered with `eval`** (contrast
+  # `test_journal_embedding_5004.py` above): this file pins no embedding path,
+  # so an `embeddings.py`-only PR cannot leave a guard here unrun. The
+  # fail-before/pass-after evidence: 12 of the 21 fail on the unfixed base and
+  # all 21 pass here.
+  - test_source_rematerialisation_5024.py
   - test_subject_layer_read_surfaces_4889.py  # #4889: the Subject-layer read surfaces fail loud instead of silently empty
   - test_transport_wait_bound.py  # #3834: transport wait bound + cold-half gate wiring (dual: api)
   # #2877: DB-free guards that a dead backup watcher degrades /health (the file
@@ -2344,6 +2359,7 @@ durations:
   test_provenance_extractedfrom_3263.py: 2.6
   test_rebuild_turn_points_3947.py: 4.4
   test_journal_embedding_5004.py: 24.0  # #5004: 32 tests, docker FalkorDB; locally measured
+  test_source_rematerialisation_5024.py: 20.0  # #5024: 21 tests, docker FalkorDB; locally measured (11-30s across runs, fleet-contention sensitive)
   test_restore_seq_3902.py: 0.8
   test_retention_promise.py: 2.7
   test_retired_tools.py: 0.2

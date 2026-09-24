@@ -406,6 +406,12 @@ class _EntityHandlers:
     _SOURCE_HANDLED: frozenset = frozenset({
         "id", "url", "sourceKind", "contentHash",
         "title", "ingestedAt", "version", "externalId", "updatedAt",
+        # #5024: the version-transition record's own key. It describes the
+        # TRANSITION (which version this one superseded), never a node property
+        # — it is the fact that keeps the prior version addressable from the
+        # record alone, and `_persist_extra_props` must not also write it (the
+        # #330/#3312 one-sided-property class).
+        "previousContentHash",
         # S0a/S0b (#5012): server-managed source-identity props.  They are
         # written by `_upsert_source`'s fixed SET clauses, never by the
         # open-set passthrough (which would let a payload clobber the
@@ -2369,7 +2375,13 @@ class _EntityHandlers:
             "              s.sourceKind = $sk, "
             "              s.contentHash = coalesce($hash, ''), "
             "              s.title = $title, "
-            "              s.ingestedAt = $now, "
+            # #5024: the RECORDED ingest instant, not the replay's clock. The
+            # payload has carried `ingestedAt` since #398, but the fold set it
+            # from `_now_iso()` at REPLAY time, so `derived = replay(journal)`
+            # was FALSE for the field (measured: live ...56.751580 vs rebuilt
+            # ...57.047168 on the same 12-instance run). `coalesce` keeps a
+            # legacy/foreign record without the key working exactly as before.
+            "              s.ingestedAt = coalesce($ingestedAt, $now), "
             "              s.version = 1, "
             "              s.externalId = $ext, "
             "              s.sourcePath = coalesce($sp, s.sourcePath), "
@@ -2392,9 +2404,16 @@ class _EntityHandlers:
             "           s.version = CASE WHEN $hash IS NULL THEN s.version "
             "                    WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
             "                    THEN s.version + 1 ELSE s.version END, "
+            # #5024: same rule as `ingestedAt` above — the recorded instant,
+            # never the replay clock (measured divergence: ...57.016262 live vs
+            # ...57.079810 rebuilt). A re-materialisation now emits
+            # `SourceVersioned` (which carries its own `at`), so this branch is
+            # the LEGACY path for journals written before that record existed;
+            # keeping `coalesce($updatedAt, $now)` makes both records replay to
+            # the same node.
             "           s.updatedAt = CASE WHEN $hash IS NULL THEN s.updatedAt "
             "                     WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
-            "                     THEN $now ELSE s.updatedAt END, "
+            "                     THEN coalesce($updatedAt, $now) ELSE s.updatedAt END, "
             "           s.sourcePath = coalesce($sp, s.sourcePath), "
             "           s.canonicalUrl = coalesce(s.canonicalUrl, $cu), "
             "           s.urlAliases = CASE WHEN $raw_url IN coalesce(s.urlAliases, []) "
@@ -2411,6 +2430,10 @@ class _EntityHandlers:
                 "hash": ev.get("contentHash"),
                 "title": ev.get("title", key),
                 "now": _now_iso(),
+                # #5024: the recorded instants (None for a legacy record —
+                # `coalesce` falls back to `$now`, the pre-#5024 behaviour).
+                "ingestedAt": ev.get("ingestedAt"),
+                "updatedAt": ev.get("updatedAt"),
                 "ext": ev.get("externalId", ""),
                 "sp": ev.get("source_path"),
                 "st": search_text,
@@ -2423,3 +2446,43 @@ class _EntityHandlers:
             ev, self._SOURCE_HANDLED,
         )
         return r
+
+    def _fold_source_versioned(self, ev: dict) -> None:
+        """#5024 — replay a `:Source` VERSION TRANSITION (T6).
+
+        THE DEFECT THIS FOLDS. `_upsert_source` bumps `updatedAt` / `version` /
+        `contentHash` on a hash-differing `ON MATCH`, and `create_source`
+        journaled a plain `SourceCreated` for **every** write. Two consequences,
+        both measured on 12 real re-materialisations before this record existed::
+
+            DIFF updatedAt: live='...57.016262' rebuilt='...57.079810'
+            DIFF ingestedAt: live='...56.751580' rebuilt='...57.047168'
+
+        (the replay's clock, not the recorded instant), and a NO-OP re-check
+        (identical hash) still appended a journal line — 12 -> 13 — which is
+        the unbounded-growth cost §9.6 requires the re-check to avoid.
+
+        The ontology's own model (`ONTOLOGY.md` v3.15 §4.6 *Versioning*, and
+        `STORAGE-ARCHITECTURE.md` §9.6) is: identity is `url`, `contentHash`
+        identifies a VERSION, **one node per url**, and *"a version transition
+        appends a journal record ... the prior version's window is a journal
+        fact, recoverable by replay"*. So the record carries
+        `previousContentHash` — which version this one superseded, the fact that
+        makes the prior version addressable once the single node has moved on.
+        In-place by design: a second `:Source` per version is explicitly ruled
+        out, so the history lives in the record and the node holds the CURRENT
+        version.
+
+        THE FOLD IS THE LIVE WRITER, DELIBERATELY. The first cut of this method
+        re-stated `_upsert_source`'s SET clauses by hand and drifted from it in
+        three fields — `urlAliases`, `sourcePath`, `canonicalUrl` — every one a
+        live != replay divergence, found by the review gate rather than by the
+        tests. Delegating makes apply/replay parity true **by construction**:
+        there is no second clause list to fall out of sync. It is safe because
+        `_upsert_source`'s ON MATCH is already hash-diff-gated and already reads
+        the RECORDED instants (`coalesce($updatedAt, $now)`,
+        `coalesce($ingestedAt, $now)`), and its `version` ordinal is
+        `s.version + 1` on that same gate — exactly how the live path produced
+        it — so replaying create -> transition reproduces the ordinal.
+        """
+        self._upsert_source(ev)

@@ -175,6 +175,63 @@ a stale `PointPromoted` predating a `delete → recreate` re-applies the dead
 incarnation's derived fields — the `#2884 A7` gate is belief-only by a recorded
 #785 decision (**#5068**).
 
+**R2 — `:Source`: the per-class test does not hold, so the split is per
+FIELD.** `ONTOLOGY.md` §4.7 is the reason this is written as a table rather
+than a sentence: the per-*class* claim *“append-only — rows are added, never
+updated”* was **false**, and the corrected test binds at the **write/field**
+level. `:Source` is exactly that shape. `STORAGE-ARCHITECTURE.md` §3/§9.6 gives
+its model — identity is `url`, `contentHash` identifies a **version**, there is
+**one node per `url`** (*“the prior version's window is a journal fact,
+recoverable by replay”*, §9.6; `ONTOLOGY.md` §4.6 adds that *“a version
+transition appends a journal record”*) — so a
+re-fetched Source is a **new version of the same identity**, not an in-place
+edit and not a recomputation.
+
+`:Source` is therefore **not** declared recomputable as a class. Field by
+field (**#5024**; `contentHash` is the row that makes the class-level claim
+false):
+
+<!-- source-field-split:start -->
+| `:Source` field | Disposition | Why |
+|---|---|---|
+| `url` | **RECORDED** | The merge key — the node's identity (§9.4: a canonicalised URL, never an embedding). `_upsert_source`/the fold resolve it through the shared `resolve_source_key`, so a variant spelling replays onto the ONE node. |
+| `id` | RECORDED | Identity companion. |
+| `canonicalUrl`, `urlAliases` | **RECOMPUTABLE** | Reproduced from the record sequence by the shared resolver (`normalize_source_url` + the #5012 S0b alias append), so a URL variant replays onto the ONE canonical node with the same alias list. Not *stored* — there is no separate record for them. |
+| **`contentHash`** | **RECORDED** | **The version anchor — and the reason this is not a class-level claim.** A re-fetch *changes* it by definition, so “recompute it” would recompute the thing the record is keyed on. **#3998**, still open, **proposes** raw-absent/erased as a third value on the same record. |
+| `version` | RECORDED | The live writer's own ordinal. Counting prior records instead would be a second derivation with its own failure modes. |
+| `updatedAt` | **RECORDED** | The instant the transition happened. Minted **once** by the producer and carried on the record; a replay that read `_now_iso()` diverged live vs rebuilt (measured ...57.016262 vs ...57.079810). Legacy records without it `coalesce` to the replay clock. |
+| `ingestedAt` | **RECORDED** | The pipeline-arrival instant (§4.6: the documented proxy for the evidence-age clock). Same divergence, same fix (measured ...56.751580 vs ...57.047168). |
+| `sourceKind`, `title`, `externalId`, `sourcePath` | RECORDED | Caller-asserted. `sourcePath` is the sanctioned `source_path=` route only (§4.1). |
+| `_searchText` | RECORDED | §4.6's coalesce-on-create / overwrite-on-hash-diff fold over `title`. Rides the record like every other clause. |
+| open extras (`summary`, `topics`, `sourceDate`, `is_episodic`, `credibilityTier`, `documentKind`, `format`, `sessionId`, `eventId`, …) | RECORDED | `_persist_extra_props` passthrough with `_SOURCE_HANDLED`. `tier=`/tier-form `sourceKind` mirror to `credibilityTier`. |
+| `reliability`, `reliabilityComponents`, `reliability_derived_at` | **NOT AUTHORITATIVE** | The #398 **query-time cache**. Recomputed on rebuild by design, not restored — the §3 pattern for a cache. Excluded from the replay-parity assertion for that reason, not for convenience. |
+| `validFrom`, `validTo`, `expiredAt` | **declared, never written** | `ONTOLOGY.md` §4.6/§4.7 declare them; no writer sets them today, so a replay cannot lose what no write ever wrote. The window half of §4.6's *Versioning* clause — **#3644** (the journalling half landed in **#5024**). |
+<!-- source-field-split:end -->
+
+**The replay fold IS the live writer.** `_fold_source_versioned` delegates to
+`_upsert_source` rather than restating its SET clauses. The first cut did
+restate them and drifted in three fields (`urlAliases`, `sourcePath`,
+`canonicalUrl`) — each a live != replay divergence, found by the review gate
+rather than by a test. Parity now holds **by construction**: there is no second
+clause list to fall out of sync, and the transition record's own contribution is
+the one fact the writer cannot derive — `previousContentHash`.
+
+The write path is **repeat-safe** on top of the split: a re-check that finds the
+same bytes journals **nothing** (a `SourceVersioned` only when the hash really
+transitioned, a `SourceCreated` for a create or a stub completion — a
+**hashless** re-check included, which is why "no stored hash" alone cannot
+select the create arm),
+because §9.6 bounds a version at *“three timestamps and a hash — not a copy of
+the artifact”*. The no-op test is over the payload's **own keys**, not “same
+hash”: a hash-identical call may still carry a new `summary`, and suppressing
+**that** record would trade log growth for a live ≠ replay divergence. Its
+polarity is **fail-safe toward recording** — anything it cannot prove unchanged
+is written.
+
+> **Residual, pinned not fixed:** `PointRevised`’s embedding arm (**#5046**) and
+> `_update_entity`’s Point branch (**#4094**) are the two embedding-path
+exemptions from R1; they are orthogonal to R2 and are not widened here.
+
 | Deployment | Mechanism (where the data lives) | Honest loss window | Strongest verification actually performed |
 |---|---|---|---|
 | **Hosted — graph archives** (`tortoise/hosted_backup.py`, `tortoise/backup_sweep.py`) | Per-graph **logical dump** (`tortoise-logical-dump-v1`), AES-256-GCM encrypted, uploaded with a sha256 manifest to **Cloudflare R2 (off-box)**, swept hourly (`registry-backup-cron.yml`, `17 * * * *`). **Gated:** `BACKUP_SWEEP_ENABLED` is fail-closed (default off, `tortoise/backup_config.py:172-180`, `:249`); `deploy-hosted.yml:358-380` sets it true only when every required secret is present. | **≤ 1 h typical / ≤ 2 h worst-case** for *entitled* graphs (`tier ≠ free` AND `backup_enabled`; `tortoise/backup_sweep.py:248-272`) *when the sweep is enabled* (`docs/ops/registry-backup-dr.md` §RPO; achieved age is measured per team/graph via `/v1/internal/backups/status`). An **unentitled** graph has **no periodic archive** — its window is unbounded. With the sweep **off** the same holds; the Pro on-demand backup endpoint (`POST /backups`, `tortoise/hosted_api.py`) and the vendor snapshot below remain. | **Checksum + on-path restore verification; the drill is NOT yet clean.** The live restore path verifies sha256 against the manifest and node/edge counts against the authenticated payload before swapping (`tortoise/hosted_backup.py:3-40`) — that gate is what caught the incomplete dump. A **restore drill was attempted once and FAILED** (2026-09-17, `workflow_dispatch`): `Edge restore incomplete: 9687/10000 linked — dump references missing nodes` (#3894; export defect fixed by #3921, `_DUMP_REVISION = 2` — #3895 stays open tracking a successful re-drill of a real artifact). The scheduled monthly drill (`registry-drill-cron.yml`, #2317) has **not yet run**. Until a real archive restores end-to-end this row is **not drilled to success**; the sweep producing archives is covered by the freshness watcher (#2790 / #2922). |

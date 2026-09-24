@@ -55,6 +55,33 @@ that the payload does not name:
   `docs/durability-posture.md` → *Derived properties that are STORED, not
   recomputed*; do not restate the list here (it has drifted once already).
 
+- **`SourceVersioned`** (#5024, T6) — the `:Source` **version transition**. A
+  re-fetched source whose `contentHash` differs is a *new version of the same
+  identity*, never an in-place edit (`ONTOLOGY.md` v3.15 §4.6 *Versioning*;
+  `STORAGE-ARCHITECTURE.md` §9.6). Fields: `id` and `url` (the identity),
+  `contentHash` (the NEW version), **`previousContentHash`** (the superseded
+  one — this is what makes the prior version addressable after the single
+  `:Source` node has moved on) and the usual `sourceKind`/`title`/`ingestedAt`/
+  `updatedAt`/extras. The transition instant is **not** a separate key: the
+  payload's own `updatedAt` (minted once by `create_source`, so the live node
+  and the record cannot disagree) is it, and the fold reads exactly that. The
+  record carries **no** recomputed ordinal — `version` is reproduced on replay
+  through the same hash-diff gate the live write used, so recording it too
+  would be a second derivation that can disagree. Folded by
+  `FalkorProjection._fold_source_versioned`, which **delegates to
+  `_upsert_source`** — the LIVE writer — so apply/replay parity holds by
+  construction rather than by a second, hand-maintained clause list (the first
+  cut kept its own clauses and drifted in `urlAliases`/`sourcePath`/
+  `canonicalUrl`, each a live != replay divergence). **JSONL-only** (not
+  in `_GRAPH_EVENT_TYPES`), in `_NO_POINT_FOLD`, and folded in **both**
+  `apply()` and `rebuild_all` pass 1b. `create_source`'s cadence is
+  per-**outcome**: this record for a real hash transition, `SourceCreated` for
+  a create or a JOINT-E2E stub completion, and **nothing at all** for a
+  re-check that found what we already hold (§9.6's cost bound — a version is
+  "three timestamps and a hash", so a no-op re-fetch must not be one). A
+  hashless re-check counts: a hashless create stores `contentHash = ''`, so
+  "no stored hash" alone must not select the create arm, or every re-ingest of
+  a hashless source would append a record.
 - **`OperatorAnnotated`** (#3689) — the JSONL line carries `id` plus the
   **canonical** `annotator_bias`/`annotator_precision`/`annotator_consistency`/
   `annotator_directness` (the payload above keeps the SHORT names

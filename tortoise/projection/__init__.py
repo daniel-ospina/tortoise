@@ -1740,6 +1740,10 @@ _NO_POINT_FOLD = _NO_PROJECTION_FOLD | frozenset({
     "ObjectSuperseded",
     "DocumentCreated",
     "SourceCreated",
+    # #5024 (T6): the `:Source` version transition. Same reason as
+    # `SourceCreated` above — a real fold in `apply`/`rebuild_all`, but a
+    # `:Source` node has no representation in this `{id: point}` index.
+    "SourceVersioned",
     "DirectEdgeRepoint",
     # JSONL-only siblings of the two above: both have REAL fold branches in
     # ``apply``/``rebuild_all``, but neither has a representation in this
@@ -3028,6 +3032,13 @@ class FalkorProjection(
             # popped here so it never reaches _persist_extra_props.
             return self._upsert_source(
                 ev, merge_run_id=ev.pop("_merge_run_id", None))
+        elif t == "SourceVersioned":
+            # #5024 (T6): the re-materialisation record. `_upsert_source`'s
+            # hash-diff ON MATCH bumps version/updatedAt/contentHash in place
+            # and journals nothing OF ITS OWN; this is that write's record.
+            # A no-op re-check (identical hash) emits NOTHING, so the journal
+            # does not grow on every re-check (§9.6's cost bound).
+            self._fold_source_versioned(ev)
         elif t == "ConfidenceChanged":
             # #2884 D3: the EP/dream belief-state write-back. Inline (a
             # non-terminalizing property SET — parity with the PointRevised
@@ -4551,6 +4562,11 @@ class FalkorProjection(
             elif t == "SourceCreated":
                 # #330 parity with apply(): SourceCreated was dropped by rebuild.
                 self._upsert_source(ev)
+            elif t == "SourceVersioned":
+                # #5024 (T6): apply()/rebuild parity — the transition must be
+                # replayed in pass 1b exactly as it was applied live, or the
+                # rebuilt `:Source` keeps the pre-transition hash/version.
+                self._fold_source_versioned(ev)
             elif t in _NO_PROJECTION_FOLD:
                 # Recognized, intentionally not folded here — the audit-only
                 # markers, the JSONL-only batch snapshot (replayed in pass
