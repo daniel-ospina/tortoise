@@ -773,9 +773,23 @@ def run_fts_query(
         expansion_terms=expansion_terms)
     # #689/#1391: terminal-status Points must not leak into FTS results
     # (skipped when the caller opts in via include_terminal — audit/history).
+    # D10 (#5026): the :Source label holds BOTH the document node
+    # (documentKind non-NULL) and the corpus/provenance Source (documentKind
+    # NULL), and the fulltext index is on Source._searchText for EVERY Source.
+    # Without a discriminator, entity_type="document" retrieves non-document
+    # Sources (and entity_type="source" retrieves documents) and they occupy
+    # pool slots before LIMIT. The predicate lands in the post-YIELD WHERE —
+    # i.e. at the retrieval layer, ahead of ORDER BY/LIMIT — on the SAME axis
+    # as quota.py's `documents` meter (documentKind IS NOT NULL) and
+    # sdk.list_sources() (documentKind IS NULL). All three legs mean one
+    # thing: document ⟺ documentKind non-NULL, source ⟺ documentKind NULL.
     if label == "Point":
         status_filter = ("" if excluded_statuses == ()
                          else f"WHERE {_exclude_status_clause('node', excluded_statuses or TERMINAL_EXCLUDED_STATUSES)} ")
+    elif entity_type == "document":
+        status_filter = "WHERE node.documentKind IS NOT NULL "
+    elif entity_type == "source":
+        status_filter = "WHERE node.documentKind IS NULL "
     else:
         status_filter = ""
     try:
@@ -938,9 +952,18 @@ def run_vector_query(
     if not is_embedded:
         index_attempted = True
         # #689: retracted Points must not leak into vector results.
+        # D10 (#5026): the Source label holds both the document node
+        # (documentKind non-NULL) and the corpus/provenance Source
+        # (documentKind NULL); the predicate lands post-YIELD, ahead of the
+        # outer LIMIT, so a document query never fuses a non-document Source
+        # (and vice versa). Same axis on all three legs.
         if label == "Point":
             vec_status_filter = ("" if excluded_statuses == ()
                                  else f"WHERE {_exclude_status_clause('node', excluded_statuses or TERMINAL_EXCLUDED_STATUSES)} ")
+        elif entity_type == "document":
+            vec_status_filter = "WHERE node.documentKind IS NOT NULL "
+        elif entity_type == "source":
+            vec_status_filter = "WHERE node.documentKind IS NULL "
         else:
             vec_status_filter = ""
         try:
@@ -1071,9 +1094,17 @@ def run_vector_query(
         # vecf32-encoded too (a single plain-list node poisons the whole
         # MATCH — see _upsert_event / session indexers).
         # #689: retracted Points must not leak into vector results.
+        # D10 (#5026): discriminate the document Source from the
+        # corpus/provenance Source in the MATCH's WHERE — the brute-force
+        # retrieval layer, ahead of the ORDER BY/LIMIT. Same axis as the FTS
+        # and structural legs (documentKind IS NOT NULL ⟺ document).
         if label == "Point":
             bf_status_clause = ("" if excluded_statuses == ()
                                 else f" AND {_exclude_status_clause('n', excluded_statuses or TERMINAL_EXCLUDED_STATUSES)}")
+        elif entity_type == "document":
+            bf_status_clause = " AND n.documentKind IS NOT NULL"
+        elif entity_type == "source":
+            bf_status_clause = " AND n.documentKind IS NULL"
         else:
             bf_status_clause = ""
         cypher = (
@@ -1219,6 +1250,18 @@ def run_structural_query(
             _record(ran=True, degraded=False, reason="empty_results", count=0)
             return []
 
+        # D10 (#5026): entity_type="source" is the PROVENANCE Source — the
+        # same partition as sdk.list_sources() (documentKind IS NULL). A D10
+        # document node is a :Source too, so sourceKind alone does not
+        # separate them; the discriminator must be part of the retrieval
+        # WHERE. Placed AFTER the no-filters gate (exactly like the status
+        # clause below) so a kind-less structural call keeps main's
+        # early-return — this clause must never be the sole condition that
+        # fires a full-label scan. The document arm needs no equivalent: its
+        # kind_field IS documentKind, so `n.documentKind = $kind` already
+        # implies non-NULL. All three legs now mean one thing.
+        if entity_type == "source":
+            conditions.append("n.documentKind IS NULL")
         # #1391: terminal-status exclusion (after the no-filters gate so a
         # kind-less broad scan keeps main's early-return behavior — the
         # status clause must not become the sole condition that fires the

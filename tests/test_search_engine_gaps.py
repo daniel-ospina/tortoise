@@ -1888,3 +1888,185 @@ class TestBreakerProbeRecovery:
         for _ in range(5):
             assert run_vector_query(no_emb, self.QUERY_VEC, is_embedded=True) == []
         assert not _breaker("vector").is_open()
+
+
+# ── #5026 D10: document/source partition on EVERY retrieval leg ────────────
+
+class TestSourceDocumentDiscriminator:
+    """D10 (#5026): a document IS a :Source, and TWO :Source shapes coexist —
+    the document node (``documentKind`` non-NULL) and the corpus/provenance
+    Source (``documentKind`` NULL, ``sourceKind`` set). The three retrieval
+    legs must agree on the partition:
+
+        entity_type="document" ⟺ ``documentKind IS NOT NULL``
+        entity_type="source"   ⟺ ``documentKind IS NULL``
+
+    — the same axis as quota.py's ``documents`` meter and
+    ``sdk.list_sources()``. Without the predicate the FTS leg (Source
+    ``_searchText`` index) and the vector leg (Source label) return BOTH
+    shapes, so a non-document Source consumes a pool slot before LIMIT."""
+
+    QUERY_VEC = [0.1] * 384
+
+    # ── FTS leg ──────────────────────────────────────────────────────
+
+    def test_fts_document_discriminates(self):
+        """entity_type='document' → node.documentKind IS NOT NULL, ahead of LIMIT."""
+        graph = SimpleMockGraph(result_set=[("doc-1", 0.9)])
+        run_fts_query(graph, "licensing", entity_type="document")
+        cypher = graph.query_calls[0][0]
+        assert "node.documentKind IS NOT NULL" in cypher
+        # retrieval layer: the predicate is composed ahead of the LIMIT (a
+        # post-filter after the limit would leave the pool slot consumed).
+        assert cypher.index("documentKind") < cypher.index("LIMIT")
+
+    def test_fts_source_discriminates(self):
+        """entity_type='source' → node.documentKind IS NULL, ahead of LIMIT."""
+        graph = SimpleMockGraph(result_set=[("corpus://x/a.md", 0.9)])
+        run_fts_query(graph, "licensing", entity_type="source")
+        cypher = graph.query_calls[0][0]
+        assert "node.documentKind IS NULL" in cypher
+        assert cypher.index("documentKind") < cypher.index("LIMIT")
+
+    def test_fts_point_leg_unchanged(self):
+        """The discriminator is scoped to the Source label — Point untouched."""
+        graph = SimpleMockGraph(result_set=[("p1", 0.9)])
+        run_fts_query(graph, "licensing", entity_type="point")
+        assert "documentKind" not in graph.query_calls[0][0]
+
+    # ── Vector leg (brute-force + HNSW signatures) ───────────────────
+
+    def test_vector_brute_force_document_discriminates(self):
+        """Brute-force document query → n.documentKind IS NOT NULL before the LIMIT."""
+        graph = SimpleMockGraph(result_set=[("doc-1", 0.9)])
+        run_vector_query(graph, self.QUERY_VEC, entity_type="document",
+                         is_embedded=True)
+        cypher = graph.query_calls[0][0]
+        assert "n.documentKind IS NOT NULL" in cypher
+        assert cypher.index("documentKind") < cypher.index("LIMIT")
+
+    def test_vector_brute_force_source_discriminates(self):
+        """Brute-force source query → n.documentKind IS NULL before the LIMIT."""
+        graph = SimpleMockGraph(result_set=[("corpus://x/a.md", 0.9)])
+        run_vector_query(graph, self.QUERY_VEC, entity_type="source",
+                         is_embedded=True)
+        cypher = graph.query_calls[0][0]
+        assert "n.documentKind IS NULL" in cypher
+        assert cypher.index("documentKind") < cypher.index("LIMIT")
+
+    def test_vector_hnsw_document_discriminates(self):
+        """HNSW document query → node.documentKind IS NOT NULL after YIELD."""
+        graph = SimpleMockGraph(result_set=[("doc-1",)])
+        run_vector_query(graph, self.QUERY_VEC, entity_type="document",
+                         is_embedded=False)
+        cypher = graph.query_calls[0][0]
+        assert "node.documentKind IS NOT NULL" in cypher
+        assert cypher.index("documentKind") < cypher.index("LIMIT")
+
+    def test_vector_hnsw_source_discriminates(self):
+        """HNSW source query → node.documentKind IS NULL after YIELD."""
+        graph = SimpleMockGraph(result_set=[("corpus://x/a.md",)])
+        run_vector_query(graph, self.QUERY_VEC, entity_type="source",
+                         is_embedded=False)
+        cypher = graph.query_calls[0][0]
+        assert "node.documentKind IS NULL" in cypher
+        assert cypher.index("documentKind") < cypher.index("LIMIT")
+
+    # ── Structural leg ───────────────────────────────────────────────
+
+    def test_structural_source_discriminates(self):
+        """entity_type='source' → n.documentKind IS NULL joins the WHERE."""
+        graph = SimpleMockGraph(result_set=[("corpus://x/a.md",)])
+        run_structural_query(graph, kind="agentSession", entity_type="source")
+        cypher = graph.query_calls[0][0]
+        assert "n.documentKind IS NULL" in cypher
+        assert cypher.index("documentKind") < cypher.index("LIMIT")
+
+    def test_structural_document_arm_discriminates_via_kind_field(self):
+        """The document arm's kind_field IS documentKind — `n.documentKind =
+        $kind` is already a non-NULL discriminator (never :Document)."""
+        graph = SimpleMockGraph(result_set=[("doc-1",)])
+        run_structural_query(graph, kind="brief", entity_type="document")
+        cypher = graph.query_calls[0][0]
+        assert "n.documentKind = $kind" in cypher
+        assert ":Document" not in cypher
+
+    def test_structural_source_without_kind_still_early_returns(self):
+        """The discriminator must never become the SOLE condition that fires
+        a full-label scan — a kind-less structural call keeps main's [] return."""
+        graph = SimpleMockGraph(result_set=[("corpus://x/a.md",)])
+        assert run_structural_query(
+            graph, kind=None, entity_type="source") == []
+        assert graph.query_calls == []
+
+
+@pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="FalkorDB not available")
+def test_source_document_partition_every_leg():
+    """#5026 D10 regression (the escape test). On a graph holding ONE
+    document Source (``documentKind`` non-NULL) AND ONE provenance Source
+    (``documentKind`` NULL, ``sourceKind`` set), every retrieval leg
+    partitions the two shapes:
+
+        entity_type="document" -> the document ONLY (never the provenance)
+        entity_type="source"   -> the provenance ONLY (never the document)
+
+    Both nodes carry ``_searchText`` AND an embedding, so the pre-fix FTS and
+    vector legs return BOTH — the ``provenance NOT returned for document``
+    assertion is what fails without the fix."""
+    from tortoise.projection import FalkorProjection  # noqa: I001
+    import tortoise.search_engine as se
+
+    proj = FalkorProjection.from_uri(
+        _current_uri(), graph_name=f"test_seg_d10_{os.urandom(4).hex()}")
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    proj._ensure_indexes()
+
+    DOC_URL = "doc-licensing"
+    PROV_URL = "corpus://x/licensing.md"
+    _VEC = [0.1, 0.1, 0.1, 0.1]
+    proj.g.query(
+        "CREATE (d:Source {url:$url, id:$url, title:'Licensing Brief', "
+        "documentKind:'brief', _searchText:'Licensing Brief'}) "
+        "SET d.embedding = vecf32($v)",
+        params={"url": DOC_URL, "v": _VEC},
+    )
+    proj.g.query(
+        "CREATE (s:Source {url:$url, id:'prov-1', title:'Licensing Corpus', "
+        "sourceKind:'agentSession', _searchText:'Licensing Corpus'}) "
+        "SET s.embedding = vecf32($v)",
+        params={"url": PROV_URL, "v": _VEC},
+    )
+    try:
+        reset_circuit_breakers()
+
+        # ── FTS leg ──
+        doc_hits = se.run_fts_query(
+            proj.g, "licensing", entity_type="document")
+        doc_ids = [h[0] for h in doc_hits]
+        assert doc_ids == [DOC_URL], doc_hits
+        # ESCAPE assertion — the provenance Source must NOT surface here.
+        assert PROV_URL not in doc_ids, doc_hits
+
+        src_hits = se.run_fts_query(
+            proj.g, "licensing", entity_type="source")
+        src_ids = [h[0] for h in src_hits]
+        assert src_ids == [PROV_URL], src_hits
+        assert DOC_URL not in src_ids, src_hits
+
+        # ── Vector leg (brute-force: the embedded lane) ──
+        v_doc = se.run_vector_query(
+            proj.g, _VEC, entity_type="document", is_embedded=True, limit=20)
+        assert [h[0] for h in v_doc] == [DOC_URL], v_doc
+        v_src = se.run_vector_query(
+            proj.g, _VEC, entity_type="source", is_embedded=True, limit=20)
+        assert [h[0] for h in v_src] == [PROV_URL], v_src
+
+        # ── Structural leg + the "document with kind" happy path ──
+        s_doc = se.run_structural_query(
+            proj.g, kind="brief", entity_type="document")
+        assert [h[0] for h in s_doc] == [DOC_URL], s_doc
+        s_src = se.run_structural_query(
+            proj.g, kind="agentSession", entity_type="source")
+        assert [h[0] for h in s_src] == [PROV_URL], s_src
+    finally:
+        proj.close()
