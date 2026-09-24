@@ -365,6 +365,49 @@ def resolve_org_limits(org_id: str) -> dict:
     }
 
 
+def api_key_occupies_slot(org_id: str, key_id: str, sdk=None) -> bool:
+    """#4355: True iff `key_id` is a row that ``_count_resource(org_id,
+    'api_keys')`` counts RIGHT NOW — i.e. it currently occupies exactly one
+    ``max_api_keys`` slot.
+
+    This is NOT a fourth count. It is the api_keys cap predicate applied to
+    ONE id, and it exists for exactly one caller: the replacement-aware rotate
+    primitive, which may credit the slot it is about to release only when the
+    displaced row is one the cap actually charged. Without this proof a
+    revoked / expired / bootstrap row id would buy a free slot (the count
+    never held it) and rotate would become a cap hole.
+
+    The two lanes read through the SAME sources ``_count_resource`` uses —
+    Supabase: ``active_api_keys`` (the shared live-set reader) minus the
+    ``created_via='bootstrap'`` exclusion; registry: the same WHERE clause the
+    registry count carries — so the two can never disagree about what is LIVE
+    or about what is cap-exempt. ``tests/test_quota.py`` pins the parity
+    (the count equals the number of rows this predicate accepts).
+    """
+    if not org_id or not key_id:
+        return False
+    from tortoise.supabase_control import (  # noqa: I001
+        active_api_keys, get_control_plane, is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        cp = get_control_plane()
+        return any(
+            r.get("id") == key_id and r.get("created_via") != "bootstrap"
+            for r in active_api_keys(cp, org_id)
+        )
+    reg = (sdk if sdk is not None and getattr(sdk, "_namespace", None) == "registry"
+           else _make_sdk(namespace="registry"))
+    rows = reg._get_registry().query(
+        "MATCH (k:APIKey {org_id: $tid, id: $kid}) "
+        "WHERE k.revoked_at IS NULL "
+        "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
+        "AND (k.expires_at IS NULL OR k.expires_at > $now) RETURN k.id",
+        params={"tid": org_id, "kid": key_id,
+                "now": datetime.now(UTC).isoformat()},
+    ).result_set
+    return bool(rows)
+
+
 def count_org_usage(org_id: str, resource: str, sdk=None) -> int:
     """Count current usage for a resource. Raises QuotaCheckError on failure.
 
@@ -390,7 +433,10 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
       + /v1/subjects gates check this resource, and Object/Subject carry
       only their own labels, so they must be counted here or the cap is
       vacuous for those writes)
-    - api_keys: active (non-revoked) APIKey nodes in registry
+    - api_keys: LIVE (non-revoked, non-expired) API keys that COUNT against
+      max_api_keys. A bootstrap (24h session) credential is cap-EXEMPT
+      (R13/#4140) and excluded; a NULL/legacy ``created_via`` is a DURABLE
+      row and COUNTS (fail-closed). In registry (Cypher) and Supabase.
     - sessions: Session nodes in tenant graph (MATCH (s:Session) — NOT the
       all-nodes count; #947 P0)
     - users: active Membership nodes in registry
@@ -409,7 +455,8 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
             # the count reads Supabase via the seam — post-flip the registry
             # is DELETED, so a registry count would fail-open (0 nodes) or
             # 500. Mirrors the registry predicates exactly:
-            #   api_keys: revoked_at IS NULL AND not expired (#2426/#2481 —
+            #   api_keys: revoked_at IS NULL AND not expired (#2426/#2481)
+            #             AND not created_via='bootstrap' (#4140/R13 —
             #             a REVOKED row is an audit tombstone (retained for
             #             audit + swept later, #685) that must NEVER consume
             #             the plan's max_api_keys budget; an expired-but-
@@ -418,12 +465,21 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
             #             them would hold a slot for a dead credential.
             #             Pre-#2426 durable keys never carried expiry. The
             #             expiry filter (expires_at IS NULL OR > now) mirrors
-            #             the bootstrap cap queries' own predicate; live rows
-            #             of every created_via count exactly as before. #2481
-            #             audit: this predicate is the ONE count shared by
-            #             every max_api_keys mint gate (hosted_api._mint_key
-            #             for POST /v1/team/keys + per-graph key mints,
-            #             REST _check_org_limit, MCP enforce_org_limit).),
+            #             the bootstrap cap queries' own predicate.
+            #             #4140 (R13): a bootstrap (24h session) key is
+            #             cap-EXEMPT — this count was the ONE outlier that
+            #             omitted the exclusion every recovery-mint lane
+            #             already carries (hosted_api.session_key both lanes,
+            #             sdk.signup_token_recover, recover_team_key), so a
+            #             session credential silently burned a paid durable
+            #             slot. The exclusion is NULL-TOLERANT: a NULL/legacy
+            #             created_via is a DURABLE row and COUNTS
+            #             (fail-closed). #2481 audit: this predicate is the
+            #             ONE count shared by the standalone max_api_keys
+            #             mint gates (hosted_api._mint_key for POST
+            #             /v1/team/keys + per-graph key mints, REST
+            #             _check_org_limit / enforce_org_limit — MCP carries
+            #             no api_keys gate).),
             #   users:    status IS NULL OR status = 'active'
             #   graphs:   the default graph derived from organizations.graph_name
             #             PLUS custom graph rows from the ``graphs`` table
@@ -437,21 +493,25 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
             #             provisioning INSERT lands (review P2, recorded).
             # Selfhost (registry mode) keeps the registry count.
             from tortoise.supabase_control import (  # noqa: I001
-                _parse_ts, get_control_plane, graph_metadata,
+                active_api_keys, get_control_plane, graph_metadata,
                 is_supabase_enabled,
             )
             if is_supabase_enabled():
                 cp = get_control_plane()
                 if resource == "api_keys":
-                    rows = cp.query(
-                        "api_keys", select=["id", "expires_at"],
-                        filters=[("org_id", "eq", org_id),
-                                 ("revoked_at", "is", None)],
-                    )
-                    now = datetime.now(UTC)
-                    return len([r for r in rows
-                                if (exp := _parse_ts(r.get("expires_at")))
-                                is None or exp > now])
+                    # #4140 (R13): bootstrap (24h session) rows are
+                    # cap-EXEMPT — the SAME predicate the recovery-mint lane
+                    # applies (hosted_api._session_key_supabase). Liveness
+                    # (non-revoked + non-expired) comes from the shared
+                    # active_api_keys() reader, so this count and the
+                    # recovery lane can never disagree on what is LIVE.
+                    # The bootstrap exclusion is applied in PYTHON, never as
+                    # a PostgREST `created_via=neq.bootstrap` filter: SQL
+                    # `<>` drops NULL rows, and a legacy row with a NULL
+                    # created_via is DURABLE and must still count
+                    # (fail-closed — #4140 adversarial T4).
+                    return len([r for r in active_api_keys(cp, org_id)
+                                if r.get("created_via") != "bootstrap"])
                 if resource == "users":
                     rows = cp.query(
                         "org_memberships", select=["status"],
@@ -466,8 +526,15 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
             if resource == "api_keys":
                 # #2426: expiry filter mirrors the supabase lane — expired
                 # durable keys never count against max_api_keys.
+                # #4140 (R13): bootstrap (24h session) rows are cap-EXEMPT
+                # — the SAME predicate the recovery-mint lane uses
+                # (hosted_api.session_key, registry lane). NULL created_via
+                # (legacy selfhost) COUNTS: Cypher `NULL <> 'bootstrap'` is
+                # NULL, so the explicit IS NULL arm is required (this is the
+                # over-exemption direction the cap must fail closed on).
                 rows = reg._get_registry().query(
                     "MATCH (k:APIKey {org_id: $tid}) WHERE k.revoked_at IS NULL "
+                    "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
                     "AND (k.expires_at IS NULL OR k.expires_at > $now) RETURN count(k)",
                     params={"tid": org_id, "now": datetime.now(UTC).isoformat()},
                 ).result_set
@@ -552,7 +619,8 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
         raise QuotaCheckError(f"quota count failed for {resource}: {redacted}") from e
 
 
-def enforce_org_limit(limits: dict | None, resource: str, sdk=None) -> None:
+def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
+                      slot_credit: int = 0) -> None:
     """Reject a write when the org is at/over its resource limit.
 
     Args:
@@ -564,6 +632,13 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None) -> None:
         resource: "points" | "api_keys" | "sessions" | "users" | "graphs"
             | "documents".
         sdk: pre-built org SDK (REST callers already hold one) — optional.
+        slot_credit: #4355 — how many slots this write RELEASES as part of the
+            same operation, so the admission check is evaluated against the
+            post-release count. It exists for exactly ONE caller: the
+            replacement-aware rotate primitive, which passes 1 after proving
+            (``api_key_occupies_slot``) that the displaced row is counted once.
+            MUST be 0 everywhere else, and MUST never become reachable from a
+            client-supplied value — an unproven credit is a free slot.
 
     Raises:
         QuotaExceededError: org at/over limit (402-equivalent).
@@ -620,7 +695,7 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None) -> None:
             return
         raise QuotaCheckError(f"team limits missing {limit_key} for resource {resource!r}")
     count = _count_resource(org_id, resource, sdk=sdk)
-    if count >= limit:
+    if count - slot_credit >= limit:
         raise QuotaExceededError(
             f"Team {resource} limit reached ({limit}). Upgrade your plan to increase it."
         )

@@ -64,6 +64,7 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # resolves. Same class as test_quota/test_commit_endpoint.
     "test_cohort_cost_cap.py": {"registry": "prod-coupled"},
     "test_cross_tenant_read_isolation.py": {"registry": "prod-coupled"},  # #3663 — registry control-plane seeding for the cross-tenant read proof
+    "test_3926_error_prop_guard.py": {"registry": "prod-coupled"},  # #3926 — the literal IS the canonical namespace PROD code resolves
     "test_index_docs_api.py": {"registry": "index-docs"},
     "test_session_extraction_modes.py": {"registry": "session-extraction"},
     "test_agent_signup.py": {"registry": "prod-coupled"},
@@ -84,6 +85,7 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_tenancy_spine.py": {"registry": "prod-coupled"},   # C5 #2114 — registry seeding in _spine_env
     "test_hosted_volunteer_context.py": {"registry": "prod-coupled"},   # #2103 (W4C) — registry control-plane mint/revoke mirrors test_hosted_auth
     "test_capture_phase_d_dedup.py": {"team-001": "team-identity"},  # #2104 (W5-D) — hosted _make_sdk(namespace="team-001") mirror arm
+    "test_capture_loop_responsiveness.py": {"registry": "prod-coupled"},  # #3086 — the capture-writer loop-affinity proof reaches the graph class via _make_sdk(namespace="registry") to record writer-thread affinity
     "test_import_endpoint.py": {"registry": "import-ledger"},
     "test_issue_4010_sessions_unlimited.py": {"registry": "prod-coupled"},  # #4010: registry seeding (org_create + registry-lane auth) mirrors test_quota/test_commit_endpoint
     "test_index_mcp.py": {"registry": "prod-coupled",
@@ -115,6 +117,7 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # breaks the coupling; the namespace IS the identity here. VERIFIED by
     # rename probe this task.
     "test_onboarding_false_completion_repair.py": {"registry": "prod-coupled"},  # #3912: registry seed read back by the guard's own TortoiseSDK(namespace="registry")
+    "test_onboarding_truth_surface.py": {"registry": "prod-coupled"},  # #3670/#3671/#3681: registry-resolve seeding for the server-owned capture receipts (same _make_sdk(namespace="registry") lane as the siblings above)
     "test_onboarding_seed_endpoint.py": {"registry": "prod-coupled"},  # #1999 (W3): seed/decide endpoint tests
     "test_onboarding_state_split.py": {"registry": "prod-coupled"},
     "test_onboarding_state.py": {"registry": "unit-only"},
@@ -145,6 +148,12 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
                                   "team-strip-2600": "team-identity",   # :468 — the registry seed, the contextvar and the read-back all key off this team id
                                   "team-sweep-2600": "team-identity"},  # :530/:550 — the sweep fixture's own seeded team id is its graph
     "test_attribution_machine_model.py": {"registry": "prod-coupled"},   # :178 — _make_sdk(namespace="registry") mirrors the hosted_api registry resolve
+    # #3718 (read half): :114 — _make_sdk(namespace="registry") WARMS the same
+    # registry graph the hosted read handlers resolve (the anchor must be warm
+    # for the embedded lane to survive between requests). A test_* rename would
+    # warm a different graph and leave the prod registry anchor cold — same
+    # class as test_attribution_machine_model / test_metering.
+    "test_read_routes_loop_responsiveness.py": {"registry": "prod-coupled"},
     "test_oauth_mcp.py": {"team-free-001": "team-identity"},   # :1342 — the OAuth token's org_id IS the graph namespace the journal assert reads
     # e2e-900 (cycle-4 P2-7 / cycle-5 P1-5): the SHARED non-test team_e2e-900
     # graph of the index suite — routed by REDIRECT DERIVATION, not rename:
@@ -182,7 +191,7 @@ ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
         # #2823 Supabase-lane sweep seed — the DATA plane stays FalkorDB in
         # both lanes; the endpoint resolves graph_name from organizations.graph_name
         'f"org_{tid}"': "endpoint-constrained",  # Supabase-lane sweep seed write
-        '"org_team_x"': "read-only",                  # post-drill count assert
+        '"org_team_x"': "endpoint-constrained",  # post-drill count assert + #4233 marker write (drill/backup resolve org_{id})
         # #2313 custom-graph drill seeds (per-graph sweep/restore E2E); the
         # server-lane _clean_team_graphs fixture drops team_* graphs per test
         '"team_team_x_g_c1"': "endpoint-constrained",  # custom drill seed write
@@ -200,6 +209,13 @@ ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
         '"org_swap_target"': "test-constructed",   # live target + read-back
         '"org_bound_source"': "test-constructed",  # seeded source (ordinary-bound guard)
         '"org_bound_target"': "test-constructed",  # live target (ordinary-bound guard)
+        # #4233 outcome-settle guards — same direct-helper shape as the #3813
+        # block above: a raw source and a raw destination whose names are
+        # handed straight to `_restore_into_temp_verify_swap` /
+        # `_graph_copy_with_restore_bound` / `_restore_copy_settled` and read
+        # back. Test-constructed, not production-shape.
+        '"org_settle_source"': "test-constructed",  # seeded source
+        '"org_settle_target"': "test-constructed",  # destination + read-back
     },
     "test_eval_ingest_cache.py": {
         'f"org_{namespace}"': "endpoint-constrained",  # #2626 regression — own-graph cleanup delete (namespace=icache-<tag>-<uuid>, docker lane)
@@ -495,6 +511,9 @@ def test_no_redirect_stems_registry_exact():
         "test_projection_lifecycle",
         "test_reaper",
         "test_reaper_orphan",
+        # #2814: authoritative-config durability across rebuild_all (embedded
+        # carve-out — see config/ci-surfaces.yml `carve_out:`).
+        "test_rebuild_config_preservation",
         "test_redis_guard",
         "test_smoke_embedded",
         # 2026-08-28 merge-reconciliation: #1785/#1816 added these three to
@@ -534,6 +553,12 @@ def test_no_redirect_stems_registry_exact():
         # pass. Runs embedded in every lane (same rationale as
         # test_hosted_backup).
         "test_cross_tenant_read_isolation",
+        # #4524: the vecf32 overwrite-seam guards assert the EMBEDDED engine's
+        # silent vecf32-overwrite behaviour (the server lane lands the same
+        # write), so the module joins the carve-out lane — registered in
+        # ci-surfaces.yml:carve_out + the core surface and in
+        # TEST_NO_REDIRECT_STEMS.
+        "test_vecf32_overwrite_seams_4524",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "

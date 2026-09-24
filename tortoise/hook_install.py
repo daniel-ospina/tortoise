@@ -56,6 +56,7 @@ marker would destroy exactly the customizations this migration must protect).
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -79,6 +80,31 @@ _HOOK_VERSION_RE = re.compile(
 
 #: Where the shipped hook scripts live inside this package.
 _HOOKS_SOURCE_DIR = Path(__file__).resolve().parent / "claude-hooks"
+
+#: Where the installer records the module dir it installed FROM, relative to
+#: ``$HOME``.  An installed hook sits under ``~/.codex`` / ``~/.cursor`` /
+#: ``~/.claude``, so ``$(dirname "$0")/../..`` is ``$HOME`` — not a checkout —
+#: and a hook that trusted it captured nothing while still exiting 0 (#4314).
+HOOK_SRC_DIR_RELPATH = Path(".tortoise") / "hook-src-dir"
+
+#: The ``kind`` marker on the local ``capture-errors/<harness>.json``
+#: breadcrumb.  Two writers share that ONE path, so the reader must be able to
+#: tell them apart in BOTH directions:
+#:
+#: * the shipped shell hooks write :data:`KIND_INSTALL_INERT` when the installed
+#:   hook resolved no module dir (its install leg is inert);
+#: * ``tortoise.__main__._record_capture_error`` writes
+#:   :data:`KIND_CAPTURE_FAILURE` when a ``sessions import`` capture attempt
+#:   failed (an API outage, a parse failure, zero turns).
+#:
+#: The write condition and the read condition are the SAME condition: session
+#: verify accepts a breadcrumb as install-inert evidence ONLY when this marker
+#: is present and equal to ``KIND_INSTALL_INERT``, so a capture outage can
+#: never read as an inert install.  Conversely a reader looking for a capture
+#: failure must exclude the install-inert kind, so an inert install can never
+#: read as a failed capture.
+KIND_INSTALL_INERT = "install-inert"
+KIND_CAPTURE_FAILURE = "capture-failure"
 
 
 #: Substrings that identify a hook body as Tortoise's. Deliberately specific
@@ -143,6 +169,131 @@ def _atomic_write_text(dst: Path, text: str) -> None:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
         raise
+
+
+def _hook_src_dir_base(home: Path | None) -> Path:
+    """The base the ``hook-src-dir`` record is written under.
+
+    ``~/.tortoise`` by default.  The base is FAIL-SAFE: a call with no
+    resolved ``home`` that runs under pytest never writes to the developer
+    machine's real ``~/.tortoise`` — under pytest the base is derived
+    DETERMINISTICALLY from the test id, so every process of one test shares
+    one directory and none of them touches the real home.  Whether to RECORD
+    at all is a SEPARATE decision that keys on whether the installed hook can
+    resolve on its own (see ``_record_hook_src_dir`` and
+    ``_hook_needs_src_dir_record``), not on this fail-safe: ``upgrade_install``
+    at a repo-scoped ``--dir`` that is a checkout records nothing.
+
+    This is not hypothetical: the first cut of #4314 used ``Path.home()``
+    unconditionally and a single test run created
+    ``~/.tortoise/hook-src-dir`` on the developer's machine.
+    """
+    if home is not None:
+        return Path(home)
+    test_id = os.environ.get("PYTEST_CURRENT_TEST")
+    if test_id:
+        # ``PYTEST_CURRENT_TEST`` is ``"<nodeid> (call|setup|teardown)"`` —
+        # the phase suffix differs per phase, so hashing it verbatim gave one
+        # test three directories and a record written in ``setup`` was
+        # invisible in ``call``.  Strip the phase so ONE test == ONE dir.
+        node_id = test_id.rsplit(" (", 1)[0]
+        digest = hashlib.sha256(
+            node_id.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+        return Path(tempfile.gettempdir()) / "tortoise-hook-src-tests" / digest
+    return Path.home()
+
+
+def _record_hook_src_dir(home: Path | None = None) -> None:
+    """Record this package's module dir for the installed hooks to resolve.
+
+    The module dir is the directory that CONTAINS the ``tortoise`` package —
+    the repo root for a checkout, ``site-packages`` for a wheel install.  A
+    hook accepts a candidate only when ``<candidate>/tortoise`` exists, so this
+    record is what keeps an installed hook from falling through to its silent
+    no-op (#4314).
+
+    Best-effort and idempotent: a read-only ``~/.tortoise`` must never fail an
+    install, and a re-run whose record is already correct does not rewrite
+    (and does not churn the file's mtime).
+    """
+    base = _hook_src_dir_base(home)
+    target = base / HOOK_SRC_DIR_RELPATH
+    text = str(Path(__file__).resolve().parent.parent) + "\n"
+    try:
+        if target.is_file() and target.read_text(encoding="utf-8") == text:
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(target, text)
+    except (OSError, ValueError):
+        # Best-effort: this must NEVER fail an install. A non-UTF-8 record
+        # raises ``UnicodeDecodeError`` (a ``ValueError``) from the read — a
+        # class the old ``except OSError`` guard let escape, so
+        # `tortoise install` / `hooks upgrade` tracebacked AFTER the hooks
+        # were written (#3999, #4314).
+        pass
+
+
+def _record_hook_src_dir_best_effort(home: Path | None = None) -> None:
+    """``_record_hook_src_dir`` that can NEVER fail the caller's install.
+
+    ``_record_hook_src_dir`` already swallows the filesystem/decode failures
+    it can name; this wrapper is the belt-and-suspenders boundary the install
+    call sites need so no future raise-set member escapes a completed install
+    (#3999, #4314). ``MemoryError`` is deliberately propagated: resource
+    exhaustion is not a swallowed failure anywhere else in the install.
+    """
+    try:
+        _record_hook_src_dir(home)
+    except MemoryError:
+        raise
+    except Exception:
+        pass
+
+
+def _hook_needs_src_dir_record(layout: HarnessLayout, root: Path) -> bool:
+    """True when the installed hook's OWN ``../..`` cannot resolve ``tortoise``.
+
+    The ``hook-src-dir`` record exists for exactly one reason: the installed
+    hook falls back to ``$(dirname "$0")/../..`` when ``$TORTOISE_SRC_DIR`` and
+    the record are both absent, and from ``~/.codex/hooks`` / ``~/.cursor/
+    hooks`` that fallback is ``$HOME`` — not a checkout.  So the record is
+    NEEDED iff that fallback directory does not itself contain a ``tortoise/``
+    package.  The directory is derived from the ACTUAL install layout
+    (``layout.hooks_dir``), never a hardcoded assumption, so it is correct for
+    a two-level ``.claude/hooks`` and a one-level ``hooks`` alike.
+
+    This is a NEED-based rule, not a layout-based one, and that is deliberate:
+    the write condition (this function) and the read condition (the hook's
+    candidate loop) are the SAME condition.  It fixes Claude's project install
+    and every ``--dir`` HOME install (``~/.codex``, ``~/.cursor``,
+    ``~/.claude``) while still writing NOTHING for a repo-scoped ``--dir`` whose
+    ``../..`` IS a checkout — the #4110 case, where a HOME side effect is both
+    unnecessary and unwanted.
+    """
+    implied = (Path(root) / layout.hooks_dir).parent.parent
+    return not (implied / "tortoise").is_dir()
+
+
+def record_hook_src_dir_for_install(harness: str, *, root: Path,
+                                    home: Path | None = None) -> bool:
+    """Write the ``hook-src-dir`` record iff the installed hook needs it.
+
+    The ONE shared helper both entry points call (``install_capture`` and
+    ``upgrade_install``), so the two call sites can never drift: they write the
+    record under the same need condition the installed hook reads it under.
+    Best-effort and idempotent.  Returns whether a write was attempted.
+    """
+    layout = get_layout_optional(harness)
+    # A harness with no shell-hook layout has no `../..` fallback to rescue, so
+    # no record is needed — and this is the SAME condition the record's reader
+    # applies (WRITE == READ).  Before #4544 this raised `ValueError` for
+    # `pi`, which made `tortoise install pi` crash outright.
+    if layout is None:
+        return False
+    if not _hook_needs_src_dir_record(layout, Path(root)):
+        return False
+    _record_hook_src_dir_best_effort(home)
+    return True
 
 
 def _looks_like_our_script(path: Path) -> bool:
@@ -311,6 +462,16 @@ def _claude_layout() -> HarnessLayout:
                 "session-end.sh", "SessionEnd", 60,
                 f"{_CLAUDE_HOOKS_DIR}/session-end.sh",
             ),
+            # #3963: the CHEAP per-turn capture. Capture used to happen only at
+            # SessionEnd, which is cancelled at its ~1.5s default (#3754) and
+            # does not fire at all on a kill — so an interrupted session filed
+            # nothing. This hook spools the transcript locally (no network) at
+            # every user prompt; the filing is deferred to the SessionStart
+            # drain / the SessionEnd final flush.
+            HookScriptSpec(
+                "session-turn.sh", "UserPromptSubmit", 30,
+                f"{_CLAUDE_HOOKS_DIR}/session-turn.sh",
+            ),
         ),
     )
 
@@ -395,6 +556,23 @@ def get_layout(harness: str) -> HarnessLayout:
         raise ValueError(
             f"unknown harness {harness!r} — known layouts: {known}"
         ) from None
+
+
+def get_layout_optional(harness: str) -> HarnessLayout | None:
+    """``get_layout`` for the harnesses that HAVE a shell-hook layout.
+
+    A ``HarnessLayout`` describes where SHELL hooks live: a ``hooks_dir`` to
+    derive the ``$(dirname "$0")/../..`` fallback from, a registration file,
+    shipped scripts.  A harness that installs a non-shell integration has no
+    such layout — ``pi`` ships a TypeScript extension (``tortoise/pi-hooks/
+    tortoise-capture.ts``), not a ``session-end.sh``.
+
+    Asking what such a harness's layout is must not be an ERROR, because the
+    only question the layout answers here is "does the installed hook need a
+    ``hook-src-dir`` record?" — and for a hook that is not a shell script
+    there is no ``../..`` fallback, so the answer is simply NO (#4544).
+    """
+    return HARNESS_LAYOUTS.get(harness)
 
 
 def default_root(layout: HarnessLayout, home: Path) -> Path:
@@ -1944,7 +2122,8 @@ def _merge_settings(layout: HarnessLayout, data: dict, actions: list[str],
 
 
 def upgrade_install(root: str | os.PathLike[str], harness: str = "claude",
-                    dry_run: bool = False) -> UpgradeResult:
+                    dry_run: bool = False,
+                    home: Path | None = None) -> UpgradeResult:
     """Install or upgrade the capture hooks at ``root``, in place.
 
     * scripts — re-copied from the shipped repo copy when missing or stale;
@@ -2158,6 +2337,17 @@ def upgrade_install(root: str | os.PathLike[str], harness: str = "claude",
             "hooks upgrade` after fixing the filesystem"
         )
         return result
+
+    # ── record where this install came FROM (best-effort) ───────────────
+    # The installed hooks resolve their module dir from $TORTOISE_SRC_DIR, then
+    # this record, then `../..` — and `../..` from an installed hook is $HOME.
+    # Written last (only after every real write landed) so a refused or
+    # dry-run upgrade leaves no misleading breadcrumb.  The ONE need-based rule
+    # (``record_hook_src_dir_for_install``) writes it for every harness whose
+    # installed hook cannot resolve `../..`, and writes NOTHING when `../..` is
+    # a checkout (#4110, #4314).
+    if result.ok and not dry_run:
+        record_hook_src_dir_for_install(harness, root=root, home=home)
 
     result.findings_after = detect_install(root, harness)
     return result

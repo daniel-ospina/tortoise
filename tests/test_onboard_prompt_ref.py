@@ -31,6 +31,38 @@ def test_onboard_completion_prints_prompt_url(capsys):
     captured = capsys.readouterr()
     assert "Onboarding complete." in captured.out
     assert "https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md" in captured.out
+    # #4365: the SURFACE DELIVERY claim must be pinned, not just the URL — the
+    # wording is what tells the user this is a document the agent reads rather
+    # than a skill to install. Reverting it left every test green.
+    assert "Onboarding instructions" in captured.out, (
+        "`tortoise onboard` must present onboarding as instructions")
+
+
+def test_init_prints_onboarding_as_instructions_not_a_skill(capsys, tmp_path, monkeypatch):
+    """#4365: `tortoise init` must present onboarding as INSTRUCTIONS the agent
+    reads — never a skill to install. Pinned because the framing IS the change,
+    and reverting the wording broke no test anywhere in the suite.
+
+    An offline validation failure (URLError) is a warn-and-save path, so init
+    completes and reaches the human-readable reference block."""
+    import urllib.error
+
+    from tortoise import __main__ as m
+
+    monkeypatch.chdir(tmp_path)
+    with mock.patch("urllib.request.urlopen",
+                    side_effect=urllib.error.URLError("offline")):
+        rc = m._cmd_init(mock.Mock(
+            path=None, cmd="init", yes=True, api_key="tt_onboarding_test_key",
+            json=False, harness=None, write_mcp_config=False, force=False,
+            no_index=True))
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "── Onboarding instructions ──" in out
+    assert "never an installed skill" in out
+    assert ("https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md"
+            in out)
 
 
 @pytest.mark.embedded_only  # Epic #1647: tests the EMBEDDED install guidance (falkordblite) — under a URI the CLI correctly prefers URI mode and the embedded guidance is unreachable (D14-class)

@@ -34,7 +34,9 @@ jobs:
       python: ${{ steps.gate.outputs.python }}
       drift: ${{ steps.gate.outputs.drift }}
       driver_scripts: ${{ steps.gate.outputs.driver_scripts }}
+      ai_review_gate: ${{ steps.gate.outputs.ai_review_gate }}
       watchdog_scripts: ${{ steps.gate.outputs.watchdog_scripts }}
+      orphan_bound_scripts: ${{ steps.gate.outputs.orphan_bound_scripts }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -104,6 +106,25 @@ jobs:
                   # skips dashboard-js-tests, so the behavioural tests for the
                   # very file under review would never run.
                   isfile("website/assets/supabase-session.js"),
+                  # #3525: the dashboard's security-headers guard also pins the
+                  # MARKETING project's CSP, and it SCANS both projects'
+                  # `functions/` trees (cookie writers, `text/html` producers) —
+                  # the same policy text has to exist in a second `_headers` and
+                  # a second constant because a Pages project's `functions/`
+                  # cannot import across project roots, and
+                  # securityHeaders.test.js is what keeps the copies identical.
+                  # Scope by PREFIX, not by a list of filenames: the guard reads
+                  # the whole tree, so a file it scans but this predicate does
+                  # not name (a new marketing Function, or any file the guard
+                  # gains later) would skip dashboard-js-tests and let the guard
+                  # fail only where it never runs. A literal list is also
+                  # disarmed by a pure add: the new path matches nothing here
+                  # even though the guard scans it. The prefix is a superset of
+                  # the guard's input set by construction, which is the
+                  # fail-closed direction. `website/_headers` is a sibling of
+                  # `functions/`, so it is named explicitly.
+                  startswith("website/functions/"),
+                  isfile("website/_headers"),
               ),
               # uv-lock-check
               "uv_lock": any_file(
@@ -249,12 +270,56 @@ jobs:
                   # the record cannot silently lose the cadence factor that
                   # qualifies every availability figure.
                   startswith(".github/scripts/availability-record"),
+                  # #4545: the post-deploy health gate's harness — extracted from
+                  # deploy-hosted.yml so the gate that decides whether a deploy
+                  # SUCCEEDED is testable. It pins the regression where the gate
+                  # asserted /health/ready once after polling the strictly
+                  # weaker db.ok, reddening healthy deploys.
+                  startswith(".github/scripts/deploy-health-gate"),
+                  # #3907: the SHARED auto-file substrate the re-pointed
+                  # monitors file through (e2e-live-reconcile, tenant-provision)
+                  # — its harness pins search-before-file (one issue per
+                  # finding), the recurrence counter, the machine-author +
+                  # exact-title guard against a forged look-alike title, and
+                  # fail-closed on a failed search.
+                  # TODO(#5019): availability-watchdog.sh — the monitor #3907
+                  # names as "the shape the fix is about" — and
+                  # availability-record.sh / welcome-e2e-monitor.sh /
+                  # registry-cron.sh still POST inline, so the substrate is not
+                  # yet what EVERY monitor files through.
+                  startswith(".github/scripts/auto-file-issue"),
+                  # #4759: the bypass reporter / expiry helper and the scheduled
+                  # check that ages every SKIP_* lane left set.
+                  startswith(".github/scripts/deploy-bypass"),
+                  isfile(".github/workflows/skip-bypass-expiry.yml"),
                   isfile(".github/workflows/availability-watchdog.yml"),
                   isfile(".github/workflows/welcome-e2e-monitor.yml"),
                   isfile(".github/workflows/availability-record.yml"),
+                  isfile(".github/workflows/deploy-hosted.yml"),
+                  # #3907: the auto-file adopters — a change to the monitor that
+                  # calls the substrate re-runs its harness.
+                  isfile(".github/workflows/e2e-live-reconcile.yml"),
+                  isfile(".github/workflows/tenant-provision-monitor.yml"),
                   # a job-definition change re-runs its own suite (dashboard_e2e
                   # precedent) — review R12/Config.
                   isfile(".github/workflows/ci.yml"),
+              ),
+              # orphan_bound_scripts (#4740): the redislite orphan gate's harness
+              # — extracted from python-ci.yml so the bound it enforces (read
+              # from the conftest session-end sweep's own report, never a
+              # hand-picked constant) is testable. Gated on that gate's surface
+              # only.
+              "orphan_bound_scripts": any_file(
+                  startswith(".github/scripts/orphan-bound"),
+                  isfile(".github/workflows/python-ci.yml"),
+                  isfile(".github/workflows/ci.yml"),
+                  # #4740: tests/conftest.py defines the JSON contract the gate
+                  # parses (the session-end sweep's report) — a conftest-only
+                  # contract change must re-run the harness. The report field
+                  # set and its builder live in tortoise/embedded_reaper.py
+                  # (conftest imports them), so that module is a trigger too.
+                  isfile("tests/conftest.py"),
+                  isfile("tortoise/embedded_reaper.py"),
               ),
               # dashboard-e2e (#2166/#2178): the two-server keys-table suite
               # (mixed fixture — durable-only render regression). Triggers on
@@ -313,6 +378,16 @@ jobs:
                   # changes the served bundle — it too used to surface only
                   # through the committed dist rebuild.
                   isfile("product/pricing.json"),
+                  isfile(".github/workflows/ci.yml"),
+              ),
+              # ai-review-gate-tests (#2982): the signed-review merge gate's
+              # shell harness. Gated on the workflow, the harness, and ci.yml
+              # itself so a change to either side of the gate always exercises
+              # its evidence-acceptance logic. Security-relevant: a regression
+              # here silently accepts unsigned/stale evidence.
+              "ai_review_gate": any_file(
+                  isfile(".github/workflows/ai-review-gate.yml"),
+                  isfile(".github/scripts/ai-review-gate.test.sh"),
                   isfile(".github/workflows/ci.yml"),
               ),
           }
@@ -559,6 +634,33 @@ jobs:
       - name: Backup driver state taxonomy (#2796)
         run: bash .github/scripts/registry-cron.test.sh
 
+  ai-review-gate-tests:
+    needs: changes
+    if: needs.changes.outputs.ai_review_gate == 'true'  # #2982: gate workflow/harness only
+    # #2982: the ai-review-gate's evidence-validation shell logic runs inline
+    # in the workflow (that workflow has no checkout step, so it cannot
+    # reference a repo script). This
+    # harness extracts that run block and drives it with fabricated signed
+    # markers + a stubbed gh, covering sha-match, diff-match, backward compat,
+    # fail-closed-on-API-failure, signature-over-diff, PR/repo binding, and the
+    # PR-body source. It ALSO asserts the non-runtime invariants the required
+    # job depends on: no if:/needs:/continue-on-error:, trigger stays
+    # pull_request_target with no paths: filter, permissions keep
+    # pull-requests: read, and GH_TOKEN is declared. Self-contained, no
+    # network, no secrets.
+    #
+    # ⚠️ This job is NOT a required status check: a red harness does not block a
+    # merge, so a regression here can land and then silently make the REQUIRED
+    # `ai-review-gate` check pass without evaluating evidence. Tracked in #3091
+    # (add this job to branch protection, or move the harness into an
+    # always-run required job). The `if:` above is a complete per-surface guard:
+    # it fires on any change to the gate workflow, this harness, or ci.yml.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: AI review gate shell harness (#2982)
+        run: bash .github/scripts/ai-review-gate.test.sh
+
   availability-watchdog:
     needs: changes
     if: needs.changes.outputs.watchdog_scripts == 'true'  # #2850: monitor-script surfaces only
@@ -576,6 +678,11 @@ jobs:
         run: bash .github/scripts/availability-watchdog.test.sh
       - name: Welcome-e2e auto-file monitor (#2706/#2850)
         run: bash .github/scripts/welcome-e2e-monitor.test.sh
+      - name: Shared auto-file substrate (#3907)
+        # One issue per finding, with every occurrence recorded on it: files
+        # once, comments `Recurrence #N` after that, refuses to file on a failed
+        # search, and never adopts a forged/exact-mismatched look-alike title.
+        run: bash .github/scripts/auto-file-issue.test.sh
 
   availability-record:
     needs: changes
@@ -591,6 +698,62 @@ jobs:
       - uses: actions/checkout@v4
       - name: Availability record-only baseline (#3810)
         run: bash .github/scripts/availability-record.test.sh
+
+  deploy-health-gate:
+    needs: changes
+    if: needs.changes.outputs.watchdog_scripts == 'true'  # #4545: deploy-gate surface only
+    # #4545: the post-deploy health gate's harness. Self-contained: stubs curl,
+    # no network. It pins the regression that reddened HEALTHY deploys — the
+    # gate polled db.ok (the FalkorDB data plane) and then asserted
+    # /health/ready ONCE, but readiness is an AND of the Supabase control plane
+    # and the data plane, so db.ok does NOT imply ready. Case 3 fails against
+    # the pre-fix single-shot assertion and passes only with the readiness
+    # poll. #4771 extended the same invariant to the DECISION: cases 2 and 11 pin
+    # that db.ok alone no longer fails the run (readiness 200 → pass with a
+    # warning) while db.ok false + readiness never 200 still fails, so the gate
+    # is not weakened. Mirrors availability-record above.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy health gate poll (#4545)
+        run: bash .github/scripts/deploy-health-gate.test.sh
+
+  orphan-bound-gate:
+    needs: changes
+    if: needs.changes.outputs.orphan_bound_scripts == 'true'  # #4740: orphan-gate surface only
+    # #4740: the redislite orphan gate's harness. Self-contained: writes hygiene
+    # fixtures to a temp dir, no network, no CI runner. It pins that the gate's
+    # bound is READ from the conftest session-end sweep's report (two different
+    # `left` values both pass, so no fixed bound can satisfy both), that a
+    # disagreement between the workflow's count and the sweep's own measurement
+    # reds, that a violation of the sweep's accounting identity
+    # (`reaped + left < before`) reds, that `cleared: false` is keyed on the
+    # measured COUNT (a zero count passes with a warning, a non-zero count
+    # reds), that an 18+ digit number exits 2 as a usage error rather than
+    # reaching the pass line, and that a red verdict never falls through to a
+    # pass line.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Redislite orphan gate (#4740)
+        run: bash .github/scripts/orphan-bound.test.sh
+
+  deploy-bypass-report:
+    needs: changes
+    if: needs.changes.outputs.watchdog_scripts == 'true'  # #4759: any monitor/deploy-gate surface (shared watchdog_scripts group)
+    # #4759: the bypass reporter / expiry helper's harness. Self-contained: no
+    # network, no gh — every input is an argument or an env binding, exactly as
+    # the workflow supplies them. It proves a bypass lands in
+    # $GITHUB_STEP_SUMMARY naming the gate, the lane that fired and BYPASSED
+    # (neuter the summary write and it goes red), that each job's end-of-job
+    # audit states every gate as bypassed or not, and that the expiry check ages
+    # a set lane, VIOLATES past the window, and treats a missing/invalid start
+    # date as a violation rather than silence. Mirrors deploy-health-gate above.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy bypass report + expiry check (#4759)
+        run: bash .github/scripts/deploy-bypass.test.sh
 
   entrypoint-guards:
     needs: changes
@@ -741,7 +904,7 @@ jobs:
           python-version: '3.12'
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'   # --experimental-strip-types needs >= 22.6 (#373 harness)
+          node-version: '22'   # .ts type stripping + syntax detection is DEFAULT-ON from 22.18; the parity driver passes --experimental-strip-types (>= 22.7), test_pi_capture_hooks' `node --test` does not (#373 harness, #4714 parity test)
       - run: pip install -e '.[test]'
       - run: python -m playwright install --with-deps chromium
       # #1511: serve THIS branch's website/ (wrangler pages dev, mirroring the
