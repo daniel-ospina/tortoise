@@ -20,6 +20,27 @@ from pathlib import Path
 # a repo merely LIVING under an ancestor dir named venv/ is not.
 _NON_CONTENT_DIRS = frozenset({".venv", "venv", ".git", "node_modules", "__pycache__"})
 
+# The RECORDED local-receipt refusal set: a refusal in this set must never be
+# papered over with a 2xx local receipt (#4675's Task-15 acceptance line —
+# *"a LOCAL receipt is written on a **2xx** (403/402/503 ⇒ exit 1, honest
+# error, NO receipt) … that rule is correct and must not be weakened"*).
+#
+# Named EXPLICITLY rather than derived from `classify_failure`, because the two
+# answer DIFFERENT questions, and both answers are correct:
+#
+#   * the classifier answers *"may this become valid by waiting?"* — and 402 is
+#     TRANSIENT there, deliberately: #4614's data-loss fix needs a quota-refused
+#     capture KEPT in the spool (its `est` is computed from the incoming
+#     capture, so the identical capture succeeds once a node is freed).
+#   * this set answers *"is this a refusal the user must be shown?"* — and 402
+#     is.
+#
+# Deriving one from the other let #4614's reclassification of 402 silently
+# weaken the receipt rule: the receipt gates stopped excluding it, so a 402
+# whose session happened to be durable minted a receipt for a refusal.
+# `tests/test_session_confirm.py` pins the two rules as independent.
+_NO_RECEIPT_REFUSAL_STATUSES = frozenset({402, 403, 503})
+
 
 def _markdown_files(root: Path | str) -> list[Path]:
     """Sorted *.md files under `root` that the indexer will walk (and
@@ -3447,16 +3468,23 @@ def _session_post(api_key: str, api_url: str):
             AND their stored text files; every inconclusive read falls through
             to the original outcome and defers, which is always safe.
 
-            503 is excluded to match the LOCAL-receipt gate in
+            The recorded refusal set (:data:`_NO_RECEIPT_REFUSAL_STATUSES` =
+            402/403/503) is excluded BY NAME here, with the same constant and
+            for the same reason as the LOCAL-receipt gate in
             `_confirm_already_captured` — see the recorded 2xx-only rule there.
-            Uniformity is deliberate: a reviewer must not have to work out why
-            one path confirms a 503 and the other does not. The deferral is
-            recoverable either way (503 is `retry`, so the entry is kept and
-            re-posted); #4925 holds the question of broadening both.
+            Both 402 and 503 are `retry` to the CLASSIFIER (402 since #4614's
+            data-loss fix, 503 via `status >= 500`), so the classifier gate
+            alone would confirm them. Uniformity is deliberate: a reviewer must
+            not have to work out why one path confirms a 402 and the other does
+            not. The deferral is recoverable either way (each is `retry`, so the
+            entry is kept and re-posted); #4925 holds the question of broadening
+            both.
             """
             from tortoise.capture_spool import classify_failure
-            if outcome.ok or outcome.status == 503 or classify_failure(
-                    outcome.status, outcome.detail) != "retry":
+            if (outcome.ok
+                    or outcome.status in _NO_RECEIPT_REFUSAL_STATUSES
+                    or classify_failure(
+                        outcome.status, outcome.detail) != "retry"):
                 return outcome
             if not isinstance(payload, dict):
                 # A non-mapping payload has nothing to confirm against; the
@@ -4227,14 +4255,20 @@ def _cmd_sessions_import(args) -> int:
         RETRYABLE ONLY. A non-retryable status is not the post-commit-timeout
         shape this closes. The same gate the drain's `_refused` applies.
 
-        **503 is excluded explicitly.** The local receipt is 2xx-only by a
+        **The recorded refusal set is excluded by NAME**
+        (:data:`_NO_RECEIPT_REFUSAL_STATUSES` = 402/403/503) rather than by
+        deriving it from `classify_failure`. The local receipt is 2xx-only by a
         RECORDED decision (#4675's own body: *"a LOCAL receipt is written on a
         **2xx** (403/402/503 ⇒ exit 1, honest error, NO receipt) … that rule is
         correct and must not be weakened"*; `tortoise/__main__.py` carries it as
-        the Task-15 acceptance line). `classify_failure` calls 503 `retry`
-        (`status >= 500`), so the classifier gate does NOT exclude it — this
-        line is what keeps the recorded rule true. The cost of honouring it is
-        a deferral, not a loss: a 503 whose commit landed is spooled (503 is
+        the Task-15 acceptance line). The classifier no longer excludes two of
+        the three: it calls 503 `retry` (`status >= 500`) and, since #4614's
+        data-loss fix, 402 `retry` too. So the classifier gate alone would let a
+        402 whose session happened to be durable mint a receipt for a refusal —
+        the set is what keeps the recorded rule true, and it is deliberately
+        INDEPENDENT of the classifier: the classifier decides what to KEEP in
+        the spool, this decides what to RECEIPT. The cost of honouring it is a
+        deferral, not a loss: a 402/503 whose commit landed is spooled (both are
         `retry`, so `_spool_if_retryable` keeps it) and filed by a later
         attempt. #4925 records the tension — 503 and 504 are both 5xx and the
         post-commit shape is identical; broadening needs that reopened.
@@ -4257,7 +4291,8 @@ def _cmd_sessions_import(args) -> int:
             from tortoise.session_confirm import FILED, confirm_capture
             from tortoise.session_verify import session_detail
 
-            if status == 503 or classify_failure(status, detail) != "retry":
+            if (status in _NO_RECEIPT_REFUSAL_STATUSES
+                    or classify_failure(status, detail) != "retry"):
                 return False
             if confirm_capture(session_detail, api_url, api_key,
                                session_id, turns) != FILED:

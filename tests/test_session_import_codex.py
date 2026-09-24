@@ -526,36 +526,50 @@ def test_an_unreachable_api_that_still_committed_writes_the_receipt(
     assert read_spool_meta(spool, "sid-offline") is None
 
 
-def test_a_permanent_refusal_is_never_confirmed(tmp_path, monkeypatch,
-                                                codex_jsonl):
-    """The local import receipt is 2xx-only by a RECORDED decision, and #4675's
-    own body restates it: 403/402/503 ⇒ exit 1, honest error, NO receipt. The
-    confirmation is therefore gated on the RETRYABLE class — the same gate the
-    drain's `_refused` applies — so a 402 whose session happens to be durable
-    does not mint a receipt for a refusal the plan is refused on.
+def test_a_402_whose_session_landed_writes_no_receipt_but_keeps_the_spool(
+        tmp_path, monkeypatch, codex_jsonl, capsys):
+    """402 is `retry` to the CLASSIFIER (#4614: a quota refusal is transient —
+    its `est` is computed from the INCOMING capture, so the identical capture
+    succeeds once a node is freed), but it is in the recorded no-receipt set,
+    so the confirmation must exclude it by NAME.
 
-    MUTATION THAT REDS THIS: drop the `classify_failure(...) != "retry"` gate
-    from `_confirm_already_captured`.
+    #4675's body, verbatim: *"a LOCAL receipt is written on a **2xx**
+    (403/402/503 ⇒ exit 1, honest error, NO receipt) … that rule is correct and
+    must not be weakened"* — and the Task-15 acceptance line in
+    `tortoise/__main__.py`.
+
+    **The session here IS durable** — the read serves exactly the posted rows —
+    and that is what makes the test DISCRIMINATE. With the set derived from the
+    classifier, the confirmation runs, matches, and mints a receipt for a
+    refusal (rc 0): the recorded rule, weakened. An unreachable fake cannot
+    test this, because the confirmation swallows its own errors (fail-open by
+    contract), so "the read must not happen" is not assertable by making the
+    read raise — an earlier version of this test did exactly that and stayed
+    green under the mutation.
+
+    MUTATION THAT REDS THIS: drop 402 from `_NO_RECEIPT_REFUSAL_STATUSES` (or
+    derive the set from `classify_failure`) — rc becomes 0 and a receipt lands.
     """
     from tortoise.__main__ import _cmd_sessions_import
     from tortoise.capture_spool import read_spool_meta
 
     spool = _import_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _post_refused_get_serves(
+            "sid-quota", _EXPECTED_TURNS,
+            post_exc=_http_error(402,
+                                 '{"detail":"Team points limit reached"}')))
 
-    def _post_402(req, timeout=None):
-        if getattr(req, "get_method", lambda: "GET")() == "POST":
-            raise _http_error(402, '{"detail":"Team points limit reached"}')
-        raise AssertionError("the confirmation must not run for a permanent "
-                             "refusal")
-
-    monkeypatch.setattr("urllib.request.urlopen", _post_402)
     rc = _cmd_sessions_import(SimpleNamespace(
         file=str(codex_jsonl), harness="codex", session_id="sid-quota"))
 
-    assert rc == 1
-    assert not list((tmp_path / "receipts").glob("*.json"))
-    # 402 is not retryable, so it is not spooled either (unchanged behaviour).
-    assert read_spool_meta(spool, "sid-quota") is None
+    assert rc == 1, capsys.readouterr().err
+    assert "HTTP 402" in capsys.readouterr().err
+    assert not list((tmp_path / "receipts").glob("*.json")), \
+        "the recorded 2xx-only rule: a 402 must not mint a receipt"
+    assert read_spool_meta(spool, "sid-quota") is not None, \
+        "honouring the 402 rule must not cost the session — #4614 keeps it"
 
 
 def test_a_503_whose_session_landed_writes_no_receipt_but_keeps_the_spool(
