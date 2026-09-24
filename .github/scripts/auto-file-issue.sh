@@ -33,6 +33,16 @@
 #   occurrence belongs in the BODY (which is rewritten on the issue only when
 #   the issue is first filed; later detail arrives as recurrence comments).
 #
+# THE TOKEN MUST BE THE ACTIONS TOKEN (not a PAT, not a fine-grained token)
+#   The dedupe search keys on `author:app/github-actions` and the adopt check on
+#   the reserved login `github-actions[bot]`. A PAT (or any token that is not
+#   the Actions app token) files and searches as ITS OWNER, so the search never
+#   matches, `total` reads 0 with no warning, and a FRESH issue is filed on
+#   EVERY run — the #2706 duplicate spam this substrate exists to prevent, and
+#   silent. #5019 migrates four more monitors onto this substrate, so the trap
+#   only widens. The actor is therefore ASSERTED (one cheap `gh api user`) and
+#   the misuse fails loudly instead of degenerating.
+#
 # SECURITY — the title is attacker-reachable
 #   This repo is PUBLIC, so any account can open an issue whose title matches a
 #   key. If such an issue were adopted, the monitor would comment on a
@@ -73,6 +83,26 @@ af_note() { echo "::notice::$*"; }
 
 af_token() { printf '%s' "${GH_TOKEN:-${GITHUB_TOKEN:-}}"; }
 af_have_gh() { command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; }
+
+# Assert the EFFECTIVE ACTOR is our reserved login before filing or commenting.
+# Only reachable once a token is present (af_file_or_comment checks that first),
+# so the offline/no-token path never touches GitHub. ONE cheap call, not per
+# issue: `gh api user` is the /user endpoint and costs nothing near a search.
+# A PAT would file as its own owner, so the `author:app/github-actions` dedupe
+# search would never match and every run would file a NEW issue — silently
+# (#2706). An unanswerable actor lookup is refused for the same reason: we
+# cannot tell "no incident" from "cannot see incidents".
+af_assert_actor() {
+  local login
+  if ! login="$(gh api user --jq .login 2>/dev/null)"; then
+    af_err "could not verify the token's actor (gh api user failed) — refusing to file: the dedupe search keys on author:app/github-actions, so an unverified token may file a DUPLICATE on every run"
+    return 1
+  fi
+  if [ "$login" != "$AUTO_FILE_BOT_LOGIN" ]; then
+    af_err "GH_TOKEN authenticates as '${login}', not the reserved '${AUTO_FILE_BOT_LOGIN}' — this substrate REQUIRES the GitHub Actions token (secrets.GITHUB_TOKEN). A PAT (or any non-Actions token) files and searches as its own owner, so the 'author:app/github-actions' dedupe search never matches and EVERY run files a duplicate issue (#2706). Point GH_TOKEN at the Actions token."
+    return 1
+  fi
+}
 
 # Echoes a POSITIVE integer issue number, "" when NO machine-authored issue with
 # this EXACT title is open, or "__ERR__" when the search failed or answered
@@ -194,6 +224,7 @@ af_file_or_comment() { # <stable-title> <body-file> <label>
     return 1
   }
   af_have_gh || { af_err "gh and jq are required"; return 1; }
+  af_assert_actor || return 1
 
   found="$(af_open_issue "$title")"
   case "$found" in
@@ -223,7 +254,11 @@ usage: auto-file-issue.sh file --title <stable-title> --body-file <path> [--labe
   occurrence comments on the existing issue as "Recurrence #N" instead of
   filing. A failed dedupe search refuses to file (never risk a duplicate).
 
-env: GH_TOKEN (or GITHUB_TOKEN), GITHUB_REPOSITORY, GITHUB_SERVER_URL, GITHUB_RUN_ID
+env: GH_TOKEN (or GITHUB_TOKEN) — MUST be the GitHub Actions token
+     (secrets.GITHUB_TOKEN). The dedupe keys on author:app/github-actions, so a
+     PAT files as its own owner, matches nothing, and files a DUPLICATE on every
+     run. The actor is asserted; a non-Actions actor fails closed.
+     Also: GITHUB_REPOSITORY, GITHUB_SERVER_URL, GITHUB_RUN_ID
 USAGE
   return 2
 }

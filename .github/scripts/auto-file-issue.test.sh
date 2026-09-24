@@ -35,6 +35,13 @@
 #  17. the dedupe SEARCH pages to an exact match beyond page 1 (P3: search
 #      ranking is not equality-first, so a single-page read files a duplicate)
 #  18. the search asks for a full page (per_page=100) and passes --paginate
+#  19. a NON-Actions token actor (a PAT) fails LOUDLY and files NOTHING (P3: the
+#      dedupe search keys on author:app/github-actions, so a PAT-owner would
+#      match nothing and file a duplicate EVERY run)
+#  20. an UNVERIFIABLE actor (gh api user fails) is refused for the same reason:
+#      "no incident" is indistinguishable from "cannot see incidents"
+#  21. the actor assertion does NOT run on the no-token path: the offline run
+#      still exits 1 BEFORE contacting GitHub
 #
 # Case 2 is the #3907 acceptance pin: it FAILS on the old behaviour (a duplicate
 # issue per run) and on the silent-drop behaviour (no comment at all).
@@ -82,6 +89,7 @@ cat > "$BIN/gh" <<'GH_EOF'
 #   gh api "repos/O/R/issues/N/comments?per_page=100&page=P" (GET comments)
 #   gh api "repos/O/R/issues/N/comments" --method POST -f body=…  (comment)
 #   gh api "repos/O/R/issues" --method POST -f …           (create)
+#   gh api user --jq .login                                (actor check, #3907 P3)
 [ "${1:-}" = "api" ] || { echo "GH unexpected: $*" >&2; exit 1; }
 path="${2:-}"; method="GET"; paginate=0
 shift 2 || true
@@ -101,6 +109,13 @@ done
 DEFAULT_ITEMS_JSON='{"items":[]}'
 echo "GH ${method} ${path}" >> "$STUB_TMP/calls.log"
 case "$path" in
+  user)
+    # #3907 P3: the actor check. `gh api user --jq .login` prints the bare login
+    # (the --jq was already consumed by the arg loop above), so a stub that
+    # returned JSON here would make the helper's comparison fail for every case.
+    echo "GH-U" >> "$STUB_TMP/calls.log"
+    [ "${STUB_USER_FAIL:-0}" = "1" ] && { echo "gh: user failed" >&2; exit 1; }
+    printf '%s\n' "${STUB_USER_LOGIN:-github-actions[bot]}" ;;
   search/issues*)
     echo "GH-Q paginate=${paginate} ${path}" >> "$STUB_TMP/calls.log"
     [ "${STUB_SEARCH_FAIL:-0}" = "1" ] && { echo "gh: search failed" >&2; exit 1; }
@@ -151,7 +166,7 @@ reset_case() {
   rm -f "$STUB_TMP/created.txt" "$STUB_TMP/comment.txt"
   unset STUB_SEARCH_JSON STUB_SEARCH_FAIL STUB_CREATE_FAIL STUB_COMMENT_FAIL \
         STUB_COMMENTS_JSON STUB_COMMENTS_JSON_P2 STUB_COMMENTS_JSON_P3 \
-        STUB_COMMENTS_FAIL STUB_SEARCH_JSON_P2 || true
+        STUB_COMMENTS_FAIL STUB_SEARCH_JSON_P2 STUB_USER_LOGIN STUB_USER_FAIL || true
   export GH_TOKEN="test-token"
 }
 
@@ -378,6 +393,40 @@ export STUB_COMMENTS_JSON='[]'
 run_helper
 assert_eq "$(count_calls 'GH-Q.*per_page=100')" "1" "18. the dedupe search asks for a full page (per_page=100)"
 assert_eq "$(count_calls 'GH-Q paginate=1')" "1" "18. the dedupe search passes --paginate (page-2 walk is live)"
+
+# ── 19: a NON-Actions token actor fails loudly (P3) ────────────────────────
+# CLAIMED CONTRACT: env: GH_TOKEN (or GITHUB_TOKEN) — but ONLY the Actions app
+# token works with a dedupe that keys on `author:app/github-actions`. An adopter
+# passing a PAT creates issues under the PAT owner, so the search never matches,
+# `total` is 0 with no warning, and a fresh issue is filed EVERY run — exactly
+# the duplicate spam #3907 exists to prevent, and silently. #5019 migrates four
+# more monitors onto this substrate, so the misuse must be loud, not degenerate.
+reset_case
+export STUB_USER_LOGIN="some-human"
+run_helper
+assert_eq "$RC" "1" "19. a PAT actor → exit 1 (fail closed, no silent duplicate spam)"
+assert_eq "$(count_calls 'GH POST repos/.*/issues$')" "0" "19. a PAT actor → NOTHING is filed"
+assert_contains "$OUT" "github-actions[bot]" "19. a PAT actor → the error names the required reserved login"
+assert_contains "$OUT" "duplicate" "19. a PAT actor → the error names the duplicate-spam risk"
+
+# ── 20: an UNVERIFIABLE actor is refused (fail closed) ─────────────────────
+reset_case
+export STUB_USER_FAIL=1
+run_helper
+assert_eq "$RC" "1" "20. an unanswerable actor lookup → exit 1"
+assert_eq "$(count_calls 'GH POST')" "0" "20. an unanswerable actor lookup → nothing is filed or commented"
+assert_contains "$OUT" "author:app/github-actions" "20. the refusal says why the actor matters (the dedupe key)"
+
+# ── 21: the no-token path never reaches the actor assertion ────────────────
+# The actor check is one `gh api user`; it must NOT weaken the offline
+# fail-closed contract (no token → exit 1 without touching GitHub).
+reset_case
+unset GH_TOKEN
+export STUB_USER_FAIL=1
+run_helper
+assert_eq "$RC" "1" "21. still fail-closed with no token (actor check not reached)"
+assert_contains "$OUT" "deaf monitor" "21. the no-token error is the TOKEN error, not an actor error"
+assert_eq "$(count_calls 'GH ')" "0" "21. no token → GitHub is never contacted (incl. the actor check)"
 
 echo
 if [ "$FAIL" -eq 0 ]; then

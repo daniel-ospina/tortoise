@@ -97,7 +97,11 @@
 #      the incident and deletes its dedup object)
 #  71. a FAILED recurrence comment is never fatal and never duplicates: the run
 #      stays RED, no second issue is filed, and the driver says the record did
-#      not happen (so it cannot claim a comment it did not post)
+#      not happen (so it cannot claim a comment it did not post). The failure is
+#      modelled as the shape that ACTUALLY occurs — HTTP 403 with curl exit 0
+#      (secondary rate limit / missing issues:write) — not a transport failure;
+#      a stub that exits 1 makes the "no false record" assertion vacuous for
+#      every error a real GitHub returns.
 #  72. an OUTSIDER marker comment cannot inflate the recurrence counter (P2:
 #      the marker is public; only the Actions bot's marked comments count)
 #
@@ -250,7 +254,7 @@ DATE_EOF
 # ── stub: curl ──────────────────────────────────────────────────────────────
 cat > "$BIN/curl" <<'CURL_EOF'
 #!/usr/bin/env bash
-out_file=""; write_fmt=""; url=""; data=""; method="GET"
+out_file=""; write_fmt=""; url=""; data=""; method="GET"; fail=0
 args=("$@"); i=0
 while [ $i -lt ${#args[@]} ]; do
   a="${args[$i]}"
@@ -260,7 +264,8 @@ while [ $i -lt ${#args[@]} ]; do
     -X) method="${args[$((i+1))]:-GET}"; i=$((i+2)) ;;
     -d) data="${args[$((i+1))]:-}"; i=$((i+2)) ;;
     -H|-m|--data-urlencode|--data|--header|--max-time|-u) i=$((i+2)) ;;
-    -s|-sS|-S|-L|-k|-f|--fail) i=$((i+1)) ;;
+    -f|--fail) fail=1; i=$((i+1)) ;;
+    -s|-sS|-S|-L|-k) i=$((i+1)) ;;
     *) url="$a"; i=$((i+1)) ;;
   esac
 done
@@ -303,8 +308,19 @@ case "$url" in
         if [ "$method" = "GET" ]; then
           printf '%s' "${STUB_COMMENTS_JSON:-[]}"
         else
+          # REAL curl exits 0 on an HTTP 4xx/5xx; only `--fail` turns that into
+          # exit 22. This stub therefore models the HTTP STATUS (default 201),
+          # NOT the exit code: a stub that `exit 1`s here is a TRANSPORT failure
+          # and makes case 71's assertion vacuous for the shape that actually
+          # occurs (a 403 from the comments endpoint, exit 0).
+          #   STUB_COMMENT_CODE=403  → HTTP 403, exit 0 (the real failure shape)
+          #   STUB_COMMENT_FAIL=1    → transport failure, exit 1 (curl itself died)
           [ "${STUB_COMMENT_FAIL:-0}" = "1" ] && exit 1
-          printf '{}'
+          emit '{}' "${STUB_COMMENT_CODE:-201}"
+          case "${STUB_COMMENT_CODE:-201}" in
+            2[0-9][0-9]) ;;
+            *) [ "$fail" = "1" ] && exit 22 ;;
+          esac
         fi ;;
       */issues/*)
         if [ "$method" = "GET" ]; then
@@ -363,7 +379,7 @@ reset_case() {
         R2_DEFAULT_LIST_Z R2_DEFAULT_LIST_A \
         GH_ISSUE_SWEEP_CONFIG_ERROR GH_ISSUE_SWEEP_OFF_STALE GH_ISSUE_SWEEP_NO_COVERAGE \
         GH_ISSUE_WATCHER_DOWN GH_ISSUE_APP_DOWN GH_ISSUE_R2_DOWN GH_ISSUE_STALE \
-        STUB_COMMENTS_JSON STUB_COMMENT_FAIL || true
+        STUB_COMMENTS_JSON STUB_COMMENT_FAIL STUB_COMMENT_CODE || true
   export R2_FLAT_LIST="[]"
 }
 
@@ -1320,6 +1336,11 @@ assert_match "$(cat "$LOG")" "AWS delete-object key=ops/alerts/SWEEP_CONFIG_ERRO
 # dedup branch), so a failed comment must not abort the self-heal or the other
 # incidents, and must never be replaced by a duplicate issue. The driver also
 # must not claim a record it did not write.
+# The failure is an HTTP 403 answered by the comments endpoint with curl exit 0
+# — the shape a real GitHub returns under a secondary rate limit or a missing
+# `issues: write` permission. The pre-fix `gh_comment` reported that as success
+# (a bare `curl -sS` exits 0 on 4xx/5xx) and the driver logged a recorded
+# recurrence the issue never carried.
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
@@ -1328,12 +1349,13 @@ export STUB_412=1
 export STUB_GET_BODY='{"kind":"SWEEP_CONFIG_ERROR","issue_number":42}'
 export GH_ISSUE_STATE=open
 export STUB_COMMENTS_JSON='[]'
-export STUB_COMMENT_FAIL=1
+export STUB_COMMENT_CODE=403
 run_driver
-assert_eq "$RC" 1 "71. a failed recurrence comment still exits RED (1)"
+assert_eq "$RC" 1 "71. a 403 recurrence comment still exits RED (1)"
+assert_match "$(cat "$LOG")" "GH POST .*/issues/42/comments" "71. the comment POST was actually attempted (the 403 path is live)"
 assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "71. a failed comment never produces a duplicate issue"
 assert_match "$OUT" "recurrence comment on issue #42 FAILED" "71. the driver does not claim a record it did not write"
-assert_not_match "$OUT" "recorded recurrence #1" "71. no false 'recorded' claim on a failed comment"
+assert_not_match "$OUT" "recorded recurrence #1" "71. no false 'recorded' claim on a 403 (exit-0) comment"
 
 # ── 72. an OUTSIDER marker cannot inflate the recurrence counter (P2) ──────
 # The occurrence marker is NOT secret: the public comments API returns it

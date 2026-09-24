@@ -252,11 +252,26 @@ gh_issue_open() { # number -> 0 when OPEN or unknown; 1 when confirmed closed OR
     *)    return 1 ;;   # closed
   esac
 }
-gh_comment() { # number body -> curl's status (0 when posted)
+gh_comment() { # number body -> 0 ONLY when GitHub answered 2xx
+  # #3907 review (P1): a bare `curl -sS …` exits 0 on an HTTP 4xx/5xx — the
+  # comments endpoint answered 403 (secondary rate limit / missing `issues:
+  # write` / abuse detection) with exit 0 in review, and with core quota at
+  # 4,998. Called as `if gh_comment …`, that made gh_record_occurrence log
+  # "recorded recurrence #N … (no duplicate filed)" while the issue carried NO
+  # record at all — the #2140 deaf-monitor class this file already calls out.
+  # So capture the status code and require a REAL 2xx, exactly as gh_issue_open
+  # ~20 lines above does; a transport failure (curl exits non-zero, no code)
+  # collapses to `000` and is refused the same way.
   [ -n "$GH_TOKEN" ] || return 0
-  curl -sS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+  local code
+  code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+    -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
     "https://api.github.com/repos/${REPO}/issues/$1/comments" \
-    -d "$(jq -nc --arg b "$2" '{body:$b}')" >/dev/null 2>&1
+    -d "$(jq -nc --arg b "$2" '{body:$b}')" 2>/dev/null || echo 000)"
+  case "$code" in
+    2[0-9][0-9]) return 0 ;;
+  esac
+  return 1
 }
 # #3907: a dedup no-op must still RECORD the occurrence. The pre-#3907 dedup
 # paths logged and returned, so a driver firing hourly on ONE unchanged fault
