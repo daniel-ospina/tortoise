@@ -1121,21 +1121,74 @@ def test_cut_REFUSES_to_blank_recorded_approvals(monkeypatch, tmp_path, capsys, 
     )
 
 
-def test_the_approval_guard_is_not_vacuous_on_a_BROKEN_baseline(monkeypatch, tmp_path, capsys, derived_baseline):
-    """A malformed baseline must not block `cut` — it is the REPAIR tool.
+def test_the_guard_REFUSES_an_UNREADABLE_baseline_rather_than_overwriting_it(
+    monkeypatch, tmp_path, capsys, derived_baseline
+):
+    """An unreadable artifact is REFUSED — never silently overwritten.
 
-    The guard reads the existing manifest to enumerate what it would drop. If that read
-    raised, the guard would turn a repairable baseline into an unrepairable one. There is
-    no enumerable approval set in an unreadable file, so it must fall through and write.
+    This flips the earlier reading. The artifact is the ONLY carrier of the owner's per-row
+    approvals, and an unreadable one may well carry approvals that cannot be enumerated, so
+    writing over it destroys them without ever naming them — the #4598 wipe again. "There is
+    nothing to refuse for" was wrong: the refusal is precisely that the set is NOT enumerable.
     """
     sm = _load_manifest_tool()
     path = tmp_path / "surface-manifest.yml"
-    path.write_text("this: [is not\n  a manifest\n", encoding="utf-8")
+    broken = "this: [is not\n  a manifest\n"
+    path.write_text(broken, encoding="utf-8")
+
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 1
+    assert path.read_text(encoding="utf-8") == broken, "the refusal WROTE the manifest"
+
+
+def test_a_MISSING_baseline_still_cuts(monkeypatch, tmp_path, derived_baseline):
+    """The first cut has no approvals to lose, and must keep working.
+
+    The pair to the refusal above: the guard distinguishes MISSING (nothing to lose) from
+    UNREADABLE (may carry something we cannot see). Conflating them would either block the
+    first cut or reopen the silent overwrite.
+    """
+    sm = _load_manifest_tool()
+    path = tmp_path / "surface-manifest.yml"
+    assert not path.exists()
 
     monkeypatch.setattr(sm, "MANIFEST_FILE", path)
     monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
     assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 0
     assert yaml.safe_load(path.read_text(encoding="utf-8"))["counts"]["tools"] >= 1
+
+
+def test_the_guard_sees_a_RETIRED_row_approval(monkeypatch, tmp_path, capsys, derived_baseline):
+    """The mutation evidence for the RETIRED half of the artifact.
+
+    `retired:` rows carry `approval` too — retiring a name shrinks the surface and needs the
+    same human approval, and `build_doc` blanks it there as well. A guard that walks only
+    `rows:` passes this case GREEN while a recorded retirement approval is destroyed, which
+    is the same silent wipe through the other door. Assert on the retired row specifically:
+    a guard reading only `rows:` fails here.
+    """
+    sm = _load_manifest_tool()
+    path = tmp_path / "surface-manifest.yml"
+    prior = copy.deepcopy(_manifest())
+    for row in [*prior["rows"], *prior["retired"]]:
+        row["approval"] = None
+    assert prior["retired"], "fixture has no retired rows to test the retired arm with"
+    retired_row = prior["retired"][0]["name"]
+    prior["retired"][0]["approval"] = "#4598 @daniel-ospina"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    before = path.read_text(encoding="utf-8")
+
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 1, (
+        "a recorded approval on a RETIRED row did not stop the re-cut — the guard is "
+        "reading `rows:` only"
+    )
+    out = capsys.readouterr().out
+    assert retired_row in out and "#4598 @daniel-ospina" in out, out
+    assert path.read_text(encoding="utf-8") == before, "the refusal WROTE the manifest"
 
 
 def test_cut_refuses_when_the_declaration_cannot_be_IMPORTED(monkeypatch, capsys, tmp_path):

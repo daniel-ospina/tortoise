@@ -728,10 +728,25 @@ else
 fi
 
 # ── 3. run the sweep ────────────────────────────────────────────────────────
+# curl's own exit code is captured, because a TIMEOUT leaves $RUN EMPTY and an
+# empty body is not the same event as an error body. `jq -r '.status // "error"'`
+# on ABSENT input prints nothing and exits 0 (the `// "error"` default fires
+# only for a present-but-null field), so without this a timeout produced
+# RUN_STATUS="" and fell through to the `*)` arm — which files "the sweep backed
+# up no team" while the sweep, server-side, has NOT stopped (uvicorn's
+# h11 connection_lost only marks the cycle disconnected, and the exempt route
+# has no server-side ceiling). Name the shape instead of letting it masquerade.
+RUN=""
+CURL_RC=0
 RUN="$(curl -sS -m 600 -X POST -H "Authorization: Bearer $KEY" \
   -H "Content-Type: application/json" -d '{}' \
-  "${API}/v1/internal/backups/sweep" 2>/dev/null || true)"
-RUN_STATUS="$(printf '%s' "$RUN" | jq -r '.status // "error"' 2>/dev/null || echo error)"
+  "${API}/v1/internal/backups/sweep" 2>/dev/null)" || CURL_RC=$?
+if [ "$CURL_RC" -eq 28 ]; then
+  RUN='{"status":"driver_timeout"}'
+elif [ -z "$RUN" ]; then
+  RUN='{"status":"empty_response"}'
+fi
+RUN_STATUS="$(printf '%s' "$RUN" | jq -r 'if type=="object" then (.status // "error") else "error" end' 2>/dev/null || echo error)"
 # Security review: RUN_STATUS is app-controlled — never publish it verbatim.
 RUN_STATUS_SAFE="$(redact "$RUN_STATUS")"
 # Review P2 (bug-deep): `teams_backed_up` counts only DEFAULT-graph backups, so
@@ -812,6 +827,19 @@ case "$RUN_STATUS" in
       log "sweep found 0 teams and the R2 pool is empty — chronic pre-beta state, no incident"
     fi
     ;;
+  driver_timeout|empty_response)
+    # #4939: the driver's own patience ran out. The sweep is NOT proven stopped —
+    # the exempt route has no server-side ceiling and an abandoned request keeps
+    # running — so this must not claim "backups are NOT running", and the purge/
+    # reconcile ride-along is skipped below (see the ride-along guard) while the
+    # sweep may still hold the per-org locks. SWEEP_NO_COVERAGE stays the right
+    # KIND: this run produced no coverage, and any run that does back up
+    # auto-resolves it. The TEXT is what had to become true.
+    log "sweep ${RUN_STATUS} (curl rc=${CURL_RC}) — filing SWEEP_NO_COVERAGE with a timeout claim (job red)"
+    file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — sweep did not finish within the driver's budget" \
+      "the driver gave up on POST /v1/internal/backups/sweep after 600s (curl exit ${CURL_RC}, status=${RUN_STATUS_SAFE}). The sweep may still be RUNNING server-side — this leg cannot tell — so this is not evidence that the sweep failed, only that it did not report in time. Last known last_sweep=${LAST_SWEEP_SAFE}." ""
+    NO_COVERAGE=1
+    ;;
   *)
     # Any other body status (error / enum_failed / unrecognized) means the
     # sweep tried and failed — loud REGARDLESS of pool state (the 0-team
@@ -836,7 +864,11 @@ esac
 # health signals.
 PURGE_FAILED=0
 RECONCILE_FAILED=0
-if [ "$RUN_STATUS" != "already_running" ]; then
+# #4939: a timed-out sweep may still hold the per-org locks server-side, so the
+# ride-along is skipped for it exactly as for a held lock (already_running).
+if [ "$RUN_STATUS" != "already_running" ] \
+   && [ "$RUN_STATUS" != "driver_timeout" ] \
+   && [ "$RUN_STATUS" != "empty_response" ]; then
   PURGE_RESP="$(mktemp)"
   PURGE_CODE="$(curl -sS -o "$PURGE_RESP" -w '%{http_code}' -m 300 -X POST \
     -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{}' \

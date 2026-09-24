@@ -971,16 +971,23 @@ def _display(path: Path) -> str:
 
 
 def _recorded_approvals(doc: dict) -> list[tuple[str, str]]:
-    """Every row in `doc` carrying a non-null `approval`, as (name, approval).
+    """Every non-null row-level `approval` in a manifest, in file order.
 
     `approval` is NON_DERIVABLE: it records an OWNER decision about a row, and no re-cut can
     reproduce it. This is precisely the list a re-cut destroys.
+
+    `retired:` rows carry the field too — retiring a name shrinks the surface and needs the
+    same human approval, and `build_doc` blanks it there as well — so BOTH lists are walked.
+    Reading only `rows:` leaves the retired half of the artifact unguarded, which is the same
+    silent wipe through a different door (#4598).
     """
     found: list[tuple[str, str]] = []
-    for row in doc.get("rows", []):
-        name = row.get("name") or row.get("key") or row.get("tool") or "?"
+    for row in [*(doc.get("rows") or []), *(doc.get("retired") or [])]:
+        if not isinstance(row, dict):
+            continue
         approval = row.get("approval")
         if approval:
+            name = row.get("name") or row.get("key") or row.get("tool") or "<unnamed>"
             found.append((str(name), str(approval)))
     return found
 
@@ -1000,13 +1007,16 @@ def cmd_cut(args: argparse.Namespace) -> int:
     # property compares it and no check can see the loss. Refusing here costs one flag; not
     # refusing costs an owner decision, with no artifact left to recover it from.
     #
-    # A MALFORMED baseline must NOT block this: `cut` is the repair tool. An unreadable existing
-    # manifest means there is no enumerable approval set, so there is nothing to refuse for.
-    try:
-        existing = _read_manifest()
-    except Exception:  # a broken baseline is repaired BY this command
-        existing = {}
-    doomed = _recorded_approvals(existing)
+    # A MISSING artifact has no approvals to lose — that is the first cut, and it must keep
+    # working. An UNREADABLE one is different in kind: it may well carry approvals that cannot
+    # be enumerated, so overwriting it destroys them without ever naming them, which is the
+    # #4598 wipe again. Refuse. Never a silent overwrite of a document we could not read.
+    doomed: list[tuple[str, str]] = []
+    if MANIFEST_FILE.exists():
+        try:
+            doomed = _recorded_approvals(_read_manifest())
+        except SurfaceEvidenceUnreadable as exc:
+            return _refuse(exc)
     if doomed and not getattr(args, "allow_approval_reset", False):
         print(f"::error::cut would reset {len(doomed)} recorded approval(s) to null")
         print(f"REFUSED {_display(MANIFEST_FILE)} carries {len(doomed)} recorded approval(s) "
