@@ -257,7 +257,7 @@ aboutObjects: tortoise-memory-capture, tortoise-onboarding
 ### Task 15: T2 backfill — `tortoise sessions import --harness codex|claude-desktop|pi`
 
 **Intent:** Historical transcript backfill with 2xx-only receipts (scoped as backfill, NOT coupled to the wizard's capture acceptance).
-**Acceptance:** import CLI stages parsed session locally (data preservation), POSTs, writes receipt only on 2xx; 403/402/503 ⇒ fail, no receipt, honest error; Codex + Desktop parsers idempotent on re-import; Cursor spike verdict recorded (ships or honest `unsupported`).
+**Acceptance:** import CLI stages parsed session locally (data preservation), POSTs, writes receipt only on 2xx; 403 ⇒ fail, no receipt, honest error, and a RETRYABLE refusal (402/408/425/429/5xx, including 503) is additionally spooled for a later drain by `_spool_if_retryable` while still exiting 1 with no receipt (#4714); Codex + Desktop parsers idempotent on re-import; Cursor spike verdict recorded (ships or honest `unsupported`).
 **Files:**
 - Modify: `tortoise/__main__.py`
 - Create: `tortoise/session_import/parsers.py` (codex, claude_desktop, cursor-gated; **pi reuses the codex parser — pi session JSONL is a tree-structured JSONL like codex's; named reuse + idempotency test**, or add `pi.py`)

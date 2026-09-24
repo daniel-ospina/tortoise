@@ -7,10 +7,10 @@ it IS the opt-in — the #3575 trap was a capture extension that defaulted off),
 and it talks to both hosted capture endpoints.
 
 The behavioral assertions run the extension's own `node --test` suite when the
-local Node supports TypeScript type stripping; the flag is passed explicitly so
-that Node 22.6–22.17 (where stripping is opt-in) work too. The source-level
-assertions always run, so the surface stays pinned even where Node is older or
-absent.
+local Node enables native TypeScript type stripping AND module-syntax
+detection BY DEFAULT (Node >= 22.18 — the `.ts` is typeless with no
+`package.json`); the source-level assertions always run, so the surface stays
+pinned even where Node is older or absent.
 
 The installed-artifact tests at the bottom load and fire the file
 ``capture_install`` actually writes, so the seam is verified at its INSTALL
@@ -35,11 +35,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOKS = REPO_ROOT / "tortoise" / "pi-hooks"
 EXTENSION = HOOKS / "tortoise-capture.ts"
 EXTENSION_TEST = HOOKS / "tortoise-capture.test.ts"
-
-#: Node strips TypeScript types only WITH this flag on 22.6–22.17; it is a
-#: no-op (accepted) on >= 22.18, where stripping is the default. Passing it
-#: explicitly keeps the `_node_supports_ts` (>= 22.6) guard true.
-NODE_TS_FLAG = "--experimental-strip-types"
 
 
 def _installed_seam_path(tmp_home: Path) -> Path:
@@ -133,7 +128,30 @@ def test_extension_posts_both_capture_endpoints():
     assert "postInstallProbe" in src
 
 
+def node_supports_ts_version(major: int, minor: int) -> bool:
+    """Can THIS suite's invocation run the extension: `node --test <file>.ts`?
+
+    22.18, not 22.7 — and the difference is the FLAG, not the feature. Node 22.7
+    added `--experimental-strip-types`; enabling it BY DEFAULT (which is what a
+    bare `node --test <file>.ts` depends on) arrived in 22.18.0. The extension
+    also needs ambient module-syntax DETECTION, which is why 22.6 is not enough
+    even with the flag.
+
+    The parity test in `test_capture_spool.py` keeps a 22.7 floor BY DESIGN: it
+    invokes node as `node --experimental-strip-types <driver>`. The two floors
+    describe two different commands, so they are deliberately NOT in step — the
+    defect this replaces was a floor copied from that file onto an invocation
+    that does not pass the flag, which made 22.7-22.17 RED (the module fails to
+    load) instead of SKIP.
+
+    Pure over its inputs so the boundary is testable without a second Node.
+    """
+    return major >= 24 or (major == 23 and minor >= 6) \
+        or (major == 22 and minor >= 18)
+
+
 def _node_supports_ts(node: str) -> bool:
+    """`node_supports_ts_version` applied to the node on PATH."""
     try:
         out = subprocess.run(
             [node, "--version"], capture_output=True, text=True, timeout=15
@@ -143,8 +161,7 @@ def _node_supports_ts(node: str) -> bool:
     m = re.match(r"v(\d+)\.(\d+)", out)
     if not m:
         return False
-    major, minor = int(m.group(1)), int(m.group(2))
-    return major > 22 or (major == 22 and minor >= 6)
+    return node_supports_ts_version(int(m.group(1)), int(m.group(2)))
 
 
 def _scrubbed_env(tmpdir: str) -> dict[str, str]:
@@ -168,21 +185,46 @@ def _scrubbed_env(tmpdir: str) -> dict[str, str]:
     return env
 
 
+def test_the_node_floor_matches_the_invocation_the_suite_actually_makes():
+    """The floor must name what THIS file's invocation needs: `node --test
+    <file>.ts`, with NO `--experimental-strip-types` — because the flag may be
+    removed in a future major, the floor tracks its DEFAULT-ON version instead.
+
+    A too-low floor is worse than a high one: on 22.7-22.17 `_node_supports_ts`
+    would return True, the module would fail to load, and
+    `test_extension_behavioral_suite` would RED on a machine that simply cannot
+    run it — instead of skipping. 22.7 is correct for the SIBLING parity test
+    only, because that driver passes the flag.
+
+    Mutation: revert the floor to 22.7, drop the 23.x band, or use a bare
+    `major > 22` -> the corresponding row REDs.
+    """
+    assert node_supports_ts_version(22, 6) is False
+    assert node_supports_ts_version(22, 7) is False, (
+        "22.7 has the flag, not the DEFAULT — this suite passes no flag")
+    assert node_supports_ts_version(22, 17) is False
+    assert node_supports_ts_version(22, 18) is True
+    assert node_supports_ts_version(23, 5) is False, (
+        "default-on landed in v23.6.0, not v23.0.0 — a bare `major > 22` says "
+        "'supported' on 23.0-23.5, where the module still fails to load")
+    assert node_supports_ts_version(23, 6) is True
+    assert node_supports_ts_version(24, 0) is True
+
+
 def test_extension_behavioral_suite():
-    """Run `node --experimental-strip-types --test tortoise/pi-hooks/tortoise-capture.test.ts`
-    (probe payload, turn extraction, capture payload, reload skip) in a SCRUBBED
-    environment — see `_scrubbed_env`. The flag is passed explicitly because type
-    stripping is opt-in on Node 22.6–22.17 (matching the invocation below and
-    `tortoise/pi-hooks/README.md` § Verification). Skipped only when the local
-    Node cannot run TypeScript — the source pins above still run."""
+    """Run `node --test tortoise/pi-hooks/tortoise-capture.test.ts` (probe
+    payload, turn extraction, capture payload, reload skip) in a SCRUBBED
+    environment — see `_scrubbed_env`. Skipped only when the local Node cannot
+    run TypeScript — the source pins above still run."""
     node = shutil.which("node")
     if node is None:
         pytest.skip("node not available — extension source pins above still ran")
     if not _node_supports_ts(node):
-        pytest.skip("node < 22.6 cannot strip TypeScript types — source pins still ran")
+        pytest.skip("node < 22.18 does not enable TypeScript type stripping by "
+                    "default — source pins still ran")
     with tempfile.TemporaryDirectory() as fake_home:
         proc = subprocess.run(
-            [node, NODE_TS_FLAG, "--test", str(EXTENSION_TEST)],
+            [node, "--test", str(EXTENSION_TEST)],
             capture_output=True,
             text=True,
             cwd=str(REPO_ROOT),
@@ -262,18 +304,21 @@ def _require_node() -> str:
         if in_ci:
             pytest.fail(
                 "node is REQUIRED in CI: it is the only way the installed Pi "
-                "capture seam is loaded and fired (#4620). Install node >= 22.6 "
+                "capture seam is loaded and fired (#4620). Install node >= 22.18 "
                 "in this lane rather than letting the check vanish silently."
             )
         pytest.skip("node not available — the source pins above still ran")
     if not _node_supports_ts(node):
         if in_ci:
             pytest.fail(
-                f"node at {node} is older than 22.6 and cannot strip TypeScript "
-                "types, so the installed-seam check would be skipped — it FAILS "
-                "in CI instead (#4620)."
+                f"node at {node} is older than 22.18 and does not enable "
+                "TypeScript type stripping by default, so the installed-seam "
+                "check would be skipped — it FAILS in CI instead (#4620)."
             )
-        pytest.skip("node < 22.6 cannot strip TypeScript types — source pins still ran")
+        pytest.skip(
+            "node < 22.18 does not enable TypeScript type stripping by default "
+            "— source pins still ran"
+        )
     return node
 
 
@@ -287,7 +332,7 @@ def _run_installed_probe(tmp_home: Path, installed: Path, node: str):
     probe = tmp_home / "probe.mjs"
     probe.write_text(_PROBE_SOURCE, encoding="utf-8")
     return subprocess.run(
-        [node, NODE_TS_FLAG, "probe.mjs"],
+        [node, "probe.mjs"],
         capture_output=True,
         text=True,
         cwd=str(tmp_home),
@@ -336,7 +381,7 @@ def test_require_node_fails_closed_when_node_is_absent(monkeypatch):
 
 
 def test_require_node_fails_closed_on_a_pre_strip_types_node(monkeypatch):
-    """The other half of the gate: node present but older than 22.6."""
+    """The other half of the gate: node present but below the 22.18 floor."""
     monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/node")
     monkeypatch.setitem(_require_node.__globals__, "_node_supports_ts", lambda _n: False)
 

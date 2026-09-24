@@ -65,6 +65,12 @@ class _Graph:
         self.omit_source_field = False
         self.no_receipt = False
         self.zero_extracted = False
+        #: Write the per-harness receipt only from the Nth ``/v1/onboarding/state``
+        #: read onward — models the server writing it AFTER the session row is
+        #: visible (the abandoned handler completing), which is the real
+        #: ordering (#4675).
+        self.receipt_on_state_read: int | None = None
+        self.state_reads = 0
         self.turn_override: dict[str, int] = {}
         #: Delay (s) between STORING a captured session and answering the POST
         #: — lets a test drive ``_fire`` past its timeout while the seam has
@@ -141,6 +147,12 @@ def _make_handlers(graph: _Graph):
 
         def do_GET(self):
             if self.path == "/v1/onboarding/state":
+                graph.state_reads += 1
+                if (graph.receipt_on_state_read is not None
+                        and graph.state_reads >= graph.receipt_on_state_read
+                        and "session_capture_receipt_claude"
+                        not in graph.receipts):
+                    graph.receipts[capture_receipt_key("claude")] = graph.tick()
                 self._send(200, {"onboarding": dict(graph.receipts)})
                 return
             if self.path.startswith("/v1/sessions/"):
@@ -294,7 +306,10 @@ def _verify(hosted, home, harness, root, *, timeout=None, extra_env=None,
         timeout = _derived_fire_timeout(home, root, harness)
     _graph, api_url = hosted
     env = {**os.environ, "HOME": str(home),
-           "TORTOISE_API_KEY": "tt_test", "TORTOISE_API_URL": api_url}
+           "TORTOISE_API_KEY": "tt_test", "TORTOISE_API_URL": api_url,
+           # #3682: capture is opt-in — the credential alone no longer consents.
+           # This file exists to exercise the capture chain, so it opts in.
+           "TORTOISE_CAPTURE": "1"}
     env.update(extra_env or {})
     return verify_session_capture(
         harness, api_key="tt_test", api_url=api_url, home=home,
@@ -326,6 +341,9 @@ def _hook_fork_seconds(home, root, harness, tmp_path):
         "HOME": str(home),
         "TORTOISE_TEST_FORK_MARKER": str(tmp_path / "calibration-fork-marker"),
         "TORTOISE_TEST_FORK_PROBE": "1",
+        # #3682: without this the hook declines at the consent gate, so the
+        # calibration measures an early exit instead of the capture fork.
+        "TORTOISE_CAPTURE": "1",
     }
     started = time.monotonic()
     subprocess.run(
@@ -899,15 +917,64 @@ def test_guard_wrong_turn_count_reds_captured(hosted, setup, monkeypatch):
 def test_guard_receipt_not_advanced_reds_captured(hosted, setup):
     """Mutation: the capture stores the session but the server never advances
     the per-harness receipt — ``captured`` FAILs on the receipt leg even though
-    the session is retrievable with the expected turns."""
+    the session is retrievable with the expected turns.
+
+    This is #3809's Scope §2 predicate ("a ``session_capture_receipt_<harness>``
+    advanced AND the session is retrievable by id with the expected turns") and
+    PR #4182's documented guard. #4675 does NOT change it; it changes when the
+    receipt is READ. The DERIVED timeout is used, not a wall-clock constant:
+    the same `timeout` bounds the FIRE, and this file's own doctrine forbids
+    hardcoding one (a 3.0 constant killed the seam's prologue on a loaded box
+    and false-REDed this guard — #3809 rr4).
+    """
     home, _bindir, _fake = setup
     root = _install(home, "claude")
     graph, _url = hosted
     graph.no_receipt = True
     report = _verify(hosted, home, "claude", root)
     assert report["exit_code"] == EXIT_BROKEN, report
-    assert report["links"]["captured"]["status"] == "FAIL"
-    assert "did not advance" in report["links"]["captured"]["detail"]
+    captured = report["links"]["captured"]
+    assert captured["status"] == "FAIL"
+    assert "did not advance" in captured["detail"]
+    assert captured["receipt_advanced"] is False
+
+
+def test_captured_is_proven_when_the_receipt_advances_after_the_session_row(
+        hosted, setup):
+    """#4675, the real defect: the receipt is written by a handler the
+    transport bound ABANDONED, so it lands AFTER the session row is visible —
+    measured live, a seam fired 08:21:02 and `session_capture_receipt_cursor`
+    was written 08:21:06.
+
+    Reading it exactly once, on the first sighting of the session row, reported
+    "did not advance" for a capture that had landed. The predicate is unchanged
+    (#3809): the observation now polls both legs to the same deadline.
+
+    MUTATION THAT REDS THIS: read the receipt once before the loop (the old
+    behaviour) — the link FAILs for a capture that landed.
+
+    The session row is visible from the first state read and the receipt is not
+    written until the fifth, so a single pre-loop read cannot see it — and the
+    turn count has already settled at its expected value, which is the case an
+    early break must NOT take.
+    """
+    home, _bindir, _fake = setup
+    root = _install(home, "claude")
+    graph, _url = hosted
+    # The POST must not write the receipt (that is the ordering under test) and
+    # the delayed write must arrive after the session row is already visible.
+    graph.no_receipt = True
+    # Later than the second read, so the turn count has SETTLED at the expected
+    # value while the receipt is still outstanding — the early-break bug that
+    # would end the window on a settled-but-correct count.
+    graph.receipt_on_state_read = 5
+    report = _verify(hosted, home, "claude", root)
+    captured = report["links"]["captured"]
+    assert graph.state_reads >= 5, graph.state_reads
+    assert captured["status"] == "PROVEN", report
+    assert captured["receipt_advanced"] is True, captured
+    assert captured["turns"] == 2, captured
+    assert report["links"]["memory"]["status"] == "PROVEN", report["links"]
 
 
 def test_guard_missing_source_node_reds_memory(hosted, setup):

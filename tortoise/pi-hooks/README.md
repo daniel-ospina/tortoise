@@ -10,7 +10,7 @@ scripts.
 | File | Role |
 |---|---|
 | `tortoise-capture.ts` | the extension — install-probe on `session_start`, session filing on `session_shutdown` |
-| `tortoise-capture.test.ts` | behavioral tests (`node --experimental-strip-types --test tortoise/pi-hooks/tortoise-capture.test.ts`) |
+| `tortoise-capture.test.ts` | behavioral tests (`node --test tortoise/pi-hooks/tortoise-capture.test.ts`) |
 
 ## Install (done by the product, not by hand)
 
@@ -72,14 +72,17 @@ condition and blockers. Where another artifact summarizes it, this section gover
 
 | Check | What it proves |
 |---|---|
-| `node --experimental-strip-types --test tortoise/pi-hooks/tortoise-capture.test.ts` | the extension's full hermetic suite — `extractTurns`, truncation, payload, credential precedence, the spool, and the real `session_start` / `session_shutdown` handlers fired against a mock `pi` with an injected `fetch` (no network, no LLM) |
+| `node --test tortoise/pi-hooks/tortoise-capture.test.ts` | the extension's full hermetic suite — `extractTurns`, truncation, payload, credential precedence, the spool, and the real `session_start` / `session_shutdown` handlers fired against a mock `pi` with an injected `fetch` (no network, no LLM) |
 | `tests/test_pi_capture_hooks.py` | the source pins **plus the installed artifact**: it installs the seam into a temp `HOME` and loads/fires the file `capture_install` writes, asserting the capture receipt. A sibling anti-vacuity test proves that check would fail on a non-self-contained install |
 
 `tests/test_pi_capture_hooks.py` is registered under `core` (and `onboarding`); a change under
 `tortoise/pi-hooks/` selects `core` via the `tortoise/` fallback, so the guard runs on the PR that
 edits the seam.
 
-The `node`-backed checks need **Node ≥ 22.6** (`--experimental-strip-types`; a no-op on ≥ 22.18).
+The `node`-backed checks need **Node ≥ 22.18** (default-on TypeScript type stripping and module-syntax
+
+detection — this suite passes **no** `--experimental-strip-types` flag, so its floor tracks the version
+where stripping became the default rather than the version that first accepted the flag).
 Locally they *skip* when Node is missing or older, because the source-level pins above still ran. In
 **CI the two installed-artifact checks FAIL instead of skipping** — they are the only executable proof
 that the seam works at its install location, so a runner that cannot run them must fail by name rather

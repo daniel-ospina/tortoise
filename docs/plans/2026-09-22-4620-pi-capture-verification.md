@@ -29,7 +29,7 @@ prose, so no further layers.
 | Non-vacuity | A **second test** mutates the installed artifact and asserts the probe FAILS | Makes non-vacuity mechanical, not a claim |
 | Probe stdout contract | The probe prints one sentinel line `PROBE_JSON:<json>`; Python extracts it by regex | The seam **logs to stdout** on the fired path (`tortoise-capture.ts:1316`), so `json.loads(stdout)` would fail on every green run |
 | Probe transport | Write the probe into the temp `HOME`; pass the seam + spool paths via **env**; import via `pathToFileURL`; run with `cwd=tmp_home` | Avoids interpolating a `C:\…` path into a JS literal (invalid `\U`), works on Windows, keeps the seam specifier absolute |
-| Node TypeScript support | Pass **`--experimental-strip-types`** to every `node` invocation in the file | Type stripping is default only at Node ≥ 22.18 (`_node_supports_ts` accepts ≥ 22.6 — a pre-existing latent false-red on 22.6–22.17, nodejs.org "Type stripping is enabled by default" at v22.18.0). The flag exists from 22.6 and is accepted on ≥ 22.18, so passing it makes the ≥ 22.6 guard *true* and fixes the existing test too |
+| Node TypeScript support | Pass **no** `--experimental-strip-types` flag: the floor tracks the version where stripping became DEFAULT-ON, **Node ≥ 22.18** | Type stripping is default only at Node ≥ 22.18 (nodejs.org "Type stripping is enabled by default" at v22.18.0), and `--experimental-strip-types` survives on ≥ 22.18 only as an **undocumented alias** — Node's documented form is to run with no flag. So the invocation is bare `node --test <file>.ts` and `_node_supports_ts` accepts ≥ 22.18; the old 22.6 floor was the latent false-red, because on 22.6–22.17 that same bare invocation cannot load the typeless module at all |
 | Credential isolation | Reuse `_scrubbed_env(tmp_home)` + an explicit temp `spoolDir` | Same #3721 discipline the existing suite uses. `_scrubbed_env` does **not** strip `TORTOISE_CAPTURE_SPOOL_DIR`, so passing `spoolDir` explicitly is load-bearing — never omit it |
 | `session_verify` copy | Reword `UNVERIFIABLE_REASON["pi"]` + the `HEADLESS_FIRABLE` comment + the module-docstring sentence; keep the word **"extension"** | The absolute claim must go; the replacement must be **scoped** ("not firable **by this command**"), never another absolute. The installed artifact *is* fired headlessly by Task 1, so the copy must say so to avoid under-claiming |
 | Manual residual actor | Define the role by capability **and** give the report's full path | "release operator" is undefined in both repos; "B1 lane" alone is unreadable from the README; the report lives outside the repo |
@@ -42,17 +42,17 @@ loads in isolation, registers its handlers, and produces a capture receipt (issu
 installed fidelity).
 **Acceptance:** `tests/test_pi_capture_hooks.py::test_installed_seam_loads_and_fires` passes;
 `test_installed_seam_probe_fails_when_the_artifact_is_not_self_contained` passes (proves non-vacuity);
-both FAIL under CI when `node` is absent or is < 22.6 (they skip only in a local run, where the
+both FAIL under CI when `node` is absent or below the default-on floor (22.18) (they skip only in a local run, where the
 source-level pins above still ran); every lane that executes this file provisions Node 22.
 
 **Files:**
 - Modify: `tests/test_pi_capture_hooks.py`
 
 **Steps (TDD):**
-1. Add `import json` to the file's import block. Add a module constant
-   `NODE_TS_FLAG = "--experimental-strip-types"` and pass it in both this task's probe invocation and
-   the existing `test_extension_behavioral_suite` invocation (`[node, NODE_TS_FLAG, "--test", str(EXTENSION_TEST)]`);
-   correct the file docstring's "Node >= 22.6" note to say the flag is passed so 22.6+ works.
+1. Add `import json` to the file's import block. Pass **no**
+   `NODE_TS_FLAG`: the behavioural-suite invocation stays `[node, "--test", str(EXTENSION_TEST)]` and the
+   floor moves to the default-on boundary (`_node_supports_ts`, Node ≥ 22.18 — see the Node TypeScript
+   support row above); correct the file docstring's "Node >= 22.6" note to "Node >= 22.18 … BY DEFAULT".
 2. Add the probe SOURCE as a module constant (`_PROBE_SOURCE` as shipped) plus a
    `_run_installed_probe(tmp_home, installed, node)` that writes it into the temp HOME and runs it.
    No parameter carries a path — paths travel by ENV:
@@ -94,7 +94,7 @@ source-level pins above still ran); every lane that executes this file provision
      `installed.is_file()` — never re-type the install path (#4620 review).
    - `spool = home / "spool"`; the probe file is written into the temp HOME by
      `_run_installed_probe`, which also runs it and returns the completed process.
-   - `proc = subprocess.run([node, NODE_TS_FLAG, "probe.mjs"], cwd=tmp_home, capture_output=True,
+   - `proc = subprocess.run([node, "probe.mjs"], cwd=tmp_home, capture_output=True,
      text=True, timeout=120, env={**_scrubbed_env(tmp_home), "PROBE_SEAM": str(installed),
      "PROBE_SPOOL": str(spool)})`.
    - `m = re.search(r"^PROBE_JSON:(.*)$", proc.stdout, re.M)`; `assert m, proc.stdout`;
@@ -218,7 +218,7 @@ Order: **1 → 2 → 3 → 4 → 5** (Task 1 is the critical path; Tasks 2–5 a
    → assert `test_pi_capture_hooks.py` and `test_session_verify.py` are in the emitted `test_files`.
 5. `bash scripts/check-pipeline-compliance.sh` (pre-commit docs/version gate; `scripts` → `$AGENT_INFRA_PATH/scripts`).
 6. Node gate, both directions: `CI=true` with a stub `node` reporting v20.11.0 → the two
-   installed-artifact checks FAIL by name (7 passed / 2 failed / 1 skipped); real Node ≥ 22.6 with
+   installed-artifact checks FAIL by name (7 passed / 2 failed / 1 skipped); real Node ≥ 22.18 with
    `CI=true` → 10 passed, 0 skipped.
 
 ## Reviewers
