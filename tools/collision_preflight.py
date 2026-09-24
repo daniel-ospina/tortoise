@@ -1101,13 +1101,15 @@ def _inside_hex_digest(text: str, start: int, end: int) -> bool:
     only when all three hold: the run is at least `_HEX_RUN_MIN` long, it holds
     at least one letter, and the matched number does NOT lead it.
 
-    The POSITION test is what keeps this fail-CLOSED, and review cycle 1 is why
-    it exists. `3061cafe` is `fix/3061-…` with the separator dropped — `cafe` is
-    a word and the number leads the run — so it is a reference, exactly as
-    `w3061` is (`w` is not a hex digit, leaving the bare run `3061`). Length
-    alone made that shape a digest and read a LIVE branch CLEAN. A number
-    embedded mid-run (`d6233ab6`, `a4356bcd`, a 64-hex review signature) is a
-    fragment: there the digits are incidental."""
+    The SYMMETRIC test is what keeps this fail-CLOSED, and two review cycles are
+    why it is symmetric. A fragment has hex on BOTH sides of the number:
+    `d6233ab6`, `a4356bcd`, and a 64-hex review signature are strictly interior
+    matches. A number glued to a word on either edge is a reference — `3061cafe`
+    (`cafe` is a word; cycle 1 read this LIVE branch CLEAN) and `beef3061` /
+    `facade3061` (there the word is the hex-looking part and the number is the
+    reference; cycle 2 read these CLEAN). Requiring both edges to be interior
+    makes every discarded case the blocking one, so this is strictly more
+    fail-closed than either one-sided version it replaces."""
     lo = start
     while lo > 0 and text[lo - 1] in _HEX_DIGITS:
         lo -= 1
@@ -1117,7 +1119,7 @@ def _inside_hex_digest(text: str, start: int, end: int) -> bool:
     run = text[lo:hi]
     if len(run) < _HEX_RUN_MIN or not any(c.isalpha() for c in run):
         return False
-    return lo != start
+    return lo < start and hi > end
 
 
 def _pr_terminal_state(pr: dict) -> str | None:

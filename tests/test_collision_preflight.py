@@ -622,12 +622,18 @@ class CollisionPreflightTest(unittest.TestCase):
             self.assertNotIn("do NOT dispatch", out)
 
     def test_number_inside_a_hex_digest_is_not_a_reference(self):
-        # #4935 / #3611: a review-signature value is 64 hex characters, so every
-        # 4-digit substring occurs inside it by chance. The SHAPE of the
-        # containing run decides it — no vocabulary, no stop-word list.
-        for digest in ("3f1a4889d6a4356b2e0c7f9a1d4b8e2c5a3f6d9b0e1c4a7f2b5d8e1a4c7f0b3d",
-                       "a4356bc"[:7] + "d",
-                       "sig=deadbeef4356cafe"):
+        # #4935 / #3611: a review-signature value is hex, so every 4-digit
+        # substring occurs inside it by chance. The SHAPE of the containing run
+        # decides it — no vocabulary, no stop-word list.
+        #
+        # CYCLE 2 CAUGHT THIS TEST BEING VACUOUS: its fixtures carried no `3061`
+        # at all, so it passed because NOTHING matched rather than because the
+        # guard fired. Every fixture below now contains the issue number strictly
+        # INTERIOR to a hex run, which is the only condition under which a green
+        # result can mean the guard worked.
+        for digest in ("3f1a4889d6a3061b2e0c7f9a1d4b8e2c5a3f6d9b0e1c4a7f2b5d8e1a4c7f0",
+                       "sig=deadbeef3061cafe",
+                       "a3061bcd"):
             with self.subTest(digest=digest):
                 self.gh_fixtures(open_prs=[{
                     "number": 9995, "title": "chore: re-attest the review",
@@ -638,6 +644,9 @@ class CollisionPreflightTest(unittest.TestCase):
                 self.assertEqual(rc, 0, f"digest={digest!r}\n{out}")
                 self.assertIn("VERDICT: CLEAN", out)
                 self.assertNotIn("do NOT dispatch", out)
+                # The guard FIRED: the number is present in the fixture, so a
+                # green run cannot be a fixture artefact.
+                self.assertNotIn("matched issue-number (3061)", out)
 
     def test_number_after_a_non_hex_letter_still_matches(self):
         # The guard must not over-fire. `w3061` is a reference: `w` is not a hex
@@ -660,7 +669,8 @@ class CollisionPreflightTest(unittest.TestCase):
         # POSITION — a number leading the run is a reference, a number embedded
         # mid-run is a fragment — which is strictly more fail-closed, because
         # the discarded case is now the blocking one.
-        for head in ("fix/3061cafe", "fix/3061abcd", "fix/3061beef"):
+        for head in ("fix/3061cafe", "fix/3061abcd", "fix/3061beef",
+                     "fix/beef3061", "fix/facade3061", "fix/abcd3061"):
             with self.subTest(head=head):
                 _git(self.repo, "branch", head)
                 rc, out = self.run_tool()
