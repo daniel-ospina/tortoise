@@ -342,6 +342,27 @@ def test_target_precedence_matches_execute_embed_no_over_prune():
     assert "drop me" not in [p["content"] for p in payload["points"]]
 
 
+def test_target_is_ignored_for_non_mitigates_operators():
+    """``execute_embed`` reads a target ONLY under ``if op_type == MITIGATES``.
+    Reading it for every operator dropped a valid edge on a field the embedder
+    never looks at (verified: an IMPL carrying a stray ``target`` naming a
+    discarded point was pruned)."""
+    for op_type in ("IMPL", "NAND"):
+        el = {"entities": [], "events": [],
+              "points": [{"content": "drop me", "pointKind": "statement"},
+                         {"content": "a", "pointKind": "statement"},
+                         {"content": "b", "pointKind": "statement"}],
+              "operators": [{"src": "a", "dst": "b", "op_type": op_type,
+                             "target": {"src": "drop me", "dst": "b"}}]}
+        out = vg.vet_candidates(el, narrative="n",
+                                arbiter=_discard_matching("drop me"))
+        new, _warnings = vg.apply_vet(el, out["decisions"])
+        assert len(new["operators"]) == 1, (
+            f"{op_type}: the embedder ignores `target`, so the edge must survive")
+        payload, _res = _payload_of(new)
+        assert "drop me" not in [p["content"] for p in payload["points"]]
+
+
 def test_empty_text_item_id_cannot_be_used_to_discard():
     """``vet_candidates`` never emits an id for an empty-text item, so no
     legitimate verdict can address one. The id space must not be a way to

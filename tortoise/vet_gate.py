@@ -191,8 +191,10 @@ def _as_items(value: object) -> Sequence[Any]:
 
 
 #: The embedder truncates point/event content AND minted endpoint refs to this
-#: many characters before keying them (``extractor_v2.py:3891,3966,4175``), but
-#: still resolves the untruncated ref — so an endpoint can match either form.
+#: many characters before keying them (the ``str(...).strip()[:1000]`` sites in
+#: ``execute_embed`` — event content, point content, minted refs) — cited
+#: symbolically, not by line number, because `#5005`'s own edits to that module
+#: already invalidated one such citation.
 _MAX_CONTENT = 1000
 
 
@@ -200,9 +202,11 @@ def _norm_variants(text: object) -> set[str]:
     """Normalized forms the embedder can key an endpoint on.
 
     Both the FULL text and its :data:`_MAX_CONTENT`-char prefix: ``execute_embed``
-    keys point/event ids on the truncated content but also registers the
-    untruncated ref, so a removed item must be recognised under either — a >1000
-    character item otherwise escaped the prune and was re-minted (verified).
+    keys a point/event id on the truncated content, while an operator's ref is
+    also probed untruncated (a minted endpoint registers the untruncated key
+    only when the truncated form did not already resolve). A removed item must
+    therefore be recognised under EITHER form, or an operator on its content
+    escapes the prune and the text is re-materialised as a Point (verified).
     """
     raw = str(text or "").strip()
     if not raw:
@@ -500,27 +504,30 @@ def _entity_map(embed_list: object) -> dict[str, Mapping[str, Any]]:
 def _operator_endpoint_text(op: Mapping[str, Any]) -> set[str]:
     """Normalized texts an operator endpoint names.
 
-    Mirrors ``execute_embed``'s own resolution surface exactly: ``src``/``dst``
-    and the MITIGATES target, read as
-    ``op.get("target") or op.get("target_edge")`` — the **same** precedence,
-    not a union, so an operator carrying both (execute_embed honours ``target``
-    and ignores ``target_edge``) is not pruned on a field the embedder never
-    reads — and with the embedder's own ``str(v or "")`` coercion, so a
-    NON-STRING endpoint (an LLM can emit ``42``) is not skipped and left to be
-    re-minted. Missing ``target_edge`` is what let a discarded MITIGATES target
-    be re-minted as a brand-new Point.
+    Mirrors ``execute_embed``'s resolution surface: ``src``/``dst`` for any
+    IMPL/NAND/MITIGATES, and the target — read as
+    ``op.get("target") or op.get("target_edge")``, the **first present, not a
+    union** — **only for a MITIGATES**, which is the only ``op_type`` the
+    embedder reads a target for (``if _op_type == "MITIGATES"``). Reading it for
+    every operator would drop a valid edge on a field the embedder never looks
+    at (verified: an IMPL carrying a stray ``target`` that named a discarded
+    point was pruned, losing the edge). Endpoints are coerced with the embedder's
+    own ``str(v or "")`` so a NON-STRING endpoint (an LLM can emit ``42``) is not
+    skipped and left to be re-minted, and a target is honoured only when it is a
+    ``dict``, exactly as the embedder requires.
     """
     out: set[str] = set()
     for key in ("src", "dst"):
         v = op.get(key)
         if v and str(v).strip():
             out |= _norm_variants(v)
-    target = op.get("target") or op.get("target_edge")
-    if isinstance(target, Mapping):
-        for key in ("src", "dst"):
-            v = target.get(key)
-            if v and str(v).strip():
-                out |= _norm_variants(v)
+    if str(op.get("op_type") or "").upper() == "MITIGATES":
+        target = op.get("target") or op.get("target_edge")
+        if isinstance(target, dict):
+            for key in ("src", "dst"):
+                v = target.get(key)
+                if v and str(v).strip():
+                    out |= _norm_variants(v)
     return out
 
 
@@ -602,14 +609,14 @@ def apply_vet(embed_list: Mapping[str, Any],
        pre-pass (#2552) that materializes an unresolved endpoint as a **new
        statement Point**, so an unpruned operator silently *resurrects* the
        discarded candidate — verified end-to-end. It reads an operator's
-       endpoints with ``execute_embed``'s own coercion and precedence
-       (``str(op.get(key) or "")``, and ``target or target_edge`` — the first
-       present, **not** a union, so a field the embedder ignores is not pruned
-       on), and it includes the names of removed entities (an endpoint naming a
-       removed entity would fabricate a claim Point out of a participant name,
-       defeating #2552's own guard). It fires only when **no surviving item
-       provides the endpoint** — discarding one of two identical-content items
-       must not take the survivor's edge with it.
+       endpoints exactly as the embedder does: ``src``/``dst`` with ``str(v or
+       "")`` coercion, and — **only for a MITIGATES** — the target, as
+       ``target or target_edge`` (the first present, not a union). It also
+       includes the names of removed entities (an endpoint naming a removed
+       entity would fabricate a claim Point out of a participant name, defeating
+       #2552's own guard). It fires only when **no surviving item provides the
+       endpoint** — discarding one of two identical-content items must not take
+       the survivor's edge with it.
     4. **A referenced-but-missing entity is restored** from ``prior``, and the
        reference's spelling is reconciled to the emitted name. S4 runs between
        the two passes and can reference an entity the S2 pass removed; that

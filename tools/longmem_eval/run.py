@@ -2730,9 +2730,10 @@ INGEST_CACHE_MARKER_LABEL = "lme_ingest_cache"
 
 #: Files whose content IS the v2 extractor pipeline (the "extractor code
 #: version" dimension of the ingest fingerprint): ingest_v2.py (the
-#: eval-side pipeline + payload writer) and tortoise/extractor_v2.py (the
-#: production 5-stage extractor). A content change to either invalidates
-#: every cached per-question graph automatically — no manual cache-bust.
+#: eval-side pipeline + payload writer), tortoise/extractor_v2.py (the
+#: production 5-stage extractor), and tortoise/vet_gate.py (its S2.2 gate).
+#: A content change to any of these invalidates every cached per-question
+#: graph automatically — no manual cache-bust.
 INGEST_CACHE_CODE_FILES = (
     Path(__file__).resolve().parent / "ingest_v2.py",
     Path(__file__).resolve().parent.parent.parent
@@ -2748,7 +2749,8 @@ INGEST_CACHE_CODE_FILES = (
 #: Env knobs whose values change the EXTRACTION OUTPUT while leaving code
 #: + model untouched (P1 #2607-review-style gap on the seam): the prompt
 #: mode toggle, the S2/S4 label-order shuffle + its seed, the classify-
-#: later pipeline switch, and the stage token caps/truncation. ANY of them
+#: later pipeline switch, the S2.2 VET gate, and the stage token caps/
+#: truncation. ANY of them
 #: toggled between QA cycles must invalidate cached ingests — a silent
 #: reuse across modes would corrupt the very A/B this seam exists for.
 INGEST_CACHE_PROMPT_ENVS: tuple[str, ...] = (
@@ -2766,7 +2768,7 @@ def ingest_code_fingerprint(paths: tuple[Path, ...] | None = None) -> str:
     """sha256 (full hex) over the extractor pipeline module contents — the
     ``extractor code version`` dimension of the ingest fingerprint.
 
-    Reads the files at run start (cheap: two small modules); the digest is
+    Reads the files at run start (cheap: three small modules); the digest is
     stable within a process and identical across processes on the same
     checkout. ``paths`` is injectable for hermetic tests (fake files). An
     unreadable file hashes as empty content (never aborts a run — a
