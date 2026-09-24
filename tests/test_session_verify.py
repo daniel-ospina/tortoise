@@ -305,7 +305,10 @@ def _verify(hosted, home, harness, root, *, timeout=None, extra_env=None,
         timeout = _derived_fire_timeout(home, root, harness)
     _graph, api_url = hosted
     env = {**os.environ, "HOME": str(home),
-           "TORTOISE_API_KEY": "tt_test", "TORTOISE_API_URL": api_url}
+           "TORTOISE_API_KEY": "tt_test", "TORTOISE_API_URL": api_url,
+           # #3682: capture is opt-in — the credential alone no longer consents.
+           # This file exists to exercise the capture chain, so it opts in.
+           "TORTOISE_CAPTURE": "1"}
     env.update(extra_env or {})
     return verify_session_capture(
         harness, api_key="tt_test", api_url=api_url, home=home,
@@ -337,6 +340,9 @@ def _hook_fork_seconds(home, root, harness, tmp_path):
         "HOME": str(home),
         "TORTOISE_TEST_FORK_MARKER": str(tmp_path / "calibration-fork-marker"),
         "TORTOISE_TEST_FORK_PROBE": "1",
+        # #3682: without this the hook declines at the consent gate, so the
+        # calibration measures an early exit instead of the capture fork.
+        "TORTOISE_CAPTURE": "1",
     }
     started = time.monotonic()
     subprocess.run(
