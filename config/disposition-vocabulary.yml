@@ -68,7 +68,7 @@ delete_instruction:
   question: Must Phase 2 delete the implementation?
   values:
     delete: remove the implementation
-    retain: keep the code — a warning alias, a relocation, or an open finding
+    retain: keep the code — a relocation, an open finding, or a merge target that dispatches to it
 
 # A disposition is a COMBINATION of the axes — never a value of any one of them.
 #   target: self  → the method is already on the target surface under its own name
