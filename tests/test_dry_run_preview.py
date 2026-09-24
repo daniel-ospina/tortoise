@@ -21,7 +21,6 @@ from __future__ import annotations
 import inspect
 import os
 import sys
-import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -54,9 +53,10 @@ _PREVIEW_FUNCS = (
 
 
 @pytest.fixture
-def sdk():
-    path = os.path.join(tempfile.mkdtemp(prefix="tortoise_dryrun_"), "test.db")
-    s = TortoiseSDK(path)
+def sdk(tmp_path):
+    # `tmp_path` (not `mkdtemp`) — pytest reclaims it, so this fixture cannot leak a tree
+    # per test (#4096: 49 fixtures leaked 5,725 dirs before that guard existed).
+    s = TortoiseSDK(str(tmp_path / "test.db"))
     yield s
     s.close()
 
