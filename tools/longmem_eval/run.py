@@ -2748,8 +2748,9 @@ INGEST_CACHE_CODE_FILES = (
 INGEST_CACHE_PROMPT_ENVS: tuple[str, ...] = (
     "TORTOISE_EXTRACTOR_PROMPT",       # compact ↔ default render
     "TORTOISE_LABEL_ORDER",            # S2/S4 shuffled kind-order renders
-    "TORTOISE_LABEL_SEED",             # the shuffle seed (with the above)
+    "TORTOISE_LABEL_ORDER_SEED",       # the shuffle seed (with the above)
     "TORTOISE_CLASSIFY_LATER",         # classify-now ↔ classify-later pipeline
+    "TORTOISE_VET",                    # S2.2 VET gate (#5005) — DISCARDs items
     "TORTOISE_EXTRACTOR_MAX_TOKENS",   # stage output caps / truncation
     "TORTOISE_EXTRACTOR_ESCALATION_TOKENS",  # escalation cap
 )
