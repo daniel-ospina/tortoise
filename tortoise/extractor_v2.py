@@ -3065,11 +3065,15 @@ _CONDITION_MARKERS = frozenset({
 })
 # Relative days + month names.  Not interchangeable with the value dimension:
 # "shipped in march" vs "shipped in april" carries no number.
+#
+# "may" is deliberately absent: it is a month AND the most common English
+# modal, and reading "we may ship" vs "we can ship" as a DATE difference
+# labels a modality change as a value change the boundary lets through.
 _DATE_WORDS = frozenset({
     "today", "tomorrow", "yesterday",
     "monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
     "sunday",
-    "january", "february", "march", "april", "may", "june", "july",
+    "january", "february", "march", "april", "june", "july",
     "august", "september", "october", "november", "december",
     "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept",
     "oct", "nov", "dec",
@@ -3077,6 +3081,21 @@ _DATE_WORDS = frozenset({
 # Clock units are dropped from the content skeleton: "six pm" and "6pm" are
 # one value spelled twice, and the value dimension compares them.
 _CLOCK_UNITS = frozenset({"pm", "am"})
+# Pronouns and possessives are the one stopword class that CARRIES an entity:
+# "he won the race" vs "she won the race" and "my manager approved the plan"
+# vs "your manager approved the plan" name different subjects, so dropping
+# them would leave the two claims with identical content skeletons and fold a
+# re-subjected claim.  They are therefore content tokens, not frame.
+_ENTITY_PRONOUNS = frozenset({
+    "i", "me", "my", "mine", "myself",
+    "we", "us", "our", "ours", "ourselves",
+    "you", "your", "yours", "yourself", "yourselves",
+    "he", "him", "his", "himself", "she", "her", "hers", "herself",
+    "it", "its", "itself", "they", "them", "their", "theirs",
+    "themselves", "this", "that", "these", "those",
+})
+_CONTENT_STOPWORDS = _FRAME_STOPWORDS - _ENTITY_PRONOUNS
+_UNREADABLE = frozenset({"unreadable"})
 # Token edges stripped before comparison.  `_norm` lowercases and collapses
 # whitespace but keeps punctuation, so "team." and "team" would otherwise read
 # as different tokens and the substitution test would fire on a full stop.
@@ -3100,14 +3119,25 @@ _SCRIPT_BLOCKS = (
 # UPDATE exists to record.  These are the differences where nothing may be
 # destroyed — neither a fold nor a supersede.
 _IDENTITY_DIMENSIONS = frozenset({
-    "negation", "condition", "language", "substituted_content", "unreadable",
+    "negation", "condition", "scope", "language", "substituted_content",
+    "unreadable",
 })
+
+
+def _guard_token_seq(content: str) -> list[str]:
+    """Lowercased whitespace tokens with edge punctuation stripped, IN ORDER.
+
+    ``_guard_tokens`` returns a set, which is what most checks want; a scope
+    check must not use it, because set iteration order is by hash and discards
+    the positions the comparison is about.
+    """
+    return [t for t in (_s.strip(_TOKEN_EDGE_PUNCT)
+                        for _s in _norm(content).split()) if t]
 
 
 def _guard_tokens(content: str) -> set[str]:
     """Lowercased whitespace tokens with edge punctuation stripped."""
-    return {t for t in (_s.strip(_TOKEN_EDGE_PUNCT)
-                        for _s in _norm(content).split()) if t}
+    return set(_guard_token_seq(content))
 
 
 def _value_tokens(content: str) -> frozenset[str]:
@@ -3156,19 +3186,53 @@ def _date_tokens(content: str) -> frozenset[str]:
 
 
 def _content_tokens(content: str) -> set[str]:
-    """A claim's distinguishing skeleton — stopword- and value-free tokens.
+    """A claim's distinguishing skeleton — frame- and value-free tokens.
 
     Values are removed deliberately: they are compared by their own
     dimension, and "six pm"/"6pm" must not read as a content substitution.
+    Date words go with them — "shipped in march" vs "shipped in april" is a
+    DATE difference, and counting the month as substituted content as well
+    would refuse the value update the date dimension exists to permit.
+
+    Entity-bearing pronouns and possessives are KEPT (``_CONTENT_STOPWORDS``
+    is the frame set minus them): a change of subject is a change of entity.
     """
     out: set[str] = set()
     for t in _guard_tokens(content):
-        if t in _FRAME_STOPWORDS or t in _CLOCK_UNITS:
+        if t in _CONTENT_STOPWORDS or t in _CLOCK_UNITS or t in _DATE_WORDS:
             continue
         if any(c.isdigit() for c in t) or _num_word_value(t) is not None:
             continue
         out.add(t)
     return out
+
+
+def _marker_scope(content: str) -> tuple[str, ...]:
+    """The ordered marker-and-content sequence of a marker-bearing claim.
+
+    Negation and condition are SCOPE-bearing, and a bag of tokens cannot
+    express that.  "the cache is not the problem, the lock is" and "the cache
+    is the problem, the lock is not" carry the same marker and the same
+    content tokens, as do "we ship if the build passes and rollback if the
+    tests fail" and its clause-swapped mirror — each pair differs only in
+    what the marker attaches to.  An ordered comparison sees that; a set
+    comparison does not, and the pair would fold (at the in-capture seam,
+    that is a DELETE).
+
+    Values, clock units and date words are dropped: their own dimensions
+    compare them, and "ship at 3pm" must not read as a scope change.
+    """
+    out: list[str] = []
+    for t in _guard_token_seq(content):
+        if t in _NEGATION_MARKERS or t.endswith("n't") or t in _CONDITION_MARKERS:
+            out.append(t)
+            continue
+        if t in _CONTENT_STOPWORDS or t in _CLOCK_UNITS or t in _DATE_WORDS:
+            continue
+        if any(c.isdigit() for c in t) or _num_word_value(t) is not None:
+            continue
+        out.append(t)
+    return tuple(out)
 
 
 def _scripts(content: str) -> frozenset[str]:
@@ -3187,56 +3251,87 @@ def _scripts(content: str) -> frozenset[str]:
     return frozenset(found)
 
 
+def _identity_differences(a: str, b: str) -> frozenset[str]:
+    """Every identity dimension in which ``a`` and ``b`` differ.
+
+    Deliberately independent of the value dimensions.  Asking only for the
+    FIRST differing dimension lets a value difference MASK an identity one:
+    "the deploy succeeded at 3pm" and "the deploy failed at 5pm" differ in a
+    number and in the predicate, and returning the number would license
+    superseding the predicate — the harm this boundary exists to prevent.
+    """
+    out: set[str] = set()
+    neg_a, neg_b = _negation_markers(a), _negation_markers(b)
+    con_a, con_b = _condition_markers(a), _condition_markers(b)
+    if neg_a != neg_b:
+        out.add("negation")
+    if con_a != con_b:
+        out.add("condition")
+    if (neg_a or neg_b or con_a or con_b) and _marker_scope(a) != _marker_scope(b):
+        out.add("scope")
+    script_a, script_b = _scripts(a), _scripts(b)
+    if script_a and script_b and script_a != script_b:
+        out.add("language")
+    content_a, content_b = _content_tokens(a), _content_tokens(b)
+    if (content_a - content_b) and (content_b - content_a):
+        out.add("substituted_content")
+    return frozenset(out)
+
+
+def _boundary(a: str, b: str) -> tuple[str | None, frozenset[str]]:
+    """``(first distinguishing dimension or None, every identity difference)``.
+
+    The first element is the audit label — the dimension a caller reports.  The
+    second is the decision: a pair whose identity set is non-empty may be
+    neither folded nor superseded, however its value dimensions compare.
+
+    Total and fail-closed — every input is coerced by ``_norm`` and every
+    operation is a string, regex or set operation, so LLM-shaped input cannot
+    raise here; if anything does, the sentinel reads as a difference.
+    """
+    try:
+        ta, tb = _guard_tokens(a), _guard_tokens(b)
+        if not ta or not tb:
+            # Nothing to compare: refuse the fold rather than assume agreement.
+            return "unreadable", _UNREADABLE
+        identity = _identity_differences(a, b)
+        dimension: str | None = None
+        sig_a, sig_b = _value_signature(a), _value_signature(b)
+        # Both halves are needed.  The signature normalises the clock and
+        # quantity forms ("6pm"/"six pm" are one value); the token set catches
+        # a differing number ANYWHERE in the claim, including the one that sits
+        # beside an equal signature — which comparing signatures alone misses,
+        # because it returns early once both sides carry one.
+        if sig_a != sig_b or _value_tokens(a) != _value_tokens(b):
+            dimension = "number"
+        elif _date_tokens(a) != _date_tokens(b):
+            dimension = "date"
+        elif identity:
+            # Sorted so the reported label is deterministic across runs.
+            dimension = sorted(identity)[0]
+        return dimension, identity
+    except Exception:  # noqa: BLE001, RUF100
+        return "unreadable", _UNREADABLE
+
+
 def distinguishing_difference(a: str, b: str) -> str | None:
     """The never-across dimension in which ``a`` and ``b`` differ, else None.
 
-    Returns one of ``number``, ``negation``, ``condition``, ``date``,
-    ``language``, ``substituted_content`` or ``unreadable``.  Any of them
-    means the pair may not be folded into one claim: two claims differing in a
-    distinguishing dimension are rival claims, not duplicates.
+    Returns one of ``number``, ``negation``, ``condition``, ``scope``,
+    ``date``, ``language``, ``substituted_content`` or ``unreadable``.  Any of
+    them means the pair may not be folded into one claim: two claims differing
+    in a distinguishing dimension are rival claims, not duplicates.
 
-    Total — every input is coerced by ``_norm`` and every operation is a
-    string, regex or set operation, so LLM-shaped input cannot raise here.
+    When a pair differs in more than one dimension this reports the first, for
+    audit; the DECISION belongs to ``fold_allowed`` / ``supersede_allowed``,
+    which consult the full identity set rather than this label.
     """
-    ta, tb = _guard_tokens(a), _guard_tokens(b)
-    if not ta or not tb:
-        # Nothing to compare: refuse the fold rather than assume agreement.
-        return "unreadable"
-    sig_a, sig_b = _value_signature(a), _value_signature(b)
-    # Both halves are needed.  The signature normalises the clock and
-    # quantity forms ("6pm"/"six pm" are one value); the token set catches a
-    # differing number ANYWHERE in the claim, including the one that sits
-    # beside an equal signature — which comparing signatures alone misses,
-    # because it returns early once both sides carry one.
-    if sig_a != sig_b:
-        return "number"
-    if _value_tokens(a) != _value_tokens(b):
-        return "number"
-    if _negation_markers(a) != _negation_markers(b):
-        return "negation"
-    if _condition_markers(a) != _condition_markers(b):
-        return "condition"
-    if _date_tokens(a) != _date_tokens(b):
-        return "date"
-    script_a, script_b = _scripts(a), _scripts(b)
-    if script_a and script_b and script_a != script_b:
-        return "language"
-    content_a, content_b = _content_tokens(a), _content_tokens(b)
-    if (content_a - content_b) and (content_b - content_a):
-        return "substituted_content"
-    return None
+    return _boundary(a, b)[0]
 
 
 def _difference(a: str, b: str) -> str | None:
-    """``distinguishing_difference`` with the fail-closed sentinel filled in.
-
-    An unreadable comparison is a DIFFERENCE, so a caller that consults this
-    destroys nothing when either side cannot be read.
-    """
-    try:
-        return distinguishing_difference(a, b)
-    except Exception:  # noqa: BLE001, RUF100
-        return "unreadable"
+    """``distinguishing_difference``, already fail-closed."""
+    return _boundary(a, b)[0]
 
 
 def fold_allowed(a: str, b: str) -> bool:
@@ -3246,7 +3341,7 @@ def fold_allowed(a: str, b: str) -> bool:
     so an unreadable comparison preserves both claims instead of dropping one
     (D12/O4's asymmetry — a wrong keep is noise, a wrong drop is memory loss).
     """
-    return _difference(a, b) is None
+    return _boundary(a, b)[0] is None
 
 
 def supersede_allowed(a: str, b: str) -> bool:
@@ -3254,10 +3349,12 @@ def supersede_allowed(a: str, b: str) -> bool:
 
     A differing NUMBER or DATE is a new value for one attribute, which is what
     UPDATE is for — the boundary does not block it.  A differing NEGATION,
-    CONDITION, LANGUAGE or substituted content means the two are RIVAL claims:
-    a rival may be neither folded nor superseded, so both survive.
+    CONDITION, marker SCOPE, LANGUAGE or substituted content means the two are
+    RIVAL claims: a rival may be neither folded nor superseded, so both
+    survive.  This asks the full identity set, so a value difference elsewhere
+    in the claim cannot mask it.
     """
-    return _difference(a, b) not in _IDENTITY_DIMENSIONS
+    return not _boundary(a, b)[1]
 
 
 def classify_consolidation(point: dict, priors: list[dict], *,
@@ -3328,11 +3425,12 @@ def classify_consolidation(point: dict, priors: list[dict], *,
                                  - _frame_tokens(old_content))
         later = _date_is_later_or_undated(current_date, p)
         # D12/O4 (#5080): the boundary guards every decision that would
-        # destroy the prior, not only the fold.
-        difference = _difference(old_content, content)
+        # destroy the prior, not only the fold.  ``identity`` is the full set
+        # of identity differences, so a value difference elsewhere in the
+        # claim cannot mask one of them.
+        difference, identity = _boundary(old_content, content)
         # 2) UPDATE — priority over NOOP
-        if gate and later and value_differs \
-                and difference not in _IDENTITY_DIMENSIONS:
+        if gate and later and value_differs and not identity:
             band_ok = ov >= REVISES_MIN_OVERLAP
             contradiction = _fact_value_contradiction(
                 content, mentions, p, when=current_date)

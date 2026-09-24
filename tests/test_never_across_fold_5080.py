@@ -13,8 +13,8 @@ enforce that boundary from ONE implementation
 
 A refused fold produces ADD / no hit, so both claims survive.  A differing
 NUMBER or DATE is a new value for one attribute and keeps superseding (UPDATE);
-a differing NEGATION, CONDITION, LANGUAGE or substituted content means the two
-are rival claims, which may be neither folded nor superseded.
+a differing NEGATION, CONDITION, marker SCOPE, LANGUAGE or substituted content
+means the two are rival claims, which may be neither folded nor superseded.
 
 Every never-across pair in the tables below carries token overlap at or above
 ``NOOP_MIN_OVERLAP``, so the assertion is that the boundary refuses a fold the
@@ -53,6 +53,30 @@ NEVER_ACROSS = [
     ("shipped 5 crates at 6pm", "shipped 3 crates at 6pm", "number"),
     ("the team meets at 9am for 3 items",
      "the team meets at 9am for 4 items", "number"),
+    # Negation and condition are SCOPE-bearing: the same marker and the same
+    # content tokens, attached to different operands, are a different claim.
+    # A bag-of-tokens comparison reads both of these as identical.
+    ("the cache is not the problem, the lock is",
+     "the cache is the problem, the lock is not", "scope"),
+    ("we ship if the build passes and rollback if the tests fail",
+     "we ship if the tests fail and rollback if the build passes", "scope"),
+    # An entity-bearing pronoun or possessive names the subject; changing it
+    # re-subjects the claim.
+    ("he won the race", "she won the race", "substituted_content"),
+    ("my manager approved the plan",
+     "your manager approved the plan", "substituted_content"),
+]
+
+# Pairs differing in a VALUE dimension AND an identity dimension at once.  The
+# value dimension is reported as the audit label (it is the first match), so a
+# caller that asked only for that label would let the value difference license
+# destroying the identity one.  The decision consults the full identity set.
+MASKED_IDENTITY = [
+    ("the deploy succeeded at 3pm", "the deploy failed at 5pm"),
+    ("the build succeeded at 3pm", "the build did not succeed at 5pm"),
+    ("we retried two times and it passed",
+     "we retried 3 times and it did not pass"),
+    ("he won the 5k in 27:12", "she won the 5k in 25:03"),
 ]
 
 # A differing value is a new value for one attribute — UPDATE is what records
@@ -83,7 +107,8 @@ LEGITIMATE_BAND_FOLDS = [
 
 # The dimensions where nothing may be destroyed — neither fold nor supersede.
 IDENTITY_DIMENSIONS = {
-    "negation", "condition", "language", "substituted_content", "unreadable",
+    "negation", "condition", "scope", "language", "substituted_content",
+    "unreadable",
 }
 
 
@@ -125,6 +150,19 @@ class TestDistinguishingDifference:
             "we ship the web server first.", "we ship the web server first"
         ) is None
 
+    def test_a_value_difference_does_not_mask_an_identity_one(self):
+        """A pair differing in a number AND in its predicate is a rival claim.
+
+        The audit label is the value dimension because it is the first match,
+        so a decision made from that label alone would let the number
+        difference license superseding the predicate — the prior claim would
+        be quietly terminalized by a rival.
+        """
+        for prior, candidate in MASKED_IDENTITY:
+            assert v2.distinguishing_difference(prior, candidate) == "number"
+            assert not v2.fold_allowed(prior, candidate)
+            assert not v2.supersede_allowed(prior, candidate)
+
 
 class TestClassifierRefusesTheFold:
     """The against-store site: a rival claim is ADD (or a value UPDATE),
@@ -148,6 +186,18 @@ class TestClassifierRefusesTheFold:
     def test_an_identity_difference_also_refuses_the_supersede(
             self, prior, candidate, dimension):
         """A rival claim must not be terminalized either: ADD keeps both."""
+        mention = prior.split()[0]
+        d = v2.classify_consolidation(
+            {"content": candidate, "about_entities": [mention]},
+            [{"id": "pt1", "content": prior}],
+            entity_mentions=[mention], current_date="2026-06-16")
+        assert d.decision == "ADD"
+
+    @pytest.mark.parametrize(("prior", "candidate"), MASKED_IDENTITY)
+    def test_a_masked_identity_difference_is_still_an_add(
+            self, prior, candidate):
+        """The classifier must not UPDATE a rival just because a number
+        differs too."""
         mention = prior.split()[0]
         d = v2.classify_consolidation(
             {"content": candidate, "about_entities": [mention]},
@@ -206,6 +256,32 @@ class TestOneSharedBoundary:
 
     def test_both_sites_use_the_canonical_predicate(self):
         assert dedup_classify.fold_allowed is v2.fold_allowed
+
+    def test_the_identity_dimension_set_is_the_modules(self):
+        """The table above is the human-readable list; the module's set is the
+        one the classifier consults.  A dimension added to one and not the
+        other would silently stop guarding."""
+        assert set(v2._IDENTITY_DIMENSIONS) == IDENTITY_DIMENSIONS
+
+    @pytest.mark.parametrize(
+        ("prior", "candidate"),
+        [(a, b) for a, b, _ in NEVER_ACROSS if not v2.supersede_allowed(a, b)]
+        + MASKED_IDENTITY)
+    def test_the_classifier_cannot_supersede_what_supersede_allowed_refuses(
+            self, prior, candidate):
+        """The predicate and the classifier's UPDATE gate are one decision.
+
+        ``supersede_allowed`` is the published form of it; the classifier
+        reads the identity set from the same ``_boundary`` call, so a change
+        to either reaches both.
+        """
+        assert not v2.supersede_allowed(prior, candidate)
+        mention = prior.split()[0]
+        d = v2.classify_consolidation(
+            {"content": candidate, "about_entities": [mention]},
+            [{"id": "pt1", "content": prior}],
+            entity_mentions=[mention], current_date="2026-06-16")
+        assert d.decision != "UPDATE"
 
     @pytest.mark.parametrize(("prior", "candidate", "dimension"), NEVER_ACROSS)
     def test_both_sites_agree_on_every_dimension(
