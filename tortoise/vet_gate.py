@@ -476,7 +476,7 @@ def _item_content(section: str, item: Mapping[str, Any]) -> str:
     and leave an operator on its content unpruned, to be re-minted. Entities
     carry no content and contribute nothing here.
     """
-    if section == "entities" or not item.get("content"):
+    if section == "entities" or item.get("content") is None:
         return ""
     return str(item.get("content")).strip()
 
@@ -575,7 +575,13 @@ def removal_pool(before: object, after: object) -> dict:
         # is the resolution surface (content only) — a survivor's *name* does
         # not resolve an endpoint in ``execute_embed``, so it must not shield
         # one (verified: shielding on a name left the endpoint to be minted).
-        "removed_texts": (_identity_texts(before) - _content_texts(after)),
+        # Surviving ENTITY names are subtracted too: an entity contributes no
+        # content, so without this an UNCHANGED entity would be carried forward
+        # as "removed" and its name would prune an operator the embedder never
+        # resolves against it (verified: `removal_pool(el, el)` returned the
+        # name of an entity that was never touched).
+        "removed_texts": (_identity_texts(before) - _content_texts(after)
+                          - set(after_entities)),
         "removed_entities": {n: it for n, it in before_entities.items()
                              if n not in after_entities},
     }

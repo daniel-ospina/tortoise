@@ -626,6 +626,40 @@ def test_non_sequence_operators_does_not_raise():
     assert new["operators"] == 5          # malformed shape passes through
 
 
+def test_falsy_content_survivor_still_shields_its_endpoint():
+    """`execute_embed` emits `str(content)` — a point with `content: 0` becomes
+    the point `"0"` and resolves an endpoint on it. VET's content reader used a
+    truthiness test, so it saw no survivor and pruned the edge (a lost edge, no
+    mint — the module's own 'a wrong drop is memory loss' class)."""
+    el = {"entities": [], "events": [],
+          "points": [{"content": "0", "pointKind": "statement"},
+                     {"content": 0, "pointKind": "statement"},
+                     {"content": "X", "pointKind": "statement"}],
+          "operators": [{"src": "0", "dst": "X", "op_type": "IMPL"}]}
+    decisions = vg.vet_candidates(el, narrative="n")["decisions"]
+    pid = next(i for i, d in decisions.items()
+               if d["section"] == "points" and d["index"] == 0)
+    decisions[pid] = {"outcome": vg.DISCARD}
+    new, _w = vg.apply_vet(el, decisions)
+    assert len(new["operators"]) == 1, (
+        "the surviving `content: 0` point emits `\"0\"` — the edge must stay")
+    payload, _res = _payload_of(new)
+    assert len(payload.get("operators") or []) == 1, payload.get("operators")
+
+
+def test_removal_pool_of_an_unchanged_list_is_empty():
+    """A surviving ENTITY contributes no content, so `identity(before) -
+    content(after)` used to carry its name forward as `removed` — a false pool
+    entry that then pruned an operator with a 'discarded' warning for an item
+    that was never touched."""
+    el = {"entities": [{"name": "pytest", "kind": "core:tool"}],
+          "events": [],
+          "points": [{"content": "real claim", "pointKind": "statement"}],
+          "operators": []}
+    assert vg.removal_pool(el, el) == {"removed_texts": set(),
+                                      "removed_entities": {}}
+
+
 def test_cross_pass_reference_restores_entity_and_payload_validates():
     """Verified defect (the strongest one): the Layer-1 guard is per-pass, so
     an entity the S2 pass removed and S4 later referenced reached
