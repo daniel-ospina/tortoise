@@ -256,8 +256,16 @@ CI_TIMING_WORKFLOW = WORKFLOW_DIR / "ci-timing.yml"
 # optionally prefixed, e.g. inside `$( … )`) and `python3 -c '…'` (inline, may
 # span lines). Matched against the YAML-parsed run body — i.e. AFTER the block
 # scalar has stripped its indentation, exactly what the runner materialises.
+#
+# The inline form's closing quote is followed by whatever ends the command: `)`
+# (`$( … )`), `>>`/`|` (a redirect or a pipe), `}` — the closing brace of a bash
+# FUNCTION wrapping the call, which is how ai-review-gate.yml calls its diff
+# normalizer — or end-of-string. Omitting `}` (#5107) made the non-greedy body
+# backtrack past the real closing quote to a later one, swallowing the quote and
+# the brace into the "source" (`unterminated string literal`). The workflow ran
+# fine on every PR; only the extractor mis-read it.
 _HEREDOC_RE = re.compile(r"python3?[^\n]*<<-?'?(\w+)'?\n(.*?)\n\s*\1\s*$", re.S | re.M)
-_INLINE_C_RE = re.compile(r"python3 -c '(.*?)'(?=\s*(?:\)|>>|\||$))", re.S)
+_INLINE_C_RE = re.compile(r"python3 -c '(.*?)'(?=\s*(?:\)|>>|\||\}|$))", re.S)
 
 
 def _run_blocks(workflow_path: Path) -> list[tuple[str, str]]:
@@ -400,6 +408,38 @@ def test_workflow_embedded_python_is_column_zero_after_yaml_dedent() -> None:
         "(use `python3 - <<'EOF'` at the block's own indent, or move the logic into "
         "tools/):\n" + "\n".join(failures)
     )
+
+
+def test_inline_c_extraction_ends_at_the_shell_closing_quote() -> None:
+    """The extractor must stop at the quote that CLOSES the shell string (#5107).
+
+    #5003 wrapped a diff normalizer in a bash function —
+    `normalize_review_diff() { python3 -c '<body>' }` — so the closing quote is
+    followed by `}` rather than `)`/`>>`/`|`/end-of-string. With `}` missing from
+    the terminator allow-list the non-greedy body backtracked to a LATER quote and
+    the captured "source" swallowed the real closing quote and the brace, so
+    `compile()` failed with `unterminated string literal` and every PR carried a
+    false red on test (a)/(b)/test-carve-out — for a workflow the runner executed
+    correctly. Each of the three terminator shapes must yield exactly its own body.
+    """
+    script = "\n".join([
+        "normalize() {",
+        "python3 -c '",
+        "import sys",
+        'sys.stdout.write("ok")',
+        "'",
+        "}",
+        "python3 -c 'print(1)' | cat",
+        "out=$(python3 -c 'print(2)')",
+    ])
+    inline = [src for kind, src in _embedded_python(script) if kind == "inline -c"]
+    assert len(inline) == 3, inline
+    # the function-wrapped body stops at its quote — no `'`, no `}`, no `| cat`
+    assert inline[0].strip() == 'import sys\nsys.stdout.write("ok")', repr(inline[0])
+    assert inline[1].strip() == "print(1)", repr(inline[1])
+    assert inline[2].strip() == "print(2)", repr(inline[2])
+    for source in inline:
+        compile(source, "<inline -c>", "exec")  # what the runner materialises
 
 
 def test_ci_timing_workflow_embeds_no_inline_python() -> None:
