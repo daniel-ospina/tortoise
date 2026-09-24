@@ -176,6 +176,19 @@ jobs:
           # Telegram secrets (never job-level: that would also hand a durable
           # bot token to actions/checkout and to the third-party flyctl setup).
           ESCALATION_CHAT_ID: ${{ secrets.ESCALATION_CHAT_ID }}
+          # #3887 (round 5): the operator KILL SWITCH, wired so the runbook's
+          # documented control is actually usable. Without this line an operator
+          # sets the repo variable and NOTHING happens — the script's default of
+          # 1 wins silently, which is the "documented but unreachable control"
+          # defect review caught. Unset `vars.ESCALATE_ENABLED` expands to EMPTY,
+          # which is the script's documented default (paging ENABLED), so the
+          # unset state is safe. STEP-level, like ESCALATION_CHAT_ID above: this
+          # steers the watchdog, so it belongs to the step that RUNS the
+          # watchdog, and env precedence is step > job > workflow — a job-level
+          # copy could never shadow the step's value and would only widen where
+          # the switch is visible. Only a byte-exact 0 disables escalation; any
+          # other value warns and keeps paging.
+          ESCALATE_ENABLED: ${{ vars.ESCALATE_ENABLED }}
         run: bash .github/scripts/availability-watchdog.sh
       # SECOND TARGET (#3628): the Pages auth surface. `!cancelled()` rather
       # than the default `success()` — the two surfaces fail INDEPENDENTLY, so
@@ -202,6 +215,13 @@ jobs:
           # Telegram secrets (never job-level: that would also hand a durable
           # bot token to actions/checkout and to the third-party flyctl setup).
           ESCALATION_CHAT_ID: ${{ secrets.ESCALATION_CHAT_ID }}
+          # #3887 (round 5): the operator KILL SWITCH, in the SAME repository
+          # variable as the API step above (unset → EMPTY → paging ENABLED, the
+          # script default). Both probe steps must carry it: they fail
+          # INDEPENDENTLY, so wiring only one would leave the auth surface
+          # unkillable. STEP-level, never job-level (same discipline as
+          # ESCALATION_CHAT_ID).
+          ESCALATE_ENABLED: ${{ vars.ESCALATE_ENABLED }}
           PROBE_URL: https://app.premiselabs.co/auth/start
           PROBE_HOST_LABEL: app.premiselabs.co
           # Healthy = 302 with the PKCE challenge in the response headers. The

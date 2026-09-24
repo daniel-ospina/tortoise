@@ -1662,22 +1662,27 @@ decide_restart() {
 # own normalization step.
 normalize_escalation_knobs() { # <sustained_minutes> <sustained_runs>
   local s_min="$1" s_runs="$2" d_min d_runs raw_enabled
-  # The RAW value is validated FIRST and is the ONLY kill-switch predicate.
-  # `to_int` strips non-digits, so a value like `0abc`, `0x`, `0.0` or `00`
-  # would collapse to `0` and SILENTLY MUTE the pager — a malformed operator
-  # value choosing the kill switch is exactly the failure class this leg exists
-  # to remove, so it must not be reachable. Likewise `false`/`off`/`no` strip to
-  # the empty string and would take the default. Only a LITERAL `0` disables
-  # escalation; anything else that is not a literal `1` warns and fails CLOSED
-  # toward paging.
-  raw_enabled="$(printf '%s' "${ESCALATE_ENABLED:-}" | tr -d '[:space:]')"
+  # The value AS RECEIVED — no `to_int`, and no whitespace stripping — is the
+  # ONLY kill-switch predicate. `to_int` strips non-digits, so a value like
+  # `0abc`, `0x`, `0.0` or `00` would collapse to `0` and SILENTLY MUTE the
+  # pager — a malformed operator value choosing the kill switch is exactly the
+  # failure class this leg exists to remove, so it must not be reachable.
+  # Likewise `false`/`off`/`no` strip to the empty string and would take the
+  # default. And a whitespace normalize is the same trap one layer down: a YAML
+  # block/folded scalar in a workflow `env:` (`|` or `>`) yields exactly
+  # `0\n`, so `" 0"`/`"0\n"` would take the kill switch with NO warning — a
+  # silent mute on a pager that must be fail-closed. Only a byte-exact `0`
+  # disables escalation; an exact `1` (or unset/empty, the documented default)
+  # enables it quietly; EVERYTHING else resolves to 1 and warns (fail CLOSED
+  # toward paging).
+  raw_enabled="${ESCALATE_ENABLED:-}"
   case "$raw_enabled" in
     0) ESCALATE_ENABLED=0 ;;
     1) ESCALATE_ENABLED=1 ;;
     "") ESCALATE_ENABLED=1 ;;  # unset/empty: the documented default (not a kill)
     *)
       ESCALATE_ENABLED=1
-      warn "ESCALATE_ENABLED='${raw_enabled}' is not 0 or 1 — treating it as 1 (fail CLOSED toward paging; a kill switch must be the literal 0)"
+      warn "ESCALATE_ENABLED='[${raw_enabled}]' is not 0 or 1 — treating it as 1 (fail CLOSED toward paging; a kill switch must be the literal 0)"
       ;;
   esac
   d_min=$((s_min * 3))

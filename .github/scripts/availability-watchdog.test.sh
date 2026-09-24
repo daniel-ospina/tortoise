@@ -2090,6 +2090,23 @@ assert_not_contains "$JOB_ENV" "ESCALATION_CHAT_ID" \
   "ESCALATION_CHAT_ID is NOT job-level (step env only — otherwise the override escapes containment)"
 assert_eq "$(printf '%s' "$WORKFLOW_CODE" | grep -c 'ESCALATION_CHAT_ID: \${{ secrets.ESCALATION_CHAT_ID }}')" "2" \
   "ESCALATION_CHAT_ID is set on BOTH probe steps (the API step and the auth step fail independently)"
+# #3887 round 5: the KILL SWITCH joins the same containment surface. The runbook
+# documents ESCALATE_ENABLED as an operator control, so it must be wired — an
+# unwired knob is a documented control an operator cannot engage without editing
+# the workflow, and the unset repo variable silently leaves the script default
+# (paging enabled) in place. It comes from the repository VARIABLE (not a secret:
+# it is a switch, not a credential), and it stays STEP-level: the two probes fail
+# independently, so both must carry it, and step placement keeps the knob visible
+# only where it is consumed (a job-level env would also hand it to
+# actions/checkout and the third-party setup-flyctl action). A workflow-level
+# `vars.` placed after `steps:` would escape the JOB_ENV slice — hence the
+# whole-workflow check.
+assert_contains "$WORKFLOW_CODE" "ESCALATE_ENABLED: \${{ vars.ESCALATE_ENABLED }}" \
+  "ESCALATE_ENABLED is wired to the probe steps from the repo variable (a documented operator control must be reachable)"
+assert_not_contains "$JOB_ENV" "ESCALATE_ENABLED" \
+  "ESCALATE_ENABLED is NOT job-level (step env only — the same containment discipline as ESCALATION_CHAT_ID)"
+assert_eq "$(printf '%s' "$WORKFLOW_CODE" | grep -c 'ESCALATE_ENABLED: \${{ vars.ESCALATE_ENABLED }}')" "2" \
+  "ESCALATE_ENABLED is set on BOTH probe steps (wiring only one leaves the other surface unkillable)"
 
 # ── 96: the workflow drives the auth surface as its OWN step (#3628) ───────
 AUTH_WORKFLOW="$SCRIPT_DIR/../workflows/availability-watchdog.yml"
@@ -2300,9 +2317,35 @@ assert_eq "$(ESCALATE_ENABLED=0.0 esc_unit "$((NOW - 7200))" 20 0 "" 0 "$NOW")" 
 assert_eq "$(ESCALATE_ENABLED=0x esc_unit "$((NOW - 7200))" 20 0 "" 0 "$NOW")" "page" "knobs: ESCALATE_ENABLED=0x still PAGES"
 assert_contains "$(ESCALATE_ENABLED=0abc knobs_warn_unit 10 2)" "is not 0 or 1" "knobs: a digit-bearing non-boolean kill switch is LOUD"
 assert_eq "$(ESCALATE_ENABLED=0 knobs_warn_unit 10 2)" "" "knobs: a valid ESCALATE_ENABLED=0 is NOT warned"
-# `banana` is not a boolean either, but to_int maps it to the default 1 before
-# the case — assert what that path actually does.
+# `banana` is not a boolean either, but it reaches the `*)` branch and resolves
+# to the default 1 — assert what that path actually does.
 assert_eq "$(ESCALATE_ENABLED=banana esc_unit "$((NOW - 7200))" 20 0 "" 0 "$NOW")" "page" "knobs: a non-numeric kill switch (banana → default 1) still pages"
+# The WHITESPACE subclass (round 5). The previous normalize ran
+# `tr -d '[:space:]'` before the case, so `" 0"` / `"0\n"` / `" "` took the
+# kill switch with NO warning — a silent mute of a fail-closed pager. A YAML
+# block/folded scalar in a workflow `env:` (`|` or `>`) produces exactly
+# `"0\n"`, so this is not hypothetical. Only a BYTE-EXACT `0` may disable
+# escalation; every padded form pages AND warns.
+assert_eq "$(ESCALATE_ENABLED=' 0' esc_unit "$((NOW - 7200))" 20 0 "" 0 "$NOW")" "page" \
+  "knobs: a LEADING-space ' 0' still PAGES (whitespace must not select the kill switch)"
+assert_contains "$(ESCALATE_ENABLED=' 0' knobs_warn_unit 10 2)" "is not 0 or 1" \
+  "knobs: a LEADING-space ' 0' is LOUD (a silent mute is the failure mode)"
+assert_eq "$(ESCALATE_ENABLED='0 ' esc_unit "$((NOW - 7200))" 20 0 "" 0 "$NOW")" "page" \
+  "knobs: a TRAILING-space '0 ' still PAGES"
+assert_contains "$(ESCALATE_ENABLED='0 ' knobs_warn_unit 10 2)" "is not 0 or 1" \
+  "knobs: a TRAILING-space '0 ' is LOUD too"
+assert_eq "$(ESCALATE_ENABLED=$'0\n' esc_unit "$((NOW - 7200))" 20 0 "" 0 "$NOW")" "page" \
+  "knobs: a YAML block-scalar '0\\n' still PAGES (the real workflow-env shape)"
+assert_contains "$(ESCALATE_ENABLED=$'0\n' knobs_warn_unit 10 2)" "is not 0 or 1" \
+  "knobs: a YAML block-scalar '0\\n' is LOUD"
+assert_contains "$(ESCALATE_ENABLED=' ' knobs_warn_unit 10 2)" "is not 0 or 1" \
+  "knobs: whitespace-only ' ' is LOUD (it is not the empty default)"
+assert_eq "$(ESCALATE_ENABLED=' ' esc_unit "$((NOW - 7200))" 20 0 "" 0 "$NOW")" "page" \
+  "knobs: whitespace-only ' ' still PAGES (never silently the kill switch)"
+# …and the exact values stay quiet, so the whitespace guard did not become a
+# blanket warning.
+assert_eq "$(ESCALATE_ENABLED=0 knobs_warn_unit 10 2)" "" "knobs: a byte-exact 0 is still NOT warned"
+assert_eq "$(ESCALATE_ENABLED=1 knobs_warn_unit 10 2)" "" "knobs: a byte-exact 1 is still NOT warned"
 
 # ── unit: the ESCALATION wall-clock ANCHOR (G2/G3) ─────────────────────────
 # G2: the stale-clock reset sets first_failure_ts=now, which used to make the
