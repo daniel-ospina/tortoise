@@ -753,17 +753,77 @@ def _created_since_last_wipe() -> set[str]:
 # is destroyed (no sweep nor `wipe_server`'s filter can attribute it again).
 #
 # ⚠️ DIVERGENCE (#7795 review P2) — do NOT "dedupe" this set against the
-# journal-BLIND copies: the `wipe_server` prefix literal below,
+# journal-BLIND copies: `_SERVER_WIPE_PREFIXES` below,
 # `test_derived_names.test_from_uri_sites_resolve_test_prefixed`, and
 # `test_pre_migration_safety._docker_projection_target`.
 # CITE SYMBOLS — a line-number pointer re-stales on every rebase (#7795 P2-2).
-# Those carry ONLY ("test_", "tortoise_test") BY DESIGN: their input is
+# Those carry ONLY the `_SERVER_WIPE_PREFIXES` value BY DESIGN: their input is
 # GRAPH.LIST (the whole server, no ownership attribution), and a shared/dev
 # docker legitimately holds real tenant `team_*`/`org_*` graphs — adding a
 # product prefix there would make the last-suite-standing global sweep wipe
 # every tenant graph on the server. This set is safe ONLY because its input
 # is the journal (an ownership record).
+#
+# ── Graph-name ownership vocabulary (#3634) ────────────────────────────────
+# ONE declaration. Each set states its INPUT, because that is what makes it
+# safe: a prefix is not ownership; a journal record is.
 _SWEEP_OWNED_PREFIXES = ("test_", "tortoise_test", "team_", "org_")
+#   input: the JOURNAL (an ownership record). May include product families.
+_SERVER_WIPE_PREFIXES = ("test_", "tortoise_test")
+#   input: GRAPH.LIST (no attribution). Deliberately a SUBSET (#7795).
+_PRODUCT_GRAPH_PREFIXES = ("org_", "team_")
+#   input: opt-in via `_sweep_team_strays`; these are REAL tenant graphs (the
+#   product's own mint namespace — `org_` current since the #3543 rename,
+#   `team_` retained for graphs minted before it).
+_LEGACY_RESIDUE_PREFIXES = (
+    "registry_test_",   # the epic CI-3 cohort (#3634 census)
+    "v10fix_", "ttm_",
+    "review_rw_probe", "askshape_", "legbudget_", "tt4524_probe", "probe_d10_",
+)
+#   input: GRAPH.LIST, OPT-IN ONLY. Names no default path can reach. Exact
+#   stems are preferred over broad ones so a future name cannot be swept by
+#   accident.
+#
+# `_DIVERGENCE_REGISTER` ties every NAMED prefix constant on the declared
+# surface (`tests/_embedded.py`, `tortoise/sdk.py`,
+# `tortoise/projection/__init__.py`) to its rationale BY OBJECT IDENTITY —
+# tests/test_graph_name_ownership.py asserts the ties and fails on an
+# unregistered named constant. Anonymous prefix LITERALS are out of the
+# scanner's scope; they are governed by the DIVERGENCE comment above.
+_DIVERGENCE_REGISTER = {
+    "_SWEEP_OWNED_PREFIXES": {"set": _SWEEP_OWNED_PREFIXES,
+                              "reason": "the canonical journal-ownership declaration (#7795)."},
+    "_SERVER_WIPE_PREFIXES": {"set": _SERVER_WIPE_PREFIXES,
+                              "reason": "#7795 fail-closed: GRAPH.LIST has no attribution."},
+    "_PRODUCT_GRAPH_PREFIXES": {"set": _PRODUCT_GRAPH_PREFIXES,
+                                "reason": "real tenant graphs; opt-in via _sweep_team_strays."},
+    "_LEGACY_RESIDUE_PREFIXES": {"set": _LEGACY_RESIDUE_PREFIXES,
+                                 "reason": "#3634 journal-blind residue; opt-in only."},
+}
+
+
+def owns_by_ownership_record(name: str) -> bool:
+    """The JOURNAL path's predicate — the only one that may authorise a delete
+    from an ownership record (#7795). Mirrors the gate `_sweep_drop` applies:
+    a non-``str`` name is never owned."""
+    return isinstance(name, str) and name.startswith(_SWEEP_OWNED_PREFIXES)
+
+
+def is_legacy_residue(name: str, *, default_graph: str | None) -> bool:
+    """The GRAPH.LIST residue predicate (#3634). Opt-in only.
+
+    Deny-safe: a non-``str``, the URI default graph, anything the ownership
+    record covers, and any ``tortoise_restored*`` snapshot (which
+    ``_guard_destructive`` treats as production) are all refused."""
+    if not isinstance(name, str):
+        return False
+    if name.startswith("tortoise_restored"):
+        return False
+    if default_graph is not None and name == default_graph:
+        return False
+    if owns_by_ownership_record(name):
+        return False
+    return name.startswith(_LEGACY_RESIDUE_PREFIXES)
 
 
 def _uri_default_graph_name() -> str | None:
@@ -918,14 +978,16 @@ def wipe_server(proj, scope: set[str] | None = None, drop: bool = False) -> None
         # sweep (scope=None → global) still owns it.
         if scope is not None and g == default_graph:
             continue
-        # ⚠️ DIVERGENCE (#7795 review P2): deliberately NARROWER than
-        # `_SWEEP_OWNED_PREFIXES` — this literal omits the product
-        # namespaces. This loop's input is GRAPH.LIST (the whole server, no
-        # ownership attribution), so on a shared/dev docker `team_*`/`org_*`
-        # may be a real tenant's (or a live peer's) graph; the journal-based
-        # `_sweep_drop` may include them because there the journal IS the
-        # ownership record. Do NOT dedupe the two sets (#7795 review P2).
-        if not g.startswith(("test_", "tortoise_test")):
+        # ⚠️ DIVERGENCE (#7795 review P2): `_SERVER_WIPE_PREFIXES` is
+        # deliberately NARROWER than `_SWEEP_OWNED_PREFIXES` — it omits the
+        # product namespaces. This loop's input is GRAPH.LIST (the whole
+        # server, no ownership attribution), so on a shared/dev docker
+        # `team_*`/`org_*` may be a real tenant's (or a live peer's) graph;
+        # the journal-based `_sweep_drop` may include them because there the
+        # journal IS the ownership record. Do NOT dedupe the two sets
+        # (#7795 review P2). NAMING the symbol (rather than re-inlining the
+        # tuple) is load-bearing: the register tie cannot detect a literal.
+        if not g.startswith(_SERVER_WIPE_PREFIXES):
             continue  # fail-closed: never wipe a non-test graph
         # #3074/#3214: re-read the live peers' journals IMMEDIATELY before
         # this graph's DETACH. The up-front snapshot's window was
@@ -1149,7 +1211,7 @@ def _sweep_drop(proj, journal_file: str, *, drop: bool = True,
             # a per-session own/stale drop would race other concurrent
             # sessions' live writes on the shared default.
             continue
-        if not g.startswith(_SWEEP_OWNED_PREFIXES):
+        if not owns_by_ownership_record(g):
             # #7795 fail-closed: a name the sweep does not own is PRESERVED —
             # never DETACH+DELETE a dev/compose/Cloud graph. See the docstring.
             preserved.append(g)
@@ -1191,13 +1253,6 @@ def _session_end_own_sweep(uri: str, journal_file: str, *,
     with _sweep_proj(uri) as proj:
         return _sweep_drop(proj, journal_file, drop=True,
                            skip_on_non_loopback=skip_on_non_loopback)
-
-
-# The product's own mint namespace, for the journal-blind stray pass below.
-# `org_` is current (tenancy rename, #3543); `team_` is retained so an
-# opted-in run still reclaims graphs minted before the rename. Both identify
-# REAL tenant graphs — which is why the pass is opt-in only.
-_PRODUCT_GRAPH_PREFIXES = ("org_", "team_")
 
 
 def _team_sweep_allowed(uri: str) -> bool:
