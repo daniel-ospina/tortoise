@@ -340,6 +340,27 @@ class TestSelfHostedStdioShapes:
         claude_block = html.split('claude: () => JSON.stringify({', 1)[1].split('}, null, 2)', 1)[0]
         assert 'type:' not in claude_block
 
+    def test_self_hosted_page_sends_the_onboarding_instructions(self):
+        """#4365: this served page must hand the reader the onboarding INSTRUCTIONS
+        (a document the agent reads), not a skill to install — and must not
+        resurrect the retired Q&A "onboarding prompt" framing. Pinned because
+        reverting the copy left the whole suite green."""
+        html = (REPO_ROOT / "website" / "self-hosted.html").read_text()
+        low = html.lower()
+        assert "install the tortoise-onboarding skill" not in low, (
+            "self-hosted.html must not tell the reader to install onboarding")
+        assert ("https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md"
+                in html), ("self-hosted.html must link the served instructions")
+        assert "never an installed skill" in low, (
+            "self-hosted.html must say onboarding is not an installed skill")
+        # The retired framing must stay retired — the meta description and the
+        # step-3 note both carried it, three lines from the note above, and
+        # reverting them tripped no assertion at all (mutation-verified).
+        assert "5-question" not in low, (
+            "self-hosted.html still advertises the retired 5-question prompt")
+        assert "canonical onboarding prompt" not in low, (
+            "self-hosted.html still calls it the canonical onboarding prompt")
+
 
 class TestPrintHarnessInstructions:
     """`_print_harness_instructions` — CLI self-hosted guidance output."""

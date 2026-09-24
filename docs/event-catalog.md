@@ -8,9 +8,10 @@
 
 | Type | Version | Emitted by | Payload fields | Producer surface |
 |---|---|---|---|---|
-| `PointAdded` | 1 | `TortoiseSDK.create_point` (new point only — dedup hits do NOT emit); SDK `capture_session` / `hosted_api` capture turn loop (#3947 — one per `{session_id}_t{i}` turn Point, `is_episodic=true`) | `id`, `kind`, `content_hash` (both producers put the hash on the PAYLOAD, matching `create_point`); the capture turn adds the **envelope** key `contains_session` (the session-container link the replay fold restores — ontology §4.5), plus a `point` snapshot carrying `content`/`pointKind`/`speaker`/`is_episodic`/`status`/`createdAt`. `content_hash` is NOT in the `point` snapshot: `_emit_event` strips it (`content_hash` is derived — the replay recomputes it in `_upsert_point_props`, #2795) | SDK (MCP, REST, local) |
+| `PointAdded` | 1 | `TortoiseSDK.create_point` (new point only — dedup hits do NOT emit); SDK `capture_session` / `hosted_api` capture turn loop (#3947 — one per `{session_id}_t{i}` turn Point, `is_episodic=true`) | `id`, `kind`, `content_hash` (both producers put the hash on the PAYLOAD, matching `create_point`); the capture turn adds the **envelope** key `contains_session` (the session-container link the replay fold restores — ontology §4.5), plus a `point` snapshot carrying `content`/`pointKind`/`speaker`/`is_episodic`/`status`/`createdAt` and — since #5004 — `embedding` plus, on a creating record, its identity keys (see the JSONL shape notes below). `content_hash` is NOT in the `point` snapshot: `_emit_event` strips it (`content_hash` is derived — the replay recomputes it in `_upsert_point_props`, #2795) | SDK (MCP, REST, local) |
 | `OperatorAdded` | 1 | `TortoiseSDK.create_operator` | `id`, `op_type`, `source_id`, `target_ids` | SDK |
-| `PointRetracted` | 1 | `TortoiseSDK.retract_point` | `id` | SDK |
+| `PointRetracted` | 1 | `TortoiseSDK.retract_point` (**tombstone** — `status='retracted'`, node kept; the JSONL line is what makes it durable) AND `TortoiseSDK.delete_point` / `TortoiseSDK.delete` (**hard delete** — emitted as a **`:GraphEvent`-only subscriber row**, no JSONL line; the durable record for that delete is the `EntityMutated` row below, because one event type must not carry two live end-states, #3300) | `id` | SDK |
+| `EntityMutated` | 1 | The ONE write-surface record for durable entity mutation — `TortoiseSDK._update_entity` (non-`Point` labels: `restatus` when `status` is written, else `revise`), `TortoiseSDK._delete_entity` and `delete_point` (`delete`). Designed on #3299; the op set was extended by #3312 (unjournaled update) and #3300 (Point delete). **`rename` is fold-supported but NOT yet produced** (and the fold applies `state`, so a rename record must carry the new name as `state["name"]` — the top-level `name` field is currently unread) — a `name`-bearing write withholds its record and warns, because journalling it drops a legacy name-keyed `ObjectSuperseded` on replay (#3377 returned to open; #4769 lands rename journalling together with the structural sweep-ordering fix). Fold: `projection._fold_entity_mutation`, dispatching on `op` | `id`, `op`, `label`, plus `state` (the mutation's OWN keys — never a `properties(n)` snapshot — carrying the values the graph STORED; **absent for `op="delete"`**) and `name` (rename only) | SDK — **JSONL ONLY**: deliberately NOT in `_GRAPH_EVENT_TYPES`, so it rides the rebuild journal and not the `:GraphEvent` store |
 | `PointSuperseded` | 1 | `TortoiseSDK.supersede_point` | `id` (old), `new_id` | SDK |
 | `PointInvalidated` | 1 | `TortoiseSDK.invalidate_point` (#2488) | `id`, `corrected_by` | SDK |
 | `PointPromoted` | 1 | `TortoiseSDK.promote_point` (#785) | `point` (full snapshot) | SDK |
@@ -33,8 +34,26 @@
 The table above documents the `:GraphEvent` **payload**. The JSONL rebuild
 journal that `rebuild_all` replays is a *second*, differently-shaped store:
 `_emit_event` writes the envelope (`event_id`/`ts`/`type`/`initiated_by`/
-`projection_version`) plus the record's own fields. Four folds carry props that
-the payload does not name:
+`projection_version`) plus the record's own fields. Several folds carry props
+that the payload does not name:
+
+- **The Point-snapshot folds (`PointAdded`, `PointPromoted`) and the capture
+  turn** (#5004) — the `point` snapshot now also carries the embedding, which
+  is a *node* property and stays one: `embedding` (the vector as stored, or an
+  explicit `null`), plus — on a **creating** record only — the identity the
+  vector was computed under, `embedding_model` / `embedding_revision` /
+  `embedding_text_hash`, and (turn records that preserved an older vector)
+  `embedding_preserved`. The identity keys describe the record; they are never
+  node properties (the fold's `_POINT_HANDLED` drops them). A re-emitted
+  snapshot (`PointPromoted`) carries the vector with **no** identity, and the
+  `embedding_verbatim` marker rides the snapshot — the replay SETs it as a
+  node property to reproduce the graph-only restore. **Presence is
+  ownership:** a record that owns the field writes the key (vector or explicit
+  `null`), and the replay restores / clears / leaves — it never re-encodes; a
+  record with the key ABSENT is legacy (strip-era) and recomputes. The paths
+  still outside the rule are enumerated — and must stay enumerated — in
+  `docs/durability-posture.md` → *Derived properties that are STORED, not
+  recomputed*; do not restate the list here (it has drifted once already).
 
 - **`OperatorAnnotated`** (#3689) — the JSONL line carries `id` plus the
   **canonical** `annotator_bias`/`annotator_precision`/`annotator_consistency`/

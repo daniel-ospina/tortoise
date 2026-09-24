@@ -715,6 +715,15 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
                     "UNMETERED INCREMENT (#3981): lane=ask_ledger "
                     "team=%s error=%s: %s (metering module unavailable)",
                     org_id or "<none>", type(e).__name__, e)
+                # The fallback still ALERTS — the ledger write and the reporter
+                # are both down here, so a log line is the only other signal.
+                # ``operator_alert`` is importable when ``metering`` is not.
+                try:
+                    from tortoise.operator_alert import alert_unmetered_increment
+                except Exception:  # noqa: BLE001, RUF100 — never blocks
+                    pass
+                else:
+                    alert_unmetered_increment("ask_ledger", org_id, e)
             else:
                 report_unmetered_increment(lane="ask_ledger",
                                            org_id=org_id, error=e)

@@ -16,7 +16,14 @@ Covers the vector arm of the embedder-selection harness:
   * ``--db`` mode — per-(question, model) graph namespace isolation
     (probe-level, no live FalkorDB required).
 
-Runs fully offline (mini fixture, mocked reader/judge, fake embeddings).
+Runs offline (mini fixture, mocked reader/judge, fake embeddings).
+
+The harness invocations whose subject is NOT the dense leg itself carry an
+explicit ``--skip-preflight`` waiver (#4718): ``--mock`` selects the
+reader/judge and is not an authorisation to run without the embedder, so
+without the flag these tests would require sentence-transformers + the
+cached model on every run. Tests that DO exercise the dense leg inject it
+via ``fake_embeddings`` instead of waiving it.
 """
 from __future__ import annotations
 
@@ -105,10 +112,17 @@ def _reset_breakers():
 
 @pytest.fixture()
 def fake_embeddings(monkeypatch):
-    """Deterministic embedding path: ingest + query encode via _fake_vec."""
+    """Deterministic embedding path: ingest + query encode via _fake_vec.
+
+    #4718: the stand-in must accept the real ``EmbeddingModel.get`` signature
+    — the dense-leg pre-flight calls it with ``load_timeout=…`` and treats a
+    failure to load as fatal for any run that requires the leg. A lambda that
+    rejected the kwarg would make the pre-flight read the fake as ABSENT.
+    """
     monkeypatch.setattr(emb, "compute_embedding",
                         lambda content, max_tokens=512: _fake_vec(content))
-    monkeypatch.setattr(emb.EmbeddingModel, "get", lambda: _FakeModel())
+    monkeypatch.setattr(emb.EmbeddingModel, "get",
+                        lambda load_timeout=None: _FakeModel())
 
 
 # ── nDCG@10 / P@10 / P@5 (hand-computed binary-gain) ────────────────────────
@@ -170,7 +184,8 @@ def test_run_main_empty_graph_exits_with_distinct_code(tmp_path, monkeypatch, ca
     with pytest.raises(SystemExit) as ei:
         runner.run_main([
             "--data", str(MINI), "--limit", "1", "--split", "s", "--mock",
-            "--retriever", "vector", "--output", str(tmp_path / "o.json"),
+            "--skip-preflight", "--retriever", "vector",
+            "--output", str(tmp_path / "o.json"),
             "--work-dir", str(tmp_path),
         ])
     assert ei.value.code == retrieve.MODEL_ENCODE_FAILED_EXIT
@@ -1546,7 +1561,8 @@ def test_run_main_v2_session_workers_threads_trio_guard_silent(monkeypatch,
                               "--split", "s", "--ingest-mode", "v2",
                               "--session-workers", "2",
                               "--extractor-model", "deepseek-v4-pro",
-                              "--mock", "--output", str(out)])
+                              "--mock", "--skip-preflight",
+                              "--output", str(out)])
     # reached the question loop: 1 outcome, no ValueError from the guard
     assert len(report["outcomes"]) == 1
     assert report["methodology"]["ingest_mode"] == "v2"
@@ -1586,7 +1602,7 @@ def test_run_main_v2_session_workers_guard_fires_on_config_divergence(
                          "--split", "s", "--ingest-mode", "v2",
                          "--session-workers", "2",
                          "--extractor-model", "deepseek-v4-pro",
-                         "--mock"])
+                         "--mock", "--skip-preflight"])
 
 
 def test_model_id_wrapper_shape_discriminates_routing_vs_rotating():
@@ -2145,8 +2161,8 @@ def test_db_mode_sdk_gets_per_question_namespace(monkeypatch, tmp_path):
 def test_db_mode_requires_uri(tmp_path):
     with pytest.raises(SystemExit):
         runner.run_main(["--db", "/tmp/not-a-uri.db", "--mock",
-                         "--data", str(MINI), "--limit", "1",
-                         "--output", str(tmp_path / "o.json")])
+                         "--skip-preflight", "--data", str(MINI),
+                         "--limit", "1", "--output", str(tmp_path / "o.json")])
 
 
 # ── --spot-check: named paired artifact ─────────────────────────────────────
@@ -2205,6 +2221,7 @@ def test_spot_check_emits_paired_artifact(tmp_path, monkeypatch, fake_embeddings
         "--db", "docker://localhost:6379/bench", "--spot-check",
         "--model", "arctic-s", "--retriever", "vector",
         "--data", str(MINI), "--limit", "2", "--split", "s", "--mock",
+        "--skip-preflight",
         "--work-dir", str(tmp_path), "--cache-dir", str(tmp_path / "cache"),
         "--output", str(out),
     ])
@@ -2307,12 +2324,12 @@ def test_spotcheck_artifact_absent_question_dropped():
 def test_spot_check_requires_db_and_model(tmp_path):
     with pytest.raises(SystemExit):
         runner.run_main(["--spot-check", "--model", "arctic-s", "--mock",
-                         "--data", str(MINI), "--limit", "1",
-                         "--output", str(tmp_path / "o.json")])
+                         "--skip-preflight", "--data", str(MINI),
+                         "--limit", "1", "--output", str(tmp_path / "o.json")])
     with pytest.raises(SystemExit):
         runner.run_main(["--db", "docker://x/y", "--spot-check", "--mock",
-                         "--data", str(MINI), "--limit", "1",
-                         "--output", str(tmp_path / "o.json")])
+                         "--skip-preflight", "--data", str(MINI),
+                         "--limit", "1", "--output", str(tmp_path / "o.json")])
 
 
 def test_spot_check_rejects_control_model_as_winner(tmp_path, capsys):
@@ -2321,8 +2338,8 @@ def test_spot_check_rejects_control_model_as_winner(tmp_path, capsys):
     with pytest.raises(SystemExit) as ei:
         runner.run_main(["--db", "docker://x/y", "--spot-check",
                          "--model", "minilm", "--retriever", "vector",
-                         "--mock", "--data", str(MINI), "--limit", "1",
-                         "--output", str(tmp_path / "o.json")])
+                         "--mock", "--skip-preflight", "--data", str(MINI),
+                         "--limit", "1", "--output", str(tmp_path / "o.json")])
     # argparse error() exits with status 2 (code may be the (2, msg) tuple)
     code = ei.value.code
     assert code == 2 or (isinstance(code, tuple) and code[0] == 2)

@@ -29,6 +29,11 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
+# Shared with the #3718 guard (#4625 review F1): one home for the "is this
+# nested def invoked on the loop?" decision, so Guard A cannot stay blind to
+# a locally defined closure the route calls while Guard B sees it.
+from tests._loop_ast import nested_defs_invoked_on_loop as _nested_defs_invoked_on_loop
+
 REPO = Path(__file__).resolve().parent.parent
 HOSTED_API = REPO / "tortoise" / "hosted_api.py"
 SELFHOST = REPO / "tortoise" / "selfhost.py"
@@ -216,7 +221,10 @@ def _module_aliases(tree: ast.AST) -> dict[str, str]:
 
 
 def _unoffloaded_calls(node: ast.AST,
-                       module_aliases: dict[str, str] | None = None) -> list[tuple[str, ast.Call]]:
+                       module_aliases: dict[str, str] | None = None,
+                       boundaries: frozenset[str] | None = None,
+                       descend_nested: frozenset[str] | set[str] = frozenset(),
+                       ) -> list[tuple[str, ast.Call]]:
     """Every ``ast.Call`` in ``node``'s OWN body that is not itself an offload
     boundary and is not nested inside one, as ``(resolved_callee, call)``.
 
@@ -227,7 +235,11 @@ def _unoffloaded_calls(node: ast.AST,
 
     Nested ``def``/``async def``/``class`` bodies are skipped: a blocking call
     in a nested function belongs to that function's own inventory entry (and
-    the pre-existing #2988 pin covers the probe case deliberately).
+    the pre-existing #2988 pin covers the probe case deliberately). EXCEPT a
+    LOCAL function has no inventory entry, so ``descend_nested`` names the
+    nested defs that ARE invoked on the loop (the #4455 / #4625 rule, shared
+    with Guard B) — their bodies are scanned as part of THIS body, which is
+    the entry a residual declares (#4625 review F1).
     """
     aliases = dict(module_aliases or {})
     for stmt in getattr(node, "body", []):
@@ -243,10 +255,11 @@ def _unoffloaded_calls(node: ast.AST,
         return aliases.get(name, name)
 
     found: list[tuple[str, ast.Call]] = []
+    boundary_names = boundaries or OFFLOAD_BOUNDARY_CALLEES
 
     def visit(current: ast.AST) -> None:
         if isinstance(current, ast.Call):
-            if _callee_name(current.func) in OFFLOAD_BOUNDARY_CALLEES:
+            if _callee_name(current.func) in boundary_names:
                 # The CALLABLE argument runs on the worker — skip it. Every
                 # OTHER argument is evaluated EAGERLY on the loop, so it must
                 # still be scanned (#3498 review): a
@@ -269,14 +282,38 @@ def _unoffloaded_calls(node: ast.AST,
                 found.append((name, current))
         for child in ast.iter_child_nodes(current):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                if getattr(child, "name", None) in descend_nested:
+                    for stmt in child.body:
+                        visit(stmt)
                 continue
             visit(child)
 
     for stmt in getattr(node, "body", []):
         if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if getattr(stmt, "name", None) in descend_nested:
+                for inner in stmt.body:
+                    visit(inner)
             continue
         visit(stmt)
     return found
+
+
+def _on_loop_nested_names(node: ast.AST) -> set[str]:
+    """Nested defs of ``node`` that are INVOKED on the loop (not merely
+    reference-passed to an offload boundary) — Guard B's rule, shared.
+
+    The boundaries are ``_ONBOARDING_OFFLOAD_BOUNDARIES`` (the superset this
+    scan honours): a nested def handed to ``_run_off_loop`` / ``_graph_offload``
+    etc. runs in the worker and must stay out of the scan.
+    """
+    nested_names = {
+        sub.name
+        for sub in ast.walk(node)
+        if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and sub is not node
+    }
+    return _nested_defs_invoked_on_loop(
+        node, nested_names, _ONBOARDING_OFFLOAD_BOUNDARIES)
 
 
 def _async_bodies(tree: ast.AST):
@@ -530,6 +567,353 @@ def test_session_pinned_org_is_a_pure_predicate():
     assert not offenders, (
         f"_session_pinned_org references control-plane helper(s) {sorted(offenders)} "
         "— it must stay a pure in-memory predicate (the #3498 lazy-read regression)"
+    )
+
+
+# ── #4625: hosted-helper indirection + the mcp_server.py blind spot ─────────
+#
+# Two blind spots let #4625's read legs regrow while every existing guard stayed
+# green:
+#
+#  1. ``CONTROL_PLANE_OFFLOAD_INVENTORY`` above is a hand-curated list of
+#     ``supabase_control`` seams, and the dynamic half
+#     (``_supabase_control_blocking_names``) is derived from
+#     ``supabase_control.py`` ALONE. A blocking helper DEFINED IN
+#     ``hosted_api.py`` (``_get_onboarding_state`` -> ``org_onboarding_state``,
+#     ``_get_onboarding_projection``, ``_update_onboarding_state``,
+#     ``_session_recording_allowed``, ...) can never enter either set — the scan
+#     SEES the call and classifies it as non-blocking.
+#
+#  2. Neither this file nor ``test_read_routes_loop_responsiveness.py`` reads
+#     ``tortoise/mcp_server.py`` at all, so the MCP onboarding surface was
+#     unguarded.
+#
+# The companion below closes both, and it is per-CALLEE (not per-body): the
+# bodies it flags (``_capture_session_impl``, ``patch_onboarding_state``, ...)
+# are already declared residuals of the sibling graph-seam pin, so a body-level
+# assertion could not see a FIXED leg regress inside one of them.
+#
+# SYNC MCP TOOLS ARE DELIBERATELY OUT OF THIS SCAN — and that is a verified
+# fact, not an omission (the #4625 work order §4(b) claimed the opposite).
+# ``mcp_server`` registers every tool through ``FunctionTool.from_function``
+# with NO ``run_in_thread`` argument; the installed fastmcp 3.4.6 defaults it to
+# **True** and ``FunctionTool._execute`` dispatches a sync tool body via
+# ``anyio.to_thread.run_sync`` (``fastmcp/tools/function_tool.py`` — the work
+# order instead read the *bundled* ``mcp/server/fastmcp`` copy, which is not the
+# package this repo imports). So the sync onboarding tools already run OFF the
+# loop by dispatch; only ASYNC ``mcp_server`` bodies are scanned here, and
+# ``test_sync_mcp_tools_stay_off_loop`` pins the dispatch assumption so an
+# upstream default change fails loudly instead of silently re-opening the hole.
+
+MCP_SERVER = REPO / "tortoise" / "mcp_server.py"
+
+#: ``hosted_api``-defined onboarding/capture helpers that reach blocking
+#: control-plane (PostgREST via ``SupabaseControlPlane``) or FalkorDB I/O. Hand
+#: curated, like the #3498 inventory — the graph/PostgREST leaves are
+#: ``org_onboarding_state`` / ``_registry_existing_graphs`` / ``_get_proj``.
+#: ``test_onboarding_helper_names_still_exist`` asserts every name resolves, so
+#: a rename must update this set rather than silently vacate the pin.
+_ONBOARDING_BLOCKING_HELPERS = frozenset({
+    "_get_onboarding_state",       # teams.onboarding_state (PostgREST) / Team node
+    "_get_onboarding_projection",  # the merged jsonb + graph projection
+    "_update_onboarding_state",    # READ side (the WRITE path is the residual below)
+    "_org_email",                  # teams.email (PostgREST)
+    "_session_recording_allowed",  # #4625 leg 12 — now off-loop
+    "_graph_recording_override",   # per-graph recording override (graph read)
+    "_org_proj",                   # opens the org graph
+    "_open_org_graph_sdk",         # opens the org graph
+    "_graph_available",            # graph-exists probe
+    "_write_org_email",            # the org-email PATCH
+})
+
+#: The off-loop wrappers that ARE the seam for those helpers — a call through
+#: one of these is the fix, and the helper call itself lives inside the
+#: wrapper's ``_graph_offload`` boundary.
+_ONBOARDING_OFFLOAD_WRAPPERS = frozenset({
+    "_get_onboarding_projection_off_loop",
+    "_session_recording_allowed_off_loop",
+    "_data_sdk_offloaded",
+})
+
+#: Offload boundaries this scan must honour — a superset of
+#: ``OFFLOAD_BOUNDARY_CALLEES`` adding the data-plane / pool wrappers (#3773)
+#: that the #3498 scan did not need.
+_ONBOARDING_OFFLOAD_BOUNDARIES = OFFLOAD_BOUNDARY_CALLEES | frozenset({
+    "_run_off_loop", "_submit_off_loop", "_run_with_close", "_run_dream_on_pool",
+})
+
+#: Functions reachable ON the loop that STILL call an
+#: ``_ONBOARDING_BLOCKING_HELPERS`` member inline. This is the DECLARED,
+#: reviewed residual of #4625 — every entry is either the WRITE path (which
+#: needs a bounded-mutation design: a bounded ``wait_for`` abandons a worker
+#: mid-write, CPython #87185 / #2863) or a read site not in this unit's scope.
+#: The two FIXED read legs are asserted per-CALLEE (leg 12 in
+#: ``test_capture_session_recording_gate_is_offloaded`` here, leg 62 in
+#: ``test_read_routes_loop_responsiveness.py``), so this body-level set can
+#: never hide their regression. Burn down under #4625.
+_KNOWN_ONBOARDING_INLINE_RESIDUAL = frozenset({
+    # capture path — remaining reads + the WRITE path (the receipt/last-error
+    # writers and the onboarding jsonb read-modify-write); #4625 writes only.
+    "_capture_session_impl",
+    "_record_capture_last_error",   # the last-error WRITE chain
+    "_reconcile_capture_receipts",  # reached inline from delete_session
+    "_get_onboarding_state", "_update_onboarding_state",
+    "_get_onboarding_projection", "_maybe_apply_completion",
+    # the onboarding REST routes — every remaining entry is a WRITE path (a
+    # bounded wait_for abandons a worker mid-write, CPython #87185 / #2863).
+    # The GET route (``get_onboarding_state``) is NOT here: its read legs are
+    # offloaded (#4625 review F3) and it is pinned by
+    # ``test_onboarding_read_route_offloads_both_legs``.
+    "patch_onboarding_state", "onboarding_checkpoint",
+    "set_session_recording", "create_onboarding_org",
+    "_create_onboarding_org_lane", "public_demo", "github_callback",
+    # install probe + indexing lanes (write-side onboarding mirrors).
+    "session_install_probe", "_run_indexing", "_run_docs_indexing",
+    # sync seed helpers reached ON-LOOP from their async routes.
+    "_run_onboarding_seed", "_run_starter_seed",
+    # invitee member-progress arm (graph/onboarding write) — reached inline
+    # from the invite-accept / register routes.
+    "_arm_invitee_member_progress",
+})
+
+
+def _offloaded_callable_names(tree: ast.AST) -> set[str]:
+    """Module-level helper names handed to an offload boundary as a callable.
+
+    Such a helper runs in a worker, so its own calls are NOT on the loop and
+    must not enter the reachable-on-loop closure. The callable may be wrapped in
+    ``functools.partial`` (the ``_run_with_close`` shape).
+    """
+    names: set[str] = set()
+    for call in ast.walk(tree):
+        if not isinstance(call, ast.Call):
+            continue
+        if _callee_name(call.func) not in _ONBOARDING_OFFLOAD_BOUNDARIES:
+            continue
+        args = list(call.args)
+        if _callee_name(call.func) == "run_in_executor":
+            args = args[1:]  # arg 0 is the executor
+        args += [kw.value for kw in call.keywords]
+        for arg in args:
+            if isinstance(arg, ast.Call) and _callee_name(arg.func) == "partial":
+                for sub in arg.args:
+                    if isinstance(sub, ast.Name):
+                        names.add(sub.id)
+            elif isinstance(arg, ast.Name):
+                names.add(arg.id)
+            elif isinstance(arg, ast.Attribute):
+                names.add(arg.attr)
+    return names
+
+
+def _reachable_on_loop_functions(tree: ast.AST) -> dict[str, ast.AST]:
+    """Module-level functions reachable ON the loop from ANY async body.
+
+    A fixpoint over the call graph: an async body runs on the loop; a
+    module-level function it calls INLINE (not through an offload boundary)
+    runs there too, and so on. Sync helpers handed to an offload boundary as a
+    callable are removed — they run in a worker. This is the sync-helper
+    indirection the name-based scan would otherwise miss
+    (``onboarding_seed`` -> ``_run_onboarding_seed`` -> ``_get_onboarding_projection``).
+    """
+    aliases = _module_aliases(tree)
+    fns = {
+        n.name: n for n in getattr(tree, "body", [])
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    on_loop = {name for name, n in fns.items()
+               if isinstance(n, ast.AsyncFunctionDef)}
+    changed = True
+    while changed:
+        changed = False
+        for name in list(on_loop):
+            node = fns.get(name)
+            if node is None:
+                continue
+            for callee, _call in _unoffloaded_calls(
+                    node, aliases, boundaries=_ONBOARDING_OFFLOAD_BOUNDARIES,
+                    descend_nested=_on_loop_nested_names(node)):
+                if callee in fns and callee not in on_loop:
+                    on_loop.add(callee)
+                    changed = True
+    return {name: fns[name] for name in on_loop - _offloaded_callable_names(tree)}
+
+
+def _onboarding_inline_calls() -> list[tuple[str, str, int, str]]:
+    """``(source, body, line, callee)`` for inline calls to the blocking helpers.
+
+    BOTH files are closed over the reachable-on-loop function set (async bodies
+    + the sync helpers they reach), and each reachable body's INVOKED nested
+    defs are scanned with it (#4625 review F1). ``mcp_server.py`` is closed over
+    too (#4625 review F4): a module-level sync helper an async MCP body calls
+    inline runs on the loop, so scanning async bodies alone was blind to it.
+    The sync TOOLS stay out by construction — they are off-loop by fastmcp
+    dispatch (``run_in_thread=True``, pinned by
+    ``test_sync_mcp_tools_stay_off_loop``) and nothing reads them from an async
+    body, so the closure never reaches them.
+    """
+    hits: list[tuple[str, str, int, str]] = []
+    hosted_tree = ast.parse(HOSTED_API.read_text())
+    aliases = _module_aliases(hosted_tree)
+    for name, node in _reachable_on_loop_functions(hosted_tree).items():
+        for callee, call in _unoffloaded_calls(
+                node, aliases, boundaries=_ONBOARDING_OFFLOAD_BOUNDARIES,
+                descend_nested=_on_loop_nested_names(node)):
+            if callee in _ONBOARDING_BLOCKING_HELPERS:
+                hits.append((HOSTED_API.name, name, call.lineno, callee))
+    mcp_tree = ast.parse(MCP_SERVER.read_text())
+    mcp_aliases = _module_aliases(mcp_tree)
+    for name, node in _reachable_on_loop_functions(mcp_tree).items():
+        for callee, call in _unoffloaded_calls(
+                node, mcp_aliases, boundaries=_ONBOARDING_OFFLOAD_BOUNDARIES,
+                descend_nested=_on_loop_nested_names(node)):
+            if callee in _ONBOARDING_BLOCKING_HELPERS:
+                hits.append((MCP_SERVER.name, name, call.lineno, callee))
+    return sorted(hits)
+
+
+def test_onboarding_blocking_helpers_are_offloaded_or_declared():
+    """#4625: a hosted-helper / ``mcp_server`` call may not run inline silently.
+
+    Every inline (non-boundary) call to an ``_ONBOARDING_BLOCKING_HELPERS``
+    member reachable on the loop must be either a routed off-load or a declared
+    residual. A NEW site fails here — the "fail on the next call site" guard
+    for the class the two existing pins could not see.
+    """
+    offenders = [
+        hit for hit in _onboarding_inline_calls()
+        if not (hit[0] == HOSTED_API.name
+                and hit[1] in _KNOWN_ONBOARDING_INLINE_RESIDUAL)
+    ]
+    assert not offenders, (
+        "on-loop call(s) to a blocking onboarding helper (source, function, "
+        f"line, callee): {offenders} — route them through the off-loop wrapper "
+        "(`_get_onboarding_projection_off_loop` / "
+        "`_session_recording_allowed_off_loop` / `_data_sdk_offloaded`), or add "
+        "the body to `_KNOWN_ONBOARDING_INLINE_RESIDUAL` with a #4625 reason"
+    )
+
+
+def test_onboarding_helper_names_still_exist():
+    """A rename must fail HERE, not silently vacate the #4625 pin."""
+    defined = {
+        n.name
+        for path in (HOSTED_API, MCP_SERVER)
+        for n in ast.walk(ast.parse(path.read_text()))
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    missing = sorted(_ONBOARDING_BLOCKING_HELPERS - defined)
+    assert not missing, (
+        f"the #4625 onboarding helper set names {missing}, which no longer "
+        "exist — a rename must update the set, or the pin guards nothing"
+    )
+
+
+def test_onboarding_residual_names_still_exist():
+    """A declared residual body that was renamed/deleted must fail here."""
+    tree = ast.parse(HOSTED_API.read_text())
+    defined = {n.name for n in ast.walk(tree)
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    ghosts = sorted(_KNOWN_ONBOARDING_INLINE_RESIDUAL - defined)
+    assert not ghosts, (
+        f"{ghosts} are declared #4625 onboarding residual but no longer "
+        "defined in hosted_api.py"
+    )
+
+
+def test_capture_session_recording_gate_is_offloaded():
+    """#4625 leg 12, asserted PER CALLEE inside the residual body.
+
+    ``_capture_session_impl`` is itself a declared residual body (its WRITE
+    path and remaining reads), so the body-level assertion above cannot see
+    this leg regress. Leg 62 (the graph seam) is pinned the same way in
+    ``test_read_routes_loop_responsiveness.py`` — that file owns the graph
+    seams; this one owns the control-plane/onboarding helpers.
+    """
+    tree = ast.parse(HOSTED_API.read_text())
+    aliases = _module_aliases(tree)
+    node = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.AsyncFunctionDef)
+        and n.name == "_capture_session_impl"
+    )
+    callees = [
+        name for name, _call in _unoffloaded_calls(
+            node, aliases, boundaries=_ONBOARDING_OFFLOAD_BOUNDARIES)
+    ]
+    assert callees.count("_session_recording_allowed") == 0, (
+        "#4625 leg 12 regressed: `_capture_session_impl` calls the blocking "
+        "`_session_recording_allowed` inline — route it through "
+        "`_session_recording_allowed_off_loop`"
+    )
+
+
+def test_onboarding_read_route_offloads_both_legs():
+    """#4625 review F3: ``GET /v1/onboarding/state`` is a pure READ — both legs.
+
+    The route's projection read rides ``_get_onboarding_projection_off_loop``
+    and its email read rides ``asyncio.to_thread``. It is deliberately NOT in
+    ``_KNOWN_ONBOARDING_INLINE_RESIDUAL``: that set is for WRITE paths (a
+    bounded wait abandons a worker mid-write, CPython #87185), and this route
+    writes nothing — so a regression here must fail, not hide behind a residual
+    entry whose blanket reason covers a read.
+    """
+    tree = ast.parse(HOSTED_API.read_text())
+    aliases = _module_aliases(tree)
+    node = next(n for n in ast.walk(tree)
+                if isinstance(n, ast.AsyncFunctionDef)
+                and n.name == "get_onboarding_state")
+    callees = [
+        name for name, _call in _unoffloaded_calls(
+            node, aliases, boundaries=_ONBOARDING_OFFLOAD_BOUNDARIES)
+    ]
+    assert callees.count("_get_onboarding_projection_off_loop") == 1, (
+        "#4625 F3: `get_onboarding_state` must read the projection through "
+        "`_get_onboarding_projection_off_loop`"
+    )
+    assert "_get_onboarding_projection" not in callees, (
+        "#4625 F3 regressed: `get_onboarding_state` reads the projection "
+        "inline — it must ride the off-loop wrapper"
+    )
+    assert "_org_email" not in callees, (
+        "#4625 F3 regressed: `get_onboarding_state` reads the org email "
+        "inline — it must ride `asyncio.to_thread`"
+    )
+
+
+def test_onboarding_offload_wrappers_are_used():
+    """A wrapper nothing calls is not a fix — and a rename would silently
+    vacate the leg it was added for (#4625).
+
+    Both files are scanned: ``_get_onboarding_projection_off_loop`` is defined
+    in ``hosted_api.py`` but its caller is the MCP gate in ``mcp_server.py``.
+    """
+    called = {
+        _callee_name(call.func)
+        for path in (HOSTED_API, MCP_SERVER)
+        for call in ast.walk(ast.parse(path.read_text()))
+        if isinstance(call, ast.Call)
+    }
+    missing = sorted(_ONBOARDING_OFFLOAD_WRAPPERS - called)
+    assert not missing, (
+        f"the #4625 offload wrapper(s) {missing} are never called — a leg they "
+        "were added for has silently regressed or been renamed"
+    )
+
+
+def test_sync_mcp_tools_stay_off_loop():
+    """The dispatch assumption behind scanning only ASYNC ``mcp_server`` bodies.
+
+    fastmcp's ``FunctionTool.from_function`` defaults ``run_in_thread=True`` and
+    ``FunctionTool._execute`` sends a sync tool body through
+    ``anyio.to_thread.run_sync``, so the sync onboarding tools are already off
+    the loop. If that default flips, they become on-loop work and this scan's
+    scope is wrong — fail HERE rather than silently.
+    """
+    from fastmcp.tools import FunctionTool
+    assert FunctionTool.model_fields["run_in_thread"].default is True, (
+        "fastmcp's sync-tool dispatch default changed — the sync MCP tools may "
+        "now run on the event loop; re-scope the #4625 mcp_server scan"
     )
 
 

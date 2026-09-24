@@ -49,8 +49,8 @@ AST and reflection are *not* the same question, and nothing reconciled them befo
 `tortoise/sdk.py` already attaches one attribute outside the class body
 (`TortoiseSDK._EVENT_PURGE_LAST = now`); it is private, so it does not surface today, but a
 **public** attach would be visible to reflection and invisible to the AST walk. That is
-exactly the divergence this reconciliation makes loud, and exactly where Phase 2.5's warning
-aliases land.
+exactly the divergence this reconciliation makes loud. A public attach would land here, in the
+gap between the two counts — which is why both are reported.
 
 ## How to add a method to the surface
 
@@ -58,20 +58,27 @@ aliases land.
    with no leading `_`). That alone makes it public — which is the point: it is now *caught*,
    not absorbed.
 2. **Re-render**: `uv run python tools/sdk_surface.py`.
-3. **Get it approved**: `uv run python tools/surface-guard.py` will now be RED. A new public
-   method is an unapproved endpoint (#3863), so add its `sdk:` row to
-   `config/surface-manifest.yml` and set `approval` on that row to the PR number and the
-   approving principal's handle. That step is a human decision, by design — this declaration
-   records identity; the manifest records approval.
+3. **Get it approved — from Daniel, FIRST.** You may not add or remove a public SDK method
+   without human approval (the #4282 mandate): the surface is the contract every agent and
+   customer integration is built on, so a change materially affects customer outcomes. Ask
+   Daniel (repo `AGENTS.md` → "USER QUESTIONS" / "DECISION RELAY") before you write the code
+   or re-cut anything. Only then add the method's `sdk:` row to `config/surface-manifest.yml`
+   and set `approval` on that row to the PR number and Daniel's handle. This declaration
+   records *identity*; the manifest records *approval*. `uv run python tools/surface-guard.py`
+   is RED until that row exists — but a green guard is a CONSISTENCY result, not consent: a
+   change that updates the class and the manifest together passes it, so it cannot tell an
+   approved addition from an unapproved one. Daniel's review is what carries the approval.
 4. **Verify**: `uv run python tools/surface-guard.py` and
    `uv run pytest tests/test_sdk_surface.py tests/test_surface_manifest.py -q`.
 
 Adding a method without steps 2–3 reds `--check`. Adding it without step 3 reds the guard.
 Neither reds silently.
 
-**Removing or renaming** a method is the mirror image, with one extra gate: #3883 requires
-that a retired name still **resolve and warn, naming its replacement**, before anything is
-removed. Do not delete a `def` from the class body until its retired-name warning exists.
+**Removing or renaming** a method is the mirror image, and it carries the same approval gate:
+you may not remove or rename a public SDK method without Daniel's approval (the #4282 mandate).
+The retired name then **fails and names its replacement** (#3836 (c) ruling — there is no SDK
+alias layer, no warning shim, and no call telemetry). Do not delete a `def` from the class body
+until the replacement it points a caller at exists.
 
 ## Related
 

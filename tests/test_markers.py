@@ -511,6 +511,9 @@ def test_no_redirect_stems_registry_exact():
         "test_projection_lifecycle",
         "test_reaper",
         "test_reaper_orphan",
+        # #2814: authoritative-config durability across rebuild_all (embedded
+        # carve-out — see config/ci-surfaces.yml `carve_out:`).
+        "test_rebuild_config_preservation",
         "test_redis_guard",
         "test_smoke_embedded",
         # 2026-08-28 merge-reconciliation: #1785/#1816 added these three to
@@ -550,6 +553,12 @@ def test_no_redirect_stems_registry_exact():
         # pass. Runs embedded in every lane (same rationale as
         # test_hosted_backup).
         "test_cross_tenant_read_isolation",
+        # #4524: the vecf32 overwrite-seam guards assert the EMBEDDED engine's
+        # silent vecf32-overwrite behaviour (the server lane lands the same
+        # write), so the module joins the carve-out lane — registered in
+        # ci-surfaces.yml:carve_out + the core surface and in
+        # TEST_NO_REDIRECT_STEMS.
+        "test_vecf32_overwrite_seams_4524",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "
