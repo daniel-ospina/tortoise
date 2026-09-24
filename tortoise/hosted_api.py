@@ -5472,6 +5472,46 @@ async def _graph_offload(fn, *, op: str, timeout: float | None = None):
         unavailable=_graph_unavailable)
 
 
+async def _capture_session_probe_off_loop(org: dict, session_id: str):
+    """#4625 leg 62: the capture's SDK open + projection attach + session probe.
+
+    The capture path's first three sync FalkorDB units used to run inline in
+    ``_capture_session_impl``: ``_data_sdk`` (the tenancy resolver —
+    ``_make_sdk`` and, for a graph-bound key, ``_assert_graph_owned``'s
+    ownership query), ``sdk._get_proj()`` (a possibly-cold projection open:
+    TCP/TLS/``Is_Sentinel``) and the first ``MATCH``. Together they parked the
+    single event loop for the sample #4625 was measured on.
+
+    The SDK open goes through its own #3773 twin ``_data_sdk_offloaded``, which
+    performs the #2600 actor bind LOOP-side (the bind matters on the loop, not
+    in the discarded worker context). The attach + probe then ride the house
+    ``asyncio.to_thread`` for a short graph read (the ``list_points`` /
+    ``get_point`` shape), with ``_get_proj()`` INSIDE the worker because its
+    FIRST call opens the projection. ``proj`` is returned for the capture's
+    later work; writing it in a worker and using it afterwards is the same
+    cross-thread usage this path already had (``proj`` is handed to
+    ``asyncio.to_thread`` and the dream pools throughout).
+
+    Leg 72 of the same profile — the SDK open in the extraction-estimate quota
+    block a few lines below (``count_org_usage``) — is deliberately NOT folded
+    in: the required #4282 collision pre-flight returned COLLISION, so that leg
+    is skipped in this unit and declared residual by the #4625 guard.
+    """
+    sdk = await _data_sdk_offloaded(org)
+
+    def _probe():
+        proj = sdk._get_proj()
+        return proj, proj.g.query(
+            "OPTIONAL MATCH (s:Session {id:$sid}) "
+            "RETURN count(s) AS n, s.capture_ok AS ok, "
+            "s.capture_extractor AS extractor, s.harness AS harness",
+            params={"sid": session_id},
+        ).result_set[0]
+
+    proj, session_row = await asyncio.to_thread(_probe)
+    return sdk, proj, session_row
+
+
 async def _oauth_offload(fn, *, op: str, no_wait_bound: bool = False):
     """#3669: run ONE synchronous OAuth resolution off the event loop.
 
@@ -9276,7 +9316,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # layer gets the same clear 409 (state-conflict: recording policy off —
     # NOT the old 403 consent error), capture stops (no Session write, no
     # receipt), and the per-harness last-error surfaces the message.
-    recording_ok, rec_layer = _session_recording_allowed(org)
+    # #4625 leg 12: the recording gate is a blocking jsonb/graph read
+    # (`_session_recording_allowed` -> `_get_onboarding_state`). It used to run
+    # inline here, holding the single event loop for the resolution; it now
+    # rides the shared offload seam like the other onboarding reads.
+    recording_ok, rec_layer = await _session_recording_allowed_off_loop(org)
     if not recording_ok:
         if rec_layer == "graph":
             # #2302 (recording-on surface): the graph-layer 409 copy names
@@ -9357,10 +9401,18 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # below skips extraction) and must never be 402-blocked by an as-if-fresh
     # estimate. The opt-out check above stays FIRST in the gate stack; the
     # sessions-limit gate below still counts Session nodes.
-    sdk = _data_sdk(org)
-    proj = sdk._get_proj()
+    # #4625 leg 62: the SDK open (`_data_sdk` -> `_make_sdk` and, for a
+    # graph-bound key, `_assert_graph_owned`'s ownership query) plus the
+    # projection attach and the session probe are ALL sync FalkorDB work; they
+    # used to run inline here, parking the single event loop for the tenancy
+    # resolution, a possibly-cold projection open (TCP/TLS/Is_Sentinel) and the
+    # first MATCH. `_capture_session_probe_off_loop` owns the hand-off (the same
+    # off-loop seam the onboarding projection read uses); `session_id`/`now` are
+    # pure computations, hoisted above it.
     session_id = body.session_id or f"session_{uuid.uuid4().hex[:12]}"
     now = datetime.now(UTC).isoformat()
+    sdk, proj, session_row = await _capture_session_probe_off_loop(
+        org, session_id)
     # #1727 (review PR #1827) TOCTOU: two concurrent POSTs with the same
     # FRESH session_id can both observe session_existed=False and mint a
     # sessionCaptured Event (narrow race) — sequential retries converge
@@ -9375,12 +9427,6 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # sessionCaptured Event mint below uses a DETERMINISTIC id derived from
     # session_id (_session_capture_event_id), so both writers MERGE onto
     # ONE Event node instead of minting two.
-    session_row = proj.g.query(
-        "OPTIONAL MATCH (s:Session {id:$sid}) "
-        "RETURN count(s) AS n, s.capture_ok AS ok, "
-        "s.capture_extractor AS extractor, s.harness AS harness",
-        params={"sid": session_id},
-    ).result_set[0]
     session_existed = bool(session_row[0])
     # #3681 (server-stamped harness): the capture's harness is resolved from
     # the SERVER's own record — a session-JWT caller never names one (bare
@@ -19826,6 +19872,36 @@ def _session_recording_allowed(org: dict) -> tuple[bool, str]:
     return True, "team"
 
 
+async def _session_recording_allowed_off_loop(org: dict) -> tuple[bool, str]:
+    """`_session_recording_allowed` off the event loop (#4625, leg 12).
+
+    The helper is synchronous END TO END and both of its legs block: its
+    ``_get_onboarding_state`` read goes through the blocking
+    ``SupabaseControlPlane`` transport in hosted mode (and the registry Team
+    node in selfhost), and ``_graph_recording_override`` opens a graph handle.
+    Called inline from ``_capture_session_impl`` it held the single event loop
+    for the whole resolution — one of the py-spy MainThread legs #4625 was
+    measured on.
+
+    The unit of offload is the RESOLUTION (the #3498 design), so the org
+    default read and the per-graph override probe stay in ONE worker. The pool
+    is ``graph`` and the bound is the seam's standard REQUEST bound — the same
+    contract its sibling read wrapper keeps
+    (``_get_onboarding_projection_off_loop``): a capture must not park a graph
+    worker for the lane's cold-start allowance, and an over-bound read fails
+    closed (503) rather than hanging the capture.
+
+    Read-MOSTLY, not read-only (the #4625 work order §2): in the selfhost lane
+    ``_get_onboarding_state`` auto-materializes defaults, but that write is
+    idempotent, so abandoning the worker on a bound miss is safe.
+    """
+    return await _graph_offload(
+        lambda: _session_recording_allowed(org),
+        op="session_recording_allowed",
+        timeout=_monitoring.CONTROL_PLANE_OFFLOAD_TIMEOUT_S,
+    )
+
+
 def _onboarding_defaults() -> dict:
     """Fresh default-state dict (code-review P2): the list-typed keys
     (github_issues_scope / github_docs_scope) must NOT be shared across orgs
@@ -20603,9 +20679,17 @@ async def get_onboarding_state(org: dict = Depends(get_current_org_session_ungat
     an overview read)."""
     # C5 #2114: onboarding state reads the DEFAULT graph — org-level surface.
     _reject_graph_bound_org_surface(org, "onboarding")
+    # #4625: this route is a declared READ of the issue, not the write-path
+    # residual — BOTH of its legs block (the projection read opens the graph /
+    # hits PostgREST; `_org_email` reads `teams.email`, or the registry Team
+    # node in selfhost), so neither may run on the event loop. The projection
+    # rides its #2924 off-loop wrapper; the email read rides `asyncio.to_thread`
+    # — the same short-read hand-off `list_points` / the capture probe use,
+    # which (unlike `_cp_offload`) does not put a registry graph open on the
+    # auth pool nor impose its fail-closed 503 on this read.
     return {
-        "onboarding": _get_onboarding_projection(org["org_id"]),
-        "email": _org_email(org["org_id"]),
+        "onboarding": await _get_onboarding_projection_off_loop(org["org_id"]),
+        "email": await asyncio.to_thread(_org_email, org["org_id"]),
     }
 
 
