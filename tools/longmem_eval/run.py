@@ -5464,6 +5464,16 @@ def _print_summary(report: dict[str, Any]) -> None:
             print(f"  {cls:<28} {count}")
     else:
         print("error census: no errors")
+    # #2873: the extractor-warning readout — printed ONLY when the run
+    # emitted warnings, so a warning-bearing run's console summary is no
+    # longer byte-identical to a clean one (the issue's symptom). Readout
+    # only; never a gate limb (integrity.valid untouched).
+    ew = integ.get("extractor_warnings") or {}
+    if ew.get("count"):
+        print(f"extractor warnings: {ew.get('count')} across "
+              f"{ew.get('questions_with_warnings')} question(s)")
+        for w in (ew.get("sample") or []):
+            print(f"  - {w}")
     for c in integ.get("checks") or []:
         print(f"  check: {c}")
     # #1946: the extraction-health gate readout — printed BEFORE the score
