@@ -1049,6 +1049,10 @@ def test_cut_resets_approvals_at_the_WRITE_SITE(monkeypatch, tmp_path, derived_b
     WRITE site — which is where it would live — left the suite green (review finding). So
     the previous artifact, carrying approvals, is placed AT THE PATH `cut` WRITES and the
     file it leaves behind is read back.
+
+    The reset is now gated by `--allow-approval-reset` (#4598): it still happens, but only
+    deliberately, and it names what it drops. The refusal half is
+    `test_cut_REFUSES_to_blank_recorded_approvals` below.
     """
     sm = _load_manifest_tool()
     path = tmp_path / "surface-manifest.yml"
@@ -1060,7 +1064,8 @@ def test_cut_resets_approvals_at_the_WRITE_SITE(monkeypatch, tmp_path, derived_b
 
     monkeypatch.setattr(sm, "MANIFEST_FILE", path)
     monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
-    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 0
+    ns = argparse.Namespace(commit="deadbeef", allow_approval_reset=True)
+    assert sm.cmd_cut(ns) == 0
 
     written = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert written["approval_status"] == "pending-owner-approval"
@@ -1073,6 +1078,117 @@ def test_cut_resets_approvals_at_the_WRITE_SITE(monkeypatch, tmp_path, derived_b
         "the write site carried the previous approvals across the re-cut, reversing the "
         f"control CONTRIBUTING.md steps 2-4 rely on: {carried[:5]}"
     )
+
+
+def test_cut_REFUSES_to_blank_recorded_approvals(monkeypatch, tmp_path, capsys, derived_baseline):
+    """A re-cut must not be able to destroy an owner approval SILENTLY (#4598).
+
+    On 2026-09-23 a re-cut landed on `main` through PR #4043 and carried six recorded owner
+    approvals to zero. Nothing went red, because `approval` is NON_DERIVABLE: no derived
+    property compares it, so the loss is invisible to every check that exists. The reset
+    itself is still the documented control — what this pins is that it cannot happen
+    without the operator saying so and seeing which rows they are dropping.
+    """
+    sm = _load_manifest_tool()
+    path = tmp_path / "surface-manifest.yml"
+    prior = copy.deepcopy(_manifest())
+    for row in prior["rows"]:
+        row["approval"] = None
+    approved_row = prior["rows"][0]["name"]
+    prior["rows"][0]["approval"] = "#4173 @daniel-ospina"
+    prior["approval_status"] = "pending-owner-approval"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    before = path.read_text(encoding="utf-8")
+
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    # No flag -> refuse, and the artifact is left EXACTLY as it was found.
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 1
+    out = capsys.readouterr().out
+    assert approved_row in out, f"the row it would drop is not named: {out}"
+    assert "#4173 @daniel-ospina" in out, f"the approval value is not shown: {out}"
+    assert path.read_text(encoding="utf-8") == before, "the refusal WROTE the manifest"
+
+    # With the flag -> it proceeds, and STILL names every row it drops.
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef", allow_approval_reset=True)) == 0
+    out = capsys.readouterr().out
+    assert "DROPPED" in out and approved_row in out, out
+    written = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert all(r.get("approval") is None for r in written["rows"]), (
+        "the flag was passed, so the reset is deliberate and expected — but a row kept an "
+        "approval the re-cut should have cleared"
+    )
+
+
+def test_the_guard_REFUSES_an_UNREADABLE_baseline_rather_than_overwriting_it(
+    monkeypatch, tmp_path, capsys, derived_baseline
+):
+    """An unreadable artifact is REFUSED — never silently overwritten.
+
+    This flips the earlier reading. The artifact is the ONLY carrier of the owner's per-row
+    approvals, and an unreadable one may well carry approvals that cannot be enumerated, so
+    writing over it destroys them without ever naming them — the #4598 wipe again. "There is
+    nothing to refuse for" was wrong: the refusal is precisely that the set is NOT enumerable.
+    """
+    sm = _load_manifest_tool()
+    path = tmp_path / "surface-manifest.yml"
+    broken = "this: [is not\n  a manifest\n"
+    path.write_text(broken, encoding="utf-8")
+
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 1
+    assert path.read_text(encoding="utf-8") == broken, "the refusal WROTE the manifest"
+
+
+def test_a_MISSING_baseline_still_cuts(monkeypatch, tmp_path, derived_baseline):
+    """The first cut has no approvals to lose, and must keep working.
+
+    The pair to the refusal above: the guard distinguishes MISSING (nothing to lose) from
+    UNREADABLE (may carry something we cannot see). Conflating them would either block the
+    first cut or reopen the silent overwrite.
+    """
+    sm = _load_manifest_tool()
+    path = tmp_path / "surface-manifest.yml"
+    assert not path.exists()
+
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 0
+    assert yaml.safe_load(path.read_text(encoding="utf-8"))["counts"]["tools"] >= 1
+
+
+def test_the_guard_sees_a_RETIRED_row_approval(monkeypatch, tmp_path, capsys, derived_baseline):
+    """The mutation evidence for the RETIRED half of the artifact.
+
+    `retired:` rows carry `approval` too — retiring a name shrinks the surface and needs the
+    same human approval, and `build_doc` blanks it there as well. A guard that walks only
+    `rows:` passes this case GREEN while a recorded retirement approval is destroyed, which
+    is the same silent wipe through the other door. Assert on the retired row specifically:
+    a guard reading only `rows:` fails here.
+    """
+    sm = _load_manifest_tool()
+    path = tmp_path / "surface-manifest.yml"
+    prior = copy.deepcopy(_manifest())
+    for row in [*prior["rows"], *prior["retired"]]:
+        row["approval"] = None
+    assert prior["retired"], "fixture has no retired rows to test the retired arm with"
+    retired_row = prior["retired"][0]["name"]
+    prior["retired"][0]["approval"] = "#4598 @daniel-ospina"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    before = path.read_text(encoding="utf-8")
+
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 1, (
+        "a recorded approval on a RETIRED row did not stop the re-cut — the guard is "
+        "reading `rows:` only"
+    )
+    out = capsys.readouterr().out
+    assert retired_row in out and "#4598 @daniel-ospina" in out, out
+    assert path.read_text(encoding="utf-8") == before, "the refusal WROTE the manifest"
 
 
 def test_cut_refuses_when_the_declaration_cannot_be_IMPORTED(monkeypatch, capsys, tmp_path):

@@ -117,6 +117,7 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # breaks the coupling; the namespace IS the identity here. VERIFIED by
     # rename probe this task.
     "test_onboarding_false_completion_repair.py": {"registry": "prod-coupled"},  # #3912: registry seed read back by the guard's own TortoiseSDK(namespace="registry")
+    "test_onboarding_truth_surface.py": {"registry": "prod-coupled"},  # #3670/#3671/#3681: registry-resolve seeding for the server-owned capture receipts (same _make_sdk(namespace="registry") lane as the siblings above)
     "test_onboarding_seed_endpoint.py": {"registry": "prod-coupled"},  # #1999 (W3): seed/decide endpoint tests
     "test_onboarding_state_split.py": {"registry": "prod-coupled"},
     "test_onboarding_state.py": {"registry": "unit-only"},
@@ -510,6 +511,9 @@ def test_no_redirect_stems_registry_exact():
         "test_projection_lifecycle",
         "test_reaper",
         "test_reaper_orphan",
+        # #2814: authoritative-config durability across rebuild_all (embedded
+        # carve-out — see config/ci-surfaces.yml `carve_out:`).
+        "test_rebuild_config_preservation",
         "test_redis_guard",
         "test_smoke_embedded",
         # 2026-08-28 merge-reconciliation: #1785/#1816 added these three to

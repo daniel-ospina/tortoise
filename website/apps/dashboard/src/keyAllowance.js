@@ -105,59 +105,81 @@ export function capLimitFrom(message, team) {
 // only the number's SOURCE and added the no-number-degraded sentence.
 //
 // #2699: the remedy TAIL is not the approved #1147 one. It read "or regenerate
-// an existing key instead", which is unreachable AT the cap: rotate mints the
-// replacement through the SAME capped POST /v1/team/keys (see
-// rotateCapNoticeFrom), so "regenerate" 402s exactly like "create". The tail
-// now names the no-cost action that does work at the cap — revoke an existing
-// key (a revoked row leaves the gate's count, freeing a slot) — or upgrade.
-// It deliberately does NOT say "unused" (which presumes a spare slot-holder
-// exists; the count can be held by rows the table hides), does NOT promise a
-// SINGLE revoke always suffices (an over-cap org stays at/over the gate until
-// enough rows are revoked), and does NOT promise the upgrade frees a key
-// immediately.
-export function upgradeNoticeFrom(message, team) {
+// an existing key instead", which was unreachable at the time: rotate minted
+// its replacement through the SAME capped POST /v1/team/keys, so at the cap
+// "regenerate" 402'd exactly like "create". The tail now names remedies that
+// ALWAYS work at/over the cap — revoke an existing key (a revoked row leaves
+// the gate's count, freeing a slot) or upgrade.
+//
+// #4355 note: rotate is now a THIRD achievable remedy at the cap (it is
+// cap-neutral by construction), but the tail is deliberately NOT extended with
+// it. This string is the approved #2699 copy and the create-path remedy is
+// exact and achievable without it; adding a second route here would put a
+// second copy of the rotate promise on a surface whose job is to explain the
+// CREATE refusal. It deliberately does NOT say "unused" (which presumes a
+// spare slot-holder exists; the count can be held by rows the table hides),
+// does NOT promise a SINGLE revoke always suffices (an over-cap org stays
+// at/over the gate until enough rows are revoked), and does NOT promise the
+// upgrade frees a key immediately.
+export function upgradeNoticeFrom(message, team, hasUpgrade = true) {
   const limit = capLimitFrom(message, team)
-  if (limit === null) {
-    return "You've reached your plan's API key limit. Revoke an existing key to free a slot — or upgrade to add more."
-  }
-  return `You've reached your plan's limit of ${limit} API keys. Revoke an existing key to free a slot — or upgrade to add more.`
+  const head = limit === null
+    ? "You've reached your plan's API key limit"
+    : `You've reached your plan's limit of ${limit} API keys`
+  // #4335: the "or upgrade" tail is only truthful when an upgrade path exists
+  // (a configured higher tier, or one temporarily unavailable). Callers pass
+  // hasUpgrade=false for the top tier / a deployment selling no higher tier.
+  return `${head}. Revoke an existing key to free a slot${hasUpgrade ? ' — or upgrade to add more.' : '.'}`
 }
 
-// #2229: rotate-path cap notice. Rotate mints the REPLACEMENT before revoking
-// the old key, so a team AT max_api_keys 402s on the mint leg. Unlike the
-// create-path notice above, this one also states WHY the obvious move fails
-// (the replacement needs a free slot before the old key is revoked) — that
-// mechanism clause is what keeps rotate's notice its own string (#2699 left
-// it byte-identical). Truthful escape: revoke an unused key first, or upgrade.
-export function rotateCapNoticeFrom(message, team) {
+// #2229/#4355: rotate-path cap notice.
+//
+// #4355 CHANGED WHEN THIS IS REACHABLE AT ALL. Rotate is now cap-NEUTRAL by
+// construction: the replacement consumes exactly the slot the displaced row
+// releases (the server credits that slot only after proving the old row is one
+// the count actually charged — the revoked/expired/bootstrap refusals). So a
+// team merely AT its limit rotates fine, and the ONLY way this notice fires is
+// an org already OVER its limit — a downgrade or a legacy over-cap org, where
+// even crediting the released slot leaves `count - 1 >= limit`.
+//
+// The pre-#4355 mechanism clause ("Rotating creates the replacement before
+// revoking this one") is now FALSE and is deleted: it described the old
+// mint-then-revoke ordering, which is exactly what #4355 replaced. The remedy
+// is the truthful over-cap one — revoke down to the limit, or upgrade.
+export function rotateCapNoticeFrom(message, team, hasUpgrade = true) {
   const limit = capLimitFrom(message, team)
   if (limit === null) {
-    return "You're at your plan's API key limit. Rotating creates the replacement before revoking this one, so revoke an unused key first — or upgrade to add more."
+    return `You're over your plan's API key limit. Rotating replaces this key without adding one, so revoke keys until you're back within the limit${hasUpgrade ? ' — or upgrade to add more.' : '.'}`
   }
-  return `You're at your plan's limit of ${limit} API keys. Rotating creates the replacement before revoking this one, so revoke an unused key first — or upgrade to add more.`
+  return `You're over your plan's limit of ${limit} API keys. Rotating replaces this key without adding one, so revoke keys until you're back within the limit${hasUpgrade ? ' — or upgrade to add more.' : '.'}`
 }
 
-// #4353: the connect step's existing-key note. Below the cap, rotate is the
-// route that does not grow the count. AT the cap it is a dead end for the
-// reason rotateCapNoticeFrom states — the replacement is minted through the
-// SAME capped POST /v1/team/keys before the old row is revoked — so the note
-// returns the canonical at-cap remedy instead of sending the user there.
+// #4353/#4355: the connect step's existing-key note. #4353 made this
+// cap-aware on the (then true) premise that rotate was a dead end at the cap —
+// it minted its replacement through the SAME capped POST /v1/team/keys before
+// revoking the old row. #4355 removed that premise by construction (see
+// rotateCapNoticeFrom), so the at-cap branch now sends the user TO rotate
+// rather than away from it; what still differs at the cap is the price of the
+// OTHER route — a fresh create needs a free slot that no longer exists.
 export function existingKeyNoteFrom(team, rows, now = Date.now()) {
   const a = keyAllowance(team, rows, now)
-  if (a && a.exhausted) return rotateCapNoticeFrom('', team)
-  return "Rotate the existing key in the API Keys tab to get a value you can use — rotating replaces it without adding a key. Creating a new key here spends another of your plan's key slots."
+  const rotate = "Rotate the existing key in the API Keys tab to get a value you can use — rotating replaces it without adding a key."
+  if (a && a.exhausted) {
+    return `${rotate} Creating a new key needs a free slot, and your plan's ${a.limit} are all in use — revoke one or upgrade first.`
+  }
+  return `${rotate} Creating a new key here spends another of your plan's key slots.`
 }
 
-// #4353: the paste-validation rejections tell an owner/admin how to get a key
-// they can actually use. AT the cap every one of those routes — create and
-// rotate alike — needs a slot the gate has already spent: `create` is refused
-// by _check_org_limit before the mint, and `rotate` mints its replacement
-// through that SAME capped route before the old row is revoked. So the remedy
-// must name revoke first. Empty below the cap, and empty when the server has
-// not supplied a limit: the clause is added, never substituted, so no surface
-// gains a promise it cannot keep.
+// #4353/#4355: the paste-validation rejections tell an owner/admin how to get a
+// key they can actually use. #4353 keyed the remedy on "at the cap every route
+// needs a slot" — true then, because `rotate` minted through the capped route
+// too. #4355 makes rotate cap-neutral, so the clause must name BOTH truths:
+// create is the one that needs a free slot, and rotate is the route that does
+// not. Empty below the cap, and empty when the server has not supplied a
+// limit: the clause is added, never substituted, so no surface gains a promise
+// it cannot keep.
 export function capRevokeFirstClause(team, rows, now = Date.now()) {
   const a = keyAllowance(team, rows, now)
   if (!a || !a.exhausted) return ''
-  return " You are at your plan's key limit, so revoke a key in the API Keys tab first — a create needs a free slot, and a rotate mints its replacement before the old key is freed."
+  return " You are at your plan's key limit, so creating a new key needs a free slot — revoke a key in the API Keys tab first, or rotate an existing one instead, which replaces it without needing one."
 }

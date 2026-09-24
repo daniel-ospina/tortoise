@@ -111,7 +111,7 @@ These conditions define a **clean completion** only. A convergence, stall, abort
 
 #### Hard Cap
 
-**The skill's own bound always governs — this file only supplies a fallback.** The `proportional-gates` skill holds the **canonical** proportional table (Low → skip; Low-Medium → **3**; Medium-High → **5**; High → **10**), and most convergence-gated skills use a **10-cycle safety cap** (`code-review`, `test-review`, `epic-plan`, `verification-before-completion` are examples — **not an exhaustive list**). Other skills carry their own bounds, all of them governing over the fallback (`prototype-review` 5, 3 in React-diff mode; the `research` Step-5.5 verifier 2; the second-model gates in `code-review`, `plan-review` and `issue-scoping` 2; `codebase-audit` 3). The `subagent-driven-development` final reviewer is also a second-model gate but states no cycle bound of its own, so the fallback **10** governs it. A skill that says "no hard cap" but states a safety cap is **still governed by that cap** — "no hard cap" means no quality-gate ceiling, not no runaway guard. Only when a skill states no bound of any kind does the fallback **10** apply, and a skill that **explicitly declares itself uncapped** (`carousel-designer` — "No Cycle Cap … No arbitrary cap") is never capped by this file, and its own stop rules govern.
+**The skill's own bound always governs — this file only supplies a fallback.** The `proportional-gates` skill holds the **canonical** proportional table (Low → skip; Low-Medium → **3**; Medium-High → **5**; High → **10**), and most convergence-gated skills use a **10-cycle safety cap** (`code-review`, `test-review`, `epic-plan`, `verification-before-completion` are examples — **not an exhaustive list**). Other skills carry their own bounds, all of them governing over the fallback (`prototype-review` 5, 3 in React-diff mode; the `research` Step-5.5 verifier 2; `codebase-audit` 3). The `subagent-driven-development` final reviewer states no cycle bound of its own, so the fallback **10** governs it. A skill that says "no hard cap" but states a safety cap is **still governed by that cap** — "no hard cap" means no quality-gate ceiling, not no runaway guard. Only when a skill states no bound of any kind does the fallback **10** apply, and a skill that **explicitly declares itself uncapped** (`carousel-designer` — "No Cycle Cap … No arbitrary cap") is never capped by this file, and its own stop rules govern.
 
 **One domain bounds by surface, not by count: the adversarial domain** (gate/enforcement code whose correctness is "an attacker cannot make it fail open" — argv/path/symlink resolution, working-tree discard, merge and verification gates). Its bound is **the declared threat surface, not reviewer exhaustion: 2 cycles** — the skill's own bound for that domain, canonical in `proportional-gates`, so the paragraph above still governs (this file imposes nothing tighter). Scoping declares the in-scope bypass classes and the classes explicitly out of scope; acceptance is **every declared class covered by a test + green CI**, not "the reviewer ran out of ideas". Residuals are **filed from cycle 1, not chased** — findings outside the declared surface are follow-up issues by default. A fresh reviewer that reproduces no in-scope bypass and confirms the declaration is covered exits `THREAT SURFACE COVERED` — this domain's defined clean equivalent. **When a merge rests on threat-list coverage rather than a literal `NO ISSUES FOUND`, say so plainly** in the PR body and the report (`[ADVERSARIAL-BOUND] cycles=<N> threats=<K> covered=<K> residuals=<#N,…|none>`); never present a bounded exit as an unbounded clean one. <!-- adversarial-bound: cap=2 -->
 
@@ -175,9 +175,7 @@ This applies even for "obvious" fixes — the cost of a wrong diagnosis is highe
 
 Use Pi's `task` tool for all sub-agent work. Sub-agents have isolated context → construct their prompts with exactly what they need.
 
-**⛔ Model override prohibition:** Do NOT pass `model: "claude-sonnet"` or any non-DeepSeek model to the `task` tool. Only DeepSeek is configured for general use; see the second-model-gate exception below. Overriding will cause the sub-agent to fail with "No API key found for anthropic."
-
-**Second-model gate exception (#284, resolved by #716):** the second-model review gates (issue-scoping §5.6 coherence check, code-review §6.6 + plan-review §4.5 final gates, subagent-driven-development final code reviewer) resolve their model with `bash "$AGENT_INFRA_PATH/scripts/check-second-model.sh" --probe` (network; `RESOLVED=<provider/id>` for the first **solvent+reachable** candidate, or `DEGRADED`) — never a hardcoded literal. `--print` (offline; honours `$SECOND_MODEL`, else the ordered `preference` in `pi-bootstrap/pi-config/second-model.json`) is an offline hint for inspection only — never the dispatch source. Dispatch the `--probe` `RESOLVED` (the probe is the liveness gate and the dispatch authority; `--print` is an offline hint, never the resolution, and with `$SECOND_MODEL` set the probe certifies only that id — never a config default). Non-DeepSeek second models are permitted via the config `preference` order or an explicit `$SECOND_MODEL` override. **Fail-closed DEGRADED:** when `--probe` exits non-zero — or, for a malformed/unusable authority, `--print` emits `**DEGRADED` — the gate MUST NOT dispatch a substitute — dispatching `deepseek-flash` (pi's built-in task-subagent default) or any build-equivalent model as an "independent" review is FORBIDDEN. There is NO recordable degraded marker — check (f) hard-fails both forms: `model=**DEGRADED` is rejected as a reserved value (before the independence field is read), and `independent=DEGRADED` is rejected by design. STOP and escalate to a human: degradation is a human decision, not an auto-fallback, and the guarded-surface change cannot merge until an independent model is funded or the operator authorizes a bypass (#860). **Success path — record the marker.** When the probe resolves (`RESOLVED=<provider/id>`), record `SECOND_MODEL_GATE_MODEL=<RESOLVED id> SECOND_MODEL_GATE_INDEPENDENT=yes` via `record-review.sh` (which posts `[SECOND-MODEL-GATE] model=<id> independent=yes @ <head-sha>`); `scripts/check-pipeline-compliance.sh` check (f) fails a guarded-surface diff with no such line. **#512 cold-class carve-out:** the venice cold-class seam (`COLD_CLASS_PROVIDER`, docs/providers.md §8) is an operator override SEPARATE from `$SECOND_MODEL` — it applies ONLY to default-leg (flash) cache-cold reviewer/eval dispatches an operator has explicitly opted in; it never authorizes a non-DeepSeek or venice-served second-model gate run. Second-model gates route venice only when `$SECOND_MODEL` itself resolves there. **#476 provider-failover interplay:** the failover's exhaustion hops (deepseek → openrouter/qwen-tp serving name-compatible deepseek ids) are the framework's own dispatch change and leave `$SECOND_MODEL` untouched — the gate's role fidelity is preserved. Annotation rule when the failover is active: same provider id on a different leg is NOT the same pinned version — a `[SECOND-MODEL-GATE]` dispatch that lands on a hop leg (deepseek→openrouter re-serve of the same id, or the qwen-tp `deepseek-v4-flash-0731` rename once qwen-tp is unblocked) MUST be annotated `[#476 hop-leg]`; never present a hop-leg run as the configured second model.
+**⛔ Model override prohibition:** Do NOT pass `model: "claude-sonnet"` or any non-DeepSeek model to the `task` tool. Only DeepSeek is configured for general use. Overriding will cause the sub-agent to fail with "No API key found for anthropic."
 
 <!-- REPO-SPECIFIC: Add tool-specific exceptions here (e.g., design_reviewer for Claude Opus) -->
 
@@ -392,6 +390,31 @@ Public repository that houses:
 | Any non-trivial research | `skills/research/SKILL.md` | Shallow analysis, costly rework |
 | Dispatching work on any issue (worktree, branch, sub-agent, parallel workstream) | `python3 tools/collision_preflight.py <N> --repo .` — must exit 0 before dispatch | A second agent duplicates live work; overlapping PRs and a wasted dispatch cycle (#3061) |
 
+### ⛔ HARD RULE: MCP/SDK Surface Approval — Ask Daniel Before You Change the Surface
+
+You may **not** add or remove a tool from the MCP surface, or a method from the SDK surface,
+without **human approval from Daniel**. This is a mandated rule, not a suggestion, and it is not
+machine-enforced.
+
+- **THE RULE.** The MCP tool surface is `TOOL_REGISTRY` in `tortoise/tool_registry.py`; the SDK
+  surface is the public (non-underscore) methods on `TortoiseSDK` in `tortoise/sdk.py`. Adding,
+  removing, or renaming either is a surface change.
+- **WHY IT EXISTS.** The surface is the contract every agent and customer integration is built
+  on — changing it changes what every agent can see and do, so it materially affects customer
+  outcomes.
+- **WHAT TO DO.** Get Daniel's approval **first**, before you write the change or re-cut the
+  baseline, through the "USER QUESTIONS" / "DECISION RELAY" path above: name the tool or method,
+  say what it does and why it is needed. Then follow `CONTRIBUTING.md` → "The MCP tool surface and
+  public SDK methods cannot grow by accident".
+- **THE GATE IS NOT THE APPROVAL.** `tools/surface-guard.py` and `tools/surface_manifest.py check`
+  are **drift controls**: a change that updates the code and `config/surface-manifest.yml`
+  together **passes both**. They catch an *unrecorded* change and cannot tell an approved addition
+  from an unapproved one. A green run is not consent.
+
+Do **not** propose replacing this with a GitHub ruleset, `CODEOWNERS`, a required second approver,
+or a separate automation identity — the owner **rejected** that direction on #4282 as
+over-engineering.
+
 ### ⛔ HARD RULE: Collision Pre-Flight Before Any Dispatch
 
 Before spawning a workstream, opening a worktree, or dispatching a sub-agent for issue **N**,
@@ -444,6 +467,42 @@ PRs, a wasted dispatch cycle, and a consolidation decision that should never hav
 (#2985 vs PR #3005, #2952 vs PR #3018 — the incident in #3061). A truncated or partial check is
 worse than none: it manufactures false confidence. Never `grep`/`head`/`tail` a completeness check.
 
+### ⛔ HARD RULE: Confirm the Dispatch Landed — `cmux send` Success Is Not Delivery
+
+Never dispatch to a cmux pane with a bare `cmux send`. **Use `tools/cmux_dispatch.py`** — it is the
+only dispatch path that confirms the ARTIFACT rather than the send:
+
+```bash
+python3 tools/cmux_dispatch.py send --workspace <ws> --surface <surf> \
+    --label <lane> --file <brief.txt>        # exit 0 ONLY if it became a turn
+```
+
+`cmux send` exits 0 when *bytes were written to the terminal*, which is a different event from *the
+message became a conversation message*. Two live failure modes sit downstream of that syscall and
+are invisible to any exit code (#4292):
+
+1. **Send-during-boot race** — bytes written before pi's TUI takes over stdin sit unsent in the
+   composer (or are discarded).
+2. **The boot-block prompt** — a freshly-booted pi can be blocked on `Press any key to continue...`
+   (`dist/migrations.js::showDeprecationWarnings`, interactive mode, triggered by a non-fd/rg entry
+   under a `tools/` directory). That prompt consumes the bytes as its keypress: the pointer is
+   **eaten**, or its prefix is eaten and the remainder submitted as a **truncated turn**.
+
+The dispatcher waits for the pane to be safe to send (dismissing a boot-block prompt instead of
+feeding it the brief), sends text + a bare Enter, then confirms via
+`cmux list-workspaces --json` → `latest_submitted_message`, recovering automatically (release the
+composer with a bare Enter, or dismiss-and-re-send when the text was eaten). It exits non-zero with
+`sent-but-not-consumed` when the message never became a turn.
+
+**One-line check until every caller is migrated:** after dispatching, confirm the lane shows a
+`Working` spinner (`cmux read-screen --workspace <ws> --lines 6`) before assuming it started. A pane
+showing the pointer text above the status line with `0.0%` and no spinner has NOT started.
+
+**Consequence of skipping:** a silently-dead lane is indistinguishable from a working one until the
+work does not happen — or until a corrupted turn runs on a truncated brief. This cost a full
+dispatch cycle and was invisible to every pre-existing check; it is also the most likely explanation
+for three sends to one pane that were recorded as `OK` and never consumed.
+
 ### Key Directories
 
 | Path | Purpose |
@@ -474,7 +533,7 @@ worse than none: it manufactures false confidence. Never `grep`/`head`/`tail` a 
 - **Most tasks:** `deepseek-v4-flash` (base default)
 - **Graphics/visual tasks:** `qwen3.8-max` (Qwen 3.8) — interactive session only, where configured
 - **Highly complex / tricky tasks:** `qwen3.8-max` (Qwen 3.8) — interactive session only, where configured
-- **`task`-tool / sub-agent dispatch:** DeepSeek ONLY, per the base-head model-override rule ($SECOND_MODEL gate; see AGENTS.md base head, "Sub-agent Dispatch"). Non-DeepSeek models are never used for sub-agents without the env override.
+- **`task`-tool / sub-agent dispatch:** DeepSeek ONLY, per the base-head model-override rule. Non-DeepSeek models are never used for sub-agents.
 
 ### Git Workflow
 

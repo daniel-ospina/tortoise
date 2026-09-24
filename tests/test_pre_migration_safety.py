@@ -56,18 +56,64 @@ def _get_new_operator_set(proj, anchors: list[str]) -> set[str]:
 
 # ── Fixtures ──────────────────────────────────────────────────────────
 
+def _docker_projection_target(uri: str):
+    """Parse a ``docker://`` URI for the ``test_proj`` fixture, refusing a
+    non-test graph name.
+
+    Extracted to a plain function so the refusal is directly drivable with a
+    non-test URI (``test_non_test_uri_is_refused``) — pytest 9 forbids
+    calling a fixture directly, and no test could otherwise exercise this
+    branch without mutating the session's ambient ``TORTOISE_DB_URI`` before
+    fixture setup.
+
+    Reject a non-test DB URI. NOTE: the fixture's own data reset CANNOT
+    actually wipe such a graph — ``proj.g`` is ``_GuardedGraph``
+    (tortoise/projection/__init__.py:777-801), whose ``_is_bulk_wipe`` →
+    ``_assert_test_graph`` raises ``RuntimeError``, and the fixture's bare
+    ``except`` swallows it. The guard is therefore about ISOLATION and
+    DIAGNOSTICS, not about preventing a wipe: this suite's assertions
+    (parity_sample / audit-sidecar counts) are only meaningful against its
+    own isolated test graph, and the documented lanes use
+    ``tortoise_test_matrix``. Refuse loudly rather than report numbers
+    computed against a shared/dev graph.
+
+    ⚠️ DIVERGENCE (#7795 review P2): this prefix tuple is deliberately
+    NARROWER than tests/_embedded.py's ``_SWEEP_OWNED_PREFIXES`` (which also
+    owns ``team_``/``org_``). That set's input is the ownership JOURNAL; this
+    one gates a graph the suite is about to read and bulk-write blindly, so
+    product-namespace graphs must NOT pass. Do not dedupe the two sets.
+    """
+    from urllib.parse import urlparse
+    parsed = urlparse(uri)
+    graph_name = parsed.path.lstrip("/") or "tortoise"
+    if not graph_name.startswith(("test_", "tortoise_test")):
+        pytest.fail(
+            f"test_proj refuses to DETACH the non-test graph "
+            f"{graph_name!r} — point TORTOISE_DB_URI at a test graph"
+        )
+    return parsed, graph_name
+
+
 @pytest.fixture
 def test_proj():
     """FalkorProjection on the isolated test graph (from conftest.py)."""
     uri = os.environ.get("TORTOISE_DB_URI", "")
     if uri.startswith("docker://"):
-        from urllib.parse import urlparse
-        parsed = urlparse(uri)
+        parsed, graph_name = _docker_projection_target(uri)
+        # #3039 (from main): decode userinfo through the single shared rule —
+        # urlparse does NOT percent-decode, and this fixture previously also
+        # dropped the username entirely. Kept ALONGSIDE the helper above rather
+        # than replaced by it: the helper parses host/port and refuses a
+        # non-test graph name (this branch's whole point), while this supplies
+        # the decoded credentials. Both halves are load-bearing.
+        from tortoise.config import parse_uri_userinfo
+        username, password = parse_uri_userinfo(uri)
         proj = FalkorProjection(
             host=parsed.hostname or "localhost",
             port=parsed.port or 6379,
-            password=parsed.password or None,
-            graph_name=parsed.path.lstrip("/") or "tortoise",
+            username=username,
+            password=password,
+            graph_name=graph_name,
         )
     else:
         # Embedded/redislite — fallback to path
@@ -122,6 +168,30 @@ def _make_operator(proj, source_id: str, target_ids: list[str],
 
 
 # ── Tests ──────────────────────────────────────────────────────────────
+
+
+def test_non_test_uri_is_refused():
+    """Review P1 (#7795 sweep): the fixture's non-test-URI guard IS real and
+    directly drivable. Before this test none existed, and the fixture comment
+    justified the guard with a wipe that cannot execute (``_GuardedGraph``
+    raises ``RuntimeError``, swallowed by the bare ``except``) — the true
+    reason is isolation/diagnostics. A non-test path is refused; a test-named
+    path resolves."""
+    with pytest.raises(pytest.fail.Exception) as excinfo:
+        _docker_projection_target(
+            "docker://:falkordb@localhost:6379/tortoise")
+    msg = str(excinfo.value)
+    assert "refuses to DETACH the non-test graph" in msg
+    assert "'tortoise'" in msg
+    # A pathless docker URI defaults to the shared `tortoise` graph — also
+    # refused (and asserted WITH the rejection, so a future relaxation of
+    # the default to something test-shaped cannot silently pass this pin).
+    with pytest.raises(pytest.fail.Exception):
+        _docker_projection_target("docker://:falkordb@localhost:6379")
+    # The documented lane resolves, unchanged.
+    _parsed, name = _docker_projection_target(
+        "docker://:falkordb@localhost:6379/tortoise_test_matrix")
+    assert name == "tortoise_test_matrix"
 
 class TestParitySampleMatches:
     """Test that parity_sample logic correctly identifies matching operator sets."""

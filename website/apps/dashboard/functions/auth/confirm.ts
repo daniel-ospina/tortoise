@@ -100,6 +100,7 @@ import {
 } from "../_shared/auth/session";
 import { guardStateChangingRequest } from "../_shared/auth/csrf";
 import { requireUserSession, verifyOtp } from "../_shared/auth/supabase";
+import { cspNonce, strictCspWithNonce } from "../_shared/security-headers";
 
 /** A verified email-flow token awaiting the user's explicit confirmation. */
 interface PendingRow {
@@ -164,7 +165,11 @@ function escapeHtml(value: string): string {
  * sibling auth routes) so no new asset pipeline is introduced and the page
  * cannot be stale relative to the handler.
  */
-function emailInterstitial(email: string | null, pendingId: string, kind: string): Response {
+// Exported for the regression guard (#3525): `src/securityHeaders.test.js` calls
+// this and asserts the REAL response carries `no-store`, the flow cookie, and a
+// nonce that the inline `<script>`/`<style>` actually match — a source-level
+// regex on this file would also pass on a commented-out header.
+export function emailInterstitial(email: string | null, pendingId: string, kind: string): Response {
   const shown = email ? escapeHtml(email) : "your account";
   // Recovery is the one type with a post-condition the user must act on, and the
   // one type that revokes the user's other sessions (F15). Everything else just
@@ -175,13 +180,21 @@ function emailInterstitial(email: string | null, pendingId: string, kind: string
     : "A sign-in link was opened for";
   const action = isRecovery ? "continue to set a new password" : "continue to sign in";
   const dest = isRecovery ? "/welcome?reset=1" : "/welcome";
+  // #3525: this is the one self-rendered HTML page in the dashboard AND the one
+  // with no inline event handlers, so it can be nonce-gated — the treatment the
+  // MCP consent page already uses. The policy is NOT nonce-ONLY: it carries the
+  // platform-injected Cloudflare beacon origin beside the nonce (every policy
+  // must — see `_shared/security-headers.ts`), so any script served from that
+  // origin would run here un-nonced. What this page authors is a single inline
+  // script, and that one still needs the nonce.
+  const nonce = cspNonce();
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Confirm your sign-in — Tortoise</title>
-<style>
+<style nonce="${nonce}">
   :root { --bg:#060b14; --surface:#0d1a2d; --text:#cbd5e1; --dim:#94a3b8; --accent:#06b6d4; --red:#ef4444; --border:#1e293b;
           --mono:'SF Mono','Cascadia Code','Fira Code','JetBrains Mono',monospace; --serif:Georgia,'Times New Roman',serif; }
   *,*::before,*::after { box-sizing:border-box; margin:0; padding:0; }
@@ -211,7 +224,7 @@ function emailInterstitial(email: string | null, pendingId: string, kind: string
     <p class="error" id="error" role="alert" aria-live="polite"></p>
     <p class="small">If this is not your account, close this page — no one is signed in yet.</p>
   </main>
-  <script>
+  <script nonce="${nonce}">
     (function () {
       var btn = document.getElementById('continue');
       var err = document.getElementById('error');
@@ -251,8 +264,12 @@ function emailInterstitial(email: string | null, pendingId: string, kind: string
     // names, so it must not be framed. (`_headers` does not reach Functions
     // output, hence the explicit stamp. Not currently exploitable without this —
     // a framed cross-site POST carries no `SameSite=Lax` cookie and would 400.)
+    // #4634: `X-Frame-Options` is the legacy enforcement arm of the same
+    // requirement; `frame-ancestors 'none'` is NOT restated as a second CSP
+    // header because `strictCspWithNonce` already carries it, and #3525's guard
+    // pins the served policy to exactly that one value.
     "X-Frame-Options": "DENY",
-    "Content-Security-Policy": "frame-ancestors 'none'",
+    "Content-Security-Policy": strictCspWithNonce(nonce),
   });
   headers.append("Set-Cookie", buildCookie(FLOW_COOKIE, pendingId, RECOVERY_MAX_AGE_S));
   return new Response(html, { status: 200, headers });

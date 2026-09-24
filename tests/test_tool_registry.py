@@ -956,6 +956,85 @@ class TestCapabilityModel:
                    for v in declared_set_violations(TOOL_REGISTRY,
                                                    sdk_src="class TortoiseSDK:\n    pass\n"))
 
+    def test_read_through_non_sdk_binding_is_checked_by_tool_name(self):
+        """#4035 review (P1): the READ_THROUGH read-classification property must
+        survive the blanked declaration.  `tortoise_packs_list` no longer declares
+        `sdk_method="get_tenant_packs"`, so the `by_method` loop in
+        declared_set_violations can never key on it; the property is asserted per
+        TOOL NAME via NON_SDK_READ_BINDINGS.  Mutation: flip the tool to a writer
+        annotation and the guard must go red.
+        """
+        import dataclasses
+
+        import tool_surface_capabilities as tsc
+        from tool_surface_capabilities import declared_set_violations, served_registry
+
+        from tortoise.tool_registry import _rw
+
+        # The real registry is clean — the violation below is caused by the probe.
+        assert declared_set_violations(served_registry()) == []
+        # ... and the op is genuinely NOT declared on any entry (the premise of
+        # the finding): if it were, the old `by_method` loop would cover it.
+        assert not any(e.sdk_method == "get_tenant_packs" for e in served_registry())
+        assert tsc.NON_SDK_READ_BINDINGS["get_tenant_packs"] == "tortoise_packs_list"
+
+        flipped = [dataclasses.replace(e, annotations=_rw())
+                   if e.name == "tortoise_packs_list" else e
+                   for e in served_registry()]
+        assert any("get_tenant_packs" in v and "non-read HTTP tool" in v
+                   for v in declared_set_violations(flipped)), (
+            "the read-classification property is unchecked for a handler-served "
+            "read-through op")
+
+    def test_read_through_non_sdk_binding_is_live(self):
+        """#4035 review (P1): the op→tool binding is live — a vanished bound tool
+        fails loudly instead of silently dropping the check."""
+        from tool_surface_capabilities import declared_set_violations, served_registry
+
+        without = [e for e in served_registry() if e.name != "tortoise_packs_list"]
+        assert any(
+            "NON_SDK_READ_OPERATIONS entry 'get_tenant_packs' has no tool binding" in v
+            for v in declared_set_violations(without))
+
+    def test_read_through_non_sdk_op_is_not_a_resolution_exemption(self):
+        """#4035 review (P1 consequence 2): `get_tenant_packs` must NOT stay in
+        DANGLING_SDK_DECLARATIONS.  Its only declaration was blanked, so keeping
+        it there would exempt a *future* row that re-declares it from the
+        resolution arm — the re-declaration is the defect, not an exemption.
+        Mutation: a synthetic entry declaring it must fail resolution.
+        """
+        from tool_surface_capabilities import (
+            DANGLING_SDK_DECLARATIONS,
+            binding_resolution_violations,
+        )
+
+        from tortoise.tool_registry import _ro
+        assert "get_tenant_packs" not in DANGLING_SDK_DECLARATIONS
+        assert "health" in DANGLING_SDK_DECLARATIONS  # the legitimately-declared row
+
+        redeclared = _probe("tortoise_probe_redeclared_packs", "get_tenant_packs",
+                            annotations=_ro(), http_policy=True)
+        assert any("does not resolve" in v
+                   for v in binding_resolution_violations([redeclared]))
+
+    def test_second_nonsdk_writer_declarer_is_checked(self):
+        """#4035 review (P2d): the writer-op check keeps its OP-KEYED arm.  The
+        name-keyed NON_SDK_WRITER_BINDINGS arm alone checked one named tool; a
+        SECOND entry declaring `upsert_tenant_manifest` read-annotated passed both
+        that arm and the resolution exemption.  Mutation: it must now go red.
+        """
+        from tool_surface_capabilities import (
+            served_registry,
+            write_classification_violations,
+        )
+
+        from tortoise.tool_registry import _ro
+        second = _probe("tortoise_probe_second_manifest_writer",
+                        "upsert_tenant_manifest", annotations=_ro(), http_policy=True)
+        assert any("non-SDK writer operation" in v
+                   for v in write_classification_violations(
+                       [*served_registry(), second]))
+
     def test_declared_binding_divergence_ledger_is_live(self, monkeypatch):
         """#4337: a ledger key whose registry entry is gone must fail, not persist
         unexamined — the name-goes-stale vacuity #4113 exists to remove. The

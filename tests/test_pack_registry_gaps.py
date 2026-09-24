@@ -102,7 +102,9 @@ class TestValidationEdgeCases:
         assert any("not found in core ontology" in e for e in errors)
 
     def test_subclass_of_parent_lowercase(self):
-        """Parent kind must be PascalCase — lowercase should error."""
+        """A NON-canonical lowercase parent must error (#2727: canonical
+        lowercase object kinds like `document`/`target` are accepted, so the
+        rule is membership-scoped, not blanket PascalCase)."""
         registry = PackRegistry("/tmp/nonexistent")
         errors = registry._validate({
             "namespace": "dev", "name": "Dev",
