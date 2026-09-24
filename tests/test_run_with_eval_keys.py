@@ -384,6 +384,30 @@ class RunWithEvalKeysTests(unittest.TestCase):
         # the receipt still printed (a live shadowed `printf` would silence it)
         self.assertIn("OPENROUTER_API_KEY source=", r.stderr)
 
+    def test_the_sanitization_marker_is_not_inherited_by_children(self):
+        # `_RWEK_SANITIZED` must not leak into the wrapped command: a NESTED
+        # invocation of the launcher would then skip the `bash -p` re-exec and
+        # run with the caller's function shadows live — loading nothing while
+        # still printing a receipt.
+        env = self.base_env(EVAL_KEYS_ENV_FILE=str(self.env_file))
+        env["BASH_FUNC_printf%%"] = "() { return 0; }"
+
+        # 1. the marker itself does not reach the wrapped command
+        marker = self.run_wrapper(
+            ["printenv", "_RWEK_SANITIZED"], env=env, use_fixture=False
+        )
+        self.assertEqual(marker.stdout.strip(), "", marker.stderr)
+
+        # 2. a nested invocation still sanitizes itself
+        r = self.run_wrapper(
+            [str(WRAPPER), "printenv", "OPENROUTER_API_KEY"],
+            env=env,
+            use_fixture=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(FIXTURE_OPENROUTER, r.stdout)
+        self.assertIn("OPENROUTER_API_KEY source=", r.stderr)
+
     # ── .env parsing semantics (mirrors _load_dotenv) ──────────────────
 
     def test_parses_export_quotes_and_comments(self):

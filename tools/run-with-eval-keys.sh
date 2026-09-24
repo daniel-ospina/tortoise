@@ -54,20 +54,27 @@
 # The `_RWEK_`/`_rwek_` namespace belongs to this script: the loader SKIPS any
 # `.env` entry named into it, so a `.env` can never rewrite the launcher's own
 # state (the env file path, the source label, the managed-key set). There is no
-# `eval` on a `.env`-derived name anywhere below.
-
-set -u
+# # `eval` on a `.env`-derived name anywhere below.
 
 # A caller can export a shell FUNCTION through the environment
 # (`BASH_FUNC_<name>%%`) that shadows a builtin — `unset`, `export`, `set`,
-# `printf`, and `builtin` itself, so there is no in-process repair: the repair
-# would run through the shadow. `bash -p` imports NO shell functions and ignores
-# `SHELLOPTS`/`BASH_ENV`, so the launcher re-execs itself once under it, before
-# any builtin that matters runs. The guard uses only `case` (a reserved word,
-# not shadowable) and parameter expansion; `exec` is the one builtin it needs —
-# a caller who shadows `exec` has already broken the final `exec "$@"`.
-# (This is an auditability guard, not a privilege boundary: the invoking
-# principal already supplies the ambient keys and can read them.)
+# `printf`, `[`, and `builtin`/`declare`/`command` — so there is no in-process
+# repair: the repair would run through the shadow. `bash -p` (privileged mode)
+# imports NO shell functions and ignores `SHELLOPTS`/`BASH_ENV`, so the launcher
+# re-execs itself under it before any shadowable builtin that matters runs. The
+# guard below is `case` (a reserved word — not shadowable), parameter expansion,
+# and the `export`/`exec` builtins.
+#
+# `_RWEK_SANITIZED` is that guard's marker and is dropped again immediately, so
+# it cannot reach the wrapped command or a NESTED invocation of this launcher —
+# a nested run that skipped sanitization would print a receipt with no truth in
+# it. It is still a caller-settable opt-out, and a caller who shadows `export`
+# or `exec` prevents the re-exec: the two fail-closed checks below (tracing, and
+# the ambient strip) still run, but a shadow of `exec` would leave the wrapped
+# command unrun while a receipt was printed and the launcher exited 0.
+#
+# This is an auditability guard, not a privilege boundary — the invoking
+# principal supplies the ambient keys and can already read them.
 case "${_RWEK_SANITIZED:-}" in
   '')
     _RWEK_SANITIZED=1
@@ -75,6 +82,7 @@ case "${_RWEK_SANITIZED:-}" in
     exec "${BASH:-bash}" -p "$0" "$@"
     ;;
 esac
+unset _RWEK_SANITIZED
 
 set -u
 
