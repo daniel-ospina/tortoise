@@ -1581,11 +1581,37 @@ procedure sets the variable.
 
 Rules that hold for every one of them:
 
-- **A bypass is never silent** — each emits a `::warning::` naming the gate it
-  skipped, so a run stays auditable after the fact.
+- **A bypass is never silent — and since #4759 it is visible in the run
+  SUMMARY, not only in a step log.** Every bypass renders through ONE reporter
+  (`.github/scripts/deploy-bypass.sh report`): it keeps the `::warning::` and
+  appends a uniform block to `$GITHUB_STEP_SUMMARY` naming the gate, the lane
+  that fired, and `BYPASSED`. Each deploy job also ENDS with a `Deploy gate
+  audit` step (`if: always()`), so a green run states every gate in that job as
+  bypassed or not — the absence of a bypass block is never the reader's only
+  evidence. Before #4759 the four warnings were also inconsistent (two dedicated
+  steps, two inline `echo … >&2`) and the only trace was inside a step log: a
+  bypassed gate and a passed gate looked the same in the summary.
 - **Set the variable for the incident window and CLEAR IT AFTER.** A bypass left
   set means that gate guards no deploy — check it first when a gate seems never
   to fire.
+- **A persistent bypass is DATED, and a machine checks the date.** Setting a
+  `SKIP_*` variable also sets a companion `SKIP_<VAR>_SET_AT` = `YYYY-MM-DD`
+  (UTC) — the window start. `.github/workflows/skip-bypass-expiry.yml` runs
+  daily, ages every set lane against it, and goes **RED** past the window
+  (`WINDOW_DAYS_DEFAULT = 7` in `deploy-bypass.sh` — a week never nags during a
+  real incident, while a bypass that outlives one working week is stale by any
+  reading). A set lane with **no usable start date is a violation too**, so
+  forgetting the date fails LOUD rather than falling back to the prose-only
+  window #4605 died of. The same age is called out `OVERDUE` / `NOT RECORDED` in
+  the summary of every deploy.
+
+  **This is a reminder, never a deploy block.** `skip-bypass-expiry` is a
+  separate scheduled workflow with no path to `deploy-hosted.yml`; blocking
+  would strand the very incident-fix deploy the bypass exists for. Filing no
+  issue is deliberate: the red run is the reminder (GitHub notifies the
+  schedule's author) and the noisy alternative — a second bot-issue producer in
+  a public repo, with its own dedupe and forgery guards — buys nothing the red
+  run and the deploy-time `OVERDUE` callout do not already say.
 - **How much a bypass skips depends on the gate's shape.** The two guards whose
   wrapper translates the checker's exit code — provenance (#4126) and machines
   (#1896) — are bypassed for **exit 1 only** (undeclared/stale declarations,
@@ -1612,9 +1638,27 @@ window** via the variable — the committed default stays `false`.
 
 ```bash
 gh variable list                                             # what is currently bypassed
-gh variable set    SKIP_FLY_SECRET_PROVENANCE --body true    # during the incident
-gh variable delete SKIP_FLY_SECRET_PROVENANCE                # after — REQUIRED
+gh variable set    SKIP_FLY_SECRET_PROVENANCE      --body true          # during the incident
+gh variable set    SKIP_FLY_SECRET_PROVENANCE_SET_AT --body 2026-09-22  # the window start (#4759)
+gh variable delete SKIP_FLY_SECRET_PROVENANCE                        # after — REQUIRED
+gh variable delete SKIP_FLY_SECRET_PROVENANCE_SET_AT                 # after — REQUIRED
 ```
+
+The `_SET_AT` date is the window start, never a switch: no gate's lane condition
+reads it (`SKIP_<VAR>_SET_AT` cannot bypass anything), and `deploy-hosted.yml`
+only binds it into the report step's `env:` to be stated in the summary. Per-run
+bypasses via the dispatch input need no date — nothing is left set.
+
+**Why the expiry check reads `vars`, not `gh variable list --json updatedAt`.**
+The repository-variables endpoint requires the fine-grained "Variables"
+permission, which the workflow `GITHUB_TOKEN` does not carry, and the `vars`
+context exposes a variable's VALUE but not its `updatedAt` — so the `updatedAt`
+route cannot be a machine check on a scheduled run without a separate
+credential (an infra blocker, recorded here rather than silently dropped). The
+dated companion variable is read through the ordinary `vars` context, needs no
+new scope, and works on the push lane where `inputs` is null. The trade — one
+more variable to set — is bounded by the fail-closed rule above: forgetting it
+is a violation, not silence.
 
 ### 8.3 Why a name can be deliberately Fly-only (#661) — do NOT "tidy" it into a GitHub secret
 
