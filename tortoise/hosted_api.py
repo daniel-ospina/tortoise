@@ -120,6 +120,7 @@ from tortoise.sdk import (
     _capture_minted_ids,  # W5 Phase D (#2104): provenance-stamp gate (minted only)
     _capture_resp_error_split,  # #2335 WI-2: customer error contract (headline/diagnostics)
     _capture_turn_embeddings,  # #4194: batched local-embedder call for stored turn Points
+    _capture_turn_role_text,  # #4675: the inverse of the stored turn format
     _capture_turn_texts,  # #4194: the ONE stored-turn text definition (shared with the embed batch)
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
     _emit_capture_observation,  # #2335 WI-1d: observation leg (hosted lane tag)
@@ -11534,7 +11535,6 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     capture). Org-member authz: session users are membership-validated in
     _session_user_org (?org_id= → non-member 403); keys are org-scoped.
     """
-    import re
     _require_scope(org, "graphs:read", "get_session_detail")
     sdk = _data_sdk(org)
     try:
@@ -11598,10 +11598,11 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
         tid = tr[0]
         content = tr[1] or ""
         created_at = tr[2]
-        # Parse "[role] content" format — role is bracketed prefix
-        role_match = re.match(r'^\[([^\]]+)\]\s*', content)
-        role = role_match.group(1) if role_match else "unknown"
-        body = content[role_match.end():] if role_match else content
+        # Split "[role] content". The inverse lives in `tortoise.sdk` next to the
+        # writer (`_capture_turn_texts`) so the stored format and this read have
+        # ONE definition — a client comparing a stored turn against a served
+        # detail depends on the two agreeing (#4675).
+        role, body = _capture_turn_role_text(content)
         turns.append({
             "id": tid,
             "role": role,
