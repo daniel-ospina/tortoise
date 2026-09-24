@@ -2988,22 +2988,16 @@ def test_staged_but_released_claim_emits_no_replay_warning(tmp_path, caplog):
 def test_replay_gate_line_is_debug_and_never_warning(tmp_path, caplog):
     """#4879 regression: a healthy replay must emit NOTHING at WARNING.
 
-    The gate-visibility line names the gate that let a replay through. It is
-    diagnostic, not an alert, so it is DEBUG rather than WARNING: as a
-    WARNING it polluted the `caplog` of an UNRELATED test (#4954) —
-    `tests/test_metering.py::TestThresholdEvents::
-    test_no_threshold_for_free_tier` asserts that no WARNING record contains
-    "threshold", and its own tmpdir is named
-    `test_no_threshold_for_free_tie0`, so the registry PATH embedded in this
-    line failed that assertion on a frozen graph.
+    As a WARNING the gate line collided with the `caplog` filter of an
+    UNRELATED test (#4954): `tests/test_metering.py:284` filters captured
+    records by the substring "threshold", and the metering test's tmpdir is
+    named `test_no_threshold_for_free_tie0`, so the registry PATH embedded in
+    the line matched it.
 
-    Both halves are required:
+    The test asserts both:
     (a) the healthy replay path emits ZERO `tortoise.embedded_lifecycle`
-        records at WARNING — so it cannot collide with another test's
-        WARNING-level `caplog` assertion, and
-    (b) the same flow DOES emit the gate line at DEBUG — so the diagnostic
-        the orchestrator asked for stays available and cannot be silently
-        deleted.
+        records at WARNING, and
+    (b) the same flow DOES emit the gate line at DEBUG.
 
     RED without the fix (gate line at WARNING): (a) captures the line and
     the first assertion fails, naming it.
@@ -3049,8 +3043,8 @@ def test_replay_gate_line_is_debug_and_never_warning(tmp_path, caplog):
             and "#4879: replay allowed" in record.getMessage()
         ]
         assert gate, (
-            "#4879: the gate-visibility diagnostic must still be emitted at "
-            "DEBUG — a healthy replay must say which gate allowed it")
+            "#4879: the gate line must still be emitted at DEBUG — "
+            "a healthy replay must say which gate allowed it")
         assert any("recorded-socket-present" in r.getMessage() for r in gate), (
             "#4879: the gate that allowed this replay must be named, got "
             f"{[r.getMessage() for r in gate]!r}")

@@ -2080,17 +2080,13 @@ def _install_dead_socket_guard() -> None:
         # that had nothing to do ("no branch fired" with no way to tell which
         # gate stopped it).
         #
-        # DEBUG, not WARNING: this line is DIAGNOSTIC — it reports a decision
-        # the predicate made, not an alert about a failure. As a WARNING it
-        # polluted the `caplog` of an UNRELATED test (#4954):
-        # `tests/test_metering.py::TestThresholdEvents::
-        # test_no_threshold_for_free_tier` asserts that no WARNING record
-        # contains "threshold", and its own tmpdir is named
+        # DEBUG, not WARNING: as a WARNING this line collided with an
+        # UNRELATED test's `caplog` filter (#4954) —
+        # `tests/test_metering.py:284` filters captured records by the
+        # substring "threshold", and the metering test's tmpdir is named
         # `test_no_threshold_for_free_tie0`, so the registry PATH embedded in
-        # this line made that assertion fail on a frozen graph — the
-        # regression this line introduced when #4927 merged. The detail stays
-        # verbatim — the path IS the useful part — because at DEBUG it can no
-        # longer collide with a WARNING-level assertion.
+        # this line matched it. At DEBUG the line is not captured by a
+        # WARNING-level `caplog` filter.
         #
         # The DEBUG is gated on THIS construction's claim actually being live
         # in `_in_flight_replays` (the key the `RedisMixin.__init__` patch
