@@ -1965,7 +1965,8 @@ def test_required_gate_excludes_the_long_legs():
     shard is not coverage — so a push-only leg would make every `--admin` merge
     refuse `NOT COMPARABLE`. This test pins the CI half of that contract.
     """
-    jobs = _load_python_ci()["jobs"]
+    workflow = _load_python_ci()
+    jobs = workflow["jobs"]
 
     def _needs(name: str) -> list[str]:
         n = jobs[name].get("needs") or []
@@ -1992,6 +1993,24 @@ def test_required_gate_excludes_the_long_legs():
     assert "manifest-integrity" in closure, (
         "the required aggregate must still include the manifest drift gate, "
         "or a drift stops blocking merges (#2656)")
+
+    # `leg in jobs` alone only proves the leg is DEFINED. The fix's disclosure
+    # leans on the legs still EXECUTING (advisory on PRs, detection on main), so
+    # pin that too: both triggers must remain, and no leg may be silenced.
+    triggers = workflow.get("on", workflow.get(True)) or {}
+    assert "push" in triggers and "pull_request" in triggers, (
+        "the long legs must still run on push (post-merge detection on main) "
+        "AND on pull requests (advisory pre-merge) — dropping either trigger "
+        "silently deletes a leg the disclosure depends on")
+    for leg in ("test", "test-slow", "test-carve-out"):
+        spec = jobs[leg]
+        assert spec.get("steps"), (
+            f"{leg} must still have steps — an empty job would 'run' nothing")
+        assert not spec.get("continue-on-error"), (
+            f"{leg} must not be continue-on-error — its failure must stay "
+            "visible, or the post-merge detection is silent")
+        assert spec.get("if") not in ("false", False), (
+            f"{leg} must not be unconditionally disabled")
 
 
 # ── #2938: surface audit (report-only) ───────────────────────────────────
