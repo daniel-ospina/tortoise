@@ -488,6 +488,27 @@ def test_both_keys_item_records_content_for_the_prune():
         assert [p["content"] for p in payload["points"]] == ["keep"], endpoint
 
 
+def test_survivor_name_does_not_shield_a_removed_items_content():
+    """The removal side is the MINT surface (identity + content) but the
+    survivor side must be the RESOLUTION surface (content only): a survivor's
+    *name* does not resolve an endpoint in ``execute_embed``, so it must not
+    shield one. Applying the union to both sides left `B` — the discarded
+    item's content — to be minted back (verified)."""
+    el = {"entities": [], "events": [],
+          "points": [{"name": "A", "content": "B", "pointKind": "statement"},
+                     {"content": "A", "pointKind": "statement"},
+                     {"name": "B", "content": "C", "pointKind": "statement"}],
+          "operators": [{"src": "A", "dst": "B", "op_type": "IMPL"}]}
+    decisions = vg.vet_candidates(el, narrative="n")["decisions"]
+    qid = next(i for i, d in decisions.items()
+               if d["section"] == "points" and d["index"] == 0)
+    decisions[qid] = {"outcome": vg.DISCARD}
+    new, _w = vg.apply_vet(el, decisions)
+    assert new["operators"] == []
+    payload, _res = _payload_of(new)
+    assert "B" not in [p["content"] for p in payload["points"]]
+
+
 def test_surviving_both_keys_item_still_provides_its_content():
     """The converse of the previous test: a SURVIVING item carrying both keys
     still provides its CONTENT as an endpoint, so the operator must NOT be

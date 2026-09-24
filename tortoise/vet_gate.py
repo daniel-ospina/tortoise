@@ -494,8 +494,18 @@ def _item_text_variants(section: str, item: Mapping[str, Any]) -> set[str]:
             | _norm_variants(_item_content(section, item)))
 
 
-def _normalized_texts(embed_list: object) -> set[str]:
-    """Normalized endpoint-surface texts of every point/event."""
+def _content_texts(embed_list: object) -> set[str]:
+    """Normalized CONTENT of every point/event — the embedder's RESOLUTION
+    surface (``_resolve`` keys ``point_ids``/``event_ids`` by content)."""
+    out: set[str] = set()
+    for section, _index, item in _iter_items(embed_list):
+        out |= _norm_variants(_item_content(section, item))
+    return out
+
+
+def _identity_texts(embed_list: object) -> set[str]:
+    """Normalized identity + content of every point/event — the embedder's MINT
+    surface (its #2552 pre-pass materializes whatever text an operator wrote)."""
     out: set[str] = set()
     for section, _index, item in _iter_items(embed_list):
         out |= _item_text_variants(section, item)
@@ -560,7 +570,12 @@ def removal_pool(before: object, after: object) -> dict:
     before_entities = _entity_map(before)
     after_entities = _entity_map(after)
     return {
-        "removed_texts": _normalized_texts(before) - _normalized_texts(after),
+        # The REMOVAL side is the mint surface (identity + content): an operator
+        # naming either form would be materialized by #2552. The SURVIVOR side
+        # is the resolution surface (content only) — a survivor's *name* does
+        # not resolve an endpoint in ``execute_embed``, so it must not shield
+        # one (verified: shielding on a name left the endpoint to be minted).
+        "removed_texts": (_identity_texts(before) - _content_texts(after)),
         "removed_entities": {n: it for n, it in before_entities.items()
                              if n not in after_entities},
     }
@@ -670,7 +685,8 @@ def apply_vet(embed_list: Mapping[str, Any],
         # byte-identical downstream (the same object is never mutated).
         # ⚠️ ``prior_texts`` is part of the test: a prior that removed only
         # points/events has an EMPTY ``removed_entities``, and early-returning
-        # on that alone skipped the operator prune (regression fixed in cycle 3).
+        # on that alone skipped the operator prune — `prior_texts` must be part
+        # of the test.
         return dict(base), warnings
 
     referenced = _referenced_entity_names(base, discarded_ids)
@@ -762,7 +778,7 @@ def apply_vet(embed_list: Mapping[str, Any],
     # so the diff alone cannot see them). Only fire when no surviving item
     # provides that text: an identical-content survivor still resolves the
     # endpoint, and pruning would lose its edge.
-    surviving_texts = _normalized_texts(out)
+    surviving_texts = _content_texts(out)
     gone = (removed_context | prior_texts | removed_entity_names
             | set(prior_entities)) - surviving_texts - set(canonical)
     if gone:

@@ -115,7 +115,7 @@ def test_ingest_fingerprint_stable_same_inputs():
 
 
 def test_prompt_digest_covers_the_vet_switch(monkeypatch):
-    """#5005 (code-review P2): ``TORTOISE_VET`` removes candidates from the
+    """#5005: ``TORTOISE_VET`` removes candidates from the
     embed list, so it changes extraction output — and a knob that changes
     output while absent from ``INGEST_CACHE_PROMPT_ENVS`` is the
     silent-stale-HIT bug that tuple's docstring forbids (a ``TORTOISE_VET=0``

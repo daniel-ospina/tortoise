@@ -2778,7 +2778,7 @@ def ingest_code_fingerprint(paths: tuple[Path, ...] | None = None) -> str:
     extraction output but is not in ``paths`` — so the repo ``git_sha``
     rides as a second dimension: ANY repo code change (in or out of the
     closure) invalidates cached ingests automatically. ``git_sha`` is the
-    conservative net; ``paths`` keeps the digest sensitive to the two
+    conservative net; ``paths`` keeps the digest sensitive to the three
     hot files even across an uncommitted local edit (dirty-tree runs)."""
     files = list(INGEST_CACHE_CODE_FILES) if paths is None else list(paths)
     h = hashlib.sha256()
