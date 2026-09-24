@@ -2634,8 +2634,10 @@ class TortoiseSDK:
         Uses the existing db connection — no second FalkorDB connection.
         Registry graph name is namespace-scoped (``{ns}_control_plane``) so
         different namespaces never share registry state, and test graphs get
-        an isolated name (``{ns}_{test_graph}_control_plane``) so parallel
-        test runs stay independent (#135, #139).
+        an isolated name derived from ``{ns}_{test_graph}_control_plane`` that
+        carries an approved ``test_``/``tortoise_test_`` prefix (#3634) so
+        parallel test runs stay independent (#135, #139) and the reaper owns
+        the graph.
         """
         if self._registry_g is None:
             proj = self._get_proj()
@@ -2650,21 +2652,29 @@ class TortoiseSDK:
             if ns.startswith("test-"):
                 ns = ns.replace("-", "_")
             if graph_name and graph_name.startswith(("tortoise_test_", "test_")):
-                # Keep the test prefix so test-graph guards still apply.
                 registry_name = f"{ns}_{graph_name}_control_plane" if ns else f"{graph_name}_control_plane"
+                # #3634 / epic CI-3 half 2: WITHOUT this the derived name matches
+                # NEITHER ownership set, so every mint leaks one server graph
+                # (E2E-7). Prepend only when absent — `test-hosted` derivatives
+                # already comply, and double-prefixing breaks
+                # tests/test_derived_names.py.
+                if not registry_name.startswith(("test_", "tortoise_test_")):
+                    registry_name = f"test_{registry_name}"
             elif ns:
-                registry_name = f"{ns}_control_plane"
+                registry_name = f"{ns}_control_plane"      # shared — NEVER prefixed
             else:
-                registry_name = "control_plane"
+                registry_name = "control_plane"            # shared — NEVER prefixed
             registry_graph = proj.db.select_graph(registry_name)
             # Epic #1647 (CI P2): the registry name derived from a TEST graph
-            # is `{ns}_{test_graph}_control_plane` — NOT test-prefixed (starts
-            # with registry_/ns_), so wipe_server's test-prefix filter skips
-            # it AND it never reaches the session journal (the redirect only
-            # journals the main graph). Every such mint LEAKED one server
-            # graph per construction (E2E-7 GRAPH.LIST bound red at 466+).
-            # Journal the registry name too (product writer: env-gated no-op
-            # outside a test session).
+            # must ALSO be journaled — the redirect only journals the main
+            # graph, so without this a test-derived registry never reached
+            # the session sweep. Journal the registry name too (product
+            # writer: env-gated no-op outside a test session).
+            # #3634: the journal append alone was not enough — the derived
+            # name must also carry an approved test_/tortoise_test_ prefix
+            # (applied above), or it matched neither ownership set and every
+            # mint still LEAKED one server graph (E2E-7 GRAPH.LIST bound red
+            # at 466+).
             from tortoise.projection import _journal_append_product
             _journal_append_product(registry_name)
             # #3214 (review P2): cache the handle only AFTER the append

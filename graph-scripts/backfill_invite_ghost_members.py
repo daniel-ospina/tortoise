@@ -49,16 +49,6 @@ def _base_graph_name(uri: str) -> str:
     return parsed.path.lstrip("/") or "tortoise"
 
 
-def _registry_graph_name(base: str) -> str:
-    """Resolve the graph actually swept: with namespace='registry' the SDK
-    selects registry_control_plane (or registry_{base}_control_plane for
-    test-prefixed graphs) on the URI's server — independent of the URI
-    path (sdk._get_registry naming)."""
-    if base.startswith("tortoise_test_") or base.startswith("test_"):
-        return f"registry_{base}_control_plane"
-    return "registry_control_plane"
-
-
 def test_guard(graph_name: str, yes: bool = False) -> None:
     """Safety gate: confirm before running on non-test graphs."""
     if graph_name.startswith("tortoise_test_") or graph_name.startswith("test_"):
@@ -86,15 +76,18 @@ def main() -> int:
 
     graph_name = _base_graph_name(args.uri)
     test_guard(graph_name, args.yes)
-    print(f"Registry graph on this server: {_registry_graph_name(graph_name)}")
 
     # Connect through the SDK (registry namespace) so the sweep shares the
-    # exact registry graph + namespace logic as the invite endpoints.
+    # exact registry graph + namespace logic as the invite endpoints — and so
+    # the printed registry name comes from that SAME derivation. #3634: do
+    # not re-derive it here; a second copy drifts from sdk._get_registry.
     os.environ["TORTOISE_DB_URI"] = args.uri
     from tortoise.sdk import TortoiseSDK
 
     sdk = TortoiseSDK(namespace="registry")
     try:
+        reg = sdk._get_registry()
+        print(f"Registry graph on this server: {getattr(reg, 'name', 'control_plane')}")
         result = sdk.sweep_invite_ghost_memberships(dry_run=args.dry_run)
     finally:
         sdk.close()
