@@ -362,6 +362,12 @@ class SearchResult:
     valid_to: str = ""
     expired_at: str = ""
     subject: dict | None = None  # {id, name, kind} | None — ≤1 hop, fail-closed (D10)
+    # #4889: the fail-loud counterpart to an absent ``subject``. Emitted only
+    # when the whole batch resolved no subject AND the graph has no
+    # ``aboutSubject`` producer at all — so it says "this field cannot be
+    # populated here", never "these points happen to have none". Empty ⇒
+    # absent from the wire (additive, byte-identical default).
+    subject_unavailable: str = ""
     # A5 (#2070): stored evidence mark (``has_answer`` — written by the
     # eval ingest / fixture seeding; the product extractor does not write it
     # yet, so production hits are False). Carried so the ask lane's
@@ -419,6 +425,10 @@ class SearchResult:
             d["expired_at"] = self.expired_at
         if self.subject:
             d["subject"] = self.subject
+        # #4889: loud counterpart to the absent ``subject`` key above — only
+        # set when the Subject layer's producer is missing entirely.
+        if self.subject_unavailable:
+            d["subject_unavailable"] = self.subject_unavailable
         # A5 (#2070): additive evidence mark — emitted ONLY when known
         # (unmarked hits stay byte-identical on the wire).
         if self.has_answer:
@@ -2150,6 +2160,63 @@ def get_relationships_bounded(
         logger.warning("Bounded relationship query failed", exc_info=True)
 
     return rels
+
+
+#: #4889 — the fail-loud reason for a structurally-empty ``SearchResult.subject``.
+#:
+#: ``subject`` is read from ``aboutSubject`` edges. When the graph has no
+#: ``aboutSubject`` producer reachable, the field is silently *absent* on every
+#: hit — indistinguishable from "this point has no subject". Measured
+#: read-only 2026-09-23: the whole edge inventory of the dogfood graph
+#: (37,535 Points) holds **0** ``aboutSubject`` edges and **1** ``:Subject``
+#: node, because the capture entity spine stores SUBJECT-kind entities as
+#: ``:Object`` (issue #4934) and the only document-path Subject writer is
+#: behind the opt-in ``--semantic-extract`` flag (issue #4938).
+#: Tracked producers: #1370, #1509. The marker self-clears as soon as any
+#: ``aboutSubject`` edge exists on the graph.
+SUBJECT_BINDING_UNAVAILABLE = (
+    "aboutSubject has no reachable producer on this graph, so 'subject' is "
+    "structurally empty rather than unknown: the capture entity spine writes "
+    "SUBJECT-kind entities as :Object (#4934), and the document extractor's "
+    "Subject writer is opt-in (#4938). Tracked producers: #1370, #1509."
+)
+
+
+def subject_binding_available(graph) -> bool:
+    """True when this graph can carry ``aboutSubject`` edges at all (#4889).
+
+    One exact count over the edge type (FalkorDB resolves it from edge-type
+    metadata — measured ~44 ms against the 37.5k-Point dogfood graph, an
+    order of magnitude below the ``RETURN 1 LIMIT 1`` existence form because
+    the latter must actually locate an edge).
+
+    **Fail-OPEN**: a probe error returns True. A broken probe must never
+    invent an unavailability claim, so the failure direction that withholds
+    the marker is the safe one.
+    """
+    try:
+        rows = graph.query(
+            "MATCH ()-[r:aboutSubject]->() RETURN count(r)").result_set
+        if not rows or not rows[0]:
+            # ``RETURN count(r)`` always yields exactly one row; anything
+            # else is an anomalous probe, which must not be read as "no
+            # edges".
+            logger.warning(
+                "aboutSubject availability probe returned no row — assuming "
+                "available")
+            return True
+        count = rows[0][0]
+        if count is None:
+            logger.warning(
+                "aboutSubject availability probe returned a null count — "
+                "assuming available")
+            return True
+        return int(count) > 0
+    except Exception:  # fail-open, see docstring
+        logger.warning(
+            "aboutSubject availability probe failed — assuming available",
+            exc_info=True)
+        return True
 
 
 def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
