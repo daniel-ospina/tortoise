@@ -511,6 +511,9 @@ def test_no_redirect_stems_registry_exact():
         "test_projection_lifecycle",
         "test_reaper",
         "test_reaper_orphan",
+        # #2814: authoritative-config durability across rebuild_all (embedded
+        # carve-out — see config/ci-surfaces.yml `carve_out:`).
+        "test_rebuild_config_preservation",
         "test_redis_guard",
         "test_smoke_embedded",
         # 2026-08-28 merge-reconciliation: #1785/#1816 added these three to
