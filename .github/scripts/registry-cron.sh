@@ -50,13 +50,16 @@ export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-auto}"
 log() { echo "[backup-driver] $*"; }
 fail() { echo "[backup-driver] ERROR: $*" >&2; }
 # #2796 (review guidance P2-3): the job must be RED whenever the pipeline is
-# broken — i.e. whenever an incident was filed this run, not only on the four
-# kill-switch/no-coverage states. `file_alert` sets LOUD and every terminal
-# exit goes through finish(). Silent ⟺ nothing was filed this run.
+# broken — i.e. whenever an incident was DETECTED this run, not only on the four
+# kill-switch/no-coverage states. `file_alert` sets LOUD and every terminal exit
+# goes through finish(). Silent ⟺ nothing was detected this run.
+# #3907 review (P2): LOUD records the DETECTION, not a successful filing — a
+# failed create keeps the job red while filing nothing — so the message must not
+# claim "an incident was filed".
 LOUD=0
 finish() {
   if [ "${LOUD:-0}" = "1" ]; then
-    log "loud run: an incident was filed — exiting RED"
+    log "loud run: a broken pipeline was detected — exiting RED"
     exit 1
   fi
   exit 0
@@ -204,7 +207,66 @@ r2_get() { # key -> body (empty on failure)
 r2_delete() { # key — delete-to-resolve (the alert_store lifecycle contract)
   aws s3api delete-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" --key "$1" >/dev/null 2>&1 || true
 }
-gh_find_open() { # kind id(subject) -> first open issue number whose TITLE subject matches exactly (or empty)
+# ── the ONE GitHub HTTP primitive ───────────────────────────────────────────
+# EVERY GitHub call in this driver goes through `_gh_curl`/`gh_request`. A bare
+# `curl -sS` exits 0 on an HTTP 4xx/5xx — the #2140 deaf-monitor class: a 403
+# was reported as a successful write, and a failed SEARCH read as "no open
+# issue" → a duplicate (#2706). The status is therefore captured and REQUIRED;
+# a transport failure collapses to `000` and is refused the same way.
+#
+# This driver keeps its OWN single primitive (curl, not `gh api`) rather than a
+# fourth one-off per call site. #5019 owns re-pointing the remaining inline
+# filers — this one included, whose dedupe is R2-object-aware — at the shared
+# `auto-file-issue.sh` substrate; until then status-checking exists ONCE here.
+GH_API="https://api.github.com"
+
+_gh_curl() { # <out-file> <method> <path> [curl args…] -> HTTP code on stdout
+  local out="$1" method="$2" path="$3"; shift 3
+  curl -sS -o "$out" -w '%{http_code}' -X "$method" \
+    -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+    "$@" "${GH_API}${path}" 2>/dev/null || echo 000
+}
+
+gh_request() { # <method> <path> [curl args…] -> body on stdout; 0 ONLY on 2xx
+  local method="$1" path="$2"; shift 2
+  local tmp code
+  tmp="$(mktemp)"
+  code="$(_gh_curl "$tmp" "$method" "$path" "$@")"
+  case "$code" in
+    2[0-9][0-9]) cat "$tmp"; rm -f "$tmp"; return 0 ;;
+  esac
+  rm -f "$tmp"
+  return 1
+}
+
+# EVERY page of a search query, concatenated into ONE JSON array. A non-2xx on
+# ANY page is a FAILURE (non-zero): a partial pool must never be read as "the
+# issue is not there", which files a duplicate. GitHub caps search at 1000
+# results (10 pages of 100), which bounds the walk. Search ranking is
+# relevance-based, NOT equality-first, so a single-page read can miss the exact
+# issue and duplicate it (the class already fixed in the substrate's
+# af_open_issue).
+gh_search_items() { # <url-encoded-query> -> JSON array of items; non-zero on failure
+  local q="$1" page=1 items="[]" json n tmp code
+  tmp="$(mktemp)"
+  while [ "$page" -le 10 ]; do
+    code="$(_gh_curl "$tmp" GET "/search/issues?q=${q}&per_page=100&page=${page}")"
+    case "$code" in
+      2[0-9][0-9]) ;;
+      *) rm -f "$tmp"; return 1 ;;
+    esac
+    json="$(cat "$tmp" 2>/dev/null || true)"
+    n="$(printf '%s' "$json" | jq -r 'if (.items|type) == "array" then (.items|length) else "ERR" end' 2>/dev/null || echo ERR)"
+    case "$n" in ''|*[!0-9]*) rm -f "$tmp"; return 1 ;; esac
+    items="$(printf '%s\n%s' "$items" "$(printf '%s' "$json" | jq -c '.items' 2>/dev/null || echo '[]')" | jq -cs 'add')"
+    [ "$n" -eq 100 ] || break
+    page=$((page + 1))
+  done
+  rm -f "$tmp"
+  printf '%s' "$items"
+}
+
+gh_find_open() { # kind id(subject) -> open issue number, "" when none, __ERR__ when the search FAILED
   # #2375: subject-scoped — a bare kind search lets a per-graph issue
   # ("[DR] STALE — team_a:g_x") be adopted by a team-level file ("… team_a")
   # and vice versa (the bare team subject is a PREFIX of the per-graph
@@ -217,35 +279,42 @@ gh_find_open() { # kind id(subject) -> first open issue number whose TITLE subje
   # named `global` must match on its own TITLE, or it could adopt (and later
   # close) an unrelated platform incident.
   [ -n "$GH_TOKEN" ] || return 0
-  local kind="$1" id="${2:-}"
-  if [ -z "$id" ]; then
-    curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-      "https://api.github.com/search/issues?q=repo:${REPO}+is:issue+is:open+label:%22dr:backup%22+in:title+%22%5BDR%5D+$kind%22" \
-      | jq -r '.items[0].number // empty' 2>/dev/null || true
+  local kind="$1" id="${2:-}" q items
+  # One query shape for BOTH branches; the subject filter is applied to the
+  # TITLE after the walk, exactly as before — but both now PAGE and both
+  # REFUSE on a failed search ("" would read as "no incident" → duplicate).
+  q="repo:${REPO}+is:issue+is:open+label:%22dr:backup%22+in:title+%22%5BDR%5D+$kind%22"
+  if ! items="$(gh_search_items "$q")"; then
+    printf '__ERR__'
     return 0
   fi
-  curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-    "https://api.github.com/search/issues?q=repo:${REPO}+is:issue+is:open+label:%22dr:backup%22+in:title+%22%5BDR%5D+$kind%22&per_page=20" \
-    | jq -r --arg suf " — $id" \
-      '[.items[] | select(.title | endswith($suf))][0].number // empty' 2>/dev/null || true
+  if [ -z "$id" ]; then
+    printf '%s' "$items" | jq -r '.[0].number // empty' 2>/dev/null || true
+    return 0
+  fi
+  printf '%s' "$items" | jq -r --arg suf " — $id" \
+    '[.[] | select((.title // "") | endswith($suf))][0].number // empty' 2>/dev/null || true
 }
 gh_issue_open() { # number -> 0 when OPEN or unknown; 1 when confirmed closed OR missing
   # #2796 (review R3/R4): the 412 dedup branch must trust the object over a GH
   # search, and must be able to tell a DELETED issue (404) from a transient
   # blip. A 404 is definitively gone → re-file (otherwise the recurrence is
   # swallowed forever). Rate-limit/5xx/network → assume OPEN, never duplicate.
-  local n="${1:-}" code="" state=""
+  # ONE status-checked call via the primitive (the body and the code arrive
+  # together, so the state read can never disagree with the code that admitted
+  # it — the pre-fix code made TWO bare calls, the second of which could
+  # answer a different body than the first).
+  local n="${1:-}" tmp code state
   [ -n "$GH_TOKEN" ] && [ -n "$n" ] || return 0
-  code="$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" \
-    -H "Accept: application/vnd.github+json" \
-    "https://api.github.com/repos/${REPO}/issues/${n}" 2>/dev/null || echo 000)"
+  tmp="$(mktemp)"
+  code="$(_gh_curl "$tmp" GET "/repos/${REPO}/issues/${n}")"
   case "$code" in
-    404) return 1 ;;   # definitively missing → re-file
-    200) : ;;
-    *)   return 0 ;;   # transport / rate-limit / 5xx → assume open
+    404) rm -f "$tmp"; return 1 ;;   # definitively missing → re-file
+    2[0-9][0-9]) : ;;
+    *)   rm -f "$tmp"; return 0 ;;   # transport / rate-limit / 5xx → assume open
   esac
-  state="$(curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-    "https://api.github.com/repos/${REPO}/issues/${n}" | jq -r '.state // empty' 2>/dev/null || true)"
+  state="$(jq -r '.state // empty' "$tmp" 2>/dev/null || true)"
+  rm -f "$tmp"
   case "$state" in
     open) return 0 ;;
     "")   return 0 ;;   # unparseable body on a 200 → assume open
@@ -259,19 +328,12 @@ gh_comment() { # number body -> 0 ONLY when GitHub answered 2xx
   # 4,998. Called as `if gh_comment …`, that made gh_record_occurrence log
   # "recorded recurrence #N … (no duplicate filed)" while the issue carried NO
   # record at all — the #2140 deaf-monitor class this file already calls out.
-  # So capture the status code and require a REAL 2xx, exactly as gh_issue_open
-  # ~20 lines above does; a transport failure (curl exits non-zero, no code)
-  # collapses to `000` and is refused the same way.
+  # So capture the status code and require a REAL 2xx via the ONE primitive
+  # above; a transport failure (curl exits non-zero, no code) collapses to
+  # `000` and is refused the same way.
   [ -n "$GH_TOKEN" ] || return 0
-  local code
-  code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
-    -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-    "https://api.github.com/repos/${REPO}/issues/$1/comments" \
-    -d "$(jq -nc --arg b "$2" '{body:$b}')" 2>/dev/null || echo 000)"
-  case "$code" in
-    2[0-9][0-9]) return 0 ;;
-  esac
-  return 1
+  gh_request POST "/repos/${REPO}/issues/$1/comments" \
+    -d "$(jq -nc --arg b "$2" '{body:$b}')" >/dev/null
 }
 # #3907: a dedup no-op must still RECORD the occurrence. The pre-#3907 dedup
 # paths logged and returned, so a driver firing hourly on ONE unchanged fault
@@ -294,8 +356,9 @@ gh_occurrence_count() { # number -> integer (0 when unreadable: under-count, nev
   local n="${1:-}" page=1 total=0 body cnt len
   [ -n "$GH_TOKEN" ] && [ -n "$n" ] || { printf '0'; return 0; }
   while [ "$page" -le "$OCCURRENCE_MAX_PAGES" ]; do
-    body="$(curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-      "https://api.github.com/repos/${REPO}/issues/${n}/comments?per_page=100&page=${page}" 2>/dev/null || true)"
+    if ! body="$(gh_request GET "/repos/${REPO}/issues/${n}/comments?per_page=100&page=${page}")"; then
+      printf '%s' "$total"; return 0
+    fi
     cnt="$(printf '%s' "$body" | jq -r --arg m "$OCCURRENCE_MARKER" --arg login "$OCCURRENCE_BOT_LOGIN" \
       '[.[]? | select(((.user.login // "") == $login) and ((.body // "") | contains($m)))] | length' 2>/dev/null || true)"
     len="$(printf '%s' "$body" | jq -r 'if type == "array" then length else -1 end' 2>/dev/null || echo -1)"
@@ -327,12 +390,19 @@ gh_record_occurrence() { # number kind id
     log "dedup: recurrence comment on issue #${n} FAILED — the run is still RED; the next run re-records"
   fi
 }
-gh_close() { # number comment kind id
+gh_close() { # number comment kind id -> 0 ONLY when the close was CONFIRMED 2xx
   [ -n "$GH_TOKEN" ] || return 0
   local kind="${3:-}" id="${4:-}"
   gh_comment "$1" "$2" || true
-  curl -sS -X PATCH -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-    "https://api.github.com/repos/${REPO}/issues/$1" -d '{"state":"closed"}' >/dev/null 2>&1 || true
+  # #3907 review (P2): the pre-fix close was `curl … >/dev/null 2>&1 || true`, so
+  # a 403/5xx (or a transport failure) left the issue OPEN while the driver
+  # believed it resolved — AND deleted the R2 sentinel, so the next recurrence
+  # re-adopted a stale issue and a human saw "unresolved" indefinitely. Require
+  # a real 2xx, and on failure KEEP the sentinel (the incident is still live).
+  if ! gh_request PATCH "/repos/${REPO}/issues/$1" -d '{"state":"closed"}' >/dev/null; then
+    fail "GitHub issue #$1 CLOSE failed (HTTP error) — leaving it OPEN and KEEPING its dedup object; the next run re-attempts the close"
+    return 1
+  fi
   # delete-to-resolve: drop the R2 dedup object so a RECURRENCE is a new
   # incident. Without this, file_alert's 412 branch would adopt the stale
   # object and silently swallow the recurrence (the #2796 class).
@@ -343,6 +413,7 @@ gh_close() { # number comment kind id
     local _k
     while IFS= read -r _k; do r2_delete "$_k"; done < <(alert_keys_all "$kind" "$id")
   fi
+  return 0
 }
 resolve_global() { # kind comment — close an open global incident (no-op if none)
   local kind="$1" comment="$2" num="" owner=""
@@ -360,12 +431,42 @@ resolve_global() { # kind comment — close an open global incident (no-op if no
     return 0
   fi
   num="$(gh_find_open "$kind" "")"
-  if [ -n "$num" ]; then gh_close "$num" "$comment" "$kind" ""; fi
+  case "$num" in
+    __ERR__)
+      # A failed search cannot tell "no incident" from "cannot see incidents".
+      # Closing nothing leaves any open incident open, which the next run (with
+      # a working search) re-checks — never guess a number to close.
+      log "self-heal: the issue search FAILED for ${kind} — not guessing; any open incident stays open"
+      return 0 ;;
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  if ! gh_close "$num" "$comment" "$kind" ""; then
+    log "self-heal: could NOT close issue #${num} for ${kind} — it stays OPEN with its dedup object"
+  fi
 }
 telegram() { # text
   [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ] \
     && curl -sS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
       --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=$1" >/dev/null 2>&1 || true
+}
+# Create ONE issue, status-checked, and return its number ("" when UNFILED).
+# This is the SINGLE create call both file_alert branches used to duplicate
+# (#3907 review P2): the pre-fix bare `curl … | jq -r '.number // empty'`
+# conflated an HTTP failure with "no number", so a 403/5xx filed nothing while
+# `finish()` claimed "an incident was filed".
+gh_create_issue() { # <title> <body> -> issue number on stdout, "" when UNFILED
+  local title="$1" body="$2" resp n
+  if ! resp="$(gh_request POST "/repos/${REPO}/issues" \
+      -d "$(jq -nc --arg t "$title" --arg b "$body" '{title:$t, body:$b, labels:["dr:backup"]}')")"; then
+    fail "GitHub issue CREATE failed (HTTP error) — the '${title}' finding is UNFILED; the dedup object is kept so the next run re-files it"
+    printf ''
+    return 0
+  fi
+  n="$(printf '%s' "$resp" | jq -r '.number // empty' 2>/dev/null || true)"
+  if [ -z "$n" ]; then
+    fail "GitHub issue CREATE answered 2xx without an issue number — treating the finding as UNFILED"
+  fi
+  printf '%s' "$n"
 }
 file_alert() { # kind title body dedup_id
   local kind="$1" title="$2" body="$3" id="$4" num="" tmp="" issue_num="" key="" filed=0
@@ -390,11 +491,14 @@ file_alert() { # kind title body dedup_id
   printf '{"kind":"%s","issue_number":null,"filed_at":"%s"}' "$kind" "$(date -u +%FT%TZ)" > "$tmp"
   if r2_put_once "$key" "$tmp"; then
     num="$(gh_find_open "$kind" "$id")"
-    if [ -z "$num" ]; then
-      num="$(curl -sS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-        "https://api.github.com/repos/${REPO}/issues" \
-        -d "$(jq -nc --arg t "$title" --arg b "$body" '{title:$t, body:$b, labels:["dr:backup"]}')" \
-        | jq -r '.number // empty' 2>/dev/null || true)"
+    if [ "$num" = "__ERR__" ]; then
+      # A failed search cannot tell "no incident" from "cannot see incidents":
+      # refusing to file is the ONLY safe direction (#2706), and the create-once
+      # object above is already written, so the next run adopts or files.
+      num=""
+      fail "dedup: the issue search FAILED for ${kind}/${id:-_} — refusing to file a possible duplicate; the sentinel is kept for the next run"
+    elif [ -z "$num" ]; then
+      num="$(gh_create_issue "$title" "$body")"
       [ -n "$num" ] && filed=1
     fi
     if [ -n "$num" ]; then
@@ -436,11 +540,13 @@ file_alert() { # kind title body dedup_id
       return 0
     fi
     num="$(gh_find_open "$kind" "$id")"
-    if [ -z "$num" ]; then
-      num="$(curl -sS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-        "https://api.github.com/repos/${REPO}/issues" \
-        -d "$(jq -nc --arg t "$title" --arg b "$body" '{title:$t, body:$b, labels:["dr:backup"]}')" \
-        | jq -r '.number // empty' 2>/dev/null || true)"
+    if [ "$num" = "__ERR__" ]; then
+      # Same refusal as the create-once branch above: a failed search must never
+      # become a duplicate issue.
+      num=""
+      fail "dedup: the issue search FAILED for ${kind}/${id:-_} — refusing to file a possible duplicate"
+    elif [ -z "$num" ]; then
+      num="$(gh_create_issue "$title" "$body")"
       [ -n "$num" ] && filed=1
     fi
     if [ -n "$num" ]; then

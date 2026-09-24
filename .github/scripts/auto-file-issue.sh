@@ -40,8 +40,24 @@
 #   matches, `total` reads 0 with no warning, and a FRESH issue is filed on
 #   EVERY run — the #2706 duplicate spam this substrate exists to prevent, and
 #   silent. #5019 migrates four more monitors onto this substrate, so the trap
-#   only widens. The actor is therefore ASSERTED (one cheap `gh api user`) and
-#   the misuse fails loudly instead of degenerating.
+#   only widens. The AUTHOR is therefore ASSERTED, and the misuse fails loudly
+#   instead of degenerating.
+#
+# ASSERT THE AUTHOR FROM THE WRITE'S OWN RESPONSE — never probe the actor
+#   `POST /issues` and `POST /issues/{n}/comments` both return the created
+#   object's `user.login`, so the write itself says who made it. That is exact,
+#   costs NO extra call, and cannot disagree with what actually happened.
+#   ⛔ An earlier round probed the actor with `gh api user` instead, and that was
+#   a P0: GET /user is NOT available to a GitHub App INSTALLATION token, and
+#   GITHUB_TOKEN *is* one (GitHub's GET /user docs list fine-grained USER tokens
+#   and App USER tokens, not installation tokens; the live failure is
+#   actions/runner#3289 → `Resource not accessible by integration`). Under a real
+#   Actions run the probe 403'd, the assertion returned non-zero, and the
+#   substrate REFUSED BEFORE SEARCHING — filing nothing, ever, on both adopters,
+#   so #3907's acceptance was unreachable in production. It shipped green only
+#   because the unit-test stub FABRICATED a `github-actions[bot]` answer that
+#   real GitHub never returns; the stub now models the real 403.
+#   Fail-closed: an unparseable or non-reserved login fails the run.
 #
 # SECURITY — the title is attacker-reachable
 #   This repo is PUBLIC, so any account can open an issue whose title matches a
@@ -84,24 +100,26 @@ af_note() { echo "::notice::$*"; }
 af_token() { printf '%s' "${GH_TOKEN:-${GITHUB_TOKEN:-}}"; }
 af_have_gh() { command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; }
 
-# Assert the EFFECTIVE ACTOR is our reserved login before filing or commenting.
-# Only reachable once a token is present (af_file_or_comment checks that first),
-# so the offline/no-token path never touches GitHub. ONE cheap call, not per
-# issue: `gh api user` is the /user endpoint and costs nothing near a search.
-# A PAT would file as its own owner, so the `author:app/github-actions` dedupe
-# search would never match and every run would file a NEW issue — silently
-# (#2706). An unanswerable actor lookup is refused for the same reason: we
-# cannot tell "no incident" from "cannot see incidents".
-af_assert_actor() {
-  local login
-  if ! login="$(gh api user --jq .login 2>/dev/null)"; then
-    af_err "could not verify the token's actor (gh api user failed) — refusing to file: the dedupe search keys on author:app/github-actions, so an unverified token may file a DUPLICATE on every run"
-    return 1
+# Assert the EFFECTIVE AUTHOR from a WRITE'S OWN RESPONSE. The response's
+# `user.login` IS the authority: it cannot disagree with what was written, and
+# it costs no extra call (unlike the `gh api user` probe this replaces, which
+# an installation token cannot answer at all). A PAT would write as its own
+# owner, so the `author:app/github-actions` dedupe search never matches and
+# every run risks a NEW issue — the #2706 duplicate spam, silently. Fail-closed:
+# an unparseable or non-reserved login refuses.
+af_actor_ok() { # <write-response-json>
+  local resp="${1:-}" login bot
+  login="$(printf '%s' "$resp" | jq -r '.user.login // empty' 2>/dev/null || true)"
+  bot="$(printf '%s' "$AUTO_FILE_BOT_LOGIN" | tr '[:upper:]' '[:lower:]')"
+  if [ "$(printf '%s' "$login" | tr '[:upper:]' '[:lower:]')" = "$bot" ]; then
+    return 0
   fi
-  if [ "$login" != "$AUTO_FILE_BOT_LOGIN" ]; then
-    af_err "GH_TOKEN authenticates as '${login}', not the reserved '${AUTO_FILE_BOT_LOGIN}' — this substrate REQUIRES the GitHub Actions token (secrets.GITHUB_TOKEN). A PAT (or any non-Actions token) files and searches as its own owner, so the 'author:app/github-actions' dedupe search never matches and EVERY run files a duplicate issue (#2706). Point GH_TOKEN at the Actions token."
-    return 1
+  if [ -z "$login" ]; then
+    af_err "a GitHub write response carried no user.login — cannot verify the author; refusing to continue (the dedupe search keys on author:app/github-actions, so an unverified author can file a DUPLICATE on every run)"
+  else
+    af_err "the write was authored by '${login}', not the reserved '${AUTO_FILE_BOT_LOGIN}' — this substrate REQUIRES the GitHub Actions token (secrets.GITHUB_TOKEN). A PAT (or any non-Actions token) writes as its own owner, so the 'author:app/github-actions' dedupe search never matches and EVERY run risks a duplicate issue (#2706). Point GH_TOKEN at the Actions token, and remove the issue this run created as '${login}'."
   fi
+  return 1
 }
 
 # Echoes a POSITIVE integer issue number, "" when NO machine-authored issue with
@@ -201,22 +219,28 @@ af_occurrence_count() { # <issue-number> -> integer
 # Post the occurrence record. Fails loudly (non-zero) if the comment cannot be
 # posted — the #2140 deaf-monitor class: a bare `curl -s` exits 0 on HTTP error.
 af_post_occurrence() { # <issue-number> <what-happened>
-  local n="$1" what="$2" count next
+  local n="$1" what="$2" count next resp
   count="$(af_occurrence_count "$n")"
   case "$count" in ''|*[!0-9]*) count=0 ;; esac
   next=$((count + 1))
-  gh api "repos/${REPO}/issues/${n}/comments" --method POST \
-    -f body="🔁 **Recurrence #${next}** — ${what}
+  # `gh api` exits non-zero on an HTTP 4xx/5xx, so a failed comment fails the
+  # step loudly instead of reporting a record that was never written (#2140).
+  if ! resp="$(gh api "repos/${REPO}/issues/${n}/comments" --method POST \
+      -f body="🔁 **Recurrence #${next}** — ${what}
 
 This finding is already tracked by this issue, so no duplicate was filed. Occurrence recorded at \`$(date -u +%FT%TZ)\` — run: ${RUN_URL}
 
-${AUTO_FILE_MARKER}" >/dev/null
+${AUTO_FILE_MARKER}" 2>/dev/null)"; then
+    af_err "could not post the recurrence comment on issue #${n} — the occurrence is UNRECORDED; this failing run IS the alert"
+    return 1
+  fi
+  af_actor_ok "$resp" || return 1
   af_note "recorded recurrence #${next} on issue #${n} (no duplicate filed)"
 }
 
 # The whole flow: adopt-and-comment, or file. Never both. Never neither.
 af_file_or_comment() { # <stable-title> <body-file> <label>
-  local title="$1" body_file="$2" label="${3:-bug}" body found
+  local title="$1" body_file="$2" label="${3:-bug}" body found resp
   [ -n "$title" ] || { af_err "--title is required (it is the dedupe key)"; return 2; }
   [ -f "$body_file" ] || { af_err "body file not found: ${body_file}"; return 2; }
   [ -n "$(af_token)" ] || {
@@ -224,7 +248,6 @@ af_file_or_comment() { # <stable-title> <body-file> <label>
     return 1
   }
   af_have_gh || { af_err "gh and jq are required"; return 1; }
-  af_assert_actor || return 1
 
   found="$(af_open_issue "$title")"
   case "$found" in
@@ -233,15 +256,19 @@ af_file_or_comment() { # <stable-title> <body-file> <label>
   esac
 
   if [ -n "$found" ]; then
-    # `gh api` exits non-zero on an HTTP 4xx/5xx, so a failed comment fails the
-    # step loudly rather than reporting success (the #2140 class).
-    af_post_occurrence "$found" "the monitor fired again (run: ${RUN_URL})"
+    af_post_occurrence "$found" "the monitor fired again (run: ${RUN_URL})" || return 1
     return 0
   fi
 
   body="$(cat "$body_file")"
-  gh api "repos/${REPO}/issues" --method POST \
-    -f title="$title" -f body="$body" -f "labels[]=${label}" >/dev/null
+  # `gh api` exits non-zero on an HTTP 4xx/5xx — a failed create must fail the
+  # step loudly (a finding that was never filed must never look filed, #2140).
+  if ! resp="$(gh api "repos/${REPO}/issues" --method POST \
+      -f title="$title" -f body="$body" -f "labels[]=${label}" 2>/dev/null)"; then
+    af_err "could not create the issue for '${title}' — the finding is UNFILED; this failing run IS the alert"
+    return 1
+  fi
+  af_actor_ok "$resp" || return 1
   af_note "no open machine-authored issue for '${title}' — filed one (further occurrences will comment on it, not duplicate it)"
 }
 
@@ -256,8 +283,9 @@ usage: auto-file-issue.sh file --title <stable-title> --body-file <path> [--labe
 
 env: GH_TOKEN (or GITHUB_TOKEN) — MUST be the GitHub Actions token
      (secrets.GITHUB_TOKEN). The dedupe keys on author:app/github-actions, so a
-     PAT files as its own owner, matches nothing, and files a DUPLICATE on every
-     run. The actor is asserted; a non-Actions actor fails closed.
+     PAT writes as its own owner, matches nothing, and files a DUPLICATE on
+     every run. The author is asserted from the write's own response
+     (user.login); a non-Actions author fails closed.
      Also: GITHUB_REPOSITORY, GITHUB_SERVER_URL, GITHUB_RUN_ID
 USAGE
   return 2

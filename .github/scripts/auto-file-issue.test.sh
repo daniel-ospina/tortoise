@@ -35,13 +35,16 @@
 #  17. the dedupe SEARCH pages to an exact match beyond page 1 (P3: search
 #      ranking is not equality-first, so a single-page read files a duplicate)
 #  18. the search asks for a full page (per_page=100) and passes --paginate
-#  19. a NON-Actions token actor (a PAT) fails LOUDLY and files NOTHING (P3: the
-#      dedupe search keys on author:app/github-actions, so a PAT-owner would
-#      match nothing and file a duplicate EVERY run)
-#  20. an UNVERIFIABLE actor (gh api user fails) is refused for the same reason:
-#      "no incident" is indistinguishable from "cannot see incidents"
-#  21. the actor assertion does NOT run on the no-token path: the offline run
+#  19. a NON-Actions author is caught by the WRITE'S OWN RESPONSE and fails
+#      LOUDLY (P0 regression: the dedupe search keys on author:app/github-actions,
+#      so a PAT-owner matches nothing and would duplicate EVERY run)
+#  20. the REAL installation-token 403 on GET /user (the P0) does NOT block: the
+#      substrate files/comments normally, and never calls /user at all
+#  21. the author assertion does NOT run on the no-token path: the offline run
 #      still exits 1 BEFORE contacting GitHub
+#  22. a COMMENT authored by a non-bot fails loudly (the write-response check
+#      covers the adoption path too)
+#  23. a write response with NO user.login is refused (fail closed)
 #
 # Case 2 is the #3907 acceptance pin: it FAILS on the old behaviour (a duplicate
 # issue per run) and on the silent-drop behaviour (no comment at all).
@@ -89,7 +92,7 @@ cat > "$BIN/gh" <<'GH_EOF'
 #   gh api "repos/O/R/issues/N/comments?per_page=100&page=P" (GET comments)
 #   gh api "repos/O/R/issues/N/comments" --method POST -f body=…  (comment)
 #   gh api "repos/O/R/issues" --method POST -f …           (create)
-#   gh api user --jq .login                                (actor check, #3907 P3)
+#   gh api user --jq .login                                (NOT used — see case 20)
 [ "${1:-}" = "api" ] || { echo "GH unexpected: $*" >&2; exit 1; }
 path="${2:-}"; method="GET"; paginate=0
 shift 2 || true
@@ -107,15 +110,20 @@ done
 # NB: the default lives in a variable — a literal JSON object inside
 # ${VAR:-{...}} is mis-parsed (the first '}' closes the expansion).
 DEFAULT_ITEMS_JSON='{"items":[]}'
+DEFAULT_CREATE_JSON='{"number":900,"user":{"login":"github-actions[bot]","type":"Bot"}}'
 echo "GH ${method} ${path}" >> "$STUB_TMP/calls.log"
 case "$path" in
   user)
-    # #3907 P3: the actor check. `gh api user --jq .login` prints the bare login
-    # (the --jq was already consumed by the arg loop above), so a stub that
-    # returned JSON here would make the helper's comparison fail for every case.
+    # P0: GET /user with the Actions INSTALLATION token is a REAL 403 —
+    # `Resource not accessible by integration` (GitHub lists fine-grained USER
+    # tokens for this endpoint, not installation tokens; actions/runner#3289).
+    # The stub models that reality for EVERY case: the substrate must not
+    # depend on this call. The previous stub FABRICATED a `github-actions[bot]`
+    # answer real GitHub never returns, which is exactly why the P0 shipped
+    # green. Case 20 pins that nothing here is needed.
     echo "GH-U" >> "$STUB_TMP/calls.log"
-    [ "${STUB_USER_FAIL:-0}" = "1" ] && { echo "gh: user failed" >&2; exit 1; }
-    printf '%s\n' "${STUB_USER_LOGIN:-github-actions[bot]}" ;;
+    echo 'gh: Resource not accessible by integration (HTTP 403)' >&2
+    exit 1 ;;
   search/issues*)
     echo "GH-Q paginate=${paginate} ${path}" >> "$STUB_TMP/calls.log"
     [ "${STUB_SEARCH_FAIL:-0}" = "1" ] && { echo "gh: search failed" >&2; exit 1; }
@@ -140,11 +148,13 @@ case "$path" in
   */comments)
     [ "${STUB_COMMENT_FAIL:-0}" = "1" ] && { echo "gh: comment failed" >&2; exit 1; }
     printf '%s\n' "${fields[@]}" > "$STUB_TMP/comment.txt"
-    printf '{}' ;;
+    # A real POST returns the created comment; `user.login` IS the author, and
+    # it is the only exact author probe an installation token can obtain.
+    printf '{"user":{"login":"%s"}}' "${STUB_COMMENT_LOGIN:-github-actions[bot]}" ;;
   */issues)
     [ "${STUB_CREATE_FAIL:-0}" = "1" ] && { echo "gh: create failed" >&2; exit 1; }
     printf '%s\n' "${fields[@]}" > "$STUB_TMP/created.txt"
-    printf '{"number":900}' ;;
+    printf '%s' "${STUB_CREATE_JSON:-$DEFAULT_CREATE_JSON}" ;;
   *) printf '{}' ;;
 esac
 exit 0
@@ -166,7 +176,8 @@ reset_case() {
   rm -f "$STUB_TMP/created.txt" "$STUB_TMP/comment.txt"
   unset STUB_SEARCH_JSON STUB_SEARCH_FAIL STUB_CREATE_FAIL STUB_COMMENT_FAIL \
         STUB_COMMENTS_JSON STUB_COMMENTS_JSON_P2 STUB_COMMENTS_JSON_P3 \
-        STUB_COMMENTS_FAIL STUB_SEARCH_JSON_P2 STUB_USER_LOGIN STUB_USER_FAIL || true
+        STUB_COMMENTS_FAIL STUB_SEARCH_JSON_P2 STUB_USER_LOGIN STUB_USER_FAIL \
+        STUB_CREATE_JSON STUB_COMMENT_LOGIN || true
   export GH_TOKEN="test-token"
 }
 
@@ -394,28 +405,32 @@ run_helper
 assert_eq "$(count_calls 'GH-Q.*per_page=100')" "1" "18. the dedupe search asks for a full page (per_page=100)"
 assert_eq "$(count_calls 'GH-Q paginate=1')" "1" "18. the dedupe search passes --paginate (page-2 walk is live)"
 
-# ── 19: a NON-Actions token actor fails loudly (P3) ────────────────────────
-# CLAIMED CONTRACT: env: GH_TOKEN (or GITHUB_TOKEN) — but ONLY the Actions app
-# token works with a dedupe that keys on `author:app/github-actions`. An adopter
-# passing a PAT creates issues under the PAT owner, so the search never matches,
-# `total` is 0 with no warning, and a fresh issue is filed EVERY run — exactly
-# the duplicate spam #3907 exists to prevent, and silently. #5019 migrates four
-# more monitors onto this substrate, so the misuse must be loud, not degenerate.
+# ── 19: a NON-Actions author is caught by the write's OWN response (P0) ─────
+# The dedupe search keys on author:app/github-actions, so a PAT writes issues
+# under its own login, the search never matches, and EVERY run files a fresh
+# issue — the #2706 duplicate spam this substrate exists to prevent. The
+# installation token cannot be probed for this (GET /user 403s — case 20), so
+# the check IS the write's own response: exact, and no extra call.
 reset_case
-export STUB_USER_LOGIN="some-human"
+export STUB_CREATE_JSON='{"number":900,"user":{"login":"some-human","type":"User"}}'
 run_helper
-assert_eq "$RC" "1" "19. a PAT actor → exit 1 (fail closed, no silent duplicate spam)"
-assert_eq "$(count_calls 'GH POST repos/.*/issues$')" "0" "19. a PAT actor → NOTHING is filed"
-assert_contains "$OUT" "github-actions[bot]" "19. a PAT actor → the error names the required reserved login"
-assert_contains "$OUT" "duplicate" "19. a PAT actor → the error names the duplicate-spam risk"
+assert_eq "$RC" "1" "19. a PAT author → exit 1 (fail closed, no silent duplicate spam)"
+assert_contains "$OUT" "github-actions[bot]" "19. the failure names the required reserved login"
+assert_contains "$OUT" "duplicate" "19. the failure names the duplicate-spam risk"
+assert_contains "$OUT" "some-human" "19. the failure names the ACTUAL write author"
+assert_eq "$(count_calls 'GH POST repos/.*/issues$')" "1" "19. the write is checked by its own response (the only exact probe available)"
 
-# ── 20: an UNVERIFIABLE actor is refused (fail closed) ─────────────────────
+# ── 20: the REAL installation-token 403 on GET /user does NOT block (P0) ────
+# GET /user is not available to a GitHub App INSTALLATION token, and
+# GITHUB_TOKEN is one. The stub answers the real 403 for EVERY case in this
+# suite, so this case pins that the substrate neither calls it nor is blocked
+# by it — the P0 that shipped green only because the old stub fabricated a bot
+# answer real GitHub never returns.
 reset_case
-export STUB_USER_FAIL=1
 run_helper
-assert_eq "$RC" "1" "20. an unanswerable actor lookup → exit 1"
-assert_eq "$(count_calls 'GH POST')" "0" "20. an unanswerable actor lookup → nothing is filed or commented"
-assert_contains "$OUT" "author:app/github-actions" "20. the refusal says why the actor matters (the dedupe key)"
+assert_eq "$RC" "0" "20. the real GET /user 403 does not block filing"
+assert_eq "$(count_calls 'GH POST repos/.*/issues$')" "1" "20. the filing still happens under an installation token"
+assert_eq "$(count_calls 'GH-U')" "0" "20. the substrate never probes GET /user (the unusable endpoint)"
 
 # ── 21: the no-token path never reaches the actor assertion ────────────────
 # The actor check is one `gh api user`; it must NOT weaken the offline
@@ -425,8 +440,29 @@ unset GH_TOKEN
 export STUB_USER_FAIL=1
 run_helper
 assert_eq "$RC" "1" "21. still fail-closed with no token (actor check not reached)"
-assert_contains "$OUT" "deaf monitor" "21. the no-token error is the TOKEN error, not an actor error"
-assert_eq "$(count_calls 'GH ')" "0" "21. no token → GitHub is never contacted (incl. the actor check)"
+assert_contains "$OUT" "deaf monitor" "21. the no-token error is the TOKEN error, not an author error"
+assert_eq "$(count_calls 'GH ')" "0" "21. no token → GitHub is never contacted (incl. any author check)"
+
+# ── 22: a COMMENT authored by a non-bot fails loudly ───────────────────────
+# The write-response check covers the ADOPTION path too: a PAT adopted the
+# bot's issue and commented as itself, so the dedupe is still honest (no new
+# issue), but the misuse must not pass silently.
+reset_case
+export STUB_SEARCH_JSON="$(search_json 42)"
+export STUB_COMMENTS_JSON='[]'
+export STUB_COMMENT_LOGIN="some-human"
+run_helper
+assert_eq "$RC" "1" "22. a non-bot comment author → exit 1"
+assert_not_contains "$OUT" "recorded recurrence" "22. no 'recorded' notice for a write made by the wrong author"
+assert_contains "$OUT" "some-human" "22. the failure names the actual comment author"
+
+# ── 23: a write response with no user.login is refused (fail closed) ───────
+# The response is the authority; an unparseable one must not be read as OK.
+reset_case
+export STUB_CREATE_JSON='{"number":900}'
+run_helper
+assert_eq "$RC" "1" "23. a response with no user.login → exit 1 (fail closed)"
+assert_contains "$OUT" "no user.login" "23. the refusal names the missing evidence"
 
 echo
 if [ "$FAIL" -eq 0 ]; then

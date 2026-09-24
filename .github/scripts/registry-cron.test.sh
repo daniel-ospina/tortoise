@@ -295,18 +295,33 @@ case "$url" in
           var="GH_ISSUE_$kind"
           val="${!var:-}"
           if [ -n "$val" ] && printf '%s' "$url" | grep -q "$kind"; then
-            items="[{\"number\":$val,\"title\":\"[DR] $kind\"}]"
+            items="[{\"number\":$val,\"title\":\"${GH_ISSUE_TITLE:-[DR] $kind}\"}]"
             break
           fi
         done
-        printf '{"items":%s}' "$items" ;;
+        # GH_SEARCH_FILLER=1: page 1 is a FULL page of 100 machine-authored
+        # look-alikes, so the exact match can only be found on page 2 — a
+        # single-page read files a duplicate. NB the match must be `&page=1`:
+        # `page=1` is also a substring of `per_page=100`.
+        if [ "${GH_SEARCH_FILLER:-0}" = "1" ]; then
+          case "$url" in
+            *'&page=1')
+              filler="$(python3 -c 'import json;print(",".join(json.dumps({"number":1000+i,"title":"[DR] OTHER — filler %d" % i}) for i in range(100)))')"
+              emit "{\"items\":[$filler]}" "${STUB_SEARCH_CODE:-200}"
+              exit 0 ;;
+          esac
+        fi
+        emit "{\"items\":$items}" "${STUB_SEARCH_CODE:-200}" ;;
       */issues/*/comments*)
         # #3907: occurrence counting GETs the issue's comments; the comment
         # POST is the recording write. Distinguish by method so the counting
         # walk is actually exercised (a stub that answered the POST shape here
         # would make the counter read 0 forever).
         if [ "$method" = "GET" ]; then
-          printf '%s' "${STUB_COMMENTS_JSON:-[]}"
+          # emit honours -o/-w: the counter reads the body through the
+          # status-checked primitive, so a stub that printed the body raw would
+          # hand the JSON to the code parser and silently count 0.
+          emit "${STUB_COMMENTS_JSON:-[]}" "${STUB_COMMENTS_CODE:-200}"
         else
           # REAL curl exits 0 on an HTTP 4xx/5xx; only `--fail` turns that into
           # exit 22. This stub therefore models the HTTP STATUS (default 201),
@@ -324,12 +339,19 @@ case "$url" in
         fi ;;
       */issues/*)
         if [ "$method" = "GET" ]; then
-          # emit honours -o/-w: gh_issue_open asks for the code first, then the body.
+          # emit honours -o/-w: gh_issue_open asks for the code AND the body in
+          # ONE status-checked call.
           emit "{\"state\":\"${GH_ISSUE_STATE:-open}\"}" "${STUB_ISSUE_CODE:-200}"
         else
-          printf '{}'
+          # PATCH = the close. STUB_CLOSE_CODE models a 403/5xx answered with
+          # exit 0 (the shape a real GitHub returns).
+          emit '{}' "${STUB_CLOSE_CODE:-200}"
         fi ;;
-      */issues) printf '{"number":%s}' "${GH_NEW_ISSUE:-900}" ;;
+      */issues)
+        # A real POST returns the created issue; the HTTP status (not the exit
+        # code) is what the status-checked primitive reads. STUB_CREATE_CODE
+        # models a 403/5xx answered with exit 0.
+        emit "{\"number\":${GH_NEW_ISSUE:-900}}" "${STUB_CREATE_CODE:-201}" ;;
       *) printf '{}' ;;
     esac
     ;;
@@ -375,6 +397,8 @@ reset_case() {
         SIMULATE_APP_DOWN \
         STUB_LIST_FAIL STUB_LIST_FAIL_TEAM STUB_FLAT_FAIL STUB_INDEX_FAIL GH_ISSUE_STATE STUB_ISSUE_CODE \
         STUB_TOP_NOT_JSON \
+        STUB_SEARCH_CODE STUB_CREATE_CODE STUB_CLOSE_CODE GH_SEARCH_FILLER \
+        GH_ISSUE_TITLE STUB_COMMENTS_CODE \
         GH_SEARCH_JSON GH_NEW_ISSUE R2_TEAMS R2_DEFAULT_LIST R2_FLAT_LIST \
         R2_DEFAULT_LIST_Z R2_DEFAULT_LIST_A \
         GH_ISSUE_SWEEP_CONFIG_ERROR GH_ISSUE_SWEEP_OFF_STALE GH_ISSUE_SWEEP_NO_COVERAGE \
@@ -1278,7 +1302,7 @@ rm -f "$KEY_EXT"
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
-export STUB_STATUS_BODY="$(status_body false '\"REGISTRY_STREAM_KEY not set\"' null)"
+export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' null)"
 export STUB_412=1
 export STUB_GET_BODY='{"kind":"SWEEP_CONFIG_ERROR","issue_number":42}'
 export GH_ISSUE_STATE=open
@@ -1297,7 +1321,7 @@ assert_match "$(cat "$LOG")" "GH POST .*/issues/42/comments .*dr-occurrence" "68
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
-export STUB_STATUS_BODY="$(status_body false '\"REGISTRY_STREAM_KEY not set\"' null)"
+export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' null)"
 export STUB_412=1
 export STUB_GET_BODY='{"kind":"SWEEP_CONFIG_ERROR","issue_number":42}'
 export GH_ISSUE_STATE=open
@@ -1316,7 +1340,7 @@ assert_eq "$(grep -c 'GH POST .*/issues/42/comments' "$LOG" || true)" "1" "69. e
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
-export STUB_STATUS_BODY="$(status_body false '\"REGISTRY_STREAM_KEY not set\"' null)"
+export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' null)"
 run_driver
 assert_eq "$RC" 1 "70a. a first-time fault exits RED (1)"
 assert_match "$(cat "$LOG")" "GH POST .*/issues \{" "70a. a first-time fault still FILES"
@@ -1344,7 +1368,7 @@ assert_match "$(cat "$LOG")" "AWS delete-object key=ops/alerts/SWEEP_CONFIG_ERRO
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
-export STUB_STATUS_BODY="$(status_body false '\"REGISTRY_STREAM_KEY not set\"' null)"
+export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' null)"
 export STUB_412=1
 export STUB_GET_BODY='{"kind":"SWEEP_CONFIG_ERROR","issue_number":42}'
 export GH_ISSUE_STATE=open
@@ -1367,7 +1391,7 @@ assert_not_match "$OUT" "recorded recurrence #1" "71. no false 'recorded' claim 
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
-export STUB_STATUS_BODY="$(status_body false '\"REGISTRY_STREAM_KEY not set\"' null)"
+export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' null)"
 export STUB_412=1
 export STUB_GET_BODY='{"kind":"SWEEP_CONFIG_ERROR","issue_number":42}'
 export GH_ISSUE_STATE=open
@@ -1376,6 +1400,78 @@ run_driver
 assert_eq "$RC" 1 "72. the repeat is still RED (1)"
 assert_match "$(cat "$LOG")" "GH POST .*/issues/42/comments .*Recurrence #2" "72. an outsider marker does NOT inflate the counter (1 legit → #2)"
 assert_not_match "$(cat "$LOG")" "GH POST .*/issues/42/comments .*Recurrence #5" "72. the P2 over-count direction is closed (incl. a foreign bot)"
+
+# ── 73. a FAILED dedupe search refuses to file (P1) ───────────────────────
+# The search API has a separate, LOWER rate limit. A 403/429 answered with
+# curl exit 0 previously made `jq -r '.items[0].number // empty'` yield empty,
+# which read as "no open issue" → a DUPLICATE (the #2706 direction) inside the
+# very guard #3907 exists for. The primitive requires a real 2xx, and the file
+# path REFUSES on __ERR__ ("no incident" and "cannot see incidents" are
+# different facts).
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' null)"
+export STUB_SEARCH_CODE=403
+run_driver
+assert_eq "$RC" 1 "73. a 403 search exits RED (1)"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "73. a failed search files NO duplicate"
+assert_contains "$OUT" "refusing to file a possible duplicate" "73. the refusal says why"
+assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/SWEEP_CONFIG_ERROR/_.json" "73. the create-once sentinel is kept for the next run"
+
+# ── 74. the dedupe search PAGES to an exact match beyond page 1 (P1) ──────
+# GitHub's search ranking is relevance-based, NOT equality-first: a key query
+# can fill page 1 with other subjects and leave the EXACT subject on page 2.
+# The pre-fix single-page `per_page=20` search returned "none" and filed a
+# duplicate; page 2 is only reachable when the walk pages.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(minutes=500)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+export GH_SEARCH_FILLER=1
+export GH_ISSUE_STALE=42
+export GH_ISSUE_TITLE='[DR] STALE — teamA'
+export GH_ISSUE_STATE=open
+export STUB_COMMENTS_JSON='[]'
+run_driver
+assert_eq "$RC" 1 "74. a page-2 exact match exits RED (1)"
+assert_match "$(cat "$LOG")" "GH GET .*search/issues.*page=2" "74. the search walk reached page 2"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "74. the page-2 exact match files NO duplicate"
+assert_match "$(cat "$LOG")" 'AWS put-object body=\{"kind":"STALE","issue_number":42' "74. the page-2 issue number is adopted (only the walk could see it)"
+
+# ── 75. a FAILED issue CREATE files nothing and claims no filing (P2) ─────
+# The pre-fix create was a bare curl whose `.number // empty` conflated an HTTP
+# failure with "no number": nothing was filed, no line was logged, and
+# finish() still printed "an incident was filed — exiting RED".
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' null)"
+export STUB_CREATE_CODE=403
+run_driver
+assert_eq "$RC" 1 "75. a failed create exits RED (1)"
+assert_match "$(cat "$LOG")" "GH POST .*/issues \{" "75. the create POST was attempted"
+assert_contains "$OUT" "issue CREATE failed" "75. the failed create is logged loudly"
+assert_not_contains "$OUT" "an incident was filed" "75. no false claim of a filing that did not happen"
+assert_not_match "$(cat "$LOG")" "issue_number\":[0-9]" "75. no issue number is backfilled into the sentinel"
+
+# ── 76. a FAILED close leaves the issue OPEN and KEEPS the sentinel (P2) ──
+# The pre-fix close was `curl … >/dev/null 2>&1 || true`: on 403/5xx the issue
+# stayed OPEN while the driver believed it resolved AND deleted the R2
+# sentinel, so a human saw "unresolved" indefinitely and the next recurrence
+# re-adopted a stale issue.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false null null)"
+export GH_ISSUE_SWEEP_CONFIG_ERROR=42
+export STUB_CLOSE_CODE=403
+run_driver
+assert_eq "$RC" 0 "76. a failed close does not redden an otherwise healthy run"
+assert_match "$(cat "$LOG")" "GH PATCH .*/issues/42" "76. the close was attempted"
+assert_not_match "$(cat "$LOG")" "AWS delete-object key=ops/alerts/SWEEP_CONFIG_ERROR/_.json" "76. the sentinel is KEPT on a failed close"
+assert_contains "$OUT" "could NOT close issue #42" "76. the failed close is reported, not swallowed"
 
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"

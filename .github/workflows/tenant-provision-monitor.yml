@@ -52,11 +52,25 @@ jobs:
           start="$(date -u -d '-3 hours' +%Y-%m-%dT%H:%M:%SZ)"
           end="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           sql="select timestamp, event_message from logs where source = 'function_logs' and event_message like '%tenant-provision%' order by timestamp desc limit 500"
-          out="$(curl -sS -G "https://api.supabase.com/v1/projects/$SUPABASE_PROJECT_REF/analytics/endpoints/logs" \
+          # A bare `curl -sS` exits 0 on an HTTP 4xx/5xx, and a Supabase error
+          # body is `{"message": …}` — NOT `{"error": …}` — so the only failure
+          # detection below (`jq -r '.error'`) stayed empty on a 403/5xx and this
+          # monitor printed `✅ no incident-class markers` and exited 0: a blind
+          # monitor reporting healthy. A transport failure is caught by `set -e`;
+          # an HTTP error is not. Require a REAL 2xx before interpreting the body
+          # (a transport failure collapses to 000 and is refused the same way).
+          log_body="$(mktemp)"
+          http="$(curl -sS -o "$log_body" -w '%{http_code}' -G "https://api.supabase.com/v1/projects/$SUPABASE_PROJECT_REF/analytics/endpoints/logs" \
             -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
             --data-urlencode "sql=$sql" \
             --data-urlencode "iso_timestamp_start=$start" \
-            --data-urlencode "iso_timestamp_end=$end")"
+            --data-urlencode "iso_timestamp_end=$end" || echo 000)"
+          out="$(cat "$log_body")"
+          rm -f "$log_body"
+          if [ "$http" != "200" ]; then
+            echo "::error::log query returned HTTP ${http} — the monitor cannot read logs; refusing to report healthy"
+            exit 1
+          fi
           err="$(printf '%s' "$out" | jq -r '.error // empty')"
           if [ -n "$err" ]; then
             echo "::error::log query failed: $err"
