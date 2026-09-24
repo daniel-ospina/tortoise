@@ -68,6 +68,12 @@ from pathlib import Path
 import httpx
 import pytest
 
+# Shared nested-def-on-loop walkers (#4625 review) — one home for both guards,
+# so Guard A's blindness to an invoked local closure cannot drift back in.
+from tests._loop_ast import callee_name as _callee_name
+from tests._loop_ast import nested_defs_invoked_on_loop as _nested_defs_invoked_on_loop
+from tests._loop_ast import offload_boundary_eager_children as _offload_boundary_eager_children
+
 # The authenticated TestClient fixture (temp-DB SDK patching + the module-level
 # env the app needs on import). Imported for the fixture, not for the tests.
 from tests.test_hosted_api import TEST_ORG_ID
@@ -476,14 +482,6 @@ _KNOWN_INLINE_HELPER_RESIDUAL = frozenset({
 })
 
 
-def _callee_name(func: ast.expr) -> str | None:
-    if isinstance(func, ast.Name):
-        return func.id
-    if isinstance(func, ast.Attribute):
-        return func.attr
-    return None
-
-
 def _graph_bound_names(node: ast.AST) -> set[str]:
     """Names bound to a graph handle — when the assigned expression uses a
     ``_get_proj()`` / ``_get_registry()`` / ``dream_health_check`` seam either as
@@ -512,83 +510,6 @@ def _graph_bound_names(node: ast.AST) -> set[str]:
     return names
 
 
-def _offload_boundary_eager_children(call: ast.Call):
-    """Arguments of an offload-boundary call that are evaluated EAGERLY.
-
-    A callable REFERENCE (Lambda / Name / Attribute) is handed to the worker
-    and skipped — at ANY position, since the callable sits at index 0 for
-    ``to_thread`` but at index 1 for ``run_in_executor`` / ``_run_with_close``.
-    Every other argument (a Call, a comprehension, ...) is evaluated on the
-    loop, so the caller must still scan it.
-    """
-    for arg in call.args:
-        if isinstance(arg, (ast.Lambda, ast.Name, ast.Attribute)):
-            continue
-        yield arg
-    for kw in call.keywords:
-        if isinstance(kw.value, (ast.Lambda, ast.Name, ast.Attribute)):
-            continue
-        yield kw.value
-
-
-def _direct_nested_invocations(statements, nested_names: set[str],
-                               descend: set[str]) -> set[str]:
-    """Nested-def names INVOKED (``name(...)``) on the loop.
-
-    Only a bare CALL is an invocation: a callable REFERENCE handed to an
-    offload boundary (``asyncio.to_thread(_read)``) runs in the worker and is
-    not one — which is what keeps an off-loaded closure out of the scan. The
-    walk descends into the bodies of nested defs already known to run on the
-    loop (``descend``) so a chain of nested invocations is followed.
-    """
-    found: set[str] = set()
-
-    def walk(current: ast.AST) -> None:
-        if isinstance(current, ast.Call):
-            if _callee_name(current.func) in _OFFLOAD_BOUNDARY_CALLEES:
-                for child in _offload_boundary_eager_children(current):
-                    walk(child)
-                return
-            name = _callee_name(current.func)
-            if name in nested_names:
-                found.add(name)
-        for child in ast.iter_child_nodes(current):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                  ast.ClassDef)):
-                if getattr(child, "name", None) in descend:
-                    for stmt in child.body:
-                        walk(stmt)
-                continue
-            walk(child)
-
-    for stmt in statements:
-        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef,
-                             ast.ClassDef)):
-            if getattr(stmt, "name", None) in descend:
-                for inner in stmt.body:
-                    walk(inner)
-            continue
-        walk(stmt)
-    return found
-
-
-def _nested_defs_invoked_on_loop(node: ast.AsyncFunctionDef,
-                                 nested_names: set[str]) -> set[str]:
-    """Nested defs of ``node`` whose body RUNS ON THE LOOP (fixpoint).
-
-    The route body runs on the loop, so a nested def it invokes by name runs
-    there too — and so do the defs that one invokes. A def reached only as a
-    callable REFERENCE to an offload boundary never enters the set.
-    """
-    on_loop: set[str] = set()
-    while True:
-        invoked = _direct_nested_invocations(node.body, nested_names, on_loop)
-        newly = invoked - on_loop
-        if not newly:
-            return on_loop
-        on_loop |= newly
-
-
 def _has_inline_graph_io(node: ast.AsyncFunctionDef) -> list[int]:
     """Line numbers of sync-FalkorDB seams NOT inside an offload boundary."""
     bound = _graph_bound_names(node)
@@ -608,7 +529,8 @@ def _has_inline_graph_io(node: ast.AsyncFunctionDef) -> list[int]:
         if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef))
         and sub is not node
     }
-    on_loop_nested = _nested_defs_invoked_on_loop(node, nested_names)
+    on_loop_nested = _nested_defs_invoked_on_loop(
+        node, nested_names, _OFFLOAD_BOUNDARY_CALLEES)
 
     def visit(current: ast.AST) -> None:
         if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef,
@@ -820,7 +742,8 @@ def _inline_calls_to(node: ast.AsyncFunctionDef,
         if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef))
         and sub is not node
     }
-    on_loop_nested = _nested_defs_invoked_on_loop(node, nested_names)
+    on_loop_nested = _nested_defs_invoked_on_loop(
+        node, nested_names, _OFFLOAD_BOUNDARY_CALLEES)
     found: list[str] = []
 
     def visit(current: ast.AST) -> None:
@@ -852,6 +775,10 @@ def test_capture_session_leg62_probe_is_offloaded():
     * ``_get_proj`` — the projection attach must be gone from the loop (it now
       rides the off-loop wrapper);
     * ``_capture_session_probe_off_loop`` must be the one caller doing it;
+    * the wrapper's OWN SDK open must ride ``_data_sdk_offloaded`` (review F2:
+      reverting it to ``_data_sdk`` used to leave every test green — the
+      behavioural probe records only ``_get_proj``, and this pin scanned only
+      ``_capture_session_impl``);
     * exactly ONE inline ``_data_sdk`` may remain: the leg-72
       (``count_org_usage``) site, which is a DECLARED residual because the
       required #4282 collision pre-flight returned COLLISION, so that leg is
@@ -874,6 +801,19 @@ def test_capture_session_leg62_probe_is_offloaded():
         f"{callees.count('_data_sdk')} inline `_data_sdk` call(s); the leg-62 "
         "open must use `_data_sdk_offloaded` and the ONE remaining site is the "
         "declared leg-72 residual (count_org_usage)"
+    )
+
+    probe = _async_body_named("_capture_session_probe_off_loop")
+    probe_callees = _inline_calls_to(
+        probe, frozenset({"_data_sdk", "_data_sdk_offloaded"}))
+    assert probe_callees.count("_data_sdk_offloaded") == 1, (
+        "#4625 leg 62: `_capture_session_probe_off_loop` must open the SDK "
+        "through `_data_sdk_offloaded` — its tenancy resolver (``_make_sdk`` "
+        "+ the ownership query) blocks the loop otherwise"
+    )
+    assert probe_callees.count("_data_sdk") == 0, (
+        "#4625 leg 62 regressed: `_capture_session_probe_off_loop` opens the "
+        "SDK inline with `_data_sdk` instead of the off-loop twin"
     )
 
 

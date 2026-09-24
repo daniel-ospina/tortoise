@@ -20679,9 +20679,17 @@ async def get_onboarding_state(org: dict = Depends(get_current_org_session_ungat
     an overview read)."""
     # C5 #2114: onboarding state reads the DEFAULT graph — org-level surface.
     _reject_graph_bound_org_surface(org, "onboarding")
+    # #4625: this route is a declared READ of the issue, not the write-path
+    # residual — BOTH of its legs block (the projection read opens the graph /
+    # hits PostgREST; `_org_email` reads `teams.email`, or the registry Team
+    # node in selfhost), so neither may run on the event loop. The projection
+    # rides its #2924 off-loop wrapper; the email read rides `asyncio.to_thread`
+    # — the same short-read hand-off `list_points` / the capture probe use,
+    # which (unlike `_cp_offload`) does not put a registry graph open on the
+    # auth pool nor impose its fail-closed 503 on this read.
     return {
-        "onboarding": _get_onboarding_projection(org["org_id"]),
-        "email": _org_email(org["org_id"]),
+        "onboarding": await _get_onboarding_projection_off_loop(org["org_id"]),
+        "email": await asyncio.to_thread(_org_email, org["org_id"]),
     }
 
 
