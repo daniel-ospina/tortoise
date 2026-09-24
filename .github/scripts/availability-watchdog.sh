@@ -79,7 +79,7 @@
 #              guidance for automated remediation: "only allow the watcher
 #              service to terminate one instance every minute, and if it tries
 #              to terminate more, then it sends an alert to get a human
-#              involved". The analogue here (5-min cadence, ONE machine):
+#              involved". The analogue here (5-min cron intent, ONE machine):
 #                * SUSTAINED_DOWN_MINUTES (10) of continuous failure AND
 #                  SUSTAINED_MIN_RUNS (≥2) observed failing runs before the
 #                  FIRST restart,
@@ -1168,11 +1168,15 @@ page() { # <text>
 # the flag 0 and therefore suppresses nothing (#3887 review: an attempt stamp
 # must never be read as "a human was paged").
 page_human() { # <text>
-  if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ] || [ -z "$ESCALATION_CHAT_ID" ]; then
+  # Routes to TELEGRAM_CHAT_ID — the PRE-#3887 recipient. ESCALATION_CHAT_ID is
+  # the SUSTAINED leg's recipient only (page_required below); using it here
+  # would silently move the existing restart/cap/inconclusive pages off the ops
+  # chat just because an operator configured an on-call override (#4591 review).
+  if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
     page "$1"
     return 0
   fi
-  if telegram_send "$ESCALATION_CHAT_ID" "$1"; then HUMAN_PAGED_THIS_RUN="1"; fi
+  if telegram_send "$TELEGRAM_CHAT_ID" "$1"; then HUMAN_PAGED_THIS_RUN="1"; fi
   return 0
 }
 
@@ -1418,16 +1422,22 @@ recent_restart_ledger() { # <marker> <now> <exact-title> [exclude-issue]
   # the parse and restore it (round 4, P2-7): the round-4 retry runs while the
   # CURRENT incident's state is live, so clobbering it here would fabricate a
   # sustained window (and a sentinel) from the previous incident's body.
-  local sff sdr sld slc scn sls slsrc
+  local sff sdr sld slc scn sls slsrc ses sest spok
   sff="$STATE_FIRST_FAILURE_TS"; sdr="$STATE_DOWN_RUNS"; sld="$STATE_LAST_DOWN_TS"
   slc="$STATE_LAST_COMMENT_TS"; scn="$STATE_CAP_NOTIFIED_TS"
   sls="$STATE_LEDGER_STATE"; slsrc="$STATE_LEDGER_SRC"
-  # Reuse the ONE normalizer/validator (to_int bounds, future-stamp clamp,
-  # strict whole-value parse) rather than a second parser that could drift.
+  # #3887: the escalation triple is CURRENT-incident state too, and omitting it
+  # here let a SOURCE incident's confirmed-page stamps bleed into the caller —
+  # `decide_escalation` then returned `remind`/`wait_page_quiet` off the PREVIOUS
+  # incident's page, silently muting the human page for a new incident that had
+  # never paged (fail-OPEN, reproduced in review). Any new state field MUST be
+  # added to BOTH snapshot lists below as well as to parse_state.
+  ses="$STATE_ESCALATE_STATE"; sest="$STATE_ESCALATE_TS"; spok="$STATE_PAGE_OK_TS"
   parse_state "$body"
   STATE_FIRST_FAILURE_TS="$sff"; STATE_DOWN_RUNS="$sdr"; STATE_LAST_DOWN_TS="$sld"
   STATE_LAST_COMMENT_TS="$slc"; STATE_CAP_NOTIFIED_TS="$scn"
   STATE_LEDGER_STATE="$sls"; STATE_LEDGER_SRC="$slsrc"
+  STATE_ESCALATE_STATE="$ses"; STATE_ESCALATE_TS="$sest"; STATE_PAGE_OK_TS="$spok"
   # Keep only the stamps still inside the rolling hour. decide_restart re-checks
   # the window; this just keeps the carried body small and the semantics plain.
   ledger=""
@@ -1445,16 +1455,21 @@ recent_restart_ledger() { # <marker> <now> <exact-title> [exclude-issue]
 # 1 = still corrupt / unreadable (the caller must keep failing closed).
 reseed_ledger_from_source() { # <source-issue>
   local src="$1" body now kept ts
-  local sff sdr sld slc scn sls slsrc
+  local sff sdr sld slc scn sls slsrc ses sest spok
   body="$(get_issue_body "$src")"
   if [ "$body" = "__ERR__" ]; then return 1; fi
   sff="$STATE_FIRST_FAILURE_TS"; sdr="$STATE_DOWN_RUNS"; sld="$STATE_LAST_DOWN_TS"
   slc="$STATE_LAST_COMMENT_TS"; scn="$STATE_CAP_NOTIFIED_TS"
   sls="$STATE_LEDGER_STATE"; slsrc="$STATE_LEDGER_SRC"
+  # #3887: same snapshot rule as recent_restart_ledger — this runs mid-run on a
+  # repeat DOWN run, so a bleed here would overwrite the CURRENT incident's
+  # escalation state immediately before the final body write.
+  ses="$STATE_ESCALATE_STATE"; sest="$STATE_ESCALATE_TS"; spok="$STATE_PAGE_OK_TS"
   parse_state "$body"
   STATE_FIRST_FAILURE_TS="$sff"; STATE_DOWN_RUNS="$sdr"; STATE_LAST_DOWN_TS="$sld"
   STATE_LAST_COMMENT_TS="$slc"; STATE_CAP_NOTIFIED_TS="$scn"
   STATE_LEDGER_STATE="$sls"; STATE_LEDGER_SRC="$slsrc"
+  STATE_ESCALATE_STATE="$ses"; STATE_ESCALATE_TS="$sest"; STATE_PAGE_OK_TS="$spok"
   if [ "$STATE_RESTARTS_INVALID" = "1" ]; then
     # Never adopt HALF of a corrupt ledger.
     STATE_RESTARTS=""
@@ -1970,6 +1985,13 @@ The service failed ${STATE_DOWN_RUNS} probe run(s), starting $(fmt_iso "$STATE_F
     STATE_LAST_DOWN_TS="$now"
     STATE_LAST_COMMENT_TS="0"
     STATE_CAP_NOTIFIED_TS="0"
+    # #3887: a NEW incident starts with NO escalation history. Leaving these at
+    # the previous incident's values would stamp the new incident `sent` and
+    # render a false "A human was paged for this sustained incident" claim.
+    STATE_ESCALATE_STATE=""
+    STATE_ESCALATE_TS="0"
+    STATE_PAGE_OK_TS="0"
+    HUMAN_PAGED_THIS_RUN="0"
     STATE_RESTARTS="$carried_ledger"
     STATE_RESTARTS_INVALID="$carried_invalid"
     # DURABLE FAIL-CLOSED LEDGER SENTINEL (round 4, P2-7): persist WHY the
@@ -2180,8 +2202,8 @@ The service failed ${STATE_DOWN_RUNS} probe run(s), starting $(fmt_iso "$STATE_F
           # WRITE-THEN-ACT: record the attempt in the incident body BEFORE
           # calling flyctl. The body is the only cooldown/cap memory, so a
           # crash, a lost response, or a failed restart API call must not be
-          # able to erase it (that would allow an unthrottled restart every
-          # 5 minutes). If the record cannot be written, do NOT restart.
+          # able to erase it (that would allow an unthrottled restart on every
+          # run). If the record cannot be written, do NOT restart.
           STATE_RESTARTS="${STATE_RESTARTS:+$STATE_RESTARTS }$now"
           STATE_CAP_NOTIFIED_TS="0"
           if ! update_issue_body "$issue" "$(render_body "$kind" "$kindlabel" "🚑 Restart attempt #$((STATE_DOWN_RUNS)) recorded at $(fmt_iso "$now") — issuing \`flyctl machine restart\` next; the next probe run is the recovery check.")"; then
@@ -2363,6 +2385,11 @@ ${heal_note}"
       # "outcome unknown => retry", so the marker itself can never mute the leg.
       STATE_ESCALATE_TS="$now"
       STATE_ESCALATE_STATE="pending"
+      # NOTE: `page_ok_ts` is DELIBERATELY NOT stamped here. It records a
+      # CONFIRMED delivery, and this is only an ATTEMPT — stamping it optimistically
+      # would let an undelivered page silence the retry for a whole
+      # CAP_RENOTIFY_MINUTES window (fail-OPEN). It is stamped below, on the
+      # confirmed-success branch and for a confirmed page_human delivery.
       esc_pending=1 ;;
   esac
   # A human page CONFIRMED delivered this run (a restart / failed restart / cap /

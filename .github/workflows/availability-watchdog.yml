@@ -10,7 +10,9 @@
 # routing IS a total outage.
 #
 # This workflow is the missing OUT-OF-PROCESS observer: it runs on GitHub
-# Actions (a different failure domain than Fly), every 5 minutes, and asserts
+# Actions (a different failure domain than Fly) on a */5 cron intent — measured
+# delivery is ~15 min (33% of intent), so any threshold stated in RUNS must be
+# justified against the measured rate, never the nominal one — and asserts
 # the REAL USER PATH — `GET /v1/organizations` with no auth, which must answer 401
 # (source-verified: tortoise/session_auth.py `verify_session_jwt` raises 401
 # "Missing session token" with zero network I/O when the Authorization header

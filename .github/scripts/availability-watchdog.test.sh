@@ -252,9 +252,13 @@ path="${2:-}"; method="GET"; input=0; paginate=0
 shift 2 || true
 while [ $# -gt 0 ]; do
   case "$1" in
-    --method) method="$2"; shift 2 ;;
+    # `shift 2` FAILS when the option is the LAST argument (no value follows),
+    # and a FAILED shift shifts NOTHING — the loop then re-reads the same "$1"
+    # forever (a genuine infinite spin, one argument-ordering change from
+    # live). Fall back to a single shift so EVERY branch makes progress.
+    --method) method="$2"; shift 2 2>/dev/null || shift ;;
     --input) input=1; shift ;;
-    --jq) shift 2 ;;
+    --jq) shift 2 2>/dev/null || shift ;;
     --paginate) paginate=1; shift ;;
     *) shift ;;
   esac
@@ -423,7 +427,11 @@ reset_case() {
 run_watchdog() { # -> RC (exit code), OUT (stderr/log), OUT_STDOUT (must be empty)
   set +e
   local so
-  so="$("$WATCHDOG" 2>"$STUB_TMP/stderr.log")"
+  # `</dev/null`: the gh stub has the pipeline's only unbounded read
+  # (`payload="$(cat)"`), and this call hands the watchdog the HARNESS's own
+  # stdin. Every watchdog `--input` call is pipe-fed, but closing stdin here
+  # makes a non-piped read impossible to block on a terminal.
+  so="$("$WATCHDOG" 2>"$STUB_TMP/stderr.log" </dev/null)"
   RC=$?
   OUT="$([ -f "$STUB_TMP/stderr.log" ] && cat "$STUB_TMP/stderr.log" || true)"
   OUT_STDOUT="$so"
@@ -445,7 +453,9 @@ run_watchdog_no_flyctl() { # -> RC, OUT, OUT_STDOUT (PATH without flyctl)
   # `env VAR=… cmd` form is a git-bearing-script false positive for
   # main-worktree-guard (#1484), which made this harness unrunnable in a hub
   # session (and hid the whole suite from reviewers).
-  so="$(PATH="$BIN_NOFLY:/usr/bin:/bin:/usr/sbin:/sbin" "$WATCHDOG" 2>"$STUB_TMP/stderr.log")"
+  # Same `</dev/null` as run_watchdog(): this is the other direct watchdog
+  # invocation, so it hands over the harness's stdin too.
+  so="$(PATH="$BIN_NOFLY:/usr/bin:/bin:/usr/sbin:/sbin" "$WATCHDOG" 2>"$STUB_TMP/stderr.log" </dev/null)"
   RC=$?
   OUT="$([ -f "$STUB_TMP/stderr.log" ] && cat "$STUB_TMP/stderr.log" || true)"
   OUT_STDOUT="$so"
@@ -2061,6 +2071,17 @@ assert_not_contains "$JOB_ENV" "PROBE_HOST_LABEL" \
 # a comment and is stripped — a comment must never satisfy its own guard.)
 assert_not_contains "$WORKFLOW_CODE" "PROD_PROBE_URLS" \
   "PROD_PROBE_URLS is not set at ANY level of the watchdog workflow (the workflow's own comment is stripped, so it cannot satisfy this)"
+# #3887 round 2: the NEW knob joins the same containment surface. Added to the
+# guard in the same change that adds the knob — otherwise a workflow-level
+# ESCALATION_CHAT_ID placed after `steps:` escapes the pre-steps slice and
+# silently re-points EVERY sustained page at a different chat, with nothing red.
+# (Same class as the PROD_PROBE_URLS escape recorded in the #4286 review.)
+assert_contains "$WORKFLOW_CODE" "ESCALATION_CHAT_ID: \${{ secrets.ESCALATION_CHAT_ID }}" \
+  "ESCALATION_CHAT_ID is exported to the probe steps (step env)"
+assert_not_contains "$JOB_ENV" "ESCALATION_CHAT_ID" \
+  "ESCALATION_CHAT_ID is NOT job-level (step env only — otherwise the override escapes containment)"
+assert_eq "$(printf '%s' "$WORKFLOW_CODE" | grep -c 'ESCALATION_CHAT_ID: \${{ secrets.ESCALATION_CHAT_ID }}')" "2" \
+  "ESCALATION_CHAT_ID is set on BOTH probe steps (the API step and the auth step fail independently)"
 
 # ── 96: the workflow drives the auth surface as its OWN step (#3628) ───────
 AUTH_WORKFLOW="$SCRIPT_DIR/../workflows/availability-watchdog.yml"
@@ -2460,6 +2481,202 @@ assert_contains "$(grep 'CURL telegram' "$STUB_TMP/calls.log")" "chat_id=22222" 
 assert_not_contains "$(grep 'CURL telegram' "$STUB_TMP/calls.log")" "chat_id=11111" "e2e(o): …and NOT to the transition chat"
 assert_contains "$OUT" "recipient=telegram-override" "e2e(o): the log records that an override recipient is in use (by KIND, never the id)"
 assert_not_contains "$OUT" "22222" "e2e(o): …and never the override id itself"
+
+# ════════════════════════════════════════════════════════════════════════════
+# #3887 round 2 — findings from the code review of PR #4591. Each case pins a
+# property a FRESH reviewer PROVED was unpinned, by mutating the guard and
+# watching the whole escalation section stay green.
+# ════════════════════════════════════════════════════════════════════════════
+
+# A SOURCE incident's body, as it looks after its own sustained page.
+PAGED_SRC_BODY="<!-- watchdog-state kind=down first_failure_ts=$((NOW - 9999)) down_runs=9 last_down_ts=$((NOW - 9000)) last_comment_ts=0 cap_notified_ts=0 ledger_state= ledger_src= escalate_state=sent escalate_ts=$((NOW - 600)) page_ok_ts=$((NOW - 600)) restarts=$((NOW - 1500)) -->"
+
+# Unit-call recent_restart_ledger() against a SOURCE incident that was paged,
+# while the CALLER holds a fresh incident's (empty) escalation state. Drives the
+# real helper through the harness's stubbed gh.
+bleed_unit() { # -> "state|ts|page_ok" the CALLER still holds afterwards
+  WATCHDOG_LIB_ONLY=1 bash -c '
+    source "$0"
+    STATE_FIRST_FAILURE_TS=111; STATE_DOWN_RUNS=1; STATE_LAST_DOWN_TS=111
+    STATE_LAST_COMMENT_TS=0; STATE_CAP_NOTIFIED_TS=0
+    STATE_LEDGER_STATE=""; STATE_LEDGER_SRC=""; STATE_RESTARTS=""
+    STATE_ESCALATE_STATE=""; STATE_ESCALATE_TS=0; STATE_PAGE_OK_TS=0
+    recent_restart_ledger "down" "$WATCHDOG_NOW_EPOCH" "$1" >/dev/null 2>&1 || true
+    printf "%s|%s|%s" "$STATE_ESCALATE_STATE" "$STATE_ESCALATE_TS" "$STATE_PAGE_OK_TS"
+  ' "$WATCHDOG" "$DOWN_TITLE_FIXTURE"
+}
+
+# ── unit: a SOURCE incident's page must NOT bleed into the CURRENT incident ──
+# Both helpers parse ANOTHER incident's body while the caller's state is live.
+# Omitting the escalation triple from their snapshot/restore let the source's
+# CONFIRMED-page stamps clobber the caller's — and decide_escalation then read
+# them as "this incident already paged a human", MUTING the new incident's page
+# (fail-OPEN). Reproduced at head 67fac3305 before the fix.
+reset_case
+printf '%s' "{\"body\":\"$PAGED_SRC_BODY\"}" > "$STUB_TMP/issue.777.json"
+export STUB_LEDGER_SEARCH_JSON="$(search_json 777 "$DOWN_TITLE_FIXTURE")"
+assert_eq "$(bleed_unit)" "|0|0" "bleed: recent_restart_ledger does NOT adopt the SOURCE incident's escalation state"
+unset STUB_LEDGER_SEARCH_JSON
+# …and the parse itself IS what the snapshot protects against, so the assertion
+# above cannot be passing for the wrong reason (e.g. a parse that read nothing).
+assert_eq "$(parse_esc "$PAGED_SRC_BODY")" "$((NOW - 600))|sent|$((NOW - 600))" \
+  "bleed: parse_state DOES read those fields (the snapshot is load-bearing, not vacuous)"
+
+# ── e2e(p): a NEW incident is never born stamped as already-paged ───────────
+# The end-to-end consequence: a new incident carried from a paged source must
+# not inherit its stamps, or its leg answers wait_page_quiet/remind while this
+# incident has never paged anyone.
+reset_case
+printf '%s' "{\"body\":\"$PAGED_SRC_BODY\"}" > "$STUB_TMP/issue.777.json"
+export STUB_LEDGER_SEARCH_JSON="$(search_json 777 "$DOWN_TITLE_FIXTURE")"
+export STUB_SEARCH_JSON="$(search_json 900 "$DOWN_TITLE_FIXTURE")"
+export STUB_SEARCH_MARKER='PROD%20DOWN'
+export STUB_PROBE_CODES="000"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+run_watchdog
+assert_contains "$(patched_body)" "escalate_state=" "e2e(p): the new incident's body carries an escalation-state field"
+assert_not_contains "$(patched_body)" "escalate_state=sent" "e2e(p): a NEW incident is never born stamped already-paged by a PREVIOUS incident"
+assert_not_contains "$(patched_body)" "page_ok_ts=$((NOW - 600))" "e2e(p): …and never inherits the previous incident's confirmed-page stamp"
+unset STUB_LEDGER_SEARCH_JSON
+
+# ── e2e(q): an UNDELIVERED escalation must not stamp page_ok_ts ─────────────
+# page_ok_ts is the cross-run retry gate. Stamping it on an ATTEMPT rather than
+# a confirmed delivery turns the advertised "retried next run" into "not retried
+# for 60 min" while every other assertion stays green (proved by a reviewer).
+reset_case
+seed_issue down "$((NOW - 1800))" 3 0 ""
+export STUB_PROBE_CODES="000"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+export STUB_TELEGRAM_FAIL=1
+run_watchdog
+assert_contains "$(patched_body)" "escalate_state=failed" "e2e(q): the undelivered attempt is recorded as failed"
+assert_contains "$(patched_body)" "page_ok_ts=0" "e2e(q): an UNDELIVERED page stamps NO confirmed-page stamp (it must not gate the retry)"
+assert_not_contains "$(patched_body)" "page_ok_ts=$NOW" "e2e(q): …specifically not 'now'"
+
+# ── e2e(r): run 2 of an undelivered escalation actually RETRIES ─────────────
+# The consequence, asserted directly: reload the body run 1 PUBLISHED and confirm
+# the leg decides `page`, not `wait_page_quiet`.
+FAILED_BODY="$(patched_body)"
+reset_case
+jq -n --arg b "$FAILED_BODY" '{body:$b}' > "$STUB_TMP/issue.json"
+export STUB_SEARCH_MARKER='PROD%20DOWN'
+export STUB_SEARCH_JSON="$(search_json 42)"
+export STUB_PROBE_CODES="000"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+run_watchdog
+assert_contains "$OUT" "escalation outcome: page" "e2e(r): a failed page is RETRIED on the next run, not throttled away"
+assert_eq "$(count_calls 'CURL telegram')" "1" "e2e(r): …and the retry actually calls the channel"
+
+# ── e2e(s): a FAILED human page suppresses nothing ──────────────────────────
+# HUMAN_PAGED_THIS_RUN must be 1 only on CONFIRMED delivery. Setting it
+# unconditionally mutes the one channel that could still reach a human — the
+# fail-open this leg exists to close (proved by a reviewer).
+reset_case
+printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 7200)) down_runs=20 last_down_ts=$((NOW - 60)) last_comment_ts=0 cap_notified_ts=$((NOW + 86400)) restarts=$((NOW - 1500)),$((NOW - 1300)) -->\"}" > "$STUB_TMP/issue.json"
+export STUB_SEARCH_MARKER='PROD%20DOWN'
+export STUB_SEARCH_JSON="$(search_json 42)"
+export STUB_PROBE_CODES="000"
+export FLY_API_TOKEN="fly-token"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+export STUB_TELEGRAM_FAIL=1
+run_watchdog
+assert_contains "$OUT" "escalation outcome: page" "e2e(s): the cap page FAILED → the sustained leg is NOT suppressed by it"
+assert_eq "$(count_calls 'CURL telegram')" "2" "e2e(s): both the cap page AND the escalation page were attempted"
+assert_not_contains "$(patched_body)" "page_ok_ts=$NOW" "e2e(s): a failed page stamps no confirmed-page stamp"
+
+# ── e2e(t): an operator override does NOT move the pre-existing pages ───────
+# ESCALATION_CHAT_ID is the SUSTAINED leg's recipient. Routing page_human() to it
+# would silently move the restart / cap / INCONCLUSIVE pages off the ops chat
+# whenever an override is configured — a change to pre-existing paging that no
+# doc stated.
+reset_case
+printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 7200)) down_runs=20 last_down_ts=$((NOW - 60)) last_comment_ts=0 cap_notified_ts=$((NOW + 86400)) restarts=$((NOW - 1500)),$((NOW - 1300)) -->\"}" > "$STUB_TMP/issue.json"
+export STUB_SEARCH_MARKER='PROD%20DOWN'
+export STUB_SEARCH_JSON="$(search_json 42)"
+export STUB_PROBE_CODES="000"
+export FLY_API_TOKEN="fly-token"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="11111"
+export ESCALATION_CHAT_ID="22222"
+run_watchdog
+assert_eq "$(count_calls 'CURL telegram')" "1" "e2e(t): the confirmed cap page is the run's only page (it suppresses the duplicate leg)"
+assert_contains "$(grep -m1 'CURL telegram' "$STUB_TMP/calls.log")" "chat_id=11111" "e2e(t): the pre-existing cap page still goes to TELEGRAM_CHAT_ID"
+assert_not_contains "$(grep -m1 'CURL telegram' "$STUB_TMP/calls.log")" "chat_id=22222" "e2e(t): …NOT to the sustained-leg override"
+
+# ── e2e(u): the corrupt-ledger refusal sends NO page (and says so) ──────────
+# That path deliberately refuses to rewrite the body it cannot trust, so a send
+# could not be stamped and would repeat on every run. It must not page at all,
+# and the refusal must NAME that gap rather than leaving it silent.
+reset_case
+printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 2400)) down_runs=4 last_down_ts=$((NOW - 3000)) last_comment_ts=0 cap_notified_ts=0 restarts=abc -->\"}" > "$STUB_TMP/issue.json"
+export STUB_LEDGER_SEARCH_JSON="$(search_json 777 "$DOWN_TITLE_FIXTURE")"
+export STUB_PROBE_CODES="000"
+export FLY_API_TOKEN="fly-token"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+run_watchdog
+assert_eq "$RC" "1" "e2e(u): a corrupt ledger still fails the run (never silent)"
+# The ONE page here is the run-1 TRANSITION alert (🚨 DOWN) — the pre-existing
+# signal, which must keep firing. What must NOT happen is an ESCALATION page:
+# this path deliberately refuses to rewrite the body it cannot trust, so a send
+# could not be stamped and would repeat on every run.
+assert_not_contains "$(cat "$STUB_TMP/calls.log")" "HUMAN NEEDED" "e2e(u): the corrupt-ledger path sends NO escalation page (no durable stamp ⇒ it would repeat every run)"
+assert_not_contains "$OUT" "escalation outcome:" "e2e(u): the escalation leg is never even reached (the run exits first)"
+assert_eq "$(count_calls 'CURL telegram')" "1" "e2e(u): …while the pre-existing transition alert still goes out"
+assert_contains "$OUT" "no escalation page is sent" "e2e(u): the refusal NAMES that no human page is sent (documented, not silent)"
+
+# ── unit: the `pending` note branch is reachable and renders ────────────────
+# The operator-facing prose for the crash-between-the-two-PATCHes case (the
+# at-least-once retry story). Deleting it left the suite green.
+PENDING_NOTE="$(WATCHDOG_LIB_ONLY=1 bash -c '
+  source "$0"
+  STATE_FIRST_FAILURE_TS=111; STATE_DOWN_RUNS=3
+  STATE_ESCALATE_STATE="pending"; STATE_ESCALATE_TS=222; STATE_PAGE_OK_TS=0
+  escalation_note
+' "$WATCHDOG")"
+assert_contains "$PENDING_NOTE" "being attempted" "note: escalate_state=pending renders the 'being attempted' text (the crash-between-PATCHes story)"
+assert_not_contains "$PENDING_NOTE" "A human was paged" "note: …and does NOT claim a human was reached"
+
+# ── unit: the gh stub's argument loop ALWAYS makes progress ────────────────
+# `--method` / `--jq` as the LAST argument used to make `shift 2` fail, and a
+# failed shift shifts NOTHING → the loop re-read the same "$1" forever. The
+# spin was unreachable today (every caller passes a value) but one
+# argument-ordering change from live, and it would hang whatever run touched
+# it. `timeout` is not available here, so the WALL-CLOCK bound is a background
+# SIGKILL: the stub is launched directly (so the PID we kill IS the spinner,
+# not a wrapper), a killer subshell SIGKILLs it after <bound> seconds, and the
+# assertion fails on the resulting 137 instead of hanging the suite.
+# Deliberately NOT called in $( ): a function invoked in a command substitution
+# runs in a SUBSHELL, so its GH_STUB_RC would never reach the caller (and `set
+# -u` would then abort the whole harness on the unbound read).
+gh_stub_bounded() { # <bound-seconds> <args...>; sets GH_STUB_RC, output → $STUB_TMP/ghstub.out
+  local bound="$1"; shift
+  local out_f="$STUB_TMP/ghstub.out" pid killer
+  rm -f "$out_f"
+  "$BIN/gh" "$@" </dev/null >"$out_f" 2>&1 &
+  pid=$!
+  ( sleep "$bound"; kill -9 "$pid" 2>/dev/null ) &
+  killer=$!
+  wait "$pid"; GH_STUB_RC=$?
+  # Reap the killer at once so its sleep cannot outlive the case (and later
+  # SIGKILL a recycled PID).
+  kill "$killer" 2>/dev/null || true
+  wait "$killer" 2>/dev/null || true
+}
+
+gh_stub_bounded 10 api /repos/o/r/issues --method POST
+assert_eq "$GH_STUB_RC" "0" "stub: a well-formed '--method POST' terminates (never spins on the arg loop)"
+assert_contains "$(cat "$STUB_TMP/ghstub.out")" '{"number":900}' "stub: …and still PARSES the method (the create branch is reached)"
+assert_eq "$(grep -c '^GH POST /repos/o/r/issues$' "$STUB_TMP/calls.log")" "1" \
+  "stub: …with method=POST actually consumed (a failed shift would have dropped it)"
+gh_stub_bounded 10 api /repos/o/r/issues --method
+assert_eq "$GH_STUB_RC" "0" "stub: a BARE trailing --method (no value) terminates instead of spinning"
+gh_stub_bounded 10 api /repos/o/r/issues --jq
+assert_eq "$GH_STUB_RC" "0" "stub: a BARE trailing --jq (no value) terminates instead of spinning"
 
 echo
 if [ "$FAIL" -eq 0 ]; then

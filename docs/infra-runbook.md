@@ -952,7 +952,7 @@ raises no exception and reports nothing — the Fly proxy simply stops routing
 request hangs until it times out. There is exactly ONE machine, so its
 de-registration from routing *is* a total outage. This watchdog is the missing
 observer: it runs on GitHub Actions — a different failure domain than Fly —
-every 5 minutes.
+on a `*/5 * * * *` cron **intent** (measured delivery is ~15 min; see §7.5a).
 
 - **Workflow:** `.github/workflows/availability-watchdog.yml` (schedule `*/5 * * * *` + `workflow_dispatch`)
 - **Logic + limits:** `.github/scripts/availability-watchdog.sh`
@@ -1102,7 +1102,7 @@ velocity and involve a human when the cap is hit).
 
 | Limit | Default | Behaviour |
 |---|---|---|
-| `SUSTAINED_DOWN_MINUTES` | 10 | No restart until the service has been continuously down this long (≈3 failing runs / 2 probe intervals at the 5-min cadence) |
+| `SUSTAINED_DOWN_MINUTES` | 10 | No restart until the service has been continuously down this long (≈3 failing runs / 2 probe intervals at the 5-min cron *intent*) |
 | `SUSTAINED_MIN_RUNS` | `max(2, ceil(SUSTAINED_DOWN_MINUTES / 5))` (2 at the wired 10-minute value) | At least this many failing runs must have been OBSERVED. Guards a stale/reopened incident whose stored clock is old from authorising a restart. Raising `SUSTAINED_DOWN_MINUTES` raises this too |
 | `RESTART_COOLDOWN_MINUTES` | 20 | Minimum gap between automated restarts |
 | `MAX_RESTARTS_PER_HOUR` | 2 | Rolling-hour cap. On the next failure the watchdog **stops restarting** and comments/pages asking for a human (paged at most every `CAP_RENOTIFY_MINUTES`, default 60 — the same text can still reappear in routine comments every `COMMENT_THROTTLE_MINUTES`). Set it to **`0` to disable automated restarts entirely** (an operator kill switch: alerting continues, nothing restarts) |
@@ -1140,7 +1140,7 @@ Three further safeguards worth knowing:
   `flyctl` runs. If that write fails the restart does **not** happen — the body
   is the only cooldown/cap memory, so restarting without it could loop.
 - **Attempts, not successes, are capped:** a failed `flyctl` call still counts
-  against the hourly cap (the watchdog will not retry it every 5 minutes) and
+  against the hourly cap (the watchdog will not retry it on every run) and
   escalates to a human instead.
 - **Runner-side egress control:** before ANY restart the watchdog probes
   `CONTROL_URL` (a known-good endpoint outside this app's failure domain). If
@@ -1160,7 +1160,7 @@ Three further safeguards worth knowing:
 |---|---|---|
 | `FLY_API_TOKEN` | the automated restart of the **Fly API** target — **not** the Pages auth step, which is hard-disarmed regardless | **Already exists** (used by `deploy-hosted.yml`). If absent, the restart leg is skipped, the log says so, and the incident **body** (plus any comment that is not throttled away) names the secret — **alerting still works** |
 | `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | transition paging (**optional**) **and** the sustained-incident escalation leg (**required once an incident is sustained**) | A transition page is skipped with a log line. A **sustained** incident's escalation is **fail-closed**: the run FAILS with `escalation REQUIRED and NOT DELIVERED`, nothing is stamped as delivered, and the incident body records `escalate_state=failed` — a broken pager is never rendered as “all clear”. Both probe steps get them at STEP level |
-| `ESCALATION_CHAT_ID` | **optional** override of the sustained-escalation recipient | Defaults to `TELEGRAM_CHAT_ID`, so point it at an on-call group without moving transition paging |
+| `ESCALATION_CHAT_ID` | **optional** recipient override for the sustained-escalation leg only (restart / failed-restart / cap / INCONCLUSIVE pages keep going to `TELEGRAM_CHAT_ID`) | Defaults to `TELEGRAM_CHAT_ID`, so point it at an on-call group without moving any existing page |
 
 `GITHUB_TOKEN` is supplied by Actions and needs `issues: write` (granted in the
 workflow). A missing `GH_TOKEN` fails the run before probing — a monitor that
@@ -1169,8 +1169,10 @@ cannot file is a deaf monitor.
 ### 7.5a The sustained-incident escalation leg (#3887)
 
 **Why it exists.** Before #3887 every page was **transition-based**: one page
-when an incident was filed, and the only post-run-1 pages lived INSIDE the
-restart leg (`cap` / `heal_failed` / `no_egress`). A sustained *answered-wrongly*
+when an incident was filed, and the only post-run-1 pages that **asked a human
+to act** lived INSIDE the restart leg (`cap` / `heal_failed` / `no_egress`; the
+`✅ RECOVERED` page is post-run-1 but ends the incident rather than asking for
+anything). A sustained *answered-wrongly*
 (`UNEXPECTED`) incident — the class a restart correctly declines — therefore
 reached a human **once, then never again**. On 2026-09-16 `GET /v1/organizations`
 answered 404 for **11 h 19 m**; one issue was filed, one page went out, and the
@@ -1184,17 +1186,26 @@ per `CAP_RENOTIFY_MINUTES` while it stays failing.
 | Knob | Derived default | Meaning |
 |---|---|---|
 | `ESCALATE_ENABLED` | `1` | `0` is an operator **kill switch**: no sustained page, no stamp, logged loudly and stated in the incident body (a kill, never an “all clear”) |
-| `ESCALATE_SUSTAINED_MINUTES` | `3 × SUSTAINED_DOWN_MINUTES` = **30** | Wall-clock floor. Derived from the (normalized) sustained pair, and **clamped UP** if set below it: the human page must never fire before the automated action it escalates |
+| `ESCALATE_SUSTAINED_MINUTES` | `3 × SUSTAINED_DOWN_MINUTES` = **30** | Wall-clock floor for the SUSTAINED page. Derived from the (normalized) sustained pair, and **clamped UP to `SUSTAINED_DOWN_MINUTES`** if set below it: the human page must never fire before the automated action it escalates. (The clamp floor is the restart gate, not the derived 30 — an explicit value in `[SUSTAINED_DOWN_MINUTES, 30)` is honoured) |
 | `ESCALATE_MIN_RUNS` | `SUSTAINED_MIN_RUNS + 1` = **3** | Observed failing runs. One bad probe satisfies neither leg |
-| `CAP_RENOTIFY_MINUTES` (shared) | `60` | The minimum gap between **confirmed human pages** of any kind, so a cap page and an escalation page cannot double-page — and the reminder interval while an incident stays failing |
+| `CAP_RENOTIFY_MINUTES` (shared) | `60` | For this leg: the minimum gap between a **confirmed** human page and the next sustained page, **and** the reminder interval while an incident stays failing — so this leg cannot re-page inside a window a confirmed page already covered. **One-directional, and not “of any kind”:** the pre-existing `cap` / `INCONCLUSIVE` re-notify gates still throttle on their own `cap_notified_ts` **attempt** stamp, which a failed send also consumes — that divergence is #4575 |
+
+**Recipient.** `ESCALATION_CHAT_ID` (default `TELEGRAM_CHAT_ID`) is the
+SUSTAINED leg's recipient **only**. The pre-existing restart / failed-restart /
+velocity-cap / INCONCLUSIVE pages keep going to `TELEGRAM_CHAT_ID`, so an
+operator can point sustained pages at an on-call group **without moving any
+existing page**. The public body and the run log carry the recipient **kind**
+(`telegram-default` / `telegram-override`), never the id.
 
 **Cadence, deliberately.** The probe's cron *intent* is 5 minutes, but its
 **measured** delivery is ~96 runs/day — one run per ~**15 min** (see
-`.github/scripts/availability-record.sh`). Three consecutive runs is therefore
-~45 min, so the run leg binds at the measured cadence and the 30-minute floor
-binds at the nominal one: the first page lands **30–45 min** into an 11-hour
-incident. Over 11 h 19 m a recipient gets roughly **11–12** pages, not 135 — and
-the reminder is a **state**, not a per-run event.
+`.github/scripts/availability-record.sh`). Three observed failing runs is
+therefore ~2 probe intervals ≈ **30 min** at the measured cadence, so the run
+leg and the 30-minute floor **bind together at ~30 min**; the range only extends
+past that when runs are spaced slower than ~15 min (up to ~45 min at one run per
+~22 min). Either way the first page lands **~30 min** into an 11-hour incident,
+and over 11 h 19 m a recipient gets roughly **11–12** pages, not 135 — the
+reminder is a **state**, not a per-run event.
 
 **Fail-closed delivery.** A page is recorded as delivered only when the
 HTTP request succeeded **and** Telegram's own `ok` field is `true` — the same
@@ -1249,7 +1260,7 @@ incident means the budget really is empty):
    being wedged; roll back with `fly deploy --image $(fly releases -a tortoise-y4mjjq --json | jq -r '.[1].ImageRef') -a tortoise-y4mjjq`.
 4. If restarts are actively harmful (e.g. they lengthen the outage), use a real
    lever — a `probe_url` drill only disarms **that one run**, and the next
-   5-minute scheduled run probes production again:
+   scheduled run probes production again:
    - **Primary lever — stop restarts, keep alerting:** put
      `MAX_RESTARTS_PER_HOUR: '0'` in the workflow's `env:` via a PR/merge (the
      kill switch). It survives runs and leaves alerting intact.
@@ -1323,12 +1334,13 @@ surface.
   worst, not the whole surface.
 - **A *total* runner-side network failure is INCONCLUSIVE, not DOWN** (the
   `CONTROL_URL` check). Alerting still fires; no restart is issued. The
-  escalation page is throttled (at most once per `CAP_RENOTIFY_MINUTES` of
-  **confirmed** delivery) and the per-run record is the incident **body** plus
-  the RED workflow run — so "no page this run" does not mean "no alert". Note
-  the control can only detect a TOTAL egress failure: a failure affecting only
-  the probe's own host (its DNS zone, a Cloudflare/ASN block on the runner IP)
-  leaves the control green and still reads as DOWN.
+  INCONCLUSIVE page is throttled to at most once per `CAP_RENOTIFY_MINUTES`,
+  measured from its own **attempt** stamp — so an *undelivered* inconclusive
+  page also consumes the window (pre-existing; #4575) — and the per-run record is
+  the incident **body** plus the RED workflow run, so "no page this run" does not
+  mean "no alert". Note the control can only detect a TOTAL egress failure: a
+  failure affecting only the probe's own host (its DNS zone, a Cloudflare/ASN
+  block on the runner IP) leaves the control green and still reads as DOWN.
 - **A sustained incident whose STATE CANNOT BE WRITTEN gets no escalation page.**
   The escalation leg's idempotency stamp lives in the incident body, so on a
   path that deliberately refuses to rewrite that body — the corrupt-`restarts=`
@@ -1417,7 +1429,7 @@ surface.
   (or accept that a down service may be restarted).
 - If a human closes the incident issue mid-outage, the next run files a fresh
   issue and the sustained/velocity clock restarts (documented, accepted).
-- The dedupe search API is eventually consistent; the 5-minute cadence makes
+- The dedupe search API is eventually consistent; a ~15-min cadence makes
   that immaterial.
 - Only one machine exists, so any restart is a (multi-minute) outage by itself
   — there is no failover. A restart is therefore always the *last* automated
