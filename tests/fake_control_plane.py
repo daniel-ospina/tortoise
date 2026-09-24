@@ -128,6 +128,16 @@ class FakeControlPlane:
         # partial unique index is the READ-COMMITTED backstop; the fake must
         # be atomic under the two-tab threading test).
         self._identity_lock = threading.Lock()
+        # #4355: a conditional PATCH (the rotate CAS
+        # ``UPDATE ... WHERE id = :id AND revoked_at IS NULL``) is ONE atomic
+        # statement in Postgres — two concurrent statements serialize on the
+        # row. The in-memory check-then-write below is NOT atomic under
+        # threads (the `if _matches(...)` and the `r.update(...)` are separate
+        # bytecodes a switch can land between), so two racing claims could
+        # BOTH observe the row live and both report success — making a genuine
+        # two-thread CAS test nondeterministic instead of red. Serialize the
+        # write to model the statement the fake stands in for.
+        self._patch_lock = threading.Lock()
         # #2863: fault injectors, consumed in order (see fail_query/_take_fault).
         self._faults: list[dict] = []
 
@@ -799,13 +809,17 @@ class FakeControlPlane:
             # mutate the STORED rows (mirrors PostgREST update semantics);
             # return=representation when a select is given → the UPDATED
             # rows ([] when nothing matched), the atomic-claim path used by
-            # OAuth single-use codes / rotation (PR #1264 review P2).
+            # OAuth single-use codes / rotation (PR #1264 review P2, and the
+            # #4355 rotate claim). `_patch_lock` makes the check-then-write
+            # atomic the way the real single UPDATE statement is (see
+            # __init__) — required for the #4355 two-thread CAS test.
             updated: list[dict] = []
-            for r in self.tables.get(table, []):
-                if _matches(r, filters or []):
-                    r.update(json_body or {})
-                    if select is not None:
-                        updated.append({k: r.get(k) for k in select})
+            with self._patch_lock:
+                for r in self.tables.get(table, []):
+                    if _matches(r, filters or []):
+                        r.update(json_body or {})
+                        if select is not None:
+                            updated.append({k: r.get(k) for k in select})
             return updated if select is not None else []
         if method == "POST":
             row = dict(json_body or {})
@@ -831,7 +845,15 @@ class FakeControlPlane:
             if op == "eq":
                 rows = [r for r in rows if r.get(col) == value]
             elif op == "neq":
-                rows = [r for r in rows if r.get(col) != value]
+                # SQL semantics: `col <> value` is NULL (not TRUE) when either
+                # side is NULL, so a NULL column (or a NULL comparison value)
+                # never matches. Python's bare `r.get(col) != value` would
+                # KEEP the NULL row — a dialect divergence that would hide an
+                # over-exemption regression (e.g. a `created_via=neq.bootstrap`
+                # filter silently exempting legacy NULL rows — #4140 T4).
+                rows = ([] if value is None else
+                        [r for r in rows
+                         if r.get(col) is not None and r.get(col) != value])
             elif op == "is":
                 rows = [r for r in rows if (r.get(col) is None) == (value is None)]
             elif op == "gt":
@@ -880,7 +902,8 @@ def _matches(row: dict, filters: list[tuple[str, str, object]]) -> bool:
     for col, op, value in filters:
         if op == "eq" and row.get(col) != value:
             return False
-        if op == "neq" and row.get(col) == value:
+        if op == "neq" and (value is None or row.get(col) is None
+                            or row.get(col) == value):
             return False
         if op == "is" and (row.get(col) is None) != (value is None):
             return False

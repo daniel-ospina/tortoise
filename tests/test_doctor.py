@@ -89,8 +89,15 @@ class TestDoctorPath:
         assert "✅" in line and "1 Points" in line
 
     def test_doctor_db_uri_routes_through_from_uri(self, clear_db_env, capsys):
-        """--db docker:// URI is parsed by from_uri (dead port proves it)."""
-        rc = _run_doctor(["--db", "docker://:@127.0.0.1:59999/tortoise"])
+        """--db docker:// URI is parsed by from_uri (dead port proves it).
+
+        The graph path is TEST-PREFIXED: doctor Step 3 goes through
+        ``from_uri``, which journals its resolved graph name in a test
+        session, and the session-end sweep drops every journaled graph
+        except the env-URI default — a shared path (``/tortoise``) would
+        let this test delete the dev/compose graph (#7795).
+        """
+        rc = _run_doctor(["--db", "docker://:@127.0.0.1:59999/test_doctor"])
         out = capsys.readouterr().out
 
         assert rc == 1
@@ -128,7 +135,7 @@ class TestDoctorPath:
         """#720 conf 78: the Step 2 Docker probe must probe the RESOLVED
         --db target's host/port — never a hardcoded localhost:16379. Both
         the probe line and the health line must report the same target."""
-        rc = _run_doctor(["--db", "docker://:@127.0.0.1:59998/tortoise"])
+        rc = _run_doctor(["--db", "docker://:@127.0.0.1:59998/test_doctor"])
         out = capsys.readouterr().out
 
         assert rc == 1
@@ -141,7 +148,7 @@ class TestDoctorPath:
         """#720 P2 conf 75: a non-numeric port in --db/TORTOISE_DB_URI must
         surface as a clean ❌ check + rc 1 — never an uncaught ValueError
         traceback (parsed.port now lives inside the guarded try)."""
-        rc = _run_doctor(["--db", "docker://:@127.0.0.1:notaport/tortoise"])
+        rc = _run_doctor(["--db", "docker://:@127.0.0.1:notaport/test_doctor"])
         out = capsys.readouterr().out
 
         assert rc == 1
@@ -154,7 +161,7 @@ class TestDoctorPath:
         """#720 P2 conf 78: a malformed URI carrying a password must not
         print the credential — the 'bad port' error redacts the userinfo
         (docker://:***@) while keeping host/port for debuggability."""
-        rc = _run_doctor(["--db", "docker://:sekritpass@127.0.0.1:notaport/tortoise"])
+        rc = _run_doctor(["--db", "docker://:sekritpass@127.0.0.1:notaport/test_doctor"])
         out = capsys.readouterr().out
 
         assert rc == 1
@@ -168,7 +175,7 @@ class TestDoctorPath:
         urlparse splits userinfo at the LAST @, so the mask must consume
         everything up to the host separator (docker://:p@ss@host must not
         print the ':ss@' tail)."""
-        rc = _run_doctor(["--db", "docker://:p@ss@127.0.0.1:notaport/tortoise"])
+        rc = _run_doctor(["--db", "docker://:p@ss@127.0.0.1:notaport/test_doctor"])
         out = capsys.readouterr().out
 
         assert rc == 1
@@ -397,16 +404,54 @@ class TestDoctorPath:
                 return _FakeGraph()
 
         monkeypatch.setattr(_falkordb, "FalkorDB", _FakeFalkorDB)
-        rc = _run_doctor(["--db", "docker://:@127.0.0.1:59997/tenant-alpha"])
+        rc = _run_doctor(["--db", "docker://:@127.0.0.1:59997/test_doctor_tenant"])
         out = capsys.readouterr().out
 
         assert rc == 1  # health check still fails against the dead port
         probe = next(line for line in out.splitlines() if "Graph: FalkorDB" in line)
-        assert "tenant-alpha" in probe  # probe reports the URI path's graph
+        assert "test_doctor_tenant" in probe  # probe reports the URI path's graph
         # Every select_graph — probe AND Step 3's from_uri projection — used
         # the URI path's graph; none created a stray "tortoise" graph.
-        assert set(selected) == {"tenant-alpha"}
+        assert set(selected) == {"test_doctor_tenant"}
         assert "tortoise" not in selected
+
+    def test_doctor_db_uri_probe_uses_decoded_credentials(
+            self, clear_db_env, monkeypatch, capsys):
+        """#3039: the Step 2 probe must percent-DECODE URI userinfo — urlparse
+        does not, so a raw read forwards a literal %XX and the probe reports a
+        false auth failure. Pin the (username, password) it hands FalkorDB."""
+        import falkordb as _falkordb
+
+        calls: list[dict] = []
+
+        class _FakeGraph:
+            def query(self, q):
+                return None
+
+        class _FakeFalkorDB:
+            def __init__(self, *a, **k):
+                calls.append(
+                    {key: k.get(key) for key in ("username", "password")}
+                )
+
+            def select_graph(self, name):
+                return _FakeGraph()
+
+        monkeypatch.setattr(_falkordb, "FalkorDB", _FakeFalkorDB)
+        # ad%6Din -> admin ; p%40ss -> p@ss
+        rc = _run_doctor([
+            "--db", "docker://ad%6Din:p%40ss@127.0.0.1:59997/test_doctor_tenant"])
+        capsys.readouterr()
+
+        assert rc == 1  # dead port — both probe and Step 3 still construct
+        # Step 2 (the probe under test) is followed by Step 3's from_uri
+        # construction, so a single mutable dict would be overwritten by the
+        # later, already-decoded call. Assert on EVERY construction:
+        # reverting the probe to raw `parsed.username` must red this test.
+        assert calls, "doctor constructed no FalkorDB client"
+        assert all(
+            c == {"username": "admin", "password": "p@ss"} for c in calls
+        ), calls
 
     def test_doctor_embedded_target_skips_docker_probe(self, clear_db_env, tmp_path, capsys):
         """#720 conf 78: embedded target → probe reports embedded mode
@@ -446,7 +491,7 @@ class TestDoctorDefaultResolution:
 
     def test_no_flags_uses_env_uri(self, monkeypatch, clear_db_env, capsys):
         """TORTOISE_DB_URI env wins over embedded defaults."""
-        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:59999/tortoise")
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:59999/test_doctor")
         rc = _run_doctor([])
         out = capsys.readouterr().out
 

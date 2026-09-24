@@ -294,6 +294,104 @@ def test_oauth_offload_maps_failure_to_the_oauth_503(monkeypatch):
     assert excinfo.value.error == "temporarily_unavailable"
 
 
+def test_graph_pool_is_separate_from_all_other_pools():
+    """#3773: a graph (data-plane) burst must not park an auth slot — the
+    #3498 review P1 isolation argument applied to the write handlers'
+    per-request graph helpers (``_data_sdk`` / ``_check_org_limit``). Asserted
+    against all three sibling pools (the claim names auth, telemetry AND
+    oauth)."""
+    auth = monitoring.control_plane_worker("auth")
+    graph = monitoring.control_plane_worker("graph")
+    telemetry = monitoring.control_plane_worker("telemetry")
+    oauth = monitoring.control_plane_worker("oauth")
+    assert len({auth, graph, telemetry, oauth}) == 4, (
+        "a graph submission shared a pool with a control-plane lane")
+    assert graph.workers == monitoring.CONTROL_PLANE_GRAPH_WORKERS
+
+
+def test_graph_bound_sits_above_the_projection_cold_start_allowance(monkeypatch):
+    """#3773: the graph lane's wait bound must sit ABOVE the probe lane's own
+    projection cold-start allowance. ``_make_sdk`` / ``_get_proj()`` can open a
+    COLD projection (~28 sequential round trips), which the repo budgets via
+    ``probe_setup_timeout()`` precisely so a round-trip bound does not
+    false-degrade it (#3143). The graph bound is derived from the RESOLVED
+    allowance at call time, so raising ``TORTOISE_PROBE_SETUP_TIMEOUT`` cannot
+    invert the ordering (the CIMD sibling is
+    ``test_fetch_deadline_sits_below_the_offload_bound``)."""
+    assert (monitoring.graph_offload_timeout_s()
+            > monitoring.probe_setup_timeout()), (
+        "the graph offload bound fell to/below the projection cold-start "
+        "allowance — a cold first write would be abandoned and 503'd (#3143)")
+    monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", "120")
+    assert (monitoring.graph_offload_timeout_s()
+            > monitoring.probe_setup_timeout())
+
+
+def test_graph_offload_routes_to_the_graph_pool(monkeypatch):
+    """WIRING guard (mutation-verified gap, #3773 re-review): reverting
+    ``_graph_offload``'s ``pool="graph"`` to ``"auth"`` kept every graph test
+    green — silently re-parking the auth slots the pool exists to protect.
+    Record what ``_graph_offload`` actually passes (mirrors the
+    ``_oauth_offload`` and best-effort wiring guards)."""
+    seen: list[str] = []
+
+    async def _recorder(fn, *, op, pool="auth", timeout=None):
+        seen.append(pool)
+        return "ok"
+
+    monkeypatch.setattr(ha, "run_control_plane_call", _recorder)
+
+    async def _run():
+        await ha._graph_offload(lambda: None, op="write_preamble")
+
+    asyncio.run(_run())
+    assert seen == ["graph"], (
+        f"_graph_offload used pools {seen} — the data-plane offload must use "
+        "the dedicated `graph` pool, never the auth pool (#3773)")
+
+
+def test_graph_offload_maps_failure_to_the_graph_503(monkeypatch):
+    """#3773: a saturated / bound-missed data-plane offload is a 503 the
+    client can retry — NOT the sign-in-specific ``control_plane_unavailable``
+    body the auth/REST lane uses, which would mislead a client retrying a
+    graph write. The graph lane's OWN bound is what applies (not the seam's
+    PostgREST default), so patch the resolver."""
+    monkeypatch.setattr(ha, "graph_offload_timeout_s", lambda: 0.05)
+
+    async def _run():
+        await ha._graph_offload(lambda: time.sleep(0.4), op="graph-slow")
+
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(_run())
+    assert excinfo.value.status_code == 503
+    assert excinfo.value.detail["error_code"] == "graph_unavailable"
+
+
+def test_graph_offload_isolates_the_caller_context():
+    """#3773: ``_graph_offload`` runs the callable under a CONTEXT COPY.
+
+    ``_data_sdk`` sets the #2600 actor ContextVar, and a pool thread is
+    process-lifetime — a var set at its top level would survive into the NEXT
+    request that worker served. The copy must carry the caller's value IN and
+    must not let a worker-side write reach the caller's context."""
+    import contextvars
+
+    var = contextvars.ContextVar("graph-offload-isolation", default=None)
+
+    async def _run_read():
+        var.set("caller")
+        return await ha._graph_offload(lambda: var.get(), op="ctx-read")
+
+    assert asyncio.run(_run_read()) == "caller"
+
+    async def _run_write():
+        var.set(None)
+        await ha._graph_offload(lambda: var.set("worker"), op="ctx-write")
+        return var.get()
+
+    assert asyncio.run(_run_write()) is None
+
+
 def test_unknown_pool_fails_closed():
     """The pool selector is the only thing keeping best-effort work off auth
     capacity — a typo must raise, not silently fall back to the auth pool."""
@@ -456,6 +554,106 @@ def test_org_node_seam_reads_off_main_thread(monkeypatch):
     assert row is not None and row["org_id"] == "org-1" and row["tier"] == "pro"
     assert transport.threads and all(n != "MainThread" for n in transport.threads), (
         f"the orgs-row seam ran on the event loop: {transport.threads}"
+    )
+
+
+def test_session_recording_gate_reads_off_main_thread(monkeypatch):
+    """#4625 leg 12: the capture's recording gate must not run on the loop.
+
+    ``_session_recording_allowed`` resolves ``_get_onboarding_state`` — a
+    blocking PostgREST read in hosted mode (plus a graph override probe) — so
+    calling it inline from ``_capture_session_impl`` parked the single event
+    loop for the round trip. ``_session_recording_allowed_off_loop`` offloads
+    the whole resolution; the stub records the thread of every control-plane
+    HTTP call.
+
+    The stored state is ``session_recording: False`` with NO ``graph_id``, so
+    the resolution short-circuits to the team layer after the PostgREST read —
+    the graph override probe (which this test does not stub) is never reached,
+    keeping the assertion about the one read this leg is named for.
+    """
+    _cp, transport = _stub_control_plane(
+        monkeypatch, [{"onboarding_state": {"session_recording": False}}])
+
+    allowed, layer = asyncio.run(
+        ha._session_recording_allowed_off_loop({"org_id": "org-4625"}))
+
+    assert (allowed, layer) == (False, "team")
+    assert transport.threads, "the control-plane transport was never called"
+    assert all(name != "MainThread" for name in transport.threads), (
+        f"the recording gate read ran on the event loop: {transport.threads}"
+    )
+
+
+def test_invite_info_supabase_lane_reads_off_main_thread(monkeypatch):
+    """#3718: the hosted (Supabase) lane of the public invite-info handler.
+
+    ``GET /v1/invites/info`` is unauthenticated, so its two blocking reads —
+    the token lookup (``invitation_info_by_token``) and the org-name
+    resolution (``org_by_id``) — are reachable without a session. Both must
+    run off the loop. The registry lane is pinned behaviourally in
+    ``test_read_routes_loop_responsiveness.py``.
+
+    This case (with ``test_invite_info_submits_one_offload_regardless_of_token``
+    below) is the SOLE guard for the hosted lane: the two reads live in the
+    nested sync ``def _hosted_invite`` handed to ``_cp_offload`` as a callable
+    reference, and ``_unoffloaded_calls`` deliberately skips nested ``def``
+    bodies (a nested *sync* def has no inventory entry of its own). Inventory
+    membership for ``invitation_info_by_token`` does NOT observe this call site
+    — inlining the unit leaves the static pins green (only these behavioural
+    cases fail). See #4587 for closing that scan gap.
+
+    The stub answers every PostgREST query with the same row, so it carries
+    both the invite fields and the org ``name``.
+    """
+    _cp, transport = _stub_control_plane(monkeypatch, [{
+        "id": "inv-3718", "org_id": "org-1", "role": "member",
+        "inviter_email": "owner@example.com", "expires_at": None,
+        "status": "pending", "accepted_at": None, "name": "Stub Org",
+    }])
+
+    result = asyncio.run(ha.invite_info("tok-3718"))
+
+    assert result["org_name"] == "Stub Org"
+    assert result["role"] == "member"
+    assert transport.threads, "the control-plane transport was never called"
+    assert all(name != "MainThread" for name in transport.threads), (
+        f"the hosted invite-info lane ran on the event loop: {transport.threads}"
+    )
+
+
+def test_invite_info_submits_one_offload_regardless_of_token(monkeypatch):
+    """#3718: the hosted lane submits ONE offload unit for ANY token.
+
+    The route's 404 copy is deliberately oracle-free, so its offload-FAILURE
+    exposure must not depend on whether the token matched. If a matched token
+    were the only case that submitted a SECOND offload (the org read), then
+    under a saturated pool ``P(503 | valid) > P(503 | unknown)`` — a capacity
+    oracle an attacker can drive by loading the shared auth pool. Both hosted
+    reads are therefore one unit, and an unknown token never issues the org read.
+    """
+    def _ops_since(mark: int) -> list[str]:
+        return [op for op, _dur in monitoring.control_plane_offload_records()[mark:]]
+
+    _stub_control_plane(monkeypatch, [{
+        "id": "inv-3718", "org_id": "org-1", "role": "member",
+        "inviter_email": "owner@example.com", "expires_at": None,
+        "status": "pending", "accepted_at": None, "name": "Stub Org",
+    }])
+    mark = len(monitoring.control_plane_offload_records())
+    asyncio.run(ha.invite_info("tok-valid"))
+    assert _ops_since(mark) == ["invite_info"], (
+        "a matched token must submit exactly one offload unit"
+    )
+
+    _stub_control_plane(monkeypatch, [])  # unknown token: the lookup finds no row
+    mark = len(monitoring.control_plane_offload_records())
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(ha.invite_info("tok-unknown"))
+    assert exc.value.status_code == 404
+    assert _ops_since(mark) == ["invite_info"], (
+        "an unknown token must submit the SAME single offload unit — a second "
+        "submission on the matched path is a capacity oracle"
     )
 
 

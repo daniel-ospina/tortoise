@@ -1,0 +1,160 @@
+{
+ "question_id": "d6233ab6",
+ "question": "I've been feeling nostalgic lately. Do you think it would be a good idea to attend my high school reunion?",
+ "question_type_fixture": "single-session-preference",
+ "gold_sessions": [
+  "answer_b0fac439"
+ ],
+ "gold_turn": "answer_b0fac439_t2",
+ "fixture": {
+  "path": "tests/fixtures/ask_spotcheck_composition.json",
+  "sha256": "7f4062643323af4e5d0fec0b98bb3e3ca8499362c3f7e07a83c55f07633d15fa",
+  "expected_sha256": "7f4062643323af4e5d0fec0b98bb3e3ca8499362c3f7e07a83c55f07633d15fa",
+  "n_questions": 21,
+  "n_abs": 3,
+  "n_with_gold": 21,
+  "n_sessions": 1004,
+  "n_turns": 10470
+ },
+ "generated_at": "2026-09-23T06:32:01.258656+00:00",
+ "gold_turn_content": "I still remember the happy high school experiences such as being part of the debate team and taking advanced placement courses in economics. Now, I am surprised that I will become a Economics major so soon. Speaking of future, what are the average salaries for data scientists in different industries, and are there any specific industries that are more in demand for data scientists?",
+ "reader_env": {
+  "narrowed": [
+   "OPENROUTER_API_KEY",
+   "VENICE_API_KEY",
+   "TORTOISE_API_URL"
+  ],
+  "provider": "deepseek-direct",
+  "model": "deepseek/deepseek-v4-flash"
+ },
+ "embedder": {
+  "present": true,
+  "class": "SentenceTransformer"
+ },
+ "reader_pin": {
+  "no_reader": false,
+  "reader_class": "RoutingModel",
+  "provider": "deepseek-direct",
+  "model": "deepseek-v4-flash",
+  "temperature": 0.0,
+  "max_tokens": 500
+ },
+ "caps": {
+  "limit": 200,
+  "pool_size": 200,
+  "context_item_cap": 200,
+  "context_token_cap": 16000,
+  "context_byte_cap": 128000
+ },
+ "lane_mode": {
+  "connected_assembly": false
+ },
+ "pool": {
+  "n_hits": 200,
+  "gold_turn_fused_rank": 4,
+  "top_12": [
+   "ultrachat_329160_t8",
+   "ultrachat_329160_t9",
+   "ultrachat_329160_t10",
+   "answer_b0fac439_t2",
+   "94bc18df_3_t10",
+   "ultrachat_125013_t4",
+   "f916c63a_2_t0",
+   "32f28c7b_1_t10",
+   "ultrachat_125013_t6",
+   "f916c63a_2_t4",
+   "ultrachat_329160_t11",
+   "94bc18df_3_t4"
+  ]
+ },
+ "emitted": {
+  "question_type": null,
+  "system_prompt_sha256": "6cfd5d7635f90d1e8fe53a73c77d1241807f0ca1e87ffb9cdf77b200fc461edc",
+  "system_prompt_captured_from_wire": true,
+  "system_prompt_has_preference_fragment": false,
+  "system_prompt_has_synthesis_sentence": true,
+  "system_prompt_has_derived_license": true,
+  "context_tokens": 15983,
+  "retrieved_session_ids": [
+   "ultrachat_329160",
+   "answer_b0fac439",
+   "94bc18df_3",
+   "ultrachat_125013",
+   "f916c63a_2",
+   "32f28c7b_1",
+   "0e726047",
+   "426e7403_2",
+   "e419b7c3_4",
+   "ultrachat_49450",
+   "911f859b_5",
+   "ultrachat_459148",
+   "c927ffbb",
+   "ultrachat_336815",
+   "cf7aad73_3",
+   "sharegpt_cmJ4jdp_0",
+   "7af38385_2",
+   "cb05ed10",
+   "ultrachat_237324",
+   "ultrachat_410547",
+   "ultrachat_457634",
+   "2c81cdf8_3",
+   "e6c3a50a",
+   "e064120a",
+   "sharegpt_ZWqMvoL_607",
+   "ecfd2047_1",
+   "87cfeb28_2",
+   "ebb84f5b",
+   "ultrachat_499691",
+   "d850eba6_2",
+   "ultrachat_479415",
+   "b45e05f6",
+   "sharegpt_k4i6Hmp_8",
+   "ultrachat_381432"
+  ],
+  "evidence_len": 90518
+ },
+ "presence": {
+  "gold_turn_in_rendered_context": true,
+  "gold_turn_rendered_block": [
+   "[session answer_b0fac439] (session date 2023-05-23) [user] I still remember the happy high school experiences such as being part of the debate team and taking advanced placement courses in economics. Now, I am surprised that I will become a Economics major so soon. Speaking of future, what are the average salaries for data scientists in different industries, and are there any specific industries that are more in demand for data scientists?"
+  ],
+  "gold_answer_span": "high school experiences such as being part of the debate team and taking advanced placement courses",
+  "gold_answer_span_words": 16
+ },
+ "replay": {
+  "provider": "deepseek-direct",
+  "model": "deepseek-v4-flash",
+  "note": "every variant ran on ONE frozen rendered evidence with the SAME pinned reader and call shape (temperature 0, max_tokens 500) \u2014 a prompt change is a read-path behaviour change measured before/after on the same context",
+  "any_variant_escalated_output_budget": false,
+  "variants": {
+   "shipped_generic": {
+    "answer": "The context does not mention a high school reunion or any plans to attend one, so I don't have information to answer that.",
+    "abstained": true,
+    "system_prompt_sha256": "6cfd5d7635f90d1e8fe53a73c77d1241807f0ca1e87ffb9cdf77b200fc461edc",
+    "reader_calls": 1,
+    "escalated": false,
+    "shared_span_with_evidence": "i don t have",
+    "shared_span_words": 4
+   },
+   "with_preference_fragment": {
+    "answer": "The context does not mention a high school reunion or the user's thoughts on attending one, so I don't know whether it would be a good idea.",
+    "abstained": true,
+    "system_prompt_sha256": "f0425aa025de7a6c382eeed5033e000ca9f69d3ea140fa322917a90937ac72e9",
+    "reader_calls": 1,
+    "escalated": false,
+    "shared_span_with_evidence": null,
+    "shared_span_words": 0
+   },
+   "with_advice_sentence": {
+    "answer": "Based on your memories, yes \u2014 it sounds like a good idea. You've spoken fondly of your happy high school experiences, like being part of the debate team and taking advanced placement economics courses, and you've stayed connected to that time by thinking about old high school friends. Reconnecting could be a meaningful way to revisit those positive memories.",
+    "abstained": false,
+    "system_prompt_sha256": "83fc5362ef72e2f87d93044b0de347fc88539afa09e26d3d5d4e2e81e9d0582d",
+    "reader_calls": 1,
+    "escalated": false,
+    "shared_span_with_evidence": "being part of the debate team and taking advanced placement",
+    "shared_span_words": 10
+   }
+  }
+ },
+ "tree_head": "ada2706413158543eae07da68f38aeba19adb9a9"
+}
