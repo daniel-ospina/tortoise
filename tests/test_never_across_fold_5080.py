@@ -96,6 +96,25 @@ NEVER_ACROSS = [
     # A state pair: one side's "off" must not read as a detail added to "on".
     ("the flag is on", "the flag is off", "substituted_content"),
     ("the feature is on", "the feature is off", "substituted_content"),
+    # A name on one side only re-subjects the claim, like a pronoun does.  The
+    # capital letter is the signal, so a sentence-initial token does not count —
+    # "Workout at the gym" is capitalised by position, not by being a name, and
+    # counting it would refuse the legitimate fold pinned below.
+    ("The deploy failed for Alice", "The deploy failed",
+     "substituted_content"),
+    ("the release was shipped to Bob", "the release was shipped",
+     "substituted_content"),
+    # A multi-word relative day: the shared "tomorrow" must not mask the
+    # modifier that makes the two different days.
+    ("the delivery is tomorrow morning",
+     "the delivery is the day after tomorrow morning", "date"),
+    ("we ship yesterday", "we ship the day before yesterday", "date"),
+    # SCOPE with a value or a date as the marker's operand.  Dropping values
+    # and dates from the scope sequence hid a marker attached to the other one.
+    ("we ship today, not tomorrow", "we ship tomorrow, not today", "scope"),
+    ("we ship at 6pm, not at 5pm", "we ship at 5pm, not at 6pm", "scope"),
+    ("we ship today if the build passes",
+     "we ship if the build passes today", "scope"),
 ]
 
 # Pairs differing in a VALUE dimension AND an identity dimension at once.  The
@@ -170,13 +189,15 @@ class TestDistinguishingDifference:
         assert v2.distinguishing_difference(
             "i don't like it", "i like it") == "negation"
 
-    @pytest.mark.parametrize("apostrophe",
-                             ["\u2019", "\u02bc", "\uff07", "\u2018",
-                              "\u201b", "\u2032"])
+    @pytest.mark.parametrize("apostrophe", [
+        "\u2018", "\u2019", "\u201a", "\u201b", "\u00b4", "\u02bc",
+        "\u02b9", "\u02be", "\u02bf", "\u02c8", "\u055a", "\u05f3",
+        "\u2032", "\u2035", "\ua78c", "\uff02", "\uff07"])
     def test_a_clitic_in_any_apostrophe_spelling_negates(self, apostrophe):
-        """LLM output routinely spells the clitic with a curly apostrophe, and
-        a negator the marker list cannot see is a negator the boundary fails
-        to guard."""
+        """LLM output spells the clitic with every codepoint that looks like an
+        apostrophe, and a negator the boundary cannot see is a negator it fails
+        to guard.  The list is the whole inventory the translate table carries.
+        """
         assert v2.distinguishing_difference(
             f"i don{apostrophe}t like it", "i like it") == "negation"
         assert v2.distinguishing_difference(
@@ -185,6 +206,20 @@ class TestDistinguishingDifference:
         # ... and the spelling itself is still not a difference.
         assert v2.distinguishing_difference(
             f"i don{apostrophe}t like it", "i dont like it") is None
+        # the same codepoint carries the possessive signal
+        assert v2.distinguishing_difference(
+            "the report is ready", f"bob{apostrophe}s report is ready"
+        ) == "substituted_content"
+
+    def test_the_apostrophe_table_is_covered_by_the_test(self):
+        """The parametrisation above is the human-readable inventory; the
+        translate table is the one that runs.  A codepoint in the table and not
+        in the test is an unverified guarantee."""
+        assert set(v2._APOSTROPHES) == {
+            0x2018, 0x2019, 0x201A, 0x201B, 0x00B4, 0x02BC, 0x02B9, 0x02BE,
+            0x02BF, 0x02C8, 0x055A, 0x05F3, 0x2032, 0x2035, 0xA78C, 0xFF02,
+            0xFF07,
+        }
 
     @pytest.mark.parametrize("clitic", ["mustn't", "needn't", "shan't",
                                         "mightn't", "couldn't"])
@@ -238,6 +273,21 @@ class TestDistinguishingDifference:
         assert v2.fold_allowed("the team meets weekly in main office",
                                "the team meets weekly")
         assert v2.fold_allowed("gym at 6pm", "workout at the gym at six pm")
+
+    def test_a_lowercase_name_on_one_side_is_a_known_limit(self):
+        """Documented residual, pinned so it cannot go silent (#5134).
+
+        A name is caught by its capital letter (see the NEVER_ACROSS rows), and
+        a name the caller wrote in lower case looks exactly like a detail
+        token.  Reading it as an entity needs NER: no shape rule can separate
+        "alice" in "the deploy failed for alice" from "office" in "the team
+        meets in main office", and the second is the broadening case that must
+        keep folding.
+        """
+        assert v2.fold_allowed("the deploy failed for alice",
+                               "the deploy failed")
+        assert v2.fold_allowed("the team meets weekly in main office",
+                               "the team meets weekly")
 
     def test_a_one_sided_antonym_is_a_known_limit(self):
         """Documented residual, pinned so it cannot go silent (#5134).

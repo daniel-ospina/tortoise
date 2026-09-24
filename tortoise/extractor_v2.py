@@ -3085,6 +3085,14 @@ _DATE_WORDS = frozenset({
     "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept",
     "oct", "nov", "dec",
 })
+# Relative days spelled in more than one word.  The single-word set alone
+# cannot see the modifier, so "tomorrow morning" and "the day after tomorrow
+# morning" share the token "tomorrow" and read as one claim.
+_DATE_PHRASES = (
+    "the day after tomorrow", "the day before yesterday", "the day after next",
+    "the day before last", "next week", "last week", "next month",
+    "last month", "next year", "last year", "the other day",
+)
 # Clock units are dropped from the content skeleton: "six pm" and "6pm" are
 # one value spelled twice, and the value dimension compares them.
 _CLOCK_UNITS = frozenset({"pm", "am"})
@@ -3120,8 +3128,25 @@ _TOKEN_EDGE_PUNCT = ".,;:!?\"'`()[]{}*_"
 _APOSTROPHES = str.maketrans({
     "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'",
     "\u02bc": "'", "\u02b9": "'", "\u2032": "'", "\u2035": "'",
-    "\uff07": "'",
+    "\uff07": "'", "\u00b4": "'", "\u02be": "'", "\u02bf": "'",
+    "\u02c8": "'", "\u055a": "'", "\u05f3": "'", "\uff02": "'",
+    "\ua78c": "'",
 })
+# Codepoint-agnostic fallbacks for the two things an apostrophe carries.  A
+# translate table cannot enumerate the apostrophe inventory (U+055A, U+02BE,
+# U+02BF, U+00B4, U+FF02, U+A78C …), and a negator or a possessor the table
+# misses is one the boundary fails to guard, so the RULE is written as a shape:
+# a clitic is "n", one or two separator characters, "t", and a possessive is
+# a separator then "s".  At least one separator is required — zero would make
+# "want", "went" and "count" negators.
+_CLITIC_RE = re.compile(r"n[^\w\s]{1,2}t$")
+_POSSESSIVE_RE = re.compile(r"[^\w\s]{1,2}s$")
+
+
+def _canon_token(t: str) -> str:
+    """A token with every non-word character removed, so that one word's
+    spellings agree across apostrophe codepoints."""
+    return re.sub(r"[^\w]", "", t)
 # Non-Latin scripts, by the codepoint block that identifies them.
 _SCRIPT_BLOCKS = (
     ("greek", 0x0370, 0x03FF),
@@ -3206,13 +3231,13 @@ def _value_bindings(content: str) -> tuple[tuple[str, str], ...]:
 def _negation_markers(content: str) -> frozenset[str]:
     """Negation markers, in one canonical spelling.
 
-    Apostrophes are stripped for the comparison, so one claim's two spellings
-    agree; and the clitic rule is general (``X`` + "n't"), because a fixed word
-    list cannot enumerate every verb a negator attaches to — "mustn't" is a
-    negation and appears in no list written by hand.
+    The clitic rule is a SHAPE (``_CLITIC_RE``), not a word list: a fixed list
+    cannot enumerate every verb a negator attaches to, nor every codepoint an
+    apostrophe is written with — "mustn't" is a negation and appears in no
+    hand-written list.
     """
-    return frozenset(t.replace("'", "") for t in _guard_tokens(content)
-                     if t in _NEGATION_MARKERS or t.endswith("n't"))
+    return frozenset(_canon_token(t) for t in _guard_tokens(content)
+                     if t in _NEGATION_MARKERS or _CLITIC_RE.search(t))
 
 
 def _condition_markers(content: str) -> frozenset[str]:
@@ -3224,13 +3249,29 @@ def _condition_markers(content: str) -> frozenset[str]:
 
 
 def _date_tokens(content: str) -> frozenset[str]:
-    """Date/scope words — month names and relative days.
+    """Date/scope words — month names, relative days, multi-word relative days.
 
     Deliberately WITHOUT digit-bearing tokens: those are the value dimension's
     job, and it normalises them ("6pm"/"six pm" are one value).  Including
     them here would read a value spelling change as a date change.
     """
-    return frozenset(t for t in _guard_tokens(content) if t in _DATE_WORDS)
+    found = {t for t in _guard_tokens(content) if t in _DATE_WORDS}
+    flat = _norm(content)
+    found.update(p for p in _DATE_PHRASES if p in flat)
+    return frozenset(found)
+
+
+def _proper_nouns(content: str) -> frozenset[str]:
+    """Tokens capitalised in the RAW content, less the sentence-initial one.
+
+    Capitalisation is the one shape signal a name has without a model, and
+    ``_norm`` discards it.  The first token is excluded because it is
+    capitalised by position rather than by being a name.
+    """
+    raw = [t.strip(_TOKEN_EDGE_PUNCT) for t in str(content or "").split()]
+    return frozenset(_canon_token(_norm(t))
+                     for i, t in enumerate(raw)
+                     if i and t and t[:1].isupper())
 
 
 def _content_tokens(content: str) -> set[str]:
@@ -3250,7 +3291,7 @@ def _content_tokens(content: str) -> set[str]:
     """
     out: set[str] = set()
     for t in _guard_tokens(content):
-        t = t.replace("'", "")
+        t = _canon_token(t)
         if t in _CONTENT_STOPWORDS or t in _CLOCK_UNITS or t in _DATE_WORDS:
             continue
         if any(c.isdigit() for c in t) or _num_word_value(t) is not None:
@@ -3260,13 +3301,14 @@ def _content_tokens(content: str) -> set[str]:
 
 
 def _possessives(content: str) -> frozenset[str]:
-    """Possessive determiners/owners ("bob's", "the team's").
+    """Possessive owners ("bob's", "the team's"), in canonical spelling.
 
-    Read from the token stream, which keeps the apostrophe, because
+    Read from the token stream, which keeps the separator, because
     ``_content_tokens`` strips it to make one word's two spellings agree and
     the possessive signal is exactly what that loses.
     """
-    return frozenset(t for t in _guard_tokens(content) if t.endswith("'s"))
+    return frozenset(_canon_token(t) for t in _guard_tokens(content)
+                     if _POSSESSIVE_RE.search(t))
 
 
 def _marker_scope(content: str) -> tuple[str, ...]:
@@ -3286,12 +3328,23 @@ def _marker_scope(content: str) -> tuple[str, ...]:
     """
     out: list[str] = []
     for t in _guard_token_seq(content):
-        if t in _NEGATION_MARKERS or t.endswith("n't") or t in _CONDITION_MARKERS:
-            out.append(t.replace("'", ""))
+        if t in _NEGATION_MARKERS or _CLITIC_RE.search(t) \
+                or t in _CONDITION_MARKERS:
+            out.append(_canon_token(t))
             continue
-        if t in _CONTENT_STOPWORDS or t in _CLOCK_UNITS or t in _DATE_WORDS:
+        if t in _DATE_WORDS:
+            # Kept in position, and checked BEFORE the frame stop set: several
+            # relative days are frame words, so a marker on one of two dates
+            # would otherwise vanish ("we ship today, not tomorrow" vs its
+            # mirror) — the difference a date-word set cannot see.
+            out.append(t)
+            continue
+        if t in _CONTENT_STOPWORDS or t in _CLOCK_UNITS:
             continue
         if any(c.isdigit() for c in t) or _num_word_value(t) is not None:
+            # A placeholder, so a marker attached to a different value is
+            # visible ("we ship at 6pm, not at 5pm" vs its mirror).
+            out.append("#" + _canon_token(t))
             continue
         out.append(t)
     return tuple(out)
@@ -3301,7 +3354,7 @@ def _scripts(content: str) -> frozenset[str]:
     """Scripts the claim's letters are drawn from — a language difference in
     the one form decidable without a model."""
     found: set[str] = set()
-    for ch in str(content or ""):
+    for ch in str(content or "").translate(_APOSTROPHES):
         if ch.isascii() and ch.isalpha():
             found.add("latin")
             continue
@@ -3335,15 +3388,17 @@ def _identity_differences(a: str, b: str) -> frozenset[str]:
     content_a, content_b = _content_tokens(a), _content_tokens(b)
     only_a, only_b = content_a - content_b, content_b - content_a
     one_sided = only_a | only_b
+    named = _proper_nouns(a) | _proper_nouns(b)
     if only_a and only_b:
         out.add("substituted_content")
-    elif one_sided & _ENTITY_PRONOUNS:
-        # A pronoun on ONE side re-subjects the claim: "the manager approved
-        # the plan" and "his manager approved the plan" are not one claim in
-        # two spellings.  A possessive is caught by the set comparison below.
-        # Every other one-sided token is the documented broadening case ("the
-        # team meets weekly in main office" ← "the team meets weekly"), which
-        # must stay foldable.
+    elif (one_sided & _ENTITY_PRONOUNS) or (one_sided & named):
+        # A pronoun on ONE side re-subjects the claim, and so does a name: "the
+        # manager approved the plan" and "his manager approved the plan" are
+        # not one claim in two spellings, and neither are "the deploy failed"
+        # and "the deploy failed for alice".  A possessive is caught by the
+        # set comparison below.  Every other one-sided token is the documented
+        # broadening case ("the team meets weekly in main office" ← "the team
+        # meets weekly"), which must stay foldable.
         out.add("substituted_content")
     poss_a, poss_b = _possessives(a), _possessives(b)
     if (poss_a or poss_b) and poss_a != poss_b:
