@@ -87,10 +87,14 @@ Failure policy (§4.2): FAIL-OPEN
 --------------------------------
 A wrong keep is noise; a wrong drop is memory loss. Unknown ⇒ ``KEEP``. An
 arbiter that raises ⇒ all ``KEEP`` + a warning. The only path to ``DISCARD`` is
-an explicit arbiter verdict. The public functions are **total** — a malformed
-section shape (a non-sequence, a non-mapping item, ``None``) yields no
-candidates rather than an exception — so a direct caller outside
-``extractor_v2._run_vet_pass`` is fail-open too.
+an explicit arbiter verdict. The public functions are **total** on a malformed
+section shape — a non-sequence section, a non-mapping item, a non-iterable
+``about_entities``, ``None`` — and on a malformed ``prior``/``decisions`` map,
+yielding no candidates rather than an exception, so a direct caller outside
+``extractor_v2._run_vet_pass`` is fail-open too. (The arbiter is NOT called
+for an EMPTY candidate list, so a batch-level ``RENARRATE`` cannot be requested
+for a session that extracted nothing — ``check_batch``'s ``coverage_suspect``
+is the signal there. Disclosed, not hidden.)
 
 ⚠️ **A referenced entity is never removed** (the Layer-1 guard). See
 ``apply_vet``: an entity that any surviving candidate references **is a
@@ -123,6 +127,8 @@ OUTCOMES = frozenset({KEEP, NOOP, DISCARD, MERGE})
 BATCH_OUTCOMES = frozenset({RENARRATE})
 
 #: The sections VET inspects: ``(section, text-field, kind-field, family)``.
+#: The text-field column documents the field each section normally carries;
+#: ``_item_text`` follows the extractor's actual rule (``name or content``).
 #:
 #: ⚠️ This is a SECOND copy of ``extractor_v2._CLASSIFY_SECTIONS`` — this module
 #: cannot import it, because ``extractor_v2`` imports *this* module (a
@@ -179,10 +185,20 @@ def _section_items(embed_list: object, section: str) -> Sequence[Any]:
 
 
 def _item_text(section: str, item: Mapping[str, Any]) -> str:
-    for sec, field, _kf, _family in SECTIONS:
-        if sec == section:
-            return str(item.get(field) or "").strip()
-    return ""
+    """The item's text — the extractor's OWN rule: ``name`` or ``content``.
+
+    Deliberately not a per-section field lookup: ``extractor_v2`` builds every
+    item key (``_classify_item_id``) and the classification surface
+    (``_collect_classify_items``) from ``item.get("name") or
+    item.get("content")`` regardless of section, so a section-specific rule
+    would disagree on an item carrying both keys — and VET would then gate on a
+    different string than the pipeline labels. The ``SECTIONS`` text-field
+    column documents the field each section *normally* uses; this function
+    follows the extractor, which is the authority.
+    """
+    if section not in {sec for sec, _f, _k, _fam in SECTIONS}:
+        return ""
+    return str(item.get("name") or item.get("content") or "").strip()
 
 
 def _item_kind(section: str, item: Mapping[str, Any]) -> str:
@@ -403,9 +419,11 @@ def _referenced_entity_names(embed_list: object,
     for section, index, item in _iter_items(embed_list):
         if _item_id(section, index, item) in discarded_ids:
             continue
-        for a in (item.get("about_entities") or []):
-            if isinstance(a, str) and a.strip():
-                names.add(_norm(a))
+        refs = item.get("about_entities")
+        if isinstance(refs, Sequence) and not isinstance(refs, (str, bytes)):
+            for a in refs:
+                if isinstance(a, str) and a.strip():
+                    names.add(_norm(a))
         slots = item.get("slots")
         if isinstance(slots, Mapping):
             for role, refs in slots.items():
@@ -449,19 +467,21 @@ def _operator_endpoint_text(op: Mapping[str, Any]) -> set[str]:
     ``op.get("target") or op.get("target_edge")`` — the **same** precedence,
     not a union, so an operator carrying both (execute_embed honours ``target``
     and ignores ``target_edge``) is not pruned on a field the embedder never
-    reads. Missing ``target_edge`` is what let a discarded MITIGATES target be
-    re-minted as a brand-new Point.
+    reads — and with the embedder's own ``str(v or "")`` coercion, so a
+    NON-STRING endpoint (an LLM can emit ``42``) is not skipped and left to be
+    re-minted. Missing ``target_edge`` is what let a discarded MITIGATES target
+    be re-minted as a brand-new Point.
     """
     out: set[str] = set()
     for key in ("src", "dst"):
         v = op.get(key)
-        if isinstance(v, str) and v.strip():
+        if v and str(v).strip():
             out.add(_norm(v))
     target = op.get("target") or op.get("target_edge")
     if isinstance(target, Mapping):
         for key in ("src", "dst"):
             v = target.get(key)
-            if isinstance(v, str) and v.strip():
+            if v and str(v).strip():
                 out.add(_norm(v))
     return out
 
@@ -488,6 +508,38 @@ def removal_pool(before: object, after: object) -> dict:
     }
 
 
+def _rewrite_entity_references(embed_list: Mapping[str, Any],
+                               restored: Mapping[str, str]) -> None:
+    """Re-spell a reference to the restored entity's exact name.
+
+    ``validate_layer1`` compares ``about_entities`` and slot names by EXACT
+    string, so restoring ``pytest`` does not satisfy a point naming ``PyTest``
+    — the session still 422s (verified). Rewriting is a KEEP action (fail-open):
+    the reference means the same entity; only its spelling is canonicalised.
+    """
+    def _fix(value: Any) -> Any:
+        return restored.get(_norm(value), value) if isinstance(value, str) \
+            else value
+
+    for _section, _index, item in _iter_items(embed_list):
+        if not isinstance(item, dict):
+            continue
+        for key in ("about_entities",):
+            refs = item.get(key)
+            if isinstance(refs, Sequence) and not isinstance(refs,
+                                                            (str, bytes)):
+                item[key] = [_fix(r) for r in refs]
+        slots = item.get("slots")
+        if isinstance(slots, Mapping):
+            for role, slot_refs in slots.items():
+                if role == "event" or not isinstance(slot_refs, Sequence) \
+                        or isinstance(slot_refs, (str, bytes)):
+                    continue
+                for r in slot_refs:
+                    if isinstance(r, Mapping) and isinstance(r.get("name"), str):
+                        r["name"] = _fix(r["name"])
+
+
 def apply_vet(embed_list: Mapping[str, Any],
               decisions: Mapping[str, Mapping[str, Any]],
               *, prior: Mapping[str, Any] | None = None
@@ -509,46 +561,64 @@ def apply_vet(embed_list: Mapping[str, Any],
        **load-bearing, not cosmetic**: ``execute_embed`` has a MINT-BEFORE-WIRE
        pre-pass (#2552) that materializes an unresolved endpoint as a **new
        statement Point**, so an unpruned operator silently *resurrects* the
-       discarded candidate — verified end-to-end. It covers ``target`` **and**
-       ``target_edge`` (execute_embed reads both) and the names of removed
-       entities (an endpoint naming a removed entity would fabricate a claim
-       Point out of a participant name, defeating #2552's own guard). It fires
-       only when **no surviving item provides the endpoint** — discarding one
-       of two identical-content items must not take the survivor's edge with it.
-    4. **A referenced-but-missing entity is restored** from ``prior``. S4 runs
-       between the two passes and can reference an entity the S2 pass removed;
-       that cross-pass reference is invisible to a per-pass guard and was
-       verified to produce a Layer-1 422. Fail-open: keep, never drop.
+       discarded candidate — verified end-to-end. It reads an operator's
+       endpoints with ``execute_embed``'s own coercion and precedence
+       (``str(op.get(key) or "")``, and ``target or target_edge`` — the first
+       present, **not** a union, so a field the embedder ignores is not pruned
+       on), and it includes the names of removed entities (an endpoint naming a
+       removed entity would fabricate a claim Point out of a participant name,
+       defeating #2552's own guard). It fires only when **no surviving item
+       provides the endpoint** — discarding one of two identical-content items
+       must not take the survivor's edge with it.
+    4. **A referenced-but-missing entity is restored** from ``prior``, and the
+       reference's spelling is reconciled to the restored name. S4 runs between
+       the two passes and can reference an entity the S2 pass removed; that
+       cross-pass reference is invisible to a per-pass guard and was verified
+       to produce a Layer-1 422. ``validate_layer1`` compares ``about_entities``
+       and slot names by EXACT string, so restoring ``pytest`` while a point
+       names ``PyTest`` still 422s (verified) — the reference is rewritten to
+       the emitted spelling. Fail-open: keep, never drop.
 
-    The function is **total**: a malformed section shape yields no candidates
-    and no exception.
+    The function is **total** on a malformed section shape (a non-sequence
+    section, a non-mapping item, a non-iterable ``about_entities``) and on a
+    malformed ``prior``/``decisions`` map: no exception.
     """
     warnings: list[str] = []
-    prior = prior or {}
-    prior_texts = {_norm(t) for t in (prior.get("removed_texts") or ())}
-    prior_entities = {str(k): v for k, v in
-                      (prior.get("removed_entities") or {}).items()}
+    base: Mapping[str, Any] = embed_list if isinstance(embed_list, Mapping) \
+        else {}
+    prior_map: Mapping[str, Any] = prior if isinstance(prior, Mapping) else {}
+    raw_texts = prior_map.get("removed_texts")
+    prior_texts: set[str] = (
+        {_norm(t) for t in raw_texts}
+        if isinstance(raw_texts, (list, tuple, set, frozenset)) else set())
+    raw_entities = prior_map.get("removed_entities")
+    prior_entities: dict[str, Mapping[str, Any]] = (
+        {str(k): v for k, v in raw_entities.items() if isinstance(v, Mapping)}
+        if isinstance(raw_entities, Mapping) else {})
+    decision_map: Mapping[str, Any] = decisions if isinstance(decisions,
+                                                             Mapping) else {}
 
-    discarded_ids = {iid for iid, d in (decisions or {}).items()
-                     if str(d.get("outcome") or "").upper() == DISCARD}
-    if not discarded_ids and not prior:
+    discarded_ids = {iid for iid, d in decision_map.items()
+                     if isinstance(d, Mapping)
+                     and str(d.get("outcome") or "").upper() == DISCARD}
+    if not discarded_ids and not prior_entities:
         # Nothing to do — return a shallow copy whose contents are identical
         # to the input, so the flag-off / nothing-discarded paths are
         # byte-identical downstream (the same object is never mutated).
-        return dict(embed_list or {}), warnings
+        return dict(base), warnings
 
-    referenced = _referenced_entity_names(embed_list, discarded_ids)
+    referenced = _referenced_entity_names(base, discarded_ids)
     removed_entity_names: set[str] = set()
     removed_context: set[str] = set()      # norm texts of removed events/points
     # Start from a full copy so non-VET keys (operators, chain_notes,
     # link_before_create, …) are preserved — only the three candidate sections
     # are rewritten.
-    out: dict[str, Any] = dict(embed_list or {})
+    out: dict[str, Any] = dict(base)
     downgraded = 0
 
     for section, _field, _kf, family in SECTIONS:
         kept: list[Any] = []
-        for i, item in enumerate(_section_items(embed_list, section)):
+        for i, item in enumerate(_section_items(base, section)):
             if not isinstance(item, Mapping):
                 kept.append(item)
                 continue
@@ -584,6 +654,33 @@ def apply_vet(embed_list: Mapping[str, Any],
                 f"{_item_text(section, item)[:80]!r}")
         out[section] = kept
 
+    # Rule 4 — restore an entity an earlier pass removed and a later reference
+    # now needs, and reconcile the reference's SPELLING. Computed BEFORE the
+    # prune: a restored name is present again, so it must not be pruned as if
+    # it were discarded.
+    present = set(_entity_map(out))
+    to_restore = _referenced_entity_names(out, set()) - present
+    restored: dict[str, str] = {}
+    for name in sorted(to_restore):
+        original = prior_entities.get(name)
+        if original is not None and str(original.get("name") or ""):
+            restored[name] = str(original["name"])
+            out.setdefault("entities", [])
+            if isinstance(out["entities"], list):
+                out["entities"].append(original)
+            warnings.append(
+                f"vet: entity {name!r} was discarded by an earlier pass but "
+                "is referenced after S4 — restored (Layer-1 referential "
+                "integrity)")
+        else:
+            warnings.append(
+                "vet: ⚠️ a surviving candidate references entity "
+                f"{name!r}, which no pass emitted — it cannot be restored "
+                "here; the payload will fail Layer-1 unless the extractor "
+                "emits it")
+    if restored:
+        _rewrite_entity_references(out, restored)
+
     # Operators: drop any whose endpoint referenced a removed point/event —
     # including items an EARLIER pass removed (they are absent from this list,
     # so the diff alone cannot see them). Only fire when no surviving item
@@ -591,7 +688,7 @@ def apply_vet(embed_list: Mapping[str, Any],
     # endpoint, and pruning would lose its edge.
     surviving_texts = _normalized_texts(out)
     gone = (removed_context | prior_texts | removed_entity_names
-            | set(prior_entities)) - surviving_texts
+            | set(prior_entities)) - surviving_texts - set(restored)
     if gone:
         ops = out.get("operators") or []
         kept_ops: list[Any] = []
@@ -607,28 +704,6 @@ def apply_vet(embed_list: Mapping[str, Any],
             warnings.append(
                 f"vet: pruned {pruned} operator(s) whose endpoint was "
                 "discarded")
-
-    # Rule 4 — restore an entity an earlier pass removed and a later reference
-    # now needs. WITHOUT this, a cross-pass reference (S4 naming an entity the
-    # S2 pass discarded) reaches ``validate_layer1`` and 422s the session.
-    present = set(_entity_map(out))
-    to_restore = _referenced_entity_names(out, set()) - present
-    for name in sorted(to_restore):
-        original = prior_entities.get(name)
-        if original is not None:
-            out.setdefault("entities", [])
-            if isinstance(out["entities"], list):
-                out["entities"].append(original)
-            warnings.append(
-                f"vet: entity {name!r} was discarded by an earlier pass but "
-                "is referenced after S4 — restored (Layer-1 referential "
-                "integrity)")
-        else:
-            warnings.append(
-                "vet: ⚠️ a surviving candidate references entity "
-                f"{name!r}, which no pass emitted — it cannot be restored "
-                "here; the payload will fail Layer-1 unless the extractor "
-                "emits it")
 
     if downgraded:
         warnings.append(f"vet: {downgraded} discard(s) downgraded to KEEP")
@@ -648,9 +723,14 @@ def audit_candidates(embed_list: object,
         <section>\\t<outcome>\\t<rule_id>\\t<text>\\t<reason>
     """
     lines = ["section\toutcome\trule_id\ttext\treason"]
+    decision_map: Mapping[str, Any] = (decisions
+                                       if isinstance(decisions, Mapping)
+                                       else {})
     for section, index, item in _iter_items(embed_list):
         iid = _item_id(section, index, item)
-        d = decisions.get(iid) or {}
+        d = decision_map.get(iid)
+        if not isinstance(d, Mapping):
+            d = {}
         lines.append("\t".join([
             section,
             str(d.get("outcome") or KEEP),

@@ -2737,6 +2737,12 @@ INGEST_CACHE_CODE_FILES = (
     Path(__file__).resolve().parent / "ingest_v2.py",
     Path(__file__).resolve().parent.parent.parent
     / "tortoise" / "extractor_v2.py",
+    # #5005: the S2.2 VET gate is imported by the extractor and REMOVES
+    # candidates from the embed list, so an uncommitted edit to it changes
+    # extraction output — the dirty-tree half of the fingerprint must see it
+    # (``git_sha`` only covers committed HEAD).
+    Path(__file__).resolve().parent.parent.parent
+    / "tortoise" / "vet_gate.py",
 )
 
 #: Env knobs whose values change the EXTRACTION OUTPUT while leaving code

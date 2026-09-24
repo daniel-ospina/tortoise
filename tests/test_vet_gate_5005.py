@@ -124,11 +124,31 @@ def test_vocabulary_is_the_owner_adopted_O4_set():
 def test_section_table_matches_extractor():
     """``vet_gate.SECTIONS`` is a deliberate second copy (it cannot import
     ``extractor_v2`` — that would cycle). This test is what keeps the copy from
-    drifting SILENTLY: a new or renamed section/field in the extractor fails
-    here instead of passing unvetted with no warning."""
+    drifting SILENTLY: a new or renamed section/kind-field in the extractor
+    fails here instead of passing unvetted with no warning."""
     from tortoise import extractor_v2 as v2
     assert [(s, kf, fam) for s, _t, kf, fam in vg.SECTIONS] == \
         list(v2._CLASSIFY_SECTIONS)
+
+
+def test_text_field_matches_extractor_item_identity():
+    """The extractor's section table carries no text field, so the pin above
+    cannot see a renamed ``content``/``name`` — and that rename would make
+    ``_item_text`` empty for every point/event, i.e. VET would silently gate
+    nothing. Pin VET's text rule to the extractor's OWN item-identity function,
+    including the item that carries BOTH keys (the case a section-specific rule
+    gets wrong)."""
+    from tortoise import extractor_v2 as v2
+    probes = ({"name": "NameVal", "content": "ContentVal"},
+              {"name": "NameVal"}, {"content": "ContentVal"})
+    for section, _text_field, _kf, _fam in vg.SECTIONS:
+        for probe in probes:
+            key = v2._classify_item_id(section, probe)
+            text = vg._item_text(section, probe)
+            if text:
+                assert text.lower() in key, (
+                    f"{section}: VET reads {text!r}, the extractor's item "
+                    f"identity reads {key!r}")
 
 
 def test_norm_matches_extractor_norm():
@@ -332,6 +352,78 @@ def test_empty_text_item_id_cannot_be_used_to_discard():
           "operators": []}
     new, _warnings = vg.apply_vet(el, {"points:1:": {"outcome": vg.DISCARD}})
     assert len(new["points"]) == 2
+
+
+def test_non_string_endpoint_is_not_left_to_be_re_minted():
+    """execute_embed str()-coerces every endpoint; VET recorded the removal via
+    a stringifying normalise but skipped a non-string endpoint, so an operator
+    with ``src: 42`` survived and the mint pre-pass put ``42`` back. Verified
+    end-to-end before the fix (payload points ``['keep', '42']``)."""
+    el = {"entities": [], "events": [],
+          "points": [{"content": 42, "pointKind": "statement"},
+                     {"content": "keep", "pointKind": "statement"}],
+          "operators": [{"src": 42, "dst": "keep", "op_type": "IMPL"}]}
+    out = vg.vet_candidates(el, narrative="n",
+                            arbiter=_discard_matching("42"))
+    new, warnings = vg.apply_vet(el, out["decisions"])
+    assert [p["content"] for p in new["points"]] == ["keep"]
+    assert new["operators"] == []
+    assert any("pruned 1 operator" in w for w in warnings)
+    payload, _res = _payload_of(new)
+    assert [p["content"] for p in payload["points"]] == ["keep"]
+
+
+def test_cross_pass_reference_with_different_spelling_is_reconciled():
+    """``validate_layer1`` compares ``about_entities`` by EXACT string, so
+    restoring ``pytest`` while S4's point names ``PyTest`` left the 422 in
+    place (verified) — while the warning claimed restoration. The reference's
+    spelling is reconciled to the restored name."""
+    from tortoise.extractor_v2 import merge_embed_lists
+    s2 = {"entities": [{"name": "pytest", "kind": "core:tool"},
+                       {"name": "d", "kind": "core:document"}],
+          "events": [],
+          "points": [{"content": "d is stale", "pointKind": "statement",
+                      "about_entities": ["d"]}],
+          "operators": []}
+    out = vg.vet_candidates(
+        s2, narrative="n",
+        arbiter=lambda c, st: {"verdicts": [
+            {"id": x["id"], "outcome": vg.DISCARD} for x in c
+            if x["text"] == "pytest"]})
+    s2_vetted, _w = vg.apply_vet(s2, out["decisions"])
+    pool = vg.removal_pool(s2, s2_vetted)
+    s4 = {"entities": [], "events": [], "operators": [],
+          "points": [{"content": "P is slow", "pointKind": "statement",
+                      "about_entities": ["PyTest"]}]}
+    union = merge_embed_lists(s2_vetted, s4)
+    final, _w2 = vg.apply_vet(union, vg.vet_candidates(
+        union, narrative="n")["decisions"], prior=pool)
+    assert "pytest" in [e["name"] for e in final["entities"]]
+    payload, _res = _payload_of(final)
+    l1, _model = validate_payload_dict(payload)
+    assert l1.ok, l1.errors
+
+
+def test_total_on_malformed_decisions_and_prior():
+    """The module claims totality for direct callers, not only for the
+    pipeline-wrapped path. A non-Mapping decision value and a malformed
+    ``prior`` must not raise."""
+    el = {"entities": [{"name": "e", "kind": "core:other"}],
+          "points": [{"content": "p", "pointKind": "statement",
+                      "about_entities": 5}],
+          "events": [], "operators": []}
+    for decisions in ({"points:0:p": None}, {"points:0:p": "DISCARD"}, None):
+        new, _w = vg.apply_vet(el, decisions)
+        assert isinstance(new, dict)
+    for prior in (5, "x", {"removed_texts": 5},
+                  {"removed_entities": 5},
+                  {"removed_entities": {"e": "NOT-A-MAPPING"}}):
+        new, _w = vg.apply_vet(el, {}, prior=prior)
+        assert isinstance(new, dict)
+        for ent in new.get("entities") or []:
+            assert isinstance(ent, dict), "a non-Mapping must never be emitted"
+    for bad in (None, "x", 5, {"points:0:p": "DISCARD"}):
+        vg.audit_candidates(el, bad)
 
 
 def test_cross_pass_reference_restores_entity_and_payload_validates():
