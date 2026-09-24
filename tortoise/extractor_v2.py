@@ -3131,12 +3131,15 @@ _UNREADABLE = frozenset({"unreadable"})
 # whitespace but keeps punctuation, so "team." and "team" would otherwise read
 # as different tokens and the substitution test would fire on a full stop.
 _TOKEN_EDGE_PUNCT = ".,;:!?\"'`()[]{}*_"
-# A numeric token's own edges are part of its value, and two shapes have to
-# survive the strip: a LEADING separator that begins a numeral (".5", "$50")
-# and a TRAILING suffix that changes what it counts ("50%").
+# A numeric token's own edges are part of its value, and three shapes have to
+# survive the strip: a LEADING separator that begins a numeral (".5"), a
+# CURRENCY or SIGN in any script ("£50", "−50"), and a TRAILING suffix that
+# changes what is counted ("50%").  The sign and currency classes are read
+# from the character category, because the ASCII spellings are a fraction of
+# them: `$`, `+` and `-` are one word each of `Sc`/`Sm`, and a whitelist of
+# ASCII characters let `£50` fold into `50` and `£50` into `€50`.
 _NUMERIC_LEAD = frozenset(".,:+-$#")
-_NUMERIC_TRAIL = frozenset("%$#")
-# Clitic apostrophes, normalised to the ASCII form before tokenising.  LLM
+_NUMERIC_TRAIL = frozenset("%$#\u2030\u2031\u00b0")# Clitic apostrophes, normalised to the ASCII form before tokenising.  LLM
 # output routinely spells "don't" with U+2019, and a negator the marker list
 # cannot see is a negator the boundary fails to guard.
 _APOSTROPHES = str.maketrans({
@@ -3198,6 +3201,19 @@ _IDENTITY_DIMENSIONS = frozenset({
 })
 
 
+def _fold_unicode(s: str) -> str:
+    """NFC, with invisible format characters turned into separators.
+
+    A zero-width space inside a word is neither whitespace nor punctuation, so
+    it fused a word to its neighbour: "for\u200bAlice" was ONE token, it
+    began lower case, and the name stopped reading as a name at all — the
+    entity dimension went silent on an invisible character.  Composition runs
+    first so a decomposed accent is the same word as its precomposed form.
+    """
+    text = unicodedata.normalize("NFC", str(s or ""))
+    return "".join(" " if unicodedata.category(c) == "Cf" else c for c in text)
+
+
 def _guard_token_seq(content: str) -> list[str]:
     """Lowercased whitespace tokens with edge punctuation stripped, IN ORDER.
 
@@ -3205,20 +3221,43 @@ def _guard_token_seq(content: str) -> list[str]:
     check must not use it, because set iteration order is by hash and discards
     the positions the comparison is about.
     """
-    text = _norm(content).translate(_APOSTROPHES)
+    text = _fold_unicode(_norm(content)).translate(_APOSTROPHES)
     return [t for t in (_strip_edges(_s) for _s in text.split()) if t]
 
 
 def _is_edge_punct(ch: str) -> bool:
-    """Punctuation or symbol, in any script.
+    """Punctuation, symbol, mark or format character, in any script.
 
     ``_TOKEN_EDGE_PUNCT`` alone is ASCII, and LLM output wraps words in the
     typographic characters too.  A name or a negator fused to one of them
     ("\u201cAlice\u201d", "not\u2026", "tomorrow\u2026") kept the quoting
     character, so it stopped being the word it was and its whole dimension went
     silent.
+
+    Marks and format characters belong here for the same reason and are easy to
+    miss, because neither is punctuation: a zero-width space or a combining
+    mark at a token edge is invisible and fuses a word to whatever is beside
+    it, so "for\u200bAlice" read as one lower-case token and the name vanished.
     """
-    return ch in _TOKEN_EDGE_PUNCT or unicodedata.category(ch)[:1] in ("P", "S")
+    return (ch in _TOKEN_EDGE_PUNCT
+            or unicodedata.category(ch)[:1] in ("P", "S", "C", "M"))
+
+
+def _keeps_numeric_edge(ch: str, leading: bool) -> bool:
+    """A symbol that changes what the numeral beside it counts.
+
+    A currency sign or a mathematical sign in ANY script, plus the ASCII
+    separators and the percent-like suffixes.  Category, not a whitelist: the
+    ASCII list named ``$`` and ``+`` and missed every other currency and sign,
+    which folded "\u00a350" into "50" and "\u00a350" into "\u20ac50".
+
+    Direction matters: a leading separator may BEGIN a numeral (".5") but the
+    same character must not survive at the END, or "5." and "5" stop being one
+    value.
+    """
+    if unicodedata.category(ch) in ("Sc", "Sm"):
+        return True
+    return ch in (_NUMERIC_LEAD if leading else _NUMERIC_TRAIL)
 
 
 def _strip_edges(t: str) -> str:
@@ -3230,11 +3269,11 @@ def _strip_edges(t: str) -> str:
     """
     start, end = 0, len(t)
     while start < end and _is_edge_punct(t[start]):
-        if t[start] in _NUMERIC_LEAD and t[start + 1:start + 2].isdigit():
+        if _keeps_numeric_edge(t[start], True) and t[start + 1:start + 2].isdigit():
             break
         start += 1
     while end > start and _is_edge_punct(t[end - 1]):
-        if t[end - 1] in _NUMERIC_TRAIL and t[start:end - 1][-1:].isdigit():
+        if _keeps_numeric_edge(t[end - 1], False) and t[start:end - 1][-1:].isdigit():
             break
         end -= 1
     return t[start:end]
@@ -3318,6 +3357,20 @@ def _value_bindings(content: str) -> tuple[tuple[str, str], ...]:
     return tuple(out)
 
 
+def _sub_tokens(t: str) -> tuple[str, ...]:
+    """The word-parts of one whitespace token, when it is more than a word.
+
+    A negator can be fused on its LEFT edge too, and then the separator belongs
+    to the word BEFORE it: "is!not", "do-not", "do…not" are each one
+    whitespace token, and an edge-strip cannot reach a separator that is in the
+    middle.  Canonicalised whole, they read as "isnot"/"donot", which is no
+    negation marker, and the negated claim folded into the positive one.
+    """
+    if t.isalnum():
+        return ()
+    return tuple(_apostrophe_free(p) for p in re.split(r"[^\w']+|_+", t) if p)
+
+
 def _negation_markers(content: str) -> frozenset[str]:
     """Negation markers, in one canonical spelling.
 
@@ -3325,9 +3378,23 @@ def _negation_markers(content: str) -> frozenset[str]:
     cannot enumerate every verb a negator attaches to, nor every codepoint an
     apostrophe is written with — "mustn't" is a negation and appears in no
     hand-written list.
+
+    Each token is read whole AND by its word-parts.  Reading it whole is what
+    makes a clitic a negator whatever the apostrophe; reading the parts is what
+    finds one fused to a separator on its left.  A part can only ADD a marker,
+    and a marker only ever refuses a fold, so over-reading is the safe
+    direction.
     """
-    return frozenset(_canon_token(t) for t in _guard_tokens(content)
-                     if t in _NEGATION_MARKERS or _CLITIC_RE.search(t))
+    out: set[str] = set()
+    for t in _guard_tokens(content):
+        canon = _canon_token(t)
+        if canon in _NEGATION_MARKERS or _CLITIC_RE.search(canon):
+            out.add(canon)
+            continue
+        for part in _sub_tokens(t):
+            if part in _NEGATION_MARKERS or _CLITIC_RE.search(part):
+                out.add(part)
+    return frozenset(out)
 
 
 def _condition_markers(content: str) -> frozenset[str]:
@@ -3380,7 +3447,7 @@ def _proper_nouns(content: str) -> frozenset[str]:
     ``_norm`` discards it.  The first token is excluded because it is
     capitalised by position rather than by being a name.
     """
-    raw = [_strip_edges(t) for t in str(content or "").split()]
+    raw = [_strip_edges(t) for t in _fold_unicode(content).split()]
     return frozenset(_apostrophe_free(_norm(t))
                      for i, t in enumerate(raw)
                      if i and t and t[:1].isupper())

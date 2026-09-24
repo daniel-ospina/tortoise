@@ -503,6 +503,74 @@ class TestDistinguishingDifference:
         assert not v2.fold_allowed("we ship the build",
                                    f"we ship the build {day}")
 
+    def test_a_currency_or_a_sign_is_part_of_the_quantity(self):
+        """A sign or currency symbol changes what the numeral counts.
+
+        Read from the character category, not a whitelist of ASCII characters:
+        ``$``, ``+`` and ``-`` are one spelling each of two Unicode classes, and
+        naming only those folded "\u00a350" into "50" and "\u00a350" into "\u20ac50"
+        — two different currencies collapsing.
+        """
+        for symbol in ("\u00a3", "\u20ac", "\u00a5", "\u20b9", "\u20bd", "\u20a9", "\u20bf",
+                       "$", "\u20b1", "\u0e3f", "\u00a2"):
+            for b in ("we paid 50", f"we paid {symbol}50"):
+                a = f"we paid {symbol}50"
+                if a == b:
+                    continue
+                assert v2.distinguishing_difference(a, b) == "number", (a, b)
+                assert not v2.fold_allowed(a, b)
+        for sign in ("\u2212", "+", "\u00b1", "\uff0b", "\u207b"):
+            a, b = f"we paid {sign}50", "we paid 50"
+            assert v2.distinguishing_difference(a, b) == "number", sign
+            assert not v2.fold_allowed(a, b)
+        for suffix in ("\u2030", "\u2031", "\u00b0"):
+            a, b = f"we got 50{suffix}", "we got 50"
+            assert v2.distinguishing_difference(a, b) == "number", suffix
+            assert not v2.fold_allowed(a, b)
+        # A TRAILING full stop or comma is still punctuation, not a suffix.
+        for tail in (".", ",", "!", "?"):
+            a, b = f"the answer is 5{tail}", "the answer is 5"
+            assert v2.distinguishing_difference(a, b) is None, tail
+
+    def test_a_negator_fused_on_its_left_is_still_a_negator(self):
+        """The separator can belong to the word before the negator.
+
+        "is!not" and "do-not" are each ONE whitespace token, so an edge strip
+        cannot reach a separator in the middle; canonicalised whole they read
+        as "isnot"/"donot" and the negated claim folded into the positive one.
+        """
+        for sep in ("!", "-", ",", ":", "\u2026", "/", "~", "@", "*", "_", "+"):
+            labeled = [("the build is green", f"the build is{sep}not green"),
+                       ("we ship the build", f"we do{sep}not ship the build")]
+            for base, b in labeled:
+                assert v2.distinguishing_difference(base, b) == "negation", b
+                assert not v2.fold_allowed(base, b)
+
+    def test_an_invisible_format_character_is_not_a_word(self):
+        """A zero-width character is neither whitespace nor punctuation.
+
+        It fused a word to its neighbour: "for\u200bAlice" was ONE token that
+        began lower case, so the name stopped reading as a name at all.  Format
+        characters become separators before tokenising, and composition runs
+        first so an accent is a spelling variant rather than a difference.
+        """
+        for invis in ("\u200b", "\u200c", "\u200d", "\u2060", "\ufeff", "\u00ad"):
+            for stem in ("for", "to"):
+                a, b = "The deploy failed", f"The deploy failed {stem}{invis}Alice"
+                assert v2.distinguishing_difference(a, b) == "substituted_content", \
+                    (stem, invis)
+                assert not v2.fold_allowed(a, b)
+            assert v2.distinguishing_difference(
+                "we ship the build", f"we do{invis}not ship the build") == "negation"
+            assert v2.distinguishing_difference(
+                "we ship the build passes",
+                f"we ship the build passes if{invis}") == "condition"
+            assert v2.distinguishing_difference(
+                "we ship the build", f"we ship the build tomorrow{invis}") == "date"
+        # A combining mark is a spelling variant of the same word.
+        assert v2.distinguishing_difference("we ship the build",
+                                            "we ship the build\u0301") is None
+
     def test_a_range_or_a_version_is_a_different_quantity(self):
         """The separators inside a numeric token are part of its value."""
         for a, b in (("we ship 3-4 crates", "we ship 4-3 crates"),
@@ -537,6 +605,8 @@ class TestDistinguishingDifference:
         content tokens cannot tell the two uses apart.
         """
         assert v2.fold_allowed("we ship and test", "we ship or test")
+        assert v2.fold_allowed("we ship to the store", "we ship from the store")
+        assert v2.fold_allowed("we ship with the courier", "we ship by the courier")
 
     def test_a_sentence_initial_name_is_a_known_limit(self):
         """Documented residual, pinned with the uncapitalised name (#5134).
