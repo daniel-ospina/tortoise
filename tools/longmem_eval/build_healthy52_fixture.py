@@ -28,9 +28,19 @@ the old miscalibration (51/52 with ``evidence_points == 0``, total 1/12,085).
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/longmem_eval/build_healthy52_fixture.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/longmem_eval/build_healthy52_fixture.py`"
+    )
+
 import argparse
 import json
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
