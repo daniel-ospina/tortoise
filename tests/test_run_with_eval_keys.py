@@ -606,30 +606,42 @@ class RunWithEvalKeysTests(unittest.TestCase):
         # `export` is a builtin a caller can shadow, and a shadow that ASSIGNS
         # without exporting leaves the value in this shell but not in the child's
         # environment. Comparing the value alone would then certify the file as
-        # the source of a key the command never received — the comparison must
-        # also confirm the `-x` flag, as the fill-if-absent branch already does.
-        env = self.base_env(
-            EVAL_KEYS_ENV_FILE=str(self.env_file), _RWEK_SANITIZED="1"
-        )
-        env["BASH_FUNC_export%%"] = (
-            '() { builtin printf -v "${1%%=*}" "%s" "${1#*=}"; }'
-        )
-        r = self.run_wrapper(
-            ["sh", "-c", 'printf "%s" "${OPENROUTER_API_KEY-UNSET}"'],
-            env=env,
-            use_fixture=False,
-        )
-        self.assertEqual(r.returncode, 0, r.stderr)
-        # the child never received the key…
-        self.assertEqual(r.stdout, "UNSET")
-        # …so no receipt line may name the file as its source
-        self.assertIn("NOT SANITIZED", r.stderr)
-        line = next(
-            s for s in r.stderr.splitlines() if "OPENROUTER_API_KEY source=" in s
-        )
-        self.assertIn("aborted", line)
-        self.assertNotIn(f"source={self.env_file.resolve()}", line)
-        self.assertNotIn(FIXTURE_OPENROUTER, r.stderr)
+        # the source of a key the command never received. The flag is therefore
+        # read from a FRESH privileged shell (absolute path, no imported
+        # functions), which a caller cannot shadow — including by shadowing
+        # `builtin` itself to fake a `declare -x` line.
+        for fake_builtin in (False, True):
+            with self.subTest(builtin_shadowed=fake_builtin):
+                env = self.base_env(
+                    EVAL_KEYS_ENV_FILE=str(self.env_file), _RWEK_SANITIZED="1"
+                )
+                env["BASH_FUNC_export%%"] = (
+                    '() { builtin printf -v "${1%%=*}" "%s" "${1#*=}"; }'
+                )
+                if fake_builtin:
+                    env["BASH_FUNC_builtin%%"] = (
+                        '() { if [ "$1" = declare ]; then shift 2; '
+                        'printf "declare -x %s=fake\\n" "$1"; '
+                        'else command "$@"; fi; }'
+                    )
+                r = self.run_wrapper(
+                    ["sh", "-c", 'printf "%s" "${OPENROUTER_API_KEY-UNSET}"'],
+                    env=env,
+                    use_fixture=False,
+                )
+                self.assertEqual(r.returncode, 0, r.stderr)
+                # the child never received the key…
+                self.assertEqual(r.stdout, "UNSET")
+                # …so no receipt line may name the file as its source
+                self.assertIn("NOT SANITIZED", r.stderr)
+                line = next(
+                    s
+                    for s in r.stderr.splitlines()
+                    if "OPENROUTER_API_KEY source=" in s
+                )
+                self.assertIn("aborted", line)
+                self.assertNotIn(f"source={self.env_file.resolve()}", line)
+                self.assertNotIn(FIXTURE_OPENROUTER, r.stderr)
 
     def test_env_file_cannot_repoint_the_interpreter(self):
         # The fail-closed responses exec an absolute path, so a `.env`-supplied

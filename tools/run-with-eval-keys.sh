@@ -372,23 +372,26 @@ if [ -f "$_RWEK_ENV_FILE" ] && [ -r "$_RWEK_ENV_FILE" ]; then
 
     if is_managed_key "$_rwek_key"; then
       export "$_rwek_key=$_rwek_value"
-      # Record the file as this key's source only if the export BOTH assigned the
-      # file's value AND exported it. `export` is a builtin a caller can shadow:
-      # a shadow that assigns without exporting hides the value from the child,
-      # and one that does nothing leaves the ambient value (or nothing) behind —
-      # either way the receipt must not name the file, so the `-x` flag is read
-      # with the `declare` builtin exactly as the fill-if-absent branch below
-      # does. A shadowed probe can only make this MORE conservative.
+      # Record the file as this key's source only if the file's value is the one
+      # this process HOLDS **and** the one the wrapped command will actually
+      # inherit (it must be exported). `export` and `builtin` are builtins a
+      # caller can shadow — a shadow can assign without exporting, or fake a
+      # `declare -x` probe — so the export flag is read from a FRESH privileged
+      # shell: `"$_RWEK_BASH"` is an absolute path (never a function lookup) and
+      # `-p` imports no exported functions, so that child's view IS the
+      # environment the command gets, and nothing the caller exported can
+      # shadow it. The value half is a direct expansion, also unshadowable.
       _rwek_proven=
-      _rwek_decl=$(builtin declare -p "$_rwek_key" 2>/dev/null) || _rwek_decl=
-      _rwek_flags=${_rwek_decl#declare -}
-      _rwek_flags=${_rwek_flags%% *}
-      case "$_rwek_flags" in
-        *x*)
-          case "${!_rwek_key+x}" in
-            ?*)
-              case "${!_rwek_key}" in
-                "$_rwek_value") _rwek_proven=1 ;;
+      case "${!_rwek_key+x}" in
+        ?*)
+          case "${!_rwek_key}" in
+            "$_rwek_value")
+              _rwek_exported=$(
+                "$_RWEK_BASH" -p -c '_rwek_n=$1; case "$(declare -p "$_rwek_n" 2>/dev/null)" in *-x*) printf 1 ;; esac' \
+                  _rwek "$_rwek_key" 2>/dev/null
+              )
+              case "${_rwek_exported:-}" in
+                ?*) _rwek_proven=1 ;;
               esac
               ;;
           esac
