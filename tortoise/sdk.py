@@ -143,6 +143,18 @@ BASELINE_SOURCE_DISPLAY: dict[str, str] = {
 STALE_TERMINAL_STATUSES = frozenset(
     {'retracted', 'superseded', 'outdated', 'archived'})
 
+# The structural rels `supersede_point` transfers in its 2b leg (#122). Single
+# source of truth for the WRITER and for every mirror of it: the MCP dry-run
+# preview imports this name rather than re-listing the rels, so a rel added to
+# (or dropped from) the transfer cannot drift out of the preview. Superset of
+# `projection.edges.STRUCTURAL_REL_LABELS` (which carries only the
+# snapshot-derivable subset): `aboutAction` (Action dissolved in Ontology v3.0)
+# and `wasDerivedFrom` (A10 raw family) transfer but are never snapshot-recreated.
+SUPERSEDE_STRUCTURAL_RELS = (
+    'aboutSubject', 'aboutObject', 'aboutAction', 'aboutEvent',
+    'aboutPoint', 'aboutDocument', 'extractedFrom', 'wasDerivedFrom',
+)
+
 # Epic #902 W4 A0 — single-source valid-value sets for ingest() (consumed by
 # the SDK validation AND the MCP pre-validation so the two layers cannot
 # drift; INGEST_CONTRACT.md §2/§5 pins the exact values + error shapes).
@@ -6202,10 +6214,7 @@ class TortoiseSDK:
         # identity only (tgt=<key> or, for the delete-only guard, tgt=new_id) —
         # never the FalkorDB internal ID (internal ids die at rebuild).
         from .projection.edges import DERIVABLE_STRUCTURAL_RELS, STRUCTURAL_REL_LABELS, stub_key
-        structural_rels = [
-            'aboutSubject', 'aboutObject', 'aboutAction', 'aboutEvent',
-            'aboutPoint', 'aboutDocument', 'extractedFrom', 'wasDerivedFrom'
-        ]
+        structural_rels = SUPERSEDE_STRUCTURAL_RELS
         # Successor internal node id — runtime-only (never journaled). The 2b
         # no-self-edge guard compares the structural target's NODE IDENTITY to
         # the successor (mirror 2a-DIRECT's tid==new_id guard at ~4407): without

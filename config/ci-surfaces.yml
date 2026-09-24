@@ -549,6 +549,21 @@ surfaces:
   # (the outcome counter lives in `core`, which has no SOURCE_PATTERN).
   - test_analytics_fallback_alert.py
   - test_client_status_vocabulary.py
+  # KEEP BOTH ARMS — a conflict in THIS list is a registration conflict: one
+  # name arrives on each side and the resolver must keep both.
+  # main landed `test_cmux_dispatch.py` in commit 423c7bec5 (PR #4405, issue
+  # #4292), in the same slot this branch adds `test_dry_run_preview.py` to.
+  #
+  # Dropping one side does NOT go unnoticed here. Tested, not assumed: with the
+  # cmux line deleted, the gated `python3 tools/ci_selection.py --integrity` step
+  # (python-ci.yml:326) fails and names the dropped file, because integrity()
+  # classifies every top-level test file and `core` is that file's only surface.
+  # So the cost is a red and a manual re-add, not a silent hole. Note the limit
+  # of that guarantee: it holds for a SINGLE-surface file. A file registered in
+  # more than one surface would stay classified after a dropped registration and
+  # `--integrity` would pass — which is the case issue #4617 covers for its own
+  # (dual-registered) file, not this one.
+  - test_dry_run_preview.py
   - test_cmux_dispatch.py
   - test_embedder_provision.py
   - test_embedded_evidence.py
@@ -1564,6 +1579,15 @@ durations:
 # the file back to the default anyway, and cannot mis-balance the LPT pack).
 # Refresh from the first post-merge main run that includes it.
   test_license_surface_consumer.py: 2.0
+  # #4102: new file in this pool — no CI junit measurement exists yet, so it
+  # enters at the flat 2.0s default per the #3400/#4221 convention above, NOT the
+  # local timing measured on this host (148.6s at fleet load; local values are not
+  # the input here — see the #3827 note). It is a genuinely heavy file, so the
+  # entry matters more than usual: without it the file enters the pool with no
+  # weight, coverage falls to 89.9% (544/605) and duration_coverage_issues()
+  # fails closed, which is how this was caught. Refresh from the first post-merge
+  # main run that includes it.
+  test_dry_run_preview.py: 2.0
   # #4327: no CI junit measurement yet (new file), so enter at the flat 2.0s
   # default per the #3400/#4221 convention — the conservative floor keeps the
   # 90% durations-coverage floor satisfied; refresh from the first post-merge
