@@ -54,9 +54,9 @@ A **decision-only** model structurally enforces the vocabulary: a ``Choice``
 over supplied options cannot return an out-of-vocabulary answer, whereas an
 extraction LLM emitting kinds/verdicts inline can only be *hoped* to comply.
 ``arbiter=None`` ⇒ the step performs only its mechanical Level-2 checks and
-returns all-``KEEP``. **No production caller is wired yet** (``vet_arbiter`` is
-an injected seam), so with the flag on and no arbiter the step provably decides
-nothing — that is the current, honest state.
+returns all-``KEEP``. **No production caller injects an arbiter yet** (it is an
+injected seam), so with the flag on and no arbiter the step decides nothing —
+that is the current, honest state.
 
 Vocabulary (owner ruling **O4**, `EXTRACTOR-V4-ARCHITECTURE.md` §16.3 / §16.4)
 -----------------------------------------------------------------------------
@@ -89,8 +89,9 @@ Failure policy (§4.2): FAIL-OPEN
 A wrong keep is noise; a wrong drop is memory loss. Unknown ⇒ ``KEEP``. An
 arbiter that raises ⇒ all ``KEEP`` + a warning. The only path to ``DISCARD`` is
 an explicit arbiter verdict. The public functions are **total** on a malformed
-section shape — a non-sequence section, a non-mapping item, a non-iterable
-``about_entities``, ``None`` — and on a malformed ``prior``/``decisions`` map,
+section shape — a non-sequence section, a non-sequence ``operators``, a
+non-mapping item, a non-iterable ``about_entities``, ``None`` — and on a
+malformed ``prior``/``decisions`` map,
 yielding no candidates rather than an exception, so a direct caller outside
 ``extractor_v2._run_vet_pass`` is fail-open too. (The arbiter is NOT called
 for an EMPTY candidate list, so a batch-level ``RENARRATE`` cannot be requested
@@ -193,8 +194,8 @@ def _as_items(value: object) -> Sequence[Any]:
 #: The embedder truncates point/event content AND minted endpoint refs to this
 #: many characters before keying them (the ``str(...).strip()[:1000]`` sites in
 #: ``execute_embed`` — event content, point content, minted refs) — cited
-#: symbolically, not by line number, because `#5005`'s own edits to that module
-#: already invalidated one such citation.
+#: symbolically, not by line number, because line numbers move as the module is
+#: edited.
 _MAX_CONTENT = 1000
 
 
@@ -512,6 +513,20 @@ def _identity_texts(embed_list: object) -> set[str]:
     return out
 
 
+def _survives(section: str, item: Mapping[str, Any],
+              after: object) -> bool:
+    """Whether ``item`` is still present in ``after`` (value equality).
+
+    A *removal* is an absent item, not a text that is merely absent from a
+    surface — the distinction the carry-forward pool rests on. Equality rather
+    than identity: a list may be rebuilt around equal dicts, and a value-equal
+    item is the same item for every purpose here.
+    """
+    return any(item == other
+               for other in _section_items(after, section)
+               if isinstance(other, Mapping))
+
+
 def _entity_map(embed_list: object) -> dict[str, Mapping[str, Any]]:
     """Normalized entity name → the entity item, for every emitted entity."""
     out: dict[str, Mapping[str, Any]] = {}
@@ -566,22 +581,38 @@ def removal_pool(before: object, after: object) -> dict:
 
     Derived by diff, not by re-reading the verdicts, so a *downgraded* discard
     (the Layer-1 guard) correctly contributes nothing to the pool.
+
+    **A removal is an absent ITEM, not a text missing from a surface.** An
+    earlier revision collected ``identity(before) - content(after)``, which is a
+    surface difference, not a removal diff: every surviving point/event carrying
+    a ``name`` contributed that name, because a name is in the identity surface
+    and not in the content surface. The union pass then pruned operators naming
+    a survivor — with ``TORTOISE_VET=1``, **no arbiter, and nothing discarded on
+    either pass**, an operator on a surviving point's name was silently dropped
+    and the warning claimed the endpoint "was discarded" (verified end-to-end
+    through ``extract_session_v2``). Only genuinely absent items contribute:
+    their identity *and* content enter ``removed_texts``, because the #2552 mint
+    materialises whatever an operator wrote.
+
+    An item dropped between ``before`` and ``after`` by merge-dedup counts as
+    removed, which is correct — it is absent from the list the embedder sees, so
+    an endpoint on it must not survive to be re-minted.
     """
     before_entities = _entity_map(before)
     after_entities = _entity_map(after)
+    removed_texts: set[str] = set()
+    for section, _field, _kind_field, _family in SECTIONS:
+        if section == "entities":
+            # Entities carry no content; a removed entity's name travels in
+            # ``removed_entities`` and reaches the prune through its keys.
+            continue
+        for item in _section_items(before, section):
+            if not isinstance(item, Mapping):
+                continue
+            if not _survives(section, item, after):
+                removed_texts |= _item_text_variants(section, item)
     return {
-        # The REMOVAL side is the mint surface (identity + content): an operator
-        # naming either form would be materialized by #2552. The SURVIVOR side
-        # is the resolution surface (content only) — a survivor's *name* does
-        # not resolve an endpoint in ``execute_embed``, so it must not shield
-        # one (verified: shielding on a name left the endpoint to be minted).
-        # Surviving ENTITY names are subtracted too: an entity contributes no
-        # content, so without this an UNCHANGED entity would be carried forward
-        # as "removed" and its name would prune an operator the embedder never
-        # resolves against it (verified: `removal_pool(el, el)` returned the
-        # name of an entity that was never touched).
-        "removed_texts": (_identity_texts(before) - _content_texts(after)
-                          - set(after_entities)),
+        "removed_texts": removed_texts,
         "removed_entities": {n: it for n, it in before_entities.items()
                              if n not in after_entities},
     }
@@ -663,9 +694,9 @@ def apply_vet(embed_list: Mapping[str, Any],
        keep, never drop.
 
     The function is **total** on a malformed section shape (a non-sequence
-    section, a non-mapping item, a non-iterable ``about_entities``, an immutable
-    ``Mapping`` slot ref) and on a malformed ``prior``/``decisions`` map: no
-    exception.
+    section, a non-sequence ``operators``, a non-mapping item, a non-iterable
+    ``about_entities``, an immutable ``Mapping`` slot ref) and on a malformed
+    ``prior``/``decisions`` map: no exception.
     """
     warnings: list[str] = []
     base: Mapping[str, Any] = embed_list if isinstance(embed_list, Mapping) \
@@ -816,7 +847,10 @@ def audit_candidates(embed_list: object,
 
     This is the **report**, not a gate. Its output is what the owner reviews to
     set the thresholds the design refuses to invent (D13/O5: draft → run →
-    look → refine). One line per candidate, stable order, tab-separated:
+    look → refine). One line per candidate — the same predicate as
+    :func:`vet_candidates`, so the body has exactly ``stats["candidates"]``
+    lines and an empty-text item (which no gate saw) is not a blank row.
+    Stable order, tab-separated:
 
         <section>\\t<outcome>\\t<rule_id>\\t<text>\\t<reason>
     """
@@ -825,6 +859,8 @@ def audit_candidates(embed_list: object,
                                        if isinstance(decisions, Mapping)
                                        else {})
     for section, index, item in _iter_items(embed_list):
+        if not _item_text(section, item):
+            continue
         iid = _item_id(section, index, item)
         d = decision_map.get(iid)
         if not isinstance(d, Mapping):

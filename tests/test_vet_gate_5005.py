@@ -6,8 +6,8 @@ What this file pins, and why each is load-bearing:
   ``MERGE-INTO-EXISTING``);
 - **fail-open is structural** — no arbiter, a raising arbiter, and an unknown
   outcome all keep every candidate;
-- ``apply_vet`` removes **only** an explicit ``DISCARD`` (the P2 from the
-  the same-pass guard);
+- ``apply_vet`` removes **only** an explicit ``DISCARD`` (the same-pass
+  Layer-1 guard);
 - **the Layer-1 guard** — a referenced entity proposed for discard is
   downgraded to KEEP, because ``commit_schema`` requires
   ``about_entities ⊆ entities`` and a removal would 422 the whole session
@@ -16,9 +16,8 @@ What this file pins, and why each is load-bearing:
   reaches the classifier/resolver/embedder; with the flag off the gate is
   off-path.
 
-The **removal must survive ``execute_embed``'s MINT-BEFORE-WIRE pre-pass** —
-the defect classes, each reproduced against the code as it stood before its
-fix:
+The **removal must survive ``execute_embed``'s MINT-BEFORE-WIRE pre-pass**.
+Each defect class below is pinned by the named test:
 
 - a MITIGATES whose only reference to a discarded point is its ``target_edge``
   kept the operator, and the pre-pass re-minted the discarded text as a NEW
@@ -670,6 +669,38 @@ def test_present_null_content_is_the_minted_text():
     assert [p["content"] for p in payload["points"]] == ["X"]
 
 
+def test_removal_pool_carries_only_items_actually_absent():
+    """A *removal* is an absent ITEM, not a text missing from a surface. Deriving
+    the pool as ``identity(before) - content(after)`` carried the NAME of every
+    surviving point/event that had one (a name is in the identity surface, not
+    the content surface), so the union pass pruned operators naming a survivor —
+    with the flag ON, NO arbiter, and nothing discarded on either pass.
+    """
+    el = {"entities": [], "events": [],
+          "points": [{"name": "N", "content": "C", "pointKind": "statement"},
+                     {"content": "K", "pointKind": "statement"}],
+          "operators": [{"src": "N", "dst": "K", "op_type": "IMPL"}]}
+    assert vg.removal_pool(el, el)["removed_texts"] == set()
+    final, warnings = vg.apply_vet(el, {}, prior=vg.removal_pool(el, el))
+    assert final["operators"] == el["operators"], (
+        "an unchanged list must not lose an operator — no verdict named it")
+    assert not any("discarded" in w for w in warnings)
+
+
+def test_a_genuinely_removed_item_still_fills_the_pool():
+    """The other side of the same rule: an item that IS absent from ``after``
+    contributes its identity AND its content — the #2552 mint materialises
+    whichever form an operator wrote."""
+    before = {"entities": [], "events": [],
+              "points": [{"name": "N", "content": "C", "pointKind": "statement"},
+                         {"content": "K", "pointKind": "statement"}],
+              "operators": []}
+    after = {"entities": [], "events": [],
+             "points": [{"content": "K", "pointKind": "statement"}],
+             "operators": []}
+    assert vg.removal_pool(before, after)["removed_texts"] == {"c", "n"}
+
+
 def test_removal_pool_of_an_unchanged_list_is_empty():
     """A surviving ENTITY contributes no content, so `identity(before) -
     content(after)` used to carry its name forward as `removed` — a false pool
@@ -805,6 +836,20 @@ def test_arbiter_batch_renarrate_is_recorded_not_acted_on():
     # recorded, never applied: the candidates are untouched
     new, _ = vg.apply_vet(el, out["decisions"])
     assert new["entities"] == el["entities"]
+
+
+def test_audit_report_has_one_row_per_candidate_not_per_item():
+    """An empty-text item is not a candidate, so it must not render a blank row
+    — the report's body has to match ``stats["candidates"]``, or the owner
+    reviewing it counts rows the gate never saw."""
+    el = {"entities": [], "events": [],
+          "points": [{"content": "real"}, {"content": ""},
+                     {"pointKind": "statement"}],
+          "operators": []}
+    out = vg.vet_candidates(el, narrative="n")
+    report = vg.audit_candidates(el, out["decisions"])
+    assert out["stats"]["candidates"] == 1
+    assert len(report.splitlines()) == 2
 
 
 def test_audit_candidates_renders_rule_and_reason_per_candidate():
