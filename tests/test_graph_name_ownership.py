@@ -9,8 +9,9 @@ copies narrow:
   strict SUBSET of `_SWEEP_OWNED_PREFIXES` (input: the journal);
 * the opt-in residue set must be disjoint from every owned family, so an
   opted-in reclamation can never become a third copy of ``wipe_server``;
-* the residue predicate is deny-safe (non-``str``, the URI default, snapshots,
-  and every owned family are refused);
+* the residue predicate is deny-safe (non-``str``, the literal ``tortoise``,
+  the URI default, snapshots, and every owned family are refused), and its
+  APPROVE side is pinned for every declared residue family;
 * every NAMED prefix constant on the declared surface is tied to the register
   BY OBJECT IDENTITY, and a new named constant fails this file;
 * the AST pin for AC3 — the opt-in legacy sweep (Task 3) has NO default call
@@ -24,12 +25,13 @@ import ast
 import re
 from pathlib import Path
 
+import tests._embedded as embedded
+
 REPO = Path(__file__).resolve().parent.parent
 
 from tests._embedded import (  # noqa: E402
     _DIVERGENCE_REGISTER,
     _LEGACY_RESIDUE_PREFIXES,
-    _PRODUCT_GRAPH_PREFIXES,
     _SERVER_WIPE_PREFIXES,
     _SWEEP_OWNED_PREFIXES,
     is_legacy_residue,
@@ -42,14 +44,8 @@ def test_the_register_is_tied_to_the_real_symbols():
     An identical-but-redeclared tuple (`is` False) is exactly the drift this
     register exists to catch, so the tie is asserted by object identity.
     """
-    for name, symbol in (
-        ("_SWEEP_OWNED_PREFIXES", _SWEEP_OWNED_PREFIXES),
-        ("_SERVER_WIPE_PREFIXES", _SERVER_WIPE_PREFIXES),
-        ("_PRODUCT_GRAPH_PREFIXES", _PRODUCT_GRAPH_PREFIXES),
-        ("_LEGACY_RESIDUE_PREFIXES", _LEGACY_RESIDUE_PREFIXES),
-    ):
-        assert _DIVERGENCE_REGISTER[name]["set"] is symbol, name
     for name, entry in _DIVERGENCE_REGISTER.items():
+        assert entry["set"] is getattr(embedded, name), name
         assert entry["reason"].strip(), f"{name} registered without a reason"
 
 
@@ -74,23 +70,61 @@ def test_the_residue_predicate_is_deny_safe():
                  "org_x", "team_y", "totally_unrelated"):
         assert not is_legacy_residue(name, default_graph="tortoise_test_matrix"), name
     assert not is_legacy_residue(None, default_graph=None)     # non-str must not raise
+    assert not is_legacy_residue("tortoise", default_graph="tortoise_test_matrix")
+    # The APPROVE side, pinned for EVERY declared residue family — without
+    # this, `return False` would satisfy every refusal above.
+    for n in ("registry_test_c_control_plane", "v10fix_c1", "ttm_a1",
+              "review_rw_probe", "askshape_b6_live_1_33760_21",
+              "legbudget_25979_txrx", "tt4524_probe", "probe_d10_doc_fts"):
+        assert is_legacy_residue(n, default_graph="tortoise_test_matrix"), n
+
+
+def test_the_tortoise_restored_guard_fires_when_a_residue_prefix_overlaps(monkeypatch):
+    """The `tortoise_restored` refusal is load-bearing, not incidental.
+
+    `tortoise_restored_20260101` is refused today because no residue prefix
+    matches it — not because the guard fired. Pin the guard itself by
+    monkeypatching an OVERLAPPING prefix onto the module: import the module as
+    an object (not the function name) so the patch is visible to
+    `is_legacy_residue`.
+    """
+    monkeypatch.setattr(embedded, "_LEGACY_RESIDUE_PREFIXES",
+                        ("tortoise_restored",))
+    assert not embedded.is_legacy_residue("tortoise_restored_20260101",
+                                          default_graph=None)
+
+
+def test_the_default_graph_refusal_is_isolated_from_the_owned_refusal():
+    """Pin the `default_graph` branch with a name that is residue and NOT owned.
+
+    `tortoise_test_matrix` is ALSO refused by the ownership branch, so the
+    `default_graph` branch is unreachable with it. `registry_test_shared` is
+    residue and unowned, isolating the branch.
+    """
+    assert not is_legacy_residue("registry_test_shared",
+                                 default_graph="registry_test_shared")
+    assert is_legacy_residue("registry_test_shared", default_graph=None)
 
 
 def test_a_sixth_copy_of_the_vocabulary_fails_here():
     """AC1's enforcement, SCOPE: NAMED prefix constants on the declared surface.
 
     The declared surface is `tests/_embedded.py`, `tortoise/sdk.py`, and
-    `tortoise/projection/__init__.py`. Anonymous literals
+    `tortoise/projection/__init__.py`. The scanner matches any named constant
+    ending in `PREFIXES`, at any indentation (`^\\s*…`) and with either `=` or
+    a `:` annotation, so an indented or annotated constant is caught too.
+    OUT OF SCOPE: numeric-suffixed or differently-named constants
+    (`_PREFIXES_2`, `_MY_PREFIX`), and anonymous literals
     (`startswith(("test_", ...))` in `tortoise/sdk.py`,
-    `tests/test_derived_names.py`, `tests/test_pre_migration_safety.py`) are
-    NOT covered — they remain governed by the DIVERGENCE comment at the
-    declaration. Do not claim a guarantee broader than this scanner.
+    `tests/test_derived_names.py`, `tests/test_pre_migration_safety.py`) —
+    they remain governed by the DIVERGENCE comment at the declaration. Do not
+    claim a guarantee broader than this scanner.
     """
     seen = set()
     for rel in ("tests/_embedded.py", "tortoise/sdk.py",
                 "tortoise/projection/__init__.py"):
         src = (REPO / rel).read_text()
-        for m in re.finditer(r"^(_?[A-Z_]*PREFIXES)\s*[:=]", src, re.M):
+        for m in re.finditer(r"^\s*([A-Za-z_][A-Za-z_0-9]*PREFIXES)\s*[:=]", src, re.M):
             seen.add(m.group(1))
     unregistered = {n for n in seen if n not in _DIVERGENCE_REGISTER}
     assert unregistered == set(), f"prefix constant(s) not in the register: {unregistered}"
@@ -112,29 +146,26 @@ def _calls_in(path: Path) -> list[int]:
     A bare ``ast.Call`` has no parent link, so the enclosing definition cannot
     be recovered from ``ast.walk`` alone. This mirrors
     ``tests/test_write_ahead_mint.py``'s ``_collect_sites``: a RECURSIVE walk
-    that carries the innermost definition's name down the tree. Matches both a
-    bare ``Name`` (``_sweep_legacy_strays(...)``) and an ``Attribute``
-    (``_embedded._sweep_legacy_strays(...)``).
+    over every child node. Matches both a bare ``Name``
+    (``_sweep_legacy_strays(...)``) and an ``Attribute``
+    (``_embedded._sweep_legacy_strays(...)``). The walk recurses into lambda
+    bodies, so an ``atexit.register(lambda: _sweep_legacy_strays(...))`` call
+    site is not missed.
     """
     tree = ast.parse(path.read_text())
     found: list[int] = []
 
-    def walk(node: ast.AST, def_name: str | None) -> None:
+    def walk(node: ast.AST) -> None:
         for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                walk(child, child.name)
-                continue
-            if isinstance(child, ast.Lambda):
-                continue
             if isinstance(child, ast.Call):
                 f = child.func
                 if ((isinstance(f, ast.Name) and f.id == _LEGACY_SWEEP_NAME)
                         or (isinstance(f, ast.Attribute)
                             and f.attr == _LEGACY_SWEEP_NAME)):
                     found.append(child.lineno)
-            walk(child, def_name)
+            walk(child)
 
-    walk(tree, None)
+    walk(tree)
     return found
 
 

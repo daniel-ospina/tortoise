@@ -767,22 +767,36 @@ def _created_since_last_wipe() -> set[str]:
 # ── Graph-name ownership vocabulary (#3634) ────────────────────────────────
 # ONE declaration. Each set states its INPUT, because that is what makes it
 # safe: a prefix is not ownership; a journal record is.
-_SWEEP_OWNED_PREFIXES = ("test_", "tortoise_test", "team_", "org_")
 #   input: the JOURNAL (an ownership record). May include product families.
-_SERVER_WIPE_PREFIXES = ("test_", "tortoise_test")
+_SWEEP_OWNED_PREFIXES = ("test_", "tortoise_test", "team_", "org_")
 #   input: GRAPH.LIST (no attribution). Deliberately a SUBSET (#7795).
-_PRODUCT_GRAPH_PREFIXES = ("org_", "team_")
+_SERVER_WIPE_PREFIXES = ("test_", "tortoise_test")
 #   input: opt-in via `_sweep_team_strays`; these are REAL tenant graphs (the
 #   product's own mint namespace — `org_` current since the #3543 rename,
 #   `team_` retained for graphs minted before it).
+_PRODUCT_GRAPH_PREFIXES = ("org_", "team_")
+#   input: GRAPH.LIST, OPT-IN ONLY. THE EXACT #3634 CENSUS COHORT, not a stem
+#   set: every entry below (except the two noted) is a name verified present in
+#   the 1,745-name census (`/tmp/pi-5083-consolidation/graphs-6379.txt`), so a
+#   future name cannot be swept by accident. `registry_test_` is the single
+#   deliberate stem (723 census names — the epic CI-3 cohort);
+#   `review_rw_probe` covers the two census names `review_rw_probe` and
+#   `review_rw_probe2`. ADDING A STEM HERE IS A SAFETY DECISION, not a
+#   convenience: every entry authorises an irreversible DETACH DELETE +
+#   GRAPH.DELETE, so widen only with a census name in hand.
 _LEGACY_RESIDUE_PREFIXES = (
-    "registry_test_",   # the epic CI-3 cohort (#3634 census)
-    "v10fix_", "ttm_",
-    "review_rw_probe", "askshape_", "legbudget_", "tt4524_probe", "probe_d10_",
+    "registry_test_",                # the epic CI-3 cohort — 723 census names
+    "v10fix_c0", "v10fix_c1", "v10fix_c2", "v10fix_c3", "v10fix_c4",
+    "v10fix_c5", "v10fix_c6", "v10fix_c7", "v10fix_c8", "v10fix_c9",
+    "v10_smoke",
+    "ttm_a1", "ttm_a1_fresh1", "ttm_a1_fresh2", "ttm_a3",
+    "ttm_batch1", "ttm_batch2", "ttm_batch3", "ttm_batch4", "ttm_wave2",
+    "review_rw_probe",               # covers review_rw_probe2 too
+    "askshape_b6_live_1_33760_21",
+    "legbudget_25979_txrx",
+    "tt4524_probe",
+    "probe_d10_doc_fts",
 )
-#   input: GRAPH.LIST, OPT-IN ONLY. Names no default path can reach. Exact
-#   stems are preferred over broad ones so a future name cannot be swept by
-#   accident.
 #
 # `_DIVERGENCE_REGISTER` ties every NAMED prefix constant on the declared
 # surface (`tests/_embedded.py`, `tortoise/sdk.py`,
@@ -802,20 +816,30 @@ _DIVERGENCE_REGISTER = {
 }
 
 
-def owns_by_ownership_record(name: str) -> bool:
+def owns_by_ownership_record(name: object) -> bool:
     """The JOURNAL path's predicate — the only one that may authorise a delete
     from an ownership record (#7795). Mirrors the gate `_sweep_drop` applies:
     a non-``str`` name is never owned."""
     return isinstance(name, str) and name.startswith(_SWEEP_OWNED_PREFIXES)
 
 
-def is_legacy_residue(name: str, *, default_graph: str | None) -> bool:
+def is_legacy_residue(name: object, *, default_graph: str | None) -> bool:
     """The GRAPH.LIST residue predicate (#3634). Opt-in only.
 
-    Deny-safe: a non-``str``, the URI default graph, anything the ownership
-    record covers, and any ``tortoise_restored*`` snapshot (which
-    ``_guard_destructive`` treats as production) are all refused."""
+    Deny-safe: a non-``str``, the literal production graph name ``tortoise``,
+    the URI default graph, anything the ownership record covers, and any
+    ``tortoise_restored*`` snapshot are all refused.
+
+    The ``tortoise`` and ``tortoise_restored*`` refusals mirror the production
+    guard ``TortoiseSDK.test_guard`` (``tortoise/sdk.py``), which blocks
+    destructive teardowns on BOTH spellings. This predicate must refuse at
+    least that set: its caller performs an irreversible DETACH DELETE +
+    GRAPH.DELETE on the names it approves. The ``name: object`` annotation is
+    deliberate — ``isinstance(name, str)`` is part of the tested contract, so a
+    non-``str`` is refused rather than coerced."""
     if not isinstance(name, str):
+        return False
+    if name == "tortoise":
         return False
     if name.startswith("tortoise_restored"):
         return False
