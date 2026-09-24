@@ -48,6 +48,11 @@ os.environ.setdefault("TORTOISE_TEST_MODE", "1")
 SWEEP_TIME_BUDGET = 30.0
 SWEEP_BATCH_SIZE = 200
 
+# #4740: the session-end sweep report's field set is owned by the report
+# builder in `tortoise/embedded_reaper.py` (`_HYGIENE_REPORT_FIELDS`), which
+# this conftest imports. The orphan-bound harness reads the contract and the
+# builder from that module; there is no second declaration here to drift.
+
 # #1371: opt-in fast interpreter-exit close for ephemeral embedded test
 # servers (tortoise/embedded_lifecycle.py) — kills the ~10-15 min atexit
 # teardown tail on every test run (local + CI + post-merge-validation, which
@@ -406,6 +411,9 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
     import time
     import uuid
 
+    # #4740 review 11: the builder and the probe are reached through the
+    # MODULE attribute rather than a bare imported name.
+    from tortoise import embedded_reaper
     from tortoise.embedded_reaper import (
         ACTIVE_SUITES_DIR,
         _ReaperLock,
@@ -482,14 +490,23 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
                     # a multi-hundred backlog (the old single batch_size=50
                     # pass could not; the 445-orphan wave needed 9 sweeps).
                     deadline = time.monotonic() + SWEEP_TIME_BUDGET
-                    total = 0
                     # The budget bounds ITERATIONS, not wall time — one
                     # iteration at batch 200 with kill_pacing 0.4 takes ~80s
                     # of pacing, so a multi-hundred backlog can run past the
                     # 30s soft budget (review P2; it still terminates). The
                     # cron sweeps every 10 min make up the difference.
-                    while True:
-                        acted = _run_sweep(
+                    # #4740 review 9: the raw composition — the pre-sweep
+                    # probe (`before`), the sweep, the post-sweep probe
+                    # (`left`) and their arrangement into the report — lives in
+                    # `embedded_reaper.build_end_sweep_report` (behaviourally
+                    # pinned in tests/test_reaper.py). Both probes run while
+                    # TORTOISE_REAPER_MIN_UPTIME still holds this sweep's own
+                    # setting (the `finally` below restores it); `None` (not 0)
+                    # marks a failed probe. The module-attribute call and
+                    # probe (see the import block above) are pinned by
+                    # `test_conftest_sweep_returns_build_end_sweep_report`.
+                    return embedded_reaper.build_end_sweep_report(
+                        lambda: _run_sweep(
                             dry_run=False, batch_size=SWEEP_BATCH_SIZE,
                             only_safe=only_safe, jobs=8, kill_pacing=0.4,
                             # Epic #1647 (PR #1684 CI-fix): the suite is
@@ -499,18 +516,16 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
                             # CI load (observed: TestMcpHandlers teardown
                             # timed out at 600s with the reaper in _kill).
                             sigterm_timeout=3.0,
-                            # deadline is now threaded INTO reap(): the
-                            # eager pre-probe cache is skipped and the record
-                            # loop aborts once the budget is spent — the
-                            # end-sweep can never run past pytest-timeout on
-                            # a large stale backlog (observed: >300s teardown
-                            # timeout redding the leg with the reaper in
-                            # _kill/probe).
-                            deadline=deadline)
-                        total += len(acted)
-                        if not acted or time.monotonic() >= deadline:
-                            break
-                    return {"reaped": total}
+                            # deadline is threaded INTO reap(): the eager
+                            # pre-probe cache is skipped and the record loop
+                            # aborts once the budget is spent — the end-sweep
+                            # can never run past pytest-timeout on a large
+                            # stale backlog (observed: >300s teardown timeout
+                            # redding the leg with the reaper in _kill/probe).
+                            deadline=deadline),
+                        deadline,
+                        embedded_reaper.live_embedded_server_count,
+                    )
                 finally:
                     if prev is None:
                         os.environ.pop("TORTOISE_REAPER_MIN_UPTIME", None)
