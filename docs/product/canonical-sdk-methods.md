@@ -308,8 +308,8 @@ surface observed (Pinecone's `Index`, 27). But the
 evidence does **not** say "delete 128 methods" — it says **namespace**, and it says
 **collapse the aliases**. The sketch above does exactly that: **32 groups over 149
 names** — 26 memory-facing (R1–R9, W1–W17) and 6 control-plane namespaces (N1–N6) —
-reached by grouping and merging; the retired primitives are removed outright — a call fails
-and names its replacement (#3836 (c)) — and `backfill_v25` is archived. The
+reached by grouping and merging; the retired primitives stop resolving — a call raises with the
+hint naming its replacement (#3836 (c)) — and `backfill_v25` is archived. The
 control plane is what moves behind namespaces; the memory surface
 is what mirrors the approved 23-tool list.
 
@@ -345,9 +345,11 @@ not by method name.
 The eval harness drives `TortoiseSDK` **by method name** — no eval or benchmark invokes an
 MCP tool. So a *tool* rename is invisible to it and an *SDK* rename is not. Every name below
 is **retired**, not aliased: after Phase 2 a call to it **fails and names its replacement**
-(#3836 (c) ruling — no SDK alias layer, no warning shim, no call telemetry). So this is not a
-set of names to preserve; it is a migration order, because these in-repo callers are the only
-callers that exist:
+(#3836 (c) ruling — no SDK alias layer, no warning shim, no call telemetry). The two names that
+are themselves targets — `create_entity` and `close` — do **not** retire and need no migration;
+they are listed because the harness calls them and their signature must not drift under it. So
+this is not a set of names to preserve; it is a migration order, because these in-repo callers
+are the only callers that exist:
 
 `create_point` · `create_operator` · `create_event` · `create_entity` · `get_point` ·
 `ingest` · `recall_state` · `promote_point` · `mitigate_operator` · `compute_confidence` ·
@@ -489,8 +491,8 @@ justified as one.
 2. **The bridge table** (each tool's `type=`/`mode=` → the SDK method behind it) — the pre-flight.
 3. **The SDK dispatchers**, which are additive and unblock the mirror.
 4. **Collapse the aliases**, then **retire the old names to a failing name that names the
-   replacement** (#3836 (c) ruling — no SDK warning shim). The in-repo callers migrated in
-   step 3 are the only callers.
+   replacement** (#3836 (c) ruling — no SDK warning shim). The in-repo callers listed above
+   are the only callers, so migrating them is what makes this step safe.
 5. **Namespace the control plane.**
 
 ## Verification notes

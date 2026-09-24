@@ -52,9 +52,10 @@ disagreement in either direction:
      owner-approved set (#3863).
 
 AST and REFLECTION are not the same question, and nothing reconciled them until this file.
-They agree exactly today (150 / 150); the reconciliation is what keeps that true as Phase 2.5
-adds aliases, which is precisely where a `dir()`-only gate and an AST-only gate would
-silently part company.
+They agree exactly today (150 / 150). They are not guaranteed to keep agreeing: a public
+attribute attached to the class OUTSIDE its body is visible to reflection and invisible to the
+AST walk, which is precisely where a `dir()`-only gate and an AST-only gate would silently
+part company.
 
 WHAT THIS IS NOT
 ----------------
