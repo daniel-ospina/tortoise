@@ -12,6 +12,15 @@ allowed-tools: read write bash
 ---
 
 > ⛔ **This is the single live onboarding script.** `AGENT_ONBOARDING.md` and its deployed copies are ARCHIVED under `tortoise/onboarding/archive/` (M8, epic #1976) — never create a second live onboarding script. Edit THIS file; the deployed mirror (`website/apps/dashboard/public/skills/tortoise-onboarding/SKILL.md`) is byte-identical by test.
+>
+> **#4365 — delivered as INSTRUCTIONS, never installed as a skill.** Onboarding is a
+> one-time setup FLOW, not a reusable capability, so this document is READ — at the
+> served URL (`https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md`),
+> printed by `tortoise init` as `onboarding_prompt_url`, or named by the dashboard's
+> connect command — and is never copied into a harness's skills namespace. The skill
+> installer ships the three reusable capabilities only (`how-to-use-tortoise`,
+> `tortoise-decide`, `tortoise-file-finding`); reach across all six harnesses comes
+> from reading this document, not from a local install.
 
 # Tortoise Onboarding — install and connect your agent
 
@@ -19,15 +28,16 @@ Successor to the archived `AGENT_ONBOARDING.md` question flow. Instead of a
 paste-the-prompt Q&A, onboarding is now: **read state → pick your harness →
 install/connect (self-hosted: Docker Compose first — §3a) → verify →
 checkpoint → (later) seed + decide**. The dashboard wizard
-hands you ONE universal command; this skill is what your agent follows after
-you run or paste it.
+hands you ONE universal command; the instructions below are what your agent
+follows after you run or paste it — nothing is installed into a skills dir.
 
 ## When to use
 
 - The user pastes the dashboard's universal setup command into you (any of
-  the 6 skill-installer harnesses) or runs it in a terminal. (A 7th harness —
-  ChatGPT — connects key-less via OAuth and never runs this command; see the
-  §2 note.)
+  the 6 harnesses this document covers — 4 config-writing harnesses that run
+  the skill installer, plus 2 teach-human leaves) or runs it in a terminal.
+  (A 7th harness — ChatGPT — connects key-less via OAuth and never runs this
+  command; see the §2 note.)
 - The Setup guide card / Overview says the organization is waiting on
   "Connect your agent".
 - You are a fresh agent pointed at a Tortoise organization and need to know
@@ -90,12 +100,16 @@ If you are unsure which row applies (e.g. a wrapper/terminal agent), assume
 the config-writing class — you can verify after writing (section 3, failure
 mode → teach-human fallback).
 
-> **#1701 — ChatGPT is a 7th dashboard harness, outside this table.** ChatGPT
-> connects key-less through OpenAI's Developer-mode OAuth connector (dashboard
-> → ChatGPT tab: Scan Tools → OAuth consent on the hosted endpoint → paste the
-> workflows prompt). It has no local filesystem, shell, or skill installer, so
-> it never runs this skill and has no row here — these six rows are the
-> skill-installer/agent harnesses. (If you are ChatGPT and already have the
+> **#1701 — ChatGPT is a 7th harness, outside this table.** ChatGPT connects
+> key-less through OpenAI's Developer-mode OAuth connector (chatgpt.com →
+> Settings → Security and login → Developer mode, then chatgpt.com/plugins →
+> new app → MCP server URL → OAuth → Scan Tools → paste the workflows prompt).
+> There is no ChatGPT surface in the dashboard chooser (#2698), so this is the
+> path a ChatGPT user takes. It has no local filesystem, shell, or skill
+> installer, so it never runs these instructions and has no row here — these
+> six rows are the harnesses this document covers (4 config-writing, 2
+> teach-human). (If you
+> are ChatGPT and already have the
 > tortoise MCP tools via OAuth, skip install: section 4's tortoise_health
 > verify still applies.)
 
@@ -554,4 +568,4 @@ Contract notes:
 ---
 > **Archived:** `AGENT_ONBOARDING.md` + variant headers live under
 > `tortoise/onboarding/archive/` (A0 rollback path — do not delete; never
-> re-promote while this skill is live).
+> re-promote while this document is live).
