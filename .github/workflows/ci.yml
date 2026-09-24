@@ -276,6 +276,18 @@ jobs:
                   # asserted /health/ready once after polling the strictly
                   # weaker db.ok, reddening healthy deploys.
                   startswith(".github/scripts/deploy-health-gate"),
+                  # #3907: the SHARED auto-file substrate the re-pointed
+                  # monitors file through (e2e-live-reconcile, tenant-provision)
+                  # — its harness pins search-before-file (one issue per
+                  # finding), the recurrence counter, the machine-author +
+                  # exact-title guard against a forged look-alike title, and
+                  # fail-closed on a failed search.
+                  # TODO(#5019): availability-watchdog.sh — the monitor #3907
+                  # names as "the shape the fix is about" — and
+                  # availability-record.sh / welcome-e2e-monitor.sh /
+                  # registry-cron.sh still POST inline, so the substrate is not
+                  # yet what EVERY monitor files through.
+                  startswith(".github/scripts/auto-file-issue"),
                   # #4759: the bypass reporter / expiry helper and the scheduled
                   # check that ages every SKIP_* lane left set.
                   startswith(".github/scripts/deploy-bypass"),
@@ -284,6 +296,10 @@ jobs:
                   isfile(".github/workflows/welcome-e2e-monitor.yml"),
                   isfile(".github/workflows/availability-record.yml"),
                   isfile(".github/workflows/deploy-hosted.yml"),
+                  # #3907: the auto-file adopters — a change to the monitor that
+                  # calls the substrate re-runs its harness.
+                  isfile(".github/workflows/e2e-live-reconcile.yml"),
+                  isfile(".github/workflows/tenant-provision-monitor.yml"),
                   # a job-definition change re-runs its own suite (dashboard_e2e
                   # precedent) — review R12/Config.
                   isfile(".github/workflows/ci.yml"),
@@ -662,6 +678,11 @@ jobs:
         run: bash .github/scripts/availability-watchdog.test.sh
       - name: Welcome-e2e auto-file monitor (#2706/#2850)
         run: bash .github/scripts/welcome-e2e-monitor.test.sh
+      - name: Shared auto-file substrate (#3907)
+        # One issue per finding, with every occurrence recorded on it: files
+        # once, comments `Recurrence #N` after that, refuses to file on a failed
+        # search, and never adopts a forged/exact-mismatched look-alike title.
+        run: bash .github/scripts/auto-file-issue.test.sh
 
   availability-record:
     needs: changes
