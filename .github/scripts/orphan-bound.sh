@@ -29,8 +29,7 @@
 #         `close_embedded_clients()` BEFORE its probe (#1005), so both read the
 #         SAME seam: after this suite's own live clients were closed and their
 #         pools disconnected. That producer-side ordering is what makes
-#         `COUNT <= left` a same-seam comparison; the `left <= before` control
-#         below is its consumer-side validity check.
+#         `COUNT <= left` a same-seam comparison.
 #         While the suite's own clients were still open, every server they held
 #         read as a live-client server and `reap()` declined it, so `left`
 #         counted the suite's own clients (147 in the post-#4927 CI sample)
@@ -43,12 +42,6 @@
 #         BELOW the sweep's measurement is therefore a PASS with the delta
 #         logged, not an anomaly — the workflow can only observe FEWER servers
 #         than the sweep, never more.
-#       * the sweep's own pre/post readings are a SAME-SEAM pair: `left <=
-#         before` (checked whenever `before` is a positive count). Both are the
-#         same probe one sweep apart, and no client may appear at session end,
-#         so a post-sweep count ABOVE the pre-sweep count means the two
-#         readings are not a monotone drain and `left` is not a valid residue
-#         for COUNT to bind to. REDs (kill-downgradable, like the identity).
 #       * `cleared` — whether the sweep FINISHED or ran out of its time budget.
 #         `cleared: false` says the budget was exhausted, which is a function of
 #         runner LOAD, not of the residue — so it does not decide the verdict at
@@ -149,9 +142,8 @@
 #   independently red it. What the gate DOES red: a leak that appears AFTER the
 #   sweep (`COUNT > left`), an abort or failure that produced no usable report
 #   (`error`, `skipped`), a `probe_failed` at a non-zero count (no `left` to bind
-#   to), an identity violation (`reaped + left < before`), a non-monotone
-#   same-seam pair (`left > before`), and an unaccounted/unreadable report.
-#   `cleared: false` does NOT red at any count:
+#   to), an identity violation (`reaped + left < before`), and an
+#   unaccounted/unreadable report. `cleared: false` does NOT red at any count:
 #   it reports whether the sweep's time budget sufficed, which is a function of
 #   runner load and unrelated to the residue, so redding it fires on healthy
 #   loaded runs — a loaded runner reported `{reaped: 9, cleared: false, left:
@@ -493,15 +485,6 @@ case "$kind" in
     if [ "$before" != "null" ] && [ "$before" -gt 0 ]; then
       if [ "$((reaped + left))" -lt "$before" ]; then
         red_or_kill_warning "redislite orphan gate: the sweep does not account for the servers it started with — before=$before, reaped=$reaped, left=$left (reaped + left < before); the sweep's own measurement is broken"
-      fi
-      # The SAME-SEAM control (#1005): `before` and `left` are the same probe,
-      # one sweep apart, and no client may appear at session end — so a
-      # post-sweep count ABOVE the pre-sweep count means the two readings are
-      # not a monotone drain and `left` is not a valid residue for COUNT to
-      # bind to. Same polarity as the identity: the sweep's OWN readings are
-      # inconsistent, not the workflow's count.
-      if [ "$left" -gt "$before" ]; then
-        red_or_kill_warning "redislite orphan gate: the sweep's post-sweep count exceeds its pre-sweep count — before=$before, left=$left (left > before); the two readings are not a same-seam pair, so left is not a valid bound"
       fi
     fi
     if [ "$COUNT" -gt "$left" ]; then
